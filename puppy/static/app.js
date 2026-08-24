@@ -74,7 +74,7 @@ function transportShieldIcon(encrypted) {
   shield.setAttribute("fill", "currentColor");
   shield.setAttribute("fill-opacity", ".1");
   shield.setAttribute("stroke", "currentColor");
-  shield.setAttribute("stroke-width", "1.35");
+  shield.setAttribute("stroke-width", "1.1");
   shield.setAttribute("stroke-linejoin", "round");
   svg.appendChild(shield);
 
@@ -84,7 +84,7 @@ function transportShieldIcon(encrypted) {
     : "M6.35 6.45 11.65 11.55 M11.65 6.45 6.35 11.55");
   mark.setAttribute("fill", "none");
   mark.setAttribute("stroke", "currentColor");
-  mark.setAttribute("stroke-width", "1.45");
+  mark.setAttribute("stroke-width", "1.2");
   mark.setAttribute("stroke-linecap", "round");
   mark.setAttribute("stroke-linejoin", "round");
   svg.appendChild(mark);
