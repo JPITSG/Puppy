@@ -301,6 +301,9 @@ label input,label select{margin-top:5px;text-transform:none;letter-spacing:0}
 .chat-status .spinner{display:inline-block;width:10px;height:10px;border:2px solid var(--acc-dim);border-top-color:var(--acc);border-radius:50%;animation:spin .8s linear infinite;vertical-align:-1px;margin-right:5px}
 @keyframes spin{to{transform:rotate(360deg)}}
 .chat-head .spacer{flex:1}
+/* match the tabbar's + button: 26px, centers on the same vertical axis
+   (head pad 14 - 4 = 10px edge gap, same as the tabbar's 10px) */
+.chat-head .menu-btn{width:26px;height:26px;font-size:14px;margin-right:-4px}
 /* no scroll-behavior:smooth - animated programmatic pins land short while
    content is still growing (clipped last message) and cause typing wobble.
    scrollbar-gutter keeps the width constant; --sbw (JS-measured scrollbar width)
