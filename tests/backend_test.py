@@ -432,6 +432,120 @@ async def exercise_redirect_rejection() -> None:
         await runner.cleanup()
 
 
+async def exercise_proxy_recovery(controller_url: str, controller_token: str) -> None:
+    """A dead upstream must fail its WS handshake, then recover on the same origin."""
+    backend_token = "recovery-backend-token-0123456789abcdef"
+    port = free_port()
+    backend_url = f"http://127.0.0.1:{port}"
+
+    async def start_backend() -> web.AppRunner:
+        async def authorized(request):
+            if request.headers.get("X-Puppy-Token") != backend_token:
+                return web.json_response({"error": "unauthorized"}, status=401)
+            return None
+
+        async def ping(request):
+            denied = await authorized(request)
+            if denied is not None:
+                return denied
+            return web.json_response({
+                "ok": True, "name": "recovery-node", "version": __version__,
+                "protocol": protocol.API_PROTOCOL, "role": "backend",
+                "capabilities": ["sessions"],
+                "transport": {"encrypted": False},
+            })
+
+        async def sessions(request):
+            denied = await authorized(request)
+            if denied is not None:
+                return denied
+            return web.json_response({"type": "sessions", "sessions": []})
+
+        async def engines(request):
+            denied = await authorized(request)
+            if denied is not None:
+                return denied
+            return web.json_response({"engines": []})
+
+        async def updates(request):
+            denied = await authorized(request)
+            if denied is not None:
+                return denied
+            ws = web.WebSocketResponse()
+            await ws.prepare(request)
+            await ws.send_json({"type": "sessions", "sessions": []})
+            async for _message in ws:
+                pass
+            return ws
+
+        app = web.Application()
+        app.router.add_get("/api/ping", ping)
+        app.router.add_get("/api/sessions", sessions)
+        app.router.add_get("/api/engines", engines)
+        app.router.add_get("/api/ws/updates", updates)
+        runner = web.AppRunner(app, shutdown_timeout=0.2)
+        await runner.setup()
+        await web.TCPSite(runner, "127.0.0.1", port).start()
+        return runner
+
+    headers = {"X-Puppy-Token": controller_token}
+    backend_runner = await start_backend()
+    backend_id = None
+    try:
+        async with aiohttp.ClientSession() as http:
+            async with http.post(controller_url + "/api/backends", headers=headers, json={
+                    "name": "recovery-node", "url": backend_url, "token": backend_token,
+            }) as response:
+                added = await response.json()
+                assert response.status == 200, added
+            backend_id = added["id"]
+            proxy_url = controller_url + f"/api/b/{backend_id}"
+
+            async with http.get(proxy_url + "/sessions", headers=headers) as response:
+                assert response.status == 200, await response.text()
+            updates = await http.ws_connect(proxy_url + "/ws/updates", headers=headers)
+            assert (await updates.receive_json(timeout=2))["type"] == "sessions"
+
+            await backend_runner.cleanup()
+            backend_runner = None
+            closed = await updates.receive(timeout=2)
+            assert closed.type in (
+                aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED,
+                aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.ERROR), closed
+            await updates.close()
+            async with http.get(proxy_url + "/sessions", headers=headers) as response:
+                assert response.status in (502, 504), await response.text()
+            try:
+                await http.ws_connect(proxy_url + "/ws/updates", headers=headers)
+                raise AssertionError("dead backend completed the proxied WebSocket handshake")
+            except aiohttp.WSServerHandshakeError as exc:
+                assert exc.status in (502, 504), exc.status
+
+            backend_runner = await start_backend()
+            recovered = False
+            for _attempt in range(30):
+                try:
+                    async with http.get(proxy_url + "/sessions", headers=headers) as response:
+                        recovered = response.status == 200
+                except aiohttp.ClientError:
+                    recovered = False
+                if recovered:
+                    break
+                await asyncio.sleep(0.1)
+            assert recovered, "HTTP proxy did not recover after backend restart"
+            updates = await http.ws_connect(proxy_url + "/ws/updates", headers=headers)
+            assert (await updates.receive_json(timeout=2))["type"] == "sessions"
+            await updates.close()
+    finally:
+        if backend_id is not None:
+            async with aiohttp.ClientSession() as http:
+                async with http.delete(
+                        controller_url + f"/api/backends/{backend_id}", headers=headers) as response:
+                    assert response.status == 200
+        if backend_runner is not None:
+            await backend_runner.cleanup()
+
+
 async def exercise_launcher_rollback(artifact: Path, launcher: Path, state_dir: Path,
                                      data_dir: Path, backend_url: str,
                                      backend_token: str,
@@ -630,6 +744,7 @@ async def main() -> None:
         controller_url = f"http://127.0.0.1:{sock.getsockname()[1]}"
         await exercise_controller(controller_url, controller_token, backend_url,
                                   backend_token, backend_fingerprint, old_version)
+        await exercise_proxy_recovery(controller_url, controller_token)
         await exercise_redirect_rejection()
         upgrade_status = json.loads((state_dir / "status.json").read_text(encoding="utf-8"))
         assert upgrade_status["state"] == "succeeded", upgrade_status

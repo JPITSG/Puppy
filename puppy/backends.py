@@ -26,6 +26,9 @@ _client = None
 _upgrades_in_progress = set()
 _fingerprints = {}
 
+PROXY_CONNECT_TIMEOUT = 8.0
+PROXY_TOTAL_TIMEOUT = 60.0
+
 HOP_HEADERS = {"host", "connection", "upgrade", "sec-websocket-key", "sec-websocket-version",
                "sec-websocket-extensions", "sec-websocket-protocol", "cookie", "x-puppy-token",
                "content-length", "transfer-encoding", "accept-encoding"}
@@ -419,7 +422,10 @@ async def proxy(request: web.Request):
         body = await request.read()
         async with client().request(request.method, target, headers=headers,
                                     data=body if body else None,
-                                    timeout=aiohttp.ClientTimeout(total=60),
+                                    timeout=aiohttp.ClientTimeout(
+                                        total=PROXY_TOTAL_TIMEOUT,
+                                        connect=PROXY_CONNECT_TIMEOUT,
+                                        sock_connect=PROXY_CONNECT_TIMEOUT),
                                     allow_redirects=False,
                                     ssl=_ssl_pin(be["tls_fingerprint"])) as r:
             payload = await r.read()
@@ -435,14 +441,30 @@ async def proxy(request: web.Request):
 
 async def _proxy_ws(request: web.Request, target: str, headers: dict,
                     tls_fingerprint: str):
-    ws_server = web.WebSocketResponse(heartbeat=30, max_msg_size=1 << 22)
-    await ws_server.prepare(request)
     ws_url = "ws" + target[4:] if target.startswith("http") else target
+    ws_client = None
     try:
-        async with client().ws_connect(ws_url, headers={"X-Puppy-Token": headers["X-Puppy-Token"]},
-                                       heartbeat=30, max_msg_size=1 << 22,
-                                       ssl=_ssl_pin(tls_fingerprint)) as ws_client:
-            async def pump(src, dst):
+        ws_client = await asyncio.wait_for(
+            client().ws_connect(
+                ws_url, headers={"X-Puppy-Token": headers["X-Puppy-Token"]},
+                heartbeat=30, max_msg_size=1 << 22,
+                ssl=_ssl_pin(tls_fingerprint)),
+            timeout=PROXY_CONNECT_TIMEOUT)
+    except asyncio.TimeoutError:
+        log.warning("ws proxy to %s timed out before handshake", ws_url)
+        return web.json_response({"error": "backend websocket connection timed out"}, status=504)
+    except Exception as exc:
+        error = _connection_error(exc)
+        log.warning("ws proxy to %s failed before handshake: %s", ws_url, error)
+        return web.json_response(
+            {"error": "backend websocket unreachable: {}".format(error)}, status=502)
+
+    ws_server = web.WebSocketResponse(heartbeat=30, max_msg_size=1 << 22)
+    try:
+        await ws_server.prepare(request)
+
+        async def pump(src, dst):
+            try:
                 async for msg in src:
                     if msg.type == WSMsgType.TEXT:
                         await dst.send_str(msg.data)
@@ -450,19 +472,25 @@ async def _proxy_ws(request: web.Request, target: str, headers: dict,
                         await dst.send_bytes(msg.data)
                     elif msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
                         break
+            finally:
                 try:
                     await dst.close()
                 except Exception:
                     pass
 
-            await asyncio.gather(pump(ws_server, ws_client), pump(ws_client, ws_server),
-                                 return_exceptions=True)
-    except Exception as e:
-        error = _connection_error(e)
-        log.warning("ws proxy to %s failed: %s", ws_url, error)
+        await asyncio.gather(pump(ws_server, ws_client), pump(ws_client, ws_server),
+                             return_exceptions=True)
+    except Exception as exc:
+        log.warning("ws proxy to %s failed after handshake: %s", ws_url, _connection_error(exc))
+    finally:
         if not ws_server.closed:
             try:
-                await ws_server.close(message=error.encode()[:120])
+                await ws_server.close()
+            except Exception:
+                pass
+        if ws_client is not None and not ws_client.closed:
+            try:
+                await ws_client.close()
             except Exception:
                 pass
     return ws_server

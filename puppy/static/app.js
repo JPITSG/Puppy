@@ -513,21 +513,38 @@ function apiPath(bid, path) {
 }
 async function api(bid, path, opts = {}) {
   const o = { headers: {}, ...opts };
+  const timeoutMs = Math.max(0, Number(o.timeoutMs) || 0);
+  delete o.timeoutMs;
+  let timeout = null;
+  let controller = null;
+  if (timeoutMs && !o.signal && typeof AbortController !== "undefined") {
+    controller = new AbortController();
+    o.signal = controller.signal;
+    timeout = setTimeout(() => controller.abort(), timeoutMs);
+  }
   if (o.body !== undefined && typeof o.body !== "string") {
     o.body = JSON.stringify(o.body);
     o.headers["Content-Type"] = "application/json";
   }
-  let r;
   try {
-    r = await fetch(apiPath(bid, path), o);
-  } catch (e) {
-    throw new Error("network error");
+    let r;
+    try {
+      r = await fetch(apiPath(bid, path), o);
+    } catch (e) {
+      if (controller && controller.signal.aborted) throw new Error("request timed out");
+      throw new Error("network error");
+    }
+    /* A proxied backend can reject its controller token with 401 while this
+       browser's local session remains perfectly valid. Only a local 401 means
+       the WebUI itself must return to the sign-in screen. */
+    if (r.status === 401 && !bid) { showAuth(); throw new Error("auth required"); }
+    let data = null;
+    try { data = await r.json(); } catch (e) { /* non-json */ }
+    if (!r.ok) throw new Error((data && data.error) || `HTTP ${r.status}`);
+    return data;
+  } finally {
+    if (timeout !== null) clearTimeout(timeout);
   }
-  if (r.status === 401) { showAuth(); throw new Error("auth required"); }
-  let data = null;
-  try { data = await r.json(); } catch (e) { /* non-json */ }
-  if (!r.ok) throw new Error((data && data.error) || `HTTP ${r.status}`);
-  return data;
 }
 function wsUrl(bid, path) {
   const proto = location.protocol === "https:" ? "wss://" : "ws://";
@@ -662,12 +679,45 @@ const state = {
   sessions: [],           // local sessions (live via updates ws)
   remoteSessions: {},     // bid -> sessions[]
   remoteOk: {},           // bid -> bool
+  remoteErrors: {},       // bid -> latest reachability error
   engCache: {},           // bid -> engines[]
+  remoteEngineErrors: {}, // bid -> latest engine-status error (node can still be reachable)
+  remoteEngineCheckedAt: {},
   tabs: [],               // [{id,type,bid,sid,title,cmd}]
   active: null,           // tab id
   showArchived: false,
   views: {},              // tab id -> view object
 };
+
+const REMOTE_POLL_INTERVAL = 12000;
+const REMOTE_POLL_TIMEOUT = 5000;
+const REMOTE_ENGINE_REFRESH = 60000;
+const remotePollSequence = {};
+let remotePollTimer = null;
+let remotePollingGeneration = 0;
+
+function reconcileRemoteState() {
+  const live = new Set(state.backends.map(backend => String(backend.id)));
+  for (const bucket of [state.remoteSessions, state.remoteOk, state.remoteErrors,
+                        state.engCache, state.remoteEngineErrors,
+                        state.remoteEngineCheckedAt, remotePollSequence]) {
+    for (const id of Object.keys(bucket)) if (!live.has(String(id))) delete bucket[id];
+  }
+}
+
+function remoteAvailability(bid) {
+  return state.remoteOk[bid] === false ? "bad" :
+    state.remoteOk[bid] === true ? "ok" : "pending";
+}
+
+function remoteAvailabilityTitle(bid) {
+  const status = remoteAvailability(bid);
+  if (status === "pending") return "checking";
+  if (status === "bad")
+    return `unavailable${state.remoteErrors[bid] ? ": " + state.remoteErrors[bid] : ""}`;
+  return state.remoteEngineErrors[bid] ?
+    `available · engine status unavailable: ${state.remoteEngineErrors[bid]}` : "available";
+}
 
 function saveTabs() {
   try {
@@ -688,6 +738,9 @@ function loadTabs() {
 let authMode = "login";
 function showAuth(mode) {
   if (mode) authMode = mode;
+  state.authed = false;
+  stopRemotePolling();
+  if (updatesWs) try { updatesWs.close(); } catch (error) {}
   $("app").classList.add("hidden");
   $("auth-shell").classList.remove("hidden");
   const setup = authMode === "setup";
@@ -728,6 +781,8 @@ $("auth-form").addEventListener("submit", async (ev) => {
 /* ================= boot ================= */
 let updatesWs = null;
 let updatesRetry = 800;
+let updatesReconnectTimer = null;
+let updatesConnectionSequence = 0;
 
 async function enterApp() {
   state.authed = true;
@@ -743,65 +798,200 @@ async function enterApp() {
   if (!state.active && state.tabs.length) state.active = state.tabs[0].id;
   renderTabs(); renderSidebar(); activateTab(state.active);
   connectUpdates();
-  if (!state.booted) {
-    state.booted = true;
-    pollRemotes(); setInterval(pollRemotes, 12000);
-  }
+  startRemotePolling();
 }
 
 async function refreshState() {
   const s = await api(0, "state");
   state.instance = s.instance_name;
   state.sessionColors = s.session_colors || [];
-  state.engines = s.engines;
+  state.engines = Array.isArray(s.engines) ? s.engines : [];
   state.engMap = {};
-  s.engines.forEach(e => state.engMap[e.key] = e);
-  state.backends = s.backends;
-  state.sessions = s.sessions;
+  state.engines.forEach(e => state.engMap[e.key] = e);
+  state.backends = Array.isArray(s.backends) ? s.backends : [];
+  state.sessions = Array.isArray(s.sessions) ? s.sessions : [];
+  reconcileRemoteState();
   state.defaultCwd = s.default_cwd || "/";
   renderSidebar();
 }
 
 function connectUpdates() {
-  if (updatesWs) try { updatesWs.close(); } catch (e) {}
+  if (!state.authed) return;
+  if (updatesWs && (updatesWs.readyState === 0 || updatesWs.readyState === 1)) return;
+  if (updatesReconnectTimer !== null) {
+    clearTimeout(updatesReconnectTimer);
+    updatesReconnectTimer = null;
+  }
+  const sequence = ++updatesConnectionSequence;
   const ws = new WebSocket(wsUrl(0, "ws/updates"));
   updatesWs = ws;
-  ws.onopen = () => { updatesRetry = 800; $("conn-dot").classList.add("ok"); };
+  ws.onopen = () => {
+    if (sequence !== updatesConnectionSequence || updatesWs !== ws) {
+      try { ws.close(); } catch (error) {}
+      return;
+    }
+    updatesRetry = 800;
+    $("conn-dot").classList.add("ok");
+  };
   ws.onmessage = (ev) => {
+    if (sequence !== updatesConnectionSequence || updatesWs !== ws) return;
     try {
       const d = JSON.parse(ev.data);
-      if (d.type === "sessions") { state.sessions = d.sessions; renderSidebar(); syncTabsWithSessions(); }
+      if (d.type === "sessions" && Array.isArray(d.sessions)) {
+        state.sessions = d.sessions;
+        renderSidebar();
+        syncTabsWithSessions();
+      }
     } catch (e) {}
   };
   ws.onclose = () => {
+    if (sequence !== updatesConnectionSequence || updatesWs !== ws) return;
+    updatesWs = null;
     $("conn-dot").classList.remove("ok");
     if (!state.authed) return;
-    setTimeout(connectUpdates, updatesRetry);
+    const delay = Math.round(updatesRetry * (.85 + Math.random() * .3));
     updatesRetry = Math.min(updatesRetry * 1.6, 15000);
+    updatesReconnectTimer = setTimeout(() => {
+      updatesReconnectTimer = null;
+      connectUpdates();
+    }, delay);
   };
   ws.onerror = () => { try { ws.close(); } catch (e) {} };
 }
 
-async function pollRemotes() {
-  for (const b of state.backends) {
-    let reachable = false;
+function remotePollIsCurrent(bid, sequence) {
+  return remotePollSequence[bid] === sequence &&
+    state.backends.some(backend => backend.id === bid);
+}
+
+function syncRemoteStateViews() {
+  try { renderSidebar(); } catch (error) { console.warn("remote sidebar update failed", error); }
+  for (const view of Object.values(state.views)) {
+    if (!view || typeof view.syncRemoteState !== "function") continue;
+    try { view.syncRemoteState(); } catch (error) { console.warn("remote state view update failed", error); }
+  }
+}
+
+async function pollRemoteBackend(backend, forceEngines = false) {
+  const bid = backend.id;
+  const sequence = (remotePollSequence[bid] || 0) + 1;
+  remotePollSequence[bid] = sequence;
+  const wasReachable = state.remoteOk[bid] === true;
+  let payload = null;
+  let failure = null;
+
+  /* A backend restart can invalidate one pooled connection while the new
+     listener is already healthy. Confirm one failure before publishing it. */
+  for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const d = await api(b.id, "sessions");
-      state.remoteSessions[b.id] = d.sessions || [];
-      state.remoteOk[b.id] = true;
-      reachable = true;
-    } catch (e) {
-      state.remoteOk[b.id] = false;
-    }
-    if (reachable && !state.engCache[b.id]) {
-      try {
-        const d = await api(b.id, "engines");
-        state.engCache[b.id] = Array.isArray(d.engines) ? d.engines : [];
-      } catch (e) { /* retry on the next remote poll */ }
+      payload = await api(bid, "sessions", { timeoutMs: REMOTE_POLL_TIMEOUT });
+      if (!payload || !Array.isArray(payload.sessions))
+        throw new Error("backend returned an invalid sessions response");
+      failure = null;
+      break;
+    } catch (error) {
+      failure = error;
+      if (attempt === 0) {
+        await new Promise(resolve => setTimeout(resolve, 300));
+        if (!remotePollIsCurrent(bid, sequence)) return;
+      }
     }
   }
-  if (state.backends.length) renderSidebar();
+  if (!remotePollIsCurrent(bid, sequence)) return;
+  if (failure) {
+    state.remoteOk[bid] = false;
+    state.remoteErrors[bid] = failure.message || "backend unavailable";
+    return;
+  }
+
+  state.remoteSessions[bid] = payload.sessions;
+  state.remoteOk[bid] = true;
+  delete state.remoteErrors[bid];
+
+  const now = Date.now();
+  const hasCachedEngines = Object.prototype.hasOwnProperty.call(state.engCache, bid);
+  const enginesAreStale = now - Number(state.remoteEngineCheckedAt[bid] || 0) >=
+    REMOTE_ENGINE_REFRESH;
+  const refreshEngines = forceEngines || !wasReachable || !hasCachedEngines ||
+    enginesAreStale || !!state.remoteEngineErrors[bid];
+  if (!refreshEngines) return;
+
+  try {
+    const engines = await api(bid, "engines", { timeoutMs: REMOTE_POLL_TIMEOUT });
+    if (!engines || !Array.isArray(engines.engines))
+      throw new Error("backend returned an invalid engines response");
+    if (!remotePollIsCurrent(bid, sequence)) return;
+    state.engCache[bid] = engines.engines;
+    state.remoteEngineCheckedAt[bid] = Date.now();
+    delete state.remoteEngineErrors[bid];
+  } catch (error) {
+    if (!remotePollIsCurrent(bid, sequence)) return;
+    /* Sessions proved the node is reachable. Keep last-known engine data and
+       retry this narrower status request next cycle instead of marking the
+       whole backend down. */
+    state.remoteEngineErrors[bid] = error.message || "engine status unavailable";
+  }
 }
+
+async function pollRemotes(options = {}) {
+  const forceEngines = !!options.forceEngines;
+  const backends = [...state.backends];
+  await Promise.all(backends.map(backend => pollRemoteBackend(backend, forceEngines)));
+  reconcileRemoteState();
+  syncRemoteStateViews();
+}
+
+function startRemotePolling() {
+  const generation = ++remotePollingGeneration;
+  const tick = async () => {
+    remotePollTimer = null;
+    if (!state.authed || generation !== remotePollingGeneration) return;
+    try { await pollRemotes(); }
+    catch (error) { console.warn("remote poll failed", error); }
+    finally {
+      if (state.authed && generation === remotePollingGeneration)
+        remotePollTimer = setTimeout(tick, REMOTE_POLL_INTERVAL);
+    }
+  };
+  if (remotePollTimer !== null) clearTimeout(remotePollTimer);
+  tick();
+}
+
+function stopRemotePolling() {
+  remotePollingGeneration++;
+  if (remotePollTimer !== null) clearTimeout(remotePollTimer);
+  remotePollTimer = null;
+}
+
+/* With the controller proxy's upstream-first handshake, a remote socket open
+   or message is direct proof that the backend is reachable. Let that newer
+   evidence invalidate an older in-flight HTTP failure and refresh the lists. */
+function noteRemoteSocketReachable(bid) {
+  if (!bid) return;
+  const backend = state.backends.find(item => String(item.id) === String(bid));
+  if (!backend) return;
+  bid = backend.id;
+  if (state.remoteOk[bid] === true) return;
+  remotePollSequence[bid] = (remotePollSequence[bid] || 0) + 1;
+  state.remoteOk[bid] = true;
+  delete state.remoteErrors[bid];
+  syncRemoteStateViews();
+  pollRemotes({ forceEngines: true })
+    .catch(error => console.warn("socket recovery poll failed", error));
+}
+
+window.addEventListener("online", () => {
+  if (state.authed) {
+    connectUpdates();
+    pollRemotes({ forceEngines: true })
+      .catch(error => console.warn("online remote poll failed", error));
+  }
+});
+document.addEventListener("visibilitychange", () => {
+  if (state.authed && document.visibilityState === "visible")
+    pollRemotes({ forceEngines: true })
+      .catch(error => console.warn("resume remote poll failed", error));
+});
 
 /* ================= sidebar ================= */
 function sessionsFor(bid) {
@@ -830,15 +1020,19 @@ function backendSupportsScratch(bid) {
 function renderSidebar() {
   const root = $("sess-groups");
   root.innerHTML = "";
-  const groups = [{ bid: 0, name: backendName(0), ok: true }]
-    .concat(state.backends.map(b => ({ bid: b.id, name: b.name, ok: state.remoteOk[b.id] !== false })));
+  const groups = [{ bid: 0, name: backendName(0), ok: true, status: "ok" }]
+    .concat(state.backends.map(b => {
+      const status = remoteAvailability(b.id);
+      return { bid: b.id, name: b.name, ok: status !== "bad", status };
+    }));
   const showGroups = groups.length > 1;
   for (const g of groups) {
     const group = el("section", "sess-group");
     const body = el("div", "sess-group-body");
     if (showGroups) {
       const t = el("div", "sess-group-title");
-      const dot = el("span", "gdot " + (g.ok ? "ok" : "bad"));
+      const dot = el("span", "gdot " + g.status);
+      dot.title = g.bid ? remoteAvailabilityTitle(g.bid) : "available";
       const name = el("span", "sess-group-name", g.name);
       name.title = g.name;
       const key = g.bid ? `remote:${g.bid}` : "local";
@@ -916,7 +1110,9 @@ function ctxMenuAt(x, y) {
   return menu;
 }
 
-function refreshGroup(bid) { if (bid) pollRemotes(); }   // local changes arrive via the updates websocket
+function refreshGroup(bid) {
+  if (bid) pollRemotes().catch(error => console.warn("remote group refresh failed", error));
+}   // local changes arrive via the updates websocket
 
 function sessionContextMenu(ev, bid, s) {
   ev.preventDefault();
@@ -1060,10 +1256,9 @@ function renderFootEngines() {
     if (showGroups) {
       const head = el("div", "foot-engine-head");
       const ico = el("span", "foot-ico");
-      const status = g.bid === 0 ? "ok" : state.remoteOk[g.bid] === false ? "bad" :
-        state.remoteOk[g.bid] === true ? "ok" : "pending";
+      const status = g.bid === 0 ? "ok" : remoteAvailability(g.bid);
       const dot = el("span", "gdot " + status);
-      dot.title = status === "ok" ? "available" : status === "bad" ? "unavailable" : "checking";
+      dot.title = g.bid ? remoteAvailabilityTitle(g.bid) : "available";
       ico.appendChild(dot);
       head.appendChild(ico);
       const name = el("span", "foot-engine-name", g.name);
@@ -1462,6 +1657,8 @@ class SessionView {
     this.ws = null;
     this.closed = false;
     this.retry = 800;
+    this.reconnectTimer = null;
+    this.connectionSequence = 0;
     this.toolCards = {};
     this.liveEl = null;
     this.liveKind = null;
@@ -1635,24 +1832,47 @@ class SessionView {
 
   connect() {
     if (this.closed) return;
+    if (this.ws && (this.ws.readyState === 0 || this.ws.readyState === 1)) return;
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    const sequence = ++this.connectionSequence;
     const ws = new WebSocket(wsUrl(this.tab.bid, `ws/session/${this.tab.sid}`));
     this.ws = ws;
-    ws.onopen = () => { this.retry = 800; };
+    ws.onopen = () => {
+      if (this.closed || sequence !== this.connectionSequence || this.ws !== ws) {
+        try { ws.close(); } catch (error) {}
+        return;
+      }
+      noteRemoteSocketReachable(this.tab.bid);
+    };
     ws.onmessage = (ev) => {
+      if (sequence !== this.connectionSequence || this.ws !== ws) return;
       let d; try { d = JSON.parse(ev.data); } catch (e) { return; }
+      noteRemoteSocketReachable(this.tab.bid);
       this.handle(d);
     };
     ws.onclose = () => {
+      if (sequence !== this.connectionSequence || this.ws !== ws) return;
+      this.ws = null;
       if (this.closed) return;
-      this.setStatus("reconnecting…");
-      setTimeout(() => this.connect(), this.retry);
+      this.setStatus("connection lost · reconnecting…");
+      const delay = Math.round(this.retry * (.85 + Math.random() * .3));
       this.retry = Math.min(this.retry * 1.7, 15000);
+      this.reconnectTimer = setTimeout(() => {
+        this.reconnectTimer = null;
+        this.connect();
+      }, delay);
     };
     ws.onerror = () => { try { ws.close(); } catch (e) {} };
   }
 
   destroy() {
     this.closed = true;
+    this.connectionSequence++;
+    if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
     window.removeEventListener("resize", this._onResize);
     if (this.ws) try { this.ws.close(); } catch (e) {}
     this.attachments.forEach(a => URL.revokeObjectURL(a.url));
@@ -1730,6 +1950,7 @@ class SessionView {
       case "snapshot":
         this.session = d.session;
         this.status = d.status;
+        this.retry = 800;
         this.inner.innerHTML = "";
         this.toolCards = {};
         this.oldestSeq = d.events.length ? d.events[0].seq : null;
@@ -2436,7 +2657,7 @@ class SessionView {
     try {
       await api(this.tab.bid, `sessions/${this.tab.sid}`, { method: "DELETE" });
       closeTab(this.tab.id);
-      if (this.tab.bid) pollRemotes();
+      if (this.tab.bid) refreshGroup(this.tab.bid);
       toast("session deleted");
     } catch (e) { toast(e.message, "error"); }
   }
@@ -2454,7 +2675,7 @@ class SessionView {
         { method: "POST" });
       this.session = r.session;
       this.updateHead();
-      if (this.tab.bid) pollRemotes();
+      if (this.tab.bid) refreshGroup(this.tab.bid);
       toast(wasMissing ? "scratch workspace recreated" : "scratch workspace reset");
     } catch (e) { toast(e.message, "error"); }
   }
@@ -2465,6 +2686,7 @@ class TermView {
   constructor(tab) {
     this.tab = tab;
     this.closed = false;
+    this.connectionSequence = 0;
     this.root = el("div", "view term");
     this.root.innerHTML = `<div class="term-wrap"><div class="term-host"></div></div>`;
     $("views").appendChild(this.root);
@@ -2494,6 +2716,8 @@ class TermView {
     this.resizeObs.observe(this.host);
   }
   connect() {
+    const sequence = ++this.connectionSequence;
+    if (this.dataSub) { this.dataSub.dispose(); this.dataSub = null; }
     const params = new URLSearchParams({ cols: this.term.cols, rows: this.term.rows });
     if (this.tab.cmd) params.set("cmd", this.tab.cmd);
     const ws = new WebSocket(wsUrl(this.tab.bid, "ws/term?" + params.toString()));
@@ -2501,14 +2725,26 @@ class TermView {
     this.ws = ws;
     const enc = new TextEncoder();
     ws.onopen = () => {
+      if (this.closed || sequence !== this.connectionSequence || this.ws !== ws) {
+        try { ws.close(); } catch (error) {}
+        return;
+      }
+      noteRemoteSocketReachable(this.tab.bid);
       this.term.focus();
       this.dataSub = this.term.onData(d => { if (ws.readyState === 1) ws.send(enc.encode(d)); });
     };
     ws.onmessage = (ev) => {
+      if (sequence !== this.connectionSequence || this.ws !== ws) return;
       if (typeof ev.data === "string") return;
+      noteRemoteSocketReachable(this.tab.bid);
       this.term.write(new Uint8Array(ev.data));
     };
-    ws.onclose = () => { if (!this.closed) this.showDead(); };
+    ws.onclose = () => {
+      if (sequence !== this.connectionSequence || this.ws !== ws) return;
+      this.ws = null;
+      if (this.dataSub) { this.dataSub.dispose(); this.dataSub = null; }
+      if (!this.closed) this.showDead();
+    };
     ws.onerror = () => { try { ws.close(); } catch (e) {} };
   }
   sendResize() {
@@ -2516,9 +2752,9 @@ class TermView {
       this.ws.send(JSON.stringify({ type: "resize", cols: this.term.cols, rows: this.term.rows }));
   }
   showDead() {
-    if (this.root.querySelector(".term-dead")) return;
+    if (this.root.querySelector(".term-dead")) { this.syncRemoteState(); return; }
     const d = el("div", "term-dead");
-    d.appendChild(el("div", "", "terminal ended"));
+    d.appendChild(el("div", "term-dead-message", "terminal ended"));
     const b = el("button", "btn btn-pri", "New shell");
     b.onclick = () => {
       d.remove();
@@ -2528,11 +2764,24 @@ class TermView {
     d.appendChild(b);
     this.root.querySelector(".term-wrap").style.position = "relative";
     this.root.appendChild(d);
+    this.syncRemoteState();
+  }
+  syncRemoteState() {
+    const dead = this.root.querySelector(".term-dead");
+    if (!dead) return;
+    const message = dead.querySelector(".term-dead-message");
+    const button = dead.querySelector("button");
+    const unavailable = !!this.tab.bid && state.remoteOk[this.tab.bid] === false;
+    message.textContent = unavailable ? "backend unavailable" : "terminal ended";
+    button.textContent = unavailable ? "Waiting for backend…" : "New shell";
+    button.disabled = unavailable;
   }
   destroy() {
     this.closed = true;
+    this.connectionSequence++;
     if (this.resizeObs) this.resizeObs.disconnect();
     if (this.ws) try { this.ws.close(); } catch (e) {}
+    if (this.dataSub) { this.dataSub.dispose(); this.dataSub = null; }
     if (this.term) this.term.dispose();
     this.root.remove();
   }
@@ -2543,13 +2792,52 @@ class SettingsView {
   constructor(tab) {
     this.tab = tab;
     this.renderGeneration = 0;
+    this.remoteEngineGroups = new Map();
+    this.remoteBackendDots = new Map();
     this.root = el("div", "view settings");
     this.root.innerHTML = `<div class="settings-scroll"><div class="settings-inner"></div></div>`;
     $("views").appendChild(this.root);
     this.inner = this.root.querySelector(".settings-inner");
   }
-  destroy() { this.renderGeneration++; this.root.remove(); }
+  destroy() {
+    this.renderGeneration++;
+    this.remoteEngineGroups.clear();
+    this.remoteBackendDots.clear();
+    this.root.remove();
+  }
   onShow() { this.render(); }
+
+  syncRemoteState() {
+    for (const [bid, group] of this.remoteEngineGroups) {
+      if (!state.backends.some(backend => backend.id === bid)) continue;
+      const reachable = state.remoteOk[bid];
+      const cached = Object.prototype.hasOwnProperty.call(state.engCache, bid) ?
+        state.engCache[bid] : null;
+      if (reachable === false) {
+        group.update({
+          status: "bad", engines: [], message: "Backend unavailable",
+          detail: state.remoteErrors[bid] || "The controller cannot reach this backend",
+        });
+      } else if (reachable === true && cached === null) {
+        group.update({
+          status: "ok", engines: null,
+          message: state.remoteEngineErrors[bid] ?
+            "Backend available · retrying engine status…" : "Loading engines…",
+          detail: state.remoteEngineErrors[bid] || "",
+        });
+      } else {
+        group.update({
+          status: reachable === true ? "ok" : "pending", engines: cached,
+          detail: state.remoteEngineErrors[bid] || "",
+        });
+      }
+    }
+    for (const [bid, dot] of this.remoteBackendDots) {
+      const status = remoteAvailability(bid);
+      dot.className = "gdot " + status;
+      dot.title = remoteAvailabilityTitle(bid);
+    }
+  }
 
   engineRow(e2) {
     const row = el("div", "engine-row");
@@ -2594,7 +2882,8 @@ class SettingsView {
 
     const update = ({ status = "pending", engines = null, message = "", detail = "" }) => {
       dot.className = "gdot " + status;
-      dot.title = status === "ok" ? "available" : status === "bad" ? "unavailable" : "checking";
+      const statusLabel = status === "ok" ? "available" : status === "bad" ? "unavailable" : "checking";
+      dot.title = detail ? `${statusLabel}: ${detail}` : statusLabel;
       body.innerHTML = "";
       if (message || engines === null) {
         const note = el("div", "engine-node-message", message || "Checking engines…");
@@ -2625,6 +2914,8 @@ class SettingsView {
     state.engines.forEach(e2 => state.engMap[e2.key] = e2);
     renderFootEngines();
     this.inner.innerHTML = "";
+    this.remoteEngineGroups.clear();
+    this.remoteBackendDots.clear();
 
     /* instance */
     const c1 = el("div", "card");
@@ -2676,23 +2967,13 @@ class SettingsView {
         status: state.remoteOk[b.id] === false ? "bad" : state.remoteOk[b.id] === true ? "ok" : "pending",
         engines: cached || null,
       });
+      this.remoteEngineGroups.set(b.id, group);
       c2.appendChild(group.root);
-      api(b.id, "engines").then(result => {
-        if (generation !== this.renderGeneration) return;
-        const remoteEngines = Array.isArray(result.engines) ? result.engines : [];
-        state.engCache[b.id] = remoteEngines;
-        state.remoteOk[b.id] = true;
-        group.update({ status: "ok", engines: remoteEngines });
-        renderFootEngines();
-      }).catch(error => {
-        if (generation !== this.renderGeneration) return;
-        state.remoteOk[b.id] = false;
-        delete state.engCache[b.id];
-        group.update({ status: "bad", engines: [], message: "Backend unavailable", detail: error.message });
-        renderFootEngines();
-      });
     }
     this.inner.appendChild(c2);
+    this.syncRemoteState();
+    pollRemotes({ forceEngines: true })
+      .catch(error => console.warn("settings remote poll failed", error));
 
     /* backends */
     const c3 = el("div", "card");
@@ -2711,11 +2992,14 @@ class SettingsView {
     const beList = c3.querySelector("#be-list");
     const renderBes = () => {
       beList.innerHTML = "";
+      this.remoteBackendDots.clear();
       if (!state.backends.length) beList.innerHTML = `<p class="hint">No remote backends. This instance ("${esc(backendName(0))}") is always available as local.</p>`;
       for (const b of state.backends) {
         const row = el("div", "be-row");
         const details = el("div", "be-details");
         const identity = el("div", "be-identity");
+        const nameRow = el("div", "be-name-row");
+        const availability = el("span", "gdot pending");
         const name = el("span", "be-name", b.name);
         name.title = [b.role, b.remote_version && `v${b.remote_version}`,
           b.protocol != null && `protocol ${b.protocol}`].filter(Boolean).join(" · ");
@@ -2734,10 +3018,13 @@ class SettingsView {
           : isTls ? "Encrypted · certificate verified by the controller system trust store"
             : "Cleartext · traffic to this backend is not encrypted";
         security.appendChild(transportShieldIcon(isTls));
-        identity.appendChild(name);
+        nameRow.appendChild(availability);
+        nameRow.appendChild(name);
+        identity.appendChild(nameRow);
         identity.appendChild(url);
         details.appendChild(security);
         details.appendChild(identity);
+        this.remoteBackendDots.set(b.id, availability);
         row.appendChild(details);
         const actions = el("div", "be-actions");
         const test = el("button", "btn btn-sm", "Test");
@@ -2745,13 +3032,25 @@ class SettingsView {
           test.textContent = "…";
           try {
             const r = await api(0, `backends/${b.id}/test`, { method: "POST" });
-            test.textContent = "Test";
             if (r.ok) {
+              state.remoteOk[b.id] = true;
+              delete state.remoteErrors[b.id];
               toast(`${b.name}: ok (${r.remote && r.remote.version})`, "ok");
               await refreshState(); await this.render();
+            } else {
+              const message = r.error || "HTTP " + r.status;
+              state.remoteOk[b.id] = false;
+              state.remoteErrors[b.id] = message;
+              syncRemoteStateViews();
+              toast(`${b.name}: ${message}`, "error");
             }
-            else toast(`${b.name}: ${r.error || "HTTP " + r.status}`, "error");
-          } catch (e) { test.textContent = "Test"; toast(e.message, "error"); }
+          } catch (e) {
+            toast(e.message, "error");
+          } finally {
+            if (test.isConnected) test.textContent = "Test";
+            pollRemotes({ forceEngines: true })
+              .catch(error => console.warn("backend test follow-up poll failed", error));
+          }
         };
         const upgrade = el("button", "btn btn-sm", "Upgrade");
         const versionOrder = cmpVersion(b.remote_version, settings.version);
@@ -2780,7 +3079,11 @@ class SettingsView {
             const result = await api(0, `backends/${b.id}/upgrade`, { method: "POST" });
             toast(`${b.name}: upgraded ${result.from_version} → ${result.to_version}`, "ok", 7000);
             delete state.engCache[b.id];
-            await refreshState(); await this.render(); pollRemotes();
+            delete state.remoteEngineCheckedAt[b.id];
+            delete state.remoteEngineErrors[b.id];
+            await refreshState(); await this.render();
+            pollRemotes({ forceEngines: true })
+              .catch(error => console.warn("post-upgrade remote poll failed", error));
           } catch (e) {
             toast(`${b.name}: ${e.message}`, "error", 7000);
             await this.render();
@@ -2790,7 +3093,6 @@ class SettingsView {
         rm.onclick = async () => {
           if (!(await modalConfirm("Remove backend?", `${b.name} (${b.url})`))) return;
           await api(0, `backends/${b.id}`, { method: "DELETE" });
-          delete state.engCache[b.id]; delete state.remoteOk[b.id]; delete state.remoteSessions[b.id];
           await refreshState(); await this.render();
         };
         actions.appendChild(test); actions.appendChild(upgrade); actions.appendChild(rm);
@@ -2821,9 +3123,11 @@ class SettingsView {
         }});
         toast("backend added", "ok");
         c3.querySelector("#be-name").value = c3.querySelector("#be-url").value =
-          c3.querySelector("#be-token").value = c3.querySelector("#be-tls").value = "";
+        c3.querySelector("#be-token").value = c3.querySelector("#be-tls").value = "";
         c3.querySelector("#be-pairing").value = "";
-        await refreshState(); await this.render(); pollRemotes();
+        await refreshState(); await this.render();
+        pollRemotes({ forceEngines: true })
+          .catch(error => console.warn("new-backend poll failed", error));
       } catch (e) { toast(e.message, "error"); }
     };
     this.inner.appendChild(c3);
@@ -2845,6 +3149,7 @@ class SettingsView {
       } catch (e) { toast(e.message, "error"); }
     };
     this.inner.appendChild(c4);
+    this.syncRemoteState();
   }
 }
 
@@ -2964,6 +3269,7 @@ async function modalNewSession() {
   cwdInp.value = lsGet("puppy.lastcwd") || state.defaultCwd || "/";
   let engines = [];
   let engine = null;
+  let engineLoadSequence = 0;
 
   function pickWorkspace(kind) {
     if (kind === "temporary" && scratchButton.disabled) return;
@@ -2992,13 +3298,33 @@ async function modalNewSession() {
 
   async function loadEngines() {
     const bid = parseInt(beSel.value, 10);
+    const sequence = ++engineLoadSequence;
+    let loaded = [];
     try {
-      if (bid === 0) engines = state.engines;
+      if (bid === 0) loaded = state.engines;
       else {
-        if (!state.engCache[bid]) state.engCache[bid] = (await api(bid, "engines")).engines;
-        engines = state.engCache[bid];
+        if (!Object.prototype.hasOwnProperty.call(state.engCache, bid)) {
+          const result = await api(bid, "engines", { timeoutMs: REMOTE_POLL_TIMEOUT });
+          if (!result || !Array.isArray(result.engines))
+            throw new Error("backend returned an invalid engines response");
+          state.engCache[bid] = result.engines;
+          state.remoteEngineCheckedAt[bid] = Date.now();
+          delete state.remoteEngineErrors[bid];
+        }
+        loaded = state.engCache[bid];
       }
-    } catch (e) { toast("backend unreachable: " + e.message, "error"); engines = []; }
+    } catch (e) {
+      if (sequence !== engineLoadSequence || parseInt(beSel.value, 10) !== bid) return;
+      toast("backend unavailable: " + e.message, "error");
+      if (bid) {
+        state.remoteEngineErrors[bid] = e.message;
+        syncRemoteStateViews();
+        pollRemotes({ forceEngines: true })
+          .catch(error => console.warn("new-session recovery poll failed", error));
+      }
+    }
+    if (sequence !== engineLoadSequence || parseInt(beSel.value, 10) !== bid) return;
+    engines = loaded;
     engBox.innerHTML = "";
     for (const e2 of engines) {
       const card = el("div", "ep");
