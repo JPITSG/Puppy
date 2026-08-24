@@ -777,6 +777,8 @@ class SessionView {
     this.liveKind = null;
     this.statusText = "";     // header status; the transcript foot mirrors it
     this.statusRow = null;    // standalone foot row, used when no thinking block is live
+    this.queued = [];         // last queue payload, re-rendered when the list expands
+    this.queueOpen = false;   // whether the tail past QUEUE_ROWS is showing
     this.oldestSeq = null;
     this.history = [];        // sent messages, oldest first (shell-style recall)
     this.histIdx = null;
@@ -1404,14 +1406,17 @@ class SessionView {
 
   renderQueue(q) {
     const box = this.queueEl;
+    this.queued = q;
     box.innerHTML = "";
-    if (!q.length) { box.classList.add("hidden"); return; }
+    if (!q.length) { box.classList.add("hidden"); this.queueOpen = false; return; }
     box.classList.remove("hidden");
+    box.classList.toggle("expanded", !!this.queueOpen);
     box.appendChild(el("div", "q-head", `queued · ${q.length}`));
-    /* one row per message, in the order they will run. The per-item cap only
-       keeps a runaway message out of the DOM - each row is a single line that
-       fades out at whatever width is going. */
-    const shown = q.slice(0, QUEUE_ROWS);
+    /* one row per message, in the order they will run. The list is capped so a
+       deep queue cannot push the composer down the screen; the tail is one
+       click away. The per-item cap only keeps a runaway message out of the DOM
+       - each row is a single line that fades out at whatever width is going. */
+    const shown = this.queueOpen ? q : q.slice(0, QUEUE_ROWS);
     shown.forEach((text, i) => {
       const row = el("div", "q-item");
       row.appendChild(el("span", "q-n", String(i + 1)));
@@ -1424,8 +1429,15 @@ class SessionView {
       row.appendChild(x);
       box.appendChild(row);
     });
-    if (q.length > shown.length)
-      box.appendChild(el("div", "q-more", `+${q.length - shown.length} more`));
+    if (q.length > shown.length) {
+      const more = el("button", "q-more", `+${q.length - shown.length} more`);
+      more.onclick = () => { this.queueOpen = true; this.renderQueue(this.queued); };
+      box.appendChild(more);
+    } else if (this.queueOpen && q.length > QUEUE_ROWS) {
+      const less = el("button", "q-more", "show fewer");
+      less.onclick = () => { this.queueOpen = false; this.renderQueue(this.queued); };
+      box.appendChild(less);
+    }
     this.syncQueueFade();
   }
   unqueue(index, text) {
