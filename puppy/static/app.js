@@ -58,6 +58,39 @@ function copyIcon(done = false) {
   return svg;
 }
 
+/* A compact transport indicator for backend rows. Shape as well as colour
+   carries the state, so the distinction survives colour-vision differences:
+   encrypted connections get a check; cleartext connections get an X. */
+function transportShieldIcon(encrypted) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 18 18");
+  svg.setAttribute("width", "18");
+  svg.setAttribute("height", "18");
+  svg.setAttribute("aria-hidden", "true");
+
+  const shield = document.createElementNS(NS, "path");
+  shield.setAttribute("d", "M9 1.7 15 4v4.25c0 3.7-2.25 6.35-6 8-3.75-1.65-6-4.3-6-8V4L9 1.7Z");
+  shield.setAttribute("fill", "currentColor");
+  shield.setAttribute("fill-opacity", ".1");
+  shield.setAttribute("stroke", "currentColor");
+  shield.setAttribute("stroke-width", "1.35");
+  shield.setAttribute("stroke-linejoin", "round");
+  svg.appendChild(shield);
+
+  const mark = document.createElementNS(NS, "path");
+  mark.setAttribute("d", encrypted
+    ? "M5.65 8.7 7.75 10.8 12.25 6.3"
+    : "M6.35 6.45 11.65 11.55 M11.65 6.45 6.35 11.55");
+  mark.setAttribute("fill", "none");
+  mark.setAttribute("stroke", "currentColor");
+  mark.setAttribute("stroke-width", "1.45");
+  mark.setAttribute("stroke-linecap", "round");
+  mark.setAttribute("stroke-linejoin", "round");
+  svg.appendChild(mark);
+  return svg;
+}
+
 const esc = (s) => String(s == null ? "" : s)
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
   .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
@@ -2431,20 +2464,32 @@ class SettingsView {
       if (!state.backends.length) beList.innerHTML = `<p class="hint">No remote backends. This instance ("${esc(backendName(0))}") is always available as local.</p>`;
       for (const b of state.backends) {
         const row = el("div", "be-row");
+        const details = el("div", "be-details");
+        const identity = el("div", "be-identity");
         const name = el("span", "be-name", b.name);
         name.title = [b.role, b.remote_version && `v${b.remote_version}`,
           b.protocol != null && `protocol ${b.protocol}`].filter(Boolean).join(" · ");
-        row.appendChild(name);
-        row.appendChild(el("span", "be-url", b.url));
+        const url = el("span", "be-url", b.url);
+        url.title = b.url;
         const isTls = /^https:\/\//i.test(b.url || "");
         const isPinned = isTls && !!b.tls_fingerprint;
-        const security = el("span", `pill be-security ${isTls ? "ok" : "warn"}`,
-          isPinned ? "TLS pinned" : isTls ? "TLS verified" : "Cleartext");
+        const security = el("span", `be-security ${isTls ? "secure" : "clear"}`);
+        const securityLabel = isPinned ? "Encrypted: TLS certificate pinned"
+          : isTls ? "Encrypted: TLS certificate verified"
+            : "Cleartext: traffic is not encrypted";
+        security.setAttribute("role", "img");
+        security.setAttribute("aria-label", securityLabel);
         security.title = isPinned
-          ? `Certificate SHA-256: ${b.tls_fingerprint}`
-          : isTls ? "Certificate verified by the controller system trust store"
-            : "Traffic to this backend is not encrypted";
-        row.appendChild(security);
+          ? `Encrypted · pinned certificate SHA-256: ${b.tls_fingerprint}`
+          : isTls ? "Encrypted · certificate verified by the controller system trust store"
+            : "Cleartext · traffic to this backend is not encrypted";
+        security.appendChild(transportShieldIcon(isTls));
+        identity.appendChild(name);
+        identity.appendChild(url);
+        details.appendChild(security);
+        details.appendChild(identity);
+        row.appendChild(details);
+        const actions = el("div", "be-actions");
         const test = el("button", "btn btn-sm", "Test");
         test.onclick = async () => {
           test.textContent = "…";
@@ -2498,7 +2543,8 @@ class SettingsView {
           delete state.engCache[b.id]; delete state.remoteOk[b.id]; delete state.remoteSessions[b.id];
           await refreshState(); await this.render();
         };
-        row.appendChild(test); row.appendChild(upgrade); row.appendChild(rm);
+        actions.appendChild(test); actions.appendChild(upgrade); actions.appendChild(rm);
+        row.appendChild(actions);
         beList.appendChild(row);
       }
     };
