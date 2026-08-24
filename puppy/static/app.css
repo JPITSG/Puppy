@@ -199,7 +199,13 @@ a{color:var(--acc2)}
 @media (hover:hover){.linklike:hover{color:var(--txt);text-decoration-color:var(--line3)}}
 .linklike:active{color:var(--txt2)}
 .side-foot{border-top:1px solid var(--line);padding:10px 14px;display:flex;flex-direction:column;gap:8px}
-.foot-engines{display:flex;flex-direction:column;gap:4px;max-height:38dvh;overflow-y:auto}
+/* The compact disclosure overlaps its 13px header by a few pixels. When the
+   final group is closed that overhang becomes the scroller's lowest content,
+   so reserve it internally and cancel it externally to avoid a false bar. */
+.foot-engines{
+  display:flex;flex-direction:column;gap:4px;max-height:38dvh;overflow-y:auto;
+  padding-bottom:4px;margin-bottom:-4px;
+}
 .foot-engine-group{display:flex;flex-direction:column;gap:4px}
 .foot-engine-body{display:flex;flex-direction:column;gap:4px}
 .foot-engine-body[hidden]{display:none}
