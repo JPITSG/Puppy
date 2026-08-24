@@ -282,8 +282,7 @@ label input,label select{margin-top:5px;text-transform:none;letter-spacing:0}
 }
 .chat-head::after{
   content:"";position:absolute;left:0;right:0;bottom:0;height:1px;pointer-events:none;
-  /* short fade so the line doesn't touch the sidebar joint */
-  background:linear-gradient(90deg,transparent 0,transparent 6px,var(--line) 34px);
+  background:var(--line);
 }
 .chip{
   display:inline-flex;align-items:center;gap:6px;font-size:11px;font-family:var(--mono);
