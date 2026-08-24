@@ -784,6 +784,9 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   .composer textarea{font-size:16px}
   .approval,.queue-strip{margin:0 10px 6px;width:calc(100% - 20px)}
   .chat-head{padding:8px 10px;gap:6px}
+  /* the head's own padding already matches the tabbar's, so the desktop
+     nudge would push the ⋮ 4px past the + above it */
+  .chat-head .menu-btn{margin-right:0}
   .chat-meta-scroll{gap:6px}
   .chat-status{max-width:150px}
   .chip{max-width:160px}
@@ -798,6 +801,11 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   .msg-user{max-width:94%}
 }
 @media (max-width:900px) and (any-pointer:coarse){
+  /* a left-edge swipe opens the drawer on touch, so the button is redundant
+     here. It stays for narrow windows on a fine pointer, where the swipe
+     handler bails out (it only accepts pointerType "touch") and the button
+     would otherwise be the only way into the session list. */
+  .burger{display:none}
   .drawer-edge{
     display:block;position:fixed;left:0;top:0;bottom:0;width:24px;z-index:19;
     touch-action:pan-y pinch-zoom;
