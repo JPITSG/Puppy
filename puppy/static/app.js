@@ -1996,7 +1996,51 @@ function modalSwitchEngine(view) {
   };
 }
 
+/* Optical label centring. Flexbox centres a button's line box, but a font's
+   ascent, descent and cap height are not symmetric about it, so the cap band
+   can land up to a pixel below the geometric centre - Segoe UI is the worst
+   offender, SF and Roboto are already square. Measure the live font once and
+   publish the correction as a bottom pad: shrinking the content box lifts the
+   label by half the pad. No metrics => 0, i.e. plain geometric centring. */
+function syncLabelNudge() {
+  try {
+    const ref = el("span", "btn");
+    ref.style.cssText = "position:absolute;left:-9999px;top:0;visibility:hidden";
+    document.body.appendChild(ref);
+    const cs = getComputedStyle(ref);
+    const size = parseFloat(cs.fontSize);
+    const font = `${cs.fontStyle} ${cs.fontWeight} ${size}px ${cs.fontFamily}`;
+    ref.remove();
+
+    /* where the browser actually puts the baseline inside a line-height:1 box:
+       a zero-height inline-block's bottom edge sits exactly on it. Block probe,
+       so its own top edge is the line box top rather than the font's content box */
+    const probe = document.createElement("div");
+    /* line-height comes after the font shorthand, which resets it */
+    probe.style.cssText = "position:absolute;left:-9999px;top:0;visibility:hidden;" +
+      "display:block;width:max-content;font:" + font + ";line-height:1";
+    probe.textContent = "H";
+    const strut = document.createElement("span");
+    strut.style.cssText = "display:inline-block;width:0;height:0";
+    probe.appendChild(strut);
+    document.body.appendChild(probe);
+    const box = probe.getBoundingClientRect();
+    const baseline = strut.getBoundingClientRect().bottom - box.top;
+    probe.remove();
+
+    const ctx = document.createElement("canvas").getContext("2d");
+    ctx.font = font;
+    const cap = ctx.measureText("H").actualBoundingBoxAscent;   // ink above the baseline
+
+    const low = baseline - cap / 2 - size / 2;   // >0: the cap band sits that low
+    if (!size || !cap || !isFinite(low) || low <= 0.1) return;
+    document.documentElement.style.setProperty("--label-pb",
+      (2 * Math.min(low, 1.5) / size).toFixed(4) + "em");
+  } catch (e) { /* keep the geometric centre */ }
+}
+
 /* ================= go ================= */
+syncLabelNudge();
 initAuth().catch(e => {
   toast("failed to reach backend: " + e.message, "error");
   showAuth("login");

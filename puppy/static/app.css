@@ -13,6 +13,9 @@
   /* button system: one height scale + themeable face/lift tokens so every
      control (btn, icon-btn, send, mini pill) shares the same material */
   --btn-h:34px; --btn-h-sm:28px; --btn-r:10px;
+  /* optical label centring; measured from the live font at boot (see
+     syncLabelNudge). 0 = the font's cap band is already square in its line box */
+  --label-pb:0px;
   --line3:rgba(255,255,255,.24);
   --btn-face:linear-gradient(180deg,rgba(255,255,255,.07),rgba(255,255,255,.015));
   --btn-face-hi:linear-gradient(180deg,rgba(255,255,255,.13),rgba(255,255,255,.04));
@@ -208,7 +211,7 @@ button{
 :where(button,summary,[role=button]):focus-visible{outline:2px solid var(--acc);outline-offset:2px}
 .btn{
   display:inline-flex;align-items:center;justify-content:center;gap:7px;flex-shrink:0;
-  height:var(--btn-h);padding:0 15px;border-radius:var(--btn-r);cursor:pointer;user-select:none;
+  height:var(--btn-h);padding:0 15px var(--label-pb);border-radius:var(--btn-r);cursor:pointer;user-select:none;
   font-size:12.5px;font-weight:600;line-height:1;white-space:nowrap;color:var(--txt);
   background-color:var(--panel3);background-image:var(--btn-face);border:1px solid var(--line2);
   box-shadow:inset 0 1px 0 var(--btn-top),var(--btn-lift);
@@ -273,7 +276,7 @@ button{
 @media (hover:hover){.btn-ghost:hover{background:var(--hov);color:var(--txt);box-shadow:none}}
 .btn-ghost:active{background:var(--hov);box-shadow:var(--btn-press)}
 .btn-wide{width:100%;height:36px}
-.btn-sm{height:var(--btn-h-sm);padding:0 11px;font-size:11.5px;border-radius:8px;gap:5px}
+.btn-sm{height:var(--btn-h-sm);padding:0 11px var(--label-pb);font-size:11.5px;border-radius:8px;gap:5px}
 .icon-btn{
   display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;
   width:32px;height:32px;border-radius:10px;cursor:pointer;user-select:none;
@@ -610,14 +613,16 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .composer-row .spacer{flex:1}
 .btn-send{
   display:inline-flex;align-items:center;justify-content:center;gap:7px;flex-shrink:0;
-  height:32px;min-width:86px;padding:0 16px;border:none;border-radius:var(--btn-r);
+  height:32px;min-width:86px;padding:0 16px var(--label-pb);border:none;border-radius:var(--btn-r);
   font-size:13px;font-weight:650;line-height:1;letter-spacing:.01em;cursor:pointer;user-select:none;
   color:#fff;
   background-color:var(--acc-lo);background-image:linear-gradient(180deg,var(--acc-hi),var(--acc-lo));
   box-shadow:inset 0 1px 0 rgba(255,255,255,.3),0 1px 2px rgba(0,0,0,.25),var(--glow-acc);
   transition:box-shadow .15s var(--ease),filter .15s var(--ease);
 }
-.btn-send .stop-sq{width:9px;height:9px;background:currentColor;border-radius:2px;flex-shrink:0}
+/* the pad lifts the whole content box, so give the square it back - it is
+   already centred and only the text needed the correction */
+.btn-send .stop-sq{width:9px;height:9px;background:currentColor;border-radius:2px;flex-shrink:0;margin-top:var(--label-pb)}
 @media (hover:hover){
   .btn-send:hover{filter:brightness(1.07);box-shadow:inset 0 1px 0 rgba(255,255,255,.34),0 1px 2px rgba(0,0,0,.25),var(--glow-acc-hi)}
 }
@@ -762,8 +767,8 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   .chip{max-width:160px}
   /* comfortable touch targets - the tabbar/footer icon buttons keep their
      own tighter sizing, which is set after .icon-btn in the cascade */
-  .btn{height:36px;padding:0 16px}
-  .btn-sm{height:30px;padding:0 12px}
+  .btn{height:36px;padding:0 16px var(--label-pb)}
+  .btn-sm{height:30px;padding:0 12px var(--label-pb)}
   .btn-send{height:34px}
   .composer-row .mini{height:26px}
   .icon-btn{width:34px;height:34px}
