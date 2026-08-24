@@ -239,7 +239,7 @@ async def h_session_switch(request: web.Request):
     old = s["engine"]
     ev = db.add_event(s["id"], "engine_switch", {"from": old, "to": engine})
     db.touch_session(s["id"], engine=engine, native_session_id="", model="", effort="",
-                     permission_mode=driver.default_permission())
+                     last_model="", permission_mode=driver.default_permission())
     h.broadcast({"type": "event", "event": ev})
     h.broadcast({"type": "session_meta", "session": db.get_session(s["id"])})
     runner.broadcast_sessions()

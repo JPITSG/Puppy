@@ -623,6 +623,54 @@ $("burger").onclick = () => $("app").classList.add("side-open");
 $("side-backdrop").onclick = closeDrawer;
 function closeDrawer() { $("app").classList.remove("side-open"); }
 
+/* Touch-only drawer gestures. The narrow edge target keeps ordinary chat,
+   terminal and tab gestures untouched while making the closed drawer easy to
+   discover. Vertical movement remains native scrolling inside the drawer. */
+(() => {
+  const app = $("app");
+  const mobile = window.matchMedia("(max-width: 900px)");
+  const swipeDistance = 52;
+
+  function wireSwipe(target, opening) {
+    let start = null;
+    let suppressClick = false;
+
+    target.addEventListener("pointerdown", (e) => {
+      if (!mobile.matches || e.pointerType !== "touch" || !e.isPrimary) return;
+      const open = app.classList.contains("side-open");
+      if ((opening && open) || (!opening && !open)) return;
+      start = { id: e.pointerId, x: e.clientX, y: e.clientY };
+      try { target.setPointerCapture(e.pointerId); } catch (err) {}
+    });
+
+    target.addEventListener("pointerup", (e) => {
+      if (!start || e.pointerId !== start.id) return;
+      const dx = e.clientX - start.x;
+      const dy = e.clientY - start.y;
+      const horizontal = Math.abs(dx) >= swipeDistance && Math.abs(dx) > Math.abs(dy) * 1.2;
+      start = null;
+      if (!horizontal || (opening ? dx <= 0 : dx >= 0)) return;
+      e.preventDefault();
+      suppressClick = true;
+      setTimeout(() => { suppressClick = false; }, 350);
+      if (opening) app.classList.add("side-open");
+      else closeDrawer();
+    });
+
+    target.addEventListener("pointercancel", () => { start = null; });
+    target.addEventListener("click", (e) => {
+      if (!suppressClick) return;
+      e.preventDefault();
+      e.stopPropagation();
+      suppressClick = false;
+    }, true);
+  }
+
+  wireSwipe($("drawer-edge"), true);
+  wireSwipe($("side"), false);
+  wireSwipe($("side-backdrop"), false);
+})();
+
 /* light / dark theme (class applied pre-paint by an inline head script) */
 function applyTheme(t) {
   document.documentElement.classList.toggle("light", t === "light");
@@ -727,7 +775,7 @@ class SessionView {
     this.histDraft = "";
     this.attachments = [];    // server paths of pasted images, sent with the next message
     this.buildDom();
-    this._onResize = () => this.syncGutter();
+    this._onResize = () => { this.syncGutter(); this.syncComposerMeta(); this.syncHeadOverflow(); };
     window.addEventListener("resize", this._onResize);
     this.connect();
   }
@@ -736,12 +784,15 @@ class SessionView {
     const root = el("div", "view chat");
     root.innerHTML = `
       <div class="chat-head">
-        <span class="chip eng"><span class="dot"></span><span class="eng-label">…</span></span>
-        <span class="chip be" title="Backend"></span>
-        <span class="chip cwd" title=""></span>
-        <span class="chat-status"></span>
-        <span class="spacer"></span>
-        <div style="position:relative">
+        <div class="chat-meta-viewport">
+          <div class="chat-meta-scroll">
+            <span class="chip eng"><span class="dot"></span><span class="eng-label">…</span></span>
+            <span class="chip be" title="Backend"></span>
+            <span class="chip cwd" title=""></span>
+            <span class="chat-status"></span>
+          </div>
+        </div>
+        <div class="chat-menu">
           <button class="icon-btn menu-btn" title="Session menu">⋮</button>
         </div>
       </div>
@@ -750,12 +801,12 @@ class SessionView {
       <div class="approval hidden"></div>
       <div class="composer">
         <div class="composer-box">
-          <textarea rows="1" placeholder="Message the agent… (Enter to send, Shift+Enter for newline, paste images)"></textarea>
+          <textarea rows="1" placeholder="Message the agent…"></textarea>
           <div class="attach-strip hidden"></div>
           <div class="composer-row">
-            <button class="mini perm" title="Permission mode">perms</button>
-            <button class="mini model" title="Model">model</button>
-            <button class="mini effort" title="Reasoning effort">effort</button>
+            <button class="mini perm" title="Permission mode"><span class="mini-key">permissions:</span><span class="mini-value">auto</span></button>
+            <button class="mini model" title="Model"><span class="mini-key">model:</span><span class="mini-value">auto</span></button>
+            <button class="mini effort" title="Reasoning effort"><span class="mini-key">effort:</span><span class="mini-value">auto</span></button>
             <span class="spacer"></span>
             <button class="btn-send">Send</button>
           </div>
@@ -767,10 +818,14 @@ class SessionView {
     this.inner = root.querySelector(".chat-inner");
     this.ta = root.querySelector("textarea");
     this.sendBtn = root.querySelector(".btn-send");
+    this.composerRow = root.querySelector(".composer-row");
+    this.headMeta = root.querySelector(".chat-meta-scroll");
+    this.headMetaViewport = root.querySelector(".chat-meta-viewport");
     this.statusEl = root.querySelector(".chat-status");
     this.approvalEl = root.querySelector(".approval");
     this.queueEl = root.querySelector(".queue-strip");
     this.attachStrip = root.querySelector(".attach-strip");
+    this.headMeta.addEventListener("scroll", () => this.syncHeadOverflow(), { passive: true });
     this.ta.addEventListener("paste", (e) => this.handlePaste(e));
 
     this.fieldSizing = window.CSS && CSS.supports && CSS.supports("field-sizing", "content");
@@ -849,13 +904,32 @@ class SessionView {
     this.root.remove();
   }
 
-  onShow() { this.syncGutter(); this.scrollBottom(true); this.ta.focus(); }
+  onShow() {
+    this.syncGutter(); this.syncComposerMeta(); this.syncHeadOverflow();
+    this.scrollBottom(true); this.ta.focus();
+  }
 
   /* transcript sits left of the scrollbar; export its width so the composer /
      approval / queue columns can align with the transcript column exactly */
   syncGutter() {
     const g = this.scroll.offsetWidth - this.scroll.clientWidth;
     this.root.style.setProperty("--sbw", (g > 0 ? g : 0) + "px");
+  }
+
+  syncHeadOverflow() {
+    const sc = this.headMeta;
+    if (!sc || !sc.clientWidth) return;
+    const moreRight = sc.scrollLeft + sc.clientWidth < sc.scrollWidth - 1;
+    this.headMetaViewport.classList.toggle("more-right", moreRight);
+  }
+
+  /* Keep the controls on one line. If their labelled forms would overflow,
+     retain the values and menus but drop the redundant key prefixes. */
+  syncComposerMeta() {
+    const row = this.composerRow;
+    if (!row || !row.clientWidth) return;
+    row.classList.remove("compact-meta");
+    row.classList.toggle("compact-meta", row.scrollWidth > row.clientWidth + 1);
   }
 
   /* with field-sizing the browser autosizes natively; otherwise measure on the
@@ -974,9 +1048,17 @@ class SessionView {
     cwd.textContent = tailPath(s.cwd, 34);
     cwd.title = s.cwd;
     this.root.querySelector(".chip.be").textContent = backendName(this.tab.bid);
-    this.root.querySelector(".mini.perm").textContent = "permissions: " + (s.permission_mode || "auto");
-    this.root.querySelector(".mini.model").textContent = "model: " + (s.model || "auto");
-    this.root.querySelector(".mini.effort").textContent = "effort: " + (s.effort || "auto");
+    const setMini = (cls, label, value) => {
+      const button = this.root.querySelector(".mini." + cls);
+      button.querySelector(".mini-value").textContent = value;
+      button.title = label + ": " + value;
+      button.setAttribute("aria-label", label + ": " + value);
+    };
+    setMini("perm", "Permission mode", s.permission_mode || "auto");
+    setMini("model", "Model", s.model || "auto");
+    setMini("effort", "Reasoning effort", s.effort || "auto");
+    this.syncComposerMeta();
+    this.syncHeadOverflow();
     this.tab.title = s.name || `session ${s.id}`;
     renderTabs();
   }
@@ -992,6 +1074,7 @@ class SessionView {
   setStatus(text) {
     this.statusEl.innerHTML = text ? `<span class="spinner"></span>${esc(text)}` : "";
     if (!text) this.statusEl.innerHTML = "";
+    this.syncHeadOverflow();
   }
 
   /* ---- transcript rendering ---- */
@@ -1615,7 +1698,7 @@ class SettingsView {
       <div class="settings-form">
         <label>Current password<input type="password" id="pw-old"></label>
         <label>New password<input type="password" id="pw-new"></label>
-        <div class="full"><button class="btn btn-sm" id="pw-save">Change password</button></div>
+        <div class="full"><button class="btn btn-pri btn-sm" id="pw-save">Change password</button></div>
       </div>`;
     c4.querySelector("#pw-save").onclick = async () => {
       try {
@@ -1647,7 +1730,7 @@ function modal(html) {
 function modalConfirm(title, text) {
   return new Promise((resolve) => {
     const { m, close } = modal(`<h2>${esc(title)}</h2><p style="color:var(--txt2);font-size:13px">${esc(text || "")}</p>
-      <div class="m-btns"><button class="btn" id="mc-no">Cancel</button><button class="btn btn-danger" id="mc-yes">Confirm</button></div>`);
+      <div class="m-btns"><button class="btn" id="mc-no">Cancel</button><button class="btn btn-danger btn-solid" id="mc-yes">Confirm</button></div>`);
     m.querySelector("#mc-no").onclick = () => { close(); resolve(false); };
     m.querySelector("#mc-yes").onclick = () => { close(); resolve(true); };
   });
