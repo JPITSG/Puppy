@@ -135,6 +135,259 @@ function tailPath(p, n = 26) {
   return p.length > n ? "…" + p.slice(-n) : p;
 }
 
+/* Desktop browsers render <select> popups outside the page, so their large
+   native panels cannot follow Puppy's theme. Keep the native picker on touch
+   devices, where it is the better control, and progressively enhance modal
+   selects on precise pointers with one app-owned choice menu. The hidden
+   select remains the value/event source, keeping the surrounding code simple. */
+let openChoiceControl = null;
+let choiceMenuSeq = 0;
+
+function choiceSvg(kind) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 12 12");
+  svg.setAttribute("width", "12");
+  svg.setAttribute("height", "12");
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS(NS, "path");
+  path.setAttribute("fill", "none");
+  path.setAttribute("stroke", "currentColor");
+  path.setAttribute("stroke-width", "1.4");
+  path.setAttribute("stroke-linecap", "round");
+  path.setAttribute("stroke-linejoin", "round");
+  path.setAttribute("d", kind === "check" ? "M2.2 6.2 4.8 8.7 9.8 3.4" : "M2.5 4.5 6 8 9.5 4.5");
+  svg.appendChild(path);
+  return svg;
+}
+
+function closeChoiceMenu(returnFocus = false) {
+  const control = openChoiceControl;
+  if (!control) return;
+  openChoiceControl = null;
+  if (control.menu) control.menu.remove();
+  control.menu = null;
+  control.wrap.classList.remove("open");
+  control.button.setAttribute("aria-expanded", "false");
+  control.button.removeAttribute("aria-controls");
+  control.button.removeAttribute("aria-activedescendant");
+  if (returnFocus && control.button.isConnected) control.button.focus();
+}
+
+function positionChoiceMenu(control) {
+  const menu = control.menu;
+  if (!menu || !control.button.isConnected) return;
+  const rect = control.button.getBoundingClientRect();
+  menu.style.visibility = "hidden";
+  menu.style.minWidth = Math.ceil(rect.width) + "px";
+  menu.style.left = "0px";
+  menu.style.top = "0px";
+  const width = menu.offsetWidth;
+  const height = menu.offsetHeight;
+  const edge = 8;
+  const gap = 5;
+  const roomBelow = window.innerHeight - rect.bottom - edge;
+  const roomAbove = rect.top - edge;
+  let top = rect.bottom + gap;
+  if (height > roomBelow && roomAbove > roomBelow) top = Math.max(edge, rect.top - height - gap);
+  else top = Math.min(top, window.innerHeight - height - edge);
+  const left = Math.max(edge, Math.min(rect.left, window.innerWidth - width - edge));
+  menu.style.left = Math.round(left) + "px";
+  menu.style.top = Math.round(Math.max(edge, top)) + "px";
+  menu.style.visibility = "visible";
+}
+
+function refreshChoiceSelect(select) {
+  if (select && select._choiceControl) select._choiceControl.refresh();
+}
+
+function enhanceChoiceSelect(select) {
+  if (!select || select._choiceControl) return select;
+  const precise = !window.matchMedia ||
+    window.matchMedia("(hover:hover) and (pointer:fine)").matches;
+  if (!precise) return select;
+
+  const label = select.closest("label");
+  const fieldName = select.getAttribute("aria-label") ||
+    (label && label.firstChild && label.firstChild.nodeType === 3 ?
+      label.firstChild.textContent.trim() : "Choice");
+  const wrap = el("span", "choice-control");
+  const button = el("button", "choice-button");
+  button.type = "button";
+  button.setAttribute("role", "combobox");
+  button.setAttribute("aria-haspopup", "listbox");
+  button.setAttribute("aria-autocomplete", "none");
+  button.setAttribute("aria-expanded", "false");
+  const value = el("span", "choice-value");
+  const arrow = el("span", "choice-arrow");
+  arrow.appendChild(choiceSvg("arrow"));
+  button.appendChild(value);
+  button.appendChild(arrow);
+  wrap.appendChild(button);
+  select.classList.add("choice-native");
+  select.setAttribute("aria-hidden", "true");
+  select.tabIndex = -1;
+  select.insertAdjacentElement("afterend", wrap);
+
+  const control = {
+    select, wrap, button, value, menu: null, activeIndex: -1,
+    typeBuffer: "", typeTimer: null,
+    refresh() {
+      if (openChoiceControl === control) closeChoiceMenu();
+      let option = select.options[select.selectedIndex];
+      if (!option && select.options.length) {
+        select.selectedIndex = 0;
+        option = select.options[0];
+      }
+      const text = option ? option.textContent : "Not available";
+      value.textContent = text;
+      button.disabled = select.disabled || !option;
+      button.title = option ? (option.title || "") : "No choices available";
+      button.setAttribute("aria-label", fieldName ? `${fieldName}: ${text}` : text);
+    },
+  };
+  select._choiceControl = control;
+
+  const setActive = (index) => {
+    if (!control.menu || index < 0 || index >= select.options.length ||
+        select.options[index].disabled) return;
+    control.activeIndex = index;
+    control.menu.querySelectorAll(".choice-option").forEach((row, i) =>
+      row.classList.toggle("active", i === index));
+    const row = control.menu.querySelector(`[data-choice-index="${index}"]`);
+    if (row) {
+      button.setAttribute("aria-activedescendant", row.id);
+      row.scrollIntoView({ block: "nearest" });
+    }
+  };
+
+  const moveActive = (delta) => {
+    const enabled = [...select.options].map((option, index) => option.disabled ? -1 : index)
+      .filter(index => index >= 0);
+    if (!enabled.length) return;
+    let at = enabled.indexOf(control.activeIndex);
+    if (at < 0) at = delta > 0 ? -1 : 0;
+    setActive(enabled[(at + delta + enabled.length) % enabled.length]);
+  };
+
+  const choose = (index) => {
+    const option = select.options[index];
+    if (!option || option.disabled) return;
+    select.selectedIndex = index;
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    control.refresh();
+    if (button.isConnected) button.focus();
+  };
+
+  const open = () => {
+    if (button.disabled) return;
+    if (openChoiceControl === control) return;
+    closeChoiceMenu();
+    document.querySelectorAll(".menu.dyn").forEach(menu => menu.remove());
+    const menu = el("div", "choice-menu");
+    const menuId = `choice-menu-${++choiceMenuSeq}`;
+    menu.id = menuId;
+    menu.setAttribute("role", "listbox");
+    menu.setAttribute("aria-label", fieldName || "Choices");
+    [...select.options].forEach((option, index) => {
+      const selected = index === select.selectedIndex;
+      const row = el("button", "choice-option" + (selected ? " selected" : ""));
+      row.type = "button";
+      row.id = `${menuId}-${index}`;
+      row.dataset.choiceIndex = String(index);
+      row.setAttribute("role", "option");
+      row.setAttribute("aria-selected", selected ? "true" : "false");
+      row.disabled = option.disabled;
+      row.tabIndex = -1;
+      row.title = option.title || "";
+      row.appendChild(el("span", "choice-option-label", option.textContent));
+      const mark = el("span", "choice-mark");
+      if (selected) mark.appendChild(choiceSvg("check"));
+      row.appendChild(mark);
+      row.onmouseenter = () => setActive(index);
+      row.onmousedown = (event) => event.preventDefault();
+      row.onclick = (event) => { event.stopPropagation(); choose(index); };
+      menu.appendChild(row);
+    });
+    menu.onclick = (event) => event.stopPropagation();
+    document.body.appendChild(menu);
+    menu.style.maxHeight = Math.max(80, window.innerHeight - 16) + "px";
+    control.menu = menu;
+    control.activeIndex = select.selectedIndex;
+    openChoiceControl = control;
+    wrap.classList.add("open");
+    button.setAttribute("aria-expanded", "true");
+    button.setAttribute("aria-controls", menuId);
+    setActive(control.activeIndex);
+    positionChoiceMenu(control);
+  };
+
+  button.onclick = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (openChoiceControl === control) closeChoiceMenu();
+    else open();
+  };
+  button.onkeydown = (event) => {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      if (openChoiceControl !== control) open();
+      else moveActive(event.key === "ArrowDown" ? 1 : -1);
+      return;
+    }
+    if (event.key === "Home" || event.key === "End") {
+      if (openChoiceControl !== control) return;
+      event.preventDefault();
+      const enabled = [...select.options].map((option, index) => option.disabled ? -1 : index)
+        .filter(index => index >= 0);
+      if (enabled.length) setActive(event.key === "Home" ? enabled[0] : enabled[enabled.length - 1]);
+      return;
+    }
+    if (event.key === "Enter" || event.key === " " || event.key === "Spacebar") {
+      event.preventDefault();
+      if (openChoiceControl === control) choose(control.activeIndex);
+      else open();
+      return;
+    }
+    if (event.key === "Escape" && openChoiceControl === control) {
+      event.preventDefault();
+      closeChoiceMenu(true);
+      return;
+    }
+    if (event.key === "Tab" && openChoiceControl === control) {
+      closeChoiceMenu();
+      return;
+    }
+    if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      clearTimeout(control.typeTimer);
+      control.typeBuffer += event.key.toLowerCase();
+      control.typeTimer = setTimeout(() => { control.typeBuffer = ""; }, 650);
+      const found = [...select.options].findIndex(option => !option.disabled &&
+        option.textContent.trim().toLowerCase().startsWith(control.typeBuffer));
+      if (found >= 0) {
+        event.preventDefault();
+        if (openChoiceControl !== control) open();
+        setActive(found);
+      }
+    }
+  };
+  select.addEventListener("change", () => control.refresh());
+  control.refresh();
+  return select;
+}
+
+window.addEventListener("resize", () => closeChoiceMenu());
+document.addEventListener("scroll", (event) => {
+  if (openChoiceControl && (!openChoiceControl.menu ||
+      !openChoiceControl.menu.contains(event.target))) closeChoiceMenu();
+}, true);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && openChoiceControl) {
+    event.preventDefault();
+    closeChoiceMenu(true);
+  }
+});
+
 function isScratchWorkspace(session) {
   return !!session && session.workspace_kind === "temporary";
 }
@@ -882,6 +1135,7 @@ $("btn-tab-add").onclick = (e) => {
 document.addEventListener("click", () => {
   $("tab-add-menu").classList.add("hidden");
   document.querySelectorAll(".menu.dyn").forEach(m => m.remove());
+  closeChoiceMenu();
 });
 $("tab-add-menu").addEventListener("click", (e) => {
   const act = e.target.dataset && e.target.dataset.act;
@@ -2305,11 +2559,20 @@ function modal(html) {
   m.innerHTML = html;
   back.appendChild(m);
   $("modal-root").appendChild(back);
-  const close = () => back.remove();
+  m.querySelectorAll("select").forEach(select => enhanceChoiceSelect(select));
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    closeChoiceMenu();
+    back.remove();
+    document.removeEventListener("keydown", escH);
+  };
   back.addEventListener("mousedown", (e) => { if (e.target === back) close(); });
-  document.addEventListener("keydown", function escH(e) {
-    if (e.key === "Escape") { close(); document.removeEventListener("keydown", escH); }
-  });
+  function escH(e) {
+    if (e.key === "Escape" && !e.defaultPrevented && !openChoiceControl) close();
+  }
+  document.addEventListener("keydown", escH);
   return { m, close };
 }
 
@@ -2463,6 +2726,7 @@ async function modalNewSession() {
         if (o.value === selected) opt.selected = true;
         sel.appendChild(opt);
       }
+      refreshChoiceSelect(sel);
     };
     fill(permSel, e2 ? e2.permission_options : [], e2 ? e2.default_permission : "");
     fill(modelSel, (e2 ? e2.model_options : []).concat([{ value: "__custom__", label: "Custom…" }]), "");
