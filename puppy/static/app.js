@@ -897,8 +897,10 @@ class SessionView {
       case "event":
         this.clearLive();
         this.renderEvent(d.event, true);
-        if (d.event.kind === "user" && d.event.data && d.event.data.text)
-          this.history.push(d.event.data.text);
+        if (d.event.kind === "user") {
+          if (d.event.data && d.event.data.text) this.history.push(d.event.data.text);
+          if (this._forceScroll) { this._forceScroll = false; this.scrollBottom(true); }
+        }
         break;
       case "delta":
         this.appendLive(d.block, d.text);
@@ -1153,6 +1155,10 @@ class SessionView {
     this.ta.value = "";
     this.resizeComposer();
     this.histIdx = null; this.histDraft = "";
+    // sending always jumps to the bottom - now, and again when the sent
+    // message echoes back as a transcript event (even if it was queued)
+    this._forceScroll = true;
+    this.scrollBottom(true);
     localStorage.removeItem("puppy.draft." + this.tab.id);
     this.status = "running"; this.updateRunState();
     this.setStatus("starting…");
