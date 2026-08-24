@@ -833,7 +833,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 }
 
 /* ---------- settings view ---------- */
-.settings-scroll{flex:1;overflow-y:auto;padding:20px 18px 60px}
+.settings-scroll{flex:1;overflow-y:auto;padding:20px 18px}
 .settings-inner{max-width:860px;margin:0 auto;display:flex;flex-direction:column;gap:16px}
 .card,.modal.new-session-modal{
   /* sheen layered over an opaque panel - the backdrop grid must not bleed through */
