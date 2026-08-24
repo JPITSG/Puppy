@@ -704,8 +704,8 @@ class SessionView {
     root.innerHTML = `
       <div class="chat-head">
         <span class="chip eng"><span class="dot"></span><span class="eng-label">…</span></span>
-        <span class="chip cwd" title=""></span>
         <span class="chip be" title="Backend"></span>
+        <span class="chip cwd" title=""></span>
         <span class="chat-status"></span>
         <span class="spacer"></span>
         <div style="position:relative">
