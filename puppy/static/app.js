@@ -27,6 +27,15 @@ function fmtTokens(n) {
   if (n == null) return "";
   return n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n);
 }
+/* localStorage is per-origin; behind a path-mounting relay every app on the
+   host shares it. Namespace all keys by the mount path - "" when served at
+   the root, so existing local keys keep working unchanged. */
+const LS_NS = location.pathname.replace(/\/$/, "");
+const lsKey = (k) => (LS_NS ? LS_NS + ":" : "") + k;
+const lsGet = (k) => localStorage.getItem(lsKey(k));
+const lsSet = (k, v) => localStorage.setItem(lsKey(k), v);
+const lsDel = (k) => localStorage.removeItem(lsKey(k));
+
 function tailPath(p, n = 26) {
   if (!p) return "";
   return p.length > n ? "…" + p.slice(-n) : p;
@@ -108,7 +117,7 @@ const state = {
 
 function saveTabs() {
   try {
-    localStorage.setItem("puppy.tabs", JSON.stringify({
+    lsSet("puppy.tabs", JSON.stringify({
       tabs: state.tabs.map(t => ({ id: t.id, type: t.type, bid: t.bid, sid: t.sid, title: t.title, cmd: t.cmd })),
       active: state.active,
     }));
@@ -116,7 +125,7 @@ function saveTabs() {
 }
 function loadTabs() {
   try {
-    const d = JSON.parse(localStorage.getItem("puppy.tabs") || "null");
+    const d = JSON.parse(lsGet("puppy.tabs") || "null");
     if (d && Array.isArray(d.tabs)) { state.tabs = d.tabs; state.active = d.active; }
   } catch (e) {}
 }
@@ -618,15 +627,15 @@ function closeDrawer() { $("app").classList.remove("side-open"); }
 function applyTheme(t) {
   document.documentElement.classList.toggle("light", t === "light");
   $("btn-theme").textContent = t === "light" ? "☾" : "☀";
-  localStorage.setItem("puppy.theme", t);
+  lsSet("puppy.theme", t);
 }
 $("btn-theme").onclick = () =>
   applyTheme(document.documentElement.classList.contains("light") ? "dark" : "light");
-applyTheme(localStorage.getItem("puppy.theme") || "dark");
+applyTheme(lsGet("puppy.theme") || "dark");
 
 /* sidebar width: draggable, persisted */
 (() => {
-  const saved = parseInt(localStorage.getItem("puppy.sidew") || "", 10);
+  const saved = parseInt(lsGet("puppy.sidew") || "", 10);
   if (saved) document.documentElement.style.setProperty("--side-w", Math.min(480, Math.max(200, saved)) + "px");
   const grip = $("side-resize");
   if (!grip) return;
@@ -643,7 +652,7 @@ applyTheme(localStorage.getItem("puppy.theme") || "dark");
       grip.removeEventListener("pointermove", move);
       grip.removeEventListener("pointerup", up);
       const w = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--side-w"), 10);
-      if (w) localStorage.setItem("puppy.sidew", String(w));
+      if (w) lsSet("puppy.sidew", String(w));
       window.dispatchEvent(new Event("resize"));   // xterm fit etc.
     };
     grip.addEventListener("pointermove", move);
@@ -651,7 +660,7 @@ applyTheme(localStorage.getItem("puppy.theme") || "dark");
   });
   grip.addEventListener("dblclick", () => {
     document.documentElement.style.setProperty("--side-w", "256px");
-    localStorage.removeItem("puppy.sidew");
+    lsDel("puppy.sidew");
     window.dispatchEvent(new Event("resize"));
   });
 })();
@@ -774,12 +783,12 @@ class SessionView {
     }
     this._lastTaH = 0;
 
-    const draft = localStorage.getItem("puppy.draft." + this.tab.id);
+    const draft = lsGet("puppy.draft." + this.tab.id);
     if (draft) { this.ta.value = draft; this.resizeComposer(); }
     this.ta.addEventListener("input", () => {
       this.histIdx = null;   // manual edits exit history mode
       this.resizeComposer();
-      localStorage.setItem("puppy.draft." + this.tab.id, this.ta.value);
+      lsSet("puppy.draft." + this.tab.id, this.ta.value);
     });
     this.ta.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); this.submit(); return; }
@@ -870,7 +879,7 @@ class SessionView {
     this.ta.value = v;
     this.ta.selectionStart = this.ta.selectionEnd = v.length;
     this.resizeComposer();
-    localStorage.setItem("puppy.draft." + this.tab.id, v);
+    lsSet("puppy.draft." + this.tab.id, v);
   }
 
   /* ---- incoming ---- */
@@ -1159,7 +1168,7 @@ class SessionView {
     // message echoes back as a transcript event (even if it was queued)
     this._forceScroll = true;
     this.scrollBottom(true);
-    localStorage.removeItem("puppy.draft." + this.tab.id);
+    lsDel("puppy.draft." + this.tab.id);
     this.status = "running"; this.updateRunState();
     this.setStatus("starting…");
   }
@@ -1656,7 +1665,7 @@ async function modalNewSession() {
   renderColors();
   const cwdInp = m.querySelector("#ns-cwd");
   const dirBox = m.querySelector("#ns-dirs");
-  cwdInp.value = localStorage.getItem("puppy.lastcwd") || state.defaultCwd || "/";
+  cwdInp.value = lsGet("puppy.lastcwd") || state.defaultCwd || "/";
   let engines = [];
   let engine = null;
 
@@ -1737,7 +1746,7 @@ async function modalNewSession() {
         effort: effortSel.value, permission_mode: permSel.value, color: nsColor,
         mkdir: m.querySelector("#ns-mkdir").checked,
       }});
-      localStorage.setItem("puppy.lastcwd", cwdInp.value.trim());
+      lsSet("puppy.lastcwd", cwdInp.value.trim());
       close();
       if (bid) await pollRemotes();
       openSessionTab(bid, r.session.id, r.session);
