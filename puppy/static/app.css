@@ -357,7 +357,7 @@ select.choice-native{display:none!important}
   transition:background .1s var(--ease),color .1s var(--ease);
 }
 .choice-option.active{background:var(--hov);color:var(--txt)}
-.choice-option.selected{background:var(--acc-dim);color:var(--txt);box-shadow:inset 2px 0 0 var(--acc)}
+.choice-option.selected{background:var(--acc-dim);color:var(--txt)}
 .choice-option.selected.active{color:var(--acc2)}
 .choice-option:disabled{opacity:.38;cursor:not-allowed}
 .choice-option-label{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis}
