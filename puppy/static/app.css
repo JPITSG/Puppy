@@ -202,6 +202,7 @@ a{color:var(--acc2)}
 .foot-engines{display:flex;flex-direction:column;gap:4px;max-height:38dvh;overflow-y:auto}
 .foot-engine-group{display:flex;flex-direction:column;gap:4px}
 .foot-engine-body{display:flex;flex-direction:column;gap:4px}
+.foot-engine-body[hidden]{display:none}
 .foot-engine-group+.foot-engine-group{border-top:1px solid var(--line);margin-top:3px;padding-top:7px}
 .foot-engine-head{display:flex;align-items:center;gap:6px;min-width:0;color:var(--txt3)}
 .foot-engine-head .gdot{width:6px;height:6px;border-radius:50%;background:var(--txt3)}
