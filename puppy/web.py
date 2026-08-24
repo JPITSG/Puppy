@@ -362,7 +362,7 @@ async def ws_session(request: web.Request):
                 if "error" in res:
                     await ws.send_json({"type": "toast", "level": "error", "text": res["error"]})
             elif t == "interrupt":
-                await h.interrupt()
+                await h.interrupt(clear_queue=data.get("clear_queue") is True)
     finally:
         h.detach(ws)
     return ws

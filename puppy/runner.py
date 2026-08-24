@@ -82,6 +82,7 @@ class SessionHub:
         self.queue = []
         self.status = "idle"
         self.proc = None
+        self._proc_ready = False
         self.turn_task = None
         self.pending_approval = None
         self.interrupted = False
@@ -141,20 +142,42 @@ class SessionHub:
         self.broadcast({"type": "queued", "queued": list(self.queue)})
         return {"ok": True}
 
+    def clear_queue(self) -> int:
+        """Drop every message that has not started yet and return the count."""
+        count = len(self.queue)
+        if count:
+            self.queue.clear()
+            self.broadcast({"type": "queued", "queued": []})
+        return count
+
     def _start_turn(self, text: str) -> None:
         self.status = "running"
         self.interrupted = False
+        self._proc_ready = False
         self.turn_task = asyncio.ensure_future(self._run_turn(text))
 
-    async def interrupt(self) -> None:
-        proc = self.proc
-        if proc is None or proc.returncode is not None:
+    async def interrupt(self, clear_queue: bool = False) -> None:
+        if clear_queue:
+            self.clear_queue()
+        if self.status != "running":
             return
+        already_interrupted = self.interrupted
         self.interrupted = True
-        self.broadcast({"type": "status", "text": "interrupting..."})
-        session = db.get_session(self.id)
+        if not already_interrupted:
+            self.broadcast({"type": "status", "text": "interrupting..."})
+        proc = self.proc
+        # A stop can arrive while create_subprocess_exec or the driver's initial
+        # stdin handshake is in flight. _run_turn observes the flag as soon as
+        # the process is ready, so this keypress is not lost in that window.
+        if already_interrupted or proc is None or proc.returncode is not None or not self._proc_ready:
+            return
+        await self._interrupt_proc(proc)
+
+    async def _interrupt_proc(self, proc, driver=None) -> None:
         try:
-            driver = get_driver(session["engine"])
+            if driver is None:
+                session = db.get_session(self.id)
+                driver = get_driver(session["engine"])
             payload = driver.interrupt_payload()
             if payload is not None and proc.stdin is not None and not proc.stdin.is_closing():
                 await self._write_stdin(payload)
@@ -267,6 +290,10 @@ class SessionHub:
                 for obj in driver.initial_stdin(session, prompt):
                     await self._write_stdin(obj)
 
+            self._proc_ready = True
+            if self.interrupted:
+                await self._interrupt_proc(self.proc, driver)
+
             timeout = float(config.get("sessions.turn_timeout", 7200))
             deadline = time.time() + timeout
             ctx = {}
@@ -361,6 +388,7 @@ class SessionHub:
                 self.pending_approval = None
                 self.broadcast({"type": "approval_resolved", "request_id": rid, "behavior": "cancelled"})
             self.proc = None
+            self._proc_ready = False
             self.status = "idle"
             self.stderr_tail = ""
             try:

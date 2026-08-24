@@ -804,6 +804,7 @@ class SessionView {
     this.history = [];        // sent messages, oldest first (shell-style recall)
     this.histIdx = null;
     this.histDraft = "";
+    this.ctrlCStreak = 0;     // composer-only: second consecutive Ctrl-C clears the queue
     this.attachments = [];    // {path, url}: server path sent with the message, blob url for the preview
     this.buildDom();
     this._onResize = () => { this.syncGutter(); this.syncComposerMeta(); this.syncHeadOverflow(); this.syncQueueFade(); };
@@ -876,11 +877,24 @@ class SessionView {
     const draft = lsGet("puppy.draft." + this.tab.id);
     if (draft) { this.ta.value = draft; this.resizeComposer(); }
     this.ta.addEventListener("input", () => {
+      this.ctrlCStreak = 0;
       this.histIdx = null;   // manual edits exit history mode
       this.resizeComposer();
       lsSet("puppy.draft." + this.tab.id, this.ta.value);
     });
     this.ta.addEventListener("keydown", (e) => {
+      if (e.isComposing) { this.ctrlCStreak = 0; return; }
+      const ctrlC = e.ctrlKey && !e.metaKey && !e.altKey && (e.key === "c" || e.key === "C");
+      if (e.key === "Escape" || ctrlC) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.repeat) return; // holding C must not accidentally erase the queue
+        this.ctrlCStreak = ctrlC ? this.ctrlCStreak + 1 : 0;
+        this.interrupt(this.ctrlCStreak > 1);
+        return;
+      }
+      // Modifier keydowns between two presses do not break the sequence; typing does.
+      if (!(["Control", "Shift", "Alt", "Meta"].includes(e.key))) this.ctrlCStreak = 0;
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); this.submit(); return; }
       if (e.shiftKey || e.ctrlKey || e.altKey || e.metaKey || e.isComposing) return;
       const atStart = this.ta.selectionStart === 0 && this.ta.selectionEnd === 0;
@@ -903,6 +917,8 @@ class SessionView {
         }
       }
     });
+    this.ta.addEventListener("blur", () => { this.ctrlCStreak = 0; });
+    this.ta.addEventListener("pointerdown", () => { this.ctrlCStreak = 0; });
     this.sendBtn.onclick = () => this.status === "running" ? this.interrupt() : this.submit();
     root.querySelector(".menu-btn").onclick = (e) => { e.stopPropagation(); this.showMenu(e.currentTarget); };
     root.querySelector(".mini.perm").onclick = (e) => { e.stopPropagation(); this.showPermMenu(e.currentTarget); };
@@ -1381,8 +1397,9 @@ class SessionView {
     this.status = "running"; this.updateRunState();
     this.setStatus("starting…");
   }
-  interrupt() {
-    if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify({ type: "interrupt" }));
+  interrupt(clearQueue = false) {
+    if (this.ws && this.ws.readyState === 1)
+      this.ws.send(JSON.stringify({ type: "interrupt", clear_queue: clearQueue }));
   }
 
   /* ---- approvals ---- */
