@@ -27,6 +27,9 @@ body::before{
     radial-gradient(700px 420px at 12% -8%,rgba(90,162,245,.13),transparent 60%),
     radial-gradient(600px 380px at 88% -6%,rgba(157,123,255,.10),transparent 60%),
     radial-gradient(700px 500px at 50% 110%,rgba(34,229,164,.05),transparent 60%);
+  /* keep the tab/header strip flat --bg so opaque chrome (active tab) matches it */
+  -webkit-mask-image:linear-gradient(180deg,transparent 0,transparent 92px,#000 230px);
+          mask-image:linear-gradient(180deg,transparent 0,transparent 92px,#000 230px);
 }
 body::after{
   content:"";position:fixed;inset:0;pointer-events:none;z-index:0;
@@ -98,7 +101,7 @@ a{color:var(--acc2)}
 }
 .si-row{display:flex;align-items:center;gap:7px;min-width:0}
 .si-row.sub{margin-top:2px}
-.si-be{font-size:9.5px;color:var(--txt3);text-transform:uppercase;letter-spacing:.06em;flex-shrink:0}
+.si-be{font-size:9.5px;color:var(--txt3);flex-shrink:0}
 .sess-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0;background:var(--txt3)}
 /* dot (9px) and prov icon (11px) share a column: pad the dot so centers align */
 .si-row .sess-dot{margin:0 1px}
@@ -223,7 +226,9 @@ label input,label select{margin-top:5px;text-transform:none;letter-spacing:0}
   background:var(--acc);border-radius:2px;
 }
 .tab:hover{background:rgba(255,255,255,.04)}
-.tab.active{background:var(--panel2);border-color:var(--line);color:var(--txt)}
+/* fill matches the flat page background (aurora is masked out of the top strip)
+   so the open-bottomed pill merges with the bar below at every x position */
+.tab.active{background:var(--bg);border-color:var(--line);color:var(--txt)}
 .tab .t-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
 .tab .t-dot.claude{background:var(--claude)}
 .tab .t-dot.codex{background:var(--codex)}

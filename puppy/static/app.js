@@ -1243,7 +1243,8 @@ class SessionView {
     if (closeMenusToggling(anchor)) return null;
     const menu = el("div", "menu dyn");
     menu._anchor = anchor;
-    menu.style.bottom = "36px"; menu.style.top = "auto"; menu.style.right = "auto"; menu.style.left = "0";
+    menu.style.bottom = "36px"; menu.style.top = "auto"; menu.style.right = "auto";
+    menu.style.left = anchor.offsetLeft + "px";   // open above its own button, not the row start
     for (const o of opts) {
       const b = el("button", "", `${o.label}${current === o.value ? " ✔" : ""}`);
       b.title = o.hint || "";
@@ -1464,9 +1465,7 @@ class SettingsView {
         row.appendChild(el("span", "pill " + (e2.rate_limit.status === "allowed" ? "" : "warn"),
           `${e2.rate_limit.rateLimitType || "window"} resets ${reset.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`));
       }
-      const det = el("div", "hint", e2.detail || "");
       c2.appendChild(row);
-      if (e2.detail) c2.appendChild(det);
     }
     this.inner.appendChild(c2);
 
