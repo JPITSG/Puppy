@@ -119,6 +119,10 @@ a{color:var(--acc2)}
 .sess-group-title .gdot{width:6px;height:6px;border-radius:50%;background:var(--txt3)}
 .sess-group-title .gdot.ok{background:var(--ok)}
 .sess-group-title .gdot.bad{background:var(--err)}
+.sess-group-empty{
+  padding:2px 6px 10px 18px;color:var(--txt3);font-size:11px;line-height:1.35;
+}
+.sess-group-empty.standalone{padding:12px 6px 5px}
 .sess-item{
   display:block;width:100%;text-align:left;
   padding:8px 9px;border-radius:var(--r-md);border:1px solid transparent;

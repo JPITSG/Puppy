@@ -296,9 +296,14 @@ function renderSidebar() {
       t.appendChild(dot); t.appendChild(document.createTextNode(g.name));
       root.appendChild(t);
     }
-    const list = sessionsFor(g.bid).filter(s => state.showArchived || !s.archived);
+    const allSessions = sessionsFor(g.bid);
+    const list = allSessions.filter(s => state.showArchived || !s.archived);
     if (!list.length) {
-      root.appendChild(el("div", "sess-group-title", g.bid === 0 && !showGroups ? "no sessions yet" : "—"));
+      let message = "No sessions yet";
+      if (!g.ok) message = "Backend unavailable";
+      else if (!state.showArchived && allSessions.some(s => s.archived)) message = "Archived sessions hidden";
+      else if (showGroups) message = g.bid === 0 ? "No local sessions" : "No sessions attached";
+      root.appendChild(el("div", "sess-group-empty" + (showGroups ? "" : " standalone"), message));
     }
     for (const s of list) {
       const item = el("button", "sess-item" + (s.archived ? " archived" : ""));
