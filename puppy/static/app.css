@@ -134,11 +134,14 @@ a{color:var(--acc2)}
    border-box keeps the outer size, so only the fill turns into a ring. */
 .sess-dot.running,.engine-dot.running,.tab.running .t-dot{
   background:none;
-  border:1.5px solid var(--spin-track);
+  border:2.5px solid var(--spin-track);
   border-color:color-mix(in srgb,currentColor 30%,transparent);
   border-top-color:currentColor;
   animation:spin .8s linear infinite;
 }
+/* the tab dot is 8px, so it takes a thinner ring to keep the same ring-to-hole
+   proportion as the 9px session dots */
+.tab.running .t-dot{border-width:2px}
 .prov{
   width:11px;height:11px;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;
   font-size:9px;font-weight:700;color:var(--txt3);background:none;
@@ -484,7 +487,7 @@ details.think .think-brain{font-size:12px;line-height:1}
 }
 .live-status .spinner{
   flex-shrink:0;width:9px;height:9px;border-radius:50%;
-  border:1.5px solid var(--spin-track);border-top-color:currentColor;
+  border:2.5px solid var(--spin-track);border-top-color:currentColor;
   animation:spin .8s linear infinite;
 }
 details.think[open] summary::before{transform:rotate(90deg)}
