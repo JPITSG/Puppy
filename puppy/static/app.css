@@ -571,7 +571,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   font-family:var(--sans);font-size:10px;text-transform:uppercase;letter-spacing:.09em;
   color:var(--txt3);opacity:.85;margin-bottom:1px;
 }
-.queue-strip .q-item{display:flex;align-items:baseline;gap:7px;min-width:0}
+.queue-strip .q-item{display:flex;align-items:center;gap:7px;min-width:0}
 .queue-strip .q-n{flex:0 0 auto;opacity:.55;font-variant-numeric:tabular-nums}
 /* each row is one line; the tail fades rather than ending in an ellipsis */
 .queue-strip .q-t{flex:1;min-width:0;white-space:nowrap;overflow:hidden}
@@ -579,6 +579,19 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   -webkit-mask-image:linear-gradient(90deg,#000 calc(100% - 38px),transparent);
           mask-image:linear-gradient(90deg,#000 calc(100% - 38px),transparent);
 }
+/* cancels this message before its turn starts; the row's fade masks the text
+   span only, so the button stays crisp at the edge */
+.queue-strip .q-x{
+  position:relative;flex:0 0 auto;
+  display:inline-flex;align-items:center;justify-content:center;
+  width:16px;height:16px;padding:0;border:none;border-radius:50%;cursor:pointer;
+  background:none;color:var(--txt3);font-size:13px;line-height:1;
+  transition:background .12s var(--ease),color .12s var(--ease),transform .12s var(--ease);
+}
+/* the visual button stays 16px; the tap target is comfortable */
+.queue-strip .q-x::after{content:"";position:absolute;inset:-7px -6px}
+@media (hover:hover){.queue-strip .q-x:hover{background:var(--hov);color:var(--err)}}
+.queue-strip .q-x:active{transform:scale(.88);background:var(--hov);color:var(--err)}
 .queue-strip .q-more{opacity:.7;padding-left:1px}
 
 /* composer */

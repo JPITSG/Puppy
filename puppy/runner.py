@@ -131,6 +131,16 @@ class SessionHub:
         self._start_turn(text)
         return {"queued": False}
 
+    def unqueue(self, index: int, text: str) -> dict:
+        """Drop a message that is still waiting. The index is guarded by its
+        text so a turn finishing between the click and this call - which shifts
+        every index down by one - cannot cancel the wrong message."""
+        if not 0 <= index < len(self.queue) or self.queue[index] != text:
+            return {"error": "that message already started"}
+        self.queue.pop(index)
+        self.broadcast({"type": "queued", "queued": list(self.queue)})
+        return {"ok": True}
+
     def _start_turn(self, text: str) -> None:
         self.status = "running"
         self.interrupted = False

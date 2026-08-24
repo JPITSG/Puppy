@@ -1418,11 +1418,19 @@ class SessionView {
       const t = el("span", "q-t", text.length > 200 ? text.slice(0, 199) + "…" : text);
       t.title = text;
       row.appendChild(t);
+      const x = el("button", "q-x", "×");
+      x.title = "Cancel this queued message";
+      x.onclick = () => this.unqueue(i, text);   // full text, not the capped copy
+      row.appendChild(x);
       box.appendChild(row);
     });
     if (q.length > shown.length)
       box.appendChild(el("div", "q-more", `+${q.length - shown.length} more`));
     this.syncQueueFade();
+  }
+  unqueue(index, text) {
+    if (!this.ws || this.ws.readyState !== 1) { toast("not connected", "error"); return; }
+    this.ws.send(JSON.stringify({ type: "unqueue", index, text }));
   }
   /* mask a row's tail only when its line overruns the box */
   syncQueueFade() {
