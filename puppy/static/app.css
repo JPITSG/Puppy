@@ -763,7 +763,19 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 }
 @media (hover:hover){.attach-chip .attach-x:hover{background:rgba(6,9,14,.85)}}
 .attach-chip .attach-x:active{transform:scale(.88);background:rgba(6,9,14,.85)}
-.composer-row{display:flex;align-items:center;gap:8px}
+.composer-row{display:flex;align-items:center;gap:8px;min-width:0}
+.composer-meta-viewport{position:relative;flex:1 1 0;min-width:0;overflow:hidden}
+.composer-meta-scroll{
+  display:flex;align-items:center;gap:8px;min-width:0;overflow-x:auto;overflow-y:hidden;
+  scrollbar-width:none;overscroll-behavior-x:contain;touch-action:pan-x pinch-zoom;
+  -webkit-overflow-scrolling:touch;
+}
+.composer-meta-scroll::-webkit-scrollbar{display:none}
+.composer-meta-viewport::after{
+  content:"";position:absolute;top:0;right:0;bottom:0;width:34px;pointer-events:none;
+  background:linear-gradient(90deg,transparent,var(--panel2));opacity:0;transition:opacity .15s;
+}
+.composer-meta-viewport.more-right::after{opacity:1}
 .composer-row .mini{
   display:inline-flex;align-items:center;justify-content:center;gap:4px;flex-shrink:0;
   height:24px;padding:0 10px;border-radius:var(--btn-r);cursor:pointer;user-select:none;
@@ -777,7 +789,6 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .composer-row .mini:active{transform:scale(.96);background:var(--hov)}
 .composer-row .mini .mini-value{color:var(--txt2)}
 @media (hover:hover){.composer-row .mini:hover .mini-value{color:var(--txt)}}
-.composer-row .spacer{flex:1}
 .btn-send{
   display:inline-flex;align-items:center;justify-content:center;gap:7px;flex-shrink:0;
   height:32px;min-width:86px;padding:0 16px var(--label-pb);border:none;border-radius:var(--btn-r);

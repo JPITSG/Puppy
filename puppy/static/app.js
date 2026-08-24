@@ -1502,10 +1502,13 @@ class SessionView {
           <textarea rows="1" placeholder="Message the agent…"></textarea>
           <div class="attach-strip hidden"></div>
           <div class="composer-row">
-            <button class="mini perm" title="Permission mode"><span class="mini-key">permissions:</span><span class="mini-value">auto</span></button>
-            <button class="mini model" title="Model"><span class="mini-key">model:</span><span class="mini-value">auto</span></button>
-            <button class="mini effort" title="Reasoning effort"><span class="mini-key">effort:</span><span class="mini-value">auto</span></button>
-            <span class="spacer"></span>
+            <div class="composer-meta-viewport">
+              <div class="composer-meta-scroll">
+                <button class="mini perm" title="Permission mode"><span class="mini-key">permissions:</span><span class="mini-value">auto</span></button>
+                <button class="mini model" title="Model"><span class="mini-key">model:</span><span class="mini-value">auto</span></button>
+                <button class="mini effort" title="Reasoning effort"><span class="mini-key">effort:</span><span class="mini-value">auto</span></button>
+              </div>
+            </div>
             <button class="btn-send">Send</button>
           </div>
         </div>
@@ -1517,6 +1520,8 @@ class SessionView {
     this.ta = root.querySelector("textarea");
     this.sendBtn = root.querySelector(".btn-send");
     this.composerRow = root.querySelector(".composer-row");
+    this.composerMeta = root.querySelector(".composer-meta-scroll");
+    this.composerMetaViewport = root.querySelector(".composer-meta-viewport");
     this.headMeta = root.querySelector(".chat-meta-scroll");
     this.headMetaViewport = root.querySelector(".chat-meta-viewport");
     this.statusEl = root.querySelector(".chat-status");
@@ -1524,6 +1529,7 @@ class SessionView {
     this.queueEl = root.querySelector(".queue-strip");
     this.attachStrip = root.querySelector(".attach-strip");
     this.headMeta.addEventListener("scroll", () => this.syncHeadOverflow(), { passive: true });
+    this.composerMeta.addEventListener("scroll", () => this.syncComposerOverflow(), { passive: true });
     this.ta.addEventListener("paste", (e) => this.handlePaste(e));
 
     this.fieldSizing = window.CSS && CSS.supports && CSS.supports("field-sizing", "content");
@@ -1630,20 +1636,29 @@ class SessionView {
     this.root.style.setProperty("--sbw", (g > 0 ? g : 0) + "px");
   }
 
-  syncHeadOverflow() {
-    const sc = this.headMeta;
-    if (!sc || !sc.clientWidth) return;
+  syncRightOverflow(sc, viewport) {
+    if (!sc || !viewport || !sc.clientWidth) return;
     const moreRight = sc.scrollLeft + sc.clientWidth < sc.scrollWidth - 1;
-    this.headMetaViewport.classList.toggle("more-right", moreRight);
+    viewport.classList.toggle("more-right", moreRight);
   }
 
-  /* Keep the controls on one line. If their labelled forms would overflow,
-     retain the values and menus but drop the redundant key prefixes. */
+  syncHeadOverflow() {
+    this.syncRightOverflow(this.headMeta, this.headMetaViewport);
+  }
+
+  syncComposerOverflow() {
+    this.syncRightOverflow(this.composerMeta, this.composerMetaViewport);
+  }
+
+  /* Keep the controls on one line. First drop redundant key prefixes; if long
+     values still do not fit, their own touch-scroll lane contains the overflow
+     without ever displacing the Send / Stop button. */
   syncComposerMeta() {
-    const row = this.composerRow;
-    if (!row || !row.clientWidth) return;
+    const row = this.composerRow, sc = this.composerMeta;
+    if (!row || !sc || !sc.clientWidth) return;
     row.classList.remove("compact-meta");
-    row.classList.toggle("compact-meta", row.scrollWidth > row.clientWidth + 1);
+    row.classList.toggle("compact-meta", sc.scrollWidth > sc.clientWidth + 1);
+    this.syncComposerOverflow();
   }
 
   /* with field-sizing the browser autosizes natively; otherwise measure on the
