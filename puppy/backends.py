@@ -4,13 +4,14 @@ HTTP and websocket traffic to them, authenticated with their api_token."""
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 
 import aiohttp
 from aiohttp import WSMsgType, web
 
-from puppy import db
+from puppy import db, protocol
 
 log = logging.getLogger("puppy.backends")
 
@@ -29,8 +30,19 @@ def client() -> aiohttp.ClientSession:
 
 
 def list_backends() -> list:
-    rows = db.query("SELECT id,name,url,created_at FROM backends ORDER BY id")
-    return [dict(r) for r in rows]
+    rows = db.query(
+        "SELECT id,name,url,protocol,capabilities,remote_version,role,created_at "
+        "FROM backends ORDER BY id")
+    out = []
+    for row in rows:
+        item = dict(row)
+        try:
+            caps = json.loads(item.get("capabilities") or "[]")
+        except Exception:
+            caps = []
+        item["capabilities"] = caps if isinstance(caps, list) else []
+        out.append(item)
+    return out
 
 
 def get_backend(bid: int):
@@ -39,6 +51,69 @@ def get_backend(bid: int):
 
 
 # ---- CRUD handlers ----
+
+def _normalize_peer(data: dict) -> dict:
+    try:
+        api_protocol = int(data.get("protocol", protocol.LEGACY_PROTOCOL))
+    except (TypeError, ValueError):
+        raise ValueError("backend returned an invalid protocol")
+    if api_protocol not in protocol.SUPPORTED_BACKEND_PROTOCOLS:
+        supported = ", ".join(str(v) for v in protocol.SUPPORTED_BACKEND_PROTOCOLS)
+        raise ValueError(f"backend protocol {api_protocol} is unsupported (supported: {supported})")
+    role = str(data.get("role") or ("legacy-full" if api_protocol == 0 else "")).strip()
+    if api_protocol > 0 and role not in ("backend", "full"):
+        raise ValueError(f"remote role '{role or '?'}' is not a Puppy backend")
+    caps = data.get("capabilities") or []
+    if not isinstance(caps, list) or not all(isinstance(v, str) for v in caps):
+        raise ValueError("backend returned invalid capabilities")
+    return {
+        **data,
+        "protocol": api_protocol,
+        "role": role,
+        "capabilities": sorted(set(caps)),
+    }
+
+
+async def probe_backend(url: str, token: str, timeout: float = 8.0) -> dict:
+    """Authenticate and negotiate metadata with a prospective backend."""
+    try:
+        async with client().get(
+                f"{url.rstrip('/')}/api/ping",
+                headers={"X-Puppy-Token": token},
+                timeout=aiohttp.ClientTimeout(total=timeout),
+                allow_redirects=False) as response:
+            try:
+                data = await response.json()
+            except Exception:
+                return {"ok": False, "status": response.status,
+                        "error": "backend did not return JSON"}
+            if not isinstance(data, dict):
+                return {"ok": False, "status": response.status,
+                        "error": "backend returned an invalid response"}
+            if response.status != 200:
+                return {"ok": False, "status": response.status,
+                        "error": data.get("error") or f"HTTP {response.status}"}
+            if data.get("ok") is not True:
+                return {"ok": False, "status": response.status,
+                        "error": "endpoint is not a Puppy backend"}
+            try:
+                remote = _normalize_peer(data)
+            except ValueError as e:
+                return {"ok": False, "status": response.status, "error": str(e)}
+            return {"ok": True, "status": response.status, "remote": remote}
+    except asyncio.TimeoutError:
+        return {"ok": False, "error": "connection timed out"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def _metadata(remote: dict) -> tuple:
+    return (
+        int(remote.get("protocol", 0)),
+        json.dumps(remote.get("capabilities") or [], separators=(",", ":")),
+        str(remote.get("version") or "")[:40],
+        str(remote.get("role") or "")[:24],
+    )
 
 async def h_list(request: web.Request):
     return web.json_response({"backends": list_backends()})
@@ -49,11 +124,20 @@ async def h_add(request: web.Request):
     name = (body.get("name") or "").strip()
     url = (body.get("url") or "").strip().rstrip("/")
     token = (body.get("token") or "").strip()
-    if not name or not url.startswith(("http://", "https://")) or not token:
-        return web.json_response({"error": "name, http(s) url and token required"}, status=400)
-    bid = db.execute("INSERT INTO backends(name,url,token,created_at) VALUES(?,?,?,?)",
-                     (name, url, token, time.time()))
-    return web.json_response({"ok": True, "id": bid})
+    if not url.startswith(("http://", "https://")) or not token:
+        return web.json_response({"error": "http(s) url and token required"}, status=400)
+    result = await probe_backend(url, token)
+    if not result["ok"]:
+        return web.json_response({"error": result.get("error", "backend test failed"),
+                                  "status": result.get("status")}, status=400)
+    remote = result["remote"]
+    name = name or str(remote.get("name") or "").strip() or "backend"
+    api_protocol, capabilities, remote_version, role = _metadata(remote)
+    bid = db.execute(
+        "INSERT INTO backends(name,url,token,protocol,capabilities,remote_version,role,created_at) "
+        "VALUES(?,?,?,?,?,?,?,?)",
+        (name[:80], url, token, api_protocol, capabilities, remote_version, role, time.time()))
+    return web.json_response({"ok": True, "id": bid, "remote": remote})
 
 
 async def h_delete(request: web.Request):
@@ -67,14 +151,13 @@ async def h_test(request: web.Request):
     be = get_backend(bid)
     if be is None:
         return web.json_response({"error": "unknown backend"}, status=404)
-    try:
-        async with client().get(f"{be['url']}/api/ping",
-                                headers={"X-Puppy-Token": be["token"]},
-                                timeout=aiohttp.ClientTimeout(total=8)) as r:
-            data = await r.json()
-            return web.json_response({"ok": r.status == 200, "status": r.status, "remote": data})
-    except Exception as e:
-        return web.json_response({"ok": False, "error": str(e)})
+    result = await probe_backend(be["url"], be["token"])
+    if result["ok"]:
+        api_protocol, capabilities, remote_version, role = _metadata(result["remote"])
+        db.execute(
+            "UPDATE backends SET protocol=?,capabilities=?,remote_version=?,role=? WHERE id=?",
+            (api_protocol, capabilities, remote_version, role, bid))
+    return web.json_response(result)
 
 
 # ---- proxy ----

@@ -18,9 +18,10 @@ approvals, multi-backend support and built-in web terminals.
 - **Engine switching**: a session can be moved claude ⇄ codex at any point. The
   new engine starts a fresh native session seeded with a transcript handoff in
   the same working directory.
-- **Multi-backend**: pair other puppy instances (Settings → Backends, using the
-  remote's URL + API token). The browser stays single-origin; this instance
-  proxies HTTP + websockets to remotes, including their terminals.
+- **Multi-backend**: pair full Puppy instances or the API-only headless package
+  in `backend/` (Settings → Backends, using pairing JSON or URL + API token).
+  The browser stays single-origin; this instance proxies HTTP + websockets to
+  remotes, including terminals when that capability is enabled.
 
 ## Requirements
 
@@ -44,6 +45,17 @@ supervisorctl update
 ```
 
 First visit prompts for the creation of the admin account.
+
+Headless remote backend artifact:
+
+```
+python3 backend/build.py
+backend/dist/puppy-backend.pyz serve --help
+```
+
+See `backend/README.md` for token pairing, private-network/TLS guidance and the
+example systemd service. The artifact contains no frontend or cookie-login
+surface and reports an independently versioned controller/backend protocol.
 
 ## Data & config
 

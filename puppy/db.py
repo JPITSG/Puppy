@@ -42,6 +42,10 @@ CREATE TABLE IF NOT EXISTS backends (
     name TEXT NOT NULL,
     url TEXT NOT NULL,
     token TEXT NOT NULL,
+    protocol INTEGER NOT NULL DEFAULT 0,
+    capabilities TEXT NOT NULL DEFAULT '[]',
+    remote_version TEXT NOT NULL DEFAULT '',
+    role TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS sessions (
@@ -104,6 +108,15 @@ def _migrate(conn) -> None:
         for (sid,) in conn.execute("SELECT id FROM sessions").fetchall():
             conn.execute("UPDATE sessions SET color=? WHERE id=?",
                          (random.choice(SESSION_COLORS), sid))
+    backend_cols = {r["name"] for r in conn.execute("PRAGMA table_info(backends)")}
+    if "protocol" not in backend_cols:
+        conn.execute("ALTER TABLE backends ADD COLUMN protocol INTEGER NOT NULL DEFAULT 0")
+    if "capabilities" not in backend_cols:
+        conn.execute("ALTER TABLE backends ADD COLUMN capabilities TEXT NOT NULL DEFAULT '[]'")
+    if "remote_version" not in backend_cols:
+        conn.execute("ALTER TABLE backends ADD COLUMN remote_version TEXT NOT NULL DEFAULT ''")
+    if "role" not in backend_cols:
+        conn.execute("ALTER TABLE backends ADD COLUMN role TEXT NOT NULL DEFAULT ''")
 
 
 def query(sql: str, args=()) -> list:

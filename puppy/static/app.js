@@ -278,6 +278,11 @@ function backendName(bid) {
   return b ? b.name : `backend ${bid}`;
 }
 
+function backendHasCapability(backend, capability) {
+  if (!backend || Number(backend.protocol || 0) === 0) return true; // legacy full nodes
+  return Array.isArray(backend.capabilities) && backend.capabilities.includes(capability);
+}
+
 function renderSidebar() {
   const root = $("sess-groups");
   root.innerHTML = "";
@@ -1782,9 +1787,11 @@ class SettingsView {
     const c3 = el("div", "card");
     c3.innerHTML = `<h2>Backends</h2><div id="be-list"></div>
       <div class="settings-form" style="margin-top:12px">
-        <label>Name<input type="text" id="be-name"></label>
+        <label>Name <span style="text-transform:none">(optional)</span><input type="text" id="be-name"></label>
         <label>URL<input type="text" id="be-url"></label>
-        <label class="full">API token<input type="text" id="be-token"></label>
+        <label class="full">API token<input type="password" id="be-token" autocomplete="off"></label>
+        <label class="full">Pairing JSON <span style="text-transform:none">(optional)</span>
+          <textarea id="be-pairing" rows="3" placeholder="Paste puppy-backend pairing output"></textarea></label>
         <div class="full"><button class="btn btn-pri btn-sm" id="be-add">Add backend</button></div>
       </div>`;
     const beList = c3.querySelector("#be-list");
@@ -1793,7 +1800,10 @@ class SettingsView {
       if (!state.backends.length) beList.innerHTML = `<p class="hint">No remote backends. This instance ("${esc(backendName(0))}") is always available as local.</p>`;
       for (const b of state.backends) {
         const row = el("div", "be-row");
-        row.appendChild(el("span", "be-name", b.name));
+        const name = el("span", "be-name", b.name);
+        name.title = [b.role, b.remote_version && `v${b.remote_version}`,
+          b.protocol != null && `protocol ${b.protocol}`].filter(Boolean).join(" · ");
+        row.appendChild(name);
         row.appendChild(el("span", "be-url", b.url));
         const test = el("button", "btn btn-sm", "Test");
         test.onclick = async () => {
@@ -1818,14 +1828,27 @@ class SettingsView {
     renderBes();
     c3.querySelector("#be-add").onclick = async () => {
       try {
+        let paired = {};
+        const raw = c3.querySelector("#be-pairing").value.trim();
+        if (raw) {
+          try { paired = JSON.parse(raw); }
+          catch (e) { throw new Error("invalid pairing JSON"); }
+          if (!paired || typeof paired !== "object" || Array.isArray(paired))
+            throw new Error("invalid pairing JSON");
+        }
+        const pairingValue = (id, key) => {
+          const entered = c3.querySelector(id).value.trim();
+          return entered || (typeof paired[key] === "string" ? paired[key] : "");
+        };
         await api(0, "backends", { method: "POST", body: {
-          name: c3.querySelector("#be-name").value,
-          url: c3.querySelector("#be-url").value,
-          token: c3.querySelector("#be-token").value,
+          name: pairingValue("#be-name", "name"),
+          url: pairingValue("#be-url", "url"),
+          token: pairingValue("#be-token", "token"),
         }});
         toast("backend added", "ok");
         await refreshState(); renderBes(); pollRemotes();
         c3.querySelector("#be-name").value = c3.querySelector("#be-url").value = c3.querySelector("#be-token").value = "";
+        c3.querySelector("#be-pairing").value = "";
       } catch (e) { toast(e.message, "error"); }
     };
     this.inner.appendChild(c3);
@@ -2060,7 +2083,8 @@ function modalOpenSession() {
 
 /* new terminal */
 function modalNewTerminal() {
-  const beOpts = [{ id: 0, name: backendName(0) }].concat(state.backends);
+  const beOpts = [{ id: 0, name: backendName(0) }]
+    .concat(state.backends.filter(b => backendHasCapability(b, "terminal")));
   const { m, close } = modal(`<h2>New terminal</h2>
     <label>Backend<select id="nt-be">${beOpts.map(b => `<option value="${b.id}">${esc(b.name)}</option>`).join("")}</select></label>
     <label>Command <span style="text-transform:none">(optional)</span><input type="text" id="nt-cmd" placeholder="default shell — or e.g. ssh user@host"></label>

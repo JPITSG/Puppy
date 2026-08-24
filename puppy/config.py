@@ -22,8 +22,15 @@ DEFAULTS = {
     "instance_name": socket.gethostname() or "puppy",
     "web": {"host": "0.0.0.0", "port": 10888},
     "auth": {"api_token": ""},  # generated on first run; used by remote puppy instances
+    "backend": {
+        "host": "127.0.0.1",
+        "port": 10888,
+        "advertise_url": "",
+        "terminal_enabled": True,
+    },
     "terminal": {"command": "/bin/bash -l"},
-    "sessions": {"default_cwd": "/etc/scripts", "turn_timeout": 7200},
+    "sessions": {"default_cwd": "/etc/scripts", "turn_timeout": 7200,
+                 "shutdown_grace": 60},
 }
 
 _lock = threading.Lock()

@@ -26,7 +26,8 @@ def setup_logging() -> None:
     logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
 
 
-def main() -> None:
+def initialize_runtime() -> None:
+    """Initialize shared state for either the full console or a headless node."""
     if sys.version_info < (3, 9):
         print("puppy requires Python 3.9+", file=sys.stderr)
         sys.exit(1)
@@ -38,6 +39,10 @@ def main() -> None:
     # a previous unclean shutdown can leave sessions stuck on 'running';
     # nothing is actually running at boot (and restart.sh keys off this)
     db.execute("UPDATE sessions SET status='idle' WHERE status!='idle'")
+
+
+def main() -> None:
+    initialize_runtime()
 
     log = logging.getLogger("puppy")
     host = config.get("web.host", "0.0.0.0")

@@ -11,7 +11,7 @@ import time
 
 from aiohttp import WSMsgType, web
 
-from puppy import __version__, auth, backends, config, db, runner, terminal
+from puppy import __version__, auth, backends, config, db, protocol, runner, terminal
 from puppy.drivers import all_drivers, get_driver
 
 log = logging.getLogger("puppy.web")
@@ -47,8 +47,22 @@ async def h_favicon(request: web.Request):
 # ---- core api ----
 
 async def h_ping(request: web.Request):
-    return web.json_response({"ok": True, "name": config.get("instance_name"),
-                              "version": __version__})
+    payload = {
+        "ok": True,
+        "name": config.get("instance_name"),
+        "version": __version__,
+        "protocol": protocol.API_PROTOCOL,
+        "role": request.app.get("puppy_role", "full"),
+        "capabilities": list(request.app.get(
+            "puppy_capabilities", protocol.execution_capabilities())),
+    }
+    upgrade = request.app.get("puppy_upgrade")
+    if upgrade is not None:
+        payload["upgrade"] = upgrade
+    build = request.app.get("puppy_build")
+    if build is not None:
+        payload["build"] = build
+    return web.json_response(payload)
 
 
 async def _engines_payload():
@@ -384,18 +398,15 @@ async def ws_updates(request: web.Request):
 
 # ---- app assembly ----
 
-def build_app() -> web.Application:
-    app = web.Application(middlewares=[auth.middleware], client_max_size=8 * 1024 * 1024)
+def register_execution_api(app: web.Application, include_terminal: bool = True) -> None:
+    """Register the API surface consumed through a local or remote session tab.
+
+    The full console and the deployable headless backend both call this. Keep
+    backend-facing route changes here so the two runtimes cannot silently drift.
+    """
     r = app.router
-    r.add_get("/", h_index)
-    r.add_get("/favicon.ico", h_favicon)
-    r.add_static("/static/", config.STATIC_DIR, follow_symlinks=False)
-
-    auth.register(app)
-    backends.register(app)
-
     r.add_get("/api/ping", h_ping)
-    r.add_get("/api/state", h_state)
+    r.add_get("/api/node", h_ping)
     r.add_get("/api/engines", h_engines)
 
     r.add_get("/api/sessions", h_sessions_list)
@@ -412,12 +423,28 @@ def build_app() -> web.Application:
 
     r.add_get("/api/fs", h_fs)
     r.add_post("/api/fs/mkdir", h_fs_mkdir)
-    r.add_get("/api/settings", h_settings_get)
-    r.add_patch("/api/settings", h_settings_patch)
-
     r.add_get("/api/ws/session/{sid:\\d+}", ws_session)
     r.add_get("/api/ws/updates", ws_updates)
-    r.add_get("/api/ws/term", terminal.ws_terminal)
+    if include_terminal:
+        r.add_get("/api/ws/term", terminal.ws_terminal)
+
+
+def build_app() -> web.Application:
+    app = web.Application(middlewares=[auth.middleware], client_max_size=8 * 1024 * 1024)
+    app["puppy_role"] = "full"
+    app["puppy_capabilities"] = protocol.execution_capabilities(include_terminal=True)
+    r = app.router
+    r.add_get("/", h_index)
+    r.add_get("/favicon.ico", h_favicon)
+    r.add_static("/static/", config.STATIC_DIR, follow_symlinks=False)
+
+    auth.register(app)
+    backends.register(app)
+
+    r.add_get("/api/state", h_state)
+    r.add_get("/api/settings", h_settings_get)
+    r.add_patch("/api/settings", h_settings_patch)
+    register_execution_api(app, include_terminal=True)
 
     async def on_shutdown(app):
         await runner.shutdown()

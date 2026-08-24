@@ -1,0 +1,22 @@
+[Unit]
+Description=Puppy headless execution backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=puppy
+Group=puppy
+WorkingDirectory=/var/lib/puppy-backend
+Environment=HOME=/var/lib/puppy-backend
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/opt/puppy-backend/puppy-backend.pyz serve --data-dir /var/lib/puppy-backend --bind 127.0.0.1 --port 10888
+Restart=always
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=75
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
