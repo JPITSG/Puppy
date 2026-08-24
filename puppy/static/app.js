@@ -66,6 +66,29 @@ function md(text) {
   }
 }
 
+/* append text to node with URLs as clickable new-tab links (DOM-built, no innerHTML) */
+function linkifyInto(node, text) {
+  const re = /https?:\/\/[^\s<>"]+/g;
+  let last = 0, m;
+  while ((m = re.exec(text))) {
+    let url = m[0];
+    const trail = url.match(/[)\]'".,;:!?]+$/);
+    if (trail) url = url.slice(0, -trail[0].length);
+    if (!url) continue;
+    if (m.index > last) node.appendChild(document.createTextNode(text.slice(last, m.index)));
+    const a = el("a", "", url);
+    a.href = url;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    a.onclick = (e) => e.stopPropagation();   // don't toggle tool cards etc.
+    node.appendChild(a);
+    last = m.index + url.length;
+    re.lastIndex = last;
+  }
+  node.appendChild(document.createTextNode(text.slice(last)));
+  return node;
+}
+
 /* ================= state ================= */
 const state = {
   authed: false,
@@ -992,13 +1015,14 @@ class SessionView {
     switch (ev.kind) {
       case "user": {
         const n = el("div", "msg msg-user");
-        n.textContent = d.text || "";
+        linkifyInto(n, d.text || "");
         return n;
       }
       case "assistant": {
         const n = el("div", "msg msg-assistant");
         const box = el("div", "md");
         box.innerHTML = md(d.text || "");
+        box.querySelectorAll("a").forEach(a => { a.target = "_blank"; a.rel = "noopener noreferrer"; });
         n.appendChild(box);
         return n;
       }
@@ -1017,10 +1041,10 @@ class SessionView {
         head.appendChild(el("span", "t-caret", "❯"));
         head.appendChild(el("span", "t-ico", TOOL_ICONS[d.tool] || "🔧"));
         head.appendChild(el("span", "t-name", d.tool || "tool"));
-        head.appendChild(el("span", "t-sum", toolSummary(d.tool, d.input)));
+        head.appendChild(linkifyInto(el("span", "t-sum"), toolSummary(d.tool, d.input)));
         head.appendChild(el("span", "t-state", "…"));
         const body = el("div", "tool-body");
-        const inp = el("pre", "", JSON.stringify(d.input || {}, null, 2));
+        const inp = linkifyInto(el("pre"), JSON.stringify(d.input || {}, null, 2));
         body.appendChild(el("div", "tb-label", "input"));
         body.appendChild(inp);
         head.onclick = () => n.classList.toggle("open");
@@ -1037,13 +1061,13 @@ class SessionView {
           if (d.is_error) card.classList.add("err");
           const body = card.querySelector(".tool-body");
           body.appendChild(el("div", "tb-label", d.is_error ? "error" : "result"));
-          body.appendChild(el("pre", "", (d.content || "").slice(0, 12000) || "(empty)"));
+          body.appendChild(linkifyInto(el("pre"), (d.content || "").slice(0, 12000) || "(empty)"));
           return null;
         }
         const n = el("div", "tool-card" + (d.is_error ? " err" : "") + " open");
         n.appendChild(el("div", "tool-head"));
         const body = el("div", "tool-body");
-        body.appendChild(el("pre", "", (d.content || "").slice(0, 12000)));
+        body.appendChild(linkifyInto(el("pre"), (d.content || "").slice(0, 12000)));
         n.appendChild(body);
         return n;
       }
@@ -1145,8 +1169,8 @@ class SessionView {
       (req.description ? ` — ${req.description}` : "")));
     const pre = el("pre");
     const inp = req.input || {};
-    pre.textContent = inp.command || inp.file_path && (inp.file_path + (inp.content ? "\n---\n" + String(inp.content).slice(0, 800) : ""))
-      || JSON.stringify(inp, null, 2).slice(0, 1500);
+    linkifyInto(pre, inp.command || inp.file_path && (inp.file_path + (inp.content ? "\n---\n" + String(inp.content).slice(0, 800) : ""))
+      || JSON.stringify(inp, null, 2).slice(0, 1500));
     this.approvalEl.appendChild(pre);
     const btns = el("div", "ap-btns");
     const allow = el("button", "btn btn-ok btn-sm", "Allow");
