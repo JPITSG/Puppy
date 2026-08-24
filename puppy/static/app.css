@@ -346,7 +346,7 @@ label input,label select{margin-top:5px;text-transform:none;letter-spacing:0}
 /* Shared app-owned choice menu. It replaces native modal <select> popups on a
    precise pointer and also gives the composer's model/effort/permission menus
    the same compact material, geometry, selection tint and checkmark. Touch
-   keeps the platform picker wherever a real <select> is available. */
+   choices remain real <select> controls and therefore use the platform picker. */
 select.choice-native{display:none!important}
 .choice-control{display:block;min-width:0;margin-top:5px;text-transform:none;letter-spacing:0}
 .choice-button{
@@ -784,6 +784,18 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   transition:background .15s var(--ease),border-color .15s var(--ease),
              color .15s var(--ease),transform .12s var(--ease);
 }
+/* Touch devices get a real select stretched over the unchanged mini-pill.
+   Its popup is therefore owned by Android/iOS while Puppy keeps the compact
+   trigger geometry and the horizontally scrollable composer lane. */
+.composer-native-choice{position:relative}
+.composer-native-choice select{
+  position:absolute;z-index:1;inset:0;width:100%;height:100%;margin:0;padding:0;
+  border:0;border-radius:inherit;background:transparent;box-shadow:none!important;
+  opacity:0;cursor:pointer;font-size:16px;touch-action:pan-x pinch-zoom;
+}
+.composer-native-choice:focus-within{color:var(--txt);border-color:var(--line3);background:var(--hov)}
+.composer-native-choice.disabled{cursor:default;opacity:.45}
+.composer-native-choice.disabled select{cursor:default}
 .composer-row.compact-meta .mini-key{display:none}
 @media (hover:hover){.composer-row .mini:hover{color:var(--txt);border-color:var(--line3);background:var(--hov)}}
 .composer-row .mini:active{transform:scale(.96);background:var(--hov)}

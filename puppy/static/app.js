@@ -187,11 +187,16 @@ function tailPath(p, n = 26) {
 
 /* Desktop browsers render <select> popups outside the page, so their large
    native panels cannot follow Puppy's theme. Keep the native picker on touch
-   devices, where it is the better control, and progressively enhance modal
-   selects on precise pointers with one app-owned choice menu. The hidden
-   select remains the value/event source, keeping the surrounding code simple. */
+   devices, where it is the better control, and progressively enhance choices
+   on precise pointers with one app-owned menu. */
 let openChoiceControl = null;
 let choiceMenuSeq = 0;
+
+function prefersNativeChoices() {
+  if (window.matchMedia)
+    return !window.matchMedia("(hover:hover) and (pointer:fine)").matches;
+  return typeof navigator !== "undefined" && !!navigator.maxTouchPoints;
+}
 
 function choiceSvg(kind) {
   const NS = "http://www.w3.org/2000/svg";
@@ -302,9 +307,7 @@ function refreshChoiceSelect(select) {
 
 function enhanceChoiceSelect(select) {
   if (!select || select._choiceControl) return select;
-  const precise = !window.matchMedia ||
-    window.matchMedia("(hover:hover) and (pointer:fine)").matches;
-  if (!precise) return select;
+  if (prefersNativeChoices()) return select;
 
   const label = select.closest("label");
   const fieldName = select.getAttribute("aria-label") ||
@@ -1472,6 +1475,7 @@ class SessionView {
     this.histDraft = "";
     this.ctrlCStreak = 0;     // composer-only: second consecutive Ctrl-C clears the queue
     this.attachments = [];    // {path, url}: server path sent with the message, blob url for the preview
+    this.nativeComposerChoices = prefersNativeChoices();
     this.buildDom();
     this._onResize = () => { this.syncGutter(); this.syncComposerMeta(); this.syncHeadOverflow(); this.syncQueueFade(); };
     window.addEventListener("resize", this._onResize);
@@ -1480,6 +1484,14 @@ class SessionView {
 
   buildDom() {
     const root = el("div", "view chat");
+    const composerChoice = (cls, key, label) => this.nativeComposerChoices ?
+      `<span class="mini composer-native-choice ${cls}" title="${esc(label)}">
+        <span class="mini-key">${esc(key)}:</span><span class="mini-value">auto</span>
+        <select aria-label="${esc(label)}" disabled></select>
+      </span>` :
+      `<button type="button" class="mini ${cls}" title="${esc(label)}">
+        <span class="mini-key">${esc(key)}:</span><span class="mini-value">auto</span>
+      </button>`;
     root.innerHTML = `
       <div class="chat-head">
         <div class="chat-meta-viewport">
@@ -1504,9 +1516,9 @@ class SessionView {
           <div class="composer-row">
             <div class="composer-meta-viewport">
               <div class="composer-meta-scroll">
-                <button class="mini perm" title="Permission mode"><span class="mini-key">permissions:</span><span class="mini-value">auto</span></button>
-                <button class="mini model" title="Model"><span class="mini-key">model:</span><span class="mini-value">auto</span></button>
-                <button class="mini effort" title="Reasoning effort"><span class="mini-key">effort:</span><span class="mini-value">auto</span></button>
+                ${composerChoice("perm", "permissions", "Permission mode")}
+                ${composerChoice("model", "model", "Model")}
+                ${composerChoice("effort", "effort", "Reasoning effort")}
               </div>
             </div>
             <button class="btn-send">Send</button>
@@ -1522,6 +1534,11 @@ class SessionView {
     this.composerRow = root.querySelector(".composer-row");
     this.composerMeta = root.querySelector(".composer-meta-scroll");
     this.composerMetaViewport = root.querySelector(".composer-meta-viewport");
+    this.composerNativeSelects = this.nativeComposerChoices ? {
+      perm: root.querySelector(".composer-native-choice.perm select"),
+      model: root.querySelector(".composer-native-choice.model select"),
+      effort: root.querySelector(".composer-native-choice.effort select"),
+    } : null;
     this.headMeta = root.querySelector(".chat-meta-scroll");
     this.headMetaViewport = root.querySelector(".chat-meta-viewport");
     this.statusEl = root.querySelector(".chat-status");
@@ -1593,9 +1610,27 @@ class SessionView {
     this.ta.addEventListener("pointerdown", () => { this.ctrlCStreak = 0; });
     this.sendBtn.onclick = () => this.status === "running" ? this.interrupt() : this.submit();
     root.querySelector(".menu-btn").onclick = (e) => { e.stopPropagation(); this.showMenu(e.currentTarget); };
-    root.querySelector(".mini.perm").onclick = (e) => { e.stopPropagation(); this.showPermMenu(e.currentTarget); };
-    root.querySelector(".mini.model").onclick = (e) => { e.stopPropagation(); this.showModelMenu(e.currentTarget); };
-    root.querySelector(".mini.effort").onclick = (e) => { e.stopPropagation(); this.showEffortMenu(e.currentTarget); };
+    if (this.nativeComposerChoices) {
+      const bind = (kind, apply) => {
+        const select = this.composerNativeSelects[kind];
+        select.onchange = async () => {
+          const value = select.value;
+          select.disabled = true;
+          try { await apply(value); }
+          finally {
+            this.syncNativeComposerChoices();
+            this.syncComposerMeta();
+          }
+        };
+      };
+      bind("perm", (value) => this.patchSession({ permission_mode: value }));
+      bind("model", (value) => this.applyModelChoice(value));
+      bind("effort", (value) => this.patchSession({ effort: value }));
+    } else {
+      root.querySelector(".mini.perm").onclick = (e) => { e.stopPropagation(); this.showPermMenu(e.currentTarget); };
+      root.querySelector(".mini.model").onclick = (e) => { e.stopPropagation(); this.showModelMenu(e.currentTarget); };
+      root.querySelector(".mini.effort").onclick = (e) => { e.stopPropagation(); this.showEffortMenu(e.currentTarget); };
+    }
   }
 
   connect() {
@@ -1781,14 +1816,16 @@ class SessionView {
     cwd.classList.toggle("warn", !!s.workspace_missing);
     this.root.querySelector(".chip.be").textContent = backendName(this.tab.bid);
     const setMini = (cls, label, value) => {
-      const button = this.root.querySelector(".mini." + cls);
-      button.querySelector(".mini-value").textContent = value;
-      button.title = label + ": " + value;
-      button.setAttribute("aria-label", label + ": " + value);
+      const control = this.root.querySelector(".mini." + cls);
+      control.querySelector(".mini-value").textContent = value;
+      control.title = label + ": " + value;
+      const select = control.querySelector("select");
+      (select || control).setAttribute("aria-label", label + ": " + value);
     };
     setMini("perm", "Permission mode", s.permission_mode || "auto");
     setMini("model", "Model", s.model || "auto");
     setMini("effort", "Reasoning effort", s.effort || "auto");
+    this.syncNativeComposerChoices();
     this.syncComposerMeta();
     this.syncHeadOverflow();
     this.tab.title = s.name || `session ${s.id}`;
@@ -2217,11 +2254,63 @@ class SessionView {
     positionAnchoredMenu(menu, anchor);
   }
 
+  composerChoiceSpec(kind, native = false) {
+    const s = this.session || {};
+    const eng = state.engMap[s.engine];
+    if (kind === "perm") return {
+      options: [...((eng && eng.permission_options) || [])],
+      selected: s.permission_mode || "",
+    };
+    if (kind === "effort") return {
+      options: [...((eng && eng.effort_options) || [])],
+      selected: s.effort || "",
+    };
+    const options = [...((eng && eng.model_options) || [])];
+    const current = s.model || "";
+    const custom = !!current && !options.some(option => option.value === current);
+    if (native && custom) {
+      options.push({ value: "__current_custom__", label: `Current: ${current}` });
+      options.push({ value: "__custom__", label: "Custom…", hint: "Any model id the engine accepts" });
+      return { options, selected: "__current_custom__" };
+    }
+    options.push({
+      value: "__custom__", label: custom ? `Custom… (${current})` : "Custom…",
+      hint: "Any model id the engine accepts",
+    });
+    return { options, selected: custom ? "__custom__" : current };
+  }
+
+  syncNativeComposerChoices() {
+    if (!this.nativeComposerChoices || !this.composerNativeSelects || !this.session) return;
+    for (const kind of ["perm", "model", "effort"]) {
+      const select = this.composerNativeSelects[kind];
+      const spec = this.composerChoiceSpec(kind, true);
+      const supplied = spec.options.length > 0;
+      const options = [...spec.options];
+      if (supplied && !options.some(option => String(option.value) === String(spec.selected)))
+        options.unshift({ value: spec.selected, label: spec.selected || "Default" });
+      if (!options.length)
+        options.push({ value: spec.selected, label: spec.selected || "Not available" });
+      select.replaceChildren();
+      for (const item of options) {
+        const option = document.createElement("option");
+        option.value = item.value;
+        option.textContent = item.label;
+        option.title = item.hint || "";
+        option.disabled = !!item.disabled;
+        option.selected = String(item.value) === String(spec.selected);
+        select.appendChild(option);
+      }
+      select.disabled = !supplied;
+      select.parentElement.classList.toggle("disabled", !supplied);
+    }
+  }
+
   showPermMenu(anchor) {
     if (!this.session) return;
-    const eng = state.engMap[this.session.engine];
-    const opts = (eng && eng.permission_options) || [];
-    this.optionMenu(anchor, opts, this.session.permission_mode, (v) => this.patchSession({ permission_mode: v }));
+    const spec = this.composerChoiceSpec("perm");
+    this.optionMenu(anchor, spec.options, spec.selected,
+      (value) => this.patchSession({ permission_mode: value }));
   }
 
   async patchSession(body) {
@@ -2303,28 +2392,25 @@ class SessionView {
 
   showModelMenu(anchor) {
     if (!this.session) return;
-    const eng = state.engMap[this.session.engine];
-    const opts = (eng && eng.model_options) || [];
-    const cur = this.session.model || "";
-    const isCustom = cur && !opts.some(o => o.value === cur);
-    const choices = opts.concat([{
-      value: "__custom__", label: isCustom ? `Custom… (${cur})` : "Custom…",
-      hint: "Any model id the engine accepts",
-    }]);
-    this.optionMenu(anchor, choices, isCustom ? "__custom__" : cur, async (value) => {
-      if (value !== "__custom__") { this.patchSession({ model: value }); return; }
-      const val = await modalPrompt("Model override",
-        "Model for this session (empty = engine default).", cur);
-      if (val !== null) this.patchSession({ model: val.trim() });
-    });
+    const spec = this.composerChoiceSpec("model");
+    this.optionMenu(anchor, spec.options, spec.selected, (value) => this.applyModelChoice(value));
+  }
+
+  async applyModelChoice(value) {
+    if (value === "__current_custom__") return;
+    if (value !== "__custom__") { await this.patchSession({ model: value }); return; }
+    const current = (this.session && this.session.model) || "";
+    const val = await modalPrompt("Model override",
+      "Model for this session (empty = engine default).", current);
+    if (val !== null) await this.patchSession({ model: val.trim() });
   }
 
   showEffortMenu(anchor) {
     if (!this.session) return;
-    const eng = state.engMap[this.session.engine];
-    const opts = (eng && eng.effort_options) || [];
-    if (!opts.length) { toast("engine has no effort levels", "info"); return; }
-    this.optionMenu(anchor, opts, this.session.effort || "", (v) => this.patchSession({ effort: v }));
+    const spec = this.composerChoiceSpec("effort");
+    if (!spec.options.length) { toast("engine has no effort levels", "info"); return; }
+    this.optionMenu(anchor, spec.options, spec.selected,
+      (value) => this.patchSession({ effort: value }));
   }
 
   async rename() {
