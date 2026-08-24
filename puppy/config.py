@@ -27,6 +27,7 @@ DEFAULTS = {
         "port": 10888,
         "advertise_url": "",
         "terminal_enabled": True,
+        "remote_upgrade_enabled": False,
     },
     "terminal": {"command": "/bin/bash -l"},
     "sessions": {"default_cwd": "/etc/scripts", "turn_timeout": 7200,

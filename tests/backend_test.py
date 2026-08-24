@@ -12,6 +12,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 
 import aiohttp
@@ -20,6 +21,8 @@ from aiohttp import web
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 
+from puppy import __version__, protocol, upgrade_contract  # noqa: E402
+
 
 def free_port() -> int:
     sock = socket.socket()
@@ -27,6 +30,35 @@ def free_port() -> int:
     port = sock.getsockname()[1]
     sock.close()
     return port
+
+
+def previous_patch_version() -> str:
+    major, minor, patch = upgrade_contract.version_key(__version__)
+    assert patch > 0
+    return f"{major}.{minor}.{patch - 1}"
+
+
+def copy_with_version(source: Path, target: Path, version: str) -> None:
+    with zipfile.ZipFile(source) as current, \
+            zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as older:
+        for info in current.infolist():
+            payload = current.read(info.filename)
+            if info.filename == "puppy/__init__.py":
+                text = payload.decode("utf-8")
+                text = text.replace(f'__version__ = "{__version__}"',
+                                    f'__version__ = "{version}"')
+                payload = text.encode("utf-8")
+            older.writestr(info, payload)
+    target.chmod(0o755)
+
+
+def stop_process(process: subprocess.Popen) -> None:
+    process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
 
 
 async def wait_for_backend(url: str, process: subprocess.Popen) -> None:
@@ -45,7 +77,8 @@ async def wait_for_backend(url: str, process: subprocess.Popen) -> None:
     raise AssertionError("backend did not start")
 
 
-async def exercise_node(url: str, token: str) -> None:
+async def exercise_node(url: str, token: str, expected_version: str,
+                        upgrade_enabled: bool) -> None:
     good = {"X-Puppy-Token": token}
     async with aiohttp.ClientSession() as http:
         async with http.get(url + "/api/ping") as response:
@@ -58,11 +91,14 @@ async def exercise_node(url: str, token: str) -> None:
             ping = await response.json()
         assert ping["role"] == "backend"
         assert ping["protocol"] == 1
+        assert ping["version"] == expected_version
         assert "sessions" in ping["capabilities"]
         assert "terminal" not in ping["capabilities"]
-        assert "remote-upgrade" not in ping["capabilities"]
-        assert ping["upgrade"]["supported"] is False
+        assert ("remote-upgrade" in ping["capabilities"]) is upgrade_enabled
+        assert ping["upgrade"]["supported"] is upgrade_enabled
         assert ping["upgrade"]["api"] == "/api/node/upgrade"
+        assert ping["upgrade"]["signing"] == "hmac-sha256"
+        assert ping["upgrade"]["restart"] == "external-launcher"
         assert ping["build"]["artifact"] == "zipapp"
 
         async with http.get(url + "/api/node", headers=good) as response:
@@ -74,14 +110,44 @@ async def exercise_node(url: str, token: str) -> None:
         first = await updates.receive_json(timeout=3)
         assert first["type"] == "sessions" and first["sessions"] == []
         await updates.close()
+        async with http.get(url + "/api/node/upgrade", headers=good) as response:
+            status = await response.json()
+            assert response.status == 200 and status["supported"] is upgrade_enabled
         for path in ("/", "/static/app.js", "/api/settings", "/api/auth/status",
-                     "/api/ws/term", "/api/node/upgrade"):
+                     "/api/ws/term"):
             async with http.get(url + path, headers=good) as response:
                 assert response.status == 404, (path, response.status)
+        if not upgrade_enabled:
+            async with http.post(url + "/api/node/upgrade", headers=good,
+                                 data=b"not-an-artifact") as response:
+                assert response.status == 409
+
+
+async def reject_bad_signature(url: str, token: str) -> None:
+    payload = b"signed body is intentionally not a zipapp"
+    manifest = {
+        "format": upgrade_contract.FORMAT_VERSION,
+        "artifact": "zipapp",
+        "version": __version__,
+        "protocol": protocol.API_PROTOCOL,
+        "size": len(payload),
+        "sha256": upgrade_contract.artifact_sha256(payload),
+        "nonce": "bad-signature-test-nonce",
+        "created_at": int(time.time()),
+    }
+    headers = {
+        "X-Puppy-Token": token,
+        upgrade_contract.MANIFEST_HEADER: upgrade_contract.encode_manifest(manifest),
+        upgrade_contract.SIGNATURE_HEADER: "0" * 64,
+    }
+    async with aiohttp.ClientSession() as http:
+        async with http.post(url + "/api/node/upgrade", headers=headers,
+                             data=payload) as response:
+            assert response.status == 403, await response.text()
 
 
 async def exercise_controller(url: str, token: str, backend_url: str,
-                              backend_token: str) -> None:
+                              backend_token: str, old_version: str) -> None:
     headers = {"X-Puppy-Token": token}
     async with aiohttp.ClientSession() as http:
         async with http.get(url + "/api/ping", headers=headers) as response:
@@ -107,6 +173,8 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert stored["role"] == "backend"
         assert "sessions" in stored["capabilities"]
         assert "terminal" not in stored["capabilities"]
+        assert "remote-upgrade" in stored["capabilities"]
+        assert stored["remote_version"] == old_version
         assert "token" not in stored
 
         async with http.post(url + f"/api/backends/{stored['id']}/test",
@@ -129,47 +197,138 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert b"PUPPY_BACKEND_ROUTE_OK" in output, output[-200:]
         await terminal.close()
 
+        async with http.post(url + f"/api/backends/{stored['id']}/upgrade",
+                             headers=headers) as response:
+            upgraded = await response.json()
+            assert response.status == 200, upgraded
+        assert upgraded["from_version"] == old_version
+        assert upgraded["to_version"] == __version__
+        assert len(upgraded["sha256"]) == 64
+
+        async with http.get(url + "/api/backends", headers=headers) as response:
+            refreshed = (await response.json())["backends"][0]
+        assert refreshed["remote_version"] == __version__
+        assert "remote-upgrade" in refreshed["capabilities"]
+
+
+async def exercise_launcher_rollback(artifact: Path, launcher: Path, state_dir: Path,
+                                     data_dir: Path, backend_url: str,
+                                     backend_token: str) -> subprocess.Popen:
+    backup = artifact.with_name(artifact.stem + ".previous" + artifact.suffix)
+    shutil.copy2(artifact, backup)
+    previous_sha = upgrade_contract.artifact_sha256(backup.read_bytes())
+    bad_payload = b"import sys\nsys.exit(23)\n"
+    artifact.write_bytes(bad_payload)
+    artifact.chmod(0o755)
+    status_path = state_dir / "status.json"
+    marker = state_dir / "pending.json"
+    marker.write_text(json.dumps({
+        "format": upgrade_contract.LAUNCHER_PROTOCOL,
+        "artifact": str(artifact.resolve()),
+        "backup": str(backup.resolve()),
+        "status_path": str(status_path.resolve()),
+        "data_dir": str(data_dir.resolve()),
+        "previous_version": __version__,
+        "previous_sha256": previous_sha,
+        "target_version": "9.9.9",
+        "target_sha256": upgrade_contract.artifact_sha256(bad_payload),
+        "health": {"host": "127.0.0.1", "port": int(backend_url.rsplit(":", 1)[1]),
+                   "tls": False},
+    }), encoding="utf-8")
+    process = subprocess.Popen([
+        sys.executable, str(launcher), "--artifact", str(artifact),
+        "--state-dir", str(state_dir), "--", "serve", "--data-dir", str(data_dir),
+    ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    await wait_for_backend(backend_url, process)
+    async with aiohttp.ClientSession() as http:
+        async with http.get(backend_url + "/api/ping",
+                            headers={"X-Puppy-Token": backend_token}) as response:
+            ping = await response.json()
+            assert response.status == 200 and ping["version"] == __version__, ping
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    assert status["state"] == "rolled-back", status
+    assert not marker.exists()
+    assert upgrade_contract.artifact_sha256(artifact.read_bytes()) == previous_sha
+    return process
+
 
 async def main() -> None:
     temp_root = Path(tempfile.mkdtemp(prefix="puppy_backend_test_"))
     process = None
+    disabled_process = None
     controller_runner = None
     try:
-        artifact = temp_root / "puppy-backend.pyz"
+        release_artifact = temp_root / "release" / "puppy-backend.pyz"
         subprocess.run([sys.executable, str(BASE / "backend" / "build.py"),
-                        "--output", str(artifact)], cwd=str(BASE), check=True)
-        with zipfile.ZipFile(artifact) as archive:
+                        "--output", str(release_artifact)], cwd=str(BASE), check=True)
+        generated_launcher = release_artifact.with_name("puppy-backend-launcher.py")
+        assert generated_launcher.is_file() and os.access(generated_launcher, os.X_OK)
+        with zipfile.ZipFile(release_artifact) as archive:
             names = archive.namelist()
         assert any(name.startswith("puppy/drivers/") for name in names)
         assert not any(name.startswith("puppy/static/") for name in names)
+        self_test = json.loads(subprocess.check_output([
+            sys.executable, str(release_artifact), "self-test", "--data-dir",
+            str(temp_root / "self-test-data"),
+        ], text=True).splitlines()[-1])
+        assert self_test["ok"] is True and self_test["version"] == __version__
 
+        # Configuration alone is insufficient: a directly launched zipapp must
+        # keep remote upgrades disabled because no external rollback exists.
+        disabled_data = temp_root / "disabled-data"
+        disabled_port = free_port()
+        disabled_url = f"http://127.0.0.1:{disabled_port}"
+        backend_token = "backend-test-token-0123456789abcdef"
+        subprocess.check_output([
+            sys.executable, str(release_artifact), "pairing", "--data-dir", str(disabled_data),
+            "--name", "disabled-node", "--bind", "127.0.0.1", "--port", str(disabled_port),
+            "--advertise-url", disabled_url, "--api-token", backend_token,
+            "--disable-terminal", "--enable-remote-upgrade",
+        ], text=True)
+        disabled_process = subprocess.Popen([
+            sys.executable, str(release_artifact), "serve", "--data-dir", str(disabled_data),
+        ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        await wait_for_backend(disabled_url, disabled_process)
+        await exercise_node(disabled_url, backend_token, __version__, upgrade_enabled=False)
+        stop_process(disabled_process)
+        disabled_process = None
+
+        old_version = previous_patch_version()
+        artifact = temp_root / "node" / "puppy-backend.pyz"
+        artifact.parent.mkdir()
+        copy_with_version(release_artifact, artifact, old_version)
         backend_data = temp_root / "backend-data"
         backend_port = free_port()
         backend_url = f"http://127.0.0.1:{backend_port}"
-        backend_token = "backend-test-token-0123456789abcdef"
         pairing_raw = subprocess.check_output([
-            str(artifact), "pairing", "--data-dir", str(backend_data),
+            sys.executable, str(artifact), "pairing", "--data-dir", str(backend_data),
             "--name", "backend-test-node", "--bind", "127.0.0.1",
             "--port", str(backend_port), "--advertise-url", backend_url,
-            "--api-token", backend_token, "--disable-terminal",
+            "--api-token", backend_token, "--disable-terminal", "--enable-remote-upgrade",
         ], text=True)
         pairing = json.loads(pairing_raw)
         assert pairing["url"] == backend_url and pairing["token"] == backend_token
         assert "terminal" not in pairing["capabilities"]
+        assert "remote-upgrade" not in pairing["capabilities"]  # pairing command is not launcher-managed
         assert (backend_data / "config.json").stat().st_mode & 0o777 == 0o600
 
         enabled_pairing = json.loads(subprocess.check_output([
-            str(artifact), "pairing", "--data-dir", str(temp_root / "enabled-data"),
+            sys.executable, str(release_artifact), "pairing",
+            "--data-dir", str(temp_root / "enabled-data"),
             "--bind", "127.0.0.1", "--port", str(backend_port),
             "--api-token", backend_token,
         ], text=True))
         assert "terminal" in enabled_pairing["capabilities"]
 
+        state_dir = backend_data / "upgrade"
         process = subprocess.Popen([
-            str(artifact), "serve", "--data-dir", str(backend_data),
+            sys.executable, str(BASE / "backend" / "launcher.py"),
+            "--artifact", str(artifact), "--state-dir", str(state_dir), "--",
+            "serve", "--data-dir", str(backend_data),
         ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         await wait_for_backend(backend_url, process)
-        await exercise_node(backend_url, backend_token)
+        await exercise_node(backend_url, backend_token, old_version, upgrade_enabled=True)
+        await reject_bad_signature(backend_url, backend_token)
 
         # Import the full application only after its independent data path is set.
         controller_data = temp_root / "controller-data"
@@ -195,18 +354,27 @@ async def main() -> None:
         await site.start()
         sock = site._server.sockets[0]
         controller_url = f"http://127.0.0.1:{sock.getsockname()[1]}"
-        await exercise_controller(controller_url, controller_token, backend_url, backend_token)
-        print("backend package, auth, protocol, and controller pairing passed")
+        await exercise_controller(controller_url, controller_token, backend_url,
+                                  backend_token, old_version)
+        upgrade_status = json.loads((state_dir / "status.json").read_text(encoding="utf-8"))
+        assert upgrade_status["state"] == "succeeded", upgrade_status
+        assert artifact.with_name(artifact.stem + ".previous" + artifact.suffix).is_file()
+
+        await controller_runner.cleanup()
+        controller_runner = None
+        stop_process(process)
+        process = None
+        process = await exercise_launcher_rollback(
+            artifact, BASE / "backend" / "launcher.py", state_dir, backend_data,
+            backend_url, backend_token)
+        print("backend package, auth, signed upgrade, restart, and rollback passed")
     finally:
         if controller_runner is not None:
             await controller_runner.cleanup()
+        if disabled_process is not None:
+            stop_process(disabled_process)
         if process is not None:
-            process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
+            stop_process(process)
         shutil.rmtree(temp_root, ignore_errors=True)
 
 

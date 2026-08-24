@@ -34,8 +34,12 @@ def _commit() -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", default=str(BACKEND_DIR / "dist" / "puppy-backend.pyz"))
+    parser.add_argument("--launcher-output",
+                        help="launcher path (default: puppy-backend-launcher.py beside the zipapp)")
     args = parser.parse_args()
     output = Path(args.output).resolve()
+    launcher_output = (Path(args.launcher_output).resolve() if args.launcher_output else
+                       output.with_name("puppy-backend-launcher.py"))
     output.parent.mkdir(parents=True, exist_ok=True)
     commit = _commit()
 
@@ -61,8 +65,15 @@ def main() -> None:
         os.chmod(temporary_output, 0o755)
         os.replace(temporary_output, output)
 
+    launcher_temporary = launcher_output.with_name("." + launcher_output.name + ".tmp")
+    launcher_output.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(BACKEND_DIR / "launcher.py", launcher_temporary)
+    os.chmod(launcher_temporary, 0o755)
+    os.replace(launcher_temporary, launcher_output)
+
     size_kib = output.stat().st_size / 1024
     print(f"built {output} ({size_kib:.1f} KiB), puppy {__version__}, commit {commit or 'unknown'}")
+    print(f"copied upgrade launcher to {launcher_output}")
 
 
 if __name__ == "__main__":

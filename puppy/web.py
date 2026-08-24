@@ -57,6 +57,8 @@ async def h_ping(request: web.Request):
             "puppy_capabilities", protocol.execution_capabilities())),
     }
     upgrade = request.app.get("puppy_upgrade")
+    if callable(upgrade):
+        upgrade = upgrade()
     if upgrade is not None:
         payload["upgrade"] = upgrade
     build = request.app.get("puppy_build")
@@ -357,6 +359,12 @@ async def ws_session(request: web.Request):
             except Exception:
                 continue
             t = data.get("type")
+            if request.app.get("puppy_upgrade_draining"):
+                await ws.send_json({
+                    "type": "toast", "level": "error",
+                    "text": "backend is restarting for an upgrade",
+                })
+                continue
             if t == "approval_response":
                 await h.approval_response(
                     data.get("request_id", ""),

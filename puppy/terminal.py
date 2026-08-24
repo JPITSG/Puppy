@@ -20,6 +20,12 @@ from puppy.drivers.base import clean_env
 
 log = logging.getLogger("puppy.terminal")
 
+_active_terminals = 0
+
+
+def active_count() -> int:
+    return _active_terminals
+
 
 def _set_winsize(fd: int, cols: int, rows: int) -> None:
     try:
@@ -29,6 +35,7 @@ def _set_winsize(fd: int, cols: int, rows: int) -> None:
 
 
 async def ws_terminal(request: web.Request) -> web.WebSocketResponse:
+    global _active_terminals
     ws = web.WebSocketResponse(heartbeat=30, max_msg_size=1 << 20)
     await ws.prepare(request)
 
@@ -61,6 +68,7 @@ async def ws_terminal(request: web.Request) -> web.WebSocketResponse:
         except Exception:
             os._exit(127)
 
+    _active_terminals += 1
     log.info("terminal spawned pid=%s cmd=%r for %s", pid, cmd_str, request.remote)
     _set_winsize(master, cols, rows)
     os.set_blocking(master, False)
@@ -132,6 +140,7 @@ async def ws_terminal(request: web.Request) -> web.WebSocketResponse:
         except OSError:
             pass
         await _reap(pid)
+        _active_terminals = max(0, _active_terminals - 1)
         log.info("terminal pid=%s closed", pid)
     return ws
 

@@ -47,6 +47,13 @@ function fmtTokens(n) {
   if (n == null) return "";
   return n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n);
 }
+function cmpVersion(a, b) {
+  const parse = (v) => /^\d+\.\d+\.\d+$/.test(v || "") ? v.split(".").map(Number) : null;
+  const av = parse(a), bv = parse(b);
+  if (!av || !bv) return null;
+  for (let i = 0; i < 3; i++) if (av[i] !== bv[i]) return av[i] < bv[i] ? -1 : 1;
+  return 0;
+}
 const QUEUE_ROWS = 5;     // queued messages listed before collapsing to "+N more"
 
 /* the header's thinking status; the live thinking block mirrors the header
@@ -1925,6 +1932,39 @@ class SettingsView {
             else toast(`${b.name}: ${r.error || "HTTP " + r.status}`, "error");
           } catch (e) { test.textContent = "Test"; toast(e.message, "error"); }
         };
+        const upgrade = el("button", "btn btn-sm", "Upgrade");
+        const versionOrder = cmpVersion(b.remote_version, settings.version);
+        const upgradeCapable = b.role === "backend" && backendHasCapability(b, "remote-upgrade");
+        if (!upgradeCapable) {
+          upgrade.disabled = true;
+          upgrade.title = "This backend needs one manual upgrade before WebUI upgrades are available";
+        } else if (versionOrder === 0) {
+          upgrade.textContent = "Current";
+          upgrade.disabled = true;
+          upgrade.title = `Already at v${settings.version}`;
+        } else if (versionOrder === 1) {
+          upgrade.textContent = "Newer";
+          upgrade.disabled = true;
+          upgrade.title = `Backend v${b.remote_version} is newer than this controller`;
+        } else if (versionOrder === null) {
+          upgrade.disabled = true;
+          upgrade.title = "Backend version cannot be compared safely";
+        }
+        upgrade.onclick = async () => {
+          if (!(await modalConfirm("Upgrade backend?",
+            `${b.name} will upgrade from v${b.remote_version} to v${settings.version} and restart. The backend must have no running turns or terminals.`))) return;
+          upgrade.disabled = true;
+          upgrade.textContent = "Upgrading…";
+          try {
+            const result = await api(0, `backends/${b.id}/upgrade`, { method: "POST" });
+            toast(`${b.name}: upgraded ${result.from_version} → ${result.to_version}`, "ok", 7000);
+            delete state.engCache[b.id];
+            await refreshState(); await this.render(); pollRemotes();
+          } catch (e) {
+            toast(`${b.name}: ${e.message}`, "error", 7000);
+            await this.render();
+          }
+        };
         const rm = el("button", "btn btn-danger btn-sm", "Remove");
         rm.onclick = async () => {
           if (!(await modalConfirm("Remove backend?", `${b.name} (${b.url})`))) return;
@@ -1932,7 +1972,7 @@ class SettingsView {
           delete state.engCache[b.id]; delete state.remoteOk[b.id]; delete state.remoteSessions[b.id];
           await refreshState(); await this.render();
         };
-        row.appendChild(test); row.appendChild(rm);
+        row.appendChild(test); row.appendChild(upgrade); row.appendChild(rm);
         beList.appendChild(row);
       }
     };

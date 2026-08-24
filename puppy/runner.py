@@ -61,6 +61,14 @@ def sessions_payload() -> dict:
     return {"type": "sessions", "sessions": sessions}
 
 
+def upgrade_blockers() -> list:
+    """Sessions whose running turn or queued work makes a restart unsafe."""
+    return [
+        {"id": h.id, "running": h.status == "running", "queued": len(h.queue)}
+        for h in _hubs.values() if h.status == "running" or h.queue
+    ]
+
+
 def broadcast_sessions() -> None:
     payload = sessions_payload()
     for ws in list(_updates_watchers):

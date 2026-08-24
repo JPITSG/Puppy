@@ -27,7 +27,7 @@ def _parser() -> argparse.ArgumentParser:
         prog="puppy-backend",
         description="Headless execution backend for a Puppy web console")
     parser.add_argument("command", nargs="?", default="serve",
-                        choices=("serve", "token", "pairing"))
+                        choices=("serve", "token", "pairing", "self-test"))
     parser.add_argument("--version", action="version", version=__version__)
     parser.add_argument("--data-dir", default=_default_data_dir(),
                         help="private state directory (default: beside the artifact)")
@@ -46,6 +46,13 @@ def _parser() -> argparse.ArgumentParser:
     terminals.add_argument("--disable-terminal", dest="terminal_enabled", action="store_false",
                            help="disable remote terminal websockets")
     parser.set_defaults(terminal_enabled=None)
+    upgrades = parser.add_mutually_exclusive_group()
+    upgrades.add_argument("--enable-remote-upgrade", dest="remote_upgrade_enabled",
+                          action="store_true",
+                          help="allow signed upgrades when running under the external launcher")
+    upgrades.add_argument("--disable-remote-upgrade", dest="remote_upgrade_enabled",
+                          action="store_false", help="disable remote artifact upgrades")
+    parser.set_defaults(remote_upgrade_enabled=None)
     parser.add_argument("--turn-timeout", type=float, help="maximum turn duration in seconds")
     parser.add_argument("--shutdown-grace", type=float,
                         help="seconds to wait for active turns during shutdown")
@@ -95,6 +102,8 @@ def _configure(args, parser: argparse.ArgumentParser):
         config.set_value("terminal.command", command)
     if args.terminal_enabled is not None:
         config.set_value("backend.terminal_enabled", bool(args.terminal_enabled))
+    if args.remote_upgrade_enabled is not None:
+        config.set_value("backend.remote_upgrade_enabled", bool(args.remote_upgrade_enabled))
     if args.turn_timeout is not None:
         if args.turn_timeout <= 0:
             parser.error("--turn-timeout must be positive")
@@ -122,6 +131,7 @@ def _derived_url(config, tls_enabled: bool) -> str:
 
 def _pairing(config, tls_enabled: bool) -> dict:
     from puppy import protocol
+    from . import upgrade
 
     terminal_enabled = bool(config.get("backend.terminal_enabled", True))
     return {
@@ -129,7 +139,32 @@ def _pairing(config, tls_enabled: bool) -> dict:
         "url": _derived_url(config, tls_enabled),
         "token": config.get("auth.api_token"),
         "protocol": protocol.API_PROTOCOL,
-        "capabilities": protocol.execution_capabilities(terminal_enabled),
+        "capabilities": upgrade.capabilities(terminal_enabled),
+    }
+
+
+def _self_test() -> dict:
+    from puppy import protocol
+    from puppy.main import initialize_runtime
+    from . import build_info
+    from .app import build_app
+
+    initialize_runtime()
+    app = build_app(include_terminal=False, upgrade_health={
+        "host": "127.0.0.1", "port": 1, "tls": False,
+    })
+    routes = sorted({route.resource.canonical for route in app.router.routes()})
+    required = {"/api/ping", "/api/engines", "/api/sessions", protocol.UPGRADE_API_PATH}
+    if not required.issubset(routes):
+        raise RuntimeError("candidate API surface is incomplete")
+    return {
+        "ok": True,
+        "role": "backend",
+        "version": __version__,
+        "protocol": protocol.API_PROTOCOL,
+        "artifact": build_info.ARTIFACT_KIND,
+        "build_commit": build_info.BUILD_COMMIT,
+        "routes": routes,
     }
 
 
@@ -156,6 +191,9 @@ def main() -> None:
             parser.error("pairing needs --advertise-url when listening on a wildcard address")
         print(json.dumps(pairing, indent=2, sort_keys=True))
         return
+    if args.command == "self-test":
+        print(json.dumps(_self_test(), sort_keys=True))
+        return
 
     from aiohttp import web as aioweb
     from puppy.main import initialize_runtime
@@ -177,7 +215,9 @@ def main() -> None:
         log.info("pair this backend at %s; retrieve credentials with the pairing command", url)
     else:
         log.info("set --advertise-url to produce a controller pairing block")
-    aioweb.run_app(build_app(include_terminal=terminal_enabled), host=host, port=port,
+    aioweb.run_app(build_app(include_terminal=terminal_enabled, upgrade_health={
+                        "host": host, "port": port, "tls": tls_context is not None,
+                    }), host=host, port=port,
                     print=None, shutdown_timeout=5, ssl_context=tls_context)
 
 

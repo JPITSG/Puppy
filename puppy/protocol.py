@@ -21,8 +21,8 @@ BASE_CAPABILITIES = (
 )
 TERMINAL_CAPABILITY = "terminal"
 
-# Reserved for the future signed/staged remote-upgrade API. A backend must not
-# advertise this capability until the mutation endpoint is actually available.
+# Signed/staged remote upgrades are additive to protocol 1. A backend advertises
+# this only while its external health-check/rollback launcher is active.
 UPGRADE_CAPABILITY = "remote-upgrade"
 UPGRADE_API_PATH = "/api/node/upgrade"
 

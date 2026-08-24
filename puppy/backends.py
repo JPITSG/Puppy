@@ -6,16 +6,23 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+from pathlib import Path
+import secrets
+import subprocess
+import sys
+import tempfile
 import time
 
 import aiohttp
 from aiohttp import WSMsgType, web
 
-from puppy import db, protocol
+from puppy import __version__, config, db, protocol, upgrade_contract
 
 log = logging.getLogger("puppy.backends")
 
 _client = None
+_upgrades_in_progress = set()
 
 HOP_HEADERS = {"host", "connection", "upgrade", "sec-websocket-key", "sec-websocket-version",
                "sec-websocket-extensions", "sec-websocket-protocol", "cookie", "x-puppy-token",
@@ -115,6 +122,66 @@ def _metadata(remote: dict) -> tuple:
         str(remote.get("role") or "")[:24],
     )
 
+
+def _store_metadata(bid: int, remote: dict) -> None:
+    api_protocol, capabilities, remote_version, role = _metadata(remote)
+    db.execute(
+        "UPDATE backends SET protocol=?,capabilities=?,remote_version=?,role=? WHERE id=?",
+        (api_protocol, capabilities, remote_version, role, bid))
+
+
+def _build_upgrade_payload() -> tuple:
+    """Build and independently self-test the current backend in private data."""
+    root = Path(__file__).resolve().parent.parent
+    build_script = root / "backend" / "build.py"
+    if not build_script.is_file():
+        raise RuntimeError("backend build source is not installed on this controller")
+    work_root = Path(config.DATA_DIR) / "upgrades"
+    work_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os_mode = work_root.stat().st_mode & 0o777
+    if os_mode != 0o700:
+        work_root.chmod(0o700)
+    with tempfile.TemporaryDirectory(prefix="build-", dir=str(work_root)) as temporary:
+        temp_dir = Path(temporary)
+        artifact = temp_dir / "puppy-backend.pyz"
+        built = subprocess.run(
+            [sys.executable, str(build_script), "--output", str(artifact)],
+            cwd=str(root), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, timeout=60)
+        if built.returncode != 0:
+            raise RuntimeError("backend build failed: " + built.stdout[-800:].strip())
+        smoke_data = temp_dir / "smoke-data"
+        checked = subprocess.run(
+            [sys.executable, str(artifact), "self-test", "--data-dir", str(smoke_data)],
+            cwd=str(root), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, timeout=30)
+        if checked.returncode != 0:
+            raise RuntimeError("backend self-test failed: " + checked.stdout[-800:].strip())
+        try:
+            self_test = json.loads([line for line in checked.stdout.splitlines() if line.strip()][-1])
+        except Exception as exc:
+            raise RuntimeError("backend self-test returned invalid output") from exc
+        payload = artifact.read_bytes()
+    if self_test.get("ok") is not True or self_test.get("role") != "backend" or \
+            self_test.get("version") != __version__ or \
+            self_test.get("protocol") != protocol.API_PROTOCOL or \
+            self_test.get("artifact") != "zipapp":
+        raise RuntimeError("built backend metadata does not match this controller")
+    if not 0 < len(payload) <= upgrade_contract.MAX_ARTIFACT_BYTES:
+        raise RuntimeError("built backend artifact exceeds the upgrade size limit")
+    manifest = {
+        "format": upgrade_contract.FORMAT_VERSION,
+        "artifact": "zipapp",
+        "version": __version__,
+        "protocol": protocol.API_PROTOCOL,
+        "size": len(payload),
+        "sha256": upgrade_contract.artifact_sha256(payload),
+        "nonce": secrets.token_urlsafe(18),
+        "created_at": int(time.time()),
+        "build_commit": str(self_test.get("build_commit") or ""),
+    }
+    return payload, manifest
+
 async def h_list(request: web.Request):
     return web.json_response({"backends": list_backends()})
 
@@ -153,11 +220,105 @@ async def h_test(request: web.Request):
         return web.json_response({"error": "unknown backend"}, status=404)
     result = await probe_backend(be["url"], be["token"])
     if result["ok"]:
-        api_protocol, capabilities, remote_version, role = _metadata(result["remote"])
-        db.execute(
-            "UPDATE backends SET protocol=?,capabilities=?,remote_version=?,role=? WHERE id=?",
-            (api_protocol, capabilities, remote_version, role, bid))
+        _store_metadata(bid, result["remote"])
     return web.json_response(result)
+
+
+async def h_upgrade(request: web.Request):
+    bid = int(request.match_info["bid"])
+    be = get_backend(bid)
+    if be is None:
+        return web.json_response({"error": "unknown backend"}, status=404)
+    if bid in _upgrades_in_progress:
+        return web.json_response({"error": "an upgrade is already in progress for this backend"},
+                                 status=409)
+    _upgrades_in_progress.add(bid)
+    try:
+        current = await probe_backend(be["url"], be["token"])
+        if not current["ok"]:
+            return web.json_response({"error": current.get("error", "backend is unavailable")},
+                                     status=502)
+        remote = current["remote"]
+        _store_metadata(bid, remote)
+        if protocol.UPGRADE_CAPABILITY not in (remote.get("capabilities") or []) or \
+                not (remote.get("upgrade") or {}).get("supported"):
+            return web.json_response({"error": "backend does not support safe remote upgrades"},
+                                     status=409)
+        try:
+            if upgrade_contract.version_key(__version__) <= \
+                    upgrade_contract.version_key(str(remote.get("version") or "")):
+                return web.json_response({"error": "backend is already at this version or newer"},
+                                         status=409)
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=409)
+
+        loop = asyncio.get_running_loop()
+        try:
+            payload, manifest = await loop.run_in_executor(None, _build_upgrade_payload)
+        except Exception as exc:
+            log.exception("backend release build failed")
+            return web.json_response({"error": str(exc)}, status=500)
+        headers = {
+            "X-Puppy-Token": be["token"],
+            "Content-Type": "application/octet-stream",
+            upgrade_contract.MANIFEST_HEADER: upgrade_contract.encode_manifest(manifest),
+            upgrade_contract.SIGNATURE_HEADER: upgrade_contract.sign(be["token"], manifest, payload),
+        }
+        target = be["url"].rstrip("/") + protocol.UPGRADE_API_PATH
+        try:
+            async with client().post(
+                    target, data=payload, headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=45), allow_redirects=False) as response:
+                try:
+                    accepted = await response.json()
+                except Exception:
+                    accepted = {"error": "backend returned a non-JSON upgrade response"}
+                if response.status != 202 or accepted.get("accepted") is not True:
+                    return web.json_response(
+                        {"error": accepted.get("error") or "backend rejected the upgrade"},
+                        status=(response.status if 400 <= response.status < 600 and
+                                response.status not in (401, 403) else 502))
+        except asyncio.TimeoutError:
+            return web.json_response({"error": "backend timed out while staging the upgrade"}, status=504)
+        except Exception as exc:
+            return web.json_response({"error": "backend upgrade request failed: {}".format(exc)},
+                                     status=502)
+
+        deadline = time.monotonic() + 90
+        last_error = "backend did not return after its upgrade restart"
+        while time.monotonic() < deadline:
+            await asyncio.sleep(0.75)
+            checked = await probe_backend(be["url"], be["token"], timeout=2.5)
+            if not checked["ok"]:
+                last_error = checked.get("error", last_error)
+                continue
+            upgraded = checked["remote"]
+            last = (upgraded.get("upgrade") or {}).get("last") or {}
+            if upgraded.get("version") == manifest["version"] and \
+                    protocol.UPGRADE_CAPABILITY in (upgraded.get("capabilities") or []) and \
+                    last.get("state") == "succeeded" and \
+                    last.get("target_version") == manifest["version"] and \
+                    last.get("sha256") == manifest["sha256"]:
+                _store_metadata(bid, upgraded)
+                log.info("backend %s upgraded %s -> %s", be["name"],
+                         remote.get("version"), upgraded.get("version"))
+                return web.json_response({
+                    "ok": True, "from_version": remote.get("version"),
+                    "to_version": upgraded.get("version"), "sha256": manifest["sha256"],
+                    "remote": upgraded,
+                })
+            if last.get("target_version") == manifest["version"] and \
+                    last.get("state") in ("rolled-back", "failed"):
+                _store_metadata(bid, upgraded)
+                return web.json_response({
+                    "error": "backend rolled back the upgrade: {}".format(
+                        last.get("error") or "candidate health check failed")
+                }, status=502)
+            last_error = "backend returned version {} instead of {}".format(
+                upgraded.get("version", "?"), manifest["version"])
+        return web.json_response({"error": last_error}, status=504)
+    finally:
+        _upgrades_in_progress.discard(bid)
 
 
 # ---- proxy ----
@@ -241,4 +402,5 @@ def register(app: web.Application) -> None:
     app.router.add_post("/api/backends", h_add)
     app.router.add_delete("/api/backends/{bid:\\d+}", h_delete)
     app.router.add_post("/api/backends/{bid:\\d+}/test", h_test)
+    app.router.add_post("/api/backends/{bid:\\d+}/upgrade", h_upgrade)
     app.router.add_route("*", "/api/b/{bid:\\d+}/{tail:.+}", proxy)
