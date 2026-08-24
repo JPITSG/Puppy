@@ -317,8 +317,13 @@ label input,label select{margin-top:5px;text-transform:none;letter-spacing:0}
 /* the burger mirrors the + at the other end of the bar: same 26px box, same
    optical centre. The bar carries 8px of top padding and none at the bottom,
    so a centred item sits 8px low and its hover box would meet the divider -
-   the -8px cancels that, the same trick .tab-add-wrap uses. */
-.tabbar .burger{width:26px;height:26px;border-radius:var(--btn-r);margin-top:-8px;position:relative}
+   the -8px cancels that, the same trick .tab-add-wrap uses. The horizontal
+   margins then match that 8px: -2px off the bar's 10px padding on the left,
+   +4px on top of the bar's 4px gap on the right. */
+.tabbar .burger{
+  width:26px;height:26px;border-radius:var(--btn-r);position:relative;
+  margin:-8px 4px 0 -2px;
+}
 .tabbar .burger svg{display:block}
 /* the visual box stays 26px; the tap target fills the bar's height */
 .tabbar .burger::after,.tab-add-wrap .icon-btn::after{content:"";position:absolute;inset:-8px -6px}
