@@ -213,18 +213,20 @@ button{
   background-color:var(--panel3);background-image:var(--btn-face);border:1px solid var(--line2);
   box-shadow:inset 0 1px 0 var(--btn-top),var(--btn-lift);
   transition:background .15s var(--ease),border-color .15s var(--ease),color .15s var(--ease),
-             box-shadow .15s var(--ease),filter .15s var(--ease),transform .12s var(--ease);
+             box-shadow .15s var(--ease),filter .15s var(--ease);
 }
 /* leading glyph in a label ("＋ New session"): optically sized and balanced */
 .btn .btn-ico{font-size:1.15em;line-height:1;opacity:.92;margin-top:-1px}
 @media (hover:hover){
+  /* hover brightens the face - deliberately no lift: a translate on hover
+     makes a dense UI twitch as the pointer crosses it */
   .btn:hover{
     background-image:var(--btn-face-hi);border-color:var(--line3);
-    box-shadow:inset 0 1px 0 var(--btn-top),var(--btn-lift-hi);transform:translateY(-1px);
+    box-shadow:inset 0 1px 0 var(--btn-top),var(--btn-lift);
   }
 }
-.btn:active{transform:translateY(0);box-shadow:var(--btn-press);filter:brightness(.97)}
-.btn:disabled{opacity:.42;box-shadow:none;transform:none;filter:none;pointer-events:none}
+.btn:active{box-shadow:var(--btn-press);filter:brightness(.97)}
+.btn:disabled{opacity:.42;box-shadow:none;filter:none;pointer-events:none}
 .btn-pri{
   color:#fff;border-color:transparent;
   background-color:var(--acc-lo);background-image:linear-gradient(180deg,var(--acc-hi),var(--acc-lo));
@@ -250,7 +252,7 @@ button{
   color:var(--err);background:var(--err-dim);border-color:var(--danger-line);box-shadow:none;
 }
 @media (hover:hover){
-  .btn-danger:hover{background:var(--danger-hov);border-color:var(--danger-line-hi);box-shadow:var(--btn-lift-hi)}
+  .btn-danger:hover{background:var(--danger-hov);border-color:var(--danger-line-hi)}
 }
 .btn-danger:active{background:var(--danger-press);box-shadow:var(--btn-press)}
 /* solid destructive: for a modal's committing action, where a tinted button
@@ -604,13 +606,13 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   color:#fff;
   background-color:var(--acc-lo);background-image:linear-gradient(180deg,var(--acc-hi),var(--acc-lo));
   box-shadow:inset 0 1px 0 rgba(255,255,255,.3),0 1px 2px rgba(0,0,0,.25),var(--glow-acc);
-  transition:box-shadow .15s var(--ease),filter .15s var(--ease),transform .12s var(--ease);
+  transition:box-shadow .15s var(--ease),filter .15s var(--ease);
 }
 .btn-send .stop-sq{width:9px;height:9px;background:currentColor;border-radius:2px;flex-shrink:0}
 @media (hover:hover){
   .btn-send:hover{filter:brightness(1.07);box-shadow:inset 0 1px 0 rgba(255,255,255,.34),0 1px 2px rgba(0,0,0,.25),var(--glow-acc-hi)}
 }
-.btn-send:active{transform:translateY(1px);filter:brightness(.94);box-shadow:inset 0 2px 6px rgba(4,17,40,.4)}
+.btn-send:active{filter:brightness(.94);box-shadow:inset 0 2px 6px rgba(4,17,40,.4)}
 .btn-send.stop{
   background-color:var(--err-lo);background-image:linear-gradient(180deg,var(--err-hi),var(--err-lo));
   box-shadow:inset 0 1px 0 rgba(255,255,255,.3),0 1px 2px rgba(0,0,0,.25),var(--glow-err);
@@ -618,7 +620,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 @media (hover:hover){
   .btn-send.stop:hover{box-shadow:inset 0 1px 0 rgba(255,255,255,.34),0 1px 2px rgba(0,0,0,.25),0 6px 18px -6px rgba(217,66,89,1)}
 }
-.btn-send:disabled{opacity:.4;filter:none;transform:none;box-shadow:none;pointer-events:none}
+.btn-send:disabled{opacity:.4;filter:none;box-shadow:none;pointer-events:none}
 
 /* ---------- terminal view ---------- */
 .term-wrap{flex:1;min-height:0;padding:6px 8px 8px;display:flex}
@@ -669,11 +671,10 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .engine-pick .ep{
   flex:1;padding:11px 10px;border-radius:var(--r-md);border:1px solid var(--line2);cursor:pointer;
   text-align:center;background-color:var(--panel);background-image:var(--btn-face);user-select:none;
-  transition:background .15s var(--ease),border-color .15s var(--ease),
-             box-shadow .15s var(--ease),transform .12s var(--ease);
+  transition:background .15s var(--ease),border-color .15s var(--ease),box-shadow .15s var(--ease);
 }
-@media (hover:hover){.engine-pick .ep:hover{border-color:var(--line3);box-shadow:var(--btn-lift-hi);transform:translateY(-1px)}}
-.engine-pick .ep:active{transform:translateY(0);box-shadow:var(--btn-press)}
+@media (hover:hover){.engine-pick .ep:hover{border-color:var(--line3);background-image:var(--btn-face-hi)}}
+.engine-pick .ep:active{box-shadow:var(--btn-press)}
 /* provider logos in company colors */
 .engine-pick .ep .ep-ico{width:18px;height:18px;margin:0 auto 6px;font-size:13px;color:var(--txt2)}
 .engine-pick .ep .ep-ico.prov-anthropic{background:#d97757}
