@@ -352,7 +352,9 @@ label input,label select{margin-top:5px;text-transform:none;letter-spacing:0}
   border:1px solid transparent;border-bottom:none;color:var(--txt2);font-size:12.5px;
   background:transparent;user-select:none;position:relative;
 }
-.tab.dragging{opacity:.4}
+/* Dim the dragged tab's contents rather than the whole box so its own
+   insertion marker stays just as crisp as every other drop position. */
+.tab.dragging>*{opacity:.4}
 .tab.drag-over::before{
   content:"";position:absolute;left:0;top:5px;bottom:5px;width:2px;
   background:var(--acc);border-radius:2px;

@@ -624,7 +624,7 @@ function renderTabs() {
       document.querySelectorAll(".tab.dragging,.tab.drag-over").forEach(n => n.classList.remove("dragging", "drag-over"));
     });
     tab.addEventListener("dragover", (e) => {
-      if (!dragTabId || dragTabId === t.id) return;
+      if (!dragTabId) return;
       e.preventDefault();
       e.dataTransfer.dropEffect = "move";
       tab.classList.add("drag-over");
@@ -632,10 +632,13 @@ function renderTabs() {
     tab.addEventListener("dragleave", () => tab.classList.remove("drag-over"));
     tab.addEventListener("drop", (e) => {
       e.preventDefault();
-      if (!dragTabId || dragTabId === t.id) return;
-      const from = state.tabs.findIndex(x => x.id === dragTabId);
-      const to = state.tabs.findIndex(x => x.id === t.id);
+      tab.classList.remove("drag-over");
+      if (!dragTabId) return;
+      const sourceId = dragTabId;
       dragTabId = null;
+      if (sourceId === t.id) return;  // visible drop slot, intentionally no reorder
+      const from = state.tabs.findIndex(x => x.id === sourceId);
+      const to = state.tabs.findIndex(x => x.id === t.id);
       if (from < 0 || to < 0) return;
       state.tabs.splice(to, 0, state.tabs.splice(from, 1)[0]);
       renderTabs();
