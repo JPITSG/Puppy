@@ -2736,9 +2736,9 @@ class SettingsView {
 }
 
 /* ================= modals ================= */
-function modal(html) {
+function modal(html, className = "") {
   const back = el("div", "modal-backdrop");
-  const m = el("div", "modal");
+  const m = el("div", "modal" + (className ? " " + className : ""));
   m.innerHTML = html;
   back.appendChild(m);
   $("modal-root").appendChild(back);
@@ -2813,7 +2813,8 @@ async function modalNewSession() {
     </div>
     <label class="hidden" id="ns-model-custom-wrap">Custom model<input type="text" id="ns-model-custom" placeholder="model id"></label>
     <div class="field-lbl" style="margin-top:8px">Color<div class="swatch-row" id="ns-colors"></div></div>
-    <div class="m-btns"><button class="btn" id="ns-cancel">Cancel</button><button class="btn btn-pri" id="ns-go">Start session</button></div>`);
+    <div class="m-btns"><button class="btn" id="ns-cancel">Cancel</button><button class="btn btn-pri" id="ns-go">Start session</button></div>`,
+    "new-session-modal");
 
   const beSel = m.querySelector("#ns-be");
   const engBox = m.querySelector("#ns-engines");
