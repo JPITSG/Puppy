@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import random
+import shutil
 import time
 
 from aiohttp import WSMsgType, web
@@ -178,9 +179,32 @@ async def h_session_patch(request: web.Request):
     return web.json_response({"ok": True, "session": db.get_session(s["id"])})
 
 
+IMAGE_TYPES = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif"}
+
+
+async def h_session_upload(request: web.Request):
+    """Store a pasted image; the returned path goes into the message text and
+    the engine views the file with its own tools (engine-agnostic)."""
+    s = _session_or_404(request)
+    ctype = (request.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+    if ctype not in IMAGE_TYPES:
+        return web.json_response({"error": f"unsupported image type '{ctype}'"}, status=415)
+    data = await request.read()
+    if not data:
+        return web.json_response({"error": "empty upload"}, status=400)
+    updir = os.path.join(config.DATA_DIR, "uploads", str(s["id"]))
+    os.makedirs(updir, exist_ok=True)
+    path = os.path.join(updir, f"{int(time.time() * 1000)}.{IMAGE_TYPES[ctype]}")
+    with open(path, "wb") as f:
+        f.write(data)
+    log.info("session %s image pasted: %s (%d bytes)", s["id"], path, len(data))
+    return web.json_response({"ok": True, "path": path})
+
+
 async def h_session_delete(request: web.Request):
     s = _session_or_404(request)
     runner.drop_hub(s["id"])
+    shutil.rmtree(os.path.join(config.DATA_DIR, "uploads", str(s["id"])), ignore_errors=True)
     db.delete_session(s["id"])
     runner.broadcast_sessions()
     log.info("session %s deleted", s["id"])
@@ -373,6 +397,7 @@ def build_app() -> web.Application:
     r.add_patch("/api/sessions/{sid:\\d+}", h_session_patch)
     r.add_delete("/api/sessions/{sid:\\d+}", h_session_delete)
     r.add_post("/api/sessions/{sid:\\d+}/message", h_session_message)
+    r.add_post("/api/sessions/{sid:\\d+}/upload", h_session_upload)
     r.add_post("/api/sessions/{sid:\\d+}/interrupt", h_session_interrupt)
     r.add_post("/api/sessions/{sid:\\d+}/switch", h_session_switch)
     r.add_get("/api/sessions/{sid:\\d+}/events", h_session_events)

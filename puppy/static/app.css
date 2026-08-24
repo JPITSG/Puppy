@@ -449,6 +449,17 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
      and Firefox jitters its internal scroll per keystroke to keep the caret visible */
   min-height:24px;max-height:224px;font-size:13.5px;line-height:20px;
 }
+.attach-strip{display:flex;gap:6px;flex-wrap:wrap}
+.attach-chip{
+  display:inline-flex;align-items:center;gap:5px;font-size:11px;font-family:var(--mono);
+  color:var(--txt2);background:var(--panel3);border:1px solid var(--line);border-radius:7px;
+  padding:3px 4px 3px 8px;
+}
+.attach-chip .attach-x{
+  border:none;background:none;color:var(--txt3);cursor:pointer;font-size:13px;line-height:1;
+  padding:0 3px;border-radius:4px;
+}
+.attach-chip .attach-x:hover{color:var(--txt);background:rgba(255,255,255,.08)}
 .composer-row{display:flex;align-items:center;gap:8px}
 .composer-row .mini{
   font-size:10.5px;font-family:var(--mono);color:var(--txt3);border:1px solid var(--line);

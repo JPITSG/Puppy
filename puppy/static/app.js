@@ -725,6 +725,7 @@ class SessionView {
     this.history = [];        // sent messages, oldest first (shell-style recall)
     this.histIdx = null;
     this.histDraft = "";
+    this.attachments = [];    // server paths of pasted images, sent with the next message
     this.buildDom();
     this._onResize = () => this.syncGutter();
     window.addEventListener("resize", this._onResize);
@@ -749,7 +750,8 @@ class SessionView {
       <div class="approval hidden"></div>
       <div class="composer">
         <div class="composer-box">
-          <textarea rows="1" placeholder="Message the agent… (Enter to send, Shift+Enter for newline)"></textarea>
+          <textarea rows="1" placeholder="Message the agent… (Enter to send, Shift+Enter for newline, paste images)"></textarea>
+          <div class="attach-strip hidden"></div>
           <div class="composer-row">
             <button class="mini perm" title="Permission mode">perms</button>
             <button class="mini model" title="Model">model</button>
@@ -768,6 +770,8 @@ class SessionView {
     this.statusEl = root.querySelector(".chat-status");
     this.approvalEl = root.querySelector(".approval");
     this.queueEl = root.querySelector(".queue-strip");
+    this.attachStrip = root.querySelector(".attach-strip");
+    this.ta.addEventListener("paste", (e) => this.handlePaste(e));
 
     this.fieldSizing = window.CSS && CSS.supports && CSS.supports("field-sizing", "content");
     if (this.fieldSizing) {
@@ -1156,10 +1160,55 @@ class SessionView {
   }
 
   /* ---- outgoing ---- */
+  async handlePaste(e) {
+    const items = e.clipboardData ? [...e.clipboardData.items] : [];
+    const images = items.filter(it => it.kind === "file" && /^image\//.test(it.type));
+    if (!images.length) return;
+    e.preventDefault();
+    for (const it of images) {
+      const blob = it.getAsFile();
+      if (!blob) continue;
+      try {
+        const r = await fetch(apiPath(this.tab.bid, `sessions/${this.tab.sid}/upload`), {
+          method: "POST", headers: { "Content-Type": blob.type }, body: blob,
+        });
+        const d = await r.json().catch(() => null);
+        if (!r.ok) throw new Error((d && d.error) || `HTTP ${r.status}`);
+        this.attachments.push(d.path);
+        this.renderAttachments();
+      } catch (err) {
+        toast("image upload failed: " + err.message, "error");
+      }
+    }
+  }
+
+  renderAttachments() {
+    this.attachStrip.innerHTML = "";
+    this.attachStrip.classList.toggle("hidden", !this.attachments.length);
+    for (const p of this.attachments) {
+      const chip = el("span", "attach-chip");
+      chip.appendChild(el("span", "", "🖼 " + p.split("/").pop()));
+      const x = el("button", "attach-x", "×");
+      x.title = "Remove attachment";
+      x.onclick = () => {
+        this.attachments = this.attachments.filter(a => a !== p);
+        this.renderAttachments();
+      };
+      chip.appendChild(x);
+      this.attachStrip.appendChild(chip);
+    }
+  }
+
   submit() {
-    const text = this.ta.value.trim();
-    if (!text) return;
+    let text = this.ta.value.trim();
+    if (!text && !this.attachments.length) return;
     if (!this.ws || this.ws.readyState !== 1) { toast("not connected", "error"); return; }
+    if (this.attachments.length) {
+      const lines = this.attachments.map(p => `[image attached: ${p} — view it with your image/file tools]`).join("\n");
+      text = text ? text + "\n\n" + lines : lines;
+      this.attachments = [];
+      this.renderAttachments();
+    }
     this.ws.send(JSON.stringify({ type: "message", text }));
     this.ta.value = "";
     this.resizeComposer();
