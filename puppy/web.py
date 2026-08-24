@@ -5,13 +5,16 @@ import asyncio
 import json
 import logging
 import os
+from pathlib import Path
 import random
 import shutil
+import tempfile
 import time
 
 from aiohttp import WSMsgType, web
 
-from puppy import __version__, auth, backends, config, db, protocol, runner, terminal, workspaces
+from puppy import (__version__, auth, backends, config, db, protocol, runner,
+                   snapshots, terminal, workspaces)
 from puppy.drivers import all_drivers, get_driver
 
 log = logging.getLogger("puppy.web")
@@ -26,6 +29,28 @@ FAVICON_SVG = ("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>"
                "<path fill='#fff' d='M44 14 Q50 48 84 54 Q50 60 44 94 Q38 60 4 54 Q38 48 44 14 Z'/>"
                "<path fill='#fff' opacity='.85' d='M76 12 Q79 25 92 28 Q79 31 76 44 Q73 31 60 28 Q73 25 76 12 Z'/>"
                "</svg>")
+
+
+@web.middleware
+async def state_change_guard(request: web.Request, handler):
+    """Freeze mutations while a consistent snapshot is built or installed."""
+    snapshot_path = request.path.startswith("/api/snapshot/")
+    busy = request.app.get("puppy_snapshot_busy")
+    websocket = request.headers.get("Upgrade", "").lower() == "websocket"
+    mutating = request.method not in ("GET", "HEAD", "OPTIONS")
+    if busy and not snapshot_path and request.path.startswith("/api/") and \
+            (busy == "restore" or mutating or websocket):
+        return web.json_response(
+            {"error": "Puppy {} in progress".format(
+                "restore" if busy == "restore" else "backup")}, status=503)
+    if mutating and not snapshot_path:
+        request.app["puppy_mutations"] = request.app.get("puppy_mutations", 0) + 1
+        try:
+            return await handler(request)
+        finally:
+            request.app["puppy_mutations"] = max(
+                0, request.app.get("puppy_mutations", 1) - 1)
+    return await handler(request)
 
 
 # ---- pages ----
@@ -394,6 +419,162 @@ async def h_settings_patch(request: web.Request):
     return await h_settings_get(request)
 
 
+# ---- backup / restore ----
+
+def _snapshot_conflict(app: web.Application):
+    if app.get("puppy_snapshot_busy"):
+        return "another backup or restore is already in progress"
+    mutations = int(app.get("puppy_mutations", 0))
+    if mutations:
+        return "another state-changing request is still in progress"
+    blocked = snapshots.blockers()
+    if blocked:
+        return "close or stop these first: " + "; ".join(blocked)
+    return ""
+
+
+async def h_snapshot_export(request: web.Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid backup request"}, status=400)
+    try:
+        ui_state = snapshots.validate_ui_state(body.get("ui") if isinstance(body, dict) else None)
+    except snapshots.SnapshotError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+    conflict = _snapshot_conflict(request.app)
+    if conflict:
+        return web.json_response({"error": conflict}, status=409)
+    request.app["puppy_snapshot_busy"] = "export"
+    result = None
+    try:
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, snapshots.create_archive, ui_state)
+        blocked = snapshots.blockers()
+        if blocked:
+            snapshots.discard_export(result)
+            result = None
+            return web.json_response(
+                {"error": "backup could not obtain an idle snapshot: " + "; ".join(blocked)},
+                status=409)
+        token = snapshots.register_export(result, str(request["user"]))
+        loop.call_later(snapshots.EXPORT_TTL, snapshots.expire_export, token)
+        return web.json_response({
+            "ok": True, "download": "/api/snapshot/download/" + token,
+            "filename": result["filename"], "size": result["size"],
+            "sessions": result["sessions"],
+        })
+    except (snapshots.SnapshotError, ValueError) as exc:
+        if result:
+            snapshots.discard_export(result)
+        return web.json_response({"error": str(exc)}, status=400)
+    except Exception as exc:
+        if result:
+            snapshots.discard_export(result)
+        log.exception("snapshot export failed")
+        return web.json_response({"error": "backup failed: {}".format(exc)}, status=500)
+    finally:
+        request.app["puppy_snapshot_busy"] = None
+
+
+async def h_snapshot_download(request: web.Request):
+    item = snapshots.claim_export(request.match_info["token"], str(request["user"]))
+    if item is None:
+        return web.json_response({"error": "backup download expired or was already used"},
+                                 status=404)
+    path = Path(item["path"])
+    response = web.StreamResponse(status=200, headers={
+        "Content-Type": "application/gzip",
+        "Content-Disposition": 'attachment; filename="{}"'.format(item["filename"]),
+        "Content-Length": str(path.stat().st_size),
+        "Cache-Control": "private, no-store",
+        "X-Content-Type-Options": "nosniff",
+    })
+    try:
+        await response.prepare(request)
+        with path.open("rb") as source:
+            while True:
+                chunk = source.read(1024 * 1024)
+                if not chunk:
+                    break
+                await response.write(chunk)
+        await response.write_eof()
+        return response
+    finally:
+        snapshots.discard_export(item)
+
+
+async def h_snapshot_import(request: web.Request):
+    conflict = _snapshot_conflict(request.app)
+    if conflict:
+        return web.json_response({"error": conflict}, status=409)
+    try:
+        declared = int(request.headers.get("Content-Length", "0") or 0)
+    except ValueError:
+        declared = 0
+    if declared > snapshots.MAX_ARCHIVE_BYTES:
+        return web.json_response({"error": "snapshot archive exceeds the 512 MiB limit"},
+                                 status=413)
+
+    descriptor, upload_name = tempfile.mkstemp(prefix="upload-", suffix=".tar.gz",
+                                               dir=str(snapshots.work_root()))
+    os.chmod(upload_name, 0o600)
+    size = 0
+    staged = None
+    owns_busy = False
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            async for chunk in request.content.iter_chunked(1024 * 1024):
+                size += len(chunk)
+                if size > snapshots.MAX_ARCHIVE_BYTES:
+                    return web.json_response(
+                        {"error": "snapshot archive exceeds the 512 MiB limit"}, status=413)
+                output.write(chunk)
+        if not size:
+            return web.json_response({"error": "snapshot archive is empty"}, status=400)
+
+        loop = asyncio.get_running_loop()
+        staged = await loop.run_in_executor(None, snapshots.stage_import, upload_name)
+        conflict = _snapshot_conflict(request.app)
+        if conflict:
+            return web.json_response({"error": conflict}, status=409)
+
+        request.app["puppy_snapshot_busy"] = "restore"
+        owns_busy = True
+        # Recheck states that could have changed immediately before the marker
+        # was installed. New mutations are rejected from this point onward.
+        blocked = snapshots.blockers()
+        if request.app.get("puppy_mutations") or blocked:
+            detail = "another state change is in progress" if request.app.get(
+                "puppy_mutations") else "; ".join(blocked)
+            return web.json_response({"error": detail}, status=409)
+        await runner.detach_for_restore()
+        await backends.close_proxy_websockets()
+        blocked = snapshots.blockers()
+        if blocked:
+            return web.json_response({"error": "; ".join(blocked)}, status=409)
+        result = snapshots.commit_import(staged)
+        try:
+            await backends.close_client()
+        except Exception as exc:
+            log.warning("restored state but could not close the old backend client: %s", exc)
+        return web.json_response(result)
+    except snapshots.SnapshotError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    except Exception as exc:
+        log.exception("snapshot import failed")
+        return web.json_response({"error": "restore failed: {}".format(exc)}, status=500)
+    finally:
+        if owns_busy:
+            request.app["puppy_snapshot_busy"] = None
+        snapshots.discard_staged(staged)
+        try:
+            os.unlink(upload_name)
+        except FileNotFoundError:
+            pass
+
+
 # ---- websockets ----
 
 async def ws_session(request: web.Request):
@@ -414,6 +595,12 @@ async def ws_session(request: web.Request):
             except Exception:
                 continue
             t = data.get("type")
+            if request.app.get("puppy_snapshot_busy"):
+                await ws.send_json({
+                    "type": "toast", "level": "error",
+                    "text": "backup or restore in progress",
+                })
+                continue
             if request.app.get("puppy_upgrade_draining"):
                 await ws.send_json({
                     "type": "toast", "level": "error",
@@ -494,8 +681,11 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
 
 
 def build_app() -> web.Application:
-    app = web.Application(middlewares=[auth.middleware], client_max_size=8 * 1024 * 1024)
+    app = web.Application(middlewares=[auth.middleware, state_change_guard],
+                          client_max_size=8 * 1024 * 1024)
     app["puppy_role"] = "full"
+    app["puppy_snapshot_busy"] = None
+    app["puppy_mutations"] = 0
     app["puppy_capabilities"] = protocol.execution_capabilities(include_terminal=True)
     r = app.router
     r.add_get("/", h_index)
@@ -508,6 +698,9 @@ def build_app() -> web.Application:
     r.add_get("/api/state", h_state)
     r.add_get("/api/settings", h_settings_get)
     r.add_patch("/api/settings", h_settings_patch)
+    r.add_post("/api/snapshot/export", h_snapshot_export)
+    r.add_get("/api/snapshot/download/{token:[A-Za-z0-9_-]+}", h_snapshot_download)
+    r.add_post("/api/snapshot/import", h_snapshot_import)
     register_execution_api(app, include_terminal=True)
 
     async def on_shutdown(app):

@@ -80,6 +80,29 @@ def upgrade_blockers() -> list:
     ]
 
 
+async def detach_for_restore() -> None:
+    """Close authenticated live views before replacing their backing database."""
+    if upgrade_blockers():
+        raise RuntimeError("sessions became busy while preparing the restore")
+    sockets = set(_updates_watchers)
+    for h in _hubs.values():
+        sockets.update(h.watchers)
+    async def close_socket(ws) -> None:
+        try:
+            await ws.close(code=1012, message=b"Puppy state restored")
+        except Exception:
+            pass
+
+    if sockets:
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*(close_socket(ws) for ws in sockets)), timeout=3)
+        except asyncio.TimeoutError:
+            pass
+    _updates_watchers.clear()
+    _hubs.clear()
+
+
 def broadcast_sessions() -> None:
     payload = sessions_payload()
     for ws in list(_updates_watchers):

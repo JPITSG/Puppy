@@ -25,6 +25,7 @@ log = logging.getLogger("puppy.backends")
 _client = None
 _upgrades_in_progress = set()
 _fingerprints = {}
+_proxy_websockets = set()
 
 PROXY_CONNECT_TIMEOUT = 8.0
 PROXY_TOTAL_TIMEOUT = 60.0
@@ -459,9 +460,14 @@ async def _proxy_ws(request: web.Request, target: str, headers: dict,
         return web.json_response(
             {"error": "backend websocket unreachable: {}".format(error)}, status=502)
 
+    if request.app.get("puppy_snapshot_busy") == "restore":
+        await ws_client.close()
+        return web.json_response({"error": "Puppy restore in progress"}, status=503)
+
     ws_server = web.WebSocketResponse(heartbeat=30, max_msg_size=1 << 22)
     try:
         await ws_server.prepare(request)
+        _proxy_websockets.add(ws_server)
 
         async def pump(src, dst):
             try:
@@ -483,6 +489,7 @@ async def _proxy_ws(request: web.Request, target: str, headers: dict,
     except Exception as exc:
         log.warning("ws proxy to %s failed after handshake: %s", ws_url, _connection_error(exc))
     finally:
+        _proxy_websockets.discard(ws_server)
         if not ws_server.closed:
             try:
                 await ws_server.close()
@@ -494,6 +501,25 @@ async def _proxy_ws(request: web.Request, target: str, headers: dict,
             except Exception:
                 pass
     return ws_server
+
+
+async def close_proxy_websockets() -> None:
+    """Revoke live proxied channels before imported auth/backend state takes effect."""
+    sockets = list(_proxy_websockets)
+    if not sockets:
+        return
+
+    async def close_socket(ws) -> None:
+        try:
+            await ws.close(code=1012, message=b"Puppy state restored")
+        except Exception:
+            pass
+
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*(close_socket(ws) for ws in sockets)), timeout=3)
+    except asyncio.TimeoutError:
+        pass
 
 
 async def close_client() -> None:

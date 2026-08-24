@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import math
 import os
 import secrets
 import socket
@@ -115,3 +116,74 @@ def set_value(path: str, value) -> None:
             cur = cur.setdefault(part, {})
         cur[parts[-1]] = value
         _save_locked()
+
+
+def export_data() -> dict:
+    """Return an isolated copy of every persisted configuration value."""
+    load()
+    with _lock:
+        return copy.deepcopy(_config)
+
+
+def _validate_shape(reference, value, path: str = "config") -> None:
+    """Reject type-confused backup data while permitting future unknown keys."""
+    if isinstance(reference, dict):
+        if not isinstance(value, dict):
+            raise ValueError("{} must be an object".format(path))
+        for key, child in value.items():
+            if key in reference:
+                _validate_shape(reference[key], child, "{}.{}".format(path, key))
+        return
+    if isinstance(reference, bool):
+        valid = isinstance(value, bool)
+    elif isinstance(reference, int):
+        valid = isinstance(value, (int, float)) and not isinstance(value, bool)
+    else:
+        valid = isinstance(value, type(reference))
+    if not valid:
+        raise ValueError("{} has the wrong type".format(path))
+
+
+def _finite_number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and \
+        (isinstance(value, int) or math.isfinite(value))
+
+
+def normalize_import(data: dict) -> dict:
+    if not isinstance(data, dict):
+        raise ValueError("config must be an object")
+    _validate_shape(DEFAULTS, data)
+    merged = _merge(DEFAULTS, data)
+    for section in ("web", "backend"):
+        port = merged.get(section, {}).get("port")
+        if not _finite_number(port) or not 1 <= port <= 65535 or port != int(port):
+            raise ValueError("config.{}.port must be between 1 and 65535".format(section))
+        merged[section]["port"] = int(port)
+    for key, allow_zero in (("turn_timeout", False), ("shutdown_grace", True)):
+        value = merged.get("sessions", {}).get(key)
+        if not _finite_number(value) or abs(value) > 1e308 or \
+                (value < 0 if allow_zero else value <= 0):
+            raise ValueError("config.sessions.{} must be {}".format(
+                key, "non-negative" if allow_zero else "positive"))
+    token = merged.get("auth", {}).get("api_token")
+    if not isinstance(token, str) or not token or len(token) > 4096:
+        raise ValueError("config.auth.api_token is missing")
+    if not merged.get("web", {}).get("host") or not merged.get("backend", {}).get("host"):
+        raise ValueError("configured bind hosts must not be empty")
+    if merged.get("backend", {}).get("tls_mode") not in ("disabled", "auto", "files"):
+        raise ValueError("config.backend.tls_mode is invalid")
+    return merged
+
+
+def replace_all(data: dict) -> None:
+    """Atomically replace persisted configuration and its in-process cache."""
+    global _config
+    normalized = normalize_import(data)
+    with _lock:
+        previous = _config
+        _config = normalized
+        try:
+            _save_locked()
+        except Exception:
+            _config = previous
+            raise

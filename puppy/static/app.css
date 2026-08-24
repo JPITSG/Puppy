@@ -894,6 +894,9 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .be-actions{display:flex;align-items:center;gap:8px}
 .settings-form{display:grid;grid-template-columns:1fr 1fr;gap:0 14px;margin-top:8px}
 .settings-form .full{grid-column:1/-1}
+.snapshot-copy{max-width:720px;margin:0 0 8px;color:var(--txt2);font-size:12px;line-height:1.55}
+.snapshot-warning{margin:0;color:var(--warn);font-size:11px;line-height:1.45}
+.snapshot-actions{display:flex;align-items:center;gap:8px;margin-top:13px;flex-wrap:wrap}
 
 /* ---------- modals ---------- */
 .modal-backdrop{
@@ -1029,6 +1032,8 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   .be-row .be-url{margin-top:2px;font-size:10.5px}
   .be-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;width:100%}
   .be-actions .btn{width:100%;min-width:0;height:34px;padding-left:6px;padding-right:6px}
+  .snapshot-actions{display:grid;grid-template-columns:1fr 1fr;gap:7px}
+  .snapshot-actions .btn{width:100%;min-width:0;height:34px;padding-left:8px;padding-right:8px}
 }
 @media (max-width:900px) and (any-pointer:coarse){
   /* a left-edge swipe opens the drawer on touch, so the button is redundant

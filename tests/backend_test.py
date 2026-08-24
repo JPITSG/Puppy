@@ -256,6 +256,9 @@ async def exercise_node(url: str, token: str, expected_version: str,
                      "/api/ws/term"):
             async with http.get(url + path, headers=good, ssl=pinned) as response:
                 assert response.status == 404, (path, response.status)
+        async with http.post(url + "/api/snapshot/export", headers=good,
+                             json={"ui": {}}, ssl=pinned) as response:
+            assert response.status == 404  # backup/restore is a full-WebUI surface
         if not upgrade_enabled:
             async with http.post(url + "/api/node/upgrade", headers=good,
                                  data=b"not-an-artifact", ssl=pinned) as response:

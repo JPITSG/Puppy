@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import random
 import sqlite3
 import threading
@@ -147,6 +148,51 @@ def execute(sql: str, args=()) -> int:
         rowid = cur.lastrowid
         cur.close()
         return rowid
+
+
+def backup_to(path: str) -> None:
+    """Write a transactionally consistent, standalone SQLite snapshot."""
+    with _lock:
+        destination = sqlite3.connect(path)
+        try:
+            connect().backup(destination)
+            destination.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            destination.commit()
+        finally:
+            destination.close()
+    os.chmod(path, 0o600)
+
+
+def replace_from(path: str) -> None:
+    """Atomically install a validated database file and reconnect this process."""
+    global _conn
+    with _lock:
+        current = _conn
+        _conn = None
+        if current is not None:
+            try:
+                current.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except Exception:
+                pass
+            current.close()
+        for suffix in ("-wal", "-shm"):
+            try:
+                os.unlink(config.DB_PATH + suffix)
+            except FileNotFoundError:
+                pass
+        try:
+            os.replace(path, config.DB_PATH)
+            os.chmod(config.DB_PATH, 0o600)
+            connect()
+        except Exception:
+            # If replacement itself failed, the old path is still usable. If
+            # opening the new file failed, the caller owns rollback.
+            if _conn is None and os.path.exists(config.DB_PATH):
+                try:
+                    connect()
+                except Exception:
+                    pass
+            raise
 
 
 # ---- meta helpers ----

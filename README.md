@@ -30,6 +30,14 @@ approvals, multi-backend support and built-in web terminals.
   default to one-port HTTPS/WSS with a persistent certificate pin enforced by
   the controller. Launcher-managed nodes can also be upgraded and health-checked
   from Settings, with automatic rollback if the replacement does not start cleanly.
+- **Backup and restore**: Settings can download a versioned `.tar.gz` snapshot
+  containing Puppy settings, accounts, backend registrations, sessions and
+  transcripts, uploads, scratch workspaces, and browser tabs/drafts. Import is
+  idle-only, validates the complete archive before changing live state, and
+  rolls back a failed install. Ordinary project directories and external engine
+  credentials/native caches stay on their respective hosts. On a controller,
+  remote registrations are included while node-owned sessions remain on those
+  registered backends.
 
 ## Requirements
 
@@ -73,7 +81,9 @@ name, port, api token, terminal command), `puppy.db` (sessions, transcripts,
 users), backend TLS identities, and `puppy.log`. Scratch-session files are the
 intentional exception: they live in a mode-0700, instance-specific namespace
 under the OS temporary directory and are disposable. The repo itself is clean
-code, safe to publish.
+code, safe to publish. Export archives contain password hashes, API/backend
+tokens, and TLS material; treat them as private credentials and only import
+archives from a trusted source.
 
 ## Compliance
 

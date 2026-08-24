@@ -38,6 +38,9 @@ async def ws_terminal(request: web.Request) -> web.WebSocketResponse:
     global _active_terminals
     ws = web.WebSocketResponse(heartbeat=30, max_msg_size=1 << 20)
     await ws.prepare(request)
+    if request.app.get("puppy_snapshot_busy"):
+        await ws.close(code=1013, message=b"Puppy backup or restore in progress")
+        return ws
 
     cmd_str = request.query.get("cmd", "").strip() or config.get("terminal.command", "/bin/bash -l")
     cwd = request.query.get("cwd", "").strip() or os.environ.get("HOME", "/root")

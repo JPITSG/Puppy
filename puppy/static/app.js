@@ -176,6 +176,48 @@ function saveStringSet(key, values) {
   try { lsSet(key, JSON.stringify([...values])); } catch (_) { /* storage is optional */ }
 }
 
+function snapshotBrowserState() {
+  saveTabs();
+  const values = {};
+  const namespace = LS_NS ? LS_NS + ":" : "";
+  const prefix = namespace + "puppy.";
+  try {
+    for (let index = 0; index < localStorage.length; index++) {
+      const rawKey = localStorage.key(index);
+      if (!rawKey || !rawKey.startsWith(prefix)) continue;
+      const value = localStorage.getItem(rawKey);
+      if (value !== null) values[rawKey.slice(namespace.length)] = value;
+    }
+  } catch (_) { /* browser storage is optional */ }
+  return values;
+}
+
+function restoreBrowserState(values) {
+  if (!values || typeof values !== "object" || Array.isArray(values)) return;
+  const namespace = LS_NS ? LS_NS + ":" : "";
+  const prefix = namespace + "puppy.";
+  try {
+    const remove = [];
+    for (let index = 0; index < localStorage.length; index++) {
+      const rawKey = localStorage.key(index);
+      if (rawKey && rawKey.startsWith(prefix)) remove.push(rawKey);
+    }
+    remove.forEach(key => localStorage.removeItem(key));
+    for (const [key, value] of Object.entries(values)) {
+      if (/^puppy\.[A-Za-z0-9_.:-]{1,240}$/.test(key) && typeof value === "string")
+        localStorage.setItem(namespace + key, value);
+    }
+  } catch (_) { /* the server state is still restored if storage is unavailable */ }
+}
+
+function fmtBytes(value) {
+  const bytes = Math.max(0, Number(value) || 0);
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MiB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GiB`;
+}
+
 const collapsedSessionBackends = storedStringSet("puppy.collapsed.session-backends");
 const collapsedStatusBackends = storedStringSet("puppy.collapsed.status-backends");
 let disclosureSeq = 0;
@@ -3149,6 +3191,82 @@ class SettingsView {
       } catch (e) { toast(e.message, "error"); }
     };
     this.inner.appendChild(c4);
+
+    /* backup and restore */
+    const c5 = el("div", "card snapshot-card");
+    c5.innerHTML = `<h2>Backup &amp; restore</h2>
+      <p class="snapshot-copy">A backup restores this instance’s settings, accounts, backend
+        connections, local sessions and transcripts, uploads, scratch workspaces, tabs, and drafts.
+        Remote sessions remain on their registered backends. Ordinary project directories and
+        engine sign-ins/native caches remain on their machines.</p>
+      <p class="snapshot-warning">The archive contains private credentials and API tokens.
+        Only import a backup you trust, and store it securely.</p>
+      <div class="snapshot-actions">
+        <button class="btn btn-pri btn-sm" id="snapshot-export">Export backup</button>
+        <button class="btn btn-sm" id="snapshot-import">Import backup…</button>
+        <input class="hidden" type="file" id="snapshot-file"
+          accept=".tar.gz,application/gzip,application/x-gzip">
+      </div>`;
+    const exportButton = c5.querySelector("#snapshot-export");
+    const importButton = c5.querySelector("#snapshot-import");
+    const fileInput = c5.querySelector("#snapshot-file");
+    exportButton.onclick = async () => {
+      exportButton.disabled = true;
+      importButton.disabled = true;
+      exportButton.textContent = "Preparing…";
+      try {
+        const prepared = await api(0, "snapshot/export", {
+          method: "POST", body: { ui: snapshotBrowserState() },
+        });
+        const link = el("a");
+        link.href = prepared.download;
+        link.download = prepared.filename || "puppy-snapshot.tar.gz";
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        toast(`backup ready · ${prepared.sessions} sessions · ${fmtBytes(prepared.size)}`, "ok");
+      } catch (error) {
+        toast(error.message, "error", 7000);
+      } finally {
+        if (exportButton.isConnected) {
+          exportButton.disabled = false;
+          importButton.disabled = false;
+          exportButton.textContent = "Export backup";
+        }
+      }
+    };
+    importButton.onclick = () => fileInput.click();
+    fileInput.onchange = async () => {
+      const file = fileInput.files && fileInput.files[0];
+      if (!file) return;
+      const confirmed = await modalConfirm("Restore Puppy backup?",
+        `This replaces current Puppy settings and sessions with “${file.name}”. ` +
+        "Running turns, queued messages, and terminals must be stopped first.");
+      if (!confirmed) { fileInput.value = ""; return; }
+      exportButton.disabled = true;
+      importButton.disabled = true;
+      importButton.textContent = "Restoring…";
+      try {
+        const response = await fetch(apiPath(0, "snapshot/import"), {
+          method: "POST", body: file, headers: { "Content-Type": "application/gzip" },
+        });
+        let result = null;
+        try { result = await response.json(); } catch (_) { /* handled below */ }
+        if (response.status === 401) { showAuth(); throw new Error("auth required"); }
+        if (!response.ok) throw new Error((result && result.error) || `HTTP ${response.status}`);
+        restoreBrowserState(result.ui || {});
+        location.reload();
+      } catch (error) {
+        toast(error.message, "error", 8000);
+        if (importButton.isConnected) {
+          exportButton.disabled = false;
+          importButton.disabled = false;
+          importButton.textContent = "Import backup…";
+          fileInput.value = "";
+        }
+      }
+    };
+    this.inner.appendChild(c5);
     this.syncRemoteState();
   }
 }
