@@ -365,7 +365,7 @@ function sessionContextMenu(ev, bid, s) {
   }));
   menu.appendChild(el("div", "menu-sep"));
   add("Copy cwd", () => { navigator.clipboard.writeText(s.cwd); toast("copied"); });
-  if (s.has_native) add("Copy native session ID", async () => {
+  if (s.has_native) add("Copy native session id", async () => {
     try {
       const r = await api(bid, `sessions/${s.id}`);
       navigator.clipboard.writeText(r.session.native_session_id || "");
@@ -1469,7 +1469,7 @@ class SessionView {
     menu.appendChild(el("div", "menu-sep"));
     add("Copy cwd", () => { navigator.clipboard.writeText(this.session.cwd); toast("copied"); });
     if (this.session && this.session.native_session_id)
-      add("Copy native session ID", () => { navigator.clipboard.writeText(this.session.native_session_id); toast("copied"); });
+      add("Copy native session id", () => { navigator.clipboard.writeText(this.session.native_session_id); toast("copied"); });
     menu.appendChild(el("div", "menu-sep"));
     add(this.session && this.session.archived ? "Unarchive" : "Archive", () => this.archive());
     add("Delete session", () => this.deleteSession(), true);
