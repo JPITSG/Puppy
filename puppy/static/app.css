@@ -321,9 +321,10 @@ label input,label select{margin-top:5px;text-transform:none;letter-spacing:0}
 .check{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--txt2);text-transform:none;letter-spacing:0}
 .check input{width:auto;margin:0}
 
-/* Precise-pointer replacement for native modal <select> popups. Touch keeps
-   the platform picker; desktop gets the same compact material and geometry as
-   Puppy menus/buttons instead of a browser-owned floating panel. */
+/* Shared app-owned choice menu. It replaces native modal <select> popups on a
+   precise pointer and also gives the composer's model/effort/permission menus
+   the same compact material, geometry, selection tint and checkmark. Touch
+   keeps the platform picker wherever a real <select> is available. */
 select.choice-native{display:none!important}
 .choice-control{display:block;min-width:0;margin-top:5px;text-transform:none;letter-spacing:0}
 .choice-button{
@@ -362,6 +363,7 @@ select.choice-native{display:none!important}
 .choice-option:disabled{opacity:.38;cursor:not-allowed}
 .choice-option-label{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis}
 .choice-mark{width:14px;height:14px;display:flex;align-items:center;justify-content:center;flex:none;color:var(--acc2)}
+.choice-empty{display:block;padding:8px 10px;color:var(--txt3);font-size:12px;white-space:nowrap}
 
 /* ---------- tabbar ---------- */
 .tabbar{

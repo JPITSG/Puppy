@@ -194,6 +194,18 @@ function choiceSvg(kind) {
   return svg;
 }
 
+function choiceOptionNode(label, selected = false) {
+  const row = el("button", "choice-option" + (selected ? " selected" : ""));
+  row.type = "button";
+  row.setAttribute("role", "option");
+  row.setAttribute("aria-selected", selected ? "true" : "false");
+  row.appendChild(el("span", "choice-option-label", label));
+  const mark = el("span", "choice-mark");
+  if (selected) mark.appendChild(choiceSvg("check"));
+  row.appendChild(mark);
+  return row;
+}
+
 function closeChoiceMenu(returnFocus = false) {
   const control = openChoiceControl;
   if (!control) return;
@@ -316,7 +328,7 @@ function enhanceChoiceSelect(select) {
     if (button.disabled) return;
     if (openChoiceControl === control) return;
     closeChoiceMenu();
-    document.querySelectorAll(".menu.dyn").forEach(menu => menu.remove());
+    closeMenusToggling(null);
     const menu = el("div", "choice-menu");
     const menuId = `choice-menu-${++choiceMenuSeq}`;
     menu.id = menuId;
@@ -324,19 +336,12 @@ function enhanceChoiceSelect(select) {
     menu.setAttribute("aria-label", fieldName || "Choices");
     [...select.options].forEach((option, index) => {
       const selected = index === select.selectedIndex;
-      const row = el("button", "choice-option" + (selected ? " selected" : ""));
-      row.type = "button";
+      const row = choiceOptionNode(option.textContent, selected);
       row.id = `${menuId}-${index}`;
       row.dataset.choiceIndex = String(index);
-      row.setAttribute("role", "option");
-      row.setAttribute("aria-selected", selected ? "true" : "false");
       row.disabled = option.disabled;
       row.tabIndex = -1;
       row.title = option.title || "";
-      row.appendChild(el("span", "choice-option-label", option.textContent));
-      const mark = el("span", "choice-mark");
-      if (selected) mark.appendChild(choiceSvg("check"));
-      row.appendChild(mark);
       row.onmouseenter = () => setActive(index);
       row.onmousedown = (event) => event.preventDefault();
       row.onclick = (event) => { event.stopPropagation(); choose(index); };
@@ -409,7 +414,10 @@ function enhanceChoiceSelect(select) {
   return select;
 }
 
-window.addEventListener("resize", () => closeChoiceMenu());
+window.addEventListener("resize", () => {
+  closeChoiceMenu();
+  closeMenusToggling(null);
+});
 document.addEventListener("scroll", (event) => {
   if (openChoiceControl && (!openChoiceControl.menu ||
       !openChoiceControl.menu.contains(event.target))) closeChoiceMenu();
@@ -831,7 +839,7 @@ function provIcon(engine) {
 
 /* right-click menu on sidebar sessions - mirrors the open-view ⋮ menu */
 function ctxMenuAt(x, y) {
-  document.querySelectorAll(".menu.dyn").forEach(m => m.remove());
+  closeMenusToggling(null);
   const menu = el("div", "menu dyn");
   menu.style.position = "fixed";
   menu.style.left = Math.min(x, window.innerWidth - 220) + "px";
@@ -1167,7 +1175,7 @@ $("btn-tab-add").onclick = (e) => {
 };
 document.addEventListener("click", () => {
   $("tab-add-menu").classList.add("hidden");
-  document.querySelectorAll(".menu.dyn").forEach(m => m.remove());
+  closeMenusToggling(null);
   closeChoiceMenu();
 });
 $("tab-add-menu").addEventListener("click", (e) => {
@@ -1298,8 +1306,9 @@ document.addEventListener("keydown", (e) => {
 /* clicking the same trigger while its menu is open closes it (returns true) */
 function closeMenusToggling(anchor) {
   let wasOpen = false;
-  document.querySelectorAll(".menu.dyn").forEach(m => {
-    if (m._anchor === anchor) wasOpen = true;
+  document.querySelectorAll(".menu.dyn,.choice-menu.dyn").forEach(m => {
+    if (anchor && m._anchor === anchor) wasOpen = true;
+    if (m._anchor) m._anchor.setAttribute("aria-expanded", "false");
     m.remove();
   });
   return wasOpen;
@@ -2100,7 +2109,7 @@ class SessionView {
   }
 
   pickColor(anchor) {
-    document.querySelectorAll(".menu.dyn").forEach(m => m.remove());   // always opens fresh (invoked from the ⋮ menu)
+    closeMenusToggling(null);   // always opens fresh (invoked from the ⋮ menu)
     const menu = el("div", "menu dyn color-menu");
     for (const c of state.sessionColors || []) {
       const b = el("button", "swatch" + (this.session && this.session.color === c ? " sel" : ""));
@@ -2133,18 +2142,71 @@ class SessionView {
 
   optionMenu(anchor, opts, current, onPick) {
     if (closeMenusToggling(anchor)) return null;
-    const menu = el("div", "menu dyn");
+    closeChoiceMenu();
+    const menu = el("div", "choice-menu composer-choice-menu dyn");
     menu._anchor = anchor;
-    menu.style.bottom = "36px"; menu.style.top = "auto"; menu.style.right = "auto";
-    menu.style.left = anchor.offsetLeft + "px";   // open above its own button, not the row start
-    for (const o of opts) {
-      const b = el("button", "", `${o.label}${current === o.value ? " ✔" : ""}`);
-      b.title = o.hint || "";
-      b.onclick = (e) => { e.stopPropagation(); menu.remove(); onPick(o.value); };
-      menu.appendChild(b);
+    menu.setAttribute("role", "listbox");
+    menu.setAttribute("aria-label", anchor.title || "Choices");
+    menu.style.visibility = "hidden";
+    anchor.setAttribute("aria-haspopup", "listbox");
+    anchor.setAttribute("aria-expanded", "true");
+    const rows = [];
+    const dismiss = (returnFocus = false) => {
+      menu.remove();
+      anchor.setAttribute("aria-expanded", "false");
+      if (returnFocus && anchor.isConnected) anchor.focus();
+    };
+    opts.forEach((o, index) => {
+      const selected = current === o.value;
+      const row = choiceOptionNode(o.label, selected);
+      row.title = o.hint || "";
+      row.tabIndex = selected ? 0 : -1;
+      row.onmouseenter = () => rows.forEach((item, i) => item.classList.toggle("active", i === index));
+      row.onfocus = row.onmouseenter;
+      row.onclick = (event) => {
+        event.stopPropagation();
+        dismiss(true);
+        onPick(o.value);
+      };
+      rows.push(row);
+      menu.appendChild(row);
+    });
+    menu.onkeydown = (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        dismiss(true);
+        return;
+      }
+      if (event.key === "Tab") {
+        dismiss();
+        return;
+      }
+      if (!rows.length) return;
+      const at = Math.max(0, rows.indexOf(document.activeElement));
+      let next = null;
+      if (event.key === "ArrowDown") next = (at + 1) % rows.length;
+      else if (event.key === "ArrowUp") next = (at - 1 + rows.length) % rows.length;
+      else if (event.key === "Home") next = 0;
+      else if (event.key === "End") next = rows.length - 1;
+      if (next !== null) {
+        event.preventDefault();
+        rows.forEach((row, index) => { row.tabIndex = index === next ? 0 : -1; });
+        rows[next].focus();
+      }
+    };
+    menu.onclick = (event) => event.stopPropagation();
+    document.body.appendChild(menu);
+    const selectedRow = rows.find(row => row.classList.contains("selected")) || rows[0];
+    if (selectedRow) selectedRow.classList.add("active");
+    requestAnimationFrame(() => {
+      if (!menu.isConnected) return;
+      positionChoiceMenu({ menu, button: anchor });
+      (selectedRow || menu).focus({ preventScroll: true });
+    });
+    if (!rows.length) {
+      menu.tabIndex = -1;
+      menu.appendChild(el("span", "choice-empty", "No choices available"));
     }
-    anchor.parentElement.style.position = "relative";
-    anchor.parentElement.appendChild(menu);
     return menu;
   }
 
@@ -2153,18 +2215,17 @@ class SessionView {
     const eng = state.engMap[this.session.engine];
     const opts = (eng && eng.model_options) || [];
     const cur = this.session.model || "";
-    const menu = this.optionMenu(anchor, opts, cur, (v) => this.patchSession({ model: v }));
-    if (!menu) return;
     const isCustom = cur && !opts.some(o => o.value === cur);
-    const custom = el("button", "", `Custom…${isCustom ? ` (${cur}) ✔` : ""}`);
-    custom.title = "Any model id the engine accepts";
-    custom.onclick = async (e) => {
-      e.stopPropagation(); menu.remove();
+    const choices = opts.concat([{
+      value: "__custom__", label: isCustom ? `Custom… (${cur})` : "Custom…",
+      hint: "Any model id the engine accepts",
+    }]);
+    this.optionMenu(anchor, choices, isCustom ? "__custom__" : cur, async (value) => {
+      if (value !== "__custom__") { this.patchSession({ model: value }); return; }
       const val = await modalPrompt("Model override",
         "Model for this session (empty = engine default).", cur);
       if (val !== null) this.patchSession({ model: val.trim() });
-    };
-    menu.appendChild(custom);
+    });
   }
 
   showEffortMenu(anchor) {
