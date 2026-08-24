@@ -775,7 +775,8 @@ class SessionView {
     this.toolCards = {};
     this.liveEl = null;
     this.liveKind = null;
-    this.statusText = "";     // header status; the live thinking block mirrors it
+    this.statusText = "";     // header status; the transcript foot mirrors it
+    this.statusRow = null;    // standalone foot row, used when no thinking block is live
     this.oldestSeq = null;
     this.history = [];        // sent messages, oldest first (shell-style recall)
     this.histIdx = null;
@@ -984,6 +985,7 @@ class SessionView {
         this.updateHead();
         this.updateRunState();
         this.renderQueue(d.queued || []);
+        this.syncLiveStatus();
         if (d.pending_approval) this.showApproval(d.pending_approval);
         else this.hideApproval();
         this.scrollBottom(true);
@@ -995,6 +997,7 @@ class SessionView {
           if (d.event.data && d.event.data.text) this.history.push(d.event.data.text);
           if (this._forceScroll) { this._forceScroll = false; this.scrollBottom(true); }
         }
+        this.syncLiveStatus();
         break;
       case "delta":
         this.appendLive(d.block, d.text);
@@ -1076,13 +1079,14 @@ class SessionView {
     else this.sendBtn.textContent = "Send";
     this.sendBtn.classList.toggle("stop", running);
     if (!running) this.setStatus("");
+    else this.syncLiveStatus();
   }
 
   setStatus(text) {
     this.statusText = text || "";
     this.statusEl.innerHTML = text ? `<span class="spinner"></span>${esc(text)}` : "";
     if (!text) this.statusEl.innerHTML = "";
-    this.syncThinkLabel();
+    this.syncLiveStatus();
     this.syncHeadOverflow();
   }
 
@@ -1239,6 +1243,7 @@ class SessionView {
         this.liveEl.appendChild(el("span", "cursor"));
       }
       this.inner.appendChild(this.liveEl);
+      this.syncLiveStatus();
     }
     const target = block === "thinking" ? this.liveEl.querySelector(".tbody") : this.liveEl.querySelector(".md");
     target.textContent += text;
@@ -1247,11 +1252,32 @@ class SessionView {
   clearLive() {
     if (this.liveEl) { this.liveEl.remove(); this.liveEl = null; this.liveKind = null; }
   }
-  /* the open thinking block shows exactly what the header status shows */
-  syncThinkLabel() {
-    if (!this.liveEl || this.liveKind !== "thinking") return;
-    const lab = this.liveEl.querySelector(".think-label");
-    if (lab) lab.textContent = this.statusText || thinkingLabel(0);
+  /* The foot of the transcript always says what the header says while a turn
+     runs. A streaming thinking block carries it in its summary; the rest of the
+     time - tool calls, text streaming, the gaps between blocks - a standalone
+     row does, so the two never disagree. */
+  syncLiveStatus() {
+    const text = this.statusText || thinkingLabel(0);
+    const thinking = this.liveEl && this.liveKind === "thinking";
+    if (thinking) {
+      const lab = this.liveEl.querySelector(".think-label");
+      if (lab) lab.textContent = text;
+    }
+    if (this.status !== "running" || thinking) {
+      if (this.statusRow) { this.statusRow.remove(); this.statusRow = null; }
+      return;
+    }
+    if (!this.statusRow) {
+      this.statusRow = el("div", "live-status");
+      this.statusRow.appendChild(el("span", "spinner"));
+      this.statusRow.appendChild(el("span", "think-label", text));
+    } else {
+      this.statusRow.querySelector(".think-label").textContent = text;
+    }
+    if (this.inner.lastChild !== this.statusRow) {
+      this.inner.appendChild(this.statusRow);   // stays the last thing in the transcript
+      this.scrollBottom(false);
+    }
   }
 
   scrollBottom(force) {
