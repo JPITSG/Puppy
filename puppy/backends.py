@@ -1,0 +1,161 @@
+"""Multi-backend support. Backend id 0 = this instance. Remote backends are other
+puppy instances; the browser stays single-origin and this instance proxies both
+HTTP and websocket traffic to them, authenticated with their api_token."""
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+
+import aiohttp
+from aiohttp import WSMsgType, web
+
+from puppy import db
+
+log = logging.getLogger("puppy.backends")
+
+_client = None
+
+HOP_HEADERS = {"host", "connection", "upgrade", "sec-websocket-key", "sec-websocket-version",
+               "sec-websocket-extensions", "sec-websocket-protocol", "cookie", "x-puppy-token",
+               "content-length", "transfer-encoding", "accept-encoding"}
+
+
+def client() -> aiohttp.ClientSession:
+    global _client
+    if _client is None or _client.closed:
+        _client = aiohttp.ClientSession()
+    return _client
+
+
+def list_backends() -> list:
+    rows = db.query("SELECT id,name,url,created_at FROM backends ORDER BY id")
+    return [dict(r) for r in rows]
+
+
+def get_backend(bid: int):
+    row = db.query_one("SELECT * FROM backends WHERE id=?", (bid,))
+    return dict(row) if row else None
+
+
+# ---- CRUD handlers ----
+
+async def h_list(request: web.Request):
+    return web.json_response({"backends": list_backends()})
+
+
+async def h_add(request: web.Request):
+    body = await request.json()
+    name = (body.get("name") or "").strip()
+    url = (body.get("url") or "").strip().rstrip("/")
+    token = (body.get("token") or "").strip()
+    if not name or not url.startswith(("http://", "https://")) or not token:
+        return web.json_response({"error": "name, http(s) url and token required"}, status=400)
+    bid = db.execute("INSERT INTO backends(name,url,token,created_at) VALUES(?,?,?,?)",
+                     (name, url, token, time.time()))
+    return web.json_response({"ok": True, "id": bid})
+
+
+async def h_delete(request: web.Request):
+    bid = int(request.match_info["bid"])
+    db.execute("DELETE FROM backends WHERE id=?", (bid,))
+    return web.json_response({"ok": True})
+
+
+async def h_test(request: web.Request):
+    bid = int(request.match_info["bid"])
+    be = get_backend(bid)
+    if be is None:
+        return web.json_response({"error": "unknown backend"}, status=404)
+    try:
+        async with client().get(f"{be['url']}/api/ping",
+                                headers={"X-Puppy-Token": be["token"]},
+                                timeout=aiohttp.ClientTimeout(total=8)) as r:
+            data = await r.json()
+            return web.json_response({"ok": r.status == 200, "status": r.status, "remote": data})
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)})
+
+
+# ---- proxy ----
+
+def _is_ws(request: web.Request) -> bool:
+    return request.headers.get("Upgrade", "").lower() == "websocket"
+
+
+async def proxy(request: web.Request):
+    bid = int(request.match_info["bid"])
+    tail = request.match_info["tail"]
+    be = get_backend(bid)
+    if be is None:
+        return web.json_response({"error": "unknown backend"}, status=404)
+    target = f"{be['url']}/api/{tail}"
+    if request.query_string:
+        target += "?" + request.query_string
+    headers = {"X-Puppy-Token": be["token"]}
+    for k, v in request.headers.items():
+        if k.lower() not in HOP_HEADERS:
+            headers.setdefault(k, v)
+
+    if _is_ws(request):
+        return await _proxy_ws(request, target, headers)
+
+    try:
+        body = await request.read()
+        async with client().request(request.method, target, headers=headers,
+                                    data=body if body else None,
+                                    timeout=aiohttp.ClientTimeout(total=60)) as r:
+            payload = await r.read()
+            resp = web.Response(status=r.status, body=payload,
+                                content_type=r.content_type or "application/json")
+            return resp
+    except asyncio.TimeoutError:
+        return web.json_response({"error": f"backend '{be['name']}' timeout"}, status=504)
+    except Exception as e:
+        return web.json_response({"error": f"backend '{be['name']}' unreachable: {e}"}, status=502)
+
+
+async def _proxy_ws(request: web.Request, target: str, headers: dict):
+    ws_server = web.WebSocketResponse(heartbeat=30, max_msg_size=1 << 22)
+    await ws_server.prepare(request)
+    ws_url = "ws" + target[4:] if target.startswith("http") else target
+    try:
+        async with client().ws_connect(ws_url, headers={"X-Puppy-Token": headers["X-Puppy-Token"]},
+                                       heartbeat=30, max_msg_size=1 << 22) as ws_client:
+            async def pump(src, dst):
+                async for msg in src:
+                    if msg.type == WSMsgType.TEXT:
+                        await dst.send_str(msg.data)
+                    elif msg.type == WSMsgType.BINARY:
+                        await dst.send_bytes(msg.data)
+                    elif msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
+                        break
+                try:
+                    await dst.close()
+                except Exception:
+                    pass
+
+            await asyncio.gather(pump(ws_server, ws_client), pump(ws_client, ws_server),
+                                 return_exceptions=True)
+    except Exception as e:
+        log.warning("ws proxy to %s failed: %s", ws_url, e)
+        if not ws_server.closed:
+            try:
+                await ws_server.close(message=str(e).encode()[:120])
+            except Exception:
+                pass
+    return ws_server
+
+
+async def close_client() -> None:
+    global _client
+    if _client is not None and not _client.closed:
+        await _client.close()
+
+
+def register(app: web.Application) -> None:
+    app.router.add_get("/api/backends", h_list)
+    app.router.add_post("/api/backends", h_add)
+    app.router.add_delete("/api/backends/{bid:\\d+}", h_delete)
+    app.router.add_post("/api/backends/{bid:\\d+}/test", h_test)
+    app.router.add_route("*", "/api/b/{bid:\\d+}/{tail:.+}", proxy)

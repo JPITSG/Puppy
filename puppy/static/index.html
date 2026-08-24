@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>Puppy Console</title>
+<link rel="icon" href="/favicon.ico">
+<link rel="stylesheet" href="/static/vendor/xterm.css?v=__V__">
+<link rel="stylesheet" href="/static/app.css?v=__V__">
+</head>
+<body>
+
+<!-- auth overlay (setup / login) -->
+<div id="auth-shell" class="auth-shell hidden">
+  <div class="auth-card">
+    <div class="auth-brand"><span class="brand-mark"><svg viewBox="0 0 24 24" width="20" height="20" fill="#fff"><path d="M11 3 Q12.5 11.5 21 13 Q12.5 14.5 11 23 Q9.5 14.5 1 13 Q9.5 11.5 11 3 Z"/><path opacity=".85" d="M19.5 1 Q20.2 4.3 23.5 5 Q20.2 5.7 19.5 9 Q18.8 5.7 15.5 5 Q18.8 4.3 19.5 1 Z"/></svg></span></div>
+    <div class="auth-kicker" id="auth-kicker">PUPPY CONSOLE</div>
+    <h1 id="auth-title">Sign in</h1>
+    <p class="auth-sub" id="auth-sub">AI coding session manager</p>
+    <form id="auth-form" autocomplete="on">
+      <label>Username<input type="text" id="auth-user" autocomplete="username" required></label>
+      <label>Password<input type="password" id="auth-pass" autocomplete="current-password" required></label>
+      <label id="auth-pass2-wrap" class="hidden">Repeat password<input type="password" id="auth-pass2"></label>
+      <div class="auth-err hidden" id="auth-err"></div>
+      <button class="btn btn-pri btn-wide" id="auth-submit" type="submit">Sign in</button>
+    </form>
+  </div>
+</div>
+
+<!-- main app -->
+<div id="app" class="app hidden">
+  <div id="side-backdrop" class="side-backdrop"></div>
+  <aside id="side" class="side">
+    <div class="side-actions">
+      <button class="btn btn-pri btn-wide" id="btn-new-session">＋ New session</button>
+    </div>
+    <div class="side-scroll">
+      <div id="sess-groups"></div>
+      <button class="linklike" id="toggle-archived">show archived</button>
+    </div>
+    <div class="side-foot">
+      <div class="foot-engines" id="foot-engines"></div>
+      <div class="foot-row">
+        <button class="icon-btn" id="btn-settings" title="Settings">⚙</button>
+        <span class="foot-ver">v__V__</span>
+        <span class="conn-dot" id="conn-dot" title="connection"></span>
+      </div>
+    </div>
+    <div class="side-resize" id="side-resize" title="Drag to resize (double-click resets)"></div>
+  </aside>
+
+  <main class="main">
+    <div class="tabbar" id="tabbar">
+      <button class="icon-btn burger" id="burger" title="Menu">☰</button>
+      <div class="tabs" id="tabs"></div>
+      <div class="tab-add-wrap">
+        <button class="icon-btn" id="btn-tab-add" title="New tab">＋</button>
+        <div class="menu hidden" id="tab-add-menu">
+          <button data-act="open-session">Open session…</button>
+          <button data-act="new-session">New session</button>
+          <button data-act="new-terminal">New terminal</button>
+        </div>
+      </div>
+    </div>
+    <div class="views" id="views">
+      <div class="empty-hint" id="empty-hint">
+        <div class="empty-paw"><svg viewBox="0 0 24 24" width="46" height="46" fill="currentColor"><path d="M11 3 Q12.5 11.5 21 13 Q12.5 14.5 11 23 Q9.5 14.5 1 13 Q9.5 11.5 11 3 Z"/><path opacity=".85" d="M19.5 1 Q20.2 4.3 23.5 5 Q20.2 5.7 19.5 9 Q18.8 5.7 15.5 5 Q18.8 4.3 19.5 1 Z"/></svg></div>
+        <p>No tabs open.<br>Create a session or open one from the left.</p>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div id="modal-root"></div>
+<div id="toasts" class="toasts"></div>
+
+<script src="/static/vendor/marked.min.js?v=__V__" defer></script>
+<script src="/static/vendor/purify.min.js?v=__V__" defer></script>
+<script src="/static/vendor/xterm.min.js?v=__V__" defer></script>
+<script src="/static/vendor/addon-fit.min.js?v=__V__" defer></script>
+<script src="/static/app.js?v=__V__" defer></script>
+</body>
+</html>
