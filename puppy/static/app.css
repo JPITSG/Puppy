@@ -12,9 +12,9 @@
   --r-sm:8px; --r-md:11px; --r-lg:15px;
   /* button system: one height scale + themeable face/lift tokens so every
      control (btn, icon-btn, send, mini pill) shares the same material */
-  /* --btn-r is the single knob for every button corner: 0 = square, bump it
-     to 8-10px to go back to the rounded set */
-  --btn-h:34px; --btn-h-sm:28px; --btn-r:0px;
+  /* --btn-r is the single knob for every button corner: 2px is a hairline
+     softening of the square set, 8-10px is the old rounded one */
+  --btn-h:34px; --btn-h-sm:28px; --btn-r:2px;
   /* optical label centring; measured from the live font at boot (see
      syncLabelNudge). 0 = the font's cap band is already square in its line box */
   --label-pb:0px;
