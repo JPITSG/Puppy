@@ -9,6 +9,26 @@ const el = (tag, cls, text) => {
   if (text !== undefined) e.textContent = text;
   return e;
 };
+/* Close buttons draw their cross rather than setting a "×": the glyph's ink
+   sits off the centre of its em box (measured ~1px high, ~0.5px left in the UI
+   font), and no amount of flex centring moves ink the font placed off-axis. */
+function xIcon(size) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 12 12");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const p = document.createElementNS(NS, "path");
+  p.setAttribute("d", "M3.5 3.5 L8.5 8.5 M8.5 3.5 L3.5 8.5");
+  p.setAttribute("stroke", "currentColor");
+  p.setAttribute("stroke-width", "1.5");
+  p.setAttribute("stroke-linecap", "round");
+  p.setAttribute("fill", "none");
+  svg.appendChild(p);
+  return svg;
+}
+
 const esc = (s) => String(s == null ? "" : s)
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
   .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
@@ -585,7 +605,8 @@ function renderTabs() {
         if (meta) sessionContextMenu(e, t.bid, meta);
       });
     }
-    const x = el("button", "t-close", "×");
+    const x = el("button", "t-close");
+    x.appendChild(xIcon(12));
     x.onclick = (e) => { e.stopPropagation(); closeTab(t.id); };
     tab.appendChild(x);
     tab.onclick = () => activateTab(t.id);
@@ -1323,7 +1344,8 @@ class SessionView {
       img.alt = "pasted image";
       img.title = a.path.split("/").pop();
       chip.appendChild(img);
-      const x = el("button", "attach-x", "×");
+      const x = el("button", "attach-x");
+      x.appendChild(xIcon(12));
       x.title = "Remove attachment";
       x.onclick = () => {
         URL.revokeObjectURL(a.url);
@@ -1423,7 +1445,8 @@ class SessionView {
       const t = el("span", "q-t", text.length > 200 ? text.slice(0, 199) + "…" : text);
       t.title = text;
       row.appendChild(t);
-      const x = el("button", "q-x", "×");
+      const x = el("button", "q-x");
+      x.appendChild(xIcon(12));   // even size in an even box: no half-pixel centring
       x.title = "Cancel this queued message";
       x.onclick = () => this.unqueue(i, text);   // full text, not the capped copy
       row.appendChild(x);

@@ -144,6 +144,8 @@ a{color:var(--acc2)}
 /* the tab dot is 8px, so it takes a thinner ring to keep the same ring-to-hole
    proportion as the 9px session dots */
 .tab.running .t-dot{border-width:2px}
+/* drawn crosses (see xIcon): block so no inline baseline gap creeps in */
+.t-close svg,.attach-chip .attach-x svg,.queue-strip .q-x svg{display:block}
 .prov{
   width:11px;height:11px;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;
   font-size:9px;font-weight:700;color:var(--txt3);background:none;
