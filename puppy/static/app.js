@@ -781,7 +781,7 @@ class SessionView {
     this.histDraft = "";
     this.attachments = [];    // server paths of pasted images, sent with the next message
     this.buildDom();
-    this._onResize = () => { this.syncGutter(); this.syncComposerMeta(); this.syncHeadOverflow(); };
+    this._onResize = () => { this.syncGutter(); this.syncComposerMeta(); this.syncHeadOverflow(); this.syncQueueFade(); };
     window.addEventListener("resize", this._onResize);
     this.connect();
   }
@@ -1368,12 +1368,18 @@ class SessionView {
   renderQueue(q) {
     if (!q.length) { this.queueEl.classList.add("hidden"); return; }
     this.queueEl.classList.remove("hidden");
-    /* one line, clipped by CSS: it fills whatever width is going and ellipsises
+    /* one line, clipped by CSS: it fills whatever width is going and fades out
        exactly there. The per-item cap only keeps a runaway message out of the
        DOM - 200 chars is well past what the widest strip can ever show. */
     this.queueEl.textContent = "queued: " +
       q.map(x => (x.length > 200 ? x.slice(0, 199) + "…" : x)).join(" | ");
     this.queueEl.title = q.join("\n---\n");
+    this.syncQueueFade();
+  }
+  /* mask the tail only when the line overruns the box */
+  syncQueueFade() {
+    const e = this.queueEl;
+    e.classList.toggle("clipped", !e.classList.contains("hidden") && e.scrollWidth > e.clientWidth + 1);
   }
 
   /* ---- menus / meta ops ---- */
