@@ -541,6 +541,12 @@ function renderTabs() {
     if (dotColor) { tdot.style.background = dotColor; tdot.style.color = dotColor; }
     tab.appendChild(tdot);
     tab.appendChild(el("span", "t-title", t.title || "tab"));
+    if (t.type === "session") {
+      tab.addEventListener("contextmenu", (e) => {
+        const meta = findSessionMeta(t.bid, t.sid);
+        if (meta) sessionContextMenu(e, t.bid, meta);
+      });
+    }
     const x = el("button", "t-close", "×");
     x.onclick = (e) => { e.stopPropagation(); closeTab(t.id); };
     tab.appendChild(x);
