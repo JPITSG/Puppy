@@ -1,5 +1,6 @@
 /* Puppy console - dark glassy aurora, aligned with the house style */
 :root{
+  color-scheme:dark;
   --bg:#07080b; --panel:#0e1015; --panel2:#13161e; --panel3:#191d27;
   --line:rgba(255,255,255,.075); --line2:rgba(255,255,255,.14);
   --txt:#eceef4; --txt2:#a6adbf; --txt3:#6b7286;
@@ -894,6 +895,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 
 /* ---------- light theme ---------- */
 html.light{
+  color-scheme:light;
   --bg:#f3f5f9; --panel:#ffffff; --panel2:#eaeef5; --panel3:#dfe5ee;
   --line:rgba(15,23,42,.10); --line2:rgba(15,23,42,.18);
   --txt:#1b2434; --txt2:#48536b; --txt3:#8a94a8;
