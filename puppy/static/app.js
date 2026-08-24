@@ -266,12 +266,14 @@ function closeChoiceMenu(returnFocus = false) {
   if (returnFocus && control.button.isConnected) control.button.focus();
 }
 
-function positionChoiceMenu(control) {
-  const menu = control.menu;
-  if (!menu || !control.button.isConnected) return;
-  const rect = control.button.getBoundingClientRect();
+function positionAnchoredMenu(menu, button, matchButtonWidth = false) {
+  if (!menu || !button || !button.isConnected) return;
+  const rect = button.getBoundingClientRect();
   menu.style.visibility = "hidden";
-  menu.style.minWidth = Math.ceil(rect.width) + "px";
+  menu.style.position = "fixed";
+  menu.style.right = "auto";
+  menu.style.bottom = "auto";
+  if (matchButtonWidth) menu.style.minWidth = Math.ceil(rect.width) + "px";
   menu.style.left = "0px";
   menu.style.top = "0px";
   const width = menu.offsetWidth;
@@ -283,10 +285,15 @@ function positionChoiceMenu(control) {
   let top = rect.bottom + gap;
   if (height > roomBelow && roomAbove > roomBelow) top = Math.max(edge, rect.top - height - gap);
   else top = Math.min(top, window.innerHeight - height - edge);
-  const left = Math.max(edge, Math.min(rect.left, window.innerWidth - width - edge));
+  const centered = rect.left + (rect.width - width) / 2;
+  const left = Math.max(edge, Math.min(centered, window.innerWidth - width - edge));
   menu.style.left = Math.round(left) + "px";
   menu.style.top = Math.round(Math.max(edge, top)) + "px";
   menu.style.visibility = "visible";
+}
+
+function positionChoiceMenu(control) {
+  positionAnchoredMenu(control.menu, control.button, true);
 }
 
 function refreshChoiceSelect(select) {
@@ -1235,7 +1242,10 @@ function syncTabsWithSessions() {
 /* tab add menu */
 $("btn-tab-add").onclick = (e) => {
   e.stopPropagation();
-  $("tab-add-menu").classList.toggle("hidden");
+  const menu = $("tab-add-menu");
+  const opening = menu.classList.contains("hidden");
+  menu.classList.toggle("hidden");
+  if (opening) positionAnchoredMenu(menu, e.currentTarget);
 };
 document.addEventListener("click", () => {
   $("tab-add-menu").classList.add("hidden");
@@ -2170,6 +2180,7 @@ class SessionView {
     add(this.session && this.session.archived ? "Unarchive" : "Archive", () => this.archive());
     add("Delete session", () => this.deleteSession(), true);
     anchor.parentElement.appendChild(menu);
+    positionAnchoredMenu(menu, anchor);
   }
 
   pickColor(anchor) {
@@ -2188,6 +2199,7 @@ class SessionView {
       menu.appendChild(b);
     }
     anchor.parentElement.appendChild(menu);
+    positionAnchoredMenu(menu, anchor);
   }
 
   showPermMenu(anchor) {
