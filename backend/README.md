@@ -35,13 +35,18 @@ Unix user that will run the service. Initialize the private configuration once:
   --data-dir ./data \
   --bind 100.64.0.12 \
   --port 10888 \
-  --advertise-url http://100.64.0.12:10888 \
+  --advertise-url https://100.64.0.12:10888 \
+  --auto-tls \
   --default-cwd /srv/projects \
   --enable-remote-upgrade
 ```
 
-This generates and prints a pasteable token, persisted only inside the private
-data directory. Run the backend through the launcher:
+This generates and prints a pasteable pairing block containing an API token and
+the SHA-256 pin for a persistent, self-signed TLS identity. The private key and
+token are stored only in the private data directory; the public fingerprint is
+what lets the controller authenticate the certificate without a public CA.
+`--auto-tls` requires the `openssl` command once, when the identity is created.
+Run the backend through the launcher:
 
 ```bash
 python3 ./puppy-backend-launcher.py \
@@ -56,12 +61,32 @@ the zipapp directly deliberately suppresses the `remote-upgrade` capability,
 even if it was enabled in configuration. The zipapp and its containing
 directory must be writable by the service user so it can retain and atomically
 replace the artifact; the stable launcher can remain root-owned and read-only.
+Artifact upgrades intentionally do not replace that stable launcher. When
+enabling TLS on an installation created before pinned health checks existed,
+copy the newly built launcher once before changing the backend to HTTPS.
 
-Use a private encrypted network such as Tailscale/WireGuard, or supply
-`--tls-cert` and `--tls-key`. The API token grants the authority of the Unix
-account running this service; do not expose token-authenticated plain HTTP to
-the public internet. Terminal websockets are enabled by default for feature
-parity and can be removed with `--disable-terminal`.
+Fresh headless data directories default to automatic TLS; `--auto-tls` is kept
+explicit in deployment commands so the intended transport is visible. HTTPS
+and secure WebSockets share the same bind port. The API token remains
+application-layer authentication; standard TLS provides traffic encryption and
+the certificate pin provides backend identity. Paste the complete pairing JSON
+in Settings so the controller stores and enforces the pin on probes, proxied API
+requests, WebSockets, upgrades, and launcher health checks. Redirects are never
+followed with backend credentials.
+
+For a CA-issued certificate, use `--tls-cert` and `--tls-key` instead of
+`--auto-tls`; these paths are persisted in backend configuration. Pairing still
+includes a pin. `--disable-tls` retains legacy cleartext HTTP compatibility,
+which the WebUI labels explicitly and which should only be used over a trusted,
+encrypted private network such as WireGuard. The API token grants the authority
+of the Unix account running this service; never expose token-authenticated
+cleartext HTTP to an untrusted network. Terminal WebSockets are enabled by
+default for feature parity and can be removed with `--disable-terminal`.
+
+The automatic identity survives backend artifact upgrades because it lives in
+`data/tls/`. If that directory is lost or a custom leaf certificate is rotated,
+the fingerprint changes: remove and re-add the backend using fresh pairing JSON.
+Pin changes are intentionally never accepted automatically.
 
 Adjust the template user, paths, bind address, and network protection before
 installation.
@@ -85,4 +110,5 @@ Pending state and the last result live under `data/upgrade/` with private
 permissions, so a launcher/Supervisor crash or host reboot during replacement
 continues the same validation or rollback on the next start. Replays and
 downgrades are rejected because the target version must be newer than the
-running version.
+running version. TLS-enabled nodes advertise remote upgrade support only when
+the active launcher declares pinned-certificate health-check support.

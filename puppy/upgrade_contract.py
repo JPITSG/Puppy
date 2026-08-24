@@ -15,6 +15,7 @@ from typing import Any, Dict, Tuple
 
 FORMAT_VERSION = 1
 LAUNCHER_PROTOCOL = 1
+LAUNCHER_TLS_PIN_FEATURE = "tls-pin-health"
 UPGRADE_EXIT_CODE = 75
 MAX_ARTIFACT_BYTES = 4 * 1024 * 1024
 MANIFEST_HEADER = "X-Puppy-Upgrade-Manifest"

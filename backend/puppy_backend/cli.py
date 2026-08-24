@@ -5,9 +5,9 @@ import argparse
 import json
 import logging
 import os
-import ssl
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from puppy import __version__
 
@@ -56,8 +56,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--turn-timeout", type=float, help="maximum turn duration in seconds")
     parser.add_argument("--shutdown-grace", type=float,
                         help="seconds to wait for active turns during shutdown")
-    parser.add_argument("--tls-cert", help="PEM certificate chain for direct HTTPS")
-    parser.add_argument("--tls-key", help="PEM private key for direct HTTPS")
+    tls_modes = parser.add_mutually_exclusive_group()
+    tls_modes.add_argument("--auto-tls", dest="tls_mode", action="store_const", const="auto",
+                           help="create and persist a self-signed identity for pinned HTTPS")
+    tls_modes.add_argument("--disable-tls", dest="tls_mode", action="store_const",
+                           const="disabled", help="serve cleartext HTTP (legacy mode)")
+    parser.set_defaults(tls_mode=None)
+    parser.add_argument("--tls-cert", help="persist a custom PEM certificate chain for HTTPS")
+    parser.add_argument("--tls-key", help="persist its PEM private key")
     parser.add_argument("--log-level", choices=("debug", "info", "warning", "error"),
                         default="info")
     return parser
@@ -70,6 +76,7 @@ def _configure(args, parser: argparse.ArgumentParser):
     # Import only after PUPPY_DATA is fixed: config paths are module constants.
     from puppy import config
 
+    existing_config = os.path.exists(config.CONFIG_PATH)
     config.load()
     if args.name is not None:
         config.set_value("instance_name", args.name.strip()[:60] or "puppy-backend")
@@ -81,8 +88,16 @@ def _configure(args, parser: argparse.ArgumentParser):
         config.set_value("backend.port", args.port)
     if args.advertise_url is not None:
         url = args.advertise_url.strip().rstrip("/")
-        if url and not url.startswith(("http://", "https://")):
-            parser.error("--advertise-url must start with http:// or https://")
+        try:
+            parsed = urlsplit(url)
+            host = parsed.hostname
+            parsed.port
+        except ValueError:
+            parser.error("--advertise-url is invalid")
+        if url and (parsed.scheme not in ("http", "https") or not host or
+                    parsed.username is not None or parsed.password is not None or
+                    parsed.path not in ("", "/") or parsed.query or parsed.fragment):
+            parser.error("--advertise-url must be an http(s) origin without credentials or a path")
         config.set_value("backend.advertise_url", url)
     supplied_token = args.api_token or os.environ.get("PUPPY_BACKEND_TOKEN")
     if supplied_token:
@@ -114,12 +129,29 @@ def _configure(args, parser: argparse.ArgumentParser):
         config.set_value("sessions.shutdown_grace", args.shutdown_grace)
     if bool(args.tls_cert) != bool(args.tls_key):
         parser.error("--tls-cert and --tls-key must be supplied together")
+    if args.tls_cert and args.tls_mode is not None:
+        parser.error("custom --tls-cert/--tls-key cannot be combined with a TLS mode flag")
+    if args.tls_cert:
+        config.set_value("backend.tls_cert", str(Path(args.tls_cert).expanduser().resolve()))
+        config.set_value("backend.tls_key", str(Path(args.tls_key).expanduser().resolve()))
+        config.set_value("backend.tls_mode", "files")
+    elif args.tls_mode is not None:
+        config.set_value("backend.tls_mode", args.tls_mode)
+    elif not existing_config and args.command != "self-test":
+        # New headless installations start secure. Existing pre-TLS configs
+        # merge the disabled default so an upgrade never changes their scheme.
+        config.set_value("backend.tls_mode", "auto")
     return config
 
 
 def _derived_url(config, tls_enabled: bool) -> str:
     advertised = str(config.get("backend.advertise_url", "") or "").rstrip("/")
     if advertised:
+        actual_scheme = "https" if tls_enabled else "http"
+        if not advertised.startswith(actual_scheme + "://"):
+            raise ValueError(
+                "--advertise-url must use {}:// for the configured transport".format(
+                    actual_scheme))
         return advertised
     host = str(config.get("backend.host", "127.0.0.1"))
     if host in ("0.0.0.0", "::", ""):
@@ -129,18 +161,21 @@ def _derived_url(config, tls_enabled: bool) -> str:
     return f"{scheme}://{display_host}:{int(config.get('backend.port', 10888))}"
 
 
-def _pairing(config, tls_enabled: bool) -> dict:
+def _pairing(config, identity) -> dict:
     from puppy import protocol
     from . import upgrade
 
     terminal_enabled = bool(config.get("backend.terminal_enabled", True))
-    return {
+    pairing = {
         "name": config.get("instance_name"),
-        "url": _derived_url(config, tls_enabled),
+        "url": _derived_url(config, identity.enabled),
         "token": config.get("auth.api_token"),
         "protocol": protocol.API_PROTOCOL,
-        "capabilities": upgrade.capabilities(terminal_enabled),
+        "capabilities": upgrade.capabilities(terminal_enabled, identity.enabled),
     }
+    if identity.enabled:
+        pairing["tls_sha256"] = identity.fingerprint
+    return pairing
 
 
 def _self_test() -> dict:
@@ -150,7 +185,7 @@ def _self_test() -> dict:
     from .app import build_app
 
     initialize_runtime()
-    app = build_app(include_terminal=False, upgrade_health={
+    app = build_app(include_terminal=False, transport={"encrypted": False}, upgrade_health={
         "host": "127.0.0.1", "port": 1, "tls": False,
     })
     routes = sorted({route.resource.canonical for route in app.router.routes()})
@@ -168,14 +203,6 @@ def _self_test() -> dict:
     }
 
 
-def _ssl_context(args):
-    if not args.tls_cert:
-        return None
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.load_cert_chain(args.tls_cert, args.tls_key)
-    return context
-
-
 def main() -> None:
     os.umask(0o077)
     parser = _parser()
@@ -186,7 +213,13 @@ def main() -> None:
         print(config.get("auth.api_token"))
         return
     if args.command == "pairing":
-        pairing = _pairing(config, bool(args.tls_cert))
+        from .tls import load_identity
+
+        try:
+            identity = load_identity()
+            pairing = _pairing(config, identity)
+        except (RuntimeError, ValueError) as exc:
+            parser.error(str(exc))
         if not pairing["url"]:
             parser.error("pairing needs --advertise-url when listening on a wildcard address")
         print(json.dumps(pairing, indent=2, sort_keys=True))
@@ -199,26 +232,36 @@ def main() -> None:
     from puppy.main import initialize_runtime
 
     from .app import build_app
+    from .tls import load_identity
 
     initialize_runtime()
     logging.getLogger().setLevel(getattr(logging, args.log_level.upper()))
     host = str(config.get("backend.host", "127.0.0.1"))
     port = int(config.get("backend.port", 10888))
     terminal_enabled = bool(config.get("backend.terminal_enabled", True))
-    tls_context = _ssl_context(args)
+    try:
+        identity = load_identity()
+        url = _derived_url(config, identity.enabled)
+    except (RuntimeError, ValueError) as exc:
+        parser.error(str(exc))
     log = logging.getLogger("puppy.backend")
-    log.info("headless backend %s starting on %s:%s (data: %s, terminal: %s)",
+    log.info("headless backend %s starting on %s:%s (data: %s, terminal: %s, transport: %s)",
              __version__, host, port, config.DATA_DIR,
-             "enabled" if terminal_enabled else "disabled")
-    url = _derived_url(config, tls_context is not None)
+             "enabled" if terminal_enabled else "disabled",
+             "pinned TLS" if identity.enabled else "cleartext HTTP")
     if url:
         log.info("pair this backend at %s; retrieve credentials with the pairing command", url)
     else:
         log.info("set --advertise-url to produce a controller pairing block")
-    aioweb.run_app(build_app(include_terminal=terminal_enabled, upgrade_health={
-                        "host": host, "port": port, "tls": tls_context is not None,
+    transport = {"encrypted": identity.enabled}
+    if identity.enabled:
+        transport["certificate_sha256"] = identity.fingerprint
+    aioweb.run_app(build_app(include_terminal=terminal_enabled, transport=transport,
+                    upgrade_health={
+                        "host": host, "port": port, "tls": identity.enabled,
+                        "certificate_sha256": identity.fingerprint,
                     }), host=host, port=port,
-                    print=None, shutdown_timeout=5, ssl_context=tls_context)
+                    print=None, shutdown_timeout=5, ssl_context=identity.context)
 
 
 if __name__ == "__main__":

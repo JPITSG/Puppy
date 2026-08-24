@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
+import http.client
 import json
 import os
 from pathlib import Path
@@ -20,10 +22,10 @@ import subprocess
 import sys
 import time
 from typing import Any, Dict, Optional, Tuple
-from urllib import request as urlrequest
 
 LAUNCHER_PROTOCOL = 1
 UPGRADE_EXIT_CODE = 75
+TLS_PIN_FEATURE = "tls-pin-health"
 
 _child: Optional[subprocess.Popen] = None
 _stopping = False
@@ -93,6 +95,16 @@ def _start(artifact: Path, backend_args: list, env: Dict[str, str]) -> subproces
     return _child
 
 
+def _pin_context() -> ssl.SSLContext:
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    if hasattr(ssl, "OP_NO_COMPRESSION"):
+        context.options |= ssl.OP_NO_COMPRESSION
+    return context
+
+
 def _stop(child: subprocess.Popen) -> None:
     if child.poll() is not None:
         return
@@ -115,16 +127,17 @@ def _health(pending: Dict[str, Any], child: subprocess.Popen,
     elif host in ("0.0.0.0", ""):
         host = "127.0.0.1"
     port = int(health.get("port") or 10888)
-    display_host = "[{}]".format(host) if ":" in host and not host.startswith("[") else host
-    scheme = "https" if health.get("tls") else "http"
-    url = "{}://{}:{}/api/ping".format(scheme, display_host, port)
+    use_tls = bool(health.get("tls"))
+    fingerprint = str(health.get("certificate_sha256") or "").strip().lower().replace(":", "")
+    if use_tls and (len(fingerprint) != 64 or
+                    any(char not in "0123456789abcdef" for char in fingerprint)):
+        return False, "pending TLS health configuration has no valid certificate pin"
     data_dir = Path(str(pending.get("data_dir") or ""))
     try:
         config = json.loads((data_dir / "config.json").read_text(encoding="utf-8"))
         token = str(config["auth"]["api_token"])
     except Exception as exc:
         return False, "cannot read health token: {}".format(exc)
-    context = ssl._create_unverified_context() if scheme == "https" else None
     expected = str(pending.get("target_version") or "")
     deadline = time.monotonic() + timeout
     last_error = "health check timed out"
@@ -134,10 +147,28 @@ def _health(pending: Dict[str, Any], child: subprocess.Popen,
         code = child.poll()
         if code is not None:
             return False, "candidate exited with status {}".format(code)
+        connection = None
         try:
-            req = urlrequest.Request(url, headers={"X-Puppy-Token": token})
-            with urlrequest.urlopen(req, timeout=1.5, context=context) as response:
-                payload = json.loads(response.read().decode("utf-8"))
+            if use_tls:
+                # Complete the handshake and authenticate the peer certificate
+                # before placing the API token on the connection.
+                context = _pin_context()
+                connection = http.client.HTTPSConnection(
+                    host, port, timeout=1.5, context=context)
+                connection.connect()
+                peer = connection.sock.getpeercert(binary_form=True) if connection.sock else b""
+                actual = hashlib.sha256(peer).hexdigest() if peer else ""
+                if not actual or not hmac.compare_digest(actual, fingerprint):
+                    raise RuntimeError("backend TLS certificate pin mismatch")
+            else:
+                connection = http.client.HTTPConnection(host, port, timeout=1.5)
+                connection.connect()
+            connection.request("GET", "/api/ping", headers={"X-Puppy-Token": token})
+            response = connection.getresponse()
+            body = response.read(1024 * 1024)
+            if response.status != 200:
+                raise RuntimeError("health endpoint returned HTTP {}".format(response.status))
+            payload = json.loads(body.decode("utf-8"))
             caps = payload.get("capabilities") or []
             upgrade = payload.get("upgrade") or {}
             if payload.get("version") == expected and "remote-upgrade" in caps and \
@@ -146,6 +177,9 @@ def _health(pending: Dict[str, Any], child: subprocess.Popen,
             last_error = "candidate health metadata did not match the staged release"
         except Exception as exc:
             last_error = str(exc)
+        finally:
+            if connection is not None:
+                connection.close()
         time.sleep(0.25)
     return False, last_error
 
@@ -260,6 +294,7 @@ def main() -> int:
     env = dict(os.environ)
     env.update({
         "PUPPY_BACKEND_LAUNCHER_PROTOCOL": str(LAUNCHER_PROTOCOL),
+        "PUPPY_BACKEND_LAUNCHER_FEATURES": TLS_PIN_FEATURE,
         "PUPPY_BACKEND_MANAGED_ARTIFACT": str(artifact),
         "PUPPY_BACKEND_UPGRADE_MARKER": str(marker),
         "PUPPY_BACKEND_UPGRADE_STATUS": str(status),

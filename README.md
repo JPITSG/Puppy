@@ -21,9 +21,10 @@ approvals, multi-backend support and built-in web terminals.
 - **Multi-backend**: pair full Puppy instances or the API-only headless package
   in `backend/` (Settings → Backends, using pairing JSON or URL + API token).
   The browser stays single-origin; this instance proxies HTTP + websockets to
-  remotes, including terminals when that capability is enabled. Launcher-managed
-  headless nodes can also be upgraded and health-checked from Settings, with
-  automatic rollback if the replacement does not start cleanly.
+  remotes, including terminals when that capability is enabled. Headless nodes
+  default to one-port HTTPS/WSS with a persistent certificate pin enforced by
+  the controller. Launcher-managed nodes can also be upgraded and health-checked
+  from Settings, with automatic rollback if the replacement does not start cleanly.
 
 ## Requirements
 
@@ -55,7 +56,7 @@ python3 backend/build.py
 backend/dist/puppy-backend.pyz serve --help
 ```
 
-See `backend/README.md` for token pairing, private-network/TLS guidance,
+See `backend/README.md` for pinned-TLS pairing, legacy network guidance,
 Supervisor/systemd templates, and the one-time launcher bootstrap needed for
 remote upgrades. The artifact contains no frontend or cookie-login surface and
 reports an independently versioned controller/backend protocol.
@@ -64,7 +65,8 @@ reports an independently versioned controller/backend protocol.
 
 Everything private lives in `data/` (gitignored): `config.json` (instance name,
 port, api token, terminal command), `puppy.db` (sessions, transcripts, users),
-`puppy.log`. The repo itself is clean code, safe to publish.
+backend TLS identities, and `puppy.log`. The repo itself is clean code, safe to
+publish.
 
 ## Compliance
 

@@ -35,9 +35,15 @@ def _under(path: Path, parent: Path) -> bool:
         return False
 
 
-def _runtime() -> dict:
+def _runtime(tls_enabled=None) -> dict:
     configured = bool(config.get("backend.remote_upgrade_enabled", False))
+    if tls_enabled is None:
+        tls_enabled = str(config.get("backend.tls_mode", "disabled")) != "disabled"
     launcher = os.environ.get("PUPPY_BACKEND_LAUNCHER_PROTOCOL")
+    launcher_features = {
+        item.strip() for item in
+        os.environ.get("PUPPY_BACKEND_LAUNCHER_FEATURES", "").split(",") if item.strip()
+    }
     artifact_raw = os.environ.get("PUPPY_BACKEND_MANAGED_ARTIFACT", "")
     marker_raw = os.environ.get("PUPPY_BACKEND_UPGRADE_MARKER", "")
     status_raw = os.environ.get("PUPPY_BACKEND_UPGRADE_STATUS", "")
@@ -50,6 +56,8 @@ def _runtime() -> dict:
             reason = "only zipapp deployments can upgrade remotely"
         elif launcher != str(upgrade_contract.LAUNCHER_PROTOCOL):
             reason = "external upgrade launcher is not active"
+        elif tls_enabled and upgrade_contract.LAUNCHER_TLS_PIN_FEATURE not in launcher_features:
+            reason = "external upgrade launcher cannot validate pinned TLS health"
         elif not artifact_raw or not marker_raw or not status_raw:
             reason = "launcher paths are incomplete"
         else:
@@ -76,13 +84,15 @@ def _runtime() -> dict:
     }
 
 
-def enabled() -> bool:
-    return bool(_runtime()["enabled"])
+def enabled(tls_enabled=None) -> bool:
+    return bool(_runtime(tls_enabled)["enabled"])
 
 
-def capabilities(include_terminal: bool) -> list:
+def capabilities(include_terminal: bool, tls_enabled: bool = False) -> list:
     caps = protocol.execution_capabilities(include_terminal)
-    if enabled():
+    if tls_enabled:
+        caps.append(protocol.TLS_PIN_CAPABILITY)
+    if enabled(tls_enabled):
         caps.append(protocol.UPGRADE_CAPABILITY)
     return caps
 
@@ -98,8 +108,8 @@ def _last_status(path: Path) -> dict:
         return {}
 
 
-def descriptor() -> dict:
-    runtime = _runtime()
+def descriptor(tls_enabled=None) -> dict:
+    runtime = _runtime(tls_enabled)
     out = {
         "supported": bool(runtime["enabled"]),
         "api": protocol.UPGRADE_API_PATH,
@@ -202,6 +212,7 @@ async def _smoke_test(stage: Path, state_dir: Path, expected: dict) -> dict:
     smoke_dir = Path(tempfile.mkdtemp(prefix="smoke-", dir=str(state_dir)))
     env = dict(os.environ)
     for key in ("PUPPY_DATA", "PUPPY_BACKEND_LAUNCHER_PROTOCOL",
+                "PUPPY_BACKEND_LAUNCHER_FEATURES",
                 "PUPPY_BACKEND_MANAGED_ARTIFACT", "PUPPY_BACKEND_UPGRADE_MARKER",
                 "PUPPY_BACKEND_UPGRADE_STATUS"):
         env.pop(key, None)

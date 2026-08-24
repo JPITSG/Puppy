@@ -21,6 +21,11 @@ BASE_CAPABILITIES = (
 )
 TERMINAL_CAPABILITY = "terminal"
 
+# An HTTPS backend advertises this when its pairing data includes a stable
+# SHA-256 leaf-certificate pin. The API token remains application-layer auth;
+# TLS provides confidentiality and peer identity on the same port.
+TLS_PIN_CAPABILITY = "pinned-tls"
+
 # Signed/staged remote upgrades are additive to protocol 1. A backend advertises
 # this only while its external health-check/rollback launcher is active.
 UPGRADE_CAPABILITY = "remote-upgrade"

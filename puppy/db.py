@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS backends (
     capabilities TEXT NOT NULL DEFAULT '[]',
     remote_version TEXT NOT NULL DEFAULT '',
     role TEXT NOT NULL DEFAULT '',
+    tls_fingerprint TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS sessions (
@@ -117,6 +118,8 @@ def _migrate(conn) -> None:
         conn.execute("ALTER TABLE backends ADD COLUMN remote_version TEXT NOT NULL DEFAULT ''")
     if "role" not in backend_cols:
         conn.execute("ALTER TABLE backends ADD COLUMN role TEXT NOT NULL DEFAULT ''")
+    if "tls_fingerprint" not in backend_cols:
+        conn.execute("ALTER TABLE backends ADD COLUMN tls_fingerprint TEXT NOT NULL DEFAULT ''")
 
 
 def query(sql: str, args=()) -> list:

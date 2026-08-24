@@ -13,32 +13,76 @@ import subprocess
 import sys
 import tempfile
 import time
+from urllib.parse import urlsplit
 
 import aiohttp
 from aiohttp import WSMsgType, web
 
-from puppy import __version__, config, db, protocol, upgrade_contract
+from puppy import __version__, config, db, protocol, tls, upgrade_contract
 
 log = logging.getLogger("puppy.backends")
 
 _client = None
 _upgrades_in_progress = set()
+_fingerprints = {}
 
 HOP_HEADERS = {"host", "connection", "upgrade", "sec-websocket-key", "sec-websocket-version",
                "sec-websocket-extensions", "sec-websocket-protocol", "cookie", "x-puppy-token",
                "content-length", "transfer-encoding", "accept-encoding"}
 
 
+async def _reject_redirect(_session, _context, _params) -> None:
+    raise aiohttp.ClientConnectionError("backend redirects are not allowed")
+
+
 def client() -> aiohttp.ClientSession:
     global _client
     if _client is None or _client.closed:
-        _client = aiohttp.ClientSession()
+        trace = aiohttp.TraceConfig()
+        trace.on_request_redirect.append(_reject_redirect)
+        _client = aiohttp.ClientSession(trace_configs=[trace])
     return _client
+
+
+def _ssl_pin(fingerprint: str):
+    if not fingerprint:
+        return True  # aiohttp default: normal CA verification for HTTPS
+    pinned = _fingerprints.get(fingerprint)
+    if pinned is None:
+        pinned = aiohttp.Fingerprint(bytes.fromhex(fingerprint))
+        _fingerprints[fingerprint] = pinned
+    return pinned
+
+
+def _connection_error(exc: Exception) -> str:
+    if isinstance(exc, aiohttp.ServerFingerprintMismatch):
+        return "TLS certificate fingerprint mismatch; verify and re-pair this backend"
+    if isinstance(exc, (aiohttp.ClientConnectorCertificateError,
+                        aiohttp.ClientConnectorSSLError)):
+        return "TLS certificate verification failed: {}".format(exc)
+    return str(exc)
+
+
+def _base_url(value: str) -> str:
+    url = str(value or "").strip().rstrip("/")
+    try:
+        parsed = urlsplit(url)
+        host = parsed.hostname
+        parsed.port
+    except ValueError as exc:
+        raise ValueError("backend URL is invalid") from exc
+    if parsed.scheme not in ("http", "https") or not host:
+        raise ValueError("backend URL must start with http:// or https://")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("backend URL must not contain credentials")
+    if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+        raise ValueError("backend URL must be an origin without a path, query, or fragment")
+    return "{}://{}".format(parsed.scheme, parsed.netloc)
 
 
 def list_backends() -> list:
     rows = db.query(
-        "SELECT id,name,url,protocol,capabilities,remote_version,role,created_at "
+        "SELECT id,name,url,protocol,capabilities,remote_version,role,tls_fingerprint,created_at "
         "FROM backends ORDER BY id")
     out = []
     for row in rows:
@@ -81,14 +125,15 @@ def _normalize_peer(data: dict) -> dict:
     }
 
 
-async def probe_backend(url: str, token: str, timeout: float = 8.0) -> dict:
+async def probe_backend(url: str, token: str, tls_fingerprint: str = "",
+                        timeout: float = 8.0) -> dict:
     """Authenticate and negotiate metadata with a prospective backend."""
     try:
         async with client().get(
                 f"{url.rstrip('/')}/api/ping",
                 headers={"X-Puppy-Token": token},
                 timeout=aiohttp.ClientTimeout(total=timeout),
-                allow_redirects=False) as response:
+                allow_redirects=False, ssl=_ssl_pin(tls_fingerprint)) as response:
             try:
                 data = await response.json()
             except Exception:
@@ -107,11 +152,25 @@ async def probe_backend(url: str, token: str, timeout: float = 8.0) -> dict:
                 remote = _normalize_peer(data)
             except ValueError as e:
                 return {"ok": False, "status": response.status, "error": str(e)}
+            reported_transport = remote.get("transport")
+            if reported_transport is not None and not isinstance(reported_transport, dict):
+                return {"ok": False, "status": response.status,
+                        "error": "backend returned invalid transport metadata"}
+            if tls_fingerprint and isinstance(reported_transport, dict):
+                try:
+                    reported_pin = tls.normalize_fingerprint(
+                        reported_transport.get("certificate_sha256"))
+                except ValueError:
+                    return {"ok": False, "status": response.status,
+                            "error": "backend returned an invalid TLS certificate fingerprint"}
+                if reported_pin and reported_pin != tls_fingerprint:
+                    return {"ok": False, "status": response.status,
+                            "error": "backend TLS metadata does not match the verified certificate"}
             return {"ok": True, "status": response.status, "remote": remote}
     except asyncio.TimeoutError:
         return {"ok": False, "error": "connection timed out"}
     except Exception as e:
-        return {"ok": False, "error": str(e)}
+        return {"ok": False, "error": _connection_error(e)}
 
 
 def _metadata(remote: dict) -> tuple:
@@ -189,11 +248,19 @@ async def h_list(request: web.Request):
 async def h_add(request: web.Request):
     body = await request.json()
     name = (body.get("name") or "").strip()
-    url = (body.get("url") or "").strip().rstrip("/")
     token = (body.get("token") or "").strip()
-    if not url.startswith(("http://", "https://")) or not token:
-        return web.json_response({"error": "http(s) url and token required"}, status=400)
-    result = await probe_backend(url, token)
+    try:
+        url = _base_url(body.get("url"))
+        tls_fingerprint = tls.normalize_fingerprint(
+            body.get("tls_fingerprint") or body.get("tls_sha256"))
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    if not token:
+        return web.json_response({"error": "API token is required"}, status=400)
+    if tls_fingerprint and urlsplit(url).scheme != "https":
+        return web.json_response(
+            {"error": "a TLS certificate fingerprint requires an https:// URL"}, status=400)
+    result = await probe_backend(url, token, tls_fingerprint)
     if not result["ok"]:
         return web.json_response({"error": result.get("error", "backend test failed"),
                                   "status": result.get("status")}, status=400)
@@ -201,9 +268,10 @@ async def h_add(request: web.Request):
     name = name or str(remote.get("name") or "").strip() or "backend"
     api_protocol, capabilities, remote_version, role = _metadata(remote)
     bid = db.execute(
-        "INSERT INTO backends(name,url,token,protocol,capabilities,remote_version,role,created_at) "
-        "VALUES(?,?,?,?,?,?,?,?)",
-        (name[:80], url, token, api_protocol, capabilities, remote_version, role, time.time()))
+        "INSERT INTO backends(name,url,token,protocol,capabilities,remote_version,role,"
+        "tls_fingerprint,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+        (name[:80], url, token, api_protocol, capabilities, remote_version, role,
+         tls_fingerprint, time.time()))
     return web.json_response({"ok": True, "id": bid, "remote": remote})
 
 
@@ -218,7 +286,7 @@ async def h_test(request: web.Request):
     be = get_backend(bid)
     if be is None:
         return web.json_response({"error": "unknown backend"}, status=404)
-    result = await probe_backend(be["url"], be["token"])
+    result = await probe_backend(be["url"], be["token"], be["tls_fingerprint"])
     if result["ok"]:
         _store_metadata(bid, result["remote"])
     return web.json_response(result)
@@ -234,7 +302,7 @@ async def h_upgrade(request: web.Request):
                                  status=409)
     _upgrades_in_progress.add(bid)
     try:
-        current = await probe_backend(be["url"], be["token"])
+        current = await probe_backend(be["url"], be["token"], be["tls_fingerprint"])
         if not current["ok"]:
             return web.json_response({"error": current.get("error", "backend is unavailable")},
                                      status=502)
@@ -268,7 +336,8 @@ async def h_upgrade(request: web.Request):
         try:
             async with client().post(
                     target, data=payload, headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=45), allow_redirects=False) as response:
+                    timeout=aiohttp.ClientTimeout(total=45), allow_redirects=False,
+                    ssl=_ssl_pin(be["tls_fingerprint"])) as response:
                 try:
                     accepted = await response.json()
                 except Exception:
@@ -281,14 +350,16 @@ async def h_upgrade(request: web.Request):
         except asyncio.TimeoutError:
             return web.json_response({"error": "backend timed out while staging the upgrade"}, status=504)
         except Exception as exc:
-            return web.json_response({"error": "backend upgrade request failed: {}".format(exc)},
+            return web.json_response({"error": "backend upgrade request failed: {}".format(
+                _connection_error(exc))},
                                      status=502)
 
         deadline = time.monotonic() + 90
         last_error = "backend did not return after its upgrade restart"
         while time.monotonic() < deadline:
             await asyncio.sleep(0.75)
-            checked = await probe_backend(be["url"], be["token"], timeout=2.5)
+            checked = await probe_backend(be["url"], be["token"], be["tls_fingerprint"],
+                                          timeout=2.5)
             if not checked["ok"]:
                 last_error = checked.get("error", last_error)
                 continue
@@ -342,13 +413,15 @@ async def proxy(request: web.Request):
             headers.setdefault(k, v)
 
     if _is_ws(request):
-        return await _proxy_ws(request, target, headers)
+        return await _proxy_ws(request, target, headers, be["tls_fingerprint"])
 
     try:
         body = await request.read()
         async with client().request(request.method, target, headers=headers,
                                     data=body if body else None,
-                                    timeout=aiohttp.ClientTimeout(total=60)) as r:
+                                    timeout=aiohttp.ClientTimeout(total=60),
+                                    allow_redirects=False,
+                                    ssl=_ssl_pin(be["tls_fingerprint"])) as r:
             payload = await r.read()
             resp = web.Response(status=r.status, body=payload,
                                 content_type=r.content_type or "application/json")
@@ -356,16 +429,19 @@ async def proxy(request: web.Request):
     except asyncio.TimeoutError:
         return web.json_response({"error": f"backend '{be['name']}' timeout"}, status=504)
     except Exception as e:
-        return web.json_response({"error": f"backend '{be['name']}' unreachable: {e}"}, status=502)
+        return web.json_response(
+            {"error": f"backend '{be['name']}' unreachable: {_connection_error(e)}"}, status=502)
 
 
-async def _proxy_ws(request: web.Request, target: str, headers: dict):
+async def _proxy_ws(request: web.Request, target: str, headers: dict,
+                    tls_fingerprint: str):
     ws_server = web.WebSocketResponse(heartbeat=30, max_msg_size=1 << 22)
     await ws_server.prepare(request)
     ws_url = "ws" + target[4:] if target.startswith("http") else target
     try:
         async with client().ws_connect(ws_url, headers={"X-Puppy-Token": headers["X-Puppy-Token"]},
-                                       heartbeat=30, max_msg_size=1 << 22) as ws_client:
+                                       heartbeat=30, max_msg_size=1 << 22,
+                                       ssl=_ssl_pin(tls_fingerprint)) as ws_client:
             async def pump(src, dst):
                 async for msg in src:
                     if msg.type == WSMsgType.TEXT:
@@ -382,10 +458,11 @@ async def _proxy_ws(request: web.Request, target: str, headers: dict):
             await asyncio.gather(pump(ws_server, ws_client), pump(ws_client, ws_server),
                                  return_exceptions=True)
     except Exception as e:
-        log.warning("ws proxy to %s failed: %s", ws_url, e)
+        error = _connection_error(e)
+        log.warning("ws proxy to %s failed: %s", ws_url, error)
         if not ws_server.closed:
             try:
-                await ws_server.close(message=str(e).encode()[:120])
+                await ws_server.close(message=error.encode()[:120])
             except Exception:
                 pass
     return ws_server

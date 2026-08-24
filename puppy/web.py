@@ -64,6 +64,9 @@ async def h_ping(request: web.Request):
     build = request.app.get("puppy_build")
     if build is not None:
         payload["build"] = build
+    transport = request.app.get("puppy_transport")
+    if transport is not None:
+        payload["transport"] = dict(transport)
     return web.json_response(payload)
 
 

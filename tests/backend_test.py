@@ -61,14 +61,20 @@ def stop_process(process: subprocess.Popen) -> None:
         process.wait(timeout=5)
 
 
-async def wait_for_backend(url: str, process: subprocess.Popen) -> None:
+def ssl_pin(fingerprint: str):
+    return aiohttp.Fingerprint(bytes.fromhex(fingerprint)) if fingerprint else True
+
+
+async def wait_for_backend(url: str, process: subprocess.Popen,
+                           fingerprint: str = "") -> None:
+    pinned = ssl_pin(fingerprint)
     async with aiohttp.ClientSession() as http:
         for _ in range(100):
             if process.poll() is not None:
                 output = process.stdout.read() if process.stdout else ""
                 raise AssertionError(f"backend exited during startup:\n{output[-3000:]}")
             try:
-                async with http.get(url + "/api/ping") as response:
+                async with http.get(url + "/api/ping", ssl=pinned) as response:
                     if response.status == 401:
                         return
             except Exception:
@@ -78,15 +84,17 @@ async def wait_for_backend(url: str, process: subprocess.Popen) -> None:
 
 
 async def exercise_node(url: str, token: str, expected_version: str,
-                        upgrade_enabled: bool) -> None:
+                        upgrade_enabled: bool, fingerprint: str = "") -> None:
     good = {"X-Puppy-Token": token}
+    pinned = ssl_pin(fingerprint)
     async with aiohttp.ClientSession() as http:
-        async with http.get(url + "/api/ping") as response:
+        async with http.get(url + "/api/ping", ssl=pinned) as response:
             assert response.status == 401
         async with http.get(url + "/api/ping",
-                            headers={"X-Puppy-Token": "wrong-token-value"}) as response:
+                            headers={"X-Puppy-Token": "wrong-token-value"},
+                            ssl=pinned) as response:
             assert response.status == 401
-        async with http.get(url + "/api/ping", headers=good) as response:
+        async with http.get(url + "/api/ping", headers=good, ssl=pinned) as response:
             assert response.status == 200
             ping = await response.json()
         assert ping["role"] == "backend"
@@ -94,6 +102,10 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert ping["version"] == expected_version
         assert "sessions" in ping["capabilities"]
         assert "terminal" not in ping["capabilities"]
+        assert ("pinned-tls" in ping["capabilities"]) is bool(fingerprint)
+        assert ping["transport"]["encrypted"] is bool(fingerprint)
+        if fingerprint:
+            assert ping["transport"]["certificate_sha256"] == fingerprint
         assert ("remote-upgrade" in ping["capabilities"]) is upgrade_enabled
         assert ping["upgrade"]["supported"] is upgrade_enabled
         assert ping["upgrade"]["api"] == "/api/node/upgrade"
@@ -101,29 +113,29 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert ping["upgrade"]["restart"] == "external-launcher"
         assert ping["build"]["artifact"] == "zipapp"
 
-        async with http.get(url + "/api/node", headers=good) as response:
+        async with http.get(url + "/api/node", headers=good, ssl=pinned) as response:
             assert response.status == 200
-        async with http.get(url + "/api/sessions", headers=good) as response:
+        async with http.get(url + "/api/sessions", headers=good, ssl=pinned) as response:
             assert response.status == 200
             assert (await response.json())["sessions"] == []
-        updates = await http.ws_connect(url + "/api/ws/updates", headers=good)
+        updates = await http.ws_connect(url + "/api/ws/updates", headers=good, ssl=pinned)
         first = await updates.receive_json(timeout=3)
         assert first["type"] == "sessions" and first["sessions"] == []
         await updates.close()
-        async with http.get(url + "/api/node/upgrade", headers=good) as response:
+        async with http.get(url + "/api/node/upgrade", headers=good, ssl=pinned) as response:
             status = await response.json()
             assert response.status == 200 and status["supported"] is upgrade_enabled
         for path in ("/", "/static/app.js", "/api/settings", "/api/auth/status",
                      "/api/ws/term"):
-            async with http.get(url + path, headers=good) as response:
+            async with http.get(url + path, headers=good, ssl=pinned) as response:
                 assert response.status == 404, (path, response.status)
         if not upgrade_enabled:
             async with http.post(url + "/api/node/upgrade", headers=good,
-                                 data=b"not-an-artifact") as response:
+                                 data=b"not-an-artifact", ssl=pinned) as response:
                 assert response.status == 409
 
 
-async def reject_bad_signature(url: str, token: str) -> None:
+async def reject_bad_signature(url: str, token: str, fingerprint: str = "") -> None:
     payload = b"signed body is intentionally not a zipapp"
     manifest = {
         "format": upgrade_contract.FORMAT_VERSION,
@@ -142,12 +154,13 @@ async def reject_bad_signature(url: str, token: str) -> None:
     }
     async with aiohttp.ClientSession() as http:
         async with http.post(url + "/api/node/upgrade", headers=headers,
-                             data=payload) as response:
+                             data=payload, ssl=ssl_pin(fingerprint)) as response:
             assert response.status == 403, await response.text()
 
 
 async def exercise_controller(url: str, token: str, backend_url: str,
-                              backend_token: str, old_version: str) -> None:
+                              backend_token: str, backend_fingerprint: str,
+                              old_version: str) -> None:
     headers = {"X-Puppy-Token": token}
     async with aiohttp.ClientSession() as http:
         async with http.get(url + "/api/ping", headers=headers) as response:
@@ -157,7 +170,22 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert "terminal" in full_ping["capabilities"]
 
         async with http.post(url + "/api/backends", headers=headers, json={
-                "name": "", "url": backend_url, "token": backend_token}) as response:
+                "url": backend_url, "token": backend_token}) as response:
+            unpinned = await response.json()
+            assert response.status == 400, unpinned
+        assert "TLS certificate verification failed" in unpinned["error"]
+
+        wrong_pin = ("0" if backend_fingerprint[0] != "0" else "1") + backend_fingerprint[1:]
+        async with http.post(url + "/api/backends", headers=headers, json={
+                "url": backend_url, "token": backend_token,
+                "tls_fingerprint": wrong_pin}) as response:
+            mismatched = await response.json()
+            assert response.status == 400, mismatched
+        assert "fingerprint mismatch" in mismatched["error"]
+
+        async with http.post(url + "/api/backends", headers=headers, json={
+                "name": "", "url": backend_url, "token": backend_token,
+                "tls_fingerprint": backend_fingerprint}) as response:
             added = await response.json()
             assert response.status == 200, added
         assert added["remote"]["role"] == "backend"
@@ -174,13 +202,25 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert "sessions" in stored["capabilities"]
         assert "terminal" not in stored["capabilities"]
         assert "remote-upgrade" in stored["capabilities"]
+        assert "pinned-tls" in stored["capabilities"]
         assert stored["remote_version"] == old_version
+        assert stored["tls_fingerprint"] == backend_fingerprint
         assert "token" not in stored
 
         async with http.post(url + f"/api/backends/{stored['id']}/test",
                              headers=headers) as response:
             tested = await response.json()
             assert response.status == 200 and tested["ok"] is True, tested
+
+        async with http.get(url + f"/api/b/{stored['id']}/sessions",
+                            headers=headers) as response:
+            proxied = await response.json()
+            assert response.status == 200 and proxied["sessions"] == [], proxied
+        remote_updates = await http.ws_connect(
+            url + f"/api/b/{stored['id']}/ws/updates", headers=headers)
+        first = await remote_updates.receive_json(timeout=3)
+        assert first["type"] == "sessions" and first["sessions"] == []
+        await remote_updates.close()
 
         terminal = await http.ws_connect(
             url + "/api/ws/term?cmd=/bin/bash&cols=80&rows=24", headers=headers)
@@ -211,9 +251,49 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert "remote-upgrade" in refreshed["capabilities"]
 
 
+async def exercise_redirect_rejection() -> None:
+    redirected_tokens = []
+
+    async def redirect(_request):
+        raise web.HTTPFound(location="/capture")
+
+    async def capture(request):
+        redirected_tokens.append(request.headers.get("X-Puppy-Token"))
+        return web.Response(text="captured")
+
+    app = web.Application()
+    app.router.add_get("/api/ping", redirect)
+    app.router.add_get("/api/ws/updates", redirect)
+    app.router.add_get("/capture", capture)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    origin = f"http://127.0.0.1:{port}"
+    token = "redirect-test-token-0123456789abcdef"
+    try:
+        from puppy import backends
+
+        probed = await backends.probe_backend(origin, token)
+        assert probed["ok"] is False
+        assert redirected_tokens == []
+        try:
+            await backends.client().ws_connect(
+                f"ws://127.0.0.1:{port}/api/ws/updates",
+                headers={"X-Puppy-Token": token})
+            raise AssertionError("backend WebSocket redirect was accepted")
+        except (aiohttp.ClientError, RuntimeError):
+            pass
+        assert redirected_tokens == []
+    finally:
+        await runner.cleanup()
+
+
 async def exercise_launcher_rollback(artifact: Path, launcher: Path, state_dir: Path,
                                      data_dir: Path, backend_url: str,
-                                     backend_token: str) -> subprocess.Popen:
+                                     backend_token: str,
+                                     backend_fingerprint: str) -> subprocess.Popen:
     backup = artifact.with_name(artifact.stem + ".previous" + artifact.suffix)
     shutil.copy2(artifact, backup)
     previous_sha = upgrade_contract.artifact_sha256(backup.read_bytes())
@@ -233,16 +313,17 @@ async def exercise_launcher_rollback(artifact: Path, launcher: Path, state_dir: 
         "target_version": "9.9.9",
         "target_sha256": upgrade_contract.artifact_sha256(bad_payload),
         "health": {"host": "127.0.0.1", "port": int(backend_url.rsplit(":", 1)[1]),
-                   "tls": False},
+                   "tls": True, "certificate_sha256": backend_fingerprint},
     }), encoding="utf-8")
     process = subprocess.Popen([
         sys.executable, str(launcher), "--artifact", str(artifact),
         "--state-dir", str(state_dir), "--", "serve", "--data-dir", str(data_dir),
     ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    await wait_for_backend(backend_url, process)
+    await wait_for_backend(backend_url, process, backend_fingerprint)
     async with aiohttp.ClientSession() as http:
         async with http.get(backend_url + "/api/ping",
-                            headers={"X-Puppy-Token": backend_token}) as response:
+                            headers={"X-Puppy-Token": backend_token},
+                            ssl=ssl_pin(backend_fingerprint)) as response:
             ping = await response.json()
             assert response.status == 200 and ping["version"] == __version__, ping
     status = json.loads(status_path.read_text(encoding="utf-8"))
@@ -253,7 +334,10 @@ async def exercise_launcher_rollback(artifact: Path, launcher: Path, state_dir: 
 
 
 async def main() -> None:
-    temp_root = Path(tempfile.mkdtemp(prefix="puppy_backend_test_"))
+    private_tests = BASE / "data" / "tests"
+    private_tests.mkdir(parents=True, exist_ok=True, mode=0o700)
+    private_tests.chmod(0o700)
+    temp_root = Path(tempfile.mkdtemp(prefix="backend-", dir=str(private_tests)))
     process = None
     disabled_process = None
     controller_runner = None
@@ -283,7 +367,7 @@ async def main() -> None:
             sys.executable, str(release_artifact), "pairing", "--data-dir", str(disabled_data),
             "--name", "disabled-node", "--bind", "127.0.0.1", "--port", str(disabled_port),
             "--advertise-url", disabled_url, "--api-token", backend_token,
-            "--disable-terminal", "--enable-remote-upgrade",
+            "--disable-terminal", "--enable-remote-upgrade", "--disable-tls",
         ], text=True)
         disabled_process = subprocess.Popen([
             sys.executable, str(release_artifact), "serve", "--data-dir", str(disabled_data),
@@ -299,18 +383,27 @@ async def main() -> None:
         copy_with_version(release_artifact, artifact, old_version)
         backend_data = temp_root / "backend-data"
         backend_port = free_port()
-        backend_url = f"http://127.0.0.1:{backend_port}"
+        backend_url = f"https://127.0.0.1:{backend_port}"
         pairing_raw = subprocess.check_output([
             sys.executable, str(artifact), "pairing", "--data-dir", str(backend_data),
             "--name", "backend-test-node", "--bind", "127.0.0.1",
             "--port", str(backend_port), "--advertise-url", backend_url,
             "--api-token", backend_token, "--disable-terminal", "--enable-remote-upgrade",
+            "--auto-tls",
         ], text=True)
         pairing = json.loads(pairing_raw)
         assert pairing["url"] == backend_url and pairing["token"] == backend_token
+        backend_fingerprint = pairing["tls_sha256"]
+        assert len(backend_fingerprint) == 64
+        assert "pinned-tls" in pairing["capabilities"]
         assert "terminal" not in pairing["capabilities"]
         assert "remote-upgrade" not in pairing["capabilities"]  # pairing command is not launcher-managed
         assert (backend_data / "config.json").stat().st_mode & 0o777 == 0o600
+        identity_manifest = json.loads(
+            (backend_data / "tls" / "identity.json").read_text(encoding="utf-8"))
+        assert (backend_data / "tls").stat().st_mode & 0o777 == 0o700
+        assert ((backend_data / "tls" / identity_manifest["private_key"])
+                .stat().st_mode & 0o777) == 0o600
 
         enabled_pairing = json.loads(subprocess.check_output([
             sys.executable, str(release_artifact), "pairing",
@@ -319,16 +412,41 @@ async def main() -> None:
             "--api-token", backend_token,
         ], text=True))
         assert "terminal" in enabled_pairing["capabilities"]
+        assert "pinned-tls" in enabled_pairing["capabilities"]
+        assert len(enabled_pairing["tls_sha256"]) == 64
+        repeated_pairing = json.loads(subprocess.check_output([
+            sys.executable, str(release_artifact), "pairing",
+            "--data-dir", str(temp_root / "enabled-data"),
+        ], text=True))
+        assert repeated_pairing["tls_sha256"] == enabled_pairing["tls_sha256"]
 
         state_dir = backend_data / "upgrade"
+        legacy_launcher_env = dict(os.environ)
+        legacy_launcher_env.update({
+            "PUPPY_BACKEND_LAUNCHER_PROTOCOL": str(upgrade_contract.LAUNCHER_PROTOCOL),
+            "PUPPY_BACKEND_MANAGED_ARTIFACT": str(artifact.resolve()),
+            "PUPPY_BACKEND_UPGRADE_MARKER": str((state_dir / "pending.json").resolve()),
+            "PUPPY_BACKEND_UPGRADE_STATUS": str((state_dir / "status.json").resolve()),
+        })
+        process = subprocess.Popen([
+            sys.executable, str(artifact), "serve", "--data-dir", str(backend_data),
+        ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            env=legacy_launcher_env)
+        await wait_for_backend(backend_url, process, backend_fingerprint)
+        await exercise_node(backend_url, backend_token, old_version, upgrade_enabled=False,
+                            fingerprint=backend_fingerprint)
+        stop_process(process)
+        process = None
+
         process = subprocess.Popen([
             sys.executable, str(BASE / "backend" / "launcher.py"),
             "--artifact", str(artifact), "--state-dir", str(state_dir), "--",
             "serve", "--data-dir", str(backend_data),
         ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        await wait_for_backend(backend_url, process)
-        await exercise_node(backend_url, backend_token, old_version, upgrade_enabled=True)
-        await reject_bad_signature(backend_url, backend_token)
+        await wait_for_backend(backend_url, process, backend_fingerprint)
+        await exercise_node(backend_url, backend_token, old_version, upgrade_enabled=True,
+                            fingerprint=backend_fingerprint)
+        await reject_bad_signature(backend_url, backend_token, backend_fingerprint)
 
         # Import the full application only after its independent data path is set.
         controller_data = temp_root / "controller-data"
@@ -347,6 +465,8 @@ async def main() -> None:
         controller_token = "controller-test-token-0123456789abcdef"
         config.set_value("auth.api_token", controller_token)
         db.connect()
+        assert "tls_fingerprint" in {
+            row["name"] for row in db.query("PRAGMA table_info(backends)")}
         app = build_app()
         controller_runner = web.AppRunner(app)
         await controller_runner.setup()
@@ -355,7 +475,8 @@ async def main() -> None:
         sock = site._server.sockets[0]
         controller_url = f"http://127.0.0.1:{sock.getsockname()[1]}"
         await exercise_controller(controller_url, controller_token, backend_url,
-                                  backend_token, old_version)
+                                  backend_token, backend_fingerprint, old_version)
+        await exercise_redirect_rejection()
         upgrade_status = json.loads((state_dir / "status.json").read_text(encoding="utf-8"))
         assert upgrade_status["state"] == "succeeded", upgrade_status
         assert artifact.with_name(artifact.stem + ".previous" + artifact.suffix).is_file()
@@ -366,8 +487,8 @@ async def main() -> None:
         process = None
         process = await exercise_launcher_rollback(
             artifact, BASE / "backend" / "launcher.py", state_dir, backend_data,
-            backend_url, backend_token)
-        print("backend package, auth, signed upgrade, restart, and rollback passed")
+            backend_url, backend_token, backend_fingerprint)
+        print("backend package, pinned TLS, signed upgrade, restart, and rollback passed")
     finally:
         if controller_runner is not None:
             await controller_runner.cleanup()

@@ -1907,6 +1907,9 @@ class SettingsView {
         <label>Name <span style="text-transform:none">(optional)</span><input type="text" id="be-name"></label>
         <label>URL<input type="text" id="be-url"></label>
         <label class="full">API token<input type="password" id="be-token" autocomplete="off"></label>
+        <label class="full">TLS certificate SHA-256 <span style="text-transform:none">(optional)</span>
+          <input type="text" id="be-tls" autocomplete="off" spellcheck="false"
+            placeholder="Supplied automatically by pairing JSON"></label>
         <label class="full">Pairing JSON <span style="text-transform:none">(optional)</span>
           <textarea id="be-pairing" rows="3" placeholder="Paste puppy-backend pairing output"></textarea></label>
         <div class="full"><button class="btn btn-pri btn-sm" id="be-add">Add backend</button></div>
@@ -1922,6 +1925,15 @@ class SettingsView {
           b.protocol != null && `protocol ${b.protocol}`].filter(Boolean).join(" · ");
         row.appendChild(name);
         row.appendChild(el("span", "be-url", b.url));
+        const isTls = /^https:\/\//i.test(b.url || "");
+        const isPinned = isTls && !!b.tls_fingerprint;
+        const security = el("span", `pill be-security ${isTls ? "ok" : "warn"}`,
+          isPinned ? "TLS pinned" : isTls ? "TLS verified" : "Cleartext");
+        security.title = isPinned
+          ? `Certificate SHA-256: ${b.tls_fingerprint}`
+          : isTls ? "Certificate verified by the controller system trust store"
+            : "Traffic to this backend is not encrypted";
+        row.appendChild(security);
         const test = el("button", "btn btn-sm", "Test");
         test.onclick = async () => {
           test.textContent = "…";
@@ -1998,9 +2010,11 @@ class SettingsView {
           name: pairingValue("#be-name", "name"),
           url: pairingValue("#be-url", "url"),
           token: pairingValue("#be-token", "token"),
+          tls_fingerprint: pairingValue("#be-tls", "tls_sha256"),
         }});
         toast("backend added", "ok");
-        c3.querySelector("#be-name").value = c3.querySelector("#be-url").value = c3.querySelector("#be-token").value = "";
+        c3.querySelector("#be-name").value = c3.querySelector("#be-url").value =
+          c3.querySelector("#be-token").value = c3.querySelector("#be-tls").value = "";
         c3.querySelector("#be-pairing").value = "";
         await refreshState(); await this.render(); pollRemotes();
       } catch (e) { toast(e.message, "error"); }
