@@ -27,6 +27,8 @@ function fmtTokens(n) {
   if (n == null) return "";
   return n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n);
 }
+const QUEUE_ROWS = 5;     // queued messages listed before collapsing to "+N more"
+
 /* the header's thinking status; the live thinking block mirrors the header
    verbatim, so this is also what that block reads while a turn is thinking */
 function thinkingLabel(tokens) {
@@ -1366,20 +1368,34 @@ class SessionView {
   }
 
   renderQueue(q) {
-    if (!q.length) { this.queueEl.classList.add("hidden"); return; }
-    this.queueEl.classList.remove("hidden");
-    /* one line, clipped by CSS: it fills whatever width is going and fades out
-       exactly there. The per-item cap only keeps a runaway message out of the
-       DOM - 200 chars is well past what the widest strip can ever show. */
-    this.queueEl.textContent = "queued: " +
-      q.map(x => (x.length > 200 ? x.slice(0, 199) + "…" : x)).join(" | ");
-    this.queueEl.title = q.join("\n---\n");
+    const box = this.queueEl;
+    box.innerHTML = "";
+    if (!q.length) { box.classList.add("hidden"); return; }
+    box.classList.remove("hidden");
+    box.appendChild(el("div", "q-head", `queued · ${q.length}`));
+    /* one row per message, in the order they will run. The per-item cap only
+       keeps a runaway message out of the DOM - each row is a single line that
+       fades out at whatever width is going. */
+    const shown = q.slice(0, QUEUE_ROWS);
+    shown.forEach((text, i) => {
+      const row = el("div", "q-item");
+      row.appendChild(el("span", "q-n", String(i + 1)));
+      const t = el("span", "q-t", text.length > 200 ? text.slice(0, 199) + "…" : text);
+      t.title = text;
+      row.appendChild(t);
+      box.appendChild(row);
+    });
+    if (q.length > shown.length)
+      box.appendChild(el("div", "q-more", `+${q.length - shown.length} more`));
     this.syncQueueFade();
   }
-  /* mask the tail only when the line overruns the box */
+  /* mask a row's tail only when its line overruns the box */
   syncQueueFade() {
-    const e = this.queueEl;
-    e.classList.toggle("clipped", !e.classList.contains("hidden") && e.scrollWidth > e.clientWidth + 1);
+    const box = this.queueEl;
+    if (!box || box.classList.contains("hidden")) return;
+    box.querySelectorAll(".q-t").forEach(t => {
+      t.classList.toggle("clipped", t.scrollWidth > t.clientWidth + 1);
+    });
   }
 
   /* ---- menus / meta ops ---- */
