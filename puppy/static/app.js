@@ -163,6 +163,23 @@ const lsGet = (k) => localStorage.getItem(lsKey(k));
 const lsSet = (k, v) => localStorage.setItem(lsKey(k), v);
 const lsDel = (k) => localStorage.removeItem(lsKey(k));
 
+function storedStringSet(key) {
+  try {
+    const values = JSON.parse(lsGet(key) || "[]");
+    return new Set(Array.isArray(values) ? values.map(String) : []);
+  } catch (_) {
+    return new Set();
+  }
+}
+
+function saveStringSet(key, values) {
+  try { lsSet(key, JSON.stringify([...values])); } catch (_) { /* storage is optional */ }
+}
+
+const collapsedSessionBackends = storedStringSet("puppy.collapsed.session-backends");
+const collapsedStatusBackends = storedStringSet("puppy.collapsed.status-backends");
+let disclosureSeq = 0;
+
 function tailPath(p, n = 26) {
   if (!p) return "";
   return p.length > n ? "…" + p.slice(-n) : p;
@@ -192,6 +209,36 @@ function choiceSvg(kind) {
   path.setAttribute("d", kind === "check" ? "M2.2 6.2 4.8 8.7 9.8 3.4" : "M2.5 4.5 6 8 9.5 4.5");
   svg.appendChild(path);
   return svg;
+}
+
+/* Backend sections are rebuilt whenever sessions or availability change. Keep
+   their disclosure state outside the DOM, and expose a real button/panel
+   relationship so the compact chevron remains keyboard and screen-reader
+   accessible. */
+function disclosureButton(label, body, collapsedKeys, storageKey, itemKey) {
+  const key = String(itemKey);
+  const button = el("button", "disclosure-toggle");
+  button.type = "button";
+  body.id = `disclosure-panel-${++disclosureSeq}`;
+  button.setAttribute("aria-controls", body.id);
+  button.appendChild(choiceSvg("arrow"));
+
+  const sync = () => {
+    const isCollapsed = collapsedKeys.has(key);
+    body.hidden = isCollapsed;
+    button.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
+    const action = isCollapsed ? "Expand" : "Collapse";
+    button.title = `${action} ${label}`;
+    button.setAttribute("aria-label", `${action} ${label}`);
+  };
+  button.onclick = () => {
+    if (collapsedKeys.has(key)) collapsedKeys.delete(key);
+    else collapsedKeys.add(key);
+    saveStringSet(storageKey, collapsedKeys);
+    sync();
+  };
+  sync();
+  return button;
 }
 
 function choiceOptionNode(label, selected = false) {
@@ -777,11 +824,19 @@ function renderSidebar() {
     .concat(state.backends.map(b => ({ bid: b.id, name: b.name, ok: state.remoteOk[b.id] !== false })));
   const showGroups = groups.length > 1;
   for (const g of groups) {
+    const group = el("section", "sess-group");
+    const body = el("div", "sess-group-body");
     if (showGroups) {
       const t = el("div", "sess-group-title");
       const dot = el("span", "gdot " + (g.ok ? "ok" : "bad"));
-      t.appendChild(dot); t.appendChild(document.createTextNode(g.name));
-      root.appendChild(t);
+      const name = el("span", "sess-group-name", g.name);
+      name.title = g.name;
+      const key = g.bid ? `remote:${g.bid}` : "local";
+      t.appendChild(dot);
+      t.appendChild(name);
+      t.appendChild(disclosureButton(`${g.name} sessions`, body,
+        collapsedSessionBackends, "puppy.collapsed.session-backends", key));
+      group.appendChild(t);
     }
     const allSessions = sessionsFor(g.bid);
     const list = allSessions.filter(s => state.showArchived || !s.archived);
@@ -790,7 +845,7 @@ function renderSidebar() {
       if (!g.ok) message = "Backend unavailable";
       else if (!state.showArchived && allSessions.some(s => s.archived)) message = "Archived sessions hidden";
       else if (showGroups) message = g.bid === 0 ? "No local sessions" : "No sessions attached";
-      root.appendChild(el("div", "sess-group-empty" + (showGroups ? "" : " standalone"), message));
+      body.appendChild(el("div", "sess-group-empty" + (showGroups ? "" : " standalone"), message));
     }
     for (const s of list) {
       const item = el("button", "sess-item" + (s.archived ? " archived" : ""));
@@ -810,8 +865,10 @@ function renderSidebar() {
       item.onclick = () => { openSessionTab(g.bid, s.id, s); closeDrawer(); };
       item.addEventListener("contextmenu", (e) => sessionContextMenu(e, g.bid, s));
       wireSessionDrag(item, g.bid, s.id);
-      root.appendChild(item);
+      body.appendChild(item);
     }
+    group.appendChild(body);
+    root.appendChild(group);
   }
   let archTotal = 0;
   for (const g of groups) archTotal += sessionsFor(g.bid).filter(s => s.archived).length;
@@ -989,6 +1046,7 @@ function renderFootEngines() {
   const showGroups = groups.length > 1;
   for (const g of groups) {
     const group = el("div", "foot-engine-group");
+    const body = el("div", "foot-engine-body");
     if (showGroups) {
       const head = el("div", "foot-engine-head");
       const ico = el("span", "foot-ico");
@@ -998,15 +1056,20 @@ function renderFootEngines() {
       dot.title = status === "ok" ? "available" : status === "bad" ? "unavailable" : "checking";
       ico.appendChild(dot);
       head.appendChild(ico);
-      head.appendChild(el("span", "foot-engine-name", g.name));
+      const name = el("span", "foot-engine-name", g.name);
+      name.title = g.name;
+      const key = g.bid ? `remote:${g.bid}` : "local";
+      head.appendChild(name);
+      head.appendChild(disclosureButton(`${g.name} engine status`, body,
+        collapsedStatusBackends, "puppy.collapsed.status-backends", key));
       group.appendChild(head);
     }
     if (g.bid && state.remoteOk[g.bid] === false) {
-      group.appendChild(el("div", "foot-engine-empty", "backend unavailable"));
+      body.appendChild(el("div", "foot-engine-empty", "backend unavailable"));
     } else if (g.engines === null) {
-      group.appendChild(el("div", "foot-engine-empty", "checking engines…"));
+      body.appendChild(el("div", "foot-engine-empty", "checking engines…"));
     } else if (!g.engines.length) {
-      group.appendChild(el("div", "foot-engine-empty", "no engines reported"));
+      body.appendChild(el("div", "foot-engine-empty", "no engines reported"));
     } else for (const e of g.engines) {
       const row = el("div", "foot-eng");
       const ico = el("span", "foot-ico");
@@ -1019,8 +1082,9 @@ function renderFootEngines() {
         stTxt + (pct != null ? ` · ${Math.round(pct)}% wk` : ""));
       if (pct != null) st.title = `${Math.round(pct)}% of the weekly quota remaining`;
       row.appendChild(st);
-      group.appendChild(row);
+      body.appendChild(row);
     }
+    group.appendChild(body);
     root.appendChild(group);
   }
 }
