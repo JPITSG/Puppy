@@ -12,7 +12,9 @@
   --r-sm:8px; --r-md:11px; --r-lg:15px;
   /* button system: one height scale + themeable face/lift tokens so every
      control (btn, icon-btn, send, mini pill) shares the same material */
-  --btn-h:34px; --btn-h-sm:28px; --btn-r:10px;
+  /* --btn-r is the single knob for every button corner: 0 = square, bump it
+     to 8-10px to go back to the rounded set */
+  --btn-h:34px; --btn-h-sm:28px; --btn-r:0px;
   /* optical label centring; measured from the live font at boot (see
      syncLabelNudge). 0 = the font's cap band is already square in its line box */
   --label-pb:0px;
@@ -171,7 +173,7 @@ a{color:var(--acc2)}
 .sess-item .si-sub{flex:1;min-width:0;font-size:11px;color:var(--txt3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:var(--mono)}
 .linklike{
   display:inline-flex;align-items:center;background:none;border:none;color:var(--txt3);
-  font:inherit;font-size:11px;line-height:1;cursor:pointer;padding:8px 6px;border-radius:6px;
+  font:inherit;font-size:11px;line-height:1;cursor:pointer;padding:8px 6px;border-radius:var(--btn-r);
   text-decoration:underline;text-decoration-color:transparent;text-underline-offset:3px;
   transition:color .15s var(--ease),text-decoration-color .15s var(--ease);
 }
@@ -186,7 +188,7 @@ a{color:var(--acc2)}
 .foot-eng .st.ok{color:var(--ok)}
 .foot-eng .st.bad{color:var(--err)}
 .foot-row{display:flex;align-items:center;gap:6px}
-.foot-row .icon-btn{width:24px;height:24px;font-size:14px;border-radius:7px;margin-left:-8px}
+.foot-row .icon-btn{width:24px;height:24px;font-size:14px;border-radius:var(--btn-r);margin-left:-8px}
 .foot-ver{font-size:10.5px;color:var(--txt3);font-family:var(--mono)}
 .conn-dot{width:8px;height:8px;border-radius:50%;background:var(--err);margin-left:auto;transition:background .3s}
 .conn-dot.ok{background:var(--ok)}
@@ -273,10 +275,10 @@ button{
 @media (hover:hover){.btn-ghost:hover{background:var(--hov);color:var(--txt);box-shadow:none}}
 .btn-ghost:active{background:var(--hov);box-shadow:var(--btn-press)}
 .btn-wide{width:100%;height:36px}
-.btn-sm{height:var(--btn-h-sm);padding:0 11px var(--label-pb);font-size:11.5px;border-radius:8px;gap:5px}
+.btn-sm{height:var(--btn-h-sm);padding:0 11px var(--label-pb);font-size:11.5px;border-radius:var(--btn-r);gap:5px}
 .icon-btn{
   display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;
-  width:32px;height:32px;border-radius:10px;cursor:pointer;user-select:none;
+  width:32px;height:32px;border-radius:var(--btn-r);cursor:pointer;user-select:none;
   background:none;border:1px solid transparent;color:var(--txt2);font-size:15px;line-height:1;
   transition:background .15s var(--ease),color .15s var(--ease),
              border-color .15s var(--ease),transform .12s var(--ease);
@@ -316,7 +318,7 @@ label input,label select{margin-top:5px;text-transform:none;letter-spacing:0}
    optical centre. The bar carries 8px of top padding and none at the bottom,
    so a centred item sits 8px low and its hover box would meet the divider -
    the -8px cancels that, the same trick .tab-add-wrap uses. */
-.tabbar .burger{width:26px;height:26px;border-radius:8px;margin-top:-8px;position:relative}
+.tabbar .burger{width:26px;height:26px;border-radius:var(--btn-r);margin-top:-8px;position:relative}
 .tabbar .burger svg{display:block}
 /* the visual box stays 26px; the tap target fills the bar's height */
 .tabbar .burger::after,.tab-add-wrap .icon-btn::after{content:"";position:absolute;inset:-8px -6px}
@@ -345,7 +347,7 @@ label input,label select{margin-top:5px;text-transform:none;letter-spacing:0}
 .tab .t-title{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto;min-width:0}
 .tab .t-close{
   border:none;background:none;color:var(--txt3);cursor:pointer;font-size:15px;line-height:1;
-  padding:0;width:18px;height:18px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0;
+  padding:0;width:18px;height:18px;border-radius:var(--btn-r);display:flex;align-items:center;justify-content:center;flex-shrink:0;
   transition:background .15s var(--ease),color .15s var(--ease),transform .12s var(--ease);
 }
 @media (hover:hover){.tab .t-close:hover{background:rgba(255,255,255,.12);color:var(--txt)}}
@@ -353,7 +355,7 @@ label input,label select{margin-top:5px;text-transform:none;letter-spacing:0}
 /* stretch over the bar's full height (incl. its 8px top padding) so the +
    sits at the true vertical center with an even hover halo */
 .tab-add-wrap{position:relative;display:flex;align-items:center;align-self:stretch;margin-top:-8px}
-.tab-add-wrap .icon-btn{width:26px;height:26px;font-size:14px;border-radius:8px;position:relative}
+.tab-add-wrap .icon-btn{width:26px;height:26px;font-size:14px;border-radius:var(--btn-r);position:relative}
 
 /* ---------- menus ---------- */
 .menu{
@@ -364,7 +366,7 @@ label input,label select{margin-top:5px;text-transform:none;letter-spacing:0}
 .menu button{
   display:flex;align-items:center;gap:8px;width:100%;min-height:32px;text-align:left;
   background:none;border:none;color:var(--txt);
-  font:inherit;font-size:12.5px;padding:7px 11px;border-radius:7px;cursor:pointer;
+  font:inherit;font-size:12.5px;padding:7px 11px;border-radius:var(--btn-r);cursor:pointer;
   transition:background .12s var(--ease),color .12s var(--ease);
 }
 @media (hover:hover){.menu button:hover{background:var(--hov)}}
@@ -374,7 +376,7 @@ label input,label select{margin-top:5px;text-transform:none;letter-spacing:0}
 .menu.color-menu{display:grid;grid-template-columns:repeat(5,auto);gap:2px;padding:8px}
 /* .menu button.swatch specificity must beat the generic .menu button block rule */
 .swatch,.menu button.swatch{
-  display:flex;align-items:center;justify-content:center;padding:7px;border-radius:8px;width:auto;
+  display:flex;align-items:center;justify-content:center;padding:7px;border-radius:var(--btn-r);width:auto;
   min-height:0;background:none;border:1px solid transparent;cursor:pointer;
   transition:background .12s var(--ease),transform .12s var(--ease);
 }
@@ -584,7 +586,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .queue-strip .q-x{
   position:relative;flex:0 0 auto;
   display:inline-flex;align-items:center;justify-content:center;
-  width:16px;height:16px;padding:0;border:none;border-radius:50%;cursor:pointer;
+  width:16px;height:16px;padding:0;border:none;border-radius:var(--btn-r);cursor:pointer;
   background:none;color:var(--txt3);font-size:13px;line-height:1;
   transition:background .12s var(--ease),color .12s var(--ease),transform .12s var(--ease);
 }
@@ -594,7 +596,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .queue-strip .q-x:active{transform:scale(.88);background:var(--hov);color:var(--err)}
 /* expands the tail past the cap, and collapses it again */
 .queue-strip .q-more{
-  align-self:flex-start;padding:1px 2px;border:none;border-radius:5px;cursor:pointer;
+  align-self:flex-start;padding:1px 2px;border:none;border-radius:var(--btn-r);cursor:pointer;
   background:none;color:var(--txt3);font:inherit;opacity:.75;
   text-decoration:underline;text-decoration-color:transparent;text-underline-offset:3px;
   transition:color .12s var(--ease),opacity .12s var(--ease),text-decoration-color .12s var(--ease);
@@ -646,7 +648,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .attach-chip .attach-x{
   position:absolute;top:4px;right:4px;
   display:inline-flex;align-items:center;justify-content:center;
-  width:18px;height:18px;padding:0;border:none;border-radius:50%;cursor:pointer;
+  width:18px;height:18px;padding:0;border:none;border-radius:var(--btn-r);cursor:pointer;
   background:rgba(6,9,14,.6);color:#fff;font-size:13px;line-height:1;
   transition:background .12s var(--ease),transform .12s var(--ease);
 }
@@ -655,7 +657,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .composer-row{display:flex;align-items:center;gap:8px}
 .composer-row .mini{
   display:inline-flex;align-items:center;justify-content:center;gap:4px;flex-shrink:0;
-  height:24px;padding:0 10px;border-radius:99px;cursor:pointer;user-select:none;
+  height:24px;padding:0 10px;border-radius:var(--btn-r);cursor:pointer;user-select:none;
   font-size:10.5px;font-family:var(--mono);line-height:1;white-space:nowrap;
   color:var(--txt3);background:none;border:1px solid var(--line);
   transition:background .15s var(--ease),border-color .15s var(--ease),
@@ -678,7 +680,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 }
 /* the pad lifts the whole content box, so give the square it back - it is
    already centred and only the text needed the correction */
-.btn-send .stop-sq{width:9px;height:9px;background:currentColor;border-radius:2px;flex-shrink:0;margin-top:var(--label-pb)}
+.btn-send .stop-sq{width:9px;height:9px;background:currentColor;flex-shrink:0;margin-top:var(--label-pb)}
 @media (hover:hover){
   .btn-send:hover{filter:brightness(1.07);box-shadow:inset 0 1px 0 rgba(255,255,255,.34),0 1px 2px rgba(0,0,0,.25),var(--glow-acc-hi)}
 }
