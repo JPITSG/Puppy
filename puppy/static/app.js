@@ -1368,7 +1368,12 @@ class SessionView {
   renderQueue(q) {
     if (!q.length) { this.queueEl.classList.add("hidden"); return; }
     this.queueEl.classList.remove("hidden");
-    this.queueEl.textContent = `queued: ${q.map(x => x.slice(0, 40)).join(" | ")}`;
+    /* one line, clipped by CSS: it fills whatever width is going and ellipsises
+       exactly there. The per-item cap only keeps a runaway message out of the
+       DOM - 200 chars is well past what the widest strip can ever show. */
+    this.queueEl.textContent = "queued: " +
+      q.map(x => (x.length > 200 ? x.slice(0, 199) + "…" : x)).join(" | ");
+    this.queueEl.title = q.join("\n---\n");
   }
 
   /* ---- menus / meta ops ---- */
