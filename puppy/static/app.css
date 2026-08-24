@@ -97,9 +97,9 @@ a{color:var(--acc2)}
 }
 /* first shadow layer: crisp 1px ring so the dot keeps a defined edge inside the glow */
 @keyframes glowpulse{
-  0%{box-shadow:0 0 0 1px rgba(255,255,255,.55), 0 0 7px 2px currentColor, 0 0 0 0 currentColor}
-  70%{box-shadow:0 0 0 1px rgba(255,255,255,.55), 0 0 7px 2px currentColor, 0 0 0 7px transparent}
-  100%{box-shadow:0 0 0 1px rgba(255,255,255,.55), 0 0 7px 2px currentColor, 0 0 0 0 transparent}
+  0%{box-shadow:0 0 0 1px var(--ring,rgba(255,255,255,.55)), 0 0 7px 2px currentColor, 0 0 0 0 currentColor}
+  70%{box-shadow:0 0 0 1px var(--ring,rgba(255,255,255,.55)), 0 0 7px 2px currentColor, 0 0 0 7px transparent}
+  100%{box-shadow:0 0 0 1px var(--ring,rgba(255,255,255,.55)), 0 0 7px 2px currentColor, 0 0 0 0 transparent}
 }
 .prov{
   width:11px;height:11px;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;
@@ -566,3 +566,48 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 @media (prefers-reduced-motion:reduce){
   *{animation:none!important;transition:none!important;scroll-behavior:auto!important}
 }
+
+/* ---------- light theme ---------- */
+html.light{
+  --ring:rgba(15,23,42,.45);
+  --bg:#f3f5f9; --panel:#ffffff; --panel2:#eaeef5; --panel3:#dfe5ee;
+  --line:rgba(15,23,42,.10); --line2:rgba(15,23,42,.18);
+  --txt:#1b2434; --txt2:#48536b; --txt3:#8a94a8;
+  --acc:#3b82e0; --acc2:#2563c4; --acc-dim:rgba(59,130,224,.13);
+  --ok:#0b9e71; --ok-dim:rgba(11,158,113,.10);
+  --warn:#b26205; --warn-dim:rgba(178,98,5,.10);
+  --err:#d6455d; --err-dim:rgba(214,69,93,.10);
+  --violet:#7c5bd6; --cyan:#0e8bc4;
+}
+html.light body::before{
+  background:
+    radial-gradient(700px 420px at 12% -8%,rgba(59,130,224,.10),transparent 60%),
+    radial-gradient(600px 380px at 88% -6%,rgba(124,91,214,.08),transparent 60%),
+    radial-gradient(700px 500px at 50% 110%,rgba(11,158,113,.05),transparent 60%);
+}
+html.light body::after{
+  background-image:linear-gradient(rgba(15,23,42,.028) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(15,23,42,.028) 1px,transparent 1px);
+}
+html.light ::-webkit-scrollbar-thumb{background:#c0c9d8;border-color:var(--bg)}
+html.light .side{background:linear-gradient(180deg,rgba(15,23,42,.035),rgba(15,23,42,.012))}
+html.light .sess-item:hover{background:rgba(15,23,42,.05)}
+html.light .icon-btn:hover{background:rgba(15,23,42,.07)}
+html.light .btn:hover{border-color:rgba(15,23,42,.30)}
+html.light .menu button:hover{background:rgba(15,23,42,.055)}
+html.light .swatch:hover,html.light .menu button.swatch:hover{background:rgba(15,23,42,.055)}
+html.light .swatch.sel,html.light .menu button.swatch.sel{background:rgba(15,23,42,.05)}
+html.light .menu{box-shadow:0 16px 40px -12px rgba(15,23,42,.28)}
+html.light .tabbar{background:rgba(243,245,249,.82)}
+html.light .tab:hover{background:rgba(15,23,42,.045)}
+html.light .tab .t-close:hover{background:rgba(15,23,42,.09)}
+html.light .chat-head{background:rgba(15,23,42,.02)}
+html.light .tool-head:hover{background:rgba(15,23,42,.035)}
+html.light .msg-assistant code{background:rgba(15,23,42,.075)}
+html.light .msg-assistant pre code{background:none}
+html.light .msg-user{
+  background:linear-gradient(180deg,rgba(59,130,224,.13),rgba(59,130,224,.06));
+  border-color:rgba(59,130,224,.30);
+}
+html.light .approval pre{background:rgba(15,23,42,.06)}
+html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}

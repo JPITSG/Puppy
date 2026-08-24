@@ -591,6 +591,16 @@ $("burger").onclick = () => $("app").classList.add("side-open");
 $("side-backdrop").onclick = closeDrawer;
 function closeDrawer() { $("app").classList.remove("side-open"); }
 
+/* light / dark theme (class applied pre-paint by an inline head script) */
+function applyTheme(t) {
+  document.documentElement.classList.toggle("light", t === "light");
+  $("btn-theme").textContent = t === "light" ? "☾" : "☀";
+  localStorage.setItem("puppy.theme", t);
+}
+$("btn-theme").onclick = () =>
+  applyTheme(document.documentElement.classList.contains("light") ? "dark" : "light");
+applyTheme(localStorage.getItem("puppy.theme") || "dark");
+
 /* sidebar width: draggable, persisted */
 (() => {
   const saved = parseInt(localStorage.getItem("puppy.sidew") || "", 10);
