@@ -289,9 +289,20 @@ class SessionHub:
                             session["native_session_id"] = nid
                             db.touch_session(self.id, native_session_id=nid)
                     elif a == "model":
-                        if act["model"] != session.get("last_model"):
-                            session["last_model"] = act["model"]
-                            db.touch_session(self.id, last_model=act["model"])
+                        new_model = act["model"]
+                        old_model = session.get("last_model") or ""
+                        if new_model != old_model:
+                            requested = (session.get("model") or "").strip()
+                            mismatch = requested and requested.lower() not in new_model.lower()
+                            if old_model:
+                                self._emit("info", {"subtype": "model_switch",
+                                                    "text": f"engine model changed: {old_model} → {new_model}"})
+                            elif mismatch:
+                                self._emit("info", {"subtype": "model_switch",
+                                                    "text": f"requested model '{requested}' but engine is serving {new_model}"})
+                            session["last_model"] = new_model
+                            db.touch_session(self.id, last_model=new_model)
+                            self.broadcast({"type": "session_meta", "session": db.get_session(self.id)})
                     elif a == "approval":
                         self.pending_approval = act["req"]
                         self.broadcast({"type": "approval_request", "req": act["req"]})

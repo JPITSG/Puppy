@@ -1045,7 +1045,7 @@ class SessionView {
           }
           return n;
         }
-        const n = el("div", "info-line" + (d.subtype === "interrupted" ? " warn" : ""));
+        const n = el("div", "info-line" + (d.subtype === "interrupted" || d.subtype === "model_switch" ? " warn" : ""));
         n.textContent = d.text || d.subtype || "";
         return n;
       }

@@ -137,6 +137,7 @@ class ClaudeDriver(Driver):
                                                    "model": ev.get("model", ""),
                                                    "tools": len(ev.get("tools") or [])}}]
                 if ev.get("model"):
+                    ctx["model_seen"] = ev["model"]
                     acts.append({"a": "model", "model": ev["model"]})
                 return acts
             if sub == "status":
@@ -149,6 +150,11 @@ class ClaudeDriver(Driver):
         if t == "assistant":
             acts = []
             msg = ev.get("message") or {}
+            # per-response model id - catches mid-turn fallback (e.g. fable -> opus)
+            mdl = msg.get("model") or ""
+            if mdl and mdl != ctx.get("model_seen"):
+                ctx["model_seen"] = mdl
+                acts.append({"a": "model", "model": mdl})
             for blk in msg.get("content") or []:
                 bt = blk.get("type")
                 if bt == "text" and blk.get("text"):
