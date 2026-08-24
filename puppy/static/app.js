@@ -29,6 +29,35 @@ function xIcon(size) {
   return svg;
 }
 
+function copyIcon(done = false) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("width", "14");
+  svg.setAttribute("height", "14");
+  svg.setAttribute("aria-hidden", "true");
+  if (done) {
+    const path = document.createElementNS(NS, "path");
+    path.setAttribute("d", "M3 8.3 6.3 11.5 13 4.8");
+    path.setAttribute("fill", "none");
+    path.setAttribute("stroke", "currentColor");
+    path.setAttribute("stroke-width", "1.7");
+    path.setAttribute("stroke-linecap", "round");
+    path.setAttribute("stroke-linejoin", "round");
+    svg.appendChild(path);
+  } else {
+    for (const [x, y] of [[5, 2], [2, 5]]) {
+      const rect = document.createElementNS(NS, "rect");
+      rect.setAttribute("x", x); rect.setAttribute("y", y);
+      rect.setAttribute("width", "9"); rect.setAttribute("height", "9");
+      rect.setAttribute("rx", "1.2"); rect.setAttribute("fill", "none");
+      rect.setAttribute("stroke", "currentColor"); rect.setAttribute("stroke-width", "1.35");
+      svg.appendChild(rect);
+    }
+  }
+  return svg;
+}
+
 const esc = (s) => String(s == null ? "" : s)
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
   .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
@@ -37,6 +66,37 @@ function toast(text, level = "info", ms = 4200) {
   const t = el("div", "toast " + (level === "error" ? "err" : level === "ok" ? "ok" : ""), text);
   $("toasts").appendChild(t);
   setTimeout(() => t.remove(), ms);
+}
+
+/* Clipboard.writeText is unavailable on some plain-HTTP deployments. Keep one
+   fallback for every copy surface instead of letting those buttons fail there. */
+async function writeClipboardText(text) {
+  const value = String(text == null ? "" : text);
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    try { await navigator.clipboard.writeText(value); return; }
+    catch (e) { /* fall through to the selection-based path */ }
+  }
+  const ta = el("textarea");
+  const active = document.activeElement;
+  ta.value = value;
+  ta.setAttribute("readonly", "");
+  ta.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0;pointer-events:none";
+  document.body.appendChild(ta);
+  ta.select();
+  let copied = false;
+  try { copied = !!document.execCommand("copy"); }
+  finally {
+    ta.remove();
+    if (active && active.focus) {
+      try { active.focus({ preventScroll: true }); } catch (e) { active.focus(); }
+    }
+  }
+  if (!copied) throw new Error("clipboard unavailable");
+}
+
+async function copyWithToast(text, message = "copied") {
+  try { await writeClipboardText(text); toast(message); return true; }
+  catch (e) { toast("copy failed", "error"); return false; }
 }
 
 function fmtTime(ts) {
@@ -107,6 +167,92 @@ function md(text) {
   } catch (e) {
     return esc(text);
   }
+}
+
+const PLAIN_CODE_LANGS = new Set([
+  "", "text", "txt", "plain", "plaintext", "console", "terminal", "shell-session", "none",
+]);
+const OUTPUT_CODE_LANGS = new Set(["output", "log", "logs", "trace", "traceback", "stdout", "stderr"]);
+const SHELL_CODE_LANGS = new Set(["bash", "sh", "shell", "zsh", "fish", "powershell", "ps1", "cmd", "bat"]);
+const COMMAND_NAMES = new Set((
+  "bash sh zsh fish pwsh powershell cmd env export source python node deno bun npm npx pnpm yarn " +
+  "pip pipx uv git gh curl wget ssh scp rsync cd ls cp mv rm mkdir rmdir touch chmod chown cat " +
+  "sed awk grep rg find xargs printf echo tee make cmake ninja docker podman kubectl helm systemctl " +
+  "service supervisorctl go cargo rustc java javac gradle mvn dotnet terraform tofu ansible apt dnf yum brew"
+).split(" "));
+
+function codeLanguage(code) {
+  for (const cls of code.classList) if (cls.startsWith("language-")) return cls.slice(9).toLowerCase();
+  return "";
+}
+
+function lineLooksLikeCommand(line) {
+  const value = line.trim().replace(/^(?:[$>#]\s*)/, "").replace(/^sudo\s+/i, "");
+  const match = value.match(/^(?:"([^"]+)"|'([^']+)'|(\S+))/);
+  if (!match) return false;
+  const executable = (match[1] || match[2] || match[3]).split(/[\\/]/).pop().toLowerCase()
+    .replace(/\.exe$/, "");
+  return COMMAND_NAMES.has(executable) || /^(?:python|pip)\d+(?:\.\d+)?$/.test(executable);
+}
+
+/* Explicit programming/config languages are intentional snippets. Plain or
+   unlabeled fences need stronger evidence so quoted output and incidental
+   identifiers do not acquire a copy control. */
+function probablyCopyableCode(code) {
+  const text = String(code.textContent || "").replace(/\n$/, "").trim();
+  if (text.length < 4) return false;
+  const lang = codeLanguage(code);
+  if (OUTPUT_CODE_LANGS.has(lang)) return false;
+  if ((PLAIN_CODE_LANGS.has(lang) || SHELL_CODE_LANGS.has(lang)) &&
+      /(^|\s)(?:\.{3}|…)(?=\s|$)/.test(text)) return false; // incomplete command/example
+  if (!PLAIN_CODE_LANGS.has(lang)) return true;
+
+  const lines = text.split("\n").filter(line => line.trim());
+  const syntax = /^\s*(?:const|let|var|function|class|def|async\s+def|import|from|package|func|fn|return|if|for|while|select|insert|update|delete|create|alter)\b/i;
+  const assignment = /^\s*(?:[-?]\s*)?[A-Za-z_][\w.-]*\s*[:=]/;
+  const equals = /^\s*[A-Za-z_][\w.-]*\s*=/;
+  const punctuation = /(?:=>|\$\(|\$\{|&&|\|\||[{}\[\]]|<\/?[A-Za-z]|^\s*#(?:!|include|define)|["'][^"']+["']\s*:|\b[A-Za-z_$][\w.$]*\s*\([^)]*\)\s*;?\s*$|;\s*$)/;
+  if (lines.length === 1)
+    return lineLooksLikeCommand(lines[0]) || syntax.test(lines[0]) || equals.test(lines[0]) || punctuation.test(lines[0]);
+  const hasCommand = lines.some(lineLooksLikeCommand);
+  const codeLines = lines.filter(line => lineLooksLikeCommand(line) || syntax.test(line) ||
+    assignment.test(line) || punctuation.test(line) || (hasCommand && /^\s*--?[\w-]+/.test(line))).length;
+  return codeLines >= 2;
+}
+
+function decorateCodeBlocks(root) {
+  root.querySelectorAll("pre > code").forEach(code => {
+    if (!probablyCopyableCode(code)) return;
+    const pre = code.parentElement;
+    if (!pre || pre.parentElement.classList.contains("code-block")) return;
+    const wrap = el("div", "code-block");
+    pre.parentNode.insertBefore(wrap, pre);
+    wrap.appendChild(pre);
+    const button = el("button", "code-copy");
+    button.type = "button";
+    button.title = "Copy code";
+    button.setAttribute("aria-label", "Copy code");
+    button.appendChild(copyIcon());
+    button.onclick = async (e) => {
+      e.preventDefault(); e.stopPropagation();
+      try {
+        await writeClipboardText(String(code.textContent || "").replace(/\n$/, ""));
+        clearTimeout(button._copyReset);
+        button.classList.add("done");
+        button.replaceChildren(copyIcon(true));
+        button.title = "Copied";
+        button.setAttribute("aria-label", "Copied");
+        button._copyReset = setTimeout(() => {
+          if (!button.isConnected) return;
+          button.classList.remove("done");
+          button.replaceChildren(copyIcon());
+          button.title = "Copy code";
+          button.setAttribute("aria-label", "Copy code");
+        }, 1400);
+      } catch (err) { toast("copy failed", "error"); }
+    };
+    wrap.appendChild(button);
+  });
 }
 
 /* append text to node with URLs as clickable new-tab links (DOM-built, no innerHTML) */
@@ -410,12 +556,11 @@ function sessionContextMenu(ev, bid, s) {
     session: s, tab: { bid, sid: s.id }, updateHead() { refreshGroup(bid); },
   }));
   menu.appendChild(el("div", "menu-sep"));
-  add("Copy cwd", () => { navigator.clipboard.writeText(s.cwd); toast("copied"); });
+  add("Copy cwd", () => copyWithToast(s.cwd));
   if (s.has_native) add("Copy native session id", async () => {
     try {
       const r = await api(bid, `sessions/${s.id}`);
-      navigator.clipboard.writeText(r.session.native_session_id || "");
-      toast("copied");
+      await copyWithToast(r.session.native_session_id || "");
     } catch (e) { toast(e.message, "error"); }
   });
   menu.appendChild(el("div", "menu-sep"));
@@ -1278,6 +1423,7 @@ class SessionView {
         const box = el("div", "md");
         box.innerHTML = md(d.text || "");
         box.querySelectorAll("a").forEach(a => { a.target = "_blank"; a.rel = "noopener noreferrer"; });
+        decorateCodeBlocks(box);
         n.appendChild(box);
         return n;
       }
@@ -1603,9 +1749,9 @@ class SessionView {
     add("Dot color…", () => this.pickColor(anchor));
     add("Switch engine…", () => modalSwitchEngine(this));
     menu.appendChild(el("div", "menu-sep"));
-    add("Copy cwd", () => { navigator.clipboard.writeText(this.session.cwd); toast("copied"); });
+    add("Copy cwd", () => copyWithToast(this.session.cwd));
     if (this.session && this.session.native_session_id)
-      add("Copy native session id", () => { navigator.clipboard.writeText(this.session.native_session_id); toast("copied"); });
+      add("Copy native session id", () => copyWithToast(this.session.native_session_id));
     menu.appendChild(el("div", "menu-sep"));
     add(this.session && this.session.archived ? "Unarchive" : "Archive", () => this.archive());
     add("Delete session", () => this.deleteSession(), true);
@@ -1891,7 +2037,7 @@ class SettingsView {
     c1.querySelector("#set-token").onclick = () => {
       const elx = c1.querySelector("#set-token");
       if (!tokenShown) { elx.textContent = settings.api_token; tokenShown = true; }
-      else { navigator.clipboard.writeText(settings.api_token); toast("token copied"); }
+      else copyWithToast(settings.api_token, "token copied");
     };
     c1.querySelector("#set-save").onclick = async () => {
       try {
