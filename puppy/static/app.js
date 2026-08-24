@@ -27,8 +27,8 @@ function fmtTokens(n) {
   if (n == null) return "";
   return n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n);
 }
-/* the header status and the live thinking block's label are the same string -
-   built here once so the two can never drift apart */
+/* the header's thinking status; the live thinking block mirrors the header
+   verbatim, so this is also what that block reads while a turn is thinking */
 function thinkingLabel(tokens) {
   return tokens ? `thinking… ${fmtTokens(tokens)} tokens` : "thinking…";
 }
@@ -774,7 +774,7 @@ class SessionView {
     this.toolCards = {};
     this.liveEl = null;
     this.liveKind = null;
-    this.thinkTokens = 0;     // turn-level count driving both thinking labels
+    this.statusText = "";     // header status; the live thinking block mirrors it
     this.oldestSeq = null;
     this.history = [];        // sent messages, oldest first (shell-style recall)
     this.histIdx = null;
@@ -1006,9 +1006,7 @@ class SessionView {
         if (this.session) { this.session.last_model = d.model; this.updateHead(); }
         break;
       case "thinking_tokens":
-        this.thinkTokens = d.tokens;
         this.setStatus(thinkingLabel(d.tokens));
-        this.syncThinkLabel();
         break;
       case "approval_request":
         this.showApproval(d.req);
@@ -1021,7 +1019,6 @@ class SessionView {
         break;
       case "turn_done":
         this.status = "idle";
-        this.thinkTokens = 0;
         this.clearLive();
         this.updateRunState();
         this.setStatus("");
@@ -1081,8 +1078,10 @@ class SessionView {
   }
 
   setStatus(text) {
+    this.statusText = text || "";
     this.statusEl.innerHTML = text ? `<span class="spinner"></span>${esc(text)}` : "";
     if (!text) this.statusEl.innerHTML = "";
+    this.syncThinkLabel();
     this.syncHeadOverflow();
   }
 
@@ -1137,7 +1136,7 @@ class SessionView {
         const n = el("details", "think");
         const sum = el("summary");
         sum.appendChild(el("span", "think-brain", "🧠"));
-        sum.appendChild(document.createTextNode("thinking"));
+        sum.appendChild(el("span", "think-label", "thinking"));
         const body = el("div", "tbody", d.text || "");
         n.appendChild(sum); n.appendChild(body);
         return n;
@@ -1229,7 +1228,9 @@ class SessionView {
       if (block === "thinking") {
         this.liveEl = el("details", "think msg-live");
         this.liveEl.open = false;
-        this.liveEl.appendChild(el("summary", "", thinkingLabel(this.thinkTokens)));
+        const sum = el("summary");
+        sum.appendChild(el("span", "think-label", this.statusText || thinkingLabel(0)));
+        this.liveEl.appendChild(sum);
         this.liveEl.appendChild(el("div", "tbody"));
       } else {
         this.liveEl = el("div", "msg msg-assistant msg-live");
@@ -1245,11 +1246,11 @@ class SessionView {
   clearLive() {
     if (this.liveEl) { this.liveEl.remove(); this.liveEl = null; this.liveKind = null; }
   }
-  /* keep the open thinking block's summary in step with the header status */
+  /* the open thinking block shows exactly what the header status shows */
   syncThinkLabel() {
     if (!this.liveEl || this.liveKind !== "thinking") return;
-    const sum = this.liveEl.querySelector("summary");
-    if (sum) sum.textContent = thinkingLabel(this.thinkTokens);
+    const lab = this.liveEl.querySelector(".think-label");
+    if (lab) lab.textContent = this.statusText || thinkingLabel(0);
   }
 
   scrollBottom(force) {
@@ -1317,7 +1318,6 @@ class SessionView {
     this.scrollBottom(true);
     lsDel("puppy.draft." + this.tab.id);
     this.status = "running"; this.updateRunState();
-    this.thinkTokens = 0;
     this.setStatus("starting…");
   }
   interrupt() {

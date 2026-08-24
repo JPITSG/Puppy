@@ -478,6 +478,9 @@ details.think summary::before{
   transition:transform .18s var(--ease);
 }
 details.think .think-brain{font-size:12px;line-height:1}
+/* a mirrored status can be long (a shell command, a file path): hold the
+   summary to one line and clip it the way the header status clips */
+details.think summary .think-label{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 details.think[open] summary::before{transform:rotate(90deg)}
 details.think summary:hover{color:var(--txt2)}
 details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
