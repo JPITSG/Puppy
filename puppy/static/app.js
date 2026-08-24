@@ -2375,17 +2375,29 @@ class SettingsView {
   onShow() { this.render(); }
 
   engineRow(e2) {
-    const row = el("div", "kv");
-    row.appendChild(el("span", "engine-dot " + e2.key));
-    row.appendChild(el("span", "k", e2.label));
-    row.appendChild(el("span", "pill " + (e2.installed ? "ok" : "bad"),
-      e2.installed ? (e2.version || "installed") : "not installed"));
-    row.appendChild(el("span", "pill " + (e2.auth === "ok" ? "ok" : "bad"), "auth: " + e2.auth));
+    const row = el("div", "engine-row");
+    const identity = el("div", "engine-row-identity");
+    identity.appendChild(el("span", "engine-dot " + e2.key));
+    identity.appendChild(el("span", "engine-row-name", e2.label));
+    const statuses = el("div", "engine-row-statuses");
+    const version = el("span", "pill engine-version " + (e2.installed ? "ok" : "bad"),
+      e2.installed ? (e2.version || "installed") : "not installed");
+    version.title = version.textContent;
+    statuses.appendChild(version);
+    statuses.appendChild(el("span", "pill " + (e2.auth === "ok" ? "ok" : "bad"),
+      "auth: " + e2.auth));
     if (e2.rate_limit && e2.rate_limit.resetsAt) {
       const reset = new Date(e2.rate_limit.resetsAt * 1000);
-      row.appendChild(el("span", "pill " + (e2.rate_limit.status === "allowed" ? "" : "warn"),
-        `${e2.rate_limit.rateLimitType || "window"} resets ${reset.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`));
+      const rate = el("span", "pill " +
+        (e2.rate_limit.status === "allowed" ? "" : "warn"),
+        `${e2.rate_limit.rateLimitType || "window"} resets ${reset.toLocaleTimeString([], {
+          hour: "2-digit", minute: "2-digit",
+        })}`);
+      rate.title = rate.textContent;
+      statuses.appendChild(rate);
     }
+    row.appendChild(identity);
+    row.appendChild(statuses);
     return row;
   }
 
