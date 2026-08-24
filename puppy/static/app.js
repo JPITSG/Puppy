@@ -27,6 +27,11 @@ function fmtTokens(n) {
   if (n == null) return "";
   return n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n);
 }
+/* the header status and the live thinking block's label are the same string -
+   built here once so the two can never drift apart */
+function thinkingLabel(tokens) {
+  return tokens ? `thinking… ${fmtTokens(tokens)} tokens` : "thinking…";
+}
 /* localStorage is per-origin; behind a path-mounting relay every app on the
    host shares it. Namespace all keys by the mount path - "" when served at
    the root, so existing local keys keep working unchanged. */
@@ -769,6 +774,7 @@ class SessionView {
     this.toolCards = {};
     this.liveEl = null;
     this.liveKind = null;
+    this.thinkTokens = 0;     // turn-level count driving both thinking labels
     this.oldestSeq = null;
     this.history = [];        // sent messages, oldest first (shell-style recall)
     this.histIdx = null;
@@ -1000,7 +1006,9 @@ class SessionView {
         if (this.session) { this.session.last_model = d.model; this.updateHead(); }
         break;
       case "thinking_tokens":
-        this.setStatus(`thinking… ${fmtTokens(d.tokens)} tokens`);
+        this.thinkTokens = d.tokens;
+        this.setStatus(thinkingLabel(d.tokens));
+        this.syncThinkLabel();
         break;
       case "approval_request":
         this.showApproval(d.req);
@@ -1013,6 +1021,7 @@ class SessionView {
         break;
       case "turn_done":
         this.status = "idle";
+        this.thinkTokens = 0;
         this.clearLive();
         this.updateRunState();
         this.setStatus("");
@@ -1220,7 +1229,7 @@ class SessionView {
       if (block === "thinking") {
         this.liveEl = el("details", "think msg-live");
         this.liveEl.open = false;
-        this.liveEl.appendChild(el("summary", "", "thinking…"));
+        this.liveEl.appendChild(el("summary", "", thinkingLabel(this.thinkTokens)));
         this.liveEl.appendChild(el("div", "tbody"));
       } else {
         this.liveEl = el("div", "msg msg-assistant msg-live");
@@ -1235,6 +1244,12 @@ class SessionView {
   }
   clearLive() {
     if (this.liveEl) { this.liveEl.remove(); this.liveEl = null; this.liveKind = null; }
+  }
+  /* keep the open thinking block's summary in step with the header status */
+  syncThinkLabel() {
+    if (!this.liveEl || this.liveKind !== "thinking") return;
+    const sum = this.liveEl.querySelector("summary");
+    if (sum) sum.textContent = thinkingLabel(this.thinkTokens);
   }
 
   scrollBottom(force) {
@@ -1302,6 +1317,7 @@ class SessionView {
     this.scrollBottom(true);
     lsDel("puppy.draft." + this.tab.id);
     this.status = "running"; this.updateRunState();
+    this.thinkTokens = 0;
     this.setStatus("starting…");
   }
   interrupt() {
