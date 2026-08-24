@@ -55,16 +55,15 @@ a{color:var(--acc2)}
 .main{flex:1;display:flex;flex-direction:column;min-width:0}
 
 /* ---------- sidebar ---------- */
-/* side / tabbar / chat-head share the transparent body backdrop; their divider
-   lines are gradients that fade out approaching the top-left junction, so the
-   corner reads as one piece while normal separation remains elsewhere */
+/* side / tabbar / chat-head share the transparent body backdrop (no tint seams);
+   their divider lines are solid and meet cleanly at the top-left junction */
 .side{
   width:var(--side-w);flex-shrink:0;display:flex;flex-direction:column;height:100%;
   background:transparent;z-index:30;position:relative;
 }
 .side::after{
   content:"";position:absolute;top:0;right:0;bottom:0;width:1px;pointer-events:none;
-  background:linear-gradient(180deg,transparent 0,transparent 84px,var(--line) 170px);
+  background:var(--line);
 }
 .side-resize{
   position:absolute;top:0;right:-3px;width:7px;height:100%;cursor:col-resize;z-index:40;
@@ -207,7 +206,7 @@ label input,label select{margin-top:5px;text-transform:none;letter-spacing:0}
 }
 .tabbar::after{
   content:"";position:absolute;left:0;right:0;bottom:0;height:1px;z-index:-1;pointer-events:none;
-  background:linear-gradient(90deg,transparent 0,var(--line) 110px);
+  background:var(--line);
 }
 .burger{display:none}
 .tabs{display:flex;gap:4px;overflow-x:auto;flex:1;min-width:0;scrollbar-width:none}
@@ -283,7 +282,7 @@ label input,label select{margin-top:5px;text-transform:none;letter-spacing:0}
 }
 .chat-head::after{
   content:"";position:absolute;left:0;right:0;bottom:0;height:1px;pointer-events:none;
-  background:linear-gradient(90deg,transparent 0,var(--line) 110px);
+  background:var(--line);
 }
 .chip{
   display:inline-flex;align-items:center;gap:6px;font-size:11px;font-family:var(--mono);
