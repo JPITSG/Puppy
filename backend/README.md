@@ -91,6 +91,25 @@ Pin changes are intentionally never accepted automatically.
 Adjust the template user, paths, bind address, and network protection before
 installation.
 
+## Scratch workspaces
+
+Controllers can create a session with `workspace_kind: "temporary"` instead of
+supplying a working directory. The backend creates a mode-0700 directory inside
+a private namespace under the OS temporary directory (normally `/tmp`), scoped
+to both the service user and backend data directory. It advertises this contract
+with the `temporary-workspaces` capability, so controllers do not offer it for
+older nodes that would ignore the field.
+
+Scratch files survive an ordinary service restart but are deliberately not
+durable host data. Deleting the session removes them; a reboot or the host's
+temporary-file policy may remove them first. The SQLite session and transcript
+remain in `data/`. A missing workspace is reported as `workspace_missing`, and
+the reset endpoint—or the next turn—creates a new empty directory, clears the
+engine-native session id, and seeds the fresh engine context with a notice that
+the old files were cleared. Startup cleanup removes only unreferenced,
+service-owned directories inside the validated private namespace; normal
+working directories are never removed.
+
 ## Remote upgrades
 
 After the one-time launcher bootstrap, the attached WebUI can upgrade an older

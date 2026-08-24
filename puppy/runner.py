@@ -11,7 +11,7 @@ import signal
 import time
 import uuid
 
-from puppy import config, db, handoff
+from puppy import config, db, handoff, workspaces
 from puppy.drivers import get_driver
 from puppy.drivers.base import clean_env
 
@@ -39,6 +39,15 @@ def drop_hub(session_id: int) -> None:
 
 # ---- session-list broadcasting ----
 
+def session_payload(session):
+    if session is None:
+        return None
+    out = dict(session)
+    out["workspace_kind"] = out.get("workspace_kind") or workspaces.KIND_DIRECTORY
+    out["workspace_missing"] = workspaces.is_temporary(out) and not workspaces.is_available(out)
+    return out
+
+
 def updates_attach(ws) -> None:
     _updates_watchers.add(ws)
 
@@ -57,6 +66,8 @@ def sessions_payload() -> dict:
             "updated_at": s["updated_at"], "model": s["model"], "last_model": s["last_model"],
             "effort": s["effort"], "color": s["color"], "permission_mode": s["permission_mode"],
             "has_native": bool(s["native_session_id"]),
+            "workspace_kind": s.get("workspace_kind") or workspaces.KIND_DIRECTORY,
+            "workspace_missing": workspaces.is_temporary(s) and not workspaces.is_available(s),
         })
     return {"type": "sessions", "sessions": sessions}
 
@@ -113,7 +124,7 @@ class SessionHub:
         session = db.get_session(self.id)
         return {
             "type": "snapshot",
-            "session": session,
+            "session": session_payload(session),
             "events": db.get_events(self.id, limit=200),
             "status": self.status,
             "queued": list(self.queue),
@@ -225,7 +236,8 @@ class SessionHub:
         for perm in updated_permissions or []:
             if isinstance(perm, dict) and perm.get("type") == "setMode" and perm.get("mode"):
                 db.touch_session(self.id, permission_mode=perm["mode"])
-                self.broadcast({"type": "session_meta", "session": db.get_session(self.id)})
+                self.broadcast({"type": "session_meta",
+                                "session": session_payload(db.get_session(self.id))})
         self.broadcast({"type": "approval_resolved", "request_id": request_id, "behavior": behavior})
 
     async def kill(self) -> None:
@@ -260,11 +272,24 @@ class SessionHub:
         got_result = False
         try:
             session = db.get_session(self.id)
+            try:
+                session, workspace_reset = workspaces.ensure_session(session)
+            except workspaces.WorkspaceError as exc:
+                self._emit("error", {"text": "scratch workspace unavailable: {}".format(exc)})
+                return
+            if workspace_reset:
+                self._emit("info", {
+                    "subtype": "workspace_reset",
+                    "text": "Scratch workspace recreated; its previous temporary files were cleared.",
+                })
+                self.broadcast({"type": "session_meta", "session": session_payload(session)})
+                broadcast_sessions()
             driver = get_driver(session["engine"])
             db.touch_session(self.id, status="running")
             broadcast_sessions()
 
-            do_handoff = (not session.get("native_session_id")) and handoff.needs_handoff(session)
+            do_handoff = (not session.get("native_session_id")) and \
+                (workspace_reset or handoff.needs_handoff(session))
             user_ev = self._emit("user", {"text": text})
 
             prompt = text
@@ -347,7 +372,8 @@ class SessionHub:
                                                     "text": f"requested model '{requested}' but engine is serving {new_model}"})
                             session["last_model"] = new_model
                             db.touch_session(self.id, last_model=new_model)
-                            self.broadcast({"type": "session_meta", "session": db.get_session(self.id)})
+                            self.broadcast({"type": "session_meta",
+                                            "session": session_payload(db.get_session(self.id))})
                     elif a == "approval":
                         self.pending_approval = act["req"]
                         self.broadcast({"type": "approval_request", "req": act["req"]})

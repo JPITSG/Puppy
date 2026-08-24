@@ -135,6 +135,28 @@ function tailPath(p, n = 26) {
   return p.length > n ? "…" + p.slice(-n) : p;
 }
 
+function isScratchWorkspace(session) {
+  return !!session && session.workspace_kind === "temporary";
+}
+
+function workspaceLabel(session, n = 26) {
+  if (!isScratchWorkspace(session)) return tailPath((session && session.cwd) || "", n);
+  return session.workspace_missing ? "Scratch workspace expired" : "Scratch workspace";
+}
+
+function workspaceTitle(session) {
+  if (!isScratchWorkspace(session)) return (session && session.cwd) || "";
+  if (session.workspace_missing)
+    return "The host cleared this scratch workspace. It will be recreated before the next turn.";
+  return `Disposable scratch workspace · ${session.cwd}`;
+}
+
+function sessionDeleteMessage(session) {
+  return isScratchWorkspace(session)
+    ? "The transcript and all files in its scratch workspace are removed permanently."
+    : "The puppy transcript is removed permanently. Files in the working directory are not touched.";
+}
+
 function apiPath(bid, path) {
   return bid ? `/api/b/${bid}/${path}` : `/api/${path}`;
 }
@@ -445,6 +467,15 @@ function backendHasCapability(backend, capability) {
   return Array.isArray(backend.capabilities) && backend.capabilities.includes(capability);
 }
 
+function backendSupportsScratch(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(b => b.id === bid);
+  // Protocol-0 nodes ignore unknown create fields, so they must not be offered
+  // a scratch choice that would silently become a normal directory session.
+  return !!backend && Number(backend.protocol || 0) > 0 &&
+    Array.isArray(backend.capabilities) && backend.capabilities.includes("temporary-workspaces");
+}
+
 function renderSidebar() {
   const root = $("sess-groups");
   root.innerHTML = "";
@@ -477,7 +508,10 @@ function renderSidebar() {
       r1.appendChild(el("span", "si-be", backendName(g.bid)));
       const r2 = el("div", "si-row sub");
       r2.appendChild(provIcon(s.engine));
-      r2.appendChild(el("div", "si-sub", tailPath(s.cwd)));
+      const workspace = el("div", "si-sub" + (s.workspace_missing ? " warn" : ""),
+        workspaceLabel(s));
+      workspace.title = workspaceTitle(s);
+      r2.appendChild(workspace);
       item.appendChild(r1); item.appendChild(r2);
       item.onclick = () => { openSessionTab(g.bid, s.id, s); closeDrawer(); };
       item.addEventListener("contextmenu", (e) => sessionContextMenu(e, g.bid, s));
@@ -556,18 +590,31 @@ function sessionContextMenu(ev, bid, s) {
     session: s, tab: { bid, sid: s.id }, updateHead() { refreshGroup(bid); },
   }));
   menu.appendChild(el("div", "menu-sep"));
-  add("Copy cwd", () => copyWithToast(s.cwd));
+  add(isScratchWorkspace(s) ? "Copy workspace path" : "Copy cwd", () => copyWithToast(s.cwd));
   if (s.has_native) add("Copy native session id", async () => {
     try {
       const r = await api(bid, `sessions/${s.id}`);
       await copyWithToast(r.session.native_session_id || "");
     } catch (e) { toast(e.message, "error"); }
   });
+  if (isScratchWorkspace(s)) add(s.workspace_missing ? "Recreate scratch workspace" :
+    "Reset scratch workspace…", async () => {
+    const ok = await modalConfirm(
+      s.workspace_missing ? "Recreate scratch workspace?" : "Reset scratch workspace?",
+      s.workspace_missing ?
+        "Puppy will create a new empty workspace. The transcript is kept." :
+        "All files in this scratch workspace are removed permanently. The transcript is kept.");
+    if (!ok) return;
+    try {
+      await api(bid, `sessions/${s.id}/workspace/reset`, { method: "POST" });
+      refreshGroup(bid);
+      toast(s.workspace_missing ? "scratch workspace recreated" : "scratch workspace reset");
+    } catch (e) { toast(e.message, "error"); }
+  });
   menu.appendChild(el("div", "menu-sep"));
   add(s.archived ? "Unarchive" : "Archive", () => patch({ archived: !s.archived }));
   add("Delete session", async () => {
-    const ok = await modalConfirm("Delete session?",
-      "The puppy transcript is removed permanently. Files in the working directory are not touched.");
+    const ok = await modalConfirm("Delete session?", sessionDeleteMessage(s));
     if (!ok) return;
     try {
       await api(bid, `sessions/${s.id}`, { method: "DELETE" });
@@ -1344,8 +1391,9 @@ class SessionView {
       (state.engMap[s.engine] ? state.engMap[s.engine].label : s.engine) +
       (s.last_model ? " · " + s.last_model.replace(/^claude-/, "") : (s.model ? " · " + s.model : ""));
     const cwd = this.root.querySelector(".chip.cwd");
-    cwd.textContent = tailPath(s.cwd, 34);
-    cwd.title = s.cwd;
+    cwd.textContent = workspaceLabel(s, 34);
+    cwd.title = workspaceTitle(s);
+    cwd.classList.toggle("warn", !!s.workspace_missing);
     this.root.querySelector(".chip.be").textContent = backendName(this.tab.bid);
     const setMini = (cls, label, value) => {
       const button = this.root.querySelector(".mini." + cls);
@@ -1478,7 +1526,9 @@ class SessionView {
           const query = String(d.text || "").replace(/^web search:\s*/i, "");
           return toolCardNode({tool: "web_search", input: query ? {query} : undefined}, true);
         }
-        const n = el("div", "info-line" + (d.subtype === "interrupted" || d.subtype === "model_switch" ? " warn" : ""));
+        const warned = d.subtype === "interrupted" || d.subtype === "model_switch" ||
+          d.subtype === "workspace_reset";
+        const n = el("div", "info-line" + (warned ? " warn" : ""));
         n.textContent = d.text || d.subtype || "";
         return n;
       }
@@ -1749,9 +1799,13 @@ class SessionView {
     add("Dot color…", () => this.pickColor(anchor));
     add("Switch engine…", () => modalSwitchEngine(this));
     menu.appendChild(el("div", "menu-sep"));
-    add("Copy cwd", () => copyWithToast(this.session.cwd));
+    add(isScratchWorkspace(this.session) ? "Copy workspace path" : "Copy cwd",
+      () => copyWithToast(this.session.cwd));
     if (this.session && this.session.native_session_id)
       add("Copy native session id", () => copyWithToast(this.session.native_session_id));
+    if (isScratchWorkspace(this.session))
+      add(this.session.workspace_missing ? "Recreate scratch workspace" :
+        "Reset scratch workspace…", () => this.resetWorkspace());
     menu.appendChild(el("div", "menu-sep"));
     add(this.session && this.session.archived ? "Unarchive" : "Archive", () => this.archive());
     add("Delete session", () => this.deleteSession(), true);
@@ -1852,14 +1906,31 @@ class SessionView {
   }
 
   async deleteSession() {
-    const ok = await modalConfirm("Delete session?",
-      "The puppy transcript is removed permanently. Files in the working directory are not touched.");
+    const ok = await modalConfirm("Delete session?", sessionDeleteMessage(this.session));
     if (!ok) return;
     try {
       await api(this.tab.bid, `sessions/${this.tab.sid}`, { method: "DELETE" });
       closeTab(this.tab.id);
       if (this.tab.bid) pollRemotes();
       toast("session deleted");
+    } catch (e) { toast(e.message, "error"); }
+  }
+
+  async resetWorkspace() {
+    if (!isScratchWorkspace(this.session)) return;
+    const wasMissing = !!this.session.workspace_missing;
+    const ok = await modalConfirm(
+      wasMissing ? "Recreate scratch workspace?" : "Reset scratch workspace?",
+      wasMissing ? "Puppy will create a new empty workspace. The transcript is kept." :
+        "All files in this scratch workspace are removed permanently. The transcript is kept.");
+    if (!ok) return;
+    try {
+      const r = await api(this.tab.bid, `sessions/${this.tab.sid}/workspace/reset`,
+        { method: "POST" });
+      this.session = r.session;
+      this.updateHead();
+      if (this.tab.bid) pollRemotes();
+      toast(wasMissing ? "scratch workspace recreated" : "scratch workspace reset");
     } catch (e) { toast(e.message, "error"); }
   }
 }
@@ -2272,9 +2343,22 @@ async function modalNewSession() {
   const { m, close } = modal(`<h2>New session</h2>
     <label>Backend<select id="ns-be">${beOpts.map(b => `<option value="${b.id}">${esc(b.name)}</option>`).join("")}</select></label>
     <div class="engine-pick" id="ns-engines"></div>
-    <label>Working directory<input type="text" id="ns-cwd" spellcheck="false"></label>
-    <div class="dirpick hidden" id="ns-dirs"></div>
-    <label class="check" style="margin:8px 0"><input type="checkbox" id="ns-mkdir"> create directory if missing</label>
+    <div class="field-lbl">Workspace
+      <div class="workspace-pick" id="ns-workspace">
+        <button type="button" class="wp sel" data-kind="directory" aria-pressed="true">
+          <span class="wp-name">Directory</span><span class="wp-sub">Use a project folder</span>
+        </button>
+        <button type="button" class="wp" data-kind="temporary" aria-pressed="false">
+          <span class="wp-name">Scratch</span><span class="wp-sub">No folder to choose</span>
+        </button>
+      </div>
+    </div>
+    <div id="ns-dir-fields">
+      <label>Working directory<input type="text" id="ns-cwd" spellcheck="false"></label>
+      <div class="dirpick hidden" id="ns-dirs"></div>
+      <label class="check" style="margin:8px 0"><input type="checkbox" id="ns-mkdir"> create directory if missing</label>
+    </div>
+    <p class="hint scratch-note hidden" id="ns-scratch-note">Puppy creates a private empty workspace in the host's temporary storage (normally /tmp). It survives Puppy restarts and is deleted with this session, but the host may clear it—commonly on reboot. The transcript is kept and Puppy can start a fresh workspace.</p>
     <label>Name <span style="text-transform:none;letter-spacing:0">(optional, auto from first message)</span><input type="text" id="ns-name"></label>
     <div class="field-row">
       <label>Model<select id="ns-model"></select></label>
@@ -2292,6 +2376,11 @@ async function modalNewSession() {
   const effortSel = m.querySelector("#ns-effort");
   const customWrap = m.querySelector("#ns-model-custom-wrap");
   const customInp = m.querySelector("#ns-model-custom");
+  const workspaceBox = m.querySelector("#ns-workspace");
+  const directoryFields = m.querySelector("#ns-dir-fields");
+  const scratchNote = m.querySelector("#ns-scratch-note");
+  const scratchButton = workspaceBox.querySelector('[data-kind="temporary"]');
+  let workspaceKind = "directory";
   modelSel.onchange = () => customWrap.classList.toggle("hidden", modelSel.value !== "__custom__");
 
   const colorBox = m.querySelector("#ns-colors");
@@ -2315,6 +2404,31 @@ async function modalNewSession() {
   cwdInp.value = lsGet("puppy.lastcwd") || state.defaultCwd || "/";
   let engines = [];
   let engine = null;
+
+  function pickWorkspace(kind) {
+    if (kind === "temporary" && scratchButton.disabled) return;
+    workspaceKind = kind;
+    workspaceBox.querySelectorAll(".wp").forEach(button => {
+      const selected = button.dataset.kind === kind;
+      button.classList.toggle("sel", selected);
+      button.setAttribute("aria-pressed", selected ? "true" : "false");
+    });
+    directoryFields.classList.toggle("hidden", kind !== "directory");
+    scratchNote.classList.toggle("hidden", kind !== "temporary");
+    if (kind !== "directory") dirBox.classList.add("hidden");
+  }
+  workspaceBox.querySelectorAll(".wp").forEach(button => {
+    button.onclick = () => pickWorkspace(button.dataset.kind);
+  });
+
+  function syncWorkspaceSupport() {
+    const supported = backendSupportsScratch(parseInt(beSel.value, 10));
+    scratchButton.disabled = !supported;
+    scratchButton.title = supported ? "" : "Upgrade this backend to use scratch workspaces";
+    scratchButton.querySelector(".wp-sub").textContent = supported ?
+      "No folder to choose" : "Backend upgrade required";
+    if (!supported && workspaceKind === "temporary") pickWorkspace("directory");
+  }
 
   async function loadEngines() {
     const bid = parseInt(beSel.value, 10);
@@ -2355,7 +2469,8 @@ async function modalNewSession() {
     fill(effortSel, e2 ? e2.effort_options : [], "");
     modelSel.onchange();
   }
-  beSel.onchange = loadEngines;
+  beSel.onchange = () => { syncWorkspaceSupport(); loadEngines(); };
+  syncWorkspaceSupport();
   await loadEngines();
 
   /* directory browser */
@@ -2388,12 +2503,14 @@ async function modalNewSession() {
     if (!engine) { toast("pick an engine", "error"); return; }
     try {
       const r = await api(bid, "sessions", { method: "POST", body: {
-        engine, cwd: cwdInp.value.trim(), name: m.querySelector("#ns-name").value,
+        engine, workspace_kind: workspaceKind,
+        cwd: workspaceKind === "directory" ? cwdInp.value.trim() : "",
+        name: m.querySelector("#ns-name").value,
         model: modelSel.value === "__custom__" ? customInp.value.trim() : modelSel.value,
         effort: effortSel.value, permission_mode: permSel.value, color: nsColor,
-        mkdir: m.querySelector("#ns-mkdir").checked,
+        mkdir: workspaceKind === "directory" && m.querySelector("#ns-mkdir").checked,
       }});
-      lsSet("puppy.lastcwd", cwdInp.value.trim());
+      if (workspaceKind === "directory") lsSet("puppy.lastcwd", cwdInp.value.trim());
       close();
       if (bid) await pollRemotes();
       openSessionTab(bid, r.session.id, r.session);
@@ -2413,7 +2530,8 @@ function modalOpenSession() {
     const q = filterInp.value.toLowerCase();
     list.innerHTML = "";
     for (const g of groups) {
-      const matches = g.sessions.filter(s => !q || (s.name || "").toLowerCase().includes(q) || (s.cwd || "").toLowerCase().includes(q));
+      const matches = g.sessions.filter(s => !q || (s.name || "").toLowerCase().includes(q) ||
+        (s.cwd || "").toLowerCase().includes(q) || workspaceLabel(s).toLowerCase().includes(q));
       if (!matches.length) continue;
       if (groups.length > 1) list.appendChild(el("div", "sess-group-title", g.name));
       for (const s of matches) {
@@ -2423,7 +2541,10 @@ function modalOpenSession() {
         r1.appendChild(el("div", "si-name", (s.name || `session ${s.id}`) + (s.archived ? " (archived)" : "")));
         const r2 = el("div", "si-row sub");
         r2.appendChild(provIcon(s.engine));
-        r2.appendChild(el("div", "si-sub", tailPath(s.cwd)));
+        const workspace = el("div", "si-sub" + (s.workspace_missing ? " warn" : ""),
+          workspaceLabel(s));
+        workspace.title = workspaceTitle(s);
+        r2.appendChild(workspace);
         item.appendChild(r1); item.appendChild(r2);
         item.onclick = () => { close(); openSessionTab(g.bid, s.id, s); };
         list.appendChild(item);

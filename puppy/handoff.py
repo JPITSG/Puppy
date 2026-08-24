@@ -3,6 +3,8 @@ preamble so a fresh native session on another engine can continue the work.
 The filesystem state carries most of the real context; this carries the narrative."""
 from __future__ import annotations
 
+import json
+
 from puppy import db
 
 MAX_CHARS = 16000
@@ -28,6 +30,9 @@ def _fmt(ev) -> str:
         return f"[{prefix}: {content}]" if content else ""
     if k == "engine_switch":
         return f"[session was moved from {d.get('from', '?')} to {d.get('to', '?')}]"
+    if k == "info" and d.get("subtype") == "workspace_reset":
+        return ("[scratch workspace reset: the previous temporary files were cleared; "
+                "this is a new empty workspace]")
     if k == "error":
         return f"[error: {d.get('text', '')}]"
     return ""
@@ -37,10 +42,20 @@ def needs_handoff(session: dict) -> bool:
     """Fresh native session but existing meaningful history -> seed with handoff."""
     if session.get("native_session_id"):
         return False
-    row = db.query_one(
-        "SELECT id FROM events WHERE session_id=? AND kind IN ('assistant','tool_use') LIMIT 1",
-        (session["id"],))
-    return row is not None
+    if db.query_one(
+            "SELECT id FROM events WHERE session_id=? "
+            "AND kind IN ('assistant','tool_use') LIMIT 1", (session["id"],)):
+        return True
+    rows = db.query(
+        "SELECT payload FROM events WHERE session_id=? AND kind='info' "
+        "ORDER BY seq DESC LIMIT 50", (session["id"],))
+    for row in rows:
+        try:
+            if json.loads(row["payload"]).get("subtype") == "workspace_reset":
+                return True
+        except Exception:
+            pass
+    return False
 
 
 def build(session: dict, exclude_seq=None) -> str:
@@ -49,7 +64,8 @@ def build(session: dict, exclude_seq=None) -> str:
     for ev in events:
         if exclude_seq is not None and ev["seq"] == exclude_seq:
             continue
-        if ev["kind"] in ("user", "assistant", "tool_use", "tool_result", "engine_switch", "error"):
+        if ev["kind"] in ("user", "assistant", "tool_use", "tool_result",
+                          "engine_switch", "info", "error"):
             s = _fmt(ev)
             if s:
                 parts.append(s)
@@ -61,8 +77,9 @@ def build(session: dict, exclude_seq=None) -> str:
 
     return (
         "You are taking over an ongoing AI coding session. A previous agent worked in this "
-        f"same working directory ({session['cwd']}); the current state of the files reflects "
-        "its work. The conversation so far is transcribed below. Read it, then continue the "
+        f"same working directory ({session['cwd']}); the filesystem may carry its work unless "
+        "a lifecycle notice below says the workspace was reset. The conversation so far is "
+        "transcribed below. Read it, then continue the "
         "session seamlessly - do not re-introduce yourself or redo completed work.\n\n"
         "----- PREVIOUS CONVERSATION -----\n\n"
         + body +

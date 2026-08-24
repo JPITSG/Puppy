@@ -18,6 +18,11 @@ approvals, multi-backend support and built-in web terminals.
 - **Engine switching**: a session can be moved claude ⇄ codex at any point. The
   new engine starts a fresh native session seeded with a transcript handoff in
   the same working directory.
+- **Scratch workspaces**: a session can start in a private, disposable workspace
+  without choosing a project directory. Its transcript remains durable while
+  its files live under the host's temporary filesystem and are removed with the
+  session. If the host clears them (commonly on reboot), Puppy marks the
+  workspace expired and safely starts fresh instead of resuming stale context.
 - **Multi-backend**: pair full Puppy instances or the API-only headless package
   in `backend/` (Settings → Backends, using pairing JSON or URL + API token).
   The browser stays single-origin; this instance proxies HTTP + websockets to
@@ -63,10 +68,12 @@ reports an independently versioned controller/backend protocol.
 
 ## Data & config
 
-Everything private lives in `data/` (gitignored): `config.json` (instance name,
-port, api token, terminal command), `puppy.db` (sessions, transcripts, users),
-backend TLS identities, and `puppy.log`. The repo itself is clean code, safe to
-publish.
+Persistent private state lives in `data/` (gitignored): `config.json` (instance
+name, port, api token, terminal command), `puppy.db` (sessions, transcripts,
+users), backend TLS identities, and `puppy.log`. Scratch-session files are the
+intentional exception: they live in a mode-0700, instance-specific namespace
+under the OS temporary directory and are disposable. The repo itself is clean
+code, safe to publish.
 
 ## Compliance
 

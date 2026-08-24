@@ -11,7 +11,7 @@ import time
 
 from aiohttp import WSMsgType, web
 
-from puppy import __version__, auth, backends, config, db, protocol, runner, terminal
+from puppy import __version__, auth, backends, config, db, protocol, runner, terminal, workspaces
 from puppy.drivers import all_drivers, get_driver
 
 log = logging.getLogger("puppy.web")
@@ -124,32 +124,49 @@ async def h_session_create(request: web.Request):
         driver = get_driver(engine)
     except KeyError:
         return web.json_response({"error": f"unknown engine '{engine}'"}, status=400)
-    cwd = os.path.abspath((body.get("cwd") or "").strip() or config.get("sessions.default_cwd", "/"))
-    if not os.path.isdir(cwd):
-        if body.get("mkdir"):
-            try:
-                os.makedirs(cwd, exist_ok=True)
-            except OSError as e:
-                return web.json_response({"error": f"mkdir failed: {e}"}, status=400)
-        else:
-            return web.json_response({"error": f"directory does not exist: {cwd}", "mkdir_possible": True},
-                                     status=400)
+    workspace_kind = str(body.get("workspace_kind") or workspaces.KIND_DIRECTORY)
+    if workspace_kind not in workspaces.KINDS:
+        return web.json_response({"error": "unknown workspace kind"}, status=400)
+    cwd = ""
+    if workspace_kind == workspaces.KIND_DIRECTORY:
+        cwd = os.path.abspath(
+            str(body.get("cwd") or "").strip() or config.get("sessions.default_cwd", "/"))
+        if not os.path.isdir(cwd):
+            if body.get("mkdir"):
+                try:
+                    os.makedirs(cwd, exist_ok=True)
+                except OSError as e:
+                    return web.json_response({"error": f"mkdir failed: {e}"}, status=400)
+            else:
+                return web.json_response(
+                    {"error": f"directory does not exist: {cwd}", "mkdir_possible": True},
+                    status=400)
     perm = body.get("permission_mode") or driver.default_permission()
     if perm not in [o["value"] for o in driver.permission_options()]:
         perm = driver.default_permission()
-    effort = (body.get("effort") or "").strip()
+    effort = str(body.get("effort") or "").strip()
     if effort not in [o["value"] for o in driver.effort_options()]:
         effort = ""
     color = body.get("color") if body.get("color") in db.SESSION_COLORS else random.choice(db.SESSION_COLORS)
-    now = time.time()
-    sid = db.execute(
-        "INSERT INTO sessions(name,engine,cwd,model,effort,color,permission_mode,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
-        ((body.get("name") or "").strip()[:80], engine, cwd,
-         (body.get("model") or "").strip()[:60], effort, color, perm, now, now))
-    db.execute("UPDATE sessions SET sort_order=(SELECT COALESCE(MAX(sort_order),0)+1 FROM sessions) WHERE id=?", (sid,))
+    name = str(body.get("name") or "").strip()[:80]
+    model = str(body.get("model") or "").strip()[:60]
+    created_workspace = ""
+    if workspace_kind == workspaces.KIND_TEMPORARY:
+        try:
+            cwd = created_workspace = workspaces.create_temporary()
+        except workspaces.WorkspaceError as exc:
+            return web.json_response({"error": str(exc)}, status=500)
+    try:
+        sid = db.create_session(name, engine, cwd, model, effort, color, perm,
+                                workspace_kind=workspace_kind)
+    except Exception:
+        if created_workspace:
+            workspaces.discard_created(created_workspace)
+        raise
     runner.broadcast_sessions()
-    log.info("session %s created engine=%s cwd=%s", sid, engine, cwd)
-    return web.json_response({"ok": True, "session": db.get_session(sid)})
+    log.info("session %s created engine=%s workspace=%s cwd=%s",
+             sid, engine, workspace_kind, cwd)
+    return web.json_response({"ok": True, "session": runner.session_payload(db.get_session(sid))})
 
 
 async def h_sessions_reorder(request: web.Request):
@@ -165,7 +182,7 @@ async def h_sessions_reorder(request: web.Request):
 async def h_session_get(request: web.Request):
     s = _session_or_404(request)
     h = runner.hub(s["id"])
-    return web.json_response({"session": s, "status": h.status,
+    return web.json_response({"session": runner.session_payload(s), "status": h.status,
                               "events": db.get_events(s["id"], limit=200)})
 
 
@@ -194,8 +211,10 @@ async def h_session_patch(request: web.Request):
     if fields:
         db.touch_session(s["id"], **fields)
         runner.broadcast_sessions()
-        runner.hub(s["id"]).broadcast({"type": "session_meta", "session": db.get_session(s["id"])})
-    return web.json_response({"ok": True, "session": db.get_session(s["id"])})
+        runner.hub(s["id"]).broadcast(
+            {"type": "session_meta", "session": runner.session_payload(db.get_session(s["id"]))})
+    return web.json_response(
+        {"ok": True, "session": runner.session_payload(db.get_session(s["id"]))})
 
 
 IMAGE_TYPES = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif"}
@@ -222,12 +241,43 @@ async def h_session_upload(request: web.Request):
 
 async def h_session_delete(request: web.Request):
     s = _session_or_404(request)
+    if runner.hub(s["id"]).status == "running":
+        return web.json_response(
+            {"error": "turn in progress - stop it before deleting the session"}, status=409)
+    try:
+        workspace_removed = workspaces.remove_temporary(s)
+    except workspaces.WorkspaceError as exc:
+        return web.json_response({"error": str(exc)}, status=500)
     runner.drop_hub(s["id"])
     shutil.rmtree(os.path.join(config.DATA_DIR, "uploads", str(s["id"])), ignore_errors=True)
     db.delete_session(s["id"])
     runner.broadcast_sessions()
-    log.info("session %s deleted", s["id"])
-    return web.json_response({"ok": True})
+    log.info("session %s deleted workspace_removed=%s", s["id"], workspace_removed)
+    return web.json_response({"ok": True, "workspace_removed": workspace_removed})
+
+
+async def h_session_workspace_reset(request: web.Request):
+    s = _session_or_404(request)
+    h = runner.hub(s["id"])
+    if h.status == "running":
+        return web.json_response(
+            {"error": "turn in progress - stop it before resetting the workspace"}, status=409)
+    if not workspaces.is_temporary(s):
+        return web.json_response({"error": "this session does not use a scratch workspace"},
+                                 status=400)
+    try:
+        updated = workspaces.reset_session(s)
+    except workspaces.WorkspaceError as exc:
+        return web.json_response({"error": str(exc)}, status=500)
+    ev = db.add_event(s["id"], "info", {
+        "subtype": "workspace_reset",
+        "text": "Scratch workspace reset; its previous temporary files were cleared.",
+    })
+    h.broadcast({"type": "event", "event": ev})
+    h.broadcast({"type": "session_meta", "session": runner.session_payload(updated)})
+    runner.broadcast_sessions()
+    log.info("session %s scratch workspace reset", s["id"])
+    return web.json_response({"ok": True, "session": runner.session_payload(updated)})
 
 
 async def h_session_message(request: web.Request):
@@ -260,10 +310,12 @@ async def h_session_switch(request: web.Request):
     db.touch_session(s["id"], engine=engine, native_session_id="", model="", effort="",
                      last_model="", permission_mode=driver.default_permission())
     h.broadcast({"type": "event", "event": ev})
-    h.broadcast({"type": "session_meta", "session": db.get_session(s["id"])})
+    h.broadcast({"type": "session_meta",
+                 "session": runner.session_payload(db.get_session(s["id"]))})
     runner.broadcast_sessions()
     log.info("session %s switched %s -> %s", s["id"], old, engine)
-    return web.json_response({"ok": True, "session": db.get_session(s["id"])})
+    return web.json_response(
+        {"ok": True, "session": runner.session_payload(db.get_session(s["id"]))})
 
 
 async def h_session_events(request: web.Request):
@@ -426,6 +478,7 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     r.add_get("/api/sessions/{sid:\\d+}", h_session_get)
     r.add_patch("/api/sessions/{sid:\\d+}", h_session_patch)
     r.add_delete("/api/sessions/{sid:\\d+}", h_session_delete)
+    r.add_post("/api/sessions/{sid:\\d+}/workspace/reset", h_session_workspace_reset)
     r.add_post("/api/sessions/{sid:\\d+}/message", h_session_message)
     r.add_post("/api/sessions/{sid:\\d+}/upload", h_session_upload)
     r.add_post("/api/sessions/{sid:\\d+}/interrupt", h_session_interrupt)

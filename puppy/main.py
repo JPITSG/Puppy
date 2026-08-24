@@ -7,7 +7,7 @@ import sys
 
 from aiohttp import web as aioweb
 
-from puppy import __version__, config, db
+from puppy import __version__, config, db, workspaces
 
 
 def setup_logging() -> None:
@@ -36,6 +36,7 @@ def initialize_runtime() -> None:
     setup_logging()
     config.load()
     db.connect()
+    workspaces.cleanup_orphans()
     # a previous unclean shutdown can leave sessions stuck on 'running';
     # nothing is actually running at boot (and restart.sh keys off this)
     db.execute("UPDATE sessions SET status='idle' WHERE status!='idle'")

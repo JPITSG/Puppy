@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     last_model TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'idle',
     archived INTEGER NOT NULL DEFAULT 0,
+    workspace_kind TEXT NOT NULL DEFAULT 'directory',
     sort_order INTEGER NOT NULL DEFAULT 0,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
@@ -109,6 +110,9 @@ def _migrate(conn) -> None:
         for (sid,) in conn.execute("SELECT id FROM sessions").fetchall():
             conn.execute("UPDATE sessions SET color=? WHERE id=?",
                          (random.choice(SESSION_COLORS), sid))
+    if "workspace_kind" not in cols:
+        conn.execute(
+            "ALTER TABLE sessions ADD COLUMN workspace_kind TEXT NOT NULL DEFAULT 'directory'")
     backend_cols = {r["name"] for r in conn.execute("PRAGMA table_info(backends)")}
     if "protocol" not in backend_cols:
         conn.execute("ALTER TABLE backends ADD COLUMN protocol INTEGER NOT NULL DEFAULT 0")
@@ -163,6 +167,34 @@ def meta_set(key: str, value) -> None:
 
 
 # ---- session helpers ----
+
+def create_session(name: str, engine: str, cwd: str, model: str, effort: str,
+                   color: str, permission_mode: str,
+                   workspace_kind: str = "directory") -> int:
+    """Create a session and assign its sticky order in one transaction."""
+    with _lock:
+        conn = connect()
+        now = time.time()
+        cursor = None
+        try:
+            row = conn.execute(
+                "SELECT COALESCE(MAX(sort_order),0)+1 AS n FROM sessions").fetchone()
+            cursor = conn.execute(
+                "INSERT INTO sessions(name,engine,cwd,model,effort,color,permission_mode,"
+                "workspace_kind,sort_order,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (name, engine, cwd, model, effort, color, permission_mode,
+                 workspace_kind, row["n"], now, now))
+            session_id = int(cursor.lastrowid)
+            conn.commit()
+            return session_id
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            if cursor is not None:
+                cursor.close()
+
 
 def session_row_to_dict(row) -> dict:
     d = dict(row)
@@ -227,5 +259,8 @@ def get_events(session_id: int, before_seq=None, limit: int = 200) -> list:
 
 
 def delete_session(session_id: int) -> None:
-    execute("DELETE FROM events WHERE session_id=?", (session_id,))
-    execute("DELETE FROM sessions WHERE id=?", (session_id,))
+    with _lock:
+        conn = connect()
+        conn.execute("DELETE FROM events WHERE session_id=?", (session_id,))
+        conn.execute("DELETE FROM sessions WHERE id=?", (session_id,))
+        conn.commit()

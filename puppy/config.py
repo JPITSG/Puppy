@@ -1,4 +1,4 @@
-"""Paths, config.json handling. All user config / private data lives in data/."""
+"""Paths and config.json handling for Puppy's durable private state."""
 from __future__ import annotations
 
 import copy

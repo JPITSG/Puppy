@@ -158,6 +158,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert ping["protocol"] == 1
         assert ping["version"] == expected_version
         assert "sessions" in ping["capabilities"]
+        assert "temporary-workspaces" in ping["capabilities"]
         assert "terminal" not in ping["capabilities"]
         assert ("pinned-tls" in ping["capabilities"]) is bool(fingerprint)
         assert ping["transport"]["encrypted"] is bool(fingerprint)
@@ -179,6 +180,75 @@ async def exercise_node(url: str, token: str, expected_version: str,
         first = await updates.receive_json(timeout=3)
         assert first["type"] == "sessions" and first["sessions"] == []
         await updates.close()
+
+        async with http.post(url + "/api/sessions", headers=good, ssl=pinned, json={
+                "engine": "codex", "workspace_kind": "not-a-workspace",
+        }) as response:
+            assert response.status == 400
+        async with http.post(url + "/api/sessions", headers=good, ssl=pinned, json={
+                "engine": "codex", "workspace_kind": "temporary", "name": "scratch-test",
+        }) as response:
+            created = await response.json()
+            assert response.status == 200, created
+        scratch = created["session"]
+        assert scratch["workspace_kind"] == "temporary"
+        assert scratch["workspace_missing"] is False
+        scratch_path = Path(scratch["cwd"])
+        assert scratch_path.is_dir()
+        assert scratch_path.name.startswith("session-")
+        assert scratch_path.parent.parent.name.startswith("puppy-workspaces-")
+        assert scratch_path.stat().st_mode & 0o777 == 0o700
+        (scratch_path / "throw-away.txt").write_text("disposable", encoding="utf-8")
+
+        # Model a boot-time /tmp cleanup. The durable transcript/session stays,
+        # advertises the expiration, and can be given a fresh private workspace.
+        shutil.rmtree(scratch_path)
+        async with http.get(url + f"/api/sessions/{scratch['id']}",
+                            headers=good, ssl=pinned) as response:
+            expired = (await response.json())["session"]
+            assert response.status == 200
+        assert expired["workspace_missing"] is True
+        async with http.post(url + f"/api/sessions/{scratch['id']}/workspace/reset",
+                             headers=good, ssl=pinned) as response:
+            reset = await response.json()
+            assert response.status == 200, reset
+        fresh_path = Path(reset["session"]["cwd"])
+        assert fresh_path != scratch_path and fresh_path.is_dir()
+        assert reset["session"]["workspace_missing"] is False
+        async with http.get(url + f"/api/sessions/{scratch['id']}",
+                            headers=good, ssl=pinned) as response:
+            reset_events = (await response.json())["events"]
+        assert any(event["kind"] == "info" and
+                   event["data"].get("subtype") == "workspace_reset"
+                   for event in reset_events)
+        async with http.delete(url + f"/api/sessions/{scratch['id']}",
+                               headers=good, ssl=pinned) as response:
+            deleted = await response.json()
+            assert response.status == 200 and deleted["workspace_removed"] is True, deleted
+        assert not fresh_path.exists()
+        async with http.get(url + "/api/sessions", headers=good, ssl=pinned) as response:
+            assert (await response.json())["sessions"] == []
+
+        normal_path = Path(tempfile.mkdtemp(prefix="puppy-normal-workspace-"))
+        try:
+            sentinel = normal_path / "must-survive-session-delete.txt"
+            sentinel.write_text("persistent", encoding="utf-8")
+            async with http.post(url + "/api/sessions", headers=good, ssl=pinned, json={
+                    "engine": "codex", "cwd": str(normal_path), "name": "normal-test",
+            }) as response:
+                normal_created = await response.json()
+                assert response.status == 200, normal_created
+            normal = normal_created["session"]
+            assert normal["workspace_kind"] == "directory"
+            async with http.delete(url + f"/api/sessions/{normal['id']}",
+                                   headers=good, ssl=pinned) as response:
+                normal_deleted = await response.json()
+                assert response.status == 200, normal_deleted
+            assert normal_deleted["workspace_removed"] is False
+            assert sentinel.read_text(encoding="utf-8") == "persistent"
+        finally:
+            shutil.rmtree(normal_path, ignore_errors=True)
+
         async with http.get(url + "/api/node/upgrade", headers=good, ssl=pinned) as response:
             status = await response.json()
             assert response.status == 200 and status["supported"] is upgrade_enabled
@@ -257,6 +327,7 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert stored["protocol"] == 1
         assert stored["role"] == "backend"
         assert "sessions" in stored["capabilities"]
+        assert "temporary-workspaces" in stored["capabilities"]
         assert "terminal" not in stored["capabilities"]
         assert "remote-upgrade" in stored["capabilities"]
         assert "pinned-tls" in stored["capabilities"]
@@ -278,6 +349,20 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         first = await remote_updates.receive_json(timeout=3)
         assert first["type"] == "sessions" and first["sessions"] == []
         await remote_updates.close()
+
+        async with http.post(url + f"/api/b/{stored['id']}/sessions", headers=headers, json={
+                "engine": "codex", "workspace_kind": "temporary", "name": "proxied-scratch",
+        }) as response:
+            proxied_created = await response.json()
+            assert response.status == 200, proxied_created
+        proxied_scratch = proxied_created["session"]
+        proxied_path = Path(proxied_scratch["cwd"])
+        assert proxied_scratch["workspace_kind"] == "temporary" and proxied_path.is_dir()
+        async with http.delete(
+                url + f"/api/b/{stored['id']}/sessions/{proxied_scratch['id']}",
+                headers=headers) as response:
+            assert response.status == 200, await response.text()
+        assert not proxied_path.exists()
 
         terminal = await http.ws_connect(
             url + "/api/ws/term?cmd=/bin/bash&cols=80&rows=24", headers=headers)
@@ -513,6 +598,15 @@ async def main() -> None:
         old_db.execute(
             "CREATE TABLE backends (id INTEGER PRIMARY KEY AUTOINCREMENT, "
             "name TEXT NOT NULL, url TEXT NOT NULL, token TEXT NOT NULL, created_at REAL NOT NULL)")
+        old_db.execute(
+            "CREATE TABLE sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "name TEXT NOT NULL DEFAULT '', engine TEXT NOT NULL, cwd TEXT NOT NULL, "
+            "model TEXT NOT NULL DEFAULT '', effort TEXT NOT NULL DEFAULT '', "
+            "color TEXT NOT NULL DEFAULT '', permission_mode TEXT NOT NULL DEFAULT '', "
+            "native_session_id TEXT NOT NULL DEFAULT '', last_model TEXT NOT NULL DEFAULT '', "
+            "status TEXT NOT NULL DEFAULT 'idle', archived INTEGER NOT NULL DEFAULT 0, "
+            "sort_order INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL, "
+            "updated_at REAL NOT NULL)")
         old_db.commit()
         old_db.close()
         os.environ["PUPPY_DATA"] = str(controller_data)
@@ -525,6 +619,8 @@ async def main() -> None:
         db.connect()
         assert "tls_fingerprint" in {
             row["name"] for row in db.query("PRAGMA table_info(backends)")}
+        assert "workspace_kind" in {
+            row["name"] for row in db.query("PRAGMA table_info(sessions)")}
         app = build_app()
         controller_runner = web.AppRunner(app)
         await controller_runner.setup()
