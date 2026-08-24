@@ -303,8 +303,7 @@ function renderSidebar() {
 
 function sessDot(s) {
   const dot = el("span", "sess-dot" + (s.status === "running" ? " running" : ""));
-  dot.style.background = s.color || "var(--txt3)";
-  dot.style.color = s.color || "var(--txt3)";   // currentColor drives the running glow
+  dot.style.color = s.color || "var(--txt3)";   // fill and spinner both ride currentColor
   return dot;
 }
 
@@ -355,7 +354,7 @@ function sessionContextMenu(ev, bid, s) {
     for (const c of state.sessionColors || []) {
       const b = el("button", "swatch" + (s.color === c ? " sel" : ""));
       const d = el("span", "sess-dot");
-      d.style.background = c;
+      d.style.color = c;
       b.appendChild(d);
       b.onclick = (e) => { e.stopPropagation(); cm.remove(); patch({ color: c }); };
       cm.appendChild(b);
@@ -577,7 +576,7 @@ function renderTabs() {
       if (meta) t.title = meta.name || `session ${t.sid}`;
     } else if (t.type === "term") dotCls = "term";
     const tdot = el("span", "t-dot " + dotCls);
-    if (dotColor) { tdot.style.background = dotColor; tdot.style.color = dotColor; }
+    if (dotColor) tdot.style.color = dotColor;
     tab.appendChild(tdot);
     tab.appendChild(el("span", "t-title", t.title || "tab"));
     if (t.type === "session") {
@@ -1427,7 +1426,7 @@ class SessionView {
     for (const c of state.sessionColors || []) {
       const b = el("button", "swatch" + (this.session && this.session.color === c ? " sel" : ""));
       const d = el("span", "sess-dot");
-      d.style.background = c;
+      d.style.color = c;
       b.appendChild(d);
       b.onclick = async (e) => {
         e.stopPropagation(); menu.remove();
@@ -1831,7 +1830,7 @@ async function modalNewSession() {
       const b = el("button", "swatch" + (c === nsColor ? " sel" : ""));
       b.type = "button";
       const d = el("span", "sess-dot");
-      d.style.background = c;
+      d.style.color = c;
       b.appendChild(d);
       b.onclick = () => { nsColor = c; renderColors(); };
       colorBox.appendChild(b);
