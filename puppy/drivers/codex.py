@@ -10,6 +10,8 @@ Event schema (verified against codex-cli 0.149.0):
 Item types: agent_message, reasoning, command_execution, file_change,
 mcp_tool_call, web_search, todo_list, error.
 exec mode has no interactive approvals - the sandbox policy is the control.
+New completed item types that look call-shaped are preserved as generic tool
+pairs so CLI additions do not silently disappear from the transcript.
 """
 from __future__ import annotations
 
@@ -136,6 +138,101 @@ def _clean_cmd(cmd) -> str:
     return inner
 
 
+def _text_value(value, limit: int = 20000) -> str:
+    """Readable, bounded text for structured tool results."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        text = value
+    else:
+        try:
+            text = json.dumps(value, ensure_ascii=False, indent=2)
+        except Exception:
+            text = str(value)
+    return text[:limit]
+
+
+def _completed_tool(tool: str, tool_input, result, item_id: str,
+                    is_error: bool = False) -> list:
+    """Normalize a completed one-shot CLI item into the shared tool pair."""
+    return [
+        {"a": "event", "kind": "tool_use",
+         "data": {"tool": tool, "input": tool_input, "tool_use_id": item_id}},
+        {"a": "event", "kind": "tool_result",
+         "data": {"tool_use_id": item_id, "content": _text_value(result),
+                  "is_error": bool(is_error)}},
+    ]
+
+
+def _web_search_input(item: dict) -> dict:
+    action = item.get("action")
+    out = dict(action) if isinstance(action, dict) else {}
+    if action is not None and not isinstance(action, dict):
+        out["action"] = action
+    query = item.get("query")
+    if query and not out.get("query") and not out.get("queries") and not out.get("url"):
+        out["query"] = query
+    return out
+
+
+def _web_search_result(item: dict) -> str:
+    results = item.get("results")
+    if isinstance(results, list):
+        blocks = []
+        for result in results:
+            if not isinstance(result, dict):
+                blocks.append(_text_value(result, 2000))
+                continue
+            title = str(result.get("title") or result.get("name") or
+                        result.get("ref_id") or "result")
+            url = str(result.get("url") or "")
+            snippet = str(result.get("snippet") or result.get("text") or "")
+            lines = [title]
+            if url:
+                lines.append(url)
+            if snippet:
+                lines.append(snippet)
+            blocks.append("\n".join(lines))
+        if blocks:
+            return "\n\n".join(blocks)[:20000]
+    elif results is not None:
+        return _text_value(results)
+    for key in ("result", "output", "error", "message"):
+        if item.get(key) is not None:
+            return _text_value(item.get(key))
+    return "(search completed)"
+
+
+def _looks_like_tool_item(item: dict) -> bool:
+    """Catch new CLI call types without turning lifecycle items into cards."""
+    item_type = str(item.get("type") or "").lower()
+    markers = ("tool", "call", "execution", "change", "search", "fetch",
+               "browse", "view", "generation", "activity")
+    if any(marker in item_type for marker in markers):
+        return True
+    return any(key in item for key in ("arguments", "input", "command", "path", "url"))
+
+
+def _generic_tool(item: dict, item_id: str) -> list:
+    result_keys = ("result", "results", "aggregated_output", "output", "error", "message")
+    omitted = {"type", "id", "name", "tool", "status", "arguments", "input", *result_keys}
+    if "arguments" in item:
+        tool_input = item.get("arguments")
+    elif "input" in item:
+        tool_input = item.get("input")
+    else:
+        tool_input = {key: value for key, value in item.items() if key not in omitted}
+    if tool_input is None:
+        tool_input = {}
+    result = next((item.get(key) for key in result_keys if item.get(key) is not None), None)
+    status = str(item.get("status") or "").lower()
+    is_error = status in ("failed", "error") or bool(item.get("error"))
+    if result is None:
+        result = "({} completed)".format(str(item.get("type") or "tool").replace("_", " "))
+    tool = str(item.get("name") or item.get("tool") or item.get("type") or "tool")
+    return _completed_tool(tool, tool_input, result, item_id, is_error)
+
+
 class CodexDriver(Driver):
     key = "codex"
     label = "Codex"
@@ -218,18 +315,32 @@ class CodexDriver(Driver):
 
         if t in ("item.started", "item.updated"):
             item = ev.get("item") or {}
+            if not isinstance(item, dict):
+                return []
             it = item.get("type", "")
             if it == "command_execution":
                 return [{"a": "transient", "msg": {"type": "status",
                                                    "text": f"$ {_clean_cmd(item.get('command'))[:120]}"}}]
             if it == "agent_message" and item.get("text"):
                 return [{"a": "transient", "msg": {"type": "status", "text": "writing..."}}]
+            if it == "web_search":
+                search_input = _web_search_input(item)
+                query = search_input.get("query") or search_input.get("url") or ""
+                if not query and isinstance(search_input.get("queries"), list):
+                    query = next((value for value in search_input["queries"] if value), "")
+                text = "web search" + (": " + str(query)[:100] if query else "...")
+                return [{"a": "transient", "msg": {"type": "status", "text": text}}]
             return []
 
         if t == "item.completed":
             item = ev.get("item") or {}
+            if not isinstance(item, dict):
+                return []
             it = item.get("type", "")
-            iid = item.get("id", "")
+            iid = str(item.get("id") or "")
+            if not iid:
+                ctx["item_seq"] = int(ctx.get("item_seq", 0)) + 1
+                iid = "codex-item-{}".format(ctx["item_seq"])
             if it == "agent_message":
                 return [{"a": "event", "kind": "assistant", "data": {"text": item.get("text", "")}}]
             if it == "reasoning":
@@ -237,44 +348,39 @@ class CodexDriver(Driver):
             if it == "command_execution":
                 out = item.get("aggregated_output") or item.get("output") or ""
                 code = item.get("exit_code")
-                return [
-                    {"a": "event", "kind": "tool_use",
-                     "data": {"tool": "shell", "input": {"command": _clean_cmd(item.get("command"))},
-                              "tool_use_id": iid}},
-                    {"a": "event", "kind": "tool_result",
-                     "data": {"tool_use_id": iid, "content": str(out)[:20000],
-                              "is_error": bool(code) and code != 0}},
-                ]
+                return _completed_tool(
+                    "shell", {"command": _clean_cmd(item.get("command"))}, out, iid,
+                    code not in (None, 0, "0"))
             if it == "file_change":
                 changes = item.get("changes") or []
-                summary = "\n".join(f"{c.get('kind', 'edit')}: {c.get('path', '?')}" for c in changes) or "(no changes)"
-                return [
-                    {"a": "event", "kind": "tool_use",
-                     "data": {"tool": "file_change", "input": {"changes": changes}, "tool_use_id": iid}},
-                    {"a": "event", "kind": "tool_result",
-                     "data": {"tool_use_id": iid, "content": summary, "is_error": False}},
-                ]
+                if not isinstance(changes, list):
+                    changes = [changes]
+                summary = "\n".join(
+                    "{}: {}".format(c.get("kind", "edit"), c.get("path", "?"))
+                    if isinstance(c, dict) else str(c) for c in changes) or "(no changes)"
+                return _completed_tool("file_change", {"changes": changes}, summary, iid)
             if it == "mcp_tool_call":
-                tool = ".".join(x for x in (item.get("server", ""), item.get("tool", "")) if x) or "mcp"
-                return [
-                    {"a": "event", "kind": "tool_use",
-                     "data": {"tool": tool, "input": item.get("arguments") or {}, "tool_use_id": iid}},
-                    {"a": "event", "kind": "tool_result",
-                     "data": {"tool_use_id": iid,
-                              "content": json.dumps(item.get("result"))[:8000] if item.get("result") is not None else str(item.get("status", "")),
-                              "is_error": item.get("status") == "failed"}},
-                ]
+                tool = ".".join(str(x) for x in
+                                (item.get("server", ""), item.get("tool", "")) if x) or "mcp"
+                result = item.get("result") if item.get("result") is not None else item.get("status", "")
+                return _completed_tool(tool, item.get("arguments") or {}, result, iid,
+                                       item.get("status") == "failed")
             if it == "web_search":
-                return [{"a": "event", "kind": "info",
-                         "data": {"subtype": "web_search", "text": f"web search: {item.get('query', '')}"}}]
+                status = str(item.get("status") or "").lower()
+                return _completed_tool(
+                    "web_search", _web_search_input(item), _web_search_result(item), iid,
+                    status in ("failed", "error") or bool(item.get("error")))
             if it == "todo_list":
                 items = item.get("items") or []
-                txt = "\n".join(("[x] " if x.get("completed") else "[ ] ") + x.get("text", "")
+                txt = "\n".join(("[x] " if x.get("completed") else "[ ] ") +
+                                str(x.get("text", ""))
                                 for x in items if isinstance(x, dict))
                 return [{"a": "transient", "msg": {"type": "status", "text": "plan updated"}},
                         {"a": "event", "kind": "info", "data": {"subtype": "todo", "text": txt}}] if txt else []
             if it == "error":
                 return [{"a": "event", "kind": "error", "data": {"text": item.get("message", "codex error")}}]
+            if _looks_like_tool_item(item):
+                return _generic_tool(item, iid)
             return []
 
         if t == "token_count":

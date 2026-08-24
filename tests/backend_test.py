@@ -22,6 +22,63 @@ BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 
 from puppy import __version__, protocol, upgrade_contract  # noqa: E402
+from puppy.drivers.codex import CodexDriver  # noqa: E402
+
+
+def exercise_driver_normalization() -> None:
+    driver = CodexDriver()
+    context = {}
+    search = driver.parse_line(json.dumps({
+        "type": "item.completed",
+        "item": {
+            "type": "web_search", "id": "search-1", "status": "completed",
+            "query": "python TLS support ...",
+            "action": {"type": "search", "query": None,
+                       "queries": ["python 3.9 TLS", "aiohttp certificate pin"]},
+            "results": [
+                {"title": "ssl documentation", "url": "https://docs.python.org/3/library/ssl.html",
+                 "snippet": "TLS support in the standard library."},
+                {"title": "aiohttp documentation", "url": "https://docs.aiohttp.org/",
+                 "snippet": "Fingerprint verification."},
+            ],
+        },
+    }), context)
+    assert [action.get("kind") for action in search] == ["tool_use", "tool_result"]
+    assert search[0]["data"]["tool"] == "web_search"
+    assert search[0]["data"]["input"]["queries"] == \
+        ["python 3.9 TLS", "aiohttp certificate pin"]
+    assert "https://docs.python.org/" in search[1]["data"]["content"]
+    assert search[1]["data"]["is_error"] is False
+
+    structured_search = driver.parse_line(json.dumps({
+        "type": "item.completed",
+        "item": {"type": "web_search", "action": "open_page",
+                 "results": {"url": "https://example.test/", "status": 200}},
+    }), context)
+    assert structured_search[0]["data"]["input"] == {"action": "open_page"}
+    assert structured_search[0]["data"]["tool_use_id"] == "codex-item-1"
+    assert '"status": 200' in structured_search[1]["data"]["content"]
+
+    image = driver.parse_line(json.dumps({
+        "type": "item.completed",
+        "item": {"type": "image_view", "id": "image-1", "path": "/data/example.png"},
+    }), context)
+    assert [action.get("kind") for action in image] == ["tool_use", "tool_result"]
+    assert image[0]["data"]["input"] == {"path": "/data/example.png"}
+
+    future_call = driver.parse_line(json.dumps({
+        "type": "item.completed",
+        "item": {"type": "collab_agent_tool_call", "id": "call-1", "name": "delegate",
+                 "arguments": {"task": "inspect"}, "result": {"status": "done"}},
+    }), context)
+    assert [action.get("kind") for action in future_call] == ["tool_use", "tool_result"]
+    assert future_call[0]["data"]["tool"] == "delegate"
+    assert '"status": "done"' in future_call[1]["data"]["content"]
+
+    lifecycle = driver.parse_line(json.dumps({
+        "type": "item.completed", "item": {"type": "context_compaction", "id": "compact-1"},
+    }), context)
+    assert lifecycle == []
 
 
 def free_port() -> int:
@@ -342,6 +399,7 @@ async def main() -> None:
     disabled_process = None
     controller_runner = None
     try:
+        exercise_driver_normalization()
         release_artifact = temp_root / "release" / "puppy-backend.pyz"
         subprocess.run([sys.executable, str(BASE / "backend" / "build.py"),
                         "--output", str(release_artifact)], cwd=str(BASE), check=True)

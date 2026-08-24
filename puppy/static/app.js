@@ -111,6 +111,7 @@ function md(text) {
 
 /* append text to node with URLs as clickable new-tab links (DOM-built, no innerHTML) */
 function linkifyInto(node, text) {
+  text = String(text == null ? "" : text);
   const re = /https?:\/\/[^\s<>"]+/g;
   let last = 0, m;
   while ((m = re.exec(text))) {
@@ -830,15 +831,62 @@ const TOOL_ICONS = {
   Bash: "$", shell: "$", Read: "📄", Write: "✏️", Edit: "✏️", file_change: "✏️",
   Grep: "🔎", Glob: "🔎", WebSearch: "🌐", WebFetch: "🌐", Task: "🤖", TodoWrite: "☑",
 };
+function displayValue(value, limit = 12000) {
+  let text;
+  if (value == null) text = "";
+  else if (typeof value === "string") text = value;
+  else {
+    try { text = JSON.stringify(value, null, 2); }
+    catch (e) { text = String(value); }
+    if (text === undefined) text = String(value);
+  }
+  return text.length > limit ? text.slice(0, limit) + "…" : text;
+}
+function toolIcon(tool) {
+  if (TOOL_ICONS[tool]) return TOOL_ICONS[tool];
+  const name = String(tool || "").toLowerCase();
+  if (/(web|search|browse|fetch|url)/.test(name)) return "🌐";
+  if (/(read|view|image)/.test(name)) return "📄";
+  if (/(write|edit|patch|change|file)/.test(name)) return "✏️";
+  if (/(shell|exec|command|bash)/.test(name)) return "$";
+  if (/(todo|plan)/.test(name)) return "☑";
+  if (/(task|agent|collab)/.test(name)) return "🤖";
+  return "🔧";
+}
+function toolLabel(tool) {
+  return String(tool || "tool").replace(/_/g, " ");
+}
 function toolSummary(tool, input) {
-  if (!input) return "";
-  if (input.command) return input.command;
-  if (input.file_path) return input.file_path;
-  if (input.pattern) return input.pattern;
-  if (input.query) return input.query;
-  if (input.changes) return input.changes.map(c => c.path).join(", ");
-  const s = JSON.stringify(input);
-  return s.length > 120 ? s.slice(0, 120) + "…" : s;
+  if (input == null) return "";
+  if (typeof input !== "object") return displayValue(input, 120);
+  for (const key of ["command", "file_path", "path", "pattern", "query", "url"])
+    if (input[key]) return displayValue(input[key], 120).replace(/\s+/g, " ");
+  if (Array.isArray(input.queries))
+    return displayValue(input.queries.map(x => displayValue(x, 80)).join(" · "), 120);
+  if (Array.isArray(input.changes)) return displayValue(input.changes.map(c =>
+    c && typeof c === "object" ? (c.path || c.file_path || displayValue(c, 50)) : displayValue(c, 50)
+  ).join(", "), 120);
+  return displayValue(input, 120).replace(/\s+/g, " ");
+}
+function toolCardNode(data, completed = false) {
+  const d = data || {};
+  const n = el("div", "tool-card" + (d.is_error ? " err" : ""));
+  const head = el("div", "tool-head");
+  head.appendChild(el("span", "t-caret", "❯"));
+  head.appendChild(el("span", "t-ico", toolIcon(d.tool)));
+  head.appendChild(el("span", "t-name", toolLabel(d.tool)));
+  head.appendChild(linkifyInto(el("span", "t-sum"), toolSummary(d.tool, d.input)));
+  const stateEl = el("span", "t-state", completed ? (d.is_error ? "✗" : "✔") : "…");
+  if (completed) stateEl.classList.add(d.is_error ? "bad" : "ok");
+  head.appendChild(stateEl);
+  const body = el("div", "tool-body");
+  if (d.input !== undefined) {
+    body.appendChild(el("div", "tb-label", "input"));
+    body.appendChild(linkifyInto(el("pre"), displayValue(d.input)));
+  }
+  head.onclick = () => n.classList.toggle("open");
+  n.appendChild(head); n.appendChild(body);
+  return n;
 }
 
 class SessionView {
@@ -1243,19 +1291,7 @@ class SessionView {
         return n;
       }
       case "tool_use": {
-        const n = el("div", "tool-card");
-        const head = el("div", "tool-head");
-        head.appendChild(el("span", "t-caret", "❯"));
-        head.appendChild(el("span", "t-ico", TOOL_ICONS[d.tool] || "🔧"));
-        head.appendChild(el("span", "t-name", d.tool || "tool"));
-        head.appendChild(linkifyInto(el("span", "t-sum"), toolSummary(d.tool, d.input)));
-        head.appendChild(el("span", "t-state", "…"));
-        const body = el("div", "tool-body");
-        const inp = linkifyInto(el("pre"), JSON.stringify(d.input || {}, null, 2));
-        body.appendChild(el("div", "tb-label", "input"));
-        body.appendChild(inp);
-        head.onclick = () => n.classList.toggle("open");
-        n.appendChild(head); n.appendChild(body);
+        const n = toolCardNode(d);
         if (d.tool_use_id) this.toolCards[d.tool_use_id] = n;
         return n;
       }
@@ -1268,14 +1304,14 @@ class SessionView {
           if (d.is_error) card.classList.add("err");
           const body = card.querySelector(".tool-body");
           body.appendChild(el("div", "tb-label", d.is_error ? "error" : "result"));
-          body.appendChild(linkifyInto(el("pre"), (d.content || "").slice(0, 12000) || "(empty)"));
+          body.appendChild(linkifyInto(el("pre"), displayValue(d.content) || "(empty)"));
           return null;
         }
-        const n = el("div", "tool-card" + (d.is_error ? " err" : "") + " open");
-        n.appendChild(el("div", "tool-head"));
-        const body = el("div", "tool-body");
-        body.appendChild(linkifyInto(el("pre"), (d.content || "").slice(0, 12000)));
-        n.appendChild(body);
+        const n = toolCardNode({tool: d.tool || "tool_result", is_error: d.is_error}, true);
+        n.classList.add("open");
+        const body = n.querySelector(".tool-body");
+        body.appendChild(el("div", "tb-label", d.is_error ? "error" : "result"));
+        body.appendChild(linkifyInto(el("pre"), displayValue(d.content) || "(empty)"));
         return n;
       }
       case "info": {
@@ -1291,6 +1327,10 @@ class SessionView {
             n.appendChild(row);
           }
           return n;
+        }
+        if (d.subtype === "web_search") {
+          const query = String(d.text || "").replace(/^web search:\s*/i, "");
+          return toolCardNode({tool: "web_search", input: query ? {query} : undefined}, true);
         }
         const n = el("div", "info-line" + (d.subtype === "interrupted" || d.subtype === "model_switch" ? " warn" : ""));
         n.textContent = d.text || d.subtype || "";
