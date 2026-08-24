@@ -1714,21 +1714,74 @@ class TermView {
 class SettingsView {
   constructor(tab) {
     this.tab = tab;
+    this.renderGeneration = 0;
     this.root = el("div", "view settings");
     this.root.innerHTML = `<div class="settings-scroll"><div class="settings-inner"></div></div>`;
     $("views").appendChild(this.root);
     this.inner = this.root.querySelector(".settings-inner");
-    this.render();
   }
-  destroy() { this.root.remove(); }
+  destroy() { this.renderGeneration++; this.root.remove(); }
   onShow() { this.render(); }
 
+  engineRow(e2) {
+    const row = el("div", "kv");
+    row.appendChild(el("span", "engine-dot " + e2.key));
+    row.appendChild(el("span", "k", e2.label));
+    row.appendChild(el("span", "pill " + (e2.installed ? "ok" : "bad"),
+      e2.installed ? (e2.version || "installed") : "not installed"));
+    row.appendChild(el("span", "pill " + (e2.auth === "ok" ? "ok" : "bad"), "auth: " + e2.auth));
+    if (e2.rate_limit && e2.rate_limit.resetsAt) {
+      const reset = new Date(e2.rate_limit.resetsAt * 1000);
+      row.appendChild(el("span", "pill " + (e2.rate_limit.status === "allowed" ? "" : "warn"),
+        `${e2.rate_limit.rateLimitType || "window"} resets ${reset.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`));
+    }
+    return row;
+  }
+
+  engineGroup(name, meta) {
+    const root = el("section", "engine-node");
+    const head = el("div", "engine-node-head");
+    const dot = el("span", "gdot pending");
+    head.appendChild(dot);
+    const nameEl = el("span", "engine-node-name", name);
+    nameEl.title = name;
+    const metaEl = el("span", "engine-node-meta", meta);
+    metaEl.title = meta;
+    head.appendChild(nameEl);
+    head.appendChild(metaEl);
+    const body = el("div", "engine-node-body");
+    root.appendChild(head); root.appendChild(body);
+
+    const update = ({ status = "pending", engines = null, message = "", detail = "" }) => {
+      dot.className = "gdot " + status;
+      dot.title = status === "ok" ? "available" : status === "bad" ? "unavailable" : "checking";
+      body.innerHTML = "";
+      if (message || engines === null) {
+        const note = el("div", "engine-node-message", message || "Checking engines…");
+        if (detail) note.title = detail;
+        body.appendChild(note);
+      } else if (!engines.length) {
+        body.appendChild(el("div", "engine-node-message", "No engines reported"));
+      } else {
+        engines.forEach(e2 => body.appendChild(this.engineRow(e2)));
+      }
+    };
+    return { root, update };
+  }
+
   async render() {
+    const generation = ++this.renderGeneration;
     let settings, engines;
     try {
       [settings, engines] = await Promise.all([api(0, "settings"), api(0, "engines")]);
-    } catch (e) { this.inner.innerHTML = `<div class="err-card">${esc(e.message)}</div>`; return; }
+    } catch (e) {
+      if (generation === this.renderGeneration)
+        this.inner.innerHTML = `<div class="err-card">${esc(e.message)}</div>`;
+      return;
+    }
+    if (generation !== this.renderGeneration) return;
     state.engines = engines.engines;
+    state.engMap = {};
     state.engines.forEach(e2 => state.engMap[e2.key] = e2);
     renderFootEngines();
     this.inner.innerHTML = "";
@@ -1761,7 +1814,7 @@ class SettingsView {
           default_cwd: c1.querySelector("#set-cwd").value,
           terminal_command: c1.querySelector("#set-term").value,
         }});
-        toast("saved", "ok"); refreshState();
+        toast("saved", "ok"); await refreshState(); await this.render();
       } catch (e) { toast(e.message, "error"); }
     };
     c1.querySelector("#set-logout").onclick = async () => {
@@ -1772,19 +1825,29 @@ class SettingsView {
     /* engines */
     const c2 = el("div", "card");
     c2.innerHTML = `<h2>Engines</h2>`;
-    for (const e2 of state.engines) {
-      const row = el("div", "kv");
-      row.appendChild(el("span", "engine-dot " + e2.key));
-      const name = el("span", "k", e2.label);
-      row.appendChild(name);
-      row.appendChild(el("span", "pill " + (e2.installed ? "ok" : "bad"), e2.installed ? (e2.version || "installed") : "not installed"));
-      row.appendChild(el("span", "pill " + (e2.auth === "ok" ? "ok" : "bad"), "auth: " + e2.auth));
-      if (e2.rate_limit && e2.rate_limit.resetsAt) {
-        const reset = new Date(e2.rate_limit.resetsAt * 1000);
-        row.appendChild(el("span", "pill " + (e2.rate_limit.status === "allowed" ? "" : "warn"),
-          `${e2.rate_limit.rateLimitType || "window"} resets ${reset.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`));
-      }
-      c2.appendChild(row);
+    const localGroup = this.engineGroup(settings.instance_name, `this instance · v${settings.version}`);
+    localGroup.update({ status: "ok", engines: state.engines });
+    c2.appendChild(localGroup.root);
+    for (const b of state.backends) {
+      const meta = [b.remote_version ? `v${b.remote_version}` : "", b.url].filter(Boolean).join(" · ");
+      const group = this.engineGroup(b.name, meta);
+      const cached = state.engCache[b.id];
+      group.update({
+        status: state.remoteOk[b.id] === false ? "bad" : state.remoteOk[b.id] === true ? "ok" : "pending",
+        engines: cached || null,
+      });
+      c2.appendChild(group.root);
+      api(b.id, "engines").then(result => {
+        if (generation !== this.renderGeneration) return;
+        const remoteEngines = Array.isArray(result.engines) ? result.engines : [];
+        state.engCache[b.id] = remoteEngines;
+        state.remoteOk[b.id] = true;
+        group.update({ status: "ok", engines: remoteEngines });
+      }).catch(error => {
+        if (generation !== this.renderGeneration) return;
+        state.remoteOk[b.id] = false;
+        group.update({ status: "bad", engines: [], message: "Backend unavailable", detail: error.message });
+      });
     }
     this.inner.appendChild(c2);
 
@@ -1816,7 +1879,10 @@ class SettingsView {
           try {
             const r = await api(0, `backends/${b.id}/test`, { method: "POST" });
             test.textContent = "Test";
-            if (r.ok) toast(`${b.name}: ok (${r.remote && r.remote.version})`, "ok");
+            if (r.ok) {
+              toast(`${b.name}: ok (${r.remote && r.remote.version})`, "ok");
+              await refreshState(); await this.render();
+            }
             else toast(`${b.name}: ${r.error || "HTTP " + r.status}`, "error");
           } catch (e) { test.textContent = "Test"; toast(e.message, "error"); }
         };
@@ -1824,7 +1890,8 @@ class SettingsView {
         rm.onclick = async () => {
           if (!(await modalConfirm("Remove backend?", `${b.name} (${b.url})`))) return;
           await api(0, `backends/${b.id}`, { method: "DELETE" });
-          await refreshState(); renderBes(); renderSidebar();
+          delete state.engCache[b.id]; delete state.remoteOk[b.id]; delete state.remoteSessions[b.id];
+          await refreshState(); await this.render();
         };
         row.appendChild(test); row.appendChild(rm);
         beList.appendChild(row);
@@ -1851,9 +1918,9 @@ class SettingsView {
           token: pairingValue("#be-token", "token"),
         }});
         toast("backend added", "ok");
-        await refreshState(); renderBes(); pollRemotes();
         c3.querySelector("#be-name").value = c3.querySelector("#be-url").value = c3.querySelector("#be-token").value = "";
         c3.querySelector("#be-pairing").value = "";
+        await refreshState(); await this.render(); pollRemotes();
       } catch (e) { toast(e.message, "error"); }
     };
     this.inner.appendChild(c3);
