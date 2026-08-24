@@ -312,6 +312,14 @@ label input,label select{margin-top:5px;text-transform:none;letter-spacing:0}
   background:var(--line);
 }
 .burger{display:none}
+/* the burger mirrors the + at the other end of the bar: same 26px box, same
+   optical centre. The bar carries 8px of top padding and none at the bottom,
+   so a centred item sits 8px low and its hover box would meet the divider -
+   the -8px cancels that, the same trick .tab-add-wrap uses. */
+.tabbar .burger{width:26px;height:26px;border-radius:8px;margin-top:-8px;position:relative}
+.tabbar .burger svg{display:block}
+/* the visual box stays 26px; the tap target fills the bar's height */
+.tabbar .burger::after,.tab-add-wrap .icon-btn::after{content:"";position:absolute;inset:-8px -6px}
 .tabs{display:flex;gap:4px;overflow-x:auto;flex:1;min-width:0;scrollbar-width:none}
 .tabs::-webkit-scrollbar{display:none}
 .tab{
@@ -346,7 +354,7 @@ label input,label select{margin-top:5px;text-transform:none;letter-spacing:0}
 /* stretch over the bar's full height (incl. its 8px top padding) so the +
    sits at the true vertical center with an even hover halo */
 .tab-add-wrap{position:relative;display:flex;align-items:center;align-self:stretch;margin-top:-8px}
-.tab-add-wrap .icon-btn{width:26px;height:26px;font-size:14px;border-radius:8px}
+.tab-add-wrap .icon-btn{width:26px;height:26px;font-size:14px;border-radius:8px;position:relative}
 
 /* ---------- menus ---------- */
 .menu{
