@@ -257,12 +257,20 @@ function connectUpdates() {
 
 async function pollRemotes() {
   for (const b of state.backends) {
+    let reachable = false;
     try {
       const d = await api(b.id, "sessions");
       state.remoteSessions[b.id] = d.sessions || [];
       state.remoteOk[b.id] = true;
+      reachable = true;
     } catch (e) {
       state.remoteOk[b.id] = false;
+    }
+    if (reachable && !state.engCache[b.id]) {
+      try {
+        const d = await api(b.id, "engines");
+        state.engCache[b.id] = Array.isArray(d.engines) ? d.engines : [];
+      } catch (e) { /* retry on the next remote poll */ }
     }
   }
   if (state.backends.length) renderSidebar();
@@ -479,19 +487,47 @@ function weeklyQuotaLeft(e) {
 function renderFootEngines() {
   const root = $("foot-engines");
   root.innerHTML = "";
-  for (const e of state.engines) {
-    const row = el("div", "foot-eng");
-    const ico = el("span", "foot-ico");
-    ico.appendChild(el("span", `engine-dot ${e.key}`));
-    row.appendChild(ico);
-    row.appendChild(document.createTextNode(e.label));
-    const pct = weeklyQuotaLeft(e);
-    const stTxt = !e.installed ? "missing" : (e.auth === "ok" ? "ready" : "no auth");
-    const st = el("span", "st " + (e.installed && e.auth === "ok" ? "ok" : "bad"),
-      stTxt + (pct != null ? ` · ${Math.round(pct)}% wk` : ""));
-    if (pct != null) st.title = `${Math.round(pct)}% of the weekly quota remaining`;
-    row.appendChild(st);
-    root.appendChild(row);
+  const groups = [{ bid: 0, name: backendName(0), engines: state.engines }]
+    .concat(state.backends.map(b => ({
+      bid: b.id, name: b.name,
+      engines: Object.prototype.hasOwnProperty.call(state.engCache, b.id) ? state.engCache[b.id] : null,
+    })));
+  const showGroups = groups.length > 1;
+  for (const g of groups) {
+    const group = el("div", "foot-engine-group");
+    if (showGroups) {
+      const head = el("div", "foot-engine-head");
+      const ico = el("span", "foot-ico");
+      const status = g.bid === 0 ? "ok" : state.remoteOk[g.bid] === false ? "bad" :
+        state.remoteOk[g.bid] === true ? "ok" : "pending";
+      const dot = el("span", "gdot " + status);
+      dot.title = status === "ok" ? "available" : status === "bad" ? "unavailable" : "checking";
+      ico.appendChild(dot);
+      head.appendChild(ico);
+      head.appendChild(el("span", "foot-engine-name", g.name));
+      group.appendChild(head);
+    }
+    if (g.bid && state.remoteOk[g.bid] === false) {
+      group.appendChild(el("div", "foot-engine-empty", "backend unavailable"));
+    } else if (g.engines === null) {
+      group.appendChild(el("div", "foot-engine-empty", "checking engines…"));
+    } else if (!g.engines.length) {
+      group.appendChild(el("div", "foot-engine-empty", "no engines reported"));
+    } else for (const e of g.engines) {
+      const row = el("div", "foot-eng");
+      const ico = el("span", "foot-ico");
+      ico.appendChild(el("span", `engine-dot ${e.key}`));
+      row.appendChild(ico);
+      row.appendChild(document.createTextNode(e.label));
+      const pct = weeklyQuotaLeft(e);
+      const stTxt = !e.installed ? "missing" : (e.auth === "ok" ? "ready" : "no auth");
+      const st = el("span", "st " + (e.installed && e.auth === "ok" ? "ok" : "bad"),
+        stTxt + (pct != null ? ` · ${Math.round(pct)}% wk` : ""));
+      if (pct != null) st.title = `${Math.round(pct)}% of the weekly quota remaining`;
+      row.appendChild(st);
+      group.appendChild(row);
+    }
+    root.appendChild(group);
   }
 }
 
@@ -1843,10 +1879,13 @@ class SettingsView {
         state.engCache[b.id] = remoteEngines;
         state.remoteOk[b.id] = true;
         group.update({ status: "ok", engines: remoteEngines });
+        renderFootEngines();
       }).catch(error => {
         if (generation !== this.renderGeneration) return;
         state.remoteOk[b.id] = false;
+        delete state.engCache[b.id];
         group.update({ status: "bad", engines: [], message: "Backend unavailable", detail: error.message });
+        renderFootEngines();
       });
     }
     this.inner.appendChild(c2);

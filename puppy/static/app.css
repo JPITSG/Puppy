@@ -186,7 +186,18 @@ a{color:var(--acc2)}
 @media (hover:hover){.linklike:hover{color:var(--txt);text-decoration-color:var(--line3)}}
 .linklike:active{color:var(--txt2)}
 .side-foot{border-top:1px solid var(--line);padding:10px 14px;display:flex;flex-direction:column;gap:8px}
-.foot-engines{display:flex;flex-direction:column;gap:4px}
+.foot-engines{display:flex;flex-direction:column;gap:4px;max-height:38dvh;overflow-y:auto}
+.foot-engine-group{display:flex;flex-direction:column;gap:4px}
+.foot-engine-group+.foot-engine-group{border-top:1px solid var(--line);margin-top:3px;padding-top:7px}
+.foot-engine-head{display:flex;align-items:center;gap:6px;min-width:0;color:var(--txt3)}
+.foot-engine-head .gdot{width:6px;height:6px;border-radius:50%;background:var(--txt3)}
+.foot-engine-head .gdot.ok{background:var(--ok)}
+.foot-engine-head .gdot.bad{background:var(--err)}
+.foot-engine-name{
+  min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-size:9px;font-weight:650;text-transform:uppercase;letter-spacing:.1em;
+}
+.foot-engine-empty{padding-left:22px;color:var(--txt3);font-size:10px}
 .foot-eng{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--txt2)}
 /* -8px pulls the icon column left so the dots' visual inset matches the 14px right inset */
 .foot-ico{width:24px;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-left:-8px}
