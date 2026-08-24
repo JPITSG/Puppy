@@ -1865,7 +1865,7 @@ class SettingsView {
     localGroup.update({ status: "ok", engines: state.engines });
     c2.appendChild(localGroup.root);
     for (const b of state.backends) {
-      const meta = [b.remote_version ? `v${b.remote_version}` : "", b.url].filter(Boolean).join(" · ");
+      const meta = [b.url, b.remote_version ? `v${b.remote_version}` : ""].filter(Boolean).join(" · ");
       const group = this.engineGroup(b.name, meta);
       const cached = state.engCache[b.id];
       group.update({
