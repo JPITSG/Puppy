@@ -608,19 +608,27 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   min-height:24px;max-height:224px;font-size:13.5px;line-height:20px;
 }
 .attach-strip{display:flex;gap:6px;flex-wrap:wrap}
+/* a pasted image previews as a thumbnail: its filename is a millisecond stamp,
+   which tells the user nothing the picture doesn't */
 .attach-chip{
-  display:inline-flex;align-items:center;gap:5px;font-size:11px;font-family:var(--mono);
-  color:var(--txt2);background:var(--panel3);border:1px solid var(--line);border-radius:7px;
-  padding:3px 4px 3px 8px;
+  position:relative;display:inline-flex;line-height:0;
+  background:var(--panel3);border:1px solid var(--line2);border-radius:9px;overflow:hidden;
+}
+/* contain, not cover: these are usually screenshots, and a cropped slice of
+   one shows nothing useful. Wide images letterbox into the panel colour. */
+.attach-chip .attach-thumb{
+  display:block;height:54px;width:auto;max-width:140px;min-width:26px;
+  object-fit:contain;background:var(--panel2);
 }
 .attach-chip .attach-x{
-  display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;
-  width:16px;height:16px;border:none;background:none;color:var(--txt3);cursor:pointer;
-  font-size:13px;line-height:1;padding:0;border-radius:50%;
-  transition:background .12s var(--ease),color .12s var(--ease),transform .12s var(--ease);
+  position:absolute;top:4px;right:4px;
+  display:inline-flex;align-items:center;justify-content:center;
+  width:18px;height:18px;padding:0;border:none;border-radius:50%;cursor:pointer;
+  background:rgba(6,9,14,.6);color:#fff;font-size:13px;line-height:1;
+  transition:background .12s var(--ease),transform .12s var(--ease);
 }
-@media (hover:hover){.attach-chip .attach-x:hover{color:var(--txt);background:var(--hov)}}
-.attach-chip .attach-x:active{transform:scale(.88);color:var(--txt);background:var(--hov)}
+@media (hover:hover){.attach-chip .attach-x:hover{background:rgba(6,9,14,.85)}}
+.attach-chip .attach-x:active{transform:scale(.88);background:rgba(6,9,14,.85)}
 .composer-row{display:flex;align-items:center;gap:8px}
 .composer-row .mini{
   display:inline-flex;align-items:center;justify-content:center;gap:4px;flex-shrink:0;

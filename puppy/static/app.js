@@ -781,7 +781,7 @@ class SessionView {
     this.history = [];        // sent messages, oldest first (shell-style recall)
     this.histIdx = null;
     this.histDraft = "";
-    this.attachments = [];    // server paths of pasted images, sent with the next message
+    this.attachments = [];    // {path, url}: server path sent with the message, blob url for the preview
     this.buildDom();
     this._onResize = () => { this.syncGutter(); this.syncComposerMeta(); this.syncHeadOverflow(); this.syncQueueFade(); };
     window.addEventListener("resize", this._onResize);
@@ -909,6 +909,7 @@ class SessionView {
     this.closed = true;
     window.removeEventListener("resize", this._onResize);
     if (this.ws) try { this.ws.close(); } catch (e) {}
+    this.attachments.forEach(a => URL.revokeObjectURL(a.url));
     this.root.remove();
   }
 
@@ -1300,7 +1301,9 @@ class SessionView {
         });
         const d = await r.json().catch(() => null);
         if (!r.ok) throw new Error((d && d.error) || `HTTP ${r.status}`);
-        this.attachments.push(d.path);
+        /* the blob is already in hand, so the thumbnail costs no round trip -
+           the uploads directory is not served over HTTP */
+        this.attachments.push({ path: d.path, url: URL.createObjectURL(blob) });
         this.renderAttachments();
       } catch (err) {
         toast("image upload failed: " + err.message, "error");
@@ -1311,13 +1314,18 @@ class SessionView {
   renderAttachments() {
     this.attachStrip.innerHTML = "";
     this.attachStrip.classList.toggle("hidden", !this.attachments.length);
-    for (const p of this.attachments) {
+    for (const a of this.attachments) {
       const chip = el("span", "attach-chip");
-      chip.appendChild(el("span", "", "🖼 " + p.split("/").pop()));
+      const img = el("img", "attach-thumb");
+      img.src = a.url;
+      img.alt = "pasted image";
+      img.title = a.path.split("/").pop();
+      chip.appendChild(img);
       const x = el("button", "attach-x", "×");
       x.title = "Remove attachment";
       x.onclick = () => {
-        this.attachments = this.attachments.filter(a => a !== p);
+        URL.revokeObjectURL(a.url);
+        this.attachments = this.attachments.filter(o => o !== a);
         this.renderAttachments();
       };
       chip.appendChild(x);
@@ -1330,8 +1338,10 @@ class SessionView {
     if (!text && !this.attachments.length) return;
     if (!this.ws || this.ws.readyState !== 1) { toast("not connected", "error"); return; }
     if (this.attachments.length) {
-      const lines = this.attachments.map(p => `[image attached: ${p} — view it with your image/file tools]`).join("\n");
+      const lines = this.attachments
+        .map(a => `[image attached: ${a.path} — view it with your image/file tools]`).join("\n");
       text = text ? text + "\n\n" + lines : lines;
+      this.attachments.forEach(a => URL.revokeObjectURL(a.url));
       this.attachments = [];
       this.renderAttachments();
     }
