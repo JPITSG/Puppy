@@ -39,6 +39,16 @@ def drop_hub(session_id: int) -> None:
 
 # ---- session-list broadcasting ----
 
+def _is_queued_config(item) -> bool:
+    """Queue items are prompt strings, except pending model/effort changes."""
+    return isinstance(item, dict) and item.get("kind") == "config"
+
+
+def _queued_config_key(fields: dict) -> str:
+    """Stable identity a console echoes back to cancel a pending change."""
+    return "config:" + json.dumps(fields, sort_keys=True)
+
+
 def parse_used_config(raw):
     """{model, effort} of the last turn that actually ran, or None if the
     session has not run one since it was created or moved to this engine."""
@@ -179,10 +189,27 @@ class SessionHub:
             "status": self.status,
             "active_since": self.active_since if self.status == "running" else None,
             "server_time": time.time(),
-            "queued": list(self.queue),
+            "queued": self._queue_wire(),
             "pending_approval": self.pending_approval,
             "uploads": uploads.settings_payload(),
         }
+
+    def _queue_wire(self) -> list:
+        """Wire form of the queue: prompts stay plain strings, so consoles from
+        before pending changes existed keep rendering them; a pending change is
+        an additive {kind:"config", key, model?, effort?} entry."""
+        out = []
+        for item in self.queue:
+            if _is_queued_config(item):
+                entry = {"kind": "config", "key": item.get("key") or ""}
+                entry.update(item.get("fields") or {})
+                out.append(entry)
+            else:
+                out.append(item)
+        return out
+
+    def _broadcast_queue(self) -> None:
+        self.broadcast({"type": "queued", "queued": self._queue_wire()})
 
     # ---- public ops ----
 
@@ -197,29 +224,58 @@ class SessionHub:
             name = text.splitlines()[0][:48]
             db.touch_session(self.id, name=name)
             broadcast_sessions()
-        if self.status == "running":
+        # also queue behind a non-empty queue while idle (the moment between a
+        # turn ending and its successor starting): a pending change in there
+        # must still apply before this prompt runs
+        if self.status == "running" or self.queue:
             self.queue.append(text)
-            self.broadcast({"type": "queued", "queued": list(self.queue)})
+            self._broadcast_queue()
             return {"queued": True}
         self._start_turn(text)
         return {"queued": False}
 
+    def queue_config(self, fields: dict) -> bool:
+        """Hold a model/effort change until everything already queued has run:
+        the user changed it after sending those prompts, so they belong to the
+        configuration that was showing when they were written. Consecutive
+        changes collapse into one pending entry. Returns False when nothing is
+        pending and the change should just apply immediately."""
+        clean = {k: str(v) for k, v in fields.items() if k in ("model", "effort")}
+        if not clean:
+            return False
+        if self.status != "running" and not self.queue:
+            return False
+        last = self.queue[-1] if self.queue else None
+        if _is_queued_config(last):
+            last["fields"].update(clean)
+            last["key"] = _queued_config_key(last["fields"])
+        else:
+            self.queue.append({"kind": "config", "fields": clean,
+                               "key": _queued_config_key(clean)})
+        self._broadcast_queue()
+        return True
+
     def unqueue(self, index: int, text: str) -> dict:
-        """Drop a message that is still waiting. The index is guarded by its
-        text so a turn finishing between the click and this call - which shifts
-        every index down by one - cannot cancel the wrong message."""
-        if not 0 <= index < len(self.queue) or self.queue[index] != text:
+        """Drop a message or pending change that is still waiting. The index is
+        guarded by the item's text (its key, for a change) so a turn finishing
+        between the click and this call - which shifts every index down by one
+        - cannot cancel the wrong item."""
+        if not 0 <= index < len(self.queue):
+            return {"error": "that message already started"}
+        item = self.queue[index]
+        ident = item.get("key") if _is_queued_config(item) else item
+        if ident != text:
             return {"error": "that message already started"}
         self.queue.pop(index)
-        self.broadcast({"type": "queued", "queued": list(self.queue)})
+        self._broadcast_queue()
         return {"ok": True}
 
     def clear_queue(self) -> int:
-        """Drop every message that has not started yet and return the count."""
+        """Drop everything that has not started yet and return the count."""
         count = len(self.queue)
         if count:
             self.queue.clear()
-            self.broadcast({"type": "queued", "queued": []})
+            self._broadcast_queue()
         return count
 
     def _start_turn(self, text: str) -> None:
@@ -234,12 +290,30 @@ class SessionHub:
         broadcast_sessions()
 
     def _take_next_turn(self):
-        """Advance within an activity block, or close it when the queue is empty."""
+        """Advance within an activity block, or close it when the queue is
+        empty. Pending model/effort changes at the front apply now - everything
+        queued ahead of them has finished - so the next prompt taken runs under
+        the configuration that was current when it was sent."""
+        applied = False
+        while self.queue and _is_queued_config(self.queue[0]):
+            self._apply_queued_config(self.queue.pop(0).get("fields") or {})
+            applied = True
+        if applied:
+            self._broadcast_queue()
         if self.queue:
             return self.queue.pop(0)
         self.status = "idle"
         self.active_since = None
         return None
+
+    def _apply_queued_config(self, fields: dict) -> None:
+        clean = {k: v for k, v in fields.items() if k in ("model", "effort")}
+        if not clean:
+            return
+        db.touch_session(self.id, **clean)
+        self.broadcast({"type": "session_meta",
+                        "session": session_payload(db.get_session(self.id))})
+        broadcast_sessions()
 
     async def interrupt(self, clear_queue: bool = False) -> None:
         if clear_queue:

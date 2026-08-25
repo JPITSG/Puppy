@@ -264,15 +264,16 @@ async def h_session_patch(request: web.Request):
     s = _session_or_404(request)
     body = await request.json()
     fields = {}
+    config = {}
     if "name" in body:
         fields["name"] = str(body["name"]).strip()[:80]
     if "model" in body:
-        fields["model"] = str(body["model"]).strip()[:60]
+        config["model"] = str(body["model"]).strip()[:60]
     if "effort" in body:
         driver = get_driver(s["engine"])
         val = str(body["effort"]).strip()
         if val in [o["value"] for o in driver.effort_options()]:
-            fields["effort"] = val
+            config["effort"] = val
     if "color" in body and body["color"] in db.SESSION_COLORS:
         fields["color"] = body["color"]
     if "archived" in body:
@@ -282,13 +283,20 @@ async def h_session_patch(request: web.Request):
         val = str(body["permission_mode"])
         if val in [o["value"] for o in driver.permission_options()]:
             fields["permission_mode"] = val
+    # While a turn runs or prompts wait, a model/effort change joins the queue
+    # and applies in order - prompts sent before it keep the configuration they
+    # were written under. With nothing pending it applies like any other field.
+    queued_config = bool(config) and runner.hub(s["id"]).queue_config(config)
+    if not queued_config:
+        fields.update(config)
     if fields:
         db.touch_session(s["id"], **fields)
         runner.broadcast_sessions()
         runner.hub(s["id"]).broadcast(
             {"type": "session_meta", "session": runner.session_payload(db.get_session(s["id"]))})
     return web.json_response(
-        {"ok": True, "session": runner.session_payload(db.get_session(s["id"]))})
+        {"ok": True, "queued_config": queued_config,
+         "session": runner.session_payload(db.get_session(s["id"]))})
 
 
 async def h_session_delete(request: web.Request):

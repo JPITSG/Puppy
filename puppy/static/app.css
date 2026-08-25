@@ -737,6 +737,8 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 }
 .queue-strip .q-item{display:flex;align-items:center;gap:7px;min-width:0}
 .queue-strip .q-n{flex:0 0 auto;opacity:.55;font-variant-numeric:tabular-nums}
+/* a pending model/effort change waiting its turn among the messages */
+.queue-strip .q-item.q-cfg .q-t{color:var(--acc2);font-style:italic}
 /* each row is one line; the tail fades rather than ending in an ellipsis */
 .queue-strip .q-t{flex:1;min-width:0;white-space:nowrap;overflow:hidden}
 .queue-strip .q-t.clipped{
@@ -875,6 +877,9 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .composer-row .mini.attach-add svg{display:block}
 .composer-row .mini.attach-add.uploading>span{animation:attach-pulse 1s ease-in-out infinite}
 .composer-row .mini:disabled{cursor:not-allowed;opacity:.38}
+/* the pill shows what the NEXT prompt will use; italics while that value is
+   still waiting in the queue behind the running turn */
+.composer-row .mini.pending .mini-value{font-style:italic;color:var(--acc2)}
 /* Touch devices get a real select stretched over the unchanged mini-pill.
    Its popup is therefore owned by Android/iOS while Puppy keeps the compact
    trigger geometry and the horizontally scrollable composer lane. */

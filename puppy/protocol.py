@@ -22,6 +22,9 @@ BASE_CAPABILITIES = (
     "session-stream",
     "approvals",
     "message-queue",
+    # model/effort changes made while work is pending hold their place in the
+    # message queue ({kind:"config"} items) instead of applying immediately
+    "queued-config",
     "uploads",
     FILE_UPLOAD_CAPABILITY,
     "filesystem",

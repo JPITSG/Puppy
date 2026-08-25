@@ -3077,9 +3077,9 @@ class SessionView {
         this.history = d.events.filter(ev => ev.kind === "user")
           .map(ev => (ev.data && ev.data.text) || "").filter(Boolean);
         this.histIdx = null;
+        this.renderQueue(d.queued || []);   // before updateHead: pickers read the queue
         this.updateHead();
         this.updateRunState();
-        this.renderQueue(d.queued || []);
         this.syncLiveStatus();
         if (d.pending_approval) this.showApproval(d.pending_approval);
         else this.hideApproval();
@@ -3115,6 +3115,7 @@ class SessionView {
         break;
       case "queued":
         this.renderQueue(d.queued || []);
+        this.updateHead();   // the pickers speak for whatever is now last in line
         break;
       case "turn_done":
         /* New nodes tell us whether this turn flowed directly into a queued
@@ -3161,16 +3162,19 @@ class SessionView {
     cwd.title = workspaceTitle(s);
     cwd.classList.toggle("warn", !!s.workspace_missing);
     this.root.querySelector(".chip.be").textContent = backendName(this.tab.bid);
-    const setMini = (cls, label, value) => {
+    const setMini = (cls, label, value, pending = false) => {
       const control = this.root.querySelector(".mini." + cls);
       control.querySelector(".mini-value").textContent = value;
-      control.title = label + ": " + value;
+      control.classList.toggle("pending", pending);
+      const title = label + ": " + value + (pending ? " · applies after the queue" : "");
+      control.title = title;
       const select = control.querySelector("select");
-      (select || control).setAttribute("aria-label", label + ": " + value);
+      (select || control).setAttribute("aria-label", title);
     };
+    const eff = this.effectiveConfig();
     setMini("perm", "Permission mode", s.permission_mode || "auto");
-    setMini("model", "Model", s.model || "auto");
-    setMini("effort", "Reasoning effort", s.effort || "auto");
+    setMini("model", "Model", eff.model || "auto", eff.queuedModel);
+    setMini("effort", "Reasoning effort", eff.effort || "auto", eff.queuedEffort);
     this.syncSwitchLines();   // the newest divider tracks the live selection
     this.syncNativeComposerChoices();
     this.syncComposerMeta();
@@ -3715,6 +3719,15 @@ class SessionView {
     this.hideApproval();
   }
 
+  /* a queue entry is a prompt string, or a pending model/effort change */
+  describeQueuedConfig(item) {
+    const eng = engineInfo(this.tab.bid, (this.session || {}).engine);
+    const parts = [];
+    if ("model" in item) parts.push("model → " + (modelShorthand(eng, item.model) || "default"));
+    if ("effort" in item) parts.push("effort → " + (effortShorthand(eng, item.effort) || "default"));
+    return parts.join(" · ") || "setting change";
+  }
+
   renderQueue(q) {
     const box = this.queueEl;
     this.queued = q;
@@ -3723,21 +3736,24 @@ class SessionView {
     box.classList.remove("hidden");
     box.classList.toggle("expanded", !!this.queueOpen);
     box.appendChild(el("div", "q-head", `queued · ${q.length}`));
-    /* one row per message, in the order they will run. The list is capped so a
+    /* one row per item, in the order they will run. The list is capped so a
        deep queue cannot push the composer down the screen; the tail is one
        click away. The per-item cap only keeps a runaway message out of the DOM
        - each row is a single line that fades out at whatever width is going. */
     const shown = this.queueOpen ? q : q.slice(0, QUEUE_ROWS);
-    shown.forEach((text, i) => {
-      const row = el("div", "q-item");
+    shown.forEach((item, i) => {
+      const cfg = !!(item && typeof item === "object");
+      const row = el("div", "q-item" + (cfg ? " q-cfg" : ""));
       row.appendChild(el("span", "q-n", String(i + 1)));
-      const t = el("span", "q-t", text.length > 200 ? text.slice(0, 199) + "…" : text);
-      t.title = text;
+      const text = cfg ? this.describeQueuedConfig(item)
+        : (item.length > 200 ? item.slice(0, 199) + "…" : item);
+      const t = el("span", "q-t", text);
+      t.title = cfg ? text : item;
       row.appendChild(t);
       const x = el("button", "q-x");
       x.appendChild(xIcon(12));   // even size in an even box: no half-pixel centring
-      x.title = "Cancel this queued message";
-      x.onclick = () => this.unqueue(i, text);   // full text, not the capped copy
+      x.title = cfg ? "Cancel this queued change" : "Cancel this queued message";
+      x.onclick = () => this.unqueue(i, cfg ? item.key || "" : item);   // full text, not the capped copy
       row.appendChild(x);
       box.appendChild(row);
     });
@@ -3812,19 +3828,35 @@ class SessionView {
     positionAnchoredMenu(menu, anchor);
   }
 
+  /* what the NEXT prompt will run under: the session's model/effort, then any
+     pending changes waiting in the queue, in order. The pickers and mini pills
+     speak about the next prompt, so they read this rather than the session. */
+  effectiveConfig() {
+    const s = this.session || {};
+    const out = { model: s.model || "", effort: s.effort || "",
+                  queuedModel: false, queuedEffort: false };
+    for (const item of this.queued || []) {
+      if (!item || typeof item !== "object") continue;
+      if ("model" in item) { out.model = item.model || ""; out.queuedModel = true; }
+      if ("effort" in item) { out.effort = item.effort || ""; out.queuedEffort = true; }
+    }
+    return out;
+  }
+
   composerChoiceSpec(kind, native = false) {
     const s = this.session || {};
     const eng = state.engMap[s.engine];
+    const eff = this.effectiveConfig();
     if (kind === "perm") return {
       options: [...((eng && eng.permission_options) || [])],
       selected: s.permission_mode || "",
     };
     if (kind === "effort") return {
       options: [...((eng && eng.effort_options) || [])],
-      selected: s.effort || "",
+      selected: eff.effort || "",
     };
     const options = [...((eng && eng.model_options) || [])];
-    const current = s.model || "";
+    const current = eff.model || "";
     const custom = !!current && !options.some(option => option.value === current);
     if (native && custom) {
       options.push({ value: "__current_custom__", label: `Current: ${current}` });
