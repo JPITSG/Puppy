@@ -1454,6 +1454,10 @@ function backendSupportsAutoUpgrade(backend) {
 }
 
 function renderSidebar() {
+  if (dragSess && dragSess.item && dragSess.item.isConnected) {
+    dragSess.renderPending = true;
+    return;
+  }
   const root = $("sess-groups");
   root.innerHTML = "";
   const groups = [{ bid: 0, name: backendName(0), ok: true, status: "ok" }]
@@ -1489,6 +1493,7 @@ function renderSidebar() {
     }
     for (const s of list) {
       const item = el("button", "sess-item" + (s.archived ? " archived" : ""));
+      item.dataset.sessionId = String(s.id);
       const tabId = `s:${g.bid}:${s.id}`;
       if (state.active === tabId) item.classList.add("active");
       const r1 = el("div", "si-row");
@@ -1521,6 +1526,7 @@ function renderSidebar() {
       wireSessionDrag(item, g.bid, s.id);
       body.appendChild(item);
     }
+    wireSessionDropZone(body, g.bid);
     group.appendChild(body);
     root.appendChild(group);
   }
@@ -1632,44 +1638,166 @@ function sessionContextMenu(ev, bid, s) {
   }, true);
 }
 
-/* sticky manual ordering: drag a session onto another to move it there */
+/* Live sortable layouts. The DOM slot moves during dragover; FLIP animates
+   every affected sibling from its old visual position to its new one. */
+const REORDER_MOTION_MS = 180;
+const REORDER_EASING = "cubic-bezier(.16,1,.3,1)";
+
+function reorderChildren(container, selector) {
+  return Array.from(container.children).filter(node => node.matches(selector));
+}
+
+function animateChildReorder(container, selector, mutate) {
+  const before = new Map(reorderChildren(container, selector)
+    .map(node => [node, node.getBoundingClientRect()]));
+  mutate();
+  const reduced = window.matchMedia &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  for (const node of reorderChildren(container, selector)) {
+    const first = before.get(node);
+    const previous = node._puppyReorderAnimation;
+    if (previous) {
+      node._puppyReorderAnimation = null;
+      previous.cancel();
+    }
+    if (!first || reduced || typeof node.animate !== "function") continue;
+    const last = node.getBoundingClientRect();
+    const dx = first.left - last.left;
+    const dy = first.top - last.top;
+    if (Math.abs(dx) < .5 && Math.abs(dy) < .5) continue;
+    const animation = node.animate([
+      { transform: `translate(${dx}px,${dy}px)` },
+      { transform: "translate(0,0)" },
+    ], { duration: REORDER_MOTION_MS, easing: REORDER_EASING });
+    node._puppyReorderAnimation = animation;
+    const clear = () => {
+      if (node._puppyReorderAnimation === animation)
+        node._puppyReorderAnimation = null;
+    };
+    animation.onfinish = clear;
+    animation.oncancel = clear;
+  }
+}
+
+function moveDragSlot(container, dragged, selector, coordinate, horizontal) {
+  if (!dragged || dragged.parentElement !== container) return false;
+  const current = reorderChildren(container, selector);
+  const siblings = current.filter(node => node !== dragged);
+  let slot = siblings.length;
+  for (let i = 0; i < siblings.length; i++) {
+    const box = siblings[i].getBoundingClientRect();
+    const midpoint = horizontal ? box.left + box.width / 2 : box.top + box.height / 2;
+    if (coordinate < midpoint) { slot = i; break; }
+  }
+  if (current.indexOf(dragged) === slot) return false;
+  animateChildReorder(container, selector, () => {
+    if (slot < siblings.length) container.insertBefore(dragged, siblings[slot]);
+    else container.appendChild(dragged);
+  });
+  return true;
+}
+
+function restoreDragSlots(context, selector) {
+  if (!context.container || !context.container.isConnected) return;
+  animateChildReorder(context.container, selector, () => {
+    for (const node of context.originalOrder)
+      if (node.parentElement === context.container) context.container.appendChild(node);
+  });
+}
+
+function sortSessionsByOrder(sessions, ids) {
+  const positions = new Map(ids.map((id, index) => [id, index]));
+  sessions.sort((a, b) => {
+    const ap = positions.has(a.id) ? positions.get(a.id) : Number.MAX_SAFE_INTEGER;
+    const bp = positions.has(b.id) ? positions.get(b.id) : Number.MAX_SAFE_INTEGER;
+    return ap - bp;
+  });
+}
+
+/* Sticky manual ordering remains scoped to one backend. Hidden archived rows
+   retain their durable slots while the visible rows move around them. */
 let dragSess = null;
 
 function wireSessionDrag(item, bid, sid) {
   item.draggable = true;
   item.addEventListener("dragstart", (e) => {
-    dragSess = { bid, sid };
-    item.classList.add("dragging");
+    const container = item.parentElement;
+    dragSess = {
+      bid, sid, item, container, renderPending: false,
+      originalOrder: reorderChildren(container, ".sess-item"),
+    };
+    container.classList.add("reordering");
+    requestAnimationFrame(() => {
+      if (dragSess && dragSess.item === item) item.classList.add("dragging");
+    });
     e.dataTransfer.effectAllowed = "move";
-    try { e.dataTransfer.setData("text/plain", String(sid)); } catch (err) {}
+    try { e.dataTransfer.setData("text/plain", `puppy-session:${bid}:${sid}`); } catch (err) {}
   });
   item.addEventListener("dragend", () => {
+    if (!dragSess || dragSess.item !== item) return;
+    const context = dragSess;
     dragSess = null;
-    document.querySelectorAll(".sess-item.dragging,.sess-item.drag-over")
-      .forEach(n => n.classList.remove("dragging", "drag-over"));
+    restoreDragSlots(context, ".sess-item");
+    item.classList.remove("dragging");
+    context.container.classList.remove("reordering");
+    if (context.renderPending)
+      setTimeout(() => {
+        if (dragSess) dragSess.renderPending = true;
+        else renderSidebar();
+      }, REORDER_MOTION_MS);
   });
-  item.addEventListener("dragover", (e) => {
-    if (!dragSess || dragSess.bid !== bid || dragSess.sid === sid) return;
+}
+
+function wireSessionDropZone(body, bid) {
+  body.addEventListener("dragover", (e) => {
+    if (!dragSess || dragSess.bid !== bid || dragSess.container !== body) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = "move";
-    item.classList.add("drag-over");
+    moveDragSlot(body, dragSess.item, ".sess-item", e.clientY, false);
   });
-  item.addEventListener("dragleave", () => item.classList.remove("drag-over"));
-  item.addEventListener("drop", async (e) => {
+  body.addEventListener("drop", async (e) => {
+    if (!dragSess || dragSess.bid !== bid || dragSess.container !== body) return;
     e.preventDefault();
-    item.classList.remove("drag-over");
-    if (!dragSess || dragSess.bid !== bid || dragSess.sid === sid) return;
-    const src = dragSess.sid;
+    const context = dragSess;
     dragSess = null;
-    const all = sessionsFor(bid);            // full list incl. archived - keeps hidden rows in place
-    const ids = all.map(x => x.id);
-    const from = ids.indexOf(src), to = ids.indexOf(sid);
-    if (from < 0 || to < 0) return;
-    ids.splice(to, 0, ids.splice(from, 1)[0]);
-    all.sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id));   // optimistic
-    renderSidebar();
-    try { await api(bid, "sessions/reorder", { method: "POST", body: { order: ids } }); }
-    catch (err) { toast(err.message, "error"); }
+    context.item.classList.remove("dragging");
+    body.classList.remove("reordering");
+
+    const all = sessionsFor(bid);
+    const previousIds = all.map(session => session.id);
+    const visibleIds = reorderChildren(body, ".sess-item")
+      .map(node => Number(node.dataset.sessionId));
+    const visibleSet = new Set(visibleIds);
+    if (visibleIds.some(id => !Number.isInteger(id)) || visibleSet.size !== visibleIds.length ||
+        visibleIds.some(id => !previousIds.includes(id))) {
+      renderSidebar();
+      return;
+    }
+    let visibleIndex = 0;
+    const ids = all.map(session => visibleSet.has(session.id) ?
+      visibleIds[visibleIndex++] : session.id);
+    if (visibleIndex !== visibleIds.length) {
+      renderSidebar();
+      return;
+    }
+    const changed = ids.some((id, index) => id !== previousIds[index]);
+    if (!changed) {
+      if (context.renderPending) renderSidebar();
+      return;
+    }
+
+    sortSessionsByOrder(all, ids); // optimistic; the DOM is already in this order
+    if (context.renderPending) renderSidebar();
+    try {
+      await api(bid, "sessions/reorder", { method: "POST", body: { order: ids } });
+    } catch (err) {
+      const current = sessionsFor(bid);
+      if (current.length === previousIds.length &&
+          current.every(session => previousIds.includes(session.id)))
+        sortSessionsByOrder(current, previousIds);
+      renderSidebar();
+      toast(err.message, "error");
+    }
   });
 }
 
@@ -1873,43 +2001,43 @@ function activateTab(id) {
   saveTabs();
 }
 
-let dragTabId = null;
+let dragTab = null;
 
 function renderTabs() {
+  if (dragTab && dragTab.item && dragTab.item.isConnected) {
+    dragTab.renderPending = true;
+    return;
+  }
   const root = $("tabs");
   root.innerHTML = "";
   for (const t of state.tabs) {
     const tab = el("div", "tab" + (state.active === t.id ? " active" : ""));
     tab.draggable = true;
+    tab.dataset.tabId = t.id;
     tab.addEventListener("dragstart", (e) => {
-      dragTabId = t.id;
-      tab.classList.add("dragging");
+      dragTab = {
+        id: t.id, item: tab, container: root, renderPending: false,
+        originalOrder: reorderChildren(root, ".tab"),
+      };
+      root.classList.add("reordering");
+      requestAnimationFrame(() => {
+        if (dragTab && dragTab.item === tab) tab.classList.add("dragging");
+      });
       e.dataTransfer.effectAllowed = "move";
-      try { e.dataTransfer.setData("text/plain", t.id); } catch (err) {}
+      try { e.dataTransfer.setData("text/plain", `puppy-tab:${t.id}`); } catch (err) {}
     });
     tab.addEventListener("dragend", () => {
-      dragTabId = null;
-      document.querySelectorAll(".tab.dragging,.tab.drag-over").forEach(n => n.classList.remove("dragging", "drag-over"));
-    });
-    tab.addEventListener("dragover", (e) => {
-      if (!dragTabId) return;
-      e.preventDefault();
-      e.dataTransfer.dropEffect = "move";
-      tab.classList.add("drag-over");
-    });
-    tab.addEventListener("dragleave", () => tab.classList.remove("drag-over"));
-    tab.addEventListener("drop", (e) => {
-      e.preventDefault();
-      tab.classList.remove("drag-over");
-      if (!dragTabId) return;
-      const sourceId = dragTabId;
-      dragTabId = null;
-      if (sourceId === t.id) return;  // visible drop slot, intentionally no reorder
-      const from = state.tabs.findIndex(x => x.id === sourceId);
-      const to = state.tabs.findIndex(x => x.id === t.id);
-      if (from < 0 || to < 0) return;
-      state.tabs.splice(to, 0, state.tabs.splice(from, 1)[0]);
-      renderTabs();
+      if (!dragTab || dragTab.item !== tab) return;
+      const context = dragTab;
+      dragTab = null;
+      restoreDragSlots(context, ".tab");
+      tab.classList.remove("dragging");
+      root.classList.remove("reordering");
+      if (context.renderPending)
+        setTimeout(() => {
+          if (dragTab) dragTab.renderPending = true;
+          else renderTabs();
+        }, REORDER_MOTION_MS);
     });
     let dotCls = "settings", dotColor = "";
     if (t.type === "session") {
@@ -1940,6 +2068,37 @@ function renderTabs() {
   }
   saveTabs();
 }
+
+$("tabs").addEventListener("dragover", (e) => {
+  if (!dragTab || dragTab.container !== $("tabs")) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = "move";
+  moveDragSlot(dragTab.container, dragTab.item, ".tab", e.clientX, true);
+});
+
+$("tabs").addEventListener("drop", (e) => {
+  if (!dragTab || dragTab.container !== $("tabs")) return;
+  e.preventDefault();
+  const context = dragTab;
+  const ids = reorderChildren(context.container, ".tab")
+    .map(node => node.dataset.tabId);
+  const byId = new Map(state.tabs.map(tab => [tab.id, tab]));
+  const valid = ids.length === state.tabs.length && new Set(ids).size === ids.length &&
+    ids.every(id => byId.has(id));
+  if (!valid) {
+    dragTab = null;
+    context.item.classList.remove("dragging");
+    context.container.classList.remove("reordering");
+    renderTabs();
+    return;
+  }
+  state.tabs = ids.map(id => byId.get(id));
+  dragTab = null;
+  context.item.classList.remove("dragging");
+  context.container.classList.remove("reordering");
+  saveTabs();
+  if (context.renderPending) renderTabs();
+});
 
 function syncTabsWithSessions() {
   let dirty = false;

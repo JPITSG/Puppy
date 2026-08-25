@@ -193,11 +193,8 @@ a{color:var(--acc2)}
 .sess-item:active{background:var(--hov)}
 .sess-item.active{background:var(--acc-dim);border-color:rgba(90,162,245,.25)}
 .sess-item.archived{opacity:.5}
-.sess-item.dragging{opacity:.35}
-.sess-item.drag-over::before{
-  content:"";position:absolute;left:6px;right:6px;top:-4px;height:2px;
-  background:var(--acc);border-radius:2px;
-}
+.sess-item.dragging{opacity:.28}
+.sess-group-body.reordering .sess-item{will-change:transform}
 .engine-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0;color:var(--txt3);background:currentColor}
 .engine-dot.claude{color:var(--claude)}
 .engine-dot.codex{color:var(--codex)}
@@ -452,13 +449,10 @@ select.choice-native{display:none!important}
   border:1px solid transparent;border-bottom:none;color:var(--txt2);font-size:12.5px;
   background:transparent;user-select:none;position:relative;
 }
-/* Dim the dragged tab's contents rather than the whole box so its own
-   insertion marker stays just as crisp as every other drop position. */
-.tab.dragging>*{opacity:.4}
-.tab.drag-over::before{
-  content:"";position:absolute;left:0;top:5px;bottom:5px;width:2px;
-  background:var(--acc);border-radius:2px;
-}
+/* The dimmed live slot moves with the pointer while sibling tabs slide into
+   place; the native drag image remains under the pointer. */
+.tab.dragging>*{opacity:.28}
+.tabs.reordering .tab{will-change:transform}
 @media (hover:hover){
   .tab:hover{background:var(--tab-hov)}
   /* Keep almost all of the active hover face intact, then quickly merge it
