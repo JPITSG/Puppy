@@ -844,6 +844,60 @@ const remotePollSequence = {};
 let remotePollTimer = null;
 let remotePollingGeneration = 0;
 
+/* Browser-clock anchors for uninterrupted work blocks. The server sends both
+   active_since and server_time so a controller can display a remote duration
+   without assuming that the two machines' wall clocks agree. */
+const sessionActivityAnchors = new Map();
+
+function sessionActivityKey(bid, sid) {
+  return `${bid || 0}:${sid}`;
+}
+
+function ingestOneSessionActivity(bid, session, serverTime, receivedAt) {
+  const key = sessionActivityKey(bid, session.id);
+  if (session.status !== "running") {
+    sessionActivityAnchors.delete(key);
+    return;
+  }
+
+  const activeSince = Number(session.active_since);
+  const serverNow = Number(serverTime);
+  let candidate = null;
+  if (Number.isFinite(activeSince) && activeSince > 0 &&
+      Number.isFinite(serverNow) && serverNow >= activeSince) {
+    candidate = receivedAt - (serverNow - activeSince) * 1000;
+  } else if (Number.isFinite(activeSince) && activeSince > 0 &&
+             !sessionActivityAnchors.has(key)) {
+    /* Compatibility with an additive implementation that supplies the start
+       but not its server clock. This can be skewed, so use it only initially. */
+    candidate = activeSince * 1000;
+  } else if (!sessionActivityAnchors.has(key)) {
+    /* Older backends have no timing fields. Start at first observation; the
+       status remains useful even though the elapsed value is approximate. */
+    candidate = receivedAt;
+  }
+
+  if (candidate !== null) {
+    const current = sessionActivityAnchors.get(key);
+    if (current === undefined || Math.abs(current - candidate) > 2000)
+      sessionActivityAnchors.set(key, candidate);
+  }
+}
+
+function ingestSessionActivity(bid, sessions, serverTime) {
+  const receivedAt = Date.now();
+  const prefix = `${bid || 0}:`;
+  const seen = new Set();
+  for (const session of sessions) {
+    const key = sessionActivityKey(bid, session.id);
+    seen.add(key);
+    ingestOneSessionActivity(bid, session, serverTime, receivedAt);
+  }
+  for (const key of sessionActivityAnchors.keys()) {
+    if (key.startsWith(prefix) && !seen.has(key)) sessionActivityAnchors.delete(key);
+  }
+}
+
 function reconcileRemoteState() {
   const live = new Set(state.backends.map(backend => String(backend.id)));
   for (const bucket of [state.remoteSessions, state.remoteOk, state.remoteErrors,
@@ -851,6 +905,10 @@ function reconcileRemoteState() {
                         state.remoteEngineCheckedAt, state.remoteUsageRefresh,
                         remotePollSequence]) {
     for (const id of Object.keys(bucket)) if (!live.has(String(id))) delete bucket[id];
+  }
+  for (const key of sessionActivityAnchors.keys()) {
+    const bid = key.slice(0, key.indexOf(":"));
+    if (bid !== "0" && !live.has(bid)) sessionActivityAnchors.delete(key);
   }
 }
 
@@ -961,6 +1019,7 @@ async function refreshState() {
   state.engines.forEach(e => state.engMap[e.key] = e);
   state.backends = Array.isArray(s.backends) ? s.backends : [];
   state.sessions = Array.isArray(s.sessions) ? s.sessions : [];
+  ingestSessionActivity(0, state.sessions, s.server_time);
   reconcileRemoteState();
   state.defaultCwd = s.default_cwd || "/";
   renderSidebar();
@@ -990,6 +1049,7 @@ function connectUpdates() {
       const d = JSON.parse(ev.data);
       if (d.type === "sessions" && Array.isArray(d.sessions)) {
         state.sessions = d.sessions;
+        ingestSessionActivity(0, state.sessions, d.server_time);
         renderSidebar();
         syncTabsWithSessions();
       }
@@ -1077,6 +1137,7 @@ async function pollRemoteBackend(backend, forceEngines = false) {
   }
 
   state.remoteSessions[bid] = payload.sessions;
+  ingestSessionActivity(bid, payload.sessions, payload.server_time);
   state.remoteOk[bid] = true;
   delete state.remoteErrors[bid];
 
@@ -1179,6 +1240,43 @@ function backendName(bid) {
   return b ? b.name : `backend ${bid}`;
 }
 
+function formatSessionActivity(startedAt, now = Date.now()) {
+  const start = Number(startedAt);
+  const total = Number.isFinite(start) ?
+    Math.max(0, Math.floor((now - start) / 1000)) : 0;
+  const seconds = String(total % 60).padStart(2, "0");
+  const minutes = String(Math.floor(total / 60) % 60).padStart(2, "0");
+  if (total < 3600) return `${minutes}:${seconds}`;
+  const hours = String(Math.floor(total / 3600)).padStart(2, "0");
+  return `${hours}:${minutes}:${seconds}`;
+}
+
+function updateSessionActivityLabels() {
+  const now = Date.now();
+  document.querySelectorAll(".si-be.active-time[data-activity-key]").forEach(label => {
+    const startedAt = sessionActivityAnchors.get(label.dataset.activityKey);
+    if (startedAt === undefined) return;
+    const value = formatSessionActivity(startedAt, now);
+    if (label.textContent !== value) label.textContent = value;
+  });
+}
+
+function noteSessionActivity(bid, sid, running, activeSince, serverTime) {
+  const sessions = sessionsFor(bid);
+  const session = sessions.find(item => String(item.id) === String(sid));
+  const sample = session || { id: sid };
+  sample.status = running ? "running" : "idle";
+  sample.active_since = running ? (activeSince == null ? sample.active_since : activeSince) : null;
+  ingestOneSessionActivity(bid, sample, serverTime, Date.now());
+  renderSidebar();
+  renderTabs();
+}
+
+setInterval(updateSessionActivityLabels, 1000);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") updateSessionActivityLabels();
+});
+
 function backendHasCapability(backend, capability) {
   if (!backend || Number(backend.protocol || 0) === 0) return true; // legacy full nodes
   return Array.isArray(backend.capabilities) && backend.capabilities.includes(capability);
@@ -1244,7 +1342,21 @@ function renderSidebar() {
       const r1 = el("div", "si-row");
       r1.appendChild(sessDot(s));
       r1.appendChild(el("div", "si-name", s.name || `session ${s.id}`));
-      r1.appendChild(el("span", "si-be", backendName(g.bid)));
+      const activity = el("span", "si-be");
+      if (s.status === "running") {
+        const key = sessionActivityKey(g.bid, s.id);
+        if (!sessionActivityAnchors.has(key))
+          ingestOneSessionActivity(g.bid, s, null, Date.now());
+        activity.classList.add("active-time");
+        activity.dataset.activityKey = key;
+        activity.textContent = formatSessionActivity(sessionActivityAnchors.get(key));
+        activity.title = "Agent active";
+      } else {
+        activity.classList.add("idle");
+        activity.textContent = "IDLE";
+        activity.title = "Session idle";
+      }
+      r1.appendChild(activity);
       const r2 = el("div", "si-row sub");
       r2.appendChild(provIcon(s.engine));
       const workspace = el("div", "si-sub" + (s.workspace_missing ? " warn" : ""),
@@ -2136,6 +2248,8 @@ class SessionView {
       case "snapshot":
         this.session = d.session;
         this.status = d.status;
+        noteSessionActivity(this.tab.bid, this.tab.sid, d.status === "running",
+          d.active_since, d.server_time);
         this.retry = 800;
         this.inner.innerHTML = "";
         this.toolCards = {};
@@ -2185,10 +2299,15 @@ class SessionView {
         this.renderQueue(d.queued || []);
         break;
       case "turn_done":
-        this.status = "idle";
+        /* New nodes tell us whether this turn flowed directly into a queued
+           one. On older nodes the pre-pop queue is the closest equivalent. */
+        const continued = typeof d.continued === "boolean" ?
+          d.continued : this.queued.length > 0;
+        this.status = continued ? "running" : "idle";
         this.clearLive();
         this.updateRunState();
-        this.setStatus("");
+        this.setStatus(continued ? "starting next queued message…" : "");
+        noteSessionActivity(this.tab.bid, this.tab.sid, continued);
         break;
       case "session_meta":
         this.session = d.session;
@@ -2204,7 +2323,9 @@ class SessionView {
     }
     const runningKinds = { user: 1, assistant: 1, thinking: 1, tool_use: 1, tool_result: 1 };
     if (d.type === "delta" || (d.type === "event" && runningKinds[d.event.kind])) {
+      const becameRunning = this.status !== "running";
       this.status = "running"; this.updateRunState();
+      if (becameRunning) noteSessionActivity(this.tab.bid, this.tab.sid, true);
     }
   }
 
@@ -2515,7 +2636,9 @@ class SessionView {
     this._forceScroll = true;
     this.scrollBottom(true);
     lsDel("puppy.draft." + this.tab.id);
-    this.status = "running"; this.updateRunState();
+    this.status = "running";
+    noteSessionActivity(this.tab.bid, this.tab.sid, true);
+    this.updateRunState();
     this.setStatus("starting…");
   }
   interrupt(clearQueue = false) {

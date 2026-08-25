@@ -111,6 +111,16 @@ the old files were cleared. Startup cleanup removes only unreferenced,
 service-owned directories inside the validated private namespace; normal
 working directories are never removed.
 
+## Session activity timing
+
+Session-list responses and update events include `server_time`. A running
+session also includes `active_since`, the start of its current uninterrupted
+work block. That start is retained while queued messages flow into subsequent
+turns and is cleared only after both the active turn and queue are empty. This
+lets a controller show one continuous elapsed time while compensating for clock
+differences between the controller and backend. These fields are additive;
+controllers can continue to attach older nodes that do not send them.
+
 ## Account usage refresh
 
 The headless package stores the same per-node usage-refresh interval as the full

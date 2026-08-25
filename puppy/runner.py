@@ -57,19 +57,21 @@ def updates_detach(ws) -> None:
 
 
 def sessions_payload() -> dict:
+    now = time.time()
     sessions = []
     for s in db.list_sessions(include_archived=True):
         h = _hubs.get(s["id"])
         sessions.append({
             "id": s["id"], "name": s["name"], "engine": s["engine"], "cwd": s["cwd"],
             "status": (h.status if h else "idle"), "archived": s["archived"],
+            "active_since": (h.active_since if h and h.status == "running" else None),
             "updated_at": s["updated_at"], "model": s["model"], "last_model": s["last_model"],
             "effort": s["effort"], "color": s["color"], "permission_mode": s["permission_mode"],
             "has_native": bool(s["native_session_id"]),
             "workspace_kind": s.get("workspace_kind") or workspaces.KIND_DIRECTORY,
             "workspace_missing": workspaces.is_temporary(s) and not workspaces.is_available(s),
         })
-    return {"type": "sessions", "sessions": sessions}
+    return {"type": "sessions", "server_time": now, "sessions": sessions}
 
 
 def upgrade_blockers() -> list:
@@ -123,6 +125,9 @@ class SessionHub:
         self.watchers = set()
         self.queue = []
         self.status = "idle"
+        # Start of one uninterrupted block of work. Queued turns inherit this
+        # timestamp; it is cleared only when the turn and its queue are empty.
+        self.active_since = None
         self.proc = None
         self._proc_ready = False
         self.turn_task = None
@@ -150,6 +155,8 @@ class SessionHub:
             "session": session_payload(session),
             "events": db.get_events(self.id, limit=200),
             "status": self.status,
+            "active_since": self.active_since if self.status == "running" else None,
+            "server_time": time.time(),
             "queued": list(self.queue),
             "pending_approval": self.pending_approval,
         }
@@ -193,10 +200,23 @@ class SessionHub:
         return count
 
     def _start_turn(self, text: str) -> None:
+        if self.active_since is None:
+            self.active_since = time.time()
         self.status = "running"
         self.interrupted = False
         self._proc_ready = False
         self.turn_task = asyncio.ensure_future(self._run_turn(text))
+        # Publish the active block immediately, before process startup and the
+        # first persisted event have a chance to yield the event loop.
+        broadcast_sessions()
+
+    def _take_next_turn(self):
+        """Advance within an activity block, or close it when the queue is empty."""
+        if self.queue:
+            return self.queue.pop(0)
+        self.status = "idle"
+        self.active_since = None
+        return None
 
     async def interrupt(self, clear_queue: bool = False) -> None:
         if clear_queue:
@@ -446,18 +466,20 @@ class SessionHub:
                 self.broadcast({"type": "approval_resolved", "request_id": rid, "behavior": "cancelled"})
             self.proc = None
             self._proc_ready = False
-            self.status = "idle"
             self.stderr_tail = ""
-            try:
-                db.touch_session(self.id, status="idle")
-            except Exception:
-                pass
-            self.broadcast({"type": "turn_done"})
-            broadcast_sessions()
-            if self.queue:
-                nxt = self.queue.pop(0)
+            nxt = self._take_next_turn()
+            continued = nxt is not None
+            if not continued:
+                try:
+                    db.touch_session(self.id, status="idle")
+                except Exception:
+                    pass
+            self.broadcast({"type": "turn_done", "continued": continued})
+            if continued:
                 self.broadcast({"type": "queued", "queued": list(self.queue)})
                 self._start_turn(nxt)
+            else:
+                broadcast_sessions()
 
     async def _pump_stderr(self, proc) -> None:
         try:

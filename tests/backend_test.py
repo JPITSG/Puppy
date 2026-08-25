@@ -81,6 +81,19 @@ def exercise_driver_normalization() -> None:
     assert lifecycle == []
 
 
+def exercise_activity_blocks(session_hub_cls) -> None:
+    """Queued turns retain one start time and become idle only after the tail."""
+    hub = session_hub_cls(-1)
+    started = time.time() - 42
+    hub.status = "running"
+    hub.active_since = started
+    hub.queue = ["next queued turn"]
+    assert hub._take_next_turn() == "next queued turn"
+    assert hub.status == "running" and hub.active_since == started
+    assert hub._take_next_turn() is None
+    assert hub.status == "idle" and hub.active_since is None
+
+
 def free_port() -> int:
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
@@ -176,7 +189,9 @@ async def exercise_node(url: str, token: str, expected_version: str,
             assert response.status == 200
         async with http.get(url + "/api/sessions", headers=good, ssl=pinned) as response:
             assert response.status == 200
-            assert (await response.json())["sessions"] == []
+            sessions_payload = await response.json()
+            assert sessions_payload["sessions"] == []
+            assert isinstance(sessions_payload["server_time"], (int, float))
         async with http.get(url + "/api/engines/usage-refresh",
                             headers=good, ssl=pinned) as response:
             refresh = await response.json()
@@ -190,6 +205,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         updates = await http.ws_connect(url + "/api/ws/updates", headers=good, ssl=pinned)
         first = await updates.receive_json(timeout=3)
         assert first["type"] == "sessions" and first["sessions"] == []
+        assert isinstance(first["server_time"], (int, float))
         await updates.close()
 
         async with http.post(url + "/api/sessions", headers=good, ssl=pinned, json={
@@ -210,6 +226,15 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert scratch_path.parent.parent.name.startswith("puppy-workspaces-")
         assert scratch_path.stat().st_mode & 0o777 == 0o700
         (scratch_path / "throw-away.txt").write_text("disposable", encoding="utf-8")
+
+        async with http.get(url + "/api/sessions", headers=good, ssl=pinned) as response:
+            listed_payload = await response.json()
+            assert response.status == 200, listed_payload
+        listed_scratch = next(row for row in listed_payload["sessions"]
+                              if row["id"] == scratch["id"])
+        assert listed_scratch["status"] == "idle"
+        assert listed_scratch["active_since"] is None
+        assert isinstance(listed_payload["server_time"], (int, float))
 
         # Model a boot-time /tmp cleanup. The durable transcript/session stays,
         # advertises the expiration, and can be given a fresh private workspace.
@@ -373,6 +398,7 @@ async def exercise_controller(url: str, token: str, backend_url: str,
                             headers=headers) as response:
             proxied = await response.json()
             assert response.status == 200 and proxied["sessions"] == [], proxied
+        assert isinstance(proxied["server_time"], (int, float))
         async with http.get(url + f"/api/b/{stored['id']}/engines/usage-refresh",
                             headers=headers) as response:
             proxied_refresh = await response.json()
@@ -382,6 +408,7 @@ async def exercise_controller(url: str, token: str, backend_url: str,
             url + f"/api/b/{stored['id']}/ws/updates", headers=headers)
         first = await remote_updates.receive_json(timeout=3)
         assert first["type"] == "sessions" and first["sessions"] == []
+        assert isinstance(first["server_time"], (int, float))
         await remote_updates.close()
 
         async with http.post(url + f"/api/b/{stored['id']}/sessions", headers=headers, json={
@@ -761,7 +788,7 @@ async def main() -> None:
         old_db.commit()
         old_db.close()
         os.environ["PUPPY_DATA"] = str(controller_data)
-        from puppy import config, db
+        from puppy import config, db, runner
         from puppy.web import build_app
 
         config.load()
@@ -769,6 +796,7 @@ async def main() -> None:
         config.set_value("auth.api_token", controller_token)
         config.set_value("engines.usage_refresh_minutes", 0)
         db.connect()
+        exercise_activity_blocks(runner.SessionHub)
         assert "tls_fingerprint" in {
             row["name"] for row in db.query("PRAGMA table_info(backends)")}
         assert "workspace_kind" in {

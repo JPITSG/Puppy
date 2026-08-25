@@ -118,13 +118,15 @@ async def h_state(request: web.Request):
     # Keep initial app/auth entry fast. The browser immediately follows with
     # an asynchronous engine poll, which performs a due account refresh.
     engines = await _engines_payload(refresh_usage=False)
+    session_state = runner.sessions_payload()
     return web.json_response({
         "version": __version__,
         "instance_name": config.get("instance_name"),
         "engines": engines,
         "usage_refresh": usage_refresh.payload(),
         "backends": backends.list_backends(),
-        "sessions": runner.sessions_payload()["sessions"],
+        "sessions": session_state["sessions"],
+        "server_time": session_state["server_time"],
         "default_cwd": config.get("sessions.default_cwd", "/"),
         "session_colors": db.SESSION_COLORS,
     })
@@ -242,6 +244,8 @@ async def h_session_get(request: web.Request):
     s = _session_or_404(request)
     h = runner.hub(s["id"])
     return web.json_response({"session": runner.session_payload(s), "status": h.status,
+                              "active_since": h.active_since if h.status == "running" else None,
+                              "server_time": time.time(),
                               "events": db.get_events(s["id"], limit=200)})
 
 

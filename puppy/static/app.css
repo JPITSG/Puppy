@@ -154,6 +154,10 @@ a{color:var(--acc2)}
 .si-row{display:flex;align-items:center;gap:7px;min-width:0}
 .si-row.sub{margin-top:2px}
 .si-be{font-size:9.5px;color:var(--txt3);flex-shrink:0}
+.si-be.active-time{
+  color:var(--txt2);font-family:var(--mono);font-variant-numeric:tabular-nums;
+}
+.si-be.idle{letter-spacing:.08em}
 .sess-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0;color:var(--txt3);background:currentColor}
 /* dot (9px) and prov icon (11px) share a column: pad the dot so centers align */
 .si-row .sess-dot{margin:0 1px}
