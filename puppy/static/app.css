@@ -1230,11 +1230,16 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   .engine-row{grid-template-columns:minmax(0,1fr);gap:6px;padding:9px 0 9px 13px}
   .engine-row-statuses{justify-content:flex-start;padding-left:17px}
   .engine-node-message{padding-left:26px}
-  .be-row{grid-template-columns:minmax(0,1fr);gap:6px;padding:12px 0}
+  /* The toggle takes the empty space beside the name rather than a line of its
+     own, where it read as a stray control between the backend and its buttons. */
+  .be-row{grid-template-columns:minmax(0,1fr) auto;gap:8px 10px;padding:12px 0}
+  .be-details{grid-column:1;grid-row:1}
   .be-row .be-url{margin-top:2px;font-size:10.5px}
   .be-meta-row{gap:7px}
-  .be-auto-existing{min-height:26px;margin-left:29px}
-  .be-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;width:100%}
+  .be-auto-existing{grid-column:2;grid-row:1;align-self:center;min-height:26px}
+  .be-actions{
+    grid-column:1/-1;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;width:100%;
+  }
   .be-actions .btn{width:100%;min-width:0;height:34px;padding-left:6px;padding-right:6px}
   .snapshot-actions{display:grid;grid-template-columns:1fr 1fr;gap:7px}
   .snapshot-actions .btn{width:100%;min-width:0;height:34px;padding-left:8px;padding-right:8px}
