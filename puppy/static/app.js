@@ -70,12 +70,12 @@ function terminalIcon(size) {
   frame.setAttribute("rx", "1.5");
   frame.setAttribute("fill", "none");
   frame.setAttribute("stroke", "currentColor");
-  frame.setAttribute("stroke-width", "1.4");
+  frame.setAttribute("stroke-width", "1.15");
   const prompt = document.createElementNS(NS, "path");
   prompt.setAttribute("d", "M4.25 6 6.25 8 4.25 10 M8 10h3.5");
   prompt.setAttribute("fill", "none");
   prompt.setAttribute("stroke", "currentColor");
-  prompt.setAttribute("stroke-width", "1.4");
+  prompt.setAttribute("stroke-width", "1.15");
   prompt.setAttribute("stroke-linecap", "round");
   prompt.setAttribute("stroke-linejoin", "round");
   svg.appendChild(frame);

@@ -474,7 +474,7 @@ select.choice-native{display:none!important}
 .tab .t-dot.claude{color:var(--claude)}
 .tab .t-dot.codex{color:var(--codex)}
 .tab .t-dot.term{
-  width:12px;height:12px;border-radius:0;background:none;color:var(--term);
+  width:12px;height:12px;border-radius:0;background:none;color:var(--txt3);
 }
 .tab .t-dot.settings{
   width:12px;height:12px;border-radius:0;background:none;color:var(--txt3);
