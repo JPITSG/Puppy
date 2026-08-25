@@ -29,10 +29,6 @@ function xIcon(size) {
   return svg;
 }
 
-/* A chat bubble with a bell in it: the session speaking up when it is done.
-   The bubble is stroked like the app's other icons; the bell inside is filled,
-   because an outlined shape that small turns to mush at the footer's 14px.
-   Both sit in the plain 24 box, centred, with no fitting transform. */
 function bellIcon(size, off) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
@@ -40,27 +36,19 @@ function bellIcon(size, off) {
   svg.setAttribute("width", size);
   svg.setAttribute("height", size);
   svg.setAttribute("aria-hidden", "true");
-  const draw = (d, fill) => {
+  const draw = (d) => {
     const p = document.createElementNS(NS, "path");
     p.setAttribute("d", d);
-    if (fill) {
-      p.setAttribute("fill", "currentColor");
-    } else {
-      p.setAttribute("fill", "none");
-      p.setAttribute("stroke", "currentColor");
-      p.setAttribute("stroke-width", "2");
-      p.setAttribute("stroke-linecap", "round");
-      p.setAttribute("stroke-linejoin", "round");
-    }
+    p.setAttribute("stroke", "currentColor");
+    p.setAttribute("stroke-width", "2");
+    p.setAttribute("stroke-linecap", "round");
+    p.setAttribute("stroke-linejoin", "round");
+    p.setAttribute("fill", "none");
     svg.appendChild(p);
   };
-  /* bubble walls leave an interior of x 4..20, y 4..16; the bell fills it to
-     within about two units, centred on that interior rather than on the box -
-     the tail hangs below and would drag the bell off-centre otherwise */
-  draw("M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z");
-  draw("M12 6.1a3.2 3.2 0 0 0-3.2 3.2c0 2.1-1 2.9-1 2.9h8.4s-1-.8-1-2.9A3.2 3.2 0 0 0 12 6.1Z", true);
-  draw("M10.8 13.1a1.3 1.3 0 0 0 2.4 0Z", true);
-  if (off) draw("M4 4 L20 20");
+  draw("M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3c0 0 3-2 3-9");
+  draw("M10.3 21a1.94 1.94 0 0 0 3.4 0");
+  if (off) draw("M4.5 3.5 L19.5 20.5");
   return svg;
 }
 
