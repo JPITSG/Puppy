@@ -433,7 +433,8 @@ async def exercise_controller(url: str, token: str, backend_url: str,
 
         async with http.post(url + "/api/backends", headers=headers, json={
                 "name": "", "url": backend_url, "token": backend_token,
-                "tls_fingerprint": backend_fingerprint}) as response:
+                "tls_fingerprint": backend_fingerprint,
+                "auto_upgrade": False}) as response:
             added = await response.json()
             assert response.status == 200, added
         assert added["remote"]["role"] == "backend"
@@ -455,7 +456,13 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert "pinned-tls" in stored["capabilities"]
         assert stored["remote_version"] == old_version
         assert stored["tls_fingerprint"] == backend_fingerprint
+        assert stored["auto_upgrade"] is False
+        assert stored["upgrade_in_progress"] is False
         assert "token" not in stored
+
+        async with http.patch(url + f"/api/backends/{stored['id']}", headers=headers,
+                              json={"auto_upgrade": "yes"}) as response:
+            assert response.status == 400, await response.text()
 
         async with http.post(url + f"/api/backends/{stored['id']}/test",
                              headers=headers) as response:
@@ -489,6 +496,18 @@ async def exercise_controller(url: str, token: str, backend_url: str,
                 rejected = await response.json()
                 assert response.status == 409, rejected
             assert rejected["readiness"]["state"] == "blocked"
+            async with http.patch(url + f"/api/backends/{stored['id']}", headers=headers,
+                                  json={"auto_upgrade": True}) as response:
+                enabled_while_blocked = await response.json()
+                assert response.status == 200, enabled_while_blocked
+            await asyncio.sleep(0.5)
+            async with http.get(url + "/api/backends", headers=headers) as response:
+                still_blocked = (await response.json())["backends"][0]
+            assert still_blocked["remote_version"] == old_version
+            assert still_blocked["upgrade_in_progress"] is False
+            async with http.patch(url + f"/api/backends/{stored['id']}", headers=headers,
+                                  json={"auto_upgrade": False}) as response:
+                assert response.status == 200, await response.text()
         finally:
             pending_marker.unlink(missing_ok=True)
         async with http.get(url + f"/api/b/{stored['id']}/engines/usage-refresh",
@@ -532,17 +551,27 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert b"PUPPY_BACKEND_ROUTE_OK" in output, output[-200:]
         await terminal.close()
 
-        async with http.post(url + f"/api/backends/{stored['id']}/upgrade",
-                             headers=headers) as response:
-            upgraded = await response.json()
-            assert response.status == 200, upgraded
-        assert upgraded["from_version"] == old_version
-        assert upgraded["to_version"] == __version__
-        assert len(upgraded["sha256"]) == 64
+        # Enabling the controller-owned policy wakes its background worker.
+        # The node's live readiness remains authoritative, then the exact same
+        # signed/restart/rollback pipeline used by the manual action runs.
+        async with http.patch(url + f"/api/backends/{stored['id']}", headers=headers,
+                              json={"auto_upgrade": True}) as response:
+            toggled = await response.json()
+            assert response.status == 200, toggled
+        assert toggled["backend"]["auto_upgrade"] is True
 
-        async with http.get(url + "/api/backends", headers=headers) as response:
-            refreshed = (await response.json())["backends"][0]
-        assert refreshed["remote_version"] == __version__
+        deadline = asyncio.get_event_loop().time() + 120
+        refreshed = None
+        while asyncio.get_event_loop().time() < deadline:
+            async with http.get(url + "/api/backends", headers=headers) as response:
+                refreshed = (await response.json())["backends"][0]
+                assert response.status == 200
+            if refreshed["remote_version"] == __version__ and \
+                    not refreshed["upgrade_in_progress"]:
+                break
+            await asyncio.sleep(0.25)
+        assert refreshed is not None and refreshed["remote_version"] == __version__, refreshed
+        assert refreshed["auto_upgrade"] is True
         assert "remote-upgrade" in refreshed["capabilities"]
 
 
@@ -653,6 +682,12 @@ async def exercise_proxy_recovery(controller_url: str, controller_token: str) ->
                 assert response.status == 200, added
             backend_id = added["id"]
             proxy_url = controller_url + f"/api/b/{backend_id}"
+
+            async with http.patch(controller_url + f"/api/backends/{backend_id}",
+                                  headers=headers, json={"auto_upgrade": True}) as response:
+                unsupported = await response.json()
+                assert response.status == 409, unsupported
+            assert "upgrade-capable headless backend" in unsupported["error"]
 
             async with http.get(proxy_url + "/sessions", headers=headers) as response:
                 assert response.status == 200, await response.text()
@@ -893,6 +928,8 @@ async def main() -> None:
         await exercise_upgrade_readiness(
             backend_upgrade, runner, terminal, temp_root / "readiness")
         assert "tls_fingerprint" in {
+            row["name"] for row in db.query("PRAGMA table_info(backends)")}
+        assert "auto_upgrade" in {
             row["name"] for row in db.query("PRAGMA table_info(backends)")}
         assert "workspace_kind" in {
             row["name"] for row in db.query("PRAGMA table_info(sessions)")}

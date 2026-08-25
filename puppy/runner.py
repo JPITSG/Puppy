@@ -106,7 +106,11 @@ async def detach_for_restore() -> None:
 
 
 def broadcast_sessions() -> None:
-    payload = sessions_payload()
+    broadcast_update(sessions_payload())
+
+
+def broadcast_update(payload: dict) -> None:
+    """Send an additive controller update to every authenticated list watcher."""
     for ws in list(_updates_watchers):
         asyncio.ensure_future(_safe_send(ws, payload, _updates_watchers))
 

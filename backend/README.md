@@ -168,3 +168,13 @@ runtime blocker before staging; it checks the workload again after candidate
 validation. Older upgrade-capable nodes are supported for their first upgrade
 by conservatively inferring session activity, while their existing POST gate
 remains authoritative for terminals and races.
+
+Each attached headless backend also has an opt-in **Auto-upgrade when idle**
+policy in the controller's Backends card. It is controller-owned (and therefore
+included in a WebUI backup), not a setting stored on the remote node. When the
+controller version moves ahead, its background worker checks the node's live
+readiness and starts the same signed, self-tested, health-checked upgrade flow.
+Busy nodes are left alone and checked again shortly; unavailable or blocked
+nodes back off and retry. The backend still repeats its idle/readiness check at
+POST time, so a turn or terminal that starts during artifact preparation wins
+the race and safely rejects the automatic attempt.

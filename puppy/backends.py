@@ -18,7 +18,7 @@ from urllib.parse import urlsplit
 import aiohttp
 from aiohttp import WSMsgType, web
 
-from puppy import __version__, config, db, protocol, tls, upgrade_contract
+from puppy import __version__, config, db, protocol, runner, tls, upgrade_contract
 
 log = logging.getLogger("puppy.backends")
 
@@ -26,9 +26,17 @@ _client = None
 _upgrades_in_progress = set()
 _fingerprints = {}
 _proxy_websockets = set()
+_auto_upgrade_task = None
+_auto_upgrade_wake = None
+_auto_upgrade_retry_after = {}
+_auto_upgrade_checked_at = {}
+_auto_upgrade_last_errors = {}
 
 PROXY_CONNECT_TIMEOUT = 8.0
 PROXY_TOTAL_TIMEOUT = 60.0
+AUTO_UPGRADE_INTERVAL = 8.0
+AUTO_UPGRADE_FAILURE_RETRY = 30.0
+AUTO_UPGRADE_CURRENT_RECHECK = 5 * 60.0
 
 HOP_HEADERS = {"host", "connection", "upgrade", "sec-websocket-key", "sec-websocket-version",
                "sec-websocket-extensions", "sec-websocket-protocol", "cookie", "x-puppy-token",
@@ -86,7 +94,8 @@ def _base_url(value: str) -> str:
 
 def list_backends() -> list:
     rows = db.query(
-        "SELECT id,name,url,protocol,capabilities,remote_version,role,tls_fingerprint,created_at "
+        "SELECT id,name,url,protocol,capabilities,remote_version,role,tls_fingerprint,"
+        "auto_upgrade,created_at "
         "FROM backends ORDER BY id")
     out = []
     for row in rows:
@@ -96,6 +105,8 @@ def list_backends() -> list:
         except Exception:
             caps = []
         item["capabilities"] = caps if isinstance(caps, list) else []
+        item["auto_upgrade"] = bool(item.get("auto_upgrade"))
+        item["upgrade_in_progress"] = item["id"] in _upgrades_in_progress
         out.append(item)
     return out
 
@@ -103,6 +114,33 @@ def list_backends() -> list:
 def get_backend(bid: int):
     row = db.query_one("SELECT * FROM backends WHERE id=?", (bid,))
     return dict(row) if row else None
+
+
+def _backend_capabilities(backend: dict) -> list:
+    value = backend.get("capabilities") or []
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except Exception:
+            value = []
+    return value if isinstance(value, list) else []
+
+
+def _broadcast_backends() -> None:
+    runner.broadcast_update({"type": "backends", "backends": list_backends()})
+
+
+def _wake_auto_upgrade() -> None:
+    if _auto_upgrade_wake is not None:
+        _auto_upgrade_wake.set()
+
+
+def reset_auto_upgrade_schedule() -> None:
+    """Forget timing state after a database restore and evaluate its policies."""
+    _auto_upgrade_retry_after.clear()
+    _auto_upgrade_checked_at.clear()
+    _auto_upgrade_last_errors.clear()
+    _wake_auto_upgrade()
 
 
 # ---- CRUD handlers ----
@@ -199,11 +237,20 @@ def _metadata(remote: dict) -> tuple:
     )
 
 
-def _store_metadata(bid: int, remote: dict) -> None:
+def _store_metadata(bid: int, remote: dict) -> bool:
     api_protocol, capabilities, remote_version, role = _metadata(remote)
-    db.execute(
-        "UPDATE backends SET protocol=?,capabilities=?,remote_version=?,role=? WHERE id=?",
-        (api_protocol, capabilities, remote_version, role, bid))
+    previous = db.query_one(
+        "SELECT protocol,capabilities,remote_version,role FROM backends WHERE id=?", (bid,))
+    changed = previous is not None and (
+        int(previous["protocol"]) != api_protocol or
+        str(previous["capabilities"]) != capabilities or
+        str(previous["remote_version"]) != remote_version or
+        str(previous["role"]) != role)
+    if changed:
+        db.execute(
+            "UPDATE backends SET protocol=?,capabilities=?,remote_version=?,role=? WHERE id=?",
+            (api_protocol, capabilities, remote_version, role, bid))
+    return changed
 
 
 def _build_upgrade_payload() -> tuple:
@@ -263,9 +310,17 @@ async def h_list(request: web.Request):
 
 
 async def h_add(request: web.Request):
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid backend request"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "invalid backend request"}, status=400)
     name = (body.get("name") or "").strip()
     token = (body.get("token") or "").strip()
+    auto_upgrade = body.get("auto_upgrade", False)
+    if type(auto_upgrade) is not bool:
+        return web.json_response({"error": "auto-upgrade must be on or off"}, status=400)
     try:
         url = _base_url(body.get("url"))
         tls_fingerprint = tls.normalize_fingerprint(
@@ -283,18 +338,59 @@ async def h_add(request: web.Request):
                                   "status": result.get("status")}, status=400)
     remote = result["remote"]
     name = name or str(remote.get("name") or "").strip() or "backend"
+    if auto_upgrade and (remote.get("role") != "backend" or
+                         protocol.UPGRADE_CAPABILITY not in (remote.get("capabilities") or [])):
+        return web.json_response({
+            "error": "automatic upgrades require an upgrade-capable headless backend"
+        }, status=409)
     api_protocol, capabilities, remote_version, role = _metadata(remote)
     bid = db.execute(
         "INSERT INTO backends(name,url,token,protocol,capabilities,remote_version,role,"
-        "tls_fingerprint,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+        "tls_fingerprint,auto_upgrade,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
         (name[:80], url, token, api_protocol, capabilities, remote_version, role,
-         tls_fingerprint, time.time()))
-    return web.json_response({"ok": True, "id": bid, "remote": remote})
+         tls_fingerprint, int(auto_upgrade), time.time()))
+    _broadcast_backends()
+    if auto_upgrade:
+        _wake_auto_upgrade()
+    return web.json_response({"ok": True, "id": bid, "remote": remote,
+                              "auto_upgrade": auto_upgrade})
+
+
+async def h_patch(request: web.Request):
+    bid = int(request.match_info["bid"])
+    backend = get_backend(bid)
+    if backend is None:
+        return web.json_response({"error": "unknown backend"}, status=404)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid backend request"}, status=400)
+    if not isinstance(body, dict) or type(body.get("auto_upgrade")) is not bool:
+        return web.json_response({"error": "auto-upgrade must be on or off"}, status=400)
+    enabled = body["auto_upgrade"]
+    if enabled and (backend.get("role") != "backend" or
+                    protocol.UPGRADE_CAPABILITY not in _backend_capabilities(backend)):
+        return web.json_response({
+            "error": "automatic upgrades require an upgrade-capable headless backend"
+        }, status=409)
+    db.execute("UPDATE backends SET auto_upgrade=? WHERE id=?", (int(enabled), bid))
+    _auto_upgrade_retry_after.pop(bid, None)
+    _auto_upgrade_checked_at.pop(bid, None)
+    _auto_upgrade_last_errors.pop(bid, None)
+    _broadcast_backends()
+    if enabled:
+        _wake_auto_upgrade()
+    updated = next(item for item in list_backends() if item["id"] == bid)
+    return web.json_response({"ok": True, "backend": updated})
 
 
 async def h_delete(request: web.Request):
     bid = int(request.match_info["bid"])
     db.execute("DELETE FROM backends WHERE id=?", (bid,))
+    _auto_upgrade_retry_after.pop(bid, None)
+    _auto_upgrade_checked_at.pop(bid, None)
+    _auto_upgrade_last_errors.pop(bid, None)
+    _broadcast_backends()
     return web.json_response({"ok": True})
 
 
@@ -306,50 +402,63 @@ async def h_test(request: web.Request):
     result = await probe_backend(be["url"], be["token"], be["tls_fingerprint"])
     if result["ok"]:
         _store_metadata(bid, result["remote"])
+        _broadcast_backends()
     return web.json_response(result)
 
 
-async def h_upgrade(request: web.Request):
-    bid = int(request.match_info["bid"])
+class BackendUpgradeError(RuntimeError):
+    def __init__(self, message: str, status: int = 500, readiness=None):
+        super().__init__(message)
+        self.status = status
+        self.readiness = readiness if isinstance(readiness, dict) else None
+
+    def payload(self) -> dict:
+        value = {"error": str(self)}
+        if self.readiness is not None:
+            value["readiness"] = self.readiness
+        return value
+
+
+async def upgrade_backend(bid: int, remote_hint=None) -> dict:
+    """Run the one safe upgrade pipeline used by manual and automatic requests."""
     be = get_backend(bid)
     if be is None:
-        return web.json_response({"error": "unknown backend"}, status=404)
+        raise BackendUpgradeError("unknown backend", 404)
     if bid in _upgrades_in_progress:
-        return web.json_response({"error": "an upgrade is already in progress for this backend"},
-                                 status=409)
+        raise BackendUpgradeError("an upgrade is already in progress for this backend", 409)
     _upgrades_in_progress.add(bid)
+    _broadcast_backends()
     try:
-        current = await probe_backend(be["url"], be["token"], be["tls_fingerprint"])
-        if not current["ok"]:
-            return web.json_response({"error": current.get("error", "backend is unavailable")},
-                                     status=502)
-        remote = current["remote"]
+        remote = remote_hint
+        if remote is None:
+            current = await probe_backend(be["url"], be["token"], be["tls_fingerprint"])
+            if not current["ok"]:
+                raise BackendUpgradeError(
+                    current.get("error", "backend is unavailable"), 502)
+            remote = current["remote"]
         _store_metadata(bid, remote)
         upgrade_descriptor = remote.get("upgrade") or {}
         if protocol.UPGRADE_CAPABILITY not in (remote.get("capabilities") or []) or \
                 not upgrade_descriptor.get("supported"):
-            return web.json_response({"error": "backend does not support safe remote upgrades"},
-                                     status=409)
+            raise BackendUpgradeError("backend does not support safe remote upgrades", 409)
         remote_readiness = upgrade_descriptor.get("readiness")
         if isinstance(remote_readiness, dict) and remote_readiness.get("ready") is not True:
-            return web.json_response({
-                "error": remote_readiness.get("reason") or "backend is not ready to upgrade",
-                "readiness": remote_readiness,
-            }, status=409)
+            raise BackendUpgradeError(
+                remote_readiness.get("reason") or "backend is not ready to upgrade",
+                409, remote_readiness)
         try:
             if upgrade_contract.version_key(__version__) <= \
                     upgrade_contract.version_key(str(remote.get("version") or "")):
-                return web.json_response({"error": "backend is already at this version or newer"},
-                                         status=409)
+                raise BackendUpgradeError("backend is already at this version or newer", 409)
         except ValueError as exc:
-            return web.json_response({"error": str(exc)}, status=409)
+            raise BackendUpgradeError(str(exc), 409) from exc
 
         loop = asyncio.get_running_loop()
         try:
             payload, manifest = await loop.run_in_executor(None, _build_upgrade_payload)
         except Exception as exc:
             log.exception("backend release build failed")
-            return web.json_response({"error": str(exc)}, status=500)
+            raise BackendUpgradeError(str(exc), 500) from exc
         headers = {
             "X-Puppy-Token": be["token"],
             "Content-Type": "application/octet-stream",
@@ -367,20 +476,19 @@ async def h_upgrade(request: web.Request):
                 except Exception:
                     accepted = {"error": "backend returned a non-JSON upgrade response"}
                 if response.status != 202 or accepted.get("accepted") is not True:
-                    rejected = {
-                        "error": accepted.get("error") or "backend rejected the upgrade",
-                    }
-                    if isinstance(accepted.get("readiness"), dict):
-                        rejected["readiness"] = accepted["readiness"]
-                    return web.json_response(rejected, status=(
-                        response.status if 400 <= response.status < 600 and
-                        response.status not in (401, 403) else 502))
-        except asyncio.TimeoutError:
-            return web.json_response({"error": "backend timed out while staging the upgrade"}, status=504)
+                    status = (response.status if 400 <= response.status < 600 and
+                              response.status not in (401, 403) else 502)
+                    raise BackendUpgradeError(
+                        accepted.get("error") or "backend rejected the upgrade", status,
+                        accepted.get("readiness"))
+        except BackendUpgradeError:
+            raise
+        except asyncio.TimeoutError as exc:
+            raise BackendUpgradeError(
+                "backend timed out while staging the upgrade", 504) from exc
         except Exception as exc:
-            return web.json_response({"error": "backend upgrade request failed: {}".format(
-                _connection_error(exc))},
-                                     status=502)
+            raise BackendUpgradeError(
+                "backend upgrade request failed: {}".format(_connection_error(exc)), 502) from exc
 
         deadline = time.monotonic() + 90
         last_error = "backend did not return after its upgrade restart"
@@ -401,23 +509,236 @@ async def h_upgrade(request: web.Request):
                 _store_metadata(bid, upgraded)
                 log.info("backend %s upgraded %s -> %s", be["name"],
                          remote.get("version"), upgraded.get("version"))
-                return web.json_response({
+                return {
                     "ok": True, "from_version": remote.get("version"),
                     "to_version": upgraded.get("version"), "sha256": manifest["sha256"],
                     "remote": upgraded,
-                })
+                }
             if last.get("target_version") == manifest["version"] and \
                     last.get("state") in ("rolled-back", "failed"):
                 _store_metadata(bid, upgraded)
-                return web.json_response({
-                    "error": "backend rolled back the upgrade: {}".format(
-                        last.get("error") or "candidate health check failed")
-                }, status=502)
+                raise BackendUpgradeError(
+                    "backend rolled back the upgrade: {}".format(
+                        last.get("error") or "candidate health check failed"), 502)
             last_error = "backend returned version {} instead of {}".format(
                 upgraded.get("version", "?"), manifest["version"])
-        return web.json_response({"error": last_error}, status=504)
+        raise BackendUpgradeError(last_error, 504)
     finally:
         _upgrades_in_progress.discard(bid)
+        _broadcast_backends()
+
+
+async def h_upgrade(request: web.Request):
+    try:
+        result = await upgrade_backend(int(request.match_info["bid"]))
+        return web.json_response(result)
+    except BackendUpgradeError as exc:
+        return web.json_response(exc.payload(), status=exc.status)
+
+
+async def _legacy_auto_readiness(backend: dict) -> dict:
+    """Conservatively infer idleness for the first upgrade of older nodes.
+
+    Their POST remains authoritative for terminal activity and last-moment
+    races. This check prevents artifact work while a reported session is busy.
+    """
+    target = backend["url"].rstrip("/") + "/api/sessions"
+    try:
+        async with client().get(
+                target, headers={"X-Puppy-Token": backend["token"]},
+                timeout=aiohttp.ClientTimeout(total=5), allow_redirects=False,
+                ssl=_ssl_pin(backend["tls_fingerprint"])) as response:
+            try:
+                payload = await response.json()
+            except Exception:
+                payload = None
+            if response.status != 200 or not isinstance(payload, dict) or \
+                    not isinstance(payload.get("sessions"), list):
+                return {
+                    "ready": False, "state": "checking",
+                    "reason": "could not verify legacy backend session activity",
+                }
+    except Exception as exc:
+        return {
+            "ready": False, "state": "checking",
+            "reason": "could not verify legacy backend idleness: {}".format(
+                _connection_error(exc)),
+        }
+    busy = [item for item in payload["sessions"] if not isinstance(item, dict) or
+            item.get("status") != "idle"]
+    return {
+        "ready": not busy,
+        "state": "ready" if not busy else "busy",
+        "reason": ("legacy backend reports no active sessions" if not busy else
+                   "legacy backend has an active session"),
+        "legacy": True,
+    }
+
+
+def _auto_note_error(backend: dict, message: str) -> None:
+    bid = int(backend["id"])
+    if _auto_upgrade_last_errors.get(bid) != message:
+        log.warning("automatic upgrade for backend %s deferred: %s", backend["name"], message)
+        _auto_upgrade_last_errors[bid] = message
+
+
+async def auto_upgrade_cycle(app: web.Application) -> None:
+    """Probe opted-in headless nodes and upgrade at most one at a time."""
+    if app.get("puppy_snapshot_busy"):
+        return
+    rows = [dict(row) for row in db.query(
+        "SELECT * FROM backends WHERE auto_upgrade=1 ORDER BY id")]
+    live_ids = {int(row["id"]) for row in rows}
+    for bucket in (_auto_upgrade_retry_after, _auto_upgrade_checked_at,
+                   _auto_upgrade_last_errors):
+        for bid in list(bucket):
+            if bid not in live_ids:
+                bucket.pop(bid, None)
+    now = time.monotonic()
+    due = []
+    controller_version = upgrade_contract.version_key(__version__)
+    for backend in rows:
+        bid = int(backend["id"])
+        if _auto_upgrade_retry_after.get(bid, 0) > now:
+            continue
+        try:
+            stored_version = upgrade_contract.version_key(
+                str(backend.get("remote_version") or ""))
+        except ValueError:
+            stored_version = None
+        if stored_version is not None and stored_version >= controller_version and \
+                now - _auto_upgrade_checked_at.get(bid, 0) < AUTO_UPGRADE_CURRENT_RECHECK:
+            continue
+        due.append(backend)
+    if not due:
+        return
+
+    probes = await asyncio.gather(*(
+        probe_backend(item["url"], item["token"], item["tls_fingerprint"], timeout=5)
+        for item in due), return_exceptions=True)
+    metadata_changed = False
+    for backend, current in zip(due, probes):
+        if app.get("puppy_snapshot_busy"):
+            break
+        bid = int(backend["id"])
+        now = time.monotonic()
+        _auto_upgrade_checked_at[bid] = now
+        if isinstance(current, Exception):
+            message = _connection_error(current)
+            _auto_upgrade_retry_after[bid] = now + AUTO_UPGRADE_FAILURE_RETRY
+            _auto_note_error(backend, message)
+            continue
+        if not current["ok"]:
+            message = current.get("error", "backend is unavailable")
+            _auto_upgrade_retry_after[bid] = now + AUTO_UPGRADE_FAILURE_RETRY
+            _auto_note_error(backend, message)
+            continue
+        remote = current["remote"]
+        metadata_changed = _store_metadata(bid, remote) or metadata_changed
+        try:
+            remote_version = upgrade_contract.version_key(str(remote.get("version") or ""))
+        except ValueError as exc:
+            _auto_upgrade_retry_after[bid] = now + AUTO_UPGRADE_FAILURE_RETRY
+            _auto_note_error(backend, str(exc))
+            continue
+        if remote_version >= controller_version:
+            _auto_upgrade_retry_after.pop(bid, None)
+            _auto_upgrade_last_errors.pop(bid, None)
+            continue
+        descriptor = remote.get("upgrade") or {}
+        if remote.get("role") != "backend" or \
+                protocol.UPGRADE_CAPABILITY not in (remote.get("capabilities") or []) or \
+                descriptor.get("supported") is not True:
+            message = descriptor.get("reason") or \
+                "backend does not support safe remote upgrades"
+            _auto_upgrade_retry_after[bid] = now + AUTO_UPGRADE_FAILURE_RETRY
+            _auto_note_error(backend, message)
+            continue
+        readiness = descriptor.get("readiness")
+        if not isinstance(readiness, dict):
+            readiness = await _legacy_auto_readiness(backend)
+        if readiness.get("ready") is not True:
+            state = readiness.get("state")
+            delay = AUTO_UPGRADE_INTERVAL if state in ("busy", "upgrading", "checking") \
+                else AUTO_UPGRADE_FAILURE_RETRY
+            _auto_upgrade_retry_after[bid] = time.monotonic() + delay
+            if state in ("blocked", "unsupported"):
+                _auto_note_error(
+                    backend, readiness.get("reason") or "backend is not ready to upgrade")
+            continue
+        fresh = get_backend(bid)
+        if fresh is None or not bool(fresh.get("auto_upgrade")) or \
+                app.get("puppy_snapshot_busy"):
+            continue
+        try:
+            result = await upgrade_backend(bid, remote_hint=remote)
+        except BackendUpgradeError as exc:
+            state = (exc.readiness or {}).get("state")
+            delay = AUTO_UPGRADE_INTERVAL if state in ("busy", "upgrading") or \
+                "already in progress" in str(exc) else AUTO_UPGRADE_FAILURE_RETRY
+            _auto_upgrade_retry_after[bid] = time.monotonic() + delay
+            if state not in ("busy", "upgrading") and "already in progress" not in str(exc):
+                _auto_note_error(backend, str(exc))
+            continue
+        _auto_upgrade_retry_after.pop(bid, None)
+        _auto_upgrade_last_errors.pop(bid, None)
+        _auto_upgrade_checked_at[bid] = time.monotonic()
+        log.info("automatic backend upgrade completed for %s at v%s",
+                 backend["name"], result["to_version"])
+    if metadata_changed:
+        _broadcast_backends()
+
+
+async def _auto_upgrade_loop(app: web.Application) -> None:
+    while True:
+        if _auto_upgrade_wake is not None:
+            _auto_upgrade_wake.clear()
+        try:
+            await auto_upgrade_cycle(app)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("automatic backend upgrade scan failed")
+        try:
+            if _auto_upgrade_wake is None:
+                await asyncio.sleep(AUTO_UPGRADE_INTERVAL)
+            else:
+                await asyncio.wait_for(
+                    _auto_upgrade_wake.wait(), timeout=AUTO_UPGRADE_INTERVAL)
+        except asyncio.TimeoutError:
+            pass
+
+
+async def start_auto_upgrade_worker(app: web.Application) -> None:
+    global _auto_upgrade_task, _auto_upgrade_wake
+    if _auto_upgrade_task is not None and not _auto_upgrade_task.done():
+        return
+    _auto_upgrade_wake = asyncio.Event()
+    _auto_upgrade_task = asyncio.create_task(_auto_upgrade_loop(app))
+
+
+async def stop_auto_upgrade_worker(_app: web.Application = None) -> None:
+    global _auto_upgrade_task, _auto_upgrade_wake
+    task = _auto_upgrade_task
+    _auto_upgrade_task = None
+    _auto_upgrade_wake = None
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+def upgrade_blockers() -> list:
+    if not _upgrades_in_progress:
+        return []
+    names = []
+    for bid in sorted(_upgrades_in_progress):
+        backend = get_backend(bid)
+        names.append(backend["name"] if backend else str(bid))
+    return ["backend upgrade in progress: {}".format(", ".join(names))]
 
 
 # ---- proxy ----
@@ -454,6 +775,13 @@ async def proxy(request: web.Request):
                                     allow_redirects=False,
                                     ssl=_ssl_pin(be["tls_fingerprint"])) as r:
             payload = await r.read()
+            if request.method == "GET" and tail in ("ping", "node") and r.status == 200:
+                try:
+                    remote = _normalize_peer(json.loads(payload.decode("utf-8")))
+                    if remote.get("ok") is True and _store_metadata(bid, remote):
+                        _broadcast_backends()
+                except Exception:
+                    pass  # proxy the authoritative response; metadata caching is best-effort
             resp = web.Response(status=r.status, body=payload,
                                 content_type=r.content_type or "application/json")
             return resp
@@ -555,6 +883,7 @@ async def close_client() -> None:
 def register(app: web.Application) -> None:
     app.router.add_get("/api/backends", h_list)
     app.router.add_post("/api/backends", h_add)
+    app.router.add_patch("/api/backends/{bid:\\d+}", h_patch)
     app.router.add_delete("/api/backends/{bid:\\d+}", h_delete)
     app.router.add_post("/api/backends/{bid:\\d+}/test", h_test)
     app.router.add_post("/api/backends/{bid:\\d+}/upgrade", h_upgrade)

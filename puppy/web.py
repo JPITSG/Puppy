@@ -738,6 +738,7 @@ async def h_snapshot_import(request: web.Request):
             return web.json_response({"error": "; ".join(blocked)}, status=409)
         result = snapshots.commit_import(staged)
         usage_refresh.reset_due(clear_status=True)
+        backends.reset_auto_upgrade_schedule()
         try:
             await backends.close_client()
         except Exception as exc:
@@ -886,6 +887,7 @@ def build_app() -> web.Application:
 
     auth.register(app)
     backends.register(app)
+    app.on_startup.append(backends.start_auto_upgrade_worker)
 
     r.add_get("/api/state", h_state)
     r.add_get("/api/settings", h_settings_get)
@@ -906,6 +908,7 @@ def build_app() -> web.Application:
 
     async def on_shutdown(app):
         await bind_verify.close_all(app)
+        await backends.stop_auto_upgrade_worker(app)
         await runner.shutdown()
         await backends.close_client()
 

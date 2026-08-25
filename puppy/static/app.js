@@ -860,6 +860,7 @@ const state = {
   engCache: {},           // bid -> engines[]
   remoteEngineErrors: {}, // bid -> latest engine-status error (node can still be reachable)
   remoteEngineCheckedAt: {},
+  remoteNodeCheckedAt: {},
   remoteUsageRefresh: {}, // bid -> account-usage refresh metadata
   tabs: [],               // [{id,type,bid,sid,title,cmd}]
   active: null,           // tab id
@@ -935,7 +936,8 @@ function reconcileRemoteState() {
   const live = new Set(state.backends.map(backend => String(backend.id)));
   for (const bucket of [state.remoteSessions, state.remoteOk, state.remoteErrors,
                         state.engCache, state.remoteEngineErrors,
-                        state.remoteEngineCheckedAt, state.remoteUsageRefresh,
+                        state.remoteEngineCheckedAt, state.remoteNodeCheckedAt,
+                        state.remoteUsageRefresh,
                         remotePollSequence]) {
     for (const id of Object.keys(bucket)) if (!live.has(String(id))) delete bucket[id];
   }
@@ -1085,6 +1087,11 @@ function connectUpdates() {
         ingestSessionActivity(0, state.sessions, d.server_time);
         renderSidebar();
         syncTabsWithSessions();
+      } else if (d.type === "backends" && Array.isArray(d.backends)) {
+        state.backends = d.backends;
+        reconcileRemoteState();
+        renderSidebar();
+        syncRemoteStateViews();
       }
     } catch (e) {}
   };
@@ -1175,6 +1182,28 @@ async function pollRemoteBackend(backend, forceEngines = false) {
   delete state.remoteErrors[bid];
 
   const now = Date.now();
+  const nodeIsStale = now - Number(state.remoteNodeCheckedAt[bid] || 0) >=
+    REMOTE_ENGINE_REFRESH;
+  if (forceEngines || nodeIsStale) {
+    try {
+      let node;
+      try { node = await api(bid, "node", { timeoutMs: REMOTE_POLL_TIMEOUT }); }
+      catch (_) { node = await api(bid, "ping", { timeoutMs: REMOTE_POLL_TIMEOUT }); }
+      if (!node || node.ok !== true || typeof node.version !== "string")
+        throw new Error("backend returned invalid node metadata");
+      if (!remotePollIsCurrent(bid, sequence)) return;
+      backend.remote_version = node.version;
+      if (typeof node.role === "string") backend.role = node.role;
+      if (Number.isInteger(node.protocol)) backend.protocol = node.protocol;
+      if (Array.isArray(node.capabilities)) backend.capabilities = node.capabilities;
+    } catch (error) {
+      /* Sessions are the reachability authority. Metadata failure must not
+         turn a healthy backend red or erase the last-known version. */
+      console.warn(`backend ${backend.name} metadata refresh failed`, error);
+    } finally {
+      state.remoteNodeCheckedAt[bid] = Date.now();
+    }
+  }
   const hasCachedEngines = Object.prototype.hasOwnProperty.call(state.engCache, bid);
   const enginesAreStale = now - Number(state.remoteEngineCheckedAt[bid] || 0) >=
     REMOTE_ENGINE_REFRESH;
@@ -1332,6 +1361,14 @@ function backendSupportsUsageRefresh(bid) {
      offering a control that the remote cannot accept. */
   return !!backend && Array.isArray(backend.capabilities) &&
     backend.capabilities.includes("engine-usage-refresh");
+}
+
+function backendSupportsAutoUpgrade(backend) {
+  /* This policy is deliberately narrower than legacy execution inference:
+     only a headless node explicitly advertising the signed upgrade contract
+     may be armed for unattended replacement. */
+  return !!backend && backend.role === "backend" &&
+    Array.isArray(backend.capabilities) && backend.capabilities.includes("remote-upgrade");
 }
 
 function renderSidebar() {
@@ -1577,7 +1614,7 @@ function renderFootEngines() {
   root.innerHTML = "";
   const groups = [{ bid: 0, name: backendName(0), engines: state.engines }]
     .concat(state.backends.map(b => ({
-      bid: b.id, name: b.name,
+      bid: b.id, name: b.name, version: b.remote_version || "",
       engines: Object.prototype.hasOwnProperty.call(state.engCache, b.id) ? state.engCache[b.id] : null,
     })));
   const showGroups = groups.length > 1;
@@ -1596,6 +1633,11 @@ function renderFootEngines() {
       name.title = g.name;
       const key = g.bid ? `remote:${g.bid}` : "local";
       head.appendChild(name);
+      if (g.bid && g.version) {
+        const version = el("span", "foot-engine-version", `· v${g.version}`);
+        version.title = `Backend version ${g.version}`;
+        head.appendChild(version);
+      }
       head.appendChild(disclosureButton(`${g.name} engine status`, body,
         collapsedStatusBackends, "puppy.collapsed.status-backends", key));
       group.appendChild(head);
@@ -3139,6 +3181,7 @@ class SettingsView {
     this.remoteBackendDots = new Map();
     this.usageRows = new Map();
     this.upgradeButtons = new Map();
+    this.backendAutoToggles = new Map();
     this.upgradeReadiness = new Map();
     this.upgradesInProgress = new Set();
     this.upgradePollTimer = null;
@@ -3156,6 +3199,7 @@ class SettingsView {
     this.remoteBackendDots.clear();
     this.usageRows.clear();
     this.upgradeButtons.clear();
+    this.backendAutoToggles.clear();
     this.upgradeReadiness.clear();
     this.upgradesInProgress.clear();
     this.localEngineGroup = null;
@@ -3215,6 +3259,24 @@ class SettingsView {
       cmpVersion(backend.remote_version, record.controllerVersion) === -1;
   }
 
+  syncBackendAutoToggles() {
+    for (const [bid, record] of this.backendAutoToggles) {
+      const backend = state.backends.find(item => item.id === bid);
+      if (!backend || !record.input.isConnected) continue;
+      const enabled = !!backend.auto_upgrade;
+      const supported = backendSupportsAutoUpgrade(backend);
+      if (!record.saving) record.input.checked = enabled;
+      const upgrading = this.upgradesInProgress.has(bid) || !!backend.upgrade_in_progress;
+      record.input.disabled = record.saving || upgrading ||
+        (!supported && !enabled);
+      record.root.classList.toggle("disabled", record.input.disabled);
+      record.root.title = upgrading ?
+        "This backend upgrade is already in progress" : supported ?
+        "Upgrade this backend automatically when it is outdated and idle" :
+        "Automatic upgrades require an upgrade-capable headless backend";
+    }
+  }
+
   syncUpgradeButtons() {
     for (const [bid, record] of this.upgradeButtons) {
       const button = record.button;
@@ -3228,7 +3290,7 @@ class SettingsView {
         button.disabled = disabled;
         button.title = title || "";
       };
-      if (this.upgradesInProgress.has(bid)) {
+      if (this.upgradesInProgress.has(bid) || backend.upgrade_in_progress) {
         set("Upgrading…", true, "Upgrade is being staged and health-checked");
       } else if (!capable) {
         set("Upgrade", true,
@@ -3263,6 +3325,7 @@ class SettingsView {
         }
       }
     }
+    this.syncBackendAutoToggles();
   }
 
   async refreshUpgradeReadiness(generation) {
@@ -3318,7 +3381,10 @@ class SettingsView {
 
   syncRemoteState() {
     for (const [bid, group] of this.remoteEngineGroups) {
-      if (!state.backends.some(backend => backend.id === bid)) continue;
+      const backend = state.backends.find(item => item.id === bid);
+      if (!backend) continue;
+      group.setMeta([backend.url, backend.remote_version ? `v${backend.remote_version}` : ""]
+        .filter(Boolean).join(" · "));
       const reachable = state.remoteOk[bid];
       const cached = Object.prototype.hasOwnProperty.call(state.engCache, bid) ?
         state.engCache[bid] : null;
@@ -3414,7 +3480,11 @@ class SettingsView {
         engines.forEach(e2 => body.appendChild(this.engineRow(e2)));
       }
     };
-    return { root, update };
+    const setMeta = value => {
+      metaEl.textContent = value || "";
+      metaEl.title = value || "";
+    };
+    return { root, update, setMeta };
   }
 
   usageRefreshRow(name, bid) {
@@ -3550,6 +3620,7 @@ class SettingsView {
     this.remoteBackendDots.clear();
     this.usageRows.clear();
     this.upgradeButtons.clear();
+    this.backendAutoToggles.clear();
     /* A hidden Settings tab is not polled. Re-enter through Checking rather
        than briefly enabling a button from an arbitrarily old ready result. */
     this.upgradeReadiness.clear();
@@ -3780,6 +3851,12 @@ class SettingsView {
             placeholder="Supplied automatically by pairing JSON"></label>
         <label class="full">Pairing JSON <span style="text-transform:none">(optional)</span>
           <textarea id="be-pairing" rows="3" placeholder="Paste puppy-backend pairing output"></textarea></label>
+        <label class="be-auto be-auto-add full" title="Upgrade this headless backend automatically when it is outdated and idle">
+          <input type="checkbox" id="be-auto">
+          <span class="be-auto-track" aria-hidden="true"><span></span></span>
+          <span class="be-auto-copy"><span>Auto-upgrade when idle</span>
+            <small>Signed release · readiness checked · rollback protected</small></span>
+        </label>
         <div class="full"><button class="btn btn-pri btn-sm" id="be-add">Add backend</button></div>
       </div>`;
     const beList = c3.querySelector("#be-list");
@@ -3798,6 +3875,42 @@ class SettingsView {
           b.protocol != null && `protocol ${b.protocol}`].filter(Boolean).join(" · ");
         const url = el("span", "be-url", b.url);
         url.title = b.url;
+        const metaRow = el("div", "be-meta-row");
+        const autoRoot = el("label", "be-auto be-auto-existing");
+        const autoInput = document.createElement("input");
+        autoInput.type = "checkbox";
+        autoInput.checked = !!b.auto_upgrade;
+        autoInput.setAttribute("aria-label", `Automatically upgrade ${b.name} when idle`);
+        const autoTrack = el("span", "be-auto-track");
+        autoTrack.setAttribute("aria-hidden", "true");
+        autoTrack.appendChild(el("span"));
+        autoRoot.appendChild(autoInput);
+        autoRoot.appendChild(autoTrack);
+        autoRoot.appendChild(el("span", "be-auto-label", "Auto-upgrade"));
+        const autoRecord = { root: autoRoot, input: autoInput, saving: false };
+        this.backendAutoToggles.set(b.id, autoRecord);
+        autoInput.onchange = async () => {
+          const desired = autoInput.checked;
+          const previous = !!b.auto_upgrade;
+          autoRecord.saving = true;
+          this.syncBackendAutoToggles();
+          try {
+            const result = await api(0, `backends/${b.id}`, {
+              method: "PATCH", body: { auto_upgrade: desired },
+            });
+            const current = state.backends.find(item => item.id === b.id);
+            if (current && result.backend) Object.assign(current, result.backend);
+            Object.assign(b, result.backend || { auto_upgrade: desired });
+          } catch (error) {
+            const current = state.backends.find(item => item.id === b.id);
+            if (current) current.auto_upgrade = previous;
+            b.auto_upgrade = previous;
+            toast(`${b.name}: ${error.message}`, "error", 6500);
+          } finally {
+            autoRecord.saving = false;
+            this.syncBackendAutoToggles();
+          }
+        };
         const isTls = /^https:\/\//i.test(b.url || "");
         const isPinned = isTls && !!b.tls_fingerprint;
         const security = el("span", `be-security ${isTls ? "secure" : "clear"}`);
@@ -3814,7 +3927,9 @@ class SettingsView {
         nameRow.appendChild(availability);
         nameRow.appendChild(name);
         identity.appendChild(nameRow);
-        identity.appendChild(url);
+        metaRow.appendChild(url);
+        metaRow.appendChild(autoRoot);
+        identity.appendChild(metaRow);
         details.appendChild(security);
         details.appendChild(identity);
         this.remoteBackendDots.set(b.id, availability);
@@ -3893,6 +4008,7 @@ class SettingsView {
         beList.appendChild(row);
       }
     };
+    this.inner.appendChild(c3);
     renderBes();
     this.syncUpgradeButtons();
     c3.querySelector("#be-add").onclick = async () => {
@@ -3914,18 +4030,18 @@ class SettingsView {
           url: pairingValue("#be-url", "url"),
           token: pairingValue("#be-token", "token"),
           tls_fingerprint: pairingValue("#be-tls", "tls_sha256"),
+          auto_upgrade: c3.querySelector("#be-auto").checked,
         }});
         toast("backend added", "ok");
         c3.querySelector("#be-name").value = c3.querySelector("#be-url").value =
         c3.querySelector("#be-token").value = c3.querySelector("#be-tls").value = "";
         c3.querySelector("#be-pairing").value = "";
+        c3.querySelector("#be-auto").checked = false;
         await refreshState(); await this.render();
         pollRemotes({ forceEngines: true })
           .catch(error => console.warn("new-backend poll failed", error));
       } catch (e) { toast(e.message, "error"); }
     };
-    this.inner.appendChild(c3);
-
     /* security */
     const c4 = el("div", "card");
     c4.innerHTML = `<h2>Security</h2>

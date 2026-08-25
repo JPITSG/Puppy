@@ -94,6 +94,11 @@ def blockers() -> List[str]:
     if active_terminals:
         reasons.append("{} active terminal{}".format(
             active_terminals, "" if active_terminals == 1 else "s"))
+    # Imported lazily to keep module initialization acyclic. A controller-side
+    # automatic upgrade is a durable external mutation just like a manual one,
+    # so backup/restore must not race its artifact replacement and restart.
+    from puppy import backends
+    reasons.extend(backends.upgrade_blockers())
     return reasons
 
 
@@ -536,6 +541,9 @@ def _validate_database(path: Path) -> int:
             "meta": {"key", "value"},
             "users": {"id", "username", "pwhash", "created_at"},
             "web_sessions": {"id", "token_hash", "username", "created_at", "expires_at"},
+            # auto_upgrade is intentionally optional here: archives created
+            # before v1.0.114 gain its safe-off default through db._migrate()
+            # immediately after installation.
             "backends": {"id", "name", "url", "token", "protocol", "capabilities",
                          "remote_version", "role", "tls_fingerprint", "created_at"},
             "sessions": {"id", "name", "engine", "cwd", "model", "effort", "color",

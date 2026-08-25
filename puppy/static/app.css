@@ -229,6 +229,9 @@ a{color:var(--acc2)}
   min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
   font-family:var(--sans);font-size:9px;font-weight:400;text-transform:uppercase;letter-spacing:.1em;
 }
+.foot-engine-version{
+  flex:0 0 auto;color:var(--txt3);font:9px var(--mono);white-space:nowrap;letter-spacing:0;
+}
 .foot-engine-empty{padding-left:22px;color:var(--txt3);font-size:10px}
 .foot-eng{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--txt2)}
 /* -8px pulls the icon column left so the dots' visual inset matches the 14px right inset */
@@ -904,10 +907,37 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .be-identity{min-width:0}
 .be-name-row{display:flex;align-items:center;gap:7px;min-width:0}
 .be-row .be-name{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:650}
+.be-meta-row{display:flex;align-items:center;gap:9px;min-width:0;margin-top:1px}
 .be-row .be-url{
-  display:block;min-width:0;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  display:block;flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
   color:var(--txt3);font-family:var(--mono);font-size:11.5px;
 }
+.be-auto{
+  position:relative;display:inline-flex;align-items:center;gap:6px;min-width:0;margin:0;
+  color:var(--txt3);font:10px/1.25 var(--sans);text-transform:none;letter-spacing:0;
+  cursor:pointer;user-select:none;
+}
+.be-auto input{position:absolute;width:1px;height:1px;margin:0;opacity:0;pointer-events:none}
+.be-auto-track{
+  position:relative;display:block;flex:0 0 auto;width:28px;height:16px;border:1px solid var(--line2);
+  border-radius:9px;background:transparent;transition:border-color .15s,background .15s;
+}
+.be-auto-track>span{
+  position:absolute;left:3px;top:3px;width:8px;height:8px;border-radius:50%;
+  background:var(--txt3);transition:transform .15s var(--ease),background .15s;
+}
+.be-auto input:checked+.be-auto-track{border-color:rgba(90,162,245,.65);background:var(--acc-dim)}
+.be-auto input:checked+.be-auto-track>span{transform:translateX(12px);background:var(--acc2)}
+.be-auto input:focus-visible+.be-auto-track{box-shadow:0 0 0 3px rgba(90,162,245,.12)}
+@media (hover:hover){.be-auto:hover .be-auto-track{border-color:var(--line3)}}
+.be-auto.disabled{cursor:not-allowed;opacity:.45}
+.be-auto-existing{flex:0 0 auto;min-height:22px}
+.be-auto-label{white-space:nowrap}
+.be-auto-add{
+  align-items:center;margin:1px 0 10px;padding:10px 0 0;border-top:1px solid var(--line);
+}
+.be-auto-copy{display:flex;flex-direction:column;gap:2px;min-width:0;color:var(--txt2);font-size:11.5px}
+.be-auto-copy small{color:var(--txt3);font:9.5px/1.35 var(--mono);white-space:normal}
 .be-security{width:20px;height:20px;display:flex;align-items:center;justify-content:center}
 .be-security svg{display:block}
 .be-security.secure{color:var(--ok)}
@@ -1103,6 +1133,8 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   .engine-node-message{padding-left:26px}
   .be-row{grid-template-columns:minmax(0,1fr);gap:10px;padding:12px 0}
   .be-row .be-url{margin-top:2px;font-size:10.5px}
+  .be-meta-row{gap:7px}
+  .be-auto-existing{min-height:26px}
   .be-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;width:100%}
   .be-actions .btn{width:100%;min-width:0;height:34px;padding-left:6px;padding-right:6px}
   .snapshot-actions{display:grid;grid-template-columns:1fr 1fr;gap:7px}
@@ -1111,6 +1143,12 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   .usage-refresh-controls{justify-content:flex-start}
   .usage-refresh-controls input{width:min(120px,40vw);height:34px}
   .usage-refresh-controls .btn{height:34px;margin-left:auto}
+}
+@media (max-width:360px){
+  .be-meta-row{flex-wrap:wrap;row-gap:1px}
+  .be-meta-row .be-url{flex-basis:100%;margin-top:2px}
+  .be-auto-existing{margin-top:1px}
+  .be-row .be-security{align-self:start;margin-top:1px}
 }
 @media (max-width:900px) and (any-pointer:coarse){
   /* a left-edge swipe opens the drawer on touch, so the button is redundant
