@@ -934,7 +934,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .be-auto-existing{flex:0 0 auto;min-height:22px}
 .be-auto-label{white-space:nowrap}
 .be-auto-add{
-  align-items:center;margin:0 0 10px;padding:0;
+  align-items:center;margin:0 0 14px;padding:0;
 }
 .be-auto-copy{display:flex;flex-direction:column;gap:2px;min-width:0;color:var(--txt2);font-size:11.5px}
 .be-auto-copy small{color:var(--txt3);font:9.5px/1.35 var(--mono);white-space:normal}
