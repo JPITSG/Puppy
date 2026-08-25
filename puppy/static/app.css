@@ -247,7 +247,7 @@ a{color:var(--acc2)}
 }
 .foot-usage-refresh::after{content:"";position:absolute;inset:-5px}
 .foot-usage-refresh svg{display:block;transform-origin:center}
-@media (hover:hover){.foot-usage-refresh:hover{background:var(--ok-dim);color:var(--ok-hi)}}
+@media (hover:hover){.foot-usage-refresh:hover{color:var(--ok-hi)}}
 .foot-usage-refresh:active{transform:scale(.88);background:var(--ok-dim)}
 .foot-usage-refresh:focus-visible{outline:1px solid var(--ok);outline-offset:2px}
 .foot-usage-refresh:disabled{cursor:wait;opacity:.78}
