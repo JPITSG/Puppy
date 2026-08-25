@@ -587,16 +587,21 @@ function enhanceChoiceSelect(select) {
   };
   select._choiceControl = control;
 
-  const setActive = (index) => {
+  /* `pointer` marks a highlight the mouse is responsible for: it does not move
+     the keyboard cursor, so leaving the menu can put the highlight back where
+     the keys left it. `quiet` skips the scroll - only key presses may move the
+     list under the pointer. */
+  const setActive = (index, { pointer = false, quiet = false } = {}) => {
     if (!control.menu || index < 0 || index >= select.options.length ||
         select.options[index].disabled) return;
     control.activeIndex = index;
+    if (!pointer) control.cursorIndex = index;
     control.menu.querySelectorAll(".choice-option").forEach((row, i) =>
       row.classList.toggle("active", i === index));
     const row = control.menu.querySelector(`[data-choice-index="${index}"]`);
     if (row) {
       button.setAttribute("aria-activedescendant", row.id);
-      row.scrollIntoView({ block: "nearest" });
+      if (!quiet) row.scrollIntoView({ block: "nearest" });
     }
   };
 
@@ -636,16 +641,18 @@ function enhanceChoiceSelect(select) {
       row.disabled = option.disabled;
       row.tabIndex = -1;
       row.title = option.title || "";
-      row.onmouseenter = () => setActive(index);
+      row.onmouseenter = () => setActive(index, { pointer: true, quiet: true });
       row.onmousedown = (event) => event.preventDefault();
       row.onclick = (event) => { event.stopPropagation(); choose(index); };
       menu.appendChild(row);
     });
+    /* the pointer takes its highlight with it when it goes */
+    menu.onmouseleave = () => setActive(control.cursorIndex, { quiet: true });
     menu.onclick = (event) => event.stopPropagation();
     document.body.appendChild(menu);
     menu.style.maxHeight = Math.max(80, window.innerHeight - 16) + "px";
     control.menu = menu;
-    control.activeIndex = select.selectedIndex;
+    control.activeIndex = control.cursorIndex = select.selectedIndex;
     openChoiceControl = control;
     wrap.classList.add("open");
     button.setAttribute("aria-expanded", "true");
@@ -3879,12 +3886,21 @@ class SessionView {
       anchor.setAttribute("aria-expanded", "false");
       if (returnFocus && anchor.isConnected) anchor.focus();
     };
+    const highlight = (index) => rows.forEach((row, i) => row.classList.toggle("active", i === index));
+    /* where the highlight belongs with no pointer on the menu: the row the keys
+       are on, else the current value - the state the menu opened in */
+    const resting = () => {
+      const focused = rows.indexOf(document.activeElement);
+      if (focused >= 0) return focused;
+      const selectedAt = rows.findIndex(row => row.classList.contains("selected"));
+      return selectedAt >= 0 ? selectedAt : 0;
+    };
     opts.forEach((o, index) => {
       const selected = current === o.value;
       const row = choiceOptionNode(o.label, selected);
       row.title = o.hint || "";
       row.tabIndex = selected ? 0 : -1;
-      row.onmouseenter = () => rows.forEach((item, i) => item.classList.toggle("active", i === index));
+      row.onmouseenter = () => highlight(index);
       row.onfocus = row.onmouseenter;
       row.onclick = (event) => {
         event.stopPropagation();
@@ -3917,14 +3933,16 @@ class SessionView {
         rows[next].focus();
       }
     };
+    /* the pointer takes its highlight with it when it goes */
+    menu.onmouseleave = () => highlight(resting());
     menu.onclick = (event) => event.stopPropagation();
     document.body.appendChild(menu);
-    const selectedRow = rows.find(row => row.classList.contains("selected")) || rows[0];
-    if (selectedRow) selectedRow.classList.add("active");
+    const openAt = resting();
+    highlight(openAt);
     requestAnimationFrame(() => {
       if (!menu.isConnected) return;
       positionChoiceMenu({ menu, button: anchor });
-      (selectedRow || menu).focus({ preventScroll: true });
+      (rows[openAt] || menu).focus({ preventScroll: true });
     });
     if (!rows.length) {
       menu.tabIndex = -1;
