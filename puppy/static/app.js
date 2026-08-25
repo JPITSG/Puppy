@@ -1002,6 +1002,7 @@ function showAuth(mode) {
   state.authed = false;
   stopRemotePolling();
   if (updatesWs) try { updatesWs.close(); } catch (error) {}
+  setLocalConnection(false);
   $("app").classList.add("hidden");
   $("auth-shell").classList.remove("hidden");
   const setup = authMode === "setup";
@@ -1095,7 +1096,7 @@ function connectUpdates() {
       return;
     }
     updatesRetry = 800;
-    $("conn-dot").classList.add("ok");
+    setLocalConnection(true);
   };
   ws.onmessage = (ev) => {
     if (sequence !== updatesConnectionSequence || updatesWs !== ws) return;
@@ -1111,13 +1112,15 @@ function connectUpdates() {
         reconcileRemoteState();
         renderSidebar();
         syncRemoteStateViews();
+      } else if (d.type === "host_metrics") {
+        renderHostCpu(d.cpu_percent);
       }
     } catch (e) {}
   };
   ws.onclose = () => {
     if (sequence !== updatesConnectionSequence || updatesWs !== ws) return;
     updatesWs = null;
-    $("conn-dot").classList.remove("ok");
+    setLocalConnection(false);
     if (!state.authed) return;
     const delay = Math.round(updatesRetry * (.85 + Math.random() * .3));
     updatesRetry = Math.min(updatesRetry * 1.6, 15000);
@@ -1127,6 +1130,26 @@ function connectUpdates() {
     }, delay);
   };
   ws.onerror = () => { try { ws.close(); } catch (e) {} };
+}
+
+function renderHostCpu(cpuPercent) {
+  const output = $("host-cpu");
+  const value = typeof cpuPercent === "number" ? cpuPercent : NaN;
+  if (!Number.isFinite(value) || value < 0 || value > 100 ||
+      !$("conn-dot").classList.contains("ok")) {
+    output.textContent = "";
+    output.removeAttribute("title");
+    output.classList.add("hidden");
+    return;
+  }
+  output.textContent = `CPU ${Math.round(value)}%`;
+  output.title = `WebUI host CPU usage: ${value.toFixed(1)}%`;
+  output.classList.remove("hidden");
+}
+
+function setLocalConnection(connected) {
+  $("conn-dot").classList.toggle("ok", connected);
+  if (!connected) renderHostCpu(null);
 }
 
 function remotePollIsCurrent(bid, sequence) {

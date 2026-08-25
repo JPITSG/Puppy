@@ -255,7 +255,12 @@ a{color:var(--acc2)}
 .foot-row{display:flex;align-items:center;gap:6px;border-top:1px solid var(--line);padding-top:7px}
 .foot-row .icon-btn{width:24px;height:24px;font-size:14px;border-radius:var(--btn-r);margin-left:-8px}
 .foot-ver{font-size:10.5px;color:var(--txt3);font-family:var(--mono)}
-.conn-dot{width:8px;height:8px;border-radius:50%;background:var(--err);margin-left:auto;transition:background .3s}
+.conn-state{display:flex;align-items:center;min-width:0;margin-left:auto}
+.host-cpu{
+  color:var(--txt3);font:9.5px var(--mono);font-variant-numeric:tabular-nums;
+  white-space:nowrap;
+}
+.conn-dot{width:8px;height:8px;flex:0 0 auto;margin-left:6px;border-radius:50%;background:var(--err);transition:background .3s}
 .conn-dot.ok{background:var(--ok)}
 .side-backdrop,.drawer-edge{display:none}
 

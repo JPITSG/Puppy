@@ -94,6 +94,19 @@ def exercise_activity_blocks(session_hub_cls) -> None:
     assert hub.status == "idle" and hub.active_since is None
 
 
+def exercise_host_cpu_math(host_metrics_module) -> None:
+    previous = host_metrics_module._parse_cpu_stat(
+        "intr 1\ncpu 100 10 20 400 50 5 6 9 1000 1000\n")
+    current = host_metrics_module._parse_cpu_stat(
+        "cpu 130 10 30 440 50 5 10 15 5000 5000\n")
+    assert previous is not None and current is not None
+    # guest counters are deliberately excluded because Linux already includes
+    # them in user/nice. Of 90 elapsed ticks, 40 were idle.
+    assert round(host_metrics_module._cpu_percent(previous, current), 1) == 55.6
+    assert host_metrics_module._parse_cpu_stat("cpu invalid counters\n") is None
+    assert host_metrics_module._cpu_percent(current, previous) is None
+
+
 async def exercise_upgrade_readiness(upgrade_module, runner_module,
                                      terminal_module, temporary: Path) -> None:
     """Readiness and the POST gate must agree on workload and runtime blockers."""
@@ -432,6 +445,18 @@ async def exercise_controller(url: str, token: str, backend_url: str,
             assert response.status == 200
         assert full_ping["role"] == "full" and full_ping["protocol"] == 1
         assert "terminal" in full_ping["capabilities"]
+
+        updates = await http.ws_connect(url + "/api/ws/updates", headers=headers)
+        first = await updates.receive_json(timeout=3)
+        assert first["type"] == "sessions"
+        while True:
+            metric = await updates.receive_json(timeout=5)
+            if metric.get("type") == "host_metrics":
+                break
+        assert isinstance(metric["cpu_percent"], (int, float))
+        assert 0 <= metric["cpu_percent"] <= 100
+        assert isinstance(metric["sampled_at"], (int, float))
+        await updates.close()
 
         async with http.post(url + "/api/backends", headers=headers, json={
                 "url": backend_url, "token": backend_token}) as response:
@@ -931,7 +956,7 @@ async def main() -> None:
         old_db.commit()
         old_db.close()
         os.environ["PUPPY_DATA"] = str(controller_data)
-        from puppy import config, db, runner, terminal
+        from puppy import config, db, host_metrics, runner, terminal
         from backend.puppy_backend import upgrade as backend_upgrade
         from puppy.web import build_app
 
@@ -941,6 +966,7 @@ async def main() -> None:
         config.set_value("engines.usage_refresh_minutes", 0)
         db.connect()
         exercise_activity_blocks(runner.SessionHub)
+        exercise_host_cpu_math(host_metrics)
         await exercise_upgrade_readiness(
             backend_upgrade, runner, terminal, temp_root / "readiness")
         assert "tls_fingerprint" in {

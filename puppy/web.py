@@ -15,7 +15,7 @@ import time
 from aiohttp import WSMsgType, web
 
 from puppy import (__version__, auth, backends, bind_verify, cli_releases, config, db,
-                   listener_handoff, protocol, runner, snapshots, terminal,
+                   host_metrics, listener_handoff, protocol, runner, snapshots, terminal,
                    usage_refresh, workspaces)
 from puppy.drivers import all_drivers, get_driver
 
@@ -830,6 +830,10 @@ async def ws_updates(request: web.Request):
     runner.updates_attach(ws)
     try:
         await ws.send_json(runner.sessions_payload())
+        if request.app.get("puppy_role") == "full":
+            metrics = host_metrics.latest(request.app)
+            if metrics is not None:
+                await ws.send_json(metrics)
         async for msg in ws:
             if msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
                 break
@@ -880,6 +884,7 @@ def build_app() -> web.Application:
     app = web.Application(middlewares=[auth.middleware, state_change_guard],
                           client_max_size=8 * 1024 * 1024)
     app["puppy_role"] = "full"
+    host_metrics.register(app)
     app["puppy_snapshot_busy"] = None
     app["puppy_mutations"] = 0
     app["puppy_runtime_web"] = {
