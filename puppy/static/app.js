@@ -1557,7 +1557,10 @@ function saveTabs() {
   try {
     lsSet("puppy.tabs", JSON.stringify({
       version: 2,
-      tabs: state.tabs.map(t => ({ id: t.id, type: t.type, bid: t.bid, sid: t.sid, title: t.title, cmd: t.cmd })),
+      tabs: state.tabs.map(t => ({
+        id: t.id, type: t.type, bid: t.bid, sid: t.sid, title: t.title,
+        cmd: t.cmd, ended: t.ended === true,
+      })),
       active: state.active,
       activeGroup: state.activeGroup,
       layout: storedWorkspace(state.layout),
@@ -1578,6 +1581,9 @@ function storedTabs(value) {
     if (typeof item.sid === "number" && Number.isFinite(item.sid)) tab.sid = item.sid;
     if (typeof item.title === "string") tab.title = item.title.slice(0, 1000);
     if (typeof item.cmd === "string") tab.cmd = item.cmd.slice(0, 10000);
+    /* A shell the user ended is restored as ended: reopening the tab must not
+       silently start a second login session on that host. */
+    if (item.ended === true) tab.ended = true;
     tabs.push(tab);
     seen.add(tab.id);
   }
@@ -5068,8 +5074,9 @@ class TermView {
   onShow(focus = true) {
     if (!this.started) { this.started = true; this.start(); }
     else if (this.fit) setTimeout(() => this.fit.fit(), 30);
-    if (focus && this.term) this.term.focus();
+    if (focus && this.term && !this.isDead()) this.term.focus();
   }
+  isDead() { return !!this.root.querySelector(".term-dead"); }
   start() {
     this.term = new Terminal({
       cursorBlink: true, fontSize: 13, scrollback: 8000,
@@ -5106,7 +5113,11 @@ class TermView {
       this.pasteClipboard();
     };
     this.host.addEventListener("contextmenu", this.onContextMenu);
-    setTimeout(() => { this.fit.fit(); this.connect(); }, 40);
+    setTimeout(() => {
+      this.fit.fit();
+      if (this.tab.ended === true) this.showDead();
+      else this.connect();
+    }, 40);
     this.resizeObs = new ResizeObserver(() => {
       if (!this.fit) return;
       try { this.fit.fit(); } catch (e) {}
@@ -5174,27 +5185,45 @@ class TermView {
     }
   }
   showDead() {
-    if (this.root.querySelector(".term-dead")) { this.syncRemoteState(); return; }
+    if (this.tab.ended !== true) { this.tab.ended = true; saveTabs(); }
+    if (this.isDead()) { this.syncRemoteState(); return; }
+    /* DECTCEM rather than a CSS override: the cursor is the terminal's to draw,
+       and a hidden one stays hidden under a translucent overlay whichever
+       renderer xterm chose. reset() on a new shell brings it back. */
+    this.term.write("\x1b[?25l");
+    this.term.blur();
     const d = el("div", "term-dead");
-    d.appendChild(el("div", "term-dead-message", "terminal ended"));
-    const b = el("button", "btn btn-pri", "New shell");
-    b.onclick = () => {
+    d.appendChild(el("div", "term-dead-message", "Terminal ended"));
+    const actions = el("div", "term-dead-actions");
+    const fresh = el("button", "btn btn-pri term-dead-new", "New shell");
+    fresh.type = "button";
+    fresh.onclick = () => {
+      this.tab.ended = false;
+      saveTabs();
       d.remove();
       this.term.reset();
+      this.term.write("\x1b[?25h");
       this.connect();
+      this.term.focus();
     };
-    d.appendChild(b);
-    this.root.querySelector(".term-wrap").style.position = "relative";
-    this.root.appendChild(d);
+    const close = el("button", "btn term-dead-close", "Close shell");
+    close.type = "button";
+    close.onclick = () => closeTab(this.tab.id);
+    actions.appendChild(fresh);
+    actions.appendChild(close);
+    d.appendChild(actions);
+    /* Anchored to the terminal box, not the padded view, so the stack is
+       centred on the black rectangle the user is actually looking at. */
+    this.host.appendChild(d);
     this.syncRemoteState();
   }
   syncRemoteState() {
     const dead = this.root.querySelector(".term-dead");
     if (!dead) return;
     const message = dead.querySelector(".term-dead-message");
-    const button = dead.querySelector("button");
+    const button = dead.querySelector(".term-dead-new");
     const unavailable = !!this.tab.bid && state.remoteOk[this.tab.bid] === false;
-    message.textContent = unavailable ? "backend unavailable" : "terminal ended";
+    message.textContent = unavailable ? "Backend unavailable" : "Terminal ended";
     button.textContent = unavailable ? "Waiting for backend…" : "New shell";
     button.disabled = unavailable;
   }
