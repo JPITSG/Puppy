@@ -509,7 +509,7 @@ select.choice-native{display:none!important}
   .tab:not(.active):hover{background:var(--tab-hov)}
 }
 /* Every pane's visible tab gets a solid face. The one in the focused pane also
-   gets an accent wash and top rail: obvious globally, without implying the
+   gets an accent wash and outline: obvious globally, without implying the
    visible tabs in the other panes are closed. */
 .tab.active{
   background:linear-gradient(180deg,var(--tab-active-bg),var(--bg) 92%);
@@ -519,7 +519,6 @@ select.choice-native{display:none!important}
   background:linear-gradient(180deg,var(--tab-active-focus-bg),var(--bg) 92%);
   border-color:rgba(90,162,245,.58);
   border-color:color-mix(in srgb,var(--acc) 58%,var(--line2));
-  box-shadow:inset 0 2px 0 var(--acc);
 }
 .workspace-pane.focused>.tabbar::after{
   background:rgba(90,162,245,.24);
