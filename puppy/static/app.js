@@ -3336,11 +3336,13 @@ function syncBell() {
     if (!saving) toggle.checked = !!n.enabled;
     toggle.disabled = saving;
     toggleRoot.classList.toggle("disabled", saving);
-    toggleRoot.title = saving ? "Updating completion alerts…" : !n.configured && n.enabled ?
-      "Enabled, but no command is configured, so nothing will run" : n.enabled ?
-        "Completion alerts enabled" : "Completion alerts disabled";
-    toggle.setAttribute("aria-label", n.enabled ?
-      "Disable completion alerts" : "Enable completion alerts");
+    toggleRoot.removeAttribute("title");
+    toggleRoot.removeAttribute("data-tip");
+    const label = saving ? "Updating completion alerts" : !n.configured && n.enabled ?
+      "Completion alerts enabled, but no command is configured, so nothing will run" :
+      `Completion alerts ${n.enabled ? "enabled" : "disabled"}`;
+    toggle.setAttribute("aria-label", saving ? label :
+      `${label}; activate to ${n.enabled ? "disable" : "enable"}`);
   }
 }
 $("btn-bell").onclick = async () => {
@@ -5131,10 +5133,13 @@ class SettingsView {
       record.input.disabled = record.saving || upgrading ||
         (!supported && !enabled);
       record.root.classList.toggle("disabled", record.input.disabled);
-      record.root.title = upgrading ?
+      const description = upgrading ?
         "This backend upgrade is already in progress" : supported ?
         "Upgrade this backend automatically when it is outdated and idle" :
         "Automatic upgrades require an upgrade-capable headless backend";
+      record.root.removeAttribute("title");
+      record.root.removeAttribute("data-tip");
+      record.input.setAttribute("aria-label", `${backend.name}: ${description}`);
     }
   }
 
@@ -5146,10 +5151,12 @@ class SettingsView {
       const versionOrder = cmpVersion(backend.remote_version, record.controllerVersion);
       const capable = backend.role === "backend" &&
         backendHasCapability(backend, "remote-upgrade");
-      const set = (text, disabled, title) => {
+      const set = (text, disabled, description) => {
         button.textContent = text;
         button.disabled = disabled;
-        button.title = title || "";
+        button.removeAttribute("title");
+        button.removeAttribute("data-tip");
+        button.setAttribute("aria-label", description ? `${text}: ${description}` : text);
       };
       if (this.upgradesInProgress.has(bid) || backend.upgrade_in_progress) {
         set("Upgrading…", true, "Upgrade is being staged and health-checked");
@@ -5272,14 +5279,14 @@ class SettingsView {
     for (const [bid, dot] of this.remoteBackendDots) {
       const status = remoteAvailability(bid);
       dot.className = "gdot " + status;
-      dot.title = remoteAvailabilityTitle(bid);
+      dot.setAttribute("aria-label", remoteAvailabilityTitle(bid));
     }
     for (const [bid, meta] of this.remoteBackendMeta) {
       const backend = state.backends.find(item => item.id === bid);
       if (!backend || !meta.isConnected) continue;
       const value = backendLocationVersion(backend);
       meta.textContent = value;
-      meta.title = value;
+      meta.setAttribute("aria-label", value);
     }
     for (const [bid, row] of this.usageRows) {
       if (!bid) {
@@ -5311,8 +5318,8 @@ class SettingsView {
     const versionState = !e2.installed ? "bad" : e2.update_available === true ? "warn" : "ok";
     const version = el("span", "pill engine-version " + versionState,
       e2.installed ? (e2.version || "installed") : "not installed");
-    version.title = e2.update_available === true && e2.latest_version ?
-      `${version.textContent} · latest is ${e2.latest_version}` : version.textContent;
+    version.setAttribute("aria-label", e2.update_available === true && e2.latest_version ?
+      `${version.textContent} · latest is ${e2.latest_version}` : version.textContent);
     statuses.appendChild(version);
     statuses.appendChild(el("span", "pill " + (e2.auth === "ok" ? "ok" : "bad"),
       "auth: " + e2.auth));
@@ -5325,11 +5332,13 @@ class SettingsView {
     const root = el("section", "engine-node");
     const head = el("div", "engine-node-head");
     const dot = el("span", "gdot pending");
+    dot.setAttribute("role", "img");
+    dot.setAttribute("aria-label", "checking");
     head.appendChild(dot);
     const nameEl = el("span", "engine-node-name", name);
-    nameEl.title = name;
+    nameEl.setAttribute("aria-label", name);
     const metaEl = el("span", "engine-node-meta", meta);
-    metaEl.title = meta;
+    metaEl.setAttribute("aria-label", meta);
     head.appendChild(nameEl);
     head.appendChild(metaEl);
     const body = el("div", "engine-node-body");
@@ -5338,11 +5347,11 @@ class SettingsView {
     const update = ({ status = "pending", engines = null, message = "", detail = "" }) => {
       dot.className = "gdot " + status;
       const statusLabel = status === "ok" ? "available" : status === "bad" ? "unavailable" : "checking";
-      dot.title = detail ? `${statusLabel}: ${detail}` : statusLabel;
+      dot.setAttribute("aria-label", detail ? `${statusLabel}: ${detail}` : statusLabel);
       body.innerHTML = "";
       if (message || engines === null) {
         const note = el("div", "engine-node-message", message || "Checking engines…");
-        if (detail) note.title = detail;
+        note.setAttribute("aria-label", detail || note.textContent);
         body.appendChild(note);
       } else if (!engines.length) {
         body.appendChild(el("div", "engine-node-message", "No engines reported"));
@@ -5352,7 +5361,8 @@ class SettingsView {
     };
     const setMeta = value => {
       metaEl.textContent = value || "";
-      metaEl.title = value || "";
+      if (value) metaEl.setAttribute("aria-label", value);
+      else metaEl.removeAttribute("aria-label");
     };
     return { root, update, setMeta };
   }
@@ -5361,7 +5371,7 @@ class SettingsView {
     const root = el("div", "usage-refresh-row");
     const identity = el("div", "usage-refresh-identity");
     const nameEl = el("div", "usage-refresh-name", name);
-    nameEl.title = name;
+    nameEl.setAttribute("aria-label", name);
     const note = el("div", "usage-refresh-note", "Checking setting…");
     identity.appendChild(nameEl);
     identity.appendChild(note);
@@ -5373,8 +5383,8 @@ class SettingsView {
     interval.max = "1440";
     interval.step = "1";
     interval.inputMode = "numeric";
-    interval.setAttribute("aria-label", `${name} usage refresh interval in minutes`);
-    interval.title = "0 disables automatic refresh; maximum 1440 minutes";
+    interval.setAttribute("aria-label",
+      `${name} usage refresh interval in minutes; 0 disables automatic refresh; maximum 1440`);
     const unit = el("span", "usage-refresh-unit", "min");
     const save = el("button", "btn btn-sm", "Apply");
     controls.appendChild(interval);
@@ -5410,7 +5420,7 @@ class SettingsView {
       save.disabled = disabled;
       const description = describe(metadata, reachable, canConfigure);
       note.textContent = description;
-      note.title = description;
+      note.setAttribute("aria-label", description);
     };
     save.onclick = async () => {
       if (!interval.value.trim()) {
@@ -5451,7 +5461,7 @@ class SettingsView {
     const root = el("div", "usage-refresh-row upload-limit-row");
     const identity = el("div", "usage-refresh-identity");
     const nameEl = el("div", "usage-refresh-name", name);
-    nameEl.title = name;
+    nameEl.setAttribute("aria-label", name);
     const note = el("div", "usage-refresh-note", "Checking setting…");
     identity.appendChild(nameEl);
     identity.appendChild(note);
@@ -5463,8 +5473,8 @@ class SettingsView {
     limit.max = "1024";
     limit.step = "1";
     limit.inputMode = "numeric";
-    limit.setAttribute("aria-label", `${name} maximum upload size in MiB`);
-    limit.title = "0 disables file uploads; maximum 1024 MiB";
+    limit.setAttribute("aria-label",
+      `${name} maximum upload size in MiB; 0 disables file uploads; maximum 1024`);
     const unit = el("span", "usage-refresh-unit", "MiB");
     const save = el("button", "btn btn-sm", "Apply");
     controls.appendChild(limit);
@@ -5494,7 +5504,7 @@ class SettingsView {
       else if (!current.enabled) description = "File uploads are disabled";
       else description = `Any file type · ${current.max_file_size_mb} MiB maximum each`;
       note.textContent = description;
-      note.title = description;
+      note.setAttribute("aria-label", description);
     };
     const load = async () => {
       if (!supported) return;
@@ -5600,7 +5610,8 @@ class SettingsView {
         <button class="btn btn-sm" id="set-activate" type="button">Verify &amp; restart</button>
       </div>` : ""}
       <div class="kv"><span class="k">Version</span><span class="v">${esc(settings.version)}</span></div>
-      <div class="kv"><span class="k">API token</span><span class="v" id="set-token" style="cursor:pointer" title="click to reveal / copy">••••••••••••</span></div>
+      <div class="kv"><span class="k">API token</span><span class="v" id="set-token"
+        role="button" tabindex="0" aria-label="Reveal API token" style="cursor:pointer">••••••••••••</span></div>
       <div class="m-btns" style="justify-content:flex-start;margin-top:10px">
         <button class="btn btn-pri btn-sm" id="set-save">Save</button>
         <button class="btn btn-sm btn-ghost" id="set-logout">Log out</button>
@@ -5608,10 +5619,19 @@ class SettingsView {
 `;
     this.inner.appendChild(c1);
     let tokenShown = false;
-    c1.querySelector("#set-token").onclick = () => {
-      const elx = c1.querySelector("#set-token");
-      if (!tokenShown) { elx.textContent = settings.api_token; tokenShown = true; }
-      else copyWithToast(settings.api_token, "token copied");
+    const tokenControl = c1.querySelector("#set-token");
+    const useToken = () => {
+      if (!tokenShown) {
+        tokenControl.textContent = settings.api_token;
+        tokenControl.setAttribute("aria-label", "Copy API token");
+        tokenShown = true;
+      } else copyWithToast(settings.api_token, "token copied");
+    };
+    tokenControl.onclick = useToken;
+    tokenControl.onkeydown = event => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      useToken();
     };
     const saveSettings = async (forceActivation = false) => {
       const saveButton = c1.querySelector("#set-save");
@@ -5859,7 +5879,6 @@ class SettingsView {
       const capable = Array.isArray(b.capabilities) && b.capabilities.includes("notify-exec");
       option.textContent = b.name + (capable ? "" : " — upgrade to enable");
       option.disabled = !capable;
-      if (!capable) option.title = "This backend predates remote commands, or runs without its shell surface";
       nfBackend.appendChild(option);
     }
     this.inner.appendChild(notifyCard);
@@ -5932,8 +5951,9 @@ class SettingsView {
             placeholder="Supplied automatically by pairing JSON"></label>
         <label class="full">Pairing JSON <span style="text-transform:none">(optional)</span>
           <textarea id="be-pairing" rows="3" placeholder="Paste puppy-backend pairing output"></textarea></label>
-        <label class="be-auto be-auto-add full" title="Upgrade this headless backend automatically when it is outdated and idle">
-          <input type="checkbox" id="be-auto">
+        <label class="be-auto be-auto-add full">
+          <input type="checkbox" id="be-auto"
+            aria-label="Upgrade this headless backend automatically when it is outdated and idle">
           <span class="be-auto-track" aria-hidden="true"><span></span></span>
           <span class="be-auto-copy"><span>Auto-upgrade when idle</span>
             <small>Signed release · readiness checked · rollback protected</small></span>
@@ -5952,12 +5972,16 @@ class SettingsView {
         const identity = el("div", "be-identity");
         const nameRow = el("div", "be-name-row");
         const availability = el("span", "gdot pending");
+        availability.setAttribute("role", "img");
+        availability.setAttribute("aria-label", "checking");
         const name = el("span", "be-name", b.name);
-        name.title = [b.role, b.remote_version && `v${b.remote_version}`,
+        const backendIdentity = [b.role, b.remote_version && `v${b.remote_version}`,
           b.protocol != null && `protocol ${b.protocol}`].filter(Boolean).join(" · ");
+        name.setAttribute("aria-label", backendIdentity ?
+          `${b.name} · ${backendIdentity}` : b.name);
         const backendMeta = backendLocationVersion(b);
         const url = el("span", "be-url", backendMeta);
-        url.title = backendMeta;
+        url.setAttribute("aria-label", backendMeta);
         const metaRow = el("div", "be-meta-row");
         const autoRoot = el("label", "be-auto be-auto-existing");
         const autoInput = document.createElement("input");
@@ -5997,15 +6021,12 @@ class SettingsView {
         const isTls = /^https:\/\//i.test(b.url || "");
         const isPinned = isTls && !!b.tls_fingerprint;
         const security = el("span", `be-security ${isTls ? "secure" : "clear"}`);
-        const securityLabel = isPinned ? "Encrypted: TLS certificate pinned"
-          : isTls ? "Encrypted: TLS certificate verified"
-            : "Cleartext: traffic is not encrypted";
-        security.setAttribute("role", "img");
-        security.setAttribute("aria-label", securityLabel);
-        security.title = isPinned
+        const securityLabel = isPinned
           ? `Encrypted · pinned certificate SHA-256: ${b.tls_fingerprint}`
           : isTls ? "Encrypted · certificate verified by the controller system trust store"
             : "Cleartext · traffic to this backend is not encrypted";
+        security.setAttribute("role", "img");
+        security.setAttribute("aria-label", securityLabel);
         security.appendChild(transportShieldIcon(isTls));
         nameRow.appendChild(availability);
         nameRow.appendChild(name);
@@ -6368,7 +6389,10 @@ async function modalNewSession(groupId = null) {
   function syncWorkspaceSupport() {
     const supported = backendSupportsScratch(parseInt(beSel.value, 10));
     scratchButton.disabled = !supported;
-    scratchButton.title = supported ? "" : "Upgrade this backend to use scratch workspaces";
+    scratchButton.removeAttribute("title");
+    scratchButton.removeAttribute("data-tip");
+    if (supported) scratchButton.removeAttribute("aria-label");
+    else scratchButton.setAttribute("aria-label", "Scratch workspace · backend upgrade required");
     scratchButton.querySelector(".wp-sub").textContent = supported ?
       "No folder to choose" : "Backend upgrade required";
     if (!supported && workspaceKind === "temporary") pickWorkspace("directory");
