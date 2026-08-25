@@ -1299,7 +1299,7 @@ function sessionContextMenu(ev, bid, s) {
     const val = await modalPrompt("Rename session", "", s.name || "");
     if (val !== null) patch({ name: val.trim() });
   });
-  add("Dot color…", () => {
+  add("Dot color", () => {
     const cm = ctxMenuAt(ev.clientX, ev.clientY);
     cm.classList.add("color-menu");
     for (const c of state.sessionColors || []) {
@@ -1311,7 +1311,7 @@ function sessionContextMenu(ev, bid, s) {
       cm.appendChild(b);
     }
   });
-  add("Switch engine…", () => modalSwitchEngine({
+  add("Switch engine", () => modalSwitchEngine({
     session: s, tab: { bid, sid: s.id }, updateHead() { refreshGroup(bid); },
   }));
   menu.appendChild(el("div", "menu-sep"));
@@ -1323,7 +1323,7 @@ function sessionContextMenu(ev, bid, s) {
     } catch (e) { toast(e.message, "error"); }
   });
   if (isScratchWorkspace(s)) add(s.workspace_missing ? "Recreate scratch workspace" :
-    "Reset scratch workspace…", async () => {
+    "Reset scratch workspace", async () => {
     const ok = await modalConfirm(
       s.workspace_missing ? "Recreate scratch workspace?" : "Reset scratch workspace?",
       s.workspace_missing ?
@@ -2607,8 +2607,8 @@ class SessionView {
       menu.appendChild(b);
     };
     add("Rename", () => this.rename());
-    add("Dot color…", () => this.pickColor(anchor));
-    add("Switch engine…", () => modalSwitchEngine(this));
+    add("Dot color", () => this.pickColor(anchor));
+    add("Switch engine", () => modalSwitchEngine(this));
     menu.appendChild(el("div", "menu-sep"));
     add(isScratchWorkspace(this.session) ? "Copy workspace path" : "Copy cwd",
       () => copyWithToast(this.session.cwd));
@@ -2616,7 +2616,7 @@ class SessionView {
       add("Copy native session id", () => copyWithToast(this.session.native_session_id));
     if (isScratchWorkspace(this.session))
       add(this.session.workspace_missing ? "Recreate scratch workspace" :
-        "Reset scratch workspace…", () => this.resetWorkspace());
+        "Reset scratch workspace", () => this.resetWorkspace());
     menu.appendChild(el("div", "menu-sep"));
     add(this.session && this.session.archived ? "Unarchive" : "Archive", () => this.archive());
     add("Delete session", () => this.deleteSession(), true);
