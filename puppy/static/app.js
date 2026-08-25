@@ -29,6 +29,10 @@ function xIcon(size) {
   return svg;
 }
 
+/* The bell's mass is its body (y 2..17 of the 24 box); the clapper below is a
+   thin descender. Centring the whole ink therefore leaves the body reading a
+   full 2.5 units high. The group scales it down and drops it so the body sits
+   near the middle, with the clapper's painted edge still clear of the box. */
 function bellIcon(size, off) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
@@ -36,6 +40,9 @@ function bellIcon(size, off) {
   svg.setAttribute("width", size);
   svg.setAttribute("height", size);
   svg.setAttribute("aria-hidden", "true");
+  const g = document.createElementNS(NS, "g");
+  g.setAttribute("transform", "translate(0.96 2.06) scale(0.92)");
+  svg.appendChild(g);
   const draw = (d) => {
     const p = document.createElementNS(NS, "path");
     p.setAttribute("d", d);
@@ -44,7 +51,7 @@ function bellIcon(size, off) {
     p.setAttribute("stroke-linecap", "round");
     p.setAttribute("stroke-linejoin", "round");
     p.setAttribute("fill", "none");
-    svg.appendChild(p);
+    g.appendChild(p);
   };
   draw("M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3c0 0 3-2 3-9");
   draw("M10.3 21a1.94 1.94 0 0 0 3.4 0");
