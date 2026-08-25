@@ -2706,6 +2706,19 @@ function burgerButton() {
   return button;
 }
 
+function makeTabDragImage(tab) {
+  const ghost = tab.cloneNode(true);
+  ghost.classList.remove("active", "dragging", "running");
+  ghost.classList.add("tab-drag-image");
+  ghost.draggable = false;
+  ghost.setAttribute("aria-hidden", "true");
+  const rect = tab.getBoundingClientRect();
+  ghost.style.width = `${Math.ceil(rect.width)}px`;
+  ghost.style.height = `${Math.ceil(rect.height)}px`;
+  document.body.appendChild(ghost);
+  return ghost;
+}
+
 function cleanupTabDrag(context = dragTab) {
   if (tabDropMarker) { tabDropMarker.remove(); tabDropMarker = null; }
   document.querySelectorAll(".split-preview.on").forEach(node =>
@@ -2713,8 +2726,10 @@ function cleanupTabDrag(context = dragTab) {
   if (context) {
     if (context.item) context.item.classList.remove("dragging");
     if (context.container) context.container.classList.remove("reordering");
+    if (context.dragImage) context.dragImage.remove();
     context.previewHost = null;
     context.previewSide = null;
+    context.dragImage = null;
   }
 }
 
@@ -2749,16 +2764,25 @@ function renderTabNode(t, pane, tabsRoot) {
   tab.draggable = true;
   tab.dataset.tabId = t.id;
   tab.addEventListener("dragstart", (event) => {
+    const dragImage = makeTabDragImage(tab);
     dragTab = {
       id: t.id, item: tab, container: tabsRoot, sourcePaneId: pane.id,
-      pendingFocus: null,
+      pendingFocus: null, dragImage,
     };
     tabsRoot.classList.add("reordering");
     requestAnimationFrame(() => {
       if (dragTab && dragTab.item === tab) tab.classList.add("dragging");
     });
-    event.dataTransfer.effectAllowed = "move";
-    try { event.dataTransfer.setData("text/plain", `puppy-tab:${t.id}`); } catch (error) {}
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = "move";
+      const rect = tab.getBoundingClientRect();
+      const x = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
+      const y = Math.max(0, Math.min(rect.height, event.clientY - rect.top));
+      try {
+        event.dataTransfer.setData("text/plain", `puppy-tab:${t.id}`);
+        event.dataTransfer.setDragImage(dragImage, x, y);
+      } catch (error) {}
+    }
   });
   tab.addEventListener("dragend", () => cancelTabDrag(tab));
 

@@ -27,6 +27,13 @@
   --btn-lift-hi:0 5px 14px -5px rgba(0,0,0,.7);
   --btn-press:inset 0 2px 5px rgba(0,0,0,.28);
   --hov:rgba(255,255,255,.07); --tab-hov:rgba(255,255,255,.04);
+  /* tab selection has two levels: the visible tab in every pane, then the
+     globally focused pane. Drag/drop surfaces stay legible over xterm black. */
+  --tab-active-bg:rgba(255,255,255,.065);
+  --tab-active-focus-bg:rgba(90,162,245,.19);
+  --tab-drag-bg:#151a24;
+  --split-preview-bg:rgba(48,128,224,.38);
+  --split-preview-line:rgba(132,197,255,.96);
   /* one elevated material for select popups, context menus and tab menus */
   --float-menu-bg:var(--panel); --float-menu-hover:var(--acc-dim);
   --float-menu-shadow:0 18px 42px -14px rgba(0,0,0,.78),inset 0 1px 0 var(--btn-top);
@@ -495,24 +502,35 @@ select.choice-native{display:none!important}
   background:transparent;user-select:none;position:relative;
 }
 /* The dimmed live slot moves with the pointer while sibling tabs slide into
-   place; the native drag image remains under the pointer. */
+   place; an explicit, opaque drag card remains under the pointer. */
 .tab.dragging>*{opacity:.28}
 .tabs.reordering .tab{will-change:transform}
 @media (hover:hover){
-  .tab:hover{background:var(--tab-hov)}
-  /* Keep almost all of the active hover face intact, then quickly merge it
-     into the bar below. The opaque final stop also masks the bar divider. */
-  .tab.active:hover{
-    background:linear-gradient(180deg,var(--tab-hov) 0,var(--tab-hov) 78%,var(--bg) 100%);
-  }
+  .tab:not(.active):hover{background:var(--tab-hov)}
 }
-/* fill matches the flat page background (aurora is masked out of the top strip)
-   so the open-bottomed pill merges with the bar below at every x position */
-.tab.active{background:var(--bg);border-color:var(--line);color:var(--txt)}
+/* Every pane's visible tab gets a solid face. The one in the focused pane also
+   gets an accent wash and top rail: obvious globally, without implying the
+   visible tabs in the other panes are closed. */
+.tab.active{
+  background:linear-gradient(180deg,var(--tab-active-bg),var(--bg) 92%);
+  border-color:var(--line2);color:var(--txt);
+}
+.workspace-pane.focused>.tabbar .tab.active{
+  background:linear-gradient(180deg,var(--tab-active-focus-bg),var(--bg) 92%);
+  border-color:rgba(90,162,245,.58);
+  border-color:color-mix(in srgb,var(--acc) 58%,var(--line2));
+  box-shadow:inset 0 2px 0 var(--acc);
+}
 .workspace-pane.focused>.tabbar::after{
   background:rgba(90,162,245,.24);
   background:color-mix(in srgb,var(--acc) 28%,var(--line));
 }
+.tab-drag-image{
+  position:fixed;left:-1000px;top:-1000px;z-index:10000;margin:0;
+  background:var(--tab-drag-bg);border:1px solid var(--acc);border-radius:8px;
+  color:var(--txt);box-shadow:var(--float-menu-shadow);pointer-events:none;
+}
+.tab-drag-image .t-close{color:var(--txt2)}
 .tab .t-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;color:var(--txt3);background:currentColor}
 .tab .t-dot.claude{color:var(--claude)}
 .tab .t-dot.codex{color:var(--codex)}
@@ -575,11 +593,8 @@ select.choice-native{display:none!important}
 .view.on{display:flex}
 .split-preview{
   display:none;position:absolute;z-index:80;pointer-events:none;
-  background:rgba(90,162,245,.24);border:1px solid rgba(90,162,245,.72);
-  box-shadow:inset 0 0 28px rgba(90,162,245,.10);
-  background:color-mix(in srgb,var(--acc) 24%,transparent);
-  border:1px solid color-mix(in srgb,var(--acc) 72%,transparent);
-  box-shadow:inset 0 0 28px color-mix(in srgb,var(--acc) 10%,transparent);
+  background:var(--split-preview-bg);border:2px solid var(--split-preview-line);
+  box-shadow:inset 0 0 0 1px rgba(6,15,28,.24),inset 0 0 36px rgba(90,162,245,.16);
 }
 .split-preview.on{display:block}
 .split-preview.left{left:0;top:0;bottom:0;width:50%}
@@ -1373,6 +1388,9 @@ html.light{
   --btn-lift-hi:0 5px 14px -6px rgba(15,23,42,.35);
   --btn-press:inset 0 2px 5px rgba(15,23,42,.14);
   --hov:rgba(15,23,42,.06); --tab-hov:rgba(15,23,42,.045);
+  --tab-active-bg:rgba(15,23,42,.075);
+  --tab-active-focus-bg:rgba(59,130,224,.17);
+  --tab-drag-bg:#ffffff;
   --spin-track:rgba(15,23,42,.2);
   --acc-hi:#4a8ce9; --acc-lo:#2159bd;
   --glow-acc:0 2px 8px -5px rgba(33,89,189,.42);
