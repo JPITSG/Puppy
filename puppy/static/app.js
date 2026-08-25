@@ -2324,16 +2324,22 @@ function renderFootEngines() {
       ico.appendChild(dot);
       head.appendChild(ico);
       const name = el("span", "foot-engine-name", g.name);
-      name.title = g.name;
+      name.title = `${g.name} · double-click to collapse or expand status`;
       const key = g.bid ? `remote:${g.bid}` : "local";
+      const disclosure = disclosureButton(`${g.name} engine status`, body,
+        collapsedStatusBackends, "puppy.collapsed.status-backends", key);
+      name.ondblclick = event => {
+        event.preventDefault();
+        event.stopPropagation();
+        disclosure.click();
+      };
       head.appendChild(name);
       if (g.bid && g.version) {
         const version = el("span", "foot-engine-version", `· v${g.version}`);
         version.title = `Backend version ${g.version}`;
         head.appendChild(version);
       }
-      head.appendChild(disclosureButton(`${g.name} engine status`, body,
-        collapsedStatusBackends, "puppy.collapsed.status-backends", key));
+      head.appendChild(disclosure);
       group.appendChild(head);
     }
     if (g.bid && state.remoteOk[g.bid] === false) {

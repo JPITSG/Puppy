@@ -134,7 +134,10 @@ a{color:var(--acc2)}
 .gdot{display:block;flex:0 0 6px;width:6px;height:6px;border-radius:50%;background:var(--txt3)}
 .gdot.ok{background:var(--ok)}
 .gdot.bad{background:var(--err)}
-.sess-group-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;user-select:none}
+.sess-group-name{
+  min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  cursor:pointer;user-select:none;
+}
 .sess-group-terminal{
   width:18px;height:18px;margin:-4px 0;padding:0;display:inline-flex;align-items:center;
   justify-content:center;flex:0 0 auto;border:0;border-radius:var(--btn-r);background:transparent;
@@ -241,6 +244,7 @@ a{color:var(--acc2)}
 .foot-engine-name{
   min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
   font-family:var(--sans);font-size:9px;font-weight:400;text-transform:uppercase;letter-spacing:.1em;
+  cursor:pointer;user-select:none;
 }
 .foot-engine-version{
   flex:0 0 auto;color:var(--txt3);font:9px var(--mono);white-space:nowrap;letter-spacing:0;
