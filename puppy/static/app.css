@@ -493,7 +493,15 @@ select.choice-native{display:none!important}
 .tabbar .burger svg{display:block}
 /* the visual box stays 26px; the tap target fills the bar's height */
 .tabbar .burger::after,.tab-add-wrap .icon-btn::after{content:"";position:absolute;inset:-8px -6px}
-.tabs{display:flex;gap:4px;overflow-x:auto;flex:1;min-width:0;scrollbar-width:none}
+/* The bar's 42px min-height is taller than a tab, and a centred tab would sit
+   half a pixel above the bar's bottom edge - invisible at 100% zoom, but at
+   other zoom levels that slack becomes a real device row and the bar's divider
+   reappears underneath the active tab. Stretch the strip and seat the tabs on
+   the bottom edge so the active tab always covers the divider exactly. */
+.tabs{
+  display:flex;gap:4px;overflow-x:auto;flex:1;min-width:0;scrollbar-width:none;
+  align-self:stretch;align-items:flex-end;
+}
 .tabs::-webkit-scrollbar{display:none}
 .tab{
   --tab-space:10px;
@@ -524,6 +532,14 @@ select.choice-native{display:none!important}
 .workspace-pane.focused>.tabbar::after{
   background:rgba(90,162,245,.24);
   background:color-mix(in srgb,var(--acc) 28%,var(--line));
+}
+/* Rasterising a 1px divider and the tab face that hides it can disagree on the
+   final device row at fractional zoom, leaving the divider visible under the
+   active tab. This opaque cap overshoots the seam; the tab strip clips it at
+   the bar's bottom edge, so it never reaches the view below. */
+.tab.active::after{
+  content:"";position:absolute;left:0;right:0;bottom:-1px;height:2px;
+  background:var(--bg);pointer-events:none;
 }
 .tab-drag-image{
   position:fixed;left:-1000px;top:-1000px;z-index:10000;margin:0;
