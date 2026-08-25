@@ -218,6 +218,11 @@ function fmtBytes(value) {
   return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GiB`;
 }
 
+function fmtEndpoint(host, port) {
+  const value = String(host || "");
+  return `${value.includes(":") ? `[${value}]` : value}:${port}`;
+}
+
 const collapsedSessionBackends = storedStringSet("puppy.collapsed.session-backends");
 const collapsedStatusBackends = storedStringSet("puppy.collapsed.status-backends");
 let disclosureSeq = 0;
@@ -2961,11 +2966,19 @@ class SettingsView {
 
     /* instance */
     const c1 = el("div", "card");
+    const activeWeb = settings.active_web || settings.web;
     c1.innerHTML = `<h2>Instance</h2>
       <label>Instance name<input type="text" id="set-name" value="${esc(settings.instance_name)}"></label>
       <label>Default working directory<input type="text" id="set-cwd" value="${esc(settings.default_cwd || "")}"></label>
       <label>Terminal command<input type="text" id="set-term" value="${esc(settings.terminal_command)}"></label>
-      <div class="kv"><span class="k">Listen</span><span class="v">${esc(settings.web.host)}:${esc(String(settings.web.port))}</span></div>
+      <label>Bind IP<input type="text" id="set-bind" value="${esc(settings.web.host)}"
+        inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
+      <p class="bind-help">Literal IPv4 or IPv6 address. A changed address is tested directly
+        from this browser before it can be saved.</p>
+      <div class="kv"><span class="k">Active listener</span><span class="v">${esc(fmtEndpoint(activeWeb.host, activeWeb.port))}</span></div>
+      ${settings.web_restart_required ? `<div class="bind-pending">
+        Restart required to activate verified listener ${esc(fmtEndpoint(settings.web.host, settings.web.port))}.
+      </div>` : ""}
       <div class="kv"><span class="k">Version</span><span class="v">${esc(settings.version)}</span></div>
       <div class="kv"><span class="k">API token</span><span class="v" id="set-token" style="cursor:pointer" title="click to reveal / copy">••••••••••••</span></div>
       <div class="m-btns" style="justify-content:flex-start;margin-top:10px">
@@ -2981,14 +2994,101 @@ class SettingsView {
       else copyWithToast(settings.api_token, "token copied");
     };
     c1.querySelector("#set-save").onclick = async () => {
+      const saveButton = c1.querySelector("#set-save");
+      const bindInput = c1.querySelector("#set-bind");
+      const proposedBind = bindInput.value.trim();
+      const bindChanged = proposedBind !== String(settings.web.host || "");
+      if (bindChanged && !(await modalConfirm("Change Puppy bind IP?",
+        `Puppy will first ask this browser to reach ${proposedBind
+          ? fmtEndpoint(proposedBind, settings.web.port) : "the proposed address"} directly. ` +
+        `The setting is saved only if that succeeds. ` +
+        "A service restart is required afterward."))) return;
+      saveButton.disabled = true;
+      saveButton.textContent = bindChanged ? "Verifying…" : "Saving…";
+      let bindCommit = null;
+      let verified = null;
+      let commitAttempted = false;
       try {
+        if (bindChanged) {
+          const prepared = await api(0, "settings/bind/prepare", {
+            method: "POST", body: { host: proposedBind, origin: location.origin },
+          });
+          const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+          const timer = controller ? setTimeout(() => controller.abort(), 8000) : null;
+          let proofResponse;
+          try {
+            proofResponse = await fetch(prepared.verify_url, {
+              method: "GET", mode: "cors", credentials: "omit", cache: "no-store",
+              redirect: "error", referrerPolicy: "no-referrer",
+              ...(controller ? { signal: controller.signal } : {}),
+            });
+          } catch (error) {
+            throw new Error(controller && controller.signal.aborted
+              ? "the direct browser check timed out"
+              : "this browser could not reach the proposed IP and port");
+          } finally {
+            if (timer !== null) clearTimeout(timer);
+          }
+          let proof = null;
+          try { proof = await proofResponse.json(); } catch (_) { /* checked below */ }
+          if (!proofResponse.ok || !proof || proof.ok !== true || proof.token !== prepared.token)
+            throw new Error("the proposed address did not return Puppy's verification proof");
+          verified = prepared;
+        }
         await api(0, "settings", { method: "PATCH", body: {
           instance_name: c1.querySelector("#set-name").value,
           default_cwd: c1.querySelector("#set-cwd").value,
           terminal_command: c1.querySelector("#set-term").value,
         }});
-        toast("saved", "ok"); await refreshState(); await this.render();
-      } catch (e) { toast(e.message, "error"); }
+        if (verified) {
+          commitAttempted = true;
+          bindCommit = await api(0, "settings/bind/commit", {
+            method: "POST", body: { token: verified.token },
+          });
+        }
+        await refreshState();
+        await this.render();
+        if (bindCommit && bindCommit.restart_required) {
+          modalNotice("Bind IP verified and saved",
+            `Restart Puppy to activate ${fmtEndpoint(bindCommit.host, bindCommit.port)}. ` +
+            `Afterward, this browser can reconnect at ${bindCommit.next_url}`);
+        } else {
+          toast("saved", "ok");
+        }
+      } catch (e) {
+        if (bindCommit) {
+          const activation = bindCommit.restart_required
+            ? `Restart Puppy to activate ${fmtEndpoint(bindCommit.host, bindCommit.port)}.`
+            : "The active listener already matches this setting; no restart is required.";
+          modalNotice("Bind IP was saved",
+            `The browser check and save succeeded, but the settings view could not refresh: ` +
+            `${e.message}. ${activation}`);
+        } else if (commitAttempted && verified) {
+          let current = null;
+          try { current = await api(0, "settings", { timeoutMs: 3000 }); } catch (_) { /* uncertain */ }
+          if (current && String(current.web.host) === String(verified.host)) {
+            const activation = current.web_restart_required
+              ? `Restart Puppy to activate ${fmtEndpoint(current.web.host, current.web.port)}.`
+              : "The active listener already matches this setting; no restart is required.";
+            modalNotice("Bind IP was saved",
+              `The save completed even though its response was interrupted. ${activation}`);
+          } else if (current && String(current.web.host) === String(settings.web.host)) {
+            modalNotice("Bind IP was not changed",
+              `${e.message}. Puppy remains configured on ${fmtEndpoint(settings.web.host, settings.web.port)}.`);
+          } else {
+            modalNotice("Bind IP save could not be confirmed",
+              `${e.message}. The current listener remains active. Reload Settings and confirm the ` +
+              "configured listener before restarting Puppy.");
+          }
+        } else if (bindChanged) modalNotice("Bind IP was not changed",
+          `${e.message}. Puppy remains configured on ${fmtEndpoint(settings.web.host, settings.web.port)}.`);
+        else toast(e.message, "error");
+      } finally {
+        if (saveButton.isConnected) {
+          saveButton.disabled = false;
+          saveButton.textContent = "Save";
+        }
+      }
     };
     c1.querySelector("#set-logout").onclick = async () => {
       await api(0, "auth/logout", { method: "POST" });
@@ -3302,6 +3402,13 @@ function modalConfirm(title, text) {
     m.querySelector("#mc-no").onclick = () => { close(); resolve(false); };
     m.querySelector("#mc-yes").onclick = () => { close(); resolve(true); };
   });
+}
+
+function modalNotice(title, text) {
+  const { m, close } = modal(`<h2>${esc(title)}</h2>
+    <p style="color:var(--txt2);font-size:13px;line-height:1.55">${esc(text || "")}</p>
+    <div class="m-btns"><button class="btn btn-pri" id="mn-ok">OK</button></div>`);
+  m.querySelector("#mn-ok").onclick = close;
 }
 
 function modalPrompt(title, hint, value) {

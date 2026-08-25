@@ -91,10 +91,14 @@ async def exercise_http(archive_ui: dict, session_id: int) -> None:
             busy_hub.clear_queue()
 
             config.set_value("instance_name", "changed-over-http")
+            app["puppy_bind_verifications"]["stale-before-restore"] = {
+                "timer": None, "server": None,
+            }
             async with http.post(url + "/api/snapshot/import", headers={
                     **headers, "Content-Type": "application/gzip"}, data=payload) as response:
                 restored = await response.json()
                 assert response.status == 200, restored
+            assert app["puppy_bind_verifications"] == {}
             assert restored["ui"] == archive_ui
             assert restored["sessions"] == 2
             assert config.get("instance_name") == "saved-instance"

@@ -13,8 +13,8 @@ import time
 
 from aiohttp import WSMsgType, web
 
-from puppy import (__version__, auth, backends, config, db, protocol, runner,
-                   snapshots, terminal, workspaces)
+from puppy import (__version__, auth, backends, bind_verify, config, db, protocol,
+                   runner, snapshots, terminal, workspaces)
 from puppy.drivers import all_drivers, get_driver
 
 log = logging.getLogger("puppy.web")
@@ -398,12 +398,17 @@ async def h_fs_mkdir(request: web.Request):
 # ---- settings ----
 
 async def h_settings_get(request: web.Request):
+    runtime_web = request.app.get("puppy_runtime_web") or {
+        "host": config.get("web.host"), "port": config.get("web.port")}
+    configured_web = {"host": config.get("web.host"), "port": config.get("web.port")}
     return web.json_response({
         "instance_name": config.get("instance_name"),
         "terminal_command": config.get("terminal.command"),
         "default_cwd": config.get("sessions.default_cwd"),
         "api_token": config.get("auth.api_token"),
-        "web": {"host": config.get("web.host"), "port": config.get("web.port")},
+        "web": configured_web,
+        "active_web": runtime_web,
+        "web_restart_required": configured_web != runtime_web,
         "version": __version__,
     })
 
@@ -417,6 +422,41 @@ async def h_settings_patch(request: web.Request):
     if "default_cwd" in body:
         config.set_value("sessions.default_cwd", str(body["default_cwd"]).strip() or "/")
     return await h_settings_get(request)
+
+
+async def h_bind_prepare(request: web.Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid bind verification request"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "invalid bind verification request"}, status=400)
+    origin = str(body.get("origin") or "")
+    supplied_origin = request.headers.get("Origin")
+    if supplied_origin and supplied_origin.rstrip("/") != origin.rstrip("/"):
+        return web.json_response({"error": "browser origin mismatch"}, status=403)
+    sockname = request.transport.get_extra_info("sockname") if request.transport else None
+    connected_host = sockname[0] if isinstance(sockname, tuple) and sockname else None
+    try:
+        return web.json_response(await bind_verify.prepare(
+            request.app, str(request["user"]), body.get("host"), origin,
+            int(config.get("web.port", 10888)), connected_host=connected_host))
+    except bind_verify.BindVerificationError as exc:
+        return web.json_response({"error": str(exc)}, status=exc.status)
+
+
+async def h_bind_commit(request: web.Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid bind commit request"}, status=400)
+    try:
+        result = await bind_verify.commit(
+            request.app, str(request["user"]),
+            body.get("token") if isinstance(body, dict) else "")
+        return web.json_response(result)
+    except bind_verify.BindVerificationError as exc:
+        return web.json_response({"error": str(exc)}, status=exc.status)
 
 
 # ---- backup / restore ----
@@ -551,6 +591,7 @@ async def h_snapshot_import(request: web.Request):
             return web.json_response({"error": detail}, status=409)
         await runner.detach_for_restore()
         await backends.close_proxy_websockets()
+        await bind_verify.close_all(request.app)
         blocked = snapshots.blockers()
         if blocked:
             return web.json_response({"error": "; ".join(blocked)}, status=409)
@@ -686,6 +727,11 @@ def build_app() -> web.Application:
     app["puppy_role"] = "full"
     app["puppy_snapshot_busy"] = None
     app["puppy_mutations"] = 0
+    app["puppy_runtime_web"] = {
+        "host": config.get("web.host", "0.0.0.0"),
+        "port": int(config.get("web.port", 10888)),
+    }
+    app["puppy_bind_verifications"] = {}
     app["puppy_capabilities"] = protocol.execution_capabilities(include_terminal=True)
     r = app.router
     r.add_get("/", h_index)
@@ -698,12 +744,17 @@ def build_app() -> web.Application:
     r.add_get("/api/state", h_state)
     r.add_get("/api/settings", h_settings_get)
     r.add_patch("/api/settings", h_settings_patch)
+    r.add_post("/api/settings/bind/prepare", h_bind_prepare)
+    r.add_route("*", "/api/settings/bind/verify/{token:[A-Za-z0-9_-]+}",
+                bind_verify.h_probe)
+    r.add_post("/api/settings/bind/commit", h_bind_commit)
     r.add_post("/api/snapshot/export", h_snapshot_export)
     r.add_get("/api/snapshot/download/{token:[A-Za-z0-9_-]+}", h_snapshot_download)
     r.add_post("/api/snapshot/import", h_snapshot_import)
     register_execution_api(app, include_terminal=True)
 
     async def on_shutdown(app):
+        await bind_verify.close_all(app)
         await runner.shutdown()
         await backends.close_client()
 

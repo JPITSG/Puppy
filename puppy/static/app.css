@@ -894,6 +894,12 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .be-actions{display:flex;align-items:center;gap:8px}
 .settings-form{display:grid;grid-template-columns:1fr 1fr;gap:0 14px;margin-top:8px}
 .settings-form .full{grid-column:1/-1}
+.bind-help{margin:-5px 0 7px;color:var(--txt3);font-size:10.5px;line-height:1.45}
+.bind-pending{
+  margin:5px 0 7px;padding:8px 10px;border:1px solid rgba(255,182,77,.28);
+  border-radius:var(--r-md);background:var(--warn-dim);color:var(--warn);
+  font-size:11px;line-height:1.45;
+}
 .snapshot-copy{max-width:720px;margin:0 0 8px;color:var(--txt2);font-size:12px;line-height:1.55}
 .snapshot-warning{margin:0;color:var(--warn);font-size:11px;line-height:1.45}
 .snapshot-actions{display:flex;align-items:center;gap:8px;margin-top:13px;flex-wrap:wrap}

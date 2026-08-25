@@ -38,6 +38,12 @@ approvals, multi-backend support and built-in web terminals.
   credentials/native caches stay on their respective hosts. On a controller,
   remote registrations are included while node-owned sessions remain on those
   registered backends.
+- **Lockout-safe binding**: a new WebUI bind IP is committed only after the
+  current browser reaches a short-lived, one-use proof on that literal address
+  and Puppy's configured port. The current listener stays active until the next
+  service restart, and failed verification leaves the setting unchanged. An
+  HTTPS reverse-proxy page fails closed because browsers forbid the direct HTTP
+  proof as mixed content.
 
 ## Requirements
 
@@ -77,7 +83,7 @@ reports an independently versioned controller/backend protocol.
 ## Data & config
 
 Persistent private state lives in `data/` (gitignored): `config.json` (instance
-name, port, api token, terminal command), `puppy.db` (sessions, transcripts,
+name, bind host/port, api token, terminal command), `puppy.db` (sessions, transcripts,
 users), backend TLS identities, and `puppy.log`. Scratch-session files are the
 intentional exception: they live in a mode-0700, instance-specific namespace
 under the OS temporary directory and are disposable. The repo itself is clean

@@ -259,6 +259,13 @@ async def exercise_node(url: str, token: str, expected_version: str,
         async with http.post(url + "/api/snapshot/export", headers=good,
                              json={"ui": {}}, ssl=pinned) as response:
             assert response.status == 404  # backup/restore is a full-WebUI surface
+        async with http.post(url + "/api/settings/bind/prepare", headers=good,
+                             json={"host": "127.0.0.1", "origin": url},
+                             ssl=pinned) as response:
+            assert response.status == 404  # browser-verified binding is controller-only
+        async with http.get(url + "/api/settings/bind/verify/not-a-token",
+                            headers=good, ssl=pinned) as response:
+            assert response.status == 404
         if not upgrade_enabled:
             async with http.post(url + "/api/node/upgrade", headers=good,
                                  data=b"not-an-artifact", ssl=pinned) as response:
