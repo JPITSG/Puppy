@@ -6768,7 +6768,10 @@ async function modalNewSession(groupId = null) {
   renderColors();
   const cwdInp = m.querySelector("#ns-cwd");
   const dirBox = m.querySelector("#ns-dirs");
-  cwdInp.value = lsGet("puppy.lastcwd") || state.defaultCwd || "/";
+  /* Every new session starts from the configured default, never from wherever
+     the last one happened to be pointed. */
+  cwdInp.value = state.defaultCwd || "/";
+  lsDel("puppy.lastcwd");   // drop what older builds remembered
   let engines = [];
   let engine = null;
   let engineLoadSequence = 0;
@@ -6903,7 +6906,6 @@ async function modalNewSession(groupId = null) {
         effort: effortSel.value, permission_mode: permSel.value, color: nsColor,
         mkdir: workspaceKind === "directory" && m.querySelector("#ns-mkdir").checked,
       }});
-      if (workspaceKind === "directory") lsSet("puppy.lastcwd", cwdInp.value.trim());
       close();
       if (bid) await pollRemotes();
       openSessionTab(bid, r.session.id, r.session, groupId);
