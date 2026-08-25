@@ -160,6 +160,19 @@ async def probe_backend(url: str, token: str, tls_fingerprint: str = "",
             if reported_transport is not None and not isinstance(reported_transport, dict):
                 return {"ok": False, "status": response.status,
                         "error": "backend returned invalid transport metadata"}
+            reported_upgrade = remote.get("upgrade")
+            if reported_upgrade is not None and not isinstance(reported_upgrade, dict):
+                return {"ok": False, "status": response.status,
+                        "error": "backend returned invalid upgrade metadata"}
+            if isinstance(reported_upgrade, dict) and \
+                    reported_upgrade.get("readiness") is not None:
+                readiness = reported_upgrade["readiness"]
+                if not isinstance(readiness, dict) or \
+                        type(readiness.get("ready")) is not bool or \
+                        not isinstance(readiness.get("state"), str) or \
+                        not isinstance(readiness.get("reason"), str):
+                    return {"ok": False, "status": response.status,
+                            "error": "backend returned invalid upgrade readiness"}
             if tls_fingerprint and isinstance(reported_transport, dict):
                 try:
                     reported_pin = tls.normalize_fingerprint(
@@ -312,10 +325,17 @@ async def h_upgrade(request: web.Request):
                                      status=502)
         remote = current["remote"]
         _store_metadata(bid, remote)
+        upgrade_descriptor = remote.get("upgrade") or {}
         if protocol.UPGRADE_CAPABILITY not in (remote.get("capabilities") or []) or \
-                not (remote.get("upgrade") or {}).get("supported"):
+                not upgrade_descriptor.get("supported"):
             return web.json_response({"error": "backend does not support safe remote upgrades"},
                                      status=409)
+        remote_readiness = upgrade_descriptor.get("readiness")
+        if isinstance(remote_readiness, dict) and remote_readiness.get("ready") is not True:
+            return web.json_response({
+                "error": remote_readiness.get("reason") or "backend is not ready to upgrade",
+                "readiness": remote_readiness,
+            }, status=409)
         try:
             if upgrade_contract.version_key(__version__) <= \
                     upgrade_contract.version_key(str(remote.get("version") or "")):
@@ -347,10 +367,14 @@ async def h_upgrade(request: web.Request):
                 except Exception:
                     accepted = {"error": "backend returned a non-JSON upgrade response"}
                 if response.status != 202 or accepted.get("accepted") is not True:
-                    return web.json_response(
-                        {"error": accepted.get("error") or "backend rejected the upgrade"},
-                        status=(response.status if 400 <= response.status < 600 and
-                                response.status not in (401, 403) else 502))
+                    rejected = {
+                        "error": accepted.get("error") or "backend rejected the upgrade",
+                    }
+                    if isinstance(accepted.get("readiness"), dict):
+                        rejected["readiness"] = accepted["readiness"]
+                    return web.json_response(rejected, status=(
+                        response.status if 400 <= response.status < 600 and
+                        response.status not in (401, 403) else 502))
         except asyncio.TimeoutError:
             return web.json_response({"error": "backend timed out while staging the upgrade"}, status=504)
         except Exception as exc:

@@ -108,7 +108,65 @@ def _last_status(path: Path) -> dict:
         return {}
 
 
-def descriptor(tls_enabled=None) -> dict:
+def _readiness_payload(state: str, reason: str = "", sessions=None,
+                       active_terminals: int = 0) -> dict:
+    return {
+        "ready": state == "ready",
+        "state": state,
+        "reason": reason,
+        "sessions": list(sessions or []),
+        "active_terminals": int(active_terminals),
+        "checked_at": time.time(),
+    }
+
+
+def _busy_reason(blockers: list, terminals: int) -> str:
+    running = sum(1 for item in blockers if item.get("running"))
+    queued = sum(max(0, int(item.get("queued") or 0)) for item in blockers)
+    parts = []
+    if running:
+        parts.append("{} running turn{}".format(running, "" if running == 1 else "s"))
+    if queued:
+        parts.append("{} queued message{}".format(queued, "" if queued == 1 else "s"))
+    if terminals:
+        parts.append("{} active terminal{}".format(
+            terminals, "" if terminals == 1 else "s"))
+    return "backend is busy: " + ", ".join(parts or ["session activity"])
+
+
+def _workload_readiness() -> dict:
+    blockers = runner.upgrade_blockers()
+    terminals = terminal.active_count()
+    if blockers or terminals:
+        return _readiness_payload("busy", _busy_reason(blockers, terminals),
+                                  blockers, terminals)
+    return _readiness_payload("ready", "backend is idle and ready to upgrade")
+
+
+def _readiness(runtime: dict, app=None) -> dict:
+    if not runtime["enabled"]:
+        return _readiness_payload(
+            "unsupported", runtime["reason"] or "remote upgrade is disabled")
+    if app is not None and app.get("puppy_upgrade_draining"):
+        return _readiness_payload("upgrading", "backend is restarting for an upgrade")
+    if _upgrade_lock.locked():
+        return _readiness_payload("upgrading", "another upgrade is being staged")
+    marker = runtime.get("marker")
+    try:
+        if isinstance(marker, Path) and marker.exists():
+            return _readiness_payload(
+                "blocked", "an earlier upgrade is awaiting launcher validation")
+    except OSError as exc:
+        return _readiness_payload("blocked", "upgrade state cannot be read: {}".format(exc))
+    return _workload_readiness()
+
+
+def readiness(tls_enabled=None, app=None) -> dict:
+    """Report whether a new upgrade can be accepted at this instant."""
+    return _readiness(_runtime(tls_enabled), app)
+
+
+def descriptor(tls_enabled=None, app=None) -> dict:
     runtime = _runtime(tls_enabled)
     out = {
         "supported": bool(runtime["enabled"]),
@@ -117,6 +175,7 @@ def descriptor(tls_enabled=None) -> dict:
         "signing": "hmac-sha256",
         "restart": "external-launcher",
         "launcher_protocol": upgrade_contract.LAUNCHER_PROTOCOL,
+        "readiness": _readiness(runtime, app),
     }
     if runtime["reason"]:
         out["reason"] = runtime["reason"]
@@ -252,24 +311,19 @@ async def _exit_for_launcher(app: web.Application) -> None:
         os._exit(upgrade_contract.UPGRADE_EXIT_CODE)
 
 
-async def h_status(_request: web.Request) -> web.Response:
-    return web.json_response(descriptor())
+async def h_status(request: web.Request) -> web.Response:
+    return web.json_response(descriptor(app=request.app))
 
 
 async def h_upgrade(request: web.Request) -> web.Response:
     runtime = _runtime()
-    if not runtime["enabled"]:
-        return web.json_response({"error": runtime["reason"] or "remote upgrade disabled"}, status=409)
-    if request.app.get("puppy_upgrade_draining"):
-        return web.json_response({"error": "backend is already restarting for an upgrade"}, status=409)
-    if _upgrade_lock.locked():
-        return web.json_response({"error": "another upgrade is already being staged"}, status=409)
-    blockers = runner.upgrade_blockers()
-    terminals = terminal.active_count()
-    if blockers or terminals:
+    current_readiness = _readiness(runtime, request.app)
+    if not current_readiness["ready"]:
         return web.json_response({
-            "error": "backend must be idle before upgrading",
-            "sessions": blockers, "active_terminals": terminals,
+            "error": current_readiness["reason"],
+            "readiness": current_readiness,
+            "sessions": current_readiness["sessions"],
+            "active_terminals": current_readiness["active_terminals"],
         }, status=409)
     if request.content_length is not None and request.content_length > upgrade_contract.MAX_ARTIFACT_BYTES:
         return web.json_response({"error": "upgrade artifact is too large"}, status=413)
@@ -311,10 +365,14 @@ async def h_upgrade(request: web.Request) -> web.Response:
                 os.chmod(str(stage), stat.S_IMODE(artifact.stat().st_mode) or 0o755)
                 _validate_zipapp(stage)
                 smoke = await _smoke_test(stage, state_dir, manifest)
-                blockers = runner.upgrade_blockers()
-                terminals = terminal.active_count()
-                if blockers or terminals:
-                    raise ValueError("backend became busy while the candidate was being validated")
+                current_readiness = _workload_readiness()
+                if not current_readiness["ready"]:
+                    return web.json_response({
+                        "error": "backend became busy while the candidate was being validated",
+                        "readiness": current_readiness,
+                        "sessions": current_readiness["sessions"],
+                        "active_terminals": current_readiness["active_terminals"],
+                    }, status=409)
                 _copy_atomic(artifact, backup)
                 pending = {
                     "format": upgrade_contract.LAUNCHER_PROTOCOL,

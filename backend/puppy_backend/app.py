@@ -37,7 +37,7 @@ def build_app(include_terminal: bool = True, transport=None,
     transport = dict(transport or {"encrypted": False})
     tls_enabled = bool(transport.get("encrypted"))
     app["puppy_capabilities"] = upgrade.capabilities(include_terminal, tls_enabled)
-    app["puppy_upgrade"] = lambda: upgrade.descriptor(tls_enabled)
+    app["puppy_upgrade"] = lambda: upgrade.descriptor(tls_enabled, app=app)
     app["puppy_transport"] = transport
     app["puppy_build"] = upgrade.build_descriptor()
     app["puppy_upgrade_health"] = dict(upgrade_health or {

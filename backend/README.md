@@ -158,3 +158,13 @@ continues the same validation or rollback on the next start. Replays and
 downgrades are rejected because the target version must be newer than the
 running version. TLS-enabled nodes advertise remote upgrade support only when
 the active launcher declares pinned-certificate health-check support.
+
+`GET /api/node/upgrade` reports live readiness as `ready`, `busy`, `upgrading`,
+`blocked`, or `unsupported`, including active session/queue blockers and the
+terminal count. Settings polls this lightweight status while visible: the
+Upgrade button is enabled only when the node reports that it can accept the
+request. The POST repeats the same check and can still reject a race or any
+runtime blocker before staging; it checks the workload again after candidate
+validation. Older upgrade-capable nodes are supported for their first upgrade
+by conservatively inferring session activity, while their existing POST gate
+remains authoritative for terminals and races.

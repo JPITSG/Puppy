@@ -692,7 +692,12 @@ async function api(bid, path, opts = {}) {
     if (r.status === 401 && !bid) { showAuth(); throw new Error("auth required"); }
     let data = null;
     try { data = await r.json(); } catch (e) { /* non-json */ }
-    if (!r.ok) throw new Error((data && data.error) || `HTTP ${r.status}`);
+    if (!r.ok) {
+      const error = new Error((data && data.error) || `HTTP ${r.status}`);
+      error.status = r.status;
+      error.data = data;
+      throw error;
+    }
     return data;
   } finally {
     if (timeout !== null) clearTimeout(timeout);
@@ -866,6 +871,8 @@ const REMOTE_POLL_INTERVAL = 12000;
 const REMOTE_POLL_TIMEOUT = 5000;
 const REMOTE_ENGINE_REFRESH = 60000;
 const ENGINE_POLL_TIMEOUT = 15000;
+const UPGRADE_READINESS_INTERVAL = 2000;
+const UPGRADE_READINESS_TIMEOUT = 4000;
 const remotePollSequence = {};
 let remotePollTimer = null;
 let remotePollingGeneration = 0;
@@ -3131,6 +3138,11 @@ class SettingsView {
     this.remoteEngineGroups = new Map();
     this.remoteBackendDots = new Map();
     this.usageRows = new Map();
+    this.upgradeButtons = new Map();
+    this.upgradeReadiness = new Map();
+    this.upgradesInProgress = new Set();
+    this.upgradePollTimer = null;
+    this.upgradePollGeneration = 0;
     this.localEngineGroup = null;
     this.root = el("div", "view settings");
     this.root.innerHTML = `<div class="settings-scroll"><div class="settings-inner"></div></div>`;
@@ -3139,13 +3151,170 @@ class SettingsView {
   }
   destroy() {
     this.renderGeneration++;
+    this.stopUpgradeReadinessPolling();
     this.remoteEngineGroups.clear();
     this.remoteBackendDots.clear();
     this.usageRows.clear();
+    this.upgradeButtons.clear();
+    this.upgradeReadiness.clear();
+    this.upgradesInProgress.clear();
     this.localEngineGroup = null;
     this.root.remove();
   }
   onShow() { this.render(); }
+
+  stopUpgradeReadinessPolling() {
+    this.upgradePollGeneration++;
+    if (this.upgradePollTimer !== null) clearTimeout(this.upgradePollTimer);
+    this.upgradePollTimer = null;
+  }
+
+  normalizeReportedReadiness(value) {
+    if (!value || typeof value !== "object" || typeof value.ready !== "boolean" ||
+        typeof value.state !== "string" || typeof value.reason !== "string") return null;
+    return {
+      ready: value.ready,
+      state: value.state,
+      reason: value.reason,
+      sessions: Array.isArray(value.sessions) ? value.sessions : [],
+      active_terminals: Math.max(0, Number(value.active_terminals) || 0),
+    };
+  }
+
+  readinessFromDescriptor(bid, descriptor) {
+    const reported = this.normalizeReportedReadiness(descriptor && descriptor.readiness);
+    if (reported) return reported;
+    if (descriptor && Object.prototype.hasOwnProperty.call(descriptor, "readiness")) {
+      return { ready: false, state: "checking", reason: "backend returned invalid readiness" };
+    }
+    if (!descriptor || descriptor.supported !== true) {
+      return {
+        ready: false, state: "unsupported",
+        reason: (descriptor && descriptor.reason) || "backend does not support remote upgrades",
+      };
+    }
+    /* Compatibility bridge for the first upgrade of older upgrade-capable
+       nodes. They verify terminals and races authoritatively on POST, but only
+       session activity can be inferred before they gain readiness reporting. */
+    if (!Object.prototype.hasOwnProperty.call(state.remoteSessions, bid)) {
+      return { ready: false, state: "checking", reason: "waiting for backend session status" };
+    }
+    const busy = sessionsFor(bid).some(session => session.status === "running");
+    return {
+      ready: !busy,
+      state: busy ? "busy" : "ready",
+      reason: busy ? "backend has an active session" :
+        "readiness inferred from sessions until this backend is upgraded",
+      legacy: true,
+    };
+  }
+
+  isUpgradeCandidate(record) {
+    const backend = state.backends.find(item => item.id === record.backend.id) || record.backend;
+    return backend.role === "backend" && backendHasCapability(backend, "remote-upgrade") &&
+      cmpVersion(backend.remote_version, record.controllerVersion) === -1;
+  }
+
+  syncUpgradeButtons() {
+    for (const [bid, record] of this.upgradeButtons) {
+      const button = record.button;
+      if (!button.isConnected) continue;
+      const backend = state.backends.find(item => item.id === bid) || record.backend;
+      const versionOrder = cmpVersion(backend.remote_version, record.controllerVersion);
+      const capable = backend.role === "backend" &&
+        backendHasCapability(backend, "remote-upgrade");
+      const set = (text, disabled, title) => {
+        button.textContent = text;
+        button.disabled = disabled;
+        button.title = title || "";
+      };
+      if (this.upgradesInProgress.has(bid)) {
+        set("Upgrading…", true, "Upgrade is being staged and health-checked");
+      } else if (!capable) {
+        set("Upgrade", true,
+          "This backend needs one manual upgrade before WebUI upgrades are available");
+      } else if (versionOrder === 0) {
+        set("Current", true, `Already at v${record.controllerVersion}`);
+      } else if (versionOrder === 1) {
+        set("Newer", true,
+          `Backend v${backend.remote_version} is newer than this controller`);
+      } else if (versionOrder === null) {
+        set("Upgrade", true, "Backend version cannot be compared safely");
+      } else if (state.remoteOk[bid] === false) {
+        set("Unavailable", true, state.remoteErrors[bid] || "Backend unavailable");
+      } else if (sessionsFor(bid).some(session => session.status === "running")) {
+        const known = this.upgradeReadiness.get(bid);
+        set("Busy", true, known && known.state === "busy" ?
+          known.reason : "Backend has an active session");
+      } else {
+        const readiness = this.upgradeReadiness.get(bid);
+        if (!readiness) {
+          set("Checking…", true, "Checking whether the backend can accept an upgrade");
+        } else if (readiness.ready) {
+          set("Upgrade", false, readiness.reason || "Backend is ready to upgrade");
+        } else if (readiness.state === "busy") {
+          set("Busy", true, readiness.reason);
+        } else if (readiness.state === "upgrading") {
+          set("Upgrading…", true, readiness.reason);
+        } else if (readiness.state === "blocked" || readiness.state === "unsupported") {
+          set("Blocked", true, readiness.reason);
+        } else {
+          set("Checking…", true, readiness.reason || "Upgrade readiness is unavailable");
+        }
+      }
+    }
+  }
+
+  async refreshUpgradeReadiness(generation) {
+    const candidates = [...this.upgradeButtons.entries()]
+      .filter(([, record]) => this.isUpgradeCandidate(record) &&
+        !this.upgradesInProgress.has(record.backend.id));
+    const results = await Promise.all(candidates.map(async ([bid]) => {
+      try {
+        const descriptor = await api(bid, "node/upgrade", {
+          timeoutMs: UPGRADE_READINESS_TIMEOUT,
+        });
+        return { bid, readiness: this.readinessFromDescriptor(bid, descriptor), reachable: true };
+      } catch (error) {
+        const rejected = this.normalizeReportedReadiness(
+          error.data && error.data.readiness);
+        return {
+          bid,
+          readiness: rejected || {
+            ready: false, state: "checking", reason: error.message || "readiness check failed",
+          },
+          reachable: !!rejected,
+        };
+      }
+    }));
+    if (generation !== this.upgradePollGeneration || state.active !== this.tab.id) return;
+    for (const result of results) {
+      this.upgradeReadiness.set(result.bid, result.readiness);
+      if (result.reachable) {
+        state.remoteOk[result.bid] = true;
+        delete state.remoteErrors[result.bid];
+      }
+    }
+    this.syncRemoteState();
+  }
+
+  startUpgradeReadinessPolling() {
+    this.stopUpgradeReadinessPolling();
+    const generation = this.upgradePollGeneration;
+    if (![...this.upgradeButtons.values()].some(record => this.isUpgradeCandidate(record)))
+      return;
+    const tick = async () => {
+      this.upgradePollTimer = null;
+      if (generation !== this.upgradePollGeneration || state.active !== this.tab.id ||
+          !this.root.isConnected) return;
+      try { await this.refreshUpgradeReadiness(generation); }
+      catch (error) { console.warn("upgrade readiness poll failed", error); }
+      if (generation === this.upgradePollGeneration && state.active === this.tab.id &&
+          this.root.isConnected)
+        this.upgradePollTimer = setTimeout(tick, UPGRADE_READINESS_INTERVAL);
+    };
+    tick();
+  }
 
   syncRemoteState() {
     for (const [bid, group] of this.remoteEngineGroups) {
@@ -3186,6 +3355,7 @@ class SettingsView {
       row.update(state.remoteUsageRefresh[bid] || null,
         remoteAvailability(bid), backendSupportsUsageRefresh(bid));
     }
+    this.syncUpgradeButtons();
   }
 
   engineRow(e2) {
@@ -3358,6 +3528,7 @@ class SettingsView {
   }
 
   async render() {
+    this.stopUpgradeReadinessPolling();
     const generation = ++this.renderGeneration;
     let settings, engines;
     try {
@@ -3378,6 +3549,10 @@ class SettingsView {
     this.remoteEngineGroups.clear();
     this.remoteBackendDots.clear();
     this.usageRows.clear();
+    this.upgradeButtons.clear();
+    /* A hidden Settings tab is not polled. Re-enter through Checking rather
+       than briefly enabling a button from an arbitrarily old ready result. */
+    this.upgradeReadiness.clear();
     this.localEngineGroup = null;
 
     /* instance */
@@ -3671,41 +3846,41 @@ class SettingsView {
           }
         };
         const upgrade = el("button", "btn btn-sm", "Upgrade");
-        const versionOrder = cmpVersion(b.remote_version, settings.version);
-        const upgradeCapable = b.role === "backend" && backendHasCapability(b, "remote-upgrade");
-        if (!upgradeCapable) {
-          upgrade.disabled = true;
-          upgrade.title = "This backend needs one manual upgrade before WebUI upgrades are available";
-        } else if (versionOrder === 0) {
-          upgrade.textContent = "Current";
-          upgrade.disabled = true;
-          upgrade.title = `Already at v${settings.version}`;
-        } else if (versionOrder === 1) {
-          upgrade.textContent = "Newer";
-          upgrade.disabled = true;
-          upgrade.title = `Backend v${b.remote_version} is newer than this controller`;
-        } else if (versionOrder === null) {
-          upgrade.disabled = true;
-          upgrade.title = "Backend version cannot be compared safely";
-        }
+        this.upgradeButtons.set(b.id, {
+          button: upgrade, backend: b, controllerVersion: settings.version,
+        });
         upgrade.onclick = async () => {
-          if (!(await modalConfirm("Upgrade backend?",
-            `${b.name} will upgrade from v${b.remote_version} to v${settings.version} and restart. The backend must have no running turns or terminals.`))) return;
-          upgrade.disabled = true;
-          upgrade.textContent = "Upgrading…";
+          if (upgrade.disabled || this.upgradesInProgress.has(b.id)) return;
+          this.upgradesInProgress.add(b.id);
+          this.syncUpgradeButtons();
+          let result;
           try {
-            const result = await api(0, `backends/${b.id}/upgrade`, { method: "POST" });
-            toast(`${b.name}: upgraded ${result.from_version} → ${result.to_version}`, "ok", 7000);
-            delete state.engCache[b.id];
-            delete state.remoteEngineCheckedAt[b.id];
-            delete state.remoteEngineErrors[b.id];
-            await refreshState(); await this.render();
-            pollRemotes({ forceEngines: true })
-              .catch(error => console.warn("post-upgrade remote poll failed", error));
+            result = await api(0, `backends/${b.id}/upgrade`, { method: "POST" });
           } catch (e) {
-            toast(`${b.name}: ${e.message}`, "error", 7000);
-            await this.render();
+            this.upgradesInProgress.delete(b.id);
+            const rejected = this.normalizeReportedReadiness(
+              e.data && e.data.readiness);
+            if (rejected) {
+              this.upgradeReadiness.set(b.id, rejected);
+              state.remoteOk[b.id] = true;
+              delete state.remoteErrors[b.id];
+            }
+            this.syncUpgradeButtons();
+            modalNotice("Upgrade rejected", `${b.name}: ${e.message}`);
+            return;
           }
+          this.upgradesInProgress.delete(b.id);
+          const upgradedBackend = state.backends.find(item => item.id === b.id);
+          if (upgradedBackend && result && result.to_version)
+            upgradedBackend.remote_version = result.to_version;
+          this.syncUpgradeButtons();
+          delete state.engCache[b.id];
+          delete state.remoteEngineCheckedAt[b.id];
+          delete state.remoteEngineErrors[b.id];
+          try { await refreshState(); await this.render(); }
+          catch (error) { console.warn("post-upgrade settings refresh failed", error); }
+          pollRemotes({ forceEngines: true })
+            .catch(error => console.warn("post-upgrade remote poll failed", error));
         };
         const rm = el("button", "btn btn-danger btn-sm", "Remove");
         rm.onclick = async () => {
@@ -3719,6 +3894,7 @@ class SettingsView {
       }
     };
     renderBes();
+    this.syncUpgradeButtons();
     c3.querySelector("#be-add").onclick = async () => {
       try {
         let paired = {};
@@ -3844,6 +4020,7 @@ class SettingsView {
     };
     this.inner.appendChild(c5);
     this.syncRemoteState();
+    this.startUpgradeReadinessPolling();
   }
 }
 

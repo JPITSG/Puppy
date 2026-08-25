@@ -34,7 +34,9 @@ TERMINAL_CAPABILITY = "terminal"
 TLS_PIN_CAPABILITY = "pinned-tls"
 
 # Signed/staged remote upgrades are additive to protocol 1. A backend advertises
-# this only while its external health-check/rollback launcher is active.
+# this only while its external health-check/rollback launcher is active. The
+# GET descriptor's readiness object is additive: older nodes omit it and still
+# enforce their original POST-time idle gate.
 UPGRADE_CAPABILITY = "remote-upgrade"
 UPGRADE_API_PATH = "/api/node/upgrade"
 

@@ -94,6 +94,65 @@ def exercise_activity_blocks(session_hub_cls) -> None:
     assert hub.status == "idle" and hub.active_since is None
 
 
+async def exercise_upgrade_readiness(upgrade_module, runner_module,
+                                     terminal_module, temporary: Path) -> None:
+    """Readiness and the POST gate must agree on workload and runtime blockers."""
+    temporary.mkdir(parents=True, exist_ok=True)
+    marker = temporary / "readiness-pending.json"
+    runtime = {"enabled": True, "reason": "", "marker": marker}
+    app = {"puppy_upgrade_draining": False}
+    hub_id = -9001
+    hub = runner_module.SessionHub(hub_id)
+    old_terminal_count = terminal_module._active_terminals
+    old_runtime = upgrade_module._runtime
+    runner_module._hubs[hub_id] = hub
+    try:
+        ready = upgrade_module._readiness(runtime, app)
+        assert ready["ready"] is True and ready["state"] == "ready"
+        assert ready["sessions"] == [] and ready["active_terminals"] == 0
+
+        hub.status = "running"
+        hub.active_since = time.time()
+        hub.queue = ["queued behind the active turn"]
+        terminal_module._active_terminals = 2
+        busy = upgrade_module._readiness(runtime, app)
+        assert busy["ready"] is False and busy["state"] == "busy"
+        assert busy["sessions"][0]["id"] == hub_id
+        assert busy["sessions"][0]["queued"] == 1
+        assert busy["active_terminals"] == 2
+        assert "running turn" in busy["reason"] and "queued message" in busy["reason"]
+        assert "active terminals" in busy["reason"]
+
+        upgrade_module._runtime = lambda tls_enabled=None: runtime
+        rejected = await upgrade_module.h_upgrade(type("Request", (), {"app": app})())
+        rejected_body = json.loads(rejected.text)
+        assert rejected.status == 409
+        assert rejected_body["readiness"]["state"] == "busy"
+
+        app["puppy_upgrade_draining"] = True
+        upgrading = upgrade_module._readiness(runtime, app)
+        assert upgrading["ready"] is False and upgrading["state"] == "upgrading"
+        app["puppy_upgrade_draining"] = False
+
+        hub.status = "idle"
+        hub.active_since = None
+        hub.queue = []
+        terminal_module._active_terminals = 0
+        marker.touch()
+        blocked = upgrade_module._readiness(runtime, app)
+        assert blocked["ready"] is False and blocked["state"] == "blocked"
+
+        unsupported = upgrade_module._readiness({
+            "enabled": False, "reason": "launcher unavailable", "marker": None,
+        }, app)
+        assert unsupported["state"] == "unsupported"
+        assert unsupported["reason"] == "launcher unavailable"
+    finally:
+        upgrade_module._runtime = old_runtime
+        runner_module._hubs.pop(hub_id, None)
+        terminal_module._active_terminals = old_terminal_count
+
+
 def free_port() -> int:
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
@@ -183,6 +242,10 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert ping["upgrade"]["api"] == "/api/node/upgrade"
         assert ping["upgrade"]["signing"] == "hmac-sha256"
         assert ping["upgrade"]["restart"] == "external-launcher"
+        ping_readiness = ping["upgrade"]["readiness"]
+        assert ping_readiness["ready"] is upgrade_enabled
+        assert ping_readiness["state"] == \
+            ("ready" if upgrade_enabled else "unsupported")
         assert ping["build"]["artifact"] == "zipapp"
 
         async with http.get(url + "/api/node", headers=good, ssl=pinned) as response:
@@ -288,6 +351,9 @@ async def exercise_node(url: str, token: str, expected_version: str,
         async with http.get(url + "/api/node/upgrade", headers=good, ssl=pinned) as response:
             status = await response.json()
             assert response.status == 200 and status["supported"] is upgrade_enabled
+        assert status["readiness"]["ready"] is upgrade_enabled
+        assert status["readiness"]["state"] == \
+            ("ready" if upgrade_enabled else "unsupported")
         for path in ("/", "/static/app.js", "/api/settings", "/api/auth/status",
                      "/api/ws/term"):
             async with http.get(url + path, headers=good, ssl=pinned) as response:
@@ -313,6 +379,8 @@ async def exercise_node(url: str, token: str, expected_version: str,
             async with http.post(url + "/api/node/upgrade", headers=good,
                                  data=b"not-an-artifact", ssl=pinned) as response:
                 assert response.status == 409
+                rejected = await response.json()
+            assert rejected["readiness"]["state"] == "unsupported"
 
 
 async def reject_bad_signature(url: str, token: str, fingerprint: str = "") -> None:
@@ -340,7 +408,7 @@ async def reject_bad_signature(url: str, token: str, fingerprint: str = "") -> N
 
 async def exercise_controller(url: str, token: str, backend_url: str,
                               backend_token: str, backend_fingerprint: str,
-                              old_version: str) -> None:
+                              old_version: str, backend_state_dir: Path) -> None:
     headers = {"X-Puppy-Token": token}
     async with aiohttp.ClientSession() as http:
         async with http.get(url + "/api/ping", headers=headers) as response:
@@ -399,6 +467,30 @@ async def exercise_controller(url: str, token: str, backend_url: str,
             proxied = await response.json()
             assert response.status == 200 and proxied["sessions"] == [], proxied
         assert isinstance(proxied["server_time"], (int, float))
+        async with http.get(url + f"/api/b/{stored['id']}/node/upgrade",
+                            headers=headers) as response:
+            proxied_upgrade = await response.json()
+            assert response.status == 200, proxied_upgrade
+        assert proxied_upgrade["readiness"]["ready"] is True
+        assert proxied_upgrade["readiness"]["state"] == "ready"
+
+        # A backend-owned runtime blocker must disable readiness and be
+        # propagated by the controller before it spends time building an artifact.
+        pending_marker = backend_state_dir / "pending.json"
+        pending_marker.write_text("{}\n", encoding="utf-8")
+        try:
+            async with http.get(url + f"/api/b/{stored['id']}/node/upgrade",
+                                headers=headers) as response:
+                blocked = await response.json()
+                assert response.status == 200, blocked
+            assert blocked["readiness"]["state"] == "blocked"
+            async with http.post(url + f"/api/backends/{stored['id']}/upgrade",
+                                 headers=headers) as response:
+                rejected = await response.json()
+                assert response.status == 409, rejected
+            assert rejected["readiness"]["state"] == "blocked"
+        finally:
+            pending_marker.unlink(missing_ok=True)
         async with http.get(url + f"/api/b/{stored['id']}/engines/usage-refresh",
                             headers=headers) as response:
             proxied_refresh = await response.json()
@@ -788,7 +880,8 @@ async def main() -> None:
         old_db.commit()
         old_db.close()
         os.environ["PUPPY_DATA"] = str(controller_data)
-        from puppy import config, db, runner
+        from puppy import config, db, runner, terminal
+        from backend.puppy_backend import upgrade as backend_upgrade
         from puppy.web import build_app
 
         config.load()
@@ -797,6 +890,8 @@ async def main() -> None:
         config.set_value("engines.usage_refresh_minutes", 0)
         db.connect()
         exercise_activity_blocks(runner.SessionHub)
+        await exercise_upgrade_readiness(
+            backend_upgrade, runner, terminal, temp_root / "readiness")
         assert "tls_fingerprint" in {
             row["name"] for row in db.query("PRAGMA table_info(backends)")}
         assert "workspace_kind" in {
@@ -809,7 +904,7 @@ async def main() -> None:
         sock = site._server.sockets[0]
         controller_url = f"http://127.0.0.1:{sock.getsockname()[1]}"
         await exercise_controller(controller_url, controller_token, backend_url,
-                                  backend_token, backend_fingerprint, old_version)
+                                  backend_token, backend_fingerprint, old_version, state_dir)
         await exercise_proxy_recovery(controller_url, controller_token)
         await exercise_redirect_rejection()
         upgrade_status = json.loads((state_dir / "status.json").read_text(encoding="utf-8"))
