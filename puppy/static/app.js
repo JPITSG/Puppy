@@ -29,6 +29,27 @@ function xIcon(size) {
   return svg;
 }
 
+/* Same reason as the close cross above: a "+" character is placed on the font's
+   math axis, which is not the middle of its line box, so the glyph lands about
+   1.5px low in a flex-centred button however the box is aligned. Drawn ink is
+   centred by construction, on every font and platform. */
+function plusIcon(size) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 12 12");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const p = document.createElementNS(NS, "path");
+  p.setAttribute("d", "M6 2.75 L6 9.25 M2.75 6 L9.25 6");
+  p.setAttribute("stroke", "currentColor");
+  p.setAttribute("stroke-width", "1.5");
+  p.setAttribute("stroke-linecap", "round");
+  p.setAttribute("fill", "none");
+  svg.appendChild(p);
+  return svg;
+}
+
 function gearIcon(size) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
@@ -2745,7 +2766,7 @@ class SessionView {
             <div class="composer-meta-viewport">
               <div class="composer-meta-scroll">
                 <button type="button" class="mini attach-add" aria-label="Attach files"
-                  title="Attach files"><span aria-hidden="true">+</span></button>
+                  title="Attach files"><span aria-hidden="true"></span></button>
                 ${composerChoice("perm", "permissions", "Permission mode")}
                 ${composerChoice("model", "model", "Model")}
                 ${composerChoice("effort", "effort", "Reasoning effort")}
@@ -2778,6 +2799,7 @@ class SessionView {
     this.queueEl = root.querySelector(".queue-strip");
     this.attachStrip = root.querySelector(".attach-strip");
     this.attachButton = root.querySelector(".attach-add");
+    this.attachButton.firstElementChild.appendChild(plusIcon(12));
     this.fileInput = root.querySelector(".attach-input");
     this.headMeta.addEventListener("scroll", () => this.syncHeadOverflow(), { passive: true });
     this.composerMeta.addEventListener("scroll", () => this.syncComposerOverflow(), { passive: true });
