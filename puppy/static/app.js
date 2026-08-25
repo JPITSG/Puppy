@@ -3140,10 +3140,14 @@ class SettingsView {
       <label>Instance name<input type="text" id="set-name" value="${esc(settings.instance_name)}"></label>
       <label>Default working directory<input type="text" id="set-cwd" value="${esc(settings.default_cwd || "")}"></label>
       <label>Terminal command<input type="text" id="set-term" value="${esc(settings.terminal_command)}"></label>
-      <label>Bind IP<input type="text" id="set-bind" value="${esc(settings.web.host)}"
-        inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
-      <p class="bind-help">Literal IPv4 or IPv6 address. A changed address is tested directly
-        from this browser before it can be saved.</p>
+      <div class="bind-fields">
+        <label>Bind IP<input type="text" id="set-bind" value="${esc(settings.web.host)}"
+          inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
+        <label>Bind port<input type="number" id="set-port" value="${esc(settings.web.port)}"
+          min="1" max="65535" step="1" inputmode="numeric" autocomplete="off"></label>
+      </div>
+      <p class="bind-help">Literal IPv4 or IPv6 address and TCP port for this WebUI instance.
+        A changed endpoint is tested directly from this browser before it can be saved.</p>
       <div class="kv"><span class="k">Active listener</span><span class="v">${esc(fmtEndpoint(activeWeb.host, activeWeb.port))}</span></div>
       ${settings.web_restart_required ? `<div class="bind-pending">
         Restart required to activate verified listener ${esc(fmtEndpoint(settings.web.host, settings.web.port))}.
@@ -3165,13 +3169,23 @@ class SettingsView {
     c1.querySelector("#set-save").onclick = async () => {
       const saveButton = c1.querySelector("#set-save");
       const bindInput = c1.querySelector("#set-bind");
+      const portInput = c1.querySelector("#set-port");
       const proposedBind = bindInput.value.trim();
-      const bindChanged = proposedBind !== String(settings.web.host || "");
-      if (bindChanged && !(await modalConfirm("Change Puppy bind IP?",
+      const proposedPortText = portInput.value.trim();
+      const proposedPort = Number(proposedPortText);
+      if (!proposedPortText || !Number.isInteger(proposedPort) ||
+          proposedPort < 1 || proposedPort > 65535) {
+        toast("bind port must be a whole number between 1 and 65535", "error");
+        portInput.focus();
+        return;
+      }
+      const bindChanged = proposedBind !== String(settings.web.host || "") ||
+        proposedPort !== Number(settings.web.port);
+      if (bindChanged && !(await modalConfirm("Change Puppy listener?",
         `Puppy will first ask this browser to reach ${proposedBind
-          ? fmtEndpoint(proposedBind, settings.web.port) : "the proposed address"} directly. ` +
-        `The setting is saved only if that succeeds. ` +
-        "A service restart is required afterward."))) return;
+          ? fmtEndpoint(proposedBind, proposedPort) : "the proposed endpoint"} directly. ` +
+        `The listener is saved only if that succeeds. A service restart is required if ` +
+        "the verified endpoint differs from the active listener."))) return;
       saveButton.disabled = true;
       saveButton.textContent = bindChanged ? "Verifying…" : "Saving…";
       let bindCommit = null;
@@ -3180,7 +3194,9 @@ class SettingsView {
       try {
         if (bindChanged) {
           const prepared = await api(0, "settings/bind/prepare", {
-            method: "POST", body: { host: proposedBind, origin: location.origin },
+            method: "POST", body: {
+              host: proposedBind, port: proposedPort, origin: location.origin,
+            },
           });
           const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
           const timer = controller ? setTimeout(() => controller.abort(), 8000) : null;
@@ -3218,7 +3234,7 @@ class SettingsView {
         await refreshState();
         await this.render();
         if (bindCommit && bindCommit.restart_required) {
-          modalNotice("Bind IP verified and saved",
+          modalNotice("Listener verified and saved",
             `Restart Puppy to activate ${fmtEndpoint(bindCommit.host, bindCommit.port)}. ` +
             `Afterward, this browser can reconnect at ${bindCommit.next_url}`);
         } else {
@@ -3229,27 +3245,29 @@ class SettingsView {
           const activation = bindCommit.restart_required
             ? `Restart Puppy to activate ${fmtEndpoint(bindCommit.host, bindCommit.port)}.`
             : "The active listener already matches this setting; no restart is required.";
-          modalNotice("Bind IP was saved",
+          modalNotice("Listener was saved",
             `The browser check and save succeeded, but the settings view could not refresh: ` +
             `${e.message}. ${activation}`);
         } else if (commitAttempted && verified) {
           let current = null;
           try { current = await api(0, "settings", { timeoutMs: 3000 }); } catch (_) { /* uncertain */ }
-          if (current && String(current.web.host) === String(verified.host)) {
+          if (current && String(current.web.host) === String(verified.host) &&
+              Number(current.web.port) === Number(verified.port)) {
             const activation = current.web_restart_required
               ? `Restart Puppy to activate ${fmtEndpoint(current.web.host, current.web.port)}.`
               : "The active listener already matches this setting; no restart is required.";
-            modalNotice("Bind IP was saved",
+            modalNotice("Listener was saved",
               `The save completed even though its response was interrupted. ${activation}`);
-          } else if (current && String(current.web.host) === String(settings.web.host)) {
-            modalNotice("Bind IP was not changed",
+          } else if (current && String(current.web.host) === String(settings.web.host) &&
+                     Number(current.web.port) === Number(settings.web.port)) {
+            modalNotice("Listener was not changed",
               `${e.message}. Puppy remains configured on ${fmtEndpoint(settings.web.host, settings.web.port)}.`);
           } else {
-            modalNotice("Bind IP save could not be confirmed",
+            modalNotice("Listener save could not be confirmed",
               `${e.message}. The current listener remains active. Reload Settings and confirm the ` +
               "configured listener before restarting Puppy.");
           }
-        } else if (bindChanged) modalNotice("Bind IP was not changed",
+        } else if (bindChanged) modalNotice("Listener was not changed",
           `${e.message}. Puppy remains configured on ${fmtEndpoint(settings.web.host, settings.web.port)}.`);
         else toast(e.message, "error");
       } finally {

@@ -38,12 +38,13 @@ approvals, multi-backend support and built-in web terminals.
   credentials/native caches stay on their respective hosts. On a controller,
   remote registrations are included while node-owned sessions remain on those
   registered backends.
-- **Lockout-safe binding**: a new WebUI bind IP is committed only after the
-  current browser reaches a short-lived, one-use proof on that literal address
-  and Puppy's configured port. The current listener stays active until the next
+- **Lockout-safe binding**: a new WebUI bind IP or port is committed only after
+  the current browser reaches a short-lived, one-use proof on that exact
+  endpoint. The current listener stays active until the next
   service restart, and failed verification leaves the setting unchanged. An
   HTTPS reverse-proxy page fails closed because browsers forbid the direct HTTP
-  proof as mixed content.
+  proof as mixed content. Headless backend ports remain deployment-time
+  settings.
 - **Fresh usage status**: Settings → Usage refresh controls a separate interval
   for this instance and every attached backend. Supported engines refresh their
   read-only account-limit snapshot without starting a model turn, so the weekly

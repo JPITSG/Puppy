@@ -1,9 +1,9 @@
 """Browser-reachable, one-use verification for full-WebUI bind changes.
 
 Changing a listener blindly can lock an administrator out. A proposed literal
-IP is therefore exposed briefly on the configured port (or through the current
-wildcard listener), and the originating browser must fetch a nonce there before
-the address can be committed to config.json.
+IP and port are therefore exposed briefly (or proved through the current
+listener), and the originating browser must fetch a nonce there before the
+endpoint can be committed to config.json.
 """
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import errno
 import ipaddress
 import json
 import logging
+import math
 import secrets
 import time
 from typing import Dict, Optional, Tuple
@@ -43,6 +44,31 @@ def normalize_bind_ip(value) -> str:
     except ValueError as exc:
         raise BindVerificationError(
             "bind address must be a literal IPv4 or IPv6 address") from exc
+
+
+def normalize_bind_port(value) -> int:
+    if isinstance(value, bool):
+        raise BindVerificationError(
+            "bind port must be a whole number between 1 and 65535")
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw or len(raw) > 5 or not raw.isascii() or not raw.isdecimal():
+            raise BindVerificationError(
+                "bind port must be a whole number between 1 and 65535")
+        port = int(raw)
+    elif isinstance(value, int):
+        port = value
+    elif isinstance(value, float) and math.isfinite(value) and value == int(value):
+        # Keep compatibility with hand-written config.json values and imported
+        # numeric settings that represent a whole port as 10888.0.
+        port = int(value)
+    else:
+        raise BindVerificationError(
+            "bind port must be a whole number between 1 and 65535")
+    if not 1 <= port <= 65535:
+        raise BindVerificationError(
+            "bind port must be a whole number between 1 and 65535")
+    return port
 
 
 def _origin(value: str) -> Tuple[str, str, int, str]:
@@ -250,16 +276,14 @@ async def _raw_probe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
 
 
 async def prepare(app: web.Application, user: str, bind_ip, origin: str,
-                  port: int, connected_host: Optional[str] = None) -> dict:
+                  port, connected_host: Optional[str] = None) -> dict:
     host = normalize_bind_ip(bind_ip)
+    port = normalize_bind_port(port)
     scheme, origin_host, origin_port, canonical_origin = _origin(origin)
     if scheme != "http":
         raise BindVerificationError(
             "direct bind verification is unavailable from an HTTPS-proxied page; "
-            "the bind address was not changed")
-    if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
-        raise BindVerificationError("configured web port is invalid")
-
+            "the bind endpoint was not changed")
     entries = _entries(app)
     for old_token, old_entry in list(entries.items()):
         if old_entry.get("user") == user or time.monotonic() >= old_entry.get("expires", 0):
@@ -330,7 +354,7 @@ async def commit(app: web.Application, user: str, token: str) -> dict:
         raise BindVerificationError("bind verification expired; try again", status=409)
     if not entry["verified"]:
         raise BindVerificationError(
-            "the proposed bind address was not reached by this browser", status=409)
+            "the proposed bind endpoint was not reached by this browser", status=409)
     entry = _discard(app, str(token))
     server = entry.get("server") if entry else None
     if server is not None:
@@ -347,14 +371,16 @@ async def commit(app: web.Application, user: str, token: str) -> dict:
     try:
         updated = config.export_data()
         updated["web"]["host"] = entry["host"]
+        updated["web"]["port"] = entry["port"]
         config.replace_all(updated)
     except (OSError, ValueError) as exc:
         raise BindVerificationError(
-            "verification succeeded but the bind setting could not be saved", status=500) from exc
-    log.info("verified WebUI bind address changed from %s to %s by %r",
-             old_host, entry["host"], user)
+            "verification succeeded but the listener setting could not be saved", status=500) from exc
+    log.info("verified WebUI listener changed from %s to %s by %r",
+             _authority(old_host, old_port),
+             _authority(entry["host"], entry["port"]), user)
     runtime_web = app.get("puppy_runtime_web") or {
-        "host": old_host, "port": entry["port"]}
+        "host": old_host, "port": old_port}
     restart_required = entry["host"] != str(runtime_web.get("host")) or \
         entry["port"] != int(runtime_web.get("port", entry["port"]))
     return {
@@ -362,6 +388,7 @@ async def commit(app: web.Application, user: str, token: str) -> dict:
         "host": entry["host"],
         "port": entry["port"],
         "previous_host": old_host,
+        "previous_port": old_port,
         "restart_required": restart_required,
         "next_url": "http://" + _authority(entry["probe_host"], entry["port"]) + "/",
     }

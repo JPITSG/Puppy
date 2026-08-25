@@ -471,9 +471,10 @@ async def h_bind_prepare(request: web.Request):
     sockname = request.transport.get_extra_info("sockname") if request.transport else None
     connected_host = sockname[0] if isinstance(sockname, tuple) and sockname else None
     try:
+        proposed_port = body["port"] if "port" in body else config.get("web.port", 10888)
         return web.json_response(await bind_verify.prepare(
             request.app, str(request["user"]), body.get("host"), origin,
-            int(config.get("web.port", 10888)), connected_host=connected_host))
+            proposed_port, connected_host=connected_host))
     except bind_verify.BindVerificationError as exc:
         return web.json_response({"error": str(exc)}, status=exc.status)
 

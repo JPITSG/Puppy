@@ -78,6 +78,91 @@ async def main() -> None:
                 assert response.status == 200, committed
                 assert committed["restart_required"] is False
 
+            # A new port is proved by a temporary listener on the exact
+            # proposed endpoint. Config changes only after the browser reaches
+            # it, while the original WebUI socket remains active.
+            proposed_port = free_port()
+            async with http.post(origin + "/api/settings/bind/prepare",
+                                 headers=auth_headers,
+                                 json={"host": "127.0.0.1", "port": proposed_port,
+                                       "origin": origin}) as response:
+                port_change = await json_response(response)
+                assert response.status == 200, port_change
+            assert port_change["port"] == proposed_port
+            assert port_change["verify_url"].startswith(
+                "http://127.0.0.1:{}/".format(proposed_port))
+            assert config.get("web.port") == port
+            async with http.get(port_change["verify_url"],
+                                headers={"Origin": origin}) as response:
+                proof = await json_response(response)
+                assert response.status == 200, proof
+            assert config.get("web.port") == port
+            async with http.post(origin + "/api/settings/bind/commit",
+                                 headers=auth_headers,
+                                 json={"token": port_change["token"]}) as response:
+                committed = await json_response(response)
+                assert response.status == 200, committed
+            assert committed["port"] == proposed_port
+            assert committed["previous_port"] == port
+            assert committed["restart_required"] is True
+            assert config.get("web.port") == proposed_port
+            async with http.get(origin + "/api/settings", headers=auth_headers) as response:
+                settings = await json_response(response)
+                assert settings["web"]["port"] == proposed_port
+                assert settings["active_web"]["port"] == port
+                assert settings["web_restart_required"] is True
+            # Proofs are one-use even though their public route remains safe.
+            async with http.post(origin + "/api/settings/bind/commit",
+                                 headers=auth_headers,
+                                 json={"token": port_change["token"]}) as response:
+                assert response.status == 409
+
+            # Revert through the live listener so the remaining address tests
+            # continue against the original configured endpoint.
+            async with http.post(origin + "/api/settings/bind/prepare",
+                                 headers=auth_headers,
+                                 json={"host": "127.0.0.1", "port": port,
+                                       "origin": origin}) as response:
+                port_revert = await json_response(response)
+                assert response.status == 200, port_revert
+            async with http.get(port_revert["verify_url"],
+                                headers={"Origin": origin}) as response:
+                assert response.status == 200
+            async with http.post(origin + "/api/settings/bind/commit",
+                                 headers=auth_headers,
+                                 json={"token": port_revert["token"]}) as response:
+                reverted = await json_response(response)
+                assert response.status == 200, reverted
+                assert reverted["restart_required"] is False
+            assert config.get("web.port") == port
+
+            # The ordinary settings patch cannot bypass endpoint proof.
+            async with http.patch(origin + "/api/settings", headers=auth_headers,
+                                  json={"web": {"host": "127.0.0.8",
+                                                "port": proposed_port}}) as response:
+                unchanged = await json_response(response)
+                assert response.status == 200, unchanged
+            assert config.get("web.host") == "127.0.0.1"
+            assert config.get("web.port") == port
+
+            # An unrelated process on a proposed new port is a hard conflict;
+            # Puppy's active listener cannot explain EADDRINUSE there.
+            occupied_port_server = await asyncio.start_server(
+                lambda _reader, writer: writer.close(), "127.0.0.6", 0)
+            occupied_port = occupied_port_server.sockets[0].getsockname()[1]
+            try:
+                async with http.post(origin + "/api/settings/bind/prepare",
+                                     headers=auth_headers,
+                                     json={"host": "127.0.0.6", "port": occupied_port,
+                                           "origin": origin}) as response:
+                    collision = await json_response(response)
+                    assert response.status == 400, collision
+                    assert "address already in use" in collision["error"].lower()
+            finally:
+                occupied_port_server.close()
+                await occupied_port_server.wait_closed()
+            assert config.get("web.port") == port
+
             # EADDRINUSE on an address the active Puppy listener cannot own is
             # a real collision, not permission to rely on the public route.
             occupied = await asyncio.start_server(
@@ -173,6 +258,16 @@ async def main() -> None:
                                  headers=auth_headers,
                                  json={"host": "localhost", "origin": origin}) as response:
                 assert response.status == 400
+            for invalid_port in (0, -1, 65536, 1.5, True, "12x", ""):
+                async with http.post(origin + "/api/settings/bind/prepare",
+                                     headers=auth_headers,
+                                     json={"host": "127.0.0.1", "port": invalid_port,
+                                           "origin": origin}) as response:
+                    invalid = await json_response(response)
+                    assert response.status == 400, (invalid_port, invalid)
+                    assert "whole number" in invalid["error"]
+            assert bind_verify.normalize_bind_port("10888") == 10888
+            assert bind_verify.normalize_bind_port(10888.0) == 10888
             async with http.post(origin + "/api/settings/bind/prepare",
                                  headers=auth_headers,
                                  json={"host": "192.0.2.1", "origin": origin}) as response:
@@ -185,6 +280,29 @@ async def main() -> None:
             }, json={"host": "127.0.0.4", "origin": https_origin}) as response:
                 assert response.status == 400
             assert config.get("web.host") == "127.0.0.2"
+
+            # A concurrent port edit invalidates an otherwise valid proof just
+            # like a concurrent host edit; neither field may be overwritten.
+            stale_port = free_port()
+            async with http.post(origin + "/api/settings/bind/prepare",
+                                 headers=auth_headers,
+                                 json={"host": "127.0.0.2", "port": stale_port,
+                                       "origin": origin}) as response:
+                stale_endpoint = await json_response(response)
+                assert response.status == 200, stale_endpoint
+            async with http.get(stale_endpoint["verify_url"],
+                                headers={"Origin": origin}) as response:
+                assert response.status == 200
+            concurrent_port = free_port()
+            config.set_value("web.port", concurrent_port)
+            async with http.post(origin + "/api/settings/bind/commit",
+                                 headers=auth_headers,
+                                 json={"token": stale_endpoint["token"]}) as response:
+                changed_during_proof = await json_response(response)
+                assert response.status == 409, changed_during_proof
+                assert "changed while" in changed_during_proof["error"]
+            assert config.get("web.port") == concurrent_port
+            config.set_value("web.port", port)
 
             # Wildcard binding is verified through the concrete origin that is
             # already known to reach this host; 0.0.0.0 and a potentially
@@ -273,7 +391,7 @@ async def main() -> None:
         await runner.cleanup()
         shutil.rmtree(TEST_ROOT, ignore_errors=True)
 
-    print("bind IP browser proof, fail-closed commit, CORS, and cleanup passed")
+    print("bind endpoint browser proof, fail-closed commit, CORS, and cleanup passed")
 
 
 if __name__ == "__main__":
