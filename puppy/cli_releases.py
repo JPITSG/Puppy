@@ -127,6 +127,24 @@ def status(driver, installed_output: str) -> dict:
     return result
 
 
+async def _read_capped(response) -> bytes:
+    """Read a whole response body, refusing anything past the cap.
+
+    StreamReader.read(n) is not "read n bytes": it returns whatever has arrived
+    when it first wakes, so a body split across chunks - which is how the
+    registry sends its gzipped, unsized responses - decodes as a truncated
+    prefix. Loop to EOF instead, and keep the cap enforced on the way.
+    """
+    chunks = []
+    total = 0
+    async for chunk in response.content.iter_chunked(8192):
+        total += len(chunk)
+        if total > MAX_RESPONSE_BYTES:
+            raise RuntimeError("npm registry response is too large")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 async def _fetch_npm(http: aiohttp.ClientSession, package: str) -> str:
     url = "{}/{}/latest".format(NPM_REGISTRY_BASE.rstrip("/"), quote(package, safe=""))
     async with http.get(url, allow_redirects=False) as response:
@@ -134,13 +152,14 @@ async def _fetch_npm(http: aiohttp.ClientSession, package: str) -> str:
             raise RuntimeError("npm registry returned HTTP {}".format(response.status))
         if response.content_length is not None and response.content_length > MAX_RESPONSE_BYTES:
             raise RuntimeError("npm registry response is too large")
-        body = await response.content.read(MAX_RESPONSE_BYTES + 1)
-        if len(body) > MAX_RESPONSE_BYTES:
-            raise RuntimeError("npm registry response is too large")
+        body = await _read_capped(response)
     try:
         payload = json.loads(body.decode("utf-8"))
     except (UnicodeError, ValueError) as exc:
-        raise RuntimeError("npm registry returned invalid JSON") from exc
+        # The byte count is the whole diagnosis when this comes back: a short
+        # body means the response was cut, a plausible one means it was not JSON.
+        raise RuntimeError(
+            "npm registry returned invalid JSON ({} bytes)".format(len(body))) from exc
     version = payload.get("version") if isinstance(payload, dict) else None
     if not isinstance(version, str) or _parsed_version(version, exact=True) is None:
         raise RuntimeError("npm registry returned an invalid latest version")
