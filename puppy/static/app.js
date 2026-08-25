@@ -1232,7 +1232,9 @@ const state = {
   remoteUsageRefresh: {}, // bid -> account-usage refresh metadata
   remoteUploadSettings: {}, // bid -> remote per-file upload policy
   tabs: [],               // [{id,type,bid,sid,title,cmd}]
-  active: null,           // tab id
+  active: null,           // focused tab id (each pane also has its own active tab)
+  activeGroup: null,      // focused workspace pane id
+  layout: null,           // recursive pane/split tree
   showArchived: false,
   views: {},              // tab id -> view object
 };
@@ -1354,18 +1356,210 @@ function remoteAvailabilityTitle(bid) {
     `available · engine status unavailable: ${state.remoteEngineErrors[bid]}` : "available";
 }
 
+let workspaceIdSequence = 1;
+let workspaceRevision = 0;
+
+function workspaceId(prefix) {
+  return `${prefix}:${Date.now().toString(36)}:${workspaceIdSequence++}`;
+}
+
+function newPane(tabIds = [], active = null) {
+  const tabs = [...tabIds];
+  return {
+    kind: "pane", id: workspaceId("pane"), tabs,
+    active: tabs.includes(active) ? active : (tabs[0] || null),
+  };
+}
+
+function newSplit(axis, first, second, ratio = .5) {
+  return {
+    kind: "split", id: workspaceId("split"), axis: axis === "column" ? "column" : "row",
+    ratio: Math.max(.1, Math.min(.9, Number(ratio) || .5)), first, second,
+  };
+}
+
+function workspacePanes(node = state.layout, result = []) {
+  if (!node) return result;
+  if (node.kind === "pane") result.push(node);
+  else if (node.kind === "split") {
+    workspacePanes(node.first, result);
+    workspacePanes(node.second, result);
+  }
+  return result;
+}
+
+function workspacePane(id) {
+  return workspacePanes().find(pane => pane.id === id) || null;
+}
+
+function workspacePaneForTab(tabId) {
+  return workspacePanes().find(pane => pane.tabs.includes(tabId)) || null;
+}
+
+function workspaceReplaceNode(id, replacement, node = state.layout) {
+  if (!node || node.kind !== "split") return false;
+  if (node.first && node.first.id === id) { node.first = replacement; return true; }
+  if (node.second && node.second.id === id) { node.second = replacement; return true; }
+  return workspaceReplaceNode(id, replacement, node.first) ||
+    workspaceReplaceNode(id, replacement, node.second);
+}
+
+function collapseEmptyPane(pane) {
+  if (!pane || pane.tabs.length || !state.layout || state.layout.id === pane.id) return;
+  const findParent = (node) => {
+    if (!node || node.kind !== "split") return null;
+    if (node.first === pane || node.second === pane) return node;
+    return findParent(node.first) || findParent(node.second);
+  };
+  const parent = findParent(state.layout);
+  if (!parent) return;
+  const sibling = parent.first === pane ? parent.second : parent.first;
+  if (state.layout === parent) state.layout = sibling;
+  else workspaceReplaceNode(parent.id, sibling);
+}
+
+function removeTabFromPane(tabId) {
+  const pane = workspacePaneForTab(tabId);
+  if (!pane) return null;
+  const index = pane.tabs.indexOf(tabId);
+  pane.tabs.splice(index, 1);
+  if (pane.active === tabId)
+    pane.active = pane.tabs[Math.max(0, index - 1)] || null;
+  return pane;
+}
+
+function syncTabOrderFromLayout() {
+  const byId = new Map(state.tabs.map(tab => [tab.id, tab]));
+  const ordered = [];
+  for (const pane of workspacePanes()) {
+    for (const id of pane.tabs) {
+      const tab = byId.get(id);
+      if (tab) { ordered.push(tab); byId.delete(id); }
+    }
+  }
+  for (const tab of state.tabs) if (byId.has(tab.id)) ordered.push(tab);
+  state.tabs = ordered;
+}
+
+/* Saved layouts are browser-owned state, but still normalize them strictly:
+   stale tabs disappear, duplicate membership is ignored, empty branches
+   collapse, and old flat tab archives become one pane. */
+function normalizeWorkspace() {
+  const validTabs = new Set(state.tabs.map(tab => tab.id));
+  const assignedTabs = new Set();
+  const nodeIds = new Set();
+  const safeId = (value, prefix) => {
+    if (typeof value === "string" && value.length <= 120 && !nodeIds.has(value)) {
+      nodeIds.add(value); return value;
+    }
+    let id;
+    do { id = workspaceId(prefix); } while (nodeIds.has(id));
+    nodeIds.add(id); return id;
+  };
+  const walk = (node, depth) => {
+    if (!node || typeof node !== "object" || depth > 24) return null;
+    if (node.kind === "pane") {
+      const tabs = [];
+      if (Array.isArray(node.tabs)) for (const id of node.tabs) {
+        if (typeof id === "string" && validTabs.has(id) && !assignedTabs.has(id)) {
+          assignedTabs.add(id); tabs.push(id);
+        }
+      }
+      return {
+        kind: "pane", id: safeId(node.id, "pane"), tabs,
+        active: tabs.includes(node.active) ? node.active : (tabs[0] || null),
+      };
+    }
+    if (node.kind !== "split") return null;
+    const first = walk(node.first, depth + 1);
+    const second = walk(node.second, depth + 1);
+    if (!first) return second;
+    if (!second) return first;
+    if (first.kind === "pane" && !first.tabs.length) return second;
+    if (second.kind === "pane" && !second.tabs.length) return first;
+    const ratio = Number(node.ratio);
+    return {
+      kind: "split", id: safeId(node.id, "split"),
+      axis: node.axis === "column" ? "column" : "row",
+      ratio: Number.isFinite(ratio) ? Math.max(.1, Math.min(.9, ratio)) : .5,
+      first, second,
+    };
+  };
+
+  state.layout = walk(state.layout, 0) || newPane();
+  let panes = workspacePanes();
+  let target = panes.find(pane => pane.id === state.activeGroup) ||
+    panes.find(pane => pane.tabs.includes(state.active)) || panes[0];
+  for (const tab of state.tabs) {
+    if (!assignedTabs.has(tab.id)) {
+      target.tabs.push(tab.id);
+      assignedTabs.add(tab.id);
+    }
+  }
+  panes = workspacePanes();
+  target = panes.find(pane => pane.id === state.activeGroup) ||
+    panes.find(pane => pane.tabs.includes(state.active)) || panes[0];
+  if (state.active && target.tabs.includes(state.active)) target.active = state.active;
+  if (!target.active || !target.tabs.includes(target.active)) target.active = target.tabs[0] || null;
+  state.activeGroup = target.id;
+  state.active = target.active;
+  syncTabOrderFromLayout();
+  workspaceRevision++;
+}
+
+function storedWorkspace(node) {
+  if (!node || node.kind === "pane") return {
+    kind: "pane", id: node ? node.id : workspaceId("pane"),
+    tabs: node ? [...node.tabs] : [], active: node ? node.active : null,
+  };
+  return {
+    kind: "split", id: node.id, axis: node.axis,
+    ratio: Math.round(node.ratio * 10000) / 10000,
+    first: storedWorkspace(node.first), second: storedWorkspace(node.second),
+  };
+}
+
 function saveTabs() {
   try {
     lsSet("puppy.tabs", JSON.stringify({
+      version: 2,
       tabs: state.tabs.map(t => ({ id: t.id, type: t.type, bid: t.bid, sid: t.sid, title: t.title, cmd: t.cmd })),
       active: state.active,
+      activeGroup: state.activeGroup,
+      layout: storedWorkspace(state.layout),
     }));
   } catch (e) {}
 }
+
+function storedTabs(value) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  const tabs = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object" || typeof item.id !== "string" ||
+        !item.id || item.id.length > 512 || seen.has(item.id) ||
+        !["session", "term", "settings"].includes(item.type)) continue;
+    const tab = { id: item.id, type: item.type };
+    if (typeof item.bid === "number" && Number.isFinite(item.bid)) tab.bid = item.bid;
+    if (typeof item.sid === "number" && Number.isFinite(item.sid)) tab.sid = item.sid;
+    if (typeof item.title === "string") tab.title = item.title.slice(0, 1000);
+    if (typeof item.cmd === "string") tab.cmd = item.cmd.slice(0, 10000);
+    tabs.push(tab);
+    seen.add(tab.id);
+  }
+  return tabs;
+}
+
 function loadTabs() {
   try {
     const d = JSON.parse(lsGet("puppy.tabs") || "null");
-    if (d && Array.isArray(d.tabs)) { state.tabs = d.tabs; state.active = d.active; }
+    if (d && Array.isArray(d.tabs)) {
+      state.tabs = storedTabs(d.tabs);
+      state.active = typeof d.active === "string" ? d.active : null;
+      state.activeGroup = typeof d.activeGroup === "string" ? d.activeGroup : null;
+      state.layout = d.layout && typeof d.layout === "object" ? d.layout :
+        newPane(state.tabs.map(tab => tab.id), state.active);
+    }
   } catch (e) {}
 }
 
@@ -1426,13 +1620,11 @@ async function enterApp() {
   $("app").classList.remove("hidden");
   await refreshState();
   loadTabs();
-  renderTabs();
   const valid = state.tabs.filter(t => t.type !== "session" ||
     (t.bid ? true : state.sessions.some(s => s.id === t.sid)));
   state.tabs = valid;
-  if (state.active && !state.tabs.some(t => t.id === state.active)) state.active = null;
-  if (!state.active && state.tabs.length) state.active = state.tabs[0].id;
-  renderTabs(); renderSidebar(); activateTab(state.active);
+  normalizeWorkspace();
+  renderTabs(); renderSidebar();
   connectUpdates();
   startRemotePolling();
 }
@@ -2385,31 +2577,61 @@ $("toggle-archived").onclick = () => { state.showArchived = !state.showArchived;
 
 /* ================= tabs ================= */
 let termSeq = 1;
+let dragTab = null;
+let tabDropMarker = null;
+let tabAddTargetGroup = null;
+let tabAddAnchor = null;
+let renderedTabPanes = new Map();
+let renderedWorkspaceRevision = -1;
+let renderedWorkspaceSignature = "";
 
 function findSessionMeta(bid, sid) {
   return sessionsFor(bid).find(s => s.id === sid);
 }
 
-function openSessionTab(bid, sid, meta) {
+function targetWorkspacePane(groupId = null) {
+  let pane = workspacePane(groupId) || workspacePane(state.activeGroup) || workspacePanes()[0];
+  if (!pane) {
+    state.layout = newPane();
+    state.activeGroup = state.layout.id;
+    workspaceRevision++;
+    pane = state.layout;
+  }
+  return pane;
+}
+
+function putTabInPane(tabId, groupId = null) {
+  const existing = workspacePaneForTab(tabId);
+  if (existing) return existing;
+  const pane = targetWorkspacePane(groupId);
+  pane.tabs.push(tabId);
+  pane.active = tabId;
+  return pane;
+}
+
+function openSessionTab(bid, sid, meta, groupId = null) {
   const id = `s:${bid}:${sid}`;
   let tab = state.tabs.find(t => t.id === id);
   if (!tab) {
     tab = { id, type: "session", bid, sid, title: (meta && (meta.name || `session ${sid}`)) || `session ${sid}` };
     state.tabs.push(tab);
+    putTabInPane(id, groupId);
   }
   activateTab(id);
 }
 
-function openTermTab(bid, cmd) {
+function openTermTab(bid, cmd, groupId = null) {
   const id = `t:${Date.now()}:${termSeq++}`;
   state.tabs.push({ id, type: "term", bid: bid || 0, cmd: cmd || "",
     title: cmd ? cmd.slice(0, 24) : shellTabTitle({ bid: bid || 0 }) });
+  putTabInPane(id, groupId);
   activateTab(id);
 }
 
-function openSettingsTab() {
+function openSettingsTab(groupId = null) {
   if (!state.tabs.some(t => t.id === "settings")) {
     state.tabs.push({ id: "settings", type: "settings", title: "Settings" });
+    putTabInPane("settings", groupId);
   }
   activateTab("settings");
 }
@@ -2417,143 +2639,505 @@ function openSettingsTab() {
 function closeTab(id) {
   const idx = state.tabs.findIndex(t => t.id === id);
   if (idx < 0) return;
+  const pane = removeTabFromPane(id);
   state.tabs.splice(idx, 1);
   const v = state.views[id];
   if (v && v.destroy) v.destroy();
   delete state.views[id];
-  if (state.active === id) {
-    const next = state.tabs[Math.max(0, idx - 1)];
-    state.active = next ? next.id : null;
-  }
-  renderTabs();
-  activateTab(state.active);
+  collapseEmptyPane(pane);
+  normalizeWorkspace();
+  renderTabs(state.active);
+  renderSidebar();
 }
 
-function activateTab(id) {
-  state.active = id || null;
-  renderTabs(); renderSidebar();
-  document.querySelectorAll("#views .view").forEach(v => v.classList.remove("on"));
-  $("empty-hint").classList.toggle("hidden", !!state.active);
-  if (!state.active) { saveTabs(); return; }
-  const tab = state.tabs.find(t => t.id === state.active);
+function isTabVisible(id) {
+  const pane = workspacePaneForTab(id);
+  return !!pane && pane.active === id;
+}
+
+function focusWorkspacePane(groupId) {
+  const pane = workspacePane(groupId);
+  if (!pane || state.activeGroup === pane.id) return;
+  state.activeGroup = pane.id;
+  state.active = pane.active;
+  document.querySelectorAll(".workspace-pane").forEach(node =>
+    node.classList.toggle("focused", node.dataset.paneId === pane.id));
+  renderSidebar();
+  saveTabs();
+}
+
+function activateTab(id, groupId = null) {
+  const tab = state.tabs.find(t => t.id === id);
   if (!tab) return;
+  const pane = workspacePaneForTab(id) || putTabInPane(id, groupId);
+  pane.active = id;
+  state.activeGroup = pane.id;
+  state.active = id;
+  syncTabOrderFromLayout();
+  renderTabs(id); renderSidebar();
+}
+
+function ensureTabView(tab) {
   let view = state.views[tab.id];
   if (!view) {
     if (tab.type === "session") view = new SessionView(tab);
     else if (tab.type === "term") view = new TermView(tab);
     else view = new SettingsView(tab);
     state.views[tab.id] = view;
+    view.root.dataset.tabId = tab.id;
   }
-  view.root.classList.add("on");
-  if (view.onShow) view.onShow();
-  saveTabs();
+  return view;
 }
 
-let dragTab = null;
-
-function renderTabs() {
-  if (dragTab && dragTab.item && dragTab.item.isConnected) {
-    dragTab.renderPending = true;
-    return;
-  }
-  const root = $("tabs");
-  root.innerHTML = "";
-  for (const t of state.tabs) {
-    const tab = el("div", "tab" + (state.active === t.id ? " active" : ""));
-    tab.draggable = true;
-    tab.dataset.tabId = t.id;
-    tab.addEventListener("dragstart", (e) => {
-      dragTab = {
-        id: t.id, item: tab, container: root, renderPending: false,
-        originalOrder: reorderChildren(root, ".tab"),
-      };
-      root.classList.add("reordering");
-      requestAnimationFrame(() => {
-        if (dragTab && dragTab.item === tab) tab.classList.add("dragging");
-      });
-      e.dataTransfer.effectAllowed = "move";
-      try { e.dataTransfer.setData("text/plain", `puppy-tab:${t.id}`); } catch (err) {}
-    });
-    tab.addEventListener("dragend", () => {
-      if (!dragTab || dragTab.item !== tab) return;
-      const context = dragTab;
-      dragTab = null;
-      restoreDragSlots(context, ".tab");
-      tab.classList.remove("dragging");
-      root.classList.remove("reordering");
-      if (context.renderPending)
-        setTimeout(() => {
-          if (dragTab) dragTab.renderPending = true;
-          else renderTabs();
-        }, REORDER_MOTION_MS);
-    });
-    let dotCls = "settings", dotColor = "";
-    if (t.type === "session") {
-      const meta = findSessionMeta(t.bid, t.sid);
-      dotCls = meta ? meta.engine : "claude";
-      if (meta && meta.color) dotColor = meta.color;
-      if (meta && meta.status === "running") tab.classList.add("running");
-      if (meta) t.title = meta.name || `session ${t.sid}`;
-    } else if (t.type === "term") dotCls = "term";
-    const tdot = el("span", "t-dot " + dotCls);
-    if (dotColor) tdot.style.color = dotColor;
-    if (t.type === "settings") tdot.appendChild(gearIcon(12));
-    else if (t.type === "term") tdot.appendChild(terminalIcon(12));
-    tab.appendChild(tdot);
-    tab.appendChild(el("span", "t-title",
-      (t.type === "term" && !t.cmd) ? shellTabTitle(t) : (t.title || "tab")));
-    if (t.type === "session") {
-      tab.addEventListener("contextmenu", (e) => {
-        const meta = findSessionMeta(t.bid, t.sid);
-        if (meta) sessionContextMenu(e, t.bid, meta);
-      });
-    }
-    const x = el("button", "t-close");
-    x.appendChild(xIcon(12));
-    x.onclick = (e) => { e.stopPropagation(); closeTab(t.id); };
-    tab.appendChild(x);
-    tab.onclick = () => activateTab(t.id);
-    root.appendChild(tab);
-  }
-  saveTabs();
+function burgerButton() {
+  const button = el("button", "icon-btn burger");
+  button.type = "button";
+  button.title = "Menu";
+  button.setAttribute("aria-label", "Menu");
+  button.innerHTML = `<svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true">
+    <rect x="2" y="3" width="12" height="2" rx="1"/>
+    <rect x="2" y="7" width="12" height="2" rx="1"/>
+    <rect x="2" y="11" width="12" height="2" rx="1"/>
+  </svg>`;
+  button.onclick = event => {
+    event.stopPropagation();
+    $("app").classList.add("side-open");
+  };
+  return button;
 }
 
-/* Keep the complete bar valid while a tab is moving. Its padding and fixed
-   controls form a forgiving corridor around the narrow row of tab faces. */
-$("tabbar").addEventListener("dragenter", (e) => {
-  if (!dragTab || dragTab.container !== $("tabs")) return;
-  acceptReorderDrag(e);
-});
+function cleanupTabDrag(context = dragTab) {
+  if (tabDropMarker) { tabDropMarker.remove(); tabDropMarker = null; }
+  document.querySelectorAll(".split-preview.on").forEach(node =>
+    node.classList.remove("on", "left", "right", "top", "bottom"));
+  if (context) {
+    if (context.item) context.item.classList.remove("dragging");
+    if (context.container) context.container.classList.remove("reordering");
+    context.previewHost = null;
+    context.previewSide = null;
+  }
+}
 
-$("tabbar").addEventListener("dragover", (e) => {
-  if (!dragTab || dragTab.container !== $("tabs")) return;
-  acceptReorderDrag(e);
-  moveDragSlot(dragTab.container, dragTab.item, ".tab", e.clientX, true);
-});
-
-$("tabbar").addEventListener("drop", (e) => {
-  if (!dragTab || dragTab.container !== $("tabs")) return;
-  acceptReorderDrag(e);
+function cancelTabDrag(item) {
+  if (!dragTab || (item && dragTab.item !== item)) return;
   const context = dragTab;
-  const ids = reorderChildren(context.container, ".tab")
-    .map(node => node.dataset.tabId);
-  const byId = new Map(state.tabs.map(tab => [tab.id, tab]));
-  const valid = ids.length === state.tabs.length && new Set(ids).size === ids.length &&
-    ids.every(id => byId.has(id));
-  if (!valid) {
+  dragTab = null;
+  cleanupTabDrag(context);
+  renderTabs(context.pendingFocus || null);
+}
+
+function tabInsertionIndex(container, x) {
+  const tabs = reorderChildren(container, ".tab");
+  for (let index = 0; index < tabs.length; index++) {
+    const rect = tabs[index].getBoundingClientRect();
+    if (x < rect.left + rect.width / 2) return index;
+  }
+  return tabs.length;
+}
+
+function showTabDropMarker(container, index) {
+  if (tabDropMarker) tabDropMarker.remove();
+  tabDropMarker = el("span", "tab-drop-marker");
+  tabDropMarker.setAttribute("aria-hidden", "true");
+  const tabs = reorderChildren(container, ".tab");
+  if (index < tabs.length) container.insertBefore(tabDropMarker, tabs[index]);
+  else container.appendChild(tabDropMarker);
+}
+
+function renderTabNode(t, pane, tabsRoot) {
+  const tab = el("div", "tab" + (pane.active === t.id ? " active" : ""));
+  tab.draggable = true;
+  tab.dataset.tabId = t.id;
+  tab.addEventListener("dragstart", (event) => {
+    dragTab = {
+      id: t.id, item: tab, container: tabsRoot, sourcePaneId: pane.id,
+      pendingFocus: null,
+    };
+    tabsRoot.classList.add("reordering");
+    requestAnimationFrame(() => {
+      if (dragTab && dragTab.item === tab) tab.classList.add("dragging");
+    });
+    event.dataTransfer.effectAllowed = "move";
+    try { event.dataTransfer.setData("text/plain", `puppy-tab:${t.id}`); } catch (error) {}
+  });
+  tab.addEventListener("dragend", () => cancelTabDrag(tab));
+
+  let dotCls = "settings", dotColor = "";
+  if (t.type === "session") {
+    const meta = findSessionMeta(t.bid, t.sid);
+    dotCls = meta ? meta.engine : "claude";
+    if (meta && meta.color) dotColor = meta.color;
+    if (meta && meta.status === "running") tab.classList.add("running");
+    if (meta) t.title = meta.name || `session ${t.sid}`;
+  } else if (t.type === "term") dotCls = "term";
+  const tdot = el("span", "t-dot " + dotCls);
+  if (dotColor) tdot.style.color = dotColor;
+  if (t.type === "settings") tdot.appendChild(gearIcon(12));
+  else if (t.type === "term") tdot.appendChild(terminalIcon(12));
+  tab.appendChild(tdot);
+  tab.appendChild(el("span", "t-title",
+    (t.type === "term" && !t.cmd) ? shellTabTitle(t) : (t.title || "tab")));
+  if (t.type === "session") {
+    tab.addEventListener("contextmenu", (event) => {
+      const meta = findSessionMeta(t.bid, t.sid);
+      if (meta) sessionContextMenu(event, t.bid, meta);
+    });
+  }
+  const close = el("button", "t-close");
+  close.type = "button";
+  close.appendChild(xIcon(12));
+  close.onclick = event => { event.stopPropagation(); closeTab(t.id); };
+  tab.appendChild(close);
+  tab.onclick = () => activateTab(t.id, pane.id);
+  return tab;
+}
+
+function dropTabOnToolbar(pane, tabsRoot, event) {
+  if (!dragTab) return;
+  acceptReorderDrag(event);
+  event.stopPropagation();
+  const context = dragTab;
+  const source = workspacePane(context.sourcePaneId);
+  const destination = workspacePane(pane.id);
+  if (!source || !destination) { cancelTabDrag(); return; }
+
+  if (source.id === destination.id) {
+    const ids = reorderChildren(tabsRoot, ".tab").map(node => node.dataset.tabId);
+    const valid = ids.length === destination.tabs.length && new Set(ids).size === ids.length &&
+      ids.every(id => destination.tabs.includes(id));
+    if (!valid) { cancelTabDrag(); return; }
+    destination.tabs = ids;
+  } else {
+    const index = tabInsertionIndex(tabsRoot, event.clientX);
+    removeTabFromPane(context.id);
+    collapseEmptyPane(source);
+    const target = workspacePane(pane.id);
+    if (!target) { cancelTabDrag(); return; }
+    target.tabs.splice(Math.max(0, Math.min(index, target.tabs.length)), 0, context.id);
+    target.active = context.id;
+  }
+  state.activeGroup = destination.id;
+  const target = workspacePane(destination.id);
+  state.active = target ? target.active : null;
+  dragTab = null;
+  cleanupTabDrag(context);
+  normalizeWorkspace();
+  renderTabs(state.active);
+  renderSidebar();
+}
+
+function wirePaneTabbar(tabbar, tabsRoot, pane) {
+  tabbar.addEventListener("dragenter", event => {
+    if (!dragTab) return;
+    acceptReorderDrag(event);
+  });
+  tabbar.addEventListener("dragover", event => {
+    if (!dragTab) return;
+    acceptReorderDrag(event);
+    event.stopPropagation();
+    cleanupSplitPreview();
+    const source = workspacePane(dragTab.sourcePaneId);
+    if (source && source.id === pane.id) {
+      if (tabDropMarker) { tabDropMarker.remove(); tabDropMarker = null; }
+      moveDragSlot(tabsRoot, dragTab.item, ".tab", event.clientX, true);
+    } else {
+      const index = tabInsertionIndex(tabsRoot, event.clientX);
+      showTabDropMarker(tabsRoot, index);
+    }
+  });
+  tabbar.addEventListener("drop", event => dropTabOnToolbar(pane, tabsRoot, event));
+}
+
+function splitSideForPoint(host, x, y) {
+  const rect = host.getBoundingClientRect();
+  const nx = Math.max(0, Math.min(1, (x - rect.left) / Math.max(1, rect.width)));
+  const ny = Math.max(0, Math.min(1, (y - rect.top) / Math.max(1, rect.height)));
+  const horizontalEdge = Math.min(nx, 1 - nx);
+  const verticalEdge = Math.min(ny, 1 - ny);
+  if (horizontalEdge < verticalEdge) return nx < .5 ? "left" : "right";
+  return ny < .5 ? "top" : "bottom";
+}
+
+function cleanupSplitPreview() {
+  if (!dragTab || !dragTab.previewHost) return;
+  const preview = dragTab.previewHost.querySelector(":scope > .split-preview");
+  if (preview) preview.classList.remove("on", "left", "right", "top", "bottom");
+  dragTab.previewHost = null;
+  dragTab.previewSide = null;
+}
+
+function showSplitPreview(host, side) {
+  if (!dragTab) return;
+  if (dragTab.previewHost !== host || dragTab.previewSide !== side) cleanupSplitPreview();
+  const preview = host.querySelector(":scope > .split-preview");
+  if (!preview) return;
+  preview.classList.remove("left", "right", "top", "bottom");
+  preview.classList.add("on", side);
+  dragTab.previewHost = host;
+  dragTab.previewSide = side;
+}
+
+function splitTabIntoPane(tabId, targetPaneId, side) {
+  let target = workspacePane(targetPaneId);
+  const source = workspacePaneForTab(tabId);
+  if (!target || !source || (target === source && source.tabs.length < 2)) return false;
+  removeTabFromPane(tabId);
+  if (source !== target) {
+    collapseEmptyPane(source);
+    target = workspacePane(targetPaneId);
+    if (!target) return false;
+  }
+  const pane = newPane([tabId], tabId);
+  const axis = side === "left" || side === "right" ? "row" : "column";
+  const before = side === "left" || side === "top";
+  const split = newSplit(axis, before ? pane : target, before ? target : pane);
+  if (state.layout.id === target.id) state.layout = split;
+  else if (!workspaceReplaceNode(target.id, split)) return false;
+  state.activeGroup = pane.id;
+  state.active = tabId;
+  normalizeWorkspace();
+  return true;
+}
+
+function wirePaneDrop(host, pane) {
+  host.addEventListener("dragover", event => {
+    if (!dragTab) return;
+    const source = workspacePane(dragTab.sourcePaneId);
+    if (!source || (source.id === pane.id && source.tabs.length < 2)) {
+      cleanupSplitPreview();
+      return;
+    }
+    acceptReorderDrag(event);
+    event.stopPropagation();
+    if (tabDropMarker) { tabDropMarker.remove(); tabDropMarker = null; }
+    showSplitPreview(host, splitSideForPoint(host, event.clientX, event.clientY));
+  }, true);
+  host.addEventListener("drop", event => {
+    if (!dragTab || dragTab.previewHost !== host) return;
+    acceptReorderDrag(event);
+    event.stopPropagation();
+    const context = dragTab;
+    const side = context.previewSide;
     dragTab = null;
-    context.item.classList.remove("dragging");
-    context.container.classList.remove("reordering");
-    renderTabs();
+    cleanupTabDrag(context);
+    if (splitTabIntoPane(context.id, pane.id, side)) {
+      renderTabs(context.id);
+      renderSidebar();
+    } else renderTabs();
+  }, true);
+}
+
+function applySplitRatio(split, first, second, divider) {
+  first.style.flex = `${split.ratio} 1 0px`;
+  second.style.flex = `${1 - split.ratio} 1 0px`;
+  divider.setAttribute("aria-valuenow", String(Math.round(split.ratio * 100)));
+}
+
+function wireSplitter(split, root, first, second, divider) {
+  const setRatio = value => {
+    split.ratio = Math.max(.1, Math.min(.9, value));
+    applySplitRatio(split, first, second, divider);
+  };
+  divider.addEventListener("pointerdown", event => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    divider.classList.add("active");
+    divider.setPointerCapture(event.pointerId);
+    const move = moveEvent => {
+      const rect = root.getBoundingClientRect();
+      const dividerSize = split.axis === "row" ? divider.offsetWidth : divider.offsetHeight;
+      const total = Math.max(1, (split.axis === "row" ? rect.width : rect.height) - dividerSize);
+      const point = split.axis === "row" ? moveEvent.clientX - rect.left : moveEvent.clientY - rect.top;
+      const minimum = Math.min(.45, 80 / total);
+      setRatio(Math.max(minimum, Math.min(1 - minimum, (point - dividerSize / 2) / total)));
+    };
+    const finish = () => {
+      divider.classList.remove("active");
+      divider.removeEventListener("pointermove", move);
+      divider.removeEventListener("pointerup", finish);
+      divider.removeEventListener("pointercancel", finish);
+      saveTabs();
+      window.dispatchEvent(new Event("resize"));
+    };
+    divider.addEventListener("pointermove", move);
+    divider.addEventListener("pointerup", finish);
+    divider.addEventListener("pointercancel", finish);
+  });
+  divider.addEventListener("dblclick", () => {
+    setRatio(.5); saveTabs(); window.dispatchEvent(new Event("resize"));
+  });
+  divider.addEventListener("keydown", event => {
+    const decrease = split.axis === "row" ? event.key === "ArrowLeft" : event.key === "ArrowUp";
+    const increase = split.axis === "row" ? event.key === "ArrowRight" : event.key === "ArrowDown";
+    if (!decrease && !increase) return;
+    event.preventDefault();
+    setRatio(split.ratio + (increase ? 1 : -1) * (event.shiftKey ? .1 : .02));
+    saveTabs(); window.dispatchEvent(new Event("resize"));
+  });
+  applySplitRatio(split, first, second, divider);
+}
+
+function showTabAddMenu(groupId, button, event) {
+  event.stopPropagation();
+  const menu = $("tab-add-menu");
+  const closing = !menu.classList.contains("hidden") && tabAddAnchor === button;
+  menu.classList.add("hidden");
+  tabAddAnchor = null;
+  if (closing) return;
+  tabAddTargetGroup = groupId;
+  tabAddAnchor = button;
+  menu.classList.remove("hidden");
+  positionAnchoredMenu(menu, button);
+}
+
+function renderWorkspacePane(pane) {
+  const root = el("section", "workspace-node workspace-pane" +
+    (pane.id === state.activeGroup ? " focused" : ""));
+  root.dataset.paneId = pane.id;
+  root.addEventListener("pointerdown", event => {
+    if (event.button === 0 || event.button === 2) focusWorkspacePane(pane.id);
+  });
+  const tabbar = el("div", "tabbar");
+  tabbar.appendChild(burgerButton());
+  const tabsRoot = el("div", "tabs");
+  tabsRoot.dataset.paneId = pane.id;
+  for (const id of pane.tabs) {
+    const tab = state.tabs.find(item => item.id === id);
+    if (tab) tabsRoot.appendChild(renderTabNode(tab, pane, tabsRoot));
+  }
+  tabbar.appendChild(tabsRoot);
+  const addWrap = el("div", "tab-add-wrap");
+  const add = el("button", "icon-btn", "＋");
+  add.type = "button";
+  add.title = "New tab";
+  add.setAttribute("aria-label", "New tab");
+  add.onclick = event => showTabAddMenu(pane.id, add, event);
+  addWrap.appendChild(add);
+  tabbar.appendChild(addWrap);
+  wirePaneTabbar(tabbar, tabsRoot, pane);
+  root.appendChild(tabbar);
+
+  const host = el("div", "views pane-views");
+  const preview = el("div", "split-preview");
+  preview.setAttribute("aria-hidden", "true");
+  host.appendChild(preview);
+  wirePaneDrop(host, pane);
+  for (const id of pane.tabs) {
+    const tab = state.tabs.find(item => item.id === id);
+    if (!tab) continue;
+    const view = pane.active === id ? ensureTabView(tab) : state.views[id];
+    if (!view) continue;
+    view.root.classList.toggle("on", pane.active === id);
+    host.appendChild(view.root);
+  }
+  root.appendChild(host);
+  return root;
+}
+
+function renderWorkspaceNode(node) {
+  if (node.kind === "pane") return renderWorkspacePane(node);
+  const root = el("div", `workspace-node workspace-split ${node.axis}`);
+  root.dataset.splitId = node.id;
+  const first = renderWorkspaceNode(node.first);
+  const divider = el("div", "splitter");
+  divider.tabIndex = 0;
+  divider.title = "Drag to resize (double-click resets)";
+  divider.setAttribute("role", "separator");
+  divider.setAttribute("aria-label", "Resize panes");
+  divider.setAttribute("aria-orientation", node.axis === "row" ? "vertical" : "horizontal");
+  divider.setAttribute("aria-valuemin", "10");
+  divider.setAttribute("aria-valuemax", "90");
+  const second = renderWorkspaceNode(node.second);
+  root.appendChild(first); root.appendChild(divider); root.appendChild(second);
+  wireSplitter(node, root, first, second, divider);
+  return root;
+}
+
+function workspaceSignature(node) {
+  if (node.kind === "pane")
+    return JSON.stringify(["pane", node.id, node.active, node.tabs]);
+  return JSON.stringify(["split", node.id, node.axis,
+    workspaceSignature(node.first), workspaceSignature(node.second)]);
+}
+
+function refreshRenderedTabbars() {
+  for (const pane of workspacePanes()) {
+    const root = Array.from(document.querySelectorAll(".workspace-pane"))
+      .find(node => node.dataset.paneId === pane.id);
+    if (!root) return false;
+    const tabsRoot = root.querySelector(":scope > .tabbar > .tabs");
+    if (!tabsRoot) return false;
+    const nodes = [];
+    for (const id of pane.tabs) {
+      const tab = state.tabs.find(item => item.id === id);
+      if (tab) nodes.push(renderTabNode(tab, pane, tabsRoot));
+    }
+    tabsRoot.innerHTML = "";
+    for (const node of nodes) tabsRoot.appendChild(node);
+  }
+  return true;
+}
+
+function renderTabs(focusTabId = null) {
+  if (dragTab && dragTab.item && dragTab.item.isConnected) {
+    if (focusTabId) dragTab.pendingFocus = focusTabId;
     return;
   }
-  state.tabs = ids.map(id => byId.get(id));
-  dragTab = null;
-  context.item.classList.remove("dragging");
-  context.container.classList.remove("reordering");
+  if (!state.layout) normalizeWorkspace();
+  const signature = workspaceSignature(state.layout);
+  if (renderedWorkspaceRevision === workspaceRevision &&
+      renderedWorkspaceSignature === signature && refreshRenderedTabbars()) {
+    if (focusTabId && isTabVisible(focusTabId)) {
+      const view = state.views[focusTabId];
+      if (view && view.onShow) view.onShow(true);
+    }
+    saveTabs();
+    return;
+  }
+  const tree = $("workspace-tree");
+  const hint = $("empty-hint");
+  hint.remove();
+  for (const view of Object.values(state.views))
+    if (view.root && view.root.parentNode) view.root.remove();
+  tree.innerHTML = "";
+  tree.appendChild(renderWorkspaceNode(state.layout));
+
+  const panes = workspacePanes();
+  if (!state.tabs.length) {
+    const host = tree.querySelector(".pane-views");
+    hint.classList.remove("hidden");
+    if (host) host.appendChild(hint);
+  } else {
+    hint.classList.add("hidden");
+    $("workspace").appendChild(hint);
+  }
+
+  const current = new Map();
+  const show = new Map();
+  for (const pane of panes) {
+    if (!pane.active) continue;
+    current.set(pane.active, pane.id);
+    if (renderedTabPanes.get(pane.active) !== pane.id)
+      show.set(pane.active, pane.id === state.activeGroup);
+  }
+  if (focusTabId && current.has(focusTabId)) show.set(focusTabId, true);
+  renderedTabPanes = current;
+  renderedWorkspaceRevision = workspaceRevision;
+  renderedWorkspaceSignature = signature;
+  const requests = [...show.entries()].sort((a, b) => Number(a[1]) - Number(b[1]));
+  for (const [id, focus] of requests) {
+    const view = state.views[id];
+    if (view && view.onShow) view.onShow(focus);
+  }
+  requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));
   saveTabs();
-  if (context.renderPending) renderTabs();
-});
+}
+
+document.addEventListener("dragover", event => {
+  if (dragTab && !(event.target instanceof Element && event.target.closest(".pane-views")))
+    cleanupSplitPreview();
+}, true);
 
 function syncTabsWithSessions() {
   let dirty = false;
@@ -2566,31 +3150,27 @@ function syncTabsWithSessions() {
 }
 
 /* tab add menu */
-$("btn-tab-add").onclick = (e) => {
-  e.stopPropagation();
-  const menu = $("tab-add-menu");
-  const opening = menu.classList.contains("hidden");
-  menu.classList.toggle("hidden");
-  if (opening) positionAnchoredMenu(menu, e.currentTarget);
-};
 document.addEventListener("click", () => {
   $("tab-add-menu").classList.add("hidden");
+  tabAddAnchor = null;
   closeMenusToggling(null);
   closeChoiceMenu();
 });
 $("tab-add-menu").addEventListener("click", (e) => {
-  const act = e.target.dataset && e.target.dataset.act;
+  const button = e.target.closest && e.target.closest("button[data-act]");
+  const act = button && button.dataset.act;
   if (!act) return;
   $("tab-add-menu").classList.add("hidden");
-  if (act === "new-session") modalNewSession();
-  else if (act === "open-session") modalOpenSession();
-  else if (act === "new-terminal") modalNewTerminal();
+  const groupId = tabAddTargetGroup;
+  tabAddAnchor = null;
+  if (act === "new-session") modalNewSession(groupId);
+  else if (act === "open-session") modalOpenSession(groupId);
+  else if (act === "new-terminal") modalNewTerminal(groupId);
 });
-$("btn-new-session").onclick = () => { modalNewSession(); closeDrawer(); };
-$("btn-settings").onclick = () => { openSettingsTab(); closeDrawer(); };
+$("btn-new-session").onclick = () => { modalNewSession(state.activeGroup); closeDrawer(); };
+$("btn-settings").onclick = () => { openSettingsTab(state.activeGroup); closeDrawer(); };
 
 /* drawer (mobile) */
-$("burger").onclick = () => $("app").classList.add("side-open");
 $("side-backdrop").onclick = closeDrawer;
 function closeDrawer() { $("app").classList.remove("side-open"); }
 
@@ -2930,7 +3510,6 @@ class SessionView {
           <input class="hidden attach-input" type="file" multiple>
         </div>
       </div>`;
-    $("views").appendChild(root);
     this.root = root;
     this.scroll = root.querySelector(".chat-scroll");
     this.inner = root.querySelector(".chat-inner");
@@ -3106,10 +3685,11 @@ class SessionView {
     this.root.remove();
   }
 
-  onShow() {
+  onShow(focus = true) {
     this.syncGutter(); this.syncComposerMeta(); this.syncHeadOverflow();
     this.syncUploadButton();
-    this.scrollBottom(true); this.ta.focus();
+    this.scrollBottom(true);
+    if (focus) this.ta.focus();
   }
 
   syncRemoteState() {
@@ -4209,14 +4789,13 @@ class TermView {
     this.connectionSequence = 0;
     this.root = el("div", "view term");
     this.root.innerHTML = `<div class="term-wrap"><div class="term-host"></div></div>`;
-    $("views").appendChild(this.root);
     this.host = this.root.querySelector(".term-host");
     this.started = false;
   }
-  onShow() {
+  onShow(focus = true) {
     if (!this.started) { this.started = true; this.start(); }
     else if (this.fit) setTimeout(() => this.fit.fit(), 30);
-    if (this.term) this.term.focus();
+    if (focus && this.term) this.term.focus();
   }
   start() {
     this.term = new Terminal({
@@ -4277,7 +4856,7 @@ class TermView {
         return;
       }
       noteRemoteSocketReachable(this.tab.bid);
-      this.term.focus();
+      if (state.active === this.tab.id && isTabVisible(this.tab.id)) this.term.focus();
       this.dataSub = this.term.onData(d => { if (ws.readyState === 1) ws.send(enc.encode(d)); });
     };
     ws.onmessage = (ev) => {
@@ -4379,7 +4958,6 @@ class SettingsView {
     this.localEngineGroup = null;
     this.root = el("div", "view settings");
     this.root.innerHTML = `<div class="settings-scroll"><div class="settings-inner"></div></div>`;
-    $("views").appendChild(this.root);
     this.inner = this.root.querySelector(".settings-inner");
   }
   destroy() {
@@ -4543,7 +5121,7 @@ class SettingsView {
         };
       }
     }));
-    if (generation !== this.upgradePollGeneration || state.active !== this.tab.id) return;
+    if (generation !== this.upgradePollGeneration || !isTabVisible(this.tab.id)) return;
     for (const result of results) {
       this.upgradeReadiness.set(result.bid, result.readiness);
       if (result.reachable) {
@@ -4561,11 +5139,11 @@ class SettingsView {
       return;
     const tick = async () => {
       this.upgradePollTimer = null;
-      if (generation !== this.upgradePollGeneration || state.active !== this.tab.id ||
+      if (generation !== this.upgradePollGeneration || !isTabVisible(this.tab.id) ||
           !this.root.isConnected) return;
       try { await this.refreshUpgradeReadiness(generation); }
       catch (error) { console.warn("upgrade readiness poll failed", error); }
-      if (generation === this.upgradePollGeneration && state.active === this.tab.id &&
+      if (generation === this.upgradePollGeneration && isTabVisible(this.tab.id) &&
           this.root.isConnected)
         this.upgradePollTimer = setTimeout(tick, UPGRADE_READINESS_INTERVAL);
     };
@@ -5612,7 +6190,7 @@ function modalPrompt(title, hint, value) {
 }
 
 /* new session */
-async function modalNewSession() {
+async function modalNewSession(groupId = null) {
   const beOpts = [{ id: 0, name: backendName(0) }].concat(state.backends);
   const { m, close } = modal(`<h2>New session</h2>
     <label>Backend<select id="ns-be">${beOpts.map(b => `<option value="${b.id}">${esc(b.name)}</option>`).join("")}</select></label>
@@ -5811,13 +6389,13 @@ async function modalNewSession() {
       if (workspaceKind === "directory") lsSet("puppy.lastcwd", cwdInp.value.trim());
       close();
       if (bid) await pollRemotes();
-      openSessionTab(bid, r.session.id, r.session);
+      openSessionTab(bid, r.session.id, r.session, groupId);
     } catch (e) { toast(e.message, "error"); }
   };
 }
 
 /* open existing session */
-function modalOpenSession() {
+function modalOpenSession(groupId = null) {
   const groups = [{ bid: 0, name: backendName(0), sessions: state.sessions }]
     .concat(state.backends.map(b => ({ bid: b.id, name: b.name, sessions: state.remoteSessions[b.id] || [] })));
   let html = `<h2>Open session</h2><input type="text" id="os-filter" placeholder="filter…"><div id="os-list" style="max-height:50vh;overflow-y:auto;margin-top:10px"></div>`;
@@ -5844,7 +6422,7 @@ function modalOpenSession() {
         workspace.title = workspaceTitle(s);
         r2.appendChild(workspace);
         item.appendChild(r1); item.appendChild(r2);
-        item.onclick = () => { close(); openSessionTab(g.bid, s.id, s); };
+        item.onclick = () => { close(); openSessionTab(g.bid, s.id, s, groupId); };
         list.appendChild(item);
       }
     }
@@ -5855,7 +6433,7 @@ function modalOpenSession() {
 }
 
 /* new terminal */
-function modalNewTerminal() {
+function modalNewTerminal(groupId = null) {
   const beOpts = [{ id: 0, name: backendName(0) }]
     .concat(state.backends.filter(b => backendHasCapability(b, "terminal")));
   const { m, close } = modal(`<h2>New terminal</h2>
@@ -5867,7 +6445,7 @@ function modalNewTerminal() {
     const bid = parseInt(m.querySelector("#nt-be").value, 10);
     const cmd = m.querySelector("#nt-cmd").value.trim();
     close();
-    openTermTab(bid, cmd);
+    openTermTab(bid, cmd, groupId);
   };
   m.querySelector("#nt-go").onclick = go;
   m.querySelector("#nt-cmd").addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });

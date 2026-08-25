@@ -88,7 +88,7 @@ body::after{
 a{color:var(--acc2)}
 
 /* ---------- layout ---------- */
-.app{display:flex;height:100dvh;position:relative;z-index:1}
+.app{display:flex;height:100vh;height:100dvh;position:relative;z-index:1}
 .main{flex:1;display:flex;flex-direction:column;min-width:0}
 
 /* ---------- sidebar ---------- */
@@ -436,10 +436,36 @@ select.choice-native{display:none!important}
 .choice-empty{display:block;padding:8px 10px;color:var(--txt3);font-size:12px;white-space:nowrap}
 
 /* ---------- tabbar ---------- */
+.workspace{flex:1;min-width:0;min-height:0;position:relative;overflow:hidden}
+.workspace-tree{position:absolute;inset:0;top:0;right:0;bottom:0;left:0;display:flex;min-width:0;min-height:0}
+.workspace-tree>.workspace-node{flex:1 1 0}
+.workspace-node{min-width:0;min-height:0;overflow:hidden}
+.workspace-pane{
+  display:flex;flex-direction:column;position:relative;background:transparent;
+}
+.workspace-split{display:flex;min-width:0;min-height:0;overflow:hidden}
+.workspace-split.row{flex-direction:row}
+.workspace-split.column{flex-direction:column}
+.splitter{
+  position:relative;z-index:24;flex:0 0 7px;border:0;background:transparent;padding:0;
+  touch-action:none;user-select:none;outline:none;
+}
+.workspace-split.row>.splitter{cursor:col-resize}
+.workspace-split.column>.splitter{cursor:row-resize}
+.splitter::before{
+  content:"";position:absolute;background:var(--line2);
+  transition:background .14s var(--ease),box-shadow .14s var(--ease);
+}
+.workspace-split.row>.splitter::before{top:0;bottom:0;left:3px;width:1px}
+.workspace-split.column>.splitter::before{left:0;right:0;top:3px;height:1px}
+@media (hover:hover){.splitter:hover::before{background:var(--acc);box-shadow:0 0 8px rgba(90,162,245,.5)}}
+.splitter.active::before,.splitter:focus-visible::before{
+  background:var(--acc);box-shadow:0 0 8px rgba(90,162,245,.55);
+}
 .tabbar{
   display:flex;align-items:center;gap:4px;padding:8px 10px 0;
   min-height:42px; /* reserve the populated tab height even when .tabs is empty */
-  background:transparent;
+  background:var(--bg);
   position:relative;z-index:20;flex-shrink:0;
 }
 .tabbar::after{
@@ -483,6 +509,10 @@ select.choice-native{display:none!important}
 /* fill matches the flat page background (aurora is masked out of the top strip)
    so the open-bottomed pill merges with the bar below at every x position */
 .tab.active{background:var(--bg);border-color:var(--line);color:var(--txt)}
+.workspace-pane.focused>.tabbar::after{
+  background:rgba(90,162,245,.24);
+  background:color-mix(in srgb,var(--acc) 28%,var(--line));
+}
 .tab .t-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;color:var(--txt3);background:currentColor}
 .tab .t-dot.claude{color:var(--claude)}
 .tab .t-dot.codex{color:var(--codex)}
@@ -505,6 +535,10 @@ select.choice-native{display:none!important}
    sits at the true vertical center with an even hover halo */
 .tab-add-wrap{position:relative;display:flex;align-items:center;align-self:stretch;margin-top:-8px}
 .tab-add-wrap .icon-btn{width:26px;height:26px;font-size:14px;border-radius:var(--btn-r);position:relative}
+.tab-drop-marker{
+  width:2px;align-self:stretch;flex:0 0 2px;margin:2px -1px 4px;
+  border-radius:2px;background:var(--acc);box-shadow:0 0 7px rgba(90,162,245,.7);
+}
 
 /* ---------- menus ---------- */
 .menu{
@@ -536,11 +570,24 @@ select.choice-native{display:none!important}
 .swatch-row{display:flex;gap:2px;margin-top:6px;flex-wrap:wrap}
 
 /* ---------- views ---------- */
-.views{flex:1;min-height:0;position:relative}
-.view{position:absolute;inset:0;display:none;flex-direction:column}
+.views{flex:1;min-width:0;min-height:0;position:relative;overflow:hidden}
+.view{position:absolute;inset:0;top:0;right:0;bottom:0;left:0;display:none;flex-direction:column}
 .view.on{display:flex}
+.split-preview{
+  display:none;position:absolute;z-index:80;pointer-events:none;
+  background:rgba(90,162,245,.24);border:1px solid rgba(90,162,245,.72);
+  box-shadow:inset 0 0 28px rgba(90,162,245,.10);
+  background:color-mix(in srgb,var(--acc) 24%,transparent);
+  border:1px solid color-mix(in srgb,var(--acc) 72%,transparent);
+  box-shadow:inset 0 0 28px color-mix(in srgb,var(--acc) 10%,transparent);
+}
+.split-preview.on{display:block}
+.split-preview.left{left:0;top:0;bottom:0;width:50%}
+.split-preview.right{right:0;top:0;bottom:0;width:50%}
+.split-preview.top{left:0;right:0;top:0;height:50%}
+.split-preview.bottom{left:0;right:0;bottom:0;height:50%}
 .empty-hint{
-  position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  position:absolute;inset:0;top:0;right:0;bottom:0;left:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
   color:var(--txt3);text-align:center;gap:10px;
 }
 .empty-paw{color:var(--txt3);opacity:.6}
@@ -1219,6 +1266,17 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 }
 
 /* ---------- responsive ---------- */
+@media (max-width:700px){
+  /* A recursive split can otherwise squeeze a chat into a sliver on a phone.
+     Keep every leaf usable and let the workspace itself pan when the saved
+     desktop arrangement is wider or taller than the viewport. */
+  .workspace{overflow:auto;overscroll-behavior:contain}
+  .workspace-tree{min-width:max-content;min-height:max-content}
+  .workspace-split{overflow:visible}
+  .workspace-split.row{min-width:max-content}
+  .workspace-split.column{min-height:max-content}
+  .workspace-pane{min-width:220px;min-height:220px;overflow:hidden}
+}
 @media (max-width:900px){
   .side{
     position:fixed;left:0;top:0;bottom:0;transform:translateX(-105%);

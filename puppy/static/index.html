@@ -58,29 +58,17 @@
   </aside>
 
   <main class="main">
-    <div class="tabbar" id="tabbar">
-      <button class="icon-btn burger" id="burger" title="Menu" aria-label="Menu">
-        <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true">
-          <rect x="2" y="3" width="12" height="2" rx="1"/>
-          <rect x="2" y="7" width="12" height="2" rx="1"/>
-          <rect x="2" y="11" width="12" height="2" rx="1"/>
-        </svg>
-      </button>
-      <div class="tabs" id="tabs"></div>
-      <div class="tab-add-wrap">
-        <button class="icon-btn" id="btn-tab-add" title="New tab">＋</button>
-        <div class="menu hidden" id="tab-add-menu">
-          <button data-act="open-session">Open session</button>
-          <button data-act="new-session">New session</button>
-          <button data-act="new-terminal">New terminal</button>
-        </div>
-      </div>
-    </div>
-    <div class="views" id="views">
+    <div class="workspace" id="workspace">
+      <div class="workspace-tree" id="workspace-tree"></div>
       <div class="empty-hint" id="empty-hint">
         <div class="empty-paw"><svg viewBox="0 0 24 24" width="46" height="46" fill="currentColor"><path d="M11 3 Q12.5 11.5 21 13 Q12.5 14.5 11 23 Q9.5 14.5 1 13 Q9.5 11.5 11 3 Z"/><path opacity=".85" d="M19.5 1 Q20.2 4.3 23.5 5 Q20.2 5.7 19.5 9 Q18.8 5.7 15.5 5 Q18.8 4.3 19.5 1 Z"/></svg></div>
         <p>No tabs open.<br>Create a session or open one from the left.</p>
       </div>
+    </div>
+    <div class="menu hidden" id="tab-add-menu">
+      <button data-act="open-session">Open session</button>
+      <button data-act="new-session">New session</button>
+      <button data-act="new-terminal">New terminal</button>
     </div>
   </main>
 </div>
