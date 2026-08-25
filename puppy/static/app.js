@@ -4089,6 +4089,19 @@ class TermView {
     this.fit = new FitAddon.FitAddon();
     this.term.loadAddon(this.fit);
     this.term.open(this.host);
+    /* Copy on select, the way a terminal emulator does. The write runs inside
+       the mouseup that ended the gesture: browsers that want a user gesture
+       accept it, and so does the execCommand fallback that plain-HTTP
+       deployments need. The mouseup is listened for on the document because a
+       drag often ends outside the terminal, but only for the duration of a
+       gesture that began inside it - a click anywhere else must not re-copy a
+       selection still sitting here. Registering it from our own mousedown also
+       puts us behind the listener xterm registers from its (inner, therefore
+       earlier) one, so the selection is final by the time we read it. */
+    this.onSelectUp = () => this.copySelection();
+    this.onSelectDown = () =>
+      document.addEventListener("mouseup", this.onSelectUp, { once: true });
+    this.host.addEventListener("mousedown", this.onSelectDown);
     setTimeout(() => { this.fit.fit(); this.connect(); }, 40);
     this.resizeObs = new ResizeObserver(() => {
       if (!this.fit) return;
@@ -4133,6 +4146,16 @@ class TermView {
     if (this.ws && this.ws.readyState === 1)
       this.ws.send(JSON.stringify({ type: "resize", cols: this.term.cols, rows: this.term.rows }));
   }
+  copySelection() {
+    if (!this.term || !this.term.hasSelection()) return;   // a plain click keeps the clipboard
+    const text = this.term.getSelection();
+    if (!text.trim()) return;                              // a stray drag over blank rows too
+    writeClipboardText(text).catch(() => {
+      if (this.copyWarned) return;                         // once per terminal, not per drag
+      this.copyWarned = true;
+      toast("could not copy the selection to the clipboard", "error");
+    });
+  }
   showDead() {
     if (this.root.querySelector(".term-dead")) { this.syncRemoteState(); return; }
     const d = el("div", "term-dead");
@@ -4162,6 +4185,8 @@ class TermView {
     this.closed = true;
     this.connectionSequence++;
     if (this.resizeObs) this.resizeObs.disconnect();
+    if (this.onSelectDown) this.host.removeEventListener("mousedown", this.onSelectDown);
+    if (this.onSelectUp) document.removeEventListener("mouseup", this.onSelectUp);
     if (this.ws) try { this.ws.close(); } catch (e) {}
     if (this.dataSub) { this.dataSub.dispose(); this.dataSub = null; }
     if (this.term) this.term.dispose();
