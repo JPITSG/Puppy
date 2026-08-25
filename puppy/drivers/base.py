@@ -32,6 +32,8 @@ import logging
 import shutil
 import time
 
+from puppy import cli_releases
+
 log = logging.getLogger("puppy.drivers")
 
 _status_cache = {}  # key -> (ts, dict)
@@ -44,6 +46,9 @@ class Driver:
     # True: prompt + control messages flow over stdin as JSONL (claude style).
     # False: prompt is part of argv, stdin closed (codex style).
     uses_stdin_stream = False
+    # Optional advisory source for latest-version checks. New registry kinds
+    # belong in cli_releases; engine-specific package identity stays here.
+    release_source = None
 
     def permission_options(self):
         """[{value, label, hint}] - engine-specific permission/sandbox levels."""
@@ -98,6 +103,7 @@ class Driver:
             _status_cache[self.key] = (now, dict(st))
         # Quotas can change between the relatively expensive version/auth
         # probes, so dynamic extras must never be trapped in the 5-minute cache.
+        st.update(cli_releases.status(self, st.get("version", "")))
         st.update(self._extra_status())
         return st
 

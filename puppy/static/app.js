@@ -3387,6 +3387,8 @@ class SettingsView {
   }
 
   syncRemoteState() {
+    if (this.localEngineGroup)
+      this.localEngineGroup.update({ status: "ok", engines: state.engines });
     for (const [bid, group] of this.remoteEngineGroups) {
       const backend = state.backends.find(item => item.id === bid);
       if (!backend) continue;
@@ -3443,22 +3445,14 @@ class SettingsView {
     identity.appendChild(el("span", "engine-dot " + e2.key));
     identity.appendChild(el("span", "engine-row-name", e2.label));
     const statuses = el("div", "engine-row-statuses");
-    const version = el("span", "pill engine-version " + (e2.installed ? "ok" : "bad"),
+    const versionState = !e2.installed ? "bad" : e2.update_available === true ? "warn" : "ok";
+    const version = el("span", "pill engine-version " + versionState,
       e2.installed ? (e2.version || "installed") : "not installed");
-    version.title = version.textContent;
+    version.title = e2.update_available === true && e2.latest_version ?
+      `${version.textContent} · latest is ${e2.latest_version}` : version.textContent;
     statuses.appendChild(version);
     statuses.appendChild(el("span", "pill " + (e2.auth === "ok" ? "ok" : "bad"),
       "auth: " + e2.auth));
-    if (e2.rate_limit && e2.rate_limit.resetsAt) {
-      const reset = new Date(e2.rate_limit.resetsAt * 1000);
-      const rate = el("span", "pill " +
-        (e2.rate_limit.status === "allowed" ? "" : "warn"),
-        `${e2.rate_limit.rateLimitType || "window"} resets ${reset.toLocaleTimeString([], {
-          hour: "2-digit", minute: "2-digit",
-        })}`);
-      rate.title = rate.textContent;
-      statuses.appendChild(rate);
-    }
     row.appendChild(identity);
     row.appendChild(statuses);
     return row;

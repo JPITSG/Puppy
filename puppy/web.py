@@ -14,7 +14,7 @@ import time
 
 from aiohttp import WSMsgType, web
 
-from puppy import (__version__, auth, backends, bind_verify, config, db,
+from puppy import (__version__, auth, backends, bind_verify, cli_releases, config, db,
                    listener_handoff, protocol, runner, snapshots, terminal,
                    usage_refresh, workspaces)
 from puppy.drivers import all_drivers, get_driver
@@ -838,6 +838,7 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     The full console and the deployable headless backend both call this. Keep
     backend-facing route changes here so the two runtimes cannot silently drift.
     """
+    cli_releases.register(app)
     r = app.router
     r.add_get("/api/ping", h_ping)
     r.add_get("/api/node", h_ping)

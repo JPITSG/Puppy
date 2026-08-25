@@ -137,6 +137,17 @@ consume model tokens, concurrent polls coalesce, and failed attempts are
 rate-limited. Codex currently supplies a direct account snapshot; its existing
 local rollout record remains the fallback if the account read is unavailable.
 
+## CLI release status
+
+The full runtime and headless package periodically read bounded `latest`
+metadata for each engine's vendor-published package over HTTPS. Successful
+results are cached for six hours; failures keep the last known result and retry
+after 15 minutes. This is advisory only: it never installs software, never
+starts an engine turn, and a registry or network failure cannot disable an
+installed engine. `/api/engines` reports the latest version and whether the
+installed semantic version is older, allowing the controller to mark only the
+existing version pill as outdated.
+
 ## Remote upgrades
 
 After the one-time launcher bootstrap, the attached WebUI can upgrade an older

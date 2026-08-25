@@ -255,6 +255,15 @@ async def exercise_node(url: str, token: str, expected_version: str,
             sessions_payload = await response.json()
             assert sessions_payload["sessions"] == []
             assert isinstance(sessions_payload["server_time"], (int, float))
+        async with http.get(url + "/api/engines", headers=good, ssl=pinned) as response:
+            engine_payload = await response.json()
+            assert response.status == 200, engine_payload
+        for engine in engine_payload["engines"]:
+            assert isinstance(engine["latest_version"], str)
+            assert engine["update_available"] in (True, False, None)
+            assert engine["latest_checked_at"] is None or \
+                isinstance(engine["latest_checked_at"], (int, float))
+            assert isinstance(engine["latest_check_error"], str)
         async with http.get(url + "/api/engines/usage-refresh",
                             headers=good, ssl=pinned) as response:
             refresh = await response.json()
@@ -955,7 +964,7 @@ async def main() -> None:
         process = await exercise_launcher_rollback(
             artifact, BASE / "backend" / "launcher.py", state_dir, backend_data,
             backend_url, backend_token, backend_fingerprint)
-        print("backend package, pinned TLS, signed upgrade, restart, and rollback passed")
+        print("backend package, engine releases, pinned TLS, signed upgrade, restart, and rollback passed")
     finally:
         if controller_runner is not None:
             await controller_runner.cleanup()
