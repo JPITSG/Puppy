@@ -55,6 +55,34 @@ function gearIcon(size) {
   return svg;
 }
 
+function terminalIcon(size) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const frame = document.createElementNS(NS, "rect");
+  frame.setAttribute("x", "1.5");
+  frame.setAttribute("y", "2.5");
+  frame.setAttribute("width", "13");
+  frame.setAttribute("height", "11");
+  frame.setAttribute("rx", "1.5");
+  frame.setAttribute("fill", "none");
+  frame.setAttribute("stroke", "currentColor");
+  frame.setAttribute("stroke-width", "1.4");
+  const prompt = document.createElementNS(NS, "path");
+  prompt.setAttribute("d", "M4.25 6 6.25 8 4.25 10 M8 10h3.5");
+  prompt.setAttribute("fill", "none");
+  prompt.setAttribute("stroke", "currentColor");
+  prompt.setAttribute("stroke-width", "1.4");
+  prompt.setAttribute("stroke-linecap", "round");
+  prompt.setAttribute("stroke-linejoin", "round");
+  svg.appendChild(frame);
+  svg.appendChild(prompt);
+  return svg;
+}
+
 function refreshIcon(size = 10) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
@@ -1894,6 +1922,7 @@ function renderTabs() {
     const tdot = el("span", "t-dot " + dotCls);
     if (dotColor) tdot.style.color = dotColor;
     if (t.type === "settings") tdot.appendChild(gearIcon(12));
+    else if (t.type === "term") tdot.appendChild(terminalIcon(12));
     tab.appendChild(tdot);
     tab.appendChild(el("span", "t-title", t.title || "tab"));
     if (t.type === "session") {
