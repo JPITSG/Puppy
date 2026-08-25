@@ -62,6 +62,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     permission_mode TEXT NOT NULL DEFAULT '',
     native_session_id TEXT NOT NULL DEFAULT '',
     last_model TEXT NOT NULL DEFAULT '',
+    -- model/effort the last turn actually ran with, JSON; '' until one has
+    used_config TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'idle',
     archived INTEGER NOT NULL DEFAULT 0,
     workspace_kind TEXT NOT NULL DEFAULT 'directory',
@@ -115,6 +117,10 @@ def _migrate(conn) -> None:
     if "workspace_kind" not in cols:
         conn.execute(
             "ALTER TABLE sessions ADD COLUMN workspace_kind TEXT NOT NULL DEFAULT 'directory'")
+    if "used_config" not in cols:
+        # existing sessions start unmarked: the first turn after this upgrade
+        # records what it ran with, and only later changes mark the transcript
+        conn.execute("ALTER TABLE sessions ADD COLUMN used_config TEXT NOT NULL DEFAULT ''")
     backend_cols = {r["name"] for r in conn.execute("PRAGMA table_info(backends)")}
     if "protocol" not in backend_cols:
         conn.execute("ALTER TABLE backends ADD COLUMN protocol INTEGER NOT NULL DEFAULT 0")

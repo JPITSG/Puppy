@@ -39,12 +39,27 @@ def drop_hub(session_id: int) -> None:
 
 # ---- session-list broadcasting ----
 
+def parse_used_config(raw):
+    """{model, effort} of the last turn that actually ran, or None if the
+    session has not run one since it was created or moved to this engine."""
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return {"model": str(data.get("model") or ""), "effort": str(data.get("effort") or "")}
+
+
 def session_payload(session):
     if session is None:
         return None
     out = dict(session)
     out["workspace_kind"] = out.get("workspace_kind") or workspaces.KIND_DIRECTORY
     out["workspace_missing"] = workspaces.is_temporary(out) and not workspaces.is_available(out)
+    out["used_config"] = parse_used_config(out.get("used_config"))
     return out
 
 
@@ -139,6 +154,9 @@ class SessionHub:
         self.interrupted = False
         self.stderr_tail = ""
         self._stdin_lock = asyncio.Lock()
+        # whether this turn's divider already announced a model move, so the
+        # engine reporting that same move is not repeated as if it surprised us
+        self._model_move_announced = False
 
     # ---- watchers ----
 
@@ -316,6 +334,39 @@ class SessionHub:
         self.broadcast({"type": "event", "event": ev})
         return ev
 
+    def _note_turn_config(self, session) -> None:
+        """Record the model/effort this turn is actually run with, and mark the
+        transcript when it differs from the previous turn's.
+
+        Deliberately driven by turns, not by the picker: choosing a model in the
+        UI changes nothing until a prompt is sent under it, so a selection that
+        never reached an engine must not claim the session moved. The first turn
+        of a session - or the first after an engine switch - only establishes
+        the baseline; there is no earlier configuration to have moved from."""
+        previous = parse_used_config(session.get("used_config"))
+        current = {"model": session.get("model") or "", "effort": session.get("effort") or ""}
+        self._model_move_announced = False
+        if previous == current:
+            return
+        if previous is not None:
+            def desc(cfg):
+                return " ".join(x for x in (cfg["model"] or "default", cfg["effort"]) if x)
+            self._emit("info", {
+                "subtype": "config_change",
+                "text": f"model/effort changed: {desc(previous)} → {desc(current)}",
+                # the engine these names belong to: a later switch must not make
+                # the WebUI read this line against a different engine's catalog
+                "engine": session.get("engine") or "",
+                "from_model": previous["model"], "from_effort": previous["effort"],
+                "to_model": current["model"], "to_effort": current["effort"],
+            })
+            self._model_move_announced = current["model"] != previous["model"]
+        raw = json.dumps(current)
+        session["used_config"] = raw
+        db.touch_session(self.id, used_config=raw)
+        self.broadcast({"type": "session_meta",
+                        "session": session_payload(db.get_session(self.id))})
+
     async def _run_turn(self, text: str) -> None:
         got_result = False
         try:
@@ -338,6 +389,8 @@ class SessionHub:
 
             do_handoff = (not session.get("native_session_id")) and \
                 (workspace_reset or handoff.needs_handoff(session))
+            # ahead of the prompt: the divider introduces the turns below it
+            self._note_turn_config(session)
             user_ev = self._emit("user", {"text": text})
 
             prompt = text
@@ -412,12 +465,17 @@ class SessionHub:
                         if new_model != old_model:
                             requested = (session.get("model") or "").strip()
                             mismatch = requested and requested.lower() not in new_model.lower()
-                            if old_model:
-                                self._emit("info", {"subtype": "model_switch",
-                                                    "text": f"engine model changed: {old_model} → {new_model}"})
-                            elif mismatch:
-                                self._emit("info", {"subtype": "model_switch",
-                                                    "text": f"requested model '{requested}' but engine is serving {new_model}"})
+                            # this turn's own divider already announced the move,
+                            # so only an unasked-for one is worth a warning line
+                            announced = self._model_move_announced and not mismatch
+                            self._model_move_announced = False
+                            if not announced:
+                                if old_model:
+                                    self._emit("info", {"subtype": "model_switch",
+                                                        "text": f"engine model changed: {old_model} → {new_model}"})
+                                elif mismatch:
+                                    self._emit("info", {"subtype": "model_switch",
+                                                        "text": f"requested model '{requested}' but engine is serving {new_model}"})
                             session["last_model"] = new_model
                             db.touch_session(self.id, last_model=new_model)
                             self.broadcast({"type": "session_meta",

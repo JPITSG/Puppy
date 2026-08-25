@@ -770,11 +770,17 @@ function effortShorthand(eng, value) {
   return (match && match.label) || raw;
 }
 
+/* "5.6-Sol Max", or "" when both sit on the engine's defaults. `blank` names
+   the default model for lines where the engine is not there to carry it. */
+function engineConfigDetail(bid, engine, model, effort, blank) {
+  const eng = engineInfo(bid, engine);
+  return [modelShorthand(eng, model) || blank || "", effortShorthand(eng, effort)]
+    .filter(Boolean).join(" ");
+}
+
 /* [engine, "model effort"] - the caller styles the two apart */
 function engineConfigParts(bid, engine, model, effort) {
-  const eng = engineInfo(bid, engine);
-  const detail = [modelShorthand(eng, model), effortShorthand(eng, effort)].filter(Boolean);
-  return [String(engine || "?"), detail.join(" ")];
+  return [String(engine || "?"), engineConfigDetail(bid, engine, model, effort)];
 }
 
 function apiPath(bid, path) {
@@ -3184,13 +3190,15 @@ class SessionView {
     }
   }
 
-  /* Each divider names the configuration on both of its sides. The switch event
-     only records the side it left: switching resets the incoming engine to its
-     defaults, so that engine's model and effort are picked afterwards and are
-     not knowable when the event is written. Resolve the incoming side from the
-     transcript instead - it is the "from" snapshot of the NEXT switch, or, for
-     the newest divider (whose segment is the one still running), the session's
-     live selection. Cheap enough to redo whenever either input changes. */
+  /* Dividers mark where the configuration changed, and name it on both sides.
+     A model/effort divider carries both sides itself: the engine writes it as a
+     turn starts, so what it names is what actually ran. An engine switch cannot
+     - it resets the incoming engine to its defaults, and the model is picked
+     afterwards - so that side is resolved from what came later: the "from" side
+     of the next divider, or, for the newest one (the segment still running),
+     the configuration the session's last turn used. Never the live picker: a
+     model chosen but not yet sent anything has not run. Redone whenever either
+     input changes, which is cheap at a handful of dividers. */
   syncSwitchLines() {
     const s = this.session || {};
     const lines = this.switchLines
@@ -3198,27 +3206,41 @@ class SessionView {
       .sort((a, b) => a._switch.seq - b._switch.seq);
     this.switchLines = lines;
     lines.forEach((node, i) => {
-      const d = node._switch.data;
-      const next = lines[i + 1];
-      const live = !next && s.engine === d.to;
-      const to = next ? next._switch.data : {};
-      this.fillSwitchLine(node, d, {
-        model: live ? (s.model || s.last_model) : to.from_model,
-        effort: live ? s.effort : to.from_effort,
-      });
+      const { data: d, engines } = node._switch;
+      if (!engines) return this.fillSwitchLine(node, d, d.to_model, d.to_effort);
+      const next = lines[i + 1] && lines[i + 1]._switch.data;
+      const used = (!next && s.engine === d.to && s.used_config) || {};
+      this.fillSwitchLine(node, d, next ? next.from_model : used.model,
+        next ? next.from_effort : used.effort);
     });
   }
 
-  fillSwitchLine(node, d, to) {
+  switchLineNode(ev, d, engines) {
+    const n = el("div", "switch-line" + (engines ? "" : " cfg-line"));
+    n._switch = { seq: ev.seq, data: d, engines };
+    this.switchLines.push(n);
+    this.syncSwitchLines();
+    return n;
+  }
+
+  /* "moved codex 5.6-Sol Max → claude Fable Max" for an engine switch; the
+     engine is dropped from a model/effort change, which keeps the same one. */
+  fillSwitchLine(node, d, toModel, toEffort) {
+    const engines = node._switch.engines;
     const side = (engine, model, effort) => {
+      if (!engines) return [el("span", "sw-cfg",
+        engineConfigDetail(this.tab.bid, engine, model, effort, "default"))];
       const [name, detail] = engineConfigParts(this.tab.bid, engine, model, effort);
       const parts = [el("span", "sw-eng", name)];
       if (detail) parts.push(" ", el("span", "sw-cfg", detail));
       return parts;
     };
+    const engine = engines ? "" : (d.engine || (this.session || {}).engine);
     const body = el("span", "sw-body");
-    body.append("moved ", ...side(d.from, d.from_model, d.from_effort),
-      " ", el("span", "sw-arrow", "→"), " ", ...side(d.to, to.model, to.effort));
+    if (engines) body.append("moved ");
+    body.append(...side(engines ? d.from : engine, d.from_model, d.from_effort),
+      " ", el("span", "sw-arrow", "→"), " ",
+      ...side(engines ? d.to : engine, toModel, toEffort));
     node.textContent = "";
     node.appendChild(body);
   }
@@ -3291,19 +3313,14 @@ class SessionView {
           const query = String(d.text || "").replace(/^web search:\s*/i, "");
           return toolCardNode({tool: "web_search", input: query ? {query} : undefined}, true);
         }
+        if (d.subtype === "config_change") return this.switchLineNode(ev, d, false);
         const warned = d.subtype === "interrupted" || d.subtype === "model_switch" ||
           d.subtype === "workspace_reset";
         const n = el("div", "info-line" + (warned ? " warn" : ""));
         n.textContent = d.text || d.subtype || "";
         return n;
       }
-      case "engine_switch": {
-        const n = el("div", "switch-line");
-        n._switch = { seq: ev.seq, data: d };
-        this.switchLines.push(n);
-        this.syncSwitchLines();
-        return n;
-      }
+      case "engine_switch": return this.switchLineNode(ev, d, true);
       case "error": {
         return el("div", "err-card", d.text || "error");
       }

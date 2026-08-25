@@ -145,6 +145,9 @@ async def main() -> None:
         directory_id = db.create_session(
             "directory session", "codex", str(project), "", "", "#4dd0c4",
             "workspace-write", workspace_kind="directory")
+        # what the last turn ran with: transcript dividers are read against it
+        db.touch_session(directory_id,
+                         used_config='{"model": "gpt-5.6-sol", "effort": "max"}')
         scratch_path = workspaces.create_temporary()
         original_scratch = Path(scratch_path)
         scratch_id = db.create_session(
@@ -208,6 +211,8 @@ async def main() -> None:
         assert config.get("engines.usage_refresh_minutes") == 30
         assert config.get("uploads.max_file_size_mb") == 19
         assert len(db.list_sessions(include_archived=True)) == 2
+        assert session_runner.parse_used_config(
+            db.get_session(directory_id)["used_config"]) == {"model": "gpt-5.6-sol", "effort": "max"}
         assert db.query_one("SELECT token FROM backends")["token"] == "private-backend-token"
         assert db.query_one("SELECT auto_upgrade FROM backends")["auto_upgrade"] == 1
         assert db.query_one("SELECT username FROM users")["username"] == "snapshot-user"
