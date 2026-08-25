@@ -136,6 +136,9 @@ async def main() -> None:
         config.set_value("sessions.default_cwd", str(project))
         config.set_value("engines.usage_refresh_minutes", 30)
         config.set_value("uploads.max_file_size_mb", 19)
+        config.set_value("notify.enabled", True)
+        config.set_value("notify.backend", 1)
+        config.set_value("notify.command", "printf done: %s {session}")
         db.execute(
             "INSERT INTO backends(name,url,token,protocol,capabilities,remote_version,role,"
             "tls_fingerprint,auto_upgrade,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -195,6 +198,8 @@ async def main() -> None:
         config.set_value("instance_name", "mutated-instance")
         config.set_value("engines.usage_refresh_minutes", 5)
         config.set_value("uploads.max_file_size_mb", 2)
+        config.set_value("notify.enabled", False)
+        config.set_value("notify.command", "mutated")
         db.execute("DELETE FROM events")
         db.execute("DELETE FROM sessions")
         db.execute("DELETE FROM backends")
@@ -210,6 +215,9 @@ async def main() -> None:
         assert config.get("instance_name") == "saved-instance"
         assert config.get("engines.usage_refresh_minutes") == 30
         assert config.get("uploads.max_file_size_mb") == 19
+        assert config.get("notify.enabled") is True
+        assert config.get("notify.backend") == 1
+        assert config.get("notify.command") == "printf done: %s {session}"
         assert len(db.list_sessions(include_archived=True)) == 2
         assert session_runner.parse_used_config(
             db.get_session(directory_id)["used_config"]) == {"model": "gpt-5.6-sol", "effort": "max"}

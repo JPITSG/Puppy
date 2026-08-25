@@ -258,6 +258,8 @@ a{color:var(--acc2)}
 .foot-usage-refresh.refreshing svg{animation:spin .75s linear infinite}
 .foot-row{display:flex;align-items:center;gap:6px;border-top:1px solid var(--line);padding-top:7px}
 .foot-row .icon-btn{width:24px;height:24px;font-size:14px;border-radius:var(--btn-r);margin-left:-8px}
+#btn-bell svg{display:block}
+#btn-bell.on{color:var(--acc2)}
 .foot-ver{font-size:10.5px;color:var(--txt3);font-family:var(--mono)}
 .conn-state{display:flex;align-items:center;min-width:0;margin-left:auto}
 .host-cpu{
@@ -1011,6 +1013,11 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 }
 .be-auto-copy{display:flex;flex-direction:column;gap:2px;min-width:0;color:var(--txt2);font-size:11.5px}
 .be-auto-copy small{color:var(--txt3);font:9.5px/1.35 var(--mono);white-space:normal}
+.notify-fields{display:grid;grid-template-columns:minmax(150px,220px) minmax(0,1fr);gap:0 12px}
+@media (max-width:560px){.notify-fields{grid-template-columns:minmax(0,1fr)}}
+.mono-inline{font-family:var(--mono);font-size:11px;text-transform:none;letter-spacing:0}
+.notify-note{color:var(--txt3);font-size:11.5px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.notify-note.bad{color:var(--err)}
 .be-security{width:20px;height:20px;display:flex;align-items:center;justify-content:center}
 .be-security svg{display:block}
 .be-security.secure{color:var(--ok)}

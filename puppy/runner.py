@@ -11,7 +11,7 @@ import signal
 import time
 import uuid
 
-from puppy import config, db, handoff, uploads, workspaces
+from puppy import config, db, handoff, notify, uploads, workspaces
 from puppy.drivers import get_driver
 from puppy.drivers.base import clean_env
 
@@ -463,6 +463,7 @@ class SessionHub:
 
     async def _run_turn(self, text: str) -> None:
         got_result = False
+        self._block_status = "error"   # until a result says otherwise
         try:
             session = db.get_session(self.id)
             try:
@@ -593,6 +594,7 @@ class SessionHub:
                         # rest (codex) get the wall clock from spawn to result.
                         if act["data"].get("duration_ms") is None:
                             act["data"]["duration_ms"] = int((time.time() - turn_started) * 1000)
+                        self._block_status = "ok" if act["data"].get("ok") else "error"
                         self._emit("result", act["data"])
                         # claude: close stdin so the process exits cleanly
                         if driver.uses_stdin_stream and self.proc.stdin is not None:
@@ -630,6 +632,7 @@ class SessionHub:
             self.proc = None
             self._proc_ready = False
             self.stderr_tail = ""
+            block_started = self.active_since
             nxt = self._take_next_turn()
             continued = nxt is not None
             if not continued:
@@ -637,9 +640,18 @@ class SessionHub:
                     db.touch_session(self.id, status="idle")
                 except Exception:
                     pass
+                # the session went idle: its prompt and everything queued
+                # behind it finished - the moment the completion command means
+                try:
+                    notify.session_finished(
+                        db.get_session(self.id),
+                        "interrupted" if self.interrupted else self._block_status,
+                        int(time.time() - block_started) if block_started else 0)
+                except Exception:
+                    log.exception("completion notify failed for session %s", self.id)
             self.broadcast({"type": "turn_done", "continued": continued})
             if continued:
-                self.broadcast({"type": "queued", "queued": list(self.queue)})
+                self._broadcast_queue()
                 self._start_turn(nxt)
             else:
                 broadcast_sessions()

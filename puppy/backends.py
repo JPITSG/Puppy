@@ -170,6 +170,32 @@ def _normalize_peer(data: dict) -> dict:
     }
 
 
+async def notify_exec(bid: int, command: str, info: dict) -> dict:
+    """Run an expanded completion command on a paired backend. Same transport
+    rules as every other backend call: token auth, no redirects, pinned TLS."""
+    be = get_backend(bid)
+    if be is None:
+        return {"ok": False, "error": "backend %s is not paired" % bid}
+    try:
+        async with client().post(
+                be["url"] + "/api/notify/exec",
+                json={"command": command, "info": info},
+                headers={"X-Puppy-Token": be["token"]},
+                timeout=aiohttp.ClientTimeout(total=45),
+                allow_redirects=False,
+                ssl=_ssl_pin(be.get("tls_fingerprint") or "")) as response:
+            if response.status == 404:
+                return {"ok": False,
+                        "error": "%s cannot run commands (upgrade it, or its shell "
+                                 "surface is disabled)" % be["name"]}
+            if response.status != 200:
+                return {"ok": False, "error": "%s returned %s" % (be["name"], response.status)}
+            data = await response.json()
+            return data if isinstance(data, dict) else {"ok": False, "error": "invalid reply"}
+    except Exception as exc:
+        return {"ok": False, "error": "%s: %s" % (be["name"], _connection_error(exc))}
+
+
 async def probe_backend(url: str, token: str, tls_fingerprint: str = "",
                         timeout: float = 8.0) -> dict:
     """Authenticate and negotiate metadata with a prospective backend."""

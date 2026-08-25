@@ -258,6 +258,12 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert ping["uploads"]["enabled"] is \
             (ping["uploads"]["max_file_size_mb"] > 0)
         assert "terminal" not in ping["capabilities"]
+        # the completion-command endpoint is part of the shell surface: a node
+        # deployed without a terminal must not run commands either
+        assert "notify-exec" not in ping["capabilities"]
+        async with http.post(url + "/api/notify/exec", headers=good, ssl=pinned,
+                             json={"command": "true"}) as response:
+            assert response.status == 404
         assert ("pinned-tls" in ping["capabilities"]) is bool(fingerprint)
         assert ping["transport"]["encrypted"] is bool(fingerprint)
         if fingerprint:

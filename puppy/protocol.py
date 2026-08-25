@@ -34,6 +34,9 @@ BASE_CAPABILITIES = (
     MANUAL_USAGE_REFRESH_CAPABILITY,
 )
 TERMINAL_CAPABILITY = "terminal"
+# POST /api/notify/exec runs a controller-supplied completion command. It is
+# part of the node's shell surface, so it exists exactly when terminal does.
+NOTIFY_EXEC_CAPABILITY = "notify-exec"
 
 # An HTTPS backend advertises this when its pairing data includes a stable
 # SHA-256 leaf-certificate pin. The API token remains application-layer auth;
@@ -52,4 +55,5 @@ def execution_capabilities(include_terminal: bool = True) -> list:
     caps = list(BASE_CAPABILITIES)
     if include_terminal:
         caps.append(TERMINAL_CAPABILITY)
+        caps.append(NOTIFY_EXEC_CAPABILITY)
     return caps

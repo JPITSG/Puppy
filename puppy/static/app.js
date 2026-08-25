@@ -29,6 +29,29 @@ function xIcon(size) {
   return svg;
 }
 
+function bellIcon(size, off) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const draw = (d) => {
+    const p = document.createElementNS(NS, "path");
+    p.setAttribute("d", d);
+    p.setAttribute("stroke", "currentColor");
+    p.setAttribute("stroke-width", "2");
+    p.setAttribute("stroke-linecap", "round");
+    p.setAttribute("stroke-linejoin", "round");
+    p.setAttribute("fill", "none");
+    svg.appendChild(p);
+  };
+  draw("M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3c0 0 3-2 3-9");
+  draw("M10.3 21a1.94 1.94 0 0 0 3.4 0");
+  if (off) draw("M4.5 3.5 L19.5 20.5");
+  return svg;
+}
+
 /* Same reason as the close cross above: a "+" character is placed on the font's
    math axis, which is not the middle of its line box, so the glyph lands about
    1.5px low in a flex-centred button however the box is aligned. Drawn ink is
@@ -1200,6 +1223,7 @@ const state = {
   remoteErrors: {},       // bid -> latest reachability error
   engCache: {},           // bid -> engines[]
   nodeUsers: {},          // bid -> account the node's puppy process runs as
+  notify: { configured: false, enabled: false },   // completion-alert bell
   remoteEngineErrors: {}, // bid -> latest engine-status error (node can still be reachable)
   remoteEngineCheckedAt: {},
   remoteNodeCheckedAt: {},
@@ -1233,7 +1257,11 @@ function sessionActivityKey(bid, sid) {
 function ingestOneSessionActivity(bid, session, serverTime, receivedAt) {
   const key = sessionActivityKey(bid, session.id);
   if (session.status !== "running") {
-    sessionActivityAnchors.delete(key);
+    if (sessionActivityAnchors.has(key)) {
+      const startedAt = sessionActivityAnchors.get(key);
+      sessionActivityAnchors.delete(key);
+      reportRemoteCompletion(bid, session, startedAt, receivedAt);
+    }
     return;
   }
 
@@ -1273,6 +1301,26 @@ function ingestSessionActivity(bid, sessions, serverTime) {
   for (const key of sessionActivityAnchors.keys()) {
     if (key.startsWith(prefix) && !seen.has(key)) sessionActivityAnchors.delete(key);
   }
+}
+
+/* Completions on remote backends are seen here, by whichever consoles are
+   watching (session tab streams and the 12-second polls both funnel through
+   the activity ingest). Report them; the controller deduplicates, so several
+   open browsers ring once. Local sessions fire on the server itself and are
+   deliberately not reported. */
+function reportRemoteCompletion(bid, session, startedAt, now) {
+  if (!bid || !state.notify.configured || !state.notify.enabled) return;
+  api(0, "notify/fire", { method: "POST", body: {
+    bid, sid: session.id,
+    info: {
+      session: session.name || `session ${session.id}`,
+      engine: session.engine || "",
+      model: session.model || session.last_model || "",
+      status: "done",
+      duration: String(Math.max(0, Math.round((now - Number(startedAt || now)) / 1000))),
+      cwd: session.cwd || "",
+    },
+  } }).catch(() => { /* the next completion tries again */ });
 }
 
 function reconcileRemoteState() {
@@ -1391,6 +1439,7 @@ async function refreshState() {
   const s = await api(0, "state");
   state.instance = s.instance_name;
   if (typeof s.user === "string") state.nodeUsers[0] = s.user;
+  if (s.notify) { state.notify = s.notify; syncBell(); }
   state.sessionColors = s.session_colors || [];
   state.engines = Array.isArray(s.engines) ? s.engines : [];
   state.usageRefresh = s.usage_refresh || state.usageRefresh;
@@ -1440,6 +1489,9 @@ function connectUpdates() {
         syncRemoteStateViews();
       } else if (d.type === "host_metrics") {
         renderHostCpu(d.cpu_percent);
+      } else if (d.type === "notify") {
+        state.notify = { configured: !!d.configured, enabled: !!d.enabled };
+        syncBell();
       }
     } catch (e) {}
   };
@@ -2571,6 +2623,31 @@ function applyTheme(t) {
 $("btn-theme").onclick = () =>
   applyTheme(document.documentElement.classList.contains("light") ? "dark" : "light");
 applyTheme(lsGet("puppy.theme") || "dark");
+
+/* completion-alert bell: appears once a completion command is configured;
+   click arms or silences it (the state lives on the server, so it holds
+   with every browser closed) */
+function syncBell() {
+  const bell = $("btn-bell");
+  if (!bell) return;
+  const n = state.notify || {};
+  bell.classList.toggle("hidden", !n.configured);
+  bell.classList.toggle("on", !!n.enabled);
+  bell.textContent = "";
+  bell.appendChild(bellIcon(14, !n.enabled));
+  bell.title = n.enabled ? "Completion alerts armed · click to silence"
+    : "Completion alerts off · click to arm";
+  bell.setAttribute("aria-pressed", n.enabled ? "true" : "false");
+}
+$("btn-bell").onclick = async () => {
+  const want = !(state.notify && state.notify.enabled);
+  try {
+    const r = await api(0, "notify/toggle", { method: "POST", body: { enabled: want } });
+    state.notify = { configured: !!(r.settings.command || "").trim(),
+                     enabled: !!r.settings.enabled };
+    syncBell();
+  } catch (e) { toast(e.message, "error"); }
+};
 
 /* sidebar width: draggable, persisted */
 (() => {
@@ -5001,6 +5078,77 @@ class SettingsView {
     this.syncRemoteState();
     pollRemotes({ forceEngines: true })
       .catch(error => console.warn("settings remote poll failed", error));
+
+    /* completion alert: a command a chosen node runs when a session finishes */
+    const notifyCard = el("div", "card notify-card");
+    notifyCard.innerHTML = `<h2>Completion alert</h2>
+      <p class="usage-refresh-copy">Optional. When a session finishes its work — its prompt and
+        anything queued behind it — run this command on a node: play a sound, ping your home
+        automation, anything. Arm or silence it any time with the bell in the sidebar footer.</p>
+      <div class="notify-fields">
+        <label>Run on<select id="nf-backend" aria-label="Node the command runs on"></select></label>
+        <label>Command<input type="text" id="nf-cmd" autocomplete="off" autocapitalize="off"
+          spellcheck="false" placeholder='e.g. mosquitto_pub -t puppy/done -m {session}'></label>
+      </div>
+      <p class="usage-refresh-copy">Placeholders <span class="mono-inline">{backend} {session}
+        {engine} {model} {status} {duration} {cwd} {id}</span> are substituted shell-quoted, and the
+        same values arrive as <span class="mono-inline">PUPPY_*</span> environment variables.
+        Saving a command arms the bell; saving it empty retires the feature.</p>
+      <div class="m-btns" style="justify-content:flex-start;margin-top:10px">
+        <button class="btn btn-pri btn-sm" id="nf-save">Save</button>
+        <button class="btn btn-sm" id="nf-test">Test</button>
+        <span class="notify-note" id="nf-note"></span>
+      </div>`;
+    const nfBackend = notifyCard.querySelector("#nf-backend");
+    const nfCmd = notifyCard.querySelector("#nf-cmd");
+    const nfNote = notifyCard.querySelector("#nf-note");
+    const nfLocal = document.createElement("option");
+    nfLocal.value = "0";
+    nfLocal.textContent = `${backendName(0)} (local)`;
+    nfBackend.appendChild(nfLocal);
+    for (const b of state.backends) {
+      const option = document.createElement("option");
+      option.value = String(b.id);
+      const capable = Array.isArray(b.capabilities) && b.capabilities.includes("notify-exec");
+      option.textContent = b.name + (capable ? "" : " — upgrade to enable");
+      option.disabled = !capable;
+      if (!capable) option.title = "This backend predates remote commands, or runs without its shell surface";
+      nfBackend.appendChild(option);
+    }
+    this.inner.appendChild(notifyCard);
+    enhanceChoiceSelect(nfBackend);
+    const nfNoteSet = (text, bad = false) => {
+      nfNote.textContent = text;
+      nfNote.classList.toggle("bad", !!bad);
+    };
+    api(0, "notify").then((r) => {
+      nfCmd.value = r.settings.command || "";
+      const have = [...nfBackend.options].some(o => o.value === String(r.settings.backend));
+      nfBackend.value = have ? String(r.settings.backend) : "0";
+      refreshChoiceSelect(nfBackend);
+    }).catch(() => nfNoteSet("could not load the current setting", true));
+    notifyCard.querySelector("#nf-save").onclick = async () => {
+      try {
+        const r = await api(0, "notify", { method: "POST", body: {
+          backend: Number(nfBackend.value || 0), command: nfCmd.value,
+        } });
+        state.notify = { configured: !!(r.settings.command || "").trim(),
+                         enabled: !!r.settings.enabled };
+        syncBell();
+        nfNoteSet(state.notify.configured ? "saved · armed" : "saved · off");
+        toast(state.notify.configured ? "completion alert armed" : "completion alert off", "ok");
+      } catch (e) { nfNoteSet(e.message, true); }
+    };
+    notifyCard.querySelector("#nf-test").onclick = async () => {
+      nfNoteSet("running…");
+      try {
+        const r = await api(0, "notify/test", { method: "POST", body: {
+          backend: Number(nfBackend.value || 0), command: nfCmd.value,
+        } });
+        if (r.ok) nfNoteSet("ok" + (r.output ? " · " + r.output.slice(-120) : ""));
+        else nfNoteSet(r.error || `exit ${r.rc}` + (r.output ? " · " + r.output.slice(-120) : ""), true);
+      } catch (e) { nfNoteSet(e.message, true); }
+    };
 
     /* backends */
     const c3 = el("div", "card");

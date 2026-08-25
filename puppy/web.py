@@ -15,8 +15,8 @@ import time
 from aiohttp import WSMsgType, web
 
 from puppy import (__version__, auth, backends, bind_verify, cli_releases, config, db,
-                   host_metrics, listener_handoff, protocol, runner, snapshots, terminal,
-                   uploads, usage_refresh, workspaces)
+                   host_metrics, listener_handoff, notify, protocol, runner, snapshots,
+                   terminal, uploads, usage_refresh, workspaces)
 from puppy.drivers import all_drivers, get_driver
 
 log = logging.getLogger("puppy.web")
@@ -141,6 +141,7 @@ async def h_state(request: web.Request):
         "default_cwd": config.get("sessions.default_cwd", "/"),
         "uploads": uploads.settings_payload(),
         "session_colors": db.SESSION_COLORS,
+        "notify": notify.public_state(),
     })
 
 
@@ -858,6 +859,99 @@ async def ws_updates(request: web.Request):
 
 # ---- app assembly ----
 
+async def h_notify_exec(request: web.Request):
+    """Shared surface: run one completion command on this node. Registered only
+    alongside the terminal - a node built without a shell surface stays without
+    one. The command arrives fully expanded; info feeds PUPPY_* variables."""
+    body = await request.json()
+    command = str(body.get("command") or "").strip()[:notify.MAX_COMMAND]
+    if not command:
+        return web.json_response({"error": "empty command"}, status=400)
+    result = await notify.run_local(command, notify.clean_info(body.get("info")))
+    return web.json_response(result)
+
+
+def _notify_broadcast() -> None:
+    runner.broadcast_update({"type": "notify", **notify.public_state()})
+
+
+async def h_notify_get(request: web.Request):
+    return web.json_response({"ok": True, "settings": notify.settings(),
+                              "placeholders": list(notify.PLACEHOLDERS)})
+
+
+async def h_notify_set(request: web.Request):
+    body = await request.json()
+    command = str(body.get("command") or "").strip()[:notify.MAX_COMMAND]
+    bid = body.get("backend", 0)
+    try:
+        bid = int(bid)
+    except (TypeError, ValueError):
+        return web.json_response({"error": "invalid backend"}, status=400)
+    if bid and backends.get_backend(bid) is None:
+        return web.json_response({"error": "unknown backend"}, status=400)
+    config.set_value("notify.backend", bid)
+    config.set_value("notify.command", command)
+    # saving a command arms the bell (that is what saving means); clearing
+    # the command retires the feature and the bell with it
+    config.set_value("notify.enabled", bool(command))
+    _notify_broadcast()
+    log.info("notify command %s (backend %s)", "configured" if command else "cleared", bid)
+    return web.json_response({"ok": True, "settings": notify.settings()})
+
+
+async def h_notify_toggle(request: web.Request):
+    body = await request.json()
+    if not notify.configured():
+        return web.json_response({"error": "no completion command configured"}, status=400)
+    config.set_value("notify.enabled", bool(body.get("enabled")))
+    _notify_broadcast()
+    return web.json_response({"ok": True, "settings": notify.settings()})
+
+
+async def h_notify_test(request: web.Request):
+    """Run once, now, with the values from the panel (unsaved), so the command
+    can be proven before trusting it from across the house."""
+    body = await request.json()
+    override = {"command": str(body.get("command") or "").strip()[:notify.MAX_COMMAND]}
+    if "backend" in body:
+        try:
+            override["backend"] = int(body.get("backend") or 0)
+        except (TypeError, ValueError):
+            return web.json_response({"error": "invalid backend"}, status=400)
+    result = await notify.dispatch({
+        "backend": config.get("instance_name") or "local",
+        "session": "test session", "engine": "claude", "model": "test-model",
+        "status": "ok", "duration": "42", "cwd": config.get("sessions.default_cwd", "/"),
+        "id": "0",
+    }, override=override)
+    return web.json_response(result)
+
+
+async def h_notify_fire(request: web.Request):
+    """Consoles report a remote backend's session going idle. Deduplicated so
+    several open browsers ring once; local sessions fire from the runner and
+    are rejected here to keep that single-source."""
+    body = await request.json()
+    try:
+        bid = int(body.get("bid"))
+        sid = int(body.get("sid"))
+    except (TypeError, ValueError):
+        return web.json_response({"error": "invalid session reference"}, status=400)
+    if bid <= 0:
+        return web.json_response({"error": "local sessions fire on the server"}, status=400)
+    if not notify.active():
+        return web.json_response({"ok": True, "fired": False})
+    be = backends.get_backend(bid)
+    if be is None or not notify.accept_remote_fire(bid, sid):
+        return web.json_response({"ok": True, "fired": False})
+    info = notify.clean_info(body.get("info"))
+    info["backend"] = be["name"]
+    info["id"] = str(sid)
+    asyncio.ensure_future(notify._fire(info))
+    return web.json_response({"ok": True, "fired": True})
+
+
 def register_execution_api(app: web.Application, include_terminal: bool = True) -> None:
     """Register the API surface consumed through a local or remote session tab.
 
@@ -891,6 +985,7 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     r.add_get("/api/ws/updates", ws_updates)
     if include_terminal:
         r.add_get("/api/ws/term", terminal.ws_terminal)
+        r.add_post("/api/notify/exec", h_notify_exec)
     uploads.register(app)
 
 
@@ -919,6 +1014,11 @@ def build_app() -> web.Application:
     app.on_startup.append(backends.start_auto_upgrade_worker)
 
     r.add_get("/api/state", h_state)
+    r.add_get("/api/notify", h_notify_get)
+    r.add_post("/api/notify", h_notify_set)
+    r.add_post("/api/notify/toggle", h_notify_toggle)
+    r.add_post("/api/notify/test", h_notify_test)
+    r.add_post("/api/notify/fire", h_notify_fire)
     r.add_get("/api/settings", h_settings_get)
     r.add_patch("/api/settings", h_settings_patch)
     r.add_post("/api/settings/bind/prepare", h_bind_prepare)
