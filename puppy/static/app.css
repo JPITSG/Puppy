@@ -450,7 +450,10 @@ select.choice-native{display:none!important}
 .tab .t-dot.claude{color:var(--claude)}
 .tab .t-dot.codex{color:var(--codex)}
 .tab .t-dot.term{color:var(--term)}
-.tab .t-dot.settings{color:var(--txt3)}
+.tab .t-dot.settings{
+  width:12px;height:12px;border-radius:0;background:none;color:var(--txt3);
+}
+.tab .t-dot.settings svg{display:block}
 .tab .t-title{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto;min-width:0}
 .tab .t-close{
   border:none;background:none;color:var(--txt3);cursor:pointer;font-size:15px;line-height:1;

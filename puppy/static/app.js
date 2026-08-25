@@ -29,6 +29,32 @@ function xIcon(size) {
   return svg;
 }
 
+function gearIcon(size) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const gear = document.createElementNS(NS, "path");
+  gear.setAttribute("d", "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.09a2 2 0 0 1 1 1.74v.5a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.09a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2Z");
+  gear.setAttribute("fill", "none");
+  gear.setAttribute("stroke", "currentColor");
+  gear.setAttribute("stroke-width", "2");
+  gear.setAttribute("stroke-linecap", "round");
+  gear.setAttribute("stroke-linejoin", "round");
+  const hub = document.createElementNS(NS, "circle");
+  hub.setAttribute("cx", "12");
+  hub.setAttribute("cy", "12");
+  hub.setAttribute("r", "3");
+  hub.setAttribute("fill", "none");
+  hub.setAttribute("stroke", "currentColor");
+  hub.setAttribute("stroke-width", "2");
+  svg.appendChild(gear);
+  svg.appendChild(hub);
+  return svg;
+}
+
 function copyIcon(done = false) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
@@ -1707,6 +1733,7 @@ function renderTabs() {
     } else if (t.type === "term") dotCls = "term";
     const tdot = el("span", "t-dot " + dotCls);
     if (dotColor) tdot.style.color = dotColor;
+    if (t.type === "settings") tdot.appendChild(gearIcon(12));
     tab.appendChild(tdot);
     tab.appendChild(el("span", "t-title", t.title || "tab"));
     if (t.type === "session") {
