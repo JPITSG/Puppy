@@ -1275,6 +1275,10 @@ const REMOTE_ENGINE_REFRESH = 60000;
 const ENGINE_POLL_TIMEOUT = 15000;
 const UPGRADE_READINESS_INTERVAL = 2000;
 const UPGRADE_READINESS_TIMEOUT = 4000;
+/* An engine updater shells out to a package manager, so progress is measured
+   in tens of seconds. Poll gently and only while one is actually running. */
+const ENGINE_UPGRADE_POLL_INTERVAL = 3000;
+const ENGINE_REFRESH_TIMEOUT = 30000;
 const remotePollSequence = {};
 let remotePollTimer = null;
 let remotePollingGeneration = 0;
@@ -2038,6 +2042,16 @@ function backendSupportsManualUsageRefresh(bid) {
     backend.capabilities.includes("engine-usage-refresh-manual");
 }
 
+/* Forced version re-checks and engine CLI upgrades ship as one additive route
+   pair, so one capability gates both controls. Never inferred for older nodes:
+   a hidden control is better than a button their router would reject. */
+function backendSupportsEngineUpgrade(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(item => item.id === bid);
+  return !!backend && Array.isArray(backend.capabilities) &&
+    backend.capabilities.includes("engine-upgrade");
+}
+
 function backendSupportsFileUploads(bid) {
   if (!bid) return true;
   const backend = state.backends.find(item => item.id === bid);
@@ -2514,9 +2528,12 @@ function weeklyQuotaLeft(e) {
   return null;
 }
 
-function applyUsageRefreshPayload(bid, result) {
+/* Every engine-bearing response (poll, usage refresh, version refresh, engine
+   upgrade) carries the same {engines, usage_refresh} pair. One applier keeps
+   local and remote caches, the footer and Settings in step whatever asked. */
+function applyEnginesPayload(bid, result) {
   if (!result || !Array.isArray(result.engines) || !result.usage_refresh)
-    throw new Error("node returned an invalid usage refresh response");
+    throw new Error("node returned an invalid engine response");
   if (bid) {
     state.engCache[bid] = result.engines;
     state.remoteUsageRefresh[bid] = result.usage_refresh;
@@ -2532,6 +2549,31 @@ function applyUsageRefreshPayload(bid, result) {
     state.localEngineCheckedAt = Date.now();
   }
   syncRemoteStateViews();
+}
+
+function applyUsageRefreshPayload(bid, result) {
+  applyEnginesPayload(bid, result);
+}
+
+/* Installed and latest versions both refresh on their own timers on the node.
+   This is the impatient path: re-probe the CLIs and re-ask the registry now. */
+async function refreshEngineVersions(bid, button, nodeName) {
+  if (button.disabled) return;
+  button.disabled = true;
+  button.classList.add("refreshing");
+  button.setAttribute("aria-busy", "true");
+  try {
+    applyEnginesPayload(bid, await api(bid, "engines/refresh",
+      { method: "POST", timeoutMs: ENGINE_REFRESH_TIMEOUT }));
+  } catch (error) {
+    toast(`${nodeName}: ${error.message}`, "error", 7000);
+  } finally {
+    if (button.isConnected) {
+      button.disabled = false;
+      button.classList.remove("refreshing");
+      button.removeAttribute("aria-busy");
+    }
+  }
 }
 
 async function refreshCodexUsage(bid, button, nodeName) {
@@ -5186,6 +5228,9 @@ class SettingsView {
     this.upgradesInProgress = new Set();
     this.upgradePollTimer = null;
     this.upgradePollGeneration = 0;
+    this.engineUpgradeState = new Map();   // "bid:engine" -> "running" | "idle"
+    this.engineUpgradePollTimer = null;
+    this.engineUpgradePollGeneration = 0;
     this.localEngineGroup = null;
     this.root = el("div", "view settings");
     this.root.innerHTML = `<div class="settings-scroll"><div class="settings-inner"></div></div>`;
@@ -5194,6 +5239,8 @@ class SettingsView {
   destroy() {
     this.renderGeneration++;
     this.stopUpgradeReadinessPolling();
+    this.stopEngineUpgradePolling();
+    this.engineUpgradeState.clear();
     this.remoteEngineGroups.clear();
     this.remoteBackendDots.clear();
     this.remoteBackendMeta.clear();
@@ -5212,6 +5259,91 @@ class SettingsView {
     this.upgradePollGeneration++;
     if (this.upgradePollTimer !== null) clearTimeout(this.upgradePollTimer);
     this.upgradePollTimer = null;
+  }
+
+  stopEngineUpgradePolling() {
+    this.engineUpgradePollGeneration++;
+    if (this.engineUpgradePollTimer !== null) clearTimeout(this.engineUpgradePollTimer);
+    this.engineUpgradePollTimer = null;
+  }
+
+  /* Engine payloads carry the node's own upgrade state, so an update in flight
+     is discovered rather than remembered: a reload, a second browser, or a run
+     another window started all converge on the same rows and the same report. */
+  engineNodes() {
+    const cached = bid => Object.prototype.hasOwnProperty.call(state.engCache, bid) ?
+      state.engCache[bid] : null;
+    return [{ bid: 0, name: backendName(0), engines: state.engines }]
+      .concat(state.backends.map(b => ({ bid: b.id, name: b.name, engines: cached(b.id) })));
+  }
+
+  syncEngineUpgrades() {
+    let running = false;
+    for (const node of this.engineNodes()) {
+      if (!Array.isArray(node.engines)) continue;
+      for (const engine of node.engines) {
+        const id = `${node.bid}:${engine.key}`;
+        const was = this.engineUpgradeState.get(id);
+        if (engine.upgrade_state === "running") {
+          running = true;
+          this.engineUpgradeState.set(id, "running");
+        } else {
+          this.engineUpgradeState.set(id, "idle");
+          if (was === "running") this.reportEngineUpgrade(node.name, engine);
+        }
+      }
+    }
+    if (running) this.startEngineUpgradePolling();
+    else this.stopEngineUpgradePolling();
+  }
+
+  reportEngineUpgrade(nodeName, engine) {
+    const result = engine.upgrade_result;
+    if (!result) {
+      toast(`${nodeName}: ${engine.label} update finished`, "info", 6000);
+      return;
+    }
+    if (!result.ok) {
+      toast(`${nodeName}: ${engine.label} update failed`, "error", 7000);
+      modalNotice(`${engine.label} update failed`,
+        `${nodeName}: ${result.error || "the updater reported a failure"}` +
+        (result.output ? `\n\n${result.output}` : ""));
+      return;
+    }
+    if (result.changed) {
+      toast(`${nodeName}: ${engine.label} updated to ${result.to_version || "a new version"}`,
+        "ok", 6000);
+      return;
+    }
+    /* Exit status alone is not proof: the vendor updater can succeed without
+       moving the version. Report what it said and let the pill speak. */
+    toast(`${nodeName}: ${engine.label} unchanged on ${result.to_version || "its version"}` +
+      (result.message ? ` · ${result.message}` : ""), "info", 7000);
+  }
+
+  startEngineUpgradePolling() {
+    if (this.engineUpgradePollTimer !== null) return;
+    const generation = ++this.engineUpgradePollGeneration;
+    const tick = async () => {
+      this.engineUpgradePollTimer = null;
+      /* Only destroy() ends this loop: a hidden or detached Settings pane must
+         still land the result of an upgrade the user started from it. */
+      if (generation !== this.engineUpgradePollGeneration) return;
+      const nodes = [...new Set([...this.engineUpgradeState]
+        .filter(([, value]) => value === "running")
+        .map(([id]) => Number(id.split(":")[0])))];
+      await Promise.all(nodes.map(async bid => {
+        try {
+          applyEnginesPayload(bid, await api(bid, "engines", { timeoutMs: ENGINE_POLL_TIMEOUT }));
+        } catch (error) {
+          console.warn("engine upgrade poll failed", error);
+        }
+      }));
+      if (generation !== this.engineUpgradePollGeneration) return;
+      if ([...this.engineUpgradeState.values()].includes("running"))
+        this.engineUpgradePollTimer = setTimeout(tick, ENGINE_UPGRADE_POLL_INTERVAL);
+    };
+    this.engineUpgradePollTimer = setTimeout(tick, ENGINE_UPGRADE_POLL_INTERVAL);
   }
 
   normalizeReportedReadiness(value) {
@@ -5387,6 +5519,7 @@ class SettingsView {
   }
 
   syncRemoteState() {
+    this.syncEngineUpgrades();
     if (this.localEngineGroup)
       this.localEngineGroup.update({ status: "ok", engines: state.engines });
     for (const [bid, group] of this.remoteEngineGroups) {
@@ -5448,7 +5581,7 @@ class SettingsView {
     this.syncUpgradeButtons();
   }
 
-  engineRow(e2) {
+  engineRow(bid, nodeName, e2) {
     const row = el("div", "engine-row");
     const identity = el("div", "engine-row-identity");
     identity.appendChild(el("span", "engine-dot " + e2.key));
@@ -5464,10 +5597,58 @@ class SettingsView {
       "auth: " + e2.auth));
     row.appendChild(identity);
     row.appendChild(statuses);
+    const action = this.engineUpdateButton(bid, nodeName, e2);
+    if (action) {
+      const actions = el("div", "engine-row-actions");
+      actions.appendChild(action);
+      row.appendChild(actions);
+      row.classList.add("has-actions");
+    }
     return row;
   }
 
-  engineGroup(name, meta) {
+  /* The update button is the verb for the amber "an update exists" pill, so it
+     appears only when there is something to do (or something already running).
+     A settled, current node keeps the panel exactly as it reads today. */
+  engineUpdateButton(bid, nodeName, e2) {
+    const upgrading = e2.upgrade_state === "running";
+    if (!upgrading && !(e2.installed && e2.update_available === true)) return null;
+    const button = el("button", "btn btn-sm engine-update", "Update");
+    button.type = "button";
+    const set = (text, disabled, description) => {
+      button.textContent = text;
+      button.disabled = disabled;
+      button.setAttribute("aria-label", `${nodeName} ${e2.label}: ${description}`);
+    };
+    const target = e2.latest_version ? `v${e2.latest_version}` : "the latest version";
+    if (upgrading) {
+      set("Updating…", true, "update is running");
+      button.classList.add("busy");
+    } else if (!e2.upgrade_supported || !backendSupportsEngineUpgrade(bid)) {
+      set("Update", true, "this node cannot update its engines from here");
+    } else if (sessionsFor(bid).some(s => s.engine === e2.key && s.status === "running")) {
+      set("Busy", true, "a session is using this engine - finish it first");
+    } else {
+      set("Update", false, `update to ${target}`);
+      button.classList.add("wants-update");
+      button.onclick = () => this.startEngineUpgrade(bid, nodeName, e2);
+    }
+    return button;
+  }
+
+  async startEngineUpgrade(bid, nodeName, e2) {
+    try {
+      const result = await api(bid, `engines/${encodeURIComponent(e2.key)}/upgrade`,
+        { method: "POST", timeoutMs: 30000 });
+      applyEnginesPayload(bid, result);
+      toast(`${nodeName}: updating ${e2.label}…`, "info");
+    } catch (error) {
+      toast(`${nodeName}: ${error.message}`, "error", 7000);
+      this.syncRemoteState();
+    }
+  }
+
+  engineGroup(name, meta, bid) {
     const root = el("section", "engine-node");
     const head = el("div", "engine-node-head");
     const dot = el("span", "gdot pending");
@@ -5480,6 +5661,16 @@ class SettingsView {
     metaEl.setAttribute("aria-label", meta);
     head.appendChild(nameEl);
     head.appendChild(metaEl);
+    let refresh = null;
+    if (backendSupportsEngineUpgrade(bid)) {
+      refresh = el("button", "engine-node-refresh");
+      refresh.type = "button";
+      refresh.setAttribute("aria-label",
+        `Re-check installed and latest engine versions on ${name}`);
+      refresh.appendChild(refreshIcon(11));
+      refresh.onclick = () => refreshEngineVersions(bid, refresh, name);
+      head.appendChild(refresh);
+    }
     const body = el("div", "engine-node-body");
     root.appendChild(head); root.appendChild(body);
 
@@ -5487,6 +5678,8 @@ class SettingsView {
       dot.className = "gdot " + status;
       const statusLabel = status === "ok" ? "available" : status === "bad" ? "unavailable" : "checking";
       dot.setAttribute("aria-label", detail ? `${statusLabel}: ${detail}` : statusLabel);
+      if (refresh && !refresh.classList.contains("refreshing"))
+        refresh.disabled = status === "bad";
       body.innerHTML = "";
       if (message || engines === null) {
         const note = el("div", "engine-node-message", message || "Checking engines…");
@@ -5495,7 +5688,13 @@ class SettingsView {
       } else if (!engines.length) {
         body.appendChild(el("div", "engine-node-message", "No engines reported"));
       } else {
-        engines.forEach(e2 => body.appendChild(this.engineRow(e2)));
+        engines.forEach(e2 => body.appendChild(this.engineRow(bid, name, e2)));
+        /* Silence is only trustworthy while the check itself works: say so
+           when the latest-version lookup is the thing that is unavailable. */
+        const stale = engines.find(e2 => e2.installed && e2.latest_check_error);
+        if (stale)
+          body.appendChild(el("div", "engine-node-message engine-node-stale",
+            `Latest-version check unavailable · ${stale.latest_check_error}`));
       }
     };
     const setMeta = value => {
@@ -5910,13 +6109,14 @@ class SettingsView {
     /* engines */
     const c2 = el("div", "card");
     c2.innerHTML = `<h2>Engines</h2>`;
-    const localGroup = this.engineGroup(settings.instance_name, `this instance · v${settings.version}`);
+    const localGroup = this.engineGroup(settings.instance_name,
+      `this instance · v${settings.version}`, 0);
     localGroup.update({ status: "ok", engines: state.engines });
     this.localEngineGroup = localGroup;
     c2.appendChild(localGroup.root);
     for (const b of state.backends) {
       const meta = backendLocationVersion(b);
-      const group = this.engineGroup(b.name, meta);
+      const group = this.engineGroup(b.name, meta, b.id);
       const cached = state.engCache[b.id];
       group.update({
         status: state.remoteOk[b.id] === false ? "bad" : state.remoteOk[b.id] === true ? "ok" : "pending",

@@ -16,6 +16,10 @@ TEMPORARY_WORKSPACE_CAPABILITY = "temporary-workspaces"
 USAGE_REFRESH_CAPABILITY = "engine-usage-refresh"
 MANUAL_USAGE_REFRESH_CAPABILITY = "engine-usage-refresh-manual"
 FILE_UPLOAD_CAPABILITY = "file-uploads"
+# Covers both engine-version endpoints: the forced installed/latest re-check
+# and the vendor-delegated engine CLI upgrade. They ship together, so one
+# additive capability keeps the controller from offering either to old nodes.
+ENGINE_UPGRADE_CAPABILITY = "engine-upgrade"
 
 BASE_CAPABILITIES = (
     "sessions",
@@ -32,6 +36,7 @@ BASE_CAPABILITIES = (
     TEMPORARY_WORKSPACE_CAPABILITY,
     USAGE_REFRESH_CAPABILITY,
     MANUAL_USAGE_REFRESH_CAPABILITY,
+    ENGINE_UPGRADE_CAPABILITY,
 )
 TERMINAL_CAPABILITY = "terminal"
 # POST /api/notify/exec runs a controller-supplied completion command. It is

@@ -14,10 +14,11 @@ import time
 
 from aiohttp import WSMsgType, web
 
-from puppy import (__version__, auth, backends, bind_verify, cli_releases, config, db,
-                   host_metrics, listener_handoff, notify, protocol, runner, snapshots,
-                   terminal, uploads, usage_refresh, workspaces)
+from puppy import (__version__, auth, backends, bind_verify, cli_releases, cli_upgrade,
+                   config, db, host_metrics, listener_handoff, notify, protocol, runner,
+                   snapshots, terminal, uploads, usage_refresh, workspaces)
 from puppy.drivers import all_drivers, get_driver
+from puppy.drivers import base as driver_base
 
 log = logging.getLogger("puppy.web")
 
@@ -162,6 +163,54 @@ async def h_usage_refresh_get(request: web.Request):
 async def h_usage_refresh_post(request: web.Request):
     await usage_refresh.maybe_refresh(force=True)
     return web.json_response({
+        "engines": await _engines_payload(refresh_usage=False),
+        "usage_refresh": usage_refresh.payload(),
+    })
+
+
+async def h_engines_refresh(request: web.Request):
+    """Force one installed-version re-probe and one latest-release check.
+
+    Both values otherwise refresh on their own timers (installed on the status
+    cache, latest on the periodic release worker). This is the manual override
+    behind the Settings refresh control; it never starts a turn."""
+    drivers = all_drivers()
+    driver_base.invalidate_status()
+    await cli_releases.refresh_if_due(drivers, force=True)
+    return web.json_response({
+        "engines": await _engines_payload(refresh_usage=False),
+        "usage_refresh": usage_refresh.payload(),
+    })
+
+
+async def h_engine_upgrade(request: web.Request):
+    """Start this node's own vendor updater for one engine CLI.
+
+    The command is fixed by the driver; the request only names an engine that
+    must already be registered here. Engines are spawned per turn, so no
+    restart is involved - but the package is rewritten in place, so sessions
+    using that engine must be idle first."""
+    key = str(request.match_info.get("key") or "")
+    try:
+        driver = get_driver(key)
+    except KeyError:
+        return web.json_response({"error": "unknown engine"}, status=404)
+    if not cli_upgrade.supported(driver):
+        return web.json_response(
+            {"error": "{} cannot be upgraded from here".format(driver.label)}, status=400)
+    blockers = runner.engine_blockers(driver.key)
+    if blockers:
+        return web.json_response({
+            "error": "{} is busy on this node - finish or stop its sessions first".format(
+                driver.label),
+            "blockers": blockers,
+        }, status=409)
+    try:
+        await cli_upgrade.start(driver)
+    except RuntimeError as exc:
+        return web.json_response({"error": str(exc)}, status=409)
+    return web.json_response({
+        "ok": True,
         "engines": await _engines_payload(refresh_usage=False),
         "usage_refresh": usage_refresh.payload(),
     })
@@ -963,6 +1012,8 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     r.add_get("/api/engines/usage-refresh", h_usage_refresh_get)
     r.add_post("/api/engines/usage-refresh", h_usage_refresh_post)
     r.add_patch("/api/engines/usage-refresh", h_usage_refresh_patch)
+    r.add_post("/api/engines/refresh", h_engines_refresh)
+    r.add_post("/api/engines/{key:[A-Za-z0-9_-]{1,32}}/upgrade", h_engine_upgrade)
 
     r.add_get("/api/sessions", h_sessions_list)
     r.add_post("/api/sessions", h_session_create)

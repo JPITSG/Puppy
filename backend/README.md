@@ -144,6 +144,42 @@ consume model tokens, concurrent polls coalesce, and failed attempts are
 rate-limited. Codex currently supplies a direct account snapshot; its existing
 local rollout record remains the fallback if the account read is unavailable.
 
+## Engine versions and upgrades
+
+Every engine payload reports the installed CLI version, the latest published
+version, and whether an update exists. Both sides refresh on their own timers:
+installed `--version`/auth probes are cached for five minutes, and the latest
+published version is re-checked every six hours (fifteen minutes after a failed
+check). A registry outage only makes the latest value unavailable; it never
+makes an installed engine unavailable.
+
+Two authenticated routes complete that picture, and nodes advertise both with
+the additive `engine-upgrade` capability:
+
+- `POST /api/engines/refresh` forces one immediate installed-version re-probe
+  and one latest-release check on this node.
+- `POST /api/engines/{key}/upgrade` runs that engine's own updater
+  (`claude update`, `codex update`).
+
+The command is fixed by the driver, never by the request: the body is ignored
+and the engine key must already be registered on the node. Puppy deliberately
+does not detect how an engine was installed - the vendor updater already knows
+its npm, native, brew or standalone layout, and delegating keeps that knowledge
+with the CLI it ships in.
+
+The run is refused with 409 while any session on that engine is running or has
+queued work, because the updater rewrites the installed package in place. Other
+engines' sessions are unaffected and do not block it. Only one upgrade runs per
+node at a time, it is bounded by a fifteen-minute timeout, and its output is
+captured and truncated rather than streamed.
+
+It starts in the background and the POST returns immediately, so `upgrade_state`
+in the engine payload is the progress signal and `upgrade_result` the outcome -
+a reconnecting controller rejoins a run already in flight. Engines are spawned
+per turn, so nothing restarts afterwards; the node re-probes the version itself
+when the updater exits, because a zero exit status alone does not prove the
+version moved.
+
 ## File uploads
 
 The headless package accepts streamed session attachments of any file type and

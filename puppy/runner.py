@@ -107,6 +107,24 @@ def upgrade_blockers() -> list:
     ]
 
 
+def engine_blockers(engine: str) -> list:
+    """Busy sessions on one engine - replacing that CLI under them is unsafe.
+
+    An updater unlinks and rewrites the installed package, so only sessions
+    that would spawn (or are running) this engine need to be idle; work on the
+    other engines is unaffected."""
+    out = []
+    for h in _hubs.values():
+        if h.status != "running" and not h.queue:
+            continue
+        session = db.get_session(h.id) or {}
+        if str(session.get("engine") or "") != str(engine):
+            continue
+        out.append({"id": h.id, "name": session.get("name") or "",
+                    "running": h.status == "running", "queued": len(h.queue)})
+    return out
+
+
 async def detach_for_restore() -> None:
     """Close authenticated live views before replacing their backing database."""
     if upgrade_blockers():

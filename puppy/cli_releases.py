@@ -23,6 +23,9 @@ log = logging.getLogger("puppy.cli_releases")
 
 CHECK_INTERVAL_SECONDS = 6 * 60 * 60
 FAILURE_RETRY_SECONDS = 15 * 60
+# A forced check is a person pressing refresh; repeated presses coalesce into
+# one registry request rather than one per press.
+FORCE_MIN_INTERVAL_SECONDS = 10
 REQUEST_TIMEOUT_SECONDS = 6
 MAX_RESPONSE_BYTES = 64 * 1024
 NPM_REGISTRY_BASE = "https://registry.npmjs.org"
@@ -37,6 +40,7 @@ _SEMVER_RE = re.compile(
 
 _cache: Dict[str, Dict[str, Any]] = {}
 _next_due = 0.0
+_last_attempt = 0.0
 _refresh_lock: Optional[asyncio.Lock] = None
 _refresh_loop = None
 
@@ -211,11 +215,14 @@ def _lock_for_running_loop() -> asyncio.Lock:
 
 async def refresh_if_due(drivers: Iterable, force: bool = False) -> float:
     """Refresh coalesced release sources and return seconds until the next check."""
-    global _next_due
+    global _next_due, _last_attempt
     async with _lock_for_running_loop():
         now = time.monotonic()
         if not force and _next_due > now:
             return _next_due - now
+        if force and _last_attempt and now - _last_attempt < FORCE_MIN_INTERVAL_SECONDS:
+            return max(0.0, _next_due - now)
+        _last_attempt = now
         try:
             successful = await _refresh(drivers)
         except asyncio.CancelledError:
@@ -264,8 +271,9 @@ def register(app) -> None:
 
 
 def reset_for_tests() -> None:
-    global _next_due, _refresh_lock, _refresh_loop
+    global _next_due, _last_attempt, _refresh_lock, _refresh_loop
     _cache.clear()
     _next_due = 0.0
+    _last_attempt = 0.0
     _refresh_lock = None
     _refresh_loop = None

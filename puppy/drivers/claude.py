@@ -25,6 +25,7 @@ class ClaudeDriver(Driver):
     binary = "claude"
     uses_stdin_stream = True
     release_source = {"kind": "npm", "package": "@anthropic-ai/claude-code"}
+    upgrade_source = {"kind": "self", "args": ["update"]}
 
     def permission_options(self):
         return [

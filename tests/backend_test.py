@@ -254,6 +254,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "temporary-workspaces" in ping["capabilities"]
         assert "engine-usage-refresh" in ping["capabilities"]
         assert "engine-usage-refresh-manual" in ping["capabilities"]
+        assert "engine-upgrade" in ping["capabilities"]
         assert "file-uploads" in ping["capabilities"]
         assert ping["uploads"]["enabled"] is \
             (ping["uploads"]["max_file_size_mb"] > 0)
@@ -295,6 +296,25 @@ async def exercise_node(url: str, token: str, expected_version: str,
             assert engine["latest_checked_at"] is None or \
                 isinstance(engine["latest_checked_at"], (int, float))
             assert isinstance(engine["latest_check_error"], str)
+            assert isinstance(engine["upgrade_supported"], bool)
+            assert engine["upgrade_state"] in ("idle", "running")
+            assert engine["upgrade_result"] is None or \
+                isinstance(engine["upgrade_result"], dict)
+            assert isinstance(engine["version_checked_at"], (int, float))
+        # The headless surface serves the same version-refresh route as the
+        # console; a node that cannot re-check must not advertise the button.
+        async with http.post(url + "/api/engines/refresh",
+                             headers=good, ssl=pinned) as response:
+            rechecked = await response.json()
+            assert response.status == 200, rechecked
+        assert isinstance(rechecked["engines"], list)
+        assert "usage_refresh" in rechecked
+        async with http.post(url + "/api/engines/not-an-engine/upgrade",
+                             headers=good, ssl=pinned) as response:
+            assert response.status == 404, await response.text()
+        async with http.post(url + "/api/engines/not-an-engine/upgrade",
+                             ssl=pinned) as response:
+            assert response.status == 401, await response.text()
         async with http.get(url + "/api/engines/usage-refresh",
                             headers=good, ssl=pinned) as response:
             refresh = await response.json()
@@ -586,7 +606,7 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         async with http.get(url + "/api/backends", headers=headers) as response:
             listed = (await response.json())["backends"]
             assert response.status == 200
-        assert len(listed) == 1
+        assert len(listed) == 1, listed
         stored = listed[0]
         assert stored["name"] == "backend-test-node"
         assert stored["protocol"] == 1
@@ -594,6 +614,7 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert "sessions" in stored["capabilities"]
         assert "temporary-workspaces" in stored["capabilities"]
         assert "engine-usage-refresh" in stored["capabilities"]
+        assert "engine-upgrade" in stored["capabilities"]
         assert "file-uploads" in stored["capabilities"]
         assert "terminal" not in stored["capabilities"]
         assert "remote-upgrade" in stored["capabilities"]

@@ -35,11 +35,20 @@ import logging
 import shutil
 import time
 
-from puppy import cli_releases
+from puppy import cli_releases, cli_upgrade
 
 log = logging.getLogger("puppy.drivers")
 
+STATUS_TTL_SECONDS = 300
 _status_cache = {}  # key -> (ts, dict)
+
+
+def invalidate_status(key=None) -> None:
+    """Drop cached CLI probes so the next status() re-reads the installed truth."""
+    if key is None:
+        _status_cache.clear()
+    else:
+        _status_cache.pop(str(key), None)
 
 
 class Driver:
@@ -52,6 +61,10 @@ class Driver:
     # Optional advisory source for latest-version checks. New registry kinds
     # belong in cli_releases; engine-specific package identity stays here.
     release_source = None
+    # Optional fixed self-update verb for this CLI, e.g. {"kind": "self",
+    # "args": ["update"]}. The vendor updater owns install-method detection;
+    # cli_upgrade owns the bounded subprocess. Never build this from input.
+    upgrade_source = None
 
     def permission_options(self):
         """[{value, label, hint}] - engine-specific permission/sandbox levels."""
@@ -95,8 +108,9 @@ class Driver:
         """{installed, version, auth, detail, ...extras}; slow checks are cached."""
         now = time.time()
         cached = _status_cache.get(self.key)
-        if cached and now - cached[0] < 300:
+        if cached and now - cached[0] < STATUS_TTL_SECONDS:
             st = dict(cached[1])
+            probed_at = cached[0]
         else:
             st = {"installed": False, "version": "", "auth": "unknown", "detail": ""}
             if shutil.which(self.binary):
@@ -104,8 +118,11 @@ class Driver:
                 st["version"] = await self._run_quick([self.binary, "--version"])
                 st.update(await self._auth_status())
             _status_cache[self.key] = (now, dict(st))
+            probed_at = now
         # Quotas can change between the relatively expensive version/auth
         # probes, so dynamic extras must never be trapped in the 5-minute cache.
+        st["version_checked_at"] = probed_at
+        st.update(cli_upgrade.state(self))
         st.update(cli_releases.status(self, st.get("version", "")))
         st.update(self._extra_status())
         return st

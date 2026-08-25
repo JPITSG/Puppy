@@ -373,6 +373,7 @@ class CodexDriver(Driver):
     binary = "codex"
     uses_stdin_stream = False
     release_source = {"kind": "npm", "package": "@openai/codex"}
+    upgrade_source = {"kind": "self", "args": ["update"]}
 
     def permission_options(self):
         return [

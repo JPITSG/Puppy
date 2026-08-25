@@ -1061,16 +1061,41 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   margin-left:auto;min-width:0;max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
   color:var(--txt3);font:10px var(--mono);
 }
+.engine-node-refresh{
+  position:relative;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;
+  width:20px;height:20px;margin:0 0 0 8px;padding:0;border:0;border-radius:var(--btn-r);
+  background:transparent;color:var(--txt3);cursor:pointer;
+  transition:background .15s var(--ease),color .15s var(--ease),transform .12s var(--ease);
+}
+/* the head sits on a 10px type scale: keep the real tap target finger-sized */
+.engine-node-refresh::after{content:"";position:absolute;inset:-8px}
+.engine-node-refresh svg{display:block;transform-origin:center}
+@media (hover:hover){.engine-node-refresh:hover{background:var(--hov);color:var(--txt)}}
+.engine-node-refresh:active{transform:scale(.9);background:var(--hov)}
+.engine-node-refresh:focus-visible{outline:1px solid var(--acc);outline-offset:2px}
+.engine-node-refresh:disabled{cursor:wait;opacity:.5}
+.engine-node-refresh.refreshing svg{animation:spin .75s linear infinite}
 .engine-row{
   display:grid;grid-template-columns:minmax(110px,1fr) auto;align-items:center;gap:8px 14px;
   min-width:0;padding:8px 0 8px 13px;
 }
+/* the action column only exists while an engine has an update to offer, so a
+   settled node keeps the two-column reading it has today */
+.engine-row.has-actions{grid-template-columns:minmax(110px,1fr) auto auto}
 .engine-row-identity{display:flex;align-items:center;gap:8px;min-width:0}
 .engine-row-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--txt);font-size:13px;font-weight:500}
 .engine-row-statuses{display:flex;align-items:center;justify-content:flex-end;gap:6px;min-width:0;flex-wrap:wrap}
 .engine-row-statuses .pill{min-width:0}
+.engine-row-actions{display:flex;align-items:center;justify-content:flex-end;min-width:0}
+.engine-update{flex:0 0 auto;min-width:82px}
+.engine-update.wants-update{color:var(--warn);border-color:rgba(255,182,77,.4);background:var(--warn-dim)}
+@media (hover:hover){
+  .engine-update.wants-update:hover{color:var(--warn);border-color:rgba(255,182,77,.6)}
+}
+.engine-update.busy{cursor:wait}
 .engine-version{max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .engine-node-message{padding:7px 0 5px 30px;color:var(--txt3);font-size:11px}
+.engine-node-stale{color:var(--warn);opacity:.85}
 .be-row{
   display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:10px 16px;
   padding:10px 0;border-bottom:1px solid var(--line);
@@ -1351,10 +1376,18 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   .msg-user{max-width:94%}
 }
 @media (max-width:560px){
-  .engine-node-head{display:grid;grid-template-columns:6px minmax(0,1fr);gap:2px 7px;align-items:center}
+  .engine-node-head{
+    display:grid;grid-template-columns:6px minmax(0,1fr) auto;gap:2px 7px;align-items:center;
+  }
   .engine-node-meta{grid-column:2;margin-left:0;max-width:100%}
+  /* the name and the wrapped meta line share one row block; the refresh
+     control stays centred beside both instead of starting a third line */
+  .engine-node-refresh{grid-column:3;grid-row:1/span 2;margin:0;width:26px;height:26px}
   .engine-row{grid-template-columns:minmax(0,1fr);gap:6px;padding:9px 0 9px 13px}
+  .engine-row.has-actions{grid-template-columns:minmax(0,1fr)}
   .engine-row-statuses{justify-content:flex-start;padding-left:17px}
+  .engine-row-actions{justify-content:flex-start;padding-left:17px}
+  .engine-update{height:34px;min-width:112px}
   .engine-node-message{padding-left:26px}
   /* The toggle takes the empty space beside the name rather than a line of its
      own, where it read as a stray control between the backend and its buttons. */
