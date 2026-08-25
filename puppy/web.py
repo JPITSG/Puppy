@@ -115,6 +115,15 @@ async def _engines_payload(refresh_usage: bool = True):
     return engines
 
 
+def _node_user() -> str:
+    """Account this node's puppy process runs as - what a shell here lands on."""
+    try:
+        import getpass
+        return getpass.getuser()
+    except Exception:
+        return os.environ.get("USER") or os.environ.get("LOGNAME") or ""
+
+
 async def h_state(request: web.Request):
     # Keep initial app/auth entry fast. The browser immediately follows with
     # an asynchronous engine poll, which performs a due account refresh.
@@ -123,6 +132,7 @@ async def h_state(request: web.Request):
     return web.json_response({
         "version": __version__,
         "instance_name": config.get("instance_name"),
+        "user": _node_user(),
         "engines": engines,
         "usage_refresh": usage_refresh.payload(),
         "backends": backends.list_backends(),
@@ -139,6 +149,8 @@ async def h_engines(request: web.Request):
     return web.json_response({
         "engines": engines,
         "usage_refresh": usage_refresh.payload(),
+        # additive: lets the console label this node's shells "user @ node"
+        "user": _node_user(),
     })
 
 

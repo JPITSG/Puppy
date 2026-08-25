@@ -1199,6 +1199,7 @@ const state = {
   remoteOk: {},           // bid -> bool
   remoteErrors: {},       // bid -> latest reachability error
   engCache: {},           // bid -> engines[]
+  nodeUsers: {},          // bid -> account the node's puppy process runs as
   remoteEngineErrors: {}, // bid -> latest engine-status error (node can still be reachable)
   remoteEngineCheckedAt: {},
   remoteNodeCheckedAt: {},
@@ -1389,6 +1390,7 @@ async function enterApp() {
 async function refreshState() {
   const s = await api(0, "state");
   state.instance = s.instance_name;
+  if (typeof s.user === "string") state.nodeUsers[0] = s.user;
   state.sessionColors = s.session_colors || [];
   state.engines = Array.isArray(s.engines) ? s.engines : [];
   state.usageRefresh = s.usage_refresh || state.usageRefresh;
@@ -1502,6 +1504,7 @@ async function pollLocalEngines(forceEngines = false) {
     state.engines.forEach(engine => state.engMap[engine.key] = engine);
     state.usageRefresh = payload.usage_refresh || state.usageRefresh;
     state.localEngineCheckedAt = Date.now();
+    setNodeUser(0, payload.user);
   } catch (error) {
     /* A broken local request should not turn the 12-second session poll into
        a tight engine-status retry loop. The normal one-minute cadence retries. */
@@ -1587,6 +1590,7 @@ async function pollRemoteBackend(backend, forceEngines = false) {
     if (engines.usage_refresh) state.remoteUsageRefresh[bid] = engines.usage_refresh;
     state.remoteEngineCheckedAt[bid] = Date.now();
     delete state.remoteEngineErrors[bid];
+    setNodeUser(bid, engines.user);
   } catch (error) {
     if (!remotePollIsCurrent(bid, sequence)) return;
     /* Sessions proved the node is reachable. Keep last-known engine data and
@@ -1667,6 +1671,19 @@ function backendName(bid) {
   if (!bid) return state.instance || "local";
   const b = state.backends.find(x => x.id === bid);
   return b ? b.name : `backend ${bid}`;
+}
+
+/* Shell tabs are titled by where the shell lands: the account the node's
+   puppy process runs as. Derived at render time, so it corrects itself when
+   the account arrives from a poll, and survives titles saved by older builds. */
+function setNodeUser(bid, user) {
+  if (typeof user !== "string" || state.nodeUsers[bid] === user) return;
+  state.nodeUsers[bid] = user;
+  renderTabs();
+}
+function shellTabTitle(tab) {
+  const bid = tab.bid || 0;
+  return `${state.nodeUsers[bid] || "shell"} @ ${backendName(bid)}`;
 }
 
 function backendLocationVersion(backend) {
@@ -2305,7 +2322,8 @@ function openSessionTab(bid, sid, meta) {
 
 function openTermTab(bid, cmd) {
   const id = `t:${Date.now()}:${termSeq++}`;
-  state.tabs.push({ id, type: "term", bid: bid || 0, cmd: cmd || "", title: cmd ? cmd.slice(0, 24) : `shell @ ${backendName(bid || 0)}` });
+  state.tabs.push({ id, type: "term", bid: bid || 0, cmd: cmd || "",
+    title: cmd ? cmd.slice(0, 24) : shellTabTitle({ bid: bid || 0 }) });
   activateTab(id);
 }
 
@@ -2402,7 +2420,8 @@ function renderTabs() {
     if (t.type === "settings") tdot.appendChild(gearIcon(12));
     else if (t.type === "term") tdot.appendChild(terminalIcon(12));
     tab.appendChild(tdot);
-    tab.appendChild(el("span", "t-title", t.title || "tab"));
+    tab.appendChild(el("span", "t-title",
+      (t.type === "term" && !t.cmd) ? shellTabTitle(t) : (t.title || "tab")));
     if (t.type === "session") {
       tab.addEventListener("contextmenu", (e) => {
         const meta = findSessionMeta(t.bid, t.sid);
