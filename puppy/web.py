@@ -892,9 +892,8 @@ async def h_notify_set(request: web.Request):
         return web.json_response({"error": "unknown backend"}, status=400)
     config.set_value("notify.backend", bid)
     config.set_value("notify.command", command)
-    # saving a command arms the bell (that is what saving means); clearing
-    # the command retires the feature and the bell with it
-    config.set_value("notify.enabled", bool(command))
+    # The switch/bell owns enabled independently. An enabled alert with no
+    # command remains inert, and saving a command never undoes a user's choice.
     _notify_broadcast()
     log.info("notify command %s (backend %s)", "configured" if command else "cleared", bid)
     return web.json_response({"ok": True, "settings": notify.settings()})
@@ -902,8 +901,6 @@ async def h_notify_set(request: web.Request):
 
 async def h_notify_toggle(request: web.Request):
     body = await request.json()
-    if not notify.configured():
-        return web.json_response({"error": "no completion command configured"}, status=400)
     config.set_value("notify.enabled", bool(body.get("enabled")))
     _notify_broadcast()
     return web.json_response({"ok": True, "settings": notify.settings()})

@@ -1026,9 +1026,16 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 }
 .be-auto-copy{display:flex;flex-direction:column;gap:2px;min-width:0;color:var(--txt2);font-size:11.5px}
 .be-auto-copy small{color:var(--txt3);font:9.5px/1.35 var(--mono);white-space:normal}
+.notify-head{
+  display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;
+  gap:8px 12px;margin-bottom:12px;
+}
+.card .notify-head h2{margin-bottom:0}
+.notify-toggle{justify-self:end;min-height:22px}
 .notify-fields{display:grid;grid-template-columns:minmax(150px,220px) minmax(0,1fr);gap:0 12px}
 @media (max-width:560px){.notify-fields{grid-template-columns:minmax(0,1fr)}}
 .mono-inline{font-family:var(--mono);font-size:11px;text-transform:none;letter-spacing:0}
+.notify-actions{display:flex;align-items:center;justify-content:flex-start;gap:8px;flex-wrap:wrap;margin-top:10px}
 .notify-note{color:var(--txt3);font-size:11.5px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .notify-note.bad{color:var(--err)}
 .be-security{width:20px;height:20px;display:flex;align-items:center;justify-content:center}

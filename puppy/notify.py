@@ -48,6 +48,8 @@ def configured() -> bool:
 
 def active() -> bool:
     s = settings()
+    # Enabled and configured are intentionally independent: the Settings
+    # switch may be on before a command is supplied, but that must stay inert.
     return bool(s["command"].strip()) and s["enabled"]
 
 

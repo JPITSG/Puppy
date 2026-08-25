@@ -2666,6 +2666,21 @@ function syncBell() {
   bell.title = n.enabled ? "Completion alerts armed · click to silence"
     : "Completion alerts off · click to arm";
   bell.setAttribute("aria-pressed", n.enabled ? "true" : "false");
+
+  const toggle = $("nf-enabled");
+  const toggleRoot = $("nf-enabled-wrap");
+  if (toggle && toggleRoot) {
+    const saving = toggle.dataset.saving === "true";
+    if (!saving) toggle.checked = !!n.enabled;
+    toggle.disabled = saving;
+    toggleRoot.classList.toggle("disabled", saving);
+    toggleRoot.title = saving ? "Updating completion alerts…" : !n.configured && n.enabled ?
+      "Enabled, but no command is configured, so nothing will run" : n.enabled ?
+        "Completion alerts enabled · same setting as the sidebar bell" :
+        "Completion alerts disabled · same setting as the sidebar bell";
+    toggle.setAttribute("aria-label", n.enabled ?
+      "Disable completion alerts" : "Enable completion alerts");
+  }
 }
 $("btn-bell").onclick = async () => {
   const want = !(state.notify && state.notify.enabled);
@@ -5137,8 +5152,15 @@ class SettingsView {
 
     /* completion alert: a command a chosen node runs when a session finishes */
     const notifyCard = el("div", "card notify-card");
-    notifyCard.innerHTML = `<h2>Completion alert</h2>
-      <p class="usage-refresh-copy">Optional. When a session finishes its work — its prompt and
+    notifyCard.innerHTML = `<div class="notify-head">
+        <h2>Completion alert</h2>
+        <label class="be-auto notify-toggle" id="nf-enabled-wrap">
+          <input type="checkbox" id="nf-enabled">
+          <span class="be-auto-track" aria-hidden="true"><span></span></span>
+          <span class="be-auto-label">Enabled</span>
+        </label>
+      </div>
+      <p class="usage-refresh-copy">When a session finishes its work — its prompt and
         anything queued behind it — run this command on a node: play a sound, ping your home
         automation, anything. Arm or silence it any time with the bell in the sidebar footer.</p>
       <div class="notify-fields">
@@ -5149,14 +5171,16 @@ class SettingsView {
       <p class="usage-refresh-copy">Placeholders <span class="mono-inline">{backend} {session}
         {engine} {model} {status} {duration} {cwd} {id}</span> are substituted shell-quoted, and the
         same values arrive as <span class="mono-inline">PUPPY_*</span> environment variables.
-        Saving a command arms the bell; saving it empty retires the feature.</p>
-      <div class="m-btns" style="justify-content:flex-start;margin-top:10px">
+        The switch and sidebar bell control the same enabled state. With no command, completions
+        do nothing and the bell stays hidden.</p>
+      <div class="notify-actions">
         <button class="btn btn-pri btn-sm" id="nf-save">Save</button>
         <button class="btn btn-sm" id="nf-test">Test</button>
         <span class="notify-note" id="nf-note"></span>
       </div>`;
     const nfBackend = notifyCard.querySelector("#nf-backend");
     const nfCmd = notifyCard.querySelector("#nf-cmd");
+    const nfEnabled = notifyCard.querySelector("#nf-enabled");
     const nfNote = notifyCard.querySelector("#nf-note");
     const nfLocal = document.createElement("option");
     nfLocal.value = "0";
@@ -5172,6 +5196,7 @@ class SettingsView {
       nfBackend.appendChild(option);
     }
     this.inner.appendChild(notifyCard);
+    syncBell();
     enhanceChoiceSelect(nfBackend);
     const nfNoteSet = (text, bad = false) => {
       nfNote.textContent = text;
@@ -5182,7 +5207,31 @@ class SettingsView {
       const have = [...nfBackend.options].some(o => o.value === String(r.settings.backend));
       nfBackend.value = have ? String(r.settings.backend) : "0";
       refreshChoiceSelect(nfBackend);
+      state.notify = { configured: !!(r.settings.command || "").trim(),
+                       enabled: !!r.settings.enabled };
+      syncBell();
     }).catch(() => nfNoteSet("could not load the current setting", true));
+    nfEnabled.onchange = async () => {
+      const desired = nfEnabled.checked;
+      nfEnabled.dataset.saving = "true";
+      syncBell();
+      nfNoteSet(desired ? "enabling…" : "disabling…");
+      try {
+        const r = await api(0, "notify/toggle", {
+          method: "POST", body: { enabled: desired },
+        });
+        state.notify = { configured: !!(r.settings.command || "").trim(),
+                         enabled: !!r.settings.enabled };
+        nfNoteSet(state.notify.configured ?
+          (state.notify.enabled ? "armed" : "silenced") :
+          (state.notify.enabled ? "enabled · no command" : "disabled"));
+      } catch (e) {
+        nfNoteSet(e.message, true);
+      } finally {
+        delete nfEnabled.dataset.saving;
+        syncBell();
+      }
+    };
     notifyCard.querySelector("#nf-save").onclick = async () => {
       try {
         const r = await api(0, "notify", { method: "POST", body: {
@@ -5191,8 +5240,10 @@ class SettingsView {
         state.notify = { configured: !!(r.settings.command || "").trim(),
                          enabled: !!r.settings.enabled };
         syncBell();
-        nfNoteSet(state.notify.configured ? "saved · armed" : "saved · off");
-        toast(state.notify.configured ? "completion alert armed" : "completion alert off", "ok");
+        nfNoteSet(!state.notify.configured ? "saved · no command" :
+          state.notify.enabled ? "saved · armed" : "saved · silenced");
+        toast(state.notify.configured ? "completion alert saved" :
+          "completion alert command cleared", "ok");
       } catch (e) { nfNoteSet(e.message, true); }
     };
     notifyCard.querySelector("#nf-test").onclick = async () => {
