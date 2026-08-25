@@ -1302,6 +1302,11 @@ function backendName(bid) {
   return b ? b.name : `backend ${bid}`;
 }
 
+function backendLocationVersion(backend) {
+  return [backend.url, backend.remote_version ? `v${backend.remote_version}` : ""]
+    .filter(Boolean).join(" · ");
+}
+
 function formatSessionActivity(startedAt, now = Date.now()) {
   const start = Number(startedAt);
   const total = Number.isFinite(start) ?
@@ -3179,6 +3184,7 @@ class SettingsView {
     this.renderGeneration = 0;
     this.remoteEngineGroups = new Map();
     this.remoteBackendDots = new Map();
+    this.remoteBackendMeta = new Map();
     this.usageRows = new Map();
     this.upgradeButtons = new Map();
     this.backendAutoToggles = new Map();
@@ -3197,6 +3203,7 @@ class SettingsView {
     this.stopUpgradeReadinessPolling();
     this.remoteEngineGroups.clear();
     this.remoteBackendDots.clear();
+    this.remoteBackendMeta.clear();
     this.usageRows.clear();
     this.upgradeButtons.clear();
     this.backendAutoToggles.clear();
@@ -3383,8 +3390,7 @@ class SettingsView {
     for (const [bid, group] of this.remoteEngineGroups) {
       const backend = state.backends.find(item => item.id === bid);
       if (!backend) continue;
-      group.setMeta([backend.url, backend.remote_version ? `v${backend.remote_version}` : ""]
-        .filter(Boolean).join(" · "));
+      group.setMeta(backendLocationVersion(backend));
       const reachable = state.remoteOk[bid];
       const cached = Object.prototype.hasOwnProperty.call(state.engCache, bid) ?
         state.engCache[bid] : null;
@@ -3411,6 +3417,13 @@ class SettingsView {
       const status = remoteAvailability(bid);
       dot.className = "gdot " + status;
       dot.title = remoteAvailabilityTitle(bid);
+    }
+    for (const [bid, meta] of this.remoteBackendMeta) {
+      const backend = state.backends.find(item => item.id === bid);
+      if (!backend || !meta.isConnected) continue;
+      const value = backendLocationVersion(backend);
+      meta.textContent = value;
+      meta.title = value;
     }
     for (const [bid, row] of this.usageRows) {
       if (!bid) {
@@ -3618,6 +3631,7 @@ class SettingsView {
     this.inner.innerHTML = "";
     this.remoteEngineGroups.clear();
     this.remoteBackendDots.clear();
+    this.remoteBackendMeta.clear();
     this.usageRows.clear();
     this.upgradeButtons.clear();
     this.backendAutoToggles.clear();
@@ -3803,7 +3817,7 @@ class SettingsView {
     this.localEngineGroup = localGroup;
     c2.appendChild(localGroup.root);
     for (const b of state.backends) {
-      const meta = [b.url, b.remote_version ? `v${b.remote_version}` : ""].filter(Boolean).join(" · ");
+      const meta = backendLocationVersion(b);
       const group = this.engineGroup(b.name, meta);
       const cached = state.engCache[b.id];
       group.update({
@@ -3863,6 +3877,7 @@ class SettingsView {
     const renderBes = () => {
       beList.innerHTML = "";
       this.remoteBackendDots.clear();
+      this.remoteBackendMeta.clear();
       if (!state.backends.length) beList.innerHTML = `<p class="hint">No remote backends. This instance ("${esc(backendName(0))}") is always available as local.</p>`;
       for (const b of state.backends) {
         const row = el("div", "be-row");
@@ -3873,8 +3888,9 @@ class SettingsView {
         const name = el("span", "be-name", b.name);
         name.title = [b.role, b.remote_version && `v${b.remote_version}`,
           b.protocol != null && `protocol ${b.protocol}`].filter(Boolean).join(" · ");
-        const url = el("span", "be-url", b.url);
-        url.title = b.url;
+        const backendMeta = backendLocationVersion(b);
+        const url = el("span", "be-url", backendMeta);
+        url.title = backendMeta;
         const metaRow = el("div", "be-meta-row");
         const autoRoot = el("label", "be-auto be-auto-existing");
         const autoInput = document.createElement("input");
@@ -3932,6 +3948,7 @@ class SettingsView {
         details.appendChild(security);
         details.appendChild(identity);
         this.remoteBackendDots.set(b.id, availability);
+        this.remoteBackendMeta.set(b.id, url);
         row.appendChild(details);
         row.appendChild(autoRoot);
         const actions = el("div", "be-actions");
