@@ -1012,6 +1012,7 @@ const tips = (() => {
   let mode = "pointer";  // how the bubble was summoned: pointer | focus
   let showTimer = 0, outTimer = 0, fadeTimer = 0, tick = 0;
   let warmUntil = 0, lastX = -1, lastY = -1;
+  let aimX = -1;         // where the bubble points, taken from the pointer at show time
 
   /* the freshest tip for an element: a live `title` wins over the adopted
      copy because renderers keep assigning `.title` after adoption */
@@ -1045,7 +1046,13 @@ const tips = (() => {
     if (side === "bottom" && r.bottom + GAP + h > vh - EDGE && r.top - GAP - h >= EDGE) side = "top";
     else if (side === "top" && r.top - GAP - h < EDGE && r.bottom + GAP + h <= vh - EDGE) side = "bottom";
     const y = side === "bottom" ? Math.min(r.bottom + GAP, vh - EDGE - h) : Math.max(r.top - GAP - h, EDGE);
-    const x = Math.max(EDGE, Math.min((r.left + r.right) / 2 - w / 2, vw - EDGE - w));
+    /* Centre on the anchor while the bubble is as wide as it - the tidy look for
+       buttons and chips. Wider anchors get the bubble over the pointer instead:
+       a full-width row's centre can be an arm's length from the words actually
+       being hovered. Frozen at show time so it does not chase the mouse. */
+    const cx = (aimX >= 0 && r.width > w) ? Math.min(Math.max(aimX, r.left), r.right)
+      : (r.left + r.right) / 2;
+    const x = Math.max(EDGE, Math.min(cx - w / 2, vw - EDGE - w));
     root.classList.toggle("glide", !!glide);
     root.dataset.side = side;
     root.style.transform = `translate(${Math.round(x)}px,${Math.round(y)}px)`;
@@ -1068,6 +1075,7 @@ const tips = (() => {
     if (!t) { hide(); return; }
     const glide = !root.hidden && anchor !== a;
     anchor = a; mode = why;
+    aimX = why === "pointer" ? lastX : -1;   // keyboard focus has no pointer to aim at
     root.classList.remove("out");
     if (card.textContent !== t) card.textContent = t;
     if (root.hidden) { root.hidden = false; root.classList.remove("glide"); }
