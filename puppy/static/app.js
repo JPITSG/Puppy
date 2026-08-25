@@ -908,6 +908,187 @@ function linkifyInto(node, text) {
   return node;
 }
 
+/* ================= tooltips ================= */
+/* Custom title bubbles. A capture-phase pointerover moves an element's native
+   `title` into `data-tip` the first time it is hovered (suppressing the
+   browser bubble) and positions one shared fixed #tip node near the anchor,
+   so every current and future `.title =` assignment keeps working unchanged.
+   Empty titles keep an empty `data-tip` so they still suppress an ancestor's
+   bubble the way `title=""` does natively. */
+const tips = (() => {
+  const SHOW_MS = 500;   // first-hover delay
+  const WARM_MS = 350;   // instant re-show window after a hide
+  const GAP = 7, EDGE = 8;
+  let root = null, card = null;
+  let anchor = null;     // element the visible bubble belongs to
+  let pending = null;    // element waiting out SHOW_MS
+  let mode = "pointer";  // how the bubble was summoned: pointer | focus
+  let showTimer = 0, outTimer = 0, fadeTimer = 0, tick = 0;
+  let warmUntil = 0, lastX = -1, lastY = -1;
+
+  /* the freshest tip for an element: a live `title` wins over the adopted
+     copy because renderers keep assigning `.title` after adoption */
+  const text = (a) => {
+    if (!a) return "";
+    const v = a.hasAttribute("title") ? a.getAttribute("title") : a.getAttribute("data-tip");
+    return (v || "").trim();
+  };
+
+  /* title -> data-tip; glyph-only controls keep the text as their name */
+  const adopt = (a) => {
+    if (!a.hasAttribute("title")) return;
+    const t = a.getAttribute("title") || "";
+    a.removeAttribute("title");
+    a.setAttribute("data-tip", t);
+    const owned = a.hasAttribute("data-tip-label");
+    if (owned || (!a.hasAttribute("aria-label") && !a.hasAttribute("aria-labelledby") &&
+        (a.textContent || "").trim().length <= 2)) {
+      if (t.trim()) { a.setAttribute("aria-label", t); a.setAttribute("data-tip-label", "1"); }
+      else if (owned) { a.removeAttribute("aria-label"); a.removeAttribute("data-tip-label"); }
+    }
+  };
+
+  const anchorOf = (n) => (n instanceof Element) ? n.closest("[title],[data-tip]") : null;
+
+  function place(glide) {
+    const r = anchor.getBoundingClientRect();
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const w = root.offsetWidth, h = root.offsetHeight;
+    let side = (r.top + r.bottom) / 2 < vh / 2 ? "bottom" : "top";
+    if (side === "bottom" && r.bottom + GAP + h > vh - EDGE && r.top - GAP - h >= EDGE) side = "top";
+    else if (side === "top" && r.top - GAP - h < EDGE && r.bottom + GAP + h <= vh - EDGE) side = "bottom";
+    const y = side === "bottom" ? Math.min(r.bottom + GAP, vh - EDGE - h) : Math.max(r.top - GAP - h, EDGE);
+    const x = Math.max(EDGE, Math.min((r.left + r.right) / 2 - w / 2, vw - EDGE - w));
+    root.classList.toggle("glide", !!glide);
+    root.dataset.side = side;
+    root.style.transform = `translate(${Math.round(x)}px,${Math.round(y)}px)`;
+  }
+
+  function show(a, why) {
+    if (!root) {
+      root = el("div");
+      root.id = "tip";
+      root.hidden = true;
+      root.setAttribute("aria-hidden", "true");
+      card = el("div", "tip-card");
+      root.appendChild(card);
+      document.body.appendChild(root);
+    }
+    clearTimeout(showTimer); showTimer = 0; pending = null;
+    clearTimeout(outTimer); outTimer = 0;
+    clearTimeout(fadeTimer); fadeTimer = 0;
+    const t = text(a);
+    if (!t) { hide(); return; }
+    const glide = !root.hidden && anchor !== a;
+    anchor = a; mode = why;
+    root.classList.remove("out");
+    if (card.textContent !== t) card.textContent = t;
+    if (root.hidden) { root.hidden = false; root.classList.remove("glide"); }
+    place(glide);
+    if (!tick) tick = setInterval(onTick, 300);
+  }
+
+  function hide() {
+    clearTimeout(showTimer); showTimer = 0; pending = null;
+    clearTimeout(outTimer); outTimer = 0;
+    if (tick) { clearInterval(tick); tick = 0; }
+    anchor = null;
+    if (!root || root.hidden) return;
+    warmUntil = performance.now() + WARM_MS;
+    root.classList.add("out");
+    clearTimeout(fadeTimer);
+    fadeTimer = setTimeout(() => { root.hidden = true; root.classList.remove("out", "glide"); }, 130);
+  }
+
+  function kill() { hide(); warmUntil = 0; }
+
+  /* re-renders replace hovered nodes without any pointer event: re-resolve
+     the element under the pointer and follow it; a surviving anchor gets its
+     text refreshed (live meters) and its drift tracked (reorder animations) */
+  function onTick() {
+    if (!anchor) return;
+    if (mode === "focus") { if (!anchor.isConnected) hide(); return; }
+    const a = anchorOf(document.elementFromPoint(lastX, lastY));
+    if (!a) { hide(); return; }
+    adopt(a);
+    const t = text(a);
+    if (!t) { hide(); return; }
+    if (a !== anchor) { show(a, "pointer"); return; }
+    if (card.textContent !== t) card.textContent = t;
+    place(true);
+  }
+
+  function onOver(e) {
+    if (e.pointerType === "touch") return;
+    lastX = e.clientX; lastY = e.clientY;
+    const a = anchorOf(e.target);
+    if (!a) return;
+    adopt(a);
+    if (!text(a)) return;
+    if (a === anchor) { clearTimeout(outTimer); outTimer = 0; return; }
+    if ((root && !root.hidden) || performance.now() < warmUntil) { show(a, "pointer"); return; }
+    if (pending === a) return;
+    pending = a;
+    clearTimeout(showTimer);
+    showTimer = setTimeout(() => {
+      showTimer = 0;
+      const p = pending; pending = null;
+      if (p && p.isConnected) show(p, "pointer");
+    }, SHOW_MS);
+  }
+
+  function onOut(e) {
+    const t = e.target;
+    if (!(t instanceof Element)) return;
+    const leaves = (a) => a && (t === a || a.contains(t)) &&
+      !(e.relatedTarget instanceof Element && a.contains(e.relatedTarget));
+    if (leaves(pending)) { clearTimeout(showTimer); showTimer = 0; pending = null; }
+    if (leaves(anchor) && !outTimer) {
+      /* brief linger so a hop onto an adjacent anchor glides instead */
+      outTimer = setTimeout(() => { outTimer = 0; hide(); }, 70);
+    }
+  }
+
+  function onScroll(e) {
+    const a = anchor || pending;
+    if (!a) return;
+    const s = e.target;
+    if (s === document || s === window || (s instanceof Element && s.contains(a))) hide();
+  }
+
+  function onFocusIn(e) {
+    let fv = false;
+    try { fv = e.target instanceof Element && e.target.matches(":focus-visible"); }
+    catch (err) { /* selector unsupported: skip focus bubbles */ }
+    if (!fv) return;
+    const a = anchorOf(e.target);
+    if (!a) return;
+    adopt(a);
+    if (text(a)) show(a, "focus");
+  }
+
+  const opts = { capture: true, passive: true };
+  document.addEventListener("pointerover", onOver, opts);
+  document.addEventListener("pointerout", onOut, opts);
+  document.addEventListener("pointermove", (e) => {
+    if (anchor || pending) { lastX = e.clientX; lastY = e.clientY; }
+  }, opts);
+  document.addEventListener("pointerdown", kill, opts);
+  document.addEventListener("dragstart", kill, opts);
+  document.addEventListener("dragenter", kill, opts);
+  document.addEventListener("scroll", onScroll, opts);
+  window.addEventListener("resize", kill);
+  window.addEventListener("blur", kill);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) kill(); });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") kill();
+    else if (mode === "focus" && anchor && e.key !== "Tab") hide();
+  }, true);
+  document.addEventListener("focusin", onFocusIn);
+  document.addEventListener("focusout", () => { if (mode === "focus") hide(); });
+  return { text };
+})();
+
 /* ================= state ================= */
 const state = {
   authed: false,
@@ -3112,7 +3293,7 @@ class SessionView {
     this.syncUploadButton();
     const unavailable = this.attachButton && this.attachButton.disabled;
     this.composerBox.dataset.dropHint = unavailable ?
-      this.attachButton.title : "Drop files to attach";
+      tips.text(this.attachButton) : "Drop files to attach";
     this.composerBox.classList.add("file-drag");
     this.composerBox.classList.toggle("drop-rejected", !!unavailable);
   }
@@ -3552,7 +3733,7 @@ class SessionView {
     const menu = el("div", "choice-menu composer-choice-menu dyn");
     menu._anchor = anchor;
     menu.setAttribute("role", "listbox");
-    menu.setAttribute("aria-label", anchor.title || "Choices");
+    menu.setAttribute("aria-label", tips.text(anchor) || "Choices");
     menu.style.visibility = "hidden";
     anchor.setAttribute("aria-haspopup", "listbox");
     anchor.setAttribute("aria-expanded", "true");

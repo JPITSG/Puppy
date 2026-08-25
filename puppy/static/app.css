@@ -30,6 +30,10 @@
   /* one elevated material for select popups, context menus and tab menus */
   --float-menu-bg:var(--panel); --float-menu-hover:var(--acc-dim);
   --float-menu-shadow:0 18px 42px -14px rgba(0,0,0,.78),inset 0 1px 0 var(--btn-top);
+  /* tooltip bubble: frosted sibling of the float-menu material (see #tip) */
+  --tip-bg:linear-gradient(180deg,rgba(255,255,255,.06),rgba(255,255,255,0) 58%),rgba(16,19,26,.92);
+  --tip-line:rgba(255,255,255,.17);
+  --tip-shadow:0 10px 28px -10px rgba(0,0,0,.8),inset 0 1px 0 rgba(255,255,255,.08);
   --spin-track:rgba(255,255,255,.22);
   --acc-hi:#5fa5f6; --acc-lo:#2a63c9;
   --glow-acc:0 2px 8px -5px rgba(58,120,220,.72);
@@ -1141,6 +1145,35 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .toast.ok{border-left-color:var(--ok)}
 @keyframes toast-in{from{transform:translateY(8px);opacity:0}to{transform:none;opacity:1}}
 
+/* ---------- tooltips ---------- */
+/* Custom replacement for the browser's title bubbles. app.js moves `title`
+   into `data-tip` on first hover; #tip is a single fixed singleton positioned
+   with a transform. The card carries the material + entrance animation so the
+   outer node's transform stays purely positional (.glide transitions it when
+   sliding between adjacent anchors). */
+#tip{position:fixed;left:0;top:0;z-index:500;pointer-events:none}
+#tip[hidden]{display:none}
+#tip.glide{transition:transform .15s var(--ease)}
+#tip.out{opacity:0;transition:opacity .12s ease}
+.tip-card{
+  width:max-content;max-width:320px;max-width:min(320px,calc(100vw - 16px));
+  padding:5px 10px 6px;border:1px solid var(--tip-line);border-radius:8px;
+  font:12px/1.45 var(--sans);letter-spacing:.01em;color:var(--txt);
+  white-space:pre-line;word-wrap:break-word;overflow-wrap:anywhere;
+  background:var(--tip-bg);box-shadow:var(--tip-shadow);
+  -webkit-backdrop-filter:blur(12px) saturate(1.35);
+  backdrop-filter:blur(12px) saturate(1.35);
+}
+#tip[data-side="bottom"] .tip-card{transform-origin:50% 0;animation:tip-in-b .16s var(--ease)}
+#tip[data-side="top"] .tip-card{transform-origin:50% 100%;animation:tip-in-t .16s var(--ease)}
+#tip.glide .tip-card{animation:none}
+@keyframes tip-in-b{from{opacity:0;transform:translateY(-5px) scale(.95)}to{opacity:1;transform:none}}
+@keyframes tip-in-t{from{opacity:0;transform:translateY(5px) scale(.95)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){
+  #tip.glide{transition:none}
+  #tip[data-side="bottom"] .tip-card,#tip[data-side="top"] .tip-card{animation:none}
+}
+
 /* ---------- responsive ---------- */
 @media (max-width:900px){
   .side{
@@ -1243,6 +1276,9 @@ html.light{
   --glow-err:0 2px 8px -5px rgba(207,56,80,.42);
   --danger-line:rgba(214,69,93,.4); --danger-line-hi:rgba(214,69,93,.62);
   --danger-hov:rgba(214,69,93,.15); --danger-press:rgba(214,69,93,.22);
+  --tip-bg:linear-gradient(180deg,rgba(255,255,255,.92),rgba(255,255,255,0) 58%),rgba(250,252,255,.93);
+  --tip-line:rgba(15,23,42,.17);
+  --tip-shadow:0 10px 26px -12px rgba(15,23,42,.4),inset 0 1px 0 #fff;
 }
 html.light body::before{
   background:
