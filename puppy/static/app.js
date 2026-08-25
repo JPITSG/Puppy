@@ -2189,7 +2189,7 @@ function renderSidebar() {
       r2.appendChild(provIcon(s.engine));
       const workspace = el("div", "si-sub" + (s.workspace_missing ? " warn" : ""),
         workspaceLabel(s));
-      workspace.title = workspaceTitle(s);
+      workspace.setAttribute("aria-label", workspaceTitle(s));
       r2.appendChild(workspace);
       item.appendChild(r1); item.appendChild(r2);
       const pointerForClick = activationPointer(item);
@@ -6533,7 +6533,7 @@ function modalOpenSession(groupId = null) {
         r2.appendChild(provIcon(s.engine));
         const workspace = el("div", "si-sub" + (s.workspace_missing ? " warn" : ""),
           workspaceLabel(s));
-        workspace.title = workspaceTitle(s);
+        workspace.setAttribute("aria-label", workspaceTitle(s));
         r2.appendChild(workspace);
         item.appendChild(r1); item.appendChild(r2);
         item.onclick = () => { close(); openSessionTab(g.bid, s.id, s, groupId); };
