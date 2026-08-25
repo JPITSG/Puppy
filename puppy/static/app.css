@@ -688,10 +688,18 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .todo-row.done .todo-txt{color:var(--txt3);text-decoration:line-through}
 .info-line.warn{color:var(--warn)}
 .switch-line{
-  align-self:stretch;display:flex;align-items:center;gap:10px;color:var(--txt3);font-size:11px;
-  text-transform:uppercase;letter-spacing:.09em;margin:6px 0;
+  align-self:stretch;display:flex;align-items:center;justify-content:center;color:var(--txt3);
+  font-size:11px;text-transform:uppercase;letter-spacing:.09em;margin:6px 0;
 }
-.switch-line::before,.switch-line::after{content:"";flex:1;height:1px;background:var(--line2)}
+.switch-line::before,.switch-line::after{content:"";flex:1 1 24px;height:1px;background:var(--line2)}
+/* One inline run, not flex items: the words are separated by their own spaces,
+   so the label reads correctly (and wraps) without depending on flex gap.
+   The engine sits brighter than the model/effort it was running, keeping each
+   side legible as a unit once both carry a full configuration. */
+.switch-line .sw-body{min-width:0;margin:0 10px;text-align:center}
+.switch-line .sw-eng{color:var(--txt2)}
+.switch-line .sw-cfg{opacity:.82}
+.switch-line .sw-arrow{letter-spacing:0;opacity:.7}
 .err-card{
   align-self:stretch;background:var(--err-dim);border:1px solid rgba(255,107,129,.4);
   border-radius:var(--r-md);padding:9px 13px;font-size:12.5px;color:var(--err);white-space:pre-wrap;

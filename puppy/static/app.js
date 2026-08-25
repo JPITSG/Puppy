@@ -724,6 +724,59 @@ function sessionDeleteMessage(session) {
     : "The puppy transcript is removed permanently. Files in the working directory are not touched.";
 }
 
+/* ---- engine configuration shorthand ----
+   Names an engine + model + effort compactly ("codex 5.6 Sol Max"). Model and
+   effort vocabularies are driver-supplied and change on their own (codex reads
+   its CLI's model cache), so nothing here may know a model by name: display
+   text comes from the live option lists, and the only compaction is peeling off
+   a leading family word that most of that engine's models carry - "GPT-5.6-Sol"
+   loses its "GPT" because "GPT-5.5" and the rest repeat it, while claude's
+   Fable / Opus / Sonnet share nothing and survive whole. Most, not all: real
+   catalogs mix in one-off names (codex ships a "Daybreak Blue"), and a single
+   outlier must not make the whole family keep its prefix. A model the lists no
+   longer offer (custom id, retired slug) still prints, just uncompacted. */
+function engineInfo(bid, key) {
+  const list = (bid && Array.isArray(state.engCache[bid])) ? state.engCache[bid] : state.engines;
+  return (Array.isArray(list) && list.find(e => e.key === key)) || state.engMap[key] || null;
+}
+
+const headWord = (s) => (String(s).match(/^[^\s\-_/]+/) || [""])[0];
+const tailWords = (s) => String(s).slice(headWord(s).length).replace(/^[\s\-_/]+/, "");
+
+function modelShorthand(eng, value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const options = ((eng && eng.model_options) || []).filter(o => o && o.value);
+  const match = options.find(o => o.value === raw);
+  let text = (match && match.label) || raw;
+  let peers = options.map(o => o.label || o.value);
+  while (peers.length > 1 && tailWords(text)) {
+    const head = headWord(text).toUpperCase();
+    /* a word carrying digits is a version, not a family name: "GPT-6 Mini"
+       gives up its GPT but keeps the 6 even when every model shares it */
+    if (!head || /\d/.test(head)) break;
+    const shares = peers.filter(p => headWord(p).toUpperCase() === head);
+    if (shares.length < 2 || shares.length * 2 < peers.length) break;
+    text = tailWords(text);
+    peers = peers.map(p => headWord(p).toUpperCase() === head ? tailWords(p) : p).filter(Boolean);
+  }
+  return text;
+}
+
+function effortShorthand(eng, value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const match = ((eng && eng.effort_options) || []).find(o => o && o.value === raw);
+  return (match && match.label) || raw;
+}
+
+/* [engine, "model effort"] - the caller styles the two apart */
+function engineConfigParts(bid, engine, model, effort) {
+  const eng = engineInfo(bid, engine);
+  const detail = [modelShorthand(eng, model), effortShorthand(eng, effort)].filter(Boolean);
+  return [String(engine || "?"), detail.join(" ")];
+}
+
 function apiPath(bid, path) {
   return bid ? `/api/b/${bid}/${path}` : `/api/${path}`;
 }
@@ -2629,6 +2682,7 @@ class SessionView {
     this.reconnectTimer = null;
     this.connectionSequence = 0;
     this.toolCards = {};
+    this.switchLines = [];    // engine-switch dividers, re-labelled as state arrives
     this.liveEl = null;
     this.liveKind = null;
     this.statusText = "";     // header status; the transcript foot mirrors it
@@ -2973,6 +3027,7 @@ class SessionView {
         this.retry = 800;
         this.inner.innerHTML = "";
         this.toolCards = {};
+        this.switchLines = [];
         this.oldestSeq = d.events.length ? d.events[0].seq : null;
         if (d.events.length >= 200) this.addLoadOlder();
         d.events.forEach(ev => this.renderEvent(ev, false));
@@ -3073,6 +3128,7 @@ class SessionView {
     setMini("perm", "Permission mode", s.permission_mode || "auto");
     setMini("model", "Model", s.model || "auto");
     setMini("effort", "Reasoning effort", s.effort || "auto");
+    this.syncSwitchLines();   // the newest divider tracks the live selection
     this.syncNativeComposerChoices();
     this.syncComposerMeta();
     this.syncHeadOverflow();
@@ -3126,6 +3182,45 @@ class SessionView {
       this.inner.appendChild(node);
       this.scrollBottom(!live);
     }
+  }
+
+  /* Each divider names the configuration on both of its sides. The switch event
+     only records the side it left: switching resets the incoming engine to its
+     defaults, so that engine's model and effort are picked afterwards and are
+     not knowable when the event is written. Resolve the incoming side from the
+     transcript instead - it is the "from" snapshot of the NEXT switch, or, for
+     the newest divider (whose segment is the one still running), the session's
+     live selection. Cheap enough to redo whenever either input changes. */
+  syncSwitchLines() {
+    const s = this.session || {};
+    const lines = this.switchLines
+      .filter(n => n.isConnected || !n.parentNode)
+      .sort((a, b) => a._switch.seq - b._switch.seq);
+    this.switchLines = lines;
+    lines.forEach((node, i) => {
+      const d = node._switch.data;
+      const next = lines[i + 1];
+      const live = !next && s.engine === d.to;
+      const to = next ? next._switch.data : {};
+      this.fillSwitchLine(node, d, {
+        model: live ? (s.model || s.last_model) : to.from_model,
+        effort: live ? s.effort : to.from_effort,
+      });
+    });
+  }
+
+  fillSwitchLine(node, d, to) {
+    const side = (engine, model, effort) => {
+      const [name, detail] = engineConfigParts(this.tab.bid, engine, model, effort);
+      const parts = [el("span", "sw-eng", name)];
+      if (detail) parts.push(" ", el("span", "sw-cfg", detail));
+      return parts;
+    };
+    const body = el("span", "sw-body");
+    body.append("moved ", ...side(d.from, d.from_model, d.from_effort),
+      " ", el("span", "sw-arrow", "→"), " ", ...side(d.to, to.model, to.effort));
+    node.textContent = "";
+    node.appendChild(body);
   }
 
   buildEventNode(ev) {
@@ -3204,7 +3299,9 @@ class SessionView {
       }
       case "engine_switch": {
         const n = el("div", "switch-line");
-        n.appendChild(document.createTextNode(`moved ${d.from} → ${d.to}`));
+        n._switch = { seq: ev.seq, data: d };
+        this.switchLines.push(n);
+        this.syncSwitchLines();
         return n;
       }
       case "error": {

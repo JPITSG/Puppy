@@ -358,7 +358,15 @@ async def h_session_switch(request: web.Request):
     if h.status == "running":
         return web.json_response({"error": "turn in progress - interrupt first"}, status=409)
     old = s["engine"]
-    ev = db.add_event(s["id"], "engine_switch", {"from": old, "to": engine})
+    # Snapshot what the outgoing engine was running so the transcript divider can
+    # name both configurations. The incoming engine is reset to its defaults just
+    # below, so its model/effort is only chosen afterwards - the WebUI resolves
+    # that side from later session state instead of recording it here.
+    ev = db.add_event(s["id"], "engine_switch", {
+        "from": old, "to": engine,
+        "from_model": s.get("model") or s.get("last_model") or "",
+        "from_effort": s.get("effort") or "",
+    })
     db.touch_session(s["id"], engine=engine, native_session_id="", model="", effort="",
                      last_model="", permission_mode=driver.default_permission())
     h.broadcast({"type": "event", "event": ev})
