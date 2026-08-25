@@ -633,7 +633,12 @@ function enhanceChoiceSelect(select) {
       const text = option ? option.textContent : "Not available";
       value.textContent = text;
       button.disabled = select.disabled || !option;
-      button.title = option ? (option.title || "") : "No choices available";
+      const hint = option ? (option.title || "") : "";
+      if (hint) button.title = hint;
+      else {
+        button.removeAttribute("title");
+        button.removeAttribute("data-tip");
+      }
       button.setAttribute("aria-label", fieldName ? `${fieldName}: ${text}` : text);
     },
   };
@@ -692,7 +697,7 @@ function enhanceChoiceSelect(select) {
       row.dataset.choiceIndex = String(index);
       row.disabled = option.disabled;
       row.tabIndex = -1;
-      row.title = option.title || "";
+      if (option.title) row.title = option.title;
       row.onmouseenter = () => setActive(index, { pointer: true, quiet: true });
       row.onmousedown = (event) => event.preventDefault();
       row.onclick = (event) => { event.stopPropagation(); choose(index); };
@@ -3544,11 +3549,11 @@ class SessionView {
   buildDom() {
     const root = el("div", "view chat");
     const composerChoice = (cls, key, label) => this.nativeComposerChoices ?
-      `<span class="mini composer-native-choice ${cls}" title="${esc(label)}">
+      `<span class="mini composer-native-choice ${cls}">
         <span class="mini-key">${esc(key)}:</span><span class="mini-value">auto</span>
         <select aria-label="${esc(label)}" disabled></select>
       </span>` :
-      `<button type="button" class="mini ${cls}" title="${esc(label)}">
+      `<button type="button" class="mini ${cls}" aria-label="${esc(label)}">
         <span class="mini-key">${esc(key)}:</span><span class="mini-value">auto</span>
       </button>`;
     root.innerHTML = `
@@ -3556,13 +3561,13 @@ class SessionView {
         <div class="chat-meta-viewport">
           <div class="chat-meta-scroll">
             <span class="chip eng"><span class="dot"></span><span class="eng-label">…</span></span>
-            <span class="chip be" title="Backend"></span>
-            <span class="chip cwd" title=""></span>
+            <span class="chip be"></span>
+            <span class="chip cwd"></span>
             <span class="chat-status"></span>
           </div>
         </div>
         <div class="chat-menu">
-          <button class="icon-btn menu-btn" title="Session menu">⋮</button>
+          <button class="icon-btn menu-btn" aria-label="Session menu">⋮</button>
         </div>
       </div>
       <div class="chat-scroll"><div class="chat-inner"></div></div>
@@ -3575,8 +3580,8 @@ class SessionView {
           <div class="composer-row">
             <div class="composer-meta-viewport">
               <div class="composer-meta-scroll">
-                <button type="button" class="mini attach-add" aria-label="Attach files"
-                  title="Attach files"><span aria-hidden="true"></span></button>
+                <button type="button" class="mini attach-add" aria-label="Attach files">
+                  <span aria-hidden="true"></span></button>
                 ${composerChoice("perm", "permissions", "Permission mode")}
                 ${composerChoice("model", "model", "Model")}
                 ${composerChoice("effort", "effort", "Reasoning effort")}
@@ -3780,13 +3785,15 @@ class SessionView {
     const policy = this.uploadPolicy || uploadSettingsFor(this.tab.bid);
     const disabledByPolicy = !!policy && !policy.enabled;
     this.attachButton.disabled = !supported || unavailable || disabledByPolicy;
-    if (!supported) this.attachButton.title = "Upgrade this backend to attach arbitrary files";
-    else if (unavailable) this.attachButton.title = "Backend unavailable";
-    else if (disabledByPolicy) this.attachButton.title = "File uploads are disabled on this backend";
-    else if (policy) this.attachButton.title =
-      `Attach files · ${policy.max_file_size_mb} MiB maximum each`;
-    else this.attachButton.title = "Attach files";
-    this.attachButton.setAttribute("aria-label", this.attachButton.title);
+    let label;
+    if (!supported) label = "Upgrade this backend to attach arbitrary files";
+    else if (unavailable) label = "Backend unavailable";
+    else if (disabledByPolicy) label = "File uploads are disabled on this backend";
+    else if (policy) label = `Attach files · ${policy.max_file_size_mb} MiB maximum each`;
+    else label = "Attach files";
+    this.attachButton.removeAttribute("title");
+    this.attachButton.removeAttribute("data-tip");
+    this.attachButton.setAttribute("aria-label", label);
   }
 
   /* transcript sits left of the scrollbar; export its width so the composer /
@@ -3954,7 +3961,9 @@ class SessionView {
       (s.last_model ? " · " + s.last_model.replace(/^claude-/, "") : (s.model ? " · " + s.model : ""));
     const cwd = this.root.querySelector(".chip.cwd");
     cwd.textContent = workspaceLabel(s, 34);
-    cwd.title = workspaceTitle(s);
+    cwd.removeAttribute("title");
+    cwd.removeAttribute("data-tip");
+    cwd.setAttribute("aria-label", workspaceTitle(s));
     cwd.classList.toggle("warn", !!s.workspace_missing);
     this.root.querySelector(".chip.be").textContent = backendName(this.tab.bid);
     const setMini = (cls, label, value, pending = false) => {
@@ -3962,7 +3971,8 @@ class SessionView {
       control.querySelector(".mini-value").textContent = value;
       control.classList.toggle("pending", pending);
       const title = label + ": " + value + (pending ? " · applies after the queue" : "");
-      control.title = title;
+      control.removeAttribute("title");
+      control.removeAttribute("data-tip");
       const select = control.querySelector("select");
       (select || control).setAttribute("aria-label", title);
     };
@@ -4245,7 +4255,8 @@ class SessionView {
     this.syncUploadButton();
     const unavailable = this.attachButton && this.attachButton.disabled;
     this.composerBox.dataset.dropHint = unavailable ?
-      tips.text(this.attachButton) : "Drop files to attach";
+      (this.attachButton.getAttribute("aria-label") || "Files cannot be attached") :
+      "Drop files to attach";
     this.composerBox.classList.add("file-drag");
     this.composerBox.classList.toggle("drop-rejected", !!unavailable);
   }
@@ -4408,7 +4419,6 @@ class SessionView {
     for (const a of this.attachments) {
       const chip = el("span", "attach-chip " + (a.preview ? "image" : "file") +
         (a.uploading ? " uploading" : ""));
-      chip.title = a.path || a.name;
       if (a.preview) {
         const img = el("img", "attach-thumb");
         img.src = a.url;
@@ -4426,8 +4436,9 @@ class SessionView {
         chip.appendChild(copy);
       }
       const x = el("button", "attach-x");
+      x.type = "button";
       x.appendChild(xIcon(12));
-      x.title = "Remove attachment";
+      x.setAttribute("aria-label", "Remove attachment");
       x.onclick = () => this.removeAttachment(a);
       chip.appendChild(x);
       this.attachStrip.appendChild(chip);
@@ -4545,11 +4556,13 @@ class SessionView {
       const text = cfg ? this.describeQueuedConfig(item)
         : (item.length > 200 ? item.slice(0, 199) + "…" : item);
       const t = el("span", "q-t", text);
-      t.title = cfg ? text : item;
+      t.setAttribute("aria-label", cfg ? text : item);
       row.appendChild(t);
       const x = el("button", "q-x");
+      x.type = "button";
       x.appendChild(xIcon(12));   // even size in an even box: no half-pixel centring
-      x.title = cfg ? "Cancel this queued change" : "Cancel this queued message";
+      x.setAttribute("aria-label",
+        cfg ? "Cancel this queued change" : "Cancel this queued message");
       x.onclick = () => this.unqueue(i, cfg ? item.key || "" : item);   // full text, not the capped copy
       row.appendChild(x);
       box.appendChild(row);
@@ -4657,12 +4670,11 @@ class SessionView {
     const custom = !!current && !options.some(option => option.value === current);
     if (native && custom) {
       options.push({ value: "__current_custom__", label: `Current: ${current}` });
-      options.push({ value: "__custom__", label: "Custom…", hint: "Any model id the engine accepts" });
+      options.push({ value: "__custom__", label: "Custom…" });
       return { options, selected: "__current_custom__" };
     }
     options.push({
-      value: "__custom__", label: custom ? `Custom… (${current})` : "Custom…",
-      hint: "Any model id the engine accepts",
+      value: "__custom__", label: custom ? `Custom… (${current})` : "Custom…"
     });
     return { options, selected: custom ? "__custom__" : current };
   }
@@ -4683,7 +4695,7 @@ class SessionView {
         const option = document.createElement("option");
         option.value = item.value;
         option.textContent = item.label;
-        option.title = item.hint || "";
+        if (item.hint) option.title = item.hint;
         option.disabled = !!item.disabled;
         option.selected = String(item.value) === String(spec.selected);
         select.appendChild(option);
@@ -4713,7 +4725,8 @@ class SessionView {
     const menu = el("div", "choice-menu composer-choice-menu dyn");
     menu._anchor = anchor;
     menu.setAttribute("role", "listbox");
-    menu.setAttribute("aria-label", tips.text(anchor) || "Choices");
+    menu.setAttribute("aria-label",
+      anchor.getAttribute("aria-label") || tips.text(anchor) || "Choices");
     menu.style.visibility = "hidden";
     anchor.setAttribute("aria-haspopup", "listbox");
     anchor.setAttribute("aria-expanded", "true");
@@ -4735,7 +4748,7 @@ class SessionView {
     opts.forEach((o, index) => {
       const selected = current === o.value;
       const row = choiceOptionNode(o.label, selected);
-      row.title = o.hint || "";
+      if (o.hint) row.title = o.hint;
       row.tabIndex = selected ? 0 : -1;
       row.onmouseenter = () => highlight(index);
       row.onfocus = row.onmouseenter;
