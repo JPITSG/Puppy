@@ -29,10 +29,19 @@ function xIcon(size) {
   return svg;
 }
 
-/* The bell's mass is its body (y 2..17 of the 24 box); the clapper below is a
-   thin descender. Centring the whole ink therefore leaves the body reading a
-   full 2.5 units high. The group scales it down and drops it so the body sits
-   near the middle, with the clapper's painted edge still clear of the box. */
+/* This bell shares a row with ⚙ and ☀, which are text glyphs: they paint the
+   ink their font gives them, not the whole button. Measured at the footer's
+   14px, both cover about 10.4px and sit on the button's centre - so a drawn
+   icon that fills its own box reads too tall and lands off the line, however
+   carefully the box itself is centred.
+   The paths below are drawn compactly enough to be one mass (a tall bell with
+   a dangling clapper reads high whatever the box does), inside a square that,
+   once the 2-unit stroke is added, paints exactly BELL_INK on both axes. The
+   transform maps that square onto the neighbours' share of the icon, centred,
+   so this matches their height, centre and rhythm at any size. The off-state
+   slash spans the same square, keeping both states identical in metrics. */
+const BELL_INK = { min: 3.5, max: 20.5 };   // painted extent of the paths, in box units
+const BELL_SHARE = 10.4 / 14;               // neighbouring glyphs' ink over the icon size
 function bellIcon(size, off) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
@@ -40,8 +49,11 @@ function bellIcon(size, off) {
   svg.setAttribute("width", size);
   svg.setAttribute("height", size);
   svg.setAttribute("aria-hidden", "true");
+  const scale = (24 * BELL_SHARE) / (BELL_INK.max - BELL_INK.min);
+  const shift = 12 - ((BELL_INK.min + BELL_INK.max) / 2) * scale;
   const g = document.createElementNS(NS, "g");
-  g.setAttribute("transform", "translate(0.96 2.06) scale(0.92)");
+  g.setAttribute("transform",
+    `translate(${shift.toFixed(3)} ${shift.toFixed(3)}) scale(${scale.toFixed(4)})`);
   svg.appendChild(g);
   const draw = (d) => {
     const p = document.createElementNS(NS, "path");
@@ -53,9 +65,9 @@ function bellIcon(size, off) {
     p.setAttribute("fill", "none");
     g.appendChild(p);
   };
-  draw("M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3c0 0 3-2 3-9");
-  draw("M10.3 21a1.94 1.94 0 0 0 3.4 0");
-  if (off) draw("M4.5 3.5 L19.5 20.5");
+  draw("M12 4.5a5.5 5.5 0 0 0-5.5 5.5c0 4-2 5.5-2 5.5h15s-2-1.5-2-5.5A5.5 5.5 0 0 0 12 4.5Z");
+  draw("M10.4 18.7a2 2 0 0 0 3.2 0");
+  if (off) draw("M4.5 4.5 L19.5 19.5");
   return svg;
 }
 
