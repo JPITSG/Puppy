@@ -3365,6 +3365,9 @@ class SessionView {
       case "error": {
         return el("div", "err-card", d.text || "error");
       }
+      /* one shape for every engine: outcome · how long · tokens out · when.
+         Cost is deliberately absent - engines price differently (and some not
+         at all), so the line would stop meaning the same thing everywhere. */
       case "result": {
         const n = el("div", "result-line");
         const bits = [];
@@ -3373,7 +3376,6 @@ class SessionView {
         if (d.duration_ms) bits.push((d.duration_ms / 1000).toFixed(1) + "s");
         const u = d.usage || {};
         if (u.output_tokens != null) bits.push(fmtTokens(u.output_tokens) + " out");
-        if (d.cost_usd != null) bits.push("$" + d.cost_usd.toFixed(3));
         bits.push(fmtTime(ev.ts));
         n.innerHTML = bits.join(" · ");
         return n;

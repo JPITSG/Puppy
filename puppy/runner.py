@@ -484,6 +484,7 @@ class SessionHub:
                 return
 
             log.info("session %s turn: %s", self.id, " ".join(argv[:8]) + " ...")
+            turn_started = time.time()
             self.proc = await asyncio.create_subprocess_exec(
                 *argv, cwd=cwd, env=env,
                 stdin=asyncio.subprocess.PIPE if driver.uses_stdin_stream else asyncio.subprocess.DEVNULL,
@@ -567,6 +568,11 @@ class SessionHub:
                         self.broadcast({"type": "rate_limit", "engine": session["engine"], "info": act["info"]})
                     elif a == "result":
                         got_result = True
+                        # Every engine's turn reports how long it took: drivers
+                        # whose CLI times its own work keep that figure, the
+                        # rest (codex) get the wall clock from spawn to result.
+                        if act["data"].get("duration_ms") is None:
+                            act["data"]["duration_ms"] = int((time.time() - turn_started) * 1000)
                         self._emit("result", act["data"])
                         # claude: close stdin so the process exits cleanly
                         if driver.uses_stdin_stream and self.proc.stdin is not None:
