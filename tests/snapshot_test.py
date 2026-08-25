@@ -27,7 +27,7 @@ TEST_ROOT = Path(tempfile.mkdtemp(prefix="snapshot-", dir=str(PRIVATE_TESTS)))
 os.environ["PUPPY_DATA"] = str(TEST_ROOT / "data")
 
 from puppy import (auth, config, db, listener_handoff, runner as session_runner,
-                   snapshots, workspaces)  # noqa: E402
+                   snapshots, uploads, workspaces)  # noqa: E402
 from puppy.web import build_app  # noqa: E402
 
 
@@ -70,6 +70,16 @@ async def exercise_http(archive_ui: dict, session_id: int) -> None:
                 assert "queued" in blocked["error"]
             busy_hub.clear_queue()
 
+            uploads._active_uploads = 1
+            try:
+                async with http.post(url + "/api/snapshot/export", headers=headers,
+                                     json={"ui": archive_ui}) as response:
+                    blocked = await response.json()
+                    assert response.status == 409, blocked
+                    assert "file upload" in blocked["error"]
+            finally:
+                uploads._active_uploads = 0
+
             async with http.post(url + "/api/snapshot/export", headers=headers,
                                  json={"ui": archive_ui}) as response:
                 prepared = await response.json()
@@ -93,6 +103,7 @@ async def exercise_http(archive_ui: dict, session_id: int) -> None:
 
             config.set_value("instance_name", "changed-over-http")
             config.set_value("engines.usage_refresh_minutes", 60)
+            config.set_value("uploads.max_file_size_mb", 2)
             app["puppy_bind_verifications"]["stale-before-restore"] = {
                 "timer": None, "server": None,
             }
@@ -105,6 +116,7 @@ async def exercise_http(archive_ui: dict, session_id: int) -> None:
             assert restored["sessions"] == 2
             assert config.get("instance_name") == "saved-instance"
             assert config.get("engines.usage_refresh_minutes") == 30
+            assert config.get("uploads.max_file_size_mb") == 19
     finally:
         await runner.cleanup()
 
@@ -123,6 +135,7 @@ async def main() -> None:
         config.set_value("instance_name", "saved-instance")
         config.set_value("sessions.default_cwd", str(project))
         config.set_value("engines.usage_refresh_minutes", 30)
+        config.set_value("uploads.max_file_size_mb", 19)
         db.execute(
             "INSERT INTO backends(name,url,token,protocol,capabilities,remote_version,role,"
             "tls_fingerprint,auto_upgrade,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -178,6 +191,7 @@ async def main() -> None:
         # Mutate every restored surface and an excluded ordinary project file.
         config.set_value("instance_name", "mutated-instance")
         config.set_value("engines.usage_refresh_minutes", 5)
+        config.set_value("uploads.max_file_size_mb", 2)
         db.execute("DELETE FROM events")
         db.execute("DELETE FROM sessions")
         db.execute("DELETE FROM backends")
@@ -192,6 +206,7 @@ async def main() -> None:
         assert restored["ui"] == ui
         assert config.get("instance_name") == "saved-instance"
         assert config.get("engines.usage_refresh_minutes") == 30
+        assert config.get("uploads.max_file_size_mb") == 19
         assert len(db.list_sessions(include_archived=True)) == 2
         assert db.query_one("SELECT token FROM backends")["token"] == "private-backend-token"
         assert db.query_one("SELECT auto_upgrade FROM backends")["auto_upgrade"] == 1
@@ -222,6 +237,7 @@ async def main() -> None:
         # A failed database install must put config and filesystem trees back.
         config.set_value("instance_name", "rollback-current")
         config.set_value("engines.usage_refresh_minutes", 60)
+        config.set_value("uploads.max_file_size_mb", 23)
         current_upload = Path(config.DATA_DIR) / "uploads" / "current.txt"
         current_upload.write_text("keep me", encoding="utf-8")
         tls_key.write_bytes(b"keep current tls material")
@@ -244,6 +260,7 @@ async def main() -> None:
         assert calls["count"] == 2
         assert config.get("instance_name") == "rollback-current"
         assert config.get("engines.usage_refresh_minutes") == 60
+        assert config.get("uploads.max_file_size_mb") == 23
         assert current_upload.read_text(encoding="utf-8") == "keep me"
         assert tls_key.read_bytes() == b"keep current tls material"
         assert len(db.list_sessions(include_archived=True)) == 2

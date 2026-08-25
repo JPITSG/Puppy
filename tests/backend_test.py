@@ -117,6 +117,7 @@ async def exercise_upgrade_readiness(upgrade_module, runner_module,
     hub_id = -9001
     hub = runner_module.SessionHub(hub_id)
     old_terminal_count = terminal_module._active_terminals
+    old_upload_count = upgrade_module.uploads._active_uploads
     old_runtime = upgrade_module._runtime
     runner_module._hubs[hub_id] = hub
     try:
@@ -151,6 +152,12 @@ async def exercise_upgrade_readiness(upgrade_module, runner_module,
         hub.active_since = None
         hub.queue = []
         terminal_module._active_terminals = 0
+        upgrade_module.uploads._active_uploads = 1
+        uploading = upgrade_module._workload_readiness()
+        assert uploading["ready"] is False and uploading["state"] == "busy"
+        assert uploading["active_uploads"] == 1
+        assert "active file upload" in uploading["reason"]
+        upgrade_module.uploads._active_uploads = 0
         marker.touch()
         blocked = upgrade_module._readiness(runtime, app)
         assert blocked["ready"] is False and blocked["state"] == "blocked"
@@ -164,6 +171,7 @@ async def exercise_upgrade_readiness(upgrade_module, runner_module,
         upgrade_module._runtime = old_runtime
         runner_module._hubs.pop(hub_id, None)
         terminal_module._active_terminals = old_terminal_count
+        upgrade_module.uploads._active_uploads = old_upload_count
 
 
 def free_port() -> int:
@@ -246,6 +254,9 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "temporary-workspaces" in ping["capabilities"]
         assert "engine-usage-refresh" in ping["capabilities"]
         assert "engine-usage-refresh-manual" in ping["capabilities"]
+        assert "file-uploads" in ping["capabilities"]
+        assert ping["uploads"]["enabled"] is \
+            (ping["uploads"]["max_file_size_mb"] > 0)
         assert "terminal" not in ping["capabilities"]
         assert ("pinned-tls" in ping["capabilities"]) is bool(fingerprint)
         assert ping["transport"]["encrypted"] is bool(fingerprint)
@@ -294,6 +305,19 @@ async def exercise_node(url: str, token: str, expected_version: str,
                               headers=good, ssl=pinned,
                               json={"minutes": -1}) as response:
             assert response.status == 400
+        async with http.get(url + "/api/uploads/settings",
+                            headers=good, ssl=pinned) as response:
+            upload_settings = await response.json()
+            assert response.status == 200, upload_settings
+        assert upload_settings["uploads"]["max_file_size_mb"] >= 0
+        async with http.patch(url + "/api/uploads/settings", headers=good,
+                              ssl=pinned, json={"max_file_size_mb": -1}) as response:
+            assert response.status == 400, await response.text()
+        async with http.patch(url + "/api/uploads/settings", headers=good,
+                              ssl=pinned, json={"max_file_size_mb": 1}) as response:
+            upload_settings = await response.json()
+            assert response.status == 200, upload_settings
+        assert upload_settings["uploads"]["max_file_size_bytes"] == 1024 * 1024
         updates = await http.ws_connect(url + "/api/ws/updates", headers=good, ssl=pinned)
         first = await updates.receive_json(timeout=3)
         assert first["type"] == "sessions" and first["sessions"] == []
@@ -368,6 +392,78 @@ async def exercise_node(url: str, token: str, expected_version: str,
                 assert response.status == 200, normal_created
             normal = normal_created["session"]
             assert normal["workspace_kind"] == "directory"
+            executable = b"MZ\x00arbitrary executable payload\n"
+            async with http.post(
+                    url + f"/api/sessions/{normal['id']}/upload", headers={
+                        **good, "Content-Type": "application/x-msdownload",
+                        "X-Puppy-Filename": "%2E%2E%2Fprogram.exe",
+                        "X-Puppy-Size": str(len(executable)),
+                    }, data=executable, ssl=pinned) as response:
+                uploaded = await response.json()
+                assert response.status == 200, uploaded
+            uploaded_path = Path(uploaded["path"])
+            assert uploaded["name"] == "program.exe"
+            assert uploaded["size"] == len(executable)
+            assert uploaded_path.read_bytes() == executable
+            assert uploaded_path.stat().st_mode & 0o777 == 0o600
+            assert uploaded_path.parent.stat().st_mode & 0o777 == 0o700
+            async with http.post(
+                    url + f"/api/sessions/{normal['id']}/upload", headers={
+                        **good, "Content-Type": "application/octet-stream",
+                        "X-Puppy-Filename": "too-large.bin",
+                        "X-Puppy-Size": str(1024 * 1024 + 1),
+                    }, data=b"x", ssl=pinned) as response:
+                assert response.status == 413, await response.text()
+
+            async def oversized_body():
+                for _chunk in range(5):
+                    yield b"z" * (256 * 1024)
+
+            existing_uploads = set(uploaded_path.parent.parent.iterdir())
+            async with http.post(
+                    url + f"/api/sessions/{normal['id']}/upload", headers={
+                        **good, "Content-Type": "application/octet-stream",
+                        "X-Puppy-Filename": "lied-about-size.bin",
+                        "X-Puppy-Size": "1",
+                    }, data=oversized_body(), ssl=pinned) as response:
+                actual_limit = await response.json()
+                assert response.status == 413, actual_limit
+            assert actual_limit["uploads"]["max_file_size_mb"] == 1
+            assert set(uploaded_path.parent.parent.iterdir()) == existing_uploads
+            async with http.delete(
+                    url + f"/api/sessions/{normal['id']}/upload/{uploaded['upload_id']}",
+                    headers=good, ssl=pinned) as response:
+                discarded = await response.json()
+                assert response.status == 200 and discarded["removed"] is True, discarded
+            assert not uploaded_path.exists()
+            async with http.post(
+                    url + f"/api/sessions/{normal['id']}/upload", headers={
+                        **good, "Content-Type": "application/octet-stream",
+                        "X-Puppy-Filename": ".empty", "X-Puppy-Size": "0",
+                    }, data=b"", ssl=pinned) as response:
+                empty_upload = await response.json()
+                assert response.status == 200, empty_upload
+            assert empty_upload["name"] == ".empty"
+            assert Path(empty_upload["path"]).read_bytes() == b""
+            async with http.delete(
+                    url + f"/api/sessions/{normal['id']}/upload/{empty_upload['upload_id']}",
+                    headers=good, ssl=pinned) as response:
+                assert response.status == 200, await response.text()
+            async with http.patch(url + "/api/uploads/settings", headers=good,
+                                  ssl=pinned, json={"max_file_size_mb": 0}) as response:
+                disabled_uploads = await response.json()
+                assert response.status == 200, disabled_uploads
+            async with http.post(
+                    url + f"/api/sessions/{normal['id']}/upload", headers={
+                        **good, "Content-Type": "text/plain",
+                        "X-Puppy-Filename": "off.txt",
+                    }, data=b"disabled", ssl=pinned) as response:
+                rejected_upload = await response.json()
+                assert response.status == 403, rejected_upload
+            assert rejected_upload["uploads"]["enabled"] is False
+            async with http.patch(url + "/api/uploads/settings", headers=good,
+                                  ssl=pinned, json={"max_file_size_mb": 1}) as response:
+                assert response.status == 200, await response.text()
             async with http.delete(url + f"/api/sessions/{normal['id']}",
                                    headers=good, ssl=pinned) as response:
                 normal_deleted = await response.json()
@@ -492,6 +588,7 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert "sessions" in stored["capabilities"]
         assert "temporary-workspaces" in stored["capabilities"]
         assert "engine-usage-refresh" in stored["capabilities"]
+        assert "file-uploads" in stored["capabilities"]
         assert "terminal" not in stored["capabilities"]
         assert "remote-upgrade" in stored["capabilities"]
         assert "pinned-tls" in stored["capabilities"]
@@ -571,6 +668,33 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         proxied_scratch = proxied_created["session"]
         proxied_path = Path(proxied_scratch["cwd"])
         assert proxied_scratch["workspace_kind"] == "temporary" and proxied_path.is_dir()
+        # Exceed both aiohttp applications' historical 8 MiB read ceiling. The
+        # controller must stream the request to the node instead of buffering
+        # it, while the receiving node remains the final limit authority.
+        async with http.patch(
+                url + f"/api/b/{stored['id']}/uploads/settings", headers=headers,
+                json={"max_file_size_mb": 9}) as response:
+            proxied_policy = await response.json()
+            assert response.status == 200, proxied_policy
+        assert proxied_policy["uploads"]["max_file_size_mb"] == 9
+        proxied_file = b"MZ" + (b"x" * (8 * 1024 * 1024)) + b"streamed-through-controller"
+        async with http.post(
+                url + f"/api/b/{stored['id']}/sessions/{proxied_scratch['id']}/upload",
+                headers={
+                    **headers, "Content-Type": "application/x-msdownload",
+                    "X-Puppy-Filename": "deploy.exe",
+                    "X-Puppy-Size": str(len(proxied_file)),
+                }, data=proxied_file) as response:
+            proxied_upload = await response.json()
+            assert response.status == 200, proxied_upload
+        proxied_upload_path = Path(proxied_upload["path"])
+        assert proxied_upload["size"] == len(proxied_file)
+        assert proxied_upload_path.stat().st_size == len(proxied_file)
+        assert proxied_upload_path.read_bytes() == proxied_file
+        async with http.delete(
+                url + f"/api/b/{stored['id']}/sessions/{proxied_scratch['id']}/upload/" +
+                proxied_upload["upload_id"], headers=headers) as response:
+            assert response.status == 200, await response.text()
         async with http.delete(
                 url + f"/api/b/{stored['id']}/sessions/{proxied_scratch['id']}",
                 headers=headers) as response:
@@ -854,7 +978,7 @@ async def main() -> None:
             "--name", "disabled-node", "--bind", "127.0.0.1", "--port", str(disabled_port),
             "--advertise-url", disabled_url, "--api-token", backend_token,
             "--disable-terminal", "--enable-remote-upgrade", "--disable-tls",
-            "--usage-refresh-minutes", "0",
+            "--usage-refresh-minutes", "0", "--max-upload-size-mb", "2",
         ], text=True)
         disabled_process = subprocess.Popen([
             sys.executable, str(release_artifact), "serve", "--data-dir", str(disabled_data),
@@ -876,7 +1000,7 @@ async def main() -> None:
             "--name", "backend-test-node", "--bind", "127.0.0.1",
             "--port", str(backend_port), "--advertise-url", backend_url,
             "--api-token", backend_token, "--disable-terminal", "--enable-remote-upgrade",
-            "--auto-tls", "--usage-refresh-minutes", "0",
+            "--auto-tls", "--usage-refresh-minutes", "0", "--max-upload-size-mb", "3",
         ], text=True)
         pairing = json.loads(pairing_raw)
         assert pairing["url"] == backend_url and pairing["token"] == backend_token
@@ -885,6 +1009,7 @@ async def main() -> None:
         assert "pinned-tls" in pairing["capabilities"]
         assert "terminal" not in pairing["capabilities"]
         assert "remote-upgrade" not in pairing["capabilities"]  # pairing command is not launcher-managed
+        assert pairing["max_upload_size_mb"] == 3
         assert (backend_data / "config.json").stat().st_mode & 0o777 == 0o600
         identity_manifest = json.loads(
             (backend_data / "tls" / "identity.json").read_text(encoding="utf-8"))
@@ -897,9 +1022,11 @@ async def main() -> None:
             "--data-dir", str(temp_root / "enabled-data"),
             "--bind", "127.0.0.1", "--port", str(backend_port),
             "--api-token", backend_token, "--usage-refresh-minutes", "30",
+            "--max-upload-size-mb", "4",
         ], text=True))
         assert "terminal" in enabled_pairing["capabilities"]
         assert enabled_pairing["usage_refresh_minutes"] == 30
+        assert enabled_pairing["max_upload_size_mb"] == 4
         assert "pinned-tls" in enabled_pairing["capabilities"]
         assert len(enabled_pairing["tls_sha256"]) == 64
         repeated_pairing = json.loads(subprocess.check_output([
@@ -908,6 +1035,7 @@ async def main() -> None:
         ], text=True))
         assert repeated_pairing["tls_sha256"] == enabled_pairing["tls_sha256"]
         assert repeated_pairing["usage_refresh_minutes"] == 30
+        assert repeated_pairing["max_upload_size_mb"] == 4
 
         state_dir = backend_data / "upgrade"
         legacy_launcher_env = dict(os.environ)

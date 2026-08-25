@@ -780,8 +780,8 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   min-height:24px;max-height:224px;font-size:13.5px;line-height:20px;
 }
 .attach-strip{display:flex;gap:6px;flex-wrap:wrap}
-/* a pasted image previews as a thumbnail: its filename is a millisecond stamp,
-   which tells the user nothing the picture doesn't */
+/* Raster images keep the useful thumbnail treatment; every other file gets a
+   compact identity card with its real name and size. */
 .attach-chip{
   position:relative;display:inline-flex;line-height:0;
   background:var(--panel3);border:1px solid var(--line2);border-radius:9px;overflow:hidden;
@@ -792,6 +792,21 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   display:block;height:54px;width:auto;max-width:140px;min-width:26px;
   object-fit:contain;background:var(--panel2);
 }
+.attach-chip .attach-state{
+  position:absolute;left:4px;bottom:4px;padding:3px 5px;border-radius:var(--btn-r);
+  background:rgba(6,9,14,.72);color:#fff;font:8.5px/1 var(--mono);letter-spacing:.03em;
+}
+.attach-chip.file{
+  width:min(230px,72vw);min-width:145px;min-height:54px;align-items:center;gap:9px;
+  padding:8px 30px 8px 10px;line-height:1.2;background:var(--panel2);
+}
+.attach-file-icon{display:flex;align-items:center;justify-content:center;flex:0 0 20px;color:var(--txt3)}
+.attach-file-icon svg{display:block}
+.attach-file-copy{display:flex;flex-direction:column;gap:3px;min-width:0}
+.attach-file-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--txt2);font-size:11.5px}
+.attach-file-size{color:var(--txt3);font:9.5px/1.2 var(--mono)}
+.attach-chip.uploading .attach-file-icon{animation:attach-pulse 1s ease-in-out infinite}
+@keyframes attach-pulse{50%{opacity:.35}}
 .attach-chip .attach-x{
   position:absolute;top:4px;right:4px;
   display:inline-flex;align-items:center;justify-content:center;
@@ -801,6 +816,11 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 }
 @media (hover:hover){.attach-chip .attach-x:hover{background:rgba(6,9,14,.85)}}
 .attach-chip .attach-x:active{transform:scale(.88);background:rgba(6,9,14,.85)}
+.attach-chip.file .attach-x{
+  top:50%;transform:translateY(-50%);background:transparent;color:var(--txt3);
+}
+@media (hover:hover){.attach-chip.file .attach-x:hover{background:var(--hov);color:var(--txt)}}
+.attach-chip.file .attach-x:active{transform:translateY(-50%) scale(.88);background:var(--hov)}
 .composer-row{display:flex;align-items:center;gap:8px;min-width:0}
 .composer-meta-viewport{position:relative;flex:1 1 0;min-width:0;overflow:hidden}
 .composer-meta-scroll{
@@ -822,6 +842,9 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   transition:background .15s var(--ease),border-color .15s var(--ease),
              color .15s var(--ease),transform .12s var(--ease);
 }
+.composer-row .mini.attach-add{width:24px;padding:0;font:16px/1 var(--sans)}
+.composer-row .mini.attach-add.uploading>span{animation:attach-pulse 1s ease-in-out infinite}
+.composer-row .mini:disabled{cursor:not-allowed;opacity:.38}
 /* Touch devices get a real select stretched over the unchanged mini-pill.
    Its popup is therefore owned by Android/iOS while Puppy keeps the compact
    trigger geometry and the horizontally scrollable composer lane. */
@@ -835,8 +858,8 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .composer-native-choice.disabled{cursor:default;opacity:.45}
 .composer-native-choice.disabled select{cursor:default}
 .composer-row.compact-meta .mini-key{display:none}
-@media (hover:hover){.composer-row .mini:hover{color:var(--txt);border-color:var(--line3);background:var(--hov)}}
-.composer-row .mini:active{transform:scale(.96);background:var(--hov)}
+@media (hover:hover){.composer-row .mini:not(:disabled):hover{color:var(--txt);border-color:var(--line3);background:var(--hov)}}
+.composer-row .mini:not(:disabled):active{transform:scale(.96);background:var(--hov)}
 .composer-row .mini .mini-value{color:var(--txt2)}
 @media (hover:hover){.composer-row .mini:hover .mini-value{color:var(--txt)}}
 .btn-send{

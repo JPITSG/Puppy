@@ -58,6 +58,10 @@ approvals, multi-backend support and built-in web terminals.
   An outdated version pill turns orange; failures retain the last good result
   and never interfere with engine availability. No package manager is invoked
   and Puppy never installs the update itself.
+- **File attachments**: the composer can upload images, documents, archives,
+  source, binaries, and other files directly to the session's execution node.
+  Transfers stream through controllers, remain private under `data/uploads/`,
+  and obey the receiver's configurable per-file limit; zero disables uploads.
 
 ## Requirements
 
@@ -97,7 +101,8 @@ reports an independently versioned controller/backend protocol.
 ## Data & config
 
 Persistent private state lives in `data/` (gitignored): `config.json` (instance
-name, bind host/port, api token, terminal command, usage-refresh interval),
+name, bind host/port, api token, terminal command, usage-refresh interval,
+upload-size limit),
 `puppy.db` (sessions, transcripts, users), backend TLS identities, and `puppy.log`. Scratch-session files are the
 intentional exception: they live in a mode-0700, instance-specific namespace
 under the OS temporary directory and are disposable. The repo itself is clean

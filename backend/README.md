@@ -39,6 +39,7 @@ Unix user that will run the service. Initialize the private configuration once:
   --auto-tls \
   --default-cwd /srv/projects \
   --usage-refresh-minutes 15 \
+  --max-upload-size-mb 8 \
   --enable-remote-upgrade
 ```
 
@@ -142,6 +143,25 @@ their current read-only account-limit snapshot. It does not start a turn or
 consume model tokens, concurrent polls coalesce, and failed attempts are
 rate-limited. Codex currently supplies a direct account snapshot; its existing
 local rollout record remains the fallback if the account read is unavailable.
+
+## File uploads
+
+The headless package accepts streamed session attachments of any file type and
+stores them privately under `data/uploads/`. Files are created mode 0600 inside
+mode-0700, session-specific directories; uploaded executables are therefore not
+made executable merely by transferring them. Set the per-file limit with
+`--max-upload-size-mb N` (maximum 1024 MiB); `0` disables uploads. The same
+setting is available for every current attached node in Settings → File uploads
+through the authenticated `/api/uploads/settings` endpoint. The receiver checks
+both declared and actual byte counts, so controller or client-side checks are
+only conveniences and cannot bypass the node's limit.
+
+Controllers stream remote uploads rather than buffering them and preserve TLS
+pinning, token authentication, redirect rejection, and the receiving node's
+authority over the limit. Active transfers temporarily make upgrade readiness
+busy so an artifact restart cannot interrupt a partially written file. Older
+nodes retain their image-only endpoint and remain explicitly marked unsupported
+for arbitrary-file settings until upgraded.
 
 ## CLI release status
 

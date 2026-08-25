@@ -8,6 +8,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import secrets
 import subprocess
 import sys
@@ -34,6 +35,8 @@ _auto_upgrade_last_errors = {}
 
 PROXY_CONNECT_TIMEOUT = 8.0
 PROXY_TOTAL_TIMEOUT = 60.0
+PROXY_UPLOAD_TIMEOUT = 15 * 60.0
+UPLOAD_PROXY_PATH = re.compile(r"^sessions/\d+/upload$")
 AUTO_UPGRADE_INTERVAL = 8.0
 AUTO_UPGRADE_FAILURE_RETRY = 30.0
 AUTO_UPGRADE_CURRENT_RECHECK = 5 * 60.0
@@ -765,13 +768,20 @@ async def proxy(request: web.Request):
         return await _proxy_ws(request, target, headers, be["tls_fingerprint"])
 
     try:
-        body = await request.read()
+        streaming_upload = request.method == "POST" and UPLOAD_PROXY_PATH.fullmatch(tail)
+        if streaming_upload:
+            body = request.content.iter_chunked(256 * 1024)
+            timeout = aiohttp.ClientTimeout(
+                total=PROXY_UPLOAD_TIMEOUT, connect=PROXY_CONNECT_TIMEOUT,
+                sock_connect=PROXY_CONNECT_TIMEOUT)
+        else:
+            buffered = await request.read()
+            body = buffered if buffered else None
+            timeout = aiohttp.ClientTimeout(
+                total=PROXY_TOTAL_TIMEOUT, connect=PROXY_CONNECT_TIMEOUT,
+                sock_connect=PROXY_CONNECT_TIMEOUT)
         async with client().request(request.method, target, headers=headers,
-                                    data=body if body else None,
-                                    timeout=aiohttp.ClientTimeout(
-                                        total=PROXY_TOTAL_TIMEOUT,
-                                        connect=PROXY_CONNECT_TIMEOUT,
-                                        sock_connect=PROXY_CONNECT_TIMEOUT),
+                                    data=body, timeout=timeout,
                                     allow_redirects=False,
                                     ssl=_ssl_pin(be["tls_fingerprint"])) as r:
             payload = await r.read()

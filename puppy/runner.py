@@ -11,7 +11,7 @@ import signal
 import time
 import uuid
 
-from puppy import config, db, handoff, workspaces
+from puppy import config, db, handoff, uploads, workspaces
 from puppy.drivers import get_driver
 from puppy.drivers.base import clean_env
 
@@ -163,6 +163,7 @@ class SessionHub:
             "server_time": time.time(),
             "queued": list(self.queue),
             "pending_approval": self.pending_approval,
+            "uploads": uploads.settings_payload(),
         }
 
     # ---- public ops ----

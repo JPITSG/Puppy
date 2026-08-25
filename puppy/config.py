@@ -21,6 +21,8 @@ log = logging.getLogger("puppy.config")
 
 DEFAULT_USAGE_REFRESH_MINUTES = 15
 MAX_USAGE_REFRESH_MINUTES = 24 * 60
+DEFAULT_UPLOAD_LIMIT_MB = 8
+MAX_UPLOAD_LIMIT_MB = 1024
 
 DEFAULTS = {
     "instance_name": socket.gethostname() or "puppy",
@@ -37,6 +39,7 @@ DEFAULTS = {
         "tls_key": "",
     },
     "engines": {"usage_refresh_minutes": DEFAULT_USAGE_REFRESH_MINUTES},
+    "uploads": {"max_file_size_mb": DEFAULT_UPLOAD_LIMIT_MB},
     "terminal": {"command": "/bin/bash -l"},
     "sessions": {"default_cwd": "/etc/scripts", "turn_timeout": 7200,
                  "shutdown_grace": 60},
@@ -164,6 +167,17 @@ def normalize_usage_refresh_minutes(value) -> int:
     return minutes
 
 
+def normalize_upload_limit_mb(value) -> int:
+    """Validate the per-file MiB limit. Zero deliberately disables uploads."""
+    if not _finite_number(value) or value != int(value):
+        raise ValueError("maximum upload size must be a whole number of MiB")
+    megabytes = int(value)
+    if not 0 <= megabytes <= MAX_UPLOAD_LIMIT_MB:
+        raise ValueError("maximum upload size must be between 0 and {} MiB".format(
+            MAX_UPLOAD_LIMIT_MB))
+    return megabytes
+
+
 def normalize_import(data: dict) -> dict:
     if not isinstance(data, dict):
         raise ValueError("config must be an object")
@@ -182,6 +196,8 @@ def normalize_import(data: dict) -> dict:
                 key, "non-negative" if allow_zero else "positive"))
     merged["engines"]["usage_refresh_minutes"] = normalize_usage_refresh_minutes(
         merged.get("engines", {}).get("usage_refresh_minutes"))
+    merged["uploads"]["max_file_size_mb"] = normalize_upload_limit_mb(
+        merged.get("uploads", {}).get("max_file_size_mb"))
     token = merged.get("auth", {}).get("api_token")
     if not isinstance(token, str) or not token or len(token) > 4096:
         raise ValueError("config.auth.api_token is missing")

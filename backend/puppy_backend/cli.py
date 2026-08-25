@@ -43,6 +43,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--usage-refresh-minutes", type=int,
         help="read-only engine usage refresh interval; 0 disables (default: 15)")
+    parser.add_argument(
+        "--max-upload-size-mb", type=int,
+        help="maximum size of one uploaded file in MiB; 0 disables (default: 8)")
     terminals = parser.add_mutually_exclusive_group()
     terminals.add_argument("--terminal", dest="terminal_enabled", action="store_true",
                            help="enable remote terminal websockets")
@@ -124,6 +127,12 @@ def _configure(args, parser: argparse.ArgumentParser):
         except ValueError as exc:
             parser.error(str(exc))
         config.set_value("engines.usage_refresh_minutes", interval)
+    if args.max_upload_size_mb is not None:
+        try:
+            upload_limit = config.normalize_upload_limit_mb(args.max_upload_size_mb)
+        except ValueError as exc:
+            parser.error(str(exc))
+        config.set_value("uploads.max_file_size_mb", upload_limit)
     if args.terminal_enabled is not None:
         config.set_value("backend.terminal_enabled", bool(args.terminal_enabled))
     if args.remote_upgrade_enabled is not None:
@@ -182,6 +191,7 @@ def _pairing(config, identity) -> dict:
         "protocol": protocol.API_PROTOCOL,
         "capabilities": upgrade.capabilities(terminal_enabled, identity.enabled),
         "usage_refresh_minutes": config.get("engines.usage_refresh_minutes"),
+        "max_upload_size_mb": config.get("uploads.max_file_size_mb"),
     }
     if identity.enabled:
         pairing["tls_sha256"] = identity.fingerprint
@@ -200,7 +210,8 @@ def _self_test() -> dict:
     })
     routes = sorted({route.resource.canonical for route in app.router.routes()})
     required = {"/api/ping", "/api/engines", "/api/engines/usage-refresh",
-                "/api/sessions", protocol.UPGRADE_API_PATH}
+                "/api/uploads/settings", "/api/sessions",
+                "/api/sessions/{sid}/upload", protocol.UPGRADE_API_PATH}
     if not required.issubset(routes):
         raise RuntimeError("candidate API surface is incomplete")
     return {
@@ -257,10 +268,12 @@ def main() -> None:
         parser.error(str(exc))
     log = logging.getLogger("puppy.backend")
     log.info("headless backend %s starting on %s:%s "
-             "(data: %s, terminal: %s, usage refresh: %sm, transport: %s)",
+             "(data: %s, terminal: %s, usage refresh: %sm, upload limit: %s MiB, "
+             "transport: %s)",
              __version__, host, port, config.DATA_DIR,
              "enabled" if terminal_enabled else "disabled",
              config.get("engines.usage_refresh_minutes"),
+             config.get("uploads.max_file_size_mb"),
              "pinned TLS" if identity.enabled else "cleartext HTTP")
     if url:
         log.info("pair this backend at %s; retrieve credentials with the pairing command", url)

@@ -23,7 +23,7 @@ import time
 from typing import Dict, List
 
 from puppy import (__version__, config, db, listener_handoff, runner, terminal,
-                   upgrade_contract, workspaces)
+                   upgrade_contract, uploads, workspaces)
 
 log = logging.getLogger("puppy.snapshots")
 
@@ -94,6 +94,10 @@ def blockers() -> List[str]:
     if active_terminals:
         reasons.append("{} active terminal{}".format(
             active_terminals, "" if active_terminals == 1 else "s"))
+    active_uploads = uploads.active_count()
+    if active_uploads:
+        reasons.append("{} active file upload{}".format(
+            active_uploads, "" if active_uploads == 1 else "s"))
     # Imported lazily to keep module initialization acyclic. A controller-side
     # automatic upgrade is a durable external mutation just like a manual one,
     # so backup/restore must not race its artifact replacement and restart.

@@ -15,6 +15,7 @@ SUPPORTED_BACKEND_PROTOCOLS = (LEGACY_PROTOCOL, API_PROTOCOL)
 TEMPORARY_WORKSPACE_CAPABILITY = "temporary-workspaces"
 USAGE_REFRESH_CAPABILITY = "engine-usage-refresh"
 MANUAL_USAGE_REFRESH_CAPABILITY = "engine-usage-refresh-manual"
+FILE_UPLOAD_CAPABILITY = "file-uploads"
 
 BASE_CAPABILITIES = (
     "sessions",
@@ -22,6 +23,7 @@ BASE_CAPABILITIES = (
     "approvals",
     "message-queue",
     "uploads",
+    FILE_UPLOAD_CAPABILITY,
     "filesystem",
     "engine-switch",
     TEMPORARY_WORKSPACE_CAPABILITY,

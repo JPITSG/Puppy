@@ -17,7 +17,8 @@ import zipfile
 
 from aiohttp import web
 
-from puppy import __version__, config, protocol, runner, terminal, upgrade_contract
+from puppy import (__version__, config, protocol, runner, terminal, upgrade_contract,
+                   uploads)
 
 from . import build_info
 
@@ -109,18 +110,19 @@ def _last_status(path: Path) -> dict:
 
 
 def _readiness_payload(state: str, reason: str = "", sessions=None,
-                       active_terminals: int = 0) -> dict:
+                       active_terminals: int = 0, active_uploads: int = 0) -> dict:
     return {
         "ready": state == "ready",
         "state": state,
         "reason": reason,
         "sessions": list(sessions or []),
         "active_terminals": int(active_terminals),
+        "active_uploads": int(active_uploads),
         "checked_at": time.time(),
     }
 
 
-def _busy_reason(blockers: list, terminals: int) -> str:
+def _busy_reason(blockers: list, terminals: int, upload_count: int) -> str:
     running = sum(1 for item in blockers if item.get("running"))
     queued = sum(max(0, int(item.get("queued") or 0)) for item in blockers)
     parts = []
@@ -131,15 +133,20 @@ def _busy_reason(blockers: list, terminals: int) -> str:
     if terminals:
         parts.append("{} active terminal{}".format(
             terminals, "" if terminals == 1 else "s"))
+    if upload_count:
+        parts.append("{} active file upload{}".format(
+            upload_count, "" if upload_count == 1 else "s"))
     return "backend is busy: " + ", ".join(parts or ["session activity"])
 
 
 def _workload_readiness() -> dict:
     blockers = runner.upgrade_blockers()
     terminals = terminal.active_count()
-    if blockers or terminals:
-        return _readiness_payload("busy", _busy_reason(blockers, terminals),
-                                  blockers, terminals)
+    upload_count = uploads.active_count()
+    if blockers or terminals or upload_count:
+        return _readiness_payload(
+            "busy", _busy_reason(blockers, terminals, upload_count),
+            blockers, terminals, upload_count)
     return _readiness_payload("ready", "backend is idle and ready to upgrade")
 
 

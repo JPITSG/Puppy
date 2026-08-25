@@ -16,7 +16,7 @@ from aiohttp import WSMsgType, web
 
 from puppy import (__version__, auth, backends, bind_verify, cli_releases, config, db,
                    host_metrics, listener_handoff, protocol, runner, snapshots, terminal,
-                   usage_refresh, workspaces)
+                   uploads, usage_refresh, workspaces)
 from puppy.drivers import all_drivers, get_driver
 
 log = logging.getLogger("puppy.web")
@@ -82,6 +82,7 @@ async def h_ping(request: web.Request):
         "role": request.app.get("puppy_role", "full"),
         "capabilities": list(request.app.get(
             "puppy_capabilities", protocol.execution_capabilities())),
+        "uploads": uploads.settings_payload(),
     }
     upgrade = request.app.get("puppy_upgrade")
     if callable(upgrade):
@@ -128,6 +129,7 @@ async def h_state(request: web.Request):
         "sessions": session_state["sessions"],
         "server_time": session_state["server_time"],
         "default_cwd": config.get("sessions.default_cwd", "/"),
+        "uploads": uploads.settings_payload(),
         "session_colors": db.SESSION_COLORS,
     })
 
@@ -254,6 +256,7 @@ async def h_session_get(request: web.Request):
     return web.json_response({"session": runner.session_payload(s), "status": h.status,
                               "active_since": h.active_since if h.status == "running" else None,
                               "server_time": time.time(),
+                              "uploads": uploads.settings_payload(),
                               "events": db.get_events(s["id"], limit=200)})
 
 
@@ -286,28 +289,6 @@ async def h_session_patch(request: web.Request):
             {"type": "session_meta", "session": runner.session_payload(db.get_session(s["id"]))})
     return web.json_response(
         {"ok": True, "session": runner.session_payload(db.get_session(s["id"]))})
-
-
-IMAGE_TYPES = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif"}
-
-
-async def h_session_upload(request: web.Request):
-    """Store a pasted image; the returned path goes into the message text and
-    the engine views the file with its own tools (engine-agnostic)."""
-    s = _session_or_404(request)
-    ctype = (request.headers.get("Content-Type") or "").split(";")[0].strip().lower()
-    if ctype not in IMAGE_TYPES:
-        return web.json_response({"error": f"unsupported image type '{ctype}'"}, status=415)
-    data = await request.read()
-    if not data:
-        return web.json_response({"error": "empty upload"}, status=400)
-    updir = os.path.join(config.DATA_DIR, "uploads", str(s["id"]))
-    os.makedirs(updir, exist_ok=True)
-    path = os.path.join(updir, f"{int(time.time() * 1000)}.{IMAGE_TYPES[ctype]}")
-    with open(path, "wb") as f:
-        f.write(data)
-    log.info("session %s image pasted: %s (%d bytes)", s["id"], path, len(data))
-    return web.json_response({"ok": True, "path": path})
 
 
 async def h_session_delete(request: web.Request):
@@ -456,6 +437,7 @@ async def h_settings_get(request: web.Request):
         "active_web": runtime_web,
         "web_restart_required": configured_web != runtime_web,
         "usage_refresh": usage_refresh.payload(),
+        "uploads": uploads.settings_payload(),
         "version": __version__,
     })
 
@@ -867,7 +849,6 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     r.add_delete("/api/sessions/{sid:\\d+}", h_session_delete)
     r.add_post("/api/sessions/{sid:\\d+}/workspace/reset", h_session_workspace_reset)
     r.add_post("/api/sessions/{sid:\\d+}/message", h_session_message)
-    r.add_post("/api/sessions/{sid:\\d+}/upload", h_session_upload)
     r.add_post("/api/sessions/{sid:\\d+}/interrupt", h_session_interrupt)
     r.add_post("/api/sessions/{sid:\\d+}/switch", h_session_switch)
     r.add_get("/api/sessions/{sid:\\d+}/events", h_session_events)
@@ -878,6 +859,7 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     r.add_get("/api/ws/updates", ws_updates)
     if include_terminal:
         r.add_get("/api/ws/term", terminal.ws_terminal)
+    uploads.register(app)
 
 
 def build_app() -> web.Application:

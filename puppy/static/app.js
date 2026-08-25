@@ -131,6 +131,23 @@ function copyIcon(done = false) {
   return svg;
 }
 
+function attachmentFileIcon(size = 18) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 18 18");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const page = document.createElementNS(NS, "path");
+  page.setAttribute("d", "M4 1.75h6.1L14 5.65v10.6H4Z M10 1.75v4h4");
+  page.setAttribute("fill", "none");
+  page.setAttribute("stroke", "currentColor");
+  page.setAttribute("stroke-width", "1.2");
+  page.setAttribute("stroke-linejoin", "round");
+  svg.appendChild(page);
+  return svg;
+}
+
 /* A compact transport indicator for backend rows. Shape as well as colour
    carries the state, so the distinction survives colour-vision differences:
    encrypted connections get a check; cleartext connections get an X. */
@@ -898,6 +915,7 @@ const state = {
   engines: [],            // local engines info
   engMap: {},             // key -> engine info (local)
   usageRefresh: null,     // local account-usage refresh metadata
+  uploadSettings: null,   // local per-file upload policy
   localEngineCheckedAt: 0,
   backends: [],           // remote backends [{id,name,url}]
   sessions: [],           // local sessions (live via updates ws)
@@ -909,6 +927,7 @@ const state = {
   remoteEngineCheckedAt: {},
   remoteNodeCheckedAt: {},
   remoteUsageRefresh: {}, // bid -> account-usage refresh metadata
+  remoteUploadSettings: {}, // bid -> remote per-file upload policy
   tabs: [],               // [{id,type,bid,sid,title,cmd}]
   active: null,           // tab id
   showArchived: false,
@@ -984,7 +1003,7 @@ function reconcileRemoteState() {
   for (const bucket of [state.remoteSessions, state.remoteOk, state.remoteErrors,
                         state.engCache, state.remoteEngineErrors,
                         state.remoteEngineCheckedAt, state.remoteNodeCheckedAt,
-                        state.remoteUsageRefresh,
+                        state.remoteUsageRefresh, state.remoteUploadSettings,
                         remotePollSequence]) {
     for (const id of Object.keys(bucket)) if (!live.has(String(id))) delete bucket[id];
   }
@@ -1097,6 +1116,7 @@ async function refreshState() {
   state.sessionColors = s.session_colors || [];
   state.engines = Array.isArray(s.engines) ? s.engines : [];
   state.usageRefresh = s.usage_refresh || state.usageRefresh;
+  rememberUploadSettings(0, s.uploads);
   state.localEngineCheckedAt = 0;
   state.engMap = {};
   state.engines.forEach(e => state.engMap[e.key] = e);
@@ -1266,6 +1286,7 @@ async function pollRemoteBackend(backend, forceEngines = false) {
       if (typeof node.role === "string") backend.role = node.role;
       if (Number.isInteger(node.protocol)) backend.protocol = node.protocol;
       if (Array.isArray(node.capabilities)) backend.capabilities = node.capabilities;
+      if (node.uploads) rememberUploadSettings(bid, node.uploads);
     } catch (error) {
       /* Sessions are the reachability authority. Metadata failure must not
          turn a healthy backend red or erase the last-known version. */
@@ -1443,6 +1464,46 @@ function backendSupportsManualUsageRefresh(bid) {
   const backend = state.backends.find(b => b.id === bid);
   return !!backend && Array.isArray(backend.capabilities) &&
     backend.capabilities.includes("engine-usage-refresh-manual");
+}
+
+function backendSupportsFileUploads(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(item => item.id === bid);
+  return !!backend && Array.isArray(backend.capabilities) &&
+    backend.capabilities.includes("file-uploads");
+}
+
+function normalizeUploadSettings(value) {
+  if (!value || typeof value !== "object") return null;
+  const megabytes = Number(value.max_file_size_mb);
+  if (!Number.isInteger(megabytes) || megabytes < 0 || megabytes > 1024) return null;
+  const expectedBytes = megabytes * 1024 * 1024;
+  if (value.max_file_size_bytes != null && Number(value.max_file_size_bytes) !== expectedBytes)
+    return null;
+  if (typeof value.enabled === "boolean" && value.enabled !== (megabytes > 0)) return null;
+  return {
+    enabled: megabytes > 0,
+    max_file_size_mb: megabytes,
+    max_file_size_bytes: expectedBytes,
+  };
+}
+
+function uploadSettingsFor(bid) {
+  return bid ? state.remoteUploadSettings[bid] || null : state.uploadSettings;
+}
+
+function rememberUploadSettings(bid, value) {
+  const normalized = normalizeUploadSettings(value);
+  if (!normalized) return null;
+  if (bid) state.remoteUploadSettings[bid] = normalized;
+  else state.uploadSettings = normalized;
+  for (const view of Object.values(state.views)) {
+    if (!view || !view.tab || view.tab.type !== "session" || Number(view.tab.bid || 0) !== Number(bid || 0))
+      continue;
+    view.uploadPolicy = normalized;
+    if (typeof view.syncUploadButton === "function") view.syncUploadButton();
+  }
+  return normalized;
 }
 
 function backendSupportsAutoUpgrade(backend) {
@@ -2341,6 +2402,10 @@ function toolCardNode(data, completed = false) {
   return n;
 }
 
+const ATTACHMENT_PREVIEW_TYPES = new Set([
+  "image/png", "image/jpeg", "image/webp", "image/gif",
+]);
+
 class SessionView {
   constructor(tab) {
     this.tab = tab;
@@ -2363,7 +2428,8 @@ class SessionView {
     this.histIdx = null;
     this.histDraft = "";
     this.ctrlCStreak = 0;     // composer-only: second consecutive Ctrl-C clears the queue
-    this.attachments = [];    // {path, url}: server path sent with the message, blob url for the preview
+    this.attachments = [];    // staged server files, retained only when their message is sent
+    this.uploadPolicy = uploadSettingsFor(this.tab.bid);
     this.nativeComposerChoices = prefersNativeChoices();
     this.buildDom();
     this._onResize = () => { this.syncGutter(); this.syncComposerMeta(); this.syncHeadOverflow(); this.syncQueueFade(); };
@@ -2405,6 +2471,8 @@ class SessionView {
           <div class="composer-row">
             <div class="composer-meta-viewport">
               <div class="composer-meta-scroll">
+                <button type="button" class="mini attach-add" aria-label="Attach files"
+                  title="Attach files"><span aria-hidden="true">+</span></button>
                 ${composerChoice("perm", "permissions", "Permission mode")}
                 ${composerChoice("model", "model", "Model")}
                 ${composerChoice("effort", "effort", "Reasoning effort")}
@@ -2412,6 +2480,7 @@ class SessionView {
             </div>
             <button class="btn-send">Send</button>
           </div>
+          <input class="hidden attach-input" type="file" multiple>
         </div>
       </div>`;
     $("views").appendChild(root);
@@ -2434,9 +2503,21 @@ class SessionView {
     this.approvalEl = root.querySelector(".approval");
     this.queueEl = root.querySelector(".queue-strip");
     this.attachStrip = root.querySelector(".attach-strip");
+    this.attachButton = root.querySelector(".attach-add");
+    this.fileInput = root.querySelector(".attach-input");
     this.headMeta.addEventListener("scroll", () => this.syncHeadOverflow(), { passive: true });
     this.composerMeta.addEventListener("scroll", () => this.syncComposerOverflow(), { passive: true });
     this.ta.addEventListener("paste", (e) => this.handlePaste(e));
+    this.attachButton.onclick = () => {
+      this.fileInput.value = "";
+      this.fileInput.click();
+    };
+    this.fileInput.onchange = () => {
+      const files = this.fileInput.files ? [...this.fileInput.files] : [];
+      this.fileInput.value = "";
+      if (files.length) this.uploadFiles(files);
+    };
+    this.syncUploadButton();
 
     this.fieldSizing = window.CSS && CSS.supports && CSS.supports("field-sizing", "content");
     if (this.fieldSizing) {
@@ -2567,13 +2648,34 @@ class SessionView {
     this.reconnectTimer = null;
     window.removeEventListener("resize", this._onResize);
     if (this.ws) try { this.ws.close(); } catch (e) {}
-    this.attachments.forEach(a => URL.revokeObjectURL(a.url));
+    for (const attachment of [...this.attachments]) this.removeAttachment(attachment, true);
     this.root.remove();
   }
 
   onShow() {
     this.syncGutter(); this.syncComposerMeta(); this.syncHeadOverflow();
+    this.syncUploadButton();
     this.scrollBottom(true); this.ta.focus();
+  }
+
+  syncRemoteState() {
+    this.syncUploadButton();
+  }
+
+  syncUploadButton() {
+    if (!this.attachButton) return;
+    const supported = backendSupportsFileUploads(this.tab.bid);
+    const unavailable = !!this.tab.bid && state.remoteOk[this.tab.bid] === false;
+    const policy = this.uploadPolicy || uploadSettingsFor(this.tab.bid);
+    const disabledByPolicy = !!policy && !policy.enabled;
+    this.attachButton.disabled = !supported || unavailable || disabledByPolicy;
+    if (!supported) this.attachButton.title = "Upgrade this backend to attach arbitrary files";
+    else if (unavailable) this.attachButton.title = "Backend unavailable";
+    else if (disabledByPolicy) this.attachButton.title = "File uploads are disabled on this backend";
+    else if (policy) this.attachButton.title =
+      `Attach files · ${policy.max_file_size_mb} MiB maximum each`;
+    else this.attachButton.title = "Attach files";
+    this.attachButton.setAttribute("aria-label", this.attachButton.title);
   }
 
   /* transcript sits left of the scrollbar; export its width so the composer /
@@ -2641,6 +2743,11 @@ class SessionView {
     switch (d.type) {
       case "snapshot":
         this.session = d.session;
+        if (d.uploads) {
+          const policy = rememberUploadSettings(this.tab.bid, d.uploads);
+          if (policy) this.uploadPolicy = policy;
+        }
+        this.syncUploadButton();
         this.status = d.status;
         noteSessionActivity(this.tab.bid, this.tab.sid, d.status === "running",
           d.active_since, d.server_time);
@@ -2962,62 +3069,165 @@ class SessionView {
   }
 
   /* ---- outgoing ---- */
-  async handlePaste(e) {
+  handlePaste(e) {
     const items = e.clipboardData ? [...e.clipboardData.items] : [];
-    const images = items.filter(it => it.kind === "file" && /^image\//.test(it.type));
-    if (!images.length) return;
+    const files = items.filter(item => item.kind === "file")
+      .map(item => item.getAsFile()).filter(Boolean);
+    if (!files.length) return;
     e.preventDefault();
-    for (const it of images) {
-      const blob = it.getAsFile();
-      if (!blob) continue;
-      try {
-        const r = await fetch(apiPath(this.tab.bid, `sessions/${this.tab.sid}/upload`), {
-          method: "POST", headers: { "Content-Type": blob.type }, body: blob,
-        });
-        const d = await r.json().catch(() => null);
-        if (!r.ok) throw new Error((d && d.error) || `HTTP ${r.status}`);
-        /* the blob is already in hand, so the thumbnail costs no round trip -
-           the uploads directory is not served over HTTP */
-        this.attachments.push({ path: d.path, url: URL.createObjectURL(blob) });
-        this.renderAttachments();
-      } catch (err) {
-        toast("image upload failed: " + err.message, "error");
+    this.uploadFiles(files, true);
+  }
+
+  uploadFiles(files, fromClipboard = false) {
+    const arbitraryFiles = backendSupportsFileUploads(this.tab.bid);
+    const policy = this.uploadPolicy || uploadSettingsFor(this.tab.bid);
+    if (policy && !policy.enabled) {
+      toast("file uploads are disabled on this backend", "error");
+      return;
+    }
+    for (const file of files) {
+      const legacyImage = !arbitraryFiles && fromClipboard &&
+        ATTACHMENT_PREVIEW_TYPES.has(String(file.type || "").toLowerCase());
+      if (!arbitraryFiles && !legacyImage) {
+        toast("upgrade this backend to attach arbitrary files", "error");
+        continue;
+      }
+      if (policy && file.size > policy.max_file_size_bytes) {
+        toast(`${file.name || "file"} is ${fmtBytes(file.size)} · maximum is ` +
+          `${policy.max_file_size_mb} MiB`, "error", 6500);
+        continue;
+      }
+      this.uploadFile(file, legacyImage);
+    }
+  }
+
+  async uploadFile(file, legacyImage = false) {
+    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const preview = ATTACHMENT_PREVIEW_TYPES.has(String(file.type || "").toLowerCase());
+    const attachment = {
+      name: file.name || "file", size: file.size, contentType: file.type || "application/octet-stream",
+      path: "", uploadId: "", url: preview ? URL.createObjectURL(file) : "",
+      preview, uploading: true, controller, removed: false,
+    };
+    this.attachments.push(attachment);
+    this.renderAttachments();
+    try {
+      const response = await fetch(apiPath(this.tab.bid, `sessions/${this.tab.sid}/upload`), {
+        method: "POST",
+        headers: {
+          "Content-Type": attachment.contentType,
+          "X-Puppy-Filename": encodeURIComponent(attachment.name),
+          "X-Puppy-Size": String(file.size),
+        },
+        body: file,
+        redirect: "error",
+        ...(controller ? { signal: controller.signal } : {}),
+      });
+      const result = await response.json().catch(() => null);
+      const policy = rememberUploadSettings(this.tab.bid, result && result.uploads);
+      if (policy) this.uploadPolicy = policy;
+      if (!response.ok) throw new Error((result && result.error) || `HTTP ${response.status}`);
+      if (!result || typeof result.path !== "string" ||
+          (!legacyImage && typeof result.upload_id !== "string"))
+        throw new Error("backend returned an invalid upload response");
+      if (attachment.removed) {
+        if (result.upload_id) this.discardServerUpload(result.upload_id, true);
+        return;
+      }
+      attachment.path = result.path;
+      attachment.uploadId = result.upload_id || "";
+      attachment.name = result.name || attachment.name;
+      const reportedSize = result.size == null ? file.size : Number(result.size);
+      if (!Number.isFinite(reportedSize) || reportedSize < 0)
+        throw new Error("backend returned an invalid upload size");
+      attachment.size = reportedSize;
+      attachment.contentType = result.content_type || attachment.contentType;
+      attachment.uploading = false;
+      attachment.controller = null;
+      this.renderAttachments();
+    } catch (error) {
+      if (!attachment.removed) {
+        const wasAborted = !!(controller && controller.signal.aborted);
+        this.removeAttachment(attachment, true);
+        if (!wasAborted)
+          toast(`file upload failed: ${error.message}`, "error", 6500);
       }
     }
+  }
+
+  discardServerUpload(uploadId, quiet = false) {
+    if (!uploadId) return;
+    api(this.tab.bid, `sessions/${this.tab.sid}/upload/${uploadId}`, {
+      method: "DELETE", keepalive: true, timeoutMs: 10000,
+    }).catch(error => {
+      if (!quiet) toast(`could not discard upload: ${error.message}`, "error");
+    });
+  }
+
+  removeAttachment(attachment, quiet = false) {
+    if (!attachment || attachment.removed) return;
+    attachment.removed = true;
+    if (attachment.controller) attachment.controller.abort();
+    if (attachment.url) {
+      URL.revokeObjectURL(attachment.url);
+      attachment.url = "";
+    }
+    this.attachments = this.attachments.filter(item => item !== attachment);
+    if (attachment.uploadId) this.discardServerUpload(attachment.uploadId, quiet);
+    this.renderAttachments();
   }
 
   renderAttachments() {
     this.attachStrip.innerHTML = "";
     this.attachStrip.classList.toggle("hidden", !this.attachments.length);
     for (const a of this.attachments) {
-      const chip = el("span", "attach-chip");
-      const img = el("img", "attach-thumb");
-      img.src = a.url;
-      img.alt = "pasted image";
-      img.title = a.path.split("/").pop();
-      chip.appendChild(img);
+      const chip = el("span", "attach-chip " + (a.preview ? "image" : "file") +
+        (a.uploading ? " uploading" : ""));
+      chip.title = a.path || a.name;
+      if (a.preview) {
+        const img = el("img", "attach-thumb");
+        img.src = a.url;
+        img.alt = a.name;
+        chip.appendChild(img);
+        if (a.uploading) chip.appendChild(el("span", "attach-state", "uploading"));
+      } else {
+        const icon = el("span", "attach-file-icon");
+        icon.appendChild(attachmentFileIcon());
+        const copy = el("span", "attach-file-copy");
+        copy.appendChild(el("span", "attach-file-name", a.name));
+        copy.appendChild(el("span", "attach-file-size",
+          `${a.uploading ? "uploading · " : ""}${fmtBytes(a.size)}`));
+        chip.appendChild(icon);
+        chip.appendChild(copy);
+      }
       const x = el("button", "attach-x");
       x.appendChild(xIcon(12));
       x.title = "Remove attachment";
-      x.onclick = () => {
-        URL.revokeObjectURL(a.url);
-        this.attachments = this.attachments.filter(o => o !== a);
-        this.renderAttachments();
-      };
+      x.onclick = () => this.removeAttachment(a);
       chip.appendChild(x);
       this.attachStrip.appendChild(chip);
     }
+    if (this.attachButton)
+      this.attachButton.classList.toggle("uploading",
+        this.attachments.some(attachment => attachment.uploading));
   }
 
   submit() {
     let text = this.ta.value.trim();
     if (!text && !this.attachments.length) return;
+    if (this.attachments.some(attachment => attachment.uploading)) {
+      toast("wait for file uploads to finish", "error");
+      return;
+    }
     if (!this.ws || this.ws.readyState !== 1) { toast("not connected", "error"); return; }
     if (this.attachments.length) {
       const lines = this.attachments
-        .map(a => `[image attached: ${a.path} — view it with your image/file tools]`).join("\n");
+        .map(a => a.preview
+          ? `[image attached: ${a.path} — view it with your image/file tools]`
+          : `[file attached: ${a.path} (${a.name}, ${fmtBytes(a.size)}) — inspect it with your file tools]`)
+        .join("\n");
       text = text ? text + "\n\n" + lines : lines;
-      this.attachments.forEach(a => URL.revokeObjectURL(a.url));
+      this.attachments.forEach(a => { if (a.url) URL.revokeObjectURL(a.url); });
       this.attachments = [];
       this.renderAttachments();
     }
@@ -3499,6 +3709,7 @@ class SettingsView {
     this.remoteBackendDots = new Map();
     this.remoteBackendMeta = new Map();
     this.usageRows = new Map();
+    this.uploadRows = new Map();
     this.upgradeButtons = new Map();
     this.backendAutoToggles = new Map();
     this.upgradeReadiness = new Map();
@@ -3518,6 +3729,7 @@ class SettingsView {
     this.remoteBackendDots.clear();
     this.remoteBackendMeta.clear();
     this.usageRows.clear();
+    this.uploadRows.clear();
     this.upgradeButtons.clear();
     this.backendAutoToggles.clear();
     this.upgradeReadiness.clear();
@@ -3542,6 +3754,7 @@ class SettingsView {
       reason: value.reason,
       sessions: Array.isArray(value.sessions) ? value.sessions : [],
       active_terminals: Math.max(0, Number(value.active_terminals) || 0),
+      active_uploads: Math.max(0, Number(value.active_uploads) || 0),
     };
   }
 
@@ -3749,6 +3962,15 @@ class SettingsView {
       row.update(state.remoteUsageRefresh[bid] || null,
         remoteAvailability(bid), backendSupportsUsageRefresh(bid));
     }
+    for (const [bid, row] of this.uploadRows) {
+      if (!bid) {
+        row.update(state.uploadSettings, "ok", true);
+        continue;
+      }
+      if (!state.backends.some(backend => backend.id === bid)) continue;
+      row.update(state.remoteUploadSettings[bid] || null,
+        remoteAvailability(bid), backendSupportsFileUploads(bid));
+    }
     this.syncUpgradeButtons();
   }
 
@@ -3897,6 +4119,106 @@ class SettingsView {
     return { root, update };
   }
 
+  uploadLimitRow(name, bid) {
+    const root = el("div", "usage-refresh-row upload-limit-row");
+    const identity = el("div", "usage-refresh-identity");
+    const nameEl = el("div", "usage-refresh-name", name);
+    nameEl.title = name;
+    const note = el("div", "usage-refresh-note", "Checking setting…");
+    identity.appendChild(nameEl);
+    identity.appendChild(note);
+
+    const controls = el("div", "usage-refresh-controls");
+    const limit = document.createElement("input");
+    limit.type = "number";
+    limit.min = "0";
+    limit.max = "1024";
+    limit.step = "1";
+    limit.inputMode = "numeric";
+    limit.setAttribute("aria-label", `${name} maximum upload size in MiB`);
+    limit.title = "0 disables file uploads; maximum 1024 MiB";
+    const unit = el("span", "usage-refresh-unit", "MiB");
+    const save = el("button", "btn btn-sm", "Apply");
+    controls.appendChild(limit);
+    controls.appendChild(unit);
+    controls.appendChild(save);
+    root.appendChild(identity);
+    root.appendChild(controls);
+
+    let current = null;
+    let availability = bid ? "pending" : "ok";
+    let supported = !bid;
+    let saving = false;
+    let loadError = "";
+    const update = (metadata, reachable, canConfigure) => {
+      current = normalizeUploadSettings(metadata) || null;
+      availability = reachable;
+      supported = canConfigure;
+      if (!saving && current && document.activeElement !== limit)
+        limit.value = String(current.max_file_size_mb);
+      const disabled = saving || !canConfigure || reachable === "bad" || !current;
+      limit.disabled = disabled;
+      save.disabled = disabled;
+      let description;
+      if (!canConfigure) description = "Backend upgrade required";
+      else if (reachable === "bad") description = "Backend unavailable";
+      else if (!current) description = loadError || "Checking backend setting…";
+      else if (!current.enabled) description = "File uploads are disabled";
+      else description = `Any file type · ${current.max_file_size_mb} MiB maximum each`;
+      note.textContent = description;
+      note.title = description;
+    };
+    const load = async () => {
+      if (!supported) return;
+      try {
+        const result = await api(bid, "uploads/settings", { timeoutMs: 8000 });
+        if (!root.isConnected) return;
+        loadError = "";
+        const policy = rememberUploadSettings(bid, result.uploads);
+        if (!policy) throw new Error("backend returned an invalid upload setting");
+        update(policy, bid ? remoteAvailability(bid) : "ok", true);
+      } catch (error) {
+        if (!root.isConnected) return;
+        loadError = error.message || "Could not load upload setting";
+        update(null, bid ? remoteAvailability(bid) : "ok", true);
+      }
+    };
+    save.onclick = async () => {
+      if (!limit.value.trim()) {
+        toast("enter a maximum file size in MiB", "error");
+        limit.focus();
+        return;
+      }
+      const megabytes = Number(limit.value);
+      if (!Number.isInteger(megabytes) || megabytes < 0 || megabytes > 1024) {
+        toast("maximum file size must be a whole number from 0 to 1024 MiB", "error");
+        limit.focus();
+        return;
+      }
+      saving = true;
+      save.textContent = "Saving…";
+      update(current, availability, supported);
+      try {
+        const result = await api(bid, "uploads/settings", {
+          method: "PATCH", body: { max_file_size_mb: megabytes },
+        });
+        loadError = "";
+        const policy = rememberUploadSettings(bid, result.uploads);
+        if (!policy) throw new Error("backend returned an invalid upload setting");
+        current = policy;
+        toast(`${name}: file uploads ${policy.enabled ? `limited to ${megabytes} MiB` : "disabled"}`, "ok");
+      } catch (error) {
+        toast(`${name}: ${error.message}`, "error", 7000);
+      } finally {
+        saving = false;
+        save.textContent = "Apply";
+        update(current, availability, supported);
+      }
+    };
+    update(null, availability, supported);
+    return { root, update, load };
+  }
+
   async render() {
     this.stopUpgradeReadinessPolling();
     const generation = ++this.renderGeneration;
@@ -3911,6 +4233,7 @@ class SettingsView {
     if (generation !== this.renderGeneration) return;
     state.engines = engines.engines;
     state.usageRefresh = engines.usage_refresh || settings.usage_refresh || state.usageRefresh;
+    rememberUploadSettings(0, settings.uploads);
     state.localEngineCheckedAt = Date.now();
     state.engMap = {};
     state.engines.forEach(e2 => state.engMap[e2.key] = e2);
@@ -3920,6 +4243,7 @@ class SettingsView {
     this.remoteBackendDots.clear();
     this.remoteBackendMeta.clear();
     this.usageRows.clear();
+    this.uploadRows.clear();
     this.upgradeButtons.clear();
     this.backendAutoToggles.clear();
     /* A hidden Settings tab is not polled. Re-enter through Checking rather
@@ -4136,6 +4460,31 @@ class SettingsView {
     }
     usageCard.appendChild(usageList);
     this.inner.appendChild(usageCard);
+
+    /* per-node attachment limits */
+    const uploadCard = el("div", "card upload-limit-card");
+    uploadCard.innerHTML = `<h2>File uploads</h2>
+      <p class="usage-refresh-copy">Set the maximum size of one attached file on each
+        receiving node. Files stream directly to private session storage and may be any type.
+        Use 0 to disable uploads.</p>`;
+    const uploadList = el("div", "upload-limit-list");
+    const localUploads = this.uploadLimitRow(settings.instance_name, 0);
+    localUploads.update(state.uploadSettings, "ok", true);
+    this.uploadRows.set(0, localUploads);
+    uploadList.appendChild(localUploads.root);
+    const uploadLoads = [];
+    for (const b of state.backends) {
+      const row = this.uploadLimitRow(b.name, b.id);
+      const supported = backendSupportsFileUploads(b.id);
+      row.update(state.remoteUploadSettings[b.id] || null,
+        remoteAvailability(b.id), supported);
+      this.uploadRows.set(b.id, row);
+      uploadList.appendChild(row.root);
+      if (supported) uploadLoads.push(row.load);
+    }
+    uploadCard.appendChild(uploadList);
+    this.inner.appendChild(uploadCard);
+    uploadLoads.forEach(load => load());
     this.syncRemoteState();
     pollRemotes({ forceEngines: true })
       .catch(error => console.warn("settings remote poll failed", error));
