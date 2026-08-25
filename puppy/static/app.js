@@ -40,7 +40,9 @@ function bellIcon(size, off) {
     const p = document.createElementNS(NS, "path");
     p.setAttribute("d", d);
     p.setAttribute("stroke", "currentColor");
-    p.setAttribute("stroke-width", "2");
+    /* lighter than the 2 the other drawn icons use: this one is rendered at
+       24-box scale in a 14px button, where 2 reads heavy beside ⚙ and ☀ */
+    p.setAttribute("stroke-width", "1.5");
     p.setAttribute("stroke-linecap", "round");
     p.setAttribute("stroke-linejoin", "round");
     p.setAttribute("fill", "none");
