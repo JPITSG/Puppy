@@ -19,6 +19,9 @@ STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
 log = logging.getLogger("puppy.config")
 
+DEFAULT_USAGE_REFRESH_MINUTES = 15
+MAX_USAGE_REFRESH_MINUTES = 24 * 60
+
 DEFAULTS = {
     "instance_name": socket.gethostname() or "puppy",
     "web": {"host": "0.0.0.0", "port": 10888},
@@ -33,6 +36,7 @@ DEFAULTS = {
         "tls_cert": "",
         "tls_key": "",
     },
+    "engines": {"usage_refresh_minutes": DEFAULT_USAGE_REFRESH_MINUTES},
     "terminal": {"command": "/bin/bash -l"},
     "sessions": {"default_cwd": "/etc/scripts", "turn_timeout": 7200,
                  "shutdown_grace": 60},
@@ -149,6 +153,17 @@ def _finite_number(value) -> bool:
         (isinstance(value, int) or math.isfinite(value))
 
 
+def normalize_usage_refresh_minutes(value) -> int:
+    """Validate the persisted/API interval. Zero explicitly disables refresh."""
+    if not _finite_number(value) or value != int(value):
+        raise ValueError("usage refresh interval must be a whole number of minutes")
+    minutes = int(value)
+    if minutes != 0 and not 1 <= minutes <= MAX_USAGE_REFRESH_MINUTES:
+        raise ValueError("usage refresh interval must be 0 or between 1 and {} minutes".format(
+            MAX_USAGE_REFRESH_MINUTES))
+    return minutes
+
+
 def normalize_import(data: dict) -> dict:
     if not isinstance(data, dict):
         raise ValueError("config must be an object")
@@ -165,6 +180,8 @@ def normalize_import(data: dict) -> dict:
                 (value < 0 if allow_zero else value <= 0):
             raise ValueError("config.sessions.{} must be {}".format(
                 key, "non-negative" if allow_zero else "positive"))
+    merged["engines"]["usage_refresh_minutes"] = normalize_usage_refresh_minutes(
+        merged.get("engines", {}).get("usage_refresh_minutes"))
     token = merged.get("auth", {}).get("api_token")
     if not isinstance(token, str) or not token or len(token) > 4096:
         raise ValueError("config.auth.api_token is missing")

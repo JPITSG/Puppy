@@ -13,6 +13,7 @@ SUPPORTED_BACKEND_PROTOCOLS = (LEGACY_PROTOCOL, API_PROTOCOL)
 # The node owns create/reset/delete/reboot-expiry semantics for scratch cwd
 # paths; old protocol-1 nodes simply omit this additive capability.
 TEMPORARY_WORKSPACE_CAPABILITY = "temporary-workspaces"
+USAGE_REFRESH_CAPABILITY = "engine-usage-refresh"
 
 BASE_CAPABILITIES = (
     "sessions",
@@ -23,6 +24,7 @@ BASE_CAPABILITIES = (
     "filesystem",
     "engine-switch",
     TEMPORARY_WORKSPACE_CAPABILITY,
+    USAGE_REFRESH_CAPABILITY,
 )
 TERMINAL_CAPABILITY = "terminal"
 

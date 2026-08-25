@@ -324,7 +324,7 @@ button{
 @media (hover:hover){.icon-btn:hover{background:var(--hov);border-color:var(--line);color:var(--txt)}}
 .icon-btn:active{transform:scale(.92);background:var(--hov);color:var(--txt)}
 .icon-btn:disabled{opacity:.4;pointer-events:none}
-input[type=text],input[type=password],select,textarea{
+input[type=text],input[type=password],input[type=number],select,textarea{
   font:inherit;font-size:13px;color:var(--txt);background:var(--panel2);
   -webkit-appearance:none;appearance:none;
   border:1px solid var(--line2);border-radius:var(--r-sm);padding:8px 10px;width:100%;
@@ -903,6 +903,26 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .snapshot-copy{max-width:720px;margin:0 0 8px;color:var(--txt2);font-size:12px;line-height:1.55}
 .snapshot-warning{margin:0;color:var(--warn);font-size:11px;line-height:1.45}
 .snapshot-actions{display:flex;align-items:center;gap:8px;margin-top:13px;flex-wrap:wrap}
+.usage-refresh-copy{max-width:720px;margin:0 0 9px;color:var(--txt2);font-size:12px;line-height:1.55}
+.usage-refresh-row{
+  display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:10px 18px;
+  min-width:0;padding:11px 0;border-top:1px solid var(--line);
+}
+.usage-refresh-row:first-child{border-top:0}
+.usage-refresh-identity{min-width:0}
+.usage-refresh-name{
+  min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--txt3);
+  font-family:var(--sans);font-size:10px;font-weight:400;text-transform:uppercase;letter-spacing:.1em;
+}
+.usage-refresh-note{
+  min-width:0;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  color:var(--txt3);font-size:10.5px;
+}
+.usage-refresh-controls{display:flex;align-items:center;justify-content:flex-end;gap:7px;min-width:0}
+.usage-refresh-controls input{
+  width:74px;height:30px;margin:0;padding:5px 7px;text-align:right;font-family:var(--mono);font-size:12px;
+}
+.usage-refresh-unit{color:var(--txt3);font-size:10.5px}
 
 /* ---------- modals ---------- */
 .modal-backdrop{
@@ -1040,6 +1060,10 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   .be-actions .btn{width:100%;min-width:0;height:34px;padding-left:6px;padding-right:6px}
   .snapshot-actions{display:grid;grid-template-columns:1fr 1fr;gap:7px}
   .snapshot-actions .btn{width:100%;min-width:0;height:34px;padding-left:8px;padding-right:8px}
+  .usage-refresh-row{grid-template-columns:minmax(0,1fr);gap:8px;padding:12px 0}
+  .usage-refresh-controls{justify-content:flex-start}
+  .usage-refresh-controls input{width:min(120px,40vw);height:34px}
+  .usage-refresh-controls .btn{height:34px;margin-left:auto}
 }
 @media (max-width:900px) and (any-pointer:coarse){
   /* a left-edge swipe opens the drawer on touch, so the button is redundant

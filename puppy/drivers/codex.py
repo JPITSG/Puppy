@@ -15,13 +15,16 @@ pairs so CLI additions do not silently disappear from the transcript.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import math
 import os
 import re
+import shutil
 import time
 
-from puppy.drivers.base import Driver
+from puppy.drivers.base import Driver, clean_env
 
 log = logging.getLogger("puppy.drivers.codex")
 
@@ -65,7 +68,25 @@ def _cached_models() -> list:
     return models
 
 
-_quota_cache = {"ts": 0.0, "quota": None}
+_quota_cache = {"ts": 0.0, "quota": None, "account_as_of": 0.0}
+
+
+def _quota_with_meta(quota, as_of: float, source: str):
+    if quota is None:
+        return None
+    value = dict(quota)
+    value["as_of"] = as_of
+    value["source"] = source
+    return value
+
+
+def _cache_live_quota(rate_limits) -> None:
+    quota = _weekly_from_rl(rate_limits)
+    if not quota:
+        return
+    now = time.time()
+    _quota_cache.update(
+        ts=now, quota=_quota_with_meta(quota, now, "live"), account_as_of=now)
 
 
 def _weekly_quota():
@@ -76,8 +97,9 @@ def _weekly_quota():
     if now - _quota_cache["ts"] < 300:
         return _quota_cache["quota"]
     quota = None
+    newest_m = 0.0
     try:
-        newest, newest_m = None, 0.0
+        newest = None
         for dirpath, _dirs, files in os.walk(os.path.join(_codex_home(), "sessions")):
             for fn in files:
                 if fn.startswith("rollout-") and fn.endswith(".jsonl"):
@@ -100,23 +122,135 @@ def _weekly_quota():
                 rl = (ev.get("payload") or {}).get("rate_limits") or ev.get("rate_limits") or {}
                 quota = _weekly_from_rl(rl)
                 if quota:
-                    quota["as_of"] = newest_m
+                    quota = _quota_with_meta(quota, newest_m, "rollout")
                     break
     except Exception as e:
         log.warning("weekly quota scan failed: %s", e)
+    # Never replace a newer authoritative account read (including a read that
+    # reported no weekly window) with an older rollout record.
+    if newest_m <= float(_quota_cache.get("account_as_of") or 0.0):
+        quota = _quota_cache["quota"]
+    elif quota is None and _quota_cache["quota"] is not None:
+        quota = _quota_cache["quota"]
     _quota_cache.update(ts=now, quota=quota)
-    return quota
+    return _quota_cache["quota"]
 
 
 def _weekly_from_rl(rl):
     if not isinstance(rl, dict):
         return None
     for win in (rl.get("primary"), rl.get("secondary")):
-        if isinstance(win, dict) and win.get("window_minutes") == 10080 \
-                and isinstance(win.get("used_percent"), (int, float)):
-            return {"weekly_used_percent": float(win["used_percent"]),
-                    "resets_at": win.get("resets_at") or win.get("resets_in_seconds")}
+        if not isinstance(win, dict):
+            continue
+        duration = win.get("window_minutes")
+        if duration is None:
+            duration = win.get("windowDurationMins")
+        used = win.get("used_percent")
+        if used is None:
+            used = win.get("usedPercent")
+        if duration == 10080 and isinstance(used, (int, float)) and \
+                not isinstance(used, bool) and math.isfinite(float(used)):
+            return {"weekly_used_percent": float(used),
+                    "resets_at": win.get("resets_at") or win.get("resetsAt") or
+                    win.get("resets_in_seconds")}
     return None
+
+
+async def _app_server_response(process, request_id: int, deadline: float) -> dict:
+    for _ in range(64):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("account usage request timed out")
+        line = await asyncio.wait_for(process.stdout.readline(), timeout=remaining)
+        if not line:
+            raise RuntimeError("account usage service exited before responding")
+        try:
+            value = json.loads(line)
+        except (UnicodeError, ValueError):
+            continue
+        if not isinstance(value, dict) or value.get("id") != request_id:
+            continue
+        if value.get("error"):
+            error = value["error"]
+            message = error.get("message") if isinstance(error, dict) else str(error)
+            raise RuntimeError(message or "account usage request failed")
+        result = value.get("result")
+        if not isinstance(result, dict):
+            raise RuntimeError("account usage service returned an invalid response")
+        return result
+    raise RuntimeError("account usage service returned too many unrelated messages")
+
+
+async def _stop_app_server(process) -> None:
+    if process.stdin is not None:
+        try:
+            process.stdin.close()
+        except (BrokenPipeError, ConnectionError):
+            pass
+    if process.returncode is None:
+        try:
+            await asyncio.wait_for(process.wait(), timeout=0.5)
+        except asyncio.TimeoutError:
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                pass
+    if process.returncode is None:
+        try:
+            await asyncio.wait_for(process.wait(), timeout=2)
+        except asyncio.TimeoutError:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            await process.wait()
+
+
+async def _read_account_rate_limits(binary: str, timeout: float = 12.0) -> dict:
+    """Read the CLI account snapshot through its local JSONL app server."""
+    process = await asyncio.create_subprocess_exec(
+        binary, "app-server", "--stdio",
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL, limit=256 * 1024,
+        env=clean_env(dict(os.environ)))
+    deadline = time.monotonic() + timeout
+
+    async def send(value: dict) -> None:
+        body = json.dumps(value, separators=(",", ":")).encode("utf-8") + b"\n"
+        process.stdin.write(body)
+        await process.stdin.drain()
+
+    try:
+        await send({
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "clientInfo": {"name": "puppy", "version": "1"},
+                "capabilities": {"experimentalApi": True},
+            },
+        })
+        await _app_server_response(process, 1, deadline)
+        await send({"method": "initialized"})
+        await send({"id": 2, "method": "account/rateLimits/read", "params": None})
+        result = await _app_server_response(process, 2, deadline)
+        # Newer app-server responses can carry several named limits. Prefer the
+        # explicit Codex bucket; rateLimits is the backward-compatible shape in
+        # the installed 0.149 contract.
+        snapshot = None
+        buckets = result.get("rateLimitsByLimitId")
+        if isinstance(buckets, dict):
+            snapshot = buckets.get("codex")
+            if not isinstance(snapshot, dict):
+                snapshot = next((item for item in buckets.values()
+                                 if isinstance(item, dict) and
+                                 item.get("limitId") == "codex"), None)
+        if not isinstance(snapshot, dict):
+            snapshot = result.get("rateLimits")
+        if not isinstance(snapshot, dict):
+            raise RuntimeError("account usage service did not return rate limits")
+        return snapshot
+    finally:
+        await _stop_app_server(process)
 
 
 def _clean_cmd(cmd) -> str:
@@ -281,6 +415,17 @@ class CodexDriver(Driver):
     def _extra_status(self):
         return {"quota": _weekly_quota()}
 
+    async def refresh_usage(self):
+        if not shutil.which(self.binary):
+            return None
+        snapshot = await _read_account_rate_limits(self.binary)
+        now = time.time()
+        quota = _weekly_from_rl(snapshot)
+        _quota_cache.update(
+            ts=now, quota=_quota_with_meta(quota, now, "account"),
+            account_as_of=now)
+        return True
+
     def build_cmd(self, session, first_turn, prompt, pinned_id):
         argv = [self.binary, "exec", "--json", "--skip-git-repo-check", "--color", "never",
                 "-C", session["cwd"],
@@ -388,7 +533,7 @@ class CodexDriver(Driver):
             # capture live if the stream ever carries them
             rl = ev.get("rate_limits") or (ev.get("info") or {}).get("rate_limits")
             if rl:
-                _quota_cache.update(ts=time.time(), quota=_weekly_from_rl(rl) or _quota_cache["quota"])
+                _cache_live_quota(rl)
                 return [{"a": "rate_limit", "info": rl}]
             return []
 

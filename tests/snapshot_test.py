@@ -91,6 +91,7 @@ async def exercise_http(archive_ui: dict, session_id: int) -> None:
             busy_hub.clear_queue()
 
             config.set_value("instance_name", "changed-over-http")
+            config.set_value("engines.usage_refresh_minutes", 60)
             app["puppy_bind_verifications"]["stale-before-restore"] = {
                 "timer": None, "server": None,
             }
@@ -102,6 +103,7 @@ async def exercise_http(archive_ui: dict, session_id: int) -> None:
             assert restored["ui"] == archive_ui
             assert restored["sessions"] == 2
             assert config.get("instance_name") == "saved-instance"
+            assert config.get("engines.usage_refresh_minutes") == 30
     finally:
         await runner.cleanup()
 
@@ -119,6 +121,7 @@ async def main() -> None:
         auth.create_user("snapshot-user", "secret123")
         config.set_value("instance_name", "saved-instance")
         config.set_value("sessions.default_cwd", str(project))
+        config.set_value("engines.usage_refresh_minutes", 30)
         db.execute(
             "INSERT INTO backends(name,url,token,protocol,capabilities,remote_version,role,"
             "tls_fingerprint,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -166,6 +169,7 @@ async def main() -> None:
 
         # Mutate every restored surface and an excluded ordinary project file.
         config.set_value("instance_name", "mutated-instance")
+        config.set_value("engines.usage_refresh_minutes", 5)
         db.execute("DELETE FROM events")
         db.execute("DELETE FROM sessions")
         db.execute("DELETE FROM backends")
@@ -178,6 +182,7 @@ async def main() -> None:
         snapshots.discard_staged(staged)
         assert restored["ui"] == ui
         assert config.get("instance_name") == "saved-instance"
+        assert config.get("engines.usage_refresh_minutes") == 30
         assert len(db.list_sessions(include_archived=True)) == 2
         assert db.query_one("SELECT token FROM backends")["token"] == "private-backend-token"
         assert db.query_one("SELECT username FROM users")["username"] == "snapshot-user"
@@ -206,6 +211,7 @@ async def main() -> None:
 
         # A failed database install must put config and filesystem trees back.
         config.set_value("instance_name", "rollback-current")
+        config.set_value("engines.usage_refresh_minutes", 60)
         current_upload = Path(config.DATA_DIR) / "uploads" / "current.txt"
         current_upload.write_text("keep me", encoding="utf-8")
         tls_key.write_bytes(b"keep current tls material")
@@ -227,6 +233,7 @@ async def main() -> None:
             snapshots.discard_staged(staged)
         assert calls["count"] == 2
         assert config.get("instance_name") == "rollback-current"
+        assert config.get("engines.usage_refresh_minutes") == 60
         assert current_upload.read_text(encoding="utf-8") == "keep me"
         assert tls_key.read_bytes() == b"keep current tls material"
         assert len(db.list_sessions(include_archived=True)) == 2

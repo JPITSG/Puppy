@@ -44,6 +44,11 @@ approvals, multi-backend support and built-in web terminals.
   service restart, and failed verification leaves the setting unchanged. An
   HTTPS reverse-proxy page fails closed because browsers forbid the direct HTTP
   proof as mixed content.
+- **Fresh usage status**: Settings → Usage refresh controls a separate interval
+  for this instance and every attached backend. Supported engines refresh their
+  read-only account-limit snapshot without starting a model turn, so the weekly
+  quota shown in the sidebar stays current even when that engine is idle. Zero
+  disables automatic refresh on that node.
 
 ## Requirements
 
@@ -83,8 +88,8 @@ reports an independently versioned controller/backend protocol.
 ## Data & config
 
 Persistent private state lives in `data/` (gitignored): `config.json` (instance
-name, bind host/port, api token, terminal command), `puppy.db` (sessions, transcripts,
-users), backend TLS identities, and `puppy.log`. Scratch-session files are the
+name, bind host/port, api token, terminal command, usage-refresh interval),
+`puppy.db` (sessions, transcripts, users), backend TLS identities, and `puppy.log`. Scratch-session files are the
 intentional exception: they live in a mode-0700, instance-specific namespace
 under the OS temporary directory and are disposable. The repo itself is clean
 code, safe to publish. Export archives contain password hashes, API/backend

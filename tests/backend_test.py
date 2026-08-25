@@ -159,6 +159,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert ping["version"] == expected_version
         assert "sessions" in ping["capabilities"]
         assert "temporary-workspaces" in ping["capabilities"]
+        assert "engine-usage-refresh" in ping["capabilities"]
         assert "terminal" not in ping["capabilities"]
         assert ("pinned-tls" in ping["capabilities"]) is bool(fingerprint)
         assert ping["transport"]["encrypted"] is bool(fingerprint)
@@ -176,6 +177,16 @@ async def exercise_node(url: str, token: str, expected_version: str,
         async with http.get(url + "/api/sessions", headers=good, ssl=pinned) as response:
             assert response.status == 200
             assert (await response.json())["sessions"] == []
+        async with http.get(url + "/api/engines/usage-refresh",
+                            headers=good, ssl=pinned) as response:
+            refresh = await response.json()
+            assert response.status == 200, refresh
+        assert refresh["usage_refresh"]["minutes"] == 0
+        assert refresh["usage_refresh"]["enabled"] is False
+        async with http.patch(url + "/api/engines/usage-refresh",
+                              headers=good, ssl=pinned,
+                              json={"minutes": -1}) as response:
+            assert response.status == 400
         updates = await http.ws_connect(url + "/api/ws/updates", headers=good, ssl=pinned)
         first = await updates.receive_json(timeout=3)
         assert first["type"] == "sessions" and first["sessions"] == []
@@ -338,6 +349,7 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert stored["role"] == "backend"
         assert "sessions" in stored["capabilities"]
         assert "temporary-workspaces" in stored["capabilities"]
+        assert "engine-usage-refresh" in stored["capabilities"]
         assert "terminal" not in stored["capabilities"]
         assert "remote-upgrade" in stored["capabilities"]
         assert "pinned-tls" in stored["capabilities"]
@@ -354,6 +366,11 @@ async def exercise_controller(url: str, token: str, backend_url: str,
                             headers=headers) as response:
             proxied = await response.json()
             assert response.status == 200 and proxied["sessions"] == [], proxied
+        async with http.get(url + f"/api/b/{stored['id']}/engines/usage-refresh",
+                            headers=headers) as response:
+            proxied_refresh = await response.json()
+            assert response.status == 200, proxied_refresh
+        assert proxied_refresh["usage_refresh"]["minutes"] == 0
         remote_updates = await http.ws_connect(
             url + f"/api/b/{stored['id']}/ws/updates", headers=headers)
         first = await remote_updates.receive_json(timeout=3)
@@ -635,6 +652,7 @@ async def main() -> None:
             "--name", "disabled-node", "--bind", "127.0.0.1", "--port", str(disabled_port),
             "--advertise-url", disabled_url, "--api-token", backend_token,
             "--disable-terminal", "--enable-remote-upgrade", "--disable-tls",
+            "--usage-refresh-minutes", "0",
         ], text=True)
         disabled_process = subprocess.Popen([
             sys.executable, str(release_artifact), "serve", "--data-dir", str(disabled_data),
@@ -656,7 +674,7 @@ async def main() -> None:
             "--name", "backend-test-node", "--bind", "127.0.0.1",
             "--port", str(backend_port), "--advertise-url", backend_url,
             "--api-token", backend_token, "--disable-terminal", "--enable-remote-upgrade",
-            "--auto-tls",
+            "--auto-tls", "--usage-refresh-minutes", "0",
         ], text=True)
         pairing = json.loads(pairing_raw)
         assert pairing["url"] == backend_url and pairing["token"] == backend_token
@@ -676,9 +694,10 @@ async def main() -> None:
             sys.executable, str(release_artifact), "pairing",
             "--data-dir", str(temp_root / "enabled-data"),
             "--bind", "127.0.0.1", "--port", str(backend_port),
-            "--api-token", backend_token,
+            "--api-token", backend_token, "--usage-refresh-minutes", "30",
         ], text=True))
         assert "terminal" in enabled_pairing["capabilities"]
+        assert enabled_pairing["usage_refresh_minutes"] == 30
         assert "pinned-tls" in enabled_pairing["capabilities"]
         assert len(enabled_pairing["tls_sha256"]) == 64
         repeated_pairing = json.loads(subprocess.check_output([
@@ -686,6 +705,7 @@ async def main() -> None:
             "--data-dir", str(temp_root / "enabled-data"),
         ], text=True))
         assert repeated_pairing["tls_sha256"] == enabled_pairing["tls_sha256"]
+        assert repeated_pairing["usage_refresh_minutes"] == 30
 
         state_dir = backend_data / "upgrade"
         legacy_launcher_env = dict(os.environ)
@@ -740,6 +760,7 @@ async def main() -> None:
         config.load()
         controller_token = "controller-test-token-0123456789abcdef"
         config.set_value("auth.api_token", controller_token)
+        config.set_value("engines.usage_refresh_minutes", 0)
         db.connect()
         assert "tls_fingerprint" in {
             row["name"] for row in db.query("PRAGMA table_info(backends)")}

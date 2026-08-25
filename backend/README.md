@@ -38,6 +38,7 @@ Unix user that will run the service. Initialize the private configuration once:
   --advertise-url https://100.64.0.12:10888 \
   --auto-tls \
   --default-cwd /srv/projects \
+  --usage-refresh-minutes 15 \
   --enable-remote-upgrade
 ```
 
@@ -109,6 +110,22 @@ engine-native session id, and seeds the fresh engine context with a notice that
 the old files were cleared. Startup cleanup removes only unreferenced,
 service-owned directories inside the validated private namespace; normal
 working directories are never removed.
+
+## Account usage refresh
+
+The headless package stores the same per-node usage-refresh interval as the full
+runtime. Set it while pairing or serving with `--usage-refresh-minutes N` (1 to
+1440 minutes); use `0` to disable it. Once attached, the controller exposes the
+same value in Settings → Usage refresh and can change it through the authenticated
+`/api/engines/usage-refresh` endpoint. The node advertises this support with the
+`engine-usage-refresh` capability, so older backends remain explicitly disabled
+in the Settings UI.
+
+The refresh is lazy: a due engine-status poll asks supported installed CLIs for
+their current read-only account-limit snapshot. It does not start a turn or
+consume model tokens, concurrent polls coalesce, and failed attempts are
+rate-limited. Codex currently supplies a direct account snapshot; its existing
+local rollout record remains the fallback if the account read is unavailable.
 
 ## Remote upgrades
 

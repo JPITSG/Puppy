@@ -722,6 +722,8 @@ const state = {
   instance: "",
   engines: [],            // local engines info
   engMap: {},             // key -> engine info (local)
+  usageRefresh: null,     // local account-usage refresh metadata
+  localEngineCheckedAt: 0,
   backends: [],           // remote backends [{id,name,url}]
   sessions: [],           // local sessions (live via updates ws)
   remoteSessions: {},     // bid -> sessions[]
@@ -730,6 +732,7 @@ const state = {
   engCache: {},           // bid -> engines[]
   remoteEngineErrors: {}, // bid -> latest engine-status error (node can still be reachable)
   remoteEngineCheckedAt: {},
+  remoteUsageRefresh: {}, // bid -> account-usage refresh metadata
   tabs: [],               // [{id,type,bid,sid,title,cmd}]
   active: null,           // tab id
   showArchived: false,
@@ -739,6 +742,7 @@ const state = {
 const REMOTE_POLL_INTERVAL = 12000;
 const REMOTE_POLL_TIMEOUT = 5000;
 const REMOTE_ENGINE_REFRESH = 60000;
+const ENGINE_POLL_TIMEOUT = 15000;
 const remotePollSequence = {};
 let remotePollTimer = null;
 let remotePollingGeneration = 0;
@@ -747,7 +751,8 @@ function reconcileRemoteState() {
   const live = new Set(state.backends.map(backend => String(backend.id)));
   for (const bucket of [state.remoteSessions, state.remoteOk, state.remoteErrors,
                         state.engCache, state.remoteEngineErrors,
-                        state.remoteEngineCheckedAt, remotePollSequence]) {
+                        state.remoteEngineCheckedAt, state.remoteUsageRefresh,
+                        remotePollSequence]) {
     for (const id of Object.keys(bucket)) if (!live.has(String(id))) delete bucket[id];
   }
 }
@@ -853,6 +858,8 @@ async function refreshState() {
   state.instance = s.instance_name;
   state.sessionColors = s.session_colors || [];
   state.engines = Array.isArray(s.engines) ? s.engines : [];
+  state.usageRefresh = s.usage_refresh || state.usageRefresh;
+  state.localEngineCheckedAt = 0;
   state.engMap = {};
   state.engines.forEach(e => state.engMap[e.key] = e);
   state.backends = Array.isArray(s.backends) ? s.backends : [];
@@ -919,6 +926,27 @@ function syncRemoteStateViews() {
   }
 }
 
+async function pollLocalEngines(forceEngines = false) {
+  const now = Date.now();
+  if (!forceEngines && now - Number(state.localEngineCheckedAt || 0) < REMOTE_ENGINE_REFRESH)
+    return;
+  try {
+    const payload = await api(0, "engines", { timeoutMs: ENGINE_POLL_TIMEOUT });
+    if (!payload || !Array.isArray(payload.engines))
+      throw new Error("instance returned an invalid engines response");
+    state.engines = payload.engines;
+    state.engMap = {};
+    state.engines.forEach(engine => state.engMap[engine.key] = engine);
+    state.usageRefresh = payload.usage_refresh || state.usageRefresh;
+    state.localEngineCheckedAt = Date.now();
+  } catch (error) {
+    /* A broken local request should not turn the 12-second session poll into
+       a tight engine-status retry loop. The normal one-minute cadence retries. */
+    state.localEngineCheckedAt = Date.now();
+    console.warn("local engine status refresh failed", error);
+  }
+}
+
 async function pollRemoteBackend(backend, forceEngines = false) {
   const bid = backend.id;
   const sequence = (remotePollSequence[bid] || 0) + 1;
@@ -964,11 +992,12 @@ async function pollRemoteBackend(backend, forceEngines = false) {
   if (!refreshEngines) return;
 
   try {
-    const engines = await api(bid, "engines", { timeoutMs: REMOTE_POLL_TIMEOUT });
+    const engines = await api(bid, "engines", { timeoutMs: ENGINE_POLL_TIMEOUT });
     if (!engines || !Array.isArray(engines.engines))
       throw new Error("backend returned an invalid engines response");
     if (!remotePollIsCurrent(bid, sequence)) return;
     state.engCache[bid] = engines.engines;
+    if (engines.usage_refresh) state.remoteUsageRefresh[bid] = engines.usage_refresh;
     state.remoteEngineCheckedAt[bid] = Date.now();
     delete state.remoteEngineErrors[bid];
   } catch (error) {
@@ -983,7 +1012,10 @@ async function pollRemoteBackend(backend, forceEngines = false) {
 async function pollRemotes(options = {}) {
   const forceEngines = !!options.forceEngines;
   const backends = [...state.backends];
-  await Promise.all(backends.map(backend => pollRemoteBackend(backend, forceEngines)));
+  await Promise.all([
+    pollLocalEngines(forceEngines),
+    ...backends.map(backend => pollRemoteBackend(backend, forceEngines)),
+  ]);
   reconcileRemoteState();
   syncRemoteStateViews();
 }
@@ -1062,6 +1094,16 @@ function backendSupportsScratch(bid) {
   // a scratch choice that would silently become a normal directory session.
   return !!backend && Number(backend.protocol || 0) > 0 &&
     Array.isArray(backend.capabilities) && backend.capabilities.includes("temporary-workspaces");
+}
+
+function backendSupportsUsageRefresh(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(b => b.id === bid);
+  /* Unlike the older execution surface, this is a new API route. Never infer
+     it for protocol-0 nodes: an explicit capability keeps Settings from
+     offering a control that the remote cannot accept. */
+  return !!backend && Array.isArray(backend.capabilities) &&
+    backend.capabilities.includes("engine-usage-refresh");
 }
 
 function renderSidebar() {
@@ -2841,6 +2883,8 @@ class SettingsView {
     this.renderGeneration = 0;
     this.remoteEngineGroups = new Map();
     this.remoteBackendDots = new Map();
+    this.usageRows = new Map();
+    this.localEngineGroup = null;
     this.root = el("div", "view settings");
     this.root.innerHTML = `<div class="settings-scroll"><div class="settings-inner"></div></div>`;
     $("views").appendChild(this.root);
@@ -2850,6 +2894,8 @@ class SettingsView {
     this.renderGeneration++;
     this.remoteEngineGroups.clear();
     this.remoteBackendDots.clear();
+    this.usageRows.clear();
+    this.localEngineGroup = null;
     this.root.remove();
   }
   onShow() { this.render(); }
@@ -2883,6 +2929,15 @@ class SettingsView {
       const status = remoteAvailability(bid);
       dot.className = "gdot " + status;
       dot.title = remoteAvailabilityTitle(bid);
+    }
+    for (const [bid, row] of this.usageRows) {
+      if (!bid) {
+        row.update(state.usageRefresh, "ok", true);
+        continue;
+      }
+      if (!state.backends.some(backend => backend.id === bid)) continue;
+      row.update(state.remoteUsageRefresh[bid] || null,
+        remoteAvailability(bid), backendSupportsUsageRefresh(bid));
     }
   }
 
@@ -2945,6 +3000,116 @@ class SettingsView {
     return { root, update };
   }
 
+  usageRefreshRow(name, bid) {
+    const root = el("div", "usage-refresh-row");
+    const identity = el("div", "usage-refresh-identity");
+    const nameEl = el("div", "usage-refresh-name", name);
+    nameEl.title = name;
+    const note = el("div", "usage-refresh-note", "Checking setting…");
+    identity.appendChild(nameEl);
+    identity.appendChild(note);
+
+    const controls = el("div", "usage-refresh-controls");
+    const interval = document.createElement("input");
+    interval.type = "number";
+    interval.min = "0";
+    interval.max = "1440";
+    interval.step = "1";
+    interval.inputMode = "numeric";
+    interval.setAttribute("aria-label", `${name} usage refresh interval in minutes`);
+    interval.title = "0 disables automatic refresh; maximum 1440 minutes";
+    const unit = el("span", "usage-refresh-unit", "min");
+    const save = el("button", "btn btn-sm", "Apply");
+    controls.appendChild(interval);
+    controls.appendChild(unit);
+    controls.appendChild(save);
+    root.appendChild(identity);
+    root.appendChild(controls);
+
+    let current = null;
+    let availability = bid ? "pending" : "ok";
+    let supported = !bid;
+    let saving = false;
+    const describe = (metadata, reachable, canConfigure) => {
+      if (!canConfigure) return "Backend upgrade required";
+      if (reachable === "bad") return "Backend unavailable";
+      if (!metadata) return "Checking backend setting…";
+      if (!metadata.enabled) return "Automatic refresh is off";
+      if (metadata.last_error) return `Last refresh failed · ${metadata.last_error}`;
+      if (metadata.last_success_at) {
+        const stamp = new Date(Number(metadata.last_success_at) * 1000);
+        if (!Number.isNaN(stamp.getTime())) return `Last refreshed ${stamp.toLocaleString()}`;
+      }
+      return "Refreshes on the next engine-status check";
+    };
+    const update = (metadata, reachable = "ok", canConfigure = true) => {
+      current = metadata;
+      availability = reachable;
+      supported = canConfigure;
+      if (metadata && document.activeElement !== interval)
+        interval.value = String(metadata.minutes);
+      const disabled = saving || !canConfigure || reachable === "bad" || !metadata;
+      interval.disabled = disabled;
+      save.disabled = disabled;
+      const description = describe(metadata, reachable, canConfigure);
+      note.textContent = description;
+      note.title = description;
+    };
+    save.onclick = async () => {
+      if (!interval.value.trim()) {
+        toast("enter a refresh interval in minutes", "error");
+        interval.focus();
+        return;
+      }
+      const minutes = Number(interval.value);
+      if (!Number.isInteger(minutes) || minutes < 0 || minutes > 1440) {
+        toast("refresh interval must be 0 or a whole number from 1 to 1440", "error");
+        interval.focus();
+        return;
+      }
+      saving = true;
+      save.textContent = minutes ? "Refreshing…" : "Saving…";
+      update(current, availability, supported);
+      try {
+        const result = await api(bid, "engines/usage-refresh", {
+          method: "PATCH", body: { minutes }, timeoutMs: 20000,
+        });
+        if (!result || !Array.isArray(result.engines) || !result.usage_refresh)
+          throw new Error("node returned an invalid usage refresh response");
+        if (bid) {
+          state.engCache[bid] = result.engines;
+          state.remoteUsageRefresh[bid] = result.usage_refresh;
+          state.remoteOk[bid] = true;
+          delete state.remoteErrors[bid];
+          state.remoteEngineCheckedAt[bid] = Date.now();
+          delete state.remoteEngineErrors[bid];
+          const group = this.remoteEngineGroups.get(bid);
+          if (group) group.update({ status: "ok", engines: result.engines });
+        } else {
+          state.engines = result.engines;
+          state.engMap = {};
+          state.engines.forEach(engine => state.engMap[engine.key] = engine);
+          state.usageRefresh = result.usage_refresh;
+          state.localEngineCheckedAt = Date.now();
+          if (this.localEngineGroup)
+            this.localEngineGroup.update({ status: "ok", engines: result.engines });
+        }
+        renderFootEngines();
+        current = result.usage_refresh;
+        const suffix = result.usage_refresh.last_error ? " · refresh failed" : "";
+        toast(`${name}: usage refresh saved${suffix}`,
+          result.usage_refresh.last_error ? "error" : "ok", 6000);
+      } catch (error) {
+        toast(`${name}: ${error.message}`, "error", 7000);
+      } finally {
+        saving = false;
+        save.textContent = "Apply";
+        this.syncRemoteState();
+      }
+    };
+    return { root, update };
+  }
+
   async render() {
     const generation = ++this.renderGeneration;
     let settings, engines;
@@ -2957,12 +3122,16 @@ class SettingsView {
     }
     if (generation !== this.renderGeneration) return;
     state.engines = engines.engines;
+    state.usageRefresh = engines.usage_refresh || settings.usage_refresh || state.usageRefresh;
+    state.localEngineCheckedAt = Date.now();
     state.engMap = {};
     state.engines.forEach(e2 => state.engMap[e2.key] = e2);
     renderFootEngines();
     this.inner.innerHTML = "";
     this.remoteEngineGroups.clear();
     this.remoteBackendDots.clear();
+    this.usageRows.clear();
+    this.localEngineGroup = null;
 
     /* instance */
     const c1 = el("div", "card");
@@ -3100,6 +3269,7 @@ class SettingsView {
     c2.innerHTML = `<h2>Engines</h2>`;
     const localGroup = this.engineGroup(settings.instance_name, `this instance · v${settings.version}`);
     localGroup.update({ status: "ok", engines: state.engines });
+    this.localEngineGroup = localGroup;
     c2.appendChild(localGroup.root);
     for (const b of state.backends) {
       const meta = [b.url, b.remote_version ? `v${b.remote_version}` : ""].filter(Boolean).join(" · ");
@@ -3113,6 +3283,27 @@ class SettingsView {
       c2.appendChild(group.root);
     }
     this.inner.appendChild(c2);
+
+    /* account usage refresh */
+    const usageCard = el("div", "card usage-refresh-card");
+    usageCard.innerHTML = `<h2>Usage refresh</h2>
+      <p class="usage-refresh-copy">Choose how often each node asks its installed engines
+        for current account-limit data. This read-only check does not start a turn or consume
+        model tokens. Use 0 to disable it.</p>`;
+    const usageList = el("div", "usage-refresh-list");
+    const localUsage = this.usageRefreshRow(settings.instance_name, 0);
+    localUsage.update(state.usageRefresh, "ok", true);
+    this.usageRows.set(0, localUsage);
+    usageList.appendChild(localUsage.root);
+    for (const b of state.backends) {
+      const usage = this.usageRefreshRow(b.name, b.id);
+      usage.update(state.remoteUsageRefresh[b.id] || null,
+        remoteAvailability(b.id), backendSupportsUsageRefresh(b.id));
+      this.usageRows.set(b.id, usage);
+      usageList.appendChild(usage.root);
+    }
+    usageCard.appendChild(usageList);
+    this.inner.appendChild(usageCard);
     this.syncRemoteState();
     pollRemotes({ forceEngines: true })
       .catch(error => console.warn("settings remote poll failed", error));
@@ -3529,10 +3720,11 @@ async function modalNewSession() {
       if (bid === 0) loaded = state.engines;
       else {
         if (!Object.prototype.hasOwnProperty.call(state.engCache, bid)) {
-          const result = await api(bid, "engines", { timeoutMs: REMOTE_POLL_TIMEOUT });
+          const result = await api(bid, "engines", { timeoutMs: ENGINE_POLL_TIMEOUT });
           if (!result || !Array.isArray(result.engines))
             throw new Error("backend returned an invalid engines response");
           state.engCache[bid] = result.engines;
+          if (result.usage_refresh) state.remoteUsageRefresh[bid] = result.usage_refresh;
           state.remoteEngineCheckedAt[bid] = Date.now();
           delete state.remoteEngineErrors[bid];
         }

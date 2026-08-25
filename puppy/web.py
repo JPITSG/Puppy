@@ -14,7 +14,7 @@ import time
 from aiohttp import WSMsgType, web
 
 from puppy import (__version__, auth, backends, bind_verify, config, db, protocol,
-                   runner, snapshots, terminal, workspaces)
+                   runner, snapshots, terminal, usage_refresh, workspaces)
 from puppy.drivers import all_drivers, get_driver
 
 log = logging.getLogger("puppy.web")
@@ -95,7 +95,9 @@ async def h_ping(request: web.Request):
     return web.json_response(payload)
 
 
-async def _engines_payload():
+async def _engines_payload(refresh_usage: bool = True):
+    if refresh_usage:
+        await usage_refresh.maybe_refresh()
     engines = []
     for d in all_drivers():
         st = await d.status()
@@ -111,11 +113,14 @@ async def _engines_payload():
 
 
 async def h_state(request: web.Request):
-    engines = await _engines_payload()
+    # Keep initial app/auth entry fast. The browser immediately follows with
+    # an asynchronous engine poll, which performs a due account refresh.
+    engines = await _engines_payload(refresh_usage=False)
     return web.json_response({
         "version": __version__,
         "instance_name": config.get("instance_name"),
         "engines": engines,
+        "usage_refresh": usage_refresh.payload(),
         "backends": backends.list_backends(),
         "sessions": runner.sessions_payload()["sessions"],
         "default_cwd": config.get("sessions.default_cwd", "/"),
@@ -124,7 +129,34 @@ async def h_state(request: web.Request):
 
 
 async def h_engines(request: web.Request):
-    return web.json_response({"engines": await _engines_payload()})
+    engines = await _engines_payload()
+    return web.json_response({
+        "engines": engines,
+        "usage_refresh": usage_refresh.payload(),
+    })
+
+
+async def h_usage_refresh_get(request: web.Request):
+    return web.json_response({"usage_refresh": usage_refresh.payload()})
+
+
+async def h_usage_refresh_patch(request: web.Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid usage refresh request"}, status=400)
+    if not isinstance(body, dict) or "minutes" not in body:
+        return web.json_response({"error": "usage refresh minutes are required"}, status=400)
+    try:
+        interval = usage_refresh.set_minutes(body["minutes"])
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    if interval > 0:
+        await usage_refresh.maybe_refresh(force=True)
+    return web.json_response({
+        "engines": await _engines_payload(refresh_usage=False),
+        "usage_refresh": usage_refresh.payload(),
+    })
 
 
 # ---- sessions ----
@@ -409,6 +441,7 @@ async def h_settings_get(request: web.Request):
         "web": configured_web,
         "active_web": runtime_web,
         "web_restart_required": configured_web != runtime_web,
+        "usage_refresh": usage_refresh.payload(),
         "version": __version__,
     })
 
@@ -596,6 +629,7 @@ async def h_snapshot_import(request: web.Request):
         if blocked:
             return web.json_response({"error": "; ".join(blocked)}, status=409)
         result = snapshots.commit_import(staged)
+        usage_refresh.reset_due(clear_status=True)
         try:
             await backends.close_client()
         except Exception as exc:
@@ -699,6 +733,8 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     r.add_get("/api/ping", h_ping)
     r.add_get("/api/node", h_ping)
     r.add_get("/api/engines", h_engines)
+    r.add_get("/api/engines/usage-refresh", h_usage_refresh_get)
+    r.add_patch("/api/engines/usage-refresh", h_usage_refresh_patch)
 
     r.add_get("/api/sessions", h_sessions_list)
     r.add_post("/api/sessions", h_session_create)

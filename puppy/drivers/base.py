@@ -84,23 +84,30 @@ class Driver:
         return None
 
     async def status(self) -> dict:
-        """{installed, version, auth, detail} - cached."""
+        """{installed, version, auth, detail, ...extras}; slow checks are cached."""
         now = time.time()
         cached = _status_cache.get(self.key)
         if cached and now - cached[0] < 300:
-            return cached[1]
-        st = {"installed": False, "version": "", "auth": "unknown", "detail": ""}
-        if shutil.which(self.binary):
-            st["installed"] = True
-            st["version"] = await self._run_quick([self.binary, "--version"])
-            st.update(await self._auth_status())
+            st = dict(cached[1])
+        else:
+            st = {"installed": False, "version": "", "auth": "unknown", "detail": ""}
+            if shutil.which(self.binary):
+                st["installed"] = True
+                st["version"] = await self._run_quick([self.binary, "--version"])
+                st.update(await self._auth_status())
+            _status_cache[self.key] = (now, dict(st))
+        # Quotas can change between the relatively expensive version/auth
+        # probes, so dynamic extras must never be trapped in the 5-minute cache.
         st.update(self._extra_status())
-        _status_cache[self.key] = (now, st)
         return st
 
     def _extra_status(self) -> dict:
         """Engine-specific extras merged into status() (e.g. quota info)."""
         return {}
+
+    async def refresh_usage(self):
+        """Refresh account-limit data without starting a turn; None = unsupported."""
+        return None
 
     async def _auth_status(self) -> dict:
         return {"auth": "unknown", "detail": ""}

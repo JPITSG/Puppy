@@ -40,6 +40,9 @@ def _parser() -> argparse.ArgumentParser:
                         help="set the API token (prefer PUPPY_BACKEND_TOKEN to avoid shell history)")
     parser.add_argument("--default-cwd", help="default working directory for new sessions")
     parser.add_argument("--terminal-command", help="default command for terminal tabs")
+    parser.add_argument(
+        "--usage-refresh-minutes", type=int,
+        help="read-only engine usage refresh interval; 0 disables (default: 15)")
     terminals = parser.add_mutually_exclusive_group()
     terminals.add_argument("--terminal", dest="terminal_enabled", action="store_true",
                            help="enable remote terminal websockets")
@@ -115,6 +118,12 @@ def _configure(args, parser: argparse.ArgumentParser):
         if not command:
             parser.error("--terminal-command cannot be empty")
         config.set_value("terminal.command", command)
+    if args.usage_refresh_minutes is not None:
+        try:
+            interval = config.normalize_usage_refresh_minutes(args.usage_refresh_minutes)
+        except ValueError as exc:
+            parser.error(str(exc))
+        config.set_value("engines.usage_refresh_minutes", interval)
     if args.terminal_enabled is not None:
         config.set_value("backend.terminal_enabled", bool(args.terminal_enabled))
     if args.remote_upgrade_enabled is not None:
@@ -172,6 +181,7 @@ def _pairing(config, identity) -> dict:
         "token": config.get("auth.api_token"),
         "protocol": protocol.API_PROTOCOL,
         "capabilities": upgrade.capabilities(terminal_enabled, identity.enabled),
+        "usage_refresh_minutes": config.get("engines.usage_refresh_minutes"),
     }
     if identity.enabled:
         pairing["tls_sha256"] = identity.fingerprint
@@ -189,7 +199,8 @@ def _self_test() -> dict:
         "host": "127.0.0.1", "port": 1, "tls": False,
     })
     routes = sorted({route.resource.canonical for route in app.router.routes()})
-    required = {"/api/ping", "/api/engines", "/api/sessions", protocol.UPGRADE_API_PATH}
+    required = {"/api/ping", "/api/engines", "/api/engines/usage-refresh",
+                "/api/sessions", protocol.UPGRADE_API_PATH}
     if not required.issubset(routes):
         raise RuntimeError("candidate API surface is incomplete")
     return {
@@ -245,9 +256,11 @@ def main() -> None:
     except (RuntimeError, ValueError) as exc:
         parser.error(str(exc))
     log = logging.getLogger("puppy.backend")
-    log.info("headless backend %s starting on %s:%s (data: %s, terminal: %s, transport: %s)",
+    log.info("headless backend %s starting on %s:%s "
+             "(data: %s, terminal: %s, usage refresh: %sm, transport: %s)",
              __version__, host, port, config.DATA_DIR,
              "enabled" if terminal_enabled else "disabled",
+             config.get("engines.usage_refresh_minutes"),
              "pinned TLS" if identity.enabled else "cleartext HTTP")
     if url:
         log.info("pair this backend at %s; retrieve credentials with the pairing command", url)
