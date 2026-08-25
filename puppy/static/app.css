@@ -134,7 +134,7 @@ a{color:var(--acc2)}
 .gdot{display:block;flex:0 0 6px;width:6px;height:6px;border-radius:50%;background:var(--txt3)}
 .gdot.ok{background:var(--ok)}
 .gdot.bad{background:var(--err)}
-.sess-group-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sess-group-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;user-select:none}
 .disclosure-toggle{
   width:18px;height:18px;margin:-4px 0 -4px -3px;padding:0;display:inline-flex;align-items:center;
   justify-content:center;flex-shrink:0;border:0;border-radius:var(--btn-r);background:transparent;

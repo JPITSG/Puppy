@@ -1882,12 +1882,18 @@ function renderSidebar() {
       const dot = el("span", "gdot " + g.status);
       dot.title = g.bid ? remoteAvailabilityTitle(g.bid) : "available";
       const name = el("span", "sess-group-name", g.name);
-      name.title = g.name;
+      name.title = `${g.name} · double-click to collapse or expand sessions`;
       const key = g.bid ? `remote:${g.bid}` : "local";
+      const disclosure = disclosureButton(`${g.name} sessions`, body,
+        collapsedSessionBackends, "puppy.collapsed.session-backends", key);
+      name.ondblclick = event => {
+        event.preventDefault();
+        event.stopPropagation();
+        disclosure.click();
+      };
       t.appendChild(dot);
       t.appendChild(name);
-      t.appendChild(disclosureButton(`${g.name} sessions`, body,
-        collapsedSessionBackends, "puppy.collapsed.session-backends", key));
+      t.appendChild(disclosure);
       group.appendChild(t);
     }
     const allSessions = sessionsFor(g.bid);
