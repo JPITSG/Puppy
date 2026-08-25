@@ -133,10 +133,17 @@ a{color:var(--acc2)}
 .side-scroll .linklike{margin-top:auto;align-self:flex-start;flex-shrink:0;padding:8px 6px 0}
 .sess-group-title{
   font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:var(--txt3);
-  padding:12px 6px 5px;display:flex;align-items:center;gap:6px;
+  padding:5px 6px;display:flex;align-items:center;gap:6px;
 }
-/* The title's top padding separates backend groups; the first group already
-   has the same 12px clearance below New session as the button has above it. */
+/* A backend title sits as far below the row above it as its own first row sits
+   below it: 5px + row border + row padding, read either way. That needs the row
+   above to drop the 6px it keeps between rows. */
+.sess-group:not(:last-child)>.sess-group-body>.sess-item:last-child{margin-bottom:0}
+/* same rule for the flat Open session list, where titles are row siblings;
+   kept apart so a parser without :has() still applies the sidebar one */
+.sess-item:has(+.sess-group-title){margin-bottom:0}
+/* The first group needs no top padding: the scroller's 2px plus the actions'
+   10px already give it the same 12px clearance the New session button has above. */
 #sess-groups>.sess-group:first-child>.sess-group-title{padding-top:0}
 .gdot{display:block;flex:0 0 6px;width:6px;height:6px;border-radius:50%;background:var(--txt3)}
 .gdot.ok{background:var(--ok)}
