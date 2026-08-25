@@ -5424,7 +5424,7 @@ class SettingsView {
         beList.appendChild(row);
       }
     };
-    this.inner.appendChild(c3);
+    this.inner.insertBefore(c3, c2);
     renderBes();
     this.syncUpgradeButtons();
     c3.querySelector("#be-add").onclick = async () => {
