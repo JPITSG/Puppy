@@ -237,21 +237,41 @@ class SessionHub:
     def queue_config(self, fields: dict) -> bool:
         """Hold a model/effort change until everything already queued has run:
         the user changed it after sending those prompts, so they belong to the
-        configuration that was showing when they were written. Consecutive
-        changes collapse into one pending entry. Returns False when nothing is
-        pending and the change should just apply immediately."""
+        configuration that was showing when they were written.
+
+        Only a real difference is held. Consecutive changes collapse into the
+        one pending entry, and each field is measured against what is already
+        in force at that point in the queue - fiddling with the pickers and
+        landing back on the current value leaves nothing pending, and trims a
+        pending entry that no longer changes anything.
+
+        True means the caller must not apply these fields to the session now."""
         clean = {k: str(v) for k, v in fields.items() if k in ("model", "effort")}
         if not clean:
             return False
         if self.status != "running" and not self.queue:
             return False
-        last = self.queue[-1] if self.queue else None
-        if _is_queued_config(last):
-            last["fields"].update(clean)
-            last["key"] = _queued_config_key(last["fields"])
+        session = db.get_session(self.id) or {}
+        tail = self.queue[-1] if self.queue and _is_queued_config(self.queue[-1]) else None
+        # what runs just before the tail entry: the session's own configuration
+        # plus every pending change queued ahead of it
+        base = {"model": session.get("model") or "", "effort": session.get("effort") or ""}
+        for item in self.queue:
+            if _is_queued_config(item) and item is not tail:
+                base.update(item.get("fields") or {})
+        merged = dict(tail.get("fields") or {}) if tail else {}
+        merged.update(clean)
+        merged = {k: v for k, v in merged.items() if v != base.get(k, "")}
+        if tail and merged:
+            tail["fields"] = merged
+            tail["key"] = _queued_config_key(merged)
+        elif tail:
+            self.queue.pop()
+        elif merged:
+            self.queue.append({"kind": "config", "fields": merged,
+                               "key": _queued_config_key(merged)})
         else:
-            self.queue.append({"kind": "config", "fields": clean,
-                               "key": _queued_config_key(clean)})
+            return True   # already in force further down the queue: nothing to do
         self._broadcast_queue()
         return True
 

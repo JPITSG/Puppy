@@ -737,8 +737,6 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 }
 .queue-strip .q-item{display:flex;align-items:center;gap:7px;min-width:0}
 .queue-strip .q-n{flex:0 0 auto;opacity:.55;font-variant-numeric:tabular-nums}
-/* a pending model/effort change waiting its turn among the messages */
-.queue-strip .q-item.q-cfg .q-t{color:var(--acc2);font-style:italic}
 /* each row is one line; the tail fades rather than ending in an ellipsis */
 .queue-strip .q-t{flex:1;min-width:0;white-space:nowrap;overflow:hidden}
 .queue-strip .q-t.clipped{

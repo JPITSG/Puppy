@@ -286,6 +286,7 @@ async def h_session_patch(request: web.Request):
     # While a turn runs or prompts wait, a model/effort change joins the queue
     # and applies in order - prompts sent before it keep the configuration they
     # were written under. With nothing pending it applies like any other field.
+    # True means the hub took charge of it (queued, or already in force there).
     queued_config = bool(config) and runner.hub(s["id"]).queue_config(config)
     if not queued_config:
         fields.update(config)
