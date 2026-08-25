@@ -2406,6 +2406,37 @@ const ATTACHMENT_PREVIEW_TYPES = new Set([
   "image/png", "image/jpeg", "image/webp", "image/gif",
 ]);
 
+function dataTransferHasFiles(transfer) {
+  if (!transfer) return false;
+  const types = transfer.types ? [...transfer.types] : [];
+  if (types.includes("Files")) return true;
+  return transfer.items ? [...transfer.items].some(item => item.kind === "file") : false;
+}
+
+function filesFromDataTransfer(transfer) {
+  const result = { files: [], directories: 0 };
+  if (!transfer) return result;
+  const items = transfer.items ? [...transfer.items] : [];
+  if (items.length) {
+    for (const item of items) {
+      if (item.kind !== "file") continue;
+      let entry = null;
+      try {
+        if (typeof item.webkitGetAsEntry === "function") entry = item.webkitGetAsEntry();
+      } catch (_) { /* fall back to getAsFile below */ }
+      if (entry && entry.isDirectory) {
+        result.directories++;
+        continue;
+      }
+      const file = item.getAsFile();
+      if (file) result.files.push(file);
+    }
+    return result;
+  }
+  result.files = transfer.files ? [...transfer.files] : [];
+  return result;
+}
+
 class SessionView {
   constructor(tab) {
     this.tab = tab;
@@ -2430,6 +2461,7 @@ class SessionView {
     this.ctrlCStreak = 0;     // composer-only: second consecutive Ctrl-C clears the queue
     this.attachments = [];    // staged server files, retained only when their message is sent
     this.uploadPolicy = uploadSettingsFor(this.tab.bid);
+    this.fileDragDepth = 0;
     this.nativeComposerChoices = prefersNativeChoices();
     this.buildDom();
     this._onResize = () => { this.syncGutter(); this.syncComposerMeta(); this.syncHeadOverflow(); this.syncQueueFade(); };
@@ -2488,6 +2520,7 @@ class SessionView {
     this.scroll = root.querySelector(".chat-scroll");
     this.inner = root.querySelector(".chat-inner");
     this.ta = root.querySelector("textarea");
+    this.composerBox = root.querySelector(".composer-box");
     this.sendBtn = root.querySelector(".btn-send");
     this.composerRow = root.querySelector(".composer-row");
     this.composerMeta = root.querySelector(".composer-meta-scroll");
@@ -2508,6 +2541,10 @@ class SessionView {
     this.headMeta.addEventListener("scroll", () => this.syncHeadOverflow(), { passive: true });
     this.composerMeta.addEventListener("scroll", () => this.syncComposerOverflow(), { passive: true });
     this.ta.addEventListener("paste", (e) => this.handlePaste(e));
+    this.composerBox.addEventListener("dragenter", (e) => this.handleFileDragEnter(e));
+    this.composerBox.addEventListener("dragover", (e) => this.handleFileDragOver(e));
+    this.composerBox.addEventListener("dragleave", (e) => this.handleFileDragLeave(e));
+    this.composerBox.addEventListener("drop", (e) => this.handleFileDrop(e));
     this.attachButton.onclick = () => {
       this.fileInput.value = "";
       this.fileInput.click();
@@ -2643,6 +2680,7 @@ class SessionView {
 
   destroy() {
     this.closed = true;
+    this.clearFileDropTarget();
     this.connectionSequence++;
     if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
@@ -3069,6 +3107,60 @@ class SessionView {
   }
 
   /* ---- outgoing ---- */
+  showFileDropTarget() {
+    if (!this.composerBox) return;
+    this.syncUploadButton();
+    const unavailable = this.attachButton && this.attachButton.disabled;
+    this.composerBox.dataset.dropHint = unavailable ?
+      this.attachButton.title : "Drop files to attach";
+    this.composerBox.classList.add("file-drag");
+    this.composerBox.classList.toggle("drop-rejected", !!unavailable);
+  }
+
+  clearFileDropTarget() {
+    this.fileDragDepth = 0;
+    if (!this.composerBox) return;
+    this.composerBox.classList.remove("file-drag", "drop-rejected");
+    delete this.composerBox.dataset.dropHint;
+  }
+
+  handleFileDragEnter(event) {
+    if (!dataTransferHasFiles(event.dataTransfer)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    this.fileDragDepth++;
+    this.showFileDropTarget();
+  }
+
+  handleFileDragOver(event) {
+    if (!dataTransferHasFiles(event.dataTransfer)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    this.showFileDropTarget();
+    try {
+      event.dataTransfer.dropEffect = this.attachButton.disabled ? "none" : "copy";
+    } catch (_) { /* some browsers expose a read-only dropEffect */ }
+  }
+
+  handleFileDragLeave(event) {
+    if (!this.composerBox.classList.contains("file-drag")) return;
+    event.preventDefault();
+    event.stopPropagation();
+    this.fileDragDepth = Math.max(0, this.fileDragDepth - 1);
+    if (this.fileDragDepth === 0) this.clearFileDropTarget();
+  }
+
+  handleFileDrop(event) {
+    if (!dataTransferHasFiles(event.dataTransfer)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const dropped = filesFromDataTransfer(event.dataTransfer);
+    this.clearFileDropTarget();
+    if (dropped.directories)
+      toast("folders cannot be attached · drop individual files instead", "error", 6000);
+    if (dropped.files.length) this.uploadFiles(dropped.files);
+  }
+
   handlePaste(e) {
     const items = e.clipboardData ? [...e.clipboardData.items] : [];
     const files = items.filter(item => item.kind === "file")

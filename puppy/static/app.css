@@ -772,6 +772,16 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 /* browsers with field-sizing: the textarea sizes itself natively - no JS at all */
 .composer textarea.fs-content{field-sizing:content;height:auto!important}
 .composer-box:focus-within{border-color:rgba(90,162,245,.5);box-shadow:0 0 0 3px rgba(90,162,245,.1)}
+.composer-box.file-drag{border-color:rgba(90,162,245,.62);box-shadow:0 0 0 3px rgba(90,162,245,.1)}
+.composer-box.file-drag::after{
+  content:attr(data-drop-hint);position:absolute;z-index:4;top:5px;right:5px;bottom:5px;left:5px;
+  pointer-events:none;
+  display:flex;align-items:center;justify-content:center;padding:12px;text-align:center;
+  border:1px dashed var(--line3);border-radius:calc(var(--r-lg) - 3px);
+  background:var(--panel2);color:var(--txt2);font:11px/1.35 var(--sans);letter-spacing:.025em;
+}
+.composer-box.file-drag.drop-rejected{border-color:rgba(217,66,89,.55);box-shadow:0 0 0 3px rgba(217,66,89,.08)}
+.composer-box.file-drag.drop-rejected::after{border-color:rgba(217,66,89,.38);color:var(--err)}
 .composer textarea{
   border:none;background:none;box-shadow:none!important;resize:none;padding:2px 3px;
   /* integer line-height: fractional line heights (1.45*13.5=19.575px) make every

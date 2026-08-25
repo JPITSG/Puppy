@@ -58,8 +58,9 @@ approvals, multi-backend support and built-in web terminals.
   An outdated version pill turns orange; failures retain the last good result
   and never interfere with engine availability. No package manager is invoked
   and Puppy never installs the update itself.
-- **File attachments**: the composer can upload images, documents, archives,
-  source, binaries, and other files directly to the session's execution node.
+- **File attachments**: use the `+` picker, clipboard paste, or drag files from
+  the operating system onto the composer. Images, documents, archives, source,
+  binaries, and other files upload directly to the session's execution node.
   Transfers stream through controllers, remain private under `data/uploads/`,
   and obey the receiver's configurable per-file limit; zero disables uploads.
 
