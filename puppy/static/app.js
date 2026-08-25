@@ -2676,8 +2676,7 @@ function syncBell() {
     toggleRoot.classList.toggle("disabled", saving);
     toggleRoot.title = saving ? "Updating completion alerts…" : !n.configured && n.enabled ?
       "Enabled, but no command is configured, so nothing will run" : n.enabled ?
-        "Completion alerts enabled · same setting as the sidebar bell" :
-        "Completion alerts disabled · same setting as the sidebar bell";
+        "Completion alerts enabled" : "Completion alerts disabled";
     toggle.setAttribute("aria-label", n.enabled ?
       "Disable completion alerts" : "Enable completion alerts");
   }
@@ -5215,16 +5214,13 @@ class SettingsView {
       const desired = nfEnabled.checked;
       nfEnabled.dataset.saving = "true";
       syncBell();
-      nfNoteSet(desired ? "enabling…" : "disabling…");
+      nfNoteSet("");
       try {
         const r = await api(0, "notify/toggle", {
           method: "POST", body: { enabled: desired },
         });
         state.notify = { configured: !!(r.settings.command || "").trim(),
                          enabled: !!r.settings.enabled };
-        nfNoteSet(state.notify.configured ?
-          (state.notify.enabled ? "armed" : "silenced") :
-          (state.notify.enabled ? "enabled · no command" : "disabled"));
       } catch (e) {
         nfNoteSet(e.message, true);
       } finally {
@@ -5240,8 +5236,7 @@ class SettingsView {
         state.notify = { configured: !!(r.settings.command || "").trim(),
                          enabled: !!r.settings.enabled };
         syncBell();
-        nfNoteSet(!state.notify.configured ? "saved · no command" :
-          state.notify.enabled ? "saved · armed" : "saved · silenced");
+        nfNoteSet("saved");
         toast(state.notify.configured ? "completion alert saved" :
           "completion alert command cleared", "ok");
       } catch (e) { nfNoteSet(e.message, true); }
