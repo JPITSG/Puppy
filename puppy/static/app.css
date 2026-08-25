@@ -796,11 +796,13 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   position:relative;display:inline-flex;line-height:0;
   background:var(--panel3);border:1px solid var(--line2);border-radius:9px;overflow:hidden;
 }
-/* contain, not cover: these are usually screenshots, and a cropped slice of
-   one shows nothing useful. Wide images letterbox into the panel colour. */
+/* Preserve natural proportions until an extreme aspect ratio hits the width
+   clamps; then fill the thumbnail with a cropped portion instead of
+   surrounding a tiny strip with dead space. Screenshots are left-anchored so
+   their leading labels/code survive the crop. The uploaded image is unchanged. */
 .attach-chip .attach-thumb{
   display:block;height:54px;width:auto;max-width:140px;min-width:26px;
-  object-fit:contain;background:var(--panel2);
+  object-fit:cover;object-position:left center;background:var(--panel2);
 }
 .attach-chip .attach-state{
   position:absolute;left:4px;bottom:4px;padding:3px 5px;border-radius:var(--btn-r);
