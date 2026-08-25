@@ -3484,6 +3484,71 @@ const ATTACHMENT_PREVIEW_TYPES = new Set([
   "image/png", "image/jpeg", "image/webp", "image/gif",
 ]);
 
+/* Attachments reach the engine as marker lines appended to the message text, so
+   sent messages carry them in their transcript text. The composer parses its own
+   markers back out when recalling history: the chips come back as chips instead
+   of raw bracket lines, and a recalled marker is re-sent verbatim. */
+const ATTACH_IMAGE_PREFIX = "[image attached: ";
+const ATTACH_IMAGE_SUFFIX = " — view it with your image/file tools]";
+const ATTACH_FILE_PREFIX = "[file attached: ";
+const ATTACH_FILE_SUFFIX = " — inspect it with your file tools]";
+const SENT_THUMBNAIL_LIMIT = 12;   // recall keeps this many sent image previews
+
+function baseName(path) {
+  const value = String(path || "");
+  return value.split("/").pop() || value;
+}
+
+function attachmentMarkerLine(a) {
+  if (a.line) return a.line;   // recalled markers round-trip byte for byte
+  return a.preview
+    ? `${ATTACH_IMAGE_PREFIX}${a.path}${ATTACH_IMAGE_SUFFIX}`
+    : `${ATTACH_FILE_PREFIX}${a.path} (${a.name}, ${fmtBytes(a.size)})${ATTACH_FILE_SUFFIX}`;
+}
+
+/* One marker line -> a composer attachment that owns nothing: its file is already
+   referenced by the sent message, so dismissing the chip must never discard it. */
+function parseAttachmentMarker(line) {
+  const recalled = (path, extra) => path ? Object.assign({
+    path, name: baseName(path), line, uploadId: "", url: "",
+    ownsUrl: false, size: 0, sizeText: "", uploading: false, controller: null,
+    removed: false,
+  }, extra) : null;
+  if (line.startsWith(ATTACH_IMAGE_PREFIX) && line.endsWith(ATTACH_IMAGE_SUFFIX))
+    return recalled(line.slice(ATTACH_IMAGE_PREFIX.length,
+                               line.length - ATTACH_IMAGE_SUFFIX.length),
+                    { preview: true, sizeText: "image" });
+  if (!(line.startsWith(ATTACH_FILE_PREFIX) && line.endsWith(ATTACH_FILE_SUFFIX))) return null;
+  // "<path> (<name>, <size>)", where <name> is the path's own basename: scanning
+  // the candidate splits keeps names holding spaces, commas or brackets intact.
+  const inner = line.slice(ATTACH_FILE_PREFIX.length, line.length - ATTACH_FILE_SUFFIX.length);
+  for (let at = inner.indexOf(" ("); at >= 0; at = inner.indexOf(" (", at + 1)) {
+    const path = inner.slice(0, at);
+    const tail = inner.slice(at + 2);
+    const lead = baseName(path) + ", ";
+    if (!path || !tail.startsWith(lead) || !tail.endsWith(")")) continue;
+    return recalled(path, { preview: false, sizeText: tail.slice(lead.length, -1) });
+  }
+  return null;
+}
+
+/* Markers are the message's trailing block; anything above them is the prose the
+   composer should show. A message that was only attachments recalls as chips. */
+function splitAttachmentMarkers(text) {
+  const lines = String(text || "").split("\n");
+  const attachments = [];
+  for (;;) {
+    const parsed = lines.length ? parseAttachmentMarker(lines[lines.length - 1]) : null;
+    if (!parsed) break;
+    attachments.unshift(parsed);
+    lines.pop();
+  }
+  return {
+    text: attachments.length ? lines.join("\n").replace(/\s+$/, "") : String(text || ""),
+    attachments,
+  };
+}
+
 function dataTransferHasFiles(transfer) {
   if (!transfer) return false;
   const types = transfer.types ? [...transfer.types] : [];
@@ -3539,6 +3604,8 @@ class SessionView {
     this.histDraft = "";
     this.ctrlCStreak = 0;     // composer-only: second consecutive Ctrl-C clears the queue
     this.attachments = [];    // staged server files, retained only when their message is sent
+    this.histAttach = null;   // staged attachments parked while history recall is active
+    this.sentThumbs = new Map();  // path -> object URL, so recall can re-show previews
     this.uploadPolicy = uploadSettingsFor(this.tab.bid);
     this.fileDragDepth = 0;
     this.nativeComposerChoices = prefersNativeChoices();
@@ -3649,13 +3716,21 @@ class SessionView {
     }
     this._lastTaH = 0;
 
+    // the draft is stored in sendable form, so staged attachments survive a reload
     const draft = lsGet("puppy.draft." + this.tab.id);
-    if (draft) { this.ta.value = draft; this.resizeComposer(); }
+    if (draft) {
+      const restored = splitAttachmentMarkers(draft);
+      this.ta.value = restored.text;
+      this.attachments = restored.attachments;
+      this.renderAttachments();
+      this.resizeComposer();
+    }
     this.ta.addEventListener("input", () => {
       this.ctrlCStreak = 0;
       this.histIdx = null;   // manual edits exit history mode
+      this.releaseHistoryAttachments();
       this.resizeComposer();
-      lsSet("puppy.draft." + this.tab.id, this.ta.value);
+      this.saveDraft();
     });
     this.ta.addEventListener("keydown", (e) => {
       if (e.isComposing) { this.ctrlCStreak = 0; return; }
@@ -3675,20 +3750,27 @@ class SessionView {
       const atStart = this.ta.selectionStart === 0 && this.ta.selectionEnd === 0;
       const atEnd = this.ta.selectionStart === this.ta.value.length && this.ta.selectionEnd === this.ta.value.length;
       if (e.key === "ArrowUp" && atStart && this.history.length) {
-        if (this.histIdx === null) { this.histIdx = this.history.length; this.histDraft = this.ta.value; }
+        if (this.histIdx === null) {
+          this.histIdx = this.history.length;
+          this.histDraft = this.ta.value;
+          this.histAttach = this.attachments;   // parked, not discarded
+        }
         if (this.histIdx > 0) {
           e.preventDefault();
           this.histIdx--;
-          this.setComposer(this.history[this.histIdx]);
+          this.recallComposer(this.history[this.histIdx]);
         }
       } else if (e.key === "ArrowDown" && atEnd && this.histIdx !== null) {
         e.preventDefault();
         this.histIdx++;
         if (this.histIdx >= this.history.length) {
+          this.attachments = this.histAttach || [];
+          this.histAttach = null;
+          this.renderAttachments();
           this.setComposer(this.histDraft);
           this.histIdx = null;
         } else {
-          this.setComposer(this.history[this.histIdx]);
+          this.recallComposer(this.history[this.histIdx]);
         }
       }
     });
@@ -3765,7 +3847,10 @@ class SessionView {
     this.reconnectTimer = null;
     window.removeEventListener("resize", this._onResize);
     if (this.ws) try { this.ws.close(); } catch (e) {}
+    this.releaseHistoryAttachments();
     for (const attachment of [...this.attachments]) this.removeAttachment(attachment, true);
+    for (const url of this.sentThumbs.values()) URL.revokeObjectURL(url);
+    this.sentThumbs.clear();
     this.root.remove();
   }
 
@@ -3855,7 +3940,59 @@ class SessionView {
     this.ta.value = v;
     this.ta.selectionStart = this.ta.selectionEnd = v.length;
     this.resizeComposer();
-    lsSet("puppy.draft." + this.tab.id, v);
+    this.saveDraft();
+  }
+
+  /* Keep the stored draft in the form the message would be sent in: reopening the
+     tab parses its markers back into chips instead of showing bracket lines. */
+  saveDraft() {
+    const markers = this.attachments.filter(a => a.path).map(attachmentMarkerLine).join("\n");
+    const text = this.ta.value;
+    lsSet("puppy.draft." + this.tab.id,
+          markers ? (text ? text + "\n\n" + markers : markers) : text);
+  }
+
+  /* Recall a sent message: its attachment markers become chips again, and the
+     preview from the original send is reused when this tab still holds it. */
+  recallComposer(text) {
+    const recalled = splitAttachmentMarkers(text);
+    for (const attachment of recalled.attachments) {
+      if (!attachment.preview) continue;
+      const url = this.sentThumbs.get(attachment.path);
+      if (url) attachment.url = url;   // owned by sentThumbs, never revoked here
+    }
+    this.attachments = recalled.attachments;   // the parked list keeps its own array
+    this.renderAttachments();
+    this.setComposer(recalled.text);
+  }
+
+  /* History mode ended without walking back to the draft, so the attachments it
+     parked are unreachable: discard the uploads they still own. */
+  releaseHistoryAttachments() {
+    if (!this.histAttach) return;
+    const parked = this.histAttach;
+    this.histAttach = null;
+    for (const attachment of parked)
+      if (!this.attachments.includes(attachment)) this.removeAttachment(attachment, true);
+  }
+
+  /* A sent image's object URL outlives its chip so recall can show the preview;
+     everything else the composer created is released immediately. */
+  retireSentAttachment(attachment) {
+    if (!attachment.url || !attachment.ownsUrl) return;
+    if (!attachment.preview || !attachment.path) {
+      URL.revokeObjectURL(attachment.url);
+      return;
+    }
+    const previous = this.sentThumbs.get(attachment.path);
+    if (previous && previous !== attachment.url) URL.revokeObjectURL(previous);
+    this.sentThumbs.delete(attachment.path);
+    this.sentThumbs.set(attachment.path, attachment.url);
+    while (this.sentThumbs.size > SENT_THUMBNAIL_LIMIT) {
+      const oldest = this.sentThumbs.keys().next().value;
+      URL.revokeObjectURL(this.sentThumbs.get(oldest));
+      this.sentThumbs.delete(oldest);
+    }
   }
 
   /* ---- incoming ---- */
@@ -4345,6 +4482,7 @@ class SessionView {
     const attachment = {
       name: file.name || "file", size: file.size, contentType: file.type || "application/octet-stream",
       path: "", uploadId: "", url: preview ? URL.createObjectURL(file) : "",
+      ownsUrl: preview, sizeText: "", line: "",
       preview, uploading: true, controller, removed: false,
     };
     this.attachments.push(attachment);
@@ -4407,7 +4545,8 @@ class SessionView {
     attachment.removed = true;
     if (attachment.controller) attachment.controller.abort();
     if (attachment.url) {
-      URL.revokeObjectURL(attachment.url);
+      // a recalled chip borrows its preview from sentThumbs; only revoke our own
+      if (attachment.ownsUrl) URL.revokeObjectURL(attachment.url);
       attachment.url = "";
     }
     this.attachments = this.attachments.filter(item => item !== attachment);
@@ -4419,9 +4558,11 @@ class SessionView {
     this.attachStrip.innerHTML = "";
     this.attachStrip.classList.toggle("hidden", !this.attachments.length);
     for (const a of this.attachments) {
-      const chip = el("span", "attach-chip " + (a.preview ? "image" : "file") +
+      // a recalled image without its original preview falls back to a named chip
+      const thumbnail = a.preview && !!a.url;
+      const chip = el("span", "attach-chip " + (thumbnail ? "image" : "file") +
         (a.uploading ? " uploading" : ""));
-      if (a.preview) {
+      if (thumbnail) {
         const img = el("img", "attach-thumb");
         img.src = a.url;
         img.alt = a.name;
@@ -4433,7 +4574,7 @@ class SessionView {
         const copy = el("span", "attach-file-copy");
         copy.appendChild(el("span", "attach-file-name", a.name));
         copy.appendChild(el("span", "attach-file-size",
-          `${a.uploading ? "uploading · " : ""}${fmtBytes(a.size)}`));
+          `${a.uploading ? "uploading · " : ""}${a.sizeText || fmtBytes(a.size)}`));
         chip.appendChild(icon);
         chip.appendChild(copy);
       }
@@ -4448,6 +4589,7 @@ class SessionView {
     if (this.attachButton)
       this.attachButton.classList.toggle("uploading",
         this.attachments.some(attachment => attachment.uploading));
+    if (!this.closed) this.saveDraft();   // teardown must not rewrite the draft
   }
 
   submit() {
@@ -4459,13 +4601,9 @@ class SessionView {
     }
     if (!this.ws || this.ws.readyState !== 1) { toast("not connected", "error"); return; }
     if (this.attachments.length) {
-      const lines = this.attachments
-        .map(a => a.preview
-          ? `[image attached: ${a.path} — view it with your image/file tools]`
-          : `[file attached: ${a.path} (${a.name}, ${fmtBytes(a.size)}) — inspect it with your file tools]`)
-        .join("\n");
+      const lines = this.attachments.map(attachmentMarkerLine).join("\n");
       text = text ? text + "\n\n" + lines : lines;
-      this.attachments.forEach(a => { if (a.url) URL.revokeObjectURL(a.url); });
+      this.attachments.forEach(a => this.retireSentAttachment(a));
       this.attachments = [];
       this.renderAttachments();
     }
@@ -4473,6 +4611,7 @@ class SessionView {
     this.ta.value = "";
     this.resizeComposer();
     this.histIdx = null; this.histDraft = "";
+    this.releaseHistoryAttachments();
     // sending always jumps to the bottom - now, and again when the sent
     // message echoes back as a transcript event (even if it was queued)
     this._forceScroll = true;
