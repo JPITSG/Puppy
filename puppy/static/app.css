@@ -258,7 +258,7 @@ a{color:var(--acc2)}
 .foot-usage-refresh.refreshing svg{animation:spin .75s linear infinite}
 .foot-row{display:flex;align-items:center;gap:6px;border-top:1px solid var(--line);padding-top:7px}
 .foot-row .icon-btn{width:24px;height:24px;font-size:14px;border-radius:var(--btn-r);margin-left:-8px}
-#btn-bell svg{display:block}
+#btn-bell svg{display:block;transform:translateY(1px)}
 #btn-bell.on{color:var(--acc2)}
 .foot-ver{font-size:10.5px;color:var(--txt3);font-family:var(--mono)}
 .conn-state{display:flex;align-items:center;min-width:0;margin-left:auto}
