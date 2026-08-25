@@ -3435,6 +3435,39 @@ $("btn-bell").onclick = async () => {
   });
 })();
 
+/* A keystroke the browser handled itself brings the caret back into view; an
+   edit made from script gets no such courtesy, so a composer that has grown to
+   its max height keeps showing the window it had before the change until the
+   next real character arrives. Measure where the caret sits on a throwaway
+   mirror of the textarea - the same trick the autosize ghost uses - and scroll
+   only when the caret is actually outside the visible band. */
+const CARET_MIRROR_STYLES = [
+  "fontFamily", "fontSize", "fontWeight", "fontStyle", "lineHeight", "letterSpacing",
+  "textIndent", "textTransform", "wordSpacing", "tabSize",
+  "paddingTop", "paddingBottom", "paddingLeft", "paddingRight",
+];
+function scrollCaretIntoView(ta) {
+  if (!ta || ta.scrollHeight <= ta.clientHeight + 1) return;   // nothing to scroll
+  const cs = getComputedStyle(ta);
+  const mirror = document.createElement("div");
+  for (const prop of CARET_MIRROR_STYLES) mirror.style[prop] = cs[prop];
+  /* clientWidth excludes the scrollbar the overflow just introduced, so the
+     mirror wraps exactly where the textarea does. */
+  mirror.style.cssText += ";position:absolute;top:0;left:-9999px;visibility:hidden;" +
+    "pointer-events:none;white-space:pre-wrap;overflow-wrap:break-word;box-sizing:border-box;" +
+    "width:" + ta.clientWidth + "px";
+  mirror.textContent = ta.value.slice(0, ta.selectionEnd);
+  const caret = document.createElement("span");
+  caret.textContent = "\u200b";
+  mirror.appendChild(caret);
+  document.body.appendChild(mirror);
+  const top = caret.offsetTop;
+  const bottom = top + (caret.offsetHeight || parseFloat(cs.lineHeight) || 16);
+  mirror.remove();
+  if (bottom > ta.scrollTop + ta.clientHeight) ta.scrollTop = bottom - ta.clientHeight;
+  else if (top < ta.scrollTop) ta.scrollTop = top;
+}
+
 /* ctrl+j -> newline in the composer (CLI muscle memory; keeps Firefox from
    opening its Downloads/bookmarks popup). Terminal tabs keep native handling. */
 document.addEventListener("keydown", (e) => {
@@ -3451,7 +3484,8 @@ document.addEventListener("keydown", (e) => {
   const s = ta.selectionStart, en = ta.selectionEnd;
   ta.value = ta.value.slice(0, s) + "\n" + ta.value.slice(en);
   ta.selectionStart = ta.selectionEnd = s + 1;
-  ta.dispatchEvent(new Event("input", { bubbles: true }));
+  ta.dispatchEvent(new Event("input", { bubbles: true }));   // resizes first
+  scrollCaretIntoView(ta);
 });
 
 /* clicking the same trigger while its menu is open closes it (returns true) */
@@ -3988,6 +4022,7 @@ class SessionView {
     this.ta.value = v;
     this.ta.selectionStart = this.ta.selectionEnd = v.length;
     this.resizeComposer();
+    scrollCaretIntoView(this.ta);   // recalling a long entry lands on its end
     this.saveDraft();
   }
 
