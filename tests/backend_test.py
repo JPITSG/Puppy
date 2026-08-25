@@ -232,6 +232,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "sessions" in ping["capabilities"]
         assert "temporary-workspaces" in ping["capabilities"]
         assert "engine-usage-refresh" in ping["capabilities"]
+        assert "engine-usage-refresh-manual" in ping["capabilities"]
         assert "terminal" not in ping["capabilities"]
         assert ("pinned-tls" in ping["capabilities"]) is bool(fingerprint)
         assert ping["transport"]["encrypted"] is bool(fingerprint)
@@ -270,6 +271,12 @@ async def exercise_node(url: str, token: str, expected_version: str,
             assert response.status == 200, refresh
         assert refresh["usage_refresh"]["minutes"] == 0
         assert refresh["usage_refresh"]["enabled"] is False
+        async with http.post(url + "/api/engines/usage-refresh",
+                             headers=good, ssl=pinned) as response:
+            manual_refresh = await response.json()
+            assert response.status == 200, manual_refresh
+        assert isinstance(manual_refresh["engines"], list)
+        assert manual_refresh["usage_refresh"]["enabled"] is False
         async with http.patch(url + "/api/engines/usage-refresh",
                               headers=good, ssl=pinned,
                               json={"minutes": -1}) as response:

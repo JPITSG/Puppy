@@ -55,6 +55,25 @@ function gearIcon(size) {
   return svg;
 }
 
+function refreshIcon(size = 10) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 12 12");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS(NS, "path");
+  path.setAttribute("d", "M10 6a4 4 0 0 1-6.8 2.8L2 7.6m0 0V10m0-2.4h2.4 " +
+    "M2 6a4 4 0 0 1 6.8-2.8L10 4.4m0 0V2m0 2.4H7.6");
+  path.setAttribute("fill", "none");
+  path.setAttribute("stroke", "currentColor");
+  path.setAttribute("stroke-width", "1.2");
+  path.setAttribute("stroke-linecap", "round");
+  path.setAttribute("stroke-linejoin", "round");
+  svg.appendChild(path);
+  return svg;
+}
+
 function copyIcon(done = false) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
@@ -1368,6 +1387,13 @@ function backendSupportsUsageRefresh(bid) {
     backend.capabilities.includes("engine-usage-refresh");
 }
 
+function backendSupportsManualUsageRefresh(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(b => b.id === bid);
+  return !!backend && Array.isArray(backend.capabilities) &&
+    backend.capabilities.includes("engine-usage-refresh-manual");
+}
+
 function backendSupportsAutoUpgrade(backend) {
   /* This policy is deliberately narrower than legacy execution inference:
      only a headless node explicitly advertising the signed upgrade contract
@@ -1614,6 +1640,49 @@ function weeklyQuotaLeft(e) {
   return null;
 }
 
+function applyUsageRefreshPayload(bid, result) {
+  if (!result || !Array.isArray(result.engines) || !result.usage_refresh)
+    throw new Error("node returned an invalid usage refresh response");
+  if (bid) {
+    state.engCache[bid] = result.engines;
+    state.remoteUsageRefresh[bid] = result.usage_refresh;
+    state.remoteOk[bid] = true;
+    delete state.remoteErrors[bid];
+    state.remoteEngineCheckedAt[bid] = Date.now();
+    delete state.remoteEngineErrors[bid];
+  } else {
+    state.engines = result.engines;
+    state.engMap = {};
+    state.engines.forEach(engine => state.engMap[engine.key] = engine);
+    state.usageRefresh = result.usage_refresh;
+    state.localEngineCheckedAt = Date.now();
+  }
+  syncRemoteStateViews();
+}
+
+async function refreshCodexUsage(bid, button, nodeName) {
+  if (button.disabled) return;
+  button.disabled = true;
+  button.classList.add("refreshing");
+  button.setAttribute("aria-busy", "true");
+  try {
+    const result = await api(bid, "engines/usage-refresh", {
+      method: "POST", timeoutMs: 20000,
+    });
+    applyUsageRefreshPayload(bid, result);
+    if (result.usage_refresh.last_error)
+      toast(`${nodeName}: ${result.usage_refresh.last_error}`, "error", 7000);
+  } catch (error) {
+    toast(`${nodeName}: ${error.message}`, "error", 7000);
+  } finally {
+    if (button.isConnected) {
+      button.disabled = false;
+      button.classList.remove("refreshing");
+      button.removeAttribute("aria-busy");
+    }
+  }
+}
+
 function renderFootEngines() {
   const root = $("foot-engines");
   root.innerHTML = "";
@@ -1665,6 +1734,20 @@ function renderFootEngines() {
         stTxt + (pct != null ? ` · ${Math.round(pct)}% wk` : ""));
       if (pct != null) st.title = `${Math.round(pct)}% of the weekly quota remaining`;
       row.appendChild(st);
+      if (e.key === "codex" && e.installed && e.auth === "ok" &&
+          backendSupportsManualUsageRefresh(g.bid)) {
+        const refresh = el("button", "foot-usage-refresh");
+        refresh.type = "button";
+        refresh.title = `Refresh ${g.name} Codex weekly usage`;
+        refresh.setAttribute("aria-label", refresh.title);
+        refresh.appendChild(refreshIcon(10));
+        refresh.onclick = event => {
+          event.preventDefault();
+          event.stopPropagation();
+          refreshCodexUsage(g.bid, refresh, g.name);
+        };
+        row.appendChild(refresh);
+      }
       body.appendChild(row);
     }
     group.appendChild(body);
@@ -3568,27 +3651,7 @@ class SettingsView {
         const result = await api(bid, "engines/usage-refresh", {
           method: "PATCH", body: { minutes }, timeoutMs: 20000,
         });
-        if (!result || !Array.isArray(result.engines) || !result.usage_refresh)
-          throw new Error("node returned an invalid usage refresh response");
-        if (bid) {
-          state.engCache[bid] = result.engines;
-          state.remoteUsageRefresh[bid] = result.usage_refresh;
-          state.remoteOk[bid] = true;
-          delete state.remoteErrors[bid];
-          state.remoteEngineCheckedAt[bid] = Date.now();
-          delete state.remoteEngineErrors[bid];
-          const group = this.remoteEngineGroups.get(bid);
-          if (group) group.update({ status: "ok", engines: result.engines });
-        } else {
-          state.engines = result.engines;
-          state.engMap = {};
-          state.engines.forEach(engine => state.engMap[engine.key] = engine);
-          state.usageRefresh = result.usage_refresh;
-          state.localEngineCheckedAt = Date.now();
-          if (this.localEngineGroup)
-            this.localEngineGroup.update({ status: "ok", engines: result.engines });
-        }
-        renderFootEngines();
+        applyUsageRefreshPayload(bid, result);
         current = result.usage_refresh;
         const suffix = result.usage_refresh.last_error ? " · refresh failed" : "";
         toast(`${name}: usage refresh saved${suffix}`,

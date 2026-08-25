@@ -131,6 +131,12 @@ same value in Settings → Usage refresh and can change it through the authentic
 `engine-usage-refresh` capability, so older backends remain explicitly disabled
 in the Settings UI.
 
+New nodes also advertise `engine-usage-refresh-manual`. The authenticated POST
+form of the same endpoint performs one immediate read even when the automatic
+interval is disabled. Controllers use it for the compact refresh control beside
+a ready Codex status; older nodes omit the capability, so the control is hidden
+until they are upgraded.
+
 The refresh is lazy: a due engine-status poll asks supported installed CLIs for
 their current read-only account-limit snapshot. It does not start a turn or
 consume model tokens, concurrent polls coalesce, and failed attempts are

@@ -51,7 +51,8 @@ approvals, multi-backend support and built-in web terminals.
   for this instance and every attached backend. Supported engines refresh their
   read-only account-limit snapshot without starting a model turn, so the weekly
   quota shown in the sidebar stays current even when that engine is idle. Zero
-  disables automatic refresh on that node.
+  disables automatic refresh on that node; a ready Codex row retains a compact
+  on-demand refresh control.
 - **CLI freshness**: each runtime periodically compares installed engine CLI
   versions with bounded `latest` metadata from the vendor-published package.
   An outdated version pill turns orange; failures retain the last good result

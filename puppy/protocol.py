@@ -14,6 +14,7 @@ SUPPORTED_BACKEND_PROTOCOLS = (LEGACY_PROTOCOL, API_PROTOCOL)
 # paths; old protocol-1 nodes simply omit this additive capability.
 TEMPORARY_WORKSPACE_CAPABILITY = "temporary-workspaces"
 USAGE_REFRESH_CAPABILITY = "engine-usage-refresh"
+MANUAL_USAGE_REFRESH_CAPABILITY = "engine-usage-refresh-manual"
 
 BASE_CAPABILITIES = (
     "sessions",
@@ -25,6 +26,7 @@ BASE_CAPABILITIES = (
     "engine-switch",
     TEMPORARY_WORKSPACE_CAPABILITY,
     USAGE_REFRESH_CAPABILITY,
+    MANUAL_USAGE_REFRESH_CAPABILITY,
 )
 TERMINAL_CAPABILITY = "terminal"
 

@@ -13,6 +13,7 @@ log = logging.getLogger("puppy.usage_refresh")
 
 _state = {
     "last_attempt_mono": 0.0,
+    "last_completed_mono": 0.0,
     "last_attempt_at": None,
     "last_success_at": None,
     "last_error": "",
@@ -45,6 +46,7 @@ def payload() -> dict:
 def reset_due(clear_status: bool = False) -> None:
     """Make the next status read refresh immediately after a config change."""
     _state["last_attempt_mono"] = 0.0
+    _state["last_completed_mono"] = 0.0
     if clear_status:
         _state["last_attempt_at"] = None
         _state["last_success_at"] = None
@@ -80,7 +82,7 @@ async def maybe_refresh(force: bool = False) -> dict:
     create a tight retry loop.
     """
     interval = minutes()
-    if interval <= 0:
+    if interval <= 0 and not force:
         return payload()
     requested_at = time.monotonic()
     if not force and not _due(requested_at, interval):
@@ -88,7 +90,8 @@ async def maybe_refresh(force: bool = False) -> dict:
 
     async with _get_lock():
         now = time.monotonic()
-        if _state["last_attempt_mono"] >= requested_at or \
+        if _state["last_completed_mono"] >= requested_at or \
+                _state["last_attempt_mono"] >= requested_at or \
                 (not force and not _due(now, interval)):
             return payload()
         _state["last_attempt_mono"] = now
@@ -112,4 +115,5 @@ async def maybe_refresh(force: bool = False) -> dict:
         _state["last_error"] = "; ".join(errors)[:500]
         if errors:
             log.warning("engine usage refresh failed: %s", _state["last_error"])
+        _state["last_completed_mono"] = time.monotonic()
         return payload()

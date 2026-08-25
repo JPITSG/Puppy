@@ -199,7 +199,28 @@ async def main() -> None:
             await engines()
             assert read_count() == 3
 
+            # Manual refresh remains available when the automatic interval is
+            # off, and simultaneous clicks coalesce into one account read.
+            async def manual_refresh():
+                async with http.post(url + "/api/engines/usage-refresh",
+                                     headers=headers) as response:
+                    payload = await read_json(response)
+                    assert response.status == 200, payload
+                    return payload
+
+            manual, manual_concurrent = await asyncio.gather(
+                manual_refresh(), manual_refresh())
+            assert read_count() == 4
+            for payload in (manual, manual_concurrent):
+                status = next(item for item in payload["engines"]
+                              if item["key"] == "codex")
+                assert status["quota"]["weekly_used_percent"] == 42.0
+                assert payload["usage_refresh"]["enabled"] is False
+                assert payload["usage_refresh"]["last_error"] == ""
+
             async with http.get(url + "/api/engines/usage-refresh") as response:
+                assert response.status == 401
+            async with http.post(url + "/api/engines/usage-refresh") as response:
                 assert response.status == 401
 
         # Archives produced before this setting existed inherit the current

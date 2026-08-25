@@ -144,6 +144,14 @@ async def h_usage_refresh_get(request: web.Request):
     return web.json_response({"usage_refresh": usage_refresh.payload()})
 
 
+async def h_usage_refresh_post(request: web.Request):
+    await usage_refresh.maybe_refresh(force=True)
+    return web.json_response({
+        "engines": await _engines_payload(refresh_usage=False),
+        "usage_refresh": usage_refresh.payload(),
+    })
+
+
 async def h_usage_refresh_patch(request: web.Request):
     try:
         body = await request.json()
@@ -844,6 +852,7 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     r.add_get("/api/node", h_ping)
     r.add_get("/api/engines", h_engines)
     r.add_get("/api/engines/usage-refresh", h_usage_refresh_get)
+    r.add_post("/api/engines/usage-refresh", h_usage_refresh_post)
     r.add_patch("/api/engines/usage-refresh", h_usage_refresh_patch)
 
     r.add_get("/api/sessions", h_sessions_list)
