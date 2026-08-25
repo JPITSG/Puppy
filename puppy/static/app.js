@@ -685,6 +685,24 @@ function md(text) {
   }
 }
 
+/* Engine output sometimes uses Markdown's link syntax for editor-style file
+   references. Those targets are meaningful to a local IDE, not to this web
+   page, where clicking them only produces a bogus same-origin request. Keep
+   genuine web URLs clickable and unwrap every other link back to its contents. */
+function decorateMarkdownLinks(root) {
+  root.querySelectorAll("a").forEach(a => {
+    let protocol = "";
+    try { protocol = new URL(a.getAttribute("href") || "").protocol; }
+    catch (error) { /* a relative path is not a web URL */ }
+    if (protocol !== "http:" && protocol !== "https:") {
+      a.replaceWith(...a.childNodes);
+      return;
+    }
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+  });
+}
+
 const PLAIN_CODE_LANGS = new Set([
   "", "text", "txt", "plain", "plaintext", "console", "terminal", "shell-session", "none",
 ]);
@@ -2281,7 +2299,7 @@ class SessionView {
         const n = el("div", "msg msg-assistant");
         const box = el("div", "md");
         box.innerHTML = md(d.text || "");
-        box.querySelectorAll("a").forEach(a => { a.target = "_blank"; a.rel = "noopener noreferrer"; });
+        decorateMarkdownLinks(box);
         decorateCodeBlocks(box);
         n.appendChild(box);
         return n;
