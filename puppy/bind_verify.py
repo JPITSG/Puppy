@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 
 from aiohttp import web
 
-from puppy import config
+from puppy import config, listener_handoff
 
 VERIFY_TTL = 60
 VERIFY_PREFIX = "/api/settings/bind/verify/"
@@ -280,6 +280,10 @@ async def prepare(app: web.Application, user: str, bind_ip, origin: str,
     host = normalize_bind_ip(bind_ip)
     port = normalize_bind_port(port)
     scheme, origin_host, origin_port, canonical_origin = _origin(origin)
+    if listener_handoff.queued_by(app):
+        raise BindVerificationError(
+            "a listener restart is already queued; wait for Puppy to reconnect",
+            status=409)
     if scheme != "http":
         raise BindVerificationError(
             "direct bind verification is unavailable from an HTTPS-proxied page; "
@@ -364,6 +368,10 @@ async def commit(app: web.Application, user: str, token: str) -> dict:
             pass
     old_host = str(config.get("web.host", "0.0.0.0"))
     old_port = int(config.get("web.port", entry["port"]))
+    if listener_handoff.queued_by(app):
+        raise BindVerificationError(
+            "a listener restart is already queued; wait for Puppy to reconnect",
+            status=409)
     if (old_host, old_port) != (entry["expected_host"], entry["expected_port"]):
         raise BindVerificationError(
             "the listener setting changed while it was being verified; try again",
@@ -383,7 +391,7 @@ async def commit(app: web.Application, user: str, token: str) -> dict:
         "host": old_host, "port": old_port}
     restart_required = entry["host"] != str(runtime_web.get("host")) or \
         entry["port"] != int(runtime_web.get("port", entry["port"]))
-    return {
+    result = {
         "ok": True,
         "host": entry["host"],
         "port": entry["port"],
@@ -392,6 +400,24 @@ async def commit(app: web.Application, user: str, token: str) -> dict:
         "restart_required": restart_required,
         "next_url": "http://" + _authority(entry["probe_host"], entry["port"]) + "/",
     }
+    # Any newer verified listener choice supersedes an older unclaimed
+    # browser handoff. API-token callers retain the existing manual activation
+    # contract; only a logged-in browser can receive a new-origin web session.
+    if restart_required and user != "@token":
+        try:
+            result["handoff"] = listener_handoff.create(
+                app, user, entry["host"], entry["port"], entry["probe_host"],
+                entry["origin"])
+        except (listener_handoff.ListenerHandoffError, OSError) as exc:
+            # The listener setting is already durably committed. Return that
+            # fact rather than turning a handoff-storage problem into an
+            # ambiguous interrupted save.
+            result["handoff_error"] = str(exc) if isinstance(
+                exc, listener_handoff.ListenerHandoffError) else \
+                "could not create private listener handoff state"
+    else:
+        listener_handoff.discard()
+    return result
 
 
 async def close_all(app: web.Application) -> None:

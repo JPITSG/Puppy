@@ -277,6 +277,13 @@ async def exercise_node(url: str, token: str, expected_version: str,
         async with http.get(url + "/api/settings/bind/verify/not-a-token",
                             headers=good, ssl=pinned) as response:
             assert response.status == 404
+        async with http.post(url + "/api/settings/bind/activate", headers=good,
+                             json={"token": "not-a-token", "browser_state": {}},
+                             ssl=pinned) as response:
+            assert response.status == 404
+        async with http.get(url + "/api/settings/bind/handoff/not-a-token/ready",
+                            headers=good, ssl=pinned) as response:
+            assert response.status == 404
         if not upgrade_enabled:
             async with http.post(url + "/api/node/upgrade", headers=good,
                                  data=b"not-an-artifact", ssl=pinned) as response:

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+from http.cookies import SimpleCookie
 import os
 from pathlib import Path
 import shutil
 import socket
 import sys
 import tempfile
+from urllib.parse import urlsplit
+import warnings
 
 import aiohttp
 from aiohttp import web
@@ -22,7 +25,7 @@ PRIVATE_TESTS.chmod(0o700)
 TEST_ROOT = Path(tempfile.mkdtemp(prefix="bind-", dir=str(PRIVATE_TESTS)))
 os.environ["PUPPY_DATA"] = str(TEST_ROOT / "data")
 
-from puppy import bind_verify, config, db  # noqa: E402
+from puppy import auth, bind_verify, config, db, listener_handoff  # noqa: E402
 from puppy.web import build_app  # noqa: E402
 
 
@@ -48,14 +51,23 @@ async def main() -> None:
     config.set_value("web.host", "127.0.0.1")
     config.set_value("web.port", port)
     db.connect()
+    db.execute("INSERT INTO users(username,pwhash,created_at) VALUES(?,?,?)",
+               ("bind-admin", "unused-in-this-test", 1))
+    browser_session = auth.issue_session("bind-admin")
 
     app = build_app()
+    restart_calls = []
+    app["puppy_restart_hook"] = lambda: restart_calls.append("queued")
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", port)
     await site.start()
     origin = "http://127.0.0.1:{}".format(port)
     auth_headers = {"X-Puppy-Token": config.get("auth.api_token"), "Origin": origin}
+    browser_headers = {
+        "Cookie": "{}={}".format(auth.COOKIE_NAME, browser_session),
+        "Origin": origin,
+    }
 
     try:
         async with aiohttp.ClientSession() as http:
@@ -105,6 +117,7 @@ async def main() -> None:
             assert committed["port"] == proposed_port
             assert committed["previous_port"] == port
             assert committed["restart_required"] is True
+            assert "handoff" not in committed  # API tokens cannot mint browser sessions
             assert config.get("web.port") == proposed_port
             async with http.get(origin + "/api/settings", headers=auth_headers) as response:
                 settings = await json_response(response)
@@ -387,11 +400,121 @@ async def main() -> None:
             async with http.get(origin + bind_verify.VERIFY_PREFIX + "not-a-token",
                                 headers={"Origin": origin}) as response:
                 assert response.status == 404
+
+            # A cookie-authenticated browser gets a one-use handoff only after
+            # proving the target again. Activation queues exactly one restart,
+            # waits for a different runtime on the exact target, then carries
+            # both login and namespaced UI state across the new origin.
+            target_host = "127.0.0.4"
+            target_authority = "{}:{}".format(target_host, port)
+            async with http.post(origin + "/api/settings/bind/prepare",
+                                 headers=browser_headers,
+                                 json={"host": target_host, "port": port,
+                                       "origin": origin}) as response:
+                prepared = await json_response(response)
+                assert response.status == 200, prepared
+            async with http.get(prepared["verify_url"],
+                                headers={"Origin": origin}) as response:
+                assert response.status == 200
+            async with http.post(origin + "/api/settings/bind/commit",
+                                 headers=browser_headers,
+                                 json={"token": prepared["token"]}) as response:
+                committed = await json_response(response)
+                assert response.status == 200, committed
+            assert committed["restart_required"] is True
+            handoff = committed["handoff"]
+            record_path = Path(config.DATA_DIR) / "runtime" / "listener-handoff.json"
+            assert record_path.is_file()
+            assert handoff["token"] not in record_path.read_text(encoding="utf-8")
+
+            async with http.post(origin + "/api/settings/bind/activate",
+                                 headers=browser_headers,
+                                 json={"token": "wrong", "browser_state": {}}) as response:
+                assert response.status == 409
+            assert restart_calls == []
+
+            ui_state = {
+                "puppy.tabs": '{"tabs":[],"active":null}',
+                "puppy.theme": "light",
+                "puppy.draft.7": "</script><script>unsafe()</script>",
+            }
+            async with http.post(origin + "/api/settings/bind/activate",
+                                 headers=browser_headers,
+                                 json={"token": handoff["token"],
+                                       "browser_state": ui_state}) as response:
+                activated = await json_response(response)
+                assert response.status == 200, activated
+            assert activated["queued"] is True
+            assert restart_calls == ["queued"]
+            # Retrying an interrupted activation response is idempotent.
+            async with http.post(origin + "/api/settings/bind/activate",
+                                 headers=browser_headers,
+                                 json={"token": handoff["token"],
+                                       "browser_state": ui_state}) as response:
+                retried = await json_response(response)
+                assert response.status == 200, retried
+            assert restart_calls == ["queued"]
+            async with http.post(origin + "/api/settings/bind/prepare",
+                                 headers=browser_headers,
+                                 json={"host": "127.0.0.5", "port": port,
+                                       "origin": origin}) as response:
+                already_queued = await json_response(response)
+                assert response.status == 409, already_queued
+                assert "already queued" in already_queued["error"]
+            assert listener_handoff.lookup(handoff["token"]) is not None
+
+            ready_path = urlsplit(activated["ready_url"]).path
+            target_headers = {"Host": target_authority, "Origin": origin}
+            async with http.options(origin + ready_path, headers={
+                    **target_headers,
+                    "Access-Control-Request-Method": "GET",
+                    "Access-Control-Request-Private-Network": "true",
+            }) as response:
+                assert response.status == 204
+                assert response.headers["Access-Control-Allow-Origin"] == origin
+                assert response.headers["Access-Control-Allow-Private-Network"] == "true"
+            async with http.get(origin + ready_path,
+                                headers=target_headers) as response:
+                waiting = await json_response(response)
+                assert response.status == 202, waiting
+                assert waiting["ready"] is False
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                app["puppy_runtime_web"] = {"host": target_host, "port": port}
+                app["puppy_runtime_id"] = "replacement-runtime"
+            async with http.get(origin + ready_path,
+                                headers=target_headers) as response:
+                ready = await json_response(response)
+                assert response.status == 200, ready
+                assert ready["ready"] is True
+
+            claim_path = urlsplit(activated["claim_url"]).path
+            async with http.get(origin + claim_path,
+                                headers={"Host": target_authority},
+                                allow_redirects=False) as response:
+                bootstrap = await response.text()
+                assert response.status == 200, bootstrap
+                assert response.headers["Cache-Control"] == "no-store"
+                assert "</script><script>unsafe()" not in bootstrap
+                assert "\\u003c/script\\u003e" in bootstrap
+                cookies = SimpleCookie()
+                cookies.load(response.headers["Set-Cookie"])
+                new_session = cookies[auth.COOKIE_NAME].value
+                assert auth.session_user(new_session) == "bind-admin"
+            assert not record_path.exists()
+            async with http.get(origin + claim_path,
+                                headers={"Host": target_authority}) as response:
+                assert response.status == 404
+            assert listener_handoff.lookup(handoff["token"]) is None
+            record_path.write_text('{"expires_at":"not-a-number"}', encoding="utf-8")
+            listener_handoff.cleanup()
+            assert not record_path.exists()  # corrupt crash residue cannot wedge startup
     finally:
         await runner.cleanup()
         shutil.rmtree(TEST_ROOT, ignore_errors=True)
 
-    print("bind endpoint browser proof, fail-closed commit, CORS, and cleanup passed")
+    print("bind proof, graceful restart handoff, CORS, and cleanup passed")
 
 
 if __name__ == "__main__":

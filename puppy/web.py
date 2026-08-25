@@ -7,14 +7,16 @@ import logging
 import os
 from pathlib import Path
 import random
+import secrets
 import shutil
 import tempfile
 import time
 
 from aiohttp import WSMsgType, web
 
-from puppy import (__version__, auth, backends, bind_verify, config, db, protocol,
-                   runner, snapshots, terminal, usage_refresh, workspaces)
+from puppy import (__version__, auth, backends, bind_verify, config, db,
+                   listener_handoff, protocol, runner, snapshots, terminal,
+                   usage_refresh, workspaces)
 from puppy.drivers import all_drivers, get_driver
 
 log = logging.getLogger("puppy.web")
@@ -493,6 +495,107 @@ async def h_bind_commit(request: web.Request):
         return web.json_response({"error": str(exc)}, status=exc.status)
 
 
+async def h_bind_activate(request: web.Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid listener activation request"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "invalid listener activation request"}, status=400)
+    try:
+        browser_state = snapshots.validate_ui_state(body.get("browser_state"))
+        result = listener_handoff.activate(
+            request.app, str(request["user"]), str(body.get("token") or ""),
+            browser_state, restart=request.app.get("puppy_restart_hook"))
+        log.info("queued verified WebUI listener restart for %s by %r",
+                 result["host"], request["user"])
+        return web.json_response(result)
+    except (listener_handoff.ListenerHandoffError, snapshots.SnapshotError) as exc:
+        return web.json_response(
+            {"error": str(exc)},
+            status=getattr(exc, "status", 400))
+    except Exception:
+        log.exception("could not queue verified WebUI listener restart")
+        return web.json_response({"error": "could not queue Puppy's graceful restart"},
+                                 status=500)
+
+
+def _handoff_json(payload: dict, status: int, headers: dict) -> web.Response:
+    return web.Response(
+        status=status, headers=headers,
+        body=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+        content_type="application/json")
+
+
+async def h_bind_handoff_ready(request: web.Request):
+    token = request.match_info["token"]
+    record = listener_handoff.lookup(token)
+    if record is None:
+        return web.json_response(
+            {"error": "listener handoff expired or was already used"}, status=404,
+            headers={"Cache-Control": "no-store"})
+    supplied_origin = request.headers.get("Origin", "").rstrip("/")
+    if (supplied_origin and supplied_origin != record["origin"]) or \
+            not listener_handoff.target_matches(record, request.host):
+        return web.json_response(
+            {"error": "listener handoff target mismatch"}, status=403,
+            headers={"Cache-Control": "no-store"})
+    headers = listener_handoff.cors_headers(record)
+    if request.method == "OPTIONS":
+        return web.Response(status=204, headers=headers)
+    if request.method != "GET":
+        return _handoff_json({"error": "method not allowed"}, 405, headers)
+    if record.get("status") != "queued":
+        return _handoff_json({"error": "listener restart was not queued"}, 409, headers)
+    if str(config.get("web.host")) != record.get("host") or \
+            int(config.get("web.port", 0)) != int(record.get("port", 0)):
+        return _handoff_json({"error": "configured listener changed"}, 409, headers)
+    ready = listener_handoff.is_ready(request.app, record)
+    return _handoff_json({"ok": True, "ready": ready}, 200 if ready else 202, headers)
+
+
+def _handoff_bootstrap_html(browser_state: dict) -> str:
+    # Escape HTML-significant code points even inside JSON so a draft cannot
+    # terminate the inline script. The page is a one-use bootstrap and never
+    # renders user text into markup.
+    encoded = json.dumps(browser_state, separators=(",", ":"), sort_keys=True)
+    encoded = encoded.replace("&", "\\u0026").replace("<", "\\u003c").replace(
+        ">", "\\u003e").replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+    return """<!doctype html><html><head><meta charset=\"utf-8\">
+<meta name=\"referrer\" content=\"no-referrer\"><title>Reconnecting to Puppy</title></head>
+<body><p>Reconnecting to Puppy&hellip;</p><script>
+(function () { var values = %s; try { Object.keys(values).forEach(function (key) {
+localStorage.setItem(key, values[key]); }); } catch (_) {} location.replace("/"); })();
+</script></body></html>""" % encoded
+
+
+async def h_bind_handoff_claim(request: web.Request):
+    record = listener_handoff.claim(
+        request.app, request.match_info["token"], request.host)
+    if record is None:
+        return web.Response(
+            status=404, text="Listener handoff expired or is not ready.",
+            content_type="text/plain", headers={"Cache-Control": "no-store"})
+    if db.query_one("SELECT id FROM users WHERE username=?", (record["user"],)) is None:
+        return web.Response(
+            status=403, text="The browser account used for this handoff no longer exists.",
+            content_type="text/plain", headers={"Cache-Control": "no-store"})
+    session_token = auth.issue_session(record["user"])
+    response = web.Response(
+        text=_handoff_bootstrap_html(record.get("browser_state") or {}),
+        content_type="text/html", headers={
+            "Cache-Control": "no-store",
+            "Content-Security-Policy": "default-src 'none'; script-src 'unsafe-inline'; "
+                                       "style-src 'none'; base-uri 'none'; form-action 'none'",
+            "Referrer-Policy": "no-referrer",
+            "X-Content-Type-Options": "nosniff",
+        })
+    response.set_cookie(
+        auth.COOKIE_NAME, session_token, max_age=auth.SESSION_TTL,
+        httponly=True, samesite="Strict", path="/")
+    return response
+
+
 # ---- backup / restore ----
 
 def _snapshot_conflict(app: web.Application):
@@ -768,7 +871,9 @@ def build_app() -> web.Application:
         "host": config.get("web.host", "0.0.0.0"),
         "port": int(config.get("web.port", 10888)),
     }
+    app["puppy_runtime_id"] = secrets.token_urlsafe(16)
     app["puppy_bind_verifications"] = {}
+    listener_handoff.cleanup()
     app["puppy_capabilities"] = protocol.execution_capabilities(include_terminal=True)
     r = app.router
     r.add_get("/", h_index)
@@ -785,6 +890,11 @@ def build_app() -> web.Application:
     r.add_route("*", "/api/settings/bind/verify/{token:[A-Za-z0-9_-]+}",
                 bind_verify.h_probe)
     r.add_post("/api/settings/bind/commit", h_bind_commit)
+    r.add_post("/api/settings/bind/activate", h_bind_activate)
+    r.add_route("*", listener_handoff.HANDOFF_PREFIX +
+                "{token:[A-Za-z0-9_-]+}/ready", h_bind_handoff_ready)
+    r.add_get(listener_handoff.HANDOFF_PREFIX +
+              "{token:[A-Za-z0-9_-]+}", h_bind_handoff_claim)
     r.add_post("/api/snapshot/export", h_snapshot_export)
     r.add_get("/api/snapshot/download/{token:[A-Za-z0-9_-]+}", h_snapshot_download)
     r.add_post("/api/snapshot/import", h_snapshot_import)

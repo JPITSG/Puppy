@@ -26,7 +26,8 @@ PRIVATE_TESTS.chmod(0o700)
 TEST_ROOT = Path(tempfile.mkdtemp(prefix="snapshot-", dir=str(PRIVATE_TESTS)))
 os.environ["PUPPY_DATA"] = str(TEST_ROOT / "data")
 
-from puppy import auth, config, db, runner as session_runner, snapshots, workspaces  # noqa: E402
+from puppy import (auth, config, db, listener_handoff, runner as session_runner,
+                   snapshots, workspaces)  # noqa: E402
 from puppy.web import build_app  # noqa: E402
 
 
@@ -159,13 +160,20 @@ async def main() -> None:
             "puppy.draft.s:0:{}".format(scratch_id): "unfinished prompt",
         }
 
+        listener_handoff.create(
+            {"puppy_runtime_id": "pre-snapshot-runtime"}, "snapshot-user",
+            "127.0.0.2", 10888, "127.0.0.2", "http://127.0.0.1:10888")
+        handoff_path = Path(config.DATA_DIR) / "runtime" / "listener-handoff.json"
+        assert handoff_path.is_file()
+
         direct_archive = snapshots.create_archive(ui)
         archive_path = Path(direct_archive["path"])
         assert archive_path.stat().st_mode & 0o777 == 0o600
         with tarfile.open(str(archive_path), "r:gz") as archive:
             names = archive.getnames()
         assert snapshots.ARCHIVE_ROOT + "/manifest.json" in names
-        assert not any("puppy.log" in name or "/snapshots/" in name for name in names)
+        assert not any("puppy.log" in name or "/snapshots/" in name or "/runtime/" in name
+                       for name in names)
 
         # Mutate every restored surface and an excluded ordinary project file.
         config.set_value("instance_name", "mutated-instance")
@@ -180,6 +188,7 @@ async def main() -> None:
         staged = snapshots.stage_import(str(archive_path))
         restored = snapshots.commit_import(staged)
         snapshots.discard_staged(staged)
+        assert not handoff_path.exists()
         assert restored["ui"] == ui
         assert config.get("instance_name") == "saved-instance"
         assert config.get("engines.usage_refresh_minutes") == 30

@@ -898,9 +898,29 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .bind-fields>*{min-width:0}
 .bind-help{margin:-5px 0 7px;color:var(--txt3);font-size:10.5px;line-height:1.45}
 .bind-pending{
-  margin:5px 0 7px;padding:8px 10px;border:1px solid rgba(255,182,77,.28);
+  display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;
+  margin:5px 0 7px;padding:8px 8px 8px 10px;border:1px solid rgba(255,182,77,.28);
   border-radius:var(--r-md);background:var(--warn-dim);color:var(--warn);
   font-size:11px;line-height:1.45;
+}
+.bind-pending span{min-width:0}
+.bind-pending .btn{flex:0 0 auto;height:26px;color:var(--txt)}
+.listener-handoff-backdrop{cursor:wait}
+.listener-handoff-modal{max-width:430px;text-align:left}
+.listener-handoff-status{margin:0;color:var(--txt2);font-size:13px;line-height:1.55}
+.listener-handoff-progress{display:flex;align-items:center;gap:5px;height:22px;margin:7px 0 3px}
+.listener-handoff-progress span{
+  width:5px;height:5px;border-radius:50%;background:var(--acc);
+  animation:handoff-pulse 1.25s infinite ease-in-out;
+}
+.listener-handoff-progress span:nth-child(2){animation-delay:.14s}
+.listener-handoff-progress span:nth-child(3){animation-delay:.28s}
+.listener-handoff-help{margin:0;color:var(--txt3);font-size:10.5px;line-height:1.5}
+.listener-handoff-help a{color:var(--acc2);text-decoration:none}
+.listener-handoff-help a:hover{text-decoration:underline}
+@keyframes handoff-pulse{
+  0%,70%,100%{opacity:.25;transform:translateY(0)}
+  35%{opacity:1;transform:translateY(-2px)}
 }
 .snapshot-copy{max-width:720px;margin:0 0 8px;color:var(--txt2);font-size:12px;line-height:1.55}
 .snapshot-warning{margin:0;color:var(--warn);font-size:11px;line-height:1.45}

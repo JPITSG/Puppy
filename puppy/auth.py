@@ -22,7 +22,8 @@ COOKIE_NAME = "puppy_session"
 SESSION_TTL = 30 * 24 * 3600
 PBKDF2_ITERS = 300_000
 
-PUBLIC_PREFIXES = ("/static/", "/api/settings/bind/verify/")
+PUBLIC_PREFIXES = ("/static/", "/api/settings/bind/verify/",
+                   "/api/settings/bind/handoff/")
 PUBLIC_PATHS = {"/", "/favicon.ico", "/api/auth/status", "/api/auth/login", "/api/auth/setup"}
 
 _attempts = {}  # key -> [timestamps]

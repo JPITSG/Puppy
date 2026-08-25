@@ -22,7 +22,8 @@ import threading
 import time
 from typing import Dict, List
 
-from puppy import __version__, config, db, runner, terminal, upgrade_contract, workspaces
+from puppy import (__version__, config, db, listener_handoff, runner, terminal,
+                   upgrade_contract, workspaces)
 
 log = logging.getLogger("puppy.snapshots")
 
@@ -771,6 +772,10 @@ def commit_import(staged: dict) -> dict:
         workspaces.cleanup_orphans()
     except Exception as exc:
         log.warning("post-restore scratch cleanup failed: %s", exc)
+    # Listener handoffs are intentionally transient and excluded from the
+    # archive. A successfully restored identity/configuration must not leave a
+    # capability prepared against the state that was just replaced.
+    listener_handoff.discard()
     return {
         "ok": True,
         "source_version": staged["manifest"]["source_version"],

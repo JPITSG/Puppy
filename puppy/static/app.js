@@ -192,6 +192,85 @@ function snapshotBrowserState() {
   return values;
 }
 
+function listenerHandoffBrowserState() {
+  const values = snapshotBrowserState();
+  const kept = {};
+  let bytes = 0;
+  /* Keep well below the backup format's 2 MiB UI-state ceiling. Extremely
+     large drafts remain untouched at the old origin instead of preventing a
+     listener restart; ordinary tabs, theme, layout and drafts transfer. */
+  const entries = Object.entries(values).sort(([a], [b]) =>
+    Number(a.startsWith("puppy.draft.")) - Number(b.startsWith("puppy.draft.")));
+  for (const [key, value] of entries) {
+    const size = typeof TextEncoder !== "undefined"
+      ? new TextEncoder().encode(key + value).length : (key.length + value.length) * 2;
+    if (bytes + size > 1536 * 1024) continue;
+    kept[key] = value;
+    bytes += size;
+  }
+  return kept;
+}
+
+function followListenerHandoff(handoff) {
+  const back = el("div", "modal-backdrop listener-handoff-backdrop");
+  const m = el("div", "modal listener-handoff-modal");
+  const title = el("h2", "", "Restart queued");
+  const status = el("p", "listener-handoff-status",
+    "Active work will finish first. Waiting for Puppy on the new listener…");
+  status.setAttribute("role", "status");
+  status.setAttribute("aria-live", "polite");
+  const progress = el("div", "listener-handoff-progress");
+  progress.setAttribute("aria-hidden", "true");
+  for (let i = 0; i < 3; i++) progress.appendChild(el("span"));
+  const help = el("p", "listener-handoff-help");
+  help.append("This page will reconnect automatically. If your browser blocks the check, ");
+  const direct = el("a", "", "open the verified listener");
+  direct.href = handoff.claim_url;
+  direct.rel = "noreferrer";
+  help.appendChild(direct);
+  help.append(".");
+  m.append(title, status, progress, help);
+  back.appendChild(m);
+  $("modal-root").replaceChildren(back);
+
+  const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+  const deadline = Date.now() + Math.max(60, Number(handoff.expires_in) || 2400) * 1000;
+  let delay = 500;
+  (async () => {
+    while (Date.now() < deadline) {
+      try {
+        const response = await fetch(handoff.ready_url, {
+          method: "GET", mode: "cors", credentials: "omit", cache: "no-store",
+          redirect: "error", referrerPolicy: "no-referrer",
+        });
+        let payload = null;
+        try { payload = await response.json(); } catch (_) { /* retry below */ }
+        if (response.ok && payload && payload.ready === true) {
+          status.textContent = "New listener is ready. Reconnecting…";
+          location.replace(handoff.claim_url);
+          return;
+        }
+        if (response.status === 404 || response.status === 409) {
+          throw new Error((payload && payload.error) || "the listener handoff expired");
+        }
+      } catch (error) {
+        if (error && /expired|changed|not queued/i.test(error.message || "")) {
+          status.textContent = `${error.message}. Use the link below or return to Settings and verify again.`;
+          progress.classList.add("hidden");
+          return;
+        }
+        /* A refused connection is the normal interval between old and new
+           listeners. Keep this document alive and try the proved endpoint. */
+      }
+      await wait(delay);
+      delay = Math.min(2500, Math.round(delay * 1.35));
+    }
+    status.textContent = "Puppy did not return before the secure handoff expired. Open the listener and sign in again.";
+    progress.classList.add("hidden");
+    direct.href = handoff.next_url;
+  })();
+}
+
 function restoreBrowserState(values) {
   if (!values || typeof values !== "object" || Array.isArray(values)) return;
   const namespace = LS_NS ? LS_NS + ":" : "";
@@ -3150,7 +3229,8 @@ class SettingsView {
         A changed endpoint is tested directly from this browser before it can be saved.</p>
       <div class="kv"><span class="k">Active listener</span><span class="v">${esc(fmtEndpoint(activeWeb.host, activeWeb.port))}</span></div>
       ${settings.web_restart_required ? `<div class="bind-pending">
-        Restart required to activate verified listener ${esc(fmtEndpoint(settings.web.host, settings.web.port))}.
+        <span>Restart required to activate ${esc(fmtEndpoint(settings.web.host, settings.web.port))}.</span>
+        <button class="btn btn-sm" id="set-activate" type="button">Verify &amp; restart</button>
       </div>` : ""}
       <div class="kv"><span class="k">Version</span><span class="v">${esc(settings.version)}</span></div>
       <div class="kv"><span class="k">API token</span><span class="v" id="set-token" style="cursor:pointer" title="click to reveal / copy">••••••••••••</span></div>
@@ -3166,8 +3246,9 @@ class SettingsView {
       if (!tokenShown) { elx.textContent = settings.api_token; tokenShown = true; }
       else copyWithToast(settings.api_token, "token copied");
     };
-    c1.querySelector("#set-save").onclick = async () => {
+    const saveSettings = async (forceActivation = false) => {
       const saveButton = c1.querySelector("#set-save");
+      const activateButton = c1.querySelector("#set-activate");
       const bindInput = c1.querySelector("#set-bind");
       const portInput = c1.querySelector("#set-port");
       const proposedBind = bindInput.value.trim();
@@ -3181,18 +3262,24 @@ class SettingsView {
       }
       const bindChanged = proposedBind !== String(settings.web.host || "") ||
         proposedPort !== Number(settings.web.port);
-      if (bindChanged && !(await modalConfirm("Change Puppy listener?",
+      const configuredPending = !!settings.web_restart_required &&
+        proposedBind === String(settings.web.host || "") &&
+        proposedPort === Number(settings.web.port);
+      const endpointProofNeeded = bindChanged || configuredPending || forceActivation;
+      if (endpointProofNeeded && !(await modalConfirm(
+        bindChanged ? "Change and restart Puppy listener?" : "Restart Puppy listener?",
         `Puppy will first ask this browser to reach ${proposedBind
           ? fmtEndpoint(proposedBind, proposedPort) : "the proposed endpoint"} directly. ` +
-        `The listener is saved only if that succeeds. A service restart is required if ` +
-        "the verified endpoint differs from the active listener."))) return;
+        `Only after that succeeds will it save the listener and queue a graceful restart. ` +
+        "Active turns are allowed to finish, then this page reconnects automatically."))) return;
       saveButton.disabled = true;
-      saveButton.textContent = bindChanged ? "Verifying…" : "Saving…";
+      if (activateButton) activateButton.disabled = true;
+      saveButton.textContent = endpointProofNeeded ? "Verifying…" : "Saving…";
       let bindCommit = null;
       let verified = null;
       let commitAttempted = false;
       try {
-        if (bindChanged) {
+        if (endpointProofNeeded) {
           const prepared = await api(0, "settings/bind/prepare", {
             method: "POST", body: {
               host: proposedBind, port: proposedPort, origin: location.origin,
@@ -3231,22 +3318,30 @@ class SettingsView {
             method: "POST", body: { token: verified.token },
           });
         }
+        if (bindCommit && bindCommit.restart_required) {
+          if (!bindCommit.handoff || !bindCommit.handoff.token)
+            throw new Error(bindCommit.handoff_error ||
+              "automatic activation requires a signed-in browser session");
+          const activated = await api(0, "settings/bind/activate", {
+            method: "POST", body: {
+              token: bindCommit.handoff.token,
+              browser_state: listenerHandoffBrowserState(),
+            },
+          });
+          followListenerHandoff(activated);
+          return;
+        }
         await refreshState();
         await this.render();
-        if (bindCommit && bindCommit.restart_required) {
-          modalNotice("Listener verified and saved",
-            `Restart Puppy to activate ${fmtEndpoint(bindCommit.host, bindCommit.port)}. ` +
-            `Afterward, this browser can reconnect at ${bindCommit.next_url}`);
-        } else {
-          toast("saved", "ok");
-        }
+        toast("saved", "ok");
       } catch (e) {
         if (bindCommit) {
           const activation = bindCommit.restart_required
-            ? `Restart Puppy to activate ${fmtEndpoint(bindCommit.host, bindCommit.port)}.`
+            ? `Automatic restart was not queued. Return to Settings and use Verify & restart ` +
+              `to activate ${fmtEndpoint(bindCommit.host, bindCommit.port)}.`
             : "The active listener already matches this setting; no restart is required.";
           modalNotice("Listener was saved",
-            `The browser check and save succeeded, but the settings view could not refresh: ` +
+            `The browser check and save succeeded, but activation did not complete: ` +
             `${e.message}. ${activation}`);
         } else if (commitAttempted && verified) {
           let current = null;
@@ -3267,7 +3362,7 @@ class SettingsView {
               `${e.message}. The current listener remains active. Reload Settings and confirm the ` +
               "configured listener before restarting Puppy.");
           }
-        } else if (bindChanged) modalNotice("Listener was not changed",
+        } else if (endpointProofNeeded) modalNotice("Listener was not changed",
           `${e.message}. Puppy remains configured on ${fmtEndpoint(settings.web.host, settings.web.port)}.`);
         else toast(e.message, "error");
       } finally {
@@ -3275,8 +3370,12 @@ class SettingsView {
           saveButton.disabled = false;
           saveButton.textContent = "Save";
         }
+        if (activateButton && activateButton.isConnected) activateButton.disabled = false;
       }
     };
+    c1.querySelector("#set-save").onclick = () => saveSettings(false);
+    const activateButton = c1.querySelector("#set-activate");
+    if (activateButton) activateButton.onclick = () => saveSettings(true);
     c1.querySelector("#set-logout").onclick = async () => {
       await api(0, "auth/logout", { method: "POST" });
       location.reload();
