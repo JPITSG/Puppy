@@ -3928,12 +3928,12 @@ class SettingsView {
         nameRow.appendChild(name);
         identity.appendChild(nameRow);
         metaRow.appendChild(url);
-        metaRow.appendChild(autoRoot);
         identity.appendChild(metaRow);
         details.appendChild(security);
         details.appendChild(identity);
         this.remoteBackendDots.set(b.id, availability);
         row.appendChild(details);
+        row.appendChild(autoRoot);
         const actions = el("div", "be-actions");
         const test = el("button", "btn btn-sm", "Test");
         test.onclick = async () => {
