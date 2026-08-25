@@ -29,19 +29,10 @@ function xIcon(size) {
   return svg;
 }
 
-/* This bell shares a row with ⚙ and ☀, which are text glyphs: they paint the
-   ink their font gives them, not the whole button. Measured at the footer's
-   14px, both cover about 10.4px and sit on the button's centre - so a drawn
-   icon that fills its own box reads too tall and lands off the line, however
-   carefully the box itself is centred.
-   The paths below are drawn compactly enough to be one mass (a tall bell with
-   a dangling clapper reads high whatever the box does), inside a square that,
-   once the 2-unit stroke is added, paints exactly BELL_INK on both axes. The
-   transform maps that square onto the neighbours' share of the icon, centred,
-   so this matches their height, centre and rhythm at any size. The off-state
-   slash spans the same square, keeping both states identical in metrics. */
-const BELL_INK = { min: 3.5, max: 20.5 };   // painted extent of the paths, in box units
-const BELL_SHARE = 10.4 / 14;               // neighbouring glyphs' ink over the icon size
+/* A chat bubble with a bell in it: the session speaking up when it is done.
+   The bubble is stroked like the app's other icons; the bell inside is filled,
+   because an outlined shape that small turns to mush at the footer's 14px.
+   Both sit in the plain 24 box, centred, with no fitting transform. */
 function bellIcon(size, off) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
@@ -49,25 +40,27 @@ function bellIcon(size, off) {
   svg.setAttribute("width", size);
   svg.setAttribute("height", size);
   svg.setAttribute("aria-hidden", "true");
-  const scale = (24 * BELL_SHARE) / (BELL_INK.max - BELL_INK.min);
-  const shift = 12 - ((BELL_INK.min + BELL_INK.max) / 2) * scale;
-  const g = document.createElementNS(NS, "g");
-  g.setAttribute("transform",
-    `translate(${shift.toFixed(3)} ${shift.toFixed(3)}) scale(${scale.toFixed(4)})`);
-  svg.appendChild(g);
-  const draw = (d) => {
+  const draw = (d, fill) => {
     const p = document.createElementNS(NS, "path");
     p.setAttribute("d", d);
-    p.setAttribute("stroke", "currentColor");
-    p.setAttribute("stroke-width", "2");
-    p.setAttribute("stroke-linecap", "round");
-    p.setAttribute("stroke-linejoin", "round");
-    p.setAttribute("fill", "none");
-    g.appendChild(p);
+    if (fill) {
+      p.setAttribute("fill", "currentColor");
+    } else {
+      p.setAttribute("fill", "none");
+      p.setAttribute("stroke", "currentColor");
+      p.setAttribute("stroke-width", "2");
+      p.setAttribute("stroke-linecap", "round");
+      p.setAttribute("stroke-linejoin", "round");
+    }
+    svg.appendChild(p);
   };
-  draw("M12 4.5a5.5 5.5 0 0 0-5.5 5.5c0 4-2 5.5-2 5.5h15s-2-1.5-2-5.5A5.5 5.5 0 0 0 12 4.5Z");
-  draw("M10.4 18.7a2 2 0 0 0 3.2 0");
-  if (off) draw("M4.5 4.5 L19.5 19.5");
+  /* bubble walls leave an interior of x 4..20, y 4..16; the bell fills it to
+     within about two units, centred on that interior rather than on the box -
+     the tail hangs below and would drag the bell off-centre otherwise */
+  draw("M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z");
+  draw("M12 6.1a3.2 3.2 0 0 0-3.2 3.2c0 2.1-1 2.9-1 2.9h8.4s-1-.8-1-2.9A3.2 3.2 0 0 0 12 6.1Z", true);
+  draw("M10.8 13.1a1.3 1.3 0 0 0 2.4 0Z", true);
+  if (off) draw("M4 4 L20 20");
   return svg;
 }
 
