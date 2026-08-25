@@ -1111,6 +1111,11 @@ async def main() -> None:
         old_db.commit()
         old_db.close()
         os.environ["PUPPY_DATA"] = str(controller_data)
+        # config binds its data path at import time, so an earlier import of it
+        # anywhere above would silently point this whole test at the real
+        # instance's data directory. Fail loudly instead of writing there.
+        assert "puppy.config" not in sys.modules, \
+            "puppy.config was imported before the test data path was set"
         from puppy import config, db, host_metrics, runner, terminal
         from backend.puppy_backend import upgrade as backend_upgrade
         from puppy.web import build_app
