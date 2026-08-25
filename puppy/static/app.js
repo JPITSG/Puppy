@@ -4223,9 +4223,23 @@ class TermView {
        puts us behind the listener xterm registers from its (inner, therefore
        earlier) one, so the selection is final by the time we read it. */
     this.onSelectUp = () => this.copySelection();
-    this.onSelectDown = () =>
+    this.onSelectDown = event => {
+      if (event.button !== 0) return; // a right-click must not replace what it is about to paste
       document.addEventListener("mouseup", this.onSelectUp, { once: true });
+    };
     this.host.addEventListener("mousedown", this.onSelectDown);
+    /* Clipboard reads have no selection-based HTTP fallback like writes do.
+       On a secure origin, plain right-click pastes through xterm so bracketed
+       paste mode is preserved. Shift+right-click always keeps the browser's
+       menu, as does plain right-click wherever clipboard reads are unavailable. */
+    this.onContextMenu = event => {
+      if (event.shiftKey || !window.isSecureContext || !navigator.clipboard ||
+          typeof navigator.clipboard.readText !== "function" ||
+          !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+      event.preventDefault();
+      this.pasteClipboard();
+    };
+    this.host.addEventListener("contextmenu", this.onContextMenu);
     setTimeout(() => { this.fit.fit(); this.connect(); }, 40);
     this.resizeObs = new ResizeObserver(() => {
       if (!this.fit) return;
@@ -4280,6 +4294,19 @@ class TermView {
       toast("could not copy the selection to the clipboard", "error");
     });
   }
+  async pasteClipboard() {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (this.closed || !this.term || !text ||
+          !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+      this.term.paste(text);
+      this.term.focus();
+    } catch (e) {
+      if (this.pasteWarned) return;
+      this.pasteWarned = true;
+      toast("clipboard paste was blocked · use Shift+right-click for the browser menu", "error", 7000);
+    }
+  }
   showDead() {
     if (this.root.querySelector(".term-dead")) { this.syncRemoteState(); return; }
     const d = el("div", "term-dead");
@@ -4311,6 +4338,7 @@ class TermView {
     if (this.resizeObs) this.resizeObs.disconnect();
     if (this.onSelectDown) this.host.removeEventListener("mousedown", this.onSelectDown);
     if (this.onSelectUp) document.removeEventListener("mouseup", this.onSelectUp);
+    if (this.onContextMenu) this.host.removeEventListener("contextmenu", this.onContextMenu);
     if (this.ws) try { this.ws.close(); } catch (e) {}
     if (this.dataSub) { this.dataSub.dispose(); this.dataSub = null; }
     if (this.term) this.term.dispose();
