@@ -2289,6 +2289,7 @@ function renderFootEngines() {
   const groups = [{ bid: 0, name: backendName(0), engines: state.engines }]
     .concat(state.backends.map(b => ({
       bid: b.id, name: b.name, version: b.remote_version || "",
+      terminal: backendHasCapability(b, "terminal"),
       engines: Object.prototype.hasOwnProperty.call(state.engCache, b.id) ? state.engCache[b.id] : null,
     })));
   const showGroups = groups.length > 1;
@@ -2311,6 +2312,19 @@ function renderFootEngines() {
         const version = el("span", "foot-engine-version", `· v${g.version}`);
         version.title = `Backend version ${g.version}`;
         head.appendChild(version);
+      }
+      if (!g.bid || g.terminal) {
+        const terminal = el("button", "foot-terminal");
+        terminal.type = "button";
+        terminal.title = `Open terminal on ${g.name}`;
+        terminal.setAttribute("aria-label", terminal.title);
+        terminal.appendChild(terminalIcon(12));
+        terminal.onclick = event => {
+          event.preventDefault();
+          event.stopPropagation();
+          openTermTab(g.bid, "");
+        };
+        head.appendChild(terminal);
       }
       head.appendChild(disclosureButton(`${g.name} engine status`, body,
         collapsedStatusBackends, "puppy.collapsed.status-backends", key));
