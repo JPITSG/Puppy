@@ -44,17 +44,18 @@
     <div class="side-foot">
       <div class="foot-engines" id="foot-engines"></div>
       <div class="foot-row">
-        <button class="icon-btn" id="btn-settings" title="Settings">⚙</button>
-        <button class="icon-btn" id="btn-theme" title="Toggle light/dark mode">☀</button>
-        <button class="icon-btn hidden" id="btn-bell" title="Completion alerts"></button>
+        <button class="icon-btn" id="btn-settings" aria-label="Settings">⚙</button>
+        <button class="icon-btn" id="btn-theme" aria-label="Toggle light/dark mode">☀</button>
+        <button class="icon-btn hidden" id="btn-bell" aria-label="Completion alerts"></button>
         <span class="foot-ver">v__V__</span>
         <span class="conn-state">
           <span class="host-cpu hidden" id="host-cpu"></span>
-          <span class="conn-dot" id="conn-dot" title="connection"></span>
+          <span class="conn-dot" id="conn-dot" role="img" aria-label="Connection status"></span>
         </span>
       </div>
     </div>
-    <div class="side-resize" id="side-resize" title="Drag to resize (double-click resets)"></div>
+    <div class="side-resize" id="side-resize" role="separator"
+      aria-orientation="vertical" aria-label="Resize sidebar"></div>
   </aside>
 
   <main class="main">

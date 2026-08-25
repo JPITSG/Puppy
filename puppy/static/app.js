@@ -495,7 +495,6 @@ function disclosureButton(label, body, collapsedKeys, storageKey, itemKey) {
     body.hidden = isCollapsed;
     button.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
     const action = isCollapsed ? "Expand" : "Collapse";
-    button.title = `${action} ${label}`;
     button.setAttribute("aria-label", `${action} ${label}`);
   };
   button.onclick = () => {
@@ -999,7 +998,6 @@ function decorateCodeBlocks(root) {
     wrap.appendChild(pre);
     const button = el("button", "code-copy");
     button.type = "button";
-    button.title = "Copy code";
     button.setAttribute("aria-label", "Copy code");
     button.appendChild(copyIcon());
     button.onclick = async (e) => {
@@ -1009,13 +1007,11 @@ function decorateCodeBlocks(root) {
         clearTimeout(button._copyReset);
         button.classList.add("done");
         button.replaceChildren(copyIcon(true));
-        button.title = "Copied";
         button.setAttribute("aria-label", "Copied");
         button._copyReset = setTimeout(() => {
           if (!button.isConnected) return;
           button.classList.remove("done");
           button.replaceChildren(copyIcon());
-          button.title = "Copy code";
           button.setAttribute("aria-label", "Copy code");
         }, 1400);
       } catch (err) { toast("copy failed", "error"); }
@@ -1739,17 +1735,19 @@ function renderHostCpu(cpuPercent) {
   if (!Number.isFinite(value) || value < 0 || value > 100 ||
       !$("conn-dot").classList.contains("ok")) {
     output.textContent = "";
-    output.removeAttribute("title");
+    output.removeAttribute("aria-label");
     output.classList.add("hidden");
     return;
   }
   output.textContent = `CPU ${Math.round(value)}%`;
-  output.title = `WebUI host CPU usage: ${value.toFixed(1)}%`;
+  output.setAttribute("aria-label", `WebUI host CPU usage: ${value.toFixed(1)}%`);
   output.classList.remove("hidden");
 }
 
 function setLocalConnection(connected) {
-  $("conn-dot").classList.toggle("ok", connected);
+  const dot = $("conn-dot");
+  dot.classList.toggle("ok", connected);
+  dot.setAttribute("aria-label", connected ? "Connected" : "Disconnected");
   if (!connected) renderHostCpu(null);
 }
 
@@ -1984,6 +1982,7 @@ function updateSessionActivityLabels() {
     if (startedAt === undefined) return;
     const value = formatSessionActivity(startedAt, now);
     if (label.textContent !== value) label.textContent = value;
+    label.setAttribute("aria-label", `Agent active, ${value}`);
   });
 }
 
@@ -2125,9 +2124,9 @@ function renderSidebar() {
     if (showGroups) {
       const t = el("div", "sess-group-title");
       const dot = el("span", "gdot " + g.status);
-      dot.title = g.bid ? remoteAvailabilityTitle(g.bid) : "available";
+      dot.setAttribute("role", "img");
+      dot.setAttribute("aria-label", g.bid ? remoteAvailabilityTitle(g.bid) : "available");
       const name = el("span", "sess-group-name", g.name);
-      name.title = `${g.name} · double-click to collapse or expand sessions`;
       const key = g.bid ? `remote:${g.bid}` : "local";
       const disclosure = disclosureButton(`${g.name} sessions`, body,
         collapsedSessionBackends, "puppy.collapsed.session-backends", key);
@@ -2137,8 +2136,7 @@ function renderSidebar() {
       if (!g.bid || g.terminal) {
         const terminal = el("button", "sess-group-terminal");
         terminal.type = "button";
-        terminal.title = `Open terminal on ${g.name}`;
-        terminal.setAttribute("aria-label", terminal.title);
+        terminal.setAttribute("aria-label", `Open terminal on ${g.name}`);
         terminal.appendChild(terminalIcon(12));
         terminal.onclick = event => {
           event.preventDefault();
@@ -2175,11 +2173,11 @@ function renderSidebar() {
         activity.classList.add("active-time");
         activity.dataset.activityKey = key;
         activity.textContent = formatSessionActivity(sessionActivityAnchors.get(key));
-        activity.title = "Agent active";
+        activity.setAttribute("aria-label", `Agent active, ${activity.textContent}`);
       } else {
         activity.classList.add("idle");
         activity.textContent = "IDLE";
-        activity.title = "Session idle";
+        activity.setAttribute("aria-label", "Session idle");
       }
       r1.appendChild(activity);
       const r2 = el("div", "si-row sub");
@@ -2228,7 +2226,8 @@ function provIcon(engine) {
   const p = PROVIDERS[engine];
   const n = el("span", "prov" + (p ? " prov-" + p : ""));
   if (!p) n.textContent = (engine || "?")[0].toUpperCase();
-  n.title = p ? p : engine;
+  n.setAttribute("role", "img");
+  n.setAttribute("aria-label", p || engine || "unknown engine");
   return n;
 }
 
@@ -2570,11 +2569,11 @@ function renderFootEngines() {
       const ico = el("span", "foot-ico");
       const status = g.bid === 0 ? "ok" : remoteAvailability(g.bid);
       const dot = el("span", "gdot " + status);
-      dot.title = g.bid ? remoteAvailabilityTitle(g.bid) : "available";
+      dot.setAttribute("role", "img");
+      dot.setAttribute("aria-label", g.bid ? remoteAvailabilityTitle(g.bid) : "available");
       ico.appendChild(dot);
       head.appendChild(ico);
       const name = el("span", "foot-engine-name", g.name);
-      name.title = `${g.name} · double-click to collapse or expand status`;
       const key = g.bid ? `remote:${g.bid}` : "local";
       const disclosure = disclosureButton(`${g.name} engine status`, body,
         collapsedStatusBackends, "puppy.collapsed.status-backends", key);
@@ -2582,7 +2581,6 @@ function renderFootEngines() {
       head.appendChild(name);
       if (g.bid && g.version) {
         const version = el("span", "foot-engine-version", `· v${g.version}`);
-        version.title = `Backend version ${g.version}`;
         head.appendChild(version);
       }
       head.appendChild(disclosure);
@@ -2604,14 +2602,12 @@ function renderFootEngines() {
       const stTxt = !e.installed ? "missing" : (e.auth === "ok" ? "ready" : "no auth");
       const st = el("span", "st " + (e.installed && e.auth === "ok" ? "ok" : "bad"),
         stTxt + (pct != null ? ` · ${Math.round(pct)}% wk` : ""));
-      if (pct != null) st.title = `${Math.round(pct)}% of the weekly quota remaining`;
       row.appendChild(st);
       if (e.key === "codex" && e.installed && e.auth === "ok" &&
           backendSupportsManualUsageRefresh(g.bid)) {
         const refresh = el("button", "foot-usage-refresh");
         refresh.type = "button";
-        refresh.title = `Refresh ${g.name} Codex weekly usage`;
-        refresh.setAttribute("aria-label", refresh.title);
+        refresh.setAttribute("aria-label", `Refresh ${g.name} Codex weekly usage`);
         refresh.appendChild(refreshIcon(10));
         refresh.onclick = event => {
           event.preventDefault();
@@ -2751,7 +2747,6 @@ function ensureTabView(tab) {
 function burgerButton() {
   const button = el("button", "icon-btn burger");
   button.type = "button";
-  button.title = "Menu";
   button.setAttribute("aria-label", "Menu");
   button.innerHTML = `<svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true">
     <rect x="2" y="3" width="12" height="2" rx="1"/>
@@ -3093,7 +3088,6 @@ function renderWorkspacePane(pane) {
   const addWrap = el("div", "tab-add-wrap");
   const add = el("button", "icon-btn", "＋");
   add.type = "button";
-  add.title = "New tab";
   add.setAttribute("aria-label", "New tab");
   add.onclick = event => showTabAddMenu(pane.id, add, event);
   addWrap.appendChild(add);
@@ -3125,7 +3119,6 @@ function renderWorkspaceNode(node) {
   const first = renderWorkspaceNode(node.first);
   const divider = el("div", "splitter");
   divider.tabIndex = 0;
-  divider.title = "Drag to resize (double-click resets)";
   divider.setAttribute("role", "separator");
   divider.setAttribute("aria-label", "Resize panes");
   divider.setAttribute("aria-orientation", node.axis === "row" ? "vertical" : "horizontal");
@@ -3326,8 +3319,9 @@ function syncBell() {
   bell.classList.toggle("on", !!n.enabled);
   bell.textContent = "";
   bell.appendChild(bellIcon(14, !n.enabled));
-  bell.title = n.enabled ? "Completion alerts armed · click to silence"
-    : "Completion alerts off · click to arm";
+  bell.setAttribute("aria-label", n.enabled ?
+    "Completion alerts armed; activate to silence" :
+    "Completion alerts off; activate to arm");
   bell.setAttribute("aria-pressed", n.enabled ? "true" : "false");
 
   const toggle = $("nf-enabled");
