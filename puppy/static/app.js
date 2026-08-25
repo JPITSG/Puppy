@@ -508,6 +508,34 @@ function disclosureButton(label, body, collapsedKeys, storageKey, itemKey) {
   return button;
 }
 
+/* A mouse has a natural double-click; a touchscreen does not. Track the
+   pointer that produced each click instead of guessing from viewport size, so
+   both modes keep working on a convertible with mouse and touch attached. */
+function activationPointer(target) {
+  let pointerType = "";
+  target.addEventListener("pointerdown", event => {
+    if (event.isPrimary === false) return;
+    pointerType = event.pointerType || "";
+  });
+  target.addEventListener("pointercancel", () => { pointerType = ""; });
+  return event => {
+    const type = event.pointerType || pointerType;
+    pointerType = "";
+    return type;
+  };
+}
+
+function wireDoubleClickOrTouch(target, activate) {
+  const pointerForClick = activationPointer(target);
+  target.addEventListener("click", event => {
+    const pointerType = pointerForClick(event);
+    if (pointerType !== "touch" && event.detail !== 2) return;
+    event.preventDefault();
+    event.stopPropagation();
+    activate();
+  });
+}
+
 function choiceOptionNode(label, selected = false) {
   const row = el("button", "choice-option" + (selected ? " selected" : ""));
   row.type = "button";
@@ -1234,6 +1262,7 @@ const state = {
   tabs: [],               // [{id,type,bid,sid,title,cmd}]
   active: null,           // focused tab id (each pane also has its own active tab)
   activeGroup: null,      // focused workspace pane id
+  selectedSession: null,  // sidebar selection, independent until a session tab is focused
   layout: null,           // recursive pane/split tree
   showArchived: false,
   views: {},              // tab id -> view object
@@ -2053,6 +2082,22 @@ function backendSupportsAutoUpgrade(backend) {
     Array.isArray(backend.capabilities) && backend.capabilities.includes("remote-upgrade");
 }
 
+function sidebarSessionKey(bid, sid) {
+  return `${Number(bid) || 0}:${String(sid)}`;
+}
+
+function focusedSessionKey() {
+  const tab = state.tabs.find(item => item.id === state.active);
+  return tab && tab.type === "session" ? sidebarSessionKey(tab.bid, tab.sid) : null;
+}
+
+function selectSidebarSession(bid, sid) {
+  const key = sidebarSessionKey(bid, sid);
+  state.selectedSession = key;
+  document.querySelectorAll(".sess-item[data-session-key]").forEach(item =>
+    item.classList.toggle("active", item.dataset.sessionKey === key));
+}
+
 function renderSidebar() {
   if (dragSess && dragSess.item && dragSess.item.isConnected) {
     dragSess.renderPending = true;
@@ -2066,6 +2111,13 @@ function renderSidebar() {
       return { bid: b.id, name: b.name, ok: status !== "bad", status,
         terminal: backendHasCapability(b, "terminal") };
     }));
+  const availableSessions = new Set();
+  for (const group of groups)
+    for (const session of sessionsFor(group.bid))
+      availableSessions.add(sidebarSessionKey(group.bid, session.id));
+  if (state.selectedSession && !availableSessions.has(state.selectedSession))
+    state.selectedSession = null;
+  const selectedSession = state.selectedSession || focusedSessionKey();
   const showGroups = groups.length > 1;
   for (const g of groups) {
     const group = el("section", "sess-group");
@@ -2079,11 +2131,7 @@ function renderSidebar() {
       const key = g.bid ? `remote:${g.bid}` : "local";
       const disclosure = disclosureButton(`${g.name} sessions`, body,
         collapsedSessionBackends, "puppy.collapsed.session-backends", key);
-      name.ondblclick = event => {
-        event.preventDefault();
-        event.stopPropagation();
-        disclosure.click();
-      };
+      wireDoubleClickOrTouch(name, () => disclosure.click());
       t.appendChild(dot);
       t.appendChild(name);
       if (!g.bid || g.terminal) {
@@ -2114,8 +2162,8 @@ function renderSidebar() {
     for (const s of list) {
       const item = el("button", "sess-item" + (s.archived ? " archived" : ""));
       item.dataset.sessionId = String(s.id);
-      const tabId = `s:${g.bid}:${s.id}`;
-      if (state.active === tabId) item.classList.add("active");
+      item.dataset.sessionKey = sidebarSessionKey(g.bid, s.id);
+      if (selectedSession === item.dataset.sessionKey) item.classList.add("active");
       const r1 = el("div", "si-row");
       r1.appendChild(sessDot(s));
       r1.appendChild(el("div", "si-name", s.name || `session ${s.id}`));
@@ -2141,7 +2189,17 @@ function renderSidebar() {
       workspace.title = workspaceTitle(s);
       r2.appendChild(workspace);
       item.appendChild(r1); item.appendChild(r2);
-      item.onclick = () => { openSessionTab(g.bid, s.id, s); closeDrawer(); };
+      const pointerForClick = activationPointer(item);
+      item.onclick = event => {
+        const pointerType = pointerForClick(event);
+        selectSidebarSession(g.bid, s.id);
+        /* Keyboard activation has no click count, so it follows touch and opens
+           immediately. A mouse opens only on the second click. */
+        if (pointerType === "touch" || event.detail === 0 || event.detail === 2) {
+          openSessionTab(g.bid, s.id, s);
+          closeDrawer();
+        }
+      };
       item.addEventListener("contextmenu", (e) => sessionContextMenu(e, g.bid, s));
       wireSessionDrag(item, g.bid, s.id);
       body.appendChild(item);
@@ -2520,11 +2578,7 @@ function renderFootEngines() {
       const key = g.bid ? `remote:${g.bid}` : "local";
       const disclosure = disclosureButton(`${g.name} engine status`, body,
         collapsedStatusBackends, "puppy.collapsed.status-backends", key);
-      name.ondblclick = event => {
-        event.preventDefault();
-        event.stopPropagation();
-        disclosure.click();
-      };
+      wireDoubleClickOrTouch(name, () => disclosure.click());
       head.appendChild(name);
       if (g.bid && g.version) {
         const version = el("span", "foot-engine-version", `· v${g.version}`);
@@ -2660,6 +2714,9 @@ function focusWorkspacePane(groupId) {
   if (!pane || state.activeGroup === pane.id) return;
   state.activeGroup = pane.id;
   state.active = pane.active;
+  const tab = state.tabs.find(item => item.id === state.active);
+  if (tab && tab.type === "session")
+    state.selectedSession = sidebarSessionKey(tab.bid, tab.sid);
   document.querySelectorAll(".workspace-pane").forEach(node =>
     node.classList.toggle("focused", node.dataset.paneId === pane.id));
   renderSidebar();
@@ -2673,6 +2730,8 @@ function activateTab(id, groupId = null) {
   pane.active = id;
   state.activeGroup = pane.id;
   state.active = id;
+  if (tab.type === "session")
+    state.selectedSession = sidebarSessionKey(tab.bid, tab.sid);
   syncTabOrderFromLayout();
   renderTabs(id); renderSidebar();
 }
