@@ -1526,8 +1526,8 @@ function renderSidebar() {
       wireSessionDrag(item, g.bid, s.id);
       body.appendChild(item);
     }
-    wireSessionDropZone(body, g.bid);
     group.appendChild(body);
+    wireSessionDropZone(group, body, g.bid);
     root.appendChild(group);
   }
   let archTotal = 0;
@@ -1714,6 +1714,11 @@ function sortSessionsByOrder(sessions, ids) {
   });
 }
 
+function acceptReorderDrag(event) {
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+}
+
 /* Sticky manual ordering remains scoped to one backend. Hidden archived rows
    retain their durable slots while the visible rows move around them. */
 let dragSess = null;
@@ -1748,16 +1753,24 @@ function wireSessionDrag(item, bid, sid) {
   });
 }
 
-function wireSessionDropZone(body, bid) {
-  body.addEventListener("dragover", (e) => {
+function wireSessionDropZone(surface, body, bid) {
+  /* The whole backend block is a drop surface, not only the row container.
+     That keeps the native cursor valid over the title and the small spaces
+     exposed while siblings animate. dragenter matters when live reflow puts
+     a different element beneath a stationary pointer before the next
+     dragover event arrives. */
+  surface.addEventListener("dragenter", (e) => {
     if (!dragSess || dragSess.bid !== bid || dragSess.container !== body) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = "move";
+    acceptReorderDrag(e);
+  });
+  surface.addEventListener("dragover", (e) => {
+    if (!dragSess || dragSess.bid !== bid || dragSess.container !== body) return;
+    acceptReorderDrag(e);
     moveDragSlot(body, dragSess.item, ".sess-item", e.clientY, false);
   });
-  body.addEventListener("drop", async (e) => {
+  surface.addEventListener("drop", async (e) => {
     if (!dragSess || dragSess.bid !== bid || dragSess.container !== body) return;
-    e.preventDefault();
+    acceptReorderDrag(e);
     const context = dragSess;
     dragSess = null;
     context.item.classList.remove("dragging");
@@ -2069,16 +2082,22 @@ function renderTabs() {
   saveTabs();
 }
 
-$("tabs").addEventListener("dragover", (e) => {
+/* Keep the complete bar valid while a tab is moving. Its padding and fixed
+   controls form a forgiving corridor around the narrow row of tab faces. */
+$("tabbar").addEventListener("dragenter", (e) => {
   if (!dragTab || dragTab.container !== $("tabs")) return;
-  e.preventDefault();
-  e.dataTransfer.dropEffect = "move";
+  acceptReorderDrag(e);
+});
+
+$("tabbar").addEventListener("dragover", (e) => {
+  if (!dragTab || dragTab.container !== $("tabs")) return;
+  acceptReorderDrag(e);
   moveDragSlot(dragTab.container, dragTab.item, ".tab", e.clientX, true);
 });
 
-$("tabs").addEventListener("drop", (e) => {
+$("tabbar").addEventListener("drop", (e) => {
   if (!dragTab || dragTab.container !== $("tabs")) return;
-  e.preventDefault();
+  acceptReorderDrag(e);
   const context = dragTab;
   const ids = reorderChildren(context.container, ".tab")
     .map(node => node.dataset.tabId);
