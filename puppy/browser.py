@@ -316,9 +316,13 @@ START_PAGE_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
   width:52px;height:52px;margin-bottom:22px;border-radius:16px;
   background:var(--acc-bg);border:1px solid var(--acc-line);color:var(--acc);
  }}
+ /* The WebUI's own sans, not a code face: this is a name to read and say
+    back, not a snippet. The trailing letter-space is pulled back in so wide
+    tracking does not shove the centred word off axis. */
  .id{{
-  font:600 40px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-  letter-spacing:.14em;margin:0 0 10px;color:var(--id);
+  font:800 42px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,
+   "Helvetica Neue",Arial,sans-serif;
+  letter-spacing:.2em;text-indent:.2em;margin:0 0 12px;color:var(--id);
  }}
  .ready{{margin:0 0 22px;font-size:14px;color:var(--txt2);letter-spacing:.02em}}
  .ready b{{font-weight:600;color:var(--ok)}}
