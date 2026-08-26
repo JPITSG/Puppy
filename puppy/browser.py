@@ -1,4 +1,4 @@
-"""Managed headless browser surface (one optional Chromium per node).
+"""Managed headless browser surface (independent named Chromiums per node).
 
 Puppy owns the whole lifecycle of a user-supplied Chromium/Chrome binary and
 drives it exclusively over Chromium's ``--remote-debugging-pipe``: CDP JSON
@@ -17,9 +17,10 @@ Installing/maintaining the binary is deliberately the host's job.
 
 ``--no-sandbox`` is added exactly when this process runs as root, where
 Chromium refuses to start otherwise; unprivileged deployments keep the
-sandbox. The profile lives in ``data/browser/`` (0700). Like the engines'
-native credential/session stores it is deliberately outside snapshot
-coverage: disposable render state on this node, never required for restore.
+sandbox. Each four-character browser ID owns a separate profile below
+``data/browser/instances/`` (0700). Like the engines' native credential/session
+stores this state is deliberately outside snapshot coverage: node-local render
+and login state, never required for restore.
 """
 from __future__ import annotations
 
@@ -32,8 +33,11 @@ import logging
 import math
 import os
 import re
+import secrets
 import shutil
 import signal
+import stat
+import string
 import time
 
 from aiohttp import WSMsgType, web
@@ -59,6 +63,10 @@ MAX_URL_LENGTH = 4096
 MAX_INSERT_TEXT = 8192
 MAX_AX_NODES = 400
 MAX_AX_TEXT = 48 * 1024
+BROWSER_ID_RE = re.compile(r"^[A-Z0-9]{4}$")
+BROWSER_ID_ALPHABET = string.ascii_uppercase + string.digits
+ID_RETENTION_SECONDS = 30 * 24 * 60 * 60
+CATALOG_VERSION = 1
 
 _probe_cache = None            # (monotonic ts, dict)
 _manager = None
@@ -83,10 +91,30 @@ def _browser_root() -> str:
     return path
 
 
-def _subdir(name: str) -> str:
-    path = os.path.join(_browser_root(), name)
+def _instances_root() -> str:
+    path = os.path.join(_browser_root(), "instances")
     os.makedirs(path, exist_ok=True)
+    try:
+        os.chmod(path, 0o700)
+    except OSError:
+        pass
     return path
+
+
+def normalize_browser_id(value) -> str:
+    browser_id = str(value or "").strip().upper()
+    if not BROWSER_ID_RE.fullmatch(browser_id):
+        raise BrowserError("browser ID must be four A-Z/0-9 characters")
+    return browser_id
+
+
+def _instance_root(browser_id: str) -> str:
+    browser_id = normalize_browser_id(browser_id)
+    return os.path.join(_instances_root(), browser_id)
+
+
+def _catalog_path() -> str:
+    return os.path.join(_browser_root(), "instances.json")
 
 
 def enabled() -> bool:
@@ -155,7 +183,7 @@ async def probe(force: bool = False) -> dict:
 
 async def status_payload() -> dict:
     st = await probe()
-    m = _manager
+    m = manager()
     return {
         "supported": True,
         "enabled": enabled(),
@@ -166,6 +194,7 @@ async def status_payload() -> dict:
         "sandbox": sandbox_mode(),
         "running": bool(m and m.running),
         "viewers": m.viewer_count() if m else 0,
+        "instances": m.instance_payloads() if m else [],
     }
 
 
@@ -186,7 +215,9 @@ async def set_enabled(value: bool) -> dict:
 
 
 async def apply_config() -> None:
-    """Reconcile the running instance after config replacement (restore)."""
+    """Reconcile live browsers after a snapshot's config/database replacement."""
+    if _manager is not None:
+        await _manager.clear_session_bindings()
     if not enabled() and _manager is not None:
         await _manager.stop("browser disabled by restored configuration")
 
@@ -196,10 +227,10 @@ async def shutdown() -> None:
         await _manager.stop("Puppy is shutting down")
 
 
-def manager() -> "Manager":
+def manager() -> "BrowserRegistry":
     global _manager
     if _manager is None:
-        _manager = Manager()
+        _manager = BrowserRegistry()
     return _manager
 
 
@@ -234,11 +265,10 @@ def launch_argv(binary: str, profile_dir: str, as_root: bool) -> list:
     return argv
 
 
-def _kill_stale_instance(profile_dir: str) -> None:
+def _kill_stale_instance(profile_dir: str, pidfile: str) -> None:
     """A hard-killed Puppy can orphan the browser (it runs in its own process
     group). The pidfile plus a strict cmdline check scoped to our own profile
     directory lets the next start reclaim it without ever touching a stranger."""
-    pidfile = os.path.join(_browser_root(), "chrome.pid")
     try:
         pid = int(open(pidfile, "r", encoding="utf-8").read().strip())
     except (OSError, ValueError):
@@ -390,12 +420,22 @@ def _normalize_url(text: str) -> str:
 
 
 class Manager:
-    """The node's single managed browser instance and its viewers."""
+    """One isolated managed browser instance and its viewers."""
 
-    def __init__(self):
+    def __init__(self, browser_id: str, origin: str = "user", owner_session=None):
+        self.browser_id = normalize_browser_id(browser_id)
+        self.origin = origin if origin in ("agent", "user", "legacy") else "user"
+        self.owner_session = int(owner_session) if owner_session is not None else None
+        self.root = _instance_root(self.browser_id)
+        os.makedirs(self.root, exist_ok=True)
+        try:
+            os.chmod(self.root, 0o700)
+        except OSError:
+            pass
         self.lock = asyncio.Lock()
         self.attach_lock = asyncio.Lock()
         self.agent_lock = asyncio.Lock()
+        self.closed = False
         self.running = False
         self.stopping = False
         self.pid = None
@@ -418,19 +458,38 @@ class Manager:
     def viewer_count(self) -> int:
         return len(self.viewers)
 
+    def _subdir(self, name: str) -> str:
+        path = os.path.join(self.root, name)
+        os.makedirs(path, exist_ok=True)
+        try:
+            os.chmod(path, 0o700)
+        except OSError:
+            pass
+        return path
+
+    @property
+    def pidfile(self) -> str:
+        return os.path.join(self.root, "chrome.pid")
+
     # ---- lifecycle ----
 
     async def ensure_started(self) -> None:
         async with self.lock:
+            if self.closed:
+                raise BrowserError("Browser {} is closed".format(self.browser_id))
+            if not enabled():
+                raise BrowserError("the browser is disabled on this node")
             if self.running:
                 return
             st = await probe()
+            if not enabled():
+                raise BrowserError("the browser is disabled on this node")
             if not st["available"]:
                 raise BrowserError(st["reason"] or "no usable browser on this node")
-            profile = _subdir("profile")
-            home = _subdir("home")
-            downloads = _subdir("downloads")
-            _kill_stale_instance(profile)
+            profile = self._subdir("profile")
+            home = self._subdir("home")
+            downloads = self._subdir("downloads")
+            _kill_stale_instance(profile, self.pidfile)
             argv = launch_argv(st["binary"], profile, os.geteuid() == 0)
             env = dict(os.environ)
             env["HOME"] = home
@@ -442,7 +501,7 @@ class Manager:
             cmd_read = _dup_high(cmd_read)
             out_write = _dup_high(out_write)
             devnull = _dup_high(os.open(os.devnull, os.O_RDWR))
-            log_path = os.path.join(_browser_root(), "chrome.log")
+            log_path = os.path.join(self.root, "chrome.log")
             log_fd = _dup_high(os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600))
             spawned = None
             spawn_error = None
@@ -471,10 +530,9 @@ class Manager:
             if spawn_error is not None:
                 raise BrowserError("could not start the browser: {}".format(spawn_error))
             try:
-                with open(os.path.join(_browser_root(), "chrome.pid"), "w",
-                          encoding="utf-8") as f:
+                with open(self.pidfile, "w", encoding="utf-8") as f:
                     f.write(str(spawned))
-                os.chmod(os.path.join(_browser_root(), "chrome.pid"), 0o600)
+                os.chmod(self.pidfile, 0o600)
             except OSError:
                 pass
 
@@ -504,11 +562,11 @@ class Manager:
                     pass   # best effort; downloads just land in the profile
                 await self._attach_page("")
                 self.started_at = time.time()
-                log.info("managed browser started pid=%s %s%s", spawned,
+                log.info("managed Browser %s started pid=%s %s%s", self.browser_id, spawned,
                          version.get("product", ""),
                          " (no sandbox: running as root)" if os.geteuid() == 0 else "")
             except Exception as exc:
-                log.error("managed browser failed to start: %s", exc)
+                log.error("managed Browser %s failed to start: %s", self.browser_id, exc)
                 await self._teardown()
                 await _reap_group(spawned)
                 tail = ""
@@ -524,7 +582,8 @@ class Manager:
         async with self.lock:
             if not self.running and self.pid is None:
                 return
-            log.info("stopping managed browser pid=%s (%s)", self.pid, reason)
+            log.info("stopping managed Browser %s pid=%s (%s)",
+                     self.browser_id, self.pid, reason)
             self.stopping = True
             pid = self.pid
             if self.running:
@@ -559,14 +618,15 @@ class Manager:
         self.agent_refs = {}
         self.pid = None
         try:
-            os.unlink(os.path.join(_browser_root(), "chrome.pid"))
+            os.unlink(self.pidfile)
         except OSError:
             pass
 
     def _on_pipe_lost(self) -> None:
         if self.stopping or not self.running:
             return
-        log.warning("managed browser pid=%s exited unexpectedly", self.pid)
+        log.warning("managed Browser %s pid=%s exited unexpectedly",
+                    self.browser_id, self.pid)
         self.running = False
         pid, self.pid = self.pid, None
         for fut in list(self.pending.values()):
@@ -1303,6 +1363,367 @@ class Manager:
             "Scrolled by ({}, {}).".format(dx, dy))}
 
 
+def _safe_remove_instance_storage(browser_id: str) -> None:
+    """Remove one retired instance directory, never an arbitrary path."""
+    root = _instance_root(browser_id)
+    parent = os.path.realpath(_instances_root())
+    if os.path.realpath(os.path.dirname(root)) != parent:
+        raise BrowserError("refusing to remove browser storage outside its namespace")
+    try:
+        info = os.lstat(root)
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or \
+            info.st_uid != os.geteuid():
+        raise BrowserError("refusing to remove unowned browser instance storage")
+    profile = os.path.join(root, "profile")
+    pidfile = os.path.join(root, "chrome.pid")
+    _kill_stale_instance(profile, pidfile)
+    shutil.rmtree(root)
+
+
+def _write_catalog(records: dict, bindings: dict) -> None:
+    path = _catalog_path()
+    payload = {
+        "version": CATALOG_VERSION,
+        "ids": records,
+        "bindings": {str(key): value for key, value in bindings.items()},
+    }
+    temporary = path + ".tmp-" + secrets.token_hex(6)
+    fd = None
+    try:
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = None
+            json.dump(payload, handle, separators=(",", ":"), sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    finally:
+        if fd is not None:
+            os.close(fd)
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def _load_catalog() -> tuple:
+    path = _catalog_path()
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except FileNotFoundError:
+        raw = {}
+    except Exception as exc:
+        log.warning("could not read managed browser ID history: %s", exc)
+        raw = {}
+    raw_ids = raw.get("ids") if isinstance(raw, dict) else {}
+    records = {}
+    changed = not isinstance(raw_ids, dict)
+    now = time.time()
+    cutoff = now - ID_RETENTION_SECONDS
+    for browser_id, record in (raw_ids.items() if isinstance(raw_ids, dict) else []):
+        if not isinstance(browser_id, str) or not BROWSER_ID_RE.fullmatch(browser_id) or \
+                not isinstance(record, dict):
+            changed = True
+            continue
+        try:
+            created_at = float(record.get("created_at"))
+            closed_raw = record.get("closed_at")
+            closed_at = None if closed_raw is None else float(closed_raw)
+        except (TypeError, ValueError):
+            changed = True
+            continue
+        if not math.isfinite(created_at) or created_at <= 0 or \
+                (closed_at is not None and (not math.isfinite(closed_at) or closed_at <= 0)):
+            changed = True
+            continue
+        if closed_at is not None and closed_at < cutoff:
+            changed = True
+            try:
+                _safe_remove_instance_storage(browser_id)
+            except Exception as exc:
+                log.warning("could not prune Browser %s storage: %s", browser_id, exc)
+            continue
+        origin = record.get("origin")
+        if origin not in ("agent", "user", "legacy"):
+            origin = "user"
+            changed = True
+        owner = record.get("owner_session")
+        try:
+            owner = int(owner) if owner is not None else None
+        except (TypeError, ValueError):
+            owner = None
+            changed = True
+        if owner is not None and owner <= 0:
+            owner = None
+            changed = True
+        records[browser_id] = {
+            "created_at": created_at,
+            "closed_at": closed_at,
+            "origin": origin,
+            "owner_session": owner,
+        }
+    raw_bindings = raw.get("bindings") if isinstance(raw, dict) else {}
+    bindings = {}
+    if isinstance(raw_bindings, dict):
+        for raw_session, browser_id in raw_bindings.items():
+            try:
+                session_id = int(raw_session)
+            except (TypeError, ValueError):
+                changed = True
+                continue
+            if session_id > 0 and browser_id in records and \
+                    records[browser_id]["closed_at"] is None:
+                bindings[session_id] = browser_id
+            else:
+                changed = True
+    elif raw_bindings is not None:
+        changed = True
+    if changed or not os.path.exists(path):
+        _write_catalog(records, bindings)
+    return records, bindings
+
+
+class BrowserRegistry:
+    """Node-owned catalog and lifecycle for independent browser instances."""
+
+    def __init__(self):
+        self.lock = asyncio.Lock()
+        self.records, self.bindings = _load_catalog()
+        self.instances = {}
+        for browser_id, record in self.records.items():
+            if record["closed_at"] is None:
+                self.instances[browser_id] = Manager(
+                    browser_id, record["origin"], record["owner_session"])
+        self._reclaim_unknown_stale_instances()
+
+    @property
+    def running(self) -> bool:
+        return any(instance.running for instance in self.instances.values())
+
+    def viewer_count(self) -> int:
+        return sum(instance.viewer_count() for instance in self.instances.values())
+
+    def instance_payloads(self) -> list:
+        payloads = []
+        ordered = sorted(self.instances.items(),
+                         key=lambda item: self.records[item[0]]["created_at"])
+        for browser_id, instance in ordered:
+            payloads.append({
+                "id": browser_id,
+                "origin": instance.origin,
+                "running": instance.running,
+                "viewers": instance.viewer_count(),
+                "created_at": self.records[browser_id]["created_at"],
+            })
+        return payloads
+
+    def _reclaim_unknown_stale_instances(self) -> None:
+        try:
+            names = os.listdir(_instances_root())
+        except OSError:
+            names = []
+        for name in names:
+            if not BROWSER_ID_RE.fullmatch(name):
+                continue
+            root = os.path.join(_instances_root(), name)
+            try:
+                info = os.lstat(root)
+            except OSError:
+                continue
+            if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or \
+                    info.st_uid != os.geteuid():
+                continue
+            _kill_stale_instance(os.path.join(root, "profile"),
+                                 os.path.join(root, "chrome.pid"))
+        # Reclaim the pre-instance layout after an ungraceful upgrade too.
+        _kill_stale_instance(os.path.join(_browser_root(), "profile"),
+                             os.path.join(_browser_root(), "chrome.pid"))
+
+    def _prune(self) -> None:
+        cutoff = time.time() - ID_RETENTION_SECONDS
+        removed = []
+        new_records = dict(self.records)
+        for browser_id, record in self.records.items():
+            closed_at = record.get("closed_at")
+            if closed_at is not None and closed_at < cutoff:
+                removed.append(browser_id)
+                del new_records[browser_id]
+        if not removed:
+            return
+        for browser_id in removed:
+            try:
+                _safe_remove_instance_storage(browser_id)
+            except Exception as exc:
+                log.warning("could not prune Browser %s storage: %s", browser_id, exc)
+        _write_catalog(new_records, self.bindings)
+        self.records = new_records
+
+    def _new_id(self) -> str:
+        self._prune()
+        for _ in range(4096):
+            browser_id = "".join(secrets.choice(BROWSER_ID_ALPHABET) for _ in range(4))
+            # "A-Z0-9 mix" is literal: every generated ID contains both kinds.
+            if not any(char.isalpha() for char in browser_id) or \
+                    not any(char.isdigit() for char in browser_id):
+                continue
+            if browser_id not in self.records and \
+                    not os.path.lexists(_instance_root(browser_id)):
+                return browser_id
+        raise BrowserError("could not allocate a unique browser ID")
+
+    @staticmethod
+    def _normalize_owner(owner_session):
+        if owner_session is None:
+            return None
+        try:
+            owner_session = int(owner_session)
+        except (TypeError, ValueError):
+            raise BrowserError("invalid browser session identity")
+        if owner_session <= 0:
+            raise BrowserError("invalid browser session identity")
+        return owner_session
+
+    def _create_locked(self, origin: str, owner_session=None) -> Manager:
+        """Register one instance while ``self.lock`` is held."""
+        if not enabled():
+            raise BrowserError("the browser is disabled on this node")
+        browser_id = self._new_id()
+        record = {
+            "created_at": time.time(), "closed_at": None,
+            "origin": origin, "owner_session": owner_session,
+        }
+        instance = Manager(browser_id, origin, owner_session)
+        new_records = dict(self.records)
+        new_records[browser_id] = record
+        new_bindings = dict(self.bindings)
+        if owner_session is not None:
+            new_bindings[owner_session] = browser_id
+        _write_catalog(new_records, new_bindings)
+        self.records = new_records
+        self.bindings = new_bindings
+        self.instances[browser_id] = instance
+        return instance
+
+    async def _start_created(self, instance: Manager) -> Manager:
+        try:
+            await instance.ensure_started()
+        except Exception:
+            await self.close(instance.browser_id, "browser launch failed")
+            raise
+        return instance
+
+    async def create(self, origin: str = "user", owner_session=None) -> Manager:
+        if not enabled():
+            raise BrowserError("the browser is disabled on this node")
+        if origin not in ("agent", "user", "legacy"):
+            raise BrowserError("invalid browser origin")
+        owner_session = self._normalize_owner(owner_session)
+        async with self.lock:
+            instance = self._create_locked(origin, owner_session)
+        return await self._start_created(instance)
+
+    def get(self, browser_id) -> Manager:
+        browser_id = normalize_browser_id(browser_id)
+        instance = self.instances.get(browser_id)
+        if instance is None or instance.closed:
+            raise BrowserError("Browser {} is closed or unknown".format(browser_id))
+        return instance
+
+    async def close(self, browser_id, reason: str = "closed by user") -> bool:
+        browser_id = normalize_browser_id(browser_id)
+        async with self.lock:
+            instance = self.instances.get(browser_id)
+            record = self.records.get(browser_id)
+            if instance is None or record is None or record.get("closed_at") is not None:
+                return False
+            new_records = dict(self.records)
+            new_records[browser_id] = {**record, "closed_at": time.time()}
+            new_bindings = {session_id: selected for session_id, selected in
+                            self.bindings.items() if selected != browser_id}
+            _write_catalog(new_records, new_bindings)
+            instance.closed = True
+            self.instances.pop(browser_id, None)
+            self.records = new_records
+            self.bindings = new_bindings
+        await instance.stop(reason)
+        return True
+
+    async def stop(self, reason: str) -> None:
+        instances = list(self.instances.values())
+        if instances:
+            await asyncio.gather(*(instance.stop(reason) for instance in instances),
+                                 return_exceptions=True)
+
+    async def clear_session_bindings(self) -> None:
+        """Do not let restored database IDs inherit pre-restore browser state."""
+        async with self.lock:
+            new_records = {browser_id: dict(record)
+                           for browser_id, record in self.records.items()}
+            for browser_id, record in new_records.items():
+                if record.get("closed_at") is None and record.get("owner_session") is not None:
+                    record["owner_session"] = None
+            _write_catalog(new_records, {})
+            self.records = new_records
+            self.bindings = {}
+            for instance in self.instances.values():
+                instance.owner_session = None
+
+    async def agent_browser(self, session_id: int, requested_id=None,
+                            fresh: bool = False) -> Manager:
+        session_id = self._normalize_owner(session_id)
+        if fresh:
+            return await self.create("agent", session_id)
+        explicit = requested_id is not None and str(requested_id).strip() != ""
+        if explicit:
+            browser_id = normalize_browser_id(requested_id)
+            async with self.lock:
+                instance = self.instances.get(browser_id)
+                if instance is None or instance.closed:
+                    raise BrowserError(
+                        "Browser {} is closed or unknown".format(browser_id))
+                if self.bindings.get(session_id) != browser_id:
+                    new_bindings = dict(self.bindings)
+                    new_bindings[session_id] = browser_id
+                    _write_catalog(self.records, new_bindings)
+                    self.bindings = new_bindings
+            await instance.ensure_started()
+            return instance
+
+        created = False
+        async with self.lock:
+            browser_id = self.bindings.get(session_id)
+            instance = self.instances.get(browser_id) if browser_id else None
+            if instance is None or instance.closed:
+                instance = self._create_locked("agent", session_id)
+                created = True
+        if created:
+            return await self._start_created(instance)
+        try:
+            await instance.ensure_started()
+        except BrowserError:
+            if instance.closed:
+                return await self.create("agent", session_id)
+            raise
+        return instance
+
+    async def legacy_browser(self) -> Manager:
+        created = False
+        async with self.lock:
+            instance = next((candidate for candidate in self.instances.values()
+                             if candidate.origin == "legacy" and not candidate.closed), None)
+            if instance is None:
+                instance = self._create_locked("legacy")
+                created = True
+        if created:
+            return await self._start_created(instance)
+        await instance.ensure_started()
+        return instance
+
+
 # ---- HTTP + websocket surface (registered by register_execution_api) ----
 
 async def h_status(request: web.Request):
@@ -1330,6 +1751,33 @@ async def h_enabled(request: web.Request):
     return web.json_response({"ok": True, **payload})
 
 
+async def h_create(request: web.Request):
+    if request.app.get("puppy_snapshot_busy"):
+        return web.json_response({"error": "Puppy backup or restore in progress"}, status=503)
+    try:
+        instance = await manager().create("user")
+    except BrowserError as exc:
+        return web.json_response({"error": str(exc)}, status=409)
+    return web.json_response({
+        "ok": True,
+        "browser": {"id": instance.browser_id, "origin": instance.origin},
+    }, status=201)
+
+
+async def h_close(request: web.Request):
+    if request.app.get("puppy_snapshot_busy"):
+        return web.json_response({"error": "Puppy backup or restore in progress"}, status=503)
+    try:
+        browser_id = normalize_browser_id(request.match_info.get("browser_id"))
+        closed = await manager().close(browser_id)
+    except BrowserError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    if not closed:
+        return web.json_response({"error": "Browser {} is closed or unknown".format(
+            browser_id)}, status=404)
+    return web.json_response({"ok": True, "id": browser_id})
+
+
 async def ws_browser(request: web.Request):
     ws = web.WebSocketResponse(heartbeat=30, max_msg_size=1 << 20)
     await ws.prepare(request)
@@ -1344,8 +1792,10 @@ async def ws_browser(request: web.Request):
             pass
         await ws.close()
         return ws
-    m = manager()
     try:
+        requested_id = request.match_info.get("browser_id")
+        m = manager().get(requested_id) if requested_id else \
+            await manager().legacy_browser()
         await m.attach_viewer(ws)
     except BrowserError as exc:
         try:
@@ -1354,7 +1804,8 @@ async def ws_browser(request: web.Request):
             pass
         await ws.close()
         return ws
-    log.info("browser viewer attached (%s total) for %s", m.viewer_count(), request.remote)
+    log.info("Browser %s viewer attached (%s total) for %s",
+             m.browser_id, m.viewer_count(), request.remote)
     try:
         async for msg in ws:
             if msg.type != WSMsgType.TEXT:
@@ -1378,16 +1829,23 @@ async def ws_browser(request: web.Request):
                 log.exception("browser input handling failed")
     finally:
         m.detach_viewer(ws)
-        log.info("browser viewer detached (%s left)", m.viewer_count())
+        log.info("Browser %s viewer detached (%s left)",
+                 m.browser_id, m.viewer_count())
     return ws
 
 
 def register(app: web.Application) -> None:
     app.router.add_get("/api/browser/status", h_status)
     app.router.add_post("/api/browser/enabled", h_enabled)
+    app.router.add_post("/api/browser/instances", h_create)
+    app.router.add_delete(
+        "/api/browser/instances/{browser_id:[A-Z0-9]{4}}", h_close)
+    app.router.add_get(
+        "/api/ws/browser/{browser_id:[A-Z0-9]{4}}", ws_browser)
     app.router.add_get("/api/ws/browser", ws_browser)
 
     async def on_startup(_app):
+        manager()  # load ID history and reclaim any browser left by a hard stop
         from puppy import browser_agent
         await browser_agent.start(_app)
 

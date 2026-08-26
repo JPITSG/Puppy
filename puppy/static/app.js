@@ -1342,7 +1342,7 @@ const state = {
   remoteNodeCheckedAt: {},
   remoteUsageRefresh: {}, // bid -> account-usage refresh metadata
   remoteUploadSettings: {}, // bid -> remote per-file upload policy
-  tabs: [],               // [{id,type,bid,sid,title,cmd}]
+  tabs: [],               // [{id,type,bid,sid,browserId,title,cmd}]
   active: null,           // focused tab id (each pane also has its own active tab)
   activeGroup: null,      // focused workspace pane id
   selectedSession: null,  // sidebar selection, independent until a session tab is focused
@@ -1641,7 +1641,7 @@ function saveTabs() {
       version: 2,
       tabs: state.tabs.map(t => ({
         id: t.id, type: t.type, bid: t.bid, sid: t.sid, title: t.title,
-        cmd: t.cmd, ended: t.ended === true,
+        browserId: t.browserId, cmd: t.cmd, ended: t.ended === true,
       })),
       active: state.active,
       activeGroup: state.activeGroup,
@@ -1661,6 +1661,9 @@ function storedTabs(value) {
     const tab = { id: item.id, type: item.type };
     if (typeof item.bid === "number" && Number.isFinite(item.bid)) tab.bid = item.bid;
     if (typeof item.sid === "number" && Number.isFinite(item.sid)) tab.sid = item.sid;
+    if (item.type === "browser" && typeof item.browserId === "string" &&
+        /^[A-Z0-9]{4}$/.test(item.browserId.toUpperCase()))
+      tab.browserId = item.browserId.toUpperCase();
     if (typeof item.title === "string") tab.title = item.title.slice(0, 1000);
     if (typeof item.cmd === "string") tab.cmd = item.cmd.slice(0, 10000);
     /* A shell the user ended is restored as ended: reopening the tab must not
@@ -1742,8 +1745,16 @@ async function enterApp() {
   $("app").classList.remove("hidden");
   await refreshState();
   loadTabs();
-  const valid = state.tabs.filter(t => t.type !== "session" ||
-    (t.bid ? true : state.sessions.some(s => s.id === t.sid)));
+  const valid = state.tabs.filter(t => {
+    if (t.type === "session")
+      return t.bid ? true : state.sessions.some(s => s.id === t.sid);
+    /* Pre-ID singleton tabs cannot identify a logical browser on an upgraded
+       node. Drop them instead of silently creating an unnamed extra instance;
+       retain them only for older remote nodes using the compatibility route. */
+    if (t.type === "browser" && !t.browserId && browserInstancesFor(t.bid || 0))
+      return false;
+    return true;
+  });
   state.tabs = valid;
   normalizeWorkspace();
   renderTabs(); renderSidebar();
@@ -1813,7 +1824,7 @@ function connectUpdates() {
         state.browser = { enabled: !!d.enabled };
         renderSidebar();
       } else if (d.type === "browser_activity") {
-        handleBrowserActivity(0, d.session_id, d.turn_id);
+        handleBrowserActivity(0, d.session_id, d.turn_id, d.browser_id);
       }
     } catch (e) {}
   };
@@ -2068,8 +2079,11 @@ function shellTabTitle(tab) {
   return `${state.nodeUsers[bid] || "shell"} @ ${backendName(bid)}`;
 }
 
-function browserTabTitle(bid) {
-  return `Browser · ${backendName(bid || 0)}`;
+function browserTabTitle(tabOrBid, browserId = "") {
+  const tab = tabOrBid && typeof tabOrBid === "object" ? tabOrBid : null;
+  const bid = tab ? (tab.bid || 0) : (Number(tabOrBid) || 0);
+  const id = String(tab ? (tab.browserId || "") : browserId).toUpperCase();
+  return id ? `Browser ${id} @ ${backendName(bid)}` : `Browser @ ${backendName(bid)}`;
 }
 
 function browserEnabledFor(bid) {
@@ -2077,6 +2091,32 @@ function browserEnabledFor(bid) {
   const backend = state.backends.find(item => item.id === bid);
   if (!backend || !backendHasCapability(backend, "browser")) return false;
   return !!(state.remoteBrowser[bid] && state.remoteBrowser[bid].enabled);
+}
+
+function browserInstancesFor(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(item => item.id === bid);
+  return !!backend && backendHasCapability(backend, "browser-instances");
+}
+
+async function openNewBrowser(bid, groupId = null) {
+  bid = Number(bid) || 0;
+  if (!browserInstancesFor(bid)) {
+    openBrowserTab(bid, "", groupId);
+    return;
+  }
+  try {
+    const result = await api(bid, "browser/instances", {
+      method: "POST", body: {}, timeoutMs: 45000,
+    });
+    const browserId = String(result && result.browser && result.browser.id || "").toUpperCase();
+    if (!/^[A-Z0-9]{4}$/.test(browserId))
+      throw new Error("node returned an invalid browser ID");
+    openBrowserTab(bid, browserId, groupId);
+  } catch (error) {
+    toast(`${backendName(bid)}: ${error.message || "could not open browser"}`,
+      "error", 7000);
+  }
 }
 
 function backendLocationVersion(backend) {
@@ -2273,7 +2313,7 @@ function renderSidebar() {
         browse.onclick = event => {
           event.preventDefault();
           event.stopPropagation();
-          openBrowserTab(g.bid);
+          openNewBrowser(g.bid, state.activeGroup);
           closeDrawer();
         };
         t.appendChild(browse);
@@ -2847,6 +2887,17 @@ function putTabInPane(tabId, groupId = null) {
   return pane;
 }
 
+function putTabAfter(tabId, afterTabId, groupId = null) {
+  const existing = workspacePaneForTab(tabId);
+  if (existing) return existing;
+  const afterPane = afterTabId ? workspacePaneForTab(afterTabId) : null;
+  const pane = afterPane || targetWorkspacePane(groupId);
+  const index = afterTabId ? pane.tabs.indexOf(afterTabId) : -1;
+  if (index >= 0) pane.tabs.splice(index + 1, 0, tabId);
+  else pane.tabs.push(tabId);
+  return pane;
+}
+
 function openSessionTab(bid, sid, meta, groupId = null) {
   const id = `s:${bid}:${sid}`;
   let tab = state.tabs.find(t => t.id === id);
@@ -2866,29 +2917,49 @@ function openTermTab(bid, cmd, groupId = null) {
   activateTab(id);
 }
 
-/* Each node runs at most one managed browser instance, so its tab is a
-   singleton: reopening focuses the existing screen instead of forking it. */
-function openBrowserTab(bid, groupId = null) {
-  const id = `b:${bid || 0}`;
+/* Browser IDs are node-scoped. Reopening one ID reuses its screen while a new
+   ID creates another isolated browser tab. Agent-created tabs can be inserted
+   in the background without changing the focused pane or composer. */
+function openBrowserTab(bid, browserId = "", groupId = null, options = {}) {
+  bid = Number(bid) || 0;
+  browserId = String(browserId || "").toUpperCase();
+  if (browserId && !/^[A-Z0-9]{4}$/.test(browserId)) return null;
+  const id = browserId ? `b:${bid}:${browserId}` : `b:${bid}`;
   let tab = state.tabs.find(t => t.id === id);
   if (!tab) {
-    tab = { id, type: "browser", bid: bid || 0, title: browserTabTitle(bid || 0) };
+    tab = { id, type: "browser", bid, browserId };
+    tab.title = browserTabTitle(tab);
     state.tabs.push(tab);
-    putTabInPane(id, groupId);
+    if (options.afterTabId)
+      putTabAfter(id, options.afterTabId, groupId);
+    else
+      putTabInPane(id, groupId);
   }
-  activateTab(id);
+  if (options.activate === false) {
+    const focused = document.activeElement;
+    const restoreFocus = focused instanceof HTMLElement &&
+      !!focused.closest("#workspace-tree");
+    syncTabOrderFromLayout();
+    renderTabs();
+    if (restoreFocus && focused.isConnected)
+      focused.focus({ preventScroll: true });
+  } else {
+    activateTab(id);
+  }
+  return tab;
 }
 
-/* The node announces only the first real browser tool call in a turn. Local
-   sessions can deliver it over both live sockets, so retain a small client-side
-   dedupe window as well. Put a new Browser tab beside the originating session;
-   an existing singleton keeps its pane and is simply brought to the front. */
-function handleBrowserActivity(bid, sid, turnId) {
+/* The node announces each browser first touched in a turn. Local sessions can
+   deliver it over both live sockets, so retain a client-side dedupe window.
+   Insert it beside the originating chat but leave that chat focused. */
+function handleBrowserActivity(bid, sid, turnId, browserId = "") {
   bid = Number(bid) || 0;
   sid = Number(sid) || 0;
   const token = String(turnId || "");
+  browserId = String(browserId || "").toUpperCase();
+  if (browserId && !/^[A-Z0-9]{4}$/.test(browserId)) return;
   if (!sid || !token) return;
-  const key = `${bid}:${token}`;
+  const key = `${bid}:${token}:${browserId}`;
   if (browserActivityTurns.has(key)) return;
   browserActivityTurns.set(key, Date.now());
   while (browserActivityTurns.size > 128)
@@ -2896,9 +2967,10 @@ function handleBrowserActivity(bid, sid, turnId) {
 
   if (bid) state.remoteBrowser[bid] = { enabled: true };
   else state.browser = { enabled: true };
-  const sessionPane = workspacePaneForTab(`s:${bid}:${sid}`);
-  openBrowserTab(bid, sessionPane ? sessionPane.id : null);
-  renderSidebar();
+  const sessionTabId = `s:${bid}:${sid}`;
+  const sessionPane = workspacePaneForTab(sessionTabId);
+  openBrowserTab(bid, browserId, sessionPane ? sessionPane.id : null,
+    { activate: false, afterTabId: sessionTabId });
 }
 
 function openSettingsTab(groupId = null) {
@@ -2912,6 +2984,15 @@ function openSettingsTab(groupId = null) {
 function closeTab(id) {
   const idx = state.tabs.findIndex(t => t.id === id);
   if (idx < 0) return;
+  const closing = state.tabs[idx];
+  if (closing.type === "browser" && closing.browserId) {
+    api(closing.bid || 0, `browser/instances/${encodeURIComponent(closing.browserId)}`,
+      { method: "DELETE" }).catch(error => {
+        if (error.status !== 404)
+          toast(`Browser ${closing.browserId} may still be running: ${error.message}`,
+            "error", 7000);
+      });
+  }
   const pane = removeTabFromPane(id);
   state.tabs.splice(idx, 1);
   const v = state.views[id];
@@ -3083,7 +3164,7 @@ function renderTabNode(t, pane, tabsRoot) {
   tab.appendChild(tdot);
   tab.appendChild(el("span", "t-title",
     (t.type === "term" && !t.cmd) ? shellTabTitle(t) :
-    (t.type === "browser") ? browserTabTitle(t.bid || 0) : (t.title || "tab")));
+    (t.type === "browser") ? browserTabTitle(t) : (t.title || "tab")));
   if (t.type === "session") {
     suppressContextGestureActivation(tab);
     tab.addEventListener("contextmenu", (event) => {
@@ -4419,7 +4500,7 @@ class SessionView {
         toast(d.text, d.level || "info");
         break;
       case "browser_activity":
-        handleBrowserActivity(this.tab.bid, this.tab.sid, d.turn_id);
+        handleBrowserActivity(this.tab.bid, this.tab.sid, d.turn_id, d.browser_id);
         break;
     }
     const runningKinds = { user: 1, assistant: 1, thinking: 1, tool_use: 1, tool_result: 1 };
@@ -5535,7 +5616,7 @@ class TermView {
 }
 
 /* ================= BrowserView ================= */
-/* Screen + input for a node's single managed headless browser. Frames arrive
+/* Screen + input for one identified managed headless browser. Frames arrive
    as raw JPEG websocket messages; input goes back as normalized coordinates
    so the mapping survives any display scaling on this side. */
 class BrowserView {
@@ -5738,7 +5819,9 @@ class BrowserView {
 
   connect() {
     const sequence = ++this.connectionSequence;
-    const ws = new WebSocket(wsUrl(this.tab.bid, "ws/browser"));
+    const path = this.tab.browserId ?
+      `ws/browser/${encodeURIComponent(this.tab.browserId)}` : "ws/browser";
+    const ws = new WebSocket(wsUrl(this.tab.bid, path));
     ws.binaryType = "arraybuffer";
     this.ws = ws;
     ws.onopen = () => {
@@ -7611,7 +7694,7 @@ function modalNewTerminal(groupId = null) {
   m.querySelector("#nt-cmd").addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
 }
 
-/* new browser (each node's browser is a singleton screen) */
+/* new isolated browser */
 function openBrowserFromMenu(groupId = null) {
   const nodes = [{ id: 0, name: backendName(0) }]
     .concat(state.backends)
@@ -7622,7 +7705,7 @@ function openBrowserFromMenu(groupId = null) {
     return;
   }
   if (nodes.length === 1) {
-    openBrowserTab(nodes[0].id, groupId);
+    openNewBrowser(nodes[0].id, groupId);
     return;
   }
   const { m, close } = modal(`<h2>Open browser</h2>
@@ -7634,7 +7717,7 @@ function openBrowserFromMenu(groupId = null) {
   m.querySelector("#nb-go").onclick = () => {
     const bid = parseInt(m.querySelector("#nb-be").value, 10) || 0;
     close();
-    openBrowserTab(bid, groupId);
+    openNewBrowser(bid, groupId);
   };
 }
 

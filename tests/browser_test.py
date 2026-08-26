@@ -3,10 +3,11 @@
 
 A stub "chromium" speaks just enough of the --remote-debugging-pipe CDP
 contract (fds 3/4, NUL-framed JSON) to exercise the probe, the node-owned
-enable gate, sandbox flag selection, the screencast/input websocket, viewer
-input scaling, URL normalization, the private per-turn MCP bridge, hidden model
-guidance, first-use tab events, disable-while-running, and crash reporting. No
-real browser is installed or launched and nothing reaches the network.
+enable gate, isolated named instances, ID retention, sandbox flag selection,
+the screencast/input websocket, viewer input scaling, URL normalization, the
+private per-turn MCP bridge, hidden model guidance, background first-use tab
+events, close-and-replace behavior, and crash reporting. No real browser is
+installed or launched and nothing reaches the network.
 """
 from __future__ import annotations
 
@@ -52,8 +53,8 @@ if sys.argv[1:] == ["--version"]:
     print("StubChrome " + os.environ.get("PUPPY_BROWSER_STUB_VERSION", "152.0.0.1"))
     raise SystemExit(0)
 
-with open(os.path.join(LOG, "argv.json"), "w") as f:
-    json.dump(sys.argv, f)
+with open(os.path.join(LOG, "argv.jsonl"), "a") as f:
+    f.write(json.dumps({"pid": os.getpid(), "argv": sys.argv}) + "\n")
 
 signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
@@ -230,6 +231,7 @@ async def main() -> None:
             async with http.get(url + "/api/ping", headers=headers) as r:
                 ping = await read_json(r)
                 assert "browser" in ping["capabilities"], ping
+                assert "browser-instances" in ping["capabilities"], ping
                 assert ping["browser"] == {"enabled": False}, ping
 
             # a too-old binary is refused at enable time with the probed reason
@@ -255,9 +257,80 @@ async def main() -> None:
                 assert r.status == 200 and enabled["enabled"] is True, enabled
             assert config.get("browser.enabled") is True
 
-            # viewer websocket: status text, frames, input forwarding
+            # Every create gets a distinct mixed A-Z/0-9 ID and isolated
+            # profile. Two instances can run concurrently on the same node.
+            created_ids = []
+            for _ in range(2):
+                async with http.post(url + "/api/browser/instances", headers=headers,
+                                     json={}) as r:
+                    created = await read_json(r)
+                    assert r.status == 201, created
+                    browser_id = created["browser"]["id"]
+                    assert len(browser_id) == 4 and browser_id.isalnum() and \
+                        browser_id == browser_id.upper(), browser_id
+                    assert any(char.isalpha() for char in browser_id) and \
+                        any(char.isdigit() for char in browser_id), browser_id
+                    created_ids.append(browser_id)
+            assert len(set(created_ids)) == 2, created_ids
+            first_id, closed_id = created_ids
+
+            launches = await wait_for(
+                lambda: read_lines("argv.jsonl")
+                if len(read_lines("argv.jsonl")) >= 2 else None,
+                message="two browser launches")
+            profiles = []
+            for launch in launches[:2]:
+                argv = launch["argv"]
+                assert "--remote-debugging-pipe" in argv and "--headless=new" in argv, argv
+                assert ("--no-sandbox" in argv) is (os.geteuid() == 0), argv
+                profiles.extend(value.split("=", 1)[1] for value in argv
+                                if value.startswith("--user-data-dir="))
+            assert len(set(profiles)) == 2, profiles
+            assert all(any(browser_id in profile for browser_id in created_ids)
+                       for profile in profiles), profiles
+            # and the non-root argv never carries the flag
+            assert "--no-sandbox" not in browser.launch_argv("/x", "/p", as_root=False)
+            assert "--no-sandbox" in browser.launch_argv("/x", "/p", as_root=True)
+
+            catalog = json.loads(Path(browser._catalog_path()).read_text())
+            assert set(created_ids) <= set(catalog["ids"]), catalog
+
+            # Closed IDs stay retired in the history, and their route no longer
+            # resolves. A synthetic record older than 30 days is pruned on the
+            # next allocation together with its private directory.
+            async with http.delete(
+                    url + "/api/browser/instances/" + closed_id, headers=headers) as r:
+                assert r.status == 200, await read_json(r)
+            catalog = json.loads(Path(browser._catalog_path()).read_text())
+            assert catalog["ids"][closed_id]["closed_at"] is not None, catalog
+            old_id = "Z9Z9" if "Z9Z9" not in created_ids else "Y8Y8"
+            registry = browser.manager()
+            registry.records[old_id] = {
+                "created_at": 1.0,
+                "closed_at": 1.0,
+                "origin": "user",
+                "owner_session": None,
+            }
+            old_root = Path(browser._instance_root(old_id))
+            old_root.mkdir(parents=True, mode=0o700)
+            (old_root / "retired-marker").write_text("retired")
+            browser._write_catalog(registry.records, registry.bindings)
+            async with http.post(url + "/api/browser/instances", headers=headers,
+                                 json={}) as r:
+                third = await read_json(r)
+                assert r.status == 201, third
+            third_id = third["browser"]["id"]
+            assert third_id not in created_ids
+            assert not (old_root / "retired-marker").exists()
+            if third_id == old_id:
+                assert registry.records[old_id]["closed_at"] is None
+            else:
+                assert old_id not in registry.records and not old_root.exists()
+
+            # ID-scoped viewer websocket: status text, frames, input forwarding.
             texts, frames = [], []
-            ws = await http.ws_connect(url + "/api/ws/browser", headers=headers)
+            ws = await http.ws_connect(
+                url + "/api/ws/browser/" + first_id, headers=headers)
             reader = asyncio.ensure_future(collect_ws(ws, texts, frames))
             await wait_for(lambda: frames, message="first frame")
             await wait_for(lambda: any(t.get("type") == "status" for t in texts),
@@ -265,13 +338,6 @@ async def main() -> None:
             assert frames[0] == b"stub-jpeg-frame-bytes", frames[0][:40]
             meta = next(t for t in texts if t.get("type") == "frame_meta")
             assert meta["width"] == 1280 and meta["height"] == 800, meta
-
-            argv = json.loads((STUB_LOG / "argv.json").read_text())
-            assert "--remote-debugging-pipe" in argv and "--headless=new" in argv, argv
-            assert ("--no-sandbox" in argv) is (os.geteuid() == 0), argv
-            # and the non-root argv never carries the flag
-            assert "--no-sandbox" not in browser.launch_argv("/x", "/p", as_root=False)
-            assert "--no-sandbox" in browser.launch_argv("/x", "/p", as_root=True)
 
             # normalized input coordinates scale by the streamed viewport
             await ws.send_json({"type": "mouse", "kind": "down", "nx": 0.5, "ny": 0.25,
@@ -299,8 +365,11 @@ async def main() -> None:
             async with http.get(url + "/api/browser/status", headers=headers) as r:
                 running = await read_json(r)
                 assert running["running"] is True and running["viewers"] == 1, running
+                assert {item["id"] for item in running["instances"]} == \
+                    {first_id, third_id}, running
 
-            # disabling while running stops the instance and informs viewers
+            # Disabling stops every process, preserves the logical IDs, and
+            # informs all attached viewers.
             async with http.post(url + "/api/browser/enabled", headers=headers,
                                  json={"enabled": False}) as r:
                 disabled = await read_json(r)
@@ -314,16 +383,28 @@ async def main() -> None:
                 assert stopped["running"] is False, stopped
 
             # a disabled node refuses viewers outright
-            ws2 = await http.ws_connect(url + "/api/ws/browser", headers=headers)
+            ws2 = await http.ws_connect(
+                url + "/api/ws/browser/" + first_id, headers=headers)
             refused = await ws2.receive()
             assert refused.type == aiohttp.WSMsgType.TEXT and \
                 "disabled" in json.loads(refused.data)["text"]
             await ws2.close()
 
-            # crash while streaming surfaces as "gone" and cleans up
+            # Re-enabling does not eagerly launch any instance.
             async with http.post(url + "/api/browser/enabled", headers=headers,
                                  json={"enabled": True}) as r:
                 assert r.status == 200
+
+            # Concurrent unqualified requests from one session converge on one
+            # default rather than racing two browser processes into existence.
+            race_sid = db.create_session(
+                "browser race", "codex", str(BASE), "", "", "#7aa2f7",
+                "danger-full-access")
+            raced = await asyncio.gather(
+                browser.manager().agent_browser(race_sid),
+                browser.manager().agent_browser(race_sid))
+            assert raced[0] is raced[1], [item.browser_id for item in raced]
+            await browser.manager().close(raced[0].browser_id, "race test complete")
 
             # Every enabled turn gets a private stdio MCP descriptor. Both
             # engine drivers place it in their native configuration, including
@@ -378,11 +459,17 @@ async def main() -> None:
                     "protocolVersion": "2025-06-18", "capabilities": {},
                     "clientInfo": {"name": "browser-test", "version": "1"},
                 })
+                assert initialized["result"]["serverInfo"]["version"] == "2"
                 instructions = initialized["result"].get("instructions", "")
-                assert "same node" in instructions and "opens automatically" in instructions
+                assert "fresh, isolated" in instructions and \
+                    "without taking focus" in instructions and \
+                    "explicitly asks" in instructions
                 listed = await mcp_request(mcp, 2, "tools/list")
-                names = {tool["name"] for tool in listed["result"]["tools"]}
-                assert {"snapshot", "screenshot", "navigate", "click", "type"} <= names
+                tools = {tool["name"]: tool for tool in listed["result"]["tools"]}
+                assert {"new_browser", "snapshot", "screenshot", "navigate",
+                        "click", "type"} <= set(tools)
+                assert "browser_id" in tools["snapshot"]["inputSchema"]["properties"]
+                assert "browser_id" not in tools["new_browser"]["inputSchema"]["properties"]
 
                 snapshot = await mcp_request(mcp, 3, "tools/call", {
                     "name": "snapshot", "arguments": {}})
@@ -392,14 +479,18 @@ async def main() -> None:
                                      if item["type"] == "text")
                 assert "[b1] button" in snapshot_text and \
                     "[b2] textbox" in snapshot_text, snapshot_text
-                await wait_for(
+                session_activity = await wait_for(
                     lambda: [item for item in session_capture.messages
                              if item.get("type") == "browser_activity"],
                     message="session browser activity event")
-                await wait_for(
+                update_activity = await wait_for(
                     lambda: [item for item in updates_capture.messages
                              if item.get("type") == "browser_activity"],
                     message="global browser activity event")
+                agent_id = session_activity[0]["browser_id"]
+                assert agent_id not in {first_id, closed_id, third_id}
+                assert snapshot_text.startswith("Browser {}\n".format(agent_id)), snapshot_text
+                assert update_activity[0]["browser_id"] == agent_id
 
                 shot = await mcp_request(mcp, 4, "tools/call", {
                     "name": "screenshot", "arguments": {}})
@@ -431,10 +522,66 @@ async def main() -> None:
                 assert read_lines("navigations.jsonl")[-1]["url"] == \
                     "http://router.lan/status"
 
+                # A new instance is created only through the explicit tool;
+                # subsequent unqualified calls bind to it across the session.
+                opened = await mcp_request(mcp, 8, "tools/call", {
+                    "name": "new_browser", "arguments": {}})
+                opened_text = opened["result"]["content"][0]["text"]
+                activities = await wait_for(
+                    lambda: [item for item in session_capture.messages
+                             if item.get("type") == "browser_activity"]
+                    if len([item for item in session_capture.messages
+                            if item.get("type") == "browser_activity"]) >= 2 else None,
+                    message="second identified browser event")
+                second_agent_id = activities[-1]["browser_id"]
+                assert second_agent_id != agent_id and second_agent_id in opened_text
+                continued = await mcp_request(mcp, 9, "tools/call", {
+                    "name": "screenshot", "arguments": {}})
+                continued_text = next(item["text"] for item in
+                                      continued["result"]["content"]
+                                      if item["type"] == "text")
+                assert continued_text.startswith(
+                    "Browser {}\n".format(second_agent_id)), continued_text
+
+                # Closing the session's current browser retires the ID. The
+                # next unqualified call detects that and creates a fresh one.
+                async with http.delete(
+                        url + "/api/browser/instances/" + second_agent_id,
+                        headers=headers) as r:
+                    assert r.status == 200, await read_json(r)
+                replacement = await mcp_request(mcp, 10, "tools/call", {
+                    "name": "snapshot", "arguments": {}})
+                replacement_text = replacement["result"]["content"][0]["text"]
+                activities = await wait_for(
+                    lambda: [item for item in session_capture.messages
+                             if item.get("type") == "browser_activity"]
+                    if len([item for item in session_capture.messages
+                            if item.get("type") == "browser_activity"]) >= 3 else None,
+                    message="replacement browser event")
+                replacement_id = activities[-1]["browser_id"]
+                assert replacement_id not in {agent_id, second_agent_id}
+                assert replacement_text.startswith(
+                    "Browser {}\n".format(replacement_id)), replacement_text
+
+                # A user-named ID selects that existing browser, then remains
+                # the session default. Closed/unknown named IDs fail clearly.
+                selected = await mcp_request(mcp, 11, "tools/call", {
+                    "name": "snapshot", "arguments": {"browser_id": first_id}})
+                selected_text = selected["result"]["content"][0]["text"]
+                assert selected_text.startswith("Browser {}\n".format(first_id)), selected_text
+                selected_again = await mcp_request(mcp, 12, "tools/call", {
+                    "name": "screenshot", "arguments": {}})
+                assert selected_again["result"]["content"][0]["text"].startswith(
+                    "Browser {}\n".format(first_id)), selected_again
+                missing = await mcp_request(mcp, 13, "tools/call", {
+                    "name": "snapshot", "arguments": {"browser_id": closed_id}})
+                assert missing["result"]["isError"] is True, missing
+                assert "closed or unknown" in missing["result"]["content"][0]["text"]
+
                 # A subprocess from a completed/replaced turn cannot keep
-                # driving the shared browser even if the next turn is running.
+                # driving any browser even if the next turn is running.
                 agent_hub._active_turn_id = "browser-turn-2"
-                stale = await mcp_request(mcp, 8, "tools/call", {
+                stale = await mcp_request(mcp, 14, "tools/call", {
                     "name": "reload", "arguments": {}})
                 assert stale["result"]["isError"] is True, stale
                 assert "no longer running" in stale["result"]["content"][0]["text"]
@@ -452,10 +599,15 @@ async def main() -> None:
 
             ui_source = (BASE / "puppy" / "static" / "app.js").read_text()
             assert 'case "browser_activity"' in ui_source
-            assert "openBrowserTab(bid, sessionPane ? sessionPane.id : null)" in ui_source
+            assert "`Browser ${id} @ ${backendName(bid)}`" in ui_source
+            assert "{ activate: false, afterTabId: sessionTabId }" in ui_source
+            assert "browser/instances/${encodeURIComponent(closing.browserId)}" in ui_source
 
+            # A crash affects only the addressed instance; other browser IDs
+            # remain available and the crashed logical browser can be restarted.
             texts3, frames3 = [], []
-            ws3 = await http.ws_connect(url + "/api/ws/browser", headers=headers)
+            ws3 = await http.ws_connect(
+                url + "/api/ws/browser/" + first_id, headers=headers)
             reader3 = asyncio.ensure_future(collect_ws(ws3, texts3, frames3))
             await wait_for(lambda: frames3, message="frame before crash")
             await ws3.send_json({"type": "navigate", "url": "stub://die"})
@@ -463,8 +615,16 @@ async def main() -> None:
                            message="gone notice after crash")
             await ws3.close()
             reader3.cancel()
-            manager = browser.manager()
-            await wait_for(lambda: not manager.running, message="manager stopped")
+            registry = browser.manager()
+            first_instance = registry.get(first_id)
+            await wait_for(lambda: not first_instance.running,
+                           message="addressed manager stopped")
+            assert registry.running, "other identified browsers should survive one crash"
+
+            # The retired ID log and session binding are private node-local
+            # browser state, deliberately outside config backup/restore.
+            catalog = json.loads(Path(browser._catalog_path()).read_text())
+            assert catalog["bindings"][str(agent_sid)] == first_id, catalog
 
             # the whole config, browser toggle included, round-trips an export
             exported = config.export_data()

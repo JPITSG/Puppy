@@ -20,11 +20,15 @@ FILE_UPLOAD_CAPABILITY = "file-uploads"
 # and the vendor-delegated engine CLI upgrade. They ship together, so one
 # additive capability keeps the controller from offering either to old nodes.
 ENGINE_UPGRADE_CAPABILITY = "engine-upgrade"
-# The managed headless-browser surface: /api/browser/status, the node-owned
-# enable toggle, and the screencast/input websocket. Advertising the routes is
-# distinct from availability (a usable binary) and from the node's enable
-# switch - both are reported dynamically by /api/browser/status.
+# Base managed headless-browser surface: status, the node-owned enable toggle,
+# and the legacy screencast/input websocket. Advertising the routes is distinct
+# from availability (a usable binary) and from the node's enable switch - both
+# are reported dynamically by /api/browser/status.
 BROWSER_CAPABILITY = "browser"
+# Independent four-character browser instances, their create/delete routes,
+# and the ID-scoped screencast websocket. Older browser-capable nodes expose
+# only the legacy singleton websocket and remain usable through that fallback.
+BROWSER_INSTANCES_CAPABILITY = "browser-instances"
 
 BASE_CAPABILITIES = (
     "sessions",
@@ -43,6 +47,7 @@ BASE_CAPABILITIES = (
     MANUAL_USAGE_REFRESH_CAPABILITY,
     ENGINE_UPGRADE_CAPABILITY,
     BROWSER_CAPABILITY,
+    BROWSER_INSTANCES_CAPABILITY,
 )
 TERMINAL_CAPABILITY = "terminal"
 # POST /api/notify/exec runs a controller-supplied completion command. It is

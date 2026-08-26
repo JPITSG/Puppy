@@ -259,6 +259,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         # browser surface: capability is static, enablement is node config
         # (off in this deployment), availability is probed on demand
         assert "browser" in ping["capabilities"]
+        assert "browser-instances" in ping["capabilities"]
         assert ping["browser"] == {"enabled": False}
         assert ping["uploads"]["enabled"] is \
             (ping["uploads"]["max_file_size_mb"] > 0)
@@ -297,6 +298,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
             assert browser_status["supported"] is True
             assert browser_status["enabled"] is False
             assert browser_status["running"] is False
+            assert browser_status["instances"] == []
             assert isinstance(browser_status["available"], bool)
         async with http.get(url + "/api/engines", headers=good, ssl=pinned) as response:
             engine_payload = await response.json()
@@ -1012,6 +1014,7 @@ async def main() -> None:
             env=mcp_env, cwd=str(temp_root), text=True, timeout=5)
         mcp_result = json.loads(mcp_output.strip())
         assert mcp_result["result"]["serverInfo"]["name"] == "Puppy managed browser"
+        assert "four uppercase" in mcp_result["result"]["instructions"]
         self_test = json.loads(subprocess.check_output([
             sys.executable, str(release_artifact), "self-test", "--data-dir",
             str(temp_root / "self-test-data"),

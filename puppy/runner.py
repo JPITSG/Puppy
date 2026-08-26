@@ -186,9 +186,9 @@ class SessionHub:
         # engine reporting that same move is not repeated as if it surprised us
         self._model_move_announced = False
         # The browser MCP subprocess is authorized for exactly this engine
-        # turn. Its first real call is announced once to the live WebUI.
+        # turn. Each distinct browser it touches is announced once to the UI.
         self._active_turn_id = ""
-        self._browser_activity_announced = False
+        self._browser_activity_announced = set()
 
     # ---- watchers ----
 
@@ -202,14 +202,20 @@ class SessionHub:
         for ws in list(self.watchers):
             asyncio.ensure_future(_safe_send(ws, payload, self.watchers))
 
-    def browser_activity(self, turn_id: str) -> bool:
-        """Authorize and announce a browser tool call from the current turn."""
-        if self.status != "running" or not turn_id or turn_id != self._active_turn_id:
+    def browser_turn_active(self, turn_id: str) -> bool:
+        """Whether a per-turn browser bridge still belongs to this engine."""
+        return self.status == "running" and bool(turn_id) and \
+            turn_id == self._active_turn_id
+
+    def browser_activity(self, turn_id: str, browser_id: str) -> bool:
+        """Authorize and announce one browser used by the current turn."""
+        if not self.browser_turn_active(turn_id):
             return False
-        if self._browser_activity_announced:
+        if browser_id in self._browser_activity_announced:
             return True
-        self._browser_activity_announced = True
-        payload = {"type": "browser_activity", "turn_id": turn_id}
+        self._browser_activity_announced.add(browser_id)
+        payload = {"type": "browser_activity", "turn_id": turn_id,
+                   "browser_id": browser_id}
         self.broadcast(payload)
         broadcast_update({**payload, "session_id": self.id})
         return True
@@ -530,7 +536,7 @@ class SessionHub:
 
             pinned = str(uuid.uuid4())
             self._active_turn_id = pinned
-            self._browser_activity_announced = False
+            self._browser_activity_announced = set()
             browser_mcp = browser_agent.turn_mcp(self.id, pinned)
             argv = driver.build_cmd(session, first_turn, prompt, pinned,
                                     browser_mcp=browser_mcp)
@@ -664,7 +670,7 @@ class SessionHub:
                 pass
         finally:
             self._active_turn_id = ""
-            self._browser_activity_announced = False
+            self._browser_activity_announced = set()
             if self.pending_approval is not None:
                 rid = self.pending_approval.get("request_id", "")
                 self.pending_approval = None
