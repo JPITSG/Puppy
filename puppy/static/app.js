@@ -133,6 +133,45 @@ function dirPickRow(kind, label) {
   return button;
 }
 
+/* Wire a text input to a directory list: the field stays authoritative (it can
+   still be typed or pasted into) and the list is a way to walk to a path
+   without knowing how to spell it. `bidFor` names the node to browse, so a
+   picker can follow a backend selector or stay pinned to this instance. */
+function wireDirectoryPicker(input, box, bidFor) {
+  let timer = null;
+  const browse = async () => {
+    try {
+      const d = await api(bidFor(), "fs?path=" + encodeURIComponent(input.value || "/"));
+      box.classList.remove("hidden");
+      box.innerHTML = "";
+      if (d.parent !== null && d.parent !== undefined) {
+        const up = dirPickRow("dp-up", d.parent);
+        up.onclick = () => { input.value = d.parent; browse(); };
+        box.appendChild(up);
+      }
+      for (const name of d.dirs) {
+        const row = dirPickRow("dp-folder", name);
+        row.onclick = () => {
+          input.value = (d.path === "/" ? "" : d.path) + "/" + name;
+          browse();
+        };
+        box.appendChild(row);
+      }
+      if (!d.dirs.length) {
+        const empty = dirPickRow("dp-none", "(no subdirectories)");
+        empty.disabled = true;
+        box.appendChild(empty);
+      }
+    } catch (error) { box.classList.add("hidden"); }
+  };
+  input.addEventListener("focus", browse);
+  input.addEventListener("input", () => {
+    clearTimeout(timer);
+    timer = setTimeout(browse, 350);
+  });
+  return browse;
+}
+
 function gearIcon(size, stroke = 2) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
@@ -7140,6 +7179,7 @@ class SettingsView {
     c1.innerHTML = `<h2>Instance</h2>
       <label>Instance name<input type="text" id="set-name" value="${esc(settings.instance_name)}"></label>
       <label>Default working directory<input type="text" id="set-cwd" value="${esc(settings.default_cwd || "")}"></label>
+      <div class="dirpick hidden" id="set-cwd-dirs"></div>
       <label>Terminal command<input type="text" id="set-term" value="${esc(settings.terminal_command)}"></label>
       <label class="be-auto be-auto-add browser-toggle">
         <input type="checkbox" id="set-browser" disabled
@@ -7170,6 +7210,9 @@ class SettingsView {
       </div>
 `;
     this.inner.appendChild(c1);
+    /* the instance default is always this node's own filesystem */
+    wireDirectoryPicker(c1.querySelector("#set-cwd"),
+      c1.querySelector("#set-cwd-dirs"), () => 0);
     this.wireBrowserToggle(0, c1.querySelector("#set-browser"),
       c1.querySelector("#set-browser-note"), generation);
     /* reveal -> copy -> hide, then round again, so the token never has to stay
@@ -8070,33 +8113,8 @@ async function modalNewSession(groupId = null) {
   syncWorkspaceSupport();
   await loadEngines();
 
-  /* directory browser */
-  let dirTimer = null;
-  async function browse() {
-    const bid = parseInt(beSel.value, 10);
-    try {
-      const d = await api(bid, "fs?path=" + encodeURIComponent(cwdInp.value || "/"));
-      dirBox.classList.remove("hidden");
-      dirBox.innerHTML = "";
-      if (d.parent !== null && d.parent !== undefined) {
-        const up = dirPickRow("dp-up", d.parent);
-        up.onclick = () => { cwdInp.value = d.parent; browse(); };
-        dirBox.appendChild(up);
-      }
-      for (const name of d.dirs) {
-        const b = dirPickRow("dp-folder", name);
-        b.onclick = () => { cwdInp.value = (d.path === "/" ? "" : d.path) + "/" + name; browse(); };
-        dirBox.appendChild(b);
-      }
-      if (!d.dirs.length) {
-        const empty = dirPickRow("dp-none", "(no subdirectories)");
-        empty.disabled = true;
-        dirBox.appendChild(empty);
-      }
-    } catch (e) { dirBox.classList.add("hidden"); }
-  }
-  cwdInp.addEventListener("focus", browse);
-  cwdInp.addEventListener("input", () => { clearTimeout(dirTimer); dirTimer = setTimeout(browse, 350); });
+  /* directory browser - follows whichever node the session will run on */
+  wireDirectoryPicker(cwdInp, dirBox, () => parseInt(beSel.value, 10));
 
   m.querySelector("#ns-cancel").onclick = close;
   m.querySelector("#ns-go").onclick = async () => {
