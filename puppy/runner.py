@@ -11,7 +11,7 @@ import signal
 import time
 import uuid
 
-from puppy import config, db, handoff, notify, uploads, workspaces
+from puppy import browser_agent, config, db, handoff, notify, uploads, workspaces
 from puppy.drivers import get_driver
 from puppy.drivers.base import clean_env
 
@@ -185,6 +185,10 @@ class SessionHub:
         # whether this turn's divider already announced a model move, so the
         # engine reporting that same move is not repeated as if it surprised us
         self._model_move_announced = False
+        # The browser MCP subprocess is authorized for exactly this engine
+        # turn. Its first real call is announced once to the live WebUI.
+        self._active_turn_id = ""
+        self._browser_activity_announced = False
 
     # ---- watchers ----
 
@@ -197,6 +201,18 @@ class SessionHub:
     def broadcast(self, payload: dict) -> None:
         for ws in list(self.watchers):
             asyncio.ensure_future(_safe_send(ws, payload, self.watchers))
+
+    def browser_activity(self, turn_id: str) -> bool:
+        """Authorize and announce a browser tool call from the current turn."""
+        if self.status != "running" or not turn_id or turn_id != self._active_turn_id:
+            return False
+        if self._browser_activity_announced:
+            return True
+        self._browser_activity_announced = True
+        payload = {"type": "browser_activity", "turn_id": turn_id}
+        self.broadcast(payload)
+        broadcast_update({**payload, "session_id": self.id})
+        return True
 
     def snapshot(self) -> dict:
         session = db.get_session(self.id)
@@ -513,7 +529,11 @@ class SessionHub:
                 self.broadcast({"type": "status", "text": "seeding new engine with handoff..."})
 
             pinned = str(uuid.uuid4())
-            argv = driver.build_cmd(session, first_turn, prompt, pinned)
+            self._active_turn_id = pinned
+            self._browser_activity_announced = False
+            browser_mcp = browser_agent.turn_mcp(self.id, pinned)
+            argv = driver.build_cmd(session, first_turn, prompt, pinned,
+                                    browser_mcp=browser_mcp)
             env = clean_env(dict(os.environ))
             env.setdefault("HOME", "/root")
 
@@ -643,6 +663,8 @@ class SessionHub:
             except Exception:
                 pass
         finally:
+            self._active_turn_id = ""
+            self._browser_activity_announced = False
             if self.pending_approval is not None:
                 rid = self.pending_approval.get("request_id", "")
                 self.pending_approval = None

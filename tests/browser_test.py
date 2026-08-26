@@ -4,12 +4,14 @@
 A stub "chromium" speaks just enough of the --remote-debugging-pipe CDP
 contract (fds 3/4, NUL-framed JSON) to exercise the probe, the node-owned
 enable gate, sandbox flag selection, the screencast/input websocket, viewer
-input scaling, URL normalization, disable-while-running, and crash reporting.
-No real browser is installed or launched and nothing reaches the network.
+input scaling, URL normalization, the private per-turn MCP bridge, hidden model
+guidance, first-use tab events, disable-while-running, and crash reporting. No
+real browser is installed or launched and nothing reaches the network.
 """
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 from pathlib import Path
@@ -32,7 +34,9 @@ STUB_LOG = TEST_ROOT / "stub-log"
 STUB_LOG.mkdir(mode=0o700)
 os.environ["PUPPY_BROWSER_STUB_LOG"] = str(STUB_LOG)
 
-from puppy import browser, config, db  # noqa: E402
+from puppy import browser, browser_agent, config, db, runner as session_runner  # noqa: E402
+from puppy.drivers.claude import ClaudeDriver  # noqa: E402
+from puppy.drivers.codex import CodexDriver  # noqa: E402
 from puppy.web import build_app  # noqa: E402
 
 STUB = r'''#!/usr/bin/env python3
@@ -91,6 +95,21 @@ while True:
             result = {"targetId": "stub-page-1"}
         elif method == "Page.captureScreenshot":
             result = {"data": FRAME}
+        elif method == "Accessibility.getFullAXTree":
+            result = {"nodes": [
+                {"nodeId": "root", "role": {"value": "RootWebArea"},
+                 "name": {"value": "Stub page"}, "childIds": ["button", "input"]},
+                {"nodeId": "button", "role": {"value": "button"},
+                 "name": {"value": "Continue"}, "backendDOMNodeId": 10,
+                 "properties": [{"name": "focusable", "value": {"value": True}}]},
+                {"nodeId": "input", "role": {"value": "textbox"},
+                 "name": {"value": "Email"}, "backendDOMNodeId": 11,
+                 "properties": [{"name": "focusable", "value": {"value": True}}]},
+            ]}
+        elif method == "DOM.getBoxModel":
+            result = {"model": {"content": [100, 40, 300, 40, 300, 80, 100, 80]}}
+        elif method == "DOM.focus":
+            record("dom.jsonl", {"method": method, "params": params})
         elif method == "Page.getNavigationHistory":
             result = {"currentIndex": 1, "entries": [
                 {"id": 1, "url": "about:blank"}, {"id": 2, "url": PAGE["url"]}]}
@@ -157,6 +176,27 @@ async def collect_ws(ws, texts, frames):
             break
 
 
+class CaptureSocket:
+    def __init__(self):
+        self.messages = []
+
+    async def send_json(self, payload):
+        self.messages.append(payload)
+
+
+async def mcp_request(proc, request_id, method, params=None):
+    message = {"jsonrpc": "2.0", "id": request_id, "method": method}
+    if params is not None:
+        message["params"] = params
+    proc.stdin.write(json.dumps(message).encode("utf-8") + b"\n")
+    await proc.stdin.drain()
+    raw = await asyncio.wait_for(proc.stdout.readline(), timeout=10)
+    assert raw, "MCP subprocess exited without a response"
+    response = json.loads(raw.decode("utf-8"))
+    assert response.get("id") == request_id, response
+    return response
+
+
 async def main() -> None:
     stub = TEST_ROOT / "stub-chromium"
     stub.write_text(STUB, encoding="utf-8")
@@ -166,13 +206,14 @@ async def main() -> None:
     config.load()
     db.connect()
     app = build_app()
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", 0)
+    web_runner = web.AppRunner(app)
+    await web_runner.setup()
+    site = web.TCPSite(web_runner, "127.0.0.1", 0)
     await site.start()
     port = site._server.sockets[0].getsockname()[1]
     url = "http://127.0.0.1:{}".format(port)
     headers = {"X-Puppy-Token": config.get("auth.api_token")}
+    assert browser_agent.turn_mcp(999, "disabled-turn") is None
     try:
         async with aiohttp.ClientSession() as http:
             # probe: stub advertises a modern version
@@ -283,6 +324,136 @@ async def main() -> None:
             async with http.post(url + "/api/browser/enabled", headers=headers,
                                  json={"enabled": True}) as r:
                 assert r.status == 200
+
+            # Every enabled turn gets a private stdio MCP descriptor. Both
+            # engine drivers place it in their native configuration, including
+            # resume commands (the path used after an engine handoff).
+            agent_sid = db.create_session(
+                "browser agent", "codex", str(BASE), "", "", "#7aa2f7",
+                "danger-full-access")
+            turn_id = "browser-turn-1"
+            agent_hub = session_runner.hub(agent_sid)
+            agent_hub.status = "running"
+            agent_hub._active_turn_id = turn_id
+            session_capture = CaptureSocket()
+            updates_capture = CaptureSocket()
+            agent_hub.attach(session_capture)
+            session_runner.updates_attach(updates_capture)
+            descriptor = browser_agent.turn_mcp(agent_sid, turn_id)
+            assert descriptor and descriptor["name"] == "puppy_browser", descriptor
+            assert descriptor["env"]["PUPPY_BROWSER_SESSION_ID"] == str(agent_sid)
+            assert descriptor["env"]["PUPPY_BROWSER_TURN_ID"] == turn_id
+            assert Path(descriptor["env"]["PUPPY_BROWSER_SOCKET"]).stat().st_mode & 0o777 \
+                == 0o600
+
+            agent_session = db.get_session(agent_sid)
+            claude_argv = ClaudeDriver().build_cmd(
+                agent_session, True, "hello", "native-1", browser_mcp=descriptor)
+            config_index = claude_argv.index("--mcp-config")
+            claude_mcp = json.loads(claude_argv[config_index + 1])
+            assert claude_mcp["mcpServers"]["puppy_browser"]["command"] == \
+                descriptor["command"], claude_mcp
+            resumed = dict(agent_session, native_session_id="existing-native")
+            claude_resume = ClaudeDriver().build_cmd(
+                resumed, False, "again", "unused", browser_mcp=descriptor)
+            assert "--resume" in claude_resume and "--mcp-config" in claude_resume
+
+            codex_argv = CodexDriver().build_cmd(
+                resumed, False, "again", "unused", browser_mcp=descriptor)
+            resume_index = codex_argv.index("resume")
+            mcp_options = [value for value in codex_argv[:resume_index]
+                           if "mcp_servers.puppy_browser" in value]
+            assert any(".command=" in value for value in mcp_options), codex_argv
+            assert any("PUPPY_BROWSER_TURN_ID" in value for value in mcp_options), codex_argv
+
+            mcp_env = dict(os.environ)
+            mcp_env.update(descriptor["env"])
+            base64_stub = base64.b64encode(b"stub-jpeg-frame-bytes").decode()
+            mcp = await asyncio.create_subprocess_exec(
+                descriptor["command"], *descriptor["args"], env=mcp_env,
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE)
+            try:
+                initialized = await mcp_request(mcp, 1, "initialize", {
+                    "protocolVersion": "2025-06-18", "capabilities": {},
+                    "clientInfo": {"name": "browser-test", "version": "1"},
+                })
+                instructions = initialized["result"].get("instructions", "")
+                assert "same node" in instructions and "opens automatically" in instructions
+                listed = await mcp_request(mcp, 2, "tools/list")
+                names = {tool["name"] for tool in listed["result"]["tools"]}
+                assert {"snapshot", "screenshot", "navigate", "click", "type"} <= names
+
+                snapshot = await mcp_request(mcp, 3, "tools/call", {
+                    "name": "snapshot", "arguments": {}})
+                assert snapshot["result"]["isError"] is False, snapshot
+                snapshot_text = next(item["text"] for item in
+                                     snapshot["result"]["content"]
+                                     if item["type"] == "text")
+                assert "[b1] button" in snapshot_text and \
+                    "[b2] textbox" in snapshot_text, snapshot_text
+                await wait_for(
+                    lambda: [item for item in session_capture.messages
+                             if item.get("type") == "browser_activity"],
+                    message="session browser activity event")
+                await wait_for(
+                    lambda: [item for item in updates_capture.messages
+                             if item.get("type") == "browser_activity"],
+                    message="global browser activity event")
+
+                shot = await mcp_request(mcp, 4, "tools/call", {
+                    "name": "screenshot", "arguments": {}})
+                assert any(item.get("type") == "image" and
+                           item.get("data") == base64_stub for item in
+                           shot["result"]["content"]), shot
+                await mcp_request(mcp, 5, "tools/call", {
+                    "name": "click", "arguments": {"ref": "b1"}})
+                await mcp_request(mcp, 6, "tools/call", {
+                    "name": "type", "arguments": {
+                        "ref": "b2", "text": "agent text", "clear": True}})
+                await mcp_request(mcp, 7, "tools/call", {
+                    "name": "navigate", "arguments": {
+                        "url": "router.lan/status", "wait_ms": 0}})
+                assert len([item for item in session_capture.messages
+                            if item.get("type") == "browser_activity"]) == 1
+                assert len([item for item in updates_capture.messages
+                            if item.get("type") == "browser_activity"]) == 1
+                assert not db.get_events(agent_sid), "browser activity must stay ephemeral"
+
+                agent_inputs = read_lines("input.jsonl")
+                assert any(item["params"].get("type") == "mousePressed" and
+                           item["params"].get("x") == 200 and
+                           item["params"].get("y") == 60 for item in agent_inputs), agent_inputs
+                assert any(item["method"] == "Input.insertText" and
+                           item["params"].get("text") == "agent text"
+                           for item in agent_inputs), agent_inputs
+                assert read_lines("dom.jsonl")[-1]["params"]["backendNodeId"] == 11
+                assert read_lines("navigations.jsonl")[-1]["url"] == \
+                    "http://router.lan/status"
+
+                # A subprocess from a completed/replaced turn cannot keep
+                # driving the shared browser even if the next turn is running.
+                agent_hub._active_turn_id = "browser-turn-2"
+                stale = await mcp_request(mcp, 8, "tools/call", {
+                    "name": "reload", "arguments": {}})
+                assert stale["result"]["isError"] is True, stale
+                assert "no longer running" in stale["result"]["content"][0]["text"]
+            finally:
+                if mcp.stdin:
+                    mcp.stdin.close()
+                try:
+                    await asyncio.wait_for(mcp.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    mcp.kill()
+                    await mcp.wait()
+                agent_hub.detach(session_capture)
+                session_runner.updates_detach(updates_capture)
+                agent_hub.status = "idle"
+
+            ui_source = (BASE / "puppy" / "static" / "app.js").read_text()
+            assert 'case "browser_activity"' in ui_source
+            assert "openBrowserTab(bid, sessionPane ? sessionPane.id : null)" in ui_source
+
             texts3, frames3 = [], []
             ws3 = await http.ws_connect(url + "/api/ws/browser", headers=headers)
             reader3 = asyncio.ensure_future(collect_ws(ws3, texts3, frames3))
@@ -301,7 +472,8 @@ async def main() -> None:
             assert config.normalize_import(exported)["browser"]["enabled"] is True
     finally:
         await browser.shutdown()
-        await runner.cleanup()
+        await web_runner.cleanup()
+        assert not Path(browser_agent.socket_path()).exists()
         shutil.rmtree(TEST_ROOT, ignore_errors=True)
     print("browser tests passed")
 

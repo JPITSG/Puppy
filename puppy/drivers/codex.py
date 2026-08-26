@@ -428,7 +428,7 @@ class CodexDriver(Driver):
             account_as_of=now)
         return True
 
-    def build_cmd(self, session, first_turn, prompt, pinned_id):
+    def build_cmd(self, session, first_turn, prompt, pinned_id, browser_mcp=None):
         argv = [self.binary, "exec", "--json", "--skip-git-repo-check", "--color", "never",
                 "-C", session["cwd"],
                 "-s", session.get("permission_mode") or self.default_permission()]
@@ -438,6 +438,17 @@ class CodexDriver(Driver):
         effort = (session.get("effort") or "").strip()
         if effort:
             argv += ["-c", f"model_reasoning_effort={effort}"]
+        if browser_mcp:
+            prefix = "mcp_servers." + browser_mcp["name"]
+            argv += ["-c", prefix + ".command=" + json.dumps(browser_mcp["command"]),
+                     "-c", prefix + ".args=" + json.dumps(
+                         list(browser_mcp.get("args") or []), separators=(",", ":")),
+                     "-c", prefix + ".enabled=true",
+                     "-c", prefix + ".startup_timeout_sec=10",
+                     "-c", prefix + ".tool_timeout_sec=70"]
+            for key, value in sorted((browser_mcp.get("env") or {}).items()):
+                argv += ["-c", "{}.env.{}={}".format(
+                    prefix, key, json.dumps(str(value)))]
         native = session.get("native_session_id") or ""
         if first_turn or not native:
             argv += [prompt]

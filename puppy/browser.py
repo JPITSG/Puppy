@@ -29,6 +29,7 @@ import collections
 import fcntl
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -56,6 +57,8 @@ MAX_CDP_BUFFER = 32 * 1024 * 1024
 MAX_TEXT_BACKLOG = 64          # queued small messages per viewer
 MAX_URL_LENGTH = 4096
 MAX_INSERT_TEXT = 8192
+MAX_AX_NODES = 400
+MAX_AX_TEXT = 48 * 1024
 
 _probe_cache = None            # (monotonic ts, dict)
 _manager = None
@@ -392,6 +395,7 @@ class Manager:
     def __init__(self):
         self.lock = asyncio.Lock()
         self.attach_lock = asyncio.Lock()
+        self.agent_lock = asyncio.Lock()
         self.running = False
         self.stopping = False
         self.pid = None
@@ -408,6 +412,7 @@ class Manager:
         self.frame_meta = {"width": VIEWPORT_W, "height": VIEWPORT_H}
         self.nav = {"url": "about:blank", "title": "", "can_back": False,
                     "can_forward": False}
+        self.agent_refs = {}
         self.idle_task = None
 
     def viewer_count(self) -> int:
@@ -483,6 +488,7 @@ class Manager:
             self.frame_meta = {"width": VIEWPORT_W, "height": VIEWPORT_H}
             self.nav = {"url": "about:blank", "title": "", "can_back": False,
                         "can_forward": False}
+            self.agent_refs = {}
             try:
                 self.read_transport, _ = await loop.connect_read_pipe(
                     lambda: _ReadProtocol(self), os.fdopen(out_read, "rb", buffering=0))
@@ -550,6 +556,7 @@ class Manager:
         self.page_target = ""
         self.page_session = ""
         self.screencasting = False
+        self.agent_refs = {}
         self.pid = None
         try:
             os.unlink(os.path.join(_browser_root(), "chrome.pid"))
@@ -671,6 +678,7 @@ class Manager:
                 self.nav["url"] = info.get("url", self.nav["url"])
                 self.nav["title"] = info.get("title", self.nav["title"])
                 if changed:
+                    self.agent_refs = {}
                     asyncio.ensure_future(self._refresh_nav())
         elif method == "Target.targetDestroyed":
             tid = params.get("targetId")
@@ -679,6 +687,7 @@ class Manager:
                 self.page_target = ""
                 self.page_session = ""
                 self.screencasting = False
+                self.agent_refs = {}
                 asyncio.ensure_future(self._attach_page(""))
         elif method == "Page.javascriptDialogOpening":
             if message.get("sessionId") != self.page_session:
@@ -727,6 +736,12 @@ class Manager:
             self.page_target = target_id
             self.page_session = session
             await self.call("Page.enable", session=session)
+            await self.call("DOM.enable", session=session)
+            try:
+                await self.call("Accessibility.enable", session=session)
+            except BrowserError:
+                pass
+            self.agent_refs = {}
             if previous_session and previous_session != session:
                 self._fire("Target.detachFromTarget", {"sessionId": previous_session})
             info = self.targets.get(target_id) or {}
@@ -902,16 +917,15 @@ class Manager:
             "modifiers": self._modifiers(data),
         }, session=self.page_session)
 
-    def _dispatch_key(self, data: dict) -> None:
-        if not self.page_session:
-            return
+    @staticmethod
+    def _key_payload(data: dict):
         kind = data.get("kind")
         if kind not in ("down", "up"):
-            return
+            return None
         key = str(data.get("key") or "")[:32]
         code = str(data.get("code") or "")[:32]
         text = str(data.get("text") or "")[:8]
-        modifiers = self._modifiers(data)
+        modifiers = Manager._modifiers(data)
         payload = {"modifiers": modifiers, "key": key, "code": code}
         if data.get("repeat") is True:
             payload["autoRepeat"] = True
@@ -930,6 +944,14 @@ class Manager:
             payload["windowsVirtualKeyCode"] = vk
             payload["nativeVirtualKeyCode"] = vk
         if payload["type"] == "rawKeyDown" and vk is None and not key:
+            return None
+        return payload
+
+    def _dispatch_key(self, data: dict) -> None:
+        if not self.page_session:
+            return
+        payload = self._key_payload(data)
+        if payload is None:
             return
         self._fire("Input.dispatchKeyEvent", payload, session=self.page_session)
 
@@ -944,6 +966,341 @@ class Manager:
             if entry_id is not None:
                 await self.call("Page.navigateToHistoryEntry", {"entryId": entry_id},
                                 session=self.page_session)
+
+    # ---- high-level input from the per-turn agent bridge ----
+
+    async def agent_command(self, method: str, params: dict) -> dict:
+        """Run one bounded browser operation for the private stdio MCP bridge.
+
+        The bridge intentionally cannot issue arbitrary CDP.  Serializing its
+        calls keeps accessibility refs stable within one action while still
+        allowing the person watching the Browser tab to interact normally.
+        """
+        async with self.agent_lock:
+            await self.ensure_started()
+            self._cancel_idle()
+            if not self.page_session:
+                raise BrowserError("the browser has no page to control")
+            try:
+                if method == "snapshot":
+                    return await self._agent_snapshot(
+                        params.get("include_screenshot") is True)
+                if method == "screenshot":
+                    return await self._agent_screenshot()
+                if method == "navigate":
+                    return await self._agent_navigate(params)
+                if method == "click":
+                    return await self._agent_click(params)
+                if method == "type":
+                    return await self._agent_type(params)
+                if method == "press":
+                    return await self._agent_press(params)
+                if method == "scroll":
+                    return await self._agent_scroll(params)
+                if method == "back":
+                    self.agent_refs = {}
+                    await self._history_step(-1)
+                    await asyncio.sleep(0.35)
+                    await self._refresh_nav()
+                    await self._agent_refresh_identity()
+                    return {"text": self._agent_page_text("Went back.")}
+                if method == "reload":
+                    self.agent_refs = {}
+                    await self.call("Page.reload", session=self.page_session)
+                    await asyncio.sleep(0.35)
+                    await self._refresh_nav()
+                    await self._agent_refresh_identity()
+                    return {"text": self._agent_page_text("Reloaded the page.")}
+                if method == "wait":
+                    delay = self._bounded_number(params.get("milliseconds", 1000),
+                                                 0, 10000, "milliseconds")
+                    await asyncio.sleep(delay / 1000.0)
+                    await self._refresh_nav()
+                    await self._agent_refresh_identity()
+                    return {"text": self._agent_page_text(
+                        "Waited {} ms.".format(int(delay)))}
+                raise BrowserError("unknown browser operation")
+            finally:
+                # A Browser tab normally attaches as soon as the first-use
+                # event reaches the WebUI. With no connected console, retain
+                # the same 15-minute agent-only idle lifecycle as a closed tab.
+                if self.running and not self.viewers:
+                    self._arm_idle()
+
+    @staticmethod
+    def _bounded_number(value, low: float, high: float, label: str) -> float:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            raise BrowserError("{} must be a number".format(label))
+        if not math.isfinite(number) or number < low or number > high:
+            raise BrowserError("{} must be between {} and {}".format(label, low, high))
+        return number
+
+    @staticmethod
+    def _ax_value(value) -> str:
+        if isinstance(value, dict):
+            value = value.get("value")
+        if value is None:
+            return ""
+        return re.sub(r"\s+", " ", str(value)).strip()[:300]
+
+    def _agent_page_text(self, lead: str) -> str:
+        title = self.nav.get("title") or "(untitled)"
+        url = self.nav.get("url") or "about:blank"
+        return "{}\nPage: {}\nURL: {}".format(lead, title, url)
+
+    async def _agent_refresh_identity(self) -> None:
+        """Refresh title/URL without accepting an arbitrary script from tools."""
+        try:
+            evaluated = await self.call("Runtime.evaluate", {
+                "expression": "JSON.stringify({url:location.href,title:document.title})",
+                "returnByValue": True,
+            }, session=self.page_session)
+            value = (evaluated.get("result") or {}).get("value")
+            identity = json.loads(value) if isinstance(value, str) else {}
+            if isinstance(identity, dict):
+                url = str(identity.get("url") or "")[:MAX_URL_LENGTH]
+                title = str(identity.get("title") or "")[:500]
+                if url:
+                    self.nav["url"] = url
+                self.nav["title"] = title
+        except (BrowserError, TypeError, ValueError):
+            pass
+
+    async def _agent_snapshot(self, include_screenshot: bool) -> dict:
+        await self._agent_refresh_identity()
+        result = await self.call("Accessibility.getFullAXTree", session=self.page_session)
+        raw_nodes = result.get("nodes") or []
+        nodes = [node for node in raw_nodes[:MAX_AX_NODES]
+                 if isinstance(node, dict) and node.get("nodeId") is not None]
+        by_id = {str(node["nodeId"]): node for node in nodes}
+        children = set()
+        for node in nodes:
+            children.update(str(item) for item in (node.get("childIds") or []))
+        roots = [node for node in nodes if str(node["nodeId"]) not in children]
+        if not roots and nodes:
+            roots = [nodes[0]]
+
+        interactive_roles = {
+            "button", "checkbox", "combobox", "gridcell", "link", "listbox",
+            "menuitem", "menuitemcheckbox", "menuitemradio", "option", "radio",
+            "searchbox", "slider", "spinbutton", "switch", "tab", "textbox",
+            "treeitem",
+        }
+        semantic_roles = {
+            "alert", "article", "dialog", "heading", "img", "list", "listitem",
+            "main", "navigation", "region", "row", "statictext", "table",
+        }
+        self.agent_refs = {}
+        lines = [
+            "Page: {}".format(self.nav.get("title") or "(untitled)"),
+            "URL: {}".format(self.nav.get("url") or "about:blank"),
+            "Viewport: {}x{}".format(self.frame_meta["width"], self.frame_meta["height"]),
+            "Accessibility snapshot:",
+        ]
+        seen = set()
+        shown = 0
+
+        def walk(node, depth):
+            nonlocal shown
+            node_id = str(node.get("nodeId"))
+            if node_id in seen or shown >= MAX_AX_NODES:
+                return
+            seen.add(node_id)
+            role = self._ax_value(node.get("role")) or "generic"
+            role_key = role.lower()
+            name = self._ax_value(node.get("name"))
+            value = self._ax_value(node.get("value"))
+            props = {}
+            for prop in node.get("properties") or []:
+                if isinstance(prop, dict) and prop.get("name"):
+                    props[str(prop["name"])] = prop.get("value")
+            focusable = self._ax_value(props.get("focusable")).lower() == "true"
+            interactive = role_key in interactive_roles or (
+                focusable and role_key not in ("document", "rootwebarea", "webarea"))
+            backend_id = node.get("backendDOMNodeId")
+            ref = ""
+            if interactive and backend_id is not None:
+                ref = "b{}".format(len(self.agent_refs) + 1)
+                self.agent_refs[ref] = backend_id
+            meaningful = interactive or role_key in semantic_roles or (
+                bool(name or value) and role_key not in ("inlinetextbox", "none"))
+            ignored = node.get("ignored") is True
+            if meaningful and not ignored:
+                parts = []
+                if ref:
+                    parts.append("[{}]".format(ref))
+                parts.append(role)
+                if name:
+                    parts.append(json.dumps(name, ensure_ascii=False))
+                if value and value != name:
+                    parts.append("value=" + json.dumps(value, ensure_ascii=False))
+                for flag in ("disabled", "expanded", "selected", "checked", "required"):
+                    flag_value = self._ax_value(props.get(flag)).lower()
+                    if flag_value and flag_value not in ("false", "undefined"):
+                        parts.append("{}={}".format(flag, flag_value))
+                line = "  " * min(depth, 12) + "- " + " ".join(parts)
+                if sum(len(item) + 1 for item in lines) + len(line) <= MAX_AX_TEXT:
+                    lines.append(line)
+                    shown += 1
+                else:
+                    return
+            child_depth = depth if ignored or not meaningful else depth + 1
+            for child_id in node.get("childIds") or []:
+                child = by_id.get(str(child_id))
+                if child is not None:
+                    walk(child, child_depth)
+
+        for root in roots:
+            walk(root, 0)
+        if len(raw_nodes) > len(nodes) or shown >= MAX_AX_NODES:
+            lines.append("… snapshot truncated; narrow the page or inspect again after acting")
+        if shown == 0:
+            lines.append("- No named accessible elements were reported.")
+        payload = {"text": "\n".join(lines)}
+        if include_screenshot:
+            payload.update(await self._agent_screenshot(include_text=False))
+        return payload
+
+    async def _agent_screenshot(self, include_text: bool = True) -> dict:
+        if include_text:
+            await self._agent_refresh_identity()
+        shot = await self.call("Page.captureScreenshot", {
+            "format": "jpeg", "quality": SCREENCAST_QUALITY,
+            "fromSurface": True, "captureBeyondViewport": False,
+        }, session=self.page_session)
+        data = str(shot.get("data") or "")
+        if not data:
+            raise BrowserError("the browser returned an empty screenshot")
+        payload = {"image": {"data": data, "mime_type": "image/jpeg"}}
+        if include_text:
+            payload["text"] = self._agent_page_text(
+                "Captured the {}x{} viewport.".format(
+                    self.frame_meta["width"], self.frame_meta["height"]))
+        return payload
+
+    async def _agent_navigate(self, params: dict) -> dict:
+        url = _normalize_url(params.get("url"))
+        if not url:
+            raise BrowserError("url must not be empty")
+        wait_ms = self._bounded_number(params.get("wait_ms", 500),
+                                       0, 10000, "wait_ms")
+        self.agent_refs = {}
+        await self.call("Page.navigate", {"url": url}, session=self.page_session)
+        if wait_ms:
+            await asyncio.sleep(wait_ms / 1000.0)
+        await self._refresh_nav()
+        await self._agent_refresh_identity()
+        return {"text": self._agent_page_text("Navigated to {}.".format(url))}
+
+    async def _agent_point(self, params: dict) -> tuple:
+        ref = str(params.get("ref") or "").strip().lower()
+        if ref:
+            backend_id = self.agent_refs.get(ref)
+            if backend_id is None:
+                raise BrowserError(
+                    "unknown or stale element ref {}; take a fresh snapshot".format(ref))
+            try:
+                await self.call("DOM.scrollIntoViewIfNeeded", {
+                    "backendNodeId": backend_id,
+                }, session=self.page_session)
+                box = await self.call("DOM.getBoxModel", {
+                    "backendNodeId": backend_id,
+                }, session=self.page_session)
+            except BrowserError:
+                raise BrowserError(
+                    "element {} is no longer available; take a fresh snapshot".format(ref))
+            model = box.get("model") or {}
+            quad = model.get("content") or model.get("border") or []
+            if len(quad) < 8:
+                raise BrowserError("element {} has no clickable box".format(ref))
+            return (round(sum(float(value) for value in quad[0::2]) / 4, 2),
+                    round(sum(float(value) for value in quad[1::2]) / 4, 2))
+        if "x" not in params or "y" not in params:
+            raise BrowserError("click requires an element ref or both x and y")
+        x = self._bounded_number(params.get("x"), 0, self.frame_meta["width"], "x")
+        y = self._bounded_number(params.get("y"), 0, self.frame_meta["height"], "y")
+        return x, y
+
+    async def _agent_click(self, params: dict) -> dict:
+        x, y = await self._agent_point(params)
+        button = str(params.get("button") or "left")
+        if button not in _MOUSE_BUTTONS[1:]:
+            raise BrowserError("button must be left, middle, or right")
+        clicks = int(self._bounded_number(params.get("click_count", 1),
+                                          1, 3, "click_count"))
+        base = {"x": x, "y": y, "button": button, "clickCount": clicks,
+                "modifiers": 0}
+        await self.call("Input.dispatchMouseEvent", {"type": "mousePressed", **base},
+                        session=self.page_session)
+        await self.call("Input.dispatchMouseEvent", {"type": "mouseReleased", **base},
+                        session=self.page_session)
+        return {"text": self._agent_page_text(
+            "Clicked at ({}, {}).".format(x, y))}
+
+    async def _agent_key_call(self, kind: str, key: str, modifiers: int = 0,
+                              text: str = "") -> None:
+        payload = self._key_payload({"kind": kind, "key": key,
+                                     "modifiers": modifiers, "text": text})
+        if payload is None:
+            raise BrowserError("invalid key event")
+        await self.call("Input.dispatchKeyEvent", payload, session=self.page_session)
+
+    async def _agent_type(self, params: dict) -> dict:
+        ref = str(params.get("ref") or "").strip().lower()
+        backend_id = self.agent_refs.get(ref)
+        if backend_id is None:
+            raise BrowserError(
+                "unknown or stale element ref {}; take a fresh snapshot".format(ref or "(empty)"))
+        text = str(params.get("text") or "")
+        if len(text) > MAX_INSERT_TEXT:
+            raise BrowserError("text is too long (maximum {} characters)".format(MAX_INSERT_TEXT))
+        try:
+            await self.call("DOM.focus", {"backendNodeId": backend_id},
+                            session=self.page_session)
+        except BrowserError:
+            raise BrowserError(
+                "element {} is no longer focusable; take a fresh snapshot".format(ref))
+        if params.get("clear") is True:
+            await self._agent_key_call("down", "a", modifiers=2)
+            await self._agent_key_call("up", "a", modifiers=2)
+            await self._agent_key_call("down", "Backspace")
+            await self._agent_key_call("up", "Backspace")
+        if text:
+            await self.call("Input.insertText", {"text": text},
+                            session=self.page_session)
+        return {"text": self._agent_page_text(
+            "Inserted {} character{} into {}.".format(
+                len(text), "" if len(text) == 1 else "s", ref))}
+
+    async def _agent_press(self, params: dict) -> dict:
+        key = str(params.get("key") or "")[:32]
+        if not key:
+            raise BrowserError("key must not be empty")
+        requested = params.get("modifiers") or []
+        if not isinstance(requested, list):
+            raise BrowserError("modifiers must be a list")
+        bits = {"Alt": 1, "Control": 2, "Meta": 4, "Shift": 8}
+        if any(item not in bits for item in requested):
+            raise BrowserError("unknown key modifier")
+        modifiers = sum(bits[item] for item in set(requested))
+        await self._agent_key_call("down", key, modifiers=modifiers)
+        await self._agent_key_call("up", key, modifiers=modifiers)
+        label = "+".join(list(requested) + [key])
+        return {"text": self._agent_page_text("Pressed {}.".format(label))}
+
+    async def _agent_scroll(self, params: dict) -> dict:
+        dx = self._bounded_number(params.get("delta_x", 0), -2000, 2000, "delta_x")
+        dy = self._bounded_number(params.get("delta_y"), -2000, 2000, "delta_y")
+        await self.call("Input.dispatchMouseEvent", {
+            "type": "mouseWheel",
+            "x": self.frame_meta["width"] / 2,
+            "y": self.frame_meta["height"] / 2,
+            "deltaX": dx, "deltaY": dy, "modifiers": 0,
+        }, session=self.page_session)
+        return {"text": self._agent_page_text(
+            "Scrolled by ({}, {}).".format(dx, dy))}
 
 
 # ---- HTTP + websocket surface (registered by register_execution_api) ----
@@ -1030,7 +1387,17 @@ def register(app: web.Application) -> None:
     app.router.add_post("/api/browser/enabled", h_enabled)
     app.router.add_get("/api/ws/browser", ws_browser)
 
-    async def on_shutdown(_app):
+    async def on_startup(_app):
+        from puppy import browser_agent
+        await browser_agent.start(_app)
+
+    async def on_cleanup(_app):
+        from puppy import browser_agent
+        await browser_agent.stop(_app)
         await shutdown()
 
-    app.on_shutdown.append(on_shutdown)
+    app.on_startup.append(on_startup)
+    # Cleanup runs after the runtime's shutdown hook has allowed live engine
+    # turns to finish, so their per-turn browser tools remain valid during the
+    # normal graceful-stop window.
+    app.on_cleanup.append(on_cleanup)

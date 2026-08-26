@@ -1812,6 +1812,8 @@ function connectUpdates() {
       } else if (d.type === "browser") {
         state.browser = { enabled: !!d.enabled };
         renderSidebar();
+      } else if (d.type === "browser_activity") {
+        handleBrowserActivity(0, d.session_id, d.turn_id);
       }
     } catch (e) {}
   };
@@ -2819,6 +2821,7 @@ let renderedWorkspaceSignature = "";
 const tabScrollPositions = new Map();
 let tabScrollLayoutFrame = null;
 let pendingTabScrollFocus = null;
+const browserActivityTurns = new Map();
 
 function findSessionMeta(bid, sid) {
   return sessionsFor(bid).find(s => s.id === sid);
@@ -2874,6 +2877,28 @@ function openBrowserTab(bid, groupId = null) {
     putTabInPane(id, groupId);
   }
   activateTab(id);
+}
+
+/* The node announces only the first real browser tool call in a turn. Local
+   sessions can deliver it over both live sockets, so retain a small client-side
+   dedupe window as well. Put a new Browser tab beside the originating session;
+   an existing singleton keeps its pane and is simply brought to the front. */
+function handleBrowserActivity(bid, sid, turnId) {
+  bid = Number(bid) || 0;
+  sid = Number(sid) || 0;
+  const token = String(turnId || "");
+  if (!sid || !token) return;
+  const key = `${bid}:${token}`;
+  if (browserActivityTurns.has(key)) return;
+  browserActivityTurns.set(key, Date.now());
+  while (browserActivityTurns.size > 128)
+    browserActivityTurns.delete(browserActivityTurns.keys().next().value);
+
+  if (bid) state.remoteBrowser[bid] = { enabled: true };
+  else state.browser = { enabled: true };
+  const sessionPane = workspacePaneForTab(`s:${bid}:${sid}`);
+  openBrowserTab(bid, sessionPane ? sessionPane.id : null);
+  renderSidebar();
 }
 
 function openSettingsTab(groupId = null) {
@@ -4392,6 +4417,9 @@ class SessionView {
         break;
       case "toast":
         toast(d.text, d.level || "info");
+        break;
+      case "browser_activity":
+        handleBrowserActivity(this.tab.bid, this.tab.sid, d.turn_id);
         break;
     }
     const runningKinds = { user: 1, assistant: 1, thinking: 1, tool_use: 1, tool_result: 1 };

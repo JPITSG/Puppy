@@ -998,7 +998,20 @@ async def main() -> None:
         with zipfile.ZipFile(release_artifact) as archive:
             names = archive.namelist()
         assert any(name.startswith("puppy/drivers/") for name in names)
+        assert "puppy/browser_agent.py" in names
         assert not any(name.startswith("puppy/static/") for name in names)
+        mcp_env = dict(os.environ)
+        mcp_env["PYTHONPATH"] = str(release_artifact)
+        mcp_env["PUPPY_DATA"] = str(temp_root / "mcp-data")
+        mcp_init = json.dumps({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18"},
+        }) + "\n"
+        mcp_output = subprocess.check_output(
+            [sys.executable, "-m", "puppy.browser_agent"], input=mcp_init,
+            env=mcp_env, cwd=str(temp_root), text=True, timeout=5)
+        mcp_result = json.loads(mcp_output.strip())
+        assert mcp_result["result"]["serverInfo"]["name"] == "Puppy managed browser"
         self_test = json.loads(subprocess.check_output([
             sys.executable, str(release_artifact), "self-test", "--data-dir",
             str(temp_root / "self-test-data"),

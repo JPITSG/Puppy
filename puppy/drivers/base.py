@@ -82,9 +82,11 @@ class Driver:
         """[{value, label, hint}] - reasoning effort levels ('' = engine default)."""
         return []
 
-    def build_cmd(self, session: dict, first_turn: bool, prompt: str, pinned_id: str) -> list:
+    def build_cmd(self, session: dict, first_turn: bool, prompt: str, pinned_id: str,
+                  browser_mcp=None) -> list:
         """argv for one turn. pinned_id: uuid the runner pre-generated for new sessions
-        (engines that support pinning use it; others derive their own native id)."""
+        (engines that support pinning use it; others derive their own native id).
+        browser_mcp is an optional per-turn stdio MCP server descriptor."""
         raise NotImplementedError
 
     def initial_stdin(self, session: dict, prompt: str) -> list:

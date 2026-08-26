@@ -61,7 +61,7 @@ class ClaudeDriver(Driver):
             {"value": "max", "label": "Max", "hint": "Maximum reasoning"},
         ]
 
-    def build_cmd(self, session, first_turn, prompt, pinned_id):
+    def build_cmd(self, session, first_turn, prompt, pinned_id, browser_mcp=None):
         argv = [self.binary, "-p",
                 "--output-format", "stream-json",
                 "--input-format", "stream-json",
@@ -69,6 +69,14 @@ class ClaudeDriver(Driver):
                 "--verbose",
                 "--permission-mode", session.get("permission_mode") or self.default_permission(),
                 "--permission-prompt-tool", "stdio"]
+        if browser_mcp:
+            mcp_config = {"mcpServers": {browser_mcp["name"]: {
+                "type": "stdio",
+                "command": browser_mcp["command"],
+                "args": list(browser_mcp.get("args") or []),
+                "env": dict(browser_mcp.get("env") or {}),
+            }}}
+            argv += ["--mcp-config", json.dumps(mcp_config, separators=(",", ":"))]
         native = session.get("native_session_id") or ""
         if first_turn or not native:
             argv += ["--session-id", pinned_id]
