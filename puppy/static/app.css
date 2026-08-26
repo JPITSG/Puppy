@@ -1055,6 +1055,17 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   width:min(230px,72vw);min-width:145px;min-height:54px;align-items:center;gap:9px;
   padding:8px 30px 8px 10px;line-height:1.2;background:var(--panel2);
 }
+/* the same card standing in for an unloadable Markdown image, inline in prose
+   rather than in a chip strip: no remove button, so it needs no right gutter */
+.attach-chip.file.md-img{
+  display:inline-flex;vertical-align:middle;margin:4px 0;
+  /* sized to its content rather than to a chip strip's column, and free to
+     grow taller so a long path wraps instead of being clipped by the chip's
+     overflow rule */
+  width:auto;max-width:min(430px,100%);height:auto;padding:8px 11px;
+  border-radius:var(--btn-r);border:1px solid var(--line);
+}
+.attach-chip.file.md-img .attach-file-size{word-break:break-all;white-space:normal}
 .attach-file-icon{display:flex;align-items:center;justify-content:center;flex:0 0 20px;color:var(--txt3)}
 .attach-file-icon svg{display:block}
 .attach-file-copy{display:flex;flex-direction:column;gap:3px;min-width:0}

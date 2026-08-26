@@ -1165,6 +1165,41 @@ function decorateMarkdownLinks(root) {
   });
 }
 
+/* The same problem one step worse for images: a Markdown image whose target is
+   a path on the machine the engine is running on cannot be fetched by this
+   page, and an <img> that fails leaves a broken-image glyph and the raw alt
+   text in the transcript. Non-web targets are never requested at all - the
+   reference is shown as the named card an attachment already falls back to, so
+   it stays legible without pretending it can be displayed. Genuine web images
+   still load, and only fall back if the load actually fails. */
+function decorateMarkdownImages(root) {
+  root.querySelectorAll("img").forEach(img => {
+    const src = img.getAttribute("src") || "";
+    let protocol = "";
+    // no base, exactly as decorateMarkdownLinks: only an absolute web-ish
+    // target counts, so a bare path is recognised rather than resolved
+    // against this origin and fetched as a bogus same-origin request
+    try { protocol = new URL(src).protocol; } catch (error) { /* not a URL */ }
+    const loadable = protocol === "http:" || protocol === "https:" ||
+                     protocol === "data:" || protocol === "blob:";
+    const asCard = () => {
+      const name = (img.getAttribute("alt") || "").trim() || baseName(src) || "image";
+      const card = el("span", "attach-chip file md-img");
+      const icon = el("span", "attach-file-icon");
+      icon.appendChild(attachmentFileIcon());
+      const copy = el("span", "attach-file-copy");
+      copy.appendChild(el("span", "attach-file-name", name));
+      copy.appendChild(el("span", "attach-file-size", src || "no image source"));
+      card.appendChild(icon);
+      card.appendChild(copy);
+      if (src) card.title = src;
+      img.replaceWith(card);
+    };
+    if (!loadable) { asCard(); return; }
+    img.onerror = asCard;
+  });
+}
+
 const PLAIN_CODE_LANGS = new Set([
   "", "text", "txt", "plain", "plaintext", "console", "terminal", "shell-session", "none",
 ]);
@@ -5258,6 +5293,7 @@ class SessionView {
         const box = el("div", "md");
         box.innerHTML = md(d.text || "");
         decorateMarkdownLinks(box);
+        decorateMarkdownImages(box);
         decorateCodeBlocks(box);
         n.appendChild(box);
         return n;
