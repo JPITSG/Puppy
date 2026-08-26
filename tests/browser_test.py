@@ -648,6 +648,11 @@ async def main() -> None:
             # the owning chat advertises its live browsers as clickable bubbles
             assert "syncBrowserChips()" in ui_source
             assert 'type: "color_scheme", value: currentTheme()' in ui_source
+            # the settings switch is seeded before the availability probe, so it
+            # cannot render off and then visibly flip on
+            assert "input.checked = browserEnabledFor(bid);" in ui_source
+            assert ui_source.index("input.checked = browserEnabledFor(bid);") < \
+                ui_source.index('status = await api(bid, "browser/status"')
             assert 'el("button", "chip browser")' in ui_source
             assert "t.browserGone !== true" in ui_source
 

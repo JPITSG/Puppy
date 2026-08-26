@@ -6769,6 +6769,10 @@ class SettingsView {
         setNote(st.reason || "no usable browser on this node", true);
       }
     };
+    /* Only availability needs the probe: whether the toggle is on is already
+       known from /api/state and the node pings. Seed the switch from that, or
+       it renders off and visibly flips on a moment later. */
+    input.checked = browserEnabledFor(bid);
     let status;
     try {
       status = await api(bid, "browser/status", { timeoutMs: ENGINE_POLL_TIMEOUT });
