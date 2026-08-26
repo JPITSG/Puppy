@@ -7267,8 +7267,12 @@ class SettingsView {
           spellcheck="false" placeholder='e.g. mosquitto_pub -t puppy/done -m {session}'></label>
       </div>
       <p class="usage-refresh-copy">Placeholders <span class="mono-inline">{backend} {session}
-        {engine} {model} {status} {duration} {cwd} {id}</span> are substituted shell-quoted, and the
-        same values arrive as <span class="mono-inline">PUPPY_*</span> environment variables.
+        {engine} {model} {status} {duration} {duration_hms} {cwd} {id}</span> are substituted
+        shell-quoted, and the same values arrive as <span class="mono-inline">PUPPY_*</span>
+        environment variables. <span class="mono-inline">{duration}</span> is whole seconds and
+        <span class="mono-inline">{duration_hms}</span> the same span as a clock
+        (<span class="mono-inline">9:59</span>, <span class="mono-inline">10:00</span>,
+        <span class="mono-inline">1:00:00</span>).
         The switch and sidebar bell control the same enabled state. With no command, completions
         do nothing and the bell stays hidden.</p>
       <div class="notify-actions">

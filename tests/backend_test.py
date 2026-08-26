@@ -1020,6 +1020,36 @@ async def exercise_launcher_rollback(artifact: Path, launcher: Path, state_dir: 
     return process
 
 
+def check_notify_placeholders() -> None:
+    """The completion-command contract both runtimes expand and export.
+
+    Imported here, not at module scope: notify pulls in puppy.config, which
+    binds its data path at import time and must not load before PUPPY_DATA.
+    """
+    from puppy import notify
+    # the leading unit is never zero-padded, so the shape follows the span
+    for seconds, expected in [
+            (0, "0:00"), (7, "0:07"), (59, "0:59"), (60, "1:00"),
+            (599, "9:59"),          # M:SS below ten minutes
+            (600, "10:00"), (3599, "59:59"),        # MM:SS below the hour
+            (3600, "1:00:00"), (35999, "9:59:59"),  # H:MM:SS below ten hours
+            (36000, "10:00:00"), (86399, "23:59:59"),   # HH:MM:SS thereafter
+            (360000, "100:00:00")]:
+        assert notify.clock(seconds) == expected, (seconds, notify.clock(seconds))
+    assert notify.clock(-5) == "0:00"
+    assert "duration_hms" in notify.PLACEHOLDERS
+
+    info = notify.clean_info({"session": "my app", "duration": "3661"})
+    assert info["duration_hms"] == "1:01:01", info
+    assert notify.expand("{session} {duration_hms} {duration}", info) == \
+        "'my app' 1:01:01 3661"
+    # derived on the node, so a reporting console cannot supply its own
+    hostile = notify.clean_info({"duration": "90", "duration_hms": "$(touch /tmp/x)"})
+    assert hostile["duration_hms"] == "1:30", hostile
+    # and a completion with no duration simply has neither
+    assert "duration_hms" not in notify.clean_info({"session": "s"})
+
+
 async def main() -> None:
     private_tests = BASE / "data" / "tests"
     private_tests.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -1184,6 +1214,8 @@ async def main() -> None:
         from puppy import config, db, host_metrics, runner, terminal
         from backend.puppy_backend import upgrade as backend_upgrade
         from puppy.web import build_app
+
+        check_notify_placeholders()
 
         config.load()
         controller_token = "controller-test-token-0123456789abcdef"

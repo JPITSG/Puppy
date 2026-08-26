@@ -26,7 +26,8 @@ from puppy import config
 log = logging.getLogger("puppy.notify")
 
 # {placeholder} substitutions (shell-quoted) and PUPPY_* environment variables
-PLACEHOLDERS = ("backend", "session", "engine", "model", "status", "duration", "cwd", "id")
+PLACEHOLDERS = ("backend", "session", "engine", "model", "status", "duration",
+                "duration_hms", "cwd", "id")
 EXEC_TIMEOUT = 30.0
 DEDUPE_SECONDS = 8.0
 MAX_COMMAND = 1000
@@ -59,10 +60,31 @@ def public_state() -> dict:
     return {"configured": bool(s["command"].strip()), "enabled": s["enabled"]}
 
 
+def clock(seconds: int) -> str:
+    """Whole seconds as a clock, without padding the leading unit: 0:07, 9:59,
+    10:00, 1:00:00, 9:59:59, 10:00:00. Leaving the most significant field
+    unpadded is what produces M:SS / MM:SS / H:MM:SS / HH:MM:SS in turn."""
+    seconds = max(0, int(seconds))
+    hours, rest = divmod(seconds, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return "{}:{:02d}:{:02d}".format(hours, minutes, secs)
+    return "{}:{:02d}".format(minutes, secs)
+
+
 def clean_info(info) -> dict:
     if not isinstance(info, dict):
         return {}
-    return {k: str(info.get(k) or "")[:300] for k in PLACEHOLDERS if info.get(k)}
+    out = {k: str(info.get(k) or "")[:300] for k in PLACEHOLDERS if info.get(k)}
+    # Always derived here from `duration`, never taken from the caller: one
+    # implementation for local completions, console-reported remote ones and
+    # the Test button alike, and older consoles gain it without sending it.
+    out.pop("duration_hms", None)
+    try:
+        out["duration_hms"] = clock(int(float(out["duration"])))
+    except (KeyError, TypeError, ValueError):
+        pass
+    return out
 
 
 def expand(command: str, info: dict) -> str:
