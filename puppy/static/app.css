@@ -708,7 +708,10 @@ select.choice-native{display:none!important}
 }
 .chat-meta-viewport{flex:1;min-width:0}
 .chat-meta-scroll{
-  display:flex;align-items:center;gap:9px;min-width:0;overflow-x:auto;overflow-y:hidden;
+  /* one rhythm for the whole strip: the status row spaces its spinner by the
+     same value, so pill -> spinner -> text all sit a single gap apart */
+  --meta-gap:9px;
+  display:flex;align-items:center;gap:var(--meta-gap);min-width:0;overflow-x:auto;overflow-y:hidden;
   scrollbar-width:none;overscroll-behavior-x:contain;touch-action:pan-x pinch-zoom;
   -webkit-overflow-scrolling:touch;
 }
@@ -732,9 +735,17 @@ select.choice-native{display:none!important}
 }
 .chip.browser:active{transform:scale(.96)}
 .chip.browser:focus-visible{outline:1px solid var(--acc);outline-offset:2px}
-.chat-status{font-size:11.5px;color:var(--acc2);font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:340px}
+.chat-status{
+  display:flex;align-items:center;gap:var(--meta-gap,9px);min-width:0;max-width:340px;
+  font-size:11.5px;color:var(--acc2);font-family:var(--mono);
+}
 .chat-status:empty{display:none}
-.chat-status .spinner{display:inline-block;width:10px;height:10px;border:2px solid var(--acc-dim);border-top-color:var(--acc);border-radius:50%;animation:spin .8s linear infinite;vertical-align:-1px;margin-right:5px}
+/* the text carries the truncation: a bare text node in a flex row cannot */
+.chat-status .status-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chat-status .spinner{
+  flex:0 0 auto;width:10px;height:10px;border:2px solid var(--acc-dim);
+  border-top-color:var(--acc);border-radius:50%;animation:spin .8s linear infinite;
+}
 @keyframes spin{to{transform:rotate(360deg)}}
 /* match the tabbar's + button: 26px, centers on the same vertical axis
    (head pad 14 - 4 = 10px edge gap, same as the tabbar's 10px) */
@@ -1565,7 +1576,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   /* the head's own padding already matches the tabbar's, so the desktop
      nudge would push the ⋮ 4px past the + above it */
   .chat-head .menu-btn{margin-right:0}
-  .chat-meta-scroll{gap:6px}
+  .chat-meta-scroll{--meta-gap:6px}
   .chat-status{max-width:150px}
   .chip{max-width:160px}
   /* comfortable touch targets - the tabbar/footer icon buttons keep their

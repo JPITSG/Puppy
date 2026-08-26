@@ -5034,7 +5034,8 @@ class SessionView {
 
   setStatus(text) {
     this.statusText = text || "";
-    this.statusEl.innerHTML = text ? `<span class="spinner"></span>${esc(text)}` : "";
+    this.statusEl.innerHTML = text ?
+      `<span class="spinner"></span><span class="status-text">${esc(text)}</span>` : "";
     if (!text) this.statusEl.innerHTML = "";
     this.syncLiveStatus();
     this.syncHeadOverflow();
