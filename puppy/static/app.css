@@ -113,7 +113,21 @@ a{color:var(--acc2)}
 .side-resize{
   position:absolute;top:0;right:-3px;width:7px;height:100%;cursor:col-resize;z-index:40;
 }
-.side-resize:hover,.side-resize.active{background:linear-gradient(90deg,transparent,rgba(90,162,245,.35),transparent)}
+/* The same gesture as a pane splitter, so it lights the same way: a 1px accent
+   line with a soft glow, not a wash across the whole grab area. Transparent at
+   rest because .side::after already draws this edge - and the grip's own line
+   lands on exactly that pixel, so the accent replaces it rather than doubling
+   it up. */
+.side-resize::before{
+  content:"";position:absolute;top:0;bottom:0;left:3px;width:1px;background:transparent;
+  transition:background .14s var(--ease),box-shadow .14s var(--ease);
+}
+@media (hover:hover){
+  .side-resize:hover::before{background:var(--acc);box-shadow:0 0 8px rgba(90,162,245,.5)}
+}
+.side-resize.active::before,.side-resize:focus-visible::before{
+  background:var(--acc);box-shadow:0 0 8px rgba(90,162,245,.55);
+}
 .brand-mark{
   width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;
   font-size:18px;flex-shrink:0;
