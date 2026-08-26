@@ -2167,6 +2167,7 @@ function renderSidebar() {
           event.preventDefault();
           event.stopPropagation();
           openTermTab(g.bid, "");
+          closeDrawer();
         };
         t.appendChild(terminal);
       }
