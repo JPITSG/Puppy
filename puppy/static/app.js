@@ -450,6 +450,10 @@ function cmpVersion(a, b) {
   return 0;
 }
 const QUEUE_ROWS = 5;     // queued messages listed before collapsing to "+N more"
+/* How long the load-older button stays put before fetching itself, and how far
+   before the top of the transcript that countdown begins. */
+const LOAD_OLDER_DELAY = 550;
+const LOAD_OLDER_MARGIN = 140;
 
 /* the header's thinking status; the live thinking block mirrors the header
    verbatim, so this is also what that block reads while a turn is thinking */
@@ -4803,6 +4807,7 @@ class SessionView {
 
   destroy() {
     this.closed = true;
+    if (this._stopLoadOlder) this._stopLoadOlder();
     this.clearFileDropTarget();
     this.connectionSequence++;
     if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
@@ -4998,6 +5003,8 @@ class SessionView {
         noteSessionActivity(this.tab.bid, this.tab.sid, d.status === "running",
           d.active_since, d.server_time);
         this.retry = 800;
+        // the transcript is being rebuilt: retire the watcher on the old button
+        if (this._stopLoadOlder) this._stopLoadOlder();
         this.inner.innerHTML = "";
         this.toolCards = {};
         this.switchLines = [];
@@ -5173,25 +5180,94 @@ class SessionView {
   }
 
   /* ---- transcript rendering ---- */
+  /* Reaching the top of a transcript is the whole request for more of it, so
+     the button loads itself rather than waiting to be clicked. It stays on
+     screen through a short arming pause - long enough to read what is about to
+     happen, so history does not simply materialise - and a user still scrolling
+     upward skips that pause, because they have already asked twice. Clicking
+     works exactly as before. */
   addLoadOlder() {
+    if (this._stopLoadOlder) this._stopLoadOlder();
     const btn = el("button", "btn btn-sm btn-ghost load-older", "load older…");
-    btn.onclick = async () => {
+    let loading = false;
+    let armTimer = null;
+    let lastTop = null;
+    let observer = null;
+
+    const stop = () => {
+      if (armTimer) clearTimeout(armTimer);
+      armTimer = null;
+      if (observer) observer.disconnect();
+      observer = null;
+      this.scroll.removeEventListener("scroll", onScroll);
+      if (this._stopLoadOlder === stop) this._stopLoadOlder = null;
+    };
+    const disarm = () => {
+      if (armTimer) clearTimeout(armTimer);
+      armTimer = null;
+      btn.classList.remove("armed");
+    };
+
+    const load = async () => {
+      if (loading || !btn.isConnected) return;
+      disarm();
+      loading = true;
+      btn.classList.add("busy");
+      btn.textContent = "loading older…";
       try {
         const d = await api(this.tab.bid, `sessions/${this.tab.sid}/events?before_seq=${this.oldestSeq}&limit=200`);
         const evs = d.events || [];
-        if (!evs.length) { btn.remove(); return; }
+        if (!evs.length) { stop(); btn.remove(); return; }
         this.oldestSeq = evs[0].seq;
         const frag = document.createDocumentFragment();
-        const tmp = this.inner;
         const anchor = btn.nextSibling;
         evs.forEach(ev => {
           const node = this.buildEventNode(ev);
           if (node) frag.appendChild(node);
         });
-        tmp.insertBefore(frag, anchor);
-        if (evs.length < 200) btn.remove();
-      } catch (e) { toast(e.message, "error"); }
+        /* Anchor the reading position: everything inserted lands above what the
+           user is looking at, so without giving that height back the transcript
+           would jump - and, at scrollTop 0, the button would still be in view
+           and immediately load again. */
+        const beforeHeight = this.scroll.scrollHeight;
+        const top = this.scroll.scrollTop;
+        this.inner.insertBefore(frag, anchor);
+        this.scroll.scrollTop = top + (this.scroll.scrollHeight - beforeHeight);
+        if (evs.length < 200) { stop(); btn.remove(); return; }
+      } catch (e) {
+        toast(e.message, "error");
+      } finally {
+        loading = false;
+        if (btn.isConnected) {
+          btn.classList.remove("busy");
+          btn.textContent = "load older…";
+        }
+      }
     };
+
+    const arm = () => {
+      if (loading || armTimer || !btn.isConnected) return;
+      btn.classList.add("armed");
+      armTimer = setTimeout(() => { armTimer = null; btn.classList.remove("armed"); load(); },
+                            LOAD_OLDER_DELAY);
+    };
+    const onScroll = () => {
+      const top = this.scroll.scrollTop;
+      const climbing = lastTop !== null && top < lastTop - 2;
+      lastTop = top;
+      // still heading up while the pause runs: they have asked twice, so go now
+      if (armTimer && climbing) { disarm(); load(); }
+    };
+
+    this.scroll.addEventListener("scroll", onScroll, { passive: true });
+    observer = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) arm();
+      else disarm();
+    }, { root: this.scroll, rootMargin: `${LOAD_OLDER_MARGIN}px 0px 0px 0px` });
+    observer.observe(btn);
+
+    btn.onclick = load;
+    this._stopLoadOlder = stop;
     this.inner.appendChild(btn);
   }
 

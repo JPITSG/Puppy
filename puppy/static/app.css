@@ -771,7 +771,13 @@ select.choice-native{display:none!important}
    lets the composer/approval/queue columns line up with the transcript exactly */
 .chat-scroll{flex:1;overflow-y:auto;padding:18px 16px 8px;scrollbar-gutter:stable}
 .chat-inner{max-width:900px;margin:0 auto;display:flex;flex-direction:column;gap:10px}
-.load-older{align-self:center}
+.load-older{align-self:center;transition:opacity .16s var(--ease),color .16s var(--ease)}
+/* the pause before it fetches itself: a quiet pulse says "about to happen"
+   without moving anything, so the reading position stays legible */
+.load-older.armed{animation:load-older-arm .55s var(--ease) both}
+.load-older.busy{opacity:.7;pointer-events:none}
+@keyframes load-older-arm{from{opacity:.55}to{opacity:1}}
+@media (prefers-reduced-motion:reduce){.load-older.armed{animation:none}}
 
 .msg{border-radius:var(--r-md);max-width:100%;line-height:1.55;overflow-wrap:break-word}
 .msg-user{
