@@ -7028,14 +7028,18 @@ class SettingsView {
     this.inner.appendChild(c1);
     this.wireBrowserToggle(0, c1.querySelector("#set-browser"),
       c1.querySelector("#set-browser-note"), generation);
-    let tokenShown = false;
+    /* reveal -> copy -> hide, then round again, so the token never has to stay
+       on screen once it has been taken. The label names what the NEXT activation
+       does, which is what a screen reader announces before the press. */
+    const TOKEN_MASK = "••••••••••••";
+    const TOKEN_STEPS = ["Reveal API token", "Copy API token", "Hide API token"];
+    let tokenStep = 0;   // 0 masked, 1 revealed, 2 revealed and copied
     const tokenControl = c1.querySelector("#set-token");
     const useToken = () => {
-      if (!tokenShown) {
-        tokenControl.textContent = settings.api_token;
-        tokenControl.setAttribute("aria-label", "Copy API token");
-        tokenShown = true;
-      } else copyWithToast(settings.api_token, "token copied");
+      tokenStep = (tokenStep + 1) % TOKEN_STEPS.length;
+      if (tokenStep === 2) copyWithToast(settings.api_token, "token copied");
+      tokenControl.textContent = tokenStep ? settings.api_token : TOKEN_MASK;
+      tokenControl.setAttribute("aria-label", TOKEN_STEPS[tokenStep]);
     };
     tokenControl.onclick = useToken;
     tokenControl.onkeydown = event => {
