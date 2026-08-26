@@ -1060,7 +1060,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .composer-row .mini:not(:disabled):active{transform:scale(.96);background:var(--hov)}
 .composer-row .mini .mini-value{color:var(--txt2)}
 @media (hover:hover){.composer-row .mini:hover .mini-value{color:var(--txt)}}
-.btn-send{
+.btn-send,.btn-queue{
   display:inline-flex;align-items:center;justify-content:center;gap:7px;flex-shrink:0;
   height:32px;min-width:86px;padding:0 16px var(--label-pb);border:none;border-radius:var(--btn-r);
   font-size:13px;font-weight:650;line-height:1;letter-spacing:.01em;cursor:pointer;user-select:none;
@@ -1073,9 +1073,9 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
    already centred and only the text needed the correction */
 .btn-send .stop-sq{width:9px;height:9px;background:currentColor;flex-shrink:0;margin-top:var(--label-pb)}
 @media (hover:hover){
-  .btn-send:hover{filter:brightness(1.07);box-shadow:inset 0 1px 0 rgba(255,255,255,.34),0 1px 2px rgba(0,0,0,.25),var(--glow-acc-hi)}
+  .btn-send:hover,.btn-queue:hover{filter:brightness(1.07);box-shadow:inset 0 1px 0 rgba(255,255,255,.34),0 1px 2px rgba(0,0,0,.25),var(--glow-acc-hi)}
 }
-.btn-send:active{filter:brightness(.94);box-shadow:inset 0 2px 6px rgba(4,17,40,.4)}
+.btn-send:active,.btn-queue:active{filter:brightness(.94);box-shadow:inset 0 2px 6px rgba(4,17,40,.4)}
 .btn-send.stop{
   background-color:var(--err-lo);background-image:linear-gradient(180deg,var(--err-hi),var(--err-lo));
   box-shadow:inset 0 1px 0 rgba(255,255,255,.3),0 1px 2px rgba(0,0,0,.25),var(--glow-err);
@@ -1083,7 +1083,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 @media (hover:hover){
   .btn-send.stop:hover{box-shadow:inset 0 1px 0 rgba(255,255,255,.34),0 1px 2px rgba(0,0,0,.25),0 6px 18px -6px rgba(217,66,89,1)}
 }
-.btn-send:disabled{opacity:.4;filter:none;box-shadow:none;pointer-events:none}
+.btn-send:disabled,.btn-queue:disabled{opacity:.4;filter:none;box-shadow:none;pointer-events:none}
 
 /* ---------- terminal view ---------- */
 .term-wrap{flex:1;min-height:0;padding:6px 8px 8px;display:flex}
@@ -1497,6 +1497,8 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   .btn{height:36px;padding:0 16px var(--label-pb)}
   .btn-sm{height:30px;padding:0 12px var(--label-pb)}
   .btn-send{height:34px}
+  /* the composer is tight enough on a phone; Enter already queues */
+  .btn-queue{display:none}
   .composer-row .mini{height:26px}
   .icon-btn{width:34px;height:34px}
   .settings-form{grid-template-columns:1fr}

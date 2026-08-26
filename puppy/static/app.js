@@ -4289,6 +4289,7 @@ class SessionView {
                 ${composerChoice("effort", "effort", "Reasoning effort")}
               </div>
             </div>
+            <button class="btn-queue hidden" type="button">Queue</button>
             <button class="btn-send">Send</button>
           </div>
           <input class="hidden attach-input" type="file" multiple>
@@ -4307,6 +4308,7 @@ class SessionView {
     this.ta = root.querySelector("textarea");
     this.composerBox = root.querySelector(".composer-box");
     this.sendBtn = root.querySelector(".btn-send");
+    this.queueBtn = root.querySelector(".btn-queue");
     this.composerRow = root.querySelector(".composer-row");
     this.composerMeta = root.querySelector(".composer-meta-scroll");
     this.composerMetaViewport = root.querySelector(".composer-meta-viewport");
@@ -4417,6 +4419,10 @@ class SessionView {
     this.ta.addEventListener("blur", () => { this.ctrlCStreak = 0; });
     this.ta.addEventListener("pointerdown", () => { this.ctrlCStreak = 0; });
     this.sendBtn.onclick = () => this.status === "running" ? this.interrupt() : this.submit();
+    /* submit() already queues when a turn is in flight - the same path Enter
+       takes. This just gives that a visible control while the primary button
+       is busy being Stop. */
+    this.queueBtn.onclick = () => this.submit();
     root.querySelector(".menu-btn").onclick = (e) => { e.stopPropagation(); this.showMenu(e.currentTarget); };
     if (this.nativeComposerChoices) {
       const bind = (kind, apply) => {
@@ -4834,6 +4840,9 @@ class SessionView {
     if (running) this.sendBtn.innerHTML = '<span class="stop-sq"></span>Stop';
     else this.sendBtn.textContent = "Send";
     this.sendBtn.classList.toggle("stop", running);
+    /* only while a turn is running: idle, the primary button already says Send.
+       CSS drops it below the desktop breakpoint, where the row has no room. */
+    this.queueBtn.classList.toggle("hidden", !running);
     if (!running) this.setStatus("");
     else this.syncLiveStatus();
   }
