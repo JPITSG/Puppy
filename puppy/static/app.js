@@ -524,6 +524,57 @@ function activationPointer(target) {
   };
 }
 
+/* A touch long-press is exposed as contextmenu, but some browsers still emit
+   the gesture's compatibility click after the menu opens. Consume only that
+   click: the next pointer/touch/key gesture clears the guard first, so a real
+   follow-up activation (and every desktop right-click) keeps working. */
+function suppressTouchContextActivation(target) {
+  let recentTouchAt = 0;
+  let suppressClick = false;
+  let clearOnNextGesture = null;
+
+  const clear = () => {
+    suppressClick = false;
+    if (!clearOnNextGesture) return;
+    document.removeEventListener("pointerdown", clearOnNextGesture, true);
+    document.removeEventListener("touchstart", clearOnNextGesture, true);
+    document.removeEventListener("keydown", clearOnNextGesture, true);
+    clearOnNextGesture = null;
+  };
+  target.addEventListener("pointerdown", event => {
+    if (event.isPrimary === false) return;
+    recentTouchAt = event.pointerType === "touch" ? performance.now() : 0;
+  }, true);
+  /* This is also the fallback for Safari versions whose contextmenu event is
+     a MouseEvent and therefore carries no pointerType. */
+  target.addEventListener("touchstart", () => {
+    recentTouchAt = performance.now();
+  }, { capture: true, passive: true });
+  target.addEventListener("contextmenu", event => {
+    const source = event.sourceCapabilities;
+    const fromTouch = event.pointerType === "touch" ||
+      !!(source && source.firesTouchEvents) ||
+      !!(recentTouchAt && performance.now() - recentTouchAt < 3000);
+    recentTouchAt = 0;
+    if (!fromTouch) return;
+    clear();
+    suppressClick = true;
+    clearOnNextGesture = clear;
+    document.addEventListener("pointerdown", clearOnNextGesture, true);
+    document.addEventListener("touchstart", clearOnNextGesture, true);
+    document.addEventListener("keydown", clearOnNextGesture, true);
+  }, true);
+  target.addEventListener("click", event => {
+    recentTouchAt = 0;
+    if (!suppressClick) return;
+    clear();
+    event.preventDefault();
+    /* Capture phase is intentional: a long-press on the tab close button must
+       not let the compatibility click reach and close the tab either. */
+    event.stopImmediatePropagation();
+  }, true);
+}
+
 function wireDoubleClickOrTouch(target, activate) {
   const pointerForClick = activationPointer(target);
   target.addEventListener("click", event => {
@@ -2225,6 +2276,7 @@ function renderSidebar() {
           closeDrawer();
         }
       };
+      suppressTouchContextActivation(item);
       item.addEventListener("contextmenu", (e) => sessionContextMenu(e, g.bid, s));
       wireSessionDrag(item, g.bid, s.id);
       body.appendChild(item);
@@ -2914,6 +2966,7 @@ function renderTabNode(t, pane, tabsRoot) {
   tab.appendChild(el("span", "t-title",
     (t.type === "term" && !t.cmd) ? shellTabTitle(t) : (t.title || "tab")));
   if (t.type === "session") {
+    suppressTouchContextActivation(tab);
     tab.addEventListener("contextmenu", (event) => {
       const meta = findSessionMeta(t.bid, t.sid);
       if (meta) sessionContextMenu(event, t.bid, meta);
