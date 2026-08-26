@@ -2928,23 +2928,24 @@ function renderTabNode(t, pane, tabsRoot) {
   return tab;
 }
 
-function syncTabOverflow(tabsRoot) {
-  if (!tabsRoot) return;
-  const viewport = tabsRoot.parentElement;
-  if (!viewport || !viewport.classList.contains("tab-scroll")) return;
-  const maximum = Math.max(0, tabsRoot.scrollWidth - tabsRoot.clientWidth);
-  viewport.classList.toggle("can-scroll-right",
-    maximum > 1 && tabsRoot.scrollLeft < maximum - 1);
+function syncHorizontalOverflow(scroller, viewport = scroller && scroller.parentElement) {
+  if (!scroller || !viewport) return;
+  const maximum = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
+  const position = Math.max(0, Math.min(maximum, scroller.scrollLeft));
+  const overflowed = scroller.clientWidth > 0 && maximum > 1;
+  viewport.classList.toggle("more-left", overflowed && position > 1);
+  viewport.classList.toggle("more-right", overflowed && position < maximum - 1);
 }
 
 function syncAllTabOverflow() {
-  document.querySelectorAll(".tab-scroll > .tabs").forEach(syncTabOverflow);
+  document.querySelectorAll(".tab-scroll > .tabs").forEach(scroller =>
+    syncHorizontalOverflow(scroller));
 }
 
 function wireTabScrolling(tabsRoot, paneId) {
   tabsRoot.addEventListener("scroll", () => {
     tabScrollPositions.set(paneId, tabsRoot.scrollLeft);
-    syncTabOverflow(tabsRoot);
+    syncHorizontalOverflow(tabsRoot);
   }, { passive: true });
 }
 
@@ -2965,16 +2966,17 @@ function revealTabInStrip(tabId) {
   const maximum = Math.max(0, tabsRoot.scrollWidth - tabsRoot.clientWidth);
   const viewport = tabsRoot.parentElement;
   const fadeWidth = Math.max(0, parseFloat(
-    getComputedStyle(viewport).getPropertyValue("--tab-fade-width")) || 0);
+    getComputedStyle(viewport).getPropertyValue("--edge-scroll-fade-size")) || 0);
   let target = tabsRoot.scrollLeft;
-  if (tabRect.left < stripRect.left) target -= stripRect.left - tabRect.left;
+  const visibleLeft = stripRect.left + (target > 1 ? fadeWidth : 0);
+  if (tabRect.left < visibleLeft) target -= visibleLeft - tabRect.left;
   else {
     const visibleRight = stripRect.right - (maximum > target + 1 ? fadeWidth : 0);
     if (tabRect.right > visibleRight) target += tabRect.right - visibleRight;
   }
   target = Math.max(0, Math.min(maximum, target));
   if (Math.abs(target - tabsRoot.scrollLeft) < 1) {
-    syncTabOverflow(tabsRoot);
+    syncHorizontalOverflow(tabsRoot);
     return;
   }
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -3209,7 +3211,7 @@ function renderWorkspacePane(pane) {
   });
   const tabbar = el("div", "tabbar");
   tabbar.appendChild(burgerButton());
-  const tabScroll = el("div", "tab-scroll");
+  const tabScroll = el("div", "tab-scroll edge-scroll-viewport");
   const tabsRoot = el("div", "tabs");
   tabsRoot.dataset.paneId = pane.id;
   for (const id of pane.tabs) {
@@ -3794,7 +3796,7 @@ class SessionView {
       </button>`;
     root.innerHTML = `
       <div class="chat-head">
-        <div class="chat-meta-viewport">
+        <div class="chat-meta-viewport edge-scroll-viewport">
           <div class="chat-meta-scroll">
             <span class="chip eng"><span class="dot"></span><span class="eng-label">…</span></span>
             <span class="chip be"></span>
@@ -3814,7 +3816,7 @@ class SessionView {
           <textarea rows="1" placeholder="Message the agent…"></textarea>
           <div class="attach-strip hidden"></div>
           <div class="composer-row">
-            <div class="composer-meta-viewport">
+            <div class="composer-meta-viewport edge-scroll-viewport">
               <div class="composer-meta-scroll">
                 <button type="button" class="mini attach-add" aria-label="Attach files">
                   <span aria-hidden="true"></span></button>
@@ -4057,18 +4059,12 @@ class SessionView {
     this.root.style.setProperty("--sbw", (g > 0 ? g : 0) + "px");
   }
 
-  syncRightOverflow(sc, viewport) {
-    if (!sc || !viewport || !sc.clientWidth) return;
-    const moreRight = sc.scrollLeft + sc.clientWidth < sc.scrollWidth - 1;
-    viewport.classList.toggle("more-right", moreRight);
-  }
-
   syncHeadOverflow() {
-    this.syncRightOverflow(this.headMeta, this.headMetaViewport);
+    syncHorizontalOverflow(this.headMeta, this.headMetaViewport);
   }
 
   syncComposerOverflow() {
-    this.syncRightOverflow(this.composerMeta, this.composerMetaViewport);
+    syncHorizontalOverflow(this.composerMeta, this.composerMetaViewport);
   }
 
   /* Keep the controls on one line. First drop redundant key prefixes; if long

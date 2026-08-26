@@ -501,22 +501,33 @@ select.choice-native{display:none!important}
 .tabbar .burger svg{display:block}
 /* the visual box stays 26px; the tap target fills the bar's height */
 .tabbar .burger::after,.tab-add-wrap .icon-btn::after{content:"";position:absolute;inset:-8px -6px}
+/* Shared overflow cues for compact horizontal lanes. JS applies each side
+   independently from the live scroll position: no cue at a reached edge,
+   both cues while content remains in both directions. */
+.edge-scroll-viewport{
+  --edge-scroll-fade-size:34px;
+  --edge-scroll-fade-color:var(--bg);
+  position:relative;overflow:hidden;
+}
+.edge-scroll-viewport::before,.edge-scroll-viewport::after{
+  content:"";position:absolute;z-index:4;top:0;bottom:0;
+  width:var(--edge-scroll-fade-size);pointer-events:none;opacity:0;
+  transition:opacity .16s var(--ease);
+}
+.edge-scroll-viewport::before{
+  left:0;background:linear-gradient(90deg,var(--edge-scroll-fade-color) 12%,transparent);
+}
+.edge-scroll-viewport::after{
+  right:0;background:linear-gradient(90deg,transparent,var(--edge-scroll-fade-color) 88%);
+}
+.edge-scroll-viewport.more-left::before,.edge-scroll-viewport.more-right::after{opacity:1}
 /* Give the strip a definite zero flex basis. In the phone workspace the tree
    deliberately uses max-content sizing so saved split panes can be panned;
    without this viewport, a long tab collection also became max-content and
    widened an otherwise single-pane workspace. */
 .tab-scroll{
-  --tab-fade-width:34px;
-  display:flex;position:relative;align-self:stretch;
-  flex:1 1 0;width:0;min-width:0;overflow:hidden;
+  display:flex;align-self:stretch;flex:1 1 0;width:0;min-width:0;
 }
-.tab-scroll::after{
-  content:"";position:absolute;z-index:4;top:0;right:0;bottom:0;
-  width:var(--tab-fade-width);pointer-events:none;opacity:0;
-  background:linear-gradient(90deg,transparent,var(--bg) 88%);
-  transition:opacity .16s var(--ease);
-}
-.tab-scroll.can-scroll-right::after{opacity:1}
 /* The bar's 42px min-height is taller than a tab, and a centred tab would sit
    half a pixel above the bar's bottom edge - invisible at 100% zoom, but at
    other zoom levels that slack becomes a real device row and the bar's divider
@@ -662,7 +673,7 @@ select.choice-native{display:none!important}
   color:var(--txt2);background:var(--panel2);border:1px solid var(--line);
   height:22px;line-height:1;padding:0 9px;border-radius:99px;max-width:280px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;
 }
-.chat-meta-viewport{position:relative;flex:1;min-width:0;overflow:hidden}
+.chat-meta-viewport{flex:1;min-width:0}
 .chat-meta-scroll{
   display:flex;align-items:center;gap:9px;min-width:0;overflow-x:auto;overflow-y:hidden;
   scrollbar-width:none;overscroll-behavior-x:contain;touch-action:pan-x pinch-zoom;
@@ -670,11 +681,6 @@ select.choice-native{display:none!important}
 }
 .chat-meta-scroll::-webkit-scrollbar{display:none}
 .chat-meta-scroll .chip,.chat-meta-scroll .chat-status{flex:0 0 auto}
-.chat-meta-viewport::after{
-  content:"";position:absolute;top:0;right:0;bottom:0;width:38px;pointer-events:none;
-  background:linear-gradient(90deg,transparent,var(--bg));opacity:0;transition:opacity .15s;
-}
-.chat-meta-viewport.more-right::after{opacity:1}
 .chat-menu{position:relative;flex:0 0 auto}
 .chip .dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
 .chip.eng-claude .dot{background:var(--claude)}
@@ -967,18 +973,16 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 @media (hover:hover){.attach-chip.file .attach-x:hover{background:var(--hov);color:var(--txt)}}
 .attach-chip.file .attach-x:active{transform:translateY(-50%) scale(.88);background:var(--hov)}
 .composer-row{display:flex;align-items:center;gap:8px;min-width:0}
-.composer-meta-viewport{position:relative;flex:1 1 0;min-width:0;overflow:hidden}
+.composer-meta-viewport{
+  --edge-scroll-fade-color:var(--panel2);
+  flex:1 1 0;min-width:0;
+}
 .composer-meta-scroll{
   display:flex;align-items:center;gap:8px;min-width:0;overflow-x:auto;overflow-y:hidden;
   scrollbar-width:none;overscroll-behavior-x:contain;touch-action:pan-x pinch-zoom;
   -webkit-overflow-scrolling:touch;
 }
 .composer-meta-scroll::-webkit-scrollbar{display:none}
-.composer-meta-viewport::after{
-  content:"";position:absolute;top:0;right:0;bottom:0;width:34px;pointer-events:none;
-  background:linear-gradient(90deg,transparent,var(--panel2));opacity:0;transition:opacity .15s;
-}
-.composer-meta-viewport.more-right::after{opacity:1}
 .composer-row .mini{
   display:inline-flex;align-items:center;justify-content:center;gap:4px;flex-shrink:0;
   height:24px;padding:0 10px;border-radius:var(--btn-r);cursor:pointer;user-select:none;
