@@ -490,7 +490,13 @@ select.choice-native{display:none!important}
   content:"";position:absolute;left:0;right:0;bottom:0;height:1px;z-index:-1;pointer-events:none;
   background:var(--line);
 }
-.burger{display:none}
+/* Shown everywhere. On a wide layout it collapses the session list rather than
+   opening a drawer; only the narrow touch layout hides it, because there the
+   edge swipe is the gesture and the button would duplicate it. */
+.burger{display:inline-flex}
+/* Only the column layout collapses. Below 900px the sidebar is a drawer, and
+   hiding it there would leave a persisted collapse with no way back in. */
+@media (min-width:901px){.app.side-collapsed .side{display:none}}
 /* the burger mirrors the + at the other end of the bar: same 26px box, same
    optical centre. The bar carries 8px of top padding and none at the bottom,
    so a centred item sits 8px low and its hover box would meet the divider -

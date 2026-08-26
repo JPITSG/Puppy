@@ -3117,7 +3117,11 @@ function burgerButton() {
   </svg>`;
   button.onclick = event => {
     event.stopPropagation();
-    $("app").classList.add("side-open");
+    /* Two layouts, one control. Narrow: the sidebar is a drawer, so open it.
+       Wide: it is a column and there is no drawer to open, so the same button
+       collapses it and hands the width to the workspace. */
+    if (drawerLayout()) $("app").classList.add("side-open");
+    else setSideCollapsed(!$("app").classList.contains("side-collapsed"));
   };
   return button;
 }
@@ -3815,10 +3819,30 @@ $("btn-bell").onclick = async () => {
   } catch (e) { toast(e.message, "error"); }
 };
 
+function drawerLayout() {
+  return window.matchMedia("(max-width:900px)").matches;
+}
+
+function savedSideWidth() {
+  const saved = parseInt(lsGet("puppy.sidew") || "", 10);
+  return saved ? Math.min(480, Math.max(200, saved)) : 256;
+}
+
+/* Collapsing zeroes --side-w as well as hiding the column: the body's backdrop
+   grid is masked against that width so it never collides with the session
+   list, and a stale 256 would leave a bare strip once the list is gone. */
+function setSideCollapsed(on) {
+  $("app").classList.toggle("side-collapsed", !!on);
+  document.documentElement.style.setProperty(
+    "--side-w", on ? "0px" : savedSideWidth() + "px");
+  lsSet("puppy.sidecollapsed", on ? "1" : "");
+  window.dispatchEvent(new Event("resize"));   // xterm fit etc.
+}
+
 /* sidebar width: draggable, persisted */
 (() => {
-  const saved = parseInt(lsGet("puppy.sidew") || "", 10);
-  if (saved) document.documentElement.style.setProperty("--side-w", Math.min(480, Math.max(200, saved)) + "px");
+  document.documentElement.style.setProperty("--side-w", savedSideWidth() + "px");
+  if (lsGet("puppy.sidecollapsed") === "1") setSideCollapsed(true);
   const grip = $("side-resize");
   if (!grip) return;
   grip.addEventListener("pointerdown", (e) => {
