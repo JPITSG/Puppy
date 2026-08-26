@@ -1346,7 +1346,12 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   gap:10px 14px;min-width:0;padding:11px 0;border-top:1px solid var(--line);
 }
 .eau-row:first-child{border-top:0}
-.eau-identity{min-width:0}
+/* Placed explicitly, not auto-flowed: an off row has no schedule element, so
+   the switch would fall into the middle column and sit a gap-width left of the
+   switches on rows that do. The last column ends at the card edge either way. */
+.eau-identity{min-width:0;grid-column:1}
+.eau-when{grid-column:2}
+.eau-switch{grid-column:3}
 .eau-name{
   min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--txt3);
   font-family:var(--sans);font-size:10px;font-weight:400;text-transform:uppercase;letter-spacing:.1em;
