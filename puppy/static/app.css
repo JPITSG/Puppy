@@ -949,8 +949,20 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .attach-strip{display:flex;gap:6px;flex-wrap:wrap}
 /* The same strip inside a sent bubble. .msg-user is pre-wrap, so the strip is
    given its own block spacing rather than inheriting the prose's line box. */
-.msg-user .attach-strip.sent{margin-top:8px;white-space:normal}
-.msg-user .attach-strip.sent:first-child{margin-top:0}
+/* Even margins around the attachment block: every gap matches the bubble's own
+   side padding - the one the leftmost chip already sits against - above, below,
+   at the right edge, and between two chips. The 6px top the bubble uses for
+   prose stays put; that value optically centres text against its ascent, and
+   only applies here when a chip is the first thing in the bubble. */
+/* 9, not 13, for the same reason the bubble's top padding is 6: a line box
+   carries ~4px of leading below its last line, so a geometric 13 reads as ~17
+   of whitespace against the 13 on every other side. Measured, not guessed. */
+.msg-user .attach-strip.sent{margin-top:9px;gap:13px;white-space:normal}
+.msg-user:has(.attach-strip.sent){padding-bottom:13px}
+/* .leading is JS-set: prose is a bare text node, so :first-child would match a
+   strip that has prose above it and flatten the gap to nothing. */
+.msg-user .attach-strip.sent.leading{margin-top:0}
+.msg-user:has(.attach-strip.sent.leading){padding-top:13px}
 .msg-user .attach-chip.file{width:min(230px,60vw)}
 /* Raster images keep the useful thumbnail treatment; every other file gets a
    compact identity card with its real name and size. */

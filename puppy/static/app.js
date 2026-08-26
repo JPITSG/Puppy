@@ -4864,7 +4864,11 @@ class SessionView {
         const { text, attachments } = splitAttachmentMarkers(d.text || "");
         if (!attachments.length) { linkifyInto(n, d.text || ""); return n; }
         if (text) linkifyInto(n, text);
-        const strip = el("div", "attach-strip sent");
+        /* "leading" is set here rather than matched with :first-child, which
+           counts elements only - prose is a bare text node, so the strip was
+           its own first element child either way and the no-prose spacing
+           applied to every message. */
+        const strip = el("div", "attach-strip sent" + (text ? "" : " leading"));
         for (const a of attachments) {
           /* The blob this view still holds, else the node's stored copy, so a
              reload keeps its thumbnails rather than a row of named cards. */
