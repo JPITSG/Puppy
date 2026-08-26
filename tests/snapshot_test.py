@@ -138,6 +138,8 @@ async def main() -> None:
         config.set_value("uploads.max_file_size_mb", 19)
         config.set_value("browser.enabled", True)
         config.set_value("browser.color_scheme", "light")
+        config.set_value("engines.auto_upgrade",
+                         {"enabled": True, "mode": "at", "at": "04:15"})
         config.set_value("notify.enabled", True)
         config.set_value("notify.backend", 1)
         config.set_value("notify.command", "printf done: %s {session}")
@@ -202,6 +204,8 @@ async def main() -> None:
         config.set_value("uploads.max_file_size_mb", 2)
         config.set_value("browser.enabled", False)
         config.set_value("browser.color_scheme", "dark")
+        config.set_value("engines.auto_upgrade",
+                         {"enabled": False, "mode": "now", "at": "03:30"})
         config.set_value("notify.enabled", False)
         config.set_value("notify.command", "mutated")
         db.execute("DELETE FROM events")
@@ -221,6 +225,18 @@ async def main() -> None:
         assert config.get("uploads.max_file_size_mb") == 19
         assert config.get("browser.enabled") is True
         assert config.get("browser.color_scheme") == "light"
+        assert config.get("engines.auto_upgrade") == \
+            {"enabled": True, "mode": "at", "at": "04:15"}
+        # an unattended upgrade schedule must survive import validation intact
+        for bad in ({"mode": "whenever"}, {"at": "24:00"}, {"enabled": "yes"}):
+            try:
+                config.normalize_import(dict(config.export_data(),
+                                             engines={"usage_refresh_minutes": 30,
+                                                      "auto_upgrade": bad}))
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("accepted an invalid schedule: {}".format(bad))
         # and a tampered archive cannot smuggle in an unknown rendering mode
         try:
             config.normalize_import(dict(config.export_data(),

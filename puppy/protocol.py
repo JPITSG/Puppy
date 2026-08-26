@@ -29,6 +29,10 @@ BROWSER_CAPABILITY = "browser"
 # and the ID-scoped screencast websocket. Older browser-capable nodes expose
 # only the legacy singleton websocket and remain usable through that fallback.
 BROWSER_INSTANCES_CAPABILITY = "browser-instances"
+# GET/PATCH of the node's unattended engine-update schedule. The upgrade itself
+# is the engine-upgrade surface; this only decides when the node runs it, so a
+# node may support upgrading by hand without advertising the scheduler.
+ENGINE_AUTO_UPGRADE_CAPABILITY = "engine-auto-upgrade"
 # GET on an upload id returns the stored image, so a preview outlives the blob
 # URL a page held. Older nodes store the same files but expose no way to read
 # them back; the controller falls back to the named-file chip there.
@@ -53,6 +57,7 @@ BASE_CAPABILITIES = (
     BROWSER_CAPABILITY,
     BROWSER_INSTANCES_CAPABILITY,
     UPLOAD_PREVIEW_CAPABILITY,
+    ENGINE_AUTO_UPGRADE_CAPABILITY,
 )
 TERMINAL_CAPABILITY = "terminal"
 # POST /api/notify/exec runs a controller-supplied completion command. It is

@@ -1468,6 +1468,7 @@ const state = {
   engines: [],            // local engines info
   engMap: {},             // key -> engine info (local)
   usageRefresh: null,     // local account-usage refresh metadata
+  autoUpgrade: null,      // this instance's engine-update schedule
   uploadSettings: null,   // local per-file upload policy
   localEngineCheckedAt: 0,
   backends: [],           // remote backends [{id,name,url}]
@@ -1484,6 +1485,7 @@ const state = {
   remoteEngineCheckedAt: {},
   remoteNodeCheckedAt: {},
   remoteUsageRefresh: {}, // bid -> account-usage refresh metadata
+  remoteAutoUpgrade: {},  // bid -> unattended engine-update schedule
   remoteUploadSettings: {}, // bid -> remote per-file upload policy
   tabs: [],               // [{id,type,bid,sid,browserId,title,cmd}]
   active: null,           // focused tab id (each pane also has its own active tab)
@@ -2333,6 +2335,13 @@ function backendHasCapability(backend, capability) {
   return Array.isArray(backend.capabilities) && backend.capabilities.includes(capability);
 }
 
+function backendSupportsAutoUpgrade(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(b => b.id === bid);
+  return backendHasCapability(backend, "engine-auto-upgrade") &&
+    backendSupportsEngineUpgrade(bid);
+}
+
 function backendSupportsUploadPreviews(bid) {
   if (!bid) return true;
   const backend = state.backends.find(b => b.id === bid);
@@ -2922,6 +2931,7 @@ function applyEnginesPayload(bid, result) {
   if (bid) {
     state.engCache[bid] = result.engines;
     state.remoteUsageRefresh[bid] = result.usage_refresh;
+    if (result.auto_upgrade) state.remoteAutoUpgrade[bid] = result.auto_upgrade;
     state.remoteOk[bid] = true;
     delete state.remoteErrors[bid];
     state.remoteEngineCheckedAt[bid] = Date.now();
@@ -2931,6 +2941,7 @@ function applyEnginesPayload(bid, result) {
     state.engMap = {};
     state.engines.forEach(engine => state.engMap[engine.key] = engine);
     state.usageRefresh = result.usage_refresh;
+    if (result.auto_upgrade) state.autoUpgrade = result.auto_upgrade;
     state.localEngineCheckedAt = Date.now();
   }
   syncRemoteStateViews();
@@ -6451,6 +6462,7 @@ class SettingsView {
     this.remoteBackendDots = new Map();
     this.remoteBackendMeta = new Map();
     this.usageRows = new Map();
+    this.autoUpgradeRows = new Map();
     this.uploadRows = new Map();
     this.upgradeButtons = new Map();
     this.backendAutoToggles = new Map();
@@ -6475,6 +6487,7 @@ class SettingsView {
     this.remoteBackendDots.clear();
     this.remoteBackendMeta.clear();
     this.usageRows.clear();
+    this.autoUpgradeRows.clear();
     this.uploadRows.clear();
     this.upgradeButtons.clear();
     this.backendAutoToggles.clear();
@@ -6799,6 +6812,15 @@ class SettingsView {
       row.update(state.remoteUsageRefresh[bid] || null,
         remoteAvailability(bid), backendSupportsUsageRefresh(bid));
     }
+    for (const [bid, row] of this.autoUpgradeRows) {
+      if (!bid) {
+        row.update(state.autoUpgrade, "ok", true);
+        continue;
+      }
+      if (!state.backends.some(backend => backend.id === bid)) continue;
+      row.update(state.remoteAutoUpgrade[bid] || null,
+        remoteAvailability(bid), backendSupportsAutoUpgrade(bid));
+    }
     for (const [bid, row] of this.uploadRows) {
       if (!bid) {
         row.update(state.uploadSettings, "ok", true);
@@ -6933,6 +6955,138 @@ class SettingsView {
       else metaEl.removeAttribute("aria-label");
     };
     return { root, update, setMeta };
+  }
+
+  /* One node's unattended engine-update schedule. Off is a single line; on
+     reveals when. Every control commits on its own change - no Apply button to
+     find on a phone - and the note is the only place an outcome is reported,
+     so a failed run cannot pass unnoticed. */
+  autoUpgradeRow(name, bid) {
+    const root = el("div", "eau-row");
+    const identity = el("div", "eau-identity");
+    const nameEl = el("div", "eau-name", name);
+    nameEl.setAttribute("aria-label", name);
+    const note = el("div", "eau-note", "Checking setting…");
+    identity.appendChild(nameEl);
+    identity.appendChild(note);
+
+    const when = el("div", "eau-when hidden");
+    const seg = el("div", "seg");
+    seg.setAttribute("role", "group");
+    seg.setAttribute("aria-label", `When ${name} installs engine updates`);
+    const nowBtn = el("button", "seg-btn", "Right away");
+    const atBtn = el("button", "seg-btn", "At");
+    nowBtn.type = atBtn.type = "button";
+    seg.appendChild(nowBtn);
+    seg.appendChild(atBtn);
+    const time = document.createElement("input");
+    time.type = "time";
+    time.className = "eau-time";
+    time.setAttribute("aria-label", `Time of day ${name} installs engine updates`);
+    when.appendChild(seg);
+    when.appendChild(time);
+
+    const toggleRoot = el("label", "be-auto eau-switch");
+    const toggle = document.createElement("input");
+    toggle.type = "checkbox";
+    toggle.setAttribute("aria-label", `Install engine updates on ${name} automatically`);
+    const track = el("span", "be-auto-track");
+    track.setAttribute("aria-hidden", "true");
+    track.appendChild(el("span"));
+    toggleRoot.appendChild(toggle);
+    toggleRoot.appendChild(track);
+
+    root.appendChild(identity);
+    root.appendChild(when);
+    root.appendChild(toggleRoot);
+
+    let current = null;
+    let availability = bid ? "pending" : "ok";
+    let supported = !bid;
+    let saving = false;
+
+    const describe = () => {
+      if (!supported) return "Backend upgrade required";
+      if (availability === "bad") return "Backend unavailable";
+      if (!current) return "Checking node setting…";
+      if (saving) return "Saving…";
+      const attempts = current.last_attempts || {};
+      const keys = Object.keys(attempts);
+      if (keys.length) {
+        /* the newest attempt is what someone needs to see: a silent failure is
+           the whole risk of running this unattended */
+        const newest = keys.map(k => ({ key: k, ...attempts[k] }))
+          .sort((a, b) => Number(b.at || 0) - Number(a.at || 0))[0];
+        const engine = state.engMap[newest.key] ? state.engMap[newest.key].label : newest.key;
+        const when = new Date(Number(newest.at) * 1000);
+        const stamp = Number.isNaN(when.getTime()) ? "" : ` · ${when.toLocaleString()}`;
+        if (!newest.ok) {
+          return `${engine} ${newest.to_version || ""} failed${stamp} — will not retry ` +
+            `until a newer version appears`;
+        }
+        return `${engine} updated to ${newest.installed_after || newest.to_version}${stamp}`;
+      }
+      if (!current.enabled) return "Updates are installed by hand";
+      if (current.mode === "at")
+        return `Installs in the ${current.window_minutes || 120} minutes after ${current.at}`;
+      return "Installs as soon as an update is found";
+    };
+
+    const paint = () => {
+      const usable = supported && availability !== "bad" && !!current && !saving;
+      toggle.disabled = !usable;
+      toggleRoot.classList.toggle("disabled", !usable);
+      const on = !!(current && current.enabled);
+      toggle.checked = on;
+      when.classList.toggle("hidden", !on);
+      const at = !!(current && current.mode === "at");
+      nowBtn.classList.toggle("on", !at);
+      atBtn.classList.toggle("on", at);
+      nowBtn.setAttribute("aria-pressed", at ? "false" : "true");
+      atBtn.setAttribute("aria-pressed", at ? "true" : "false");
+      nowBtn.disabled = atBtn.disabled = !usable;
+      time.disabled = !usable || !at;
+      time.classList.toggle("hidden", !at);
+      if (current && document.activeElement !== time) time.value = current.at || "03:30";
+      note.textContent = describe();
+      note.classList.toggle("warn", !!(current && current.last_attempts &&
+        Object.values(current.last_attempts).some(a => a && a.ok === false)));
+    };
+
+    const commit = async patch => {
+      if (saving || !current) return;
+      saving = true;
+      paint();
+      try {
+        const result = await api(bid, "engines/auto-upgrade",
+          { method: "PATCH", body: patch, timeoutMs: ENGINE_POLL_TIMEOUT });
+        current = result.auto_upgrade || current;
+        if (bid) state.remoteAutoUpgrade[bid] = current;
+        else state.autoUpgrade = current;
+      } catch (error) {
+        toast(`${name}: ${error.message}`, "error", 6500);
+      } finally {
+        saving = false;
+        paint();
+      }
+    };
+
+    toggle.onchange = () => commit({ enabled: toggle.checked });
+    nowBtn.onclick = () => { if (current && current.mode !== "now") commit({ mode: "now" }); };
+    atBtn.onclick = () => { if (current && current.mode !== "at") commit({ mode: "at" }); };
+    time.onchange = () => {
+      if (current && time.value && time.value !== current.at) commit({ at: time.value });
+      else paint();
+    };
+
+    const update = (metadata, reachable = "ok", canConfigure = true) => {
+      current = metadata;
+      availability = reachable;
+      supported = canConfigure;
+      paint();
+    };
+    update(null, availability, supported);
+    return { root, update };
   }
 
   usageRefreshRow(name, bid) {
@@ -7213,6 +7367,7 @@ class SettingsView {
     this.remoteBackendDots.clear();
     this.remoteBackendMeta.clear();
     this.usageRows.clear();
+    this.autoUpgradeRows.clear();
     this.uploadRows.clear();
     this.upgradeButtons.clear();
     this.backendAutoToggles.clear();
@@ -7458,6 +7613,28 @@ class SettingsView {
     }
     usageCard.appendChild(usageList);
     this.inner.appendChild(usageCard);
+
+    /* unattended engine updates */
+    const autoCard = el("div", "card");
+    autoCard.innerHTML = `<h2>Engine updates</h2>
+      <p class="usage-refresh-copy">Let a node install its own engine CLI updates using the
+        same vendor updater the Update button runs. Each version is tried once: if an update
+        fails it is not retried until a newer one appears, and a node with a busy session
+        waits rather than replacing an engine underneath it.</p>`;
+    const autoList = el("div", "eau-list");
+    const localAuto = this.autoUpgradeRow(settings.instance_name, 0);
+    localAuto.update(state.autoUpgrade, "ok", true);
+    this.autoUpgradeRows.set(0, localAuto);
+    autoList.appendChild(localAuto.root);
+    for (const b of state.backends) {
+      const auto = this.autoUpgradeRow(b.name, b.id);
+      auto.update(state.remoteAutoUpgrade[b.id] || null,
+        remoteAvailability(b.id), backendSupportsAutoUpgrade(b.id));
+      this.autoUpgradeRows.set(b.id, auto);
+      autoList.appendChild(auto.root);
+    }
+    autoCard.appendChild(autoList);
+    this.inner.appendChild(autoCard);
 
     /* per-node attachment limits */
     const uploadCard = el("div", "card upload-limit-card");

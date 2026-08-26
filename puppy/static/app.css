@@ -390,7 +390,7 @@ button{
 @media (hover:hover){.icon-btn:hover{background:var(--hov);border-color:var(--line);color:var(--txt)}}
 .icon-btn:active{transform:scale(.92);background:var(--hov);color:var(--txt)}
 .icon-btn:disabled{opacity:.4;pointer-events:none}
-input[type=text],input[type=password],input[type=number],select,textarea{
+input[type=text],input[type=password],input[type=number],input[type=time],select,textarea{
   font:inherit;font-size:13px;color:var(--txt);background:var(--panel2);
   -webkit-appearance:none;appearance:none;
   border:1px solid var(--line2);border-radius:var(--r-sm);padding:8px 10px;width:100%;
@@ -1338,6 +1338,49 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .usage-refresh-controls input[type=number]::-webkit-outer-spin-button{opacity:1}
 .usage-refresh-unit{color:var(--txt3);font-size:10.5px}
 
+/* ---------- unattended engine updates ---------- */
+/* Identity, the when-controls, and the switch. Off, the middle column is empty
+   and the row is a name and a switch; on, it grows the schedule in place. */
+.eau-row{
+  display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;
+  gap:10px 14px;min-width:0;padding:11px 0;border-top:1px solid var(--line);
+}
+.eau-row:first-child{border-top:0}
+.eau-identity{min-width:0}
+.eau-name{
+  min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--txt3);
+  font-family:var(--sans);font-size:10px;font-weight:400;text-transform:uppercase;letter-spacing:.1em;
+}
+.eau-note{
+  min-width:0;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  color:var(--txt3);font-size:10.5px;
+}
+.eau-note.warn{color:var(--warn)}
+.eau-when{display:flex;align-items:center;gap:8px;min-width:0}
+.eau-switch{flex:0 0 auto}
+/* two mutually exclusive choices, sized for a thumb and legible at 10px */
+.seg{
+  display:inline-flex;flex:0 0 auto;padding:2px;gap:2px;
+  background:var(--panel2);border:1px solid var(--line2);border-radius:var(--btn-r);
+}
+.seg-btn{
+  appearance:none;border:0;border-radius:calc(var(--btn-r) - 2px);cursor:pointer;
+  padding:0 10px;height:26px;min-width:0;white-space:nowrap;
+  background:transparent;color:var(--txt3);font:11.5px/1 var(--sans);
+  transition:background .14s var(--ease),color .14s var(--ease);
+}
+.seg-btn.on{background:var(--acc-dim);color:var(--acc2);font-weight:600}
+@media (hover:hover){.seg-btn:not(.on):not(:disabled):hover{color:var(--txt2);background:var(--hov)}}
+.seg-btn:disabled{cursor:not-allowed;opacity:.45}
+.seg-btn:focus-visible{outline:1px solid var(--acc);outline-offset:1px}
+/* the base field rule matches input[type=time] by attribute, which out-weighs a
+   bare class - scope these so the control keeps its own width */
+.eau-when .eau-time{
+  flex:0 0 auto;width:112px;height:30px;margin:0;padding:0 8px;text-align:center;
+  font-family:var(--mono);font-size:12px;
+}
+.eau-when .eau-time:disabled{opacity:.45;cursor:not-allowed}
+
 /* ---------- modals ---------- */
 .modal-backdrop{
   position:fixed;inset:0;background:rgba(4,6,10,.7);backdrop-filter:blur(4px);
@@ -1547,6 +1590,18 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   .be-actions .btn{width:100%;min-width:0;height:34px;padding-left:6px;padding-right:6px}
   .snapshot-actions{display:grid;grid-template-columns:1fr 1fr;gap:7px}
   .snapshot-actions .btn{width:100%;min-width:0;height:34px;padding-left:8px;padding-right:8px}
+  /* the switch stays beside the name; the schedule takes the line below, the
+     same shape .be-row uses when its actions no longer fit alongside */
+  .eau-row{grid-template-columns:minmax(0,1fr) auto;gap:9px 12px;padding:13px 0}
+  .eau-identity{grid-column:1;grid-row:1}
+  .eau-switch{grid-column:2;grid-row:1}
+  .eau-when{grid-column:1/-1;grid-row:2;flex-wrap:wrap}
+  .eau-when .seg{flex:1 1 auto}
+  .eau-when .seg-btn{flex:1 1 0;height:32px;font-size:12px}
+  .eau-when .eau-time{flex:0 0 auto;width:min(130px,40vw);height:32px}
+  /* a failed run explains itself here; truncating it to an ellipsis on the
+     narrowest screen would hide the one thing worth reading */
+  .eau-note{white-space:normal;overflow:visible;text-overflow:clip;line-height:1.45}
   .usage-refresh-row{grid-template-columns:minmax(0,1fr);gap:8px;padding:12px 0}
   .usage-refresh-controls{justify-content:flex-start}
   .usage-refresh-controls input{width:min(120px,40vw);height:34px}

@@ -14,7 +14,8 @@ import time
 
 from aiohttp import WSMsgType, web
 
-from puppy import (__version__, auth, backends, bind_verify, browser, cli_releases,
+from puppy import (__version__, auth, backends, bind_verify, browser,
+                   cli_auto_upgrade, cli_releases,
                    cli_upgrade, config, db, host_metrics, listener_handoff, notify,
                    protocol, runner, snapshots, terminal, uploads, usage_refresh,
                    workspaces)
@@ -138,6 +139,7 @@ async def h_state(request: web.Request):
         "user": _node_user(),
         "engines": engines,
         "usage_refresh": usage_refresh.payload(),
+        "auto_upgrade": cli_auto_upgrade.payload(),
         "backends": backends.list_backends(),
         "sessions": session_state["sessions"],
         "server_time": session_state["server_time"],
@@ -154,6 +156,7 @@ async def h_engines(request: web.Request):
     return web.json_response({
         "engines": engines,
         "usage_refresh": usage_refresh.payload(),
+        "auto_upgrade": cli_auto_upgrade.payload(),
         # additive: lets the console label this node's shells "user @ node"
         "user": _node_user(),
     })
@@ -168,6 +171,7 @@ async def h_usage_refresh_post(request: web.Request):
     return web.json_response({
         "engines": await _engines_payload(refresh_usage=False),
         "usage_refresh": usage_refresh.payload(),
+        "auto_upgrade": cli_auto_upgrade.payload(),
     })
 
 
@@ -183,7 +187,27 @@ async def h_engines_refresh(request: web.Request):
     return web.json_response({
         "engines": await _engines_payload(refresh_usage=False),
         "usage_refresh": usage_refresh.payload(),
+        "auto_upgrade": cli_auto_upgrade.payload(),
     })
+
+
+async def h_engine_auto_upgrade_get(_request: web.Request):
+    return web.json_response({"auto_upgrade": cli_auto_upgrade.payload()})
+
+
+async def h_engine_auto_upgrade_patch(request: web.Request):
+    """Set this node's unattended engine-update schedule."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid request"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "invalid request"}, status=400)
+    try:
+        cli_auto_upgrade.set_settings(body)
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    return web.json_response({"ok": True, "auto_upgrade": cli_auto_upgrade.payload()})
 
 
 async def h_engine_upgrade(request: web.Request):
@@ -216,6 +240,7 @@ async def h_engine_upgrade(request: web.Request):
         "ok": True,
         "engines": await _engines_payload(refresh_usage=False),
         "usage_refresh": usage_refresh.payload(),
+        "auto_upgrade": cli_auto_upgrade.payload(),
     })
 
 
@@ -235,6 +260,7 @@ async def h_usage_refresh_patch(request: web.Request):
     return web.json_response({
         "engines": await _engines_payload(refresh_usage=False),
         "usage_refresh": usage_refresh.payload(),
+        "auto_upgrade": cli_auto_upgrade.payload(),
     })
 
 
@@ -1012,6 +1038,7 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     backend-facing route changes here so the two runtimes cannot silently drift.
     """
     cli_releases.register(app)
+    cli_auto_upgrade.register(app)
     r = app.router
     r.add_get("/api/ping", h_ping)
     r.add_get("/api/node", h_ping)
@@ -1020,6 +1047,8 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     r.add_post("/api/engines/usage-refresh", h_usage_refresh_post)
     r.add_patch("/api/engines/usage-refresh", h_usage_refresh_patch)
     r.add_post("/api/engines/refresh", h_engines_refresh)
+    r.add_get("/api/engines/auto-upgrade", h_engine_auto_upgrade_get)
+    r.add_patch("/api/engines/auto-upgrade", h_engine_auto_upgrade_patch)
     r.add_post("/api/engines/{key:[A-Za-z0-9_-]{1,32}}/upgrade", h_engine_upgrade)
 
     r.add_get("/api/sessions", h_sessions_list)

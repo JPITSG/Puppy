@@ -13,6 +13,7 @@ from pathlib import Path
 import shutil
 import sys
 import tempfile
+import time
 
 import aiohttp
 from aiohttp import web
@@ -26,7 +27,8 @@ PRIVATE_TESTS.chmod(0o700)
 TEST_ROOT = Path(tempfile.mkdtemp(prefix="cli-upgrade-", dir=str(PRIVATE_TESTS)))
 os.environ["PUPPY_DATA"] = str(TEST_ROOT / "data")
 
-from puppy import auth, cli_releases, cli_upgrade, config, db, drivers  # noqa: E402
+from puppy import auth, cli_auto_upgrade, cli_releases, cli_upgrade  # noqa: E402
+from puppy import config, db, drivers  # noqa: E402
 from puppy import runner as session_runner  # noqa: E402
 from puppy.drivers import base as driver_base  # noqa: E402
 from puppy.drivers.base import Driver  # noqa: E402
@@ -56,6 +58,9 @@ class StubDriver(Driver):
     label = "Stub Engine"
     binary = "puppy-stub-engine"
     upgrade_source = {"kind": "self", "args": ["update"]}
+    # the scheduler only acts on a known latest version; the cache is seeded
+    # by hand below so this never reaches a registry
+    release_source = {"kind": "npm", "package": "stub-cli"}
 
     async def _auth_status(self):
         return {"auth": "ok", "detail": ""}
@@ -240,6 +245,86 @@ async def check_timeout() -> None:
         BEHAVIOUR_FILE.write_text("ok", encoding="utf-8")
 
 
+def seed_latest(version: str) -> None:
+    """Publish a latest version for the stub without touching the network."""
+    cli_releases._cache["stub"] = {
+        "source": "npm:stub-cli", "latest_version": version,
+        "checked_at": time.time(), "error": "",
+    }
+
+
+async def check_schedule() -> None:
+    """The clock half of the scheduler: off, immediate, and the timed window."""
+    assert cli_auto_upgrade.settings() == {"enabled": False, "mode": "now", "at": "03:30"}
+    assert cli_auto_upgrade.due_now() is False, "off must never be due"
+    cli_auto_upgrade.set_settings({"enabled": True, "mode": "now"})
+    assert cli_auto_upgrade.due_now() is True
+
+    now = time.time()
+
+    def at(minutes: int) -> str:
+        stamp = time.localtime(now + minutes * 60)
+        return "%02d:%02d" % (stamp.tm_hour, stamp.tm_min)
+
+    cli_auto_upgrade.set_settings({"mode": "at", "at": at(-5)})
+    assert cli_auto_upgrade.due_now() is True, "inside the window"
+    cli_auto_upgrade.set_settings({"at": at(-(cli_auto_upgrade.WINDOW_SECONDS // 60) - 5)})
+    assert cli_auto_upgrade.due_now() is False, "past the window: wait for tomorrow"
+    cli_auto_upgrade.set_settings({"at": at(30)})
+    assert cli_auto_upgrade.due_now() is False, "before the time"
+    for bad in ({"mode": "whenever"}, {"at": "24:00"}, {"at": "3:30"}, {"enabled": "yes"}):
+        try:
+            cli_auto_upgrade.set_settings(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("accepted an invalid schedule: {}".format(bad))
+
+
+async def check_attempt_once() -> None:
+    """One run per version pair, and a refusal is not a run."""
+    stub = drivers.get_driver("stub")
+    VERSION_FILE.write_text("1.0.0\n")
+    BEHAVIOUR_FILE.write_text("fail")
+    driver_base.invalidate_status()
+    cli_upgrade.reset_for_tests()
+    cli_auto_upgrade.forget("stub")
+    cli_auto_upgrade.set_settings({"enabled": True, "mode": "now"})
+    seed_latest("2.0.0")
+
+    # A busy engine defers without spending the pair's single attempt.
+    busy = db.create_session("busy stub", "stub", str(TEST_ROOT), "", "", "blue", "auto")
+    session_runner.hub(busy).queue.append("queued")
+    assert await cli_auto_upgrade.cycle(None) is None, "a busy engine must not be upgraded"
+    assert not cli_auto_upgrade.attempted("stub", "1.0.0", "2.0.0"), \
+        "being refused must not consume the attempt"
+    session_runner.hub(busy).queue.clear()
+
+    # The one attempt: the stub updater fails, so the pair is spent.
+    assert await cli_auto_upgrade.cycle(None) == "stub"
+    assert cli_auto_upgrade.attempted("stub", "1.0.0", "2.0.0")
+    record = cli_auto_upgrade.payload()["last_attempts"]["stub"]
+    assert record["ok"] is False and record["error"], record
+
+    # Same pair, still failing: no second run.
+    driver_base.invalidate_status()
+    assert await cli_auto_upgrade.cycle(None) is None, "a spent pair must not be retried"
+
+    # A newer release is a new pair, so it earns its own attempt - this time
+    # the updater works, and the ledger records the version that landed.
+    BEHAVIOUR_FILE.write_text("ok")
+    cli_auto_upgrade.forget("stub")
+    driver_base.invalidate_status()
+    assert await cli_auto_upgrade.cycle(None) == "stub"
+    record = cli_auto_upgrade.payload()["last_attempts"]["stub"]
+    assert record["ok"] is True and record["installed_after"] == "2.0.0", record
+
+    # Nothing left to do once installed and latest agree.
+    driver_base.invalidate_status()
+    assert await cli_auto_upgrade.cycle(None) is None
+    cli_auto_upgrade.set_settings({"enabled": False})
+
+
 async def main() -> None:
     try:
         write_stub()
@@ -256,7 +341,10 @@ async def main() -> None:
         cli_upgrade.reset_for_tests()
         await exercise_http()
         await check_timeout()
-        print("engine version refresh, idle gate, upgrade and failure paths passed")
+        await check_schedule()
+        await check_attempt_once()
+        print("engine version refresh, idle gate, upgrade, schedule and "
+              "attempt-once paths passed")
     finally:
         shutil.rmtree(TEST_ROOT, ignore_errors=True)
 

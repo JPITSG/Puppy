@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import os
+import re
 import secrets
 import socket
 import threading
@@ -38,7 +39,12 @@ DEFAULTS = {
         "tls_cert": "",
         "tls_key": "",
     },
-    "engines": {"usage_refresh_minutes": DEFAULT_USAGE_REFRESH_MINUTES},
+    # auto_upgrade schedules the vendor-delegated engine CLI updater this node
+    # already runs by hand: off, immediately, or in the window after a local time
+    "engines": {
+        "usage_refresh_minutes": DEFAULT_USAGE_REFRESH_MINUTES,
+        "auto_upgrade": {"enabled": False, "mode": "now", "at": "03:30"},
+    },
     "uploads": {"max_file_size_mb": DEFAULT_UPLOAD_LIMIT_MB},
     "terminal": {"command": "/bin/bash -l"},
     # node-owned managed headless browser; enabling requires the availability
@@ -158,6 +164,31 @@ def _validate_shape(reference, value, path: str = "config") -> None:
         raise ValueError("{} has the wrong type".format(path))
 
 
+ENGINE_AUTO_UPGRADE_MODES = ("now", "at")
+_ENGINE_AT_RE = re.compile(r"^([01][0-9]|2[0-3]):([0-5][0-9])$")
+
+
+def normalize_engine_auto_upgrade(value) -> dict:
+    """Validate the automatic engine-update schedule, whatever its source.
+
+    Shared by the API and by backup import so a hand-edited archive cannot
+    install a schedule the scheduler would then have to second-guess."""
+    if value is None:
+        value = {}
+    if not isinstance(value, dict):
+        raise ValueError("config.engines.auto_upgrade must be an object")
+    enabled = value.get("enabled", False)
+    if type(enabled) is not bool:
+        raise ValueError("config.engines.auto_upgrade.enabled must be true or false")
+    mode = str(value.get("mode") or "now").strip().lower()
+    if mode not in ENGINE_AUTO_UPGRADE_MODES:
+        raise ValueError("config.engines.auto_upgrade.mode must be 'now' or 'at'")
+    at = str(value.get("at") or "03:30").strip()
+    if not _ENGINE_AT_RE.match(at):
+        raise ValueError("config.engines.auto_upgrade.at must be HH:MM in 24-hour form")
+    return {"enabled": enabled, "mode": mode, "at": at}
+
+
 def _finite_number(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and \
         (isinstance(value, int) or math.isfinite(value))
@@ -203,6 +234,8 @@ def normalize_import(data: dict) -> dict:
                 key, "non-negative" if allow_zero else "positive"))
     merged["engines"]["usage_refresh_minutes"] = normalize_usage_refresh_minutes(
         merged.get("engines", {}).get("usage_refresh_minutes"))
+    merged["engines"]["auto_upgrade"] = normalize_engine_auto_upgrade(
+        merged.get("engines", {}).get("auto_upgrade"))
     merged["uploads"]["max_file_size_mb"] = normalize_upload_limit_mb(
         merged.get("uploads", {}).get("max_file_size_mb"))
     token = merged.get("auth", {}).get("api_token")

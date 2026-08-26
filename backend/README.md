@@ -180,6 +180,29 @@ per turn, so nothing restarts afterwards; the node re-probes the version itself
 when the updater exits, because a zero exit status alone does not prove the
 version moved.
 
+## Unattended engine updates
+
+A node can install its own engine CLI updates on a schedule. It adds no upgrade
+machinery: the scheduler decides *when* to run the same vendor-delegated updater
+`POST /api/engines/{key}/upgrade` runs by hand, so an automatic run is the
+manual run with nobody clicking. `GET`/`PATCH /api/engines/auto-upgrade` read and
+set `{enabled, mode, at}` - `mode` is `now` or `at`, and `at` is a local `HH:MM`.
+The node advertises the routes with the additive `engine-auto-upgrade`
+capability; older nodes simply keep updating by hand.
+
+Two rules bound the damage an unattended updater can do:
+
+- **One attempt per version pair.** A pair is (installed version -> latest
+  version). Once the updater has *run* for a pair it never runs again for that
+  same pair, successful or not, so a broken release cannot be retried in a loop.
+  The ledger is durable, so a restart does not grant a fresh attempt. Being
+  refused - busy sessions on that engine, another upgrade already running, a
+  backup in flight - is not an attempt and consumes nothing.
+- **A window, not a moment.** `at` permits a start during the two hours after
+  the given time, so a node busy at the stroke of the hour still updates that
+  night while one busy all window waits for the next day rather than replacing
+  an engine mid-afternoon.
+
 ## File uploads
 
 The headless package accepts streamed session attachments of any file type and
