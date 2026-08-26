@@ -655,6 +655,14 @@ async def main() -> None:
             # stacking context a split's divider and terminal painted over them
             assert "anchor.parentElement.appendChild(menu)" not in ui_source
             assert ui_source.count("document.body.appendChild(menu)") >= 5
+            # one float at a time: every opener funnels through closeAllMenus,
+            # so the static + menu cannot sit open beside a .dyn menu. The two
+            # permitted closeMenusToggling mentions are its own definition and
+            # the single call inside closeAllMenus.
+            assert "function closeAllMenus(anchor)" in ui_source
+            assert "if (closeAllMenus(button)) return;" in ui_source
+            assert ui_source.count("closeMenusToggling(") == 2, \
+                "menu openers must close through closeAllMenus"
             assert ui_source.index("input.checked = browserEnabledFor(bid);") < \
                 ui_source.index('status = await api(bid, "browser/status"')
             assert 'el("button", "chip browser")' in ui_source

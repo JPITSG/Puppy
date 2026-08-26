@@ -762,8 +762,7 @@ function enhanceChoiceSelect(select) {
   const open = () => {
     if (button.disabled) return;
     if (openChoiceControl === control) return;
-    closeChoiceMenu();
-    closeMenusToggling(null);
+    closeAllMenus(null);
     const menu = el("div", "choice-menu");
     const menuId = `choice-menu-${++choiceMenuSeq}`;
     menu.id = menuId;
@@ -852,8 +851,7 @@ function enhanceChoiceSelect(select) {
 }
 
 window.addEventListener("resize", () => {
-  closeChoiceMenu();
-  closeMenusToggling(null);
+  closeAllMenus(null);   // anchored floats cannot survive a reflow
   requestAnimationFrame(syncAllTabOverflow);
 });
 document.addEventListener("scroll", (event) => {
@@ -2443,7 +2441,7 @@ function provIcon(engine) {
 
 /* right-click menu on sidebar sessions - mirrors the open-view ⋮ menu */
 function ctxMenuAt(x, y) {
-  closeMenusToggling(null);
+  closeAllMenus(null);
   const menu = el("div", "menu dyn");
   menu.style.position = "fixed";
   menu.style.left = Math.min(x, window.innerWidth - 220) + "px";
@@ -3483,13 +3481,10 @@ function wireSplitter(split, root, first, second, divider) {
 
 function showTabAddMenu(groupId, button, event) {
   event.stopPropagation();
-  const menu = $("tab-add-menu");
-  const closing = !menu.classList.contains("hidden") && tabAddAnchor === button;
-  menu.classList.add("hidden");
-  tabAddAnchor = null;
-  if (closing) return;
+  if (closeAllMenus(button)) return;   // this pane's + was already open
   tabAddTargetGroup = groupId;
   tabAddAnchor = button;
+  const menu = $("tab-add-menu");
   menu.classList.remove("hidden");
   positionAnchoredMenu(menu, button);
 }
@@ -3657,13 +3652,8 @@ function syncTabsWithSessions() {
   if (!dirty) renderTabs();
 }
 
-/* tab add menu */
-document.addEventListener("click", () => {
-  $("tab-add-menu").classList.add("hidden");
-  tabAddAnchor = null;
-  closeMenusToggling(null);
-  closeChoiceMenu();
-});
+/* a click anywhere outside a float dismisses every one of them */
+document.addEventListener("click", () => closeAllMenus(null));
 $("tab-add-menu").addEventListener("click", (e) => {
   const button = e.target.closest && e.target.closest("button[data-act]");
   const act = button && button.dataset.act;
@@ -3874,6 +3864,24 @@ document.addEventListener("keydown", (e) => {
   ta.dispatchEvent(new Event("input", { bubbles: true }));   // resizes first
   scrollCaretIntoView(ta);
 });
+
+/* Every float in the app closes through here, so opening one always retires
+   the rest. The + menu needs it most: it is a static node rather than a .dyn
+   one, so closeMenusToggling could not see it and the two stayed open together.
+   Returns true when `anchor`'s own float was what closed, so a second click on
+   the same trigger toggles rather than reopening. */
+function closeAllMenus(anchor) {
+  let wasOpen = false;
+  const add = $("tab-add-menu");
+  if (!add.classList.contains("hidden")) {
+    if (anchor && tabAddAnchor === anchor) wasOpen = true;
+    add.classList.add("hidden");
+    tabAddAnchor = null;
+  }
+  if (closeMenusToggling(anchor)) wasOpen = true;
+  closeChoiceMenu();
+  return wasOpen;
+}
 
 /* clicking the same trigger while its menu is open closes it (returns true) */
 function closeMenusToggling(anchor) {
@@ -5237,7 +5245,7 @@ class SessionView {
 
   /* ---- menus / meta ops ---- */
   showMenu(anchor) {
-    if (closeMenusToggling(anchor)) return;
+    if (closeAllMenus(anchor)) return;
     const menu = el("div", "menu dyn");
     menu._anchor = anchor;
     menu._ownerView = this.root;
@@ -5269,7 +5277,7 @@ class SessionView {
   }
 
   pickColor(anchor) {
-    closeMenusToggling(null);   // always opens fresh (invoked from the ⋮ menu)
+    closeAllMenus(null);   // always opens fresh (invoked from the ⋮ menu)
     const menu = el("div", "menu dyn color-menu");
     menu._ownerView = this.root;
     for (const c of state.sessionColors || []) {
@@ -5370,8 +5378,7 @@ class SessionView {
   }
 
   optionMenu(anchor, opts, current, onPick) {
-    if (closeMenusToggling(anchor)) return null;
-    closeChoiceMenu();
+    if (closeAllMenus(anchor)) return null;
     const menu = el("div", "choice-menu composer-choice-menu dyn");
     menu._anchor = anchor;
     menu.setAttribute("role", "listbox");
