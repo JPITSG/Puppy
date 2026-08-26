@@ -4322,6 +4322,10 @@ class SessionView {
     for (const attachment of [...this.attachments]) this.removeAttachment(attachment, true);
     for (const url of this.sentThumbs.values()) URL.revokeObjectURL(url);
     this.sentThumbs.clear();
+    /* the menus now sit on <body>, so closing this view no longer takes them
+       with it - drop the ones it owns */
+    for (const menu of document.querySelectorAll(".menu.dyn"))
+      if (menu._ownerView === this.root) menu.remove();
     this.root.remove();
   }
 
@@ -5236,6 +5240,7 @@ class SessionView {
     if (closeMenusToggling(anchor)) return;
     const menu = el("div", "menu dyn");
     menu._anchor = anchor;
+    menu._ownerView = this.root;
     const add = (label, fn, danger) => {
       const b = el("button", danger ? "danger" : "", label);
       b.onclick = (e) => { e.stopPropagation(); menu.remove(); fn(); };
@@ -5255,13 +5260,18 @@ class SessionView {
     menu.appendChild(el("div", "menu-sep"));
     add(this.session && this.session.archived ? "Unarchive" : "Archive", () => this.archive());
     add("Delete session", () => this.deleteSession(), true);
-    anchor.parentElement.appendChild(menu);
+    /* On <body>, like every other float here. Inside the head it inherited
+       .chat-head's z-index:2 stacking context, so its own z-index:100 only
+       ranked it against its siblings - in a split, the divider (24) and the
+       neighbouring pane's terminal layers painted straight over it. */
+    document.body.appendChild(menu);
     positionAnchoredMenu(menu, anchor);
   }
 
   pickColor(anchor) {
     closeMenusToggling(null);   // always opens fresh (invoked from the ⋮ menu)
     const menu = el("div", "menu dyn color-menu");
+    menu._ownerView = this.root;
     for (const c of state.sessionColors || []) {
       const b = el("button", "swatch" + (this.session && this.session.color === c ? " sel" : ""));
       const d = el("span", "sess-dot");
@@ -5274,7 +5284,7 @@ class SessionView {
       };
       menu.appendChild(b);
     }
-    anchor.parentElement.appendChild(menu);
+    document.body.appendChild(menu);   // same stacking reason as showMenu
     positionAnchoredMenu(menu, anchor);
   }
 

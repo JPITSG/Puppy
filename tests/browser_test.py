@@ -651,6 +651,10 @@ async def main() -> None:
             # the settings switch is seeded before the availability probe, so it
             # cannot render off and then visibly flip on
             assert "input.checked = browserEnabledFor(bid);" in ui_source
+            # session menus float on <body>: inside .chat-head's z-index:2
+            # stacking context a split's divider and terminal painted over them
+            assert "anchor.parentElement.appendChild(menu)" not in ui_source
+            assert ui_source.count("document.body.appendChild(menu)") >= 5
             assert ui_source.index("input.checked = browserEnabledFor(bid);") < \
                 ui_source.index('status = await api(bid, "browser/status"')
             assert 'el("button", "chip browser")' in ui_source
