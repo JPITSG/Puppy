@@ -137,6 +137,7 @@ async def main() -> None:
         config.set_value("engines.usage_refresh_minutes", 30)
         config.set_value("uploads.max_file_size_mb", 19)
         config.set_value("browser.enabled", True)
+        config.set_value("browser.color_scheme", "light")
         config.set_value("notify.enabled", True)
         config.set_value("notify.backend", 1)
         config.set_value("notify.command", "printf done: %s {session}")
@@ -200,6 +201,7 @@ async def main() -> None:
         config.set_value("engines.usage_refresh_minutes", 5)
         config.set_value("uploads.max_file_size_mb", 2)
         config.set_value("browser.enabled", False)
+        config.set_value("browser.color_scheme", "dark")
         config.set_value("notify.enabled", False)
         config.set_value("notify.command", "mutated")
         db.execute("DELETE FROM events")
@@ -218,6 +220,15 @@ async def main() -> None:
         assert config.get("engines.usage_refresh_minutes") == 30
         assert config.get("uploads.max_file_size_mb") == 19
         assert config.get("browser.enabled") is True
+        assert config.get("browser.color_scheme") == "light"
+        # and a tampered archive cannot smuggle in an unknown rendering mode
+        try:
+            config.normalize_import(dict(config.export_data(),
+                                         browser={"enabled": True, "color_scheme": "neon"}))
+        except ValueError as exc:
+            assert "color_scheme" in str(exc), str(exc)
+        else:
+            raise AssertionError("an invalid browser color scheme was accepted")
         assert config.get("notify.enabled") is True
         assert config.get("notify.backend") == 1
         assert config.get("notify.command") == "printf done: %s {session}"

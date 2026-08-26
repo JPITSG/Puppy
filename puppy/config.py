@@ -42,8 +42,9 @@ DEFAULTS = {
     "uploads": {"max_file_size_mb": DEFAULT_UPLOAD_LIMIT_MB},
     "terminal": {"command": "/bin/bash -l"},
     # node-owned managed headless browser; enabling requires the availability
-    # probe (binary + version) to pass at toggle time
-    "browser": {"enabled": False},
+    # probe (binary + version) to pass at toggle time. color_scheme is the
+    # prefers-color-scheme its pages render with, synced from the WebUI theme.
+    "browser": {"enabled": False, "color_scheme": "dark"},
     "sessions": {"default_cwd": "/etc/scripts", "turn_timeout": 7200,
                  "shutdown_grace": 60},
     # prompt-completion command: run `command` on backend id `backend` (0 =
@@ -211,6 +212,8 @@ def normalize_import(data: dict) -> dict:
         raise ValueError("configured bind hosts must not be empty")
     if merged.get("backend", {}).get("tls_mode") not in ("disabled", "auto", "files"):
         raise ValueError("config.backend.tls_mode is invalid")
+    if merged.get("browser", {}).get("color_scheme") not in ("dark", "light"):
+        raise ValueError("config.browser.color_scheme is invalid")
     return merged
 
 

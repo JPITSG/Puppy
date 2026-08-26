@@ -63,6 +63,7 @@ MAX_URL_LENGTH = 4096
 MAX_INSERT_TEXT = 8192
 MAX_AX_NODES = 400
 MAX_AX_TEXT = 48 * 1024
+COLOR_SCHEMES = ("dark", "light")
 BROWSER_ID_RE = re.compile(r"^[A-Z0-9]{4}$")
 BROWSER_ID_ALPHABET = string.ascii_uppercase + string.digits
 ID_RETENTION_SECONDS = 30 * 24 * 60 * 60
@@ -119,6 +120,17 @@ def _catalog_path() -> str:
 
 def enabled() -> bool:
     return bool(config.get("browser.enabled", False))
+
+
+def normalize_color_scheme(value) -> str:
+    """Anything unrecognised reads as dark: this is a rendering hint, and a
+    stale or malformed one must never keep a browser from starting."""
+    text = str(value or "").strip().lower()
+    return text if text in COLOR_SCHEMES else "dark"
+
+
+def color_scheme() -> str:
+    return normalize_color_scheme(config.get("browser.color_scheme", "dark"))
 
 
 def sandbox_mode() -> str:
@@ -192,6 +204,7 @@ async def status_payload() -> dict:
         "binary": st["binary"],
         "product": st["product"],
         "sandbox": sandbox_mode(),
+        "color_scheme": color_scheme(),
         "running": bool(m and m.running),
         "viewers": m.viewer_count() if m else 0,
         "instances": m.instance_payloads() if m else [],
@@ -214,12 +227,31 @@ async def set_enabled(value: bool) -> dict:
     return await status_payload()
 
 
+async def set_color_scheme(value) -> str:
+    """The WebUI theme is browser-local state, so viewers tell the node which
+    one they are using. Persisting it means the agent's own screenshots and any
+    browser opened with nobody watching still match the user's UI."""
+    scheme = normalize_color_scheme(value)
+    if scheme != color_scheme():
+        config.set_value("browser.color_scheme", scheme)
+    if _manager is not None:
+        for instance in list(_manager.instances.values()):
+            try:
+                await instance.apply_color_scheme()
+            except BrowserError:
+                pass   # a browser that is stopping simply picks it up next start
+    return scheme
+
+
 async def apply_config() -> None:
     """Reconcile live browsers after a snapshot's config/database replacement."""
     if _manager is not None:
         await _manager.clear_session_bindings()
     if not enabled() and _manager is not None:
         await _manager.stop("browser disabled by restored configuration")
+        return
+    # a restore can carry a different theme; browsers still running follow it
+    await set_color_scheme(color_scheme())
 
 
 async def shutdown() -> None:
@@ -250,33 +282,51 @@ def _dup_high(fd: int) -> int:
 # entry, no network), so the address bar stays empty and the screen says which
 # browser this is and that it is ready.
 START_PAGE_TITLE = "Browser {} is ready"
+# Both palettes ship in the page and the emulated prefers-color-scheme picks
+# one, so the card restyles itself the instant a viewer syncs its theme - no
+# reload, and no second document to keep in step.
 START_PAGE_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>{title}</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark light"><title>{title}</title>
 <style>
+ :root{{
+  --bg-top:#171a21; --bg-bottom:#0b0c0f; --txt:#e7eaf0; --id:#ffffff;
+  --acc:#5aa2f5; --acc-bg:rgba(90,162,245,.10); --acc-line:rgba(90,162,245,.28);
+  --ok:#22e5a4; --txt2:#aab2c0; --txt3:#8b93a3;
+  --kbd-bg:rgba(255,255,255,.06); --kbd-line:rgba(255,255,255,.12); --kbd-txt:#c2c9d6;
+ }}
+ @media (prefers-color-scheme:light){{
+  :root{{
+   --bg-top:#ffffff; --bg-bottom:#eef1f7; --txt:#1b2434; --id:#101828;
+   --acc:#3b82e0; --acc-bg:rgba(59,130,224,.10); --acc-line:rgba(59,130,224,.30);
+   --ok:#0b9e71; --txt2:#48536b; --txt3:#8a94a8;
+   --kbd-bg:rgba(15,23,42,.05); --kbd-line:rgba(15,23,42,.14); --kbd-txt:#48536b;
+  }}
+ }}
  html,body{{height:100%;margin:0}}
  body{{
   display:flex;align-items:center;justify-content:center;
-  background:radial-gradient(120% 90% at 50% 0%,#171a21 0%,#0b0c0f 62%);
-  color:#e7eaf0;font:400 15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  background:radial-gradient(120% 90% at 50% 0%,var(--bg-top) 0%,var(--bg-bottom) 62%);
+  color:var(--txt);font:400 15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
   -webkit-font-smoothing:antialiased;
  }}
  .card{{text-align:center;padding:0 28px;max-width:520px}}
  .mark{{
   display:inline-flex;align-items:center;justify-content:center;
   width:52px;height:52px;margin-bottom:22px;border-radius:16px;
-  background:rgba(90,162,245,.10);border:1px solid rgba(90,162,245,.28);color:#5aa2f5;
+  background:var(--acc-bg);border:1px solid var(--acc-line);color:var(--acc);
  }}
  .id{{
   font:600 40px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-  letter-spacing:.14em;margin:0 0 10px;color:#fff;
+  letter-spacing:.14em;margin:0 0 10px;color:var(--id);
  }}
- .ready{{margin:0 0 22px;font-size:14px;color:#aab2c0;letter-spacing:.02em}}
- .ready b{{font-weight:600;color:#22e5a4}}
- .hint{{margin:0;font-size:12.5px;line-height:1.7;color:#8b93a3}}
+ .ready{{margin:0 0 22px;font-size:14px;color:var(--txt2);letter-spacing:.02em}}
+ .ready b{{font-weight:600;color:var(--ok)}}
+ .hint{{margin:0;font-size:12.5px;line-height:1.7;color:var(--txt3)}}
  .hint kbd{{
   font:11.5px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-  padding:2px 6px;border-radius:5px;background:rgba(255,255,255,.06);
-  border:1px solid rgba(255,255,255,.12);color:#c2c9d6;
+  padding:2px 6px;border-radius:5px;background:var(--kbd-bg);
+  border:1px solid var(--kbd-line);color:var(--kbd-txt);
  }}
 </style></head><body>
 <div class="card">
@@ -852,6 +902,10 @@ class Manager:
             await self.call("Page.enable", session=session)
             await self.call("DOM.enable", session=session)
             try:
+                await self.apply_color_scheme()
+            except BrowserError:
+                pass   # a rendering hint is never worth failing an attach over
+            try:
                 await self.call("Accessibility.enable", session=session)
             except BrowserError:
                 pass
@@ -865,6 +919,17 @@ class Manager:
                 await self._start_screencast()
                 await self._send_fresh_frame()
             await self._refresh_nav()
+
+    async def apply_color_scheme(self) -> None:
+        """Emulation is per attached page, so this is re-applied on every
+        attach as well as when the viewer's theme changes. It emulates the
+        standard media feature only - never Chromium's force-dark filter,
+        which repaints sites that deliberately have no dark mode."""
+        if not self.page_session or not self.running:
+            return
+        await self.call("Emulation.setEmulatedMedia", {
+            "features": [{"name": "prefers-color-scheme", "value": color_scheme()}],
+        }, session=self.page_session)
 
     async def _show_start_page(self) -> None:
         """Paint the identifying ready card into the launch tab's blank
@@ -1005,6 +1070,8 @@ class Manager:
         elif kind == "reload":
             if self.page_session:
                 self._fire("Page.reload", session=self.page_session)
+        elif kind == "color_scheme":
+            await set_color_scheme(data.get("value"))
 
     def _point(self, data: dict) -> tuple:
         nx = min(1.0, max(0.0, float(data.get("nx") or 0.0)))

@@ -111,6 +111,8 @@ while True:
             result = {"model": {"content": [100, 40, 300, 40, 300, 80, 100, 80]}}
         elif method == "DOM.focus":
             record("dom.jsonl", {"method": method, "params": params})
+        elif method == "Emulation.setEmulatedMedia":
+            record("media.jsonl", {"features": params.get("features")})
         elif method == "Page.getFrameTree":
             result = {"frameTree": {"frame": {"id": "f1", "url": PAGE["url"]}}}
         elif method == "Page.setDocumentContent":
@@ -377,6 +379,26 @@ async def main() -> None:
             insert = next(i for i in inputs if i["method"] == "Input.insertText")
             assert insert["params"]["text"] == "hello", insert
 
+            # pages render with the WebUI's theme: dark until a viewer says
+            # otherwise, and every live browser follows a toggle at once
+            def schemes():
+                return [feature["value"] for line in read_lines("media.jsonl")
+                        for feature in (line["features"] or [])
+                        if feature["name"] == "prefers-color-scheme"]
+
+            assert schemes() and set(schemes()) == {"dark"}, schemes()
+            assert browser.color_scheme() == "dark"
+            await ws.send_json({"type": "color_scheme", "value": "light"})
+            await wait_for(lambda: "light" in schemes(), message="light emulation")
+            assert config.get("browser.color_scheme") == "light"
+            # a stale or hostile value is a rendering hint, not a launch failure
+            assert browser.normalize_color_scheme("neon") == "dark"
+            assert browser.normalize_color_scheme(None) == "dark"
+            await ws.send_json({"type": "color_scheme", "value": "sepia"})
+            await wait_for(lambda: schemes()[-1] == "dark", message="fallback emulation")
+            await ws.send_json({"type": "color_scheme", "value": "light"})
+            await wait_for(lambda: schemes()[-1] == "light", message="light again")
+
             # bare hostnames gain a scheme; LAN-ish suffixes stay cleartext
             await ws.send_json({"type": "navigate", "url": "openhab.lan/start"})
             navs = await wait_for(lambda: read_lines("navigations.jsonl"),
@@ -625,6 +647,7 @@ async def main() -> None:
             assert "browser/instances/${encodeURIComponent(closing.browserId)}" in ui_source
             # the owning chat advertises its live browsers as clickable bubbles
             assert "syncBrowserChips()" in ui_source
+            assert 'type: "color_scheme", value: currentTheme()' in ui_source
             assert 'el("button", "chip browser")' in ui_source
             assert "t.browserGone !== true" in ui_source
 

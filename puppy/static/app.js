@@ -3732,10 +3732,17 @@ function closeDrawer() { $("app").classList.remove("side-open"); }
 })();
 
 /* light / dark theme (class applied pre-paint by an inline head script) */
+function currentTheme() {
+  return document.documentElement.classList.contains("light") ? "light" : "dark";
+}
 function applyTheme(t) {
   document.documentElement.classList.toggle("light", t === "light");
   $("btn-theme").textContent = t === "light" ? "☾" : "☀";
   lsSet("puppy.theme", t);
+  /* The theme is this browser's own state, so each node has to be told: its
+     managed browsers render pages with the matching prefers-color-scheme. */
+  for (const view of Object.values(state.views))
+    if (view && typeof view.sendColorScheme === "function") view.sendColorScheme();
 }
 $("btn-theme").onclick = () =>
   applyTheme(document.documentElement.classList.contains("light") ? "dark" : "light");
@@ -5773,6 +5780,12 @@ class BrowserView {
     this.send({ type: "key", kind: "down", key, code: key, text: "", modifiers });
     this.send({ type: "key", kind: "up", key, code: key, text: "", modifiers });
   }
+  /* Sent on every connect as well as on a toggle: the node stores the last
+     value it heard, so a browser the agent opens with nobody watching still
+     starts in the mode this WebUI is using. */
+  sendColorScheme() {
+    this.send({ type: "color_scheme", value: currentTheme() });
+  }
   showTyping(on) {
     this.typeRow.classList.toggle("hidden", !on);
     this.kbdBtn.classList.toggle("on", !!on);
@@ -5950,6 +5963,7 @@ class BrowserView {
         return;
       }
       noteRemoteSocketReachable(this.tab.bid);
+      this.sendColorScheme();
     };
     ws.onmessage = ev => {
       if (sequence !== this.connectionSequence || this.ws !== ws) return;
