@@ -2335,7 +2335,10 @@ function backendHasCapability(backend, capability) {
   return Array.isArray(backend.capabilities) && backend.capabilities.includes(capability);
 }
 
-function backendSupportsAutoUpgrade(bid) {
+/* Distinct from backendSupportsAutoUpgrade below, which answers whether the
+   backend *package* may be replaced over the signed contract. This one is about
+   the engine CLIs on that node. */
+function backendSupportsEngineAutoUpgrade(bid) {
   if (!bid) return true;
   const backend = state.backends.find(b => b.id === bid);
   return backendHasCapability(backend, "engine-auto-upgrade") &&
@@ -6819,7 +6822,7 @@ class SettingsView {
       }
       if (!state.backends.some(backend => backend.id === bid)) continue;
       row.update(state.remoteAutoUpgrade[bid] || null,
-        remoteAvailability(bid), backendSupportsAutoUpgrade(bid));
+        remoteAvailability(bid), backendSupportsEngineAutoUpgrade(bid));
     }
     for (const [bid, row] of this.uploadRows) {
       if (!bid) {
@@ -7357,6 +7360,7 @@ class SettingsView {
     if (generation !== this.renderGeneration) return;
     state.engines = engines.engines;
     state.usageRefresh = engines.usage_refresh || settings.usage_refresh || state.usageRefresh;
+    state.autoUpgrade = engines.auto_upgrade || state.autoUpgrade;
     rememberUploadSettings(0, settings.uploads);
     state.localEngineCheckedAt = Date.now();
     state.engMap = {};
@@ -7629,7 +7633,7 @@ class SettingsView {
     for (const b of state.backends) {
       const auto = this.autoUpgradeRow(b.name, b.id);
       auto.update(state.remoteAutoUpgrade[b.id] || null,
-        remoteAvailability(b.id), backendSupportsAutoUpgrade(b.id));
+        remoteAvailability(b.id), backendSupportsEngineAutoUpgrade(b.id));
       this.autoUpgradeRows.set(b.id, auto);
       autoList.appendChild(auto.root);
     }
