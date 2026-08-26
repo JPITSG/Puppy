@@ -3727,7 +3727,12 @@ function renderWorkspacePane(pane) {
     if (event.button === 0 || event.button === 2) focusWorkspacePane(pane.id);
   });
   const tabbar = el("div", "tabbar");
-  tabbar.appendChild(burgerButton());
+  /* One per window, not one per pane: it opens the session list, which is not a
+     property of any pane. workspacePanes() walks first-before-second at every
+     split, and first is the left half of a row and the top half of a column, so
+     its head is the top-left pane whatever the layout. */
+  const leading = workspacePanes()[0];
+  if (leading && leading.id === pane.id) tabbar.appendChild(burgerButton());
   const tabScroll = el("div", "tab-scroll edge-scroll-viewport");
   const tabsRoot = el("div", "tabs");
   tabsRoot.dataset.paneId = pane.id;
