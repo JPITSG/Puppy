@@ -2460,6 +2460,31 @@ function provIcon(engine) {
   return n;
 }
 
+/* Twenty swatches fit one line in a wide modal and wrap in a narrow one. Left
+   to plain wrapping they give a full first line and a short stub; instead the
+   rows are evened out and spread edge to edge, so the block reads as a grid.
+   Only when it wraps: a single line keeps its natural left-aligned run. */
+function layoutSwatchRow(box) {
+  if (!box) return;
+  box.style.display = "";
+  box.style.gridTemplateColumns = "";
+  box.style.justifyContent = "";
+  const count = box.children.length;
+  if (!count) return;
+  const style = getComputedStyle(box);
+  const gap = parseFloat(style.columnGap) || 0;
+  const width = box.clientWidth - parseFloat(style.paddingLeft) -
+    parseFloat(style.paddingRight);
+  const item = box.firstElementChild.getBoundingClientRect().width;
+  if (!(width > 0) || !(item > 0)) return;   // not laid out yet: leave it be
+  const perLine = Math.max(1, Math.floor((width + gap) / (item + gap)));
+  if (perLine >= count) return;              // one line already
+  const rows = Math.ceil(count / perLine);
+  box.style.display = "grid";
+  box.style.gridTemplateColumns = "repeat(" + Math.ceil(count / rows) + ", auto)";
+  box.style.justifyContent = "space-between";
+}
+
 /* right-click menu on sidebar sessions - mirrors the open-view ⋮ menu */
 function ctxMenuAt(x, y) {
   closeAllMenus(null);
@@ -7866,8 +7891,19 @@ async function modalNewSession(groupId = null) {
       b.onclick = () => { nsColor = c; renderColors(); };
       colorBox.appendChild(b);
     }
+    layoutSwatchRow(colorBox);
   };
   renderColors();
+  /* the modal is viewport-width on a phone, so the row is re-evened on resize;
+     the listener retires itself once the modal is gone */
+  const relayoutColors = () => {
+    if (!colorBox.isConnected) {
+      window.removeEventListener("resize", relayoutColors);
+      return;
+    }
+    layoutSwatchRow(colorBox);
+  };
+  window.addEventListener("resize", relayoutColors);
   const cwdInp = m.querySelector("#ns-cwd");
   const dirBox = m.querySelector("#ns-dirs");
   /* Every new session starts from the configured default, never from wherever

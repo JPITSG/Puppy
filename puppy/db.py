@@ -16,9 +16,16 @@ log = logging.getLogger("puppy.db")
 _conn = None
 _lock = threading.RLock()
 
-# selectable session dot colors - gray is reserved for the Settings tab
+# Selectable session dot colors - gray is reserved for the Settings tab. The
+# second ten fill the hue gaps the first ten left (yellow-green through green,
+# and magenta) and lean on lightness where hue alone would not separate them:
+# a 12px dot has to stay tellable apart on both themes, not merely be a
+# different number. Existing rows keep whatever they were given, so this list
+# only ever grows - removing an entry would orphan the sessions holding it.
 SESSION_COLORS = ["#e0784f", "#4dd0c4", "#9d7bff", "#4dc6ff", "#22e5a4",
-                  "#ff6b81", "#f0a84a", "#e8d24b", "#7ea2ff", "#ff9ad5"]
+                  "#ff6b81", "#f0a84a", "#e8d24b", "#7ea2ff", "#ff9ad5",
+                  "#b4d94a", "#63cf4e", "#7fdbb6", "#2a9d8f", "#3fd6e0",
+                  "#4a4fd8", "#b56cf0", "#e56ce0", "#d94f6e", "#b07d2e"]
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
