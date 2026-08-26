@@ -79,6 +79,60 @@ function plusIcon(size) {
 /* stroke is a parameter for the same reason bellIcon runs lighter: this 24-box
    art is drawn at 12px in a tab dot and 14px in the footer, where the tab's
    weight of 2 reads heavy beside the bell it sits next to. */
+/* The picker's rows used to be "📁 name" and "↩ parent" - two glyphs from
+   different fonts with different advance widths, so the labels could not line
+   up however they were spaced. Drawn icons in a fixed slot align by
+   construction, which is the same reason xIcon and plusIcon exist. */
+function folderIcon(size) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const p = document.createElementNS(NS, "path");
+  p.setAttribute("d", "M1.9 12.4V4.2a1 1 0 0 1 1-1h3l1.5 1.7h6.7a1 1 0 0 1 1 1v6.5" +
+    "a1 1 0 0 1-1 1H2.9a1 1 0 0 1-1-1Z");
+  p.setAttribute("fill", "none");
+  p.setAttribute("stroke", "currentColor");
+  p.setAttribute("stroke-width", "1.2");
+  p.setAttribute("stroke-linejoin", "round");
+  svg.appendChild(p);
+  return svg;
+}
+
+function parentDirIcon(size) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const p = document.createElementNS(NS, "path");
+  p.setAttribute("d", "M8 12.8V3.7M4.6 7.1 8 3.7l3.4 3.4");
+  p.setAttribute("fill", "none");
+  p.setAttribute("stroke", "currentColor");
+  p.setAttribute("stroke-width", "1.4");
+  p.setAttribute("stroke-linecap", "round");
+  p.setAttribute("stroke-linejoin", "round");
+  svg.appendChild(p);
+  return svg;
+}
+
+/* One row shape for every directory picker: fixed icon slot, then the label.
+   `icon` may be null for a placeholder row, which keeps its text on the same
+   left edge as the entries around it. */
+function dirPickRow(kind, label) {
+  const button = el("button", "");
+  button.type = "button";
+  const slot = el("span", "dp-icon " + kind);
+  if (kind === "dp-up") slot.appendChild(parentDirIcon(13));
+  else if (kind === "dp-folder") slot.appendChild(folderIcon(14));
+  button.appendChild(slot);
+  button.appendChild(el("span", "dp-name", label));
+  return button;
+}
+
 function gearIcon(size, stroke = 2) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
@@ -8025,16 +8079,20 @@ async function modalNewSession(groupId = null) {
       dirBox.classList.remove("hidden");
       dirBox.innerHTML = "";
       if (d.parent !== null && d.parent !== undefined) {
-        const up = el("button", "", "↩ " + d.parent);
+        const up = dirPickRow("dp-up", d.parent);
         up.onclick = () => { cwdInp.value = d.parent; browse(); };
         dirBox.appendChild(up);
       }
       for (const name of d.dirs) {
-        const b = el("button", "", "📁 " + name);
+        const b = dirPickRow("dp-folder", name);
         b.onclick = () => { cwdInp.value = (d.path === "/" ? "" : d.path) + "/" + name; browse(); };
         dirBox.appendChild(b);
       }
-      if (!d.dirs.length) dirBox.appendChild(el("button", "", "(no subdirectories)"));
+      if (!d.dirs.length) {
+        const empty = dirPickRow("dp-none", "(no subdirectories)");
+        empty.disabled = true;
+        dirBox.appendChild(empty);
+      }
     } catch (e) { dirBox.classList.add("hidden"); }
   }
   cwdInp.addEventListener("focus", browse);

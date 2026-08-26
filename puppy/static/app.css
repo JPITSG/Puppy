@@ -1387,7 +1387,15 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   font-family:var(--mono);font-size:12px;padding:5px 10px;cursor:pointer;
   transition:background .12s var(--ease),color .12s var(--ease);
 }
-@media (hover:hover){.dirpick button:hover{background:var(--hov);color:var(--txt)}}
+/* every row is icon-slot + label, so the labels share one left edge whatever
+   the row is - parent, folder, or the empty placeholder */
+.dirpick .dp-icon{flex:0 0 16px;display:flex;align-items:center;justify-content:center}
+.dirpick .dp-icon svg{display:block}
+.dirpick .dp-folder{color:var(--warn)}
+.dirpick .dp-up{color:var(--txt3)}
+.dirpick .dp-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dirpick button:disabled{cursor:default;color:var(--txt3)}
+@media (hover:hover){.dirpick button:not(:disabled):hover{background:var(--hov);color:var(--txt)}}
 .dirpick button:active{background:var(--hov);filter:brightness(.95)}
 .hint{font-size:11px;color:var(--txt3);margin-top:-4px;margin-bottom:10px;text-transform:none;letter-spacing:0}
 
