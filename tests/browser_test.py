@@ -663,6 +663,12 @@ async def main() -> None:
             assert "if (closeAllMenus(button)) return;" in ui_source
             assert ui_source.count("closeMenusToggling(") == 2, \
                 "menu openers must close through closeAllMenus"
+            # The transcript decides whether to follow the tail BEFORE it
+            # mutates: re-measuring after a streaming block becomes rendered
+            # markdown reads that growth as the user having scrolled away.
+            assert "atBottom()" in ui_source
+            assert "scrollBottom(false)" not in ui_source, \
+                "transcript scrolls must be forced or gated on a pre-sampled follow"
             assert ui_source.index("input.checked = browserEnabledFor(bid);") < \
                 ui_source.index('status = await api(bid, "browser/status"')
             assert 'el("button", "chip browser")' in ui_source

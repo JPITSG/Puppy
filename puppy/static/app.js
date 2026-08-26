@@ -4504,15 +4504,17 @@ class SessionView {
         else this.hideApproval();
         this.scrollBottom(true);
         break;
-      case "event":
+      case "event": {
+        const follow = this.atBottom();   // before clearLive reshapes the tail
         this.clearLive();
-        this.renderEvent(d.event, true);
+        this.renderEvent(d.event, true, follow);
         if (d.event.kind === "user") {
           if (d.event.data && d.event.data.text) this.history.push(d.event.data.text);
           if (this._forceScroll) { this._forceScroll = false; this.scrollBottom(true); }
         }
         this.syncLiveStatus();
         break;
+      }
       case "delta":
         this.appendLive(d.block, d.text);
         break;
@@ -4678,12 +4680,14 @@ class SessionView {
     this.inner.appendChild(btn);
   }
 
-  renderEvent(ev, live) {
+  renderEvent(ev, live, follow = null) {
     const node = this.buildEventNode(ev);
-    if (node) {
-      this.inner.appendChild(node);
-      this.scrollBottom(!live);
-    }
+    if (!node) return;
+    this.inner.appendChild(node);
+    /* A decision sampled before the append beats re-measuring after it, which
+       the new node's own height would skew. */
+    if (follow === null) this.scrollBottom(!live);
+    else if (follow) this.scrollBottom(true);
   }
 
   /* Dividers mark where the configuration changed, and name it on both sides.
@@ -4841,6 +4845,7 @@ class SessionView {
 
   /* live streaming bubble */
   appendLive(block, text) {
+    const follow = this.atBottom();
     if (this.liveEl && this.liveKind !== block) this.clearLive();
     if (!this.liveEl) {
       this.liveKind = block;
@@ -4861,7 +4866,7 @@ class SessionView {
     }
     const target = block === "thinking" ? this.liveEl.querySelector(".tbody") : this.liveEl.querySelector(".md");
     target.textContent += text;
-    this.scrollBottom(false);
+    if (follow) this.scrollBottom(true);
   }
   clearLive() {
     if (this.liveEl) { this.liveEl.remove(); this.liveEl = null; this.liveKind = null; }
@@ -4889,14 +4894,24 @@ class SessionView {
       this.statusRow.querySelector(".think-label").textContent = text;
     }
     if (this.inner.lastChild !== this.statusRow) {
+      const follow = this.atBottom();
       this.inner.appendChild(this.statusRow);   // stays the last thing in the transcript
-      this.scrollBottom(false);
+      if (follow) this.scrollBottom(true);
     }
   }
 
+  /* Is the transcript following the tail? Sample this BEFORE changing the DOM.
+     Finishing a turn swaps the streaming block - which holds the raw markdown
+     as plain text - for its rendered form, and a message with a table or lists
+     grows by several hundred pixels in that one step. Measured afterwards, that
+     growth is indistinguishable from the user having scrolled up, so the view
+     stops following and strands them at the top of the final message. */
+  atBottom() {
+    return this.scroll.scrollHeight - this.scroll.scrollTop - this.scroll.clientHeight < 160;
+  }
+
   scrollBottom(force) {
-    const nearBottom = this.scroll.scrollHeight - this.scroll.scrollTop - this.scroll.clientHeight < 160;
-    if (force || nearBottom) this.scroll.scrollTop = this.scroll.scrollHeight;
+    if (force || this.atBottom()) this.scroll.scrollTop = this.scroll.scrollHeight;
   }
 
   /* ---- outgoing ---- */
