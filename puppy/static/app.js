@@ -130,6 +130,10 @@ function dirPickRow(kind, label) {
   else if (kind === "dp-folder") slot.appendChild(folderIcon(14));
   button.appendChild(slot);
   button.appendChild(el("span", "dp-name", label));
+  /* Rows never take focus from the field that owns them. A row that did would
+     fire focusout, closing the list before its own click could land - and the
+     re-render would then destroy the very node holding the focus. */
+  button.addEventListener("mousedown", event => event.preventDefault());
   return button;
 }
 
@@ -174,11 +178,45 @@ function wireDirectoryPicker(input, box, bidFor) {
       }
     } catch (error) { box.classList.add("hidden"); }
   };
+  const close = () => {
+    box.classList.add("hidden");
+    shown = null;   // a fresh open starts at the top of its listing
+  };
   input.addEventListener("focus", browse);
+  /* Escape already has focus in the field, so clicking back in fires no focus
+     event: reopen on a click the list is closed for. */
+  input.addEventListener("click", () => {
+    if (box.classList.contains("hidden")) browse();
+  });
   input.addEventListener("input", () => {
     clearTimeout(timer);
     timer = setTimeout(browse, 350);
   });
+
+  /* Focus leaving the pair closes the list. Tabbing from the field into a row
+     stays inside it, so relatedTarget is checked against both. */
+  const leaving = event => {
+    const to = event.relatedTarget;
+    if (to && (to === input || box.contains(to))) return;
+    clearTimeout(timer);
+    close();
+  };
+  input.addEventListener("focusout", leaving);
+  box.addEventListener("focusout", leaving);
+
+  /* Escape closes the list and stops there. Marking the event handled is what
+     keeps an enclosing modal open - its own Escape handler skips a
+     defaultPrevented event - so the first press dismisses the list and a
+     second one closes the modal. */
+  const escape = event => {
+    if (event.key !== "Escape" || box.classList.contains("hidden")) return;
+    event.preventDefault();
+    clearTimeout(timer);
+    close();
+    input.focus();
+  };
+  input.addEventListener("keydown", escape);
+  box.addEventListener("keydown", escape);
   return browse;
 }
 
