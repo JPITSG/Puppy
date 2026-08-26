@@ -533,7 +533,14 @@ select.choice-native{display:none!important}
     overflow:hidden;
     transition:width .24s var(--ease),opacity .2s var(--ease);
   }
-  .app.side-animating .side>*{min-width:var(--side-w-open,256px)}
+  /* Contents only. The resize grip is absolutely positioned and 7px wide, and
+     stretching it to the open width turned it into a full-width band sitting
+     under the cursor - hovered for the whole slide, lighting its accent line
+     at the viewport edge and then fading it out again at the settled edge. */
+  .app.side-animating .side>*:not(.side-resize){min-width:var(--side-w-open,256px)}
+  /* A moving edge cannot be grabbed, and sweeping it under a resting cursor
+     should not light it either: no hit-testing, so :hover never matches. */
+  .app.side-animating .side-resize{pointer-events:none}
   /* the resting collapsed state: no transition, so a reload starts settled */
   .app.side-collapsed .side{width:0;opacity:0;visibility:hidden}
   /* going out, stay visible for the whole slide and only then leave the tree */
