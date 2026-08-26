@@ -481,6 +481,7 @@ select.choice-native{display:none!important}
   min-height:42px; /* reserve the populated tab height even when .tabs is empty */
   background:var(--bg);
   position:relative;z-index:20;flex-shrink:0;
+  width:100%;max-width:100%;min-width:0;overflow:hidden;
 }
 .tabbar::after{
   content:"";position:absolute;left:0;right:0;bottom:0;height:1px;z-index:-1;pointer-events:none;
@@ -500,14 +501,31 @@ select.choice-native{display:none!important}
 .tabbar .burger svg{display:block}
 /* the visual box stays 26px; the tap target fills the bar's height */
 .tabbar .burger::after,.tab-add-wrap .icon-btn::after{content:"";position:absolute;inset:-8px -6px}
+/* Give the strip a definite zero flex basis. In the phone workspace the tree
+   deliberately uses max-content sizing so saved split panes can be panned;
+   without this viewport, a long tab collection also became max-content and
+   widened an otherwise single-pane workspace. */
+.tab-scroll{
+  --tab-fade-width:34px;
+  display:flex;position:relative;align-self:stretch;
+  flex:1 1 0;width:0;min-width:0;overflow:hidden;
+}
+.tab-scroll::after{
+  content:"";position:absolute;z-index:4;top:0;right:0;bottom:0;
+  width:var(--tab-fade-width);pointer-events:none;opacity:0;
+  background:linear-gradient(90deg,transparent,var(--bg) 88%);
+  transition:opacity .16s var(--ease);
+}
+.tab-scroll.can-scroll-right::after{opacity:1}
 /* The bar's 42px min-height is taller than a tab, and a centred tab would sit
    half a pixel above the bar's bottom edge - invisible at 100% zoom, but at
    other zoom levels that slack becomes a real device row and the bar's divider
    reappears underneath the active tab. Stretch the strip and seat the tabs on
    the bottom edge so the active tab always covers the divider exactly. */
 .tabs{
-  display:flex;gap:4px;overflow-x:auto;flex:1;min-width:0;scrollbar-width:none;
-  align-self:stretch;align-items:flex-end;
+  display:flex;gap:4px;overflow-x:auto;flex:1 1 auto;width:100%;min-width:0;
+  scrollbar-width:none;align-self:stretch;align-items:flex-end;
+  overscroll-behavior-x:contain;-webkit-overflow-scrolling:touch;
 }
 .tabs::-webkit-scrollbar{display:none}
 .tab{

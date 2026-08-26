@@ -775,6 +775,7 @@ function enhanceChoiceSelect(select) {
 window.addEventListener("resize", () => {
   closeChoiceMenu();
   closeMenusToggling(null);
+  requestAnimationFrame(syncAllTabOverflow);
 });
 document.addEventListener("scroll", (event) => {
   if (openChoiceControl && (!openChoiceControl.menu ||
@@ -2688,6 +2689,9 @@ let tabAddAnchor = null;
 let renderedTabPanes = new Map();
 let renderedWorkspaceRevision = -1;
 let renderedWorkspaceSignature = "";
+const tabScrollPositions = new Map();
+let tabScrollLayoutFrame = null;
+let pendingTabScrollFocus = null;
 
 function findSessionMeta(bid, sid) {
   return sessionsFor(bid).find(s => s.id === sid);
@@ -2924,6 +2928,79 @@ function renderTabNode(t, pane, tabsRoot) {
   return tab;
 }
 
+function syncTabOverflow(tabsRoot) {
+  if (!tabsRoot) return;
+  const viewport = tabsRoot.parentElement;
+  if (!viewport || !viewport.classList.contains("tab-scroll")) return;
+  const maximum = Math.max(0, tabsRoot.scrollWidth - tabsRoot.clientWidth);
+  viewport.classList.toggle("can-scroll-right",
+    maximum > 1 && tabsRoot.scrollLeft < maximum - 1);
+}
+
+function syncAllTabOverflow() {
+  document.querySelectorAll(".tab-scroll > .tabs").forEach(syncTabOverflow);
+}
+
+function wireTabScrolling(tabsRoot, paneId) {
+  tabsRoot.addEventListener("scroll", () => {
+    tabScrollPositions.set(paneId, tabsRoot.scrollLeft);
+    syncTabOverflow(tabsRoot);
+  }, { passive: true });
+}
+
+function revealTabInStrip(tabId) {
+  const pane = workspacePaneForTab(tabId);
+  if (!pane) return;
+  const paneRoot = Array.from(document.querySelectorAll(".workspace-pane"))
+    .find(node => node.dataset.paneId === pane.id);
+  if (!paneRoot) return;
+  const tabsRoot = paneRoot.querySelector(":scope > .tabbar > .tab-scroll > .tabs");
+  if (!tabsRoot) return;
+  const tab = Array.from(tabsRoot.children)
+    .find(node => node.classList.contains("tab") && node.dataset.tabId === tabId);
+  if (!tab) return;
+
+  const stripRect = tabsRoot.getBoundingClientRect();
+  const tabRect = tab.getBoundingClientRect();
+  const maximum = Math.max(0, tabsRoot.scrollWidth - tabsRoot.clientWidth);
+  const viewport = tabsRoot.parentElement;
+  const fadeWidth = Math.max(0, parseFloat(
+    getComputedStyle(viewport).getPropertyValue("--tab-fade-width")) || 0);
+  let target = tabsRoot.scrollLeft;
+  if (tabRect.left < stripRect.left) target -= stripRect.left - tabRect.left;
+  else {
+    const visibleRight = stripRect.right - (maximum > target + 1 ? fadeWidth : 0);
+    if (tabRect.right > visibleRight) target += tabRect.right - visibleRight;
+  }
+  target = Math.max(0, Math.min(maximum, target));
+  if (Math.abs(target - tabsRoot.scrollLeft) < 1) {
+    syncTabOverflow(tabsRoot);
+    return;
+  }
+  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  try {
+    tabsRoot.scrollTo({ left: target, behavior: reducedMotion ? "auto" : "smooth" });
+  } catch (error) {
+    tabsRoot.scrollLeft = target;
+  }
+}
+
+function finishTabScrollLayout(focusTabId = null) {
+  if (focusTabId) pendingTabScrollFocus = focusTabId;
+  if (tabScrollLayoutFrame !== null) return;
+  tabScrollLayoutFrame = requestAnimationFrame(() => {
+    tabScrollLayoutFrame = null;
+    const targetTabId = pendingTabScrollFocus;
+    pendingTabScrollFocus = null;
+    document.querySelectorAll(".tab-scroll > .tabs").forEach(tabsRoot => {
+      const saved = tabScrollPositions.get(tabsRoot.dataset.paneId);
+      if (saved != null) tabsRoot.scrollLeft = saved;
+    });
+    if (targetTabId) revealTabInStrip(targetTabId);
+    syncAllTabOverflow();
+  });
+}
+
 function dropTabOnToolbar(pane, tabsRoot, event) {
   if (!dragTab) return;
   acceptReorderDrag(event);
@@ -3132,13 +3209,15 @@ function renderWorkspacePane(pane) {
   });
   const tabbar = el("div", "tabbar");
   tabbar.appendChild(burgerButton());
+  const tabScroll = el("div", "tab-scroll");
   const tabsRoot = el("div", "tabs");
   tabsRoot.dataset.paneId = pane.id;
   for (const id of pane.tabs) {
     const tab = state.tabs.find(item => item.id === id);
     if (tab) tabsRoot.appendChild(renderTabNode(tab, pane, tabsRoot));
   }
-  tabbar.appendChild(tabsRoot);
+  tabScroll.appendChild(tabsRoot);
+  tabbar.appendChild(tabScroll);
   const addWrap = el("div", "tab-add-wrap");
   const add = el("button", "icon-btn", "＋");
   add.type = "button";
@@ -3146,6 +3225,7 @@ function renderWorkspacePane(pane) {
   add.onclick = event => showTabAddMenu(pane.id, add, event);
   addWrap.appendChild(add);
   tabbar.appendChild(addWrap);
+  wireTabScrolling(tabsRoot, pane.id);
   wirePaneTabbar(tabbar, tabsRoot, pane);
   root.appendChild(tabbar);
 
@@ -3196,8 +3276,9 @@ function refreshRenderedTabbars() {
     const root = Array.from(document.querySelectorAll(".workspace-pane"))
       .find(node => node.dataset.paneId === pane.id);
     if (!root) return false;
-    const tabsRoot = root.querySelector(":scope > .tabbar > .tabs");
+    const tabsRoot = root.querySelector(":scope > .tabbar > .tab-scroll > .tabs");
     if (!tabsRoot) return false;
+    tabScrollPositions.set(pane.id, tabsRoot.scrollLeft);
     const nodes = [];
     for (const id of pane.tabs) {
       const tab = state.tabs.find(item => item.id === id);
@@ -3205,6 +3286,7 @@ function refreshRenderedTabbars() {
     }
     tabsRoot.innerHTML = "";
     for (const node of nodes) tabsRoot.appendChild(node);
+    tabsRoot.scrollLeft = tabScrollPositions.get(pane.id) || 0;
   }
   return true;
 }
@@ -3222,6 +3304,7 @@ function renderTabs(focusTabId = null) {
       const view = state.views[focusTabId];
       if (view && view.onShow) view.onShow(true);
     }
+    finishTabScrollLayout(focusTabId);
     saveTabs();
     return;
   }
@@ -3260,6 +3343,7 @@ function renderTabs(focusTabId = null) {
     const view = state.views[id];
     if (view && view.onShow) view.onShow(focus);
   }
+  finishTabScrollLayout(focusTabId || state.active);
   requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));
   saveTabs();
 }
