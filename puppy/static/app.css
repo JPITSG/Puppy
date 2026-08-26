@@ -1113,8 +1113,11 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
    never raises a soft keyboard (the stage is user-select:none, which iOS treats
    as uneditable), and on desktop an invisible one looks like a dead button. */
 .br-type{display:flex;align-items:center;gap:6px;flex:0 0 auto;padding:0 8px 2px}
-.br-type .icon-btn{width:30px;height:30px;flex:0 0 auto}
 .br-type .btn-sm{flex:0 0 auto}
+/* Backspace carries the same border and ink as Enter beside it: as a bare
+   dim icon its arrow-and-cross blurred into a smudge at this size. */
+.br-type-bksp{min-width:0;padding-left:11px;padding-right:11px}
+.br-type-bksp svg{display:block}
 .br-ime{
   flex:1 1 60px;min-width:0;height:30px;padding:0 10px;
   background:var(--panel2);border:1px solid var(--acc);border-radius:var(--r-md);

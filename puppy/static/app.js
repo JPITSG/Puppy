@@ -5734,10 +5734,11 @@ class BrowserView {
           autocorrect="off" spellcheck="false" enterkeyhint="enter"
           placeholder="Type here - keys go to the page"
           aria-label="Send typing and keys to the page">
-        <button class="icon-btn br-type-bksp" type="button" aria-label="Backspace">
-          <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor"
-            stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M14 3.5H6.2L2 8l4.2 4.5H14z"/><path d="M8.4 6.4l3.2 3.2M11.6 6.4l-3.2 3.2"/></svg>
+        <button class="btn btn-sm br-type-bksp" type="button" aria-label="Backspace">
+          <svg viewBox="0 0 22 16" width="17" height="13" fill="none" stroke="currentColor"
+            stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M20.2 2.4H7.6L1.6 8l6 5.6h12.6z"/>
+            <path d="M10.9 5.9l5.2 4.2M16.1 5.9l-5.2 4.2"/></svg>
         </button>
         <button class="btn btn-sm br-type-enter" type="button">Enter</button>
       </div>
