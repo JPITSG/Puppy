@@ -469,6 +469,44 @@ async def exercise_node(url: str, token: str, expected_version: str,
                 assert response.status == 413, actual_limit
             assert actual_limit["uploads"]["max_file_size_mb"] == 1
             assert set(uploaded_path.parent.parent.iterdir()) == existing_uploads
+            # An uploaded image reads back so a preview survives a page reload,
+            # but only as a declared raster type with sniffing off - this route
+            # must never become a general on-origin file server.
+            async with http.get(
+                    url + f"/api/sessions/{normal['id']}/upload/{uploaded['upload_id']}",
+                    headers=good, ssl=pinned) as response:
+                served = await response.read()
+                assert response.status == 415, (response.status, served)
+            png = (b"\x89PNG\r\n\x1a\n" + b"preview-bytes")
+            async with http.post(
+                    url + f"/api/sessions/{normal['id']}/upload", headers={
+                        **good, "Content-Type": "application/octet-stream",
+                        "X-Puppy-Filename": "pasted.png",
+                        "X-Puppy-Size": str(len(png)),
+                    }, data=png, ssl=pinned) as response:
+                image_upload = await response.json()
+                assert response.status == 200, image_upload
+            async with http.get(
+                    url + f"/api/sessions/{normal['id']}/upload/{image_upload['upload_id']}",
+                    headers=good, ssl=pinned) as response:
+                assert response.status == 200, await response.text()
+                assert await response.read() == png
+                assert response.headers["Content-Type"].startswith("image/png")
+                assert response.headers["X-Content-Type-Options"] == "nosniff"
+                assert "no-store" not in response.headers.get("Cache-Control", "")
+            # unauthenticated readers get nothing, and unknown ids are not found
+            async with http.get(
+                    url + f"/api/sessions/{normal['id']}/upload/{image_upload['upload_id']}",
+                    ssl=pinned) as response:
+                assert response.status == 401, await response.text()
+            async with http.get(
+                    url + f"/api/sessions/{normal['id']}/upload/1700000000000-abcdef0123",
+                    headers=good, ssl=pinned) as response:
+                assert response.status == 404, await response.text()
+            async with http.delete(
+                    url + f"/api/sessions/{normal['id']}/upload/{image_upload['upload_id']}",
+                    headers=good, ssl=pinned) as response:
+                assert response.status == 200, await response.text()
             async with http.delete(
                     url + f"/api/sessions/{normal['id']}/upload/{uploaded['upload_id']}",
                     headers=good, ssl=pinned) as response:

@@ -192,6 +192,14 @@ through the authenticated `/api/uploads/settings` endpoint. The receiver checks
 both declared and actual byte counts, so controller or client-side checks are
 only conveniences and cannot bypass the node's limit.
 
+`GET /api/sessions/{sid}/upload/{upload_id}` reads one stored image back, so a
+console that has reloaded can still show its attachment previews instead of bare
+file names. It is deliberately narrow: the node advertises it with the additive
+`upload-preview` capability, serves only PNG/JPEG/WebP/GIF (never SVG, which is
+scriptable) with an explicit content type and `nosniff`, and takes no
+caller-supplied filename - an upload directory holds exactly one file. Older
+nodes omit the capability and their previews stay as named cards.
+
 Controllers stream remote uploads rather than buffering them and preserve TLS
 pinning, token authentication, redirect rejection, and the receiving node's
 authority over the limit. Active transfers temporarily make upgrade readiness

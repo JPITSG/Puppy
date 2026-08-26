@@ -24,6 +24,15 @@ SIZE_HEADER = "X-Puppy-Size"
 STREAM_CHUNK_BYTES = 256 * 1024
 MAX_FILENAME_BYTES = 180
 UPLOAD_ID = re.compile(r"^\d{13}-[0-9a-f]{10}$")
+# Previews are served for these raster types only. SVG is deliberately absent:
+# it is scriptable, and this route hands bytes back on the console's own origin.
+PREVIEW_CONTENT_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
 
 _active_uploads = 0
 
@@ -97,6 +106,29 @@ def _discard_partial(directory: Path, partial: Path) -> None:
         pass
     except OSError:
         log.warning("empty partial upload directory retained at %s", directory)
+
+
+def _validated_upload_file(session_id: int, upload_id: str) -> Path:
+    """The one regular file inside an upload directory, or raise.
+
+    Discarding and previewing share this so a single set of checks governs both:
+    the directory and its file must be real, non-symlink, owned by this service,
+    and the directory must hold exactly the one file the upload wrote.
+    """
+    directory = Path(config.DATA_DIR).resolve() / "uploads" / str(int(session_id)) / upload_id
+    info = directory.lstat()   # FileNotFoundError is the caller's to interpret
+    uid_getter = getattr(os, "geteuid", None) or getattr(os, "getuid")
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or \
+            info.st_uid != int(uid_getter()):
+        raise OSError("upload storage is not a private service-owned directory")
+    children = list(directory.iterdir())
+    if len(children) != 1:
+        raise OSError("upload directory has unexpected contents")
+    child_info = children[0].lstat()
+    if not stat.S_ISREG(child_info.st_mode) or stat.S_ISLNK(child_info.st_mode) or \
+            child_info.st_uid != int(uid_getter()):
+        raise OSError("uploaded file failed safety validation")
+    return children[0]
 
 
 async def h_settings_get(_request: web.Request):
@@ -218,26 +250,16 @@ async def h_session_upload_delete(request: web.Request):
     upload_id = request.match_info.get("upload_id", "")
     if not UPLOAD_ID.fullmatch(upload_id):
         return web.json_response({"error": "invalid upload id"}, status=400)
-    directory = Path(config.DATA_DIR).resolve() / "uploads" / str(session_id) / upload_id
     try:
-        info = directory.lstat()
+        target = _validated_upload_file(session_id, upload_id)
     except FileNotFoundError:
         return web.json_response({"ok": True, "removed": False})
-    uid_getter = getattr(os, "geteuid", None) or getattr(os, "getuid")
-    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or \
-            info.st_uid != int(uid_getter()):
+    except OSError:
         return web.json_response({"error": "upload storage failed safety validation"},
                                  status=409)
     try:
-        children = list(directory.iterdir())
-        if len(children) != 1:
-            raise OSError("upload directory has unexpected contents")
-        child_info = children[0].lstat()
-        if not stat.S_ISREG(child_info.st_mode) or stat.S_ISLNK(child_info.st_mode) or \
-                child_info.st_uid != int(uid_getter()):
-            raise OSError("uploaded file failed safety validation")
-        children[0].unlink()
-        directory.rmdir()
+        target.unlink()
+        target.parent.rmdir()
     except OSError as exc:
         log.warning("session %s upload %s could not be discarded: %s",
                     session_id, upload_id, exc)
@@ -245,10 +267,49 @@ async def h_session_upload_delete(request: web.Request):
     return web.json_response({"ok": True, "removed": True})
 
 
+async def h_session_upload_preview(request: web.Request):
+    """Serve one uploaded image back so a preview survives a page reload.
+
+    Deliberately narrow rather than a general file route: only the raster types
+    the composer previews, always with an explicit content type and sniffing
+    off, and never a caller-supplied filename - the upload directory holds
+    exactly one file, so there is no path for a traversal to take.
+    """
+    session_id = int(request.match_info["sid"])
+    if db.get_session(session_id) is None:
+        return web.json_response({"error": "session not found"}, status=404)
+    upload_id = request.match_info.get("upload_id", "")
+    if not UPLOAD_ID.fullmatch(upload_id):
+        return web.json_response({"error": "invalid upload id"}, status=400)
+    try:
+        target = _validated_upload_file(session_id, upload_id)
+    except FileNotFoundError:
+        return web.json_response({"error": "upload not found"}, status=404)
+    except OSError as exc:
+        log.warning("session %s upload %s failed preview validation: %s",
+                    session_id, upload_id, exc)
+        return web.json_response({"error": "upload storage failed safety validation"},
+                                 status=409)
+    content_type = PREVIEW_CONTENT_TYPES.get(target.suffix.lower())
+    if content_type is None:
+        return web.json_response({"error": "this upload has no image preview"}, status=415)
+    return web.FileResponse(target, headers={
+        "Content-Type": content_type,
+        "Content-Disposition": "inline",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+        # an upload id names immutable bytes, so a reload can reuse them
+        "Cache-Control": "private, max-age=86400, immutable",
+    })
+
+
 def register(app: web.Application) -> None:
     app.router.add_get("/api/uploads/settings", h_settings_get)
     app.router.add_patch("/api/uploads/settings", h_settings_patch)
     app.router.add_post("/api/sessions/{sid:\\d+}/upload", h_session_upload)
+    app.router.add_get(
+        "/api/sessions/{sid:\\d+}/upload/{upload_id:[0-9]{13}-[0-9a-f]{10}}",
+        h_session_upload_preview)
     app.router.add_delete(
         "/api/sessions/{sid:\\d+}/upload/{upload_id:[0-9]{13}-[0-9a-f]{10}}",
         h_session_upload_delete)

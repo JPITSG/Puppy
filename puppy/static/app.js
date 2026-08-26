@@ -2192,6 +2192,23 @@ function backendHasCapability(backend, capability) {
   return Array.isArray(backend.capabilities) && backend.capabilities.includes(capability);
 }
 
+function backendSupportsUploadPreviews(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(b => b.id === bid);
+  return backendHasCapability(backend, "upload-preview");
+}
+
+/* An upload's stored path ends in its session id, its upload id, and its own
+   name. That is enough to ask the node that holds it for the bytes back, so a
+   preview no longer dies with the page's blob URL. */
+function uploadPreviewUrl(bid, storedPath) {
+  if (!backendSupportsUploadPreviews(bid)) return "";
+  const match = /\/uploads\/(\d+)\/(\d{13}-[0-9a-f]{10})\/[^/]+$/
+    .exec(String(storedPath || ""));
+  if (!match) return "";
+  return apiPath(bid, `sessions/${match[1]}/upload/${match[2]}`);
+}
+
 function backendSupportsScratch(bid) {
   if (!bid) return true;
   const backend = state.backends.find(b => b.id === bid);
@@ -4034,15 +4051,9 @@ function parseAttachmentMarker(line) {
    show; "" gives the named-file card, which is also what an image falls back
    to once its local preview is gone. */
 function attachmentChipNode(a, url, uploading = false) {
-  const chip = el("span", "attach-chip " + (url ? "image" : "file") +
-    (uploading ? " uploading" : ""));
-  if (url) {
-    const img = el("img", "attach-thumb");
-    img.src = url;
-    img.alt = a.name;
-    chip.appendChild(img);
-    if (uploading) chip.appendChild(el("span", "attach-state", "uploading"));
-  } else {
+  const chip = el("span", "attach-chip");
+  const asFile = () => {
+    chip.className = "attach-chip file" + (uploading ? " uploading" : "");
     const icon = el("span", "attach-file-icon");
     icon.appendChild(attachmentFileIcon());
     const copy = el("span", "attach-file-copy");
@@ -4051,7 +4062,23 @@ function attachmentChipNode(a, url, uploading = false) {
       `${uploading ? "uploading · " : ""}${a.sizeText || fmtBytes(a.size)}`));
     chip.appendChild(icon);
     chip.appendChild(copy);
-  }
+  };
+  if (!url) { asFile(); return chip; }
+  chip.className = "attach-chip image" + (uploading ? " uploading" : "");
+  const img = el("img", "attach-thumb");
+  img.alt = a.name;
+  /* A node too old to serve previews, or an upload since discarded, answers
+     with an error rather than bytes: keep the remove control and fall back to
+     the named card the composer already shows for a preview-less image. */
+  img.onerror = () => {
+    const remove = chip.querySelector(".attach-x");
+    chip.innerHTML = "";
+    asFile();
+    if (remove) chip.appendChild(remove);
+  };
+  img.src = url;
+  chip.appendChild(img);
+  if (uploading) chip.appendChild(el("span", "attach-state", "uploading"));
   return chip;
 }
 
@@ -4839,10 +4866,11 @@ class SessionView {
         if (text) linkifyInto(n, text);
         const strip = el("div", "attach-strip sent");
         for (const a of attachments) {
-          /* Previews live only as long as this view holds the blob URL, so an
-             older or reloaded image reads as its named card. */
-          const chip = attachmentChipNode(
-            a, a.preview ? (this.sentThumbs.get(a.path) || "") : "");
+          /* The blob this view still holds, else the node's stored copy, so a
+             reload keeps its thumbnails rather than a row of named cards. */
+          const chip = attachmentChipNode(a, a.preview
+            ? (this.sentThumbs.get(a.path) || uploadPreviewUrl(this.tab.bid, a.path))
+            : "");
           chip.setAttribute("aria-label", `${a.name} · ${a.path}`);
           strip.appendChild(chip);
         }
@@ -5180,8 +5208,9 @@ class SessionView {
     this.attachStrip.innerHTML = "";
     this.attachStrip.classList.toggle("hidden", !this.attachments.length);
     for (const a of this.attachments) {
-      // a recalled image without its original preview falls back to a named chip
-      const chip = attachmentChipNode(a, a.preview && a.url ? a.url : "", a.uploading);
+      // the local blob while this page still holds it, else the node's copy
+      const chip = attachmentChipNode(a, a.preview
+        ? (a.url || uploadPreviewUrl(this.tab.bid, a.path)) : "", a.uploading);
       const x = el("button", "attach-x");
       x.type = "button";
       x.appendChild(xIcon(12));
