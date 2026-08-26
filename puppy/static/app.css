@@ -269,8 +269,14 @@ a{color:var(--acc2)}
 /* -8px pulls the icon column left so the dots' visual inset matches the 14px right inset */
 .foot-ico{width:24px;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-left:-8px}
 .foot-eng .st{margin-left:auto;font-size:10px;font-family:var(--mono);color:var(--txt3)}
-.foot-eng .st.ok{color:var(--ok)}
-.foot-eng .st.bad{color:var(--err)}
+/* health and quota colour independently; the separator stays neutral so it
+   never looks like it belongs to whichever side has gone amber or red */
+.foot-eng .st-word.ok{color:var(--ok)}
+.foot-eng .st-word.bad{color:var(--err)}
+.foot-eng .st-word.stale{color:var(--warn)}
+.foot-eng .st-sep{color:var(--txt3)}
+.foot-eng .st-quota{color:var(--ok)}
+.foot-eng .st-quota.low{color:var(--err)}
 .foot-usage-refresh{
   position:relative;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;
   width:13px;height:13px;margin:0;padding:0;border:0;border-radius:var(--btn-r);

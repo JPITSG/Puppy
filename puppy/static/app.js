@@ -2906,6 +2906,9 @@ function wireSessionDropZone(surface, body, bid) {
   });
 }
 
+// below this much of the weekly allowance remaining, the figure reads as a warning
+const QUOTA_LOW_PERCENT = 33;
+
 function weeklyQuotaLeft(e) {
   // driver-provided quota (codex: parsed from its own records), else scan the
   // stored rate-limit info for a weekly window - tolerant of either shape
@@ -3055,9 +3058,21 @@ function renderFootEngines() {
       row.appendChild(ico);
       row.appendChild(document.createTextNode(e.label));
       const pct = weeklyQuotaLeft(e);
-      const stTxt = !e.installed ? "missing" : (e.auth === "ok" ? "ready" : "no auth");
-      const st = el("span", "st " + (e.installed && e.auth === "ok" ? "ok" : "bad"),
-        stTxt + (pct != null ? ` · ${Math.round(pct)}% wk` : ""));
+      const healthy = e.installed && e.auth === "ok";
+      /* Two independent signals in one line, so each gets its own element: the
+         engine's own health, and what is left of the weekly allowance. Sharing
+         a colour would let a low quota make a working engine look broken. */
+      const st = el("span", "st");
+      const word = el("span", "st-word " + (healthy ? "ok" : "bad"),
+        !e.installed ? "missing" : (e.auth === "ok" ? "ready" : "no auth"));
+      // ready, but the CLI is behind its latest release
+      if (healthy && e.update_available === true) word.classList.add("stale");
+      st.appendChild(word);
+      if (pct != null) {
+        st.appendChild(el("span", "st-sep", " · "));
+        st.appendChild(el("span", "st-quota" + (pct < QUOTA_LOW_PERCENT ? " low" : ""),
+          `${Math.round(pct)}% wk`));
+      }
       row.appendChild(st);
       if (e.key === "codex" && e.installed && e.auth === "ok" &&
           backendSupportsManualUsageRefresh(g.bid)) {
