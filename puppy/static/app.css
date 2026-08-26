@@ -37,6 +37,7 @@
   /* one elevated material for select popups, context menus and tab menus */
   --float-menu-bg:var(--panel); --float-menu-hover:var(--acc-dim);
   --float-menu-shadow:0 18px 42px -14px rgba(0,0,0,.78),inset 0 1px 0 var(--btn-top);
+  --chat-head-shadow:0 10px 22px -14px rgba(0,0,0,.82);
   /* tooltip bubble: frosted sibling of the float-menu material (see #tip) */
   --tip-bg:linear-gradient(180deg,rgba(255,255,255,.06),rgba(255,255,255,0) 58%),rgba(16,19,26,.92);
   --tip-line:rgba(255,255,255,.17);
@@ -662,7 +663,8 @@ select.choice-native{display:none!important}
 /* ---------- chat view ---------- */
 .chat-head{
   display:flex;align-items:center;gap:9px;padding:9px 14px;
-  background:transparent;flex-wrap:nowrap;flex-shrink:0;position:relative;min-width:0;
+  background:transparent;flex-wrap:nowrap;flex-shrink:0;position:relative;z-index:2;min-width:0;
+  box-shadow:var(--chat-head-shadow);
 }
 .chat-head::after{
   content:"";position:absolute;left:0;right:0;bottom:0;height:1px;pointer-events:none;
@@ -1488,6 +1490,7 @@ html.light{
   --glow-err:0 2px 8px -5px rgba(207,56,80,.42);
   --danger-line:rgba(214,69,93,.4); --danger-line-hi:rgba(214,69,93,.62);
   --danger-hov:rgba(214,69,93,.15); --danger-press:rgba(214,69,93,.22);
+  --chat-head-shadow:0 10px 20px -13px rgba(15,23,42,.30);
   --tip-bg:linear-gradient(180deg,rgba(255,255,255,.92),rgba(255,255,255,0) 58%),rgba(250,252,255,.93);
   --tip-line:rgba(15,23,42,.17);
   --tip-shadow:0 10px 26px -12px rgba(15,23,42,.4),inset 0 1px 0 #fff;
