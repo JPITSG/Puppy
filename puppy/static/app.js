@@ -141,6 +141,33 @@ function dirPickRow(kind, label) {
    still be typed or pasted into) and the list is a way to walk to a path
    without knowing how to spell it. `bidFor` names the node to browse, so a
    picker can follow a backend selector or stay pinned to this instance. */
+/* True while a pointer press is in flight. Anything that reacts to focus loss
+   needs to know: the press moves focus on the way DOWN, so collapsing in-flow
+   content there reflows the page between mousedown and mouseup. The element
+   the user aimed at slides out from under the cursor and the browser never
+   dispatches the click - the gesture is spent closing something instead of
+   doing what it was for. */
+let pointerPressed = false;
+document.addEventListener("pointerdown", () => { pointerPressed = true; }, true);
+for (const kind of ["pointerup", "pointercancel"])
+  document.addEventListener(kind, () => { pointerPressed = false; }, true);
+
+/* Run `action` after the press in flight has been released and the click it
+   produces has been dispatched, or straight away when nothing is pressed - so
+   a keyboard tab-out keeps closing instantly. */
+function afterPointerRelease(action) {
+  if (!pointerPressed) { action(); return; }
+  const finish = () => {
+    for (const kind of ["pointerup", "pointercancel"])
+      document.removeEventListener(kind, finish, true);
+    // a task rather than a microtask: the click follows the release, and this
+    // has to land after it
+    setTimeout(action, 0);
+  };
+  for (const kind of ["pointerup", "pointercancel"])
+    document.addEventListener(kind, finish, true);
+}
+
 function wireDirectoryPicker(input, box, bidFor) {
   let timer = null;
   let shown = null;   // the path the list is currently showing
@@ -199,7 +226,14 @@ function wireDirectoryPicker(input, box, bidFor) {
     const to = event.relatedTarget;
     if (to && (to === input || box.contains(to))) return;
     clearTimeout(timer);
-    close();
+    /* The list is in normal flow, so closing it lifts everything below by up
+       to its full height. Held until the press that took the focus has landed,
+       the click reaches what was aimed at and the list still closes. */
+    afterPointerRelease(() => {
+      const focused = document.activeElement;
+      if (focused === input || box.contains(focused)) return;   // focus came back
+      close();
+    });
   };
   input.addEventListener("focusout", leaving);
   box.addEventListener("focusout", leaving);

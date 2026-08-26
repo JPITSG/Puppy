@@ -685,6 +685,12 @@ async def main() -> None:
 
             ui_source = (BASE / "puppy" / "static" / "app.js").read_text()
             check_quota_math(ui_source)
+            # The directory list sits in normal flow, so closing it on focus
+            # loss reflows the page. Held until the press that took the focus
+            # has landed, a click on OK is not swallowed by the close.
+            assert "afterPointerRelease(() => {" in ui_source
+            assert ui_source.count("let pointerPressed = false;") == 1
+            assert "close();" in ui_source
             assert 'case "browser_activity"' in ui_source
             assert "`Browser ${id} @ ${backendName(bid)}`" in ui_source
             assert "{ activate: false, afterTabId: sessionTabId, sid }" in ui_source
