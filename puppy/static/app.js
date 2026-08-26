@@ -552,6 +552,36 @@ function suppressContextGestureActivation(target) {
   }, true);
 }
 
+/* Native HTML drag and touch long-press compete for the same gesture on mobile.
+   Disable draggability for that touch before the browser runs its default
+   pointerdown action, then restore it when the gesture ends. The dragstart
+   check is a fallback for engines that already committed to a native drag.
+   A later mouse pointerdown re-enables ordinary desktop reordering. */
+function guardNativeTouchDrag(target) {
+  let touchOrigin = false;
+  const startTouch = () => {
+    touchOrigin = true;
+    target.draggable = false;
+  };
+  const finishTouch = () => { target.draggable = true; };
+  target.addEventListener("pointerdown", event => {
+    if (event.isPrimary === false) return;
+    touchOrigin = event.pointerType === "touch";
+    target.draggable = !touchOrigin;
+  }, true);
+  target.addEventListener("touchstart", startTouch, { capture: true, passive: true });
+  target.addEventListener("pointerup", finishTouch, true);
+  target.addEventListener("pointercancel", finishTouch, true);
+  target.addEventListener("touchend", finishTouch, true);
+  target.addEventListener("touchcancel", finishTouch, true);
+  return event => {
+    if (!touchOrigin) return false;
+    event.preventDefault();
+    target.draggable = true;
+    return true;
+  };
+}
+
 function wireDoubleClickOrTouch(target, activate) {
   const pointerForClick = activationPointer(target);
   target.addEventListener("click", event => {
@@ -2306,6 +2336,11 @@ function refreshGroup(bid) {
 function sessionContextMenu(ev, bid, s) {
   ev.preventDefault();
   ev.stopPropagation();
+  /* Mobile WebKit can begin native drag and still deliver contextmenu, but
+     omit dragend afterwards. Tear down either app drag before opening the menu
+     so no stale gray/reordering state can survive that platform sequence. */
+  cancelSessionDrag();
+  cancelTabDrag();
   const menu = ctxMenuAt(ev.clientX, ev.clientY);
   const add = (label, fn, danger) => {
     const b = el("button", danger ? "danger" : "", label);
@@ -2456,9 +2491,25 @@ function acceptReorderDrag(event) {
    retain their durable slots while the visible rows move around them. */
 let dragSess = null;
 
+function cancelSessionDrag(item = null) {
+  if (!dragSess || (item && dragSess.item !== item)) return;
+  const context = dragSess;
+  dragSess = null;
+  restoreDragSlots(context, ".sess-item");
+  if (context.item) context.item.classList.remove("dragging");
+  if (context.container) context.container.classList.remove("reordering");
+  if (context.renderPending)
+    setTimeout(() => {
+      if (dragSess) dragSess.renderPending = true;
+      else renderSidebar();
+    }, REORDER_MOTION_MS);
+}
+
 function wireSessionDrag(item, bid, sid) {
   item.draggable = true;
+  const blockTouchDrag = guardNativeTouchDrag(item);
   item.addEventListener("dragstart", (e) => {
+    if (blockTouchDrag(e)) return;
     const container = item.parentElement;
     dragSess = {
       bid, sid, item, container, renderPending: false,
@@ -2471,19 +2522,7 @@ function wireSessionDrag(item, bid, sid) {
     e.dataTransfer.effectAllowed = "move";
     try { e.dataTransfer.setData("text/plain", `puppy-session:${bid}:${sid}`); } catch (err) {}
   });
-  item.addEventListener("dragend", () => {
-    if (!dragSess || dragSess.item !== item) return;
-    const context = dragSess;
-    dragSess = null;
-    restoreDragSlots(context, ".sess-item");
-    item.classList.remove("dragging");
-    context.container.classList.remove("reordering");
-    if (context.renderPending)
-      setTimeout(() => {
-        if (dragSess) dragSess.renderPending = true;
-        else renderSidebar();
-      }, REORDER_MOTION_MS);
-  });
+  item.addEventListener("dragend", () => cancelSessionDrag(item));
 }
 
 function wireSessionDropZone(surface, body, bid) {
@@ -2903,8 +2942,10 @@ function showTabDropMarker(container, index) {
 function renderTabNode(t, pane, tabsRoot) {
   const tab = el("div", "tab" + (pane.active === t.id ? " active" : ""));
   tab.draggable = true;
+  const blockTouchDrag = guardNativeTouchDrag(tab);
   tab.dataset.tabId = t.id;
   tab.addEventListener("dragstart", (event) => {
+    if (blockTouchDrag(event)) return;
     const dragImage = makeTabDragImage(tab);
     dragTab = {
       id: t.id, item: tab, container: tabsRoot, sourcePaneId: pane.id,
