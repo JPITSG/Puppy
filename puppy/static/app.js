@@ -3760,6 +3760,38 @@ function closeDrawer() { $("app").classList.remove("side-open"); }
   wireSwipe($("side-backdrop"), false);
 })();
 
+/* Browsers offer their own saved-value dropdowns on any field that does not say
+   otherwise - "Saved info" in Edge, form history in Chrome. Nothing Puppy asks
+   for is a personal detail worth remembering across sites: they are paths,
+   commands, URLs and tokens, and a stale suggestion over a working directory is
+   noise at best. So every text control opts out unless it declares its own
+   value, which is how the sign-in fields keep working with password managers.
+   Run over what is already here and over anything added later, so a modal or
+   settings card built at runtime is covered without each markup site having to
+   remember. Whether a browser honours the request is still the browser's call:
+   profile autofill can override it for fields it classifies itself. */
+const AUTOFILL_TEXT_TYPES = new Set([
+  "text", "search", "url", "tel", "email", "number", "password",
+]);
+
+function suppressAutofill(root) {
+  if (!root || root.nodeType !== 1) return;
+  const apply = node => {
+    if (node.hasAttribute("autocomplete")) return;   // a declared value wins
+    if (node.tagName === "INPUT" && !AUTOFILL_TEXT_TYPES.has(
+        (node.getAttribute("type") || "text").toLowerCase())) return;
+    node.setAttribute("autocomplete", "off");
+  };
+  if (root.tagName === "INPUT" || root.tagName === "TEXTAREA") apply(root);
+  for (const node of root.querySelectorAll("input,textarea")) apply(node);
+}
+
+suppressAutofill(document.body);
+new MutationObserver(records => {
+  for (const record of records)
+    for (const node of record.addedNodes) suppressAutofill(node);
+}).observe(document.body, { childList: true, subtree: true });
+
 /* light / dark theme (class applied pre-paint by an inline head script) */
 function currentTheme() {
   return document.documentElement.classList.contains("light") ? "light" : "dark";
