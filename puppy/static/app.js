@@ -7041,8 +7041,15 @@ class SettingsView {
     const versionState = !e2.installed ? "bad" : e2.update_available === true ? "warn" : "ok";
     const version = el("span", "pill engine-version " + versionState,
       e2.installed ? (e2.version || "installed") : "not installed");
-    version.setAttribute("aria-label", e2.update_available === true && e2.latest_version ?
-      `${version.textContent} · latest is ${e2.latest_version}` : version.textContent);
+    /* The pill turns orange the moment an update exists, so the version it is
+       behind belongs right there where the eye already is. Only set a tooltip
+       when it says something the pill does not: one that merely repeats the
+       visible text is noise. */
+    const described = e2.update_available === true && e2.latest_version
+      ? `${version.textContent} · latest is ${e2.latest_version}`
+      : version.textContent;
+    version.setAttribute("aria-label", described);
+    if (described !== version.textContent) version.title = described;
     statuses.appendChild(version);
     statuses.appendChild(el("span", "pill " + (e2.auth === "ok" ? "ok" : "bad"),
       "auth: " + e2.auth));
