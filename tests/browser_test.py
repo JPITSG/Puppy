@@ -111,6 +111,12 @@ while True:
             result = {"model": {"content": [100, 40, 300, 40, 300, 80, 100, 80]}}
         elif method == "DOM.focus":
             record("dom.jsonl", {"method": method, "params": params})
+        elif method == "Page.getFrameTree":
+            result = {"frameTree": {"frame": {"id": "f1", "url": PAGE["url"]}}}
+        elif method == "Page.setDocumentContent":
+            record("document.jsonl", {"frameId": params.get("frameId"),
+                                      "html": params.get("html", "")})
+            PAGE["title"] = "start page"
         elif method == "Page.getNavigationHistory":
             result = {"currentIndex": 1, "entries": [
                 {"id": 1, "url": "about:blank"}, {"id": 2, "url": PAGE["url"]}]}
@@ -288,6 +294,21 @@ async def main() -> None:
             assert len(set(profiles)) == 2, profiles
             assert all(any(browser_id in profile for browser_id in created_ids)
                        for profile in profiles), profiles
+            # every fresh instance identifies itself on its launch tab instead
+            # of leaving the user staring at about:blank
+            painted = await wait_for(
+                lambda: read_lines("document.jsonl")
+                if len(read_lines("document.jsonl")) >= 2 else None,
+                message="start pages")
+            assert {launch["frameId"] for launch in painted[:2]} == {"f1"}, painted
+            for browser_id in created_ids:
+                assert any(browser_id in launch["html"] and
+                           "is ready" in launch["html"] for launch in painted), browser_id
+            # painting it must not add a history entry or a visible address
+            assert not any(nav["url"] != "about:blank"
+                           for nav in read_lines("navigations.jsonl")), \
+                read_lines("navigations.jsonl")
+
             # and the non-root argv never carries the flag
             assert "--no-sandbox" not in browser.launch_argv("/x", "/p", as_root=False)
             assert "--no-sandbox" in browser.launch_argv("/x", "/p", as_root=True)
@@ -600,8 +621,12 @@ async def main() -> None:
             ui_source = (BASE / "puppy" / "static" / "app.js").read_text()
             assert 'case "browser_activity"' in ui_source
             assert "`Browser ${id} @ ${backendName(bid)}`" in ui_source
-            assert "{ activate: false, afterTabId: sessionTabId }" in ui_source
+            assert "{ activate: false, afterTabId: sessionTabId, sid }" in ui_source
             assert "browser/instances/${encodeURIComponent(closing.browserId)}" in ui_source
+            # the owning chat advertises its live browsers as clickable bubbles
+            assert "syncBrowserChips()" in ui_source
+            assert 'el("button", "chip browser")' in ui_source
+            assert "t.browserGone !== true" in ui_source
 
             # A crash affects only the addressed instance; other browser IDs
             # remain available and the crashed logical browser can be restarted.

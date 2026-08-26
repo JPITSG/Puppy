@@ -691,6 +691,19 @@ select.choice-native{display:none!important}
 .chip.eng-claude .dot{background:var(--claude)}
 .chip.eng-codex .dot{background:var(--codex)}
 .chip.cwd.warn{color:var(--warn);border-color:rgba(255,182,77,.35);background:var(--warn-dim)}
+/* the one chip that is a control: a live browser this session launched */
+.chip.browser{
+  gap:5px;cursor:pointer;color:var(--acc2);background:var(--acc-dim);
+  border-color:rgba(90,162,245,.28);-webkit-appearance:none;appearance:none;
+  transition:border-color .15s var(--ease),color .15s var(--ease),transform .12s var(--ease);
+}
+.chip.browser svg{flex-shrink:0;opacity:.85}
+@media (hover:hover){
+  .chip.browser:hover{border-color:rgba(90,162,245,.55);color:var(--txt)}
+  .chip.browser:hover svg{opacity:1}
+}
+.chip.browser:active{transform:scale(.96)}
+.chip.browser:focus-visible{outline:1px solid var(--acc);outline-offset:2px}
 .chat-status{font-size:11.5px;color:var(--acc2);font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:340px}
 .chat-status:empty{display:none}
 .chat-status .spinner{display:inline-block;width:10px;height:10px;border:2px solid var(--acc-dim);border-top-color:var(--acc);border-radius:50%;animation:spin .8s linear infinite;vertical-align:-1px;margin-right:5px}
@@ -1096,11 +1109,20 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   margin:auto;-webkit-user-drag:none;
 }
 .br-screen.live{display:block}
-/* off-screen relay input that summons the soft keyboard on touch devices */
+/* The typing relay is a real, visible field: an input hidden inside the stage
+   never raises a soft keyboard (the stage is user-select:none, which iOS treats
+   as uneditable), and on desktop an invisible one looks like a dead button. */
+.br-type{display:flex;align-items:center;gap:6px;flex:0 0 auto;padding:0 8px 2px}
+.br-type .icon-btn{width:30px;height:30px;flex:0 0 auto}
+.br-type .btn-sm{flex:0 0 auto}
 .br-ime{
-  position:absolute;left:-3px;bottom:-3px;width:2px;height:2px;opacity:.01;
-  border:none;padding:0;background:transparent;color:transparent;caret-color:transparent;
+  flex:1 1 60px;min-width:0;height:30px;padding:0 10px;
+  background:var(--panel2);border:1px solid var(--acc);border-radius:var(--r-md);
+  color:var(--txt);font:12px/1 var(--sans);outline:none;
+  -webkit-user-select:text;user-select:text;
 }
+.br-ime::placeholder{color:var(--txt3)}
+.br-kbd.on{color:var(--acc);background:var(--acc-dim)}
 
 /* ---------- settings view ---------- */
 .settings-scroll{flex:1;overflow-y:auto;padding:20px 18px}
@@ -1460,11 +1482,18 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   /* the name and the wrapped meta line share one row block; the refresh
      control stays centred beside both instead of starting a third line */
   .engine-node-refresh{grid-column:3;grid-row:1/span 2;margin:0;width:26px;height:26px}
-  .engine-row{grid-template-columns:minmax(0,1fr);gap:6px;padding:9px 0 9px 13px}
-  .engine-row.has-actions{grid-template-columns:minmax(0,1fr)}
-  .engine-row-statuses{justify-content:flex-start;padding-left:17px}
-  .engine-row-actions{justify-content:flex-start;padding-left:17px}
-  .engine-update{height:34px;min-width:112px}
+  /* Stacking all three parts gave every engine a three-line block. The update
+     button is the verb for the amber version pill, so it rides on the engine's
+     own line and the pills wrap underneath it, aligned with the name. */
+  .engine-row,.engine-row.has-actions{
+    grid-template-columns:minmax(0,1fr) auto;
+    grid-template-areas:"identity actions" "statuses statuses";
+    gap:5px 10px;padding:9px 0 10px 13px;
+  }
+  .engine-row-identity{grid-area:identity}
+  .engine-row-statuses{grid-area:statuses;justify-content:flex-start;padding-left:17px}
+  .engine-row-actions{grid-area:actions;justify-content:flex-end}
+  .engine-update{height:32px;min-width:0;padding-left:14px;padding-right:14px}
   .engine-node-message{padding-left:26px}
   /* The toggle takes the empty space beside the name rather than a line of its
      own, where it read as a stray control between the backend and its buttons. */

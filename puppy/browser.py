@@ -245,6 +245,59 @@ def _dup_high(fd: int) -> int:
     return high
 
 
+# The blank tab a fresh instance opens on reads as a broken browser. This card
+# is painted into that same about:blank document (no navigation, no history
+# entry, no network), so the address bar stays empty and the screen says which
+# browser this is and that it is ready.
+START_PAGE_TITLE = "Browser {} is ready"
+START_PAGE_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>{title}</title>
+<style>
+ html,body{{height:100%;margin:0}}
+ body{{
+  display:flex;align-items:center;justify-content:center;
+  background:radial-gradient(120% 90% at 50% 0%,#171a21 0%,#0b0c0f 62%);
+  color:#e7eaf0;font:400 15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  -webkit-font-smoothing:antialiased;
+ }}
+ .card{{text-align:center;padding:0 28px;max-width:520px}}
+ .mark{{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:52px;height:52px;margin-bottom:22px;border-radius:16px;
+  background:rgba(90,162,245,.10);border:1px solid rgba(90,162,245,.28);color:#5aa2f5;
+ }}
+ .id{{
+  font:600 40px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  letter-spacing:.14em;margin:0 0 10px;color:#fff;
+ }}
+ .ready{{margin:0 0 22px;font-size:14px;color:#aab2c0;letter-spacing:.02em}}
+ .ready b{{font-weight:600;color:#22e5a4}}
+ .hint{{margin:0;font-size:12.5px;line-height:1.7;color:#8b93a3}}
+ .hint kbd{{
+  font:11.5px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  padding:2px 6px;border-radius:5px;background:rgba(255,255,255,.06);
+  border:1px solid rgba(255,255,255,.12);color:#c2c9d6;
+ }}
+</style></head><body>
+<div class="card">
+ <div class="mark"><svg viewBox="0 0 16 16" width="26" height="26" fill="none"
+  stroke="currentColor" stroke-width="1.2" aria-hidden="true">
+  <circle cx="8" cy="8" r="6.25"/><path d="M8 1.75c-1.9 1.7-2.85 3.85-2.85 6.25S6.1 12.55 8 14.25"/>
+  <path d="M8 1.75c1.9 1.7 2.85 3.85 2.85 6.25S9.9 12.55 8 14.25"/>
+  <path d="M2.2 5.9h11.6M2.2 10.1h11.6"/></svg></div>
+ <p class="id">{browser_id}</p>
+ <p class="ready"><b>Ready.</b> This browser is empty and waiting.</p>
+ <p class="hint">Type an address in the bar above and press <kbd>Enter</kbd>,<br>
+  or ask the agent to open a page in Browser {browser_id}.</p>
+</div>
+</body></html>"""
+
+
+def start_page_html(browser_id: str) -> str:
+    return START_PAGE_HTML.format(title=START_PAGE_TITLE.format(browser_id),
+                                  browser_id=browser_id)
+
+
 def launch_argv(binary: str, profile_dir: str, as_root: bool) -> list:
     argv = [
         binary,
@@ -561,6 +614,7 @@ class Manager:
                 except BrowserError:
                     pass   # best effort; downloads just land in the profile
                 await self._attach_page("")
+                await self._show_start_page()
                 self.started_at = time.time()
                 log.info("managed Browser %s started pid=%s %s%s", self.browser_id, spawned,
                          version.get("product", ""),
@@ -811,6 +865,27 @@ class Manager:
                 await self._start_screencast()
                 await self._send_fresh_frame()
             await self._refresh_nav()
+
+    async def _show_start_page(self) -> None:
+        """Paint the identifying ready card into the launch tab's blank
+        document. Cosmetic only: a failure here never fails a launch."""
+        if not self.page_session or (self.nav.get("url") or "about:blank") != "about:blank":
+            return
+        try:
+            tree = await self.call("Page.getFrameTree", session=self.page_session)
+            frame_id = ((tree.get("frameTree") or {}).get("frame") or {}).get("id") or ""
+            if not frame_id:
+                return
+            await self.call("Page.setDocumentContent",
+                            {"frameId": frame_id, "html": start_page_html(self.browser_id)},
+                            session=self.page_session)
+        except BrowserError as exc:
+            log.debug("Browser %s start page skipped: %s", self.browser_id, exc)
+            return
+        self.nav["title"] = START_PAGE_TITLE.format(self.browser_id)
+        await self._refresh_nav()
+        if self.viewers:
+            await self._send_fresh_frame()
 
     async def _start_screencast(self) -> None:
         if self.screencasting or not self.page_session:

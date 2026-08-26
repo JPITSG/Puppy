@@ -2093,6 +2093,29 @@ function browserEnabledFor(bid) {
   return !!(state.remoteBrowser[bid] && state.remoteBrowser[bid].enabled);
 }
 
+/* Post-add follow-through for the add form's browser box: the node is only
+   reachable once it is registered, so the toggle is honoured here rather than
+   pretended at. */
+async function enableAddedBackendBrowser(added) {
+  const bid = Number(added && added.id) || 0;
+  if (!bid) return;
+  const name = String((added.remote && added.remote.name) || `backend ${bid}`);
+  const capabilities = (added.remote && added.remote.capabilities) || [];
+  if (Number(added.remote && added.remote.protocol || 0) !== 0 &&
+      !(Array.isArray(capabilities) && capabilities.includes("browser"))) {
+    toast(`${name}: this node does not offer a managed browser`, "error", 7000);
+    return;
+  }
+  try {
+    const result = await api(bid, "browser/enabled",
+      { method: "POST", body: { enabled: true } });
+    state.remoteBrowser[bid] = { enabled: !!result.enabled };
+    toast(`${name}: browser enabled`, "ok");
+  } catch (error) {
+    toast(`${name}: browser not enabled · ${error.message}`, "error", 8000);
+  }
+}
+
 function browserInstancesFor(bid) {
   if (!bid) return true;
   const backend = state.backends.find(item => item.id === bid);
@@ -2935,6 +2958,12 @@ function openBrowserTab(bid, browserId = "", groupId = null, options = {}) {
     else
       putTabInPane(id, groupId);
   }
+  /* The node binds a browser to whichever session last used it, so the tab
+     follows that binding and the owning chat can point at it. */
+  if (Number(options.sid) > 0) {
+    tab.sid = Number(options.sid);
+    tab.browserGone = false;
+  }
   if (options.activate === false) {
     const focused = document.activeElement;
     const restoreFocus = focused instanceof HTMLElement &&
@@ -2946,7 +2975,15 @@ function openBrowserTab(bid, browserId = "", groupId = null, options = {}) {
   } else {
     activateTab(id);
   }
+  syncSessionBrowserChips();
   return tab;
+}
+
+/* Every open chat re-reads which of its browsers are still live. Cheap: the
+   list is tiny and each view rebuilds only when its own set changed. */
+function syncSessionBrowserChips() {
+  for (const view of Object.values(state.views))
+    if (view && typeof view.syncBrowserChips === "function") view.syncBrowserChips();
 }
 
 /* The node announces each browser first touched in a turn. Local sessions can
@@ -2970,7 +3007,7 @@ function handleBrowserActivity(bid, sid, turnId, browserId = "") {
   const sessionTabId = `s:${bid}:${sid}`;
   const sessionPane = workspacePaneForTab(sessionTabId);
   openBrowserTab(bid, browserId, sessionPane ? sessionPane.id : null,
-    { activate: false, afterTabId: sessionTabId });
+    { activate: false, afterTabId: sessionTabId, sid });
 }
 
 function openSettingsTab(groupId = null) {
@@ -3002,6 +3039,7 @@ function closeTab(id) {
   normalizeWorkspace();
   renderTabs(state.active);
   renderSidebar();
+  if (closing.type === "browser") syncSessionBrowserChips();
 }
 
 function isTabVisible(id) {
@@ -4033,7 +4071,9 @@ class SessionView {
     this.uploadPolicy = uploadSettingsFor(this.tab.bid);
     this.fileDragDepth = 0;
     this.nativeComposerChoices = prefersNativeChoices();
+    this.browserChipKey = null;   // set of linked-browser bubbles now rendered
     this.buildDom();
+    this.syncBrowserChips();      // a restored browser tab has a bubble at once
     this._onResize = () => { this.syncGutter(); this.syncComposerMeta(); this.syncHeadOverflow(); this.syncQueueFade(); };
     window.addEventListener("resize", this._onResize);
     this.connect();
@@ -4511,6 +4551,35 @@ class SessionView {
     }
   }
 
+  /* A browser this session launched lives in its own tab, which can be
+     scrolled out of the tabbar or parked in another pane entirely. The header
+     says one exists and takes you to it, and stops saying so the moment the
+     browser closes. */
+  syncBrowserChips() {
+    const live = state.tabs.filter(t => t.type === "browser" && t.browserId &&
+      (t.bid || 0) === (this.tab.bid || 0) && t.sid === this.tab.sid &&
+      t.browserGone !== true);
+    const key = live.map(t => t.id).join("\u0000");
+    if (key === this.browserChipKey) return;
+    this.browserChipKey = key;
+    const scroll = this.root.querySelector(".chat-meta-scroll");
+    for (const stale of scroll.querySelectorAll(".chip.browser")) stale.remove();
+    /* Right behind the engine chip: the meta strip scrolls horizontally, and a
+       live browser the user has not noticed is worth more of that first screen
+       than the static backend and path chips behind it. */
+    const anchor = scroll.querySelector(".chip.be") ||
+      this.root.querySelector(".chat-status");
+    for (const t of live) {
+      const chip = el("button", "chip browser");
+      chip.type = "button";
+      chip.appendChild(globeIcon(11));
+      chip.appendChild(el("span", "chip-text", `Browser ${t.browserId}`));
+      chip.setAttribute("aria-label", `Show Browser ${t.browserId}`);
+      chip.onclick = () => activateTab(t.id);
+      scroll.insertBefore(chip, anchor);
+    }
+  }
+
   updateHead() {
     const s = this.session;
     if (!s) return;
@@ -4527,6 +4596,7 @@ class SessionView {
     cwd.setAttribute("aria-label", workspaceTitle(s));
     cwd.classList.toggle("warn", !!s.workspace_missing);
     this.root.querySelector(".chip.be").textContent = backendName(this.tab.bid);
+    this.syncBrowserChips();
     const setMini = (cls, label, value, pending = false) => {
       const control = this.root.querySelector(".mini." + cls);
       control.querySelector(".mini-value").textContent = value;
@@ -5643,7 +5713,8 @@ class BrowserView {
         <input class="br-url" type="text" inputmode="url" autocomplete="off"
           autocapitalize="off" spellcheck="false" placeholder="Address or search"
           aria-label="Address or search">
-        <button class="icon-btn br-kbd" type="button" aria-label="On-screen keyboard">
+        <button class="icon-btn br-kbd" type="button" aria-label="Type into the page"
+          aria-pressed="false" aria-expanded="false">
           <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor"
             stroke-width="1.15" stroke-linecap="round" aria-hidden="true">
             <rect x="1.5" y="4" width="13" height="8.5" rx="1.5"/>
@@ -5651,10 +5722,20 @@ class BrowserView {
               M10 9h.01M12.2 9h.01M5 11h6"/></svg>
         </button>
       </div>
+      <div class="br-type hidden">
+        <input class="br-ime" type="text" autocomplete="off" autocapitalize="none"
+          autocorrect="off" spellcheck="false" enterkeyhint="enter"
+          placeholder="Type here - keys go to the page"
+          aria-label="Send typing and keys to the page">
+        <button class="icon-btn br-type-bksp" type="button" aria-label="Backspace">
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor"
+            stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M14 3.5H6.2L2 8l4.2 4.5H14z"/><path d="M8.4 6.4l3.2 3.2M11.6 6.4l-3.2 3.2"/></svg>
+        </button>
+        <button class="btn btn-sm br-type-enter" type="button">Enter</button>
+      </div>
       <div class="br-stage" tabindex="0" role="application" aria-label="Remote browser screen">
         <img class="br-screen" alt="" draggable="false">
-        <input class="br-ime" type="text" autocomplete="off" autocapitalize="none"
-          autocorrect="off" spellcheck="false" tabindex="-1" aria-hidden="true">
       </div>`;
     this.bar = this.root.querySelector(".br-bar");
     this.backBtn = this.root.querySelector(".br-back");
@@ -5662,6 +5743,7 @@ class BrowserView {
     this.reloadBtn.appendChild(refreshIcon(13));
     this.urlInput = this.root.querySelector(".br-url");
     this.kbdBtn = this.root.querySelector(".br-kbd");
+    this.typeRow = this.root.querySelector(".br-type");
     this.stage = this.root.querySelector(".br-stage");
     this.screen = this.root.querySelector(".br-screen");
     this.ime = this.root.querySelector(".br-ime");
@@ -5669,7 +5751,9 @@ class BrowserView {
 
   onShow(focus = true) {
     if (!this.started) { this.started = true; this.start(); }
-    if (focus && !this.isDead()) this.stage.focus({ preventScroll: true });
+    if (!focus || this.isDead()) return;
+    if (this.typeRow.classList.contains("hidden")) this.stage.focus({ preventScroll: true });
+    else this.ime.focus({ preventScroll: true });
   }
   isDead() { return !!this.root.querySelector(".br-dead"); }
 
@@ -5678,6 +5762,28 @@ class BrowserView {
   }
   static modifiers(e) {
     return (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0);
+  }
+  /* Keys a soft keyboard cannot express as inserted text, so the relay row
+     forwards them as real key events instead. */
+  static get RELAY_KEYS() {
+    return { Enter: 1, Backspace: 1, Delete: 1, Tab: 1, ArrowUp: 1, ArrowDown: 1,
+             ArrowLeft: 1, ArrowRight: 1, Home: 1, End: 1, PageUp: 1, PageDown: 1 };
+  }
+  sendKey(key, modifiers = 0) {
+    this.send({ type: "key", kind: "down", key, code: key, text: "", modifiers });
+    this.send({ type: "key", kind: "up", key, code: key, text: "", modifiers });
+  }
+  showTyping(on) {
+    this.typeRow.classList.toggle("hidden", !on);
+    this.kbdBtn.classList.toggle("on", !!on);
+    this.kbdBtn.setAttribute("aria-pressed", on ? "true" : "false");
+    this.kbdBtn.setAttribute("aria-expanded", on ? "true" : "false");
+    if (on) {
+      this.ime.value = "";
+      this.ime.focus();     // synchronous inside the click: raises the keyboard
+    } else if (!this.isDead()) {
+      this.stage.focus({ preventScroll: true });
+    }
   }
   point(clientX, clientY) {
     const rect = this.screen.getBoundingClientRect();
@@ -5779,18 +5885,32 @@ class BrowserView {
       this.send({ type: "insert_text", text });
     });
 
-    /* soft-keyboard relay: whatever lands in the proxy input is forwarded */
-    this.kbdBtn.onclick = () => { this.ime.focus(); };
+    /* Typing relay. The stage takes keystrokes directly once focused, but it
+       cannot summon a soft keyboard: it is a user-select:none, unfocusable
+       surface, and on iOS an input inside one never opens the keyboard at all.
+       So the relay is its own visible row outside the stage - focusing a real,
+       on-screen field is what actually raises the keyboard, and on desktop the
+       button now has something to show for itself. */
+    this.kbdBtn.onclick = () => this.showTyping(this.typeRow.classList.contains("hidden"));
+    this.typeRow.querySelector(".br-type-bksp").onclick = () => {
+      this.sendKey("Backspace");
+      this.ime.focus();
+    };
+    this.typeRow.querySelector(".br-type-enter").onclick = () => {
+      this.sendKey("Enter");
+      this.ime.focus();
+    };
     this.ime.addEventListener("input", () => {
       const value = this.ime.value;
       this.ime.value = "";
       if (value) this.send({ type: "insert_text", text: value });
     });
     this.ime.addEventListener("keydown", e => {
-      if (e.key !== "Enter" && e.key !== "Backspace") return;
+      e.stopPropagation();   // never let the app's global shortcuts see this
+      if (e.key === "Escape") { e.preventDefault(); this.showTyping(false); return; }
+      if (!BrowserView.RELAY_KEYS[e.key]) return;
       e.preventDefault();
-      this.send({ type: "key", kind: "down", key: e.key, code: e.key, text: "", modifiers: 0 });
-      this.send({ type: "key", kind: "up", key: e.key, code: e.key, text: "", modifiers: 0 });
+      this.sendKey(e.key, BrowserView.modifiers(e));
     });
 
     this.urlInput.addEventListener("focus", () => {
@@ -5851,9 +5971,9 @@ class BrowserView {
         toast(`page ${d.kind || "dialog"} ${d.action}: ${d.message || ""}`.trim(),
           "info", 6000);
       } else if (d.type === "error") {
-        this.showDead(d.text || "Browser unavailable");
+        this.showDead(d.text || "Browser unavailable", true);
       } else if (d.type === "gone") {
-        this.showDead(d.reason || "Browser ended");
+        this.showDead(d.reason || "Browser ended", true);
       }
     };
     ws.onclose = () => {
@@ -5876,9 +5996,19 @@ class BrowserView {
   clearDead() {
     const dead = this.root.querySelector(".br-dead");
     if (dead) dead.remove();
+    this.markGone(false);
   }
 
-  showDead(message) {
+  /* Only the node's own verdict retires the owning chat's bubble: a dropped
+     socket means we cannot see the browser, not that it stopped. */
+  markGone(gone) {
+    if (this.tab.browserGone === gone) return;
+    this.tab.browserGone = gone;
+    syncSessionBrowserChips();
+  }
+
+  showDead(message, ended = false) {
+    if (ended) this.markGone(true);
     let dead = this.root.querySelector(".br-dead");
     if (dead) {
       dead.querySelector(".term-dead-message").textContent = message;
@@ -7068,6 +7198,13 @@ class SettingsView {
           <span class="be-auto-copy"><span>Auto-upgrade when idle</span>
             <small>Signed release · readiness checked · rollback protected</small></span>
         </label>
+        <label class="be-auto be-auto-add full">
+          <input type="checkbox" id="be-browser"
+            aria-label="Turn on the managed browser on this backend once it is added">
+          <span class="be-auto-track" aria-hidden="true"><span></span></span>
+          <span class="be-auto-copy"><span>Managed browser</span>
+            <small>Enabled once the backend is added, if its node supports one</small></span>
+        </label>
         <div class="full"><button class="btn btn-pri btn-sm" id="be-add">Add backend</button></div>
       </div>`;
     const beList = c3.querySelector("#be-list");
@@ -7257,7 +7394,8 @@ class SettingsView {
           const entered = c3.querySelector(id).value.trim();
           return entered || (typeof paired[key] === "string" ? paired[key] : "");
         };
-        await api(0, "backends", { method: "POST", body: {
+        const wantBrowser = c3.querySelector("#be-browser").checked;
+        const added = await api(0, "backends", { method: "POST", body: {
           name: pairingValue("#be-name", "name"),
           url: pairingValue("#be-url", "url"),
           token: pairingValue("#be-token", "token"),
@@ -7269,6 +7407,11 @@ class SettingsView {
         c3.querySelector("#be-token").value = c3.querySelector("#be-tls").value = "";
         c3.querySelector("#be-pairing").value = "";
         c3.querySelector("#be-auto").checked = false;
+        c3.querySelector("#be-browser").checked = false;
+        /* The browser is per-node state, so the box is an intent: the node only
+           exists to answer once it has been added. A refusal leaves the backend
+           in place - it is a separate setting, not part of the connection. */
+        if (wantBrowser) await enableAddedBackendBrowser(added);
         await refreshState(); await this.render();
         pollRemotes({ forceEngines: true })
           .catch(error => console.warn("new-backend poll failed", error));
