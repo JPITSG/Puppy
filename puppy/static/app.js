@@ -4018,6 +4018,32 @@ function parseAttachmentMarker(line) {
 
 /* Markers are the message's trailing block; anything above them is the prose the
    composer should show. A message that was only attachments recalls as chips. */
+/* One attachment chip. The composer strip and a sent message both build from
+   here so the two presentations cannot drift apart. `url` is the preview to
+   show; "" gives the named-file card, which is also what an image falls back
+   to once its local preview is gone. */
+function attachmentChipNode(a, url, uploading = false) {
+  const chip = el("span", "attach-chip " + (url ? "image" : "file") +
+    (uploading ? " uploading" : ""));
+  if (url) {
+    const img = el("img", "attach-thumb");
+    img.src = url;
+    img.alt = a.name;
+    chip.appendChild(img);
+    if (uploading) chip.appendChild(el("span", "attach-state", "uploading"));
+  } else {
+    const icon = el("span", "attach-file-icon");
+    icon.appendChild(attachmentFileIcon());
+    const copy = el("span", "attach-file-copy");
+    copy.appendChild(el("span", "attach-file-name", a.name));
+    copy.appendChild(el("span", "attach-file-size",
+      `${uploading ? "uploading · " : ""}${a.sizeText || fmtBytes(a.size)}`));
+    chip.appendChild(icon);
+    chip.appendChild(copy);
+  }
+  return chip;
+}
+
 function splitAttachmentMarkers(text) {
   const lines = String(text || "").split("\n");
   const attachments = [];
@@ -4757,7 +4783,22 @@ class SessionView {
     switch (ev.kind) {
       case "user": {
         const n = el("div", "msg msg-user");
-        linkifyInto(n, d.text || "");
+        /* The marker lines are how the engine receives an attachment, not how
+           the person who sent it should have to read it back. Show what the
+           composer showed; the message text keeps the markers untouched. */
+        const { text, attachments } = splitAttachmentMarkers(d.text || "");
+        if (!attachments.length) { linkifyInto(n, d.text || ""); return n; }
+        if (text) linkifyInto(n, text);
+        const strip = el("div", "attach-strip sent");
+        for (const a of attachments) {
+          /* Previews live only as long as this view holds the blob URL, so an
+             older or reloaded image reads as its named card. */
+          const chip = attachmentChipNode(
+            a, a.preview ? (this.sentThumbs.get(a.path) || "") : "");
+          chip.setAttribute("aria-label", `${a.name} · ${a.path}`);
+          strip.appendChild(chip);
+        }
+        n.appendChild(strip);
         return n;
       }
       case "assistant": {
@@ -5092,25 +5133,7 @@ class SessionView {
     this.attachStrip.classList.toggle("hidden", !this.attachments.length);
     for (const a of this.attachments) {
       // a recalled image without its original preview falls back to a named chip
-      const thumbnail = a.preview && !!a.url;
-      const chip = el("span", "attach-chip " + (thumbnail ? "image" : "file") +
-        (a.uploading ? " uploading" : ""));
-      if (thumbnail) {
-        const img = el("img", "attach-thumb");
-        img.src = a.url;
-        img.alt = a.name;
-        chip.appendChild(img);
-        if (a.uploading) chip.appendChild(el("span", "attach-state", "uploading"));
-      } else {
-        const icon = el("span", "attach-file-icon");
-        icon.appendChild(attachmentFileIcon());
-        const copy = el("span", "attach-file-copy");
-        copy.appendChild(el("span", "attach-file-name", a.name));
-        copy.appendChild(el("span", "attach-file-size",
-          `${a.uploading ? "uploading · " : ""}${a.sizeText || fmtBytes(a.size)}`));
-        chip.appendChild(icon);
-        chip.appendChild(copy);
-      }
+      const chip = attachmentChipNode(a, a.preview && a.url ? a.url : "", a.uploading);
       const x = el("button", "attach-x");
       x.type = "button";
       x.appendChild(xIcon(12));
@@ -5227,8 +5250,17 @@ class SessionView {
       const cfg = !!(item && typeof item === "object");
       const row = el("div", "q-item" + (cfg ? " q-cfg" : ""));
       row.appendChild(el("span", "q-n", String(i + 1)));
-      const text = cfg ? this.describeQueuedConfig(item)
-        : (item.length > 200 ? item.slice(0, 199) + "…" : item);
+      let text;
+      if (cfg) text = this.describeQueuedConfig(item);
+      else {
+        /* one compact line, so attachments are counted rather than spelled out */
+        const parsed = splitAttachmentMarkers(item);
+        const count = parsed.attachments.length;
+        const body = count ? parsed.text : item;
+        text = body.length > 200 ? body.slice(0, 199) + "…" : body;
+        if (count) text = (text ? text + " · " : "") +
+          `${count} attachment${count === 1 ? "" : "s"}`;
+      }
       const t = el("span", "q-t", text);
       t.setAttribute("aria-label", cfg ? text : item);
       row.appendChild(t);

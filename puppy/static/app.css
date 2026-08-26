@@ -947,6 +947,11 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   min-height:24px;max-height:224px;font-size:13.5px;line-height:20px;
 }
 .attach-strip{display:flex;gap:6px;flex-wrap:wrap}
+/* The same strip inside a sent bubble. .msg-user is pre-wrap, so the strip is
+   given its own block spacing rather than inheriting the prose's line box. */
+.msg-user .attach-strip.sent{margin-top:8px;white-space:normal}
+.msg-user .attach-strip.sent:first-child{margin-top:0}
+.msg-user .attach-chip.file{width:min(230px,60vw)}
 /* Raster images keep the useful thumbnail treatment; every other file gets a
    compact identity card with its real name and size. */
 .attach-chip{
