@@ -139,6 +139,7 @@ function dirPickRow(kind, label) {
    picker can follow a backend selector or stay pinned to this instance. */
 function wireDirectoryPicker(input, box, bidFor) {
   let timer = null;
+  let shown = null;   // the path the list is currently showing
   const browse = async () => {
     try {
       const d = await api(bidFor(), "fs?path=" + encodeURIComponent(input.value || "/"));
@@ -161,6 +162,15 @@ function wireDirectoryPicker(input, box, bidFor) {
         const empty = dirPickRow("dp-none", "(no subdirectories)");
         empty.disabled = true;
         box.appendChild(empty);
+      }
+      /* A new directory starts at its own beginning. Emptying and refilling in
+         one task never forces a layout, so the old offset would otherwise
+         survive and drop you into the middle of an unrelated listing. Only on
+         a real change: re-listing the same path (a keystroke that resolves
+         back to it) keeps your place. */
+      if (d.path !== shown) {
+        shown = d.path;
+        box.scrollTop = 0;
       }
     } catch (error) { box.classList.add("hidden"); }
   };
