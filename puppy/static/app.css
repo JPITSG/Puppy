@@ -518,7 +518,32 @@ select.choice-native{display:none!important}
 .burger{display:inline-flex}
 /* Only the column layout collapses. Below 900px the sidebar is a drawer, and
    hiding it there would leave a persisted collapse with no way back in. */
-@media (min-width:901px){.app.side-collapsed .side{display:none}}
+@media (min-width:901px){
+  /* The column slides out and the workspace takes the width back over the same
+     240ms, instead of the two swapping in one frame. Only transitioned while
+     the toggle runs (JS adds .side-animating for its duration): the resize grip
+     writes --side-w on every pointermove, and a standing transition there would
+     drag behind the pointer.
+
+     While it slides, the contents hold the width they had - otherwise the list
+     would reflow narrower on every frame, ellipsising names and reshuffling the
+     status boxes on the way out. overflow is clipped for the same span only,
+     because at rest the resize grip deliberately overhangs the edge by 3px. */
+  .app.side-animating .side{
+    overflow:hidden;
+    transition:width .24s var(--ease),opacity .2s var(--ease);
+  }
+  .app.side-animating .side>*{min-width:var(--side-w-open,256px)}
+  /* the resting collapsed state: no transition, so a reload starts settled */
+  .app.side-collapsed .side{width:0;opacity:0;visibility:hidden}
+  /* going out, stay visible for the whole slide and only then leave the tree */
+  .app.side-animating.side-collapsed .side{
+    transition:width .24s var(--ease),opacity .2s var(--ease),visibility 0s .24s;
+  }
+  @media (prefers-reduced-motion:reduce){
+    .app.side-animating .side{transition:none}
+  }
+}
 /* the burger mirrors the + at the other end of the bar: same 26px box, same
    optical centre. The bar carries 8px of top padding and none at the bottom,
    so a centred item sits 8px low and its hover box would meet the divider -

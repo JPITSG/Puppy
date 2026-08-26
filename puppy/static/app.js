@@ -2796,6 +2796,8 @@ function sessionContextMenu(ev, bid, s) {
 
 /* Live sortable layouts. The DOM slot moves during dragover; FLIP animates
    every affected sibling from its old visual position to its new one. */
+/* Sidebar collapse/expand. Kept in step with the .24s in app.css. */
+const SIDE_MOTION_MS = 240;
 const REORDER_MOTION_MS = 180;
 const REORDER_EASING = "cubic-bezier(.16,1,.3,1)";
 
@@ -4257,10 +4259,27 @@ function savedSideWidth() {
 /* Collapsing zeroes --side-w as well as hiding the column: the body's backdrop
    grid is masked against that width so it never collides with the session
    list, and a stale 256 would leave a bare strip once the list is gone. */
-function setSideCollapsed(on) {
-  $("app").classList.toggle("side-collapsed", !!on);
-  document.documentElement.style.setProperty(
-    "--side-w", on ? "0px" : savedSideWidth() + "px");
+let sideMotionTimer = null;
+function setSideCollapsed(on, animate = true) {
+  const app = $("app");
+  const root = document.documentElement;
+  const open = savedSideWidth();
+  // the width the contents keep while the column slides, so they travel with
+  // it instead of reflowing narrower and narrower on the way out
+  root.style.setProperty("--side-w-open", open + "px");
+  /* Transitioned only while the toggle runs. The resize grip writes --side-w
+     on every pointermove, and a standing transition would make that drag lag
+     behind the pointer. */
+  if (animate) {
+    app.classList.add("side-animating");
+    clearTimeout(sideMotionTimer);
+    sideMotionTimer = setTimeout(() => {
+      app.classList.remove("side-animating");
+      window.dispatchEvent(new Event("resize"));   // settle xterm on the final width
+    }, SIDE_MOTION_MS + 40);
+  }
+  app.classList.toggle("side-collapsed", !!on);
+  root.style.setProperty("--side-w", on ? "0px" : open + "px");
   lsSet("puppy.sidecollapsed", on ? "1" : "");
   window.dispatchEvent(new Event("resize"));   // xterm fit etc.
 }
@@ -4268,7 +4287,7 @@ function setSideCollapsed(on) {
 /* sidebar width: draggable, persisted */
 (() => {
   document.documentElement.style.setProperty("--side-w", savedSideWidth() + "px");
-  if (lsGet("puppy.sidecollapsed") === "1") setSideCollapsed(true);
+  if (lsGet("puppy.sidecollapsed") === "1") setSideCollapsed(true, false);
   const grip = $("side-resize");
   if (!grip) return;
   grip.addEventListener("pointerdown", (e) => {
