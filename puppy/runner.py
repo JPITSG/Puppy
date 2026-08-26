@@ -723,8 +723,12 @@ class SessionHub:
                         self.broadcast({"type": "approval_resolved",
                                         "request_id": act.get("request_id", ""), "behavior": "cancelled"})
                     elif a == "rate_limit":
-                        db.meta_set(f"rate_limit.{session['engine']}", act["info"])
-                        self.broadcast({"type": "rate_limit", "engine": session["engine"], "info": act["info"]})
+                        # stamped so consoles can say how fresh the figure is;
+                        # additive beside the CLI's own camelCase keys
+                        info = dict(act["info"] or {})
+                        info["captured_at"] = time.time()
+                        db.meta_set(f"rate_limit.{session['engine']}", info)
+                        self.broadcast({"type": "rate_limit", "engine": session["engine"], "info": info})
                     elif a == "result":
                         got_result = True
                         # Every engine's turn reports how long it took: drivers

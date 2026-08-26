@@ -17,6 +17,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -204,6 +205,48 @@ async def mcp_request(proc, request_id, method, params=None):
     response = json.loads(raw.decode("utf-8"))
     assert response.get("id") == request_id, response
     return response
+
+
+def check_quota_math(ui_source: str) -> None:
+    """The footer's weekly figure, run through node against every payload shape.
+    claude's `utilization` is a 0..1 fraction and codex's `used_percent` is
+    0..100 - the scale must follow the field name, never the magnitude, which
+    once rendered an 89%-consumed week as "99% wk"."""
+    def extract(start):
+        i = ui_source.index(start)
+        b = ui_source.index("{", i)
+        depth = 0
+        for j in range(b, len(ui_source)):
+            if ui_source[j] == "{":
+                depth += 1
+            elif ui_source[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    return ui_source[i:j + 1]
+        raise AssertionError("unbalanced " + start)
+    script = (extract("\nfunction weeklyUsedPercent(") +
+              extract("\nfunction weeklyQuotaLeft(") + """
+const claude = {rateLimitType: "seven_day_overage_included", utilization: 0.89,
+  unifiedWindows: {five_hour: {utilization: 0.29}, seven_day: {utilization: 0.68},
+                   seven_day_overage_included: {utilization: 0.89}}};
+const out = [
+  weeklyQuotaLeft({rate_limit: claude}),                                  // 11
+  weeklyQuotaLeft({rate_limit: {rateLimitType: "five_hour", utilization: 0.3,
+    unifiedWindows: {seven_day: {utilization: 0.68}}}}),                  // 32
+  weeklyQuotaLeft({quota: {weekly_used_percent: 19}}),                    // 81
+  weeklyQuotaLeft({rate_limit: {primary: {window_minutes: 10080,
+                                          used_percent: 40}}}),           // 60
+  weeklyQuotaLeft({rate_limit: null}),                                    // null
+  weeklyQuotaLeft({rate_limit: {rateLimitType: "seven_day",
+                                utilization: 1.15}}),                     // 0
+];
+console.log(JSON.stringify(out));
+""")
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:400]
+    values = json.loads(proc.stdout.strip())
+    rounded = [None if v is None else round(v) for v in values]
+    assert rounded == [11, 32, 81, 60, None, 0], values
 
 
 async def main() -> None:
@@ -641,6 +684,7 @@ async def main() -> None:
                 agent_hub.status = "idle"
 
             ui_source = (BASE / "puppy" / "static" / "app.js").read_text()
+            check_quota_math(ui_source)
             assert 'case "browser_activity"' in ui_source
             assert "`Browser ${id} @ ${backendName(bid)}`" in ui_source
             assert "{ activate: false, afterTabId: sessionTabId, sid }" in ui_source

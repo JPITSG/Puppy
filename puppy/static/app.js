@@ -2950,22 +2950,71 @@ function wireSessionDropZone(surface, body, bid) {
 // below this much of the weekly allowance remaining, the figure reads as a warning
 const QUOTA_LOW_PERCENT = 33;
 
-function weeklyQuotaLeft(e) {
-  // driver-provided quota (codex: parsed from its own records), else scan the
-  // stored rate-limit info for a weekly window - tolerant of either shape
+/* Scale is decided by the field's NAME, never its magnitude: claude's
+   `utilization` is a 0..1 fraction, codex's `used_percent` is 0..100. Guessing
+   by size once showed "99% wk" for a week that was 89% consumed. */
+function weeklyUsedPercent(e) {
   if (e.quota && typeof e.quota.weekly_used_percent === "number")
-    return Math.max(0, Math.min(100, 100 - e.quota.weekly_used_percent));
+    return e.quota.weekly_used_percent;
   const rl = e.rate_limit;
-  if (rl && typeof rl === "object") {
-    for (const w of [rl.primary, rl.secondary])
-      if (w && w.window_minutes === 10080 && typeof w.used_percent === "number")
-        return Math.max(0, Math.min(100, 100 - w.used_percent));
-    if (/seven_day|weekly/i.test(rl.rateLimitType || ""))
-      for (const k in rl)
-        if (/percent|utilization/i.test(k) && typeof rl[k] === "number")
-          return Math.max(0, Math.min(100, 100 - rl[k]));
-  }
+  if (!rl || typeof rl !== "object") return null;
+  // the window the CLI itself calls binding, when that window is a weekly one
+  if (/seven_day|weekly/i.test(rl.rateLimitType || "") &&
+      typeof rl.utilization === "number")
+    return rl.utilization * 100;
+  const windows = rl.unifiedWindows;
+  if (windows && typeof windows === "object")
+    for (const name of ["seven_day", "seven_day_overage_included"]) {
+      const w = windows[name];
+      if (w && typeof w.utilization === "number") return w.utilization * 100;
+    }
+  for (const w of [rl.primary, rl.secondary])
+    if (w && w.window_minutes === 10080 && typeof w.used_percent === "number")
+      return w.used_percent;
   return null;
+}
+
+function weeklyQuotaLeft(e) {
+  const used = weeklyUsedPercent(e);
+  return used === null ? null : Math.max(0, Math.min(100, 100 - used));
+}
+
+/* One line of provenance for the quota pill: every window the engine reported,
+   the weekly reset, and when the figure was captured - it only moves when a
+   turn runs (claude) or the account is read (codex), so its age matters. */
+function quotaTitle(e) {
+  const parts = [];
+  const clock = (epoch) => {
+    if (typeof epoch !== "number" || !isFinite(epoch)) return "";
+    try {
+      return new Date(epoch * 1000).toLocaleString([], {
+        weekday: "short", hour: "2-digit", minute: "2-digit" });
+    } catch (error) { return ""; }
+  };
+  const rl = e.rate_limit;
+  const windows = rl && rl.unifiedWindows;
+  if (windows && typeof windows === "object") {
+    const label = { five_hour: "5h", seven_day: "week",
+                    seven_day_overage_included: "week incl. overage" };
+    for (const name of ["five_hour", "seven_day", "seven_day_overage_included"]) {
+      const w = windows[name];
+      if (w && typeof w.utilization === "number") {
+        let piece = `${label[name]} ${Math.round(w.utilization * 100)}% used`;
+        const reset = clock(w.resetsAt);
+        if (reset) piece += ` (resets ${reset})`;
+        parts.push(piece);
+      }
+    }
+  } else if (e.quota && typeof e.quota.weekly_used_percent === "number") {
+    let piece = `week ${Math.round(e.quota.weekly_used_percent)}% used`;
+    const reset = clock(e.quota.resets_at);
+    if (reset) piece += ` (resets ${reset})`;
+    parts.push(piece);
+  }
+  if (!parts.length) return "";
+  const asOf = clock((rl && rl.captured_at) || (e.quota && e.quota.as_of));
+  if (asOf) parts.push(`reported ${asOf}`);
+  return parts.join(" · ");
 }
 
 /* Every engine-bearing response (poll, usage refresh, version refresh, engine
@@ -3205,8 +3254,11 @@ function renderFootEngines() {
       st.appendChild(word);
       if (pct != null) {
         st.appendChild(el("span", "st-sep", " · "));
-        st.appendChild(el("span", "st-quota" + (pct < QUOTA_LOW_PERCENT ? " low" : ""),
-          `${Math.round(pct)}% wk`));
+        const quota = el("span", "st-quota" + (pct < QUOTA_LOW_PERCENT ? " low" : ""),
+          `${Math.round(pct)}% wk`);
+        const detail = quotaTitle(e);
+        if (detail) { quota.title = detail; quota.setAttribute("aria-label", detail); }
+        st.appendChild(quota);
       }
       row.appendChild(st);
       if (e.key === "codex" && e.installed && e.auth === "ok" &&
