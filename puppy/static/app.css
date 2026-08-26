@@ -326,7 +326,6 @@ a{color:var(--acc2)}
 .foot-row .icon-btn{width:24px;height:24px;font-size:14px;border-radius:var(--btn-r);margin-left:-8px}
 #btn-bell svg{display:block;transform:translateY(1px)}
 #btn-bell.on{color:var(--acc2)}
-.foot-ver{font-size:10.5px;color:var(--txt3);font-family:var(--mono)}
 .conn-state{display:flex;align-items:center;min-width:0;margin-left:auto}
 .host-cpu{
   color:var(--txt3);font:9.5px var(--mono);font-variant-numeric:tabular-nums;

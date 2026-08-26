@@ -1465,6 +1465,7 @@ const tips = (() => {
 const state = {
   authed: false,
   instance: "",
+  version: "",             // this instance's own puppy version
   engines: [],            // local engines info
   engMap: {},             // key -> engine info (local)
   usageRefresh: null,     // local account-usage refresh metadata
@@ -1910,6 +1911,7 @@ async function enterApp() {
 async function refreshState() {
   const s = await api(0, "state");
   state.instance = s.instance_name;
+  if (typeof s.version === "string") state.version = s.version;
   if (typeof s.user === "string") state.nodeUsers[0] = s.user;
   if (s.notify) { state.notify = s.notify; syncBell(); }
   state.sessionColors = s.session_colors || [];
@@ -3014,16 +3016,16 @@ async function refreshCodexUsage(bid, button, nodeName) {
 function renderFootEngines() {
   const root = $("foot-engines");
   root.innerHTML = "";
-  const groups = [{ bid: 0, name: backendName(0), engines: state.engines }]
+  const groups = [{ bid: 0, name: backendName(0), version: state.version || "",
+                    engines: state.engines }]
     .concat(state.backends.map(b => ({
       bid: b.id, name: b.name, version: b.remote_version || "",
       engines: Object.prototype.hasOwnProperty.call(state.engCache, b.id) ? state.engCache[b.id] : null,
     })));
-  const showGroups = groups.length > 1;
   for (const g of groups) {
     const group = el("div", "foot-engine-group");
     const body = el("div", "foot-engine-body");
-    if (showGroups) {
+    {
       const head = el("div", "foot-engine-head");
       const ico = el("span", "foot-ico");
       const status = g.bid === 0 ? "ok" : remoteAvailability(g.bid);
@@ -3038,8 +3040,9 @@ function renderFootEngines() {
         collapsedStatusBackends, "puppy.collapsed.status-backends", key);
       wireDoubleClickOrTouch(name, () => disclosure.click());
       head.appendChild(name);
-      if (g.bid && g.version) {
+      if (g.version) {
         const version = el("span", "foot-engine-version", `· v${g.version}`);
+        version.setAttribute("aria-label", `version ${g.version}`);
         head.appendChild(version);
       }
       head.appendChild(disclosure);
