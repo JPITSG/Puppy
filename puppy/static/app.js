@@ -40,8 +40,9 @@ function bellIcon(size, off) {
     const p = document.createElementNS(NS, "path");
     p.setAttribute("d", d);
     p.setAttribute("stroke", "currentColor");
-    /* lighter than the 2 the other drawn icons use: this one is rendered at
-       24-box scale in a 14px button, where 2 reads heavy beside ⚙ and ☀ */
+    /* lighter than the 2 a tab dot uses: this is 24-box art in a 14px footer
+       button, where 2 reads heavy - the gear beside it runs 1.5 for the same
+       reason, and both sit next to the ☀ glyph */
     p.setAttribute("stroke-width", "1.5");
     p.setAttribute("stroke-linecap", "round");
     p.setAttribute("stroke-linejoin", "round");
@@ -75,7 +76,10 @@ function plusIcon(size) {
   return svg;
 }
 
-function gearIcon(size) {
+/* stroke is a parameter for the same reason bellIcon runs lighter: this 24-box
+   art is drawn at 12px in a tab dot and 14px in the footer, where the tab's
+   weight of 2 reads heavy beside the bell it sits next to. */
+function gearIcon(size, stroke = 2) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
   svg.setAttribute("viewBox", "0 0 24 24");
@@ -86,7 +90,7 @@ function gearIcon(size) {
   gear.setAttribute("d", "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.09a2 2 0 0 1 1 1.74v.5a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.09a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2Z");
   gear.setAttribute("fill", "none");
   gear.setAttribute("stroke", "currentColor");
-  gear.setAttribute("stroke-width", "2");
+  gear.setAttribute("stroke-width", String(stroke));
   gear.setAttribute("stroke-linecap", "round");
   gear.setAttribute("stroke-linejoin", "round");
   const hub = document.createElementNS(NS, "circle");
@@ -95,7 +99,7 @@ function gearIcon(size) {
   hub.setAttribute("r", "3");
   hub.setAttribute("fill", "none");
   hub.setAttribute("stroke", "currentColor");
-  hub.setAttribute("stroke-width", "2");
+  hub.setAttribute("stroke-width", String(stroke));
   svg.appendChild(gear);
   svg.appendChild(hub);
   return svg;
@@ -3667,6 +3671,9 @@ $("tab-add-menu").addEventListener("click", (e) => {
   else if (act === "new-browser") openBrowserFromMenu(groupId);
 });
 $("btn-new-session").onclick = () => { modalNewSession(state.activeGroup); closeDrawer(); };
+/* the same drawn cog its own tab shows: the ⚙ glyph this replaced is a
+   different icon altogether - filled, sharp-toothed, and font-dependent */
+$("btn-settings").appendChild(gearIcon(14, 1.5));
 $("btn-settings").onclick = () => { openSettingsTab(state.activeGroup); closeDrawer(); };
 
 /* drawer (mobile) */
