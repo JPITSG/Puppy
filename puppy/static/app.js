@@ -3604,10 +3604,21 @@ function renderTabs(focusTabId = null) {
   const tree = $("workspace-tree");
   const hint = $("empty-hint");
   hint.remove();
-  for (const view of Object.values(state.views))
+  /* Detaching a node discards its scroll offset outright - unlike display:none,
+     which keeps it - which is why plain tab switching never showed this. This
+     rebuild re-attaches every view, so positions are handed over and taken back
+     around it; otherwise splitting a pane rewinds a long transcript to the top. */
+  const scrolls = new Map();
+  for (const [id, view] of Object.entries(state.views)) {
+    if (view && typeof view.captureScroll === "function") scrolls.set(id, view.captureScroll());
     if (view.root && view.root.parentNode) view.root.remove();
+  }
   tree.innerHTML = "";
   tree.appendChild(renderWorkspaceNode(state.layout));
+  for (const [id, saved] of scrolls) {
+    const view = state.views[id];
+    if (view && typeof view.restoreScroll === "function") view.restoreScroll(saved);
+  }
 
   const panes = workspacePanes();
   if (!state.tabs.length) {
@@ -4120,6 +4131,8 @@ class SessionView {
     this.fileDragDepth = 0;
     this.nativeComposerChoices = prefersNativeChoices();
     this.browserChipKey = null;   // set of linked-browser bubbles now rendered
+    this.pendingScroll = null;    // position owed back after a workspace rebuild
+    this.lastScroll = null;       // last position seen while this view was visible
     this.buildDom();
     this.syncBrowserChips();      // a restored browser tab has a bubble at once
     this._onResize = () => { this.syncGutter(); this.syncComposerMeta(); this.syncHeadOverflow(); this.syncQueueFade(); };
@@ -4175,6 +4188,13 @@ class SessionView {
       </div>`;
     this.root = root;
     this.scroll = root.querySelector(".chat-scroll");
+    /* Tracked while visible so a view that is hidden when the workspace is
+       rebuilt still has a position to be handed back - a display:none element
+       reports scrollTop 0, so it cannot be read at capture time. */
+    this.scroll.addEventListener("scroll", () => {
+      if (this.scroll.clientHeight)
+        this.lastScroll = { top: this.scroll.scrollTop, bottom: this.atBottom() };
+    }, { passive: true });
     this.inner = root.querySelector(".chat-inner");
     this.ta = root.querySelector("textarea");
     this.composerBox = root.querySelector(".composer-box");
@@ -4373,8 +4393,36 @@ class SessionView {
   onShow(focus = true) {
     this.syncGutter(); this.syncComposerMeta(); this.syncHeadOverflow();
     this.syncUploadButton();
-    this.scrollBottom(true);
+    /* A position owed from a rebuild wins over jumping to the newest message:
+       the user did not open this tab, it was re-attached underneath them. */
+    if (!this.applyPendingScroll()) this.scrollBottom(true);
     if (focus) this.ta.focus();
+  }
+
+  /* Read live while visible; a hidden view has no scroll box to read, so it
+     falls back to the last position seen (or one still owed to it). */
+  captureScroll() {
+    if (this.scroll.clientHeight)
+      return { top: this.scroll.scrollTop, bottom: this.atBottom() };
+    return this.pendingScroll || this.lastScroll;
+  }
+
+  restoreScroll(saved) {
+    this.pendingScroll = saved || null;
+    this.applyPendingScroll();
+  }
+
+  /* Whether the position was actually applied: writing scrollTop on a
+     display:none element is silently ignored, so a hidden view holds onto it
+     until onShow. Following the tail is restored as the tail, not as a stale
+     offset, since the transcript may have grown or been re-laid out. */
+  applyPendingScroll() {
+    const saved = this.pendingScroll;
+    if (!saved || !this.scroll.clientHeight) return false;
+    this.pendingScroll = null;
+    this.scroll.scrollTop = saved.bottom ? this.scroll.scrollHeight : saved.top;
+    this.lastScroll = { top: this.scroll.scrollTop, bottom: saved.bottom };
+    return true;
   }
 
   syncRemoteState() {
