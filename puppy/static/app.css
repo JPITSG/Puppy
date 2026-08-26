@@ -198,7 +198,7 @@ a{color:var(--acc2)}
    starts selecting before any event a handler could cancel. Safe here because
    the text on these rows is a label, not content - the terminal, which people
    genuinely select from, is deliberately absent. */
-.sess-item,.tab,.sess-group-name,.foot-engine-name,.br-stage{
+.sess-item,.tab,.sess-group-name,.foot-engine-name,.foot-engine-head,.br-stage{
   -webkit-user-select:none;user-select:none;
   -webkit-touch-callout:none;
   -webkit-tap-highlight-color:transparent;
@@ -287,7 +287,13 @@ a{color:var(--acc2)}
 .foot-engine-body{display:flex;flex-direction:column;gap:4px;min-width:0}
 .foot-engine-body[hidden]{display:none}
 .foot-engine-group+.foot-engine-group{border-top:1px solid var(--line);margin-top:3px;padding-top:7px}
-.foot-engine-head{display:flex;align-items:center;gap:6px;min-width:0;color:var(--txt3)}
+/* the head is the drag handle for its whole box, so it carries the affordance */
+.foot-engine-head{
+  display:flex;align-items:center;gap:6px;min-width:0;color:var(--txt3);cursor:grab;
+}
+.foot-engine-head:active,.foot-engine-group.dragging .foot-engine-head{cursor:grabbing}
+.foot-engine-group.dragging{opacity:.28}
+.foot-engines.reordering .foot-engine-group{will-change:transform}
 .foot-engine-name{
   min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
   font-family:var(--sans);font-size:9px;font-weight:400;text-transform:uppercase;letter-spacing:.1em;

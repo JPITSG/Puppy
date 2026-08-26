@@ -3013,6 +3013,95 @@ async function refreshCodexUsage(bid, button, nodeName) {
   }
 }
 
+/* Node order in the status panel. A display preference for this browser, like
+   the collapse state of the very same boxes - not a property of the nodes, and
+   nothing the other side needs to know. Reuses the session reorder machinery
+   wholesale: same slot maths, same animation, same drag affordances. */
+const NODE_ORDER_KEY = "puppy.order.status-nodes";
+
+function nodeGroupKey(group) {
+  return group.bid ? `remote:${group.bid}` : "local";
+}
+
+function savedNodeOrder() {
+  try {
+    const raw = JSON.parse(lsGet(NODE_ORDER_KEY) || "[]");
+    return Array.isArray(raw) ? raw.filter(key => typeof key === "string") : [];
+  } catch (error) { return []; }
+}
+
+/* Nodes the saved order has never seen sort last in their natural order, the
+   same rule sessions use, so attaching a backend appends it rather than
+   dropping it somewhere arbitrary. */
+function sortNodeGroups(groups) {
+  const rank = new Map(savedNodeOrder().map((key, index) => [key, index]));
+  groups.sort((a, b) => {
+    const ar = rank.has(nodeGroupKey(a)) ? rank.get(nodeGroupKey(a)) : Number.MAX_SAFE_INTEGER;
+    const br = rank.has(nodeGroupKey(b)) ? rank.get(nodeGroupKey(b)) : Number.MAX_SAFE_INTEGER;
+    return ar - br;
+  });
+  return groups;
+}
+
+let dragNode = null;
+
+function cancelNodeDrag(item = null) {
+  if (!dragNode || (item && dragNode.item !== item)) return;
+  const context = dragNode;
+  dragNode = null;
+  restoreDragSlots(context, ".foot-engine-group");
+  if (context.item) context.item.classList.remove("dragging");
+  if (context.container) context.container.classList.remove("reordering");
+}
+
+/* The head is the handle, not the whole box: the body holds engine rows and a
+   usage-refresh button, and a drag starting on those would be a surprise. */
+function wireNodeGroupDrag(group, head, key) {
+  head.draggable = true;
+  const blockTouchDrag = guardNativeTouchDrag(head);
+  head.addEventListener("dragstart", (event) => {
+    if (blockTouchDrag(event)) return;
+    const container = group.parentElement;
+    if (!container) return;
+    dragNode = {
+      key, item: group, container,
+      originalOrder: reorderChildren(container, ".foot-engine-group"),
+    };
+    container.classList.add("reordering");
+    requestAnimationFrame(() => {
+      if (dragNode && dragNode.item === group) group.classList.add("dragging");
+    });
+    event.dataTransfer.effectAllowed = "move";
+    try { event.dataTransfer.setData("text/plain", `puppy-node:${key}`); } catch (error) {}
+  });
+  head.addEventListener("dragend", () => cancelNodeDrag(group));
+}
+
+function wireNodeGroupDropZone(root) {
+  if (root.dataset.reorderWired === "1") return;   // the panel outlives its rows
+  root.dataset.reorderWired = "1";
+  const mine = () => dragNode && dragNode.container === root;
+  root.addEventListener("dragenter", (event) => {
+    if (mine()) acceptReorderDrag(event);
+  });
+  root.addEventListener("dragover", (event) => {
+    if (!mine()) return;
+    acceptReorderDrag(event);
+    moveDragSlot(root, dragNode.item, ".foot-engine-group", event.clientY, false);
+  });
+  root.addEventListener("drop", (event) => {
+    if (!mine()) return;
+    acceptReorderDrag(event);
+    const context = dragNode;
+    dragNode = null;
+    context.item.classList.remove("dragging");
+    root.classList.remove("reordering");
+    const keys = reorderChildren(root, ".foot-engine-group")
+      .map(node => node.dataset.nodeKey).filter(Boolean);
+    if (keys.length) lsSet(NODE_ORDER_KEY, JSON.stringify(keys));
+  });
+}
+
 function renderFootEngines() {
   const root = $("foot-engines");
   root.innerHTML = "";
@@ -3022,6 +3111,8 @@ function renderFootEngines() {
       bid: b.id, name: b.name, version: b.remote_version || "",
       engines: Object.prototype.hasOwnProperty.call(state.engCache, b.id) ? state.engCache[b.id] : null,
     })));
+  sortNodeGroups(groups);
+  wireNodeGroupDropZone(root);
   for (const g of groups) {
     const group = el("div", "foot-engine-group");
     const body = el("div", "foot-engine-body");
@@ -3047,6 +3138,8 @@ function renderFootEngines() {
       }
       head.appendChild(disclosure);
       group.appendChild(head);
+      group.dataset.nodeKey = key;
+      wireNodeGroupDrag(group, head, key);
     }
     if (g.bid && state.remoteOk[g.bid] === false) {
       body.appendChild(el("div", "foot-engine-empty", "backend unavailable"));
