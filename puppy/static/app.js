@@ -2979,12 +2979,13 @@ function revealTabInStrip(tabId) {
     syncHorizontalOverflow(tabsRoot);
     return;
   }
-  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  try {
-    tabsRoot.scrollTo({ left: target, behavior: reducedMotion ? "auto" : "smooth" });
-  } catch (error) {
-    tabsRoot.scrollLeft = target;
-  }
+  /* A newly opened view can refresh the tab nodes immediately. A smooth scroll
+     still reports its old position during that refresh, which used to persist
+     zero and cancel the reveal before it moved. Make the destination current
+     and authoritative now; the overflow cues retain their own soft transition. */
+  tabScrollPositions.set(pane.id, target);
+  tabsRoot.scrollLeft = target;
+  syncHorizontalOverflow(tabsRoot);
 }
 
 function finishTabScrollLayout(focusTabId = null) {
