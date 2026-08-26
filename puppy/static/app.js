@@ -3539,10 +3539,15 @@ function renderTabNode(t, pane, tabsRoot) {
       event.dataTransfer.effectAllowed = "move";
       const rect = tab.getBoundingClientRect();
       const x = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
-      const y = Math.max(0, Math.min(rect.height, event.clientY - rect.top));
+      /* Anchored just below the cursor, never at the grab point. Grabbed
+         mid-tab, the card would ride at the strip's own height and lie over
+         the stationary tabs - its bright border slicing across the dimmed
+         original reads as that tab glitching. Below the cursor it trails
+         over the pane instead, and the strip keeps telling the story: the
+         dimmed slot there is the one that moves. */
       try {
         event.dataTransfer.setData("text/plain", `puppy-tab:${t.id}`);
-        event.dataTransfer.setDragImage(dragImage, x, y);
+        event.dataTransfer.setDragImage(dragImage, x, 1);
       } catch (error) {}
     }
   });

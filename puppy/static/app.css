@@ -579,6 +579,10 @@ select.choice-native{display:none!important}
    the bottom edge so the active tab always covers the divider exactly. */
 .tabs{
   display:flex;gap:4px;overflow-x:auto;flex:1 1 auto;width:100%;min-width:0;
+  /* hidden, not the implied auto: the active tab's seam cap overshoots the
+     bottom edge by design, and as scrollable overflow that one pixel lets a
+     native drag auto-scroll the strip and nudge every tab upward */
+  overflow-y:hidden;
   scrollbar-width:none;align-self:stretch;align-items:flex-end;
   overscroll-behavior-x:contain;-webkit-overflow-scrolling:touch;
 }
