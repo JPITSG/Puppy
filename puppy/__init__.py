@@ -1,3 +1,3 @@
 """Puppy - persistent AI coding session manager (Claude Code / Codex orchestrator)."""
 
-__version__ = "1.0.213"
+__version__ = "1.0.214"

@@ -2124,8 +2124,7 @@ async function pollRemoteBackend(backend, forceEngines = false) {
     if (!engines || !Array.isArray(engines.engines))
       throw new Error("backend returned an invalid engines response");
     if (!remotePollIsCurrent(bid, sequence)) return;
-    state.engCache[bid] = engines.engines;
-    if (engines.usage_refresh) state.remoteUsageRefresh[bid] = engines.usage_refresh;
+    rememberEnginePayload(bid, engines);
     state.remoteEngineCheckedAt[bid] = Date.now();
     delete state.remoteEngineErrors[bid];
     setNodeUser(bid, engines.user);
@@ -2928,23 +2927,34 @@ function weeklyQuotaLeft(e) {
 /* Every engine-bearing response (poll, usage refresh, version refresh, engine
    upgrade) carries the same {engines, usage_refresh} pair. One applier keeps
    local and remote caches, the footer and Settings in step whatever asked. */
+/* Every node's engine payload is remembered here and nowhere else. Several
+   callers do their own partial bookkeeping around it - a poll, a lazy load, the
+   settings render - and a field wired into only some of them is precisely how
+   the update schedule failed to reach a backend's row. */
+function rememberEnginePayload(bid, result) {
+  if (bid) {
+    state.engCache[bid] = result.engines;
+    if (result.usage_refresh) state.remoteUsageRefresh[bid] = result.usage_refresh;
+    if (result.auto_upgrade) state.remoteAutoUpgrade[bid] = result.auto_upgrade;
+  } else {
+    state.engines = result.engines;
+    state.engMap = {};
+    state.engines.forEach(engine => state.engMap[engine.key] = engine);
+    if (result.usage_refresh) state.usageRefresh = result.usage_refresh;
+    if (result.auto_upgrade) state.autoUpgrade = result.auto_upgrade;
+  }
+}
+
 function applyEnginesPayload(bid, result) {
   if (!result || !Array.isArray(result.engines) || !result.usage_refresh)
     throw new Error("node returned an invalid engine response");
+  rememberEnginePayload(bid, result);
   if (bid) {
-    state.engCache[bid] = result.engines;
-    state.remoteUsageRefresh[bid] = result.usage_refresh;
-    if (result.auto_upgrade) state.remoteAutoUpgrade[bid] = result.auto_upgrade;
     state.remoteOk[bid] = true;
     delete state.remoteErrors[bid];
     state.remoteEngineCheckedAt[bid] = Date.now();
     delete state.remoteEngineErrors[bid];
   } else {
-    state.engines = result.engines;
-    state.engMap = {};
-    state.engines.forEach(engine => state.engMap[engine.key] = engine);
-    state.usageRefresh = result.usage_refresh;
-    if (result.auto_upgrade) state.autoUpgrade = result.auto_upgrade;
     state.localEngineCheckedAt = Date.now();
   }
   syncRemoteStateViews();
@@ -7358,13 +7368,12 @@ class SettingsView {
       return;
     }
     if (generation !== this.renderGeneration) return;
-    state.engines = engines.engines;
-    state.usageRefresh = engines.usage_refresh || settings.usage_refresh || state.usageRefresh;
-    state.autoUpgrade = engines.auto_upgrade || state.autoUpgrade;
+    rememberEnginePayload(0, {
+      ...engines,
+      usage_refresh: engines.usage_refresh || settings.usage_refresh || state.usageRefresh,
+    });
     rememberUploadSettings(0, settings.uploads);
     state.localEngineCheckedAt = Date.now();
-    state.engMap = {};
-    state.engines.forEach(e2 => state.engMap[e2.key] = e2);
     renderFootEngines();
     this.inner.innerHTML = "";
     this.remoteEngineGroups.clear();
@@ -8288,8 +8297,7 @@ async function modalNewSession(groupId = null) {
           const result = await api(bid, "engines", { timeoutMs: ENGINE_POLL_TIMEOUT });
           if (!result || !Array.isArray(result.engines))
             throw new Error("backend returned an invalid engines response");
-          state.engCache[bid] = result.engines;
-          if (result.usage_refresh) state.remoteUsageRefresh[bid] = result.usage_refresh;
+          rememberEnginePayload(bid, result);
           state.remoteEngineCheckedAt[bid] = Date.now();
           delete state.remoteEngineErrors[bid];
         }
