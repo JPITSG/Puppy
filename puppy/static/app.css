@@ -952,6 +952,21 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .queue-strip .q-x::after{content:"";position:absolute;inset:-7px -6px}
 @media (hover:hover){.queue-strip .q-x:hover{background:var(--hov);color:var(--err)}}
 .queue-strip .q-x:active{transform:scale(.88);background:var(--hov);color:var(--err)}
+/* Work parked by a restart or an engine kill: the "!" carries the warning and
+   the resend arrow sits where the eye already goes for the row's controls. */
+.queue-strip .q-bang{opacity:1;color:var(--warn);font-weight:700}
+.queue-strip .q-item.q-held .q-t{color:var(--txt3)}
+.queue-strip .q-resend{
+  position:relative;flex:0 0 auto;
+  display:inline-flex;align-items:center;justify-content:center;
+  width:16px;height:16px;padding:0;border:none;border-radius:var(--btn-r);cursor:pointer;
+  background:none;color:var(--txt3);line-height:1;
+  transition:background .12s var(--ease),color .12s var(--ease),transform .12s var(--ease);
+}
+.queue-strip .q-resend svg{display:block}
+.queue-strip .q-resend::after{content:"";position:absolute;inset:-7px -6px}
+@media (hover:hover){.queue-strip .q-resend:hover{background:var(--hov);color:var(--ok)}}
+.queue-strip .q-resend:active{transform:scale(.88);background:var(--hov);color:var(--ok)}
 /* expands the tail past the cap, and collapses it again */
 .queue-strip .q-more{
   align-self:flex-start;padding:1px 2px;border:none;border-radius:var(--btn-r);cursor:pointer;

@@ -1050,6 +1050,60 @@ def check_notify_placeholders() -> None:
     assert "duration_hms" not in notify.clean_info({"session": "s"})
 
 
+async def exercise_queue_persistence(runner, db) -> None:
+    """Queued prompts belong to the user: they survive a kill and a restart as
+    held items, come back only on an explicit re-send, and never run twice."""
+    sid = db.create_session("queue survival", "claude", "/tmp", "", "", "blue", "auto")
+    try:
+        h = runner.hub(sid)
+        started = []
+        h._start_turn = lambda text: (started.append(text),
+                                      setattr(h, "status", "running"))
+        h.send_message("first")
+        for text in ("second", "third"):
+            h.send_message(text)
+        assert h.queue == ["second", "third"]
+        assert db.meta_get("session_queue.{}".format(sid)) ==             {"queue": ["second", "third"], "held": []}
+
+        # a deploy kill parks the queue durably instead of discarding it
+        await h.kill()
+        assert h.queue == [] and h.held == ["second", "third"]
+
+        # a restart restores everything as held; a second restart adds nothing
+        runner.drop_hub(sid)
+        h = runner.hub(sid)
+        assert h.queue == [] and h.held == ["second", "third"]
+        runner.drop_hub(sid)
+        h = runner.hub(sid)
+        assert h.held == ["second", "third"]
+
+        # held items move only on explicit instruction, guarded by their text
+        assert "error" in h.requeue_held(0, "not the item")
+        restarted = []
+        h._start_turn = lambda text: (restarted.append(text),
+                                      setattr(h, "status", "running"))
+        assert h.requeue_held(0, "second") == {"queued": False}
+        assert restarted == ["second"]
+        assert h.requeue_held(0, "third") == {"queued": True}
+        assert h.queue == ["third"] and h.held == []
+
+        # during shutdown the queue is left for kill() to park, not consumed
+        runner._draining = True
+        try:
+            assert h._take_next_turn() is None
+            assert h.queue == ["third"] and h.status == "idle"
+        finally:
+            runner._draining = False
+        await h.kill()
+        assert h.held == ["third"]
+        assert h.discard_held(0, "third") == {"ok": True}
+        assert db.meta_get("session_queue.{}".format(sid)) is None
+    finally:
+        runner.drop_hub(sid)
+        db.delete_session(sid)
+    assert db.meta_get("session_queue.{}".format(sid)) is None
+
+
 async def main() -> None:
     private_tests = BASE / "data" / "tests"
     private_tests.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -1223,6 +1277,7 @@ async def main() -> None:
         config.set_value("engines.usage_refresh_minutes", 0)
         db.connect()
         exercise_activity_blocks(runner.SessionHub)
+        await exercise_queue_persistence(runner, db)
         exercise_host_cpu_math(host_metrics)
         await exercise_upgrade_readiness(
             backend_upgrade, runner, terminal, temp_root / "readiness")

@@ -914,6 +914,15 @@ async def ws_session(request: web.Request):
                 res = h.unqueue(idx, data.get("text") or "")
                 if "error" in res:
                     await ws.send_json({"type": "toast", "level": "error", "text": res["error"]})
+            elif t in ("requeue_held", "discard_held"):
+                try:
+                    idx = int(data.get("index", -1))
+                except (TypeError, ValueError):
+                    idx = -1
+                op = h.requeue_held if t == "requeue_held" else h.discard_held
+                res = op(idx, data.get("text") or "")
+                if "error" in res:
+                    await ws.send_json({"type": "toast", "level": "error", "text": res["error"]})
             elif t == "interrupt":
                 await h.interrupt(clear_queue=data.get("clear_queue") is True)
     finally:

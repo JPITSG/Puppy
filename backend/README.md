@@ -180,6 +180,19 @@ per turn, so nothing restarts afterwards; the node re-probes the version itself
 when the updater exits, because a zero exit status alone does not prove the
 version moved.
 
+## Durable message queues
+
+Prompts queued behind a running turn are written through to the node's database
+on every change, so they belong to the user rather than to the process. A
+shutdown or engine kill parks whatever had not started as *held* items, and a
+restart restores them as held: visible in the console with a warning mark, run
+again only on an explicit re-send, never automatically - the transcript they
+were queued behind may have ended mid-thought. The session snapshot and queue
+broadcasts carry an additive `held` array old consoles simply ignore, and the
+session websocket accepts `requeue_held` / `discard_held` with the same
+stale-index guard as `unqueue`. A prompt is consumed durably the moment its
+turn starts, so a crash never runs one twice.
+
 ## Unattended engine updates
 
 A node can install its own engine CLI updates on a schedule. It adds no upgrade

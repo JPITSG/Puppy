@@ -4972,7 +4972,7 @@ class SessionView {
         this.history = d.events.filter(ev => ev.kind === "user")
           .map(ev => (ev.data && ev.data.text) || "").filter(Boolean);
         this.histIdx = null;
-        this.renderQueue(d.queued || []);   // before updateHead: pickers read the queue
+        this.renderQueue(d.queued || [], d.held || []);   // before updateHead: pickers read the queue
         this.updateHead();
         this.updateRunState();
         this.syncLiveStatus();
@@ -5011,7 +5011,7 @@ class SessionView {
         this.hideApproval();
         break;
       case "queued":
-        this.renderQueue(d.queued || []);
+        this.renderQueue(d.queued || [], d.held || []);
         this.updateHead();   // the pickers speak for whatever is now last in line
         break;
       case "turn_done":
@@ -5686,43 +5686,72 @@ class SessionView {
     return parts.join(" · ") || "setting change";
   }
 
-  renderQueue(q) {
+  queueRow(item, marker, held) {
+    const cfg = !!(item && typeof item === "object");
+    const ident = cfg ? item.key || "" : item;
+    const row = el("div", "q-item" + (cfg ? " q-cfg" : "") + (held ? " q-held" : ""));
+    row.appendChild(el("span", "q-n" + (held ? " q-bang" : ""), marker));
+    let text;
+    if (cfg) text = this.describeQueuedConfig(item);
+    else {
+      /* one compact line, so attachments are counted rather than spelled out */
+      const parsed = splitAttachmentMarkers(item);
+      const count = parsed.attachments.length;
+      const body = count ? parsed.text : item;
+      text = body.length > 200 ? body.slice(0, 199) + "…" : body;
+      if (count) text = (text ? text + " · " : "") +
+        `${count} attachment${count === 1 ? "" : "s"}`;
+    }
+    const t = el("span", "q-t", text);
+    t.setAttribute("aria-label", (held ? "held after an interruption · " : "") +
+      (cfg ? text : item));
+    row.appendChild(t);
+    return { row, ident, cfg };
+  }
+
+  renderQueue(q, held) {
     const box = this.queueEl;
     this.queued = q;
+    this.held = Array.isArray(held) ? held : (this.held || []);
+    held = this.held;
     box.innerHTML = "";
-    if (!q.length) { box.classList.add("hidden"); this.queueOpen = false; return; }
+    if (!q.length && !held.length) { box.classList.add("hidden"); this.queueOpen = false; return; }
     box.classList.remove("hidden");
     box.classList.toggle("expanded", !!this.queueOpen);
-    box.appendChild(el("div", "q-head", `queued · ${q.length}`));
+    box.appendChild(el("div", "q-head", `queued · ${q.length + held.length}`));
+    /* Held rows first: this work was queued before anything below it, and it is
+       the part that needs a decision. Never capped - each is waiting on the
+       user, and hiding one behind "+N more" is how it gets forgotten. */
+    held.forEach((item, i) => {
+      const { row, ident, cfg } = this.queueRow(item, "!", true);
+      const resend = el("button", "q-resend");
+      resend.type = "button";
+      resend.appendChild(refreshIcon(11));
+      resend.setAttribute("aria-label",
+        cfg ? "Apply this held change" : "Send this held message again");
+      resend.onclick = () => this.heldOp("requeue_held", i, ident);
+      row.appendChild(resend);
+      const x = el("button", "q-x");
+      x.type = "button";
+      x.appendChild(xIcon(12));
+      x.setAttribute("aria-label", "Discard this held item");
+      x.onclick = () => this.heldOp("discard_held", i, ident);
+      row.appendChild(x);
+      box.appendChild(row);
+    });
     /* one row per item, in the order they will run. The list is capped so a
        deep queue cannot push the composer down the screen; the tail is one
        click away. The per-item cap only keeps a runaway message out of the DOM
        - each row is a single line that fades out at whatever width is going. */
     const shown = this.queueOpen ? q : q.slice(0, QUEUE_ROWS);
     shown.forEach((item, i) => {
-      const cfg = !!(item && typeof item === "object");
-      const row = el("div", "q-item" + (cfg ? " q-cfg" : ""));
-      row.appendChild(el("span", "q-n", String(i + 1)));
-      let text;
-      if (cfg) text = this.describeQueuedConfig(item);
-      else {
-        /* one compact line, so attachments are counted rather than spelled out */
-        const parsed = splitAttachmentMarkers(item);
-        const count = parsed.attachments.length;
-        const body = count ? parsed.text : item;
-        text = body.length > 200 ? body.slice(0, 199) + "…" : body;
-        if (count) text = (text ? text + " · " : "") +
-          `${count} attachment${count === 1 ? "" : "s"}`;
-      }
-      const t = el("span", "q-t", text);
-      t.setAttribute("aria-label", cfg ? text : item);
-      row.appendChild(t);
+      const { row, ident, cfg } = this.queueRow(item, String(i + 1), false);
       const x = el("button", "q-x");
       x.type = "button";
       x.appendChild(xIcon(12));   // even size in an even box: no half-pixel centring
       x.setAttribute("aria-label",
         cfg ? "Cancel this queued change" : "Cancel this queued message");
-      x.onclick = () => this.unqueue(i, cfg ? item.key || "" : item);   // full text, not the capped copy
+      x.onclick = () => this.unqueue(i, ident);   // full text, not the capped copy
       row.appendChild(x);
       box.appendChild(row);
     });
@@ -5740,6 +5769,10 @@ class SessionView {
   unqueue(index, text) {
     if (!this.ws || this.ws.readyState !== 1) { toast("not connected", "error"); return; }
     this.ws.send(JSON.stringify({ type: "unqueue", index, text }));
+  }
+  heldOp(type, index, text) {
+    if (!this.ws || this.ws.readyState !== 1) { toast("not connected", "error"); return; }
+    this.ws.send(JSON.stringify({ type, index, text }));
   }
   /* mask a row's tail only when its line overruns the box */
   syncQueueFade() {

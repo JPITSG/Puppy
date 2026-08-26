@@ -171,6 +171,20 @@ class SessionHub:
         self.id = session_id
         self.watchers = set()
         self.queue = []
+        # Work that survived a restart or an engine kill. Held items never run
+        # on their own: the world may have moved since they were written, so
+        # each one waits for an explicit re-send (or discard) in the console.
+        self.held = []
+        try:
+            record = db.meta_get("session_queue.{}".format(session_id)) or {}
+            restored = list(record.get("queue") or []) + list(record.get("held") or [])
+            self.held = [item for item in restored
+                         if isinstance(item, str) and item.strip() or
+                         _is_queued_config(item)]
+            if record:
+                self._persist_queue()   # everything now lives under "held"
+        except Exception as exc:
+            log.warning("could not restore queue for session %s: %s", session_id, exc)
         self.status = "idle"
         # Start of one uninterrupted block of work. Queued turns inherit this
         # timestamp; it is cleared only when the turn and its queue are empty.
@@ -230,6 +244,7 @@ class SessionHub:
             "active_since": self.active_since if self.status == "running" else None,
             "server_time": time.time(),
             "queued": self._queue_wire(),
+            "held": self._held_wire(),
             "pending_approval": self.pending_approval,
             "uploads": uploads.settings_payload(),
         }
@@ -248,8 +263,35 @@ class SessionHub:
                 out.append(item)
         return out
 
+    def _held_wire(self) -> list:
+        out = []
+        for item in self.held:
+            if _is_queued_config(item):
+                entry = {"kind": "config", "key": item.get("key") or ""}
+                entry.update(item.get("fields") or {})
+                out.append(entry)
+            else:
+                out.append(item)
+        return out
+
+    def _persist_queue(self) -> None:
+        """Write-through on every mutation: queued work belongs to the user,
+        not to this process, so it must survive puppy being restarted or
+        killed mid-turn. Prompts stay strings and pending changes stay their
+        raw dicts, so a restore is lossless."""
+        try:
+            key = "session_queue.{}".format(self.id)
+            if self.queue or self.held:
+                db.meta_set(key, {"queue": self.queue, "held": self.held})
+            else:
+                db.meta_set(key, None)
+        except Exception as exc:
+            log.warning("could not persist queue for session %s: %s", self.id, exc)
+
     def _broadcast_queue(self) -> None:
-        self.broadcast({"type": "queued", "queued": self._queue_wire()})
+        self._persist_queue()
+        self.broadcast({"type": "queued", "queued": self._queue_wire(),
+                        "held": self._held_wire()})
 
     # ---- public ops ----
 
@@ -330,6 +372,42 @@ class SessionHub:
         self._broadcast_queue()
         return {"ok": True}
 
+    def _held_matches(self, index: int, ident: str):
+        """The item at index, but only if ident still names it - the same
+        stale-index guard unqueue uses."""
+        if not 0 <= index < len(self.held):
+            return None
+        item = self.held[index]
+        current = item.get("key") if _is_queued_config(item) else item
+        return item if current == ident else None
+
+    def requeue_held(self, index: int, ident: str) -> dict:
+        """Send one held item again, through the same paths a fresh submit
+        takes: a prompt starts now or queues behind running work, a pending
+        change applies now or re-queues."""
+        item = self._held_matches(index, ident)
+        if item is None:
+            return {"error": "that held item is gone"}
+        self.held.pop(index)
+        if _is_queued_config(item):
+            fields = item.get("fields") or {}
+            if not self.queue_config(fields):
+                self._apply_queued_config(fields)
+            self._broadcast_queue()
+            return {"ok": True}
+        result = self.send_message(item)
+        if "error" in result:
+            self.held.insert(index, item)   # nothing was sent: keep it held
+        self._broadcast_queue()
+        return result
+
+    def discard_held(self, index: int, ident: str) -> dict:
+        if self._held_matches(index, ident) is None:
+            return {"error": "that held item is gone"}
+        self.held.pop(index)
+        self._broadcast_queue()
+        return {"ok": True}
+
     def clear_queue(self) -> int:
         """Drop everything that has not started yet and return the count."""
         count = len(self.queue)
@@ -354,6 +432,13 @@ class SessionHub:
         empty. Pending model/effort changes at the front apply now - everything
         queued ahead of them has finished - so the next prompt taken runs under
         the configuration that was current when it was sent."""
+        # A shutdown grace window only has to outlast the RUNNING turn. Feeding
+        # it the next queued prompt would consume that prompt and then kill it
+        # mid-answer; leaving the queue untouched lets kill() park it instead.
+        if _draining and self.queue:
+            self.status = "idle"
+            self.active_since = None
+            return None
         applied = False
         while self.queue and _is_queued_config(self.queue[0]):
             self._apply_queued_config(self.queue.pop(0).get("fields") or {})
@@ -361,7 +446,9 @@ class SessionHub:
         if applied:
             self._broadcast_queue()
         if self.queue:
-            return self.queue.pop(0)
+            item = self.queue.pop(0)
+            self._persist_queue()   # consumed: a crash must not run it twice
+            return item
         self.status = "idle"
         self.active_since = None
         return None
@@ -441,7 +528,14 @@ class SessionHub:
         self.broadcast({"type": "approval_resolved", "request_id": request_id, "behavior": behavior})
 
     async def kill(self) -> None:
-        self.queue.clear()
+        if self.queue:
+            # Parked, not discarded: these prompts were written by a person.
+            # They come back after the restart marked as held, for an explicit
+            # re-send, because the transcript they were queued behind may have
+            # ended mid-thought.
+            self.held.extend(self.queue)
+            self.queue.clear()
+            self._broadcast_queue()
         proc = self.proc
         if proc is None or proc.returncode is not None:
             return
@@ -713,7 +807,12 @@ class SessionHub:
             pass
 
 
+_draining = False
+
+
 async def shutdown() -> None:
+    global _draining
+    _draining = True
     # Restarts are often triggered by an agent running INSIDE puppy (the user
     # drives puppy development through puppy). Give in-flight turns a grace
     # window to finish instead of SIGKILLing them mid-answer; supervisor's
