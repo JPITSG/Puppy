@@ -2421,13 +2421,6 @@ function backendSupportsUsageRefresh(bid) {
     backend.capabilities.includes("engine-usage-refresh");
 }
 
-function backendSupportsManualUsageRefresh(bid) {
-  if (!bid) return true;
-  const backend = state.backends.find(b => b.id === bid);
-  return !!backend && Array.isArray(backend.capabilities) &&
-    backend.capabilities.includes("engine-usage-refresh-manual");
-}
-
 /* Forced version re-checks and engine CLI upgrades ship as one additive route
    pair, so one capability gates both controls. Never inferred for older nodes:
    a hidden control is better than a button their router would reject. */
@@ -3078,28 +3071,6 @@ async function refreshEngineVersions(bid, button, nodeName) {
   }
 }
 
-async function refreshCodexUsage(bid, button, nodeName) {
-  if (button.disabled) return;
-  button.disabled = true;
-  button.classList.add("refreshing");
-  button.setAttribute("aria-busy", "true");
-  try {
-    const result = await api(bid, "engines/usage-refresh", {
-      method: "POST", timeoutMs: 20000,
-    });
-    applyUsageRefreshPayload(bid, result);
-    if (result.usage_refresh.last_error)
-      toast(`${nodeName}: ${result.usage_refresh.last_error}`, "error", 7000);
-  } catch (error) {
-    toast(`${nodeName}: ${error.message}`, "error", 7000);
-  } finally {
-    if (button.isConnected) {
-      button.disabled = false;
-      button.classList.remove("refreshing");
-      button.removeAttribute("aria-busy");
-    }
-  }
-}
 
 /* Node order in the status panel. A display preference for this browser, like
    the collapse state of the very same boxes - not a property of the nodes, and
@@ -3261,19 +3232,6 @@ function renderFootEngines() {
         st.appendChild(quota);
       }
       row.appendChild(st);
-      if (e.key === "codex" && e.installed && e.auth === "ok" &&
-          backendSupportsManualUsageRefresh(g.bid)) {
-        const refresh = el("button", "foot-usage-refresh");
-        refresh.type = "button";
-        refresh.setAttribute("aria-label", `Refresh ${g.name} Codex weekly usage`);
-        refresh.appendChild(refreshIcon(10));
-        refresh.onclick = event => {
-          event.preventDefault();
-          event.stopPropagation();
-          refreshCodexUsage(g.bid, refresh, g.name);
-        };
-        row.appendChild(refresh);
-      }
       body.appendChild(row);
     }
     group.appendChild(body);

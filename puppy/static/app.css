@@ -307,19 +307,6 @@ a{color:var(--acc2)}
 .foot-eng .st-sep{color:var(--txt3)}
 .foot-eng .st-quota{color:var(--ok)}
 .foot-eng .st-quota.low{color:var(--err)}
-.foot-usage-refresh{
-  position:relative;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;
-  width:13px;height:13px;margin:0;padding:0;border:0;border-radius:var(--btn-r);
-  background:transparent;color:var(--ok);cursor:pointer;
-  transition:background .15s var(--ease),color .15s var(--ease),transform .12s var(--ease);
-}
-.foot-usage-refresh::after{content:"";position:absolute;inset:-5px}
-.foot-usage-refresh svg{display:block;transform-origin:center}
-@media (hover:hover){.foot-usage-refresh:hover{color:var(--ok-hi)}}
-.foot-usage-refresh:active{transform:scale(.88);background:var(--ok-dim)}
-.foot-usage-refresh:focus-visible{outline:1px solid var(--ok);outline-offset:2px}
-.foot-usage-refresh:disabled{cursor:wait;opacity:.78}
-.foot-usage-refresh.refreshing svg{animation:spin .75s linear infinite}
 .foot-row{display:flex;align-items:center;gap:6px;border-top:1px solid var(--line);padding-top:7px}
 .foot-row .icon-btn{width:24px;height:24px;font-size:14px;border-radius:var(--btn-r);margin-left:-8px}
 #btn-bell svg{display:block;transform:translateY(1px)}
