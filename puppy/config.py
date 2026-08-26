@@ -41,6 +41,9 @@ DEFAULTS = {
     "engines": {"usage_refresh_minutes": DEFAULT_USAGE_REFRESH_MINUTES},
     "uploads": {"max_file_size_mb": DEFAULT_UPLOAD_LIMIT_MB},
     "terminal": {"command": "/bin/bash -l"},
+    # node-owned managed headless browser; enabling requires the availability
+    # probe (binary + version) to pass at toggle time
+    "browser": {"enabled": False},
     "sessions": {"default_cwd": "/etc/scripts", "turn_timeout": 7200,
                  "shutdown_grace": 60},
     # prompt-completion command: run `command` on backend id `backend` (0 =

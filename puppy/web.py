@@ -14,9 +14,10 @@ import time
 
 from aiohttp import WSMsgType, web
 
-from puppy import (__version__, auth, backends, bind_verify, cli_releases, cli_upgrade,
-                   config, db, host_metrics, listener_handoff, notify, protocol, runner,
-                   snapshots, terminal, uploads, usage_refresh, workspaces)
+from puppy import (__version__, auth, backends, bind_verify, browser, cli_releases,
+                   cli_upgrade, config, db, host_metrics, listener_handoff, notify,
+                   protocol, runner, snapshots, terminal, uploads, usage_refresh,
+                   workspaces)
 from puppy.drivers import all_drivers, get_driver
 from puppy.drivers import base as driver_base
 
@@ -84,6 +85,7 @@ async def h_ping(request: web.Request):
         "capabilities": list(request.app.get(
             "puppy_capabilities", protocol.execution_capabilities())),
         "uploads": uploads.settings_payload(),
+        "browser": browser.ping_payload(),
     }
     upgrade = request.app.get("puppy_upgrade")
     if callable(upgrade):
@@ -143,6 +145,7 @@ async def h_state(request: web.Request):
         "uploads": uploads.settings_payload(),
         "session_colors": db.SESSION_COLORS,
         "notify": notify.public_state(),
+        "browser": browser.ping_payload(),
     })
 
 
@@ -812,6 +815,10 @@ async def h_snapshot_import(request: web.Request):
         usage_refresh.reset_due(clear_status=True)
         backends.reset_auto_upgrade_schedule()
         try:
+            await browser.apply_config()
+        except Exception as exc:
+            log.warning("restored state but could not reconcile the browser: %s", exc)
+        try:
             await backends.close_client()
         except Exception as exc:
             log.warning("restored state but could not close the old backend client: %s", exc)
@@ -1034,6 +1041,7 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     if include_terminal:
         r.add_get("/api/ws/term", terminal.ws_terminal)
         r.add_post("/api/notify/exec", h_notify_exec)
+    browser.register(app)
     uploads.register(app)
 
 

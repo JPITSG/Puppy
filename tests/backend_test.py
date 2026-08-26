@@ -256,6 +256,10 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "engine-usage-refresh-manual" in ping["capabilities"]
         assert "engine-upgrade" in ping["capabilities"]
         assert "file-uploads" in ping["capabilities"]
+        # browser surface: capability is static, enablement is node config
+        # (off in this deployment), availability is probed on demand
+        assert "browser" in ping["capabilities"]
+        assert ping["browser"] == {"enabled": False}
         assert ping["uploads"]["enabled"] is \
             (ping["uploads"]["max_file_size_mb"] > 0)
         assert "terminal" not in ping["capabilities"]
@@ -287,6 +291,13 @@ async def exercise_node(url: str, token: str, expected_version: str,
             sessions_payload = await response.json()
             assert sessions_payload["sessions"] == []
             assert isinstance(sessions_payload["server_time"], (int, float))
+        async with http.get(url + "/api/browser/status", headers=good, ssl=pinned) as response:
+            assert response.status == 200
+            browser_status = await response.json()
+            assert browser_status["supported"] is True
+            assert browser_status["enabled"] is False
+            assert browser_status["running"] is False
+            assert isinstance(browser_status["available"], bool)
         async with http.get(url + "/api/engines", headers=good, ssl=pinned) as response:
             engine_payload = await response.json()
             assert response.status == 200, engine_payload

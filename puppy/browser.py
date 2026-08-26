@@ -1,0 +1,1036 @@
+"""Managed headless browser surface (one optional Chromium per node).
+
+Puppy owns the whole lifecycle of a user-supplied Chromium/Chrome binary and
+drives it exclusively over Chromium's ``--remote-debugging-pipe``: CDP JSON
+messages, NUL-terminated, on inherited file descriptors 3/4. No DevTools TCP
+port ever exists, no display server is involved, and nothing else on the host
+can reach the browser. The WebUI receives the screen as screencast JPEG frames
+and sends input over the same authenticated websocket surface the terminal
+uses; a controller reaches a remote node's browser through the existing
+generic backend proxy, so the browser itself never binds a socket.
+
+Enablement is node-owned config (``browser.enabled``), toggled locally or -
+for a headless backend - through its authenticated API. Enabling requires the
+availability probe to pass: a binary on PATH (or ``PUPPY_BROWSER_BIN``) whose
+``--version`` parses and is recent enough for reliable headless streaming.
+Installing/maintaining the binary is deliberately the host's job.
+
+``--no-sandbox`` is added exactly when this process runs as root, where
+Chromium refuses to start otherwise; unprivileged deployments keep the
+sandbox. The profile lives in ``data/browser/`` (0700). Like the engines'
+native credential/session stores it is deliberately outside snapshot
+coverage: disposable render state on this node, never required for restore.
+"""
+from __future__ import annotations
+
+import asyncio
+import base64
+import collections
+import fcntl
+import json
+import logging
+import os
+import re
+import shutil
+import signal
+import time
+
+from aiohttp import WSMsgType, web
+
+from puppy import config
+
+log = logging.getLogger("puppy.browser")
+
+BINARY_CANDIDATES = ("chromium", "chromium-browser", "google-chrome",
+                     "google-chrome-stable", "chrome", "chrome-headless-shell")
+# First major with the fully rendering "new" headless mode our screencast needs.
+MIN_MAJOR = 112
+PROBE_TTL_SECONDS = 300
+VERSION_TIMEOUT = 12.0
+START_TIMEOUT = 20.0
+CALL_TIMEOUT = 10.0
+IDLE_STOP_SECONDS = 900        # no viewers this long -> browser exits
+VIEWPORT_W, VIEWPORT_H = 1280, 800
+SCREENCAST_QUALITY = 70
+MAX_CDP_BUFFER = 32 * 1024 * 1024
+MAX_TEXT_BACKLOG = 64          # queued small messages per viewer
+MAX_URL_LENGTH = 4096
+MAX_INSERT_TEXT = 8192
+
+_probe_cache = None            # (monotonic ts, dict)
+_manager = None
+
+
+class BrowserError(RuntimeError):
+    pass
+
+
+def invalidate_probe() -> None:
+    global _probe_cache
+    _probe_cache = None
+
+
+def _browser_root() -> str:
+    path = os.path.join(config.DATA_DIR, "browser")
+    os.makedirs(path, exist_ok=True)
+    try:
+        os.chmod(path, 0o700)
+    except OSError:
+        pass
+    return path
+
+
+def _subdir(name: str) -> str:
+    path = os.path.join(_browser_root(), name)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def enabled() -> bool:
+    return bool(config.get("browser.enabled", False))
+
+
+def sandbox_mode() -> str:
+    return "no-sandbox" if os.geteuid() == 0 else "sandboxed"
+
+
+async def _run_version(binary: str) -> str:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            binary, "--version",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=VERSION_TIMEOUT)
+        return out.decode(errors="replace").strip().splitlines()[0] if out else ""
+    except Exception as exc:
+        log.warning("browser version probe failed for %s: %s", binary, exc)
+        return ""
+
+
+async def probe(force: bool = False) -> dict:
+    """Availability check: binary present, runnable, and recent enough."""
+    global _probe_cache
+    now = time.monotonic()
+    if not force and _probe_cache and now - _probe_cache[0] < PROBE_TTL_SECONDS:
+        return dict(_probe_cache[1])
+    result = {"available": False, "reason": "", "binary": "", "product": "", "major": 0}
+    override = os.environ.get("PUPPY_BROWSER_BIN", "")
+    binary = ""
+    if override:
+        # An explicit override wins and fails closed rather than falling back.
+        if os.path.isfile(override) and os.access(override, os.X_OK):
+            binary = os.path.abspath(override)
+        else:
+            result["reason"] = "PUPPY_BROWSER_BIN is not an executable file"
+    else:
+        for name in BINARY_CANDIDATES:
+            found = shutil.which(name)
+            if found:
+                binary = found
+                break
+        if not binary:
+            result["reason"] = "no Chromium or Chrome binary found on this node's PATH"
+    if binary:
+        result["binary"] = binary
+        product = await _run_version(binary)
+        match = re.search(r"(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?", product or "")
+        if not product:
+            result["reason"] = "the browser binary did not report a version"
+        elif not match:
+            result["reason"] = "could not parse a browser version from: " + product[:80]
+        else:
+            result["product"] = product
+            result["major"] = int(match.group(1))
+            if result["major"] < MIN_MAJOR:
+                result["reason"] = (
+                    "browser {} is too old for reliable headless streaming "
+                    "(needs {}+)".format(result["major"], MIN_MAJOR))
+            else:
+                result["available"] = True
+    _probe_cache = (now, dict(result))
+    return result
+
+
+async def status_payload() -> dict:
+    st = await probe()
+    m = _manager
+    return {
+        "supported": True,
+        "enabled": enabled(),
+        "available": st["available"],
+        "reason": st["reason"],
+        "binary": st["binary"],
+        "product": st["product"],
+        "sandbox": sandbox_mode(),
+        "running": bool(m and m.running),
+        "viewers": m.viewer_count() if m else 0,
+    }
+
+
+def ping_payload() -> dict:
+    """Cheap additive /api/ping metadata; never probes or spawns anything."""
+    return {"enabled": enabled()}
+
+
+async def set_enabled(value: bool) -> dict:
+    if value:
+        st = await probe()
+        if not st["available"]:
+            raise BrowserError(st["reason"] or "no usable browser on this node")
+    config.set_value("browser.enabled", bool(value))
+    if not value and _manager is not None:
+        await _manager.stop("browser disabled")
+    return await status_payload()
+
+
+async def apply_config() -> None:
+    """Reconcile the running instance after config replacement (restore)."""
+    if not enabled() and _manager is not None:
+        await _manager.stop("browser disabled by restored configuration")
+
+
+async def shutdown() -> None:
+    if _manager is not None:
+        await _manager.stop("Puppy is shutting down")
+
+
+def manager() -> "Manager":
+    global _manager
+    if _manager is None:
+        _manager = Manager()
+    return _manager
+
+
+# ---- spawn helpers ----
+
+def _dup_high(fd: int) -> int:
+    """Move an fd to >=16 so a dup2 file action never targets its own number
+    (dup2 with equal fds would keep close-on-exec and the fd would vanish on
+    exec - the child must genuinely receive 0..4)."""
+    high = fcntl.fcntl(fd, fcntl.F_DUPFD_CLOEXEC, 16)
+    os.close(fd)
+    return high
+
+
+def launch_argv(binary: str, profile_dir: str, as_root: bool) -> list:
+    argv = [
+        binary,
+        "--headless=new",
+        "--remote-debugging-pipe",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--hide-crash-restore-bubble",
+        "--disable-background-networking",
+        "--disable-component-update",
+        "--mute-audio",
+        "--window-size={},{}".format(VIEWPORT_W, VIEWPORT_H),
+        "--user-data-dir=" + profile_dir,
+    ]
+    if as_root:
+        argv.append("--no-sandbox")   # Chromium refuses a sandboxed root
+    argv.append("about:blank")
+    return argv
+
+
+def _kill_stale_instance(profile_dir: str) -> None:
+    """A hard-killed Puppy can orphan the browser (it runs in its own process
+    group). The pidfile plus a strict cmdline check scoped to our own profile
+    directory lets the next start reclaim it without ever touching a stranger."""
+    pidfile = os.path.join(_browser_root(), "chrome.pid")
+    try:
+        pid = int(open(pidfile, "r", encoding="utf-8").read().strip())
+    except (OSError, ValueError):
+        return
+    try:
+        with open("/proc/{}/cmdline".format(pid), "rb") as f:
+            cmdline = f.read().decode("utf-8", "replace")
+    except OSError:
+        return
+    if ("--user-data-dir=" + profile_dir) not in cmdline:
+        return
+    log.warning("reclaiming stale managed browser pid=%s", pid)
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pid, sig)
+        except (ProcessLookupError, PermissionError):
+            break
+        time.sleep(0.4)
+    try:
+        os.unlink(pidfile)
+    except OSError:
+        pass
+
+
+async def _reap_group(pid: int) -> None:
+    """INT-then-KILL the browser's own process group, then collect the child."""
+    for sig, wait in ((signal.SIGINT, 1.5), (signal.SIGTERM, 1.5), (signal.SIGKILL, 3.0)):
+        try:
+            done, _ = os.waitpid(pid, os.WNOHANG)
+            if done == pid:
+                return
+        except ChildProcessError:
+            return
+        try:
+            os.killpg(pid, sig)
+        except ProcessLookupError:
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                return
+        await asyncio.sleep(wait)
+    try:
+        await asyncio.get_event_loop().run_in_executor(None, os.waitpid, pid, 0)
+    except Exception:
+        pass
+
+
+class _ReadProtocol(asyncio.Protocol):
+    """NUL-delimited CDP JSON stream from the browser's fd 4."""
+
+    def __init__(self, owner):
+        self.owner = owner
+        self.buffer = bytearray()
+
+    def data_received(self, data):
+        self.buffer.extend(data)
+        if len(self.buffer) > MAX_CDP_BUFFER:
+            log.error("browser CDP stream exceeded %s bytes; dropping it", MAX_CDP_BUFFER)
+            self.owner._on_pipe_lost()
+            return
+        while True:
+            cut = self.buffer.find(b"\0")
+            if cut < 0:
+                return
+            raw = bytes(self.buffer[:cut])
+            del self.buffer[:cut + 1]
+            try:
+                message = json.loads(raw.decode("utf-8"))
+            except Exception:
+                continue
+            if isinstance(message, dict):
+                self.owner._on_message(message)
+
+    def connection_lost(self, exc):
+        self.owner._on_pipe_lost()
+
+
+class _Viewer:
+    """One websocket watcher. A single sender task per socket keeps writes
+    serialized; frames collapse to the newest under backpressure while small
+    JSON messages stay ordered and bounded."""
+
+    def __init__(self, ws):
+        self.ws = ws
+        self.frame = None
+        self.texts = collections.deque()
+        self.wake = asyncio.Event()
+        self.closed = False
+        self.task = asyncio.ensure_future(self._run())
+
+    def send_json(self, payload: dict) -> None:
+        if len(self.texts) < MAX_TEXT_BACKLOG:
+            self.texts.append(json.dumps(payload))
+        self.wake.set()
+
+    def send_frame(self, data: bytes) -> None:
+        self.frame = data
+        self.wake.set()
+
+    async def _run(self):
+        try:
+            while not self.closed:
+                await self.wake.wait()
+                self.wake.clear()
+                while self.texts:
+                    await self.ws.send_str(self.texts.popleft())
+                frame, self.frame = self.frame, None
+                if frame is not None:
+                    await self.ws.send_bytes(frame)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+
+    def close(self):
+        self.closed = True
+        self.task.cancel()
+
+
+# key names that need a virtual key code because they carry no text
+_VIRTUAL_KEYS = {
+    "Enter": 13, "Backspace": 8, "Tab": 9, "Escape": 27, "Delete": 46,
+    "ArrowLeft": 37, "ArrowUp": 38, "ArrowRight": 39, "ArrowDown": 40,
+    "Home": 36, "End": 35, "PageUp": 33, "PageDown": 34, "Insert": 45,
+    "Shift": 16, "Control": 17, "Alt": 18, "Meta": 91, "ContextMenu": 93,
+    "F5": 116,
+}
+_MOUSE_BUTTONS = ("none", "left", "middle", "right")
+_MOUSE_KINDS = {"down": "mousePressed", "up": "mouseReleased", "move": "mouseMoved"}
+
+
+def _normalize_url(text: str) -> str:
+    value = str(text or "").strip()[:MAX_URL_LENGTH]
+    if not value:
+        return ""
+    if value.startswith(("about:", "data:")) or \
+            re.match(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://", value):
+        return value
+    host = value.split("/", 1)[0].split(":", 1)[0].lower()
+    bare_host = " " not in value and (
+        "." in host or host == "localhost" or re.match(r"^\d+(\.\d+){3}$", host))
+    if not bare_host:
+        from urllib.parse import quote
+        return "https://duckduckgo.com/?q=" + quote(value)
+    # LAN-ish names rarely serve TLS; public names get it by default.
+    plain = (host == "localhost" or re.match(r"^\d+(\.\d+){3}$", host) or
+             host.endswith((".lan", ".local", ".home", ".internal")))
+    return ("http://" if plain else "https://") + value
+
+
+class Manager:
+    """The node's single managed browser instance and its viewers."""
+
+    def __init__(self):
+        self.lock = asyncio.Lock()
+        self.attach_lock = asyncio.Lock()
+        self.running = False
+        self.stopping = False
+        self.pid = None
+        self.write_transport = None
+        self.read_transport = None
+        self.next_id = 0
+        self.pending = {}
+        self.viewers = {}            # ws -> _Viewer
+        self.targets = {}            # targetId -> targetInfo
+        self.page_target = ""
+        self.page_session = ""
+        self.screencasting = False
+        self.started_at = 0.0
+        self.frame_meta = {"width": VIEWPORT_W, "height": VIEWPORT_H}
+        self.nav = {"url": "about:blank", "title": "", "can_back": False,
+                    "can_forward": False}
+        self.idle_task = None
+
+    def viewer_count(self) -> int:
+        return len(self.viewers)
+
+    # ---- lifecycle ----
+
+    async def ensure_started(self) -> None:
+        async with self.lock:
+            if self.running:
+                return
+            st = await probe()
+            if not st["available"]:
+                raise BrowserError(st["reason"] or "no usable browser on this node")
+            profile = _subdir("profile")
+            home = _subdir("home")
+            downloads = _subdir("downloads")
+            _kill_stale_instance(profile)
+            argv = launch_argv(st["binary"], profile, os.geteuid() == 0)
+            env = dict(os.environ)
+            env["HOME"] = home
+            env.pop("DISPLAY", None)
+            env.pop("WAYLAND_DISPLAY", None)
+
+            cmd_read, cmd_write = os.pipe()   # us -> browser (its fd 3)
+            out_read, out_write = os.pipe()   # browser -> us (its fd 4)
+            cmd_read = _dup_high(cmd_read)
+            out_write = _dup_high(out_write)
+            devnull = _dup_high(os.open(os.devnull, os.O_RDWR))
+            log_path = os.path.join(_browser_root(), "chrome.log")
+            log_fd = _dup_high(os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600))
+            spawned = None
+            spawn_error = None
+            try:
+                spawned = os.posix_spawn(st["binary"], argv, env, file_actions=[
+                    (os.POSIX_SPAWN_DUP2, devnull, 0),
+                    (os.POSIX_SPAWN_DUP2, log_fd, 1),
+                    (os.POSIX_SPAWN_DUP2, log_fd, 2),
+                    (os.POSIX_SPAWN_DUP2, cmd_read, 3),
+                    (os.POSIX_SPAWN_DUP2, out_write, 4),
+                ], setpgroup=0)
+            except OSError as exc:
+                spawn_error = exc
+            finally:
+                for fd in (cmd_read, out_write, devnull, log_fd):
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                if spawned is None:
+                    for fd in (cmd_write, out_read):
+                        try:
+                            os.close(fd)
+                        except OSError:
+                            pass
+            if spawn_error is not None:
+                raise BrowserError("could not start the browser: {}".format(spawn_error))
+            try:
+                with open(os.path.join(_browser_root(), "chrome.pid"), "w",
+                          encoding="utf-8") as f:
+                    f.write(str(spawned))
+                os.chmod(os.path.join(_browser_root(), "chrome.pid"), 0o600)
+            except OSError:
+                pass
+
+            loop = asyncio.get_event_loop()
+            self.pid = spawned
+            self.stopping = False
+            self.targets = {}
+            self.page_target = ""
+            self.page_session = ""
+            self.screencasting = False
+            self.frame_meta = {"width": VIEWPORT_W, "height": VIEWPORT_H}
+            self.nav = {"url": "about:blank", "title": "", "can_back": False,
+                        "can_forward": False}
+            try:
+                self.read_transport, _ = await loop.connect_read_pipe(
+                    lambda: _ReadProtocol(self), os.fdopen(out_read, "rb", buffering=0))
+                self.write_transport, _ = await loop.connect_write_pipe(
+                    asyncio.Protocol, os.fdopen(cmd_write, "wb", buffering=0))
+                self.running = True
+                version = await self.call("Browser.getVersion", timeout=START_TIMEOUT)
+                await self.call("Target.setDiscoverTargets", {"discover": True})
+                try:
+                    await self.call("Browser.setDownloadBehavior", {
+                        "behavior": "allow", "downloadPath": downloads})
+                except BrowserError:
+                    pass   # best effort; downloads just land in the profile
+                await self._attach_page("")
+                self.started_at = time.time()
+                log.info("managed browser started pid=%s %s%s", spawned,
+                         version.get("product", ""),
+                         " (no sandbox: running as root)" if os.geteuid() == 0 else "")
+            except Exception as exc:
+                log.error("managed browser failed to start: %s", exc)
+                await self._teardown()
+                await _reap_group(spawned)
+                tail = ""
+                try:
+                    with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                        tail = f.read()[-400:].strip()
+                except OSError:
+                    pass
+                raise BrowserError("the browser failed to start" +
+                                   (": " + tail.splitlines()[-1] if tail else ""))
+
+    async def stop(self, reason: str) -> None:
+        async with self.lock:
+            if not self.running and self.pid is None:
+                return
+            log.info("stopping managed browser pid=%s (%s)", self.pid, reason)
+            self.stopping = True
+            pid = self.pid
+            if self.running:
+                try:
+                    await self.call("Browser.close", timeout=3.0)
+                except Exception:
+                    pass
+            self._broadcast_json({"type": "gone", "reason": reason})
+            await self._teardown()
+            if pid is not None:
+                await _reap_group(pid)
+            self.stopping = False
+
+    async def _teardown(self) -> None:
+        self.running = False
+        self._cancel_idle()
+        for fut in list(self.pending.values()):
+            if not fut.done():
+                fut.set_exception(BrowserError("browser exited"))
+        self.pending.clear()
+        for transport in (self.write_transport, self.read_transport):
+            if transport is not None:
+                try:
+                    transport.close()
+                except Exception:
+                    pass
+        self.write_transport = None
+        self.read_transport = None
+        self.page_target = ""
+        self.page_session = ""
+        self.screencasting = False
+        self.pid = None
+        try:
+            os.unlink(os.path.join(_browser_root(), "chrome.pid"))
+        except OSError:
+            pass
+
+    def _on_pipe_lost(self) -> None:
+        if self.stopping or not self.running:
+            return
+        log.warning("managed browser pid=%s exited unexpectedly", self.pid)
+        self.running = False
+        pid, self.pid = self.pid, None
+        for fut in list(self.pending.values()):
+            if not fut.done():
+                fut.set_exception(BrowserError("browser exited"))
+        self.pending.clear()
+        self._broadcast_json({"type": "gone", "reason": "the browser exited"})
+        if pid is not None:
+            asyncio.ensure_future(_reap_group(pid))
+        asyncio.ensure_future(self._teardown())
+
+    # ---- CDP plumbing ----
+
+    def _send_raw(self, message: dict) -> None:
+        if self.write_transport is None:
+            raise BrowserError("browser is not running")
+        self.write_transport.write(json.dumps(message).encode("utf-8") + b"\0")
+
+    def _fire(self, method: str, params=None, session: str = "") -> None:
+        """Send without waiting (input events; unknown-id replies are ignored)."""
+        if not self.running:
+            return
+        self.next_id += 1
+        message = {"id": self.next_id, "method": method}
+        if params is not None:
+            message["params"] = params
+        if session:
+            message["sessionId"] = session
+        try:
+            self._send_raw(message)
+        except BrowserError:
+            pass
+
+    async def call(self, method: str, params=None, session: str = "",
+                   timeout: float = CALL_TIMEOUT) -> dict:
+        if not self.running:
+            raise BrowserError("browser is not running")
+        self.next_id += 1
+        mid = self.next_id
+        fut = asyncio.get_event_loop().create_future()
+        self.pending[mid] = fut
+        message = {"id": mid, "method": method}
+        if params is not None:
+            message["params"] = params
+        if session:
+            message["sessionId"] = session
+        self._send_raw(message)
+        try:
+            return await asyncio.wait_for(fut, timeout)
+        except asyncio.TimeoutError:
+            raise BrowserError("browser did not answer {} in time".format(method))
+        finally:
+            self.pending.pop(mid, None)
+
+    def _on_message(self, message: dict) -> None:
+        mid = message.get("id")
+        if mid is not None:
+            fut = self.pending.pop(mid, None)
+            if fut is not None and not fut.done():
+                if "error" in message:
+                    err = message["error"] or {}
+                    fut.set_exception(BrowserError(
+                        str(err.get("message") or "browser call failed")))
+                else:
+                    fut.set_result(message.get("result") or {})
+            return
+        method = message.get("method") or ""
+        params = message.get("params") or {}
+        if method == "Page.screencastFrame":
+            if message.get("sessionId") != self.page_session:
+                return
+            self._fire("Page.screencastFrameAck",
+                       {"sessionId": params.get("sessionId", 0)},
+                       session=self.page_session)
+            metadata = params.get("metadata") or {}
+            width = int(metadata.get("deviceWidth") or 0)
+            height = int(metadata.get("deviceHeight") or 0)
+            if width > 0 and height > 0 and \
+                    (width != self.frame_meta["width"] or height != self.frame_meta["height"]):
+                self.frame_meta = {"width": width, "height": height}
+                self._broadcast_json({"type": "frame_meta", **self.frame_meta})
+            try:
+                frame = base64.b64decode(params.get("data") or "")
+            except Exception:
+                return
+            for viewer in list(self.viewers.values()):
+                viewer.send_frame(frame)
+        elif method == "Target.targetCreated":
+            info = params.get("targetInfo") or {}
+            tid = info.get("targetId")
+            if not tid:
+                return
+            known = tid in self.targets
+            self.targets[tid] = info
+            # Follow real popups (window.open / target=_blank) so OAuth-style
+            # flows stay visible; the discovery burst at startup is not one.
+            if not known and info.get("type") == "page" and info.get("openerId") \
+                    and self.page_target and tid != self.page_target:
+                asyncio.ensure_future(self._attach_page(tid))
+        elif method == "Target.targetInfoChanged":
+            info = params.get("targetInfo") or {}
+            tid = info.get("targetId")
+            if not tid:
+                return
+            self.targets[tid] = info
+            if tid == self.page_target:
+                changed = (self.nav["url"] != info.get("url", "") or
+                           self.nav["title"] != info.get("title", ""))
+                self.nav["url"] = info.get("url", self.nav["url"])
+                self.nav["title"] = info.get("title", self.nav["title"])
+                if changed:
+                    asyncio.ensure_future(self._refresh_nav())
+        elif method == "Target.targetDestroyed":
+            tid = params.get("targetId")
+            self.targets.pop(tid, None)
+            if tid == self.page_target:
+                self.page_target = ""
+                self.page_session = ""
+                self.screencasting = False
+                asyncio.ensure_future(self._attach_page(""))
+        elif method == "Page.javascriptDialogOpening":
+            if message.get("sessionId") != self.page_session:
+                return
+            kind = params.get("type") or "dialog"
+            accept = kind in ("alert", "beforeunload")
+            self._fire("Page.handleJavaScriptDialog", {"accept": accept},
+                       session=self.page_session)
+            self._broadcast_json({
+                "type": "dialog", "kind": kind,
+                "message": str(params.get("message") or "")[:400],
+                "action": "accepted" if accept else "dismissed",
+            })
+
+    async def _attach_page(self, target_id: str) -> None:
+        """Attach (or re-attach) the streamed page; creates one if none exist."""
+        async with self.attach_lock:
+            if not self.running:
+                return
+            previous_session = self.page_session
+            if not target_id:
+                pages = [tid for tid, info in self.targets.items()
+                         if info.get("type") == "page"]
+                if not pages:
+                    try:
+                        listed = await self.call("Target.getTargets")
+                    except BrowserError:
+                        return
+                    for info in listed.get("targetInfos") or []:
+                        if isinstance(info, dict) and info.get("targetId"):
+                            self.targets[info["targetId"]] = info
+                    pages = [tid for tid, info in self.targets.items()
+                             if info.get("type") == "page"]
+                if pages:
+                    target_id = pages[-1]
+                else:
+                    created = await self.call("Target.createTarget", {"url": "about:blank"})
+                    target_id = created.get("targetId") or ""
+            if not target_id:
+                return
+            attached = await self.call("Target.attachToTarget",
+                                       {"targetId": target_id, "flatten": True})
+            session = attached.get("sessionId") or ""
+            if not session:
+                return
+            self.page_target = target_id
+            self.page_session = session
+            await self.call("Page.enable", session=session)
+            if previous_session and previous_session != session:
+                self._fire("Target.detachFromTarget", {"sessionId": previous_session})
+            info = self.targets.get(target_id) or {}
+            self.nav["url"] = info.get("url", "about:blank")
+            self.nav["title"] = info.get("title", "")
+            if self.viewers:
+                await self._start_screencast()
+                await self._send_fresh_frame()
+            await self._refresh_nav()
+
+    async def _start_screencast(self) -> None:
+        if self.screencasting or not self.page_session:
+            return
+        await self.call("Page.startScreencast", {
+            "format": "jpeg", "quality": SCREENCAST_QUALITY,
+            "maxWidth": VIEWPORT_W, "maxHeight": VIEWPORT_H,
+        }, session=self.page_session)
+        self.screencasting = True
+
+    async def _stop_screencast(self) -> None:
+        if not self.screencasting:
+            return
+        self.screencasting = False
+        if self.page_session and self.running:
+            try:
+                await self.call("Page.stopScreencast", session=self.page_session)
+            except BrowserError:
+                pass
+
+    async def _send_fresh_frame(self, viewer=None) -> None:
+        """Screencast frames only arrive on damage; a still page would leave a
+        newcomer staring at nothing, so push one explicit screenshot."""
+        if not self.page_session or not self.running:
+            return
+        try:
+            shot = await self.call("Page.captureScreenshot",
+                                   {"format": "jpeg", "quality": SCREENCAST_QUALITY},
+                                   session=self.page_session)
+            frame = base64.b64decode(shot.get("data") or "")
+        except Exception:
+            return
+        if not frame:
+            return
+        targets = [viewer] if viewer is not None else list(self.viewers.values())
+        for item in targets:
+            item.send_frame(frame)
+
+    async def _refresh_nav(self) -> None:
+        if not self.page_session or not self.running:
+            return
+        try:
+            history = await self.call("Page.getNavigationHistory", session=self.page_session)
+            index = int(history.get("currentIndex") or 0)
+            entries = history.get("entries") or []
+            self.nav["can_back"] = index > 0
+            self.nav["can_forward"] = index + 1 < len(entries)
+        except BrowserError:
+            pass
+        self._broadcast_json({"type": "status", "running": True, **self.nav})
+
+    def _broadcast_json(self, payload: dict) -> None:
+        for viewer in list(self.viewers.values()):
+            viewer.send_json(payload)
+
+    # ---- viewers ----
+
+    def _cancel_idle(self) -> None:
+        if self.idle_task is not None:
+            self.idle_task.cancel()
+            self.idle_task = None
+
+    def _arm_idle(self) -> None:
+        self._cancel_idle()
+
+        async def later():
+            try:
+                await asyncio.sleep(IDLE_STOP_SECONDS)
+            except asyncio.CancelledError:
+                return
+            if not self.viewers:
+                await self.stop("no viewers for {} minutes".format(IDLE_STOP_SECONDS // 60))
+
+        self.idle_task = asyncio.ensure_future(later())
+
+    async def attach_viewer(self, ws) -> None:
+        await self.ensure_started()
+        self._cancel_idle()
+        viewer = _Viewer(ws)
+        self.viewers[ws] = viewer
+        viewer.send_json({"type": "status", "running": True, **self.nav})
+        viewer.send_json({"type": "frame_meta", **self.frame_meta})
+        try:
+            await self._start_screencast()
+        except BrowserError:
+            pass
+        await self._send_fresh_frame(viewer)
+
+    def detach_viewer(self, ws) -> None:
+        viewer = self.viewers.pop(ws, None)
+        if viewer is not None:
+            viewer.close()
+        if not self.viewers and self.running:
+            asyncio.ensure_future(self._stop_screencast())
+            self._arm_idle()
+
+    # ---- input from viewers ----
+
+    async def handle_client(self, data: dict) -> None:
+        kind = data.get("type")
+        if kind == "mouse":
+            self._dispatch_mouse(data)
+        elif kind == "wheel":
+            self._dispatch_wheel(data)
+        elif kind == "key":
+            self._dispatch_key(data)
+        elif kind == "insert_text":
+            text = str(data.get("text") or "")[:MAX_INSERT_TEXT]
+            if text:
+                self._fire("Input.insertText", {"text": text}, session=self.page_session)
+        elif kind == "navigate":
+            url = _normalize_url(data.get("url"))
+            if url and self.page_session:
+                await self.call("Page.navigate", {"url": url}, session=self.page_session)
+        elif kind in ("back", "forward"):
+            await self._history_step(1 if kind == "forward" else -1)
+        elif kind == "reload":
+            if self.page_session:
+                self._fire("Page.reload", session=self.page_session)
+
+    def _point(self, data: dict) -> tuple:
+        nx = min(1.0, max(0.0, float(data.get("nx") or 0.0)))
+        ny = min(1.0, max(0.0, float(data.get("ny") or 0.0)))
+        return (round(nx * self.frame_meta["width"], 2),
+                round(ny * self.frame_meta["height"], 2))
+
+    @staticmethod
+    def _modifiers(data: dict) -> int:
+        try:
+            return int(data.get("modifiers") or 0) & 15
+        except (TypeError, ValueError):
+            return 0
+
+    def _dispatch_mouse(self, data: dict) -> None:
+        if not self.page_session:
+            return
+        event_type = _MOUSE_KINDS.get(data.get("kind"))
+        if event_type is None:
+            return
+        button = data.get("button")
+        if button not in _MOUSE_BUTTONS:
+            button = "left" if event_type != "mouseMoved" else "none"
+        try:
+            clicks = max(0, min(3, int(data.get("clickCount") or 0)))
+        except (TypeError, ValueError):
+            clicks = 0
+        x, y = self._point(data)
+        self._fire("Input.dispatchMouseEvent", {
+            "type": event_type, "x": x, "y": y, "button": button,
+            "clickCount": clicks, "modifiers": self._modifiers(data),
+        }, session=self.page_session)
+
+    def _dispatch_wheel(self, data: dict) -> None:
+        if not self.page_session:
+            return
+        x, y = self._point(data)
+        try:
+            dx = max(-2000.0, min(2000.0, float(data.get("dx") or 0.0)))
+            dy = max(-2000.0, min(2000.0, float(data.get("dy") or 0.0)))
+        except (TypeError, ValueError):
+            return
+        self._fire("Input.dispatchMouseEvent", {
+            "type": "mouseWheel", "x": x, "y": y, "deltaX": dx, "deltaY": dy,
+            "modifiers": self._modifiers(data),
+        }, session=self.page_session)
+
+    def _dispatch_key(self, data: dict) -> None:
+        if not self.page_session:
+            return
+        kind = data.get("kind")
+        if kind not in ("down", "up"):
+            return
+        key = str(data.get("key") or "")[:32]
+        code = str(data.get("code") or "")[:32]
+        text = str(data.get("text") or "")[:8]
+        modifiers = self._modifiers(data)
+        payload = {"modifiers": modifiers, "key": key, "code": code}
+        if data.get("repeat") is True:
+            payload["autoRepeat"] = True
+        if kind == "up":
+            payload["type"] = "keyUp"
+        elif key == "Enter":
+            payload.update({"type": "keyDown", "text": "\r", "unmodifiedText": "\r"})
+        elif text and (modifiers & ~8) == 0:    # plain or shifted printable
+            payload.update({"type": "keyDown", "text": text, "unmodifiedText": text})
+        else:
+            payload["type"] = "rawKeyDown"
+        vk = _VIRTUAL_KEYS.get(key)
+        if vk is None and len(key) == 1:
+            vk = ord(key.upper()) if key.upper().isalnum() and ord(key) < 128 else None
+        if vk is not None:
+            payload["windowsVirtualKeyCode"] = vk
+            payload["nativeVirtualKeyCode"] = vk
+        if payload["type"] == "rawKeyDown" and vk is None and not key:
+            return
+        self._fire("Input.dispatchKeyEvent", payload, session=self.page_session)
+
+    async def _history_step(self, direction: int) -> None:
+        if not self.page_session:
+            return
+        history = await self.call("Page.getNavigationHistory", session=self.page_session)
+        index = int(history.get("currentIndex") or 0) + direction
+        entries = history.get("entries") or []
+        if 0 <= index < len(entries) and isinstance(entries[index], dict):
+            entry_id = entries[index].get("id")
+            if entry_id is not None:
+                await self.call("Page.navigateToHistoryEntry", {"entryId": entry_id},
+                                session=self.page_session)
+
+
+# ---- HTTP + websocket surface (registered by register_execution_api) ----
+
+async def h_status(request: web.Request):
+    return web.json_response(await status_payload())
+
+
+async def h_enabled(request: web.Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid browser request"}, status=400)
+    if not isinstance(body, dict) or type(body.get("enabled")) is not bool:
+        return web.json_response({"error": "browser enabled must be on or off"}, status=400)
+    try:
+        payload = await set_enabled(body["enabled"])
+    except BrowserError as exc:
+        return web.json_response({"error": str(exc)}, status=409)
+    log.info("managed browser %s on this node",
+             "enabled" if body["enabled"] else "disabled")
+    try:
+        from puppy import runner
+        runner.broadcast_update({"type": "browser", **ping_payload()})
+    except Exception:
+        pass
+    return web.json_response({"ok": True, **payload})
+
+
+async def ws_browser(request: web.Request):
+    ws = web.WebSocketResponse(heartbeat=30, max_msg_size=1 << 20)
+    await ws.prepare(request)
+    if request.app.get("puppy_snapshot_busy"):
+        await ws.close(code=1013, message=b"Puppy backup or restore in progress")
+        return ws
+    if not enabled():
+        try:
+            await ws.send_json({"type": "error",
+                                "text": "the browser is disabled on this node"})
+        except Exception:
+            pass
+        await ws.close()
+        return ws
+    m = manager()
+    try:
+        await m.attach_viewer(ws)
+    except BrowserError as exc:
+        try:
+            await ws.send_json({"type": "error", "text": str(exc)})
+        except Exception:
+            pass
+        await ws.close()
+        return ws
+    log.info("browser viewer attached (%s total) for %s", m.viewer_count(), request.remote)
+    try:
+        async for msg in ws:
+            if msg.type != WSMsgType.TEXT:
+                if msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
+                    break
+                continue
+            try:
+                data = json.loads(msg.data)
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+            try:
+                await m.handle_client(data)
+            except BrowserError as exc:
+                try:
+                    await ws.send_json({"type": "error", "text": str(exc)})
+                except Exception:
+                    break
+            except Exception:
+                log.exception("browser input handling failed")
+    finally:
+        m.detach_viewer(ws)
+        log.info("browser viewer detached (%s left)", m.viewer_count())
+    return ws
+
+
+def register(app: web.Application) -> None:
+    app.router.add_get("/api/browser/status", h_status)
+    app.router.add_post("/api/browser/enabled", h_enabled)
+    app.router.add_get("/api/ws/browser", ws_browser)
+
+    async def on_shutdown(_app):
+        await shutdown()
+
+    app.on_shutdown.append(on_shutdown)

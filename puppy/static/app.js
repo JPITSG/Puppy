@@ -129,6 +129,27 @@ function terminalIcon(size) {
   return svg;
 }
 
+function globeIcon(size) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS(NS, "path");
+  path.setAttribute("d", "M8 1.75a6.25 6.25 0 1 0 0 12.5 6.25 6.25 0 0 0 0-12.5Z" +
+    "M8 1.75c-1.9 1.7-2.85 3.85-2.85 6.25S6.1 12.55 8 14.25" +
+    "m0-12.5c1.9 1.7 2.85 3.85 2.85 6.25S9.9 12.55 8 14.25" +
+    "M2.2 5.9h11.6M2.2 10.1h11.6");
+  path.setAttribute("fill", "none");
+  path.setAttribute("stroke", "currentColor");
+  path.setAttribute("stroke-width", "1.15");
+  path.setAttribute("stroke-linecap", "round");
+  path.setAttribute("stroke-linejoin", "round");
+  svg.appendChild(path);
+  return svg;
+}
+
 function refreshIcon(size = 10) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
@@ -1314,6 +1335,8 @@ const state = {
   engCache: {},           // bid -> engines[]
   nodeUsers: {},          // bid -> account the node's puppy process runs as
   notify: { configured: false, enabled: false },   // completion-alert bell
+  browser: { enabled: false },  // this instance's managed-browser toggle
+  remoteBrowser: {},      // bid -> {enabled} from that node's ping metadata
   remoteEngineErrors: {}, // bid -> latest engine-status error (node can still be reachable)
   remoteEngineCheckedAt: {},
   remoteNodeCheckedAt: {},
@@ -1634,7 +1657,7 @@ function storedTabs(value) {
   for (const item of value) {
     if (!item || typeof item !== "object" || typeof item.id !== "string" ||
         !item.id || item.id.length > 512 || seen.has(item.id) ||
-        !["session", "term", "settings"].includes(item.type)) continue;
+        !["session", "term", "browser", "settings"].includes(item.type)) continue;
     const tab = { id: item.id, type: item.type };
     if (typeof item.bid === "number" && Number.isFinite(item.bid)) tab.bid = item.bid;
     if (typeof item.sid === "number" && Number.isFinite(item.sid)) tab.sid = item.sid;
@@ -1741,6 +1764,7 @@ async function refreshState() {
   state.engMap = {};
   state.engines.forEach(e => state.engMap[e.key] = e);
   state.backends = Array.isArray(s.backends) ? s.backends : [];
+  state.browser = { enabled: !!(s.browser && s.browser.enabled) };
   state.sessions = Array.isArray(s.sessions) ? s.sessions : [];
   ingestSessionActivity(0, state.sessions, s.server_time);
   reconcileRemoteState();
@@ -1785,6 +1809,9 @@ function connectUpdates() {
       } else if (d.type === "notify") {
         state.notify = { configured: !!d.configured, enabled: !!d.enabled };
         syncBell();
+      } else if (d.type === "browser") {
+        state.browser = { enabled: !!d.enabled };
+        renderSidebar();
       }
     } catch (e) {}
   };
@@ -1913,6 +1940,12 @@ async function pollRemoteBackend(backend, forceEngines = false) {
       if (Number.isInteger(node.protocol)) backend.protocol = node.protocol;
       if (Array.isArray(node.capabilities)) backend.capabilities = node.capabilities;
       if (node.uploads) rememberUploadSettings(bid, node.uploads);
+      const remoteBrowser = { enabled: !!(node.browser && node.browser.enabled) };
+      const knownBrowser = state.remoteBrowser[bid];
+      if (!knownBrowser || knownBrowser.enabled !== remoteBrowser.enabled) {
+        state.remoteBrowser[bid] = remoteBrowser;
+        renderSidebar();
+      }
     } catch (error) {
       /* Sessions are the reachability authority. Metadata failure must not
          turn a healthy backend red or erase the last-known version. */
@@ -2031,6 +2064,17 @@ function setNodeUser(bid, user) {
 function shellTabTitle(tab) {
   const bid = tab.bid || 0;
   return `${state.nodeUsers[bid] || "shell"} @ ${backendName(bid)}`;
+}
+
+function browserTabTitle(bid) {
+  return `Browser · ${backendName(bid || 0)}`;
+}
+
+function browserEnabledFor(bid) {
+  if (!bid) return !!(state.browser && state.browser.enabled);
+  const backend = state.backends.find(item => item.id === bid);
+  if (!backend || !backendHasCapability(backend, "browser")) return false;
+  return !!(state.remoteBrowser[bid] && state.remoteBrowser[bid].enabled);
 }
 
 function backendLocationVersion(backend) {
@@ -2188,11 +2232,13 @@ function renderSidebar() {
   }
   const root = $("sess-groups");
   root.innerHTML = "";
-  const groups = [{ bid: 0, name: backendName(0), ok: true, status: "ok" }]
+  const groups = [{ bid: 0, name: backendName(0), ok: true, status: "ok",
+    browser: browserEnabledFor(0) }]
     .concat(state.backends.map(b => {
       const status = remoteAvailability(b.id);
       return { bid: b.id, name: b.name, ok: status !== "bad", status,
-        terminal: backendHasCapability(b, "terminal") };
+        terminal: backendHasCapability(b, "terminal"),
+        browser: browserEnabledFor(b.id) };
     }));
   const availableSessions = new Set();
   for (const group of groups)
@@ -2217,6 +2263,19 @@ function renderSidebar() {
       wireDoubleClickOrTouch(name, () => disclosure.click());
       t.appendChild(dot);
       t.appendChild(name);
+      if (g.browser) {
+        const browse = el("button", "sess-group-terminal sess-group-browser");
+        browse.type = "button";
+        browse.setAttribute("aria-label", `Open browser on ${g.name}`);
+        browse.appendChild(globeIcon(12));
+        browse.onclick = event => {
+          event.preventDefault();
+          event.stopPropagation();
+          openBrowserTab(g.bid);
+          closeDrawer();
+        };
+        t.appendChild(browse);
+      }
       if (!g.bid || g.terminal) {
         const terminal = el("button", "sess-group-terminal");
         terminal.type = "button";
@@ -2804,6 +2863,19 @@ function openTermTab(bid, cmd, groupId = null) {
   activateTab(id);
 }
 
+/* Each node runs at most one managed browser instance, so its tab is a
+   singleton: reopening focuses the existing screen instead of forking it. */
+function openBrowserTab(bid, groupId = null) {
+  const id = `b:${bid || 0}`;
+  let tab = state.tabs.find(t => t.id === id);
+  if (!tab) {
+    tab = { id, type: "browser", bid: bid || 0, title: browserTabTitle(bid || 0) };
+    state.tabs.push(tab);
+    putTabInPane(id, groupId);
+  }
+  activateTab(id);
+}
+
 function openSettingsTab(groupId = null) {
   if (!state.tabs.some(t => t.id === "settings")) {
     state.tabs.push({ id: "settings", type: "settings", title: "Settings" });
@@ -2863,6 +2935,7 @@ function ensureTabView(tab) {
   if (!view) {
     if (tab.type === "session") view = new SessionView(tab);
     else if (tab.type === "term") view = new TermView(tab);
+    else if (tab.type === "browser") view = new BrowserView(tab);
     else view = new SettingsView(tab);
     state.views[tab.id] = view;
     view.root.dataset.tabId = tab.id;
@@ -2976,13 +3049,16 @@ function renderTabNode(t, pane, tabsRoot) {
     if (meta && meta.status === "running") tab.classList.add("running");
     if (meta) t.title = meta.name || `session ${t.sid}`;
   } else if (t.type === "term") dotCls = "term";
+  else if (t.type === "browser") dotCls = "browser";
   const tdot = el("span", "t-dot " + dotCls);
   if (dotColor) tdot.style.color = dotColor;
   if (t.type === "settings") tdot.appendChild(gearIcon(12));
   else if (t.type === "term") tdot.appendChild(terminalIcon(12));
+  else if (t.type === "browser") tdot.appendChild(globeIcon(12));
   tab.appendChild(tdot);
   tab.appendChild(el("span", "t-title",
-    (t.type === "term" && !t.cmd) ? shellTabTitle(t) : (t.title || "tab")));
+    (t.type === "term" && !t.cmd) ? shellTabTitle(t) :
+    (t.type === "browser") ? browserTabTitle(t.bid || 0) : (t.title || "tab")));
   if (t.type === "session") {
     suppressContextGestureActivation(tab);
     tab.addEventListener("contextmenu", (event) => {
@@ -3454,6 +3530,7 @@ $("tab-add-menu").addEventListener("click", (e) => {
   if (act === "new-session") modalNewSession(groupId);
   else if (act === "open-session") modalOpenSession(groupId);
   else if (act === "new-terminal") modalNewTerminal(groupId);
+  else if (act === "new-browser") openBrowserFromMenu(groupId);
 });
 $("btn-new-session").onclick = () => { modalNewSession(state.activeGroup); closeDrawer(); };
 $("btn-settings").onclick = () => { openSettingsTab(state.activeGroup); closeDrawer(); };
@@ -5429,6 +5506,303 @@ class TermView {
   }
 }
 
+/* ================= BrowserView ================= */
+/* Screen + input for a node's single managed headless browser. Frames arrive
+   as raw JPEG websocket messages; input goes back as normalized coordinates
+   so the mapping survives any display scaling on this side. */
+class BrowserView {
+  constructor(tab) {
+    this.tab = tab;
+    this.closed = false;
+    this.started = false;
+    this.connectionSequence = 0;
+    this.frameW = 1280;
+    this.frameH = 800;
+    this.frameUrl = null;
+    this.urlFocused = false;
+    this.lastUrl = "";
+    this.moveQueued = null;
+    this.root = el("div", "view browser");
+    this.root.innerHTML = `
+      <div class="br-bar">
+        <button class="icon-btn br-back" type="button" aria-label="Back" disabled>
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor"
+            stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M10.5 3 5.5 8l5 5"/></svg>
+        </button>
+        <button class="icon-btn br-reload" type="button" aria-label="Reload"></button>
+        <input class="br-url" type="text" inputmode="url" autocomplete="off"
+          autocapitalize="off" spellcheck="false" placeholder="Address or search"
+          aria-label="Address or search">
+        <button class="icon-btn br-kbd" type="button" aria-label="On-screen keyboard">
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor"
+            stroke-width="1.15" stroke-linecap="round" aria-hidden="true">
+            <rect x="1.5" y="4" width="13" height="8.5" rx="1.5"/>
+            <path d="M4 6.75h.01M7 6.75h.01M10 6.75h.01M12.2 6.75h.01M4 9h.01M7 9h.01
+              M10 9h.01M12.2 9h.01M5 11h6"/></svg>
+        </button>
+      </div>
+      <div class="br-stage" tabindex="0" role="application" aria-label="Remote browser screen">
+        <img class="br-screen" alt="" draggable="false">
+        <input class="br-ime" type="text" autocomplete="off" autocapitalize="none"
+          autocorrect="off" spellcheck="false" tabindex="-1" aria-hidden="true">
+      </div>`;
+    this.bar = this.root.querySelector(".br-bar");
+    this.backBtn = this.root.querySelector(".br-back");
+    this.reloadBtn = this.root.querySelector(".br-reload");
+    this.reloadBtn.appendChild(refreshIcon(13));
+    this.urlInput = this.root.querySelector(".br-url");
+    this.kbdBtn = this.root.querySelector(".br-kbd");
+    this.stage = this.root.querySelector(".br-stage");
+    this.screen = this.root.querySelector(".br-screen");
+    this.ime = this.root.querySelector(".br-ime");
+  }
+
+  onShow(focus = true) {
+    if (!this.started) { this.started = true; this.start(); }
+    if (focus && !this.isDead()) this.stage.focus({ preventScroll: true });
+  }
+  isDead() { return !!this.root.querySelector(".br-dead"); }
+
+  send(payload) {
+    if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify(payload));
+  }
+  static modifiers(e) {
+    return (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0);
+  }
+  point(clientX, clientY) {
+    const rect = this.screen.getBoundingClientRect();
+    if (!rect.width || !rect.height) return null;
+    return {
+      nx: Math.min(1, Math.max(0, (clientX - rect.left) / rect.width)),
+      ny: Math.min(1, Math.max(0, (clientY - rect.top) / rect.height)),
+    };
+  }
+
+  start() {
+    const buttons = ["left", "middle", "right"];
+    const mouse = (kind, e) => {
+      const p = this.point(e.clientX, e.clientY);
+      if (!p) return;
+      this.send({ type: "mouse", kind, ...p, button: buttons[e.button] || "left",
+        clickCount: Math.max(1, Math.min(3, e.detail || 1)),
+        modifiers: BrowserView.modifiers(e) });
+    };
+    this.stage.addEventListener("mousedown", e => {
+      if (this.isDead()) return;
+      e.preventDefault();
+      this.stage.focus({ preventScroll: true });
+      mouse("down", e);
+    });
+    this.stage.addEventListener("mouseup", e => { if (!this.isDead()) mouse("up", e); });
+    /* rAF-collapsed pointer moves: only the newest position matters */
+    this.stage.addEventListener("mousemove", e => {
+      if (this.isDead()) return;
+      const p = this.point(e.clientX, e.clientY);
+      if (!p) return;
+      const idle = this.moveQueued === null;
+      this.moveQueued = { type: "mouse", kind: "move", ...p, button: "none",
+        clickCount: 0, modifiers: BrowserView.modifiers(e) };
+      if (idle) requestAnimationFrame(() => {
+        const queued = this.moveQueued;
+        this.moveQueued = null;
+        if (queued && !this.closed) this.send(queued);
+      });
+    });
+    this.stage.addEventListener("contextmenu", e => e.preventDefault());
+    this.stage.addEventListener("wheel", e => {
+      if (this.isDead()) return;
+      e.preventDefault();
+      const p = this.point(e.clientX, e.clientY);
+      if (!p) return;
+      const scale = e.deltaMode === 1 ? 16 : 1;
+      this.send({ type: "wheel", ...p, dx: e.deltaX * scale, dy: e.deltaY * scale,
+        modifiers: BrowserView.modifiers(e) });
+    }, { passive: false });
+
+    /* touch: drag scrolls, a short still tap clicks */
+    let touch = null;
+    this.stage.addEventListener("touchstart", e => {
+      if (this.isDead() || e.touches.length !== 1) { touch = null; return; }
+      const t = e.touches[0];
+      touch = { x: t.clientX, y: t.clientY, sx: t.clientX, sy: t.clientY,
+        at: Date.now(), moved: false };
+      e.preventDefault();
+    }, { passive: false });
+    this.stage.addEventListener("touchmove", e => {
+      if (!touch || e.touches.length !== 1) return;
+      e.preventDefault();
+      const t = e.touches[0];
+      const dx = t.clientX - touch.x, dy = t.clientY - touch.y;
+      touch.x = t.clientX; touch.y = t.clientY;
+      if (Math.abs(t.clientX - touch.sx) + Math.abs(t.clientY - touch.sy) > 9)
+        touch.moved = true;
+      const p = this.point(t.clientX, t.clientY);
+      if (p && touch.moved) this.send({ type: "wheel", ...p, dx: -dx, dy: -dy, modifiers: 0 });
+    }, { passive: false });
+    this.stage.addEventListener("touchend", e => {
+      const gesture = touch;
+      touch = null;
+      if (!gesture || gesture.moved || Date.now() - gesture.at > 600) return;
+      e.preventDefault();
+      const p = this.point(gesture.x, gesture.y);
+      if (!p) return;
+      this.send({ type: "mouse", kind: "down", ...p, button: "left", clickCount: 1, modifiers: 0 });
+      this.send({ type: "mouse", kind: "up", ...p, button: "left", clickCount: 1, modifiers: 0 });
+    }, { passive: false });
+
+    const key = (kind, e) => {
+      if (this.isDead()) return;
+      /* local clipboard pastes through the dedicated paste event instead */
+      if (kind === "down" && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "v") return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.send({ type: "key", kind, key: e.key, code: e.code,
+        text: e.key.length === 1 ? e.key : "",
+        modifiers: BrowserView.modifiers(e), repeat: e.repeat === true });
+    };
+    this.stage.addEventListener("keydown", e => key("down", e));
+    this.stage.addEventListener("keyup", e => key("up", e));
+    this.stage.addEventListener("paste", e => {
+      const text = e.clipboardData && e.clipboardData.getData("text");
+      if (!text) return;
+      e.preventDefault();
+      this.send({ type: "insert_text", text });
+    });
+
+    /* soft-keyboard relay: whatever lands in the proxy input is forwarded */
+    this.kbdBtn.onclick = () => { this.ime.focus(); };
+    this.ime.addEventListener("input", () => {
+      const value = this.ime.value;
+      this.ime.value = "";
+      if (value) this.send({ type: "insert_text", text: value });
+    });
+    this.ime.addEventListener("keydown", e => {
+      if (e.key !== "Enter" && e.key !== "Backspace") return;
+      e.preventDefault();
+      this.send({ type: "key", kind: "down", key: e.key, code: e.key, text: "", modifiers: 0 });
+      this.send({ type: "key", kind: "up", key: e.key, code: e.key, text: "", modifiers: 0 });
+    });
+
+    this.urlInput.addEventListener("focus", () => {
+      this.urlFocused = true;
+      this.urlInput.select();
+    });
+    this.urlInput.addEventListener("blur", () => {
+      this.urlFocused = false;
+      this.urlInput.value = this.lastUrl === "about:blank" ? "" : this.lastUrl;
+    });
+    this.urlInput.addEventListener("keydown", e => {
+      e.stopPropagation();
+      if (e.key === "Enter") {
+        const target = this.urlInput.value.trim();
+        if (target) this.send({ type: "navigate", url: target });
+        this.urlInput.blur();
+        this.stage.focus({ preventScroll: true });
+      } else if (e.key === "Escape") {
+        this.urlInput.blur();
+      }
+    });
+    this.backBtn.onclick = () => this.send({ type: "back" });
+    this.reloadBtn.onclick = () => this.send({ type: "reload" });
+    this.connect();
+  }
+
+  connect() {
+    const sequence = ++this.connectionSequence;
+    const ws = new WebSocket(wsUrl(this.tab.bid, "ws/browser"));
+    ws.binaryType = "arraybuffer";
+    this.ws = ws;
+    ws.onopen = () => {
+      if (this.closed || sequence !== this.connectionSequence || this.ws !== ws) {
+        try { ws.close(); } catch (error) {}
+        return;
+      }
+      noteRemoteSocketReachable(this.tab.bid);
+    };
+    ws.onmessage = ev => {
+      if (sequence !== this.connectionSequence || this.ws !== ws) return;
+      noteRemoteSocketReachable(this.tab.bid);
+      if (typeof ev.data !== "string") { this.showFrame(ev.data); return; }
+      let d = null;
+      try { d = JSON.parse(ev.data); } catch (error) { return; }
+      if (d.type === "status") {
+        this.lastUrl = d.url || "";
+        if (!this.urlFocused)
+          this.urlInput.value = this.lastUrl === "about:blank" ? "" : this.lastUrl;
+        this.urlInput.title = d.title || "";
+        this.backBtn.disabled = !d.can_back;
+        this.clearDead();
+      } else if (d.type === "frame_meta") {
+        this.frameW = Number(d.width) || this.frameW;
+        this.frameH = Number(d.height) || this.frameH;
+      } else if (d.type === "dialog") {
+        toast(`page ${d.kind || "dialog"} ${d.action}: ${d.message || ""}`.trim(),
+          "info", 6000);
+      } else if (d.type === "error") {
+        this.showDead(d.text || "Browser unavailable");
+      } else if (d.type === "gone") {
+        this.showDead(d.reason || "Browser ended");
+      }
+    };
+    ws.onclose = () => {
+      if (sequence !== this.connectionSequence || this.ws !== ws) return;
+      this.ws = null;
+      if (!this.closed) this.showDead("Connection closed");
+    };
+    ws.onerror = () => { try { ws.close(); } catch (e) {} };
+  }
+
+  showFrame(buffer) {
+    const previous = this.frameUrl;
+    this.frameUrl = URL.createObjectURL(new Blob([buffer], { type: "image/jpeg" }));
+    this.screen.src = this.frameUrl;
+    this.screen.classList.add("live");
+    if (previous) URL.revokeObjectURL(previous);
+    this.clearDead();
+  }
+
+  clearDead() {
+    const dead = this.root.querySelector(".br-dead");
+    if (dead) dead.remove();
+  }
+
+  showDead(message) {
+    let dead = this.root.querySelector(".br-dead");
+    if (dead) {
+      dead.querySelector(".term-dead-message").textContent = message;
+      return;
+    }
+    dead = el("div", "term-dead br-dead");
+    dead.appendChild(el("div", "term-dead-message", message));
+    const actions = el("div", "term-dead-actions");
+    const again = el("button", "btn btn-pri", "Reconnect");
+    again.type = "button";
+    again.onclick = () => {
+      this.clearDead();
+      if (this.ws) { try { this.ws.close(); } catch (e) {} }
+      this.connect();
+      this.stage.focus({ preventScroll: true });
+    };
+    const close = el("button", "btn", "Close");
+    close.type = "button";
+    close.onclick = () => closeTab(this.tab.id);
+    actions.appendChild(again);
+    actions.appendChild(close);
+    dead.appendChild(actions);
+    this.stage.appendChild(dead);
+  }
+
+  destroy() {
+    this.closed = true;
+    this.connectionSequence++;
+    if (this.ws) { try { this.ws.close(); } catch (e) {} }
+    this.ws = null;
+    if (this.frameUrl) { URL.revokeObjectURL(this.frameUrl); this.frameUrl = null; }
+    this.root.remove();
+  }
+}
+
 /* ================= SettingsView ================= */
 class SettingsView {
   constructor(tab) {
@@ -6112,6 +6486,66 @@ class SettingsView {
     return { root, update, load };
   }
 
+  /* One wiring for the instance card and every backend row: probe the node's
+     browser status, gate the toggle on availability, and surface the reason.
+     A row variant (no note element) carries the reason via title + tap toast. */
+  async wireBrowserToggle(bid, input, note, generation, root = null) {
+    const name = backendName(bid);
+    const setNote = (text, warn) => {
+      if (note) {
+        note.textContent = text;
+        note.classList.toggle("warn", !!warn);
+      }
+      if (root) root.title = text;
+    };
+    const apply = st => {
+      input.checked = !!st.enabled;
+      input.disabled = !st.available && !st.enabled;
+      if (root) {
+        root.classList.toggle("disabled", input.disabled);
+        root.onclick = input.disabled ?
+          () => toast(`${name}: ${st.reason || "no usable browser"}`, "error", 6000) : null;
+      }
+      if (st.available) {
+        setNote((st.product || "browser available") +
+          (st.sandbox === "no-sandbox" ? " · sandbox off (runs as root)" : ""), false);
+      } else {
+        setNote(st.reason || "no usable browser on this node", true);
+      }
+    };
+    let status;
+    try {
+      status = await api(bid, "browser/status", { timeoutMs: ENGINE_POLL_TIMEOUT });
+    } catch (error) {
+      if (generation !== this.renderGeneration || !input.isConnected) return;
+      input.disabled = true;
+      if (root) root.classList.add("disabled");
+      setNote(error.message || "browser status unavailable", true);
+      return;
+    }
+    if (generation !== this.renderGeneration || !input.isConnected) return;
+    apply(status);
+    input.onchange = async () => {
+      const desired = input.checked;
+      input.disabled = true;
+      setNote(desired ? "Enabling…" : "Disabling…", false);
+      try {
+        const result = await api(bid, "browser/enabled", {
+          method: "POST", body: { enabled: desired } });
+        apply(result);
+        if (bid) state.remoteBrowser[bid] = { enabled: !!result.enabled };
+        else state.browser = { enabled: !!result.enabled };
+        renderSidebar();
+        toast(`${name}: browser ${result.enabled ? "enabled" : "disabled"}`, "ok");
+      } catch (error) {
+        input.checked = !desired;
+        input.disabled = false;
+        setNote(error.message, true);
+        toast(`${name}: ${error.message}`, "error", 6500);
+      }
+    };
+  }
+
   async render() {
     this.stopUpgradeReadinessPolling();
     const generation = ++this.renderGeneration;
@@ -6151,6 +6585,13 @@ class SettingsView {
       <label>Instance name<input type="text" id="set-name" value="${esc(settings.instance_name)}"></label>
       <label>Default working directory<input type="text" id="set-cwd" value="${esc(settings.default_cwd || "")}"></label>
       <label>Terminal command<input type="text" id="set-term" value="${esc(settings.terminal_command)}"></label>
+      <label class="be-auto be-auto-add browser-toggle">
+        <input type="checkbox" id="set-browser" disabled
+          aria-label="Enable the managed browser on this instance">
+        <span class="be-auto-track" aria-hidden="true"><span></span></span>
+        <span class="be-auto-copy"><span>Browser</span>
+          <small id="set-browser-note">Checking availability…</small></span>
+      </label>
       <div class="bind-fields">
         <label>Bind IP<input type="text" id="set-bind" value="${esc(settings.web.host)}"
           inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
@@ -6173,6 +6614,8 @@ class SettingsView {
       </div>
 `;
     this.inner.appendChild(c1);
+    this.wireBrowserToggle(0, c1.querySelector("#set-browser"),
+      c1.querySelector("#set-browser-note"), generation);
     let tokenShown = false;
     const tokenControl = c1.querySelector("#set-token");
     const useToken = () => {
@@ -6594,7 +7037,24 @@ class SettingsView {
         this.remoteBackendDots.set(b.id, availability);
         this.remoteBackendMeta.set(b.id, url);
         row.appendChild(details);
-        row.appendChild(autoRoot);
+        const toggles = el("div", "be-toggles");
+        toggles.appendChild(autoRoot);
+        if (backendHasCapability(b, "browser")) {
+          const browserRoot = el("label", "be-auto be-auto-existing be-browser");
+          const browserInput = document.createElement("input");
+          browserInput.type = "checkbox";
+          browserInput.disabled = true;
+          browserInput.setAttribute("aria-label", `Enable the managed browser on ${b.name}`);
+          const browserTrack = el("span", "be-auto-track");
+          browserTrack.setAttribute("aria-hidden", "true");
+          browserTrack.appendChild(el("span"));
+          browserRoot.appendChild(browserInput);
+          browserRoot.appendChild(browserTrack);
+          browserRoot.appendChild(el("span", "be-auto-label", "Browser"));
+          this.wireBrowserToggle(b.id, browserInput, null, generation, browserRoot);
+          toggles.appendChild(browserRoot);
+        }
+        row.appendChild(toggles);
         const actions = el("div", "be-actions");
         const test = el("button", "btn btn-sm", "Test");
         test.onclick = async () => {
@@ -7121,6 +7581,33 @@ function modalNewTerminal(groupId = null) {
   };
   m.querySelector("#nt-go").onclick = go;
   m.querySelector("#nt-cmd").addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+}
+
+/* new browser (each node's browser is a singleton screen) */
+function openBrowserFromMenu(groupId = null) {
+  const nodes = [{ id: 0, name: backendName(0) }]
+    .concat(state.backends)
+    .filter(node => browserEnabledFor(node.id));
+  if (!nodes.length) {
+    toast("no node has its browser enabled · see Settings", "error", 6000);
+    openSettingsTab(groupId);
+    return;
+  }
+  if (nodes.length === 1) {
+    openBrowserTab(nodes[0].id, groupId);
+    return;
+  }
+  const { m, close } = modal(`<h2>Open browser</h2>
+    <label>Node<select id="nb-be">${nodes.map(b =>
+      `<option value="${b.id}">${esc(b.name)}</option>`).join("")}</select></label>
+    <div class="m-btns"><button class="btn" id="nb-cancel">Cancel</button>
+    <button class="btn btn-pri" id="nb-go">Open</button></div>`);
+  m.querySelector("#nb-cancel").onclick = close;
+  m.querySelector("#nb-go").onclick = () => {
+    const bid = parseInt(m.querySelector("#nb-be").value, 10) || 0;
+    close();
+    openBrowserTab(bid, groupId);
+  };
 }
 
 /* switch engine */

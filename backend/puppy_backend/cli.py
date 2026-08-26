@@ -52,6 +52,13 @@ def _parser() -> argparse.ArgumentParser:
     terminals.add_argument("--disable-terminal", dest="terminal_enabled", action="store_false",
                            help="disable remote terminal websockets")
     parser.set_defaults(terminal_enabled=None)
+    browsers = parser.add_mutually_exclusive_group()
+    browsers.add_argument("--browser", dest="browser_enabled", action="store_true",
+                          help="enable the managed headless browser (needs a usable "
+                               "Chromium/Chrome binary; also toggleable from a controller)")
+    browsers.add_argument("--disable-browser", dest="browser_enabled", action="store_false",
+                          help="disable the managed headless browser")
+    parser.set_defaults(browser_enabled=None)
     upgrades = parser.add_mutually_exclusive_group()
     upgrades.add_argument("--enable-remote-upgrade", dest="remote_upgrade_enabled",
                           action="store_true",
@@ -135,6 +142,8 @@ def _configure(args, parser: argparse.ArgumentParser):
         config.set_value("uploads.max_file_size_mb", upload_limit)
     if args.terminal_enabled is not None:
         config.set_value("backend.terminal_enabled", bool(args.terminal_enabled))
+    if args.browser_enabled is not None:
+        config.set_value("browser.enabled", bool(args.browser_enabled))
     if args.remote_upgrade_enabled is not None:
         config.set_value("backend.remote_upgrade_enabled", bool(args.remote_upgrade_enabled))
     if args.turn_timeout is not None:
