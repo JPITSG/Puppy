@@ -695,11 +695,12 @@ select.choice-native{display:none!important}
 @media (hover:hover){.menu button:hover{background:var(--float-menu-hover)}}
 .menu button:active{background:var(--float-menu-hover);filter:brightness(.95)}
 .menu button.danger{color:var(--err)}
-/* the tick keeps its slot whether or not it is drawn, so toggling one of these
-   never shifts the labels around it */
-.menu button.menu-check{gap:0}
+/* the tick is pushed out to the right margin, leaving the label on the menu's
+   own text column - so a checked row lines up with the plain rows above it */
+.menu button.menu-check{gap:10px}
 .menu-check-mark{
-  flex:0 0 18px;display:inline-flex;align-items:center;justify-content:center;color:var(--acc);
+  flex:0 0 auto;margin-left:auto;
+  display:inline-flex;align-items:center;justify-content:center;color:var(--acc);
 }
 .menu-check-mark svg{display:block}
 /* the tick alone carries the state: a dimmed label would read as unavailable

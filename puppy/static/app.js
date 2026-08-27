@@ -1078,14 +1078,15 @@ function sessionShowsMeta(session) {
   return value === undefined || value === null ? true : !!value;
 }
 
-/* A menu row that carries its own on/off state: the tick occupies its slot
-   either way, so the labels stay on one column as it toggles. */
+/* A menu row that carries its own on/off state. The tick sits out at the right
+   margin, so the label starts on the same column as every other row in the
+   menu whether it is ticked or not. */
 function menuCheckRow(label, on, fn) {
   const button = el("button", "menu-check" + (on ? " on" : ""));
   const mark = el("span", "menu-check-mark");
   if (on) mark.appendChild(checkIcon(13));
-  button.appendChild(mark);
   button.appendChild(el("span", "menu-check-label", label));
+  button.appendChild(mark);
   button.setAttribute("role", "menuitemcheckbox");
   button.setAttribute("aria-checked", on ? "true" : "false");
   button.onclick = (event) => { event.stopPropagation(); closeAllMenus(null); fn(); };
