@@ -312,6 +312,80 @@ console.log(JSON.stringify({before, lost, changedWhileLost, recovered}));
     assert result["recovered"]["live"] == "using shell", result
 
 
+def check_thinking_icons(ui_source: str) -> None:
+    """Dedicated and status-only thinking use one marker for every engine."""
+    def function(name):
+        start = ui_source.index("function " + name + "(")
+        brace = ui_source.index("{", start)
+        depth = 0
+        for index in range(brace, len(ui_source)):
+            if ui_source[index] == "{":
+                depth += 1
+            elif ui_source[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    return ui_source[start:index + 1]
+        raise AssertionError("unbalanced " + name)
+
+    start = ui_source.index("\n  syncLiveStatus()") + 1
+    brace = ui_source.index("{", start)
+    depth = 0
+    method = None
+    for index in range(brace, len(ui_source)):
+        if ui_source[index] == "{":
+            depth += 1
+        elif ui_source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                method = ui_source[start:index + 1]
+                break
+    assert method is not None, "unbalanced SessionView.syncLiveStatus"
+    script = r"""
+class Node {
+  constructor(tag,cls="",text="") {
+    this.tag=tag;this.className=cls;this.textContent=text;this.children=[];this.parent=null;
+  }
+  appendChild(child){child.parent=this;this.children.push(child);return child;}
+  replaceChildren(...children){this.children.forEach(child=>child.parent=null);this.children=[];
+    children.forEach(child=>this.appendChild(child));}
+  remove(){if(!this.parent)return;const i=this.parent.children.indexOf(this);
+    if(i>=0)this.parent.children.splice(i,1);this.parent=null;}
+  querySelector(selector){const cls=selector.slice(1);
+    for(const child of this.children){if(child.className.split(" ").includes(cls))return child;
+      const nested=child.querySelector(selector);if(nested)return nested;}return null;}
+  get lastChild(){return this.children[this.children.length-1]||null;}
+}
+const el=(tag,cls="",text="")=>new Node(tag,cls,text);
+%s
+%s
+const proto={
+%s
+};
+const view=Object.assign(Object.create(proto),{status:"running",statusText:"thinking...",
+  liveEl:null,liveKind:null,statusRow:null,inner:el("div"),
+  visibleStatusText(){return this.statusText;},atBottom(){return false;},scrollBottom(){}});
+const marker=()=>view.statusRow&&view.statusRow.children[0];
+view.syncLiveStatus();const codex={cls:marker().className,text:marker().textContent};
+view.statusText="using shell";view.syncLiveStatus();
+const tool={cls:marker().className,text:marker().textContent};
+view.statusText="thinking… 42 tokens";view.syncLiveStatus();
+const claude={cls:marker().className,text:marker().textContent};
+view.status="idle";view.syncLiveStatus();
+console.log(JSON.stringify({codex,tool,claude,idle:view.statusRow,
+  classified:[isThinkingStatus("thinking"),isThinkingStatus("Thinking 9 tokens"),
+    isThinkingStatus("rethinking"),isThinkingStatus("writing...")]}));
+""" % (function("thinkingIconNode"), function("isThinkingStatus"), method)
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:500]
+    result = json.loads(proc.stdout.strip())
+    assert result["codex"] == {"cls": "think-brain", "text": "🧠"}, result
+    assert result["claude"] == {"cls": "think-brain", "text": "🧠"}, result
+    assert result["tool"] == {"cls": "spinner", "text": ""}, result
+    assert result["idle"] is None, result
+    assert result["classified"] == [True, True, False, False], result
+    assert ui_source.count("sum.appendChild(thinkingIconNode())") == 2
+
+
 def check_drawer_drag(ui_source: str) -> None:
     """Run the real mobile drawer gesture against a tiny pointer-event DOM.
 
@@ -1267,6 +1341,7 @@ async def main() -> None:
             ui_source = (BASE / "puppy" / "static" / "app.js").read_text()
             check_free_identifiers(ui_source)
             check_reconnect_status(ui_source)
+            check_thinking_icons(ui_source)
             check_drawer_drag(ui_source)
             check_desktop_side_drag(ui_source)
             check_user_message_copy(ui_source)

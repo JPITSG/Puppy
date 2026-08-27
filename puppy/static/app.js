@@ -537,6 +537,14 @@ const LOAD_OLDER_MARGIN = 140;
 function thinkingLabel(tokens) {
   return tokens ? `thinking… ${fmtTokens(tokens)} tokens` : "thinking…";
 }
+function thinkingIconNode() {
+  return el("span", "think-brain", "🧠");
+}
+/* Claude exposes a streaming thinking block, while Codex first announces the
+   same phase as a plain status. Give either spelling the same visual marker. */
+function isThinkingStatus(text) {
+  return /^thinking(?:\s|…|\.{3}|$)/i.test(String(text || "").trim());
+}
 /* localStorage is per-origin; behind a path-mounting relay every app on the
    host shares it. Namespace all keys by the mount path - "" when served at
    the root, so existing local keys keep working unchanged. */
@@ -5914,7 +5922,7 @@ class SessionView {
       case "thinking": {
         const n = el("details", "think");
         const sum = el("summary");
-        sum.appendChild(el("span", "think-brain", "🧠"));
+        sum.appendChild(thinkingIconNode());
         sum.appendChild(el("span", "think-label", "thinking"));
         const body = el("div", "tbody", d.text || "");
         n.appendChild(sum); n.appendChild(body);
@@ -6002,6 +6010,7 @@ class SessionView {
         this.liveEl = el("details", "think msg-live");
         this.liveEl.open = false;
         const sum = el("summary");
+        sum.appendChild(thinkingIconNode());
         sum.appendChild(el("span", "think-label", this.statusText || thinkingLabel(0)));
         this.liveEl.appendChild(sum);
         this.liveEl.appendChild(el("div", "tbody"));
@@ -6037,11 +6046,14 @@ class SessionView {
     }
     if (!this.statusRow) {
       this.statusRow = el("div", "live-status");
-      this.statusRow.appendChild(el("span", "spinner"));
-      this.statusRow.appendChild(el("span", "think-label", text));
-    } else {
-      this.statusRow.querySelector(".think-label").textContent = text;
     }
+    /* Codex reports this phase as `status: thinking...` rather than a streamed
+       thinking block. Swap only the marker; commands and writing retain the
+       generic activity spinner. Replacing these two tiny children also handles
+       transitions between those states without leaving the old icon behind. */
+    this.statusRow.replaceChildren(
+      isThinkingStatus(text) ? thinkingIconNode() : el("span", "spinner"),
+      el("span", "think-label", text));
     if (this.inner.lastChild !== this.statusRow) {
       const follow = this.atBottom();
       this.inner.appendChild(this.statusRow);   // stays the last thing in the transcript
