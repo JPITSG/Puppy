@@ -685,6 +685,13 @@ async def main() -> None:
 
             ui_source = (BASE / "puppy" / "static" / "app.js").read_text()
             check_quota_math(ui_source)
+            # one checkbox face app-wide: a native checkbox is painted by the
+            # browser, ignores the theme and differs per platform, so the form
+            # input and the drawn menu mark share one rule and one tick path
+            css_source = (BASE / "puppy" / "static" / "app.css").read_text()
+            assert ".check input[type=checkbox],\n.menu-check-mark{" in css_source
+            assert "-webkit-appearance:none;appearance:none" in css_source
+            assert css_source.count("--check-tick:url(") == 1
             # the head strip hides per session, and the toggle sits in BOTH the
             # head's own menu and the sidebar menu - hiding the head takes its
             # own opener with it, so the sidebar copy is the way back
