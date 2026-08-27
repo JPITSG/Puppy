@@ -737,6 +737,22 @@ async def main() -> None:
             assert ".check input[type=checkbox],\n.menu-check-mark{" in css_source
             assert "-webkit-appearance:none;appearance:none" in css_source
             assert css_source.count("--check-tick:url(") == 1
+            # Session and engine-status disclosures share the sidebar's 240ms
+            # slide/fade helper. They are settled (and truly hidden) at rest,
+            # with transitions attached only for a user-triggered toggle so a
+            # restored collapse cannot animate during the first paint.
+            assert "setDisclosureCollapsed(body, isCollapsed, animate);" in ui_source
+            assert "sync(true);" in ui_source
+            assert ui_source.count("SLIDE_MOTION_MS + 40") == 2
+            assert ".sess-group-body[hidden],.foot-engine-body[hidden]{display:none}" in css_source
+            assert (".sess-group-body.disclosure-animating," +
+                    ".foot-engine-body.disclosure-animating{") in css_source
+            assert "--slide-time:.24s;--slide-fade-time:.2s;" in css_source
+            assert ("transition:height var(--slide-time) var(--ease)," +
+                    "opacity var(--slide-fade-time) var(--ease),") in css_source
+            assert ("transition:width var(--slide-time) var(--ease)," +
+                    "opacity var(--slide-fade-time) var(--ease);") in css_source
+            assert "@media (prefers-reduced-motion:reduce){" in css_source
             # the head strip hides per session, and the toggle sits in BOTH the
             # head's own menu and the sidebar menu - hiding the head takes its
             # own opener with it, so the sidebar copy is the way back

@@ -663,6 +663,7 @@ function fmtEndpoint(host, port) {
 const collapsedSessionBackends = storedStringSet("puppy.collapsed.session-backends");
 const collapsedStatusBackends = storedStringSet("puppy.collapsed.status-backends");
 let disclosureSeq = 0;
+const disclosureMotionTimers = new WeakMap();
 
 function tailPath(p, n = 26) {
   if (!p) return "";
@@ -704,6 +705,64 @@ function choiceSvg(kind) {
    their disclosure state outside the DOM, and expose a real button/panel
    relationship so the compact chevron remains keyboard and screen-reader
    accessible. */
+function setDisclosureCollapsed(body, collapsed, animate = false) {
+  const oldTimer = disclosureMotionTimers.get(body);
+  if (oldTimer) clearTimeout(oldTimer);
+  disclosureMotionTimers.delete(body);
+
+  const reduced = window.matchMedia &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (!animate || reduced) {
+    body.classList.remove("disclosure-animating");
+    body.style.removeProperty("height");
+    body.style.removeProperty("opacity");
+    body.style.removeProperty("margin-top");
+    body.hidden = collapsed;
+    return;
+  }
+
+  /* Pin the panel at its live size before changing direction. This also makes
+     a rapid second click reverse smoothly from the middle of a transition. */
+  const wasHidden = body.hidden;
+  const style = wasHidden ? null : getComputedStyle(body);
+  const currentHeight = wasHidden ? 0 : body.getBoundingClientRect().height;
+  const currentOpacity = wasHidden ? 0 : parseFloat(style.opacity) || 0;
+  const currentMargin = wasHidden ? 0 : parseFloat(style.marginTop) || 0;
+
+  /* Measure at auto height rather than with scrollHeight: compact text rows
+     often land on a half pixel, while scrollHeight rounds to an integer and
+     would leave a small snap when the inline target is cleared at the end.
+     Opacity and spacing stay pinned meanwhile, so revealing a hidden panel
+     cannot paint or establish a transition from their expanded values. */
+  body.classList.remove("disclosure-animating");
+  body.style.removeProperty("height");
+  body.style.opacity = String(currentOpacity);
+  body.style.marginTop = `${currentMargin}px`;
+  body.hidden = false;
+  const fullHeight = body.getBoundingClientRect().height;
+  const fullMargin = parseFloat(getComputedStyle(body)
+    .getPropertyValue("--disclosure-gap")) || 0;
+
+  body.classList.add("disclosure-animating");
+  body.style.height = `${currentHeight}px`;
+  body.style.opacity = String(currentOpacity);
+  body.style.marginTop = `${currentMargin}px`;
+  void body.offsetHeight; // commit the starting geometry before setting the target
+  body.style.height = collapsed ? "0px" : `${fullHeight}px`;
+  body.style.opacity = collapsed ? "0" : "1";
+  body.style.marginTop = collapsed ? "0px" : `${fullMargin}px`;
+
+  const timer = setTimeout(() => {
+    disclosureMotionTimers.delete(body);
+    body.classList.remove("disclosure-animating");
+    body.style.removeProperty("height");
+    body.style.removeProperty("opacity");
+    body.style.removeProperty("margin-top");
+    body.hidden = collapsed;
+  }, SLIDE_MOTION_MS + 40);
+  disclosureMotionTimers.set(body, timer);
+}
+
 function disclosureButton(label, body, collapsedKeys, storageKey, itemKey) {
   const key = String(itemKey);
   const button = el("button", "disclosure-toggle");
@@ -712,18 +771,18 @@ function disclosureButton(label, body, collapsedKeys, storageKey, itemKey) {
   button.setAttribute("aria-controls", body.id);
   button.appendChild(choiceSvg("arrow"));
 
-  const sync = () => {
+  const sync = (animate = false) => {
     const isCollapsed = collapsedKeys.has(key);
-    body.hidden = isCollapsed;
     button.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
     const action = isCollapsed ? "Expand" : "Collapse";
     button.setAttribute("aria-label", `${action} ${label}`);
+    setDisclosureCollapsed(body, isCollapsed, animate);
   };
   button.onclick = () => {
     if (collapsedKeys.has(key)) collapsedKeys.delete(key);
     else collapsedKeys.add(key);
     saveStringSet(storageKey, collapsedKeys);
-    sync();
+    sync(true);
   };
   sync();
   return button;
@@ -2844,8 +2903,8 @@ function sessionContextMenu(ev, bid, s) {
 
 /* Live sortable layouts. The DOM slot moves during dragover; FLIP animates
    every affected sibling from its old visual position to its new one. */
-/* Sidebar collapse/expand. Kept in step with the .24s in app.css. */
-const SIDE_MOTION_MS = 240;
+/* Sidebar and nested-panel slides. Kept in step with --slide-time in app.css. */
+const SLIDE_MOTION_MS = 240;
 const REORDER_MOTION_MS = 180;
 const REORDER_EASING = "cubic-bezier(.16,1,.3,1)";
 
@@ -4338,7 +4397,7 @@ function setSideCollapsed(on, animate = true) {
     sideMotionTimer = setTimeout(() => {
       app.classList.remove("side-animating");
       window.dispatchEvent(new Event("resize"));   // settle xterm on the final width
-    }, SIDE_MOTION_MS + 40);
+    }, SLIDE_MOTION_MS + 40);
   }
   app.classList.toggle("side-collapsed", !!on);
   root.style.setProperty("--side-w", on ? "0px" : open + "px");
