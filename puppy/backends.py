@@ -394,23 +394,104 @@ async def h_patch(request: web.Request):
         body = await request.json()
     except Exception:
         return web.json_response({"error": "invalid backend request"}, status=400)
-    if not isinstance(body, dict) or type(body.get("auto_upgrade")) is not bool:
+    allowed = {"name", "url", "token", "tls_fingerprint", "tls_sha256",
+               "auto_upgrade"}
+    if not isinstance(body, dict) or not body or set(body) - allowed:
+        return web.json_response({"error": "invalid backend request"}, status=400)
+    if "auto_upgrade" in body and type(body["auto_upgrade"]) is not bool:
         return web.json_response({"error": "auto-upgrade must be on or off"}, status=400)
-    enabled = body["auto_upgrade"]
-    if enabled and (backend.get("role") != "backend" or
-                    protocol.UPGRADE_CAPABILITY not in _backend_capabilities(backend)):
+
+    name = str(backend["name"])
+    if "name" in body:
+        if not isinstance(body["name"], str) or not body["name"].strip():
+            return web.json_response({"error": "backend name is required"}, status=400)
+        name = body["name"].strip()[:80]
+
+    try:
+        url = _base_url(body["url"]) if "url" in body else str(backend["url"])
+        if "token" in body:
+            if not isinstance(body["token"], str) or not body["token"].strip():
+                return web.json_response({"error": "API token is required"}, status=400)
+            token = body["token"].strip()
+        else:
+            token = str(backend["token"])
+        fingerprint_values = [body[key] for key in ("tls_fingerprint", "tls_sha256")
+                              if key in body]
+        if len(fingerprint_values) > 1:
+            normalized = {tls.normalize_fingerprint(value)
+                          for value in fingerprint_values}
+            if len(normalized) != 1:
+                raise ValueError("TLS certificate fingerprints do not match")
+            tls_fingerprint = normalized.pop()
+        elif fingerprint_values:
+            tls_fingerprint = tls.normalize_fingerprint(fingerprint_values[0])
+        else:
+            tls_fingerprint = str(backend.get("tls_fingerprint") or "")
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    if tls_fingerprint and urlsplit(url).scheme != "https":
+        return web.json_response(
+            {"error": "a TLS certificate fingerprint requires an https:// URL"}, status=400)
+
+    connection_changed = (url != backend["url"] or token != backend["token"] or
+                          tls_fingerprint != (backend.get("tls_fingerprint") or ""))
+    if connection_changed and bid in _upgrades_in_progress:
+        return web.json_response(
+            {"error": "backend connection cannot change while an upgrade is in progress"},
+            status=409)
+
+    remote = None
+    if connection_changed:
+        result = await probe_backend(url, token, tls_fingerprint)
+        if not result["ok"]:
+            return web.json_response({
+                "error": result.get("error", "backend test failed"),
+                "status": result.get("status"),
+            }, status=400)
+        remote = result["remote"]
+        # The probe yields to the upgrade worker. Re-check after it so an
+        # upgrade that began in that window cannot have its live connection
+        # replaced underneath the signed restart/rollback pipeline.
+        if bid in _upgrades_in_progress:
+            return web.json_response(
+                {"error": "backend connection cannot change while an upgrade is in progress"},
+                status=409)
+
+    enabled = body.get("auto_upgrade", bool(backend.get("auto_upgrade")))
+    candidate_role = remote.get("role") if remote else backend.get("role")
+    candidate_capabilities = ((remote.get("capabilities") or []) if remote else
+                              _backend_capabilities(backend))
+    if enabled and (candidate_role != "backend" or
+                    protocol.UPGRADE_CAPABILITY not in candidate_capabilities):
         return web.json_response({
             "error": "automatic upgrades require an upgrade-capable headless backend"
         }, status=409)
-    db.execute("UPDATE backends SET auto_upgrade=? WHERE id=?", (int(enabled), bid))
-    _auto_upgrade_retry_after.pop(bid, None)
-    _auto_upgrade_checked_at.pop(bid, None)
-    _auto_upgrade_last_errors.pop(bid, None)
+
+    if remote:
+        api_protocol, capabilities, remote_version, role = _metadata(remote)
+    else:
+        api_protocol = int(backend.get("protocol") or 0)
+        capabilities = str(backend.get("capabilities") or "[]")
+        remote_version = str(backend.get("remote_version") or "")
+        role = str(backend.get("role") or "")
+    db.execute(
+        "UPDATE backends SET name=?,url=?,token=?,protocol=?,capabilities=?,"
+        "remote_version=?,role=?,tls_fingerprint=?,auto_upgrade=? WHERE id=?",
+        (name, url, token, api_protocol, capabilities, remote_version, role,
+         tls_fingerprint, int(enabled), bid))
+    if connection_changed or enabled != bool(backend.get("auto_upgrade")):
+        _auto_upgrade_retry_after.pop(bid, None)
+        _auto_upgrade_checked_at.pop(bid, None)
+        _auto_upgrade_last_errors.pop(bid, None)
     _broadcast_backends()
     if enabled:
         _wake_auto_upgrade()
+    if connection_changed:
+        await close_proxy_websockets(bid, "Backend connection changed")
     updated = next(item for item in list_backends() if item["id"] == bid)
-    return web.json_response({"ok": True, "backend": updated})
+    return web.json_response({"ok": True, "backend": updated,
+                              "remote": remote,
+                              "connection_changed": connection_changed})
 
 
 async def h_delete(request: web.Request):
@@ -791,7 +872,7 @@ async def proxy(request: web.Request):
             headers.setdefault(k, v)
 
     if _is_ws(request):
-        return await _proxy_ws(request, target, headers, be["tls_fingerprint"])
+        return await _proxy_ws(request, target, headers, be["tls_fingerprint"], bid)
 
     try:
         streaming_upload = request.method == "POST" and UPLOAD_PROXY_PATH.fullmatch(tail)
@@ -829,7 +910,7 @@ async def proxy(request: web.Request):
 
 
 async def _proxy_ws(request: web.Request, target: str, headers: dict,
-                    tls_fingerprint: str):
+                    tls_fingerprint: str, bid: int):
     ws_url = "ws" + target[4:] if target.startswith("http") else target
     ws_client = None
     try:
@@ -848,6 +929,19 @@ async def _proxy_ws(request: web.Request, target: str, headers: dict,
         return web.json_response(
             {"error": "backend websocket unreachable: {}".format(error)}, status=502)
 
+    # A connection edit can finish while this remote handshake is in flight,
+    # before the viewer socket is registered for scoped revocation. Refuse to
+    # attach that just-opened old channel after its pairing stopped being
+    # authoritative; the browser will reconnect through the new settings.
+    current = get_backend(bid)
+    current_prefix = (str(current.get("url") or "").rstrip("/") + "/api/") \
+        if current else ""
+    if current is None or not target.startswith(current_prefix) or \
+            headers["X-Puppy-Token"] != current.get("token") or \
+            tls_fingerprint != (current.get("tls_fingerprint") or ""):
+        await ws_client.close()
+        return web.json_response({"error": "backend connection changed; reconnect"}, status=409)
+
     if request.app.get("puppy_snapshot_busy") == "restore":
         await ws_client.close()
         return web.json_response({"error": "Puppy restore in progress"}, status=503)
@@ -855,7 +949,8 @@ async def _proxy_ws(request: web.Request, target: str, headers: dict,
     ws_server = web.WebSocketResponse(heartbeat=30, max_msg_size=1 << 22)
     try:
         await ws_server.prepare(request)
-        _proxy_websockets.add(ws_server)
+        socket_record = (bid, ws_server)
+        _proxy_websockets.add(socket_record)
 
         async def pump(src, dst):
             try:
@@ -877,7 +972,7 @@ async def _proxy_ws(request: web.Request, target: str, headers: dict,
     except Exception as exc:
         log.warning("ws proxy to %s failed after handshake: %s", ws_url, _connection_error(exc))
     finally:
-        _proxy_websockets.discard(ws_server)
+        _proxy_websockets.discard((bid, ws_server))
         if not ws_server.closed:
             try:
                 await ws_server.close()
@@ -891,15 +986,18 @@ async def _proxy_ws(request: web.Request, target: str, headers: dict,
     return ws_server
 
 
-async def close_proxy_websockets() -> None:
-    """Revoke live proxied channels before imported auth/backend state takes effect."""
-    sockets = list(_proxy_websockets)
+async def close_proxy_websockets(bid=None, reason: str = "Puppy state restored") -> None:
+    """Revoke proxied channels globally for restore, or for one edited backend."""
+    sockets = [ws for socket_bid, ws in list(_proxy_websockets)
+               if bid is None or socket_bid == bid]
     if not sockets:
         return
 
+    close_message = str(reason or "Backend connection changed").encode("utf-8")[:123]
+
     async def close_socket(ws) -> None:
         try:
-            await ws.close(code=1012, message=b"Puppy state restored")
+            await ws.close(code=1012, message=close_message)
         except Exception:
             pass
 

@@ -1840,6 +1840,24 @@ function reconcileRemoteState() {
   }
 }
 
+/* A backend ID survives a connection edit, but everything learned through its
+   old URL/token/pin does not. Keep the open workspace tabs so a moved backend
+   can reconnect in place; clear only remote observations and stale poll work. */
+function resetRemoteBackendConnection(bid) {
+  bid = Number(bid) || 0;
+  if (!bid) return;
+  remotePollSequence[bid] = Number(remotePollSequence[bid] || 0) + 1;
+  for (const bucket of [state.remoteSessions, state.remoteOk, state.remoteErrors,
+                        state.engCache, state.remoteEngineErrors,
+                        state.remoteEngineCheckedAt, state.remoteNodeCheckedAt,
+                        state.remoteUsageRefresh, state.remoteUploadSettings,
+                        state.remoteBrowser, state.nodeUsers]) {
+    delete bucket[bid];
+  }
+  for (const key of [...sessionActivityAnchors.keys()])
+    if (key.startsWith(`${bid}:`)) sessionActivityAnchors.delete(key);
+}
+
 function remoteAvailability(bid) {
   return state.remoteOk[bid] === false ? "bad" :
     state.remoteOk[bid] === true ? "ok" : "pending";
@@ -8729,6 +8747,31 @@ class SettingsView {
         }
         row.appendChild(toggles);
         const actions = el("div", "be-actions");
+        const edit = el("button", "btn btn-sm", "Edit");
+        edit.setAttribute("aria-label", `Edit backend ${b.name}`);
+        edit.onclick = () => modalEditBackend(b, async result => {
+          const current = state.backends.find(item => item.id === b.id);
+          if (current && result.backend) Object.assign(current, result.backend);
+          if (result.connection_changed) resetRemoteBackendConnection(b.id);
+          toast(`${(result.backend && result.backend.name) || b.name}: backend updated`, "ok");
+          try {
+            await refreshState();
+            if (this.inner.isConnected) await this.render();
+          } catch (error) {
+            console.warn("post-edit backend refresh failed", error);
+          }
+          if (result.connection_changed) {
+            for (const view of Object.values(state.views)) {
+              if (!view || !view.tab || view.tab.type !== "browser" ||
+                  Number(view.tab.bid) !== Number(b.id) || typeof view.connect !== "function")
+                continue;
+              try { view.connect(); }
+              catch (error) { console.warn("backend browser reconnect failed", error); }
+            }
+          }
+          pollRemotes({ forceEngines: true })
+            .catch(error => console.warn("edited-backend poll failed", error));
+        });
         const test = el("button", "btn btn-sm", "Test");
         test.onclick = async () => {
           test.textContent = "…";
@@ -8797,7 +8840,8 @@ class SettingsView {
           await api(0, `backends/${b.id}`, { method: "DELETE" });
           await refreshState(); await this.render();
         };
-        actions.appendChild(test); actions.appendChild(upgrade); actions.appendChild(rm);
+        actions.appendChild(edit); actions.appendChild(test);
+        actions.appendChild(upgrade); actions.appendChild(rm);
         row.appendChild(actions);
         beList.appendChild(row);
       }
@@ -8993,6 +9037,112 @@ function modalPrompt(title, hint, value) {
     m.querySelector("#mp-yes").onclick = () => done(inp.value);
     inp.addEventListener("keydown", (e) => { if (e.key === "Enter") done(inp.value); });
   });
+}
+
+/* Edit a paired backend without ever reading its stored token back into the
+   browser. A blank token deliberately means "keep it"; pasted pairing JSON is
+   the convenient credential-rotation path and has clear precedence over the
+   three connection fields. The controller probes those candidate details
+   before committing them, so this modal never has to stage a half-edit. */
+function modalEditBackend(backend, onSaved) {
+  const { m, close } = modal(`<h2>Edit backend</h2>
+    <p class="backend-edit-intro">Update its display name or connection. New connection details are tested before they replace the current settings.</p>
+    <form id="backend-edit-form">
+      <div class="backend-edit-grid">
+        <label>Name<input type="text" id="backend-edit-name" maxlength="80"></label>
+        <label>URL<input type="text" id="backend-edit-url" spellcheck="false"></label>
+        <label class="full">API token <span class="field-optional">(leave blank to keep current)</span>
+          <input type="password" id="backend-edit-token" autocomplete="new-password"
+            placeholder="Current token is unchanged"></label>
+        <label class="full">TLS certificate SHA-256 <span class="field-optional">(optional)</span>
+          <input type="text" id="backend-edit-tls" autocomplete="off" spellcheck="false"></label>
+        <label class="full">Pairing JSON <span class="field-optional">(optional)</span>
+          <textarea id="backend-edit-pairing" rows="3"
+            placeholder="Paste new puppy-backend pairing output"></textarea></label>
+        <p class="backend-edit-help full">Pairing JSON replaces the URL, token and certificate above. The display name stays as entered.</p>
+        <p class="backend-edit-error full hidden" role="alert"></p>
+      </div>
+      <div class="m-btns"><button type="button" class="btn" id="backend-edit-cancel">Cancel</button>
+        <button type="submit" class="btn btn-pri" id="backend-edit-save">Save changes</button></div>
+    </form>`, "backend-edit-modal");
+  const form = m.querySelector("#backend-edit-form");
+  const name = m.querySelector("#backend-edit-name");
+  const url = m.querySelector("#backend-edit-url");
+  const token = m.querySelector("#backend-edit-token");
+  const fingerprint = m.querySelector("#backend-edit-tls");
+  const pairing = m.querySelector("#backend-edit-pairing");
+  const cancel = m.querySelector("#backend-edit-cancel");
+  const save = m.querySelector("#backend-edit-save");
+  const error = m.querySelector(".backend-edit-error");
+  name.value = backend.name || "";
+  url.value = backend.url || "";
+  fingerprint.value = backend.tls_fingerprint || "";
+
+  const setError = text => {
+    error.textContent = text || "";
+    error.classList.toggle("hidden", !text);
+  };
+  const setBusy = busy => {
+    form.setAttribute("aria-busy", busy ? "true" : "false");
+    form.querySelectorAll("input,textarea,button").forEach(control => control.disabled = busy);
+    save.textContent = busy ? "Saving…" : "Save changes";
+  };
+  const pairedText = (data, keys, fallback, emptyWins = false) => {
+    for (const key of keys) {
+      if (!Object.prototype.hasOwnProperty.call(data, key)) continue;
+      if (typeof data[key] !== "string")
+        throw new Error(`pairing JSON ${key} must be text`);
+      const value = data[key].trim();
+      if (value || emptyWins) return value;
+    }
+    return fallback;
+  };
+
+  cancel.onclick = close;
+  form.onsubmit = async event => {
+    event.preventDefault();
+    setError("");
+    try {
+      const displayName = name.value.trim();
+      if (!displayName) throw new Error("backend name is required");
+      let paired = {};
+      const raw = pairing.value.trim();
+      if (raw) {
+        try { paired = JSON.parse(raw); }
+        catch (_) { throw new Error("invalid pairing JSON"); }
+        if (!paired || typeof paired !== "object" || Array.isArray(paired))
+          throw new Error("invalid pairing JSON");
+      }
+      const body = {
+        name: displayName,
+        url: pairedText(paired, ["url"], url.value.trim()),
+        /* A cleartext pairing has no TLS field at all. Once a pairing block is
+           supplied, absence therefore means "clear the old pin", not "carry
+           the old HTTPS certificate into the new HTTP connection". */
+        tls_fingerprint: raw ? pairedText(
+          paired, ["tls_sha256", "tls_fingerprint"], "", true) :
+          fingerprint.value.trim(),
+      };
+      const nextToken = pairedText(paired, ["token"], token.value.trim());
+      if (nextToken) body.token = nextToken;
+      if (!body.url) throw new Error("backend URL is required");
+      setBusy(true);
+      const result = await api(0, `backends/${backend.id}`, {
+        method: "PATCH", body, timeoutMs: 45000,
+      });
+      close();
+      if (typeof onSaved === "function") await onSaved(result);
+    } catch (caught) {
+      if (m.isConnected) {
+        setBusy(false);
+        setError(caught.message || "backend could not be updated");
+      } else {
+        toast(caught.message || "backend could not be updated", "error", 7000);
+      }
+    }
+  };
+  requestAnimationFrame(() => { if (name.isConnected) { name.focus(); name.select(); } });
+  return { m, close };
 }
 
 /* new session */

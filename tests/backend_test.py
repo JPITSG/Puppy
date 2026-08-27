@@ -680,6 +680,34 @@ async def exercise_controller(url: str, token: str, backend_url: str,
                               json={"auto_upgrade": "yes"}) as response:
             assert response.status == 400, await response.text()
 
+        # Display-only edits work without replacing the private token or
+        # requiring a connection probe. A rejected credential edit is atomic:
+        # the old pairing remains usable and no secret is returned to the UI.
+        async with http.patch(url + f"/api/backends/{stored['id']}", headers=headers,
+                              json={"name": "  Edited backend  "}) as response:
+            renamed = await response.json()
+            assert response.status == 200, renamed
+        assert renamed["backend"]["name"] == "Edited backend", renamed
+        assert renamed["connection_changed"] is False and renamed["remote"] is None
+        assert "token" not in renamed["backend"]
+        async with http.patch(url + f"/api/backends/{stored['id']}", headers=headers,
+                              json={"token": "definitely-the-wrong-token"}) as response:
+            rejected_edit = await response.json()
+            assert response.status == 400, rejected_edit
+        async with http.patch(url + f"/api/backends/{stored['id']}", headers=headers,
+                              json={"tls_fingerprint": ""}) as response:
+            unpinned_edit = await response.json()
+            assert response.status == 400, unpinned_edit
+        assert "TLS certificate verification failed" in unpinned_edit["error"]
+        async with http.post(url + f"/api/backends/{stored['id']}/test",
+                             headers=headers) as response:
+            retained = await response.json()
+            assert response.status == 200 and retained["ok"] is True, retained
+        async with http.get(url + "/api/backends", headers=headers) as response:
+            after_rejection = (await response.json())["backends"][0]
+        assert after_rejection["name"] == "Edited backend", after_rejection
+        assert after_rejection["url"] == backend_url, after_rejection
+
         async with http.post(url + f"/api/backends/{stored['id']}/test",
                              headers=headers) as response:
             tested = await response.json()
@@ -736,7 +764,26 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         first = await remote_updates.receive_json(timeout=3)
         assert first["type"] == "sessions" and first["sessions"] == []
         assert isinstance(first["server_time"], (int, float))
+        # A real connection edit is probed before it is stored, and closes the
+        # affected backend's existing proxy channels so they reconnect through
+        # the new URL/token/pin rather than remaining attached to the old peer.
+        alternate_url = backend_url.replace("127.0.0.1", "localhost")
+        async with http.patch(url + f"/api/backends/{stored['id']}", headers=headers,
+                              json={"url": alternate_url}) as response:
+            moved = await response.json()
+            assert response.status == 200, moved
+        assert moved["connection_changed"] is True, moved
+        assert moved["backend"]["url"] == alternate_url, moved
+        closed = await remote_updates.receive(timeout=5)
+        assert closed.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED,
+                               aiohttp.WSMsgType.CLOSING), closed
         await remote_updates.close()
+        async with http.patch(url + f"/api/backends/{stored['id']}", headers=headers,
+                              json={"name": "backend-test-node", "url": backend_url}) as response:
+            restored_connection = await response.json()
+            assert response.status == 200, restored_connection
+        assert restored_connection["connection_changed"] is True, restored_connection
+        assert restored_connection["backend"]["name"] == "backend-test-node"
 
         async with http.post(url + f"/api/b/{stored['id']}/sessions", headers=headers, json={
                 "engine": "codex", "workspace_kind": "temporary", "name": "proxied-scratch",

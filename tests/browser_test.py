@@ -386,6 +386,110 @@ console.log(JSON.stringify({codex,tool,claude,idle:view.statusRow,
     assert ui_source.count("sum.appendChild(thinkingIconNode())") == 2
 
 
+def check_backend_editor(ui_source: str, css_source: str) -> None:
+    """The editor keeps secrets blank, validates pairing, and saves overrides."""
+    start = ui_source.index("function modalEditBackend(")
+    brace = ui_source.index("{", start)
+    depth = 0
+    end = None
+    for index in range(brace, len(ui_source)):
+        if ui_source[index] == "{":
+            depth += 1
+        elif ui_source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                end = index + 1
+                break
+    assert end is not None, "unbalanced backend editor"
+    editor = ui_source[start:end]
+    script = r"""
+class Classes {
+  constructor(){this.names=new Set(["hidden"]);}
+  toggle(name,force){if(force)this.names.add(name);else this.names.delete(name);}
+  contains(name){return this.names.has(name);}
+}
+function control(){return {value:"",disabled:false,isConnected:true,textContent:"",
+  classList:new Classes(),setAttribute(){},focus(){},select(){}};}
+const modals=[];const calls=[];const saved=[];let toastText="";
+function modal(html,className){
+  const nodes={"#backend-edit-form":control(),"#backend-edit-name":control(),
+    "#backend-edit-url":control(),"#backend-edit-token":control(),
+    "#backend-edit-tls":control(),"#backend-edit-pairing":control(),
+    "#backend-edit-cancel":control(),"#backend-edit-save":control(),
+    ".backend-edit-error":control()};
+  const fields=Object.values(nodes).filter((value,index)=>index>0&&index<8);
+  nodes["#backend-edit-form"].querySelectorAll=()=>fields;
+  const m={html,className,isConnected:true,querySelector:selector=>nodes[selector]};
+  const close=()=>{m.isConnected=false;m.closed=true;};
+  modals.push({m,nodes,close});return {m,close};
+}
+const requestAnimationFrame=fn=>fn();
+const toast=text=>{toastText=text;};
+async function api(bid,path,options){calls.push({bid,path,options});return {
+  ok:true,backend:{id:7,name:options.body.name,url:options.body.url},
+  connection_changed:options.body.url!=="https://old.test"};}
+%s
+const backend={id:7,name:"Old node",url:"https://old.test",tls_fingerprint:"a".repeat(64)};
+const first=modalEditBackend(backend,result=>saved.push(result));
+const one=modals[0].nodes;
+one["#backend-edit-pairing"].value="{";
+await one["#backend-edit-form"].onsubmit({preventDefault(){}});
+const invalid={message:one[".backend-edit-error"].textContent,
+  visible:!one[".backend-edit-error"].classList.contains("hidden"),calls:calls.length};
+one["#backend-edit-cancel"].onclick();
+const cancelled=first.m.closed===true;
+
+modalEditBackend(backend,result=>saved.push(result));
+const two=modals[1].nodes;
+two["#backend-edit-name"].value="Renamed node";
+two["#backend-edit-token"].value="";
+await two["#backend-edit-form"].onsubmit({preventDefault(){}});
+const ordinary=calls[0].options.body;
+
+modalEditBackend(backend,result=>saved.push(result));
+const three=modals[2].nodes;
+three["#backend-edit-name"].value="Paired node";
+three["#backend-edit-pairing"].value=JSON.stringify({url:"https://new.test/",
+  token:"rotated-secret",tls_sha256:"b".repeat(64),name:"ignored remote name"});
+await three["#backend-edit-form"].onsubmit({preventDefault(){}});
+const paired=calls[1].options.body;
+modalEditBackend(backend,result=>saved.push(result));
+const four=modals[3].nodes;
+four["#backend-edit-name"].value="Cleartext node";
+four["#backend-edit-pairing"].value=JSON.stringify({url:"http://new.test",
+  token:"cleartext-secret"});
+await four["#backend-edit-form"].onsubmit({preventDefault(){}});
+const cleartext=calls[2].options.body;
+console.log(JSON.stringify({invalid,cancelled,ordinary,paired,cleartext,saved:saved.length,
+  modalClass:modals[0].m.className,html:modals[0].m.html,toastText}));
+""" % editor
+    proc = subprocess.run(["node", "--input-type=module", "-e", script],
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:700]
+    result = json.loads(proc.stdout.strip())
+    assert result["invalid"] == {
+        "message": "invalid pairing JSON", "visible": True, "calls": 0}, result
+    assert result["cancelled"] is True and result["saved"] == 3, result
+    assert result["ordinary"] == {
+        "name": "Renamed node", "url": "https://old.test",
+        "tls_fingerprint": "a" * 64}, result
+    assert result["paired"] == {
+        "name": "Paired node", "url": "https://new.test/",
+        "token": "rotated-secret", "tls_fingerprint": "b" * 64}, result
+    assert result["cleartext"] == {
+        "name": "Cleartext node", "url": "http://new.test",
+        "token": "cleartext-secret", "tls_fingerprint": ""}, result
+    assert result["modalClass"] == "backend-edit-modal", result
+    assert "leave blank to keep current" in result["html"]
+    assert "tested before they replace" in result["html"]
+    assert 'const edit = el("button", "btn btn-sm", "Edit");' in ui_source
+    assert "edit.onclick = () => modalEditBackend(b" in ui_source
+    assert "if (result.connection_changed) resetRemoteBackendConnection(b.id);" in ui_source
+    assert ".backend-edit-grid{display:grid;grid-template-columns:" in css_source
+    assert "grid-template-columns:repeat(4,minmax(0,1fr))" in css_source
+    assert ".be-actions{grid-template-columns:repeat(2,minmax(0,1fr))}" in css_source
+
+
 def check_drawer_drag(ui_source: str) -> None:
     """Run the real mobile drawer gesture against a tiny pointer-event DOM.
 
@@ -1339,9 +1443,11 @@ async def main() -> None:
                 agent_hub.status = "idle"
 
             ui_source = (BASE / "puppy" / "static" / "app.js").read_text()
+            css_source = (BASE / "puppy" / "static" / "app.css").read_text()
             check_free_identifiers(ui_source)
             check_reconnect_status(ui_source)
             check_thinking_icons(ui_source)
+            check_backend_editor(ui_source, css_source)
             check_drawer_drag(ui_source)
             check_desktop_side_drag(ui_source)
             check_user_message_copy(ui_source)

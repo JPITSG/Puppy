@@ -1454,6 +1454,17 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .be-security.secure{color:var(--ok)}
 .be-security.clear{color:var(--err)}
 .be-actions{display:flex;align-items:center;gap:8px}
+.field-optional{text-transform:none;letter-spacing:0}
+.backend-edit-modal{max-width:560px}
+.backend-edit-intro{margin:-4px 0 14px;color:var(--txt2);font-size:12.5px;line-height:1.5}
+.backend-edit-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:0 14px}
+.backend-edit-grid .full{grid-column:1/-1}
+.backend-edit-grid textarea{resize:vertical;min-height:72px;max-height:180px}
+.backend-edit-help{margin:-5px 0 9px;color:var(--txt3);font-size:10.5px;line-height:1.45}
+.backend-edit-error{
+  margin:0;padding:8px 10px;border:1px solid rgba(255,107,129,.3);border-radius:var(--r-sm);
+  background:var(--err-dim);color:var(--err);font-size:11.5px;line-height:1.4;
+}
 .settings-form{display:grid;grid-template-columns:1fr 1fr;gap:0 14px;margin-top:8px}
 .settings-form .full{grid-column:1/-1}
 .bind-fields{display:grid;grid-template-columns:minmax(0,1fr) 132px;gap:0 14px;min-width:0}
@@ -1696,6 +1707,19 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   .workspace-split.row{min-width:max-content}
   .workspace-split.column{min-height:max-content}
   .workspace-pane{min-width:220px;min-height:220px;overflow:hidden}
+  /* Four clear verbs still read as one even action rail on a small tablet.
+     The identity and toggles keep their compact first line above it. */
+  .be-row{grid-template-columns:minmax(0,1fr) auto;gap:8px 10px;padding:12px 0}
+  .be-details{grid-column:1;grid-row:1}
+  .be-row .be-url{margin-top:2px;font-size:10.5px}
+  .be-meta-row{gap:7px}
+  .be-toggles{grid-column:2;grid-row:1;align-self:center;gap:9px}
+  .be-auto-existing{min-height:26px}
+  .be-actions{
+    grid-column:1/-1;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));
+    gap:6px;width:100%;
+  }
+  .be-actions .btn{width:100%;min-width:0;height:34px;padding-left:6px;padding-right:6px}
 }
 @media (max-width:900px){
   .side{
@@ -1763,18 +1787,12 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   .engine-row-actions{grid-area:actions;justify-content:flex-end}
   .engine-update{height:32px;min-width:0;padding-left:14px;padding-right:14px}
   .engine-node-message{padding-left:26px}
-  /* The toggle takes the empty space beside the name rather than a line of its
-     own, where it read as a stray control between the backend and its buttons. */
-  .be-row{grid-template-columns:minmax(0,1fr) auto;gap:8px 10px;padding:12px 0}
-  .be-details{grid-column:1;grid-row:1}
-  .be-row .be-url{margin-top:2px;font-size:10.5px}
-  .be-meta-row{gap:7px}
-  .be-toggles{grid-column:2;grid-row:1;align-self:center;gap:9px}
-  .be-auto-existing{min-height:26px}
-  .be-actions{
-    grid-column:1/-1;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;width:100%;
-  }
-  .be-actions .btn{width:100%;min-width:0;height:34px;padding-left:6px;padding-right:6px}
+  /* Two balanced rows give every backend verb a comfortable phone target. */
+  .be-actions{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .backend-edit-grid{grid-template-columns:minmax(0,1fr)}
+  .backend-edit-grid .full{grid-column:1}
+  .backend-edit-modal .m-btns{display:grid;grid-template-columns:1fr 1fr;gap:7px}
+  .backend-edit-modal .m-btns .btn{width:100%;min-width:0}
   .snapshot-actions{display:grid;grid-template-columns:1fr 1fr;gap:7px}
   .snapshot-actions .btn{width:100%;min-width:0;height:34px;padding-left:8px;padding-right:8px}
   /* the switch stays beside the name; the schedule takes the line below, the
