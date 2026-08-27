@@ -4751,7 +4751,7 @@ class SessionView {
        and rendering it visible until then made a session that hides it flash
        its strip and then drop it. An unknown session keeps the default (shown)
        and is corrected by syncSessionMetaVisibility when the list arrives. */
-    if (!sessionShowsMeta(findSessionMeta(tab.bid, tab.sid)))
+    if (!sessionShowsMeta(findSessionMeta(this.tab.bid, this.tab.sid)))
       root.classList.add("meta-hidden");
     this.scroll = root.querySelector(".chat-scroll");
     /* Tracked while visible so a view that is hidden when the workspace is

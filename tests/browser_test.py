@@ -207,6 +207,50 @@ async def mcp_request(proc, request_id, method, params=None):
     return response
 
 
+def check_free_identifiers(ui_source: str) -> None:
+    """Class methods must not reach for a name only the constructor has.
+    `node --check` parses such a reference happily and a string assert never
+    sees it, so a stray `tab.bid` inside buildDom() shipped and took the whole
+    console down with "tab is not defined" at the login screen.
+
+    A name is fine when the method takes it as a parameter or declares it
+    anywhere in its own body (including nested closures); only a genuinely
+    free reference is reported."""
+    import re
+    lines = ui_source.split("\n")
+    watched = ("tab", "session", "view", "anchor", "event")
+    offenders = []
+    for index, line in enumerate(lines):
+        match = re.match(r"^  ([a-zA-Z_$][\w$]*)\((.*?)\)\s*\{\s*$", line)
+        if not match or match.group(1) == "constructor":
+            continue
+        name, params = match.group(1), match.group(2)
+        depth, body = 0, []
+        for probe in lines[index:]:
+            depth += probe.count("{") - probe.count("}")
+            body.append(probe)
+            if depth <= 0 and len(body) > 1:
+                break
+        text = "\n".join(body)
+        for watch in watched:
+            if not re.search(r"(?<![.\w$])" + watch + r"\.", text):
+                continue
+            declared = (
+                re.search(r"(?<![.\w$])" + watch + r"(?![\w$])", params) or
+                re.search(r"\b(?:const|let|var)\s+" + watch + r"(?![\w$])", text) or
+                re.search(r"\b(?:const|let|var)\s*[\[{][^\n]*?(?<![.\w$])" + watch +
+                          r"(?![\w$])", text) or
+                re.search(r"\(([^()\n]*?(?<![.\w$])" + watch +
+                          r"(?![\w$])[^()\n]*?)\)\s*=>", text) or
+                re.search(r"(?<![.\w$])" + watch + r"\s*=>", text) or
+                re.search(r"function\s*\w*\s*\([^()\n]*?(?<![.\w$])" + watch +
+                          r"(?![\w$])", text))
+            if not declared:
+                offenders.append("{}() reaches for a free `{}`".format(name, watch))
+    assert not offenders, ("free identifiers in class methods:\n  " +
+                           "\n  ".join(sorted(set(offenders))))
+
+
 def check_quota_math(ui_source: str) -> None:
     """The footer's weekly figure, run through node against every payload shape.
     claude's `utilization` is a 0..1 fraction and codex's `used_percent` is
@@ -684,6 +728,7 @@ async def main() -> None:
                 agent_hub.status = "idle"
 
             ui_source = (BASE / "puppy" / "static" / "app.js").read_text()
+            check_free_identifiers(ui_source)
             check_quota_math(ui_source)
             # one checkbox face app-wide: a native checkbox is painted by the
             # browser, ignores the theme and differs per platform, so the form
@@ -699,7 +744,8 @@ async def main() -> None:
             assert "classList.toggle(\"meta-hidden\", !sessionShowsMeta(s))" in ui_source
             # decided before the view is attached, so a session that hides the
             # strip never paints it and then drops it on the first frame
-            assert "if (!sessionShowsMeta(findSessionMeta(tab.bid, tab.sid)))" in ui_source
+            assert ("if (!sessionShowsMeta(findSessionMeta(this.tab.bid, this.tab.sid)))"
+                    in ui_source)
             assert "syncSessionMetaVisibility();" in ui_source
             # The directory list sits in normal flow, so closing it on focus
             # loss reflows the page. Held until the press that took the focus
