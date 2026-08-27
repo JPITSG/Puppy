@@ -312,6 +312,116 @@ console.log(JSON.stringify({before, lost, changedWhileLost, recovered}));
     assert result["recovered"]["live"] == "using shell", result
 
 
+def check_drawer_drag(ui_source: str) -> None:
+    """Run the real mobile drawer gesture against a tiny pointer-event DOM.
+
+    The drawer must occupy an intermediate position for as long as a finger is
+    paused, settle by position after a slow drag, accept a short fast flick,
+    and leave vertical motion alone for the session scroller.
+    """
+    marker = ui_source.index("/* Touch-only drawer drag.")
+    start = ui_source.index("(() => {", marker)
+    brace = ui_source.index("{", start)
+    depth = 0
+    end = None
+    for index in range(brace, len(ui_source)):
+        if ui_source[index] == "{":
+            depth += 1
+        elif ui_source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                end = ui_source.index(")();", index) + 4
+                break
+    assert end is not None, "unbalanced drawer gesture"
+    gesture = ui_source[start:end]
+    script = r"""
+class Classes {
+  constructor(...names) { this.names = new Set(names); }
+  add(name) { this.names.add(name); }
+  remove(name) { this.names.delete(name); }
+  contains(name) { return this.names.has(name); }
+  toggle(name, force) {
+    if (force === undefined) force = !this.names.has(name);
+    if (force) this.names.add(name); else this.names.delete(name);
+    return force;
+  }
+}
+class Target {
+  constructor(width=0) {
+    this.width = width; this.listeners = {};
+    this.classList = new Classes();
+    this.style = {transform:"", opacity:"", removeProperty(name) { this[name] = ""; }};
+  }
+  addEventListener(kind, fn) { (this.listeners[kind] ||= []).push(fn); }
+  emit(kind, values={}) {
+    const event = Object.assign({pointerId:1, pointerType:"touch", isPrimary:true,
+      clientX:0, clientY:0, timeStamp:0, prevented:false,
+      preventDefault() { this.prevented = true; }, stopImmediatePropagation() {}}, values);
+    for (const fn of this.listeners[kind] || []) fn(event);
+    return event;
+  }
+  setPointerCapture() {} releasePointerCapture() {}
+  getBoundingClientRect() { return {width:this.width}; }
+  get offsetWidth() { return this.width; }
+}
+const nodes = {app:new Target(), side:new Target(300),
+  "side-backdrop":new Target(), "drawer-edge":new Target()};
+const $ = id => nodes[id];
+const window = {matchMedia:q => ({matches:q.includes("max-width")})};
+let frame = null;
+const requestAnimationFrame = fn => { frame = fn; return 1; };
+const cancelAnimationFrame = () => { frame = null; };
+const runFrame = () => { const fn=frame; frame=null; if (fn) fn(); };
+%s
+const edge=nodes["drawer-edge"], side=nodes.side, app=nodes.app, shade=nodes["side-backdrop"];
+edge.emit("pointerdown", {clientX:10,clientY:100,timeStamp:0});
+edge.emit("pointermove", {clientX:90,clientY:100,timeStamp:30});
+const anchored={transform:side.style.transform,opacity:shade.style.opacity,
+                dragging:app.classList.contains("drawer-dragging")};
+const paused={transform:side.style.transform,opacity:shade.style.opacity};
+edge.emit("pointerup", {clientX:90,clientY:100,timeStamp:300}); runFrame();
+const partialClosed=!app.classList.contains("side-open") && side.style.transform==="";
+
+edge.emit("pointerdown", {clientX:10,clientY:100,timeStamp:400});
+edge.emit("pointermove", {clientX:210,clientY:100,timeStamp:650});
+edge.emit("pointerup", {clientX:210,clientY:100,timeStamp:800}); runFrame();
+const majorityOpen=app.classList.contains("side-open") && side.style.transform==="";
+
+side.emit("pointerdown", {clientX:250,clientY:300,timeStamp:900});
+side.emit("pointermove", {clientX:80,clientY:300,timeStamp:950});
+const closingHeld=side.style.transform;
+side.emit("pointerup", {clientX:80,clientY:300,timeStamp:1200}); runFrame();
+const positionClosed=!app.classList.contains("side-open");
+
+edge.emit("pointerdown", {clientX:10,clientY:100,timeStamp:1300});
+edge.emit("pointermove", {clientX:14,clientY:190,timeStamp:1350});
+edge.emit("pointerup", {clientX:14,clientY:190,timeStamp:1400});
+const verticalUntouched=side.style.transform==="" &&
+  !app.classList.contains("drawer-dragging") && !app.classList.contains("side-open");
+
+edge.emit("pointerdown", {clientX:10,clientY:100,timeStamp:1500});
+edge.emit("pointermove", {clientX:48,clientY:100,timeStamp:1520});
+edge.emit("pointerup", {clientX:48,clientY:100,timeStamp:1525}); runFrame();
+const flickOpen=app.classList.contains("side-open");
+const nextSideTap=side.emit("click").prevented === false;
+const gestureClickBlocked=edge.emit("click").prevented === true;
+console.log(JSON.stringify({anchored,paused,partialClosed,majorityOpen,
+                            closingHeld,positionClosed,verticalUntouched,flickOpen,
+                            nextSideTap,gestureClickBlocked}));
+""" % gesture
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:500]
+    result = json.loads(proc.stdout.strip())
+    assert result["anchored"] == {
+        "transform": "translate3d(-210px,0,0)", "opacity": "0.3", "dragging": True}, result
+    assert result["paused"] == {
+        "transform": "translate3d(-210px,0,0)", "opacity": "0.3"}, result
+    assert result["partialClosed"] and result["majorityOpen"], result
+    assert result["closingHeld"] == "translate3d(-170px,0,0)", result
+    assert result["positionClosed"] and result["verticalUntouched"] and result["flickOpen"], result
+    assert result["nextSideTap"] and result["gestureClickBlocked"], result
+
+
 def check_quota_math(ui_source: str) -> None:
     """The footer's weekly figure, run through node against every payload shape.
     claude's `utilization` is a 0..1 fraction and codex's `used_percent` is
@@ -791,6 +901,7 @@ async def main() -> None:
             ui_source = (BASE / "puppy" / "static" / "app.js").read_text()
             check_free_identifiers(ui_source)
             check_reconnect_status(ui_source)
+            check_drawer_drag(ui_source)
             check_quota_math(ui_source)
             # one checkbox face app-wide: a native checkbox is painted by the
             # browser, ignores the theme and differs per platform, so the form
@@ -822,6 +933,11 @@ async def main() -> None:
             assert ui_source.count("this.setReconnecting(false);") == 2
             assert "this.setReconnecting(true);" in ui_source
             assert 'this.setStatus("connection lost' not in ui_source
+            # The scroll container is the touch-action boundary on Chromium;
+            # without its own pan-y rule a close drag is cancelled before the
+            # pointer stream reaches the drawer, while vertical scroll remains native.
+            assert ".side-scroll{touch-action:pan-y pinch-zoom}" in css_source
+            assert ".app.drawer-dragging .side{transition:none;will-change:transform}" in css_source
             # the head strip hides per session, and the toggle sits in BOTH the
             # head's own menu and the sidebar menu - hiding the head takes its
             # own opener with it, so the sidebar copy is the way back

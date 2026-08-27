@@ -1681,12 +1681,20 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
     transition:transform .25s var(--ease);box-shadow:20px 0 60px -20px rgba(0,0,0,.8);
     background:var(--panel);width:min(300px,84vw);touch-action:pan-y pinch-zoom;
   }
+  /* This is itself a scroll container, so touch-action resolution stops here
+     rather than inheriting the drawer's rule through it. Keep its native
+     vertical scroll, but leave horizontal motion to the drawer drag. */
+  .side-scroll{touch-action:pan-y pinch-zoom}
   .app.side-open .side{transform:none}
   .side-backdrop{
     display:block;position:fixed;inset:0;background:rgba(4,6,10,.6);z-index:25;
-    opacity:0;pointer-events:none;transition:opacity .25s;touch-action:pan-y pinch-zoom;
+    opacity:0;pointer-events:none;transition:opacity .25s var(--ease);touch-action:pan-y pinch-zoom;
   }
   .app.side-open .side-backdrop{opacity:1;pointer-events:auto}
+  /* Pointer movement owns these two properties while a drawer drag is live.
+     Re-enable their ordinary transitions only when release picks an endpoint. */
+  .app.drawer-dragging .side{transition:none;will-change:transform}
+  .app.drawer-dragging .side-backdrop{transition:none;will-change:opacity}
   .side-resize{display:none}
   .burger{display:inline-flex}
   .chat-scroll{padding:12px 10px 6px}

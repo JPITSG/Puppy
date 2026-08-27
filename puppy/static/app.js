@@ -4241,52 +4241,137 @@ $("btn-settings").onclick = () => { openSettingsTab(state.activeGroup); closeDra
 $("side-backdrop").onclick = closeDrawer;
 function closeDrawer() { $("app").classList.remove("side-open"); }
 
-/* Touch-only drawer gestures. The narrow edge target keeps ordinary chat,
+/* Touch-only drawer drag. The narrow edge target keeps ordinary chat,
    terminal and tab gestures untouched while making the closed drawer easy to
-   discover. Vertical movement remains native scrolling inside the drawer. */
+   discover. Once horizontal intent wins, the drawer edge stays attached to
+   the finger; vertical movement remains native scrolling inside the drawer. */
 (() => {
   const app = $("app");
+  const side = $("side");
+  const backdrop = $("side-backdrop");
   const mobile = window.matchMedia("(max-width: 900px)");
-  const swipeDistance = 52;
+  const intentDistance = 7;
+  const flingVelocity = .45; // CSS px/ms over the most recent 100ms
+  let gesture = null;
+  let settleFrame = null;
+  let suppressedClick = null;
 
-  function wireSwipe(target, opening) {
-    let start = null;
-    let suppressClick = false;
+  const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
 
-    target.addEventListener("pointerdown", (e) => {
-      if (!mobile.matches || e.pointerType !== "touch" || !e.isPrimary) return;
-      const open = app.classList.contains("side-open");
-      if ((opening && open) || (!opening && !open)) return;
-      start = { id: e.pointerId, x: e.clientX, y: e.clientY };
-      try { target.setPointerCapture(e.pointerId); } catch (err) {}
+  function clearLivePosition() {
+    side.style.removeProperty("transform");
+    backdrop.style.removeProperty("opacity");
+  }
+
+  function settle(open) {
+    app.classList.toggle("side-open", !!open);
+    app.classList.remove("drawer-dragging");
+    if (settleFrame !== null) cancelAnimationFrame(settleFrame);
+    const reduced = window.matchMedia &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (reduced) {
+      settleFrame = null;
+      clearLivePosition();
+      return;
+    }
+    /* The inline position remains the transition's starting frame. Commit it
+       with transitions restored, then remove it so CSS carries the drawer to
+       whichever class-owned endpoint release selected. */
+    void side.offsetWidth;
+    settleFrame = requestAnimationFrame(() => {
+      settleFrame = null;
+      clearLivePosition();
     });
+  }
 
-    target.addEventListener("pointerup", (e) => {
-      if (!start || e.pointerId !== start.id) return;
-      const dx = e.clientX - start.x;
-      const dy = e.clientY - start.y;
-      const horizontal = Math.abs(dx) >= swipeDistance && Math.abs(dx) > Math.abs(dy) * 1.2;
-      start = null;
-      if (!horizontal || (opening ? dx <= 0 : dx >= 0)) return;
-      e.preventDefault();
-      suppressClick = true;
-      setTimeout(() => { suppressClick = false; }, 350);
-      if (opening) app.classList.add("side-open");
-      else closeDrawer();
+  function recordSample(current, x, time) {
+    current.samples.push({ x, time });
+    const cutoff = time - 100;
+    while (current.samples.length > 1 && current.samples[0].time < cutoff)
+      current.samples.shift();
+  }
+
+  function move(current, event) {
+    const dx = event.clientX - current.startX;
+    const dy = event.clientY - current.startY;
+    if (!current.axis) {
+      const ax = Math.abs(dx);
+      const ay = Math.abs(dy);
+      if (Math.max(ax, ay) < intentDistance) return;
+      if (ay > ax * 1.15) { current.axis = "vertical"; return; }
+      if (ax <= ay * 1.15) return;
+      current.axis = "horizontal";
+      current.dragging = true;
+      app.classList.add("drawer-dragging");
+    }
+    if (current.axis !== "horizontal") return;
+    event.preventDefault();
+    const x = clamp(current.baseX + dx, current.closedX, 0);
+    current.progress = (x - current.closedX) / -current.closedX;
+    side.style.transform = `translate3d(${x}px,0,0)`;
+    backdrop.style.opacity = String(current.progress);
+    recordSample(current, event.clientX, event.timeStamp);
+  }
+
+  function finish(event, cancelled = false) {
+    const current = gesture;
+    if (!current || event.pointerId !== current.id) return;
+    if (!cancelled) move(current, event); // a quick flick may have no move frame
+    gesture = null;
+    try { current.target.releasePointerCapture(current.id); } catch (error) {}
+    if (!current.dragging) return;
+
+    event.preventDefault();
+    suppressedClick = { target: current.target, until: Date.now() + 450 };
+    let open = current.startOpen;
+    if (!cancelled) {
+      const first = current.samples[0];
+      const last = current.samples[current.samples.length - 1];
+      const elapsed = last && first ? last.time - first.time : 0;
+      const velocity = elapsed > 0 ? (last.x - first.x) / elapsed : 0;
+      open = Math.abs(velocity) >= flingVelocity ? velocity > 0 : current.progress >= .5;
+    }
+    settle(open);
+  }
+
+  function wireDrag(target, startOpen) {
+    target.addEventListener("pointerdown", event => {
+      if (!mobile.matches || event.pointerType !== "touch" || !event.isPrimary || gesture)
+        return;
+      if (app.classList.contains("side-open") !== startOpen) return;
+      const width = side.getBoundingClientRect().width;
+      if (!(width > 0)) return;
+      /* During an edge-open drag the drawer's right edge sits under the
+         finger. CSS carries it the final hidden 5% only after a closed settle,
+         keeping the resting shadow outside the viewport. */
+      const closedX = -width;
+      gesture = {
+        id: event.pointerId, target, startOpen,
+        startX: event.clientX, startY: event.clientY,
+        baseX: startOpen ? 0 : event.clientX - width, closedX,
+        progress: startOpen ? 1 : 0, axis: "", dragging: false,
+        samples: [{ x: event.clientX, time: event.timeStamp }],
+      };
+      try { target.setPointerCapture(event.pointerId); } catch (error) {}
     });
-
-    target.addEventListener("pointercancel", () => { start = null; });
-    target.addEventListener("click", (e) => {
-      if (!suppressClick) return;
-      e.preventDefault();
-      e.stopPropagation();
-      suppressClick = false;
+    target.addEventListener("pointermove", event => {
+      if (gesture && event.pointerId === gesture.id) move(gesture, event);
+    });
+    target.addEventListener("pointerup", event => finish(event));
+    target.addEventListener("pointercancel", event => finish(event, true));
+    target.addEventListener("click", event => {
+      if (!suppressedClick) return;
+      if (Date.now() >= suppressedClick.until) { suppressedClick = null; return; }
+      if (suppressedClick.target !== target) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      suppressedClick = null;
     }, true);
   }
 
-  wireSwipe($("drawer-edge"), true);
-  wireSwipe($("side"), false);
-  wireSwipe($("side-backdrop"), false);
+  wireDrag($("drawer-edge"), false);
+  wireDrag(side, true);
+  wireDrag(backdrop, true);
 })();
 
 /* Browsers offer their own saved-value dropdowns on any field that does not say
