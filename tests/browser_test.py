@@ -422,6 +422,175 @@ console.log(JSON.stringify({anchored,paused,partialClosed,majorityOpen,
     assert result["nextSideTap"] and result["gestureClickBlocked"], result
 
 
+def check_desktop_side_drag(ui_source: str) -> None:
+    """Run the real desktop sidebar drag against a pointer-event DOM.
+
+    The hidden edge must expose a paused intermediate width, settle slowly by
+    position or quickly by velocity, while the visible grip keeps its ordinary
+    resize range and changes into a reversible collapse below 200px.
+    """
+    marker = ui_source.index("/* Desktop sidebar drag.")
+    start = ui_source.index("(() => {", marker)
+    brace = ui_source.index("{", start)
+    depth = 0
+    end = None
+    for index in range(brace, len(ui_source)):
+        if ui_source[index] == "{":
+            depth += 1
+        elif ui_source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                end = ui_source.index(")();", index) + 4
+                break
+    assert end is not None, "unbalanced desktop sidebar gesture"
+    gesture = ui_source[start:end]
+    script = r"""
+class Classes {
+  constructor(...names) { this.names = new Set(names); }
+  add(...names) { for (const name of names) this.names.add(name); }
+  remove(...names) { for (const name of names) this.names.delete(name); }
+  contains(name) { return this.names.has(name); }
+  toggle(name, force) {
+    if (force === undefined) force = !this.names.has(name);
+    if (force) this.names.add(name); else this.names.delete(name);
+    return force;
+  }
+}
+class Style {
+  constructor() { this.values = {}; this.width = ""; this.opacity = ""; this.visibility = ""; }
+  setProperty(name, value) { this.values[name] = value; }
+  removeProperty(name) { delete this.values[name]; this[name] = ""; }
+  value(name) { return this.values[name] || ""; }
+}
+class Target {
+  constructor(id) { this.id = id; this.listeners = {}; this.classList = new Classes();
+    this.style = new Style(); }
+  addEventListener(kind, fn) { (this.listeners[kind] ||= []).push(fn); }
+  emit(kind, values={}) {
+    const event = Object.assign({pointerId:1, pointerType:"mouse", button:0,
+      isPrimary:true, clientX:0, clientY:0, timeStamp:0, prevented:false,
+      preventDefault() { this.prevented = true; }}, values);
+    for (const fn of this.listeners[kind] || []) fn(event);
+    return event;
+  }
+  setPointerCapture() {} releasePointerCapture() {}
+  getBoundingClientRect() {
+    return {width:parseFloat(document.documentElement.style.value("--side-w")) || 0};
+  }
+  get offsetWidth() { return this.getBoundingClientRect().width; }
+}
+const nodes = {app:new Target("app"), side:new Target("side"),
+  "side-resize":new Target("side-resize"), "drawer-edge":new Target("drawer-edge")};
+const $ = id => nodes[id];
+const document = {documentElement:new Target("root")};
+const storage = {"puppy.sidecollapsed":"1", "puppy.sidew":"256"};
+const lsGet = key => storage[key] || null;
+const lsSet = (key, value) => { storage[key] = value; };
+const lsDel = key => { delete storage[key]; };
+function savedSideWidth() {
+  const saved = parseInt(lsGet("puppy.sidew") || "", 10);
+  return saved ? Math.min(480, Math.max(200, saved)) : 256;
+}
+function setSideCollapsed(on, animate=true) {
+  const open = savedSideWidth();
+  nodes.app.classList.toggle("side-collapsed", !!on);
+  if (animate) nodes.app.classList.add("side-animating");
+  document.documentElement.style.setProperty("--side-w-open", open + "px");
+  document.documentElement.style.setProperty("--side-w", on ? "0px" : open + "px");
+  lsSet("puppy.sidecollapsed", on ? "1" : "");
+}
+const window = {
+  matchMedia:query => ({matches:query.includes("min-width")}),
+  dispatchEvent() {},
+};
+class Event { constructor(type) { this.type = type; } }
+let frame = null;
+const requestAnimationFrame = fn => { frame = fn; return 1; };
+const cancelAnimationFrame = () => { frame = null; };
+const runFrame = () => {
+  const fn = frame; frame = null; if (fn) fn();
+  nodes.app.classList.remove("side-animating");
+};
+%s
+const app=nodes.app, side=nodes.side, edge=nodes["drawer-edge"], grip=nodes["side-resize"];
+const rootStyle=document.documentElement.style;
+
+edge.emit("pointerdown", {clientX:4,timeStamp:0});
+edge.emit("pointermove", {clientX:90,timeStamp:200});
+const revealHeld={width:rootStyle.value("--side-w"),opacity:side.style.opacity,
+                  dragging:app.classList.contains("side-dragging")};
+const revealPaused={width:rootStyle.value("--side-w"),opacity:side.style.opacity};
+edge.emit("pointerup", {clientX:90,timeStamp:400}); runFrame();
+const minorityClosed=app.classList.contains("side-collapsed") &&
+  rootStyle.value("--side-w")==="0px" && side.style.width==="";
+
+edge.emit("pointerdown", {clientX:4,timeStamp:500});
+edge.emit("pointermove", {clientX:190,timeStamp:800});
+edge.emit("pointerup", {clientX:190,timeStamp:1000}); runFrame();
+const majorityOpen=!app.classList.contains("side-collapsed") &&
+  rootStyle.value("--side-w")==="256px";
+
+grip.emit("pointerdown", {clientX:256,timeStamp:1100});
+grip.emit("pointermove", {clientX:330,timeStamp:1300});
+grip.emit("pointerup", {clientX:330,timeStamp:1500});
+const resized=rootStyle.value("--side-w")==="330px" && storage["puppy.sidew"]==="330";
+
+grip.emit("pointerdown", {clientX:330,timeStamp:1600});
+grip.emit("pointermove", {clientX:80,timeStamp:1900});
+const collapseHeld={width:rootStyle.value("--side-w"),opacity:side.style.opacity,
+                    clipping:app.classList.contains("side-drag-collapsing")};
+grip.emit("pointerup", {clientX:80,timeStamp:2100}); runFrame();
+const positionClosed=app.classList.contains("side-collapsed") &&
+  rootStyle.value("--side-w")==="0px";
+
+edge.emit("pointerdown", {clientX:4,timeStamp:2200});
+edge.emit("pointermove", {clientX:200,timeStamp:2500});
+edge.emit("pointerup", {clientX:200,timeStamp:2700}); runFrame();
+grip.emit("pointerdown", {clientX:330,timeStamp:2800});
+grip.emit("pointermove", {clientX:150,timeStamp:3100});
+grip.emit("pointerup", {clientX:150,timeStamp:3300});
+const laneRestoresOpen=!app.classList.contains("side-collapsed") &&
+  side.style.width==="150px";
+runFrame();
+const restoredWidth=rootStyle.value("--side-w")==="330px" && side.style.width==="";
+
+grip.emit("pointerdown", {clientX:330,timeStamp:3400});
+grip.emit("pointermove", {clientX:50,timeStamp:3700});
+grip.emit("pointerup", {clientX:50,timeStamp:3900}); runFrame();
+edge.emit("pointerdown", {clientX:4,timeStamp:4000});
+edge.emit("pointermove", {clientX:35,timeStamp:4020});
+edge.emit("pointerup", {clientX:40,timeStamp:4025}); runFrame();
+const flickOpen=!app.classList.contains("side-collapsed") &&
+  rootStyle.value("--side-w")==="330px";
+
+grip.emit("pointerdown", {clientX:330,timeStamp:4100});
+grip.emit("pointermove", {clientX:70,timeStamp:4200});
+grip.emit("pointercancel", {clientX:70,timeStamp:4210}); runFrame();
+const cancelRestored=!app.classList.contains("side-collapsed") &&
+  rootStyle.value("--side-w")==="330px";
+grip.emit("dblclick");
+const doubleClickReset=rootStyle.value("--side-w")==="256px" &&
+  storage["puppy.sidew"]===undefined;
+
+console.log(JSON.stringify({revealHeld,revealPaused,minorityClosed,majorityOpen,resized,
+  collapseHeld,positionClosed,laneRestoresOpen,restoredWidth,flickOpen,cancelRestored,
+  doubleClickReset}));
+""" % gesture
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:600]
+    result = json.loads(proc.stdout.strip())
+    assert result["revealHeld"] == {
+        "width": "90px", "opacity": str(90 / 256), "dragging": True}, result
+    assert result["revealPaused"] == {
+        "width": "90px", "opacity": str(90 / 256)}, result
+    assert result["minorityClosed"] and result["majorityOpen"] and result["resized"], result
+    assert result["collapseHeld"] == {
+        "width": "80px", "opacity": "0.4", "clipping": True}, result
+    assert result["positionClosed"] and result["laneRestoresOpen"], result
+    assert result["restoredWidth"] and result["flickOpen"] and result["cancelRestored"], result
+    assert result["doubleClickReset"], result
+
+
 def check_quota_math(ui_source: str) -> None:
     """The footer's weekly figure, run through node against every payload shape.
     claude's `utilization` is a 0..1 fraction and codex's `used_percent` is
@@ -902,6 +1071,7 @@ async def main() -> None:
             check_free_identifiers(ui_source)
             check_reconnect_status(ui_source)
             check_drawer_drag(ui_source)
+            check_desktop_side_drag(ui_source)
             check_quota_math(ui_source)
             # one checkbox face app-wide: a native checkbox is painted by the
             # browser, ignores the theme and differs per platform, so the form
@@ -938,6 +1108,14 @@ async def main() -> None:
             # pointer stream reaches the drawer, while vertical scroll remains native.
             assert ".side-scroll{touch-action:pan-y pinch-zoom}" in css_source
             assert ".app.drawer-dragging .side{transition:none;will-change:transform}" in css_source
+            # A hidden desktop sidebar leaves no visual strip, but the first
+            # eight pixels expose a directional cursor and a captured drag.
+            # During that drag both the column and workspace follow --side-w.
+            assert ".app.side-collapsed .drawer-edge{" in css_source
+            assert "width:8px;z-index:41;\n    cursor:e-resize;touch-action:none;" in css_source
+            assert (".app.side-dragging.side-collapsed .side{" +
+                    "width:var(--side-w);visibility:visible}") in css_source
+            assert ".app.side-dragging .side{transition:none;will-change:width,opacity}" in css_source
             # the head strip hides per session, and the toggle sits in BOTH the
             # head's own menu and the sidebar menu - hiding the head takes its
             # own opener with it, so the sidebar copy is the way back

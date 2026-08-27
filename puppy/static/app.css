@@ -579,6 +579,24 @@ select.choice-native{display:none!important}
   /* A moving edge cannot be grabbed, and sweeping it under a resting cursor
      should not light it either: no hit-testing, so :hover never matches. */
   .app.side-animating .side-resize{pointer-events:none}
+  /* Once the column is hidden, the viewport's first few pixels become its
+     pull handle. It is intentionally invisible: the directional resize
+     cursor is the discoverability cue, without leaving a permanent strip over
+     the workspace. Pointer capture keeps the drag alive after it leaves this
+     narrow target. */
+  .app.side-collapsed .drawer-edge{
+    display:block;position:fixed;left:0;top:0;bottom:0;width:8px;z-index:41;
+    cursor:e-resize;touch-action:none;
+  }
+  .app.side-animating .drawer-edge{pointer-events:none}
+  /* Width and opacity are written directly from the pointer while dragging.
+     Override the resting collapsed visibility, and clip full-width contents
+     rather than allowing labels and status rows to reflow on every pixel. */
+  .app.side-dragging .side{transition:none;will-change:width,opacity}
+  .app.side-dragging.side-collapsed .side{width:var(--side-w);visibility:visible}
+  .app.side-drag-revealing .side,.app.side-drag-collapsing .side{overflow:hidden}
+  .app.side-drag-revealing .side>*:not(.side-resize){min-width:var(--side-w-open,256px)}
+  .app.side-drag-collapsing .side>*:not(.side-resize){min-width:200px}
   /* the resting collapsed state: no transition, so a reload starts settled */
   .app.side-collapsed .side{width:0;opacity:0;visibility:hidden}
   /* going out, stay visible for the whole slide and only then leave the tree */

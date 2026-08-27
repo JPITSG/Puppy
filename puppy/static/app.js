@@ -4502,33 +4502,178 @@ function setSideCollapsed(on, animate = true) {
   window.dispatchEvent(new Event("resize"));   // xterm fit etc.
 }
 
-/* sidebar width: draggable, persisted */
+/* Desktop sidebar drag. The ordinary right-edge grip remains a 200-480px
+   resizer. Pulling it below that range changes into a live collapse gesture;
+   when hidden, the narrow viewport-edge target reverses the same gesture.
+   Width (and therefore the workspace) stays under the pointer, then the
+   existing sidebar transition carries only the remaining distance. */
 (() => {
-  document.documentElement.style.setProperty("--side-w", savedSideWidth() + "px");
-  if (lsGet("puppy.sidecollapsed") === "1") setSideCollapsed(true, false);
+  const app = $("app");
+  const side = $("side");
   const grip = $("side-resize");
-  if (!grip) return;
-  grip.addEventListener("pointerdown", (e) => {
-    e.preventDefault();
-    grip.classList.add("active");
-    grip.setPointerCapture(e.pointerId);
-    const move = (ev) => {
-      const w = Math.min(480, Math.max(200, Math.round(ev.clientX)));
-      document.documentElement.style.setProperty("--side-w", w + "px");
+  const edge = $("drawer-edge");
+  const root = document.documentElement;
+  const desktop = window.matchMedia("(min-width: 901px)");
+  const minWidth = 200;
+  const maxWidth = 480;
+  const flingVelocity = .45; // CSS px/ms over the most recent 100ms
+  let gesture = null;
+  let settleFrame = null;
+
+  const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
+
+  root.style.setProperty("--side-w", savedSideWidth() + "px");
+  if (lsGet("puppy.sidecollapsed") === "1") setSideCollapsed(true, false);
+
+  function clearLivePosition() {
+    side.style.removeProperty("width");
+    side.style.removeProperty("opacity");
+    side.style.removeProperty("visibility");
+  }
+
+  function clearDragClasses() {
+    app.classList.remove("side-dragging", "side-drag-revealing", "side-drag-collapsing");
+    grip.classList.remove("active");
+  }
+
+  function recordSample(current, position, time) {
+    current.samples.push({ position, time });
+    const cutoff = time - 100;
+    while (current.samples.length > 1 && current.samples[0].time < cutoff)
+      current.samples.shift();
+  }
+
+  function velocity(current) {
+    const first = current.samples[0];
+    const last = current.samples[current.samples.length - 1];
+    const elapsed = last && first ? last.time - first.time : 0;
+    return elapsed > 0 ? (last.position - first.position) / elapsed : 0;
+  }
+
+  function liveWidth(current, event) {
+    const delta = event.clientX - current.startX;
+    if (!current.moved && Math.abs(delta) < 1) return;
+    current.moved = true;
+    const width = Math.round(clamp(event.clientX, 0, current.maxWidth));
+    current.width = width;
+    root.style.setProperty("--side-w", width + "px");
+    if (current.revealing) {
+      side.style.opacity = String(width / current.maxWidth);
+    } else if (width < minWidth) {
+      app.classList.add("side-drag-collapsing");
+      side.style.opacity = String(width / minWidth);
+    } else {
+      app.classList.remove("side-drag-collapsing");
+      side.style.removeProperty("opacity");
+    }
+    recordSample(current, width, event.timeStamp);
+    event.preventDefault();
+  }
+
+  function animateTo(collapsed, currentWidth, currentOpacity) {
+    /* Pin the pointer-owned frame while CSS regains its transitions. Removing
+       these inline values one frame later gives the browser an exact start
+       and lets setSideCollapsed own the persisted endpoint as usual. */
+    side.style.width = currentWidth + "px";
+    side.style.opacity = String(currentOpacity);
+    side.style.visibility = "visible";
+    clearDragClasses();
+    setSideCollapsed(collapsed, true);
+    if (settleFrame !== null) cancelAnimationFrame(settleFrame);
+    const reduced = window.matchMedia &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (reduced) {
+      settleFrame = null;
+      clearLivePosition();
+      return;
+    }
+    void side.offsetWidth;
+    settleFrame = requestAnimationFrame(() => {
+      settleFrame = null;
+      clearLivePosition();
+    });
+  }
+
+  function finish(event, cancelled = false) {
+    const current = gesture;
+    if (!current || event.pointerId !== current.id) return;
+    if (!cancelled) liveWidth(current, event); // retain a one-frame mouse flick
+    gesture = null;
+    try { current.target.releasePointerCapture(current.id); } catch (error) {}
+    if (!current.moved) {
+      clearDragClasses();
+      clearLivePosition();
+      return;
+    }
+    event.preventDefault();
+
+    if (cancelled) {
+      animateTo(current.revealing, current.width,
+        current.revealing ? current.width / current.maxWidth :
+          current.width < minWidth ? current.width / minWidth : 1);
+      return;
+    }
+
+    /* Releasing the grip in its normal range is a resize, not a hide. Only
+       the sub-minimum lane settles to an endpoint. */
+    if (!current.revealing && current.width >= minWidth) {
+      clearDragClasses();
+      clearLivePosition();
+      root.style.setProperty("--side-w-open", current.width + "px");
+      lsSet("puppy.sidew", String(current.width));
+      lsSet("puppy.sidecollapsed", "");
+      window.dispatchEvent(new Event("resize"));
+      return;
+    }
+
+    const speed = velocity(current);
+    const progress = current.revealing ? current.width / current.maxWidth :
+      current.width / minWidth;
+    const open = Math.abs(speed) >= flingVelocity ? speed > 0 : progress >= .5;
+    const opacity = current.revealing ? progress : current.width / minWidth;
+    animateTo(!open, current.width, opacity);
+  }
+
+  function begin(target, event, revealing) {
+    if (!desktop.matches || event.button !== 0 || event.isPrimary === false || gesture ||
+        app.classList.contains("side-animating")) return;
+    if (app.classList.contains("side-collapsed") !== revealing) return;
+    const openWidth = savedSideWidth();
+    const startWidth = revealing ? 0 : side.getBoundingClientRect().width;
+    if (!revealing && !(startWidth >= minWidth)) return;
+    event.preventDefault();
+    if (settleFrame !== null) {
+      cancelAnimationFrame(settleFrame);
+      settleFrame = null;
+      clearLivePosition();
+    }
+    root.style.setProperty("--side-w-open", openWidth + "px");
+    gesture = {
+      id: event.pointerId, target, revealing, startX: event.clientX,
+      width: startWidth, maxWidth: revealing ? openWidth : maxWidth,
+      moved: false, samples: [{ position: startWidth, time: event.timeStamp }],
     };
-    const up = () => {
-      grip.classList.remove("active");
-      grip.removeEventListener("pointermove", move);
-      grip.removeEventListener("pointerup", up);
-      const w = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--side-w"), 10);
-      if (w) lsSet("puppy.sidew", String(w));
-      window.dispatchEvent(new Event("resize"));   // xterm fit etc.
-    };
-    grip.addEventListener("pointermove", move);
-    grip.addEventListener("pointerup", up);
-  });
+    app.classList.add("side-dragging");
+    app.classList.toggle("side-drag-revealing", revealing);
+    if (!revealing) grip.classList.add("active");
+    try { target.setPointerCapture(event.pointerId); } catch (error) {}
+  }
+
+  function wire(target, revealing) {
+    if (!target) return;
+    target.addEventListener("pointerdown", event => begin(target, event, revealing));
+    target.addEventListener("pointermove", event => {
+      if (gesture && event.pointerId === gesture.id) liveWidth(gesture, event);
+    });
+    target.addEventListener("pointerup", event => finish(event));
+    target.addEventListener("pointercancel", event => finish(event, true));
+  }
+
+  wire(edge, true);
+  wire(grip, false);
   grip.addEventListener("dblclick", () => {
-    document.documentElement.style.setProperty("--side-w", "256px");
+    root.style.setProperty("--side-w", "256px");
+    root.style.setProperty("--side-w-open", "256px");
     lsDel("puppy.sidew");
     window.dispatchEvent(new Event("resize"));
   });
