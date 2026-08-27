@@ -4122,7 +4122,21 @@ document.addEventListener("dragover", event => {
     cleanupSplitPreview();
 }, true);
 
+/* Views built before the session list arrived - a reload that restores tabs -
+   start on the default. Correct them as soon as the list lands, rather than
+   waiting for each socket snapshot. */
+function syncSessionMetaVisibility() {
+  for (const tab of state.tabs) {
+    if (tab.type !== "session") continue;
+    const view = state.views[tab.id];
+    if (!view || !view.root || view.session) continue;   // its own data wins
+    const meta = findSessionMeta(tab.bid, tab.sid);
+    if (meta) view.root.classList.toggle("meta-hidden", !sessionShowsMeta(meta));
+  }
+}
+
 function syncTabsWithSessions() {
+  syncSessionMetaVisibility();
   let dirty = false;
   for (const t of [...state.tabs]) {
     if (t.type === "session" && !t.bid && !state.sessions.some(s => s.id === t.sid)) {
@@ -4732,6 +4746,13 @@ class SessionView {
         </div>
       </div>`;
     this.root = root;
+    /* Seeded from what the session list already knows, before this view is
+       painted. The head is only authoritative once the socket snapshot lands,
+       and rendering it visible until then made a session that hides it flash
+       its strip and then drop it. An unknown session keeps the default (shown)
+       and is corrected by syncSessionMetaVisibility when the list arrives. */
+    if (!sessionShowsMeta(findSessionMeta(tab.bid, tab.sid)))
+      root.classList.add("meta-hidden");
     this.scroll = root.querySelector(".chat-scroll");
     /* Tracked while visible so a view that is hidden when the workspace is
        rebuilt still has a position to be handed back - a display:none element

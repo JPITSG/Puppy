@@ -690,6 +690,10 @@ async def main() -> None:
             # own opener with it, so the sidebar copy is the way back
             assert ui_source.count('menuCheckRow("Show status bar"') == 2
             assert "classList.toggle(\"meta-hidden\", !sessionShowsMeta(s))" in ui_source
+            # decided before the view is attached, so a session that hides the
+            # strip never paints it and then drops it on the first frame
+            assert "if (!sessionShowsMeta(findSessionMeta(tab.bid, tab.sid)))" in ui_source
+            assert "syncSessionMetaVisibility();" in ui_source
             # The directory list sits in normal flow, so closing it on focus
             # loss reflows the page. Held until the press that took the focus
             # has landed, a click on OK is not swallowed by the close.
