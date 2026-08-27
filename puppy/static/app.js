@@ -2365,17 +2365,29 @@ function noteRemoteSocketReachable(bid) {
     .catch(error => console.warn("socket recovery poll failed", error));
 }
 
+/* Mobile browsers freeze timers while the page is backgrounded. If a socket
+   closed during that freeze, do not leave its accumulated backoff sitting
+   between the user and a fresh snapshot after the page becomes usable again. */
+function wakeSessionConnections() {
+  for (const view of Object.values(state.views))
+    if (view && typeof view.resumeConnection === "function") view.resumeConnection();
+}
+
 window.addEventListener("online", () => {
   if (state.authed) {
     connectUpdates();
+    wakeSessionConnections();
     pollRemotes({ forceEngines: true })
       .catch(error => console.warn("online remote poll failed", error));
   }
 });
 document.addEventListener("visibilitychange", () => {
-  if (state.authed && document.visibilityState === "visible")
+  if (state.authed && document.visibilityState === "visible") {
+    connectUpdates();
+    wakeSessionConnections();
     pollRemotes({ forceEngines: true })
       .catch(error => console.warn("resume remote poll failed", error));
+  }
 });
 
 /* ================= sidebar ================= */
@@ -4732,7 +4744,8 @@ class SessionView {
     this.switchLines = [];    // engine-switch dividers, re-labelled as state arrives
     this.liveEl = null;
     this.liveKind = null;
-    this.statusText = "";     // header status; the transcript foot mirrors it
+    this.statusText = "";     // model activity; the header and transcript foot mirror it
+    this.reconnecting = false; // transport state overlays activity without replacing it
     this.statusRow = null;    // standalone foot row, used when no thinking block is live
     this.queued = [];         // last queue payload, re-rendered when the list expands
     this.queueOpen = false;   // whether the tail past QUEUE_ROWS is showing
@@ -4978,10 +4991,13 @@ class SessionView {
         try { ws.close(); } catch (error) {}
         return;
       }
+      this.retry = 800;
+      this.setReconnecting(false);
       noteRemoteSocketReachable(this.tab.bid);
     };
     ws.onmessage = (ev) => {
       if (sequence !== this.connectionSequence || this.ws !== ws) return;
+      this.setReconnecting(false); // a message is proof even in unusual WebSocket shims
       let d; try { d = JSON.parse(ev.data); } catch (e) { return; }
       noteRemoteSocketReachable(this.tab.bid);
       this.handle(d);
@@ -4990,7 +5006,7 @@ class SessionView {
       if (sequence !== this.connectionSequence || this.ws !== ws) return;
       this.ws = null;
       if (this.closed) return;
-      this.setStatus("connection lost · reconnecting…");
+      this.setReconnecting(true);
       const delay = Math.round(this.retry * (.85 + Math.random() * .3));
       this.retry = Math.min(this.retry * 1.7, 15000);
       this.reconnectTimer = setTimeout(() => {
@@ -4999,6 +5015,12 @@ class SessionView {
       }, delay);
     };
     ws.onerror = () => { try { ws.close(); } catch (e) {} };
+  }
+
+  resumeConnection() {
+    if (this.closed) return;
+    if (!this.ws || this.ws.readyState > WebSocket.OPEN) this.retry = 800;
+    this.connect();
   }
 
   destroy() {
@@ -5367,13 +5389,28 @@ class SessionView {
     else this.syncLiveStatus();
   }
 
-  setStatus(text) {
-    this.statusText = text || "";
+  visibleStatusText() {
+    return this.reconnecting ? "connection lost · reconnecting…" : this.statusText;
+  }
+
+  renderStatus() {
+    const text = this.visibleStatusText();
     this.statusEl.innerHTML = text ?
       `<span class="spinner"></span><span class="status-text">${esc(text)}</span>` : "";
-    if (!text) this.statusEl.innerHTML = "";
     this.syncLiveStatus();
     this.syncHeadOverflow();
+  }
+
+  setReconnecting(value) {
+    const reconnecting = !!value;
+    if (this.reconnecting === reconnecting) return;
+    this.reconnecting = reconnecting;
+    this.renderStatus();
+  }
+
+  setStatus(text) {
+    this.statusText = text || "";
+    this.renderStatus();
   }
 
   /* ---- transcript rendering ---- */
@@ -5685,7 +5722,7 @@ class SessionView {
      time - tool calls, text streaming, the gaps between blocks - a standalone
      row does, so the two never disagree. */
   syncLiveStatus() {
-    const text = this.statusText || thinkingLabel(0);
+    const text = this.visibleStatusText() || thinkingLabel(0);
     const thinking = this.liveEl && this.liveKind === "thinking";
     if (thinking) {
       const lab = this.liveEl.querySelector(".think-label");

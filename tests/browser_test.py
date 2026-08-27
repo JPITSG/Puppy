@@ -251,6 +251,67 @@ def check_free_identifiers(ui_source: str) -> None:
                            "\n  ".join(sorted(set(offenders))))
 
 
+def check_reconnect_status(ui_source: str) -> None:
+    """A transport outage must overlay, not destroy, model activity text.
+
+    The old close handler called setStatus("connection lost ..."). A reconnect
+    snapshot restores running/idle but carries no ephemeral status text, so the
+    warning survived while fresh model output streamed underneath it. Exercise
+    the real SessionView status methods in node to keep those states separate.
+    """
+    def method(name):
+        start = ui_source.index("\n  " + name + "(") + 1
+        brace = ui_source.index("{", start)
+        depth = 0
+        for index in range(brace, len(ui_source)):
+            if ui_source[index] == "{":
+                depth += 1
+            elif ui_source[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    return ui_source[start:index + 1]
+        raise AssertionError("unbalanced SessionView." + name)
+
+    methods = [method(name) for name in (
+        "visibleStatusText", "renderStatus", "setReconnecting", "setStatus")]
+    script = """
+const esc = value => String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;");
+const proto = {
+%s
+};
+const view = Object.assign(Object.create(proto), {
+  reconnecting: false,
+  statusText: "thinking 42 tokens",
+  statusEl: {innerHTML: ""},
+  liveText: "",
+  syncLiveStatus() { this.liveText = this.visibleStatusText(); },
+  syncHeadOverflow() {},
+});
+const take = () => ({header: view.statusEl.innerHTML, live: view.liveText,
+                     activity: view.statusText, reconnecting: view.reconnecting});
+view.renderStatus();
+const before = take();
+view.setReconnecting(true);
+const lost = take();
+view.setStatus("using shell");
+const changedWhileLost = take();
+view.setReconnecting(false);
+const recovered = take();
+console.log(JSON.stringify({before, lost, changedWhileLost, recovered}));
+""" % ",\n".join(methods)
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:400]
+    result = json.loads(proc.stdout.strip())
+    assert "thinking 42 tokens" in result["before"]["header"], result
+    assert "connection lost" in result["lost"]["header"], result
+    assert result["lost"]["activity"] == "thinking 42 tokens", result
+    assert "connection lost" in result["changedWhileLost"]["header"], result
+    assert result["changedWhileLost"]["activity"] == "using shell", result
+    assert "using shell" in result["recovered"]["header"], result
+    assert "connection lost" not in result["recovered"]["header"], result
+    assert result["recovered"]["live"] == "using shell", result
+
+
 def check_quota_math(ui_source: str) -> None:
     """The footer's weekly figure, run through node against every payload shape.
     claude's `utilization` is a 0..1 fraction and codex's `used_percent` is
@@ -729,6 +790,7 @@ async def main() -> None:
 
             ui_source = (BASE / "puppy" / "static" / "app.js").read_text()
             check_free_identifiers(ui_source)
+            check_reconnect_status(ui_source)
             check_quota_math(ui_source)
             # one checkbox face app-wide: a native checkbox is painted by the
             # browser, ignores the theme and differs per platform, so the form
@@ -753,6 +815,13 @@ async def main() -> None:
             assert ("transition:width var(--slide-time) var(--ease)," +
                     "opacity var(--slide-fade-time) var(--ease);") in css_source
             assert "@media (prefers-reduced-motion:reduce){" in css_source
+            # A resumed/online phone wakes any session socket whose timer was
+            # frozen in the background. Successful transport evidence clears
+            # only the overlay; it never overwrites model activity again.
+            assert ui_source.count("wakeSessionConnections();") == 2
+            assert ui_source.count("this.setReconnecting(false);") == 2
+            assert "this.setReconnecting(true);" in ui_source
+            assert 'this.setStatus("connection lost' not in ui_source
             # the head strip hides per session, and the toggle sits in BOTH the
             # head's own menu and the sidebar menu - hiding the head takes its
             # own opener with it, so the sidebar copy is the way back
