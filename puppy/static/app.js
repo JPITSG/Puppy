@@ -486,6 +486,31 @@ async function copyWithToast(text, message = "copied") {
   catch (e) { toast("copy failed", "error"); return false; }
 }
 
+function userMessageCopyButton(text) {
+  const button = el("button", "user-copy");
+  button.type = "button";
+  button.setAttribute("aria-label", "Copy message");
+  button.appendChild(copyIcon());
+  button.onclick = async event => {
+    event.preventDefault();
+    event.stopPropagation();
+    try {
+      await writeClipboardText(text);
+      clearTimeout(button._copyReset);
+      button.classList.add("done");
+      button.replaceChildren(copyIcon(true));
+      button.setAttribute("aria-label", "Copied");
+      button._copyReset = setTimeout(() => {
+        if (!button.isConnected) return;
+        button.classList.remove("done");
+        button.replaceChildren(copyIcon());
+        button.setAttribute("aria-label", "Copy message");
+      }, 1400);
+    } catch (error) { toast("copy failed", "error"); }
+  };
+  return button;
+}
+
 function fmtTime(ts) {
   const d = new Date(ts * 1000);
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -5809,23 +5834,28 @@ class SessionView {
            the person who sent it should have to read it back. Show what the
            composer showed; the message text keeps the markers untouched. */
         const { text, attachments } = splitAttachmentMarkers(d.text || "");
-        if (!attachments.length) { linkifyInto(n, d.text || ""); return n; }
         if (text) linkifyInto(n, text);
         /* "leading" is set here rather than matched with :first-child, which
            counts elements only - prose is a bare text node, so the strip was
            its own first element child either way and the no-prose spacing
            applied to every message. */
-        const strip = el("div", "attach-strip sent" + (text ? "" : " leading"));
-        for (const a of attachments) {
-          /* The blob this view still holds, else the node's stored copy, so a
-             reload keeps its thumbnails rather than a row of named cards. */
-          const chip = attachmentChipNode(a, a.preview
-            ? (this.sentThumbs.get(a.path) || uploadPreviewUrl(this.tab.bid, a.path))
-            : "");
-          chip.setAttribute("aria-label", `${a.name} · ${a.path}`);
-          strip.appendChild(chip);
+        if (attachments.length) {
+          const strip = el("div", "attach-strip sent" + (text ? "" : " leading"));
+          for (const a of attachments) {
+            /* The blob this view still holds, else the node's stored copy, so a
+               reload keeps its thumbnails rather than a row of named cards. */
+            const chip = attachmentChipNode(a, a.preview
+              ? (this.sentThumbs.get(a.path) || uploadPreviewUrl(this.tab.bid, a.path))
+              : "");
+            chip.setAttribute("aria-label", `${a.name} · ${a.path}`);
+            strip.appendChild(chip);
+          }
+          n.appendChild(strip);
         }
-        n.appendChild(strip);
+        /* Absolute positioning keeps this control out of the prose and
+           attachment layout; copy exactly what the bubble visibly says, not
+           the private marker lines used to send its attachments. */
+        if (text) n.appendChild(userMessageCopyButton(text));
         return n;
       }
       case "assistant": {

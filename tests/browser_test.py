@@ -591,6 +591,75 @@ console.log(JSON.stringify({revealHeld,revealPaused,minorityClosed,majorityOpen,
     assert result["doubleClickReset"], result
 
 
+def check_user_message_copy(ui_source: str) -> None:
+    """Exercise the real user-message copy control and its success reset."""
+    start = ui_source.index("\nfunction userMessageCopyButton(") + 1
+    brace = ui_source.index("{", start)
+    depth = 0
+    end = None
+    for index in range(brace, len(ui_source)):
+        if ui_source[index] == "{":
+            depth += 1
+        elif ui_source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                end = index + 1
+                break
+    assert end is not None, "unbalanced user-message copy helper"
+    helper = ui_source[start:end]
+    script = r"""
+class Classes {
+  constructor() { this.names = new Set(); }
+  add(name) { this.names.add(name); }
+  remove(name) { this.names.delete(name); }
+  contains(name) { return this.names.has(name); }
+}
+class Button {
+  constructor(className) {
+    this.className=className; this.classList=new Classes(); this.attributes={};
+    this.child=null; this.isConnected=true; this.type="";
+  }
+  setAttribute(name,value) { this.attributes[name]=value; }
+  appendChild(child) { this.child=child; }
+  replaceChildren(child) { this.child=child; }
+}
+const el = (tag,className) => new Button(className);
+const copyIcon = (done=false) => ({done});
+let copied=null, timer=null, toasts=[];
+async function writeClipboardText(text) { copied=text; }
+function toast(text,level) { toasts.push({text,level}); }
+function setTimeout(fn,delay) { timer={fn,delay}; return 7; }
+function clearTimeout() { timer=null; }
+%s
+(async()=>{
+  const exact="first line\nsecond line  ";
+  const button=userMessageCopyButton(exact);
+  const event={prevented:false,stopped:false,
+    preventDefault(){this.prevented=true;},stopPropagation(){this.stopped=true;}};
+  await button.onclick(event);
+  const done={copied,event,type:button.type,className:button.className,
+    label:button.attributes["aria-label"],checked:button.child.done,
+    active:button.classList.contains("done"),delay:timer&&timer.delay};
+  timer.fn();
+  const reset={label:button.attributes["aria-label"],checked:button.child.done,
+    active:button.classList.contains("done")};
+  console.log(JSON.stringify({done,reset,toasts}));
+})().catch(error=>{console.error(error);process.exit(1);});
+""" % helper
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:500]
+    result = json.loads(proc.stdout.strip())
+    assert result["done"] == {
+        "copied": "first line\nsecond line  ",
+        "event": {"prevented": True, "stopped": True},
+        "type": "button", "className": "user-copy", "label": "Copied",
+        "checked": True, "active": True, "delay": 1400,
+    }, result
+    assert result["reset"] == {
+        "label": "Copy message", "checked": False, "active": False}, result
+    assert result["toasts"] == [], result
+
+
 def check_quota_math(ui_source: str) -> None:
     """The footer's weekly figure, run through node against every payload shape.
     claude's `utilization` is a 0..1 fraction and codex's `used_percent` is
@@ -1072,6 +1141,7 @@ async def main() -> None:
             check_reconnect_status(ui_source)
             check_drawer_drag(ui_source)
             check_desktop_side_drag(ui_source)
+            check_user_message_copy(ui_source)
             check_quota_math(ui_source)
             # one checkbox face app-wide: a native checkbox is painted by the
             # browser, ignores the theme and differs per platform, so the form
@@ -1116,6 +1186,14 @@ async def main() -> None:
             assert (".app.side-dragging.side-collapsed .side{" +
                     "width:var(--side-w);visibility:visible}") in css_source
             assert ".app.side-dragging .side{transition:none;will-change:width,opacity}" in css_source
+            # Sent user prose has an overlaid square copy control. Its absolute
+            # positioning cannot reflow the bubble, and attachment markers are
+            # stripped before both rendering and copying.
+            assert "if (text) n.appendChild(userMessageCopyButton(text));" in ui_source
+            assert ".code-copy,.user-copy{" in css_source
+            assert "position:absolute;z-index:1;top:6px;right:6px;width:27px;height:27px;" in css_source
+            assert ".user-copy{opacity:.3}" in css_source
+            assert ".code-copy:hover,.user-copy:hover{" in css_source
             # the head strip hides per session, and the toggle sits in BOTH the
             # head's own menu and the sidebar menu - hiding the head takes its
             # own opener with it, so the sidebar copy is the way back

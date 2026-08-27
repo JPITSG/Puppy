@@ -876,6 +876,7 @@ select.choice-native{display:none!important}
   align-self:flex-end;background:linear-gradient(180deg,rgba(90,162,245,.16),rgba(90,162,245,.09));
   /* top padding compensates the font's ascent dead-space so a single line sits optically centered */
   border:1px solid rgba(90,162,245,.3);padding:6px 13px 9px;max-width:85%;white-space:pre-wrap;
+  position:relative;
 }
 .msg-assistant{align-self:stretch;padding:2px 2px}
 .msg-assistant .md>*+*{margin-top:.6em}
@@ -885,20 +886,23 @@ select.choice-native{display:none!important}
 }
 .msg-assistant .code-block{position:relative}
 .msg-assistant .code-block>pre{padding-right:46px}
-.code-copy{
+.code-copy,.user-copy{
   position:absolute;z-index:1;top:6px;right:6px;width:27px;height:27px;
   display:inline-flex;align-items:center;justify-content:center;cursor:pointer;
   color:var(--txt3);background:var(--panel2);border:1px solid var(--line2);
-  border-radius:var(--btn-r);box-shadow:var(--btn-lift);opacity:.72;
+  border-radius:var(--btn-r);box-shadow:var(--btn-lift);
   transition:opacity .15s var(--ease),color .15s var(--ease),background .15s var(--ease),transform .12s var(--ease);
 }
-.code-copy svg{display:block}
+.code-copy{opacity:.72}
+.user-copy{opacity:.3}
+.code-copy svg,.user-copy svg{display:block}
 @media (hover:hover){
   .code-copy:hover,.code-block:hover .code-copy{opacity:1}
-  .code-copy:hover{color:var(--txt);background:var(--panel3)}
+  .code-copy:hover,.user-copy:hover{color:var(--txt);background:var(--panel3);opacity:1}
 }
-.code-copy:active{transform:scale(.92)}
-.code-copy.done{color:var(--ok);opacity:1}
+.user-copy:focus-visible{color:var(--txt);background:var(--panel3);opacity:1}
+.code-copy:active,.user-copy:active{transform:scale(.92)}
+.code-copy.done,.user-copy.done{color:var(--ok);opacity:1}
 .msg-assistant code{font-family:var(--mono);font-size:.92em;background:rgba(255,255,255,.07);padding:1px 5px;border-radius:5px}
 .msg-assistant pre code{background:none;padding:0}
 .msg-assistant table{border-collapse:collapse;font-size:13px;display:block;overflow-x:auto}
