@@ -660,6 +660,79 @@ function clearTimeout() { timer=null; }
     assert result["toasts"] == [], result
 
 
+def check_double_activation_survives_rerender(ui_source: str) -> None:
+    """A backend name rebuilt between clicks must still complete the gesture."""
+    def extract_function(marker: str) -> str:
+        start = ui_source.index(marker)
+        brace = ui_source.index("{", start)
+        depth = 0
+        for index in range(brace, len(ui_source)):
+            if ui_source[index] == "{":
+                depth += 1
+            elif ui_source[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    return ui_source[start:index + 1]
+        raise AssertionError("unbalanced " + marker)
+
+    activation_pointer = extract_function("function activationPointer(")
+    fallback_start = ui_source.index("const DOUBLE_ACTIVATION_MS = ")
+    wire_start = ui_source.index("function wireDoubleClickOrTouch(", fallback_start)
+    wire = extract_function("function wireDoubleClickOrTouch(")
+    fallback = ui_source[fallback_start:wire_start] + wire
+    script = r"""
+class Target {
+  constructor() { this.listeners={}; }
+  addEventListener(kind,fn) { (this.listeners[kind] ||= []).push(fn); }
+  emit(kind,values={}) {
+    const event=Object.assign({isPrimary:true,pointerType:"",detail:0,timeStamp:0,
+      clientX:0,clientY:0,prevented:false,stopped:false,
+      preventDefault(){this.prevented=true;},stopPropagation(){this.stopped=true;}},values);
+    for(const fn of this.listeners[kind] || []) fn(event);
+    return event;
+  }
+}
+%s
+%s
+const activations=[];
+const make=(key,label)=>{const target=new Target();
+  wireDoubleClickOrTouch(target,()=>activations.push(label),key);return target;};
+const click=(target,detail,time,x=20,pointerType="mouse")=>{
+  target.emit("pointerdown",{pointerType,timeStamp:time-20,clientX:x,clientY:10});
+  return target.emit("click",{pointerType,detail,timeStamp:time,clientX:x,clientY:10});
+};
+
+const oldName=make("sessions:remote:7","old");
+const first=click(oldName,1,100,20);
+const replacementName=make("sessions:remote:7","replacement");
+const replacement=click(replacementName,1,330,23);
+
+pendingDoubleActivation=null;
+click(make("sessions:remote:7","wrong sessions"),1,500,20);
+click(make("status:remote:7","wrong status"),1,650,20);
+
+pendingDoubleActivation=null;
+click(make("sessions:remote:8","too late first"),1,1000,20);
+click(make("sessions:remote:8","too late second"),1,1801,20);
+
+pendingDoubleActivation=null;
+click(make("sessions:remote:9","too far first"),1,2000,10);
+click(make("sessions:remote:9","too far second"),1,2200,40);
+
+pendingDoubleActivation=null;
+const native=click(make("sessions:local","native"),2,2500,20);
+const touch=click(make("sessions:remote:10","touch"),1,2800,20,"touch");
+console.log(JSON.stringify({activations,first,replacement,native,touch}));
+""" % (activation_pointer, fallback)
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:600]
+    result = json.loads(proc.stdout.strip())
+    assert result["activations"] == ["replacement", "native", "touch"], result
+    assert not result["first"]["prevented"] and not result["first"]["stopped"], result
+    for key in ("replacement", "native", "touch"):
+        assert result[key]["prevented"] and result[key]["stopped"], result
+
+
 def check_quota_math(ui_source: str) -> None:
     """The footer's weekly figure, run through node against every payload shape.
     claude's `utilization` is a 0..1 fraction and codex's `used_percent` is
@@ -1142,6 +1215,7 @@ async def main() -> None:
             check_drawer_drag(ui_source)
             check_desktop_side_drag(ui_source)
             check_user_message_copy(ui_source)
+            check_double_activation_survives_rerender(ui_source)
             check_quota_math(ui_source)
             # one checkbox face app-wide: a native checkbox is painted by the
             # browser, ignores the theme and differs per platform, so the form
@@ -1194,6 +1268,11 @@ async def main() -> None:
             assert "position:absolute;z-index:1;top:6px;right:6px;width:27px;height:27px;" in css_source
             assert ".user-copy{opacity:.3}" in css_source
             assert ".code-copy:hover,.user-copy:hover{" in css_source
+            # Polls rebuild backend headings. The second click is keyed to the
+            # logical section so replacing its span cannot reset a double-click.
+            assert "previous.key === activationKey" in ui_source
+            assert "`sessions:${key}`" in ui_source
+            assert "`status:${key}`" in ui_source
             # the head strip hides per session, and the toggle sits in BOTH the
             # head's own menu and the sidebar menu - hiding the head takes its
             # own opener with it, so the sidebar copy is the way back

@@ -888,11 +888,37 @@ function guardNativeTouchDrag(target) {
   };
 }
 
-function wireDoubleClickOrTouch(target, activate) {
+/* Live session/backend updates rebuild the sidebar. If one lands between the
+   two clicks, both clicks hit a different span and some browsers reset detail
+   to 1. Retain the first click by logical section key so the replacement node
+   can complete the same gesture. Native detail=2 remains authoritative when
+   the original element survives. */
+const DOUBLE_ACTIVATION_MS = 700;
+const DOUBLE_ACTIVATION_DISTANCE = 18;
+let pendingDoubleActivation = null;
+
+function wireDoubleClickOrTouch(target, activate, activationKey) {
   const pointerForClick = activationPointer(target);
   target.addEventListener("click", event => {
     const pointerType = pointerForClick(event);
-    if (pointerType !== "touch" && event.detail !== 2) return;
+    if (pointerType === "touch") {
+      pendingDoubleActivation = null;
+    } else {
+      const previous = pendingDoubleActivation;
+      const elapsed = previous ? event.timeStamp - previous.time : Infinity;
+      const distance = previous ? Math.hypot(
+        event.clientX - previous.x, event.clientY - previous.y) : Infinity;
+      const replacedElementDouble = event.detail === 1 && previous &&
+        previous.key === activationKey && elapsed >= 0 && elapsed <= DOUBLE_ACTIVATION_MS &&
+        distance <= DOUBLE_ACTIVATION_DISTANCE;
+      if (event.detail !== 2 && !replacedElementDouble) {
+        pendingDoubleActivation = event.detail === 1 ? {
+          key: activationKey, time: event.timeStamp, x: event.clientX, y: event.clientY,
+        } : null;
+        return;
+      }
+      pendingDoubleActivation = null;
+    }
     event.preventDefault();
     event.stopPropagation();
     activate();
@@ -2704,7 +2730,7 @@ function renderSidebar() {
       const key = g.bid ? `remote:${g.bid}` : "local";
       const disclosure = disclosureButton(`${g.name} sessions`, body,
         collapsedSessionBackends, "puppy.collapsed.session-backends", key);
-      wireDoubleClickOrTouch(name, () => disclosure.click());
+      wireDoubleClickOrTouch(name, () => disclosure.click(), `sessions:${key}`);
       t.appendChild(dot);
       t.appendChild(name);
       if (g.browser) {
@@ -3368,7 +3394,7 @@ function renderFootEngines() {
       const key = g.bid ? `remote:${g.bid}` : "local";
       const disclosure = disclosureButton(`${g.name} engine status`, body,
         collapsedStatusBackends, "puppy.collapsed.status-backends", key);
-      wireDoubleClickOrTouch(name, () => disclosure.click());
+      wireDoubleClickOrTouch(name, () => disclosure.click(), `status:${key}`);
       head.appendChild(name);
       if (g.version) {
         const version = el("span", "foot-engine-version", `· v${g.version}`);
