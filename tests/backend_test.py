@@ -1165,12 +1165,24 @@ def exercise_session_show_meta(runner, db) -> None:
     """The head strip is a per-session flag on the shared session payload: on by
     default, a real boolean on the wire so a console can trust it."""
     sid = db.create_session("meta", "claude", "/tmp", "", "", "blue", "auto")
+
+    def listed():
+        rows = [x for x in runner.sessions_payload()["sessions"] if x["id"] == sid]
+        assert rows, "session missing from the list payload"
+        return rows[0]
+
     try:
         assert runner.session_payload(db.get_session(sid))["show_meta"] is True
         db.touch_session(sid, show_meta=0)
         assert runner.session_payload(db.get_session(sid))["show_meta"] is False
         db.touch_session(sid, show_meta=1)
         assert runner.session_payload(db.get_session(sid))["show_meta"] is True
+        # BOTH payloads carry it. The sidebar menu reads the LIST, and is the
+        # only way back once the head is hidden - serving it without the field
+        # left that menu stuck showing "on", so every click hid it again.
+        assert listed()["show_meta"] is True
+        db.touch_session(sid, show_meta=0)
+        assert listed()["show_meta"] is False
     finally:
         db.delete_session(sid)
 

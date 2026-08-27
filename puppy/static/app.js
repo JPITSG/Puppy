@@ -1083,6 +1083,9 @@ function sessionShowsMeta(session) {
    menu whether it is ticked or not. */
 function menuCheckRow(label, on, fn) {
   const button = el("button", "menu-check" + (on ? " on" : ""));
+  /* Off draws the empty box rather than nothing: a blank margin reads as a
+     plain row, while an empty box says a tick belongs here and is currently
+     absent - the state is legible without comparing against its neighbours. */
   const mark = el("span", "menu-check-mark");
   if (on) mark.appendChild(checkIcon(13));
   button.appendChild(el("span", "menu-check-label", label));

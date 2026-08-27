@@ -700,7 +700,13 @@ select.choice-native{display:none!important}
 .menu button.menu-check{gap:10px}
 .menu-check-mark{
   flex:0 0 auto;margin-left:auto;
+  width:15px;height:15px;border-radius:4px;
   display:inline-flex;align-items:center;justify-content:center;color:var(--acc);
+}
+/* unticked: the empty box marks the slot, so an off row still reads as a
+   choice rather than as an ordinary menu entry */
+.menu button.menu-check:not(.on) .menu-check-mark{
+  border:1px solid var(--line2);background:var(--panel2);
 }
 .menu-check-mark svg{display:block}
 /* the tick alone carries the state: a dimmed label would read as unavailable

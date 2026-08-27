@@ -99,6 +99,10 @@ def sessions_payload() -> dict:
             "has_native": bool(s["native_session_id"]),
             "workspace_kind": s.get("workspace_kind") or workspaces.KIND_DIRECTORY,
             "workspace_missing": workspaces.is_temporary(s) and not workspaces.is_available(s),
+            # the sidebar menu is the way back once the head is hidden, so the
+            # list has to carry this too - reading it only from the single
+            # session payload left that menu permanently showing "on"
+            "show_meta": s.get("show_meta", 1) != 0,
         })
     return {"type": "sessions", "server_time": now, "sessions": sessions}
 
