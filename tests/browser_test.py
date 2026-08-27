@@ -721,16 +721,23 @@ click(make("sessions:remote:9","too far second"),1,2200,40);
 
 pendingDoubleActivation=null;
 const native=click(make("sessions:local","native"),2,2500,20);
+pendingDoubleActivation=null;
+const rapidTarget=make("sessions:remote:11","rapid");
+const rapid=[1,2,3,4,5,6].map((detail,index)=>
+  click(rapidTarget,detail,2600 + index * 70,20));
 const touch=click(make("sessions:remote:10","touch"),1,2800,20,"touch");
-console.log(JSON.stringify({activations,first,replacement,native,touch}));
+console.log(JSON.stringify({activations,first,replacement,native,rapid,touch}));
 """ % (activation_pointer, fallback)
     proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:600]
     result = json.loads(proc.stdout.strip())
-    assert result["activations"] == ["replacement", "native", "touch"], result
+    assert result["activations"] == [
+        "replacement", "native", "rapid", "rapid", "rapid", "touch"], result
     assert not result["first"]["prevented"] and not result["first"]["stopped"], result
     for key in ("replacement", "native", "touch"):
         assert result[key]["prevented"] and result[key]["stopped"], result
+    assert [event["prevented"] for event in result["rapid"]] == [
+        False, True, False, True, False, True], result
 
 
 def check_quota_math(ui_source: str) -> None:
@@ -1273,6 +1280,7 @@ async def main() -> None:
             assert "previous.key === activationKey" in ui_source
             assert "`sessions:${key}`" in ui_source
             assert "`status:${key}`" in ui_source
+            assert ui_source.count("event.detail > 0 && event.detail % 2 === 0") == 2
             # the head strip hides per session, and the toggle sits in BOTH the
             # head's own menu and the sidebar menu - hiding the head takes its
             # own opener with it, so the sidebar copy is the way back

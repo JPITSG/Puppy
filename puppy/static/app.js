@@ -891,8 +891,8 @@ function guardNativeTouchDrag(target) {
 /* Live session/backend updates rebuild the sidebar. If one lands between the
    two clicks, both clicks hit a different span and some browsers reset detail
    to 1. Retain the first click by logical section key so the replacement node
-   can complete the same gesture. Native detail=2 remains authoritative when
-   the original element survives. */
+   can complete the same gesture. Browsers keep counting rapid clicks past two,
+   so every positive even detail completes another deliberate pair. */
 const DOUBLE_ACTIVATION_MS = 700;
 const DOUBLE_ACTIVATION_DISTANCE = 18;
 let pendingDoubleActivation = null;
@@ -911,8 +911,9 @@ function wireDoubleClickOrTouch(target, activate, activationKey) {
       const replacedElementDouble = event.detail === 1 && previous &&
         previous.key === activationKey && elapsed >= 0 && elapsed <= DOUBLE_ACTIVATION_MS &&
         distance <= DOUBLE_ACTIVATION_DISTANCE;
-      if (event.detail !== 2 && !replacedElementDouble) {
-        pendingDoubleActivation = event.detail === 1 ? {
+      const completedNativePair = event.detail > 0 && event.detail % 2 === 0;
+      if (!completedNativePair && !replacedElementDouble) {
+        pendingDoubleActivation = event.detail > 0 && event.detail % 2 === 1 ? {
           key: activationKey, time: event.timeStamp, x: event.clientX, y: event.clientY,
         } : null;
         return;
@@ -2806,8 +2807,9 @@ function renderSidebar() {
         const pointerType = pointerForClick(event);
         selectSidebarSession(g.bid, s.id);
         /* Keyboard activation has no click count, so it follows touch and opens
-           immediately. A mouse opens only on the second click. */
-        if (pointerType === "touch" || event.detail === 0 || event.detail === 2) {
+           immediately. A mouse opens on each completed double-click pair. */
+        if (pointerType === "touch" || event.detail === 0 ||
+            (event.detail > 0 && event.detail % 2 === 0)) {
           openSessionTab(g.bid, s.id, s);
           closeDrawer();
         }
