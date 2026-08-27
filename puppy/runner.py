@@ -70,6 +70,9 @@ def session_payload(session):
     out["workspace_kind"] = out.get("workspace_kind") or workspaces.KIND_DIRECTORY
     out["workspace_missing"] = workspaces.is_temporary(out) and not workspaces.is_available(out)
     out["used_config"] = parse_used_config(out.get("used_config"))
+    # a real boolean on the wire; absent on a node too old to know the column,
+    # where the console reads the omission as "shown"
+    out["show_meta"] = out.get("show_meta", 1) != 0
     return out
 
 

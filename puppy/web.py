@@ -369,6 +369,8 @@ async def h_session_patch(request: web.Request):
         fields["color"] = body["color"]
     if "archived" in body:
         fields["archived"] = 1 if body["archived"] else 0
+    if "show_meta" in body:
+        fields["show_meta"] = 1 if body["show_meta"] else 0
     if "permission_mode" in body:
         driver = get_driver(s["engine"])
         val = str(body["permission_mode"])

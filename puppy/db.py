@@ -74,6 +74,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     status TEXT NOT NULL DEFAULT 'idle',
     archived INTEGER NOT NULL DEFAULT 0,
     workspace_kind TEXT NOT NULL DEFAULT 'directory',
+    -- whether the chat head (engine/model, node, cwd) is shown; on by default
+    show_meta INTEGER NOT NULL DEFAULT 1,
     sort_order INTEGER NOT NULL DEFAULT 0,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
@@ -124,6 +126,10 @@ def _migrate(conn) -> None:
     if "workspace_kind" not in cols:
         conn.execute(
             "ALTER TABLE sessions ADD COLUMN workspace_kind TEXT NOT NULL DEFAULT 'directory'")
+    if "show_meta" not in cols:
+        # existing sessions keep the bar: hiding it is a deliberate per-session
+        # choice, never something an upgrade does to a transcript
+        conn.execute("ALTER TABLE sessions ADD COLUMN show_meta INTEGER NOT NULL DEFAULT 1")
     if "used_config" not in cols:
         # existing sessions start unmarked: the first turn after this upgrade
         # records what it ran with, and only later changes mark the transcript

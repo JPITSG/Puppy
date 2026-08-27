@@ -695,6 +695,16 @@ select.choice-native{display:none!important}
 @media (hover:hover){.menu button:hover{background:var(--float-menu-hover)}}
 .menu button:active{background:var(--float-menu-hover);filter:brightness(.95)}
 .menu button.danger{color:var(--err)}
+/* the tick keeps its slot whether or not it is drawn, so toggling one of these
+   never shifts the labels around it */
+.menu button.menu-check{gap:0}
+.menu-check-mark{
+  flex:0 0 18px;display:inline-flex;align-items:center;justify-content:center;color:var(--acc);
+}
+.menu-check-mark svg{display:block}
+/* the tick alone carries the state: a dimmed label would read as unavailable
+   rather than as off */
+.menu-check-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .menu .menu-sep{height:1px;background:var(--line);margin:4px 6px}
 .menu.color-menu{display:grid;grid-template-columns:repeat(5,auto);gap:2px;padding:8px}
 /* .menu button.swatch specificity must beat the generic .menu button block rule */
@@ -755,6 +765,10 @@ select.choice-native{display:none!important}
 }
 .chat-meta-scroll::-webkit-scrollbar{display:none}
 .chat-meta-scroll .chip,.chat-meta-scroll .chat-status{flex:0 0 auto}
+/* Hidden per session: the whole strip goes, ⋮ included, which is the point of
+   reclaiming the row. The same toggle sits in the session's sidebar menu, so
+   it can always be turned back on. */
+.chat.meta-hidden .chat-head{display:none}
 .chat-menu{position:relative;flex:0 0 auto}
 .chip .dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
 .chip.eng-claude .dot{background:var(--claude)}

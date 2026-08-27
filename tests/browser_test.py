@@ -685,6 +685,11 @@ async def main() -> None:
 
             ui_source = (BASE / "puppy" / "static" / "app.js").read_text()
             check_quota_math(ui_source)
+            # the head strip hides per session, and the toggle sits in BOTH the
+            # head's own menu and the sidebar menu - hiding the head takes its
+            # own opener with it, so the sidebar copy is the way back
+            assert ui_source.count('menuCheckRow("Show status bar"') == 2
+            assert "classList.toggle(\"meta-hidden\", !sessionShowsMeta(s))" in ui_source
             # The directory list sits in normal flow, so closing it on focus
             # loss reflows the page. Held until the press that took the focus
             # has landed, a click on OK is not swallowed by the close.

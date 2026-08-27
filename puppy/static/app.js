@@ -329,6 +329,24 @@ function globeIcon(size) {
   return svg;
 }
 
+function checkIcon(size = 13) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS(NS, "path");
+  path.setAttribute("d", "M3.5 8.6 6.4 11.5 12.5 5.2");
+  path.setAttribute("fill", "none");
+  path.setAttribute("stroke", "currentColor");
+  path.setAttribute("stroke-width", "1.9");
+  path.setAttribute("stroke-linecap", "round");
+  path.setAttribute("stroke-linejoin", "round");
+  svg.appendChild(path);
+  return svg;
+}
+
 function refreshIcon(size = 10) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
@@ -1050,6 +1068,28 @@ document.addEventListener("keydown", (event) => {
 
 function isScratchWorkspace(session) {
   return !!session && session.workspace_kind === "temporary";
+}
+
+/* Whether a session shows its head strip. A node too old to know the column
+   omits the field entirely, and an omission means shown - never hidden. */
+function sessionShowsMeta(session) {
+  if (!session) return true;
+  const value = session.show_meta;
+  return value === undefined || value === null ? true : !!value;
+}
+
+/* A menu row that carries its own on/off state: the tick occupies its slot
+   either way, so the labels stay on one column as it toggles. */
+function menuCheckRow(label, on, fn) {
+  const button = el("button", "menu-check" + (on ? " on" : ""));
+  const mark = el("span", "menu-check-mark");
+  if (on) mark.appendChild(checkIcon(13));
+  button.appendChild(mark);
+  button.appendChild(el("span", "menu-check-label", label));
+  button.setAttribute("role", "menuitemcheckbox");
+  button.setAttribute("aria-checked", on ? "true" : "false");
+  button.onclick = (event) => { event.stopPropagation(); closeAllMenus(null); fn(); };
+  return button;
 }
 
 function workspaceLabel(session, n = 26) {
@@ -2758,6 +2798,10 @@ function sessionContextMenu(ev, bid, s) {
   add("Switch engine", () => modalSwitchEngine({
     session: s, tab: { bid, sid: s.id }, updateHead() { refreshGroup(bid); },
   }));
+  /* Also here, not only in the head's own menu: hiding the head takes its ⋮
+     with it, and this is where the setting stays reachable afterwards. */
+  menu.appendChild(menuCheckRow("Show status bar", sessionShowsMeta(s),
+    () => patch({ show_meta: !sessionShowsMeta(s) })));
   menu.appendChild(el("div", "menu-sep"));
   add(isScratchWorkspace(s) ? "Copy workspace path" : "Copy cwd", () => copyWithToast(s.cwd));
   if (s.has_native) add("Copy native session id", async () => {
@@ -5190,6 +5234,7 @@ class SessionView {
   updateHead() {
     const s = this.session;
     if (!s) return;
+    this.root.classList.toggle("meta-hidden", !sessionShowsMeta(s));
     const eng = this.root.querySelector(".chip.eng");
     eng.className = "chip eng eng-" + s.engine;
     eng.querySelector(".dot").style.background = s.color || "";
@@ -5977,6 +6022,8 @@ class SessionView {
     add("Rename", () => this.rename());
     add("Dot color", () => this.pickColor(anchor));
     add("Switch engine", () => modalSwitchEngine(this));
+    menu.appendChild(menuCheckRow("Show status bar", sessionShowsMeta(this.session),
+      () => this.patchSession({ show_meta: !sessionShowsMeta(this.session) })));
     menu.appendChild(el("div", "menu-sep"));
     add(isScratchWorkspace(this.session) ? "Copy workspace path" : "Copy cwd",
       () => copyWithToast(this.session.cwd));

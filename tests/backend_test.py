@@ -1050,6 +1050,20 @@ def check_notify_placeholders() -> None:
     assert "duration_hms" not in notify.clean_info({"session": "s"})
 
 
+def exercise_session_show_meta(runner, db) -> None:
+    """The head strip is a per-session flag on the shared session payload: on by
+    default, a real boolean on the wire so a console can trust it."""
+    sid = db.create_session("meta", "claude", "/tmp", "", "", "blue", "auto")
+    try:
+        assert runner.session_payload(db.get_session(sid))["show_meta"] is True
+        db.touch_session(sid, show_meta=0)
+        assert runner.session_payload(db.get_session(sid))["show_meta"] is False
+        db.touch_session(sid, show_meta=1)
+        assert runner.session_payload(db.get_session(sid))["show_meta"] is True
+    finally:
+        db.delete_session(sid)
+
+
 async def exercise_queue_persistence(runner, db) -> None:
     """Queued prompts belong to the user: they survive a kill and a restart as
     held items, come back only on an explicit re-send, and never run twice."""
@@ -1278,6 +1292,7 @@ async def main() -> None:
         db.connect()
         exercise_activity_blocks(runner.SessionHub)
         await exercise_queue_persistence(runner, db)
+        exercise_session_show_meta(runner, db)
         exercise_host_cpu_math(host_metrics)
         await exercise_upgrade_readiness(
             backend_upgrade, runner, terminal, temp_root / "readiness")
