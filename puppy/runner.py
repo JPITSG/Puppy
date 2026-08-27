@@ -741,6 +741,11 @@ class SessionHub:
                         if act["data"].get("duration_ms") is None:
                             act["data"]["duration_ms"] = int((time.time() - turn_started) * 1000)
                         self._block_status = "ok" if act["data"].get("ok") else "error"
+                        if act["data"].get("ok"):
+                            driver_base.clear_auth_failure(session["engine"])
+                        elif driver_base.looks_like_auth_failure(act["data"].get("error")):
+                            driver_base.note_auth_failure(
+                                session["engine"], str(act["data"].get("error") or ""))
                         self._emit("result", act["data"])
                         # claude: close stdin so the process exits cleanly
                         if driver.uses_stdin_stream and self.proc.stdin is not None:
@@ -761,6 +766,8 @@ class SessionHub:
                     self._emit("info", {"subtype": "interrupted", "text": "turn interrupted by user"})
                 else:
                     tail = self.stderr_tail.strip()[-1500:]
+                    if driver_base.looks_like_auth_failure(tail):
+                        driver_base.note_auth_failure(session["engine"], tail[-400:])
                     self._emit("error", {"text": "engine exited without a result"
                                                  + (f" (exit {self.proc.returncode})" if self.proc.returncode else "")
                                                  + (f"\n{tail}" if tail else "")})

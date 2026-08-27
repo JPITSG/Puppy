@@ -8,6 +8,7 @@ from typing import Optional
 
 from puppy import config
 from puppy.drivers import all_drivers
+from puppy.drivers import base as driver_base
 
 log = logging.getLogger("puppy.usage_refresh")
 
@@ -106,8 +107,15 @@ async def maybe_refresh(force: bool = False) -> dict:
         for driver, result in zip(drivers, results):
             if result is True:
                 refreshed = True
+                # an authenticated account read succeeded: any recorded auth
+                # failure for this engine is stale
+                driver_base.clear_auth_failure(driver.key)
             elif isinstance(result, BaseException):
                 errors.append("{}: {}".format(driver.label, result))
+                # the vendor's own API refusing the account read is the truth
+                # about this login, whatever `login status` reads from disk
+                if driver_base.looks_like_auth_failure(result):
+                    driver_base.note_auth_failure(driver.key, str(result))
             elif result is False:
                 errors.append("{}: refresh failed".format(driver.label))
         if refreshed:

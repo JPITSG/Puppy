@@ -228,6 +228,10 @@ class ClaudeDriver(Driver):
 
         return []
 
+    def auth_touch_paths(self):
+        home = os.environ.get("HOME", "/root")
+        return [os.path.join(home, ".claude", ".credentials.json")]
+
     async def _auth_status(self):
         """`claude auth status --json` is the CLI's own verdict ({"loggedIn":
         bool}), which stays true when a credentials file exists but the login

@@ -1050,6 +1050,60 @@ def check_notify_placeholders() -> None:
     assert "duration_hms" not in notify.clean_info({"session": "s"})
 
 
+def exercise_auth_evidence(root, db) -> None:
+    """Local login verbs are optimistic - codex answers "Logged in" from its
+    file while the refresh token behind it is revoked. Hard evidence from the
+    vendor's own responses (a 401 account read, a failed turn) overrides an ok
+    probe, survives restarts, and lifts on re-login or any authed success."""
+    from puppy.drivers import base as driver_base
+    from puppy.drivers.codex import CodexDriver
+    root = Path(root)
+    home = root / "codex-home"
+    home.mkdir(parents=True, exist_ok=True)
+    saved = os.environ.get("CODEX_HOME")
+    os.environ["CODEX_HOME"] = str(home)
+    try:
+        for text, want in [
+            ("Your access token could not be refreshed because your refresh "
+             "token was revoked. Please log out and sign in again.", True),
+            ("GET https://chatgpt.com/backend-api/wham/usage failed: "
+             "401 Unauthorized", True),
+            ("OAuth token has expired · Please run /login", True),
+            ("engine exited without a result (exit 1)", False),
+            ("stream error: connection reset by peer", False),
+        ]:
+            assert driver_base.looks_like_auth_failure(text) is want, text
+
+        codex = CodexDriver()
+        auth = home / "auth.json"
+        auth.write_text("{}")
+        os.utime(auth, (time.time() - 3600,) * 2)
+        ok = {"installed": True, "auth": "ok", "detail": "Logged in using ChatGPT"}
+        assert driver_base.apply_auth_evidence(codex, dict(ok))["auth"] == "ok"
+        driver_base.note_auth_failure("codex", "401 Unauthorized")
+        overlaid = driver_base.apply_auth_evidence(codex, dict(ok))
+        assert overlaid["auth"] == "expired" and "401" in overlaid["detail"]
+        # a probe already negative keeps its own words
+        kept = driver_base.apply_auth_evidence(
+            codex, {"installed": True, "auth": "missing", "detail": "Not logged in"})
+        assert kept["auth"] == "missing"
+        # re-login rewrites the credential file: evidence lifts by itself
+        os.utime(auth, None)
+        assert driver_base.apply_auth_evidence(codex, dict(ok))["auth"] == "ok"
+        assert db.meta_get("auth_evidence.codex") is None
+        # authenticated success is the other way out
+        driver_base.note_auth_failure("codex", "401")
+        os.utime(auth, (time.time() - 3600,) * 2)
+        assert driver_base.apply_auth_evidence(codex, dict(ok))["auth"] == "expired"
+        driver_base.clear_auth_failure("codex")
+        assert driver_base.apply_auth_evidence(codex, dict(ok))["auth"] == "ok"
+    finally:
+        if saved is None:
+            os.environ.pop("CODEX_HOME", None)
+        else:
+            os.environ["CODEX_HOME"] = saved
+
+
 async def exercise_auth_probes(root) -> None:
     """The ready/no-auth word must come from each CLI's own auth verb, judged
     by exit code and structure - never by substring. "Not logged in" CONTAINS
@@ -1351,6 +1405,7 @@ async def main() -> None:
         await exercise_queue_persistence(runner, db)
         exercise_session_show_meta(runner, db)
         await exercise_auth_probes(temp_root / "auth-probes")
+        exercise_auth_evidence(temp_root / "auth-evidence", db)
         exercise_host_cpu_math(host_metrics)
         await exercise_upgrade_readiness(
             backend_upgrade, runner, terminal, temp_root / "readiness")

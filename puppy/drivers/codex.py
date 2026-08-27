@@ -569,6 +569,9 @@ class CodexDriver(Driver):
 
         return []
 
+    def auth_touch_paths(self):
+        return [os.path.join(_codex_home(), "auth.json")]
+
     async def _auth_status(self):
         """`codex login status` speaks primarily through its exit code (0 =
         authenticated), which survives wording changes. The phrase check is a

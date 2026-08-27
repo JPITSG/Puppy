@@ -32,6 +32,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import re
 import shutil
 import time
 
@@ -41,6 +43,77 @@ log = logging.getLogger("puppy.drivers")
 
 STATUS_TTL_SECONDS = 300
 _status_cache = {}  # key -> (ts, dict)
+
+
+# What an authentication failure looks like when a vendor's own surface says
+# it: HTTP auth statuses, token lifecycle words, and the re-login instructions
+# both CLIs print. Matched only against error channels (failed turns, failed
+# account reads), never against model output.
+AUTH_FAILURE_RE = re.compile(
+    r"401|unauthorized|invalid bearer"
+    r"|(?:access|refresh|oauth|authentication)[ _-]?token"
+    r"|token (?:has )?(?:expired|been revoked|revoked|invalid)"
+    r"|(?:revoked|expired|invalid) token"
+    r"|authentication[ _-]?(?:error|failed)"
+    r"|please (?:log ?in|sign ?in|run /login)"
+    r"|log ?out and sign ?in", re.I)
+
+
+def looks_like_auth_failure(text) -> bool:
+    return bool(AUTH_FAILURE_RE.search(str(text or "")))
+
+
+def _evidence_key(key: str) -> str:
+    return "auth_evidence.{}".format(key)
+
+
+def note_auth_failure(key: str, detail: str) -> None:
+    """Record hard evidence that this engine's login no longer works: a real
+    vendor response said so. Durable, so a puppy restart does not fall back to
+    an optimistic local probe."""
+    from puppy import db
+    try:
+        db.meta_set(_evidence_key(key), {
+            "at": time.time(), "detail": str(detail or "")[:400]})
+    except Exception as e:
+        log.warning("could not record auth evidence for %s: %s", key, e)
+
+
+def clear_auth_failure(key: str) -> None:
+    from puppy import db
+    try:
+        db.meta_set(_evidence_key(key), None)
+    except Exception:
+        pass
+
+
+def apply_auth_evidence(driver, st: dict) -> dict:
+    """Overlay recorded failure evidence onto a probe that says ok. The local
+    verbs are optimistic - `codex login status` reads its file without trying
+    the token, so a revoked login still answers "Logged in". Evidence expires
+    the moment a credential file is rewritten (the user logged in again) and
+    is cleared by any authenticated success, so it can never wedge."""
+    from puppy import db
+    if st.get("auth") != "ok":
+        return st
+    try:
+        record = db.meta_get(_evidence_key(driver.key))
+    except Exception:
+        record = None
+    if not isinstance(record, dict) or not record.get("at"):
+        return st
+    for path in driver.auth_touch_paths():
+        try:
+            # slack because file mtimes lag the wall clock by a few ms on some
+            # filesystems; a real re-login comes minutes after the failure
+            if os.path.getmtime(path) > float(record["at"]) - 2.0:
+                clear_auth_failure(driver.key)
+                return st
+        except OSError:
+            continue
+    st["auth"] = "expired"
+    st["detail"] = record.get("detail") or "the engine reported an authentication failure"
+    return st
 
 
 def invalidate_status(key=None) -> None:
@@ -127,11 +200,17 @@ class Driver:
         st.update(cli_upgrade.state(self))
         st.update(cli_releases.status(self, st.get("version", "")))
         st.update(self._extra_status())
-        return st
+        # outside the cache: evidence must land and lift without waiting 5 min
+        return apply_auth_evidence(self, st)
 
     def _extra_status(self) -> dict:
         """Engine-specific extras merged into status() (e.g. quota info)."""
         return {}
+
+    def auth_touch_paths(self) -> list:
+        """Credential files whose rewrite means "the user logged in again".
+        Only their mtime is ever read - never their contents."""
+        return []
 
     async def refresh_usage(self):
         """Refresh account-limit data without starting a turn; None = unsupported."""
