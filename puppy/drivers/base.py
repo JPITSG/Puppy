@@ -140,6 +140,20 @@ class Driver:
     async def _auth_status(self) -> dict:
         return {"auth": "unknown", "detail": ""}
 
+    async def _run_probe(self, argv, timeout: float = 15.0):
+        """(exit_code, full_output) for a local no-quota probe; (None, "") when
+        the command could not run at all. Auth verbs speak through their exit
+        code as much as their wording, and warnings can precede the line that
+        matters, so unlike _run_quick nothing is thrown away."""
+        try:
+            p = await asyncio.create_subprocess_exec(
+                *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            out, _ = await asyncio.wait_for(p.communicate(), timeout=timeout)
+            return p.returncode, out.decode(errors="replace").strip()[:4000]
+        except Exception as e:
+            log.warning("%s probe %s failed: %s", self.key, argv[1:], e)
+            return None, ""
+
     async def _run_quick(self, argv, timeout: float = 12.0) -> str:
         try:
             p = await asyncio.create_subprocess_exec(

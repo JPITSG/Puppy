@@ -13,6 +13,7 @@ import uuid
 
 from puppy import browser_agent, config, db, handoff, notify, uploads, workspaces
 from puppy.drivers import get_driver
+from puppy.drivers import base as driver_base
 from puppy.drivers.base import clean_env
 
 log = logging.getLogger("puppy.runner")
@@ -779,6 +780,14 @@ class SessionHub:
             self.proc = None
             self._proc_ready = False
             self.stderr_tail = ""
+            # A failed turn is fresh evidence about the engine (auth revoked,
+            # binary broken): drop its cached probe so the next status poll
+            # re-reads the truth instead of serving up to five stale minutes.
+            if self._block_status == "error" and not self.interrupted:
+                try:
+                    driver_base.invalidate_status(session["engine"])
+                except Exception:
+                    pass
             block_started = self.active_since
             nxt = self._take_next_turn()
             continued = nxt is not None

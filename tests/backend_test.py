@@ -1050,6 +1050,63 @@ def check_notify_placeholders() -> None:
     assert "duration_hms" not in notify.clean_info({"session": "s"})
 
 
+async def exercise_auth_probes(root) -> None:
+    """The ready/no-auth word must come from each CLI's own auth verb, judged
+    by exit code and structure - never by substring. "Not logged in" CONTAINS
+    "logged in", which once reported a logged-out codex as ready."""
+    from puppy.drivers.claude import ClaudeDriver
+    from puppy.drivers.codex import CodexDriver
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+
+    def stub(name, script):
+        path = root / name
+        path.write_text("#!/bin/sh\n" + script + "\n")
+        path.chmod(0o755)
+        return str(path)
+
+    codex = CodexDriver()
+    for script, expected in [
+        ('echo "Logged in using ChatGPT"; exit 0', "ok"),
+        ('echo "Not logged in"; exit 1', "missing"),               # the NAS.lan case
+        ('echo "WARNING: preamble"; echo "Not logged in"; exit 1', "missing"),
+        ('echo "You are signed out"; exit 1', "missing"),          # future rewording
+        ('echo "Session active"; exit 0', "ok"),                   # rc stays the contract
+    ]:
+        codex.binary = stub("codex-case", script)
+        got = (await codex._auth_status())["auth"]
+        assert got == expected, (script, got)
+    codex.binary = str(root / "codex-absent")
+    assert (await codex._auth_status())["auth"] == "unknown"
+
+    claude = ClaudeDriver()
+    home = os.environ.get("HOME")
+    scratch = root / "home"
+    (scratch / ".claude").mkdir(parents=True, exist_ok=True)
+    os.environ["HOME"] = str(scratch)
+    try:
+        for script, creds, expected in [
+            ("echo '{\"loggedIn\": true, \"authMethod\": \"claude.ai\"}'; exit 0",
+             False, "ok"),
+            ("echo '{\"loggedIn\": false}'; exit 1", True, "missing"),  # stale creds file
+            ("echo \"error: unknown command 'auth'\" >&2; exit 1", True, "ok"),
+            ("echo \"error: unknown command 'auth'\" >&2; exit 1", False, "missing"),
+        ]:
+            cred = scratch / ".claude" / ".credentials.json"
+            if creds:
+                cred.write_text("{}")
+            elif cred.exists():
+                cred.unlink()
+            claude.binary = stub("claude-case", script)
+            got = (await claude._auth_status())["auth"]
+            assert got == expected, (script, creds, got)
+    finally:
+        if home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = home
+
+
 def exercise_session_show_meta(runner, db) -> None:
     """The head strip is a per-session flag on the shared session payload: on by
     default, a real boolean on the wire so a console can trust it."""
@@ -1293,6 +1350,7 @@ async def main() -> None:
         exercise_activity_blocks(runner.SessionHub)
         await exercise_queue_persistence(runner, db)
         exercise_session_show_meta(runner, db)
+        await exercise_auth_probes(temp_root / "auth-probes")
         exercise_host_cpu_math(host_metrics)
         await exercise_upgrade_readiness(
             backend_upgrade, runner, terminal, temp_root / "readiness")

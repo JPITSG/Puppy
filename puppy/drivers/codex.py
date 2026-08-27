@@ -570,7 +570,15 @@ class CodexDriver(Driver):
         return []
 
     async def _auth_status(self):
-        out = await self._run_quick([self.binary, "login", "status"])
-        if "logged in" in out.lower():
-            return {"auth": "ok", "detail": out}
-        return {"auth": "missing", "detail": out or "run `codex login` as this user"}
+        """`codex login status` speaks primarily through its exit code (0 =
+        authenticated), which survives wording changes. The phrase check is a
+        second lock: "Not logged in" CONTAINS "logged in", so a substring
+        match once reported a logged-out codex as ready."""
+        rc, out = await self._run_probe([self.binary, "login", "status"])
+        text = " ".join(out.split())
+        if rc is None:
+            return {"auth": "unknown", "detail": text or "login status probe failed"}
+        if rc != 0 or re.search(r"not\s+logged\s*in|logged\s*out", text, re.I):
+            return {"auth": "missing",
+                    "detail": text or "run `codex login` as this user"}
+        return {"auth": "ok", "detail": text}

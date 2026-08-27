@@ -229,8 +229,29 @@ class ClaudeDriver(Driver):
         return []
 
     async def _auth_status(self):
+        """`claude auth status --json` is the CLI's own verdict ({"loggedIn":
+        bool}), which stays true when a credentials file exists but the login
+        behind it has expired or been revoked. Only a parsed loggedIn field is
+        treated as authoritative; any other outcome (older CLI without the
+        verb, changed output) falls back to the credentials-file heuristic, so
+        a wording change can never flip a working login to "missing"."""
+        rc, out = await self._run_probe([self.binary, "auth", "status", "--json"])
+        verdict = None
+        try:
+            data = json.loads(out[out.index("{"):out.rindex("}") + 1])
+            if isinstance(data, dict) and isinstance(data.get("loggedIn"), bool):
+                verdict = data
+        except (ValueError, TypeError):
+            pass
+        if verdict is not None:
+            if verdict["loggedIn"]:
+                bits = [str(verdict.get(k)) for k in ("authMethod", "subscriptionType")
+                        if verdict.get(k) and verdict.get(k) != "none"]
+                return {"auth": "ok",
+                        "detail": "logged in" + (" · " + " · ".join(bits) if bits else "")}
+            return {"auth": "missing", "detail": "run `claude login` as this user"}
         home = os.environ.get("HOME", "/root")
         cred = os.path.join(home, ".claude", ".credentials.json")
         if os.path.exists(cred):
-            return {"auth": "ok", "detail": "subscription credentials present"}
+            return {"auth": "ok", "detail": "credentials file present (auth verb unavailable)"}
         return {"auth": "missing", "detail": f"run `claude login` as this user ({cred} not found)"}
