@@ -740,6 +740,50 @@ console.log(JSON.stringify({activations,first,replacement,native,rapid,touch}));
         False, True, False, True, False, True], result
 
 
+def check_browser_disable_closes_scoped_tabs(ui_source: str) -> None:
+    """Disabling one node retires its browser tabs and no other tab."""
+    start = ui_source.index("function closeBrowserTabsForBackend(")
+    brace = ui_source.index("{", start)
+    depth = 0
+    end = None
+    for index in range(brace, len(ui_source)):
+        if ui_source[index] == "{":
+            depth += 1
+        elif ui_source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                end = index + 1
+                break
+    assert end is not None, "unbalanced scoped browser-tab cleanup"
+    helper = ui_source[start:end]
+    script = r"""
+const state={tabs:[
+  {id:"local-browser",type:"browser",bid:0,browserId:"L1CL"},
+  {id:"remote-7-a",type:"browser",bid:7,browserId:"R7A1"},
+  {id:"remote-8",type:"browser",bid:8,browserId:"R8B1"},
+  {id:"remote-7-b",type:"browser",bid:7,browserId:"R7A2"},
+  {id:"session-7",type:"session",bid:7,sid:4},
+  {id:"settings",type:"settings"},
+]};
+const closed=[];
+function closeTab(id){closed.push(id);state.tabs.splice(state.tabs.findIndex(tab=>tab.id===id),1);}
+%s
+const remoteCount=closeBrowserTabsForBackend(7);
+const afterRemote=state.tabs.map(tab=>tab.id);
+const localCount=closeBrowserTabsForBackend(0);
+console.log(JSON.stringify({remoteCount,afterRemote,localCount,closed,
+  remaining:state.tabs.map(tab=>tab.id)}));
+""" % helper
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:500]
+    result = json.loads(proc.stdout.strip())
+    assert result["remoteCount"] == 2 and result["localCount"] == 1, result
+    assert result["closed"] == ["remote-7-a", "remote-7-b", "local-browser"], result
+    assert result["afterRemote"] == [
+        "local-browser", "remote-8", "session-7", "settings"], result
+    assert result["remaining"] == ["remote-8", "session-7", "settings"], result
+
+
 def check_quota_math(ui_source: str) -> None:
     """The footer's weekly figure, run through node against every payload shape.
     claude's `utilization` is a 0..1 fraction and codex's `used_percent` is
@@ -993,6 +1037,10 @@ async def main() -> None:
                                  json={"enabled": False}) as r:
                 disabled = await read_json(r)
                 assert r.status == 200 and disabled["enabled"] is False, disabled
+                assert {item["id"] for item in disabled["instances"]} == \
+                    {first_id, third_id}, disabled
+                assert all(item["running"] is False for item in disabled["instances"]), \
+                    disabled
             await wait_for(lambda: any(t.get("type") == "gone" for t in texts),
                            message="gone notice after disable")
             await ws.close()
@@ -1223,6 +1271,7 @@ async def main() -> None:
             check_desktop_side_drag(ui_source)
             check_user_message_copy(ui_source)
             check_double_activation_survives_rerender(ui_source)
+            check_browser_disable_closes_scoped_tabs(ui_source)
             check_quota_math(ui_source)
             # one checkbox face app-wide: a native checkbox is painted by the
             # browser, ignores the theme and differs per platform, so the form
@@ -1281,6 +1330,11 @@ async def main() -> None:
             assert "`sessions:${key}`" in ui_source
             assert "`status:${key}`" in ui_source
             assert ui_source.count("event.detail > 0 && event.detail % 2 === 0") == 2
+            # A node disable already stops its processes. The settings response
+            # and asynchronous state paths also retire only that node's tabs.
+            assert ui_source.count("closeBrowserTabsForBackend(") == 4
+            assert "if (result.enabled === false) closeBrowserTabsForBackend(bid);" in ui_source
+            assert "if (node.browser && node.browser.enabled === false)" in ui_source
             # the head strip hides per session, and the toggle sits in BOTH the
             # head's own menu and the sidebar menu - hiding the head takes its
             # own opener with it, so the sidebar copy is the way back

@@ -2197,6 +2197,7 @@ function connectUpdates() {
         syncBell();
       } else if (d.type === "browser") {
         state.browser = { enabled: !!d.enabled };
+        if (d.enabled === false) closeBrowserTabsForBackend(0);
         renderSidebar();
       } else if (d.type === "browser_activity") {
         handleBrowserActivity(0, d.session_id, d.turn_id, d.browser_id);
@@ -2332,6 +2333,8 @@ async function pollRemoteBackend(backend, forceEngines = false) {
       const knownBrowser = state.remoteBrowser[bid];
       if (!knownBrowser || knownBrowser.enabled !== remoteBrowser.enabled) {
         state.remoteBrowser[bid] = remoteBrowser;
+        if (node.browser && node.browser.enabled === false)
+          closeBrowserTabsForBackend(bid);
         renderSidebar();
       }
     } catch (error) {
@@ -3593,6 +3596,18 @@ function openSettingsTab(groupId = null) {
     putTabInPane("settings", groupId);
   }
   activateTab("settings");
+}
+
+/* Disabling one node already stops every Chromium process on that node. Retire
+   only that node's viewer tabs as the matching UI half of the lifecycle; each
+   identified tab also closes its now-stopped catalog entry through closeTab. */
+function closeBrowserTabsForBackend(bid) {
+  bid = Number(bid) || 0;
+  const ids = state.tabs
+    .filter(tab => tab.type === "browser" && (Number(tab.bid) || 0) === bid)
+    .map(tab => tab.id);
+  for (const id of ids) closeTab(id);
+  return ids.length;
 }
 
 function closeTab(id) {
@@ -8138,6 +8153,7 @@ class SettingsView {
         apply(result);
         if (bid) state.remoteBrowser[bid] = { enabled: !!result.enabled };
         else state.browser = { enabled: !!result.enabled };
+        if (result.enabled === false) closeBrowserTabsForBackend(bid);
         renderSidebar();
         toast(`${name}: browser ${result.enabled ? "enabled" : "disabled"}`, "ok");
       } catch (error) {
