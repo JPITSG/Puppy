@@ -310,6 +310,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "engine-upgrade" in ping["capabilities"]
         assert "file-uploads" in ping["capabilities"]
         assert "queue-pause" in ping["capabilities"]
+        assert "system-prompt" in ping["capabilities"]
         assert "shutdown-notice" in ping["capabilities"]
         assert ping["shutting_down"] is False
         # browser surface: capability is static, enablement is node config
@@ -321,6 +322,33 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert ping["browser"] == {"enabled": False}
         assert ping["uploads"]["enabled"] is \
             (ping["uploads"]["max_file_size_mb"] > 0)
+        async with http.get(url + "/api/system-prompt", headers=good,
+                            ssl=pinned) as response:
+            prompt_payload = await response.json()
+            assert response.status == 200, prompt_payload
+        prompt_defaults = prompt_payload["system_prompt"]
+        assert prompt_defaults["custom"] == ""
+        assert "shared, user-visible Puppy browser" in prompt_defaults["browser"]
+        assert prompt_defaults["browser_default"] == prompt_defaults["browser"]
+        assert prompt_defaults["max_chars"] == 32768
+        async with http.patch(url + "/api/system-prompt", headers=good, ssl=pinned,
+                              json={"custom": "Use terse answers.",
+                                    "browser": "Use the visible browser first."}) as response:
+            saved_prompt = await response.json()
+            assert response.status == 200, saved_prompt
+        assert saved_prompt["system_prompt"]["custom"] == "Use terse answers."
+        assert saved_prompt["system_prompt"]["browser"] == "Use the visible browser first."
+        async with http.patch(url + "/api/system-prompt", headers=good, ssl=pinned,
+                              json={"custom": "x" * 32769}) as response:
+            rejected_prompt = await response.json()
+            assert response.status == 400, rejected_prompt
+            assert "cannot exceed" in rejected_prompt["error"]
+        async with http.get(url + "/api/system-prompt", ssl=pinned) as response:
+            assert response.status == 401
+        async with http.patch(url + "/api/system-prompt", headers=good, ssl=pinned,
+                              json={"custom": "",
+                                    "browser": prompt_defaults["browser_default"]}) as response:
+            assert response.status == 200, await response.text()
         assert "terminal" not in ping["capabilities"]
         # the completion-command endpoint is part of the shell surface: a node
         # deployed without a terminal must not run commands either
@@ -872,6 +900,23 @@ async def exercise_controller(url: str, token: str, backend_url: str,
             assert response.status == 200, restored_connection
         assert restored_connection["connection_changed"] is True, restored_connection
         assert restored_connection["backend"]["name"] == "backend-test-node"
+
+        # Prompt settings are node-owned and cross the same authenticated proxy
+        # as sessions, so the controller can edit a headless node without
+        # pretending the controller's own prompt applies remotely.
+        async with http.get(url + f"/api/b/{stored['id']}/system-prompt",
+                            headers=headers) as response:
+            remote_prompt = await response.json()
+            assert response.status == 200, remote_prompt
+        async with http.patch(url + f"/api/b/{stored['id']}/system-prompt",
+                              headers=headers,
+                              json={"custom": "Controller-configured guidance.",
+                                    "browser": remote_prompt["system_prompt"]["browser_default"]
+                                    }) as response:
+            remote_prompt = await response.json()
+            assert response.status == 200, remote_prompt
+        assert remote_prompt["system_prompt"]["custom"] == \
+            "Controller-configured guidance."
 
         # Simulate the controller restarting without a remembered active URL.
         # A state-changing request may advance only after a pre-connect failure,

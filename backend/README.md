@@ -180,6 +180,22 @@ per turn, so nothing restarts afterwards; the node re-probes the version itself
 when the updater exits, because a zero exit status alone does not prove the
 version moved.
 
+## System prompts
+
+Each node stores its own two-layer prompt setting. The custom layer is added to
+every new model turn the node starts. The Puppy browser layer is editable too,
+but is added only when that node's Browser option is enabled and the turn is
+given the managed-browser tools; disabling Browser therefore removes both the
+tools and their selection guidance. Active turns keep the prompt with which
+they started.
+
+An attached console reads and edits both fields through authenticated
+`GET/PATCH /api/system-prompt`. Nodes advertise the additive `system-prompt`
+capability, so older backends remain visibly unavailable in the editor rather
+than accepting a controller-only setting they would never send. The API limits
+each field to 32,768 characters and returns Puppy's shipped browser text so the
+console can implement Reset to default without embedding a second copy.
+
 ## Durable message queues
 
 Prompts queued behind a running turn are written through to the node's database

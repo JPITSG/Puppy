@@ -17,8 +17,8 @@ from aiohttp import WSMsgType, web
 from puppy import (__version__, auth, backends, bind_verify, browser,
                    cli_auto_upgrade, cli_releases,
                    cli_upgrade, config, db, host_metrics, listener_handoff, notify,
-                   protocol, runner, snapshots, terminal, uploads, usage_refresh,
-                   workspaces)
+                   protocol, runner, snapshots, system_prompts, terminal, uploads,
+                   usage_refresh, workspaces)
 from puppy.drivers import all_drivers, get_driver
 from puppy.drivers import base as driver_base
 
@@ -1072,6 +1072,7 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     """
     cli_releases.register(app)
     cli_auto_upgrade.register(app)
+    system_prompts.register(app)
     r = app.router
     r.add_get("/api/ping", h_ping)
     r.add_get("/api/node", h_ping)

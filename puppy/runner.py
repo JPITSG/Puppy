@@ -11,7 +11,8 @@ import signal
 import time
 import uuid
 
-from puppy import browser_agent, config, db, handoff, notify, uploads, workspaces
+from puppy import (browser_agent, config, db, handoff, notify, system_prompts,
+                   uploads, workspaces)
 from puppy.drivers import get_driver
 from puppy.drivers import base as driver_base
 from puppy.drivers.base import clean_env
@@ -746,8 +747,9 @@ class SessionHub:
             self._active_turn_id = pinned
             self._browser_activity_announced = set()
             browser_mcp = browser_agent.turn_mcp(self.id, pinned)
-            argv = driver.build_cmd(session, first_turn, prompt, pinned,
-                                    browser_mcp=browser_mcp)
+            argv = driver.build_cmd(
+                session, first_turn, prompt, pinned, browser_mcp=browser_mcp,
+                system_prompt=system_prompts.custom_prompt())
             env = clean_env(dict(os.environ))
             env.setdefault("HOME", "/root")
 

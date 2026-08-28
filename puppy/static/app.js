@@ -3010,6 +3010,16 @@ function backendSupportsEngineUpgrade(bid) {
     backend.capabilities.includes("engine-upgrade");
 }
 
+function backendSupportsSystemPrompt(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(item => item.id === bid);
+  /* This route is new and node-owned. Never infer it for legacy peers: an
+     explicit capability prevents a prompt from appearing saved when that node
+     could not possibly use it. */
+  return !!backend && Array.isArray(backend.capabilities) &&
+    backend.capabilities.includes("system-prompt");
+}
+
 function backendSupportsFileUploads(bid) {
   if (!bid) return true;
   const backend = state.backends.find(item => item.id === bid);
@@ -8903,12 +8913,254 @@ class SettingsView {
     };
   }
 
+  systemPromptCard(nodes, initialPayload, generation) {
+    const card = el("div", "card system-prompt-card");
+    card.innerHTML = `<h2>System prompt</h2>
+      <p class="system-prompt-copy">Prompt settings live on the node that runs the model.
+        Choose a node, then shape the instructions it adds to new turns.</p>`;
+
+    const nodeField = el("label", "system-prompt-node");
+    nodeField.appendChild(el("span", "system-prompt-node-label", "Node"));
+    const select = document.createElement("select");
+    select.setAttribute("aria-label", "Node whose system prompt is being edited");
+    for (const node of nodes) {
+      const option = document.createElement("option");
+      option.value = String(node.bid);
+      option.textContent = node.name;
+      select.appendChild(option);
+    }
+    nodeField.appendChild(select);
+    card.appendChild(nodeField);
+
+    const customSection = el("section", "system-prompt-section");
+    const customHead = el("div", "system-prompt-section-head");
+    const customCopy = el("div", "system-prompt-section-copy");
+    customCopy.appendChild(el("h3", "", "Your system prompt"));
+    customCopy.appendChild(el("p", "",
+      "Added to every new model turn this node starts. Leave blank to add nothing."));
+    customHead.appendChild(customCopy);
+    const custom = document.createElement("textarea");
+    custom.className = "system-prompt-textarea";
+    custom.rows = 5;
+    custom.placeholder = "No custom system prompt";
+    custom.setAttribute("aria-label", "Your custom system prompt");
+    customSection.appendChild(customHead);
+    customSection.appendChild(custom);
+    card.appendChild(customSection);
+
+    const browserSection = el("section", "system-prompt-section system-prompt-browser");
+    const browserHead = el("div", "system-prompt-section-head");
+    const browserCopy = el("div", "system-prompt-section-copy");
+    browserCopy.appendChild(el("h3", "", "Puppy browser guidance"));
+    const browserNote = el("p", "",
+      "Sent only for turns on this node while its Browser option is enabled; " +
+      "when Browser is off, this text is not sent.");
+    browserCopy.appendChild(browserNote);
+    const reset = el("button", "btn btn-sm btn-ghost system-prompt-reset", "Reset to default");
+    reset.type = "button";
+    browserHead.appendChild(browserCopy);
+    browserHead.appendChild(reset);
+    const browserText = document.createElement("textarea");
+    browserText.className = "system-prompt-textarea system-prompt-browser-text";
+    browserText.rows = 8;
+    browserText.setAttribute("aria-label", "Puppy browser system prompt");
+    browserSection.appendChild(browserHead);
+    browserSection.appendChild(browserText);
+    card.appendChild(browserSection);
+
+    const actions = el("div", "system-prompt-actions");
+    const status = el("span", "system-prompt-status", "Ready");
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    const save = el("button", "btn btn-pri btn-sm", "Save prompt");
+    save.type = "button";
+    actions.appendChild(status);
+    actions.appendChild(save);
+    card.appendChild(actions);
+
+    const nodeByBid = bid => nodes.find(node => node.bid === bid);
+    const records = new Map();
+    let activeBid = 0;
+    let loadSerial = 0;
+
+    const normalized = value => {
+      const prompt = value && typeof value === "object" ? value : null;
+      if (!prompt || typeof prompt.custom !== "string" ||
+          typeof prompt.browser !== "string" ||
+          typeof prompt.browser_default !== "string")
+        throw new Error("node returned invalid system prompt settings");
+      const maxChars = Number(prompt.max_chars);
+      if (!Number.isInteger(maxChars) || maxChars < 1)
+        throw new Error("node returned an invalid system prompt limit");
+      return {
+        loaded: true,
+        custom: prompt.custom,
+        browser: prompt.browser,
+        customDraft: prompt.custom,
+        browserDraft: prompt.browser,
+        browserDefault: prompt.browser_default,
+        maxChars,
+        saving: false,
+        error: "",
+        saved: false,
+      };
+    };
+    try {
+      records.set(0, normalized(initialPayload));
+    } catch (error) {
+      records.set(0, { loaded: false, loading: false, error: error.message });
+    }
+
+    const supported = bid => backendSupportsSystemPrompt(bid);
+    const dirty = record => !!record && record.loaded &&
+      (record.customDraft !== record.custom || record.browserDraft !== record.browser);
+    const stash = () => {
+      const record = records.get(activeBid);
+      if (!record || !record.loaded || record.saving) return;
+      record.customDraft = custom.value;
+      record.browserDraft = browserText.value;
+      record.saved = false;
+    };
+    const paint = () => {
+      const node = nodeByBid(activeBid);
+      const record = records.get(activeBid);
+      const canUse = supported(activeBid);
+      const editable = canUse && !!record && record.loaded && !record.saving;
+      custom.disabled = browserText.disabled = !editable;
+      reset.disabled = !editable;
+      save.disabled = !canUse || (!!record && record.saving);
+      status.classList.remove("bad", "dirty");
+      if (!canUse) {
+        custom.value = browserText.value = "";
+        custom.removeAttribute("maxlength");
+        browserText.removeAttribute("maxlength");
+        save.disabled = true;
+        status.textContent = "Backend upgrade required for system prompt settings.";
+      } else if (!record || record.loading) {
+        custom.value = browserText.value = "";
+        save.disabled = true;
+        status.textContent = "Loading prompt…";
+      } else if (!record.loaded) {
+        custom.value = browserText.value = "";
+        save.disabled = false;
+        save.textContent = "Retry";
+        status.textContent = record.error || "Prompt settings unavailable.";
+        status.classList.add("bad");
+      } else {
+        custom.maxLength = browserText.maxLength = record.maxChars;
+        if (document.activeElement !== custom) custom.value = record.customDraft;
+        if (document.activeElement !== browserText) browserText.value = record.browserDraft;
+        save.textContent = record.saving ? "Saving…" : "Save prompt";
+        if (record.error) {
+          status.textContent = record.error;
+          status.classList.add("bad");
+        } else if (dirty(record)) {
+          status.textContent = "Unsaved changes";
+          status.classList.add("dirty");
+        } else if (record.saved) {
+          status.textContent = "Saved for new turns.";
+        } else {
+          status.textContent = `Up to ${record.maxChars.toLocaleString()} characters per field.`;
+        }
+      }
+      if (node) {
+        browserNote.textContent = `Sent only for turns on ${node.name} while its Browser ` +
+          "option is enabled; when Browser is off, this text is not sent.";
+      }
+    };
+
+    const load = async (force = false) => {
+      const bid = activeBid;
+      if (!supported(bid)) { paint(); return; }
+      const existing = records.get(bid);
+      if (!force && existing && existing.loaded) { paint(); return; }
+      const serial = ++loadSerial;
+      records.set(bid, { loaded: false, loading: true, error: "", request: serial });
+      paint();
+      try {
+        const result = await api(bid, "system-prompt", { timeoutMs: 10000 });
+        if (generation !== this.renderGeneration || !card.isConnected) return;
+        if (!records.get(bid) || records.get(bid).request !== serial) return;
+        records.set(bid, normalized(result.system_prompt));
+      } catch (error) {
+        if (generation !== this.renderGeneration || !card.isConnected) return;
+        if (!records.get(bid) || records.get(bid).request !== serial) return;
+        records.set(bid, {
+          loaded: false, loading: false,
+          error: error.message || "Could not load prompt settings",
+        });
+      }
+      if (bid === activeBid) paint();
+    };
+
+    select.onchange = () => {
+      stash();
+      activeBid = Number(select.value) || 0;
+      this.systemPromptBid = activeBid;
+      paint();
+      if (!records.has(activeBid)) load();
+    };
+    const edited = () => {
+      stash();
+      paint();
+    };
+    custom.oninput = edited;
+    browserText.oninput = edited;
+    reset.onclick = () => {
+      const record = records.get(activeBid);
+      if (!record || !record.loaded || record.saving) return;
+      browserText.value = record.browserDefault;
+      stash();
+      paint();
+      browserText.focus();
+    };
+    save.onclick = async () => {
+      let record = records.get(activeBid);
+      if (!record || !record.loaded) { await load(true); return; }
+      if (record.saving) return;
+      stash();
+      const bid = activeBid;
+      const node = nodeByBid(bid);
+      record.saving = true;
+      record.error = "";
+      paint();
+      try {
+        const result = await api(bid, "system-prompt", {
+          method: "PATCH",
+          body: { custom: record.customDraft, browser: record.browserDraft },
+          timeoutMs: 12000,
+        });
+        if (generation !== this.renderGeneration || !card.isConnected) return;
+        record = normalized(result.system_prompt);
+        record.saved = true;
+        records.set(bid, record);
+        toast(`${node ? node.name : "Node"}: system prompt saved`, "ok");
+      } catch (error) {
+        if (generation !== this.renderGeneration || !card.isConnected) return;
+        record.saving = false;
+        record.error = error.message || "Could not save prompt settings";
+        records.set(bid, record);
+        toast(`${node ? node.name : "Node"}: ${record.error}`, "error", 7000);
+      }
+      if (bid === activeBid) paint();
+    };
+
+    const preferred = Number(this.systemPromptBid) || 0;
+    if (nodes.some(node => node.bid === preferred)) activeBid = preferred;
+    select.value = String(activeBid);
+    paint();
+    if (!records.has(activeBid)) Promise.resolve().then(() => load());
+    return card;
+  }
+
   async render() {
     this.stopUpgradeReadinessPolling();
     const generation = ++this.renderGeneration;
-    let settings, engines;
+    let settings, engines, promptSettings;
     try {
-      [settings, engines] = await Promise.all([api(0, "settings"), api(0, "engines")]);
+      [settings, engines, promptSettings] = await Promise.all([
+        api(0, "settings"), api(0, "engines"), api(0, "system-prompt"),
+      ]);
     } catch (e) {
       if (generation === this.renderGeneration)
         this.inner.innerHTML = `<div class="err-card">${esc(e.message)}</div>`;
@@ -9150,7 +9402,35 @@ class SettingsView {
       this.remoteEngineGroups.set(b.id, group);
       c2.appendChild(group.root);
     }
+    /* Engine update scheduling is part of Engines, not a separate concept.
+       Keep its existing heading and rows, separated as a section inside the
+       same card so spacing remains legible without presenting two panels. */
+    const autoSection = el("section", "engine-updates-section");
+    autoSection.innerHTML = `<h2>Engine updates</h2>
+      <p class="usage-refresh-copy">Let a node install its own engine CLI updates using the
+        same vendor updater the Update button runs. Each version is tried once: if an update
+        fails it is not retried until a newer one appears, and a node with a busy session
+        waits rather than replacing an engine underneath it.</p>`;
+    const autoList = el("div", "eau-list");
+    const localAuto = this.autoUpgradeRow(settings.instance_name, 0);
+    localAuto.update(state.autoUpgrade, "ok", true);
+    this.autoUpgradeRows.set(0, localAuto);
+    autoList.appendChild(localAuto.root);
+    for (const b of state.backends) {
+      const auto = this.autoUpgradeRow(b.name, b.id);
+      auto.update(state.remoteAutoUpgrade[b.id] || null,
+        remoteAvailability(b.id), backendSupportsEngineAutoUpgrade(b.id));
+      this.autoUpgradeRows.set(b.id, auto);
+      autoList.appendChild(auto.root);
+    }
+    autoSection.appendChild(autoList);
+    c2.appendChild(autoSection);
     this.inner.appendChild(c2);
+
+    const promptNodes = [{ bid: 0, name: settings.instance_name }]
+      .concat(state.backends.map(backend => ({ bid: backend.id, name: backend.name })));
+    this.inner.appendChild(this.systemPromptCard(
+      promptNodes, promptSettings.system_prompt, generation));
 
     /* account usage refresh */
     const usageCard = el("div", "card usage-refresh-card");
@@ -9172,28 +9452,6 @@ class SettingsView {
     }
     usageCard.appendChild(usageList);
     this.inner.appendChild(usageCard);
-
-    /* unattended engine updates */
-    const autoCard = el("div", "card");
-    autoCard.innerHTML = `<h2>Engine updates</h2>
-      <p class="usage-refresh-copy">Let a node install its own engine CLI updates using the
-        same vendor updater the Update button runs. Each version is tried once: if an update
-        fails it is not retried until a newer one appears, and a node with a busy session
-        waits rather than replacing an engine underneath it.</p>`;
-    const autoList = el("div", "eau-list");
-    const localAuto = this.autoUpgradeRow(settings.instance_name, 0);
-    localAuto.update(state.autoUpgrade, "ok", true);
-    this.autoUpgradeRows.set(0, localAuto);
-    autoList.appendChild(localAuto.root);
-    for (const b of state.backends) {
-      const auto = this.autoUpgradeRow(b.name, b.id);
-      auto.update(state.remoteAutoUpgrade[b.id] || null,
-        remoteAvailability(b.id), backendSupportsEngineAutoUpgrade(b.id));
-      this.autoUpgradeRows.set(b.id, auto);
-      autoList.appendChild(auto.root);
-    }
-    autoCard.appendChild(autoList);
-    this.inner.appendChild(autoCard);
 
     /* per-node attachment limits */
     const uploadCard = el("div", "card upload-limit-card");

@@ -1356,6 +1356,130 @@ def check_queue_pause_ui(ui_source: str, css_source: str) -> None:
     assert '.queue-strip .q-item.q-paused .q-t{opacity:.58}' in css_source
 
 
+def check_system_prompt_settings(ui_source: str, css_source: str) -> None:
+    """The prompt editor stays node-aware and Engine updates shares its card."""
+    assert ui_source.count("<h2>Engine updates</h2>") == 1
+    section = ui_source.index('const autoSection = el("section", "engine-updates-section")')
+    attach = ui_source.index("c2.appendChild(autoSection)", section)
+    card = ui_source.index("this.inner.appendChild(c2)", attach)
+    assert section < attach < card
+    assert 'const autoCard = el("div", "card")' not in ui_source
+    assert 'api(0, "system-prompt")' in ui_source
+    assert 'backend.capabilities.includes("system-prompt")' in ui_source
+    assert '"Puppy browser guidance"' in ui_source
+    assert '"Reset to default"' in ui_source
+    assert 'when Browser is off, this text is not sent.' in ui_source
+    assert 'body: { custom: record.customDraft, browser: record.browserDraft }' in ui_source
+    runner_source = (BASE / "puppy" / "runner.py").read_text()
+    assert "system_prompt=system_prompts.custom_prompt()" in runner_source
+    assert ".engine-updates-section{" in css_source
+    assert ".system-prompt-section+.system-prompt-section{" in css_source
+    assert ".system-prompt-section-head{" in css_source
+    assert ".system-prompt-textarea{" in css_source
+    assert ".system-prompt-browser-text{min-height:220px}" in css_source
+
+    start = ui_source.index("\n  systemPromptCard(") + 1
+    brace = ui_source.index("{", start)
+    depth = 0
+    end = None
+    for index in range(brace, len(ui_source)):
+        if ui_source[index] == "{":
+            depth += 1
+        elif ui_source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                end = index + 1
+                break
+    assert end is not None
+    method = ui_source[start:end]
+    script = r"""
+class Classes {
+  constructor(value=""){this.names=new Set(String(value).split(/\s+/).filter(Boolean));}
+  add(...names){names.forEach(name=>this.names.add(name));}
+  remove(...names){names.forEach(name=>this.names.delete(name));}
+  toggle(name,on){if(on===undefined)on=!this.names.has(name);on?this.add(name):this.remove(name);}
+  contains(name){return this.names.has(name);}
+}
+class MockNode {
+  constructor(tag,cls="",text="") {
+    this.tagName=tag.toUpperCase();this.className=cls;this.classList=new Classes(cls);
+    this.textContent=text;this.children=[];this.attributes={};this.value="";
+    this.disabled=false;this.isConnected=true;this.maxLength=-1;this.html="";
+  }
+  appendChild(child){this.children.push(child);child.parentNode=this;return child;}
+  setAttribute(name,value){this.attributes[name]=String(value);}
+  removeAttribute(name){delete this.attributes[name];if(name==="maxlength")this.maxLength=-1;}
+  focus(){document.activeElement=this;}
+  set innerHTML(value){this.html=value;}
+  get innerHTML(){return this.html;}
+}
+const document={activeElement:null,createElement:tag=>new MockNode(tag)};
+const el=(tag,cls="",text="")=>new MockNode(tag,cls,text);
+const supported=new Set([0,1]);
+const backendSupportsSystemPrompt=bid=>supported.has(bid);
+const calls=[],toasts=[];
+const payload=(custom,browser)=>({custom,browser,browser_default:"DEFAULT",max_chars:100});
+async function api(bid,path,options={}) {
+  calls.push({bid,path,method:options.method||"GET",body:options.body||null});
+  if(options.method==="PATCH")
+    return {system_prompt:payload(options.body.custom,options.body.browser)};
+  return {system_prompt:payload("REMOTE","REMOTE BROWSER")};
+}
+const toast=(...args)=>toasts.push(args);
+class TestView {
+  constructor(){this.renderGeneration=1;this.systemPromptBid=0;}
+__METHOD__
+}
+const view=new TestView();
+const card=view.systemPromptCard([
+  {bid:0,name:"Primary"},{bid:1,name:"Laptop"},{bid:2,name:"Old backend"}
+],payload("LOCAL","DEFAULT"),1);
+const nodeField=card.children[0],select=nodeField.children[1];
+const custom=card.children[1].children[1];
+const browserSection=card.children[2],browser=browserSection.children[1];
+const reset=browserSection.children[0].children[1];
+const actions=card.children[3],status=actions.children[0],save=actions.children[1];
+const before={custom:custom.value,browser:browser.value,status:status.textContent,
+  note:browserSection.children[0].children[0].children[1].textContent};
+custom.value="LOCAL EDIT";custom.oninput();
+const dirty=status.textContent;
+browser.value="OTHER";browser.oninput();reset.onclick();
+const resetState={browser:browser.value,status:status.textContent};
+await save.onclick();
+const saved={status:status.textContent,toast:toasts[0][0]};
+select.value="1";document.activeElement=select;select.onchange();
+await new Promise(resolve=>setTimeout(resolve,0));
+const remote={custom:custom.value,browser:browser.value,status:status.textContent,
+  note:browserSection.children[0].children[0].children[1].textContent};
+select.value="2";document.activeElement=select;select.onchange();
+const unsupported={disabled:custom.disabled&&browser.disabled&&save.disabled,
+  status:status.textContent};
+console.log(JSON.stringify({before,dirty,resetState,saved,remote,unsupported,calls}));
+""".replace("__METHOD__", method)
+    proc = subprocess.run(["node", "--input-type=module", "-e", script],
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:1000]
+    result = json.loads(proc.stdout)
+    assert result["before"] == {
+        "custom": "LOCAL", "browser": "DEFAULT",
+        "status": "Up to 100 characters per field.",
+        "note": ("Sent only for turns on Primary while its Browser option is enabled; "
+                 "when Browser is off, this text is not sent."),
+    }, result
+    assert result["dirty"] == "Unsaved changes", result
+    assert result["resetState"] == {
+        "browser": "DEFAULT", "status": "Unsaved changes"}, result
+    assert result["saved"] == {
+        "status": "Saved for new turns.", "toast": "Primary: system prompt saved"}, result
+    assert result["remote"]["custom"] == "REMOTE" and \
+        result["remote"]["browser"] == "REMOTE BROWSER", result
+    assert "Laptop" in result["remote"]["note"], result
+    assert result["unsupported"] == {
+        "disabled": True,
+        "status": "Backend upgrade required for system prompt settings."}, result
+    assert [call["method"] for call in result["calls"]] == ["PATCH", "GET"], result
+
+
 def check_double_activation_survives_rerender(ui_source: str) -> None:
     """A backend name rebuilt between clicks must still complete the gesture."""
     def extract_function(marker: str) -> str:
@@ -1587,7 +1711,20 @@ async def main() -> None:
                 assert "browser-instances" in ping["capabilities"], ping
                 assert "browser-handoff" in ping["capabilities"], ping
                 assert "browser-file-workflows" in ping["capabilities"], ping
+                assert "system-prompt" in ping["capabilities"], ping
                 assert ping["browser"] == {"enabled": False}, ping
+            async with http.get(url + "/api/system-prompt", headers=headers) as r:
+                prompt_settings = await read_json(r)
+                assert r.status == 200, prompt_settings
+            default_browser_prompt = prompt_settings["system_prompt"]["browser_default"]
+            async with http.patch(url + "/api/system-prompt", headers=headers,
+                                  json={"custom": "first\r\nsecond"}) as r:
+                prompt_settings = await read_json(r)
+                assert r.status == 200, prompt_settings
+                assert prompt_settings["system_prompt"]["custom"] == "first\nsecond"
+            async with http.patch(url + "/api/system-prompt", headers=headers,
+                                  json={"custom": "", "browser": default_browser_prompt}) as r:
+                assert r.status == 200, await r.text()
 
             # a too-old binary is refused at enable time with the probed reason
             os.environ["PUPPY_BROWSER_STUB_VERSION"] = "100.0.0.0"
@@ -1918,9 +2055,12 @@ async def main() -> None:
             updates_capture = CaptureSocket()
             agent_hub.attach(session_capture)
             session_runner.updates_attach(updates_capture)
+            custom_prompt = "Configured system guidance for every turn."
+            policy = browser_agent.AGENT_SELECTION_POLICY + \
+                " Keep the shared browser visible while interacting."
+            config.set_system_prompts(custom_prompt, policy)
             descriptor = browser_agent.turn_mcp(agent_sid, turn_id)
             assert descriptor and descriptor["name"] == "puppy_browser", descriptor
-            policy = browser_agent.AGENT_SELECTION_POLICY
             assert descriptor["engine_guidance"] == policy
             assert "default for interactive web navigation" in policy
             assert "repository's own browser test suite" in policy
@@ -1932,44 +2072,65 @@ async def main() -> None:
 
             agent_session = db.get_session(agent_sid)
             claude_argv = ClaudeDriver().build_cmd(
-                agent_session, True, "hello", "native-1", browser_mcp=descriptor)
+                agent_session, True, "hello", "native-1", browser_mcp=descriptor,
+                system_prompt=custom_prompt)
             config_index = claude_argv.index("--mcp-config")
             claude_mcp = json.loads(claude_argv[config_index + 1])
             assert claude_mcp["mcpServers"]["puppy_browser"]["command"] == \
                 descriptor["command"], claude_mcp
             guidance_index = claude_argv.index("--append-system-prompt")
-            assert claude_argv[guidance_index + 1] == policy
+            assert claude_argv[guidance_index + 1] == custom_prompt + "\n\n" + policy
             resumed = dict(agent_session, native_session_id="existing-native")
             claude_resume = ClaudeDriver().build_cmd(
-                resumed, False, "again", "unused", browser_mcp=descriptor)
+                resumed, False, "again", "unused", browser_mcp=descriptor,
+                system_prompt=custom_prompt)
             assert "--resume" in claude_resume and "--mcp-config" in claude_resume
             resume_guidance = claude_resume.index("--append-system-prompt")
-            assert claude_resume[resume_guidance + 1] == policy
+            assert claude_resume[resume_guidance + 1] == custom_prompt + "\n\n" + policy
             claude_without_browser = ClaudeDriver().build_cmd(
-                resumed, False, "plain", "unused", browser_mcp=None)
+                resumed, False, "plain", "unused", browser_mcp=None,
+                system_prompt=custom_prompt)
             assert "--mcp-config" not in claude_without_browser
-            assert "--append-system-prompt" not in claude_without_browser
+            plain_guidance = claude_without_browser.index("--append-system-prompt")
+            assert claude_without_browser[plain_guidance + 1] == custom_prompt
+            claude_without_guidance = ClaudeDriver().build_cmd(
+                resumed, False, "plain", "unused", browser_mcp=None,
+                system_prompt="")
+            assert "--append-system-prompt" not in claude_without_guidance
 
             codex_first = CodexDriver().build_cmd(
-                agent_session, True, "hello", "native-2", browser_mcp=descriptor)
+                agent_session, True, "hello", "native-2", browser_mcp=descriptor,
+                system_prompt=custom_prompt)
             assert codex_first[-1].startswith(
-                "<puppy_browser_policy>\n" + policy + "\n</puppy_browser_policy>\n\n")
+                "<puppy_system_prompt>\n" + custom_prompt +
+                "\n</puppy_system_prompt>\n\n<puppy_browser_policy>\n" + policy +
+                "\n</puppy_browser_policy>\n\n")
             assert codex_first[-1].endswith("\n\nhello")
             codex_argv = CodexDriver().build_cmd(
-                resumed, False, "again", "unused", browser_mcp=descriptor)
+                resumed, False, "again", "unused", browser_mcp=descriptor,
+                system_prompt=custom_prompt)
             resume_index = codex_argv.index("resume")
             mcp_options = [value for value in codex_argv[:resume_index]
                            if "mcp_servers.puppy_browser" in value]
             assert any(".command=" in value for value in mcp_options), codex_argv
             assert any("PUPPY_BROWSER_TURN_ID" in value for value in mcp_options), codex_argv
-            assert codex_argv[-1].startswith("<puppy_browser_policy>\n" + policy)
+            assert codex_argv[-1].startswith(
+                "<puppy_system_prompt>\n" + custom_prompt + "\n</puppy_system_prompt>\n\n" +
+                "<puppy_browser_policy>\n" + policy)
             assert codex_argv[-1].endswith("\n\nagain")
             assert codex_argv[-1].count(policy) == 1
             codex_without_browser = CodexDriver().build_cmd(
-                resumed, False, "plain", "unused", browser_mcp=None)
-            assert codex_without_browser[-1] == "plain"
+                resumed, False, "plain", "unused", browser_mcp=None,
+                system_prompt=custom_prompt)
+            assert codex_without_browser[-1] == (
+                "<puppy_system_prompt>\n" + custom_prompt +
+                "\n</puppy_system_prompt>\n\nplain")
             assert not any("mcp_servers.puppy_browser" in value
                            for value in codex_without_browser)
+            codex_without_guidance = CodexDriver().build_cmd(
+                resumed, False, "plain", "unused", browser_mcp=None,
+                system_prompt="")
+            assert codex_without_guidance[-1] == "plain"
 
             mcp_env = dict(os.environ)
             mcp_env.update(descriptor["env"])
@@ -2454,6 +2615,7 @@ async def main() -> None:
             check_desktop_side_drag(ui_source)
             check_user_message_copy(ui_source)
             check_queue_pause_ui(ui_source, css_source)
+            check_system_prompt_settings(ui_source, css_source)
             check_double_activation_survives_rerender(ui_source)
             check_browser_disable_closes_scoped_tabs(ui_source)
             check_quota_math(ui_source)

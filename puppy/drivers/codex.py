@@ -32,21 +32,30 @@ log = logging.getLogger("puppy.drivers.codex")
 _SHELL_WRAP = re.compile(r"^\s*(?:\S*/)?(?:ba|z)?sh\s+-l?c\s+(.*)$", re.S)
 _BROWSER_POLICY_OPEN = "<puppy_browser_policy>"
 _BROWSER_POLICY_CLOSE = "</puppy_browser_policy>"
+_SYSTEM_PROMPT_OPEN = "<puppy_system_prompt>"
+_SYSTEM_PROMPT_CLOSE = "</puppy_system_prompt>"
 
 
-def _with_browser_guidance(prompt: str, browser_mcp) -> str:
-    """Add turn-scoped browser guidance without replacing Codex user config.
+def _with_runtime_guidance(prompt: str, system_prompt: str, browser_mcp) -> str:
+    """Add node and turn-scoped guidance without replacing native user config.
 
     Codex's developer_instructions config value is replacement-oriented. A
     tagged runtime preface keeps any user-configured developer instructions
     intact. The runner persists the original text before build_cmd is called,
     so this context never appears as part of the user's WebUI transcript.
     """
-    guidance = str((browser_mcp or {}).get("engine_guidance") or "").strip()
-    if not guidance:
+    blocks = []
+    custom = str(system_prompt or "").strip()
+    if custom:
+        blocks.append("{}\n{}\n{}".format(
+            _SYSTEM_PROMPT_OPEN, custom, _SYSTEM_PROMPT_CLOSE))
+    browser = str((browser_mcp or {}).get("engine_guidance") or "").strip()
+    if browser:
+        blocks.append("{}\n{}\n{}".format(
+            _BROWSER_POLICY_OPEN, browser, _BROWSER_POLICY_CLOSE))
+    if not blocks:
         return prompt
-    return "{}\n{}\n{}\n\n{}".format(
-        _BROWSER_POLICY_OPEN, guidance, _BROWSER_POLICY_CLOSE, prompt)
+    return "{}\n\n{}".format("\n\n".join(blocks), prompt)
 
 
 def _codex_home() -> str:
@@ -445,7 +454,8 @@ class CodexDriver(Driver):
             account_as_of=now)
         return True
 
-    def build_cmd(self, session, first_turn, prompt, pinned_id, browser_mcp=None):
+    def build_cmd(self, session, first_turn, prompt, pinned_id, browser_mcp=None,
+                  system_prompt=""):
         argv = [self.binary, "exec", "--json", "--skip-git-repo-check", "--color", "never",
                 "-C", session["cwd"],
                 "-s", session.get("permission_mode") or self.default_permission()]
@@ -466,7 +476,7 @@ class CodexDriver(Driver):
             for key, value in sorted((browser_mcp.get("env") or {}).items()):
                 argv += ["-c", "{}.env.{}={}".format(
                     prefix, key, json.dumps(str(value)))]
-            prompt = _with_browser_guidance(prompt, browser_mcp)
+        prompt = _with_runtime_guidance(prompt, system_prompt, browser_mcp)
         native = session.get("native_session_id") or ""
         if first_turn or not native:
             argv += [prompt]

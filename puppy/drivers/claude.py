@@ -61,7 +61,8 @@ class ClaudeDriver(Driver):
             {"value": "max", "label": "Max", "hint": "Maximum reasoning"},
         ]
 
-    def build_cmd(self, session, first_turn, prompt, pinned_id, browser_mcp=None):
+    def build_cmd(self, session, first_turn, prompt, pinned_id, browser_mcp=None,
+                  system_prompt=""):
         argv = [self.binary, "-p",
                 "--output-format", "stream-json",
                 "--input-format", "stream-json",
@@ -77,11 +78,14 @@ class ClaudeDriver(Driver):
                 "env": dict(browser_mcp.get("env") or {}),
             }}}
             argv += ["--mcp-config", json.dumps(mcp_config, separators=(",", ":"))]
-            guidance = str(browser_mcp.get("engine_guidance") or "").strip()
-            if guidance:
-                # Additive: preserve any system prompt the user or CLI already
-                # supplies while making the selection policy model-visible.
-                argv += ["--append-system-prompt", guidance]
+        guidance = [str(system_prompt or "").strip()]
+        if browser_mcp:
+            guidance.append(str(browser_mcp.get("engine_guidance") or "").strip())
+        guidance = "\n\n".join(part for part in guidance if part)
+        if guidance:
+            # Additive: preserve any system prompt the user or CLI already
+            # supplies while making both configured layers model-visible.
+            argv += ["--append-system-prompt", guidance]
         native = session.get("native_session_id") or ""
         if first_turn or not native:
             argv += ["--session-id", pinned_id]

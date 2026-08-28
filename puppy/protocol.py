@@ -42,6 +42,9 @@ BROWSER_FILE_WORKFLOWS_CAPABILITY = "browser-file-workflows"
 # is the engine-upgrade surface; this only decides when the node runs it, so a
 # node may support upgrading by hand without advertising the scheduler.
 ENGINE_AUTO_UPGRADE_CAPABILITY = "engine-auto-upgrade"
+# GET/PATCH of the node-owned custom and browser system-prompt text. Browser
+# guidance remains turn-scoped and is never sent when the browser is disabled.
+SYSTEM_PROMPT_CAPABILITY = "system-prompt"
 # GET on an upload id returns the stored image, so a preview outlives the blob
 # URL a page held. Older nodes store the same files but expose no way to read
 # them back; the controller falls back to the named-file chip there.
@@ -79,6 +82,7 @@ BASE_CAPABILITIES = (
     BROWSER_FILE_WORKFLOWS_CAPABILITY,
     UPLOAD_PREVIEW_CAPABILITY,
     ENGINE_AUTO_UPGRADE_CAPABILITY,
+    SYSTEM_PROMPT_CAPABILITY,
 )
 TERMINAL_CAPABILITY = "terminal"
 # POST /api/notify/exec runs a controller-supplied completion command. It is

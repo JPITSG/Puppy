@@ -22,7 +22,7 @@ import stat
 import struct
 import sys
 
-from puppy import config
+from puppy import config, system_prompts
 
 log = logging.getLogger("puppy.browser.agent")
 
@@ -32,23 +32,11 @@ MAX_REQUEST = 64 * 1024
 MAX_RESPONSE = 20 * 1024 * 1024
 REQUEST_TIMEOUT = 65.0
 
-AGENT_SELECTION_POLICY = (
-    "When the Puppy browser tools are available, use the shared, user-visible "
-    "Puppy browser as the default for interactive web navigation, authenticated "
-    "flows, screenshots, page inspection, form interaction, and user-visible UI "
-    "verification. The user sees and can interact with the same browser; Puppy "
-    "owns its lifecycle and preserves this session's browser across turns. Do not "
-    "launch or install Chrome, Chromium, Playwright, Selenium, or another "
-    "standalone browser when the Puppy browser can complete the task equivalently. "
-    "Standalone browser automation remains appropriate when the user explicitly "
-    "requests it, when running a repository's own browser test suite, for bulk or "
-    "multi-context automation, when a required capability is not offered by these "
-    "tools, or after a managed-browser attempt fails and retrying would not help. "
-    "If you fall back, briefly state the concrete reason. Command-line HTTP "
-    "clients remain appropriate for API-only and other non-rendered checks."
-)
+# Backwards-compatible name for callers/tests that need to identify Puppy's
+# shipped default. Runtime turns read the editable setting below instead.
+AGENT_SELECTION_POLICY = config.DEFAULT_BROWSER_SYSTEM_PROMPT
 
-INSTRUCTIONS = AGENT_SELECTION_POLICY + " " + (
+TOOL_INSTRUCTIONS = (
     "Independent Puppy-managed browsers are available on this session's node. "
     "Browser IDs are four uppercase A-Z/0-9 characters. If the user names an "
     "ID such as A8AR, pass it as browser_id. Otherwise omit browser_id: Puppy "
@@ -72,6 +60,12 @@ INSTRUCTIONS = AGENT_SELECTION_POLICY + " " + (
     "Browser's private download directory. Element refs belong to the latest "
     "snapshot, and page/download refs are temporary."
 )
+
+
+def instructions() -> str:
+    """MCP initialization guidance, including the node's current browser text."""
+    policy = system_prompts.browser_prompt().strip()
+    return (policy + " " if policy else "") + TOOL_INSTRUCTIONS
 
 
 def _tool(name, description, properties=None, required=None, read_only=False,
@@ -400,7 +394,7 @@ def turn_mcp(session_id: int, turn_id: str):
         # MCP server instructions are handled inconsistently by engine clients.
         # Drivers use this same policy through their strongest additive channel
         # so tool selection does not depend on MCP initialization presentation.
-        "engine_guidance": AGENT_SELECTION_POLICY,
+        "engine_guidance": system_prompts.browser_prompt(),
         "env": {
             "PYTHONPATH": _package_search_path(),
             "PUPPY_BROWSER_SOCKET": socket_path(),
@@ -668,7 +662,7 @@ def mcp_main() -> None:
                     "protocolVersion": requested if isinstance(requested, str) else "2024-11-05",
                     "capabilities": {"tools": {"listChanged": False}},
                     "serverInfo": {"name": "Puppy managed browser", "version": "4"},
-                    "instructions": INSTRUCTIONS,
+                    "instructions": instructions(),
                 }
             elif method == "ping":
                 result = {}

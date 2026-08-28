@@ -138,6 +138,9 @@ async def main() -> None:
         config.set_value("uploads.max_file_size_mb", 19)
         config.set_value("browser.enabled", True)
         config.set_value("browser.color_scheme", "light")
+        config.set_system_prompts(
+            "Keep answers concise.\nPreserve operator terminology.",
+            "Use the shared browser before standalone automation.")
         config.set_value("engines.auto_upgrade",
                          {"enabled": True, "mode": "at", "at": "04:15"})
         config.set_value("notify.enabled", True)
@@ -206,6 +209,7 @@ async def main() -> None:
         config.set_value("uploads.max_file_size_mb", 2)
         config.set_value("browser.enabled", False)
         config.set_value("browser.color_scheme", "dark")
+        config.set_system_prompts("mutated custom prompt", "mutated browser prompt")
         config.set_value("engines.auto_upgrade",
                          {"enabled": False, "mode": "now", "at": "03:30"})
         config.set_value("notify.enabled", False)
@@ -227,6 +231,15 @@ async def main() -> None:
         assert config.get("uploads.max_file_size_mb") == 19
         assert config.get("browser.enabled") is True
         assert config.get("browser.color_scheme") == "light"
+        assert config.get("system_prompt.custom") == \
+            "Keep answers concise.\nPreserve operator terminology."
+        assert config.get("system_prompt.browser") == \
+            "Use the shared browser before standalone automation."
+        older_config = config.export_data()
+        older_config.pop("system_prompt", None)
+        normalized_older = config.normalize_import(older_config)
+        assert normalized_older["system_prompt"] == {
+            "custom": "", "browser": config.DEFAULT_BROWSER_SYSTEM_PROMPT}
         assert config.get("engines.auto_upgrade") == \
             {"enabled": True, "mode": "at", "at": "04:15"}
         # an unattended upgrade schedule must survive import validation intact
@@ -247,6 +260,16 @@ async def main() -> None:
             assert "color_scheme" in str(exc), str(exc)
         else:
             raise AssertionError("an invalid browser color scheme was accepted")
+        for invalid_prompt in (None, "x" * (config.MAX_SYSTEM_PROMPT_CHARS + 1), "bad\x00text"):
+            try:
+                config.normalize_import(dict(
+                    config.export_data(),
+                    system_prompt={"custom": invalid_prompt,
+                                   "browser": config.DEFAULT_BROWSER_SYSTEM_PROMPT}))
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("an invalid system prompt was accepted")
         assert config.get("notify.enabled") is True
         assert config.get("notify.backend") == 1
         assert config.get("notify.command") == "printf done: %s {session}"

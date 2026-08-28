@@ -24,6 +24,27 @@ DEFAULT_USAGE_REFRESH_MINUTES = 15
 MAX_USAGE_REFRESH_MINUTES = 24 * 60
 DEFAULT_UPLOAD_LIMIT_MB = 8
 MAX_UPLOAD_LIMIT_MB = 1024
+MAX_SYSTEM_PROMPT_CHARS = 32768
+
+# This is model-visible only for turns where the node-owned managed browser is
+# enabled and available.  Keep the default beside the persisted setting rather
+# than in browser_agent.py so Settings, backup validation, and both runtimes all
+# agree on what "Reset to default" means.
+DEFAULT_BROWSER_SYSTEM_PROMPT = (
+    "When the Puppy browser tools are available, use the shared, user-visible "
+    "Puppy browser as the default for interactive web navigation, authenticated "
+    "flows, screenshots, page inspection, form interaction, and user-visible UI "
+    "verification. The user sees and can interact with the same browser; Puppy "
+    "owns its lifecycle and preserves this session's browser across turns. Do not "
+    "launch or install Chrome, Chromium, Playwright, Selenium, or another "
+    "standalone browser when the Puppy browser can complete the task equivalently. "
+    "Standalone browser automation remains appropriate when the user explicitly "
+    "requests it, when running a repository's own browser test suite, for bulk or "
+    "multi-context automation, when a required capability is not offered by these "
+    "tools, or after a managed-browser attempt fails and retrying would not help. "
+    "If you fall back, briefly state the concrete reason. Command-line HTTP "
+    "clients remain appropriate for API-only and other non-rendered checks."
+)
 
 DEFAULTS = {
     "instance_name": socket.gethostname() or "puppy",
@@ -51,6 +72,13 @@ DEFAULTS = {
     # probe (binary + version) to pass at toggle time. color_scheme is the
     # prefers-color-scheme its pages render with, synced from the WebUI theme.
     "browser": {"enabled": False, "color_scheme": "dark"},
+    # The custom text is added to every engine turn on this node. Browser text
+    # is an independently editable Puppy instruction and is added only while
+    # this node actually offers browser tools to that turn.
+    "system_prompt": {
+        "custom": "",
+        "browser": DEFAULT_BROWSER_SYSTEM_PROMPT,
+    },
     "sessions": {"default_cwd": "/etc/scripts", "turn_timeout": 7200,
                  "shutdown_grace": 60},
     # prompt-completion command: run `command` on backend id `backend` (0 =
@@ -216,6 +244,33 @@ def normalize_upload_limit_mb(value) -> int:
     return megabytes
 
 
+def normalize_system_prompt(value, path: str) -> str:
+    """Validate model-visible text from the API, config, or a backup archive."""
+    if not isinstance(value, str):
+        raise ValueError("{} must be text".format(path))
+    if "\x00" in value:
+        raise ValueError("{} cannot contain a null character".format(path))
+    if len(value) > MAX_SYSTEM_PROMPT_CHARS:
+        raise ValueError("{} cannot exceed {} characters".format(
+            path, MAX_SYSTEM_PROMPT_CHARS))
+    return value.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def set_system_prompts(custom: str, browser: str) -> None:
+    """Validate and persist the node's two prompt fields in one atomic write."""
+    custom = normalize_system_prompt(custom, "custom system prompt")
+    browser = normalize_system_prompt(browser, "browser system prompt")
+    cfg = load()
+    with _lock:
+        previous = cfg.get("system_prompt")
+        cfg["system_prompt"] = {"custom": custom, "browser": browser}
+        try:
+            _save_locked()
+        except Exception:
+            cfg["system_prompt"] = previous
+            raise
+
+
 def normalize_import(data: dict) -> dict:
     if not isinstance(data, dict):
         raise ValueError("config must be an object")
@@ -238,6 +293,12 @@ def normalize_import(data: dict) -> dict:
         merged.get("engines", {}).get("auto_upgrade"))
     merged["uploads"]["max_file_size_mb"] = normalize_upload_limit_mb(
         merged.get("uploads", {}).get("max_file_size_mb"))
+    merged["system_prompt"]["custom"] = normalize_system_prompt(
+        merged.get("system_prompt", {}).get("custom"),
+        "config.system_prompt.custom")
+    merged["system_prompt"]["browser"] = normalize_system_prompt(
+        merged.get("system_prompt", {}).get("browser"),
+        "config.system_prompt.browser")
     token = merged.get("auth", {}).get("api_token")
     if not isinstance(token, str) or not token or len(token) > 4096:
         raise ValueError("config.auth.api_token is missing")
