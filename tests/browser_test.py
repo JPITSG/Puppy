@@ -6,9 +6,11 @@ contract (fds 3/4, NUL-framed JSON) to exercise the probe, the node-owned
 enable gate, isolated named instances, ID retention, sandbox flag selection,
 the screencast/input websocket, pane-driven viewport sizing, navigation-surface
 recovery and input scaling, URL normalization, the private per-turn MCP bridge,
-hidden model guidance, background first-use tab
-events, close-and-replace behavior, and crash reporting. No real browser is
-installed or launched and nothing reaches the network.
+hidden model guidance, scoped/searchable accessibility snapshots, observable
+action outcomes, bounded inspection/screenshots, form controls, page switching,
+redacted diagnostics, background first-use tab events, close-and-replace
+behavior, and crash reporting. No real browser is installed or launched and
+nothing reaches the network.
 """
 from __future__ import annotations
 
@@ -46,6 +48,7 @@ STUB = r'''#!/usr/bin/env python3
 import base64
 import json
 import os
+import re
 import signal
 import sys
 
@@ -65,6 +68,12 @@ FRAME = base64.b64encode(b"stub-jpeg-frame-bytes").decode()
 STALE_FRAME = base64.b64encode(b"stale-screencast-surface").decode()
 PAGE = {"targetId": "stub-page-1", "type": "page", "title": "stub",
         "url": "about:blank", "attached": False}
+POPUP = {"targetId": "stub-popup-2", "type": "page", "title": "popup",
+         "url": "https://popup.example.test/", "attached": False,
+         "openerId": PAGE["targetId"]}
+PAGE_TEXT = "Stub page Ready Continue Email Region Alerts"
+TYPED_VALUE = ""
+active_target = PAGE["targetId"]
 
 
 def send(message):
@@ -92,31 +101,111 @@ while True:
         params = msg.get("params") or {}
         result = {}
         emit_frame = None
+        emit_lifecycle = False
         if method == "Browser.getVersion":
             result = {"product": "StubChrome/152"}
         elif method == "Target.getTargets":
             result = {"targetInfos": [PAGE]}
         elif method == "Target.attachToTarget":
-            result = {"sessionId": "stub-sess-1"}
+            active_target = params.get("targetId") or PAGE["targetId"]
+            result = {"sessionId": "stub-sess-2" if active_target == POPUP["targetId"]
+                      else "stub-sess-1"}
         elif method == "Target.createTarget":
             result = {"targetId": "stub-page-1"}
         elif method == "Page.captureScreenshot":
+            record("screenshots.jsonl", params)
             result = {"data": FRAME}
+        elif method == "Page.getLayoutMetrics":
+            result = {"cssContentSize": {"x": 0, "y": 0,
+                                         "width": 1200, "height": 1800}}
         elif method == "Accessibility.getFullAXTree":
             result = {"nodes": [
                 {"nodeId": "root", "role": {"value": "RootWebArea"},
-                 "name": {"value": "Stub page"}, "childIds": ["button", "input"]},
+                 "name": {"value": "Stub page"},
+                 "childIds": ["button", "input", "region"]},
                 {"nodeId": "button", "role": {"value": "button"},
                  "name": {"value": "Continue"}, "backendDOMNodeId": 10,
                  "properties": [{"name": "focusable", "value": {"value": True}}]},
                 {"nodeId": "input", "role": {"value": "textbox"},
                  "name": {"value": "Email"}, "backendDOMNodeId": 11,
                  "properties": [{"name": "focusable", "value": {"value": True}}]},
+                {"nodeId": "region", "role": {"value": "region"},
+                 "name": {"value": "Preferences"},
+                 "childIds": ["select", "checkbox"]},
+                {"nodeId": "select", "role": {"value": "combobox"},
+                 "name": {"value": "Region"}, "backendDOMNodeId": 12,
+                 "properties": [{"name": "focusable", "value": {"value": True}}]},
+                {"nodeId": "checkbox", "role": {"value": "checkbox"},
+                 "name": {"value": "Alerts"}, "backendDOMNodeId": 13,
+                 "properties": [
+                     {"name": "focusable", "value": {"value": True}},
+                     {"name": "checked", "value": {"value": True}}]},
             ]}
         elif method == "DOM.getBoxModel":
-            result = {"model": {"content": [100, 40, 300, 40, 300, 80, 100, 80]}}
+            result = {"model": {
+                "content": [100, 40, 300, 40, 300, 80, 100, 80],
+                "border": [98, 38, 302, 38, 302, 82, 98, 82]}}
+        elif method == "DOM.scrollIntoViewIfNeeded":
+            record("dom.jsonl", {"method": method, "params": params})
         elif method == "DOM.focus":
             record("dom.jsonl", {"method": method, "params": params})
+        elif method == "DOM.resolveNode":
+            result = {"object": {"objectId": "node-{}".format(
+                params.get("backendNodeId"))}}
+        elif method == "Runtime.callFunctionOn":
+            declaration = params.get("functionDeclaration") or ""
+            backend = int(str(params.get("objectId") or "node-0").rsplit("-", 1)[-1])
+            arguments = [item.get("value") for item in params.get("arguments") or []]
+            if "puppyInspectElement" in declaration:
+                value = {
+                    "tag": "button", "visible": True, "inViewport": True,
+                    "attributes": {
+                        "id": "continue",
+                        "href": "https://user:pass@example.test/path?token=secret#fragment",
+                    },
+                    "box": {"x": 100, "y": 40, "width": 200, "height": 40},
+                    "state": {"disabled": False, "checked": None,
+                              "selected": False, "required": False,
+                              "readOnly": False},
+                    "value": None, "valueLength": None,
+                    "styles": {"display": "block", "font-family": "Stub Sans",
+                               "font-size": "14px", "font-weight": "500"},
+                }
+            elif "puppyElementState" in declaration:
+                value = {"tag": "input", "type": "text", "value": TYPED_VALUE,
+                         "valueLength": len(TYPED_VALUE), "checked": None,
+                         "disabled": False}
+            elif "puppySelectOption" in declaration:
+                requested = arguments[0] if arguments[0] is not None else "pl"
+                label = arguments[1] if arguments[1] is not None else "Poland"
+                value = {"ok": True, "value": requested, "label": label, "index": 1}
+            elif "puppySetChecked" in declaration:
+                value = {"ok": True, "checked": bool(arguments[0]), "type": "checkbox"}
+            else:
+                value = None
+            record("agent-functions.jsonl", {
+                "backend": backend, "arguments": arguments,
+                "function": declaration.split("(", 1)[0].split()[-1]})
+            result = {"result": {"type": "object", "value": value}}
+        elif method == "Runtime.releaseObject":
+            pass
+        elif method == "Runtime.evaluate":
+            expression = params.get("expression") or ""
+            current = POPUP if active_target == POPUP["targetId"] else PAGE
+            if expression.startswith("JSON.stringify({url:location.href,title:document.title})"):
+                value = json.dumps({"url": current["url"], "title": current["title"]})
+                result = {"result": {"type": "string", "value": value}}
+            elif "textPresent" in expression and "readyState" in expression:
+                match = re.search(r"const wanted=(.*?), absent=(.*?);", expression, re.S)
+                wanted = json.loads(match.group(1)) if match else None
+                absent = json.loads(match.group(2)) if match else None
+                value = {
+                    "url": current["url"], "title": current["title"],
+                    "readyState": "complete",
+                    "textPresent": None if wanted is None else wanted in PAGE_TEXT,
+                    "textAbsent": None if absent is None else absent not in PAGE_TEXT,
+                }
+                result = {"result": {"type": "object", "value": value}}
         elif method == "Emulation.setEmulatedMedia":
             record("media.jsonl", {"features": params.get("features")})
         elif method == "Emulation.setDeviceMetricsOverride":
@@ -128,14 +217,17 @@ while True:
             if casting and same_size:
                 emit_frame = (viewport_width, viewport_height, FRAME)
         elif method == "Page.getFrameTree":
-            result = {"frameTree": {"frame": {"id": "f1", "url": PAGE["url"]}}}
+            current = POPUP if active_target == POPUP["targetId"] else PAGE
+            result = {"frameTree": {"frame": {"id": "f1", "url": current["url"]}}}
         elif method == "Page.setDocumentContent":
             record("document.jsonl", {"frameId": params.get("frameId"),
                                       "html": params.get("html", "")})
             PAGE["title"] = "start page"
         elif method == "Page.getNavigationHistory":
+            current = POPUP if active_target == POPUP["targetId"] else PAGE
             result = {"currentIndex": 1, "entries": [
-                {"id": 1, "url": "about:blank"}, {"id": 2, "url": PAGE["url"]}]}
+                {"id": 1, "url": "about:blank"}, {"id": 2, "url": current["url"]},
+                {"id": 3, "url": "https://forward.example.test/"}]}
         elif method == "Page.startScreencast":
             record("screencast.jsonl", params)
             casting = True
@@ -148,18 +240,33 @@ while True:
             if url == "stub://die":
                 send({"id": msg.get("id"), "result": {}})
                 raise SystemExit(4)
-            PAGE["url"] = url
-            send({"method": "Target.targetInfoChanged", "params": {"targetInfo": dict(PAGE)}})
+            current = POPUP if active_target == POPUP["targetId"] else PAGE
+            current["url"] = url
+            current["title"] = "navigated"
+            send({"method": "Target.targetInfoChanged",
+                  "params": {"targetInfo": dict(current)}})
             result = {"frameId": "f1"}
+            emit_lifecycle = True
             if url == "stub://surface-reset":
                 emit_frame = (1280, 657, STALE_FRAME)
+        elif method in ("Page.reload", "Page.navigateToHistoryEntry"):
+            emit_lifecycle = True
         elif method.startswith("Input."):
             record("input.jsonl", {"method": method, "params": params})
+            if method == "Input.insertText":
+                TYPED_VALUE = str(params.get("text") or "")
         elif method == "Browser.close":
             send({"id": msg.get("id"), "result": {}})
             raise SystemExit(0)
         if msg.get("id") is not None:
             send({"id": msg.get("id"), "result": result})
+        if emit_lifecycle:
+            session_id = "stub-sess-2" if active_target == POPUP["targetId"] \
+                else "stub-sess-1"
+            send({"method": "Page.domContentEventFired", "sessionId": session_id,
+                  "params": {"timestamp": 1}})
+            send({"method": "Page.loadEventFired", "sessionId": session_id,
+                  "params": {"timestamp": 2}})
         if emit_frame is not None and casting:
             frame_session += 1
             width, height, data = emit_frame
@@ -1381,6 +1488,11 @@ async def main() -> None:
 
     config.load()
     db.connect()
+    assert browser._redact_diagnostic_url(
+        "https://user:pass@example.test/path?token=secret#fragment") == \
+        "https://example.test/path"
+    assert browser._redact_diagnostic_url("data:text/plain,private") == \
+        "data:[redacted]"
     app = build_app()
     web_runner = web.AppRunner(app)
     await web_runner.setup()
@@ -1750,14 +1862,16 @@ async def main() -> None:
                     "protocolVersion": "2025-06-18", "capabilities": {},
                     "clientInfo": {"name": "browser-test", "version": "1"},
                 })
-                assert initialized["result"]["serverInfo"]["version"] == "2"
+                assert initialized["result"]["serverInfo"]["version"] == "3"
                 instructions = initialized["result"].get("instructions", "")
                 assert policy in instructions and \
                     "default for interactive web navigation" in instructions and \
                     "Do not launch or install Chrome" in instructions and \
                     "fresh, isolated" in instructions and \
                     "without taking focus" in instructions and \
-                    "explicitly asks" in instructions
+                    "explicitly asks" in instructions and \
+                    "wait_for" in instructions and \
+                    "temporary" in instructions
                 listed = await mcp_request(mcp, 2, "tools/list")
                 listed_tools = listed["result"]["tools"]
                 tool_names = [tool["name"] for tool in listed_tools]
@@ -1765,7 +1879,11 @@ async def main() -> None:
                 assert tool_names[-1] == "new_browser"
                 tools = {tool["name"]: tool for tool in listed_tools}
                 assert {"new_browser", "snapshot", "screenshot", "navigate",
-                        "click", "type"} <= set(tools)
+                        "inspect_element", "click", "type", "press", "hover",
+                        "select", "check", "scroll", "wait_for", "back",
+                        "forward", "reload", "pages", "switch_page",
+                        "console_messages", "network_failures"} <= set(tools)
+                assert "evaluate" not in tools and "cdp" not in tools
                 assert "shared, user-visible" in tools["snapshot"]["description"]
                 assert "shared, user-visible" in tools["navigate"]["description"]
                 assert "additional isolated" in tools["new_browser"]["description"]
@@ -1794,19 +1912,133 @@ async def main() -> None:
                 assert snapshot_text.startswith("Browser {}\n".format(agent_id)), snapshot_text
                 assert update_activity[0]["browser_id"] == agent_id
 
+                # Large pages can be searched or scoped without exposing raw
+                # CDP/JavaScript. Refs intentionally belong to the latest tree.
+                searched = await mcp_request(mcp, 101, "tools/call", {
+                    "name": "snapshot", "arguments": {"query": "Email"}})
+                searched_text = searched["result"]["content"][0]["text"]
+                assert "textbox \"Email\"" in searched_text and \
+                    "button \"Continue\"" not in searched_text, searched_text
+                scoped = await mcp_request(mcp, 102, "tools/call", {
+                    "name": "snapshot", "arguments": {"scope_ref": "b1"}})
+                scoped_text = scoped["result"]["content"][0]["text"]
+                assert "scoped to b1" in scoped_text and \
+                    "textbox \"Email\"" in scoped_text, scoped_text
+                fresh = await mcp_request(mcp, 103, "tools/call", {
+                    "name": "snapshot", "arguments": {}})
+                fresh_text = fresh["result"]["content"][0]["text"]
+                assert "[b3] combobox" in fresh_text and \
+                    "[b4] checkbox" in fresh_text, fresh_text
+
+                inspected = await mcp_request(mcp, 104, "tools/call", {
+                    "name": "inspect_element", "arguments": {"ref": "b1"}})
+                inspected_text = inspected["result"]["content"][0]["text"]
+                assert "Box: x=100.0 y=40.0 width=200.0 height=40.0" in inspected_text
+                assert "font-family: \"Stub Sans\"" in inspected_text
+                assert "https://example.test/path" in inspected_text
+                assert "user:pass" not in inspected_text and \
+                    "token=secret" not in inspected_text
+
                 shot = await mcp_request(mcp, 4, "tools/call", {
                     "name": "screenshot", "arguments": {}})
                 assert any(item.get("type") == "image" and
                            item.get("data") == base64_stub for item in
                            shot["result"]["content"]), shot
-                await mcp_request(mcp, 5, "tools/call", {
-                    "name": "click", "arguments": {"ref": "b1"}})
-                await mcp_request(mcp, 6, "tools/call", {
-                    "name": "type", "arguments": {
-                        "ref": "b2", "text": "agent text", "clear": True}})
-                await mcp_request(mcp, 7, "tools/call", {
+                full_shot = await mcp_request(mcp, 105, "tools/call", {
+                    "name": "screenshot", "arguments": {
+                        "format": "png", "full_page": True}})
+                assert any(item.get("type") == "image" and
+                           item.get("mimeType") == "image/png"
+                           for item in full_shot["result"]["content"]), full_shot
+                element_shot = await mcp_request(mcp, 106, "tools/call", {
+                    "name": "screenshot", "arguments": {"ref": "b2"}})
+                assert element_shot["result"]["isError"] is False, element_shot
+                captures = read_lines("screenshots.jsonl")
+                assert any(item.get("format") == "png" and
+                           item.get("clip", {}).get("height") == 1800
+                           for item in captures), captures
+                assert any(item.get("clip", {}).get("width") == 204 and
+                           item.get("clip", {}).get("height") == 44
+                           for item in captures), captures
+
+                waited = await mcp_request(mcp, 107, "tools/call", {
+                    "name": "wait_for", "arguments": {
+                        "text": "Ready", "text_absent": "Missing",
+                        "url_contains": "about:blank", "timeout_ms": 100}})
+                assert waited["result"]["isError"] is False, waited
+                assert "Observed text 'Ready'" in waited["result"]["content"][0]["text"]
+                timed_out = await mcp_request(mcp, 122, "tools/call", {
+                    "name": "wait_for", "arguments": {
+                        "text": "Never present", "timeout_ms": 0}})
+                assert timed_out["result"]["isError"] is True, timed_out
+                assert "timed out after 0 ms" in timed_out["result"]["content"][0]["text"]
+                conflicting_shot = await mcp_request(mcp, 123, "tools/call", {
+                    "name": "screenshot", "arguments": {
+                        "full_page": True, "ref": "b1"}})
+                assert conflicting_shot["result"]["isError"] is True, conflicting_shot
+                invalid_select = await mcp_request(mcp, 124, "tools/call", {
+                    "name": "select", "arguments": {
+                        "ref": "b3", "value": "pl", "label": "Poland"}})
+                assert invalid_select["result"]["isError"] is True, invalid_select
+                invalid_check = await mcp_request(mcp, 125, "tools/call", {
+                    "name": "check", "arguments": {
+                        "ref": "b4", "checked": "yes"}})
+                assert invalid_check["result"]["isError"] is True, invalid_check
+                excessive_wait = await mcp_request(mcp, 126, "tools/call", {
                     "name": "navigate", "arguments": {
-                        "url": "router.lan/status", "wait_ms": 0}})
+                        "url": "example.test", "timeout_ms": 30000,
+                        "wait_ms": 10000,
+                        "wait_for": {"text": "Ready", "timeout_ms": 30000}}})
+                assert excessive_wait["result"]["isError"] is True, excessive_wait
+                assert "combined navigation waits" in \
+                    excessive_wait["result"]["content"][0]["text"]
+
+                clicked = await mcp_request(mcp, 5, "tools/call", {
+                    "name": "click", "arguments": {
+                        "ref": "b1", "wait_for": {"text": "Ready", "timeout_ms": 100},
+                        "include_snapshot": True}})
+                clicked_text = clicked["result"]["content"][0]["text"]
+                assert "Dispatched a left click" in clicked_text and \
+                    "Outcome: Observed text 'Ready'" in clicked_text and \
+                    "Accessibility snapshot" in clicked_text, clicked_text
+                typed = await mcp_request(mcp, 6, "tools/call", {
+                    "name": "type", "arguments": {
+                        "ref": "b2", "text": "agent text", "clear": True,
+                        "wait_for": {"text": "Ready", "timeout_ms": 100}}})
+                typed_text = typed["result"]["content"][0]["text"]
+                assert "Verified: b2 reports a value length of 10" in typed_text, typed_text
+                hovered = await mcp_request(mcp, 108, "tools/call", {
+                    "name": "hover", "arguments": {
+                        "ref": "b1", "wait_for": {"text": "Ready", "timeout_ms": 100}}})
+                assert "Moved the pointer over b1" in hovered["result"]["content"][0]["text"]
+                selected_option = await mcp_request(mcp, 109, "tools/call", {
+                    "name": "select", "arguments": {
+                        "ref": "b3", "label": "Poland",
+                        "wait_for": {"text": "Ready", "timeout_ms": 100}}})
+                assert "selected \"Poland\"" in \
+                    selected_option["result"]["content"][0]["text"]
+                checked = await mcp_request(mcp, 110, "tools/call", {
+                    "name": "check", "arguments": {
+                        "ref": "b4", "checked": False,
+                        "wait_for": {"text": "Ready", "timeout_ms": 100}}})
+                assert "Verified: b4 is unchecked" in \
+                    checked["result"]["content"][0]["text"]
+                pressed = await mcp_request(mcp, 111, "tools/call", {
+                    "name": "press", "arguments": {
+                        "key": "Enter", "wait_for": {"text": "Ready", "timeout_ms": 100}}})
+                assert "Dispatched key Enter" in pressed["result"]["content"][0]["text"]
+                scrolled = await mcp_request(mcp, 112, "tools/call", {
+                    "name": "scroll", "arguments": {
+                        "delta_y": 320, "wait_for": {"text": "Ready", "timeout_ms": 100}}})
+                assert "Dispatched a scroll" in scrolled["result"]["content"][0]["text"]
+
+                navigated = await mcp_request(mcp, 7, "tools/call", {
+                    "name": "navigate", "arguments": {
+                        "url": "router.lan/status", "wait_ms": 0,
+                        "wait_for": {"url_contains": "router.lan", "timeout_ms": 1000}}})
+                navigated_text = navigated["result"]["content"][0]["text"]
+                assert "Observed document domcontentloaded" in navigated_text and \
+                    "Observed URL containing 'router.lan'" in navigated_text, navigated_text
                 assert len([item for item in session_capture.messages
                             if item.get("type") == "browser_activity"]) == 1
                 assert len([item for item in updates_capture.messages
@@ -1820,9 +2052,89 @@ async def main() -> None:
                 assert any(item["method"] == "Input.insertText" and
                            item["params"].get("text") == "agent text"
                            for item in agent_inputs), agent_inputs
-                assert read_lines("dom.jsonl")[-1]["params"]["backendNodeId"] == 11
+                assert any(item["method"] == "DOM.focus" and
+                           item["params"].get("backendNodeId") == 11
+                           for item in read_lines("dom.jsonl"))
                 assert read_lines("navigations.jsonl")[-1]["url"] == \
                     "http://router.lan/status"
+                functions = read_lines("agent-functions.jsonl")
+                assert any(item["backend"] == 12 and item["arguments"] == [None, "Poland"]
+                           for item in functions), functions
+                assert any(item["backend"] == 13 and item["arguments"] == [False]
+                           for item in functions), functions
+
+                # Back/forward/reload wait for observable document lifecycle
+                # events instead of reporting success from dispatch alone.
+                went_forward = await mcp_request(mcp, 113, "tools/call", {
+                    "name": "forward", "arguments": {}})
+                assert "new document became interactive" in \
+                    went_forward["result"]["content"][0]["text"]
+                went_back = await mcp_request(mcp, 114, "tools/call", {
+                    "name": "back", "arguments": {}})
+                assert "new document became interactive" in \
+                    went_back["result"]["content"][0]["text"]
+                reloaded = await mcp_request(mcp, 115, "tools/call", {
+                    "name": "reload", "arguments": {}})
+                assert "Observed document domcontentloaded" in \
+                    reloaded["result"]["content"][0]["text"]
+
+                # Diagnostics are captured per attached page, bounded, clearly
+                # untrusted, and strip credentials/query/fragment from URLs.
+                agent_instance = browser.manager().get(agent_id)
+                diagnostic_session = agent_instance.page_session
+                agent_instance._on_message({
+                    "method": "Runtime.exceptionThrown", "sessionId": diagnostic_session,
+                    "params": {"exceptionDetails": {
+                        "text": "Uncaught", "lineNumber": 4,
+                        "url": "https://user:pass@example.test/app?token=secret#x",
+                        "exception": {"description": "TypeError: stub failure"}}}})
+                agent_instance._on_message({
+                    "method": "Network.requestWillBeSent", "sessionId": diagnostic_session,
+                    "params": {"requestId": "r1", "request": {
+                        "method": "POST",
+                        "url": "https://user:pass@example.test/api?token=secret#x"}}})
+                agent_instance._on_message({
+                    "method": "Network.responseReceived", "sessionId": diagnostic_session,
+                    "params": {"requestId": "r1", "type": "Fetch",
+                               "response": {"status": 503}}})
+                console = await mcp_request(mcp, 116, "tools/call", {
+                    "name": "console_messages", "arguments": {
+                        "level": "error", "clear": True}})
+                console_text = console["result"]["content"][0]["text"]
+                assert "UNTRUSTED PAGE CONSOLE" in console_text and \
+                    "TypeError: stub failure" in console_text and \
+                    "https://example.test/app:5" in console_text
+                assert "user:pass" not in console_text and "token=secret" not in console_text
+                network = await mcp_request(mcp, 117, "tools/call", {
+                    "name": "network_failures", "arguments": {"clear": True}})
+                network_text = network["result"]["content"][0]["text"]
+                assert "UNTRUSTED PAGE NETWORK" in network_text and \
+                    "[HTTP 503] POST https://example.test/api" in network_text
+                assert "user:pass" not in network_text and "token=secret" not in network_text
+                cleared = await mcp_request(mcp, 118, "tools/call", {
+                    "name": "network_failures", "arguments": {}})
+                assert "No failed requests" in cleared["result"]["content"][0]["text"]
+
+                # Pages are limited to this logical Browser and use temporary
+                # refs; switching clears element refs and attaches the viewer.
+                agent_instance.targets["stub-popup-2"] = {
+                    "targetId": "stub-popup-2", "type": "page", "title": "popup",
+                    "url": "https://popup.example.test/",
+                    "openerId": "stub-page-1"}
+                pages = await mcp_request(mcp, 119, "tools/call", {
+                    "name": "pages", "arguments": {}})
+                pages_text = pages["result"]["content"][0]["text"]
+                assert "[p1] navigated (current)" in pages_text and \
+                    "[p2] popup" in pages_text, pages_text
+                switched = await mcp_request(mcp, 120, "tools/call", {
+                    "name": "switch_page", "arguments": {"page_ref": "p2"}})
+                switched_text = switched["result"]["content"][0]["text"]
+                assert "Switched to p2" in switched_text and \
+                    "https://popup.example.test/" in switched_text, switched_text
+                stale_ref = await mcp_request(mcp, 121, "tools/call", {
+                    "name": "click", "arguments": {"ref": "b1"}})
+                assert stale_ref["result"]["isError"] is True, stale_ref
+                assert "stale element ref" in stale_ref["result"]["content"][0]["text"]
 
                 # A new instance is created only through the explicit tool;
                 # subsequent unqualified calls bind to it across the session.
