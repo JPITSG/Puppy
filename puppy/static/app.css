@@ -1423,7 +1423,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   display:inline-grid;grid-template-columns:6px auto;align-items:start;gap:7px;
   width:fit-content;max-width:100%;
   margin:5px 0 3px;padding:5px 0;
-  color:var(--txt3);font-family:var(--sans);font-size:11.5px;font-weight:500;
+  color:var(--txt3);font-family:var(--sans);font-size:11.5px;font-weight:400;
 }
 .engine-node-checking-icon{
   display:flex;align-self:center;align-items:center;justify-content:center;width:6px;height:10px;

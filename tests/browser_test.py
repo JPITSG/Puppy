@@ -683,6 +683,7 @@ console.log(JSON.stringify({before,after,connected}));
             ".engine-node-message.engine-node-checking{") in css_source
     assert "display:inline-grid;grid-template-columns:6px auto" in css_source
     assert "margin:5px 0 3px;padding:5px 0;" in css_source
+    assert "font-family:var(--sans);font-size:11.5px;font-weight:400;" in css_source
     assert ".engine-node-checking-icon svg{display:block;flex:0 0 auto;animation:spin" in css_source
     assert ".engine-node-message.engine-node-unavailable::before{justify-self:center}" in css_source
     assert "--alert-triangle:url(" in css_source
