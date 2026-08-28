@@ -42,9 +42,6 @@ DEFAULTS = {
     # auto_upgrade schedules the vendor-delegated engine CLI updater this node
     # already runs by hand: off, immediately, or in the window after a local time
     "engines": {
-        # Presentation order is node-owned: an empty list means driver registry
-        # order, and newly introduced engines append after every saved key.
-        "order": [],
         "usage_refresh_minutes": DEFAULT_USAGE_REFRESH_MINUTES,
         "auto_upgrade": {"enabled": False, "mode": "now", "at": "03:30"},
     },
@@ -169,30 +166,6 @@ def _validate_shape(reference, value, path: str = "config") -> None:
 
 ENGINE_AUTO_UPGRADE_MODES = ("now", "at")
 _ENGINE_AT_RE = re.compile(r"^([01][0-9]|2[0-3]):([0-5][0-9])$")
-_ENGINE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
-
-
-def normalize_engine_order(value) -> list:
-    """Validate a durable engine display order without knowing this build's drivers.
-
-    Unknown but well-formed keys survive backup import so an archive made by a
-    newer Puppy can safely pass through an older one. The execution API applies
-    the stricter rule that a reorder must name every driver registered there.
-    """
-    if value is None:
-        value = []
-    if not isinstance(value, list):
-        raise ValueError("config.engines.order must be an array")
-    normalized = []
-    seen = set()
-    for raw in value:
-        if not isinstance(raw, str) or not _ENGINE_KEY_RE.match(raw):
-            raise ValueError("config.engines.order contains an invalid engine key")
-        if raw in seen:
-            raise ValueError("config.engines.order contains a duplicate engine key")
-        seen.add(raw)
-        normalized.append(raw)
-    return normalized
 
 
 def normalize_engine_auto_upgrade(value) -> dict:
@@ -261,8 +234,6 @@ def normalize_import(data: dict) -> dict:
                 key, "non-negative" if allow_zero else "positive"))
     merged["engines"]["usage_refresh_minutes"] = normalize_usage_refresh_minutes(
         merged.get("engines", {}).get("usage_refresh_minutes"))
-    merged["engines"]["order"] = normalize_engine_order(
-        merged.get("engines", {}).get("order"))
     merged["engines"]["auto_upgrade"] = normalize_engine_auto_upgrade(
         merged.get("engines", {}).get("auto_upgrade"))
     merged["uploads"]["max_file_size_mb"] = normalize_upload_limit_mb(

@@ -218,8 +218,7 @@ def _self_test() -> dict:
         "host": "127.0.0.1", "port": 1, "tls": False,
     })
     routes = sorted({route.resource.canonical for route in app.router.routes()})
-    required = {"/api/ping", "/api/engines", "/api/engines/order",
-                "/api/engines/usage-refresh",
+    required = {"/api/ping", "/api/engines", "/api/engines/usage-refresh",
                 "/api/uploads/settings", "/api/sessions",
                 "/api/sessions/{sid}/upload", protocol.UPGRADE_API_PATH}
     if not required.issubset(routes):

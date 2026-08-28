@@ -103,7 +103,6 @@ async def exercise_http(archive_ui: dict, session_id: int) -> None:
 
             config.set_value("instance_name", "changed-over-http")
             config.set_value("engines.usage_refresh_minutes", 60)
-            config.set_value("engines.order", ["claude", "codex"])
             config.set_value("uploads.max_file_size_mb", 2)
             app["puppy_bind_verifications"]["stale-before-restore"] = {
                 "timer": None, "server": None,
@@ -117,7 +116,6 @@ async def exercise_http(archive_ui: dict, session_id: int) -> None:
             assert restored["sessions"] == 2
             assert config.get("instance_name") == "saved-instance"
             assert config.get("engines.usage_refresh_minutes") == 30
-            assert config.get("engines.order") == ["codex", "claude"]
             assert config.get("uploads.max_file_size_mb") == 19
     finally:
         await runner.cleanup()
@@ -137,7 +135,6 @@ async def main() -> None:
         config.set_value("instance_name", "saved-instance")
         config.set_value("sessions.default_cwd", str(project))
         config.set_value("engines.usage_refresh_minutes", 30)
-        config.set_value("engines.order", ["codex", "claude"])
         config.set_value("uploads.max_file_size_mb", 19)
         config.set_value("browser.enabled", True)
         config.set_value("browser.color_scheme", "light")
@@ -206,7 +203,6 @@ async def main() -> None:
         # Mutate every restored surface and an excluded ordinary project file.
         config.set_value("instance_name", "mutated-instance")
         config.set_value("engines.usage_refresh_minutes", 5)
-        config.set_value("engines.order", ["claude", "codex"])
         config.set_value("uploads.max_file_size_mb", 2)
         config.set_value("browser.enabled", False)
         config.set_value("browser.color_scheme", "dark")
@@ -228,7 +224,6 @@ async def main() -> None:
         assert restored["ui"] == ui
         assert config.get("instance_name") == "saved-instance"
         assert config.get("engines.usage_refresh_minutes") == 30
-        assert config.get("engines.order") == ["codex", "claude"]
         assert config.get("uploads.max_file_size_mb") == 19
         assert config.get("browser.enabled") is True
         assert config.get("browser.color_scheme") == "light"
@@ -244,15 +239,6 @@ async def main() -> None:
                 pass
             else:
                 raise AssertionError("accepted an invalid schedule: {}".format(bad))
-        for bad in ("codex,claude", ["codex", "codex"], ["codex", "bad key"]):
-            try:
-                candidate = config.export_data()
-                candidate["engines"]["order"] = bad
-                config.normalize_import(candidate)
-            except ValueError:
-                pass
-            else:
-                raise AssertionError("accepted an invalid engine order: {}".format(bad))
         # and a tampered archive cannot smuggle in an unknown rendering mode
         try:
             config.normalize_import(dict(config.export_data(),
@@ -298,7 +284,6 @@ async def main() -> None:
         # A failed database install must put config and filesystem trees back.
         config.set_value("instance_name", "rollback-current")
         config.set_value("engines.usage_refresh_minutes", 60)
-        config.set_value("engines.order", ["claude", "codex"])
         config.set_value("uploads.max_file_size_mb", 23)
         current_upload = Path(config.DATA_DIR) / "uploads" / "current.txt"
         current_upload.write_text("keep me", encoding="utf-8")
@@ -322,7 +307,6 @@ async def main() -> None:
         assert calls["count"] == 2
         assert config.get("instance_name") == "rollback-current"
         assert config.get("engines.usage_refresh_minutes") == 60
-        assert config.get("engines.order") == ["claude", "codex"]
         assert config.get("uploads.max_file_size_mb") == 23
         assert current_upload.read_text(encoding="utf-8") == "keep me"
         assert tls_key.read_bytes() == b"keep current tls material"

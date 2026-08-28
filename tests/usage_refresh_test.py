@@ -227,10 +227,8 @@ async def main() -> None:
         # default; malformed archives still fail closed.
         old_config = config.export_data()
         old_config.pop("engines")
-        normalized_old = config.normalize_import(old_config)
-        assert normalized_old["engines"][
+        assert config.normalize_import(old_config)["engines"][
             "usage_refresh_minutes"] == config.DEFAULT_USAGE_REFRESH_MINUTES
-        assert normalized_old["engines"]["order"] == []
         malformed = config.export_data()
         malformed["engines"]["usage_refresh_minutes"] = "15"
         try:
