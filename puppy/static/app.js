@@ -8059,7 +8059,7 @@ class SettingsView {
     for (const [bid, group] of this.remoteEngineGroups) {
       const backend = state.backends.find(item => item.id === bid);
       if (!backend) continue;
-      group.setMeta(backendLocationVersion(backend));
+      group.setMeta(backend);
       const reachable = state.remoteOk[bid];
       const cached = Object.prototype.hasOwnProperty.call(state.engCache, bid) ?
         state.engCache[bid] : null;
@@ -8205,8 +8205,29 @@ class SettingsView {
     head.appendChild(dot);
     const nameEl = el("span", "engine-node-name", name);
     nameEl.setAttribute("aria-label", name);
-    const metaEl = el("span", "engine-node-meta", meta);
-    metaEl.setAttribute("aria-label", meta);
+    const metaEl = el("span", "engine-node-meta");
+    let locationEl = null;
+    const setMeta = value => {
+      if (value && typeof value === "object" && value.id != null) {
+        if (!locationEl) {
+          metaEl.innerHTML = "";
+          locationEl = backendLocationNode(value);
+          locationEl.classList.add("engine-node-location");
+          metaEl.appendChild(locationEl);
+        } else {
+          syncBackendLocation(locationEl, value);
+        }
+        metaEl.removeAttribute("aria-label");
+        return;
+      }
+      if (locationEl && locationEl._backendUrlTimer)
+        clearTimeout(locationEl._backendUrlTimer);
+      locationEl = null;
+      metaEl.textContent = value || "";
+      if (value) metaEl.setAttribute("aria-label", value);
+      else metaEl.removeAttribute("aria-label");
+    };
+    setMeta(meta);
     head.appendChild(nameEl);
     head.appendChild(metaEl);
     let refresh = null;
@@ -8230,7 +8251,9 @@ class SettingsView {
         refresh.disabled = status === "bad";
       body.innerHTML = "";
       if (message || engines === null) {
-        const note = el("div", "engine-node-message", message || "Checking engines…");
+        const note = el("div", "engine-node-message" +
+          (status === "bad" ? " engine-node-unavailable" : ""),
+          message || "Checking engines…");
         note.setAttribute("aria-label", detail || note.textContent);
         body.appendChild(note);
       } else if (!engines.length) {
@@ -8244,11 +8267,6 @@ class SettingsView {
           body.appendChild(el("div", "engine-node-message engine-node-stale",
             `Latest-version check unavailable · ${stale.latest_check_error}`));
       }
-    };
-    const setMeta = value => {
-      metaEl.textContent = value || "";
-      if (value) metaEl.setAttribute("aria-label", value);
-      else metaEl.removeAttribute("aria-label");
     };
     return { root, update, setMeta };
   }
@@ -8878,8 +8896,7 @@ class SettingsView {
     this.localEngineGroup = localGroup;
     c2.appendChild(localGroup.root);
     for (const b of state.backends) {
-      const meta = backendLocationVersion(b);
-      const group = this.engineGroup(b.name, meta, b.id);
+      const group = this.engineGroup(b.name, b, b.id);
       const cached = state.engCache[b.id];
       group.update({
         status: state.remoteOk[b.id] === false ? "bad" : state.remoteOk[b.id] === true ? "ok" : "pending",

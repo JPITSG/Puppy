@@ -668,6 +668,16 @@ console.log(JSON.stringify({before,after,connected}));
         "front": "0", "shown": "https://vpn.test", "cycling": False,
         "version": " · v1.2.3",
     }, status
+    # The Engines card must use the same active/cycling address treatment as
+    # the Backends card.  A failed node gets a compact, deliberately aligned
+    # callout rather than a loose line of text beneath a right-aligned URL.
+    assert "group.setMeta(backend);" in ui_source
+    assert "const group = this.engineGroup(b.name, b, b.id);" in ui_source
+    assert "locationEl = backendLocationNode(value);" in ui_source
+    assert '(status === "bad" ? " engine-node-unavailable" : "")' in ui_source
+    assert ".engine-node-meta .be-url{" in css_source
+    assert ".engine-node-message.engine-node-unavailable{" in css_source
+    assert "border-left:2px solid rgba(255,107,129,.72)" in css_source
 
 
 def check_drawer_drag(ui_source: str) -> None:
