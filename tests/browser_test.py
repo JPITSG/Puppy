@@ -1368,7 +1368,10 @@ def check_system_prompt_settings(ui_source: str, css_source: str) -> None:
     assert 'backend.capabilities.includes("system-prompt")' in ui_source
     assert '"Puppy browser guidance"' in ui_source
     assert '"Reset to default"' in ui_source
-    assert 'when Browser is off, this text is not sent.' in ui_source
+    guidance_copy = ("Sent to every model turn on nodes where Browser is enabled; "
+                     "it is not sent on nodes where Browser is off.")
+    assert guidance_copy in ui_source.replace('" +\n      "', "")
+    assert "browserNote.textContent = `Sent only for turns on ${node.name}" not in ui_source
     assert 'body: { custom: record.customDraft, browser: record.browserDraft }' in ui_source
     runner_source = (BASE / "puppy" / "runner.py").read_text()
     assert "system_prompt=system_prompts.custom_prompt()" in runner_source
@@ -1463,8 +1466,7 @@ console.log(JSON.stringify({before,dirty,resetState,saved,remote,unsupported,cal
     assert result["before"] == {
         "custom": "LOCAL", "browser": "DEFAULT",
         "status": "Up to 100 characters per field.",
-        "note": ("Sent only for turns on Primary while its Browser option is enabled; "
-                 "when Browser is off, this text is not sent."),
+        "note": guidance_copy,
     }, result
     assert result["dirty"] == "Unsaved changes", result
     assert result["resetState"] == {
@@ -1473,7 +1475,7 @@ console.log(JSON.stringify({before,dirty,resetState,saved,remote,unsupported,cal
         "status": "Saved for new turns.", "toast": "Primary: system prompt saved"}, result
     assert result["remote"]["custom"] == "REMOTE" and \
         result["remote"]["browser"] == "REMOTE BROWSER", result
-    assert "Laptop" in result["remote"]["note"], result
+    assert result["remote"]["note"] == guidance_copy, result
     assert result["unsupported"] == {
         "disabled": True,
         "status": "Backend upgrade required for system prompt settings."}, result

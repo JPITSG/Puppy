@@ -8953,8 +8953,8 @@ class SettingsView {
     const browserCopy = el("div", "system-prompt-section-copy");
     browserCopy.appendChild(el("h3", "", "Puppy browser guidance"));
     const browserNote = el("p", "",
-      "Sent only for turns on this node while its Browser option is enabled; " +
-      "when Browser is off, this text is not sent.");
+      "Sent to every model turn on nodes where Browser is enabled; it is not sent " +
+      "on nodes where Browser is off.");
     browserCopy.appendChild(browserNote);
     const reset = el("button", "btn btn-sm btn-ghost system-prompt-reset", "Reset to default");
     reset.type = "button";
@@ -9022,7 +9022,6 @@ class SettingsView {
       record.saved = false;
     };
     const paint = () => {
-      const node = nodeByBid(activeBid);
       const record = records.get(activeBid);
       const canUse = supported(activeBid);
       const editable = canUse && !!record && record.loaded && !record.saving;
@@ -9062,10 +9061,6 @@ class SettingsView {
         } else {
           status.textContent = `Up to ${record.maxChars.toLocaleString()} characters per field.`;
         }
-      }
-      if (node) {
-        browserNote.textContent = `Sent only for turns on ${node.name} while its Browser ` +
-          "option is enabled; when Browser is off, this text is not sent.";
       }
     };
 
