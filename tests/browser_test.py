@@ -398,7 +398,7 @@ def check_free_identifiers(ui_source: str) -> None:
 def check_reconnect_status(ui_source: str) -> None:
     """A transport outage must overlay, not destroy, model activity text.
 
-    The old close handler called setStatus("connection lost ..."). A reconnect
+    The old close handler called setStatus("Connection lost ..."). A reconnect
     snapshot restores running/idle but carries no ephemeral status text, so the
     warning survived while fresh model output streamed underneath it. Exercise
     the real SessionView status methods in node to keep those states separate.
@@ -454,14 +454,14 @@ console.log(JSON.stringify({before, lost, changedWhileLost, gracefulStop, recove
     assert proc.returncode == 0, proc.stderr[:400]
     result = json.loads(proc.stdout.strip())
     assert "thinking 42 tokens" in result["before"]["header"], result
-    assert "connection lost" in result["lost"]["header"], result
+    assert "Connection lost" in result["lost"]["header"], result
     assert result["lost"]["activity"] == "thinking 42 tokens", result
-    assert "connection lost" in result["changedWhileLost"]["header"], result
+    assert "Connection lost" in result["changedWhileLost"]["header"], result
     assert result["changedWhileLost"]["activity"] == "using shell", result
     assert "Backend shutting down" in result["gracefulStop"]["header"], result
-    assert "connection lost" not in result["gracefulStop"]["header"], result
+    assert "Connection lost" not in result["gracefulStop"]["header"], result
     assert "using shell" in result["recovered"]["header"], result
-    assert "connection lost" not in result["recovered"]["header"], result
+    assert "Connection lost" not in result["recovered"]["header"], result
     assert result["recovered"]["live"] == "using shell", result
 
 
@@ -1522,7 +1522,7 @@ console.log(JSON.stringify({before,dirty,resetState,saved,remote,unsupported,cal
     assert result["resetState"] == {
         "browser": "DEFAULT", "status": "Unsaved changes"}, result
     assert result["saved"] == {
-        "status": "Saved for new turns.", "toast": "Primary: system prompt saved"}, result
+        "status": "Saved for new turns.", "toast": "Primary: System prompt saved"}, result
     assert result["remote"]["custom"] == "REMOTE" and \
         result["remote"]["browser"] == "REMOTE BROWSER", result
     assert result["remote"]["note"] == guidance_copy, result
@@ -2702,7 +2702,7 @@ async def main() -> None:
             assert ui_source.count("wakeRemoteUpdateConnections();") == 2
             assert ui_source.count("this.setReconnecting(false);") == 2
             assert "this.setReconnecting(true);" in ui_source
-            assert 'this.setStatus("connection lost' not in ui_source
+            assert 'this.setStatus("Connection lost' not in ui_source
             # Compatible headless nodes get one lightweight list watcher. Its
             # explicit lifecycle event, not an ordinary socket close, is what
             # retires cached running state immediately.

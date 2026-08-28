@@ -190,7 +190,7 @@ function wireDirectoryPicker(input, box, bidFor) {
         box.appendChild(row);
       }
       if (!d.dirs.length) {
-        const empty = dirPickRow("dp-none", "(no subdirectories)");
+        const empty = dirPickRow("dp-none", "(No subdirectories)");
         empty.disabled = true;
         box.appendChild(empty);
       }
@@ -509,9 +509,9 @@ async function writeClipboardText(text) {
   if (!copied) throw new Error("clipboard unavailable");
 }
 
-async function copyWithToast(text, message = "copied") {
+async function copyWithToast(text, message = "Copied") {
   try { await writeClipboardText(text); toast(message); return true; }
-  catch (e) { toast("copy failed", "error"); return false; }
+  catch (e) { toast("Copy failed", "error"); return false; }
 }
 
 function userMessageCopyButton(text) {
@@ -534,7 +534,7 @@ function userMessageCopyButton(text) {
         button.replaceChildren(copyIcon());
         button.setAttribute("aria-label", "Copy message");
       }, 1400);
-    } catch (error) { toast("copy failed", "error"); }
+    } catch (error) { toast("Copy failed", "error"); }
   };
   return button;
 }
@@ -563,7 +563,7 @@ const LOAD_OLDER_MARGIN = 140;
 /* the header's thinking status; the live thinking block mirrors the header
    verbatim, so this is also what that block reads while a turn is thinking */
 function thinkingLabel(tokens) {
-  return tokens ? `thinking… ${fmtTokens(tokens)} tokens` : "thinking…";
+  return tokens ? `Thinking… ${fmtTokens(tokens)} tokens` : "Thinking…";
 }
 function thinkingIconNode() {
   return el("span", "think-brain", "🧠");
@@ -1418,7 +1418,7 @@ function decorateMarkdownImages(root) {
       icon.appendChild(attachmentFileIcon());
       const copy = el("span", "attach-file-copy");
       copy.appendChild(el("span", "attach-file-name", name));
-      copy.appendChild(el("span", "attach-file-size", src || "no image source"));
+      copy.appendChild(el("span", "attach-file-size", src || "No image source"));
       card.appendChild(icon);
       card.appendChild(copy);
       if (src) card.title = src;
@@ -1506,7 +1506,7 @@ function decorateCodeBlocks(root) {
           button.replaceChildren(copyIcon());
           button.setAttribute("aria-label", "Copy code");
         }, 1400);
-      } catch (err) { toast("copy failed", "error"); }
+      } catch (err) { toast("Copy failed", "error"); }
     };
     wrap.appendChild(button);
   });
@@ -2500,7 +2500,7 @@ async function pollRemoteBackend(backend, forceEngines = false) {
   if (failure) {
     state.remoteOk[bid] = false;
     state.remoteErrors[bid] = remoteStoppingMessage(bid) ||
-      failure.message || "backend unavailable";
+      failure.message || "Backend unavailable";
     return;
   }
 
@@ -2708,16 +2708,16 @@ async function enableAddedBackendBrowser(added) {
   const capabilities = (added.remote && added.remote.capabilities) || [];
   if (Number(added.remote && added.remote.protocol || 0) !== 0 &&
       !(Array.isArray(capabilities) && capabilities.includes("browser"))) {
-    toast(`${name}: this node does not offer a managed browser`, "error", 7000);
+    toast(`${name}: This node does not offer a managed browser`, "error", 7000);
     return;
   }
   try {
     const result = await api(bid, "browser/enabled",
       { method: "POST", body: { enabled: true } });
     state.remoteBrowser[bid] = { enabled: !!result.enabled };
-    toast(`${name}: browser enabled`, "ok");
+    toast(`${name}: Browser enabled`, "ok");
   } catch (error) {
-    toast(`${name}: browser not enabled · ${error.message}`, "error", 8000);
+    toast(`${name}: Browser not enabled · ${error.message}`, "error", 8000);
   }
 }
 
@@ -2749,7 +2749,7 @@ async function openNewBrowser(bid, groupId = null) {
       throw new Error("node returned an invalid browser ID");
     openBrowserTab(bid, browserId, groupId);
   } catch (error) {
-    toast(`${backendName(bid)}: ${error.message || "could not open browser"}`,
+    toast(`${backendName(bid)}: ${error.message || "Could not open browser"}`,
       "error", 7000);
   }
 }
@@ -3196,7 +3196,7 @@ function renderSidebar() {
       if (selectedSession === item.dataset.sessionKey) item.classList.add("active");
       const r1 = el("div", "si-row");
       r1.appendChild(sessDot(s));
-      r1.appendChild(el("div", "si-name", s.name || `session ${s.id}`));
+      r1.appendChild(el("div", "si-name", s.name || `Session ${s.id}`));
       const activity = el("span", "si-be");
       if (s.status === "running") {
         const key = sessionActivityKey(g.bid, s.id);
@@ -3243,7 +3243,7 @@ function renderSidebar() {
   let archTotal = 0;
   for (const g of groups) archTotal += sessionsFor(g.bid).filter(s => s.archived).length;
   const tog = $("toggle-archived");
-  tog.textContent = (state.showArchived ? "hide archived" : "show archived") + ` (${archTotal})`;
+  tog.textContent = (state.showArchived ? "Hide archived" : "Show archived") + ` (${archTotal})`;
   tog.classList.toggle("hidden", archTotal === 0);
   renderFootEngines();
 }
@@ -3366,7 +3366,7 @@ function sessionContextMenu(ev, bid, s) {
     try {
       await api(bid, `sessions/${s.id}/workspace/reset`, { method: "POST" });
       refreshGroup(bid);
-      toast(s.workspace_missing ? "scratch workspace recreated" : "scratch workspace reset");
+      toast(s.workspace_missing ? "Scratch workspace recreated" : "Scratch workspace reset");
     } catch (e) { toast(e.message, "error"); }
   });
   menu.appendChild(el("div", "menu-sep"));
@@ -3378,7 +3378,7 @@ function sessionContextMenu(ev, bid, s) {
       await api(bid, `sessions/${s.id}`, { method: "DELETE" });
       closeTab(`s:${bid}:${s.id}`);
       refreshGroup(bid);
-      toast("session deleted");
+      toast("Session deleted");
     } catch (e) { toast(e.message, "error"); }
   }, true);
 }
@@ -3831,11 +3831,11 @@ function renderFootEngines() {
     }
     if (g.bid && state.remoteOk[g.bid] === false) {
       body.appendChild(el("div", "foot-engine-empty",
-        remoteStoppingMessage(g.bid) || "backend unavailable"));
+        remoteStoppingMessage(g.bid) || "Backend unavailable"));
     } else if (g.engines === null) {
-      body.appendChild(el("div", "foot-engine-empty", "checking engines…"));
+      body.appendChild(el("div", "foot-engine-empty", "Checking engines…"));
     } else if (!g.engines.length) {
-      body.appendChild(el("div", "foot-engine-empty", "no engines reported"));
+      body.appendChild(el("div", "foot-engine-empty", "No engines reported"));
     } else for (const e of g.engines) {
       const row = el("div", "foot-eng");
       const ico = el("span", "foot-ico");
@@ -3849,7 +3849,7 @@ function renderFootEngines() {
          a colour would let a low quota make a working engine look broken. */
       const st = el("span", "st");
       const word = el("span", "st-word " + (healthy ? "ok" : "bad"),
-        !e.installed ? "missing" : (e.auth === "ok" ? "ready" : "no auth"));
+        !e.installed ? "Missing" : (e.auth === "ok" ? "Ready" : "No auth"));
       // ready, but the CLI is behind its latest release
       if (healthy && e.update_available === true) word.classList.add("stale");
       st.appendChild(word);
@@ -3924,7 +3924,7 @@ function openSessionTab(bid, sid, meta, groupId = null) {
   const id = `s:${bid}:${sid}`;
   let tab = state.tabs.find(t => t.id === id);
   if (!tab) {
-    tab = { id, type: "session", bid, sid, title: (meta && (meta.name || `session ${sid}`)) || `session ${sid}` };
+    tab = { id, type: "session", bid, sid, title: (meta && (meta.name || `Session ${sid}`)) || `Session ${sid}` };
     state.tabs.push(tab);
     putTabInPane(id, groupId);
   }
@@ -4216,7 +4216,7 @@ function renderTabNode(t, pane, tabsRoot) {
     dotCls = meta ? meta.engine : "claude";
     if (meta && meta.color) dotColor = meta.color;
     if (meta && meta.status === "running") tab.classList.add("running");
-    if (meta) t.title = meta.name || `session ${t.sid}`;
+    if (meta) t.title = meta.name || `Session ${t.sid}`;
   } else if (t.type === "term") dotCls = "term";
   else if (t.type === "browser") dotCls = "browser";
   const tdot = el("span", "t-dot " + dotCls);
@@ -5383,7 +5383,7 @@ function attachmentChipNode(a, url, uploading = false) {
     const copy = el("span", "attach-file-copy");
     copy.appendChild(el("span", "attach-file-name", a.name));
     copy.appendChild(el("span", "attach-file-size",
-      `${uploading ? "uploading · " : ""}${a.sizeText || fmtBytes(a.size)}`));
+      `${uploading ? "Uploading · " : ""}${a.sizeText || fmtBytes(a.size)}`));
     chip.appendChild(icon);
     chip.appendChild(copy);
   };
@@ -5402,7 +5402,7 @@ function attachmentChipNode(a, url, uploading = false) {
   };
   img.src = url;
   chip.appendChild(img);
-  if (uploading) chip.appendChild(el("span", "attach-state", "uploading"));
+  if (uploading) chip.appendChild(el("span", "attach-state", "Uploading"));
   return chip;
 }
 
@@ -5530,9 +5530,9 @@ class SessionView {
               <div class="composer-meta-scroll">
                 <button type="button" class="mini attach-add" aria-label="Attach files">
                   <span aria-hidden="true"></span></button>
-                ${composerChoice("perm", "permissions", "Permission mode")}
-                ${composerChoice("model", "model", "Model")}
-                ${composerChoice("effort", "effort", "Reasoning effort")}
+                ${composerChoice("perm", "Permissions", "Permission mode")}
+                ${composerChoice("model", "Model", "Model")}
+                ${composerChoice("effort", "Effort", "Reasoning effort")}
               </div>
             </div>
             <button class="btn-queue hidden" type="button">Queue</button>
@@ -6008,7 +6008,7 @@ class SessionView {
         this.setStatus(d.text);
         break;
       case "turn_init":
-        this.setStatus(`model ${d.model}`);
+        this.setStatus(`Model ${d.model}`);
         if (this.session) { this.session.last_model = d.model; this.updateHead(); }
         break;
       case "thinking_tokens":
@@ -6032,7 +6032,7 @@ class SessionView {
         this.status = continued ? "running" : "idle";
         this.clearLive();
         this.updateRunState();
-        this.setStatus(continued ? "starting next queued message…" : "");
+        this.setStatus(continued ? "Starting next queued message…" : "");
         noteSessionActivity(this.tab.bid, this.tab.sid, continued, null, null,
           d.completion_status);
         break;
@@ -6126,7 +6126,7 @@ class SessionView {
     this.syncNativeComposerChoices();
     this.syncComposerMeta();
     this.syncHeadOverflow();
-    this.tab.title = s.name || `session ${s.id}`;
+    this.tab.title = s.name || `Session ${s.id}`;
     renderTabs();
   }
 
@@ -6144,7 +6144,7 @@ class SessionView {
 
   visibleStatusText() {
     return remoteStoppingMessage(this.tab.bid) ||
-      (this.reconnecting ? "connection lost · reconnecting…" : this.statusText);
+      (this.reconnecting ? "Connection lost · reconnecting…" : this.statusText);
   }
 
   renderStatus() {
@@ -6176,7 +6176,7 @@ class SessionView {
      works exactly as before. */
   addLoadOlder() {
     if (this._stopLoadOlder) this._stopLoadOlder();
-    const btn = el("button", "btn btn-sm btn-ghost load-older", "load older…");
+    const btn = el("button", "btn btn-sm btn-ghost load-older", "Load older…");
     let loading = false;
     let armTimer = null;
     let lastTop = null;
@@ -6201,7 +6201,7 @@ class SessionView {
       disarm();
       loading = true;
       btn.classList.add("busy");
-      btn.textContent = "loading older…";
+      btn.textContent = "Loading older…";
       try {
         const d = await api(this.tab.bid, `sessions/${this.tab.sid}/events?before_seq=${this.oldestSeq}&limit=200`);
         const evs = d.events || [];
@@ -6228,7 +6228,7 @@ class SessionView {
         loading = false;
         if (btn.isConnected) {
           btn.classList.remove("busy");
-          btn.textContent = "load older…";
+          btn.textContent = "Load older…";
         }
       }
     };
@@ -6390,14 +6390,14 @@ class SessionView {
           if (d.is_error) card.classList.add("err");
           const body = card.querySelector(".tool-body");
           body.appendChild(el("div", "tb-label", d.is_error ? "error" : "result"));
-          body.appendChild(linkifyInto(el("pre"), displayValue(d.content) || "(empty)"));
+          body.appendChild(linkifyInto(el("pre"), displayValue(d.content) || "(Empty)"));
           return null;
         }
         const n = toolCardNode({tool: d.tool || "tool_result", is_error: d.is_error}, true);
         n.classList.add("open");
         const body = n.querySelector(".tool-body");
         body.appendChild(el("div", "tb-label", d.is_error ? "error" : "result"));
-        body.appendChild(linkifyInto(el("pre"), displayValue(d.content) || "(empty)"));
+        body.appendChild(linkifyInto(el("pre"), displayValue(d.content) || "(Empty)"));
         return n;
       }
       case "info": {
@@ -6427,7 +6427,7 @@ class SessionView {
       }
       case "engine_switch": return this.switchLineNode(ev, d, true);
       case "error": {
-        return el("div", "err-card", d.text || "error");
+        return el("div", "err-card", d.text || "Error");
       }
       /* one shape for every engine: outcome · how long · tokens out · when.
          Cost is deliberately absent - engines price differently (and some not
@@ -6435,7 +6435,7 @@ class SessionView {
       case "result": {
         const n = el("div", "result-line");
         const bits = [];
-        if (!d.ok) bits.push(`<span class="bad">✗ ${esc((d.error || "failed").slice(0, 80))}</span>`);
+        if (!d.ok) bits.push(`<span class="bad">✗ ${esc((d.error || "Failed").slice(0, 80))}</span>`);
         else bits.push("✔");
         if (d.duration_ms) bits.push((d.duration_ms / 1000).toFixed(1) + "s");
         const u = d.usage || {};
@@ -6575,7 +6575,7 @@ class SessionView {
     const dropped = filesFromDataTransfer(event.dataTransfer);
     this.clearFileDropTarget();
     if (dropped.directories)
-      toast("folders cannot be attached · drop individual files instead", "error", 6000);
+      toast("Folders cannot be attached · drop individual files instead", "error", 6000);
     if (dropped.files.length) this.uploadFiles(dropped.files);
   }
 
@@ -6592,14 +6592,14 @@ class SessionView {
     const arbitraryFiles = backendSupportsFileUploads(this.tab.bid);
     const policy = this.uploadPolicy || uploadSettingsFor(this.tab.bid);
     if (policy && !policy.enabled) {
-      toast("file uploads are disabled on this backend", "error");
+      toast("File uploads are disabled on this backend", "error");
       return;
     }
     for (const file of files) {
       const legacyImage = !arbitraryFiles && fromClipboard &&
         ATTACHMENT_PREVIEW_TYPES.has(String(file.type || "").toLowerCase());
       if (!arbitraryFiles && !legacyImage) {
-        toast("upgrade this backend to attach arbitrary files", "error");
+        toast("Upgrade this backend to attach arbitrary files", "error");
         continue;
       }
       if (policy && file.size > policy.max_file_size_bytes) {
@@ -6661,7 +6661,7 @@ class SessionView {
         const wasAborted = !!(controller && controller.signal.aborted);
         this.removeAttachment(attachment, true);
         if (!wasAborted)
-          toast(`file upload failed: ${error.message}`, "error", 6500);
+          toast(`File upload failed: ${error.message}`, "error", 6500);
       }
     }
   }
@@ -6671,7 +6671,7 @@ class SessionView {
     api(this.tab.bid, `sessions/${this.tab.sid}/upload/${uploadId}`, {
       method: "DELETE", keepalive: true, timeoutMs: 10000,
     }).catch(error => {
-      if (!quiet) toast(`could not discard upload: ${error.message}`, "error");
+      if (!quiet) toast(`Could not discard upload: ${error.message}`, "error");
     });
   }
 
@@ -6714,10 +6714,10 @@ class SessionView {
     let text = this.ta.value.trim();
     if (!text && !this.attachments.length) return;
     if (this.attachments.some(attachment => attachment.uploading)) {
-      toast("wait for file uploads to finish", "error");
+      toast("Wait for file uploads to finish", "error");
       return;
     }
-    if (!this.ws || this.ws.readyState !== 1) { toast("not connected", "error"); return; }
+    if (!this.ws || this.ws.readyState !== 1) { toast("Not connected", "error"); return; }
     if (this.attachments.length) {
       const lines = this.attachments.map(attachmentMarkerLine).join("\n");
       text = text ? text + "\n\n" + lines : lines;
@@ -6738,7 +6738,7 @@ class SessionView {
     this.status = "running";
     noteSessionActivity(this.tab.bid, this.tab.sid, true);
     this.updateRunState();
-    this.setStatus("starting…");
+    this.setStatus("Starting…");
   }
   interrupt(clearQueue = false) {
     if (this.ws && this.ws.readyState === 1)
@@ -6749,7 +6749,7 @@ class SessionView {
   showApproval(req) {
     this.approvalEl.classList.remove("hidden");
     this.approvalEl.innerHTML = "";
-    this.approvalEl.appendChild(el("div", "ap-title", `⚠ approval: ${req.display_name || req.tool_name}` +
+    this.approvalEl.appendChild(el("div", "ap-title", `⚠ Approval: ${req.display_name || req.tool_name}` +
       (req.description ? ` — ${req.description}` : "")));
     const pre = el("pre");
     const inp = req.input || {};
@@ -6790,9 +6790,9 @@ class SessionView {
   describeQueuedConfig(item) {
     const eng = engineInfo(this.tab.bid, (this.session || {}).engine);
     const parts = [];
-    if ("model" in item) parts.push("model → " + (modelShorthand(eng, item.model) || "default"));
-    if ("effort" in item) parts.push("effort → " + (effortShorthand(eng, item.effort) || "default"));
-    return parts.join(" · ") || "setting change";
+    if ("model" in item) parts.push("Model → " + (modelShorthand(eng, item.model) || "default"));
+    if ("effort" in item) parts.push("Effort → " + (effortShorthand(eng, item.effort) || "default"));
+    return parts.join(" · ") || "Setting change";
   }
 
   queueRow(item, marker, held, paused = false) {
@@ -6890,22 +6890,22 @@ class SessionView {
       more.onclick = () => { this.queueOpen = true; this.renderQueue(this.queued); };
       box.appendChild(more);
     } else if (this.queueOpen && q.length > QUEUE_ROWS) {
-      const less = el("button", "q-more", "show fewer");
+      const less = el("button", "q-more", "Show fewer");
       less.onclick = () => { this.queueOpen = false; this.renderQueue(this.queued); };
       box.appendChild(less);
     }
     this.syncQueueFade();
   }
   unqueue(index, text) {
-    if (!this.ws || this.ws.readyState !== 1) { toast("not connected", "error"); return; }
+    if (!this.ws || this.ws.readyState !== 1) { toast("Not connected", "error"); return; }
     this.ws.send(JSON.stringify({ type: "unqueue", index, text }));
   }
   setQueuePaused(index, text, paused) {
-    if (!this.ws || this.ws.readyState !== 1) { toast("not connected", "error"); return; }
+    if (!this.ws || this.ws.readyState !== 1) { toast("Not connected", "error"); return; }
     this.ws.send(JSON.stringify({ type: "set_queue_paused", index, text, paused }));
   }
   heldOp(type, index, text) {
-    if (!this.ws || this.ws.readyState !== 1) { toast("not connected", "error"); return; }
+    if (!this.ws || this.ws.readyState !== 1) { toast("Not connected", "error"); return; }
     this.ws.send(JSON.stringify({ type, index, text }));
   }
   /* mask a row's tail only when its line overruns the box */
@@ -7152,7 +7152,7 @@ class SessionView {
   showEffortMenu(anchor) {
     if (!this.session) return;
     const spec = this.composerChoiceSpec("effort");
-    if (!spec.options.length) { toast("engine has no effort levels", "info"); return; }
+    if (!spec.options.length) { toast("Engine has no effort levels", "info"); return; }
     this.optionMenu(anchor, spec.options, spec.selected,
       (value) => this.patchSession({ effort: value }));
   }
@@ -7170,7 +7170,7 @@ class SessionView {
     try {
       const r = await api(this.tab.bid, `sessions/${this.tab.sid}`,
         { method: "PATCH", body: { archived: !(this.session && this.session.archived) } });
-      this.session = r.session; renderSidebar(); toast(this.session.archived ? "archived" : "unarchived");
+      this.session = r.session; renderSidebar(); toast(this.session.archived ? "Archived" : "Unarchived");
     } catch (e) { toast(e.message, "error"); }
   }
 
@@ -7181,7 +7181,7 @@ class SessionView {
       await api(this.tab.bid, `sessions/${this.tab.sid}`, { method: "DELETE" });
       closeTab(this.tab.id);
       if (this.tab.bid) refreshGroup(this.tab.bid);
-      toast("session deleted");
+      toast("Session deleted");
     } catch (e) { toast(e.message, "error"); }
   }
 
@@ -7199,7 +7199,7 @@ class SessionView {
       this.session = r.session;
       this.updateHead();
       if (this.tab.bid) refreshGroup(this.tab.bid);
-      toast(wasMissing ? "scratch workspace recreated" : "scratch workspace reset");
+      toast(wasMissing ? "Scratch workspace recreated" : "Scratch workspace reset");
     } catch (e) { toast(e.message, "error"); }
   }
 }
@@ -7312,7 +7312,7 @@ class TermView {
     writeClipboardText(text).catch(() => {
       if (this.copyWarned) return;                         // once per terminal, not per drag
       this.copyWarned = true;
-      toast("could not copy the selection to the clipboard", "error");
+      toast("Could not copy the selection to the clipboard", "error");
     });
   }
   async pasteClipboard() {
@@ -7325,7 +7325,7 @@ class TermView {
     } catch (e) {
       if (this.pasteWarned) return;
       this.pasteWarned = true;
-      toast("clipboard paste was blocked · use Shift+right-click for the browser menu", "error", 7000);
+      toast("Clipboard paste was blocked · use Shift+right-click for the browser menu", "error", 7000);
     }
   }
   showDead() {
@@ -7538,8 +7538,8 @@ class BrowserView {
     const supported = browserHandoffFor(this.tab.bid);
     const ownerId = Number(this.binding.sessionId) || null;
     const owner = ownerId ? findSessionMeta(this.tab.bid, ownerId) : null;
-    const ownerName = owner ? (owner.name || `session ${ownerId}`) :
-      (this.binding.sessionName || (ownerId ? `session ${ownerId}` : ""));
+    const ownerName = owner ? (owner.name || `Session ${ownerId}`) :
+      (this.binding.sessionName || (ownerId ? `Session ${ownerId}` : ""));
     if (!supported) {
       this.ownerText.textContent = "Session linking requires an updated backend";
       this.ownerBtn.disabled = true;
@@ -7567,12 +7567,12 @@ class BrowserView {
       this.useBtn.disabled = true;
     } else if (selected.sid === ownerId) {
       this.useBtn.textContent = "Current session linked";
-      this.useBtn.title = `${selected.session.name || `session ${selected.sid}`} uses this browser`;
+      this.useBtn.title = `${selected.session.name || `Session ${selected.sid}`} uses this browser`;
       this.useBtn.disabled = true;
     } else {
       this.useBtn.textContent = ownerId ? "Move to current session" : "Use with current session";
       this.useBtn.title = `Use Browser ${browserId} with ` +
-        `${selected.session.name || `session ${selected.sid}`}`;
+        `${selected.session.name || `Session ${selected.sid}`}`;
       this.useBtn.disabled = false;
     }
   }
@@ -7875,7 +7875,7 @@ class BrowserView {
       } else if (d.type === "binding") {
         this.applyBinding(d);
       } else if (d.type === "dialog") {
-        toast(`page ${d.kind || "dialog"} ${d.action}: ${d.message || ""}`.trim(),
+        toast(`Page ${d.kind || "dialog"} ${d.action}: ${d.message || ""}`.trim(),
           "info", 6000);
       } else if (d.type === "error") {
         this.showDead(d.text || "Browser unavailable", true);
@@ -8372,7 +8372,7 @@ class SettingsView {
     const statuses = el("div", "engine-row-statuses");
     const versionState = !e2.installed ? "bad" : e2.update_available === true ? "warn" : "ok";
     const version = el("span", "pill engine-version " + versionState,
-      e2.installed ? (e2.version || "installed") : "not installed");
+      e2.installed ? (e2.version || "Installed") : "Not installed");
     /* The pill turns orange the moment an update exists, so the version it is
        behind belongs right there where the eye already is. Only set a tooltip
        when it says something the pill does not: one that merely repeats the
@@ -8384,7 +8384,7 @@ class SettingsView {
     if (described !== version.textContent) version.title = described;
     statuses.appendChild(version);
     statuses.appendChild(el("span", "pill " + (e2.auth === "ok" ? "ok" : "bad"),
-      "auth: " + e2.auth));
+      "Auth: " + e2.auth));
     row.appendChild(identity);
     row.appendChild(statuses);
     const action = this.engineUpdateButton(bid, nodeName, e2);
@@ -8719,13 +8719,13 @@ class SettingsView {
     };
     save.onclick = async () => {
       if (!interval.value.trim()) {
-        toast("enter a refresh interval in minutes", "error");
+        toast("Enter a refresh interval in minutes", "error");
         interval.focus();
         return;
       }
       const minutes = Number(interval.value);
       if (!Number.isInteger(minutes) || minutes < 0 || minutes > 1440) {
-        toast("refresh interval must be 0 or a whole number from 1 to 1440", "error");
+        toast("Refresh interval must be 0 or a whole number from 1 to 1440", "error");
         interval.focus();
         return;
       }
@@ -8739,7 +8739,7 @@ class SettingsView {
         applyUsageRefreshPayload(bid, result);
         current = result.usage_refresh;
         const suffix = result.usage_refresh.last_error ? " · refresh failed" : "";
-        toast(`${name}: usage refresh saved${suffix}`,
+        toast(`${name}: Usage refresh saved${suffix}`,
           result.usage_refresh.last_error ? "error" : "ok", 6000);
       } catch (error) {
         toast(`${name}: ${error.message}`, "error", 7000);
@@ -8818,13 +8818,13 @@ class SettingsView {
     };
     save.onclick = async () => {
       if (!limit.value.trim()) {
-        toast("enter a maximum file size in MiB", "error");
+        toast("Enter a maximum file size in MiB", "error");
         limit.focus();
         return;
       }
       const megabytes = Number(limit.value);
       if (!Number.isInteger(megabytes) || megabytes < 0 || megabytes > 1024) {
-        toast("maximum file size must be a whole number from 0 to 1024 MiB", "error");
+        toast("Maximum file size must be a whole number from 0 to 1024 MiB", "error");
         limit.focus();
         return;
       }
@@ -8839,7 +8839,7 @@ class SettingsView {
         const policy = rememberUploadSettings(bid, result.uploads);
         if (!policy) throw new Error("backend returned an invalid upload setting");
         current = policy;
-        toast(`${name}: file uploads ${policy.enabled ? `limited to ${megabytes} MiB` : "disabled"}`, "ok");
+        toast(`${name}: File uploads ${policy.enabled ? `limited to ${megabytes} MiB` : "disabled"}`, "ok");
       } catch (error) {
         toast(`${name}: ${error.message}`, "error", 7000);
       } finally {
@@ -8870,13 +8870,13 @@ class SettingsView {
       if (root) {
         root.classList.toggle("disabled", input.disabled);
         root.onclick = input.disabled ?
-          () => toast(`${name}: ${st.reason || "no usable browser"}`, "error", 6000) : null;
+          () => toast(`${name}: ${st.reason || "No usable browser"}`, "error", 6000) : null;
       }
       if (st.available) {
-        setNote((st.product || "browser available") +
+        setNote((st.product || "Browser available") +
           (st.sandbox === "no-sandbox" ? " · sandbox off (runs as root)" : ""), false);
       } else {
-        setNote(st.reason || "no usable browser on this node", true);
+        setNote(st.reason || "No usable browser on this node", true);
       }
     };
     /* Only availability needs the probe: whether the toggle is on is already
@@ -8890,7 +8890,7 @@ class SettingsView {
       if (generation !== this.renderGeneration || !input.isConnected) return;
       input.disabled = true;
       if (root) root.classList.add("disabled");
-      setNote(error.message || "browser status unavailable", true);
+      setNote(error.message || "Browser status unavailable", true);
       return;
     }
     if (generation !== this.renderGeneration || !input.isConnected) return;
@@ -8907,7 +8907,7 @@ class SettingsView {
         else state.browser = { enabled: !!result.enabled };
         if (result.enabled === false) closeBrowserTabsForBackend(bid);
         renderSidebar();
-        toast(`${name}: browser ${result.enabled ? "enabled" : "disabled"}`, "ok");
+        toast(`${name}: Browser ${result.enabled ? "enabled" : "disabled"}`, "ok");
       } catch (error) {
         input.checked = !desired;
         input.disabled = false;
@@ -9133,7 +9133,7 @@ class SettingsView {
         record = normalized(result.system_prompt);
         record.saved = true;
         records.set(bid, record);
-        toast(`${node ? node.name : "Node"}: system prompt saved`, "ok");
+        toast(`${node ? node.name : "Node"}: System prompt saved`, "ok");
       } catch (error) {
         if (generation !== this.renderGeneration || !card.isConnected) return;
         record.saving = false;
@@ -9238,7 +9238,7 @@ class SettingsView {
     const tokenControl = c1.querySelector("#set-token");
     const useToken = () => {
       tokenStep = (tokenStep + 1) % TOKEN_STEPS.length;
-      if (tokenStep === 2) copyWithToast(settings.api_token, "token copied");
+      if (tokenStep === 2) copyWithToast(settings.api_token, "Token copied");
       tokenControl.textContent = tokenStep ? settings.api_token : TOKEN_MASK;
       tokenControl.setAttribute("aria-label", TOKEN_STEPS[tokenStep]);
     };
@@ -9258,7 +9258,7 @@ class SettingsView {
       const proposedPort = Number(proposedPortText);
       if (!proposedPortText || !Number.isInteger(proposedPort) ||
           proposedPort < 1 || proposedPort > 65535) {
-        toast("bind port must be a whole number between 1 and 65535", "error");
+        toast("Bind port must be a whole number between 1 and 65535", "error");
         portInput.focus();
         return;
       }
@@ -9335,7 +9335,7 @@ class SettingsView {
         }
         await refreshState();
         await this.render();
-        toast("saved", "ok");
+        toast("Saved", "ok");
       } catch (e) {
         if (bindCommit) {
           const activation = bindCommit.restart_required
@@ -9387,7 +9387,7 @@ class SettingsView {
     const c2 = el("div", "card");
     c2.innerHTML = `<h2>Engines</h2>`;
     const localGroup = this.engineGroup(settings.instance_name,
-      `this instance · v${settings.version}`, 0);
+      `This instance · v${settings.version}`, 0);
     localGroup.update({ status: "ok", engines: state.engines });
     this.localEngineGroup = localGroup;
     c2.appendChild(localGroup.root);
@@ -9543,7 +9543,7 @@ class SettingsView {
       state.notify = { configured: !!(r.settings.command || "").trim(),
                        enabled: !!r.settings.enabled };
       syncBell();
-    }).catch(() => nfNoteSet("could not load the current setting", true));
+    }).catch(() => nfNoteSet("Could not load the current setting", true));
     nfEnabled.onchange = async () => {
       const desired = nfEnabled.checked;
       nfEnabled.dataset.saving = "true";
@@ -9570,19 +9570,19 @@ class SettingsView {
         state.notify = { configured: !!(r.settings.command || "").trim(),
                          enabled: !!r.settings.enabled };
         syncBell();
-        nfNoteSet("saved");
-        toast(state.notify.configured ? "completion alert saved" :
-          "completion alert command cleared", "ok");
+        nfNoteSet("Saved");
+        toast(state.notify.configured ? "Completion alert saved" :
+          "Completion alert command cleared", "ok");
       } catch (e) { nfNoteSet(e.message, true); }
     };
     notifyCard.querySelector("#nf-test").onclick = async () => {
-      nfNoteSet("running…");
+      nfNoteSet("Running…");
       try {
         const r = await api(0, "notify/test", { method: "POST", body: {
           backend: Number(nfBackend.value || 0), command: nfCmd.value,
         } });
-        if (r.ok) nfNoteSet("ok" + (r.output ? " · " + r.output.slice(-120) : ""));
-        else nfNoteSet(r.error || `exit ${r.rc}` + (r.output ? " · " + r.output.slice(-120) : ""), true);
+        if (r.ok) nfNoteSet("OK" + (r.output ? " · " + r.output.slice(-120) : ""));
+        else nfNoteSet(r.error || `Exit ${r.rc}` + (r.output ? " · " + r.output.slice(-120) : ""), true);
       } catch (e) { nfNoteSet(e.message, true); }
     };
 
@@ -9723,7 +9723,7 @@ class SettingsView {
           const current = state.backends.find(item => item.id === b.id);
           if (current && result.backend) Object.assign(current, result.backend);
           if (result.connection_changed) resetRemoteBackendConnection(b.id);
-          toast(`${(result.backend && result.backend.name) || b.name}: backend updated`, "ok");
+          toast(`${(result.backend && result.backend.name) || b.name}: Backend updated`, "ok");
           try {
             await refreshState();
             if (this.inner.isConnected) await this.render();
@@ -9750,7 +9750,7 @@ class SettingsView {
             if (r.ok) {
               state.remoteOk[b.id] = true;
               delete state.remoteErrors[b.id];
-              toast(`${b.name}: ok (${r.remote && r.remote.version})`, "ok");
+              toast(`${b.name}: OK (${r.remote && r.remote.version})`, "ok");
               await refreshState(); await this.render();
             } else {
               const message = r.error || "HTTP " + r.status;
@@ -9844,7 +9844,7 @@ class SettingsView {
           tls_fingerprint: pairingValue("#be-tls", "tls_sha256"),
           auto_upgrade: c3.querySelector("#be-auto").checked,
         }});
-        toast("backend added", "ok");
+        toast("Backend added", "ok");
         c3.querySelector("#be-name").value = c3.querySelector("#be-token").value =
           c3.querySelector("#be-tls").value = "";
         addUrlEditor.setValues([""]);
@@ -9872,7 +9872,7 @@ class SettingsView {
       try {
         await api(0, "auth/password", { method: "POST", body: {
           old: c4.querySelector("#pw-old").value, new: c4.querySelector("#pw-new").value } });
-        toast("password changed", "ok");
+        toast("Password changed", "ok");
         c4.querySelector("#pw-old").value = c4.querySelector("#pw-new").value = "";
       } catch (e) { toast(e.message, "error"); }
     };
@@ -9910,7 +9910,7 @@ class SettingsView {
         document.body.appendChild(link);
         link.click();
         link.remove();
-        toast(`backup ready · ${prepared.sessions} sessions · ${fmtBytes(prepared.size)}`, "ok");
+        toast(`Backup ready · ${prepared.sessions} sessions · ${fmtBytes(prepared.size)}`, "ok");
       } catch (error) {
         toast(error.message, "error", 7000);
       } finally {
@@ -10113,9 +10113,9 @@ function modalEditBackend(backend, onSaved) {
     } catch (caught) {
       if (m.isConnected) {
         setBusy(false);
-        setError(caught.message || "backend could not be updated");
+        setError(caught.message || "Backend could not be updated");
       } else {
-        toast(caught.message || "backend could not be updated", "error", 7000);
+        toast(caught.message || "Backend could not be updated", "error", 7000);
       }
     }
   };
@@ -10142,7 +10142,7 @@ async function modalNewSession(groupId = null) {
     <div id="ns-dir-fields">
       <label>Working directory<input type="text" id="ns-cwd" spellcheck="false"></label>
       <div class="dirpick hidden" id="ns-dirs"></div>
-      <label class="check" style="margin:8px 0"><input type="checkbox" id="ns-mkdir"> create directory if missing</label>
+      <label class="check" style="margin:8px 0"><input type="checkbox" id="ns-mkdir"> Create directory if missing</label>
     </div>
     <p class="hint scratch-note hidden" id="ns-scratch-note">Puppy creates a private empty workspace in the host's temporary storage (normally /tmp). It survives Puppy restarts and is deleted with this session, but the host may clear it—commonly on reboot. The transcript is kept and Puppy can start a fresh workspace.</p>
     <label>Name <span style="text-transform:none;letter-spacing:0">(optional, auto from first message)</span><input type="text" id="ns-name"></label>
@@ -10151,7 +10151,7 @@ async function modalNewSession(groupId = null) {
       <label>Effort<select id="ns-effort"></select></label>
       <label>Permissions<select id="ns-perm"></select></label>
     </div>
-    <label class="hidden" id="ns-model-custom-wrap">Custom model<input type="text" id="ns-model-custom" placeholder="model id"></label>
+    <label class="hidden" id="ns-model-custom-wrap">Custom model<input type="text" id="ns-model-custom" placeholder="Model ID"></label>
     <div class="field-lbl" style="margin-top:8px">Color<div class="swatch-row" id="ns-colors"></div></div>
     <div class="m-btns"><button class="btn" id="ns-cancel">Cancel</button><button class="btn btn-pri" id="ns-go">Start session</button></div>`,
     "new-session-modal");
@@ -10254,7 +10254,7 @@ async function modalNewSession(groupId = null) {
       }
     } catch (e) {
       if (sequence !== engineLoadSequence || parseInt(beSel.value, 10) !== bid) return;
-      toast("backend unavailable: " + e.message, "error");
+      toast("Backend unavailable: " + e.message, "error");
       if (bid) {
         state.remoteEngineErrors[bid] = e.message;
         syncRemoteStateViews();
@@ -10270,7 +10270,7 @@ async function modalNewSession(groupId = null) {
       card.dataset.key = e2.key;
       card.innerHTML = `<div class="ep-ico prov ${PROVIDERS[e2.key] ? "prov-" + PROVIDERS[e2.key] : ""}">${PROVIDERS[e2.key] ? "" : esc((e2.key[0] || "?").toUpperCase())}</div>
         <div class="ep-name">${esc(e2.label)}</div>
-        <div class="ep-sub">${e2.installed ? (e2.auth === "ok" ? "ready" : "no auth") : "missing"}</div>`;
+        <div class="ep-sub">${e2.installed ? (e2.auth === "ok" ? "Ready" : "No auth") : "Missing"}</div>`;
       card.onclick = () => pick(e2.key);
       engBox.appendChild(card);
     }
@@ -10305,7 +10305,7 @@ async function modalNewSession(groupId = null) {
   m.querySelector("#ns-cancel").onclick = close;
   m.querySelector("#ns-go").onclick = async () => {
     const bid = parseInt(beSel.value, 10);
-    if (!engine) { toast("pick an engine", "error"); return; }
+    if (!engine) { toast("Pick an engine", "error"); return; }
     try {
       const r = await api(bid, "sessions", { method: "POST", body: {
         engine, workspace_kind: workspaceKind,
@@ -10326,7 +10326,7 @@ async function modalNewSession(groupId = null) {
 function modalOpenSession(groupId = null) {
   const groups = [{ bid: 0, name: backendName(0), sessions: state.sessions }]
     .concat(state.backends.map(b => ({ bid: b.id, name: b.name, sessions: state.remoteSessions[b.id] || [] })));
-  let html = `<h2>Open session</h2><input type="text" id="os-filter" placeholder="filter…"><div id="os-list" style="max-height:50vh;overflow-y:auto;margin-top:10px"></div>`;
+  let html = `<h2>Open session</h2><input type="text" id="os-filter" placeholder="Filter…"><div id="os-list" style="max-height:50vh;overflow-y:auto;margin-top:10px"></div>`;
   const { m, close } = modal(html);
   const list = m.querySelector("#os-list");
   const filterInp = m.querySelector("#os-filter");
@@ -10342,7 +10342,7 @@ function modalOpenSession(groupId = null) {
         const item = el("button", "sess-item");
         const r1 = el("div", "si-row");
         r1.appendChild(sessDot(s));
-        r1.appendChild(el("div", "si-name", (s.name || `session ${s.id}`) + (s.archived ? " (archived)" : "")));
+        r1.appendChild(el("div", "si-name", (s.name || `Session ${s.id}`) + (s.archived ? " (archived)" : "")));
         const r2 = el("div", "si-row sub");
         r2.appendChild(provIcon(s.engine));
         const workspace = el("div", "si-sub" + (s.workspace_missing ? " warn" : ""),
@@ -10366,7 +10366,7 @@ function modalNewTerminal(groupId = null) {
     .concat(state.backends.filter(b => backendHasCapability(b, "terminal")));
   const { m, close } = modal(`<h2>New terminal</h2>
     <label>Backend<select id="nt-be">${beOpts.map(b => `<option value="${b.id}">${esc(b.name)}</option>`).join("")}</select></label>
-    <label>Command <span style="text-transform:none">(optional)</span><input type="text" id="nt-cmd" placeholder="default shell — or e.g. ssh user@host"></label>
+    <label>Command <span style="text-transform:none">(optional)</span><input type="text" id="nt-cmd" placeholder="Default shell — or e.g. ssh user@host"></label>
     <div class="m-btns"><button class="btn" id="nt-cancel">Cancel</button><button class="btn btn-pri" id="nt-go">Open</button></div>`);
   m.querySelector("#nt-cancel").onclick = close;
   const go = () => {
@@ -10385,7 +10385,7 @@ function openBrowserFromMenu(groupId = null) {
     .concat(state.backends)
     .filter(node => browserEnabledFor(node.id));
   if (!nodes.length) {
-    toast("no node has its browser enabled · see Settings", "error", 6000);
+    toast("No node has its browser enabled · see Settings", "error", 6000);
     openSettingsTab(groupId);
     return;
   }
@@ -10425,7 +10425,7 @@ function modalSwitchEngine(view) {
       const card = el("div", "ep" + (pick === e2.key ? " sel" : ""));
       card.innerHTML = `<div class="ep-ico prov ${PROVIDERS[e2.key] ? "prov-" + PROVIDERS[e2.key] : ""}">${PROVIDERS[e2.key] ? "" : esc((e2.key[0] || "?").toUpperCase())}</div>
         <div class="ep-name">${esc(e2.label)}</div>
-        <div class="ep-sub">${e2.key === s.engine ? "current (reseed)" : (e2.auth === "ok" ? "ready" : "no auth")}</div>`;
+        <div class="ep-sub">${e2.key === s.engine ? "Current (reseed)" : (e2.auth === "ok" ? "Ready" : "No auth")}</div>`;
       card.onclick = () => { pick = e2.key; render(); };
       box.appendChild(card);
     }
@@ -10438,7 +10438,7 @@ function modalSwitchEngine(view) {
       view.session = r.session;
       view.updateHead();
       close();
-      toast(`switched to ${pick}`, "ok");
+      toast(`Switched to ${pick}`, "ok");
     } catch (e) { toast(e.message, "error"); }
   };
 }
@@ -10489,6 +10489,6 @@ function syncLabelNudge() {
 /* ================= go ================= */
 syncLabelNudge();
 initAuth().catch(e => {
-  toast("failed to reach backend: " + e.message, "error");
+  toast("Failed to reach backend: " + e.message, "error");
   showAuth("login");
 });

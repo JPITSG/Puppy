@@ -271,21 +271,21 @@ async def probe(force: bool = False) -> dict:
                 binary = found
                 break
         if not binary:
-            result["reason"] = "no Chromium or Chrome binary found on this node's PATH"
+            result["reason"] = "No Chromium or Chrome binary found on this node's PATH"
     if binary:
         result["binary"] = binary
         product = await _run_version(binary)
         match = re.search(r"(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?", product or "")
         if not product:
-            result["reason"] = "the browser binary did not report a version"
+            result["reason"] = "The browser binary did not report a version"
         elif not match:
-            result["reason"] = "could not parse a browser version from: " + product[:80]
+            result["reason"] = "Could not parse a browser version from: " + product[:80]
         else:
             result["product"] = product
             result["major"] = int(match.group(1))
             if result["major"] < MIN_MAJOR:
                 result["reason"] = (
-                    "browser {} is too old for reliable headless streaming "
+                    "Browser {} is too old for reliable headless streaming "
                     "(needs {}+)".format(result["major"], MIN_MAJOR))
             else:
                 result["available"] = True
@@ -320,10 +320,10 @@ async def set_enabled(value: bool) -> dict:
     if value:
         st = await probe()
         if not st["available"]:
-            raise BrowserError(st["reason"] or "no usable browser on this node")
+            raise BrowserError(st["reason"] or "No usable browser on this node")
     config.set_value("browser.enabled", bool(value))
     if not value and _manager is not None:
-        await _manager.stop("browser disabled")
+        await _manager.stop("Browser disabled")
     return await status_payload()
 
 
@@ -348,7 +348,7 @@ async def apply_config() -> None:
     if _manager is not None:
         await _manager.clear_session_bindings()
     if not enabled() and _manager is not None:
-        await _manager.stop("browser disabled by restored configuration")
+        await _manager.stop("Browser disabled by restored configuration")
         return
     # a restore can carry a different theme; browsers still running follow it
     await set_color_scheme(color_scheme())
@@ -756,14 +756,14 @@ class Manager:
             if self.closed:
                 raise BrowserError("Browser {} is closed".format(self.browser_id))
             if not enabled():
-                raise BrowserError("the browser is disabled on this node")
+                raise BrowserError("The browser is disabled on this node")
             if self.running:
                 return
             st = await probe()
             if not enabled():
-                raise BrowserError("the browser is disabled on this node")
+                raise BrowserError("The browser is disabled on this node")
             if not st["available"]:
-                raise BrowserError(st["reason"] or "no usable browser on this node")
+                raise BrowserError(st["reason"] or "No usable browser on this node")
             profile = self._subdir("profile")
             home = self._subdir("home")
             downloads = self._subdir("downloads")
@@ -806,7 +806,7 @@ class Manager:
                         except OSError:
                             pass
             if spawn_error is not None:
-                raise BrowserError("could not start the browser: {}".format(spawn_error))
+                raise BrowserError("Could not start the browser: {}".format(spawn_error))
             try:
                 with open(self.pidfile, "w", encoding="utf-8") as f:
                     f.write(str(spawned))
@@ -864,7 +864,7 @@ class Manager:
                         tail = f.read()[-400:].strip()
                 except OSError:
                     pass
-                raise BrowserError("the browser failed to start" +
+                raise BrowserError("The browser failed to start" +
                                    (": " + tail.splitlines()[-1] if tail else ""))
 
     async def stop(self, reason: str) -> None:
@@ -894,7 +894,7 @@ class Manager:
             self.viewport_repair_task = None
         for fut in list(self.pending.values()):
             if not fut.done():
-                fut.set_exception(BrowserError("browser exited"))
+                fut.set_exception(BrowserError("Browser exited"))
         self.pending.clear()
         for transport in (self.write_transport, self.read_transport):
             if transport is not None:
@@ -932,9 +932,9 @@ class Manager:
         pid, self.pid = self.pid, None
         for fut in list(self.pending.values()):
             if not fut.done():
-                fut.set_exception(BrowserError("browser exited"))
+                fut.set_exception(BrowserError("Browser exited"))
         self.pending.clear()
-        self._broadcast_json({"type": "gone", "reason": "the browser exited"})
+        self._broadcast_json({"type": "gone", "reason": "The browser exited"})
         if pid is not None:
             asyncio.ensure_future(_reap_group(pid))
         asyncio.ensure_future(self._teardown())
@@ -1444,7 +1444,7 @@ class Manager:
             except asyncio.CancelledError:
                 return
             if not self.viewers:
-                await self.stop("no viewers for {} minutes".format(IDLE_STOP_SECONDS // 60))
+                await self.stop("No viewers for {} minutes".format(IDLE_STOP_SECONDS // 60))
 
         self.idle_task = asyncio.ensure_future(later())
 
@@ -3141,7 +3141,7 @@ class BrowserRegistry:
     def _create_locked(self, origin: str, owner_session=None) -> Manager:
         """Register one instance while ``self.lock`` is held."""
         if not enabled():
-            raise BrowserError("the browser is disabled on this node")
+            raise BrowserError("The browser is disabled on this node")
         browser_id = self._new_id()
         record = {
             "created_at": time.time(), "closed_at": None,
@@ -3172,13 +3172,13 @@ class BrowserRegistry:
         try:
             await instance.ensure_started()
         except Exception:
-            await self.close(instance.browser_id, "browser launch failed")
+            await self.close(instance.browser_id, "Browser launch failed")
             raise
         return instance
 
     async def create(self, origin: str = "user", owner_session=None) -> Manager:
         if not enabled():
-            raise BrowserError("the browser is disabled on this node")
+            raise BrowserError("The browser is disabled on this node")
         if origin not in ("agent", "user", "legacy"):
             raise BrowserError("invalid browser origin")
         owner_session = self._normalize_owner(owner_session)
@@ -3193,7 +3193,7 @@ class BrowserRegistry:
             raise BrowserError("Browser {} is closed or unknown".format(browser_id))
         return instance
 
-    async def close(self, browser_id, reason: str = "closed by user") -> bool:
+    async def close(self, browser_id, reason: str = "Closed by user") -> bool:
         browser_id = normalize_browser_id(browser_id)
         async with self.lock:
             instance = self.instances.get(browser_id)
@@ -3437,7 +3437,7 @@ async def ws_browser(request: web.Request):
     if not enabled():
         try:
             await ws.send_json({"type": "error",
-                                "text": "the browser is disabled on this node"})
+                                "text": "The browser is disabled on this node"})
         except Exception:
             pass
         await ws.close()

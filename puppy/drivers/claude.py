@@ -145,7 +145,7 @@ class ClaudeDriver(Driver):
                 blk = (inner.get("content_block") or {})
                 if blk.get("type") == "tool_use":
                     return [{"a": "transient", "msg": {"type": "status",
-                                                      "text": f"using {blk.get('name', 'tool')}..."}}]
+                                                      "text": f"Using {blk.get('name', 'tool')}..."}}]
             return []
 
         if t == "system":

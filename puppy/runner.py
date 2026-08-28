@@ -590,7 +590,7 @@ class SessionHub:
         already_interrupted = self.interrupted
         self.interrupted = True
         if not already_interrupted:
-            self.broadcast({"type": "status", "text": "interrupting..."})
+            self.broadcast({"type": "status", "text": "Interrupting..."})
         proc = self.proc
         # A stop can arrive while create_subprocess_exec or the driver's initial
         # stdin handshake is in flight. _run_turn observes the flag as soon as
@@ -727,7 +727,7 @@ class SessionHub:
             try:
                 session, workspace_reset = workspaces.ensure_session(session)
             except workspaces.WorkspaceError as exc:
-                self._emit("error", {"text": "scratch workspace unavailable: {}".format(exc)})
+                self._emit("error", {"text": "Scratch workspace unavailable: {}".format(exc)})
                 return
             if workspace_reset:
                 self._emit("info", {
@@ -750,7 +750,7 @@ class SessionHub:
             first_turn = not session.get("native_session_id")
             if do_handoff:
                 prompt = handoff.build(session, exclude_seq=user_ev["seq"]) + text
-                self.broadcast({"type": "status", "text": "seeding new engine with handoff..."})
+                self.broadcast({"type": "status", "text": "Seeding new engine with handoff..."})
 
             pinned = str(uuid.uuid4())
             self._active_turn_id = pinned
@@ -764,7 +764,7 @@ class SessionHub:
 
             cwd = session["cwd"]
             if not os.path.isdir(cwd):
-                self._emit("error", {"text": f"working directory missing: {cwd}"})
+                self._emit("error", {"text": f"Working directory missing: {cwd}"})
                 return
 
             log.info("session %s turn: %s", self.id, " ".join(argv[:8]) + " ...")
@@ -793,7 +793,7 @@ class SessionHub:
             while True:
                 remaining = deadline - time.time()
                 if remaining <= 0:
-                    self._emit("error", {"text": f"turn timeout after {int(timeout)}s - killed"})
+                    self._emit("error", {"text": f"Turn timeout after {int(timeout)}s - killed"})
                     self._signal_if_alive(self.proc, signal.SIGKILL)
                     break
                 try:
@@ -884,18 +884,18 @@ class SessionHub:
 
             if not got_result:
                 if self.interrupted:
-                    self._emit("info", {"subtype": "interrupted", "text": "turn interrupted by user"})
+                    self._emit("info", {"subtype": "interrupted", "text": "Turn interrupted by user"})
                 else:
                     tail = self.stderr_tail.strip()[-1500:]
                     if driver_base.looks_like_auth_failure(tail):
                         driver_base.note_auth_failure(session["engine"], tail[-400:])
-                    self._emit("error", {"text": "engine exited without a result"
+                    self._emit("error", {"text": "Engine exited without a result"
                                                  + (f" (exit {self.proc.returncode})" if self.proc.returncode else "")
                                                  + (f"\n{tail}" if tail else "")})
         except Exception as e:
             log.exception("turn failed for session %s", self.id)
             try:
-                self._emit("error", {"text": f"internal error: {e}"})
+                self._emit("error", {"text": f"Internal error: {e}"})
             except Exception:
                 pass
         finally:

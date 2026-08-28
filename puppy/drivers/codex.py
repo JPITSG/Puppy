@@ -497,7 +497,7 @@ class CodexDriver(Driver):
             return [{"a": "native_id", "id": ev.get("thread_id", "")}]
 
         if t == "turn.started":
-            return [{"a": "transient", "msg": {"type": "status", "text": "thinking..."}}]
+            return [{"a": "transient", "msg": {"type": "status", "text": "Thinking..."}}]
 
         if t in ("item.started", "item.updated"):
             item = ev.get("item") or {}
@@ -508,13 +508,13 @@ class CodexDriver(Driver):
                 return [{"a": "transient", "msg": {"type": "status",
                                                    "text": f"$ {_clean_cmd(item.get('command'))[:120]}"}}]
             if it == "agent_message" and item.get("text"):
-                return [{"a": "transient", "msg": {"type": "status", "text": "writing..."}}]
+                return [{"a": "transient", "msg": {"type": "status", "text": "Writing..."}}]
             if it == "web_search":
                 search_input = _web_search_input(item)
                 query = search_input.get("query") or search_input.get("url") or ""
                 if not query and isinstance(search_input.get("queries"), list):
                     query = next((value for value in search_input["queries"] if value), "")
-                text = "web search" + (": " + str(query)[:100] if query else "...")
+                text = "Web search" + (": " + str(query)[:100] if query else "...")
                 return [{"a": "transient", "msg": {"type": "status", "text": text}}]
             return []
 
@@ -561,7 +561,7 @@ class CodexDriver(Driver):
                 txt = "\n".join(("[x] " if x.get("completed") else "[ ] ") +
                                 str(x.get("text", ""))
                                 for x in items if isinstance(x, dict))
-                return [{"a": "transient", "msg": {"type": "status", "text": "plan updated"}},
+                return [{"a": "transient", "msg": {"type": "status", "text": "Plan updated"}},
                         {"a": "event", "kind": "info", "data": {"subtype": "todo", "text": txt}}] if txt else []
             if it == "error":
                 return [{"a": "event", "kind": "error", "data": {"text": item.get("message", "codex error")}}]
