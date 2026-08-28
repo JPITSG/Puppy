@@ -30,6 +30,23 @@ log = logging.getLogger("puppy.drivers.codex")
 
 # codex wraps every command in `/bin/bash -lc "<script>"` (or -c); show the script
 _SHELL_WRAP = re.compile(r"^\s*(?:\S*/)?(?:ba|z)?sh\s+-l?c\s+(.*)$", re.S)
+_BROWSER_POLICY_OPEN = "<puppy_browser_policy>"
+_BROWSER_POLICY_CLOSE = "</puppy_browser_policy>"
+
+
+def _with_browser_guidance(prompt: str, browser_mcp) -> str:
+    """Add turn-scoped browser guidance without replacing Codex user config.
+
+    Codex's developer_instructions config value is replacement-oriented. A
+    tagged runtime preface keeps any user-configured developer instructions
+    intact. The runner persists the original text before build_cmd is called,
+    so this context never appears as part of the user's WebUI transcript.
+    """
+    guidance = str((browser_mcp or {}).get("engine_guidance") or "").strip()
+    if not guidance:
+        return prompt
+    return "{}\n{}\n{}\n\n{}".format(
+        _BROWSER_POLICY_OPEN, guidance, _BROWSER_POLICY_CLOSE, prompt)
 
 
 def _codex_home() -> str:
@@ -449,6 +466,7 @@ class CodexDriver(Driver):
             for key, value in sorted((browser_mcp.get("env") or {}).items()):
                 argv += ["-c", "{}.env.{}={}".format(
                     prefix, key, json.dumps(str(value)))]
+            prompt = _with_browser_guidance(prompt, browser_mcp)
         native = session.get("native_session_id") or ""
         if first_turn or not native:
             argv += [prompt]

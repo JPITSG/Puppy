@@ -77,6 +77,11 @@ class ClaudeDriver(Driver):
                 "env": dict(browser_mcp.get("env") or {}),
             }}}
             argv += ["--mcp-config", json.dumps(mcp_config, separators=(",", ":"))]
+            guidance = str(browser_mcp.get("engine_guidance") or "").strip()
+            if guidance:
+                # Additive: preserve any system prompt the user or CLI already
+                # supplies while making the selection policy model-visible.
+                argv += ["--append-system-prompt", guidance]
         native = session.get("native_session_id") or ""
         if first_turn or not native:
             argv += ["--session-id", pinned_id]

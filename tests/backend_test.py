@@ -1541,6 +1541,10 @@ async def main() -> None:
         mcp_result = json.loads(mcp_output.strip())
         assert mcp_result["result"]["serverInfo"]["name"] == "Puppy managed browser"
         assert "four uppercase" in mcp_result["result"]["instructions"]
+        assert "default for interactive web navigation" in \
+            mcp_result["result"]["instructions"]
+        assert "repository's own browser test suite" in \
+            mcp_result["result"]["instructions"]
         self_test = json.loads(subprocess.check_output([
             sys.executable, str(release_artifact), "self-test", "--data-dir",
             str(temp_root / "self-test-data"),

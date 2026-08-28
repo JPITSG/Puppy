@@ -1687,6 +1687,11 @@ async def main() -> None:
             session_runner.updates_attach(updates_capture)
             descriptor = browser_agent.turn_mcp(agent_sid, turn_id)
             assert descriptor and descriptor["name"] == "puppy_browser", descriptor
+            policy = browser_agent.AGENT_SELECTION_POLICY
+            assert descriptor["engine_guidance"] == policy
+            assert "default for interactive web navigation" in policy
+            assert "repository's own browser test suite" in policy
+            assert "briefly state the concrete reason" in policy
             assert descriptor["env"]["PUPPY_BROWSER_SESSION_ID"] == str(agent_sid)
             assert descriptor["env"]["PUPPY_BROWSER_TURN_ID"] == turn_id
             assert Path(descriptor["env"]["PUPPY_BROWSER_SOCKET"]).stat().st_mode & 0o777 \
@@ -1699,11 +1704,24 @@ async def main() -> None:
             claude_mcp = json.loads(claude_argv[config_index + 1])
             assert claude_mcp["mcpServers"]["puppy_browser"]["command"] == \
                 descriptor["command"], claude_mcp
+            guidance_index = claude_argv.index("--append-system-prompt")
+            assert claude_argv[guidance_index + 1] == policy
             resumed = dict(agent_session, native_session_id="existing-native")
             claude_resume = ClaudeDriver().build_cmd(
                 resumed, False, "again", "unused", browser_mcp=descriptor)
             assert "--resume" in claude_resume and "--mcp-config" in claude_resume
+            resume_guidance = claude_resume.index("--append-system-prompt")
+            assert claude_resume[resume_guidance + 1] == policy
+            claude_without_browser = ClaudeDriver().build_cmd(
+                resumed, False, "plain", "unused", browser_mcp=None)
+            assert "--mcp-config" not in claude_without_browser
+            assert "--append-system-prompt" not in claude_without_browser
 
+            codex_first = CodexDriver().build_cmd(
+                agent_session, True, "hello", "native-2", browser_mcp=descriptor)
+            assert codex_first[-1].startswith(
+                "<puppy_browser_policy>\n" + policy + "\n</puppy_browser_policy>\n\n")
+            assert codex_first[-1].endswith("\n\nhello")
             codex_argv = CodexDriver().build_cmd(
                 resumed, False, "again", "unused", browser_mcp=descriptor)
             resume_index = codex_argv.index("resume")
@@ -1711,6 +1729,14 @@ async def main() -> None:
                            if "mcp_servers.puppy_browser" in value]
             assert any(".command=" in value for value in mcp_options), codex_argv
             assert any("PUPPY_BROWSER_TURN_ID" in value for value in mcp_options), codex_argv
+            assert codex_argv[-1].startswith("<puppy_browser_policy>\n" + policy)
+            assert codex_argv[-1].endswith("\n\nagain")
+            assert codex_argv[-1].count(policy) == 1
+            codex_without_browser = CodexDriver().build_cmd(
+                resumed, False, "plain", "unused", browser_mcp=None)
+            assert codex_without_browser[-1] == "plain"
+            assert not any("mcp_servers.puppy_browser" in value
+                           for value in codex_without_browser)
 
             mcp_env = dict(os.environ)
             mcp_env.update(descriptor["env"])
@@ -1726,13 +1752,23 @@ async def main() -> None:
                 })
                 assert initialized["result"]["serverInfo"]["version"] == "2"
                 instructions = initialized["result"].get("instructions", "")
-                assert "fresh, isolated" in instructions and \
+                assert policy in instructions and \
+                    "default for interactive web navigation" in instructions and \
+                    "Do not launch or install Chrome" in instructions and \
+                    "fresh, isolated" in instructions and \
                     "without taking focus" in instructions and \
                     "explicitly asks" in instructions
                 listed = await mcp_request(mcp, 2, "tools/list")
-                tools = {tool["name"]: tool for tool in listed["result"]["tools"]}
+                listed_tools = listed["result"]["tools"]
+                tool_names = [tool["name"] for tool in listed_tools]
+                assert tool_names[:3] == ["snapshot", "navigate", "screenshot"]
+                assert tool_names[-1] == "new_browser"
+                tools = {tool["name"]: tool for tool in listed_tools}
                 assert {"new_browser", "snapshot", "screenshot", "navigate",
                         "click", "type"} <= set(tools)
+                assert "shared, user-visible" in tools["snapshot"]["description"]
+                assert "shared, user-visible" in tools["navigate"]["description"]
+                assert "additional isolated" in tools["new_browser"]["description"]
                 assert "reported viewport size" in tools["click"]["description"]
                 assert "browser_id" in tools["snapshot"]["inputSchema"]["properties"]
                 assert "browser_id" not in tools["new_browser"]["inputSchema"]["properties"]

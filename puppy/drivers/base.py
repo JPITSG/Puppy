@@ -159,7 +159,8 @@ class Driver:
                   browser_mcp=None) -> list:
         """argv for one turn. pinned_id: uuid the runner pre-generated for new sessions
         (engines that support pinning use it; others derive their own native id).
-        browser_mcp is an optional per-turn stdio MCP server descriptor."""
+        browser_mcp is an optional per-turn stdio MCP server descriptor. It may
+        also carry engine_guidance that applies only while those tools exist."""
         raise NotImplementedError
 
     def initial_stdin(self, session: dict, prompt: str) -> list:

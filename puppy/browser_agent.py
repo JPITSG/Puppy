@@ -32,7 +32,23 @@ MAX_REQUEST = 64 * 1024
 MAX_RESPONSE = 20 * 1024 * 1024
 REQUEST_TIMEOUT = 65.0
 
-INSTRUCTIONS = (
+AGENT_SELECTION_POLICY = (
+    "When the Puppy browser tools are available, use the shared, user-visible "
+    "Puppy browser as the default for interactive web navigation, authenticated "
+    "flows, screenshots, page inspection, form interaction, and user-visible UI "
+    "verification. The user sees and can interact with the same browser; Puppy "
+    "owns its lifecycle and preserves this session's browser across turns. Do not "
+    "launch or install Chrome, Chromium, Playwright, Selenium, or another "
+    "standalone browser when the Puppy browser can complete the task equivalently. "
+    "Standalone browser automation remains appropriate when the user explicitly "
+    "requests it, when running a repository's own browser test suite, for bulk or "
+    "multi-context automation, when a required capability is not offered by these "
+    "tools, or after a managed-browser attempt fails and retrying would not help. "
+    "If you fall back, briefly state the concrete reason. Command-line HTTP "
+    "clients remain appropriate for API-only and other non-rendered checks."
+)
+
+INSTRUCTIONS = AGENT_SELECTION_POLICY + " " + (
     "Independent Puppy-managed browsers are available on this session's node. "
     "Browser IDs are four uppercase A-Z/0-9 characters. If the user names an "
     "ID such as A8AR, pass it as browser_id. Otherwise omit browser_id: Puppy "
@@ -77,34 +93,31 @@ def _tool(name, description, properties=None, required=None, read_only=False,
 
 TOOLS = [
     _tool(
-        "new_browser",
-        "Open a new isolated browser and make it this session's current browser. "
-        "Use only when the user explicitly asks for another browser.",
-        browser_target=False),
-    _tool(
         "snapshot",
-        "Inspect the current Puppy browser page as a compact accessibility tree. "
-        "Interactive elements receive refs such as b1 for later click/type calls. "
-        "Take a fresh snapshot after navigation or substantial page changes.",
+        "Inspect the shared, user-visible Puppy browser page as a compact "
+        "accessibility tree. Interactive elements receive refs such as b1 for "
+        "later click/type calls. Take a fresh snapshot after navigation or "
+        "substantial page changes.",
         {"include_screenshot": {
             "type": "boolean",
             "description": "Also return a JPEG image of the visible viewport.",
             "default": False,
         }}, read_only=True),
     _tool(
-        "screenshot",
-        "Capture the visible viewport of the Puppy browser as a JPEG image.",
-        read_only=True),
-    _tool(
         "navigate",
-        "Navigate the Puppy browser. Bare public hosts use HTTPS, LAN hosts use "
-        "HTTP, and non-URLs become a DuckDuckGo search.",
+        "Navigate the shared, user-visible Puppy browser. Bare public hosts use "
+        "HTTPS, LAN hosts use HTTP, and non-URLs become a DuckDuckGo search.",
         {
             "url": {"type": "string", "description": "URL, hostname, or search text."},
             "wait_ms": {"type": "integer", "minimum": 0, "maximum": 10000,
                         "default": 500,
                         "description": "Brief wait after navigation before returning."},
         }, required=["url"]),
+    _tool(
+        "screenshot",
+        "Capture the visible viewport of the shared, user-visible Puppy browser "
+        "as a JPEG image.",
+        read_only=True),
     _tool(
         "click",
         "Click an element from the latest snapshot by ref, or click viewport "
@@ -151,6 +164,12 @@ TOOLS = [
         "Wait briefly for a page update, then report the current URL and title.",
         {"milliseconds": {"type": "integer", "minimum": 0, "maximum": 10000,
                           "default": 1000}}, read_only=True),
+    _tool(
+        "new_browser",
+        "Open an additional isolated, user-visible Puppy browser and make it "
+        "this session's current browser. Use only when the user explicitly asks "
+        "for another browser.",
+        browser_target=False),
 ]
 
 _server = None
@@ -192,6 +211,10 @@ def turn_mcp(session_id: int, turn_id: str):
         "name": SERVER_NAME,
         "command": sys.executable,
         "args": ["-m", "puppy.browser_agent"],
+        # MCP server instructions are handled inconsistently by engine clients.
+        # Drivers use this same policy through their strongest additive channel
+        # so tool selection does not depend on MCP initialization presentation.
+        "engine_guidance": AGENT_SELECTION_POLICY,
         "env": {
             "PYTHONPATH": _package_search_path(),
             "PUPPY_BROWSER_SOCKET": socket_path(),
