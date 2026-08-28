@@ -194,13 +194,12 @@ model-specific, so a found binary reports `Ready` and an absent one reports
 `No binary` rather than attempting one global auth verdict.
 
 An installed node discovers its catalog from `opencode models --verbose` and
-advertises the additive `engine-model-selection` capability. The authenticated
-`PATCH /api/engines/opencode/models` route accepts `{ "models": [...] }` and
-persists the subset this node exposes to Puppy sessions. Catalogs and selections
-are node-owned: a controller never copies provider names, credentials, or a
-local path to another backend. Turns run through `opencode acp`, resume the
-native session ID, relay tool approvals/cancellation, and receive the same
-turn-scoped managed-browser MCP server when Browser is enabled on that node.
+serves every reported choice through the ordinary engine `model_options` list.
+The controller uses that list directly in new-session and chat model controls;
+there is no controller-owned provider list or node-owned model allow-list.
+Turns run through `opencode acp`, resume the native session ID, relay tool
+approvals/cancellation, and receive the same turn-scoped managed-browser MCP
+server when Browser is enabled on that node.
 
 ## System prompts
 

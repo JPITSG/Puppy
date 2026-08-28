@@ -25,7 +25,6 @@ MAX_USAGE_REFRESH_MINUTES = 24 * 60
 DEFAULT_UPLOAD_LIMIT_MB = 8
 MAX_UPLOAD_LIMIT_MB = 1024
 MAX_SYSTEM_PROMPT_CHARS = 32768
-MAX_ENGINE_MODELS = 512
 MAX_MODEL_ID_CHARS = 256
 
 # This is model-visible only for turns where the node-owned managed browser is
@@ -67,10 +66,6 @@ DEFAULTS = {
     "engines": {
         "usage_refresh_minutes": DEFAULT_USAGE_REFRESH_MINUTES,
         "auto_upgrade": {"enabled": False, "mode": "now", "at": "03:30"},
-        # OpenCode can expose many providers and thousands of models. The node
-        # discovers that catalog; this list is only the operator's visible
-        # subset and therefore remains portable across controller/backends.
-        "opencode": {"models": []},
     },
     "uploads": {"max_file_size_mb": DEFAULT_UPLOAD_LIMIT_MB},
     "terminal": {"command": "/bin/bash -l"},
@@ -106,6 +101,17 @@ def _merge(base: dict, patch: dict) -> dict:
     return out
 
 
+def _drop_retired_settings(cfg: dict) -> dict:
+    """Remove settings whose feature no longer exists, including old archives."""
+    engines = cfg.get("engines")
+    opencode = engines.get("opencode") if isinstance(engines, dict) else None
+    if isinstance(opencode, dict):
+        opencode.pop("models", None)
+        if not opencode:
+            engines.pop("opencode", None)
+    return cfg
+
+
 def ensure_dirs() -> None:
     os.makedirs(DATA_DIR, exist_ok=True)
     try:
@@ -127,7 +133,8 @@ def load() -> dict:
                     raw = json.load(f)
             except Exception as e:
                 log.error("config.json unreadable (%s), using defaults", e)
-        cfg = _merge(DEFAULTS, raw if isinstance(raw, dict) else {})
+        cfg = _drop_retired_settings(
+            _merge(DEFAULTS, raw if isinstance(raw, dict) else {}))
         if not cfg["auth"].get("api_token"):
             cfg["auth"]["api_token"] = secrets.token_urlsafe(32)
         _config = cfg
@@ -250,33 +257,6 @@ def normalize_upload_limit_mb(value) -> int:
     return megabytes
 
 
-def normalize_engine_models(value, path: str = "engine models") -> list:
-    """Validate a node-owned list of engine model identifiers.
-
-    Missing models are deliberately retained across backup/restore: providers
-    can be offline temporarily, and importing a snapshot must not silently
-    erase selections just because discovery differs on the restoring node.
-    """
-    if not isinstance(value, list):
-        raise ValueError("{} must be a list".format(path))
-    if len(value) > MAX_ENGINE_MODELS:
-        raise ValueError("{} cannot contain more than {} entries".format(
-            path, MAX_ENGINE_MODELS))
-    clean = []
-    seen = set()
-    for raw in value:
-        if not isinstance(raw, str):
-            raise ValueError("{} entries must be text".format(path))
-        model = raw.strip()
-        if not model or len(model) > MAX_MODEL_ID_CHARS or \
-                any(ord(ch) < 32 or ord(ch) == 127 for ch in model):
-            raise ValueError("{} contains an invalid model identifier".format(path))
-        if model not in seen:
-            clean.append(model)
-            seen.add(model)
-    return clean
-
-
 def normalize_system_prompt(value, path: str) -> str:
     """Validate model-visible text from the API, config, or a backup archive."""
     if not isinstance(value, str):
@@ -308,7 +288,7 @@ def normalize_import(data: dict) -> dict:
     if not isinstance(data, dict):
         raise ValueError("config must be an object")
     _validate_shape(DEFAULTS, data)
-    merged = _merge(DEFAULTS, data)
+    merged = _drop_retired_settings(_merge(DEFAULTS, data))
     for section in ("web", "backend"):
         port = merged.get(section, {}).get("port")
         if not _finite_number(port) or not 1 <= port <= 65535 or port != int(port):
@@ -324,9 +304,6 @@ def normalize_import(data: dict) -> dict:
         merged.get("engines", {}).get("usage_refresh_minutes"))
     merged["engines"]["auto_upgrade"] = normalize_engine_auto_upgrade(
         merged.get("engines", {}).get("auto_upgrade"))
-    merged["engines"]["opencode"]["models"] = normalize_engine_models(
-        merged.get("engines", {}).get("opencode", {}).get("models"),
-        "config.engines.opencode.models")
     merged["uploads"]["max_file_size_mb"] = normalize_upload_limit_mb(
         merged.get("uploads", {}).get("max_file_size_mb"))
     merged["system_prompt"]["custom"] = normalize_system_prompt(

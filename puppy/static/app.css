@@ -255,6 +255,9 @@ a{color:var(--acc2)}
   -webkit-mask:url("/static/vendor/openai.svg") center/contain no-repeat;
           mask:url("/static/vendor/openai.svg") center/contain no-repeat;
 }
+.prov-opencode{
+  width:15px;color:var(--opencode);font-size:7px;font-weight:800;letter-spacing:-.04em;
+}
 @media (hover:hover){.sess-item:hover{background:rgba(255,255,255,.045)}}
 .sess-item:active{background:var(--hov)}
 .sess-item.active{background:var(--acc-dim);border-color:rgba(90,162,245,.25)}
@@ -1454,58 +1457,6 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 }
 .engine-update.busy{cursor:wait}
 .engine-version{max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.engine-model-config{
-  margin:0 0 9px 30px;padding:10px 11px;border:1px solid var(--line);
-  border-radius:var(--r-md);background:var(--panel2);min-width:0;
-  transition:opacity .15s var(--ease),border-color .15s var(--ease);
-}
-.engine-model-config.saving{opacity:.58;pointer-events:none}
-.engine-model-head{display:flex;align-items:baseline;gap:7px 10px;min-width:0;flex-wrap:wrap}
-.engine-model-title{
-  color:var(--txt2);font:650 10px/1.25 var(--sans);letter-spacing:.075em;text-transform:uppercase;
-}
-.engine-model-copy{color:var(--txt3);font:10.5px/1.35 var(--sans)}
-.engine-model-add{
-  display:grid;grid-template-columns:minmax(0,1fr) 36px;align-items:center;gap:7px;
-  min-width:0;margin-top:8px;
-}
-.engine-model-add>select{height:36px;margin:0}
-.engine-model-add>.choice-control{min-width:0;margin:0}
-.engine-model-add-button{
-  width:36px;height:36px;border-color:var(--line2);background:var(--panel);
-}
-.engine-model-add-button svg,.engine-model-remove svg{display:block}
-.engine-model-selected{
-  display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:8px;min-width:0;
-}
-.engine-model-chip{
-  display:grid;grid-template-columns:minmax(0,1fr) 27px;align-items:stretch;min-width:0;
-  border:1px solid var(--line);border-radius:var(--r-sm);background:var(--panel);
-}
-.engine-model-chip.unavailable{border-color:rgba(255,182,77,.28)}
-.engine-model-chip-words{
-  display:flex;flex-direction:column;justify-content:center;gap:2px;min-width:0;padding:6px 8px;
-}
-.engine-model-chip-name{
-  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--txt2);
-  font:11px/1.2 var(--sans);
-}
-.engine-model-chip-id{
-  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--txt3);
-  font:9px/1.2 var(--mono);
-}
-.engine-model-remove{
-  display:flex;align-items:center;justify-content:center;width:27px;min-width:27px;padding:0;
-  border:0;border-left:1px solid var(--line);border-radius:0 var(--r-sm) var(--r-sm) 0;
-  background:transparent;color:var(--txt3);cursor:pointer;
-  transition:background .15s var(--ease),color .15s var(--ease),transform .12s var(--ease);
-}
-@media (hover:hover){.engine-model-remove:hover{background:var(--hov);color:var(--err)}}
-.engine-model-remove:active{background:var(--hov);transform:scale(.94)}
-.engine-model-remove:focus-visible{outline:1px solid var(--acc);outline-offset:-2px}
-.engine-model-note{margin-top:7px;color:var(--txt3);font:10.5px/1.4 var(--sans)}
-.engine-model-note.warn{color:var(--warn)}
-.engine-model-note.empty{grid-column:1/-1;margin:1px 0 0}
 .engine-node-message,.usage-refresh-note,.eau-note{
   font-family:var(--sans);font-size:10.5px;font-weight:400;
 }
@@ -1809,6 +1760,9 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .engine-pick .ep .ep-ico{width:18px;height:18px;margin:0 auto 6px;font-size:13px;color:var(--txt2)}
 .engine-pick .ep .ep-ico.prov-anthropic{background:#d97757}
 .engine-pick .ep .ep-ico.prov-openai{background:#10a37f}
+.engine-pick .ep .ep-ico.prov-opencode{
+  color:var(--opencode);font-size:10px;font-weight:800;letter-spacing:-.04em;
+}
 .engine-pick .ep.sel{border-color:rgba(90,162,245,.6);background:var(--acc-dim)}
 .engine-pick .ep .ep-name{font-size:12.5px;font-weight:650}
 .engine-pick .ep .ep-sub{font-size:10px;color:var(--txt3);font-family:var(--mono)}
@@ -2000,10 +1954,6 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   .engine-row-statuses{grid-area:statuses;justify-content:flex-start;padding-left:17px}
   .engine-row-actions{grid-area:actions;justify-content:flex-end}
   .engine-update{height:32px;min-width:0;padding-left:14px;padding-right:14px}
-  .engine-model-config{margin-left:30px;padding:9px 9px 10px}
-  .engine-model-selected{grid-template-columns:minmax(0,1fr)}
-  .engine-model-head{display:block}
-  .engine-model-copy{display:block;margin-top:3px}
   .engine-node-message{padding-left:26px}
   /* Give the address the full phone row: unlike the short display name, the
      two LAN/VPN origins often differ near their right edge. Controls form a

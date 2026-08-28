@@ -7,9 +7,9 @@ native history, project rules, plugins, and credentials remain entirely owned
 by OpenCode.
 
 The model catalog is intentionally discovered from ``opencode models
---verbose``.  OpenCode can route many providers, so Puppy never ships provider
-or model names of its own; Settings persists only the subset an operator wants
-to expose on each node.
+--verbose``. OpenCode can route many providers, so Puppy never ships provider
+or model names of its own; every choice reported by the node feeds the same
+per-session model control used by the other engines.
 """
 from __future__ import annotations
 
@@ -62,7 +62,10 @@ def _json_error(value) -> str:
 
 
 def _display_provider(value: str) -> str:
-    words = [part for part in re.split(r"[-_.\s]+", str(value or "")) if part]
+    raw = str(value or "").strip()
+    if raw.lower() == "opencode":
+        return "OpenCode"
+    words = [part for part in re.split(r"[-_.\s]+", raw) if part]
     return " ".join(part[:1].upper() + part[1:] for part in words) or "Provider"
 
 
@@ -271,7 +274,7 @@ class OpenCodeDriver(Driver):
     binary = "opencode"
     uses_stdin_stream = True
     availability_only = True
-    model_selection_supported = True
+    dynamic_model_options = True
     allow_custom_model = False
     resume_requires_same_cwd = True
     release_source = {"kind": "npm", "package": "opencode-ai"}
@@ -354,14 +357,11 @@ class OpenCodeDriver(Driver):
                 self._catalog_error = ""
             except Exception as exc:
                 # Keep a previously good catalog through a transient provider
-                # or network failure; Settings shows the freshness error beside
-                # it instead of erasing every configured selection.
+                # or network failure so an established session control does not
+                # suddenly lose every model choice.
                 self._catalog_error = str(exc)[:400]
                 log.warning("OpenCode model discovery failed: %s", exc)
             self._catalog_ts = time.time()
-
-    def model_catalog(self):
-        return [dict(item) for item in self._catalog]
 
     def model_catalog_error(self) -> str:
         return self._catalog_error
@@ -369,45 +369,23 @@ class OpenCodeDriver(Driver):
     def model_catalog_loaded(self) -> bool:
         return bool(self._catalog_ts)
 
-    def selected_models(self):
-        from puppy import config
-        raw = config.get("engines.opencode.models", [])
-        try:
-            return config.normalize_engine_models(raw, "OpenCode models")
-        except ValueError:
-            return []
-
-    def set_selected_models(self, values) -> list:
-        from puppy import config
-        clean = config.normalize_engine_models(values, "OpenCode models")
-        available = {item["value"] for item in self._catalog}
-        existing = set(self.selected_models())
-        unknown = [value for value in clean if value not in available and value not in existing]
-        if unknown:
-            raise ValueError("model is not in this node's OpenCode catalog: {}".format(unknown[0]))
-        config.set_value("engines.opencode.models", clean)
-        return clean
-
     def model_options(self):
-        catalog = {item["value"]: item for item in self._catalog}
-        options = []
-        for model_id in self.selected_models():
-            if model_id in catalog:
-                options.append(dict(catalog[model_id]))
-            else:
-                options.append({
-                    "value": model_id, "label": model_id,
-                    "hint": "Not currently reported by this OpenCode installation",
-                    "provider": model_id.split("/", 1)[0] if "/" in model_id else "",
-                    "provider_label": "Unavailable", "unavailable": True,
-                    "effort_options": [{"value": "", "label": "Default",
-                                        "hint": "OpenCode model default"}],
-                })
+        options = [{
+            "value": "", "label": "Default", "hint": "OpenCode default model",
+            "effort_options": [{"value": "", "label": "Default",
+                                "hint": "OpenCode model default"}],
+        }]
+        for item in self._catalog:
+            option = dict(item)
+            provider = str(option.get("provider_label") or option.get("provider") or "").strip()
+            label = str(option.get("label") or option.get("value") or "").strip()
+            if provider:
+                option["label"] = "{} · {}".format(provider, label)
+            options.append(option)
         return options
 
     def default_model(self) -> str:
-        selected = self.selected_models()
-        return selected[0] if selected else ""
+        return ""
 
     def effort_options_for_model(self, model: str):
         for item in self.model_options():

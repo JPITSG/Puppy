@@ -103,7 +103,6 @@ async def exercise_http(archive_ui: dict, session_id: int) -> None:
 
             config.set_value("instance_name", "changed-over-http")
             config.set_value("engines.usage_refresh_minutes", 60)
-            config.set_value("engines.opencode.models", [])
             config.set_value("uploads.max_file_size_mb", 2)
             app["puppy_bind_verifications"]["stale-before-restore"] = {
                 "timer": None, "server": None,
@@ -117,8 +116,7 @@ async def exercise_http(archive_ui: dict, session_id: int) -> None:
             assert restored["sessions"] == 2
             assert config.get("instance_name") == "saved-instance"
             assert config.get("engines.usage_refresh_minutes") == 30
-            assert config.get("engines.opencode.models") == \
-                ["provider/model-a", "second/model-b"]
+            assert config.get("engines.opencode") is None
             assert config.get("uploads.max_file_size_mb") == 19
     finally:
         await runner.cleanup()
@@ -138,8 +136,6 @@ async def main() -> None:
         config.set_value("instance_name", "saved-instance")
         config.set_value("sessions.default_cwd", str(project))
         config.set_value("engines.usage_refresh_minutes", 30)
-        config.set_value("engines.opencode.models",
-                         ["provider/model-a", "second/model-b"])
         config.set_value("uploads.max_file_size_mb", 19)
         config.set_value("browser.enabled", True)
         config.set_value("browser.color_scheme", "light")
@@ -211,7 +207,6 @@ async def main() -> None:
         # Mutate every restored surface and an excluded ordinary project file.
         config.set_value("instance_name", "mutated-instance")
         config.set_value("engines.usage_refresh_minutes", 5)
-        config.set_value("engines.opencode.models", [])
         config.set_value("uploads.max_file_size_mb", 2)
         config.set_value("browser.enabled", False)
         config.set_value("browser.color_scheme", "dark")
@@ -234,8 +229,7 @@ async def main() -> None:
         assert restored["ui"] == ui
         assert config.get("instance_name") == "saved-instance"
         assert config.get("engines.usage_refresh_minutes") == 30
-        assert config.get("engines.opencode.models") == \
-            ["provider/model-a", "second/model-b"]
+        assert config.get("engines.opencode") is None
         assert config.get("uploads.max_file_size_mb") == 19
         assert config.get("browser.enabled") is True
         assert config.get("browser.color_scheme") == "light"
@@ -245,11 +239,15 @@ async def main() -> None:
             "Use the shared browser before standalone automation."
         older_config = config.export_data()
         older_config.pop("system_prompt", None)
-        older_config["engines"].pop("opencode", None)
         normalized_older = config.normalize_import(older_config)
         assert normalized_older["system_prompt"] == {
             "custom": "", "browser": config.DEFAULT_BROWSER_SYSTEM_PROMPT}
-        assert normalized_older["engines"]["opencode"] == {"models": []}
+        assert "opencode" not in normalized_older["engines"]
+        legacy_selection = config.export_data()
+        legacy_selection["engines"]["opencode"] = {
+            "models": ["provider/model-a", "second/model-b"]}
+        normalized_legacy = config.normalize_import(legacy_selection)
+        assert "opencode" not in normalized_legacy["engines"]
         assert config.get("engines.auto_upgrade") == \
             {"enabled": True, "mode": "at", "at": "04:15"}
         # an unattended upgrade schedule must survive import validation intact
@@ -262,18 +260,6 @@ async def main() -> None:
                 pass
             else:
                 raise AssertionError("accepted an invalid schedule: {}".format(bad))
-        for bad_models in ("provider/model", [""], [None],
-                           ["x" * (config.MAX_MODEL_ID_CHARS + 1)],
-                           ["provider/model\x00"]):
-            archive_config = config.export_data()
-            archive_config["engines"]["opencode"] = {"models": bad_models}
-            try:
-                config.normalize_import(archive_config)
-            except ValueError:
-                pass
-            else:
-                raise AssertionError("accepted invalid OpenCode models: {!r}".format(
-                    bad_models))
         # and a tampered archive cannot smuggle in an unknown rendering mode
         try:
             config.normalize_import(dict(config.export_data(),

@@ -20,10 +20,6 @@ FILE_UPLOAD_CAPABILITY = "file-uploads"
 # and the vendor-delegated engine CLI upgrade. They ship together, so one
 # additive capability keeps the controller from offering either to old nodes.
 ENGINE_UPGRADE_CAPABILITY = "engine-upgrade"
-# A node can expose a driver-owned model catalog and persist the operator's
-# visible subset through PATCH /api/engines/{key}/models. Older nodes omit the
-# control while their static model pickers continue to work unchanged.
-ENGINE_MODEL_SELECTION_CAPABILITY = "engine-model-selection"
 # Base managed headless-browser surface: status, the node-owned enable toggle,
 # and the legacy screencast/input websocket. Advertising the routes is distinct
 # from availability (a usable binary) and from the node's enable switch - both
@@ -80,7 +76,6 @@ BASE_CAPABILITIES = (
     USAGE_REFRESH_CAPABILITY,
     MANUAL_USAGE_REFRESH_CAPABILITY,
     ENGINE_UPGRADE_CAPABILITY,
-    ENGINE_MODEL_SELECTION_CAPABILITY,
     BROWSER_CAPABILITY,
     BROWSER_INSTANCES_CAPABILITY,
     BROWSER_HANDOFF_CAPABILITY,

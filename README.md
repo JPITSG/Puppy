@@ -18,9 +18,9 @@ built-in web terminals.
 - **Engine switching**: a session can move between any installed engines at any
   point. The new engine starts a fresh native session seeded with a transcript
   handoff in the same working directory.
-- **OpenCode providers**: each node discovers its own OpenCode model catalog.
-  Settings → Engines lets the operator choose the subset exposed by Puppy;
-  provider credentials, plugins, project rules, and native sessions stay owned
+- **OpenCode providers**: each node discovers its own OpenCode model catalog and
+  presents every reported choice in the ordinary per-session model control.
+  Provider credentials, plugins, project rules, and native sessions stay owned
   by that node's ordinary OpenCode installation.
 - **Scratch workspaces**: a session can start in a private, disposable workspace
   without choosing a project directory. Its transcript remains durable while
@@ -107,8 +107,8 @@ reports an independently versioned controller/backend protocol.
 ## Data & config
 
 Persistent private state lives in `data/` (gitignored): `config.json` (instance
-name, bind host/port, api token, terminal command, usage-refresh interval,
-upload-size limit, and each node's selected OpenCode model IDs),
+name, bind host/port, api token, terminal command, usage-refresh interval, and
+upload-size limit),
 `puppy.db` (sessions, transcripts, users), backend TLS identities, and `puppy.log`. Scratch-session files are the
 intentional exception: they live in a mode-0700, instance-specific namespace
 under the OS temporary directory and are disposable. The repo itself is clean

@@ -84,7 +84,7 @@ def exercise_driver_normalization() -> None:
 def exercise_opencode_driver() -> None:
     """Pin catalog parsing and the full no-model ACP handshake/state machine."""
     from puppy import runner
-    from puppy.drivers.opencode import OpenCodeDriver, parse_model_catalog
+    from puppy.drivers.opencode import OpenCodeDriver, _display_provider, parse_model_catalog
     catalog = parse_model_catalog("""provider/model-a
 {
   "id": "model-a",
@@ -110,6 +110,14 @@ second/model-b
         ["", "high", "max"]
 
     driver = OpenCodeDriver()
+    driver._catalog = catalog
+    exposed = driver.model_options()
+    assert [model["value"] for model in exposed] == \
+        ["", "provider/model-a", "second/model-b"]
+    assert exposed[0]["label"] == "Default"
+    assert exposed[1]["label"] == "Provider · Model A"
+    assert _display_provider("opencode") == "OpenCode"
+    assert driver.default_model() == ""
     assert runner._starts_fresh_native_session(
         {"native_session_id": ""}, False, driver) is True
     assert runner._starts_fresh_native_session(
@@ -471,7 +479,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "engine-usage-refresh" in ping["capabilities"]
         assert "engine-usage-refresh-manual" in ping["capabilities"]
         assert "engine-upgrade" in ping["capabilities"]
-        assert "engine-model-selection" in ping["capabilities"]
+        assert "engine-model-selection" not in ping["capabilities"]
         assert "file-uploads" in ping["capabilities"]
         assert "queue-pause" in ping["capabilities"]
         assert "system-prompt" in ping["capabilities"]
@@ -565,11 +573,13 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert set(("claude", "codex", "opencode")).issubset(by_key)
         opencode = by_key["opencode"]
         assert opencode["availability_only"] is True
-        assert opencode["model_selection_supported"] is True
+        assert opencode["dynamic_model_options"] is True
         assert opencode["allow_custom_model"] is False
-        assert isinstance(opencode["model_catalog"], list)
-        assert isinstance(opencode["selected_models"], list)
         assert isinstance(opencode["model_catalog_error"], str)
+        assert opencode["model_options"][0]["value"] == ""
+        assert opencode["model_options"][0]["label"] == "Default"
+        assert len({model["value"] for model in opencode["model_options"]}) == \
+            len(opencode["model_options"])
         if opencode["installed"]:
             assert opencode["auth"] == "ok"
             assert opencode["detail"] == "binary available"
@@ -584,37 +594,11 @@ async def exercise_node(url: str, token: str, expected_version: str,
             assert engine["upgrade_result"] is None or \
                 isinstance(engine["upgrade_result"], dict)
             assert isinstance(engine["version_checked_at"], (int, float))
-        # Dynamic model selection is the same authenticated node-owned route in
-        # the full and headless runtimes. It is deliberately unavailable on
-        # static drivers and never accepts an arbitrary unreported model ID.
-        async with http.patch(url + "/api/engines/codex/models", headers=good,
-                              ssl=pinned, json={"models": []}) as response:
-            assert response.status == 400, await response.text()
-        async with http.patch(url + "/api/engines/no-such-engine/models", headers=good,
-                              ssl=pinned, json={"models": []}) as response:
-            assert response.status == 404, await response.text()
-        async with http.patch(url + "/api/engines/opencode/models", ssl=pinned,
-                              json={"models": []}) as response:
-            assert response.status == 401, await response.text()
+        # OpenCode's discovered choices feed model_options directly; there is
+        # no separate node-owned allow-list API.
         async with http.patch(url + "/api/engines/opencode/models", headers=good,
                               ssl=pinned, json={"models": []}) as response:
-            selected = await response.json()
-            assert response.status == 200, selected
-        assert next(engine for engine in selected["engines"]
-                    if engine["key"] == "opencode")["selected_models"] == []
-        if opencode["model_catalog"]:
-            first_model = opencode["model_catalog"][0]["value"]
-            async with http.patch(url + "/api/engines/opencode/models", headers=good,
-                                  ssl=pinned, json={"models": [first_model]}) as response:
-                selected = await response.json()
-                assert response.status == 200, selected
-            selected_opencode = next(engine for engine in selected["engines"]
-                                     if engine["key"] == "opencode")
-            assert selected_opencode["selected_models"] == [first_model]
-            assert selected_opencode["model_options"][0]["value"] == first_model
-            async with http.patch(url + "/api/engines/opencode/models", headers=good,
-                                  ssl=pinned, json={"models": []}) as response:
-                assert response.status == 200, await response.text()
+            assert response.status == 404, await response.text()
         # The headless surface serves the same version-refresh route as the
         # console; a node that cannot re-check must not advertise the button.
         async with http.post(url + "/api/engines/refresh",
@@ -1925,7 +1909,7 @@ async def main() -> None:
         assert "remote-upgrade" not in pairing["capabilities"]  # pairing command is not launcher-managed
         assert "shutdown-notice" in pairing["capabilities"]
         assert "queue-pause" in pairing["capabilities"]
-        assert "engine-model-selection" in pairing["capabilities"]
+        assert "engine-model-selection" not in pairing["capabilities"]
         assert pairing["max_upload_size_mb"] == 3
         assert (backend_data / "config.json").stat().st_mode & 0o777 == 0o600
         identity_manifest = json.loads(
@@ -1942,7 +1926,7 @@ async def main() -> None:
             "--max-upload-size-mb", "4",
         ], text=True))
         assert "terminal" in enabled_pairing["capabilities"]
-        assert "engine-model-selection" in enabled_pairing["capabilities"]
+        assert "engine-model-selection" not in enabled_pairing["capabilities"]
         assert enabled_pairing["usage_refresh_minutes"] == 30
         assert enabled_pairing["max_upload_size_mb"] == 4
         assert "pinned-tls" in enabled_pairing["capabilities"]

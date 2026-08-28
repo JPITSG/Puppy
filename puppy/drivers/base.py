@@ -136,9 +136,10 @@ class Driver:
     # provider/model a turn selects.  Their node health is binary availability,
     # not a single global login verdict.
     availability_only = False
-    # Dynamic model catalogs are opt-in.  Static drivers keep the existing
-    # model_options() contract and expose no configuration control.
-    model_selection_supported = False
+    # Dynamic model catalogs are opt-in. Static drivers return their choices
+    # immediately; dynamic drivers refresh before their model_options() are
+    # served to the ordinary session controls.
+    dynamic_model_options = False
     allow_custom_model = True
     # Loading a native session in a replacement temporary workspace is unsafe
     # for engines which bind permissions and tool routing to the creation cwd.
@@ -160,29 +161,18 @@ class Driver:
 
     def model_options(self):
         """[{value, label, hint}] - engine-specific model choices ('' = engine default).
-        Free-text overrides are still allowed; this only feeds the picker UI."""
+        ``allow_custom_model`` decides whether the picker also offers free text."""
         return []
 
     async def refresh_model_options(self, force: bool = False) -> None:
         """Refresh a driver-owned dynamic catalog. Static drivers do nothing."""
         return None
 
-    def model_catalog(self):
-        """All discoverable choices before a node-owned visibility filter."""
-        return []
-
     def model_catalog_error(self) -> str:
         return ""
 
     def model_catalog_loaded(self) -> bool:
         return True
-
-    def selected_models(self):
-        """Persisted visible model IDs for a configurable dynamic catalog."""
-        return []
-
-    def set_selected_models(self, values) -> list:
-        raise ValueError("{} does not have configurable models".format(self.label))
 
     def default_model(self) -> str:
         """Model used when a new/reseeded session does not name one."""
