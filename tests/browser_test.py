@@ -9,8 +9,9 @@ recovery and input scaling, URL normalization, the private per-turn MCP bridge,
 hidden model guidance, scoped/searchable accessibility snapshots, observable
 action outcomes, bounded inspection/screenshots, form controls, page switching,
 redacted diagnostics, background first-use tab events, close-and-replace
-behavior, and crash reporting. No real browser is installed or launched and
-nothing reaches the network.
+behavior, explicit one-chat handoff, session-scoped file inputs, private
+download inspection, and crash reporting. No real browser is installed or
+launched and nothing reaches the network.
 """
 from __future__ import annotations
 
@@ -73,6 +74,7 @@ POPUP = {"targetId": "stub-popup-2", "type": "page", "title": "popup",
          "openerId": PAGE["targetId"]}
 PAGE_TEXT = "Stub page Ready Continue Email Region Alerts"
 TYPED_VALUE = ""
+UPLOADED_FILES = []
 active_target = PAGE["targetId"]
 
 
@@ -122,7 +124,7 @@ while True:
             result = {"nodes": [
                 {"nodeId": "root", "role": {"value": "RootWebArea"},
                  "name": {"value": "Stub page"},
-                 "childIds": ["button", "input", "region"]},
+                 "childIds": ["button", "input", "region", "file"]},
                 {"nodeId": "button", "role": {"value": "button"},
                  "name": {"value": "Continue"}, "backendDOMNodeId": 10,
                  "properties": [{"name": "focusable", "value": {"value": True}}]},
@@ -140,6 +142,9 @@ while True:
                  "properties": [
                      {"name": "focusable", "value": {"value": True}},
                      {"name": "checked", "value": {"value": True}}]},
+                {"nodeId": "file", "role": {"value": "button"},
+                 "name": {"value": "Upload file"}, "backendDOMNodeId": 14,
+                 "properties": [{"name": "focusable", "value": {"value": True}}]},
             ]}
         elif method == "DOM.getBoxModel":
             result = {"model": {
@@ -149,6 +154,9 @@ while True:
             record("dom.jsonl", {"method": method, "params": params})
         elif method == "DOM.focus":
             record("dom.jsonl", {"method": method, "params": params})
+        elif method == "DOM.setFileInputFiles":
+            UPLOADED_FILES = list(params.get("files") or [])
+            record("file-inputs.jsonl", params)
         elif method == "DOM.resolveNode":
             result = {"object": {"objectId": "node-{}".format(
                 params.get("backendNodeId"))}}
@@ -172,9 +180,18 @@ while True:
                                "font-size": "14px", "font-weight": "500"},
                 }
             elif "puppyElementState" in declaration:
-                value = {"tag": "input", "type": "text", "value": TYPED_VALUE,
-                         "valueLength": len(TYPED_VALUE), "checked": None,
-                         "disabled": False}
+                value = {"tag": "input", "type": "file" if backend == 14 else "text",
+                         "value": None if backend == 14 else TYPED_VALUE,
+                         "valueLength": 0 if backend == 14 else len(TYPED_VALUE),
+                         "checked": None, "disabled": False}
+            elif "puppyFileInputState" in declaration:
+                files = []
+                for path in UPLOADED_FILES:
+                    files.append({"name": os.path.basename(path),
+                                  "size": os.path.getsize(path),
+                                  "type": "application/octet-stream"})
+                value = {"ok": backend == 14, "tag": "input", "type": "file",
+                         "count": len(files), "files": files, "disabled": False}
             elif "puppySelectOption" in declaration:
                 requested = arguments[0] if arguments[0] is not None else "pl"
                 label = arguments[1] if arguments[1] is not None else "Poland"
@@ -219,6 +236,8 @@ while True:
         elif method == "Page.getFrameTree":
             current = POPUP if active_target == POPUP["targetId"] else PAGE
             result = {"frameTree": {"frame": {"id": "f1", "url": current["url"]}}}
+        elif method == "Page.setInterceptFileChooserDialog":
+            record("file-chooser-intercept.jsonl", params)
         elif method == "Page.setDocumentContent":
             record("document.jsonl", {"frameId": params.get("frameId"),
                                       "html": params.get("html", "")})
@@ -237,7 +256,7 @@ while True:
         elif method == "Page.navigate":
             url = params.get("url", "")
             record("navigations.jsonl", {"url": url})
-            if url == "stub://die":
+            if url == "http://stub.invalid/die":
                 send({"id": msg.get("id"), "result": {}})
                 raise SystemExit(4)
             current = POPUP if active_target == POPUP["targetId"] else PAGE
@@ -247,7 +266,7 @@ while True:
                   "params": {"targetInfo": dict(current)}})
             result = {"frameId": "f1"}
             emit_lifecycle = True
-            if url == "stub://surface-reset":
+            if url == "http://stub.invalid/surface-reset":
                 emit_frame = (1280, 657, STALE_FRAME)
         elif method in ("Page.reload", "Page.navigateToHistoryEntry"):
             emit_lifecycle = True
@@ -1056,6 +1075,29 @@ console.log(JSON.stringify({sent,cleared,timers:timers.size,delay:queued.delay})
     }, result
 
 
+def check_browser_handoff_ui(ui_source: str, css_source: str) -> None:
+    """The identified browser owns a compact, responsive chat-link strip."""
+    start = ui_source.index("class BrowserView {")
+    end = ui_source.index("/* ================= SettingsView", start)
+    view = ui_source[start:end]
+    assert view.index('class="br-bar"') < view.index('class="br-meta"') < \
+        view.index('class="br-stage"')
+    assert 'aria-label="Copy Browser ID"' in view
+    assert 'Use with current session' in view and 'Move to current session' in view
+    assert 'Linked to ${ownerName}' in view and 'Not linked to a session' in view
+    assert "this.applyBinding(d);" in view
+    assert "method: \"POST\", body: { session_id: sessionId }" in view
+    assert 'method: "DELETE", timeoutMs: 15000' in view
+    assert "currentBrowserSession(this.tab.bid)" in view
+    assert ".br-meta{" in css_source and ".br-ident{" in css_source
+    assert ".br-copy-id{width:27px;height:27px;" in css_source
+    assert ".br-owner-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}" \
+        in css_source
+    assert "@media(max-width:560px){" in css_source
+    assert ".br-meta{display:grid;grid-template-columns:auto minmax(0,1fr);" \
+        in css_source
+
+
 def check_desktop_side_drag(ui_source: str) -> None:
     """Run the real desktop sidebar drag against a pointer-event DOM.
 
@@ -1488,11 +1530,35 @@ async def main() -> None:
 
     config.load()
     db.connect()
+    # Phase-2 catalogs could map several sessions to one Browser. The visible
+    # owner migration preserves a recorded owner, drops ambiguous duplicates,
+    # and every subsequent handoff stays bijective without mutating its input.
+    old_records = {
+        "A1B2": {"created_at": 1.0, "closed_at": None,
+                 "origin": "agent", "owner_session": 11},
+        "C3D4": {"created_at": 2.0, "closed_at": None,
+                 "origin": "user", "owner_session": None},
+    }
+    old_bindings = {11: "A1B2", 12: "A1B2", 13: "C3D4"}
+    normalized_records, normalized_bindings = browser._normalize_catalog_ownership(
+        old_records, old_bindings)
+    assert normalized_bindings == {11: "A1B2", 13: "C3D4"}
+    assert normalized_records["A1B2"]["owner_session"] == 11
+    moved_records, moved_bindings, moved_ids = browser._rebind_catalog(
+        normalized_records, normalized_bindings, "C3D4", 11)
+    assert moved_bindings == {11: "C3D4"} and moved_ids == {"A1B2", "C3D4"}
+    assert moved_records["A1B2"]["owner_session"] is None
+    assert normalized_bindings == {11: "A1B2", 13: "C3D4"}
     assert browser._redact_diagnostic_url(
         "https://user:pass@example.test/path?token=secret#fragment") == \
         "https://example.test/path"
     assert browser._redact_diagnostic_url("data:text/plain,private") == \
         "data:[redacted]"
+    assert browser._normalize_url("example.test/path") == "https://example.test/path"
+    assert browser._normalize_url("about:blank") == "about:blank"
+    assert browser._normalize_url("data:text/plain,hello") == "data:text/plain,hello"
+    assert browser._normalize_url("file:///etc/passwd") == ""
+    assert browser._normalize_url("chrome://version") == ""
     app = build_app()
     web_runner = web.AppRunner(app)
     await web_runner.setup()
@@ -1519,6 +1585,8 @@ async def main() -> None:
                 ping = await read_json(r)
                 assert "browser" in ping["capabilities"], ping
                 assert "browser-instances" in ping["capabilities"], ping
+                assert "browser-handoff" in ping["capabilities"], ping
+                assert "browser-file-workflows" in ping["capabilities"], ping
                 assert ping["browser"] == {"enabled": False}, ping
 
             # a too-old binary is refused at enable time with the probed reason
@@ -1636,6 +1704,53 @@ async def main() -> None:
             else:
                 assert old_id not in registry.records and not old_root.exists()
 
+            # A browser/chat handoff is explicit, authenticated, and
+            # one-to-one in both directions. Moving a chat releases its old
+            # browser, and releasing a browser leaves no stale catalog owner.
+            handoff_sid = db.create_session(
+                "handoff chat", "codex", str(BASE), "", "", "#7aa2f7",
+                "danger-full-access")
+            other_sid = db.create_session(
+                "other chat", "codex", str(BASE), "", "", "#7aa2f7",
+                "danger-full-access")
+            binding_path = url + "/api/browser/instances/{}/binding"
+            async with http.get(binding_path.format(first_id), headers=headers) as r:
+                binding = await read_json(r)
+                assert r.status == 200 and binding["session_id"] is None, binding
+            async with http.post(binding_path.format(first_id), headers=headers,
+                                 json={"session_id": handoff_sid}) as r:
+                binding = await read_json(r)
+                assert r.status == 200 and binding["session_id"] == handoff_sid, binding
+                assert binding["session_name"] == "handoff chat", binding
+            async with http.post(binding_path.format(third_id), headers=headers,
+                                 json={"session_id": handoff_sid}) as r:
+                moved = await read_json(r)
+                assert r.status == 200 and moved["session_id"] == handoff_sid, moved
+            assert browser.manager().get(first_id).owner_session is None
+            assert browser.manager().bindings == {handoff_sid: third_id}
+            async with http.post(binding_path.format(first_id), headers=headers,
+                                 json={"session_id": other_sid}) as r:
+                assert r.status == 200, await read_json(r)
+            async with http.delete(binding_path.format(first_id), headers=headers) as r:
+                released = await read_json(r)
+                assert r.status == 200 and released["session_id"] is None, released
+            async with http.post(binding_path.format(first_id), headers=headers,
+                                 json={"session_id": handoff_sid}) as r:
+                assert r.status == 200, await read_json(r)
+            assert browser.manager().get(third_id).owner_session is None
+            assert browser.manager().bindings == {handoff_sid: first_id}
+            async with http.post(binding_path.format(third_id), headers=headers,
+                                 json={"session_id": other_sid}) as r:
+                assert r.status == 200, await read_json(r)
+            async with http.delete(url + "/api/sessions/{}".format(other_sid),
+                                   headers=headers) as r:
+                assert r.status == 200, await read_json(r)
+            assert browser.manager().get(third_id).owner_session is None
+            assert browser.manager().bindings == {handoff_sid: first_id}
+            async with http.post(binding_path.format(first_id), headers=headers,
+                                 json={"session_id": True}) as r:
+                assert r.status == 400, await read_json(r)
+
             # ID-scoped viewer websocket: status text, frames, input forwarding.
             texts, frames = [], []
             ws = await http.ws_connect(
@@ -1644,6 +1759,11 @@ async def main() -> None:
             await wait_for(lambda: frames, message="first frame")
             await wait_for(lambda: any(t.get("type") == "status" for t in texts),
                            message="status message")
+            initial_binding = await wait_for(
+                lambda: next((item for item in texts if item.get("type") == "binding"), None),
+                message="browser binding message")
+            assert initial_binding["session_id"] == handoff_sid, initial_binding
+            assert initial_binding["session_name"] == "handoff chat", initial_binding
             assert frames[0] == b"stub-jpeg-frame-bytes", frames[0][:40]
             meta = next(t for t in texts if t.get("type") == "frame_meta")
             assert meta["width"] == 1280 and meta["height"] == 800, meta
@@ -1718,7 +1838,8 @@ async def main() -> None:
             repair_frame_start = len(frames)
             repair_viewports = len(read_lines("viewport.jsonl"))
             repair_casts = len(read_lines("screencast.jsonl"))
-            await ws.send_json({"type": "navigate", "url": "stub://surface-reset"})
+            await ws.send_json({"type": "navigate",
+                                "url": "http://stub.invalid/surface-reset"})
             await wait_for(
                 lambda: len(read_lines("viewport.jsonl")) > repair_viewports,
                 message="stale screencast viewport repair")
@@ -1862,7 +1983,7 @@ async def main() -> None:
                     "protocolVersion": "2025-06-18", "capabilities": {},
                     "clientInfo": {"name": "browser-test", "version": "1"},
                 })
-                assert initialized["result"]["serverInfo"]["version"] == "3"
+                assert initialized["result"]["serverInfo"]["version"] == "4"
                 instructions = initialized["result"].get("instructions", "")
                 assert policy in instructions and \
                     "default for interactive web navigation" in instructions and \
@@ -1882,7 +2003,8 @@ async def main() -> None:
                         "inspect_element", "click", "type", "press", "hover",
                         "select", "check", "scroll", "wait_for", "back",
                         "forward", "reload", "pages", "switch_page",
-                        "console_messages", "network_failures"} <= set(tools)
+                        "console_messages", "network_failures", "upload_file",
+                        "downloads", "read_download"} <= set(tools)
                 assert "evaluate" not in tools and "cdp" not in tools
                 assert "shared, user-visible" in tools["snapshot"]["description"]
                 assert "shared, user-visible" in tools["navigate"]["description"]
@@ -1890,6 +2012,10 @@ async def main() -> None:
                 assert "reported viewport size" in tools["click"]["description"]
                 assert "browser_id" in tools["snapshot"]["inputSchema"]["properties"]
                 assert "browser_id" not in tools["new_browser"]["inputSchema"]["properties"]
+                assert "file_path" not in tools["upload_file"]["inputSchema"]["properties"]
+                assert tools["upload_file"]["inputSchema"]["required"] == ["upload_id"]
+                assert tools["upload_file"]["inputSchema"]["properties"]["upload_id"][
+                    "pattern"] == "^[0-9]{13}-[0-9a-f]{10}$"
 
                 snapshot = await mcp_request(mcp, 3, "tools/call", {
                     "name": "snapshot", "arguments": {}})
@@ -1928,7 +2054,112 @@ async def main() -> None:
                     "name": "snapshot", "arguments": {}})
                 fresh_text = fresh["result"]["content"][0]["text"]
                 assert "[b3] combobox" in fresh_text and \
-                    "[b4] checkbox" in fresh_text, fresh_text
+                    "[b4] checkbox" in fresh_text and \
+                    "[b5] button \"Upload file\"" in fresh_text, fresh_text
+                chooser_intercepts = await wait_for(
+                    lambda: read_lines("file-chooser-intercept.jsonl"),
+                    message="file chooser interception")
+                assert chooser_intercepts[-1] == {"enabled": True}, chooser_intercepts
+
+                # A browser file input accepts only an upload already owned by
+                # this chat. The tool never receives or accepts an arbitrary
+                # filesystem path, and a different chat's upload is invisible.
+                upload_bytes = b"user supplied browser upload\n"
+                async with http.post(
+                        url + "/api/sessions/{}/upload".format(agent_sid),
+                        headers={**headers, "Content-Type": "text/plain",
+                                 "X-Puppy-Filename": "agent-document.txt",
+                                 "X-Puppy-Size": str(len(upload_bytes))},
+                        data=upload_bytes) as r:
+                    uploaded = await read_json(r)
+                    assert r.status == 200, uploaded
+                uploaded_to_page = await mcp_request(mcp, 127, "tools/call", {
+                    "name": "upload_file", "arguments": {
+                        "ref": "b5", "upload_id": uploaded["upload_id"]}})
+                upload_text = uploaded_to_page["result"]["content"][0]["text"]
+                assert uploaded_to_page["result"]["isError"] is False, uploaded_to_page
+                assert "user-provided session upload" in upload_text and \
+                    "agent-document.txt" in upload_text, upload_text
+                file_inputs = read_lines("file-inputs.jsonl")
+                assert file_inputs and file_inputs[-1]["backendNodeId"] == 14, file_inputs
+                assert file_inputs[-1]["files"] == [uploaded["path"]], file_inputs[-1]
+                agent_instance = browser.manager().get(agent_id)
+                agent_instance._on_message({
+                    "method": "Page.fileChooserOpened",
+                    "sessionId": agent_instance.page_session,
+                    "params": {"backendNodeId": 14, "mode": "selectSingle"},
+                })
+                chooser_upload = await mcp_request(mcp, 133, "tools/call", {
+                    "name": "upload_file", "arguments": {
+                        "upload_id": uploaded["upload_id"]}})
+                assert chooser_upload["result"]["isError"] is False, chooser_upload
+                assert "open file chooser" in \
+                    chooser_upload["result"]["content"][0]["text"]
+                assert agent_instance.agent_file_chooser is None
+                stale_chooser = await mcp_request(mcp, 134, "tools/call", {
+                    "name": "upload_file", "arguments": {
+                        "upload_id": uploaded["upload_id"]}})
+                assert stale_chooser["result"]["isError"] is True, stale_chooser
+                assert "click the page's upload control" in \
+                    stale_chooser["result"]["content"][0]["text"]
+
+                async with http.post(
+                        url + "/api/sessions/{}/upload".format(handoff_sid),
+                        headers={**headers, "Content-Type": "text/plain",
+                                 "X-Puppy-Filename": "other-chat.txt",
+                                 "X-Puppy-Size": "5"}, data=b"other") as r:
+                    other_upload = await read_json(r)
+                    assert r.status == 200, other_upload
+                cross_chat_upload = await mcp_request(mcp, 128, "tools/call", {
+                    "name": "upload_file", "arguments": {
+                        "ref": "b5", "upload_id": other_upload["upload_id"]}})
+                assert cross_chat_upload["result"]["isError"] is True, cross_chat_upload
+                assert "unavailable in this chat" in \
+                    cross_chat_upload["result"]["content"][0]["text"]
+
+                # Downloads are scoped to this logical Browser. Direct regular
+                # files receive temporary refs; partials remain visible but
+                # unreadable, and symlinks never enter the catalog.
+                download_root = Path(browser._instance_root(agent_id)) / "downloads"
+                note_path = download_root / "agent-note.txt"
+                note_path.write_text("downloaded result\n", encoding="utf-8")
+                image_path = download_root / "pixel.png"
+                image_path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"stub-png")
+                (download_root / "pending.bin.crdownload").write_bytes(b"partial")
+                try:
+                    os.symlink("/etc/passwd", str(download_root / "escape.txt"))
+                except (OSError, NotImplementedError):
+                    pass
+                downloads = await mcp_request(mcp, 129, "tools/call", {
+                    "name": "downloads", "arguments": {}})
+                downloads_text = downloads["result"]["content"][0]["text"]
+                assert "UNTRUSTED BROWSER DOWNLOADS" in downloads_text
+                assert "agent-note.txt" in downloads_text and "pixel.png" in downloads_text
+                assert "[in progress]" in downloads_text and \
+                    "pending.bin.crdownload" in downloads_text
+                assert "escape.txt" not in downloads_text
+                note_line = next(line for line in downloads_text.splitlines()
+                                 if "agent-note.txt" in line)
+                note_ref = note_line.split("[", 1)[1].split("]", 1)[0]
+                read_note = await mcp_request(mcp, 130, "tools/call", {
+                    "name": "read_download", "arguments": {"download_ref": note_ref}})
+                read_note_text = read_note["result"]["content"][0]["text"]
+                assert "UNTRUSTED BROWSER DOWNLOAD" in read_note_text and \
+                    "downloaded result" in read_note_text and \
+                    str(note_path) in read_note_text, read_note_text
+                image_line = next(line for line in downloads_text.splitlines()
+                                  if "pixel.png" in line)
+                image_ref = image_line.split("[", 1)[1].split("]", 1)[0]
+                read_image = await mcp_request(mcp, 131, "tools/call", {
+                    "name": "read_download", "arguments": {"download_ref": image_ref}})
+                assert any(item.get("type") == "image" and
+                           item.get("mimeType") == "image/png" for item in
+                           read_image["result"]["content"]), read_image
+                note_path.write_text("changed after listing\n", encoding="utf-8")
+                stale_download = await mcp_request(mcp, 132, "tools/call", {
+                    "name": "read_download", "arguments": {"download_ref": note_ref}})
+                assert stale_download["result"]["isError"] is True, stale_download
+                assert "changed" in stale_download["result"]["content"][0]["text"]
 
                 inspected = await mcp_request(mcp, 104, "tools/call", {
                     "name": "inspect_element", "arguments": {"ref": "b1"}})
@@ -2080,7 +2311,6 @@ async def main() -> None:
 
                 # Diagnostics are captured per attached page, bounded, clearly
                 # untrusted, and strip credentials/query/fragment from URLs.
-                agent_instance = browser.manager().get(agent_id)
                 diagnostic_session = agent_instance.page_session
                 agent_instance._on_message({
                     "method": "Runtime.exceptionThrown", "sessionId": diagnostic_session,
@@ -2220,6 +2450,7 @@ async def main() -> None:
             check_backend_editor(ui_source, css_source)
             check_drawer_drag(ui_source)
             check_browser_viewport(ui_source)
+            check_browser_handoff_ui(ui_source, css_source)
             check_desktop_side_drag(ui_source)
             check_user_message_copy(ui_source)
             check_queue_pause_ui(ui_source, css_source)
@@ -2363,7 +2594,7 @@ async def main() -> None:
                 url + "/api/ws/browser/" + first_id, headers=headers)
             reader3 = asyncio.ensure_future(collect_ws(ws3, texts3, frames3))
             await wait_for(lambda: frames3, message="frame before crash")
-            await ws3.send_json({"type": "navigate", "url": "stub://die"})
+            await ws3.send_json({"type": "navigate", "url": "http://stub.invalid/die"})
             await wait_for(lambda: any(t.get("type") == "gone" for t in texts3),
                            message="gone notice after crash")
             await ws3.close()

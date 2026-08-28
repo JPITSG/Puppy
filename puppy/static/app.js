@@ -2726,6 +2726,13 @@ function browserInstancesFor(bid) {
   return !!backend && backendHasCapability(backend, "browser-instances");
 }
 
+function browserHandoffFor(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(item => item.id === bid);
+  return !!backend && Number(backend.protocol || 0) > 0 &&
+    Array.isArray(backend.capabilities) && backend.capabilities.includes("browser-handoff");
+}
+
 async function openNewBrowser(bid, groupId = null) {
   bid = Number(bid) || 0;
   if (!browserInstancesFor(bid)) {
@@ -3065,6 +3072,21 @@ function sidebarSessionKey(bid, sid) {
   return `${Number(bid) || 0}:${String(sid)}`;
 }
 
+/* Browser tabs do not replace the sidebar's chat selection. That gives a
+   browser opened beside a chat one stable, explicit meaning for "current
+   chat", including while the browser itself has focus in another pane. */
+function currentBrowserSession(bid) {
+  const key = state.selectedSession || focusedSessionKey();
+  if (!key) return null;
+  const separator = key.indexOf(":");
+  if (separator < 1) return null;
+  const selectedBid = Number(key.slice(0, separator)) || 0;
+  const sid = Number(key.slice(separator + 1)) || 0;
+  if (selectedBid !== (Number(bid) || 0) || !sid) return null;
+  const session = findSessionMeta(selectedBid, sid);
+  return session ? { bid: selectedBid, sid, session } : null;
+}
+
 function focusedSessionKey() {
   const tab = state.tabs.find(item => item.id === state.active);
   return tab && tab.type === "session" ? sidebarSessionKey(tab.bid, tab.sid) : null;
@@ -3075,6 +3097,7 @@ function selectSidebarSession(bid, sid) {
   state.selectedSession = key;
   document.querySelectorAll(".sess-item[data-session-key]").forEach(item =>
     item.classList.toggle("active", item.dataset.sessionKey === key));
+  syncSessionBrowserChips();
 }
 
 function renderSidebar() {
@@ -3942,11 +3965,14 @@ function openBrowserTab(bid, browserId = "", groupId = null, options = {}) {
   return tab;
 }
 
-/* Every open chat re-reads which of its browsers are still live. Cheap: the
-   list is tiny and each view rebuilds only when its own set changed. */
+/* Every open chat re-reads which of its browsers are still live, and visible
+   browsers re-read the current sidebar chat for their handoff action. Cheap:
+   both lists are tiny and each view updates only its own compact controls. */
 function syncSessionBrowserChips() {
-  for (const view of Object.values(state.views))
+  for (const view of Object.values(state.views)) {
     if (view && typeof view.syncBrowserChips === "function") view.syncBrowserChips();
+    if (view && typeof view.renderBinding === "function") view.renderBinding();
+  }
 }
 
 /* The node announces each browser first touched in a turn. Local sessions can
@@ -4033,6 +4059,7 @@ function focusWorkspacePane(groupId) {
   document.querySelectorAll(".workspace-pane").forEach(node =>
     node.classList.toggle("focused", node.dataset.paneId === pane.id));
   renderSidebar();
+  syncSessionBrowserChips();
   saveTabs();
 }
 
@@ -4047,6 +4074,7 @@ function activateTab(id, groupId = null) {
     state.selectedSession = sidebarSessionKey(tab.bid, tab.sid);
   syncTabOrderFromLayout();
   renderTabs(id); renderSidebar();
+  syncSessionBrowserChips();
 }
 
 function ensureTabView(tab) {
@@ -5997,6 +6025,7 @@ class SessionView {
       case "session_meta":
         this.session = d.session;
         this.updateHead();
+        syncSessionBrowserChips();
         break;
       case "rate_limit":
         if (d.info && d.info.status && d.info.status !== "allowed")
@@ -7366,6 +7395,11 @@ class BrowserView {
     this.lastUrl = "";
     this.moveQueued = null;
     this.lastViewport = "";
+    this.bindingKnown = Number(tab.sid) > 0;
+    this.binding = {
+      sessionId: Number(tab.sid) || null,
+      sessionName: "",
+    };
     this.viewportTimer = null;
     this.resizeObs = null;
     this.root = el("div", "view browser");
@@ -7389,6 +7423,35 @@ class BrowserView {
               M10 9h.01M12.2 9h.01M5 11h6"/></svg>
         </button>
       </div>
+      <div class="br-meta">
+        <div class="br-ident" aria-label="Browser identity">
+          <span class="br-ident-label">Browser</span>
+          <span class="br-id"></span>
+          <button class="icon-btn br-copy-id" type="button" aria-label="Copy Browser ID"></button>
+        </div>
+        <button class="br-owner" type="button" disabled>
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none"
+            stroke="currentColor" stroke-width="1.25" stroke-linecap="round"
+            stroke-linejoin="round" aria-hidden="true">
+            <path d="M2.3 3.2h11.4v7.6H7.1L4 13.4v-2.6H2.3z"/>
+            <path d="M5 6h6M5 8.2h4"/>
+          </svg>
+          <span class="br-owner-text">Checking session link…</span>
+        </button>
+        <div class="br-handoff">
+          <button class="btn btn-sm br-use" type="button">Use with current session</button>
+          <button class="icon-btn br-unlink hidden" type="button"
+            aria-label="Unlink browser from session" title="Unlink browser from session">
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="none"
+              stroke="currentColor" stroke-width="1.35" stroke-linecap="round"
+              stroke-linejoin="round" aria-hidden="true">
+              <path d="M6.2 10.8 5 12a2.5 2.5 0 0 1-3.5-3.5l2.2-2.2a2.5 2.5 0 0 1 3.5 0"/>
+              <path d="m9.8 5.2 1.2-1.2a2.5 2.5 0 0 1 3.5 3.5l-2.2 2.2a2.5 2.5 0 0 1-3.5 0"/>
+              <path d="m5.8 5.8 4.4 4.4M2.3 2.3l11.4 11.4"/>
+            </svg>
+          </button>
+        </div>
+      </div>
       <div class="br-type hidden">
         <input class="br-ime" type="text" autocomplete="off" autocapitalize="none"
           autocorrect="off" spellcheck="false" enterkeyhint="enter"
@@ -7411,13 +7474,23 @@ class BrowserView {
     this.reloadBtn.appendChild(refreshIcon(13));
     this.urlInput = this.root.querySelector(".br-url");
     this.kbdBtn = this.root.querySelector(".br-kbd");
+    this.meta = this.root.querySelector(".br-meta");
+    this.idText = this.root.querySelector(".br-id");
+    this.copyIdBtn = this.root.querySelector(".br-copy-id");
+    this.copyIdBtn.appendChild(copyIcon());
+    this.ownerBtn = this.root.querySelector(".br-owner");
+    this.ownerText = this.root.querySelector(".br-owner-text");
+    this.useBtn = this.root.querySelector(".br-use");
+    this.unlinkBtn = this.root.querySelector(".br-unlink");
     this.typeRow = this.root.querySelector(".br-type");
     this.stage = this.root.querySelector(".br-stage");
     this.screen = this.root.querySelector(".br-screen");
     this.ime = this.root.querySelector(".br-ime");
+    this.renderBinding();
   }
 
   onShow(focus = true) {
+    this.renderBinding();
     if (!this.started) { this.started = true; this.start(); }
     else this.queueViewport();
     if (!focus || this.isDead()) return;
@@ -7425,6 +7498,93 @@ class BrowserView {
     else this.ime.focus({ preventScroll: true });
   }
   isDead() { return !!this.root.querySelector(".br-dead"); }
+
+  applyBinding(payload) {
+    const sessionId = Number(payload && payload.session_id) || null;
+    const previous = Number(this.tab.sid) || null;
+    this.bindingKnown = true;
+    this.binding = {
+      sessionId,
+      sessionName: String(payload && payload.session_name || ""),
+    };
+    if (sessionId) this.tab.sid = sessionId;
+    else delete this.tab.sid;
+    this.renderBinding();
+    if (previous !== sessionId) {
+      saveTabs();
+      syncSessionBrowserChips();
+    }
+  }
+
+  renderBinding() {
+    const browserId = String(this.tab.browserId || "").toUpperCase();
+    this.meta.classList.toggle("hidden", !browserId);
+    if (!browserId) return;
+    this.idText.textContent = browserId;
+    const supported = browserHandoffFor(this.tab.bid);
+    const ownerId = Number(this.binding.sessionId) || null;
+    const owner = ownerId ? findSessionMeta(this.tab.bid, ownerId) : null;
+    const ownerName = owner ? (owner.name || `session ${ownerId}`) :
+      (this.binding.sessionName || (ownerId ? `session ${ownerId}` : ""));
+    if (!supported) {
+      this.ownerText.textContent = "Session linking requires an updated backend";
+      this.ownerBtn.disabled = true;
+      this.useBtn.textContent = "Linking unavailable";
+      this.useBtn.disabled = true;
+      this.unlinkBtn.classList.add("hidden");
+      return;
+    }
+    if (!this.bindingKnown) {
+      this.ownerText.textContent = "Checking session link…";
+      this.ownerBtn.disabled = true;
+      this.useBtn.textContent = "Checking…";
+      this.useBtn.disabled = true;
+      this.unlinkBtn.classList.add("hidden");
+      return;
+    }
+    this.ownerText.textContent = ownerId ? `Linked to ${ownerName}` : "Not linked to a session";
+    this.ownerBtn.disabled = !owner;
+    this.ownerBtn.title = owner ? `Open ${ownerName}` : "";
+    this.unlinkBtn.classList.toggle("hidden", !ownerId);
+    const selected = currentBrowserSession(this.tab.bid);
+    if (!selected) {
+      this.useBtn.textContent = "Select a session on this node";
+      this.useBtn.title = "Select a session in the sidebar first";
+      this.useBtn.disabled = true;
+    } else if (selected.sid === ownerId) {
+      this.useBtn.textContent = "Current session linked";
+      this.useBtn.title = `${selected.session.name || `session ${selected.sid}`} uses this browser`;
+      this.useBtn.disabled = true;
+    } else {
+      this.useBtn.textContent = ownerId ? "Move to current session" : "Use with current session";
+      this.useBtn.title = `Use Browser ${browserId} with ` +
+        `${selected.session.name || `session ${selected.sid}`}`;
+      this.useBtn.disabled = false;
+    }
+  }
+
+  async changeBinding(sessionId) {
+    const browserId = String(this.tab.browserId || "").toUpperCase();
+    if (!browserId || !browserHandoffFor(this.tab.bid)) return;
+    this.useBtn.disabled = true;
+    this.useBtn.textContent = sessionId ? "Linking…" : "Unlinking…";
+    this.unlinkBtn.disabled = true;
+    try {
+      const path = `browser/instances/${encodeURIComponent(browserId)}/binding`;
+      const result = sessionId ? await api(this.tab.bid, path, {
+        method: "POST", body: { session_id: sessionId }, timeoutMs: 15000,
+      }) : await api(this.tab.bid, path, { method: "DELETE", timeoutMs: 15000 });
+      this.applyBinding(result);
+      const name = sessionId && findSessionMeta(this.tab.bid, sessionId);
+      toast(sessionId ? `Browser ${browserId} linked to ${name ? name.name : "session"}` :
+        `Browser ${browserId} unlinked`, "ok");
+    } catch (error) {
+      toast(`Browser ${browserId}: ${error.message}`, "error", 7000);
+      this.renderBinding();
+    } finally {
+      this.unlinkBtn.disabled = false;
+    }
+  }
 
   send(payload) {
     if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify(payload));
@@ -7501,6 +7661,26 @@ class BrowserView {
   start() {
     this.resizeObs = new ResizeObserver(() => this.queueViewport());
     this.resizeObs.observe(this.stage);
+    this.copyIdBtn.onclick = async () => {
+      const browserId = String(this.tab.browserId || "").toUpperCase();
+      if (!browserId || !await copyWithToast(browserId, `Browser ${browserId} ID copied`))
+        return;
+      clearTimeout(this.copyIdBtn._copyReset);
+      this.copyIdBtn.replaceChildren(copyIcon(true));
+      this.copyIdBtn._copyReset = setTimeout(() => {
+        if (this.copyIdBtn.isConnected) this.copyIdBtn.replaceChildren(copyIcon());
+      }, 1400);
+    };
+    this.ownerBtn.onclick = () => {
+      const sid = Number(this.binding.sessionId) || 0;
+      const meta = sid ? findSessionMeta(this.tab.bid, sid) : null;
+      if (meta) openSessionTab(this.tab.bid, sid, meta);
+    };
+    this.useBtn.onclick = () => {
+      const selected = currentBrowserSession(this.tab.bid);
+      if (selected) this.changeBinding(selected.sid);
+    };
+    this.unlinkBtn.onclick = () => this.changeBinding(null);
     const buttons = ["left", "middle", "right"];
     const mouse = (kind, e) => {
       const p = this.point(e.clientX, e.clientY);
@@ -7678,6 +7858,8 @@ class BrowserView {
       } else if (d.type === "frame_meta") {
         this.frameW = Number(d.width) || this.frameW;
         this.frameH = Number(d.height) || this.frameH;
+      } else if (d.type === "binding") {
+        this.applyBinding(d);
       } else if (d.type === "dialog") {
         toast(`page ${d.kind || "dialog"} ${d.action}: ${d.message || ""}`.trim(),
           "info", 6000);

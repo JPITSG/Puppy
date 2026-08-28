@@ -316,6 +316,8 @@ async def exercise_node(url: str, token: str, expected_version: str,
         # (off in this deployment), availability is probed on demand
         assert "browser" in ping["capabilities"]
         assert "browser-instances" in ping["capabilities"]
+        assert "browser-handoff" in ping["capabilities"]
+        assert "browser-file-workflows" in ping["capabilities"]
         assert ping["browser"] == {"enabled": False}
         assert ping["uploads"]["enabled"] is \
             (ping["uploads"]["max_file_size_mb"] > 0)
@@ -326,6 +328,14 @@ async def exercise_node(url: str, token: str, expected_version: str,
         async with http.post(url + "/api/notify/exec", headers=good, ssl=pinned,
                              json={"command": "true"}) as response:
             assert response.status == 404
+        # The authenticated named-browser handoff routes are packaged in the
+        # headless runtime even while Browser is off; an unknown logical ID is
+        # a domain error, not an absent route.
+        async with http.get(url + "/api/browser/instances/A1B2/binding",
+                            headers=good, ssl=pinned) as response:
+            missing_binding = await response.json()
+            assert response.status == 404, missing_binding
+            assert "closed or unknown" in missing_binding["error"]
         assert ("pinned-tls" in ping["capabilities"]) is bool(fingerprint)
         assert ping["transport"]["encrypted"] is bool(fingerprint)
         if fingerprint:
@@ -676,6 +686,8 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert full_ping["role"] == "full" and full_ping["protocol"] == 1
         assert "terminal" in full_ping["capabilities"]
         assert "queue-pause" in full_ping["capabilities"]
+        assert "browser-handoff" in full_ping["capabilities"]
+        assert "browser-file-workflows" in full_ping["capabilities"]
         assert "shutdown-notice" not in full_ping["capabilities"]
 
         updates = await http.ws_connect(url + "/api/ws/updates", headers=headers)
@@ -728,6 +740,8 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert "engine-upgrade" in stored["capabilities"]
         assert "file-uploads" in stored["capabilities"]
         assert "queue-pause" in stored["capabilities"]
+        assert "browser-handoff" in stored["capabilities"]
+        assert "browser-file-workflows" in stored["capabilities"]
         assert "shutdown-notice" in stored["capabilities"]
         assert "terminal" not in stored["capabilities"]
         assert "remote-upgrade" in stored["capabilities"]
@@ -740,6 +754,13 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert stored["auto_upgrade"] is False
         assert stored["upgrade_in_progress"] is False
         assert "token" not in stored
+
+        async with http.get(
+                url + f"/api/b/{stored['id']}/browser/instances/A1B2/binding",
+                headers=headers) as response:
+            proxied_binding = await response.json()
+            assert response.status == 404, proxied_binding
+            assert "closed or unknown" in proxied_binding["error"]
 
         async with http.patch(url + f"/api/backends/{stored['id']}", headers=headers,
                               json={"auto_upgrade": "yes"}) as response:

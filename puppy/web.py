@@ -406,6 +406,10 @@ async def h_session_delete(request: web.Request):
         return web.json_response({"error": str(exc)}, status=500)
     runner.drop_hub(s["id"])
     shutil.rmtree(os.path.join(config.DATA_DIR, "uploads", str(s["id"])), ignore_errors=True)
+    try:
+        await browser.manager().clear_session_binding(s["id"])
+    except Exception as exc:
+        log.warning("session %s browser binding cleanup failed: %s", s["id"], exc)
     db.delete_session(s["id"])
     runner.broadcast_sessions()
     log.info("session %s deleted workspace_removed=%s", s["id"], workspace_removed)

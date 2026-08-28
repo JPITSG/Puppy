@@ -29,6 +29,15 @@ BROWSER_CAPABILITY = "browser"
 # and the ID-scoped screencast websocket. Older browser-capable nodes expose
 # only the legacy singleton websocket and remain usable through that fallback.
 BROWSER_INSTANCES_CAPABILITY = "browser-instances"
+# Explicitly assigning one named browser to one chat, reporting that binding to
+# viewers, and changing it through the authenticated instance API. Older nodes
+# still accept an ID when an agent names it, but cannot make that relationship
+# visible or user-controlled in the WebUI.
+BROWSER_HANDOFF_CAPABILITY = "browser-handoff"
+# Turn-bound browser file helpers: a chat may place one of its own Puppy upload
+# records into a file input, and inspect downloads belonging to its bound
+# browser. Neither operation accepts an arbitrary caller-supplied path.
+BROWSER_FILE_WORKFLOWS_CAPABILITY = "browser-file-workflows"
 # GET/PATCH of the node's unattended engine-update schedule. The upgrade itself
 # is the engine-upgrade surface; this only decides when the node runs it, so a
 # node may support upgrading by hand without advertising the scheduler.
@@ -66,6 +75,8 @@ BASE_CAPABILITIES = (
     ENGINE_UPGRADE_CAPABILITY,
     BROWSER_CAPABILITY,
     BROWSER_INSTANCES_CAPABILITY,
+    BROWSER_HANDOFF_CAPABILITY,
+    BROWSER_FILE_WORKFLOWS_CAPABILITY,
     UPLOAD_PREVIEW_CAPABILITY,
     ENGINE_AUTO_UPGRADE_CAPABILITY,
 )
