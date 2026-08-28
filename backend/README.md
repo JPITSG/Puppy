@@ -122,6 +122,12 @@ lets a controller show one continuous elapsed time while compensating for clock
 differences between the controller and backend. These fields are additive;
 controllers can continue to attach older nodes that do not send them.
 
+When a work block becomes idle, session lists, snapshots and `turn_done` also
+carry the additive `completion_status`. A controller uses `interrupted` to
+retire its activity timer without firing a configured completion command for a
+prompt the user stopped. Queued work that continues after a stop remains one
+activity block and can still notify when that later work actually finishes.
+
 ## Account usage refresh
 
 The headless package stores the same per-node usage-refresh interval as the full

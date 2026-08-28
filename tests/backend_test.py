@@ -1248,7 +1248,7 @@ async def exercise_launcher_rollback(artifact: Path, launcher: Path, state_dir: 
     return process
 
 
-def check_notify_placeholders() -> None:
+async def check_notify_placeholders() -> None:
     """The completion-command contract both runtimes expand and export.
 
     Imported here, not at module scope: notify pulls in puppy.config, which
@@ -1276,6 +1276,53 @@ def check_notify_placeholders() -> None:
     assert hostile["duration_hms"] == "1:30", hostile
     # and a completion with no duration simply has neither
     assert "duration_hms" not in notify.clean_info({"session": "s"})
+
+    # A deliberate stop is not completed work. Test the hook itself so this
+    # stays true even if a caller accidentally passes an interrupted outcome
+    # while notification settings are armed.
+    fired = []
+    original_active, original_fire = notify.active, notify._fire
+
+    async def capture_fire(payload):
+        fired.append(payload)
+
+    try:
+        notify.active = lambda: True
+        notify._fire = capture_fire
+        session = {"id": 9, "name": "stopped", "engine": "codex",
+                   "model": "test", "cwd": "/tmp"}
+        notify.session_finished(session, "interrupted", 12)
+        await asyncio.sleep(0)
+        assert fired == [], fired
+        notify.session_finished(session, "ok", 13)
+        await asyncio.sleep(0)
+        assert len(fired) == 1 and fired[0]["status"] == "ok", fired
+    finally:
+        notify.active, notify._fire = original_active, original_fire
+
+
+async def exercise_interrupted_notify_report(web_module) -> None:
+    """A client cannot route an interrupted remote outcome around the runner
+    guard and into the controller's report endpoint."""
+    class Request:
+        async def json(self):
+            return {"bid": 7, "sid": 11,
+                    "info": {"status": "interrupted", "session": "stopped"}}
+
+    touched = []
+    original_active = web_module.notify.active
+    original_backend = web_module.backends.get_backend
+    try:
+        web_module.notify.active = lambda: touched.append("active") or True
+        web_module.backends.get_backend = \
+            lambda _bid: touched.append("backend") or {"name": "remote"}
+        response = await web_module.h_notify_fire(Request())
+        assert response.status == 200
+        assert json.loads(response.text) == {"ok": True, "fired": False}
+        assert touched == [], touched
+    finally:
+        web_module.notify.active = original_active
+        web_module.backends.get_backend = original_backend
 
 
 def exercise_auth_evidence(root, db) -> None:
@@ -1393,6 +1440,7 @@ def exercise_session_show_meta(runner, db) -> None:
     """The head strip is a per-session flag on the shared session payload: on by
     default, a real boolean on the wire so a console can trust it."""
     sid = db.create_session("meta", "claude", "/tmp", "", "", "blue", "auto")
+    hub = runner.hub(sid)
 
     def listed():
         rows = [x for x in runner.sessions_payload()["sessions"] if x["id"] == sid]
@@ -1411,7 +1459,16 @@ def exercise_session_show_meta(runner, db) -> None:
         assert listed()["show_meta"] is True
         db.touch_session(sid, show_meta=0)
         assert listed()["show_meta"] is False
+        # The same list and per-session snapshot expose why an activity block
+        # went idle. This is transient wire state, not a persisted session flag.
+        hub.last_completion_status = "interrupted"
+        assert listed()["completion_status"] == "interrupted"
+        assert hub.snapshot()["completion_status"] == "interrupted"
+        hub.status = "running"
+        assert listed()["completion_status"] == ""
+        assert hub.snapshot()["completion_status"] == ""
     finally:
+        runner.drop_hub(sid)
         db.delete_session(sid)
 
 
@@ -1747,9 +1804,11 @@ async def main() -> None:
             "puppy.config was imported before the test data path was set"
         from puppy import config, db, host_metrics, runner, terminal
         from backend.puppy_backend import upgrade as backend_upgrade
+        from puppy import web as puppy_web
         from puppy.web import build_app
 
-        check_notify_placeholders()
+        await check_notify_placeholders()
+        await exercise_interrupted_notify_report(puppy_web)
 
         config.load()
         controller_token = "controller-test-token-0123456789abcdef"

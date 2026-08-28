@@ -1052,12 +1052,17 @@ async def h_notify_fire(request: web.Request):
         return web.json_response({"error": "invalid session reference"}, status=400)
     if bid <= 0:
         return web.json_response({"error": "local sessions fire on the server"}, status=400)
+    info = notify.clean_info(body.get("info"))
+    # Defense in depth for console-reported remote completions: even if a
+    # client regresses and reports a stopped turn, it must never reach the
+    # configured command or consume the dedupe window for a later real finish.
+    if info.get("status") == "interrupted":
+        return web.json_response({"ok": True, "fired": False})
     if not notify.active():
         return web.json_response({"ok": True, "fired": False})
     be = backends.get_backend(bid)
     if be is None or not notify.accept_remote_fire(bid, sid):
         return web.json_response({"ok": True, "fired": False})
-    info = notify.clean_info(body.get("info"))
     info["backend"] = be["name"]
     info["id"] = str(sid)
     asyncio.ensure_future(notify._fire(info))

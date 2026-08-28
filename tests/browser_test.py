@@ -534,6 +534,56 @@ console.log(JSON.stringify({stoppedState, clearedState}));
     assert result["clearedState"] == {"notice": None, "error": None, "cleared": 1}, result
 
 
+def check_interrupted_completion(ui_source: str) -> None:
+    """Remote idle detection retires a stopped timer without reporting it.
+
+    Both the session socket and the polling path feed this function, so the
+    assertion also covers a phone which learns the outcome only after waking.
+    """
+    def function(name):
+        start = ui_source.index("function " + name + "(")
+        brace = ui_source.index(") {", start) + 2
+        depth = 0
+        for index in range(brace, len(ui_source)):
+            if ui_source[index] == "{":
+                depth += 1
+            elif ui_source[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    return ui_source[start:index + 1]
+        raise AssertionError("unbalanced " + name)
+
+    source = "\n".join(function(name) for name in (
+        "sessionActivityKey", "ingestOneSessionActivity", "reportRemoteCompletion"))
+    script = r"""
+const state = {notify: {configured: true, enabled: true}};
+const sessionActivityAnchors = new Map([
+  ["7:1", 1000], ["7:2", 1000], ["7:3", 1000],
+]);
+const posts = [];
+const api = (bid, route, options) => {
+  posts.push({bid, route, body: options.body});
+  return Promise.resolve({ok: true});
+};
+%s
+ingestOneSessionActivity(7,
+  {id: 1, status: "idle", completion_status: "interrupted"}, 20, 5000);
+ingestOneSessionActivity(7,
+  {id: 2, status: "idle", completion_status: "ok"}, 20, 5000);
+// An older backend has no additive outcome and retains the prior behavior.
+ingestOneSessionActivity(7, {id: 3, status: "idle"}, 20, 5000);
+console.log(JSON.stringify({posts, remaining: sessionActivityAnchors.size}));
+""" % source
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:500]
+    result = json.loads(proc.stdout.strip())
+    assert result["remaining"] == 0, result
+    assert [call["body"]["sid"] for call in result["posts"]] == [2, 3], result
+    assert all(call["route"] == "notify/fire" for call in result["posts"]), result
+    assert "d.active_since, d.server_time, d.completion_status" in ui_source
+    assert "d.completion_status);" in ui_source
+
+
 def check_thinking_icons(ui_source: str) -> None:
     """Dedicated and status-only thinking use one marker for every engine."""
     def function(name):
@@ -2609,6 +2659,7 @@ async def main() -> None:
             check_free_identifiers(ui_source)
             check_reconnect_status(ui_source)
             check_backend_shutdown_notice(ui_source)
+            check_interrupted_completion(ui_source)
             check_thinking_icons(ui_source)
             check_backend_editor(ui_source, css_source)
             check_drawer_drag(ui_source)

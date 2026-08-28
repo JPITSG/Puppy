@@ -95,6 +95,8 @@ def sessions_payload() -> dict:
             "id": s["id"], "name": s["name"], "engine": s["engine"], "cwd": s["cwd"],
             "status": (h.status if h else "idle"), "archived": s["archived"],
             "active_since": (h.active_since if h and h.status == "running" else None),
+            "completion_status": (h.last_completion_status
+                                  if h and h.status == "idle" else ""),
             "updated_at": s["updated_at"], "model": s["model"], "last_model": s["last_model"],
             "effort": s["effort"], "color": s["color"], "permission_mode": s["permission_mode"],
             "has_native": bool(s["native_session_id"]),
@@ -234,6 +236,10 @@ class SessionHub:
         self.turn_task = None
         self.pending_approval = None
         self.interrupted = False
+        # The outcome which ended the most recent activity block. It is
+        # transient protocol state, used by controllers to distinguish a user
+        # stop from work that completed while their session socket was hidden.
+        self.last_completion_status = ""
         self.stderr_tail = ""
         self._stdin_lock = asyncio.Lock()
         # whether this turn's divider already announced a model move, so the
@@ -282,6 +288,8 @@ class SessionHub:
             "events": db.get_events(self.id, limit=200),
             "status": self.status,
             "active_since": self.active_since if self.status == "running" else None,
+            "completion_status": (self.last_completion_status
+                                  if self.status == "idle" else ""),
             "server_time": time.time(),
             "queued": self._queue_wire(),
             "paused": self._paused_wire(),
@@ -510,6 +518,7 @@ class SessionHub:
     def _start_turn(self, text: str) -> None:
         if self.active_since is None:
             self.active_since = time.time()
+            self.last_completion_status = ""
         self.status = "running"
         self.interrupted = False
         self._proc_ready = False
@@ -910,7 +919,10 @@ class SessionHub:
             block_started = self.active_since
             nxt = self._take_next_turn()
             continued = nxt is not None
+            completion_status = "" if continued else (
+                "interrupted" if self.interrupted else self._block_status)
             if not continued:
+                self.last_completion_status = completion_status
                 try:
                     db.touch_session(self.id, status="idle")
                 except Exception:
@@ -920,11 +932,12 @@ class SessionHub:
                 try:
                     notify.session_finished(
                         db.get_session(self.id),
-                        "interrupted" if self.interrupted else self._block_status,
+                        completion_status,
                         int(time.time() - block_started) if block_started else 0)
                 except Exception:
                     log.exception("completion notify failed for session %s", self.id)
-            self.broadcast({"type": "turn_done", "continued": continued})
+            self.broadcast({"type": "turn_done", "continued": continued,
+                            "completion_status": completion_status})
             if continued:
                 self._broadcast_queue()
                 self._start_turn(nxt)

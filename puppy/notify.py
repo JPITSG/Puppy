@@ -11,7 +11,8 @@ chosen backend (token + pinned TLS), where it executes only if that node was
 built with its shell surface (terminal) enabled.
 
 A notification fires when a session goes idle - its turn and everything queued
-behind it finished - not once per queued prompt.
+behind it finished - not once per queued prompt. A turn stopped by the user is
+not a completion and never fires the command.
 """
 from __future__ import annotations
 
@@ -142,7 +143,7 @@ async def dispatch(info: dict, override: dict = None) -> dict:
 
 def session_finished(session: dict, status: str, duration_s: int) -> None:
     """Runner hook: fire-and-forget on this node's own completions."""
-    if session is None or not active():
+    if status == "interrupted" or session is None or not active():
         return
     info = {
         "backend": config.get("instance_name") or "local",

@@ -1792,7 +1792,8 @@ function ingestOneSessionActivity(bid, session, serverTime, receivedAt) {
     if (sessionActivityAnchors.has(key)) {
       const startedAt = sessionActivityAnchors.get(key);
       sessionActivityAnchors.delete(key);
-      reportRemoteCompletion(bid, session, startedAt, receivedAt);
+      if (session.completion_status !== "interrupted")
+        reportRemoteCompletion(bid, session, startedAt, receivedAt);
     }
     return;
   }
@@ -2928,12 +2929,14 @@ function updateSessionActivityLabels() {
   });
 }
 
-function noteSessionActivity(bid, sid, running, activeSince, serverTime) {
+function noteSessionActivity(bid, sid, running, activeSince, serverTime,
+                             completionStatus = "") {
   const sessions = sessionsFor(bid);
   const session = sessions.find(item => String(item.id) === String(sid));
   const sample = session || { id: sid };
   sample.status = running ? "running" : "idle";
   sample.active_since = running ? (activeSince == null ? sample.active_since : activeSince) : null;
+  sample.completion_status = running ? "" : completionStatus;
   ingestOneSessionActivity(bid, sample, serverTime, Date.now());
   renderSidebar();
   renderTabs();
@@ -5965,7 +5968,7 @@ class SessionView {
         this.syncUploadButton();
         this.status = d.status;
         noteSessionActivity(this.tab.bid, this.tab.sid, d.status === "running",
-          d.active_since, d.server_time);
+          d.active_since, d.server_time, d.completion_status);
         this.retry = 800;
         // the transcript is being rebuilt: retire the watcher on the old button
         if (this._stopLoadOlder) this._stopLoadOlder();
@@ -6030,7 +6033,8 @@ class SessionView {
         this.clearLive();
         this.updateRunState();
         this.setStatus(continued ? "starting next queued message…" : "");
-        noteSessionActivity(this.tab.bid, this.tab.sid, continued);
+        noteSessionActivity(this.tab.bid, this.tab.sid, continued, null, null,
+          d.completion_status);
         break;
       case "session_meta":
         this.session = d.session;
