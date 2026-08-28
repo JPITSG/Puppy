@@ -688,7 +688,9 @@ console.log(JSON.stringify({before,after,connected}));
     assert ".engine-node-message.engine-node-empty{" in css_source
     assert "display:inline-grid;grid-template-columns:6px auto" in css_source
     assert "margin:5px 0 3px;padding:5px 0;" in css_source
-    assert "font-family:var(--sans);font-size:11.5px;font-weight:400;" in css_source
+    assert ".engine-node-message,.usage-refresh-note,.eau-note{" in css_source
+    assert "font-family:var(--sans);font-size:10.5px;font-weight:400;" in css_source
+    assert ".engine-node-message{padding:7px 0 5px 30px;color:var(--txt3)}" in css_source
     assert ".engine-node-loading-icon svg{display:block;flex:0 0 auto;animation:spin" in css_source
     assert (".engine-node-message.engine-node-unavailable::before," +
             "\n.engine-node-message.engine-node-empty::before{justify-self:center}") in css_source
