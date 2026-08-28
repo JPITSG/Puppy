@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS backends (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     url TEXT NOT NULL,
+    urls TEXT NOT NULL DEFAULT '[]',
     token TEXT NOT NULL,
     protocol INTEGER NOT NULL DEFAULT 0,
     capabilities TEXT NOT NULL DEFAULT '[]',
@@ -147,6 +148,14 @@ def _migrate(conn) -> None:
         conn.execute("ALTER TABLE backends ADD COLUMN tls_fingerprint TEXT NOT NULL DEFAULT ''")
     if "auto_upgrade" not in backend_cols:
         conn.execute("ALTER TABLE backends ADD COLUMN auto_upgrade INTEGER NOT NULL DEFAULT 0")
+    if "urls" not in backend_cols:
+        # Keep the original scalar column as a compatibility primary address,
+        # while moving routing to an ordered JSON list. Every pre-failover row
+        # therefore retains exactly the connection it had before migration.
+        conn.execute("ALTER TABLE backends ADD COLUMN urls TEXT NOT NULL DEFAULT '[]'")
+        for row in conn.execute("SELECT id,url FROM backends").fetchall():
+            conn.execute("UPDATE backends SET urls=? WHERE id=?",
+                         (json.dumps([row["url"]], separators=(",", ":")), row["id"]))
 
 
 def query(sql: str, args=()) -> list:

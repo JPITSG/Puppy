@@ -32,10 +32,13 @@ _auto_upgrade_wake = None
 _auto_upgrade_retry_after = {}
 _auto_upgrade_checked_at = {}
 _auto_upgrade_last_errors = {}
+_active_urls = {}
+_url_cursors = {}
 
-PROXY_CONNECT_TIMEOUT = 8.0
+FAILOVER_CONNECT_TIMEOUT = 2.5
 PROXY_TOTAL_TIMEOUT = 60.0
 PROXY_UPLOAD_TIMEOUT = 15 * 60.0
+MAX_BACKEND_URLS = 8
 UPLOAD_PROXY_PATH = re.compile(r"^sessions/\d+/upload$")
 AUTO_UPGRADE_INTERVAL = 8.0
 AUTO_UPGRADE_FAILURE_RETRY = 30.0
@@ -78,6 +81,17 @@ def _connection_error(exc: Exception) -> str:
     return str(exc)
 
 
+def _failed_before_request(exc: Exception) -> bool:
+    """True only when replay cannot duplicate a state-changing request."""
+    return isinstance(exc, (
+        aiohttp.ClientConnectorError,
+        aiohttp.ClientConnectorCertificateError,
+        aiohttp.ClientConnectorSSLError,
+        aiohttp.ServerFingerprintMismatch,
+        aiohttp.ConnectionTimeoutError,
+    ))
+
+
 def _base_url(value: str) -> str:
     url = str(value or "").strip().rstrip("/")
     try:
@@ -95,9 +109,100 @@ def _base_url(value: str) -> str:
     return "{}://{}".format(parsed.scheme, parsed.netloc)
 
 
+def _normalize_urls(value) -> list:
+    if not isinstance(value, list):
+        raise ValueError("backend URLs must be a list")
+    if not value:
+        raise ValueError("at least one backend URL is required")
+    if len(value) > MAX_BACKEND_URLS:
+        raise ValueError("at most {} backend URLs are allowed".format(MAX_BACKEND_URLS))
+    urls = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError("each backend URL must be text")
+        url = _base_url(item)
+        if url not in urls:
+            urls.append(url)
+    if not urls:
+        raise ValueError("at least one backend URL is required")
+    return urls
+
+
+def _backend_urls(backend: dict) -> list:
+    value = backend.get("urls")
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except Exception:
+            value = None
+    try:
+        return _normalize_urls(value)
+    except ValueError:
+        try:
+            return [_base_url(backend.get("url"))]
+        except ValueError:
+            return []
+
+
+def _request_urls(body: dict, backend=None) -> list:
+    if "urls" in body:
+        urls = _normalize_urls(body["urls"])
+        if "url" in body and _base_url(body["url"]) != urls[0]:
+            raise ValueError("backend url must match the first URL in urls")
+        return urls
+    if "url" in body:
+        return [_base_url(body["url"])]
+    if backend is not None:
+        urls = _backend_urls(backend)
+        if urls:
+            return urls
+    raise ValueError("at least one backend URL is required")
+
+
+def _urls_json(urls: list) -> str:
+    return json.dumps(urls, separators=(",", ":"))
+
+
+def _ordered_backend_urls(backend: dict) -> list:
+    urls = _backend_urls(backend)
+    if not urls:
+        return []
+    bid = int(backend.get("id") or 0)
+    active = _active_urls.get(bid)
+    if active in urls:
+        return [active] + [url for url in urls if url != active]
+    start = _url_cursors.get(bid, 0) % len(urls)
+    return urls[start:] + urls[:start]
+
+
+def _remember_active_url(bid: int, url: str, urls=None) -> bool:
+    previous = _active_urls.get(bid)
+    _active_urls[bid] = url
+    candidates = urls or []
+    if url in candidates:
+        _url_cursors[bid] = candidates.index(url)
+    return previous != url
+
+
+def _publish_active_url(backend: dict, url: str) -> None:
+    if _remember_active_url(int(backend["id"]), url, _backend_urls(backend)):
+        _broadcast_backends()
+
+
+def _advance_url_cursor(bid: int, count: int) -> None:
+    if count > 1 and _active_urls.get(bid) is None:
+        _url_cursors[bid] = (_url_cursors.get(bid, 0) + 1) % count
+
+
+def _validate_url_security(urls: list, tls_fingerprint: str) -> None:
+    if tls_fingerprint and any(urlsplit(url).scheme != "https" for url in urls):
+        raise ValueError(
+            "a TLS certificate fingerprint requires every backend URL to use https://")
+
+
 def list_backends() -> list:
     rows = db.query(
-        "SELECT id,name,url,protocol,capabilities,remote_version,role,tls_fingerprint,"
+        "SELECT id,name,url,urls,protocol,capabilities,remote_version,role,tls_fingerprint,"
         "auto_upgrade,created_at "
         "FROM backends ORDER BY id")
     out = []
@@ -108,6 +213,10 @@ def list_backends() -> list:
         except Exception:
             caps = []
         item["capabilities"] = caps if isinstance(caps, list) else []
+        item["urls"] = _backend_urls(item)
+        item["url"] = item["urls"][0] if item["urls"] else str(item.get("url") or "")
+        active = _active_urls.get(int(item["id"]))
+        item["active_url"] = active if active in item["urls"] else ""
         item["auto_upgrade"] = bool(item.get("auto_upgrade"))
         item["upgrade_in_progress"] = item["id"] in _upgrades_in_progress
         out.append(item)
@@ -116,7 +225,11 @@ def list_backends() -> list:
 
 def get_backend(bid: int):
     row = db.query_one("SELECT * FROM backends WHERE id=?", (bid,))
-    return dict(row) if row else None
+    if not row:
+        return None
+    backend = dict(row)
+    backend["urls"] = _backend_urls(backend)
+    return backend
 
 
 def _backend_capabilities(backend: dict) -> list:
@@ -143,6 +256,8 @@ def reset_auto_upgrade_schedule() -> None:
     _auto_upgrade_retry_after.clear()
     _auto_upgrade_checked_at.clear()
     _auto_upgrade_last_errors.clear()
+    _active_urls.clear()
+    _url_cursors.clear()
     _wake_auto_upgrade()
 
 
@@ -176,24 +291,37 @@ async def notify_exec(bid: int, command: str, info: dict) -> dict:
     be = get_backend(bid)
     if be is None:
         return {"ok": False, "error": "backend %s is not paired" % bid}
-    try:
-        async with client().post(
-                be["url"] + "/api/notify/exec",
-                json={"command": command, "info": info},
-                headers={"X-Puppy-Token": be["token"]},
-                timeout=aiohttp.ClientTimeout(total=45),
-                allow_redirects=False,
-                ssl=_ssl_pin(be.get("tls_fingerprint") or "")) as response:
-            if response.status == 404:
-                return {"ok": False,
-                        "error": "%s cannot run commands (upgrade it, or its shell "
-                                 "surface is disabled)" % be["name"]}
-            if response.status != 200:
-                return {"ok": False, "error": "%s returned %s" % (be["name"], response.status)}
-            data = await response.json()
-            return data if isinstance(data, dict) else {"ok": False, "error": "invalid reply"}
-    except Exception as exc:
-        return {"ok": False, "error": "%s: %s" % (be["name"], _connection_error(exc))}
+    urls = _ordered_backend_urls(be)
+    last_error = "backend is unavailable"
+    for index, url in enumerate(urls):
+        try:
+            async with client().post(
+                    url + "/api/notify/exec",
+                    json={"command": command, "info": info},
+                    headers={"X-Puppy-Token": be["token"]},
+                    timeout=aiohttp.ClientTimeout(
+                        total=45, connect=FAILOVER_CONNECT_TIMEOUT,
+                        sock_connect=FAILOVER_CONNECT_TIMEOUT),
+                    allow_redirects=False,
+                    ssl=_ssl_pin(be.get("tls_fingerprint") or "")) as response:
+                _publish_active_url(be, url)
+                if response.status == 404:
+                    return {"ok": False,
+                            "error": "%s cannot run commands (upgrade it, or its shell "
+                                     "surface is disabled)" % be["name"]}
+                if response.status != 200:
+                    return {"ok": False,
+                            "error": "%s returned %s" % (be["name"], response.status)}
+                data = await response.json()
+                return data if isinstance(data, dict) else {
+                    "ok": False, "error": "invalid reply"}
+        except Exception as exc:
+            last_error = _connection_error(exc)
+            if index + 1 < len(urls) and _failed_before_request(exc):
+                continue
+            break
+    _advance_url_cursor(bid, len(urls))
+    return {"ok": False, "error": "%s: %s" % (be["name"], last_error)}
 
 
 async def probe_backend(url: str, token: str, tls_fingerprint: str = "",
@@ -255,6 +383,47 @@ async def probe_backend(url: str, token: str, tls_fingerprint: str = "",
         return {"ok": False, "error": "connection timed out"}
     except Exception as e:
         return {"ok": False, "error": _connection_error(e)}
+
+
+async def probe_backend_urls(urls: list, token: str, tls_fingerprint: str = "",
+                             timeout: float = 8.0) -> dict:
+    """Try each configured origin in order and return the first authenticated peer."""
+    attempts = []
+    for url in urls:
+        result = await probe_backend(url, token, tls_fingerprint, timeout=timeout)
+        if result.get("ok"):
+            result["active_url"] = url
+            result["attempts"] = attempts
+            return result
+        attempts.append({"url": url, "error": result.get("error", "backend test failed"),
+                         "status": result.get("status")})
+    last = attempts[-1] if attempts else {"error": "no backend URLs are configured"}
+    error = str(last.get("error") or "backend test failed")
+    if len(attempts) > 1:
+        errors = []
+        for attempt in attempts:
+            detail = str(attempt.get("error") or "backend test failed")
+            if detail not in errors:
+                errors.append(detail)
+        error = "none of the configured backend URLs could be reached; " + "; ".join(errors)
+    failed = {"ok": False, "error": error, "attempts": attempts}
+    if last.get("status") is not None:
+        failed["status"] = last["status"]
+    return failed
+
+
+async def probe_configured_backend(backend: dict, timeout: float = 8.0) -> dict:
+    urls = _ordered_backend_urls(backend)
+    result = await probe_backend_urls(
+        urls, backend["token"], backend.get("tls_fingerprint") or "", timeout=timeout)
+    bid = int(backend["id"])
+    if result.get("ok"):
+        result["active_changed"] = _remember_active_url(
+            bid, result["active_url"], _backend_urls(backend))
+    else:
+        result["active_changed"] = False
+        _advance_url_cursor(bid, len(urls))
+    return result
 
 
 def _metadata(remote: dict) -> tuple:
@@ -351,20 +520,19 @@ async def h_add(request: web.Request):
     if type(auto_upgrade) is not bool:
         return web.json_response({"error": "auto-upgrade must be on or off"}, status=400)
     try:
-        url = _base_url(body.get("url"))
+        urls = _request_urls(body)
         tls_fingerprint = tls.normalize_fingerprint(
             body.get("tls_fingerprint") or body.get("tls_sha256"))
+        _validate_url_security(urls, tls_fingerprint)
     except ValueError as exc:
         return web.json_response({"error": str(exc)}, status=400)
     if not token:
         return web.json_response({"error": "API token is required"}, status=400)
-    if tls_fingerprint and urlsplit(url).scheme != "https":
-        return web.json_response(
-            {"error": "a TLS certificate fingerprint requires an https:// URL"}, status=400)
-    result = await probe_backend(url, token, tls_fingerprint)
+    result = await probe_backend_urls(urls, token, tls_fingerprint)
     if not result["ok"]:
         return web.json_response({"error": result.get("error", "backend test failed"),
-                                  "status": result.get("status")}, status=400)
+                                  "status": result.get("status"),
+                                  "attempts": result.get("attempts", [])}, status=400)
     remote = result["remote"]
     name = name or str(remote.get("name") or "").strip() or "backend"
     if auto_upgrade and (remote.get("role") != "backend" or
@@ -374,14 +542,16 @@ async def h_add(request: web.Request):
         }, status=409)
     api_protocol, capabilities, remote_version, role = _metadata(remote)
     bid = db.execute(
-        "INSERT INTO backends(name,url,token,protocol,capabilities,remote_version,role,"
-        "tls_fingerprint,auto_upgrade,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-        (name[:80], url, token, api_protocol, capabilities, remote_version, role,
-         tls_fingerprint, int(auto_upgrade), time.time()))
+        "INSERT INTO backends(name,url,urls,token,protocol,capabilities,remote_version,role,"
+        "tls_fingerprint,auto_upgrade,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        (name[:80], urls[0], _urls_json(urls), token, api_protocol, capabilities,
+         remote_version, role, tls_fingerprint, int(auto_upgrade), time.time()))
+    _remember_active_url(bid, result["active_url"], urls)
     _broadcast_backends()
     if auto_upgrade:
         _wake_auto_upgrade()
     return web.json_response({"ok": True, "id": bid, "remote": remote,
+                              "active_url": result["active_url"], "urls": urls,
                               "auto_upgrade": auto_upgrade})
 
 
@@ -394,7 +564,7 @@ async def h_patch(request: web.Request):
         body = await request.json()
     except Exception:
         return web.json_response({"error": "invalid backend request"}, status=400)
-    allowed = {"name", "url", "token", "tls_fingerprint", "tls_sha256",
+    allowed = {"name", "url", "urls", "token", "tls_fingerprint", "tls_sha256",
                "auto_upgrade"}
     if not isinstance(body, dict) or not body or set(body) - allowed:
         return web.json_response({"error": "invalid backend request"}, status=400)
@@ -408,7 +578,7 @@ async def h_patch(request: web.Request):
         name = body["name"].strip()[:80]
 
     try:
-        url = _base_url(body["url"]) if "url" in body else str(backend["url"])
+        urls = _request_urls(body, backend)
         if "token" in body:
             if not isinstance(body["token"], str) or not body["token"].strip():
                 return web.json_response({"error": "API token is required"}, status=400)
@@ -427,13 +597,11 @@ async def h_patch(request: web.Request):
             tls_fingerprint = tls.normalize_fingerprint(fingerprint_values[0])
         else:
             tls_fingerprint = str(backend.get("tls_fingerprint") or "")
+        _validate_url_security(urls, tls_fingerprint)
     except ValueError as exc:
         return web.json_response({"error": str(exc)}, status=400)
-    if tls_fingerprint and urlsplit(url).scheme != "https":
-        return web.json_response(
-            {"error": "a TLS certificate fingerprint requires an https:// URL"}, status=400)
 
-    connection_changed = (url != backend["url"] or token != backend["token"] or
+    connection_changed = (urls != _backend_urls(backend) or token != backend["token"] or
                           tls_fingerprint != (backend.get("tls_fingerprint") or ""))
     if connection_changed and bid in _upgrades_in_progress:
         return web.json_response(
@@ -441,14 +609,21 @@ async def h_patch(request: web.Request):
             status=409)
 
     remote = None
+    active_url = _active_urls.get(bid, "")
     if connection_changed:
-        result = await probe_backend(url, token, tls_fingerprint)
+        probe_urls = list(urls)
+        if active_url in probe_urls:
+            probe_urls.remove(active_url)
+            probe_urls.insert(0, active_url)
+        result = await probe_backend_urls(probe_urls, token, tls_fingerprint)
         if not result["ok"]:
             return web.json_response({
                 "error": result.get("error", "backend test failed"),
                 "status": result.get("status"),
+                "attempts": result.get("attempts", []),
             }, status=400)
         remote = result["remote"]
+        active_url = result["active_url"]
         # The probe yields to the upgrade worker. Re-check after it so an
         # upgrade that began in that window cannot have its live connection
         # replaced underneath the signed restart/rollback pipeline.
@@ -475,10 +650,12 @@ async def h_patch(request: web.Request):
         remote_version = str(backend.get("remote_version") or "")
         role = str(backend.get("role") or "")
     db.execute(
-        "UPDATE backends SET name=?,url=?,token=?,protocol=?,capabilities=?,"
+        "UPDATE backends SET name=?,url=?,urls=?,token=?,protocol=?,capabilities=?,"
         "remote_version=?,role=?,tls_fingerprint=?,auto_upgrade=? WHERE id=?",
-        (name, url, token, api_protocol, capabilities, remote_version, role,
+        (name, urls[0], _urls_json(urls), token, api_protocol, capabilities, remote_version, role,
          tls_fingerprint, int(enabled), bid))
+    if connection_changed:
+        _remember_active_url(bid, active_url, urls)
     if connection_changed or enabled != bool(backend.get("auto_upgrade")):
         _auto_upgrade_retry_after.pop(bid, None)
         _auto_upgrade_checked_at.pop(bid, None)
@@ -497,6 +674,8 @@ async def h_patch(request: web.Request):
 async def h_delete(request: web.Request):
     bid = int(request.match_info["bid"])
     db.execute("DELETE FROM backends WHERE id=?", (bid,))
+    _active_urls.pop(bid, None)
+    _url_cursors.pop(bid, None)
     _auto_upgrade_retry_after.pop(bid, None)
     _auto_upgrade_checked_at.pop(bid, None)
     _auto_upgrade_last_errors.pop(bid, None)
@@ -509,7 +688,7 @@ async def h_test(request: web.Request):
     be = get_backend(bid)
     if be is None:
         return web.json_response({"error": "unknown backend"}, status=404)
-    result = await probe_backend(be["url"], be["token"], be["tls_fingerprint"])
+    result = await probe_configured_backend(be)
     if result["ok"]:
         _store_metadata(bid, result["remote"])
         _broadcast_backends()
@@ -541,11 +720,13 @@ async def upgrade_backend(bid: int, remote_hint=None) -> dict:
     try:
         remote = remote_hint
         if remote is None:
-            current = await probe_backend(be["url"], be["token"], be["tls_fingerprint"])
+            current = await probe_configured_backend(be)
             if not current["ok"]:
                 raise BackendUpgradeError(
                     current.get("error", "backend is unavailable"), 502)
             remote = current["remote"]
+            if current.get("active_changed"):
+                _broadcast_backends()
         _store_metadata(bid, remote)
         upgrade_descriptor = remote.get("upgrade") or {}
         if protocol.UPGRADE_CAPABILITY not in (remote.get("capabilities") or []) or \
@@ -575,37 +756,48 @@ async def upgrade_backend(bid: int, remote_hint=None) -> dict:
             upgrade_contract.MANIFEST_HEADER: upgrade_contract.encode_manifest(manifest),
             upgrade_contract.SIGNATURE_HEADER: upgrade_contract.sign(be["token"], manifest, payload),
         }
-        target = be["url"].rstrip("/") + protocol.UPGRADE_API_PATH
-        try:
-            async with client().post(
-                    target, data=payload, headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=45), allow_redirects=False,
-                    ssl=_ssl_pin(be["tls_fingerprint"])) as response:
-                try:
-                    accepted = await response.json()
-                except Exception:
-                    accepted = {"error": "backend returned a non-JSON upgrade response"}
-                if response.status != 202 or accepted.get("accepted") is not True:
-                    status = (response.status if 400 <= response.status < 600 and
-                              response.status not in (401, 403) else 502)
+        urls = _ordered_backend_urls(be)
+        for index, url in enumerate(urls):
+            target = url.rstrip("/") + protocol.UPGRADE_API_PATH
+            try:
+                async with client().post(
+                        target, data=payload, headers=headers,
+                        timeout=aiohttp.ClientTimeout(
+                            total=45, connect=FAILOVER_CONNECT_TIMEOUT,
+                            sock_connect=FAILOVER_CONNECT_TIMEOUT),
+                        allow_redirects=False,
+                        ssl=_ssl_pin(be["tls_fingerprint"])) as response:
+                    _publish_active_url(be, url)
+                    try:
+                        accepted = await response.json()
+                    except Exception:
+                        accepted = {"error": "backend returned a non-JSON upgrade response"}
+                    if response.status != 202 or accepted.get("accepted") is not True:
+                        status = (response.status if 400 <= response.status < 600 and
+                                  response.status not in (401, 403) else 502)
+                        raise BackendUpgradeError(
+                            accepted.get("error") or "backend rejected the upgrade", status,
+                            accepted.get("readiness"))
+                break
+            except BackendUpgradeError:
+                raise
+            except Exception as exc:
+                if index + 1 < len(urls) and _failed_before_request(exc):
+                    continue
+                if isinstance(exc, asyncio.TimeoutError):
                     raise BackendUpgradeError(
-                        accepted.get("error") or "backend rejected the upgrade", status,
-                        accepted.get("readiness"))
-        except BackendUpgradeError:
-            raise
-        except asyncio.TimeoutError as exc:
-            raise BackendUpgradeError(
-                "backend timed out while staging the upgrade", 504) from exc
-        except Exception as exc:
-            raise BackendUpgradeError(
-                "backend upgrade request failed: {}".format(_connection_error(exc)), 502) from exc
+                        "backend timed out while staging the upgrade", 504) from exc
+                raise BackendUpgradeError(
+                    "backend upgrade request failed: {}".format(
+                        _connection_error(exc)), 502) from exc
+        else:
+            raise BackendUpgradeError("backend is unavailable", 502)
 
         deadline = time.monotonic() + 90
         last_error = "backend did not return after its upgrade restart"
         while time.monotonic() < deadline:
             await asyncio.sleep(0.75)
-            checked = await probe_backend(be["url"], be["token"], be["tls_fingerprint"],
-                                          timeout=2.5)
+            checked = await probe_configured_backend(be, timeout=2.5)
             if not checked["ok"]:
                 last_error = checked.get("error", last_error)
                 continue
@@ -652,27 +844,38 @@ async def _legacy_auto_readiness(backend: dict) -> dict:
     Their POST remains authoritative for terminal activity and last-moment
     races. This check prevents artifact work while a reported session is busy.
     """
-    target = backend["url"].rstrip("/") + "/api/sessions"
-    try:
-        async with client().get(
-                target, headers={"X-Puppy-Token": backend["token"]},
-                timeout=aiohttp.ClientTimeout(total=5), allow_redirects=False,
-                ssl=_ssl_pin(backend["tls_fingerprint"])) as response:
-            try:
-                payload = await response.json()
-            except Exception:
-                payload = None
-            if response.status != 200 or not isinstance(payload, dict) or \
-                    not isinstance(payload.get("sessions"), list):
+    payload = None
+    last_error = "backend is unavailable"
+    for index, url in enumerate(_ordered_backend_urls(backend)):
+        target = url.rstrip("/") + "/api/sessions"
+        try:
+            async with client().get(
+                    target, headers={"X-Puppy-Token": backend["token"]},
+                    timeout=aiohttp.ClientTimeout(
+                        total=5, connect=FAILOVER_CONNECT_TIMEOUT,
+                        sock_connect=FAILOVER_CONNECT_TIMEOUT), allow_redirects=False,
+                    ssl=_ssl_pin(backend["tls_fingerprint"])) as response:
+                try:
+                    payload = await response.json()
+                except Exception:
+                    payload = None
+                if response.status == 200 and isinstance(payload, dict) and \
+                        isinstance(payload.get("sessions"), list):
+                    _publish_active_url(backend, url)
+                    break
                 return {
                     "ready": False, "state": "checking",
                     "reason": "could not verify legacy backend session activity",
                 }
-    except Exception as exc:
+        except Exception as exc:
+            last_error = _connection_error(exc)
+            if index + 1 < len(_backend_urls(backend)):
+                continue
+    if not isinstance(payload, dict) or not isinstance(payload.get("sessions"), list):
         return {
             "ready": False, "state": "checking",
             "reason": "could not verify legacy backend idleness: {}".format(
-                _connection_error(exc)),
+                last_error),
         }
     busy = [item for item in payload["sessions"] if not isinstance(item, dict) or
             item.get("status") != "idle"]
@@ -724,7 +927,7 @@ async def auto_upgrade_cycle(app: web.Application) -> None:
         return
 
     probes = await asyncio.gather(*(
-        probe_backend(item["url"], item["token"], item["tls_fingerprint"], timeout=5)
+        probe_configured_backend(item, timeout=5)
         for item in due), return_exceptions=True)
     metadata_changed = False
     for backend, current in zip(due, probes):
@@ -744,7 +947,9 @@ async def auto_upgrade_cycle(app: web.Application) -> None:
             _auto_note_error(backend, message)
             continue
         remote = current["remote"]
-        metadata_changed = _store_metadata(bid, remote) or metadata_changed
+        stored_changed = _store_metadata(bid, remote)
+        metadata_changed = bool(current.get("active_changed")) or \
+            stored_changed or metadata_changed
         try:
             remote_version = upgrade_contract.version_key(str(remote.get("version") or ""))
         except ValueError as exc:
@@ -863,69 +1068,101 @@ async def proxy(request: web.Request):
     be = get_backend(bid)
     if be is None:
         return web.json_response({"error": "unknown backend"}, status=404)
-    target = f"{be['url']}/api/{tail}"
-    if request.query_string:
-        target += "?" + request.query_string
+    urls = _ordered_backend_urls(be)
+    if not urls:
+        return web.json_response({"error": "backend has no configured URL"}, status=502)
     headers = {"X-Puppy-Token": be["token"]}
     for k, v in request.headers.items():
         if k.lower() not in HOP_HEADERS:
             headers.setdefault(k, v)
 
     if _is_ws(request):
-        return await _proxy_ws(request, target, headers, be["tls_fingerprint"], bid)
+        return await _proxy_ws(request, be, urls, tail, headers)
 
-    try:
-        streaming_upload = request.method == "POST" and UPLOAD_PROXY_PATH.fullmatch(tail)
-        if streaming_upload:
-            body = request.content.iter_chunked(256 * 1024)
-            timeout = aiohttp.ClientTimeout(
-                total=PROXY_UPLOAD_TIMEOUT, connect=PROXY_CONNECT_TIMEOUT,
-                sock_connect=PROXY_CONNECT_TIMEOUT)
-        else:
-            buffered = await request.read()
-            body = buffered if buffered else None
-            timeout = aiohttp.ClientTimeout(
-                total=PROXY_TOTAL_TIMEOUT, connect=PROXY_CONNECT_TIMEOUT,
-                sock_connect=PROXY_CONNECT_TIMEOUT)
-        async with client().request(request.method, target, headers=headers,
-                                    data=body, timeout=timeout,
-                                    allow_redirects=False,
-                                    ssl=_ssl_pin(be["tls_fingerprint"])) as r:
-            payload = await r.read()
-            if request.method == "GET" and tail in ("ping", "node") and r.status == 200:
-                try:
-                    remote = _normalize_peer(json.loads(payload.decode("utf-8")))
-                    if remote.get("ok") is True and _store_metadata(bid, remote):
-                        _broadcast_backends()
-                except Exception:
-                    pass  # proxy the authoritative response; metadata caching is best-effort
-            resp = web.Response(status=r.status, body=payload,
-                                content_type=r.content_type or "application/json")
-            return resp
-    except asyncio.TimeoutError:
+    streaming_upload = request.method == "POST" and UPLOAD_PROXY_PATH.fullmatch(tail)
+    if streaming_upload:
+        body = request.content.iter_chunked(256 * 1024)
+        timeout = aiohttp.ClientTimeout(
+            total=PROXY_UPLOAD_TIMEOUT, connect=FAILOVER_CONNECT_TIMEOUT,
+            sock_connect=FAILOVER_CONNECT_TIMEOUT)
+    else:
+        buffered = await request.read()
+        body = buffered if buffered else None
+        timeout = aiohttp.ClientTimeout(
+            total=PROXY_TOTAL_TIMEOUT, connect=FAILOVER_CONNECT_TIMEOUT,
+            sock_connect=FAILOVER_CONNECT_TIMEOUT)
+    safe_replay = request.method in ("GET", "HEAD", "OPTIONS")
+    last_error = None
+    for index, url in enumerate(urls):
+        target = f"{url}/api/{tail}"
+        if request.query_string:
+            target += "?" + request.query_string
+        try:
+            async with client().request(request.method, target, headers=headers,
+                                        data=body, timeout=timeout,
+                                        allow_redirects=False,
+                                        ssl=_ssl_pin(be["tls_fingerprint"])) as r:
+                payload = await r.read()
+                changed = _remember_active_url(bid, url, _backend_urls(be))
+                if request.method == "GET" and tail in ("ping", "node") and r.status == 200:
+                    try:
+                        remote = _normalize_peer(json.loads(payload.decode("utf-8")))
+                        if remote.get("ok") is True:
+                            changed = _store_metadata(bid, remote) or changed
+                    except Exception:
+                        pass  # proxy the authoritative response; metadata caching is best-effort
+                if changed:
+                    _broadcast_backends()
+                return web.Response(status=r.status, body=payload,
+                                    content_type=r.content_type or "application/json")
+        except Exception as exc:
+            last_error = exc
+            can_retry = _failed_before_request(exc) or (
+                safe_replay and isinstance(exc, (aiohttp.ClientConnectionError,
+                                                 asyncio.TimeoutError)))
+            if index + 1 < len(urls) and can_retry:
+                continue
+            break
+    _advance_url_cursor(bid, len(urls))
+    if isinstance(last_error, asyncio.TimeoutError):
         return web.json_response({"error": f"backend '{be['name']}' timeout"}, status=504)
-    except Exception as e:
-        return web.json_response(
-            {"error": f"backend '{be['name']}' unreachable: {_connection_error(e)}"}, status=502)
+    detail = _connection_error(last_error) if last_error else "no URL is available"
+    return web.json_response(
+        {"error": f"backend '{be['name']}' unreachable: {detail}"}, status=502)
 
 
-async def _proxy_ws(request: web.Request, target: str, headers: dict,
-                    tls_fingerprint: str, bid: int):
-    ws_url = "ws" + target[4:] if target.startswith("http") else target
+async def _proxy_ws(request: web.Request, backend: dict, urls: list,
+                    tail: str, headers: dict):
+    bid = int(backend["id"])
+    tls_fingerprint = backend.get("tls_fingerprint") or ""
     ws_client = None
-    try:
-        ws_client = await asyncio.wait_for(
-            client().ws_connect(
-                ws_url, headers={"X-Puppy-Token": headers["X-Puppy-Token"]},
-                heartbeat=30, max_msg_size=1 << 22,
-                ssl=_ssl_pin(tls_fingerprint)),
-            timeout=PROXY_CONNECT_TIMEOUT)
-    except asyncio.TimeoutError:
-        log.warning("ws proxy to %s timed out before handshake", ws_url)
+    selected_url = ""
+    last_error = None
+    ws_url = ""
+    for url in urls:
+        target = f"{url}/api/{tail}"
+        if request.query_string:
+            target += "?" + request.query_string
+        ws_url = "ws" + target[4:] if target.startswith("http") else target
+        try:
+            ws_client = await asyncio.wait_for(
+                client().ws_connect(
+                    ws_url, headers={"X-Puppy-Token": headers["X-Puppy-Token"]},
+                    heartbeat=30, max_msg_size=1 << 22,
+                    ssl=_ssl_pin(tls_fingerprint)),
+                timeout=FAILOVER_CONNECT_TIMEOUT)
+            selected_url = url
+            break
+        except Exception as exc:
+            last_error = exc
+            log.warning("ws proxy to %s failed before handshake: %s",
+                        ws_url, _connection_error(exc))
+    if ws_client is None and isinstance(last_error, asyncio.TimeoutError):
+        log.warning("all websocket URLs for backend %s timed out before handshake",
+                    backend["name"])
         return web.json_response({"error": "backend websocket connection timed out"}, status=504)
-    except Exception as exc:
-        error = _connection_error(exc)
-        log.warning("ws proxy to %s failed before handshake: %s", ws_url, error)
+    if ws_client is None:
+        error = _connection_error(last_error) if last_error else "no URL is available"
         return web.json_response(
             {"error": "backend websocket unreachable: {}".format(error)}, status=502)
 
@@ -934,13 +1171,13 @@ async def _proxy_ws(request: web.Request, target: str, headers: dict,
     # attach that just-opened old channel after its pairing stopped being
     # authoritative; the browser will reconnect through the new settings.
     current = get_backend(bid)
-    current_prefix = (str(current.get("url") or "").rstrip("/") + "/api/") \
-        if current else ""
-    if current is None or not target.startswith(current_prefix) or \
+    if current is None or selected_url not in _backend_urls(current) or \
             headers["X-Puppy-Token"] != current.get("token") or \
             tls_fingerprint != (current.get("tls_fingerprint") or ""):
         await ws_client.close()
         return web.json_response({"error": "backend connection changed; reconnect"}, status=409)
+
+    _publish_active_url(current, selected_url)
 
     if request.app.get("puppy_snapshot_busy") == "restore":
         await ws_client.close()

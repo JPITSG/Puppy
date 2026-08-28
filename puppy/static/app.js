@@ -1708,7 +1708,7 @@ const state = {
   autoUpgrade: null,      // this instance's engine-update schedule
   uploadSettings: null,   // local per-file upload policy
   localEngineCheckedAt: 0,
-  backends: [],           // remote backends [{id,name,url}]
+  backends: [],           // remote backends [{id,name,url,urls,active_url}]
   sessions: [],           // local sessions (live via updates ws)
   remoteSessions: {},     // bid -> sessions[]
   remoteOk: {},           // bid -> bool
@@ -2557,9 +2557,157 @@ async function openNewBrowser(bid, groupId = null) {
   }
 }
 
+function configuredBackendUrls(backend) {
+  const source = Array.isArray(backend && backend.urls) ? backend.urls :
+    [backend && backend.url];
+  return [...new Set(source.map(value => String(value || "").trim()).filter(Boolean))];
+}
+
+function activeBackendUrl(backend) {
+  const urls = configuredBackendUrls(backend);
+  const active = String(backend && backend.active_url || "");
+  return active && urls.includes(active) ? active : (urls[0] || "");
+}
+
 function backendLocationVersion(backend) {
-  return [backend.url, backend.remote_version ? `v${backend.remote_version}` : ""]
+  const urls = configuredBackendUrls(backend);
+  const location = state.remoteOk[backend.id] === true ? activeBackendUrl(backend) :
+    urls.join(" / ");
+  return [location, backend.remote_version ? `v${backend.remote_version}` : ""]
     .filter(Boolean).join(" · ");
+}
+
+/* A disconnected node has no authoritative active address. Keep both layers
+   in the same measured box and cross-fade their text so the row never shifts;
+   a successful proxy request supplies active_url and collapses it to one. */
+function syncBackendLocation(root, backend) {
+  if (root._backendUrlTimer) clearTimeout(root._backendUrlTimer);
+  root._backendUrlTimer = null;
+  const configured = configuredBackendUrls(backend);
+  const connected = state.remoteOk[backend.id] === true;
+  const urls = connected ? [activeBackendUrl(backend)] : configured;
+  let values = urls.filter(Boolean);
+  if (!connected && values.length > 1 && typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches)
+    values = [values.join(" / ")];
+  const version = backend.remote_version ? ` · v${backend.remote_version}` : "";
+  const allLabel = [(connected ? values[0] : values.join(" or ")) || "No URL", version]
+    .filter(Boolean).join("");
+  root.setAttribute("aria-label", allLabel);
+  root.classList.toggle("cycling", values.length > 1);
+  const track = root.querySelector(".be-url-track");
+  const layers = track.querySelectorAll(".be-url-layer");
+  root.querySelector(".be-url-version").textContent = version;
+  let index = Math.max(0, values.indexOf(root.dataset.currentUrl || ""));
+  root.dataset.currentUrl = values[index] || "";
+  track.dataset.front = "0";
+  layers[0].textContent = values[index] || "";
+  layers[1].textContent = values[(index + 1) % Math.max(1, values.length)] || "";
+  if (values.length < 2) return;
+  let front = 0;
+  const cycle = () => {
+    if (!root.isConnected || state.remoteOk[backend.id] === true) return;
+    index = (index + 1) % values.length;
+    const next = 1 - front;
+    layers[next].textContent = values[index];
+    track.dataset.front = String(next);
+    root.dataset.currentUrl = values[index];
+    front = next;
+    root._backendUrlTimer = setTimeout(cycle, 3400);
+  };
+  root._backendUrlTimer = setTimeout(cycle, 3400);
+}
+
+function backendLocationNode(backend) {
+  const root = el("span", "be-url");
+  root.innerHTML = `<span class="be-url-track" data-front="0" aria-hidden="true">
+    <span class="be-url-layer"></span><span class="be-url-layer"></span>
+  </span><span class="be-url-version" aria-hidden="true"></span>`;
+  syncBackendLocation(root, backend);
+  return root;
+}
+
+/* Repeatable connection origins use one stable primary row with the familiar
+   square + action. Each extra row owns its own remove action, which keeps the
+   control compact and unambiguous on touch screens. */
+function backendUrlEditor(root, initialUrls = [""]) {
+  let stored = Array.isArray(initialUrls) && initialUrls.length ? initialUrls : [""];
+  const render = (focusIndex, capture = true) => {
+    const previous = root.querySelectorAll("input");
+    if (capture && previous.length) stored = [...previous].map(input => input.value);
+    if (!stored.length) stored = [""];
+    root.innerHTML = "";
+    stored.forEach((value, index) => {
+      const row = el("div", "backend-url-row");
+      const input = document.createElement("input");
+      input.type = "text";
+      input.inputMode = "url";
+      input.autocomplete = "off";
+      input.autocapitalize = "off";
+      input.spellcheck = false;
+      input.placeholder = index ? "Alternate backend URL" : "http:// or https://";
+      input.setAttribute("aria-label", index ? `Backend URL ${index + 1}` : "Backend URL");
+      input.value = value || "";
+      const action = el("button", "icon-btn backend-url-action");
+      action.type = "button";
+      if (index === 0) {
+        action.setAttribute("aria-label", "Add another backend URL");
+        action.appendChild(plusIcon(13));
+        action.disabled = stored.length >= 8;
+        action.onclick = () => {
+          if (stored.length >= 8) return;
+          stored = [...root.querySelectorAll("input")].map(field => field.value);
+          stored.push("");
+          render(stored.length - 1, false);
+        };
+      } else {
+        action.setAttribute("aria-label", `Remove backend URL ${index + 1}`);
+        action.appendChild(xIcon(13));
+        action.onclick = () => {
+          stored = [...root.querySelectorAll("input")].map(field => field.value);
+          stored.splice(index, 1);
+          render(Math.max(0, index - 1), false);
+        };
+      }
+      row.appendChild(input);
+      row.appendChild(action);
+      root.appendChild(row);
+    });
+    if (Number.isInteger(focusIndex)) {
+      const field = root.querySelectorAll("input")[focusIndex];
+      if (field) requestAnimationFrame(() => field.isConnected && field.focus());
+    }
+  };
+  render();
+  return {
+    values: () => [...root.querySelectorAll("input")]
+      .map(input => input.value.trim()).filter(Boolean),
+    setValues: values => {
+      stored = Array.isArray(values) && values.length ? [...values] : [""];
+      render(undefined, false);
+    },
+    setDisabled: disabled => {
+      root.querySelectorAll("input,button").forEach(control => control.disabled = disabled);
+      if (!disabled) {
+        const add = root.querySelector(".backend-url-row:first-child button");
+        if (add) add.disabled = root.querySelectorAll(".backend-url-row").length >= 8;
+      }
+    },
+  };
+}
+
+function pairingBackendUrls(paired, fallback) {
+  let pairedUrls = [];
+  if (Object.prototype.hasOwnProperty.call(paired, "urls")) {
+    if (!Array.isArray(paired.urls) ||
+        !paired.urls.every(value => typeof value === "string"))
+      throw new Error("pairing JSON urls must be a list of text values");
+    pairedUrls = paired.urls.map(value => value.trim()).filter(Boolean);
+  } else if (Object.prototype.hasOwnProperty.call(paired, "url")) {
+    if (typeof paired.url !== "string") throw new Error("pairing JSON url must be text");
+    if (paired.url.trim()) pairedUrls = [paired.url.trim()];
+  }
+  return [...new Set([...pairedUrls, ...(fallback || [])].filter(Boolean))];
 }
 
 function formatSessionActivity(startedAt, now = Date.now()) {
@@ -7643,9 +7791,7 @@ class SettingsView {
     for (const [bid, meta] of this.remoteBackendMeta) {
       const backend = state.backends.find(item => item.id === bid);
       if (!backend || !meta.isConnected) continue;
-      const value = backendLocationVersion(backend);
-      meta.textContent = value;
-      meta.setAttribute("aria-label", value);
+      syncBackendLocation(meta, backend);
     }
     for (const [bid, row] of this.usageRows) {
       if (!bid) {
@@ -8627,7 +8773,9 @@ class SettingsView {
     c3.innerHTML = `<h2>Backends</h2><div id="be-list"></div>
       <div class="settings-form" style="margin-top:12px">
         <label>Name <span style="text-transform:none">(optional)</span><input type="text" id="be-name"></label>
-        <label>URL<input type="text" id="be-url"></label>
+        <div class="backend-url-field"><span class="backend-url-caption">URLs</span>
+          <div class="backend-url-editor" id="be-urls"></div>
+          <small>First reachable address is used; the working address stays preferred.</small></div>
         <label class="full">API token<input type="password" id="be-token" autocomplete="off"></label>
         <label class="full">TLS certificate SHA-256 <span style="text-transform:none">(optional)</span>
           <input type="text" id="be-tls" autocomplete="off" spellcheck="false"
@@ -8650,6 +8798,7 @@ class SettingsView {
         </label>
         <div class="full"><button class="btn btn-pri btn-sm" id="be-add">Add backend</button></div>
       </div>`;
+    const addUrlEditor = backendUrlEditor(c3.querySelector("#be-urls"));
     const beList = c3.querySelector("#be-list");
     const renderBes = () => {
       beList.innerHTML = "";
@@ -8669,9 +8818,7 @@ class SettingsView {
           b.protocol != null && `protocol ${b.protocol}`].filter(Boolean).join(" · ");
         name.setAttribute("aria-label", backendIdentity ?
           `${b.name} · ${backendIdentity}` : b.name);
-        const backendMeta = backendLocationVersion(b);
-        const url = el("span", "be-url", backendMeta);
-        url.setAttribute("aria-label", backendMeta);
+        const url = backendLocationNode(b);
         const metaRow = el("div", "be-meta-row");
         const autoRoot = el("label", "be-auto be-auto-existing");
         const autoInput = document.createElement("input");
@@ -8708,16 +8855,21 @@ class SettingsView {
             this.syncBackendAutoToggles();
           }
         };
-        const isTls = /^https:\/\//i.test(b.url || "");
-        const isPinned = isTls && !!b.tls_fingerprint;
-        const security = el("span", `be-security ${isTls ? "secure" : "clear"}`);
-        const securityLabel = isPinned
+        const transportUrls = configuredBackendUrls(b);
+        const allTls = !!transportUrls.length && transportUrls.every(value =>
+          /^https:\/\//i.test(value));
+        const mixedTls = transportUrls.some(value => /^https:\/\//i.test(value)) && !allTls;
+        const isPinned = allTls && !!b.tls_fingerprint;
+        const security = el("span", `be-security ${allTls ? "secure" : "clear"}`);
+        const securityLabel = mixedTls
+          ? "Mixed transport · at least one backend URL uses cleartext HTTP"
+          : isPinned
           ? `Encrypted · pinned certificate SHA-256: ${b.tls_fingerprint}`
-          : isTls ? "Encrypted · certificate verified by the controller system trust store"
+          : allTls ? "Encrypted · certificate verified by the controller system trust store"
             : "Cleartext · traffic to this backend is not encrypted";
         security.setAttribute("role", "img");
         security.setAttribute("aria-label", securityLabel);
-        security.appendChild(transportShieldIcon(isTls));
+        security.appendChild(transportShieldIcon(allTls));
         nameRow.appendChild(availability);
         nameRow.appendChild(name);
         identity.appendChild(nameRow);
@@ -8836,7 +8988,8 @@ class SettingsView {
         };
         const rm = el("button", "btn btn-danger btn-sm", "Remove");
         rm.onclick = async () => {
-          if (!(await modalConfirm("Remove backend?", `${b.name} (${b.url})`))) return;
+          const addresses = configuredBackendUrls(b).join(", ");
+          if (!(await modalConfirm("Remove backend?", `${b.name} (${addresses})`))) return;
           await api(0, `backends/${b.id}`, { method: "DELETE" });
           await refreshState(); await this.render();
         };
@@ -8864,16 +9017,19 @@ class SettingsView {
           return entered || (typeof paired[key] === "string" ? paired[key] : "");
         };
         const wantBrowser = c3.querySelector("#be-browser").checked;
+        const urls = pairingBackendUrls(paired, addUrlEditor.values());
+        if (!urls.length) throw new Error("at least one backend URL is required");
         const added = await api(0, "backends", { method: "POST", body: {
           name: pairingValue("#be-name", "name"),
-          url: pairingValue("#be-url", "url"),
+          urls,
           token: pairingValue("#be-token", "token"),
           tls_fingerprint: pairingValue("#be-tls", "tls_sha256"),
           auto_upgrade: c3.querySelector("#be-auto").checked,
         }});
         toast("backend added", "ok");
-        c3.querySelector("#be-name").value = c3.querySelector("#be-url").value =
-        c3.querySelector("#be-token").value = c3.querySelector("#be-tls").value = "";
+        c3.querySelector("#be-name").value = c3.querySelector("#be-token").value =
+          c3.querySelector("#be-tls").value = "";
+        addUrlEditor.setValues([""]);
         c3.querySelector("#be-pairing").value = "";
         c3.querySelector("#be-auto").checked = false;
         c3.querySelector("#be-browser").checked = false;
@@ -9041,8 +9197,8 @@ function modalPrompt(title, hint, value) {
 
 /* Edit a paired backend without ever reading its stored token back into the
    browser. A blank token deliberately means "keep it"; pasted pairing JSON is
-   the convenient credential-rotation path and has clear precedence over the
-   three connection fields. The controller probes those candidate details
+   the convenient credential-rotation path and supplies the primary address.
+   The controller probes those candidate details
    before committing them, so this modal never has to stage a half-edit. */
 function modalEditBackend(backend, onSaved) {
   const { m, close } = modal(`<h2>Edit backend</h2>
@@ -9050,7 +9206,9 @@ function modalEditBackend(backend, onSaved) {
     <form id="backend-edit-form">
       <div class="backend-edit-grid">
         <label>Name<input type="text" id="backend-edit-name" maxlength="80"></label>
-        <label>URL<input type="text" id="backend-edit-url" spellcheck="false"></label>
+        <div class="backend-url-field"><span class="backend-url-caption">URLs</span>
+          <div class="backend-url-editor" id="backend-edit-urls"></div>
+          <small>First reachable address is used; the working address stays preferred.</small></div>
         <label class="full">API token <span class="field-optional">(leave blank to keep current)</span>
           <input type="password" id="backend-edit-token" autocomplete="new-password"
             placeholder="Current token is unchanged"></label>
@@ -9059,7 +9217,7 @@ function modalEditBackend(backend, onSaved) {
         <label class="full">Pairing JSON <span class="field-optional">(optional)</span>
           <textarea id="backend-edit-pairing" rows="3"
             placeholder="Paste new puppy-backend pairing output"></textarea></label>
-        <p class="backend-edit-help full">Pairing JSON replaces the URL, token and certificate above. The display name stays as entered.</p>
+        <p class="backend-edit-help full">Pairing JSON supplies the primary URL, token and certificate. Other entered URLs remain as fallbacks; the display name stays as entered.</p>
         <p class="backend-edit-error full hidden" role="alert"></p>
       </div>
       <div class="m-btns"><button type="button" class="btn" id="backend-edit-cancel">Cancel</button>
@@ -9067,7 +9225,8 @@ function modalEditBackend(backend, onSaved) {
     </form>`, "backend-edit-modal");
   const form = m.querySelector("#backend-edit-form");
   const name = m.querySelector("#backend-edit-name");
-  const url = m.querySelector("#backend-edit-url");
+  const urlEditor = backendUrlEditor(m.querySelector("#backend-edit-urls"),
+    configuredBackendUrls(backend));
   const token = m.querySelector("#backend-edit-token");
   const fingerprint = m.querySelector("#backend-edit-tls");
   const pairing = m.querySelector("#backend-edit-pairing");
@@ -9075,7 +9234,6 @@ function modalEditBackend(backend, onSaved) {
   const save = m.querySelector("#backend-edit-save");
   const error = m.querySelector(".backend-edit-error");
   name.value = backend.name || "";
-  url.value = backend.url || "";
   fingerprint.value = backend.tls_fingerprint || "";
 
   const setError = text => {
@@ -9085,6 +9243,7 @@ function modalEditBackend(backend, onSaved) {
   const setBusy = busy => {
     form.setAttribute("aria-busy", busy ? "true" : "false");
     form.querySelectorAll("input,textarea,button").forEach(control => control.disabled = busy);
+    urlEditor.setDisabled(busy);
     save.textContent = busy ? "Saving…" : "Save changes";
   };
   const pairedText = (data, keys, fallback, emptyWins = false) => {
@@ -9113,9 +9272,10 @@ function modalEditBackend(backend, onSaved) {
         if (!paired || typeof paired !== "object" || Array.isArray(paired))
           throw new Error("invalid pairing JSON");
       }
+      const urls = pairingBackendUrls(paired, urlEditor.values());
       const body = {
         name: displayName,
-        url: pairedText(paired, ["url"], url.value.trim()),
+        urls,
         /* A cleartext pairing has no TLS field at all. Once a pairing block is
            supplied, absence therefore means "clear the old pin", not "carry
            the old HTTPS certificate into the new HTTP connection". */
@@ -9125,7 +9285,7 @@ function modalEditBackend(backend, onSaved) {
       };
       const nextToken = pairedText(paired, ["token"], token.value.trim());
       if (nextToken) body.token = nextToken;
-      if (!body.url) throw new Error("backend URL is required");
+      if (!body.urls.length) throw new Error("at least one backend URL is required");
       setBusy(true);
       const result = await api(0, `backends/${backend.id}`, {
         method: "PATCH", body, timeoutMs: 45000,

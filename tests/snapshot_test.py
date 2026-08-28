@@ -144,10 +144,12 @@ async def main() -> None:
         config.set_value("notify.backend", 1)
         config.set_value("notify.command", "printf done: %s {session}")
         db.execute(
-            "INSERT INTO backends(name,url,token,protocol,capabilities,remote_version,role,"
-            "tls_fingerprint,auto_upgrade,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-            ("saved-backend", "https://backend.test:10888", "private-backend-token", 1,
-             '["sessions"]', "1.2.3", "backend", "ab" * 32, 1, time.time()))
+            "INSERT INTO backends(name,url,urls,token,protocol,capabilities,remote_version,role,"
+            "tls_fingerprint,auto_upgrade,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            ("saved-backend", "https://backend.test:10888",
+             '["https://backend.test:10888","https://backend-vpn.test:10888"]',
+             "private-backend-token", 1, '["sessions"]', "1.2.3", "backend",
+             "ab" * 32, 1, time.time()))
 
         directory_id = db.create_session(
             "directory session", "codex", str(project), "", "", "#4dd0c4",
@@ -253,6 +255,8 @@ async def main() -> None:
             db.get_session(directory_id)["used_config"]) == {"model": "gpt-5.6-sol", "effort": "max"}
         assert db.query_one("SELECT token FROM backends")["token"] == "private-backend-token"
         assert db.query_one("SELECT auto_upgrade FROM backends")["auto_upgrade"] == 1
+        assert json.loads(db.query_one("SELECT urls FROM backends")["urls"]) == [
+            "https://backend.test:10888", "https://backend-vpn.test:10888"]
         assert db.query_one("SELECT username FROM users")["username"] == "snapshot-user"
         restored_scratch = db.get_session(scratch_id)
         assert restored_scratch["cwd"] != str(original_scratch)

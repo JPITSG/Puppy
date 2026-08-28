@@ -612,6 +612,7 @@ async def exercise_controller(url: str, token: str, backend_url: str,
                               backend_token: str, backend_fingerprint: str,
                               old_version: str, backend_state_dir: Path) -> None:
     headers = {"X-Puppy-Token": token}
+    unavailable_url = backend_url.replace("127.0.0.1", "127.0.0.2")
     async with aiohttp.ClientSession() as http:
         async with http.get(url + "/api/ping", headers=headers) as response:
             full_ping = await response.json()
@@ -646,7 +647,8 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert "fingerprint mismatch" in mismatched["error"]
 
         async with http.post(url + "/api/backends", headers=headers, json={
-                "name": "", "url": backend_url, "token": backend_token,
+                "name": "", "urls": [unavailable_url, backend_url],
+                "token": backend_token,
                 "tls_fingerprint": backend_fingerprint,
                 "auto_upgrade": False}) as response:
             added = await response.json()
@@ -671,6 +673,9 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert "remote-upgrade" in stored["capabilities"]
         assert "pinned-tls" in stored["capabilities"]
         assert stored["remote_version"] == old_version
+        assert stored["url"] == unavailable_url
+        assert stored["urls"] == [unavailable_url, backend_url]
+        assert stored["active_url"] == backend_url
         assert stored["tls_fingerprint"] == backend_fingerprint
         assert stored["auto_upgrade"] is False
         assert stored["upgrade_in_progress"] is False
@@ -706,7 +711,8 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         async with http.get(url + "/api/backends", headers=headers) as response:
             after_rejection = (await response.json())["backends"][0]
         assert after_rejection["name"] == "Edited backend", after_rejection
-        assert after_rejection["url"] == backend_url, after_rejection
+        assert after_rejection["urls"] == [unavailable_url, backend_url], after_rejection
+        assert after_rejection["active_url"] == backend_url, after_rejection
 
         async with http.post(url + f"/api/backends/{stored['id']}/test",
                              headers=headers) as response:
@@ -769,7 +775,7 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         # the new URL/token/pin rather than remaining attached to the old peer.
         alternate_url = backend_url.replace("127.0.0.1", "localhost")
         async with http.patch(url + f"/api/backends/{stored['id']}", headers=headers,
-                              json={"url": alternate_url}) as response:
+                              json={"urls": [alternate_url]}) as response:
             moved = await response.json()
             assert response.status == 200, moved
         assert moved["connection_changed"] is True, moved
@@ -779,12 +785,18 @@ async def exercise_controller(url: str, token: str, backend_url: str,
                                aiohttp.WSMsgType.CLOSING), closed
         await remote_updates.close()
         async with http.patch(url + f"/api/backends/{stored['id']}", headers=headers,
-                              json={"name": "backend-test-node", "url": backend_url}) as response:
+                              json={"name": "backend-test-node",
+                                    "urls": [unavailable_url, backend_url]}) as response:
             restored_connection = await response.json()
             assert response.status == 200, restored_connection
         assert restored_connection["connection_changed"] is True, restored_connection
         assert restored_connection["backend"]["name"] == "backend-test-node"
 
+        # Simulate the controller restarting without a remembered active URL.
+        # A state-changing request may advance only after a pre-connect failure,
+        # where replay cannot duplicate work on the backend.
+        from puppy import backends as controller_backends
+        controller_backends._active_urls.pop(stored["id"], None)
         async with http.post(url + f"/api/b/{stored['id']}/sessions", headers=headers, json={
                 "engine": "codex", "workspace_kind": "temporary", "name": "proxied-scratch",
         }) as response:
@@ -803,6 +815,7 @@ async def exercise_controller(url: str, token: str, backend_url: str,
             assert response.status == 200, proxied_policy
         assert proxied_policy["uploads"]["max_file_size_mb"] == 9
         proxied_file = b"MZ" + (b"x" * (8 * 1024 * 1024)) + b"streamed-through-controller"
+        controller_backends._active_urls.pop(stored["id"], None)
         async with http.post(
                 url + f"/api/b/{stored['id']}/sessions/{proxied_scratch['id']}/upload",
                 headers={
@@ -814,6 +827,7 @@ async def exercise_controller(url: str, token: str, backend_url: str,
             assert response.status == 200, proxied_upload
         proxied_upload_path = Path(proxied_upload["path"])
         assert proxied_upload["size"] == len(proxied_file)
+        assert controller_backends._active_urls[stored["id"]] == backend_url
         assert proxied_upload_path.stat().st_size == len(proxied_file)
         assert proxied_upload_path.read_bytes() == proxied_file
         async with http.delete(
@@ -905,12 +919,12 @@ async def exercise_redirect_rejection() -> None:
 
 
 async def exercise_proxy_recovery(controller_url: str, controller_token: str) -> None:
-    """A dead upstream must fail its WS handshake, then recover on the same origin."""
+    """HTTP and WebSocket proxies follow a node between configured origins."""
     backend_token = "recovery-backend-token-0123456789abcdef"
-    port = free_port()
-    backend_url = f"http://127.0.0.1:{port}"
+    ports = [free_port(), free_port()]
+    backend_urls = [f"http://127.0.0.1:{port}" for port in ports]
 
-    async def start_backend() -> web.AppRunner:
+    async def start_backend(port: int) -> web.AppRunner:
         async def authorized(request):
             if request.headers.get("X-Puppy-Token") != backend_token:
                 return web.json_response({"error": "unauthorized"}, status=401)
@@ -961,12 +975,12 @@ async def exercise_proxy_recovery(controller_url: str, controller_token: str) ->
         return runner
 
     headers = {"X-Puppy-Token": controller_token}
-    backend_runner = await start_backend()
+    backend_runner = await start_backend(ports[0])
     backend_id = None
     try:
         async with aiohttp.ClientSession() as http:
             async with http.post(controller_url + "/api/backends", headers=headers, json={
-                    "name": "recovery-node", "url": backend_url, "token": backend_token,
+                    "name": "recovery-node", "urls": backend_urls, "token": backend_token,
             }) as response:
                 added = await response.json()
                 assert response.status == 200, added
@@ -989,6 +1003,28 @@ async def exercise_proxy_recovery(controller_url: str, controller_token: str) ->
             closed = await updates.receive(timeout=2)
             assert closed.type in (
                 aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED,
+                               aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.ERROR), closed
+            await updates.close()
+
+            # The same authenticated node appears at its alternate address.
+            # The stale primary remains first in configuration, but both HTTP
+            # and WebSocket handshakes must advance to the live candidate and
+            # publish that exact address as active.
+            backend_runner = await start_backend(ports[1])
+            async with http.get(proxy_url + "/sessions", headers=headers) as response:
+                assert response.status == 200, await response.text()
+            async with http.get(controller_url + "/api/backends", headers=headers) as response:
+                moved = (await response.json())["backends"]
+            active = next(item for item in moved if item["id"] == backend_id)
+            assert active["urls"] == backend_urls and active["active_url"] == backend_urls[1]
+            updates = await http.ws_connect(proxy_url + "/ws/updates", headers=headers)
+            assert (await updates.receive_json(timeout=2))["type"] == "sessions"
+
+            await backend_runner.cleanup()
+            backend_runner = None
+            closed = await updates.receive(timeout=2)
+            assert closed.type in (
+                aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED,
                 aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.ERROR), closed
             await updates.close()
             async with http.get(proxy_url + "/sessions", headers=headers) as response:
@@ -999,7 +1035,7 @@ async def exercise_proxy_recovery(controller_url: str, controller_token: str) ->
             except aiohttp.WSServerHandshakeError as exc:
                 assert exc.status in (502, 504), exc.status
 
-            backend_runner = await start_backend()
+            backend_runner = await start_backend(ports[0])
             recovered = False
             for _attempt in range(30):
                 try:
@@ -1011,6 +1047,10 @@ async def exercise_proxy_recovery(controller_url: str, controller_token: str) ->
                     break
                 await asyncio.sleep(0.1)
             assert recovered, "HTTP proxy did not recover after backend restart"
+            async with http.get(controller_url + "/api/backends", headers=headers) as response:
+                returned = (await response.json())["backends"]
+            active = next(item for item in returned if item["id"] == backend_id)
+            assert active["active_url"] == backend_urls[0]
             updates = await http.ws_connect(proxy_url + "/ws/updates", headers=headers)
             assert (await updates.receive_json(timeout=2))["type"] == "sessions"
             await updates.close()
@@ -1441,6 +1481,9 @@ async def main() -> None:
             "status TEXT NOT NULL DEFAULT 'idle', archived INTEGER NOT NULL DEFAULT 0, "
             "sort_order INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL, "
             "updated_at REAL NOT NULL)")
+        old_db.execute(
+            "INSERT INTO backends(name,url,token,created_at) VALUES(?,?,?,?)",
+            ("legacy-node", "http://192.0.2.44:10888", "legacy-token", time.time()))
         old_db.commit()
         old_db.close()
         os.environ["PUPPY_DATA"] = str(controller_data)
@@ -1472,6 +1515,12 @@ async def main() -> None:
             row["name"] for row in db.query("PRAGMA table_info(backends)")}
         assert "auto_upgrade" in {
             row["name"] for row in db.query("PRAGMA table_info(backends)")}
+        assert "urls" in {
+            row["name"] for row in db.query("PRAGMA table_info(backends)")}
+        migrated_urls = db.query_one(
+            "SELECT urls FROM backends WHERE name='legacy-node'")["urls"]
+        assert json.loads(migrated_urls) == ["http://192.0.2.44:10888"]
+        db.execute("DELETE FROM backends WHERE name='legacy-node'")
         assert "workspace_kind" in {
             row["name"] for row in db.query("PRAGMA table_info(sessions)")}
         app = build_app()

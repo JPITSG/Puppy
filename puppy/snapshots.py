@@ -545,9 +545,9 @@ def _validate_database(path: Path) -> int:
             "meta": {"key", "value"},
             "users": {"id", "username", "pwhash", "created_at"},
             "web_sessions": {"id", "token_hash", "username", "created_at", "expires_at"},
-            # auto_upgrade is intentionally optional here: archives created
-            # before v1.0.114 gain its safe-off default through db._migrate()
-            # immediately after installation.
+            # auto_upgrade and urls are intentionally optional here: older
+            # archives gain the safe-off policy and a one-address failover list
+            # through db._migrate() immediately after installation.
             "backends": {"id", "name", "url", "token", "protocol", "capabilities",
                          "remote_version", "role", "tls_fingerprint", "created_at"},
             "sessions": {"id", "name", "engine", "cwd", "model", "effort", "color",
@@ -561,6 +561,20 @@ def _validate_database(path: Path) -> int:
             if not columns.issubset(actual):
                 raise SnapshotError(
                     "snapshot database has an incompatible {} table".format(table))
+        backend_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(backends)")}
+        if "urls" in backend_columns:
+            for row in connection.execute("SELECT url,urls FROM backends"):
+                try:
+                    urls = json.loads(row["urls"])
+                except Exception as exc:
+                    raise SnapshotError(
+                        "snapshot database contains an invalid backend URL list") from exc
+                if not isinstance(urls, list) or not 0 < len(urls) <= 8 or \
+                        not all(isinstance(value, str) and value for value in urls) or \
+                        urls[0] != row["url"] or len(set(urls)) != len(urls):
+                    raise SnapshotError(
+                        "snapshot database contains an invalid backend URL list")
         invalid_workspace = connection.execute(
             "SELECT 1 FROM sessions WHERE workspace_kind NOT IN ('directory','temporary') "
             "LIMIT 1").fetchone()

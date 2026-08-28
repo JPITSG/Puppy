@@ -387,22 +387,53 @@ console.log(JSON.stringify({codex,tool,claude,idle:view.statusRow,
 
 
 def check_backend_editor(ui_source: str, css_source: str) -> None:
-    """The editor keeps secrets blank, validates pairing, and saves overrides."""
-    start = ui_source.index("function modalEditBackend(")
-    brace = ui_source.index("{", start)
-    depth = 0
-    end = None
-    for index in range(brace, len(ui_source)):
-        if ui_source[index] == "{":
-            depth += 1
-        elif ui_source[index] == "}":
-            depth -= 1
-            if depth == 0:
-                end = index + 1
-                break
-    assert end is not None, "unbalanced backend editor"
-    editor = ui_source[start:end]
+    """The URL stack adds/removes rows and the editor keeps secrets private."""
+    def extract(name: str) -> str:
+        start = ui_source.index("function {}(".format(name))
+        brace = ui_source.index("{", start)
+        depth = 0
+        for index in range(brace, len(ui_source)):
+            if ui_source[index] == "{":
+                depth += 1
+            elif ui_source[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    return ui_source[start:index + 1]
+        raise AssertionError("unbalanced {}".format(name))
+
+    configured = extract("configuredBackendUrls")
+    paired_urls = extract("pairingBackendUrls")
+    editor_control = extract("backendUrlEditor").replace(
+        "function backendUrlEditor(", "function realBackendUrlEditor(", 1)
+    editor = extract("modalEditBackend")
     script = r"""
+class Element {
+  constructor(tag){this.tagName=tag;this.children=[];this.value="";this.isConnected=true;
+    this.attributes={};this._innerHTML="";}
+  appendChild(child){this.children.push(child);return child;}
+  setAttribute(name,value){this.attributes[name]=String(value);}
+  focus(){this.focused=true;}
+  set innerHTML(value){this._innerHTML=value;this.children=[];}
+  get innerHTML(){return this._innerHTML;}
+  querySelectorAll(tag){const found=[];const walk=node=>{for(const child of node.children){
+    if(child.tagName===tag)found.push(child);walk(child);}};walk(this);return found;}
+}
+const document={createElement:tag=>new Element(tag)};
+const el=(tag,cls,text)=>{const node=new Element(tag);node.className=cls||"";
+  if(text!==undefined)node.textContent=text;return node;};
+const plusIcon=()=>new Element("svg"),xIcon=()=>new Element("svg");
+const requestAnimationFrame=fn=>fn();
+__REAL_CONTROL__
+const controlRoot=new Element("div");
+const realControl=realBackendUrlEditor(controlRoot,["https://home.test"]);
+controlRoot.children[0].children[1].onclick();
+controlRoot.children[1].children[0].value="https://vpn.test";
+const addedValues=realControl.values();
+const rowsAfterAdd=controlRoot.children.length;
+controlRoot.children[1].children[1].onclick();
+const controlResult={rowsAfterAdd,addedValues,rowsAfterRemove:controlRoot.children.length,
+  remaining:realControl.values(),plusLabel:controlRoot.children[0].children[1].attributes["aria-label"]};
+
 class Classes {
   constructor(){this.names=new Set(["hidden"]);}
   toggle(name,force){if(force)this.names.add(name);else this.names.delete(name);}
@@ -413,7 +444,7 @@ function control(){return {value:"",disabled:false,isConnected:true,textContent:
 const modals=[];const calls=[];const saved=[];let toastText="";
 function modal(html,className){
   const nodes={"#backend-edit-form":control(),"#backend-edit-name":control(),
-    "#backend-edit-url":control(),"#backend-edit-token":control(),
+    "#backend-edit-urls":control(),"#backend-edit-token":control(),
     "#backend-edit-tls":control(),"#backend-edit-pairing":control(),
     "#backend-edit-cancel":control(),"#backend-edit-save":control(),
     ".backend-edit-error":control()};
@@ -423,13 +454,18 @@ function modal(html,className){
   const close=()=>{m.isConnected=false;m.closed=true;};
   modals.push({m,nodes,close});return {m,close};
 }
-const requestAnimationFrame=fn=>fn();
+function backendUrlEditor(root,initial){root.urlValues=[...initial];return {
+  values:()=>root.urlValues.map(value=>value.trim()).filter(Boolean),
+  setValues:values=>{root.urlValues=[...values];},setDisabled(){}};}
 const toast=text=>{toastText=text;};
 async function api(bid,path,options){calls.push({bid,path,options});return {
-  ok:true,backend:{id:7,name:options.body.name,url:options.body.url},
-  connection_changed:options.body.url!=="https://old.test"};}
-%s
-const backend={id:7,name:"Old node",url:"https://old.test",tls_fingerprint:"a".repeat(64)};
+  ok:true,backend:{id:7,name:options.body.name,urls:options.body.urls},
+  connection_changed:options.body.urls[0]!=="https://old.test"};}
+__CONFIGURED__
+__PAIRED_URLS__
+__EDITOR__
+const backend={id:7,name:"Old node",url:"https://old.test",
+  urls:["https://old.test","https://vpn.test"],tls_fingerprint:"a".repeat(64)};
 const first=modalEditBackend(backend,result=>saved.push(result));
 const one=modals[0].nodes;
 one["#backend-edit-pairing"].value="{";
@@ -461,8 +497,10 @@ four["#backend-edit-pairing"].value=JSON.stringify({url:"http://new.test",
 await four["#backend-edit-form"].onsubmit({preventDefault(){}});
 const cleartext=calls[2].options.body;
 console.log(JSON.stringify({invalid,cancelled,ordinary,paired,cleartext,saved:saved.length,
-  modalClass:modals[0].m.className,html:modals[0].m.html,toastText}));
-""" % editor
+  modalClass:modals[0].m.className,html:modals[0].m.html,toastText,controlResult}));
+""".replace("__REAL_CONTROL__", editor_control).replace(
+        "__CONFIGURED__", configured).replace("__PAIRED_URLS__", paired_urls).replace(
+        "__EDITOR__", editor)
     proc = subprocess.run(["node", "--input-type=module", "-e", script],
                           capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:700]
@@ -471,23 +509,87 @@ console.log(JSON.stringify({invalid,cancelled,ordinary,paired,cleartext,saved:sa
         "message": "invalid pairing JSON", "visible": True, "calls": 0}, result
     assert result["cancelled"] is True and result["saved"] == 3, result
     assert result["ordinary"] == {
-        "name": "Renamed node", "url": "https://old.test",
+        "name": "Renamed node", "urls": ["https://old.test", "https://vpn.test"],
         "tls_fingerprint": "a" * 64}, result
     assert result["paired"] == {
-        "name": "Paired node", "url": "https://new.test/",
+        "name": "Paired node",
+        "urls": ["https://new.test/", "https://old.test", "https://vpn.test"],
         "token": "rotated-secret", "tls_fingerprint": "b" * 64}, result
     assert result["cleartext"] == {
-        "name": "Cleartext node", "url": "http://new.test",
+        "name": "Cleartext node",
+        "urls": ["http://new.test", "https://old.test", "https://vpn.test"],
         "token": "cleartext-secret", "tls_fingerprint": ""}, result
+    assert result["controlResult"] == {
+        "rowsAfterAdd": 2,
+        "addedValues": ["https://home.test", "https://vpn.test"],
+        "rowsAfterRemove": 1,
+        "remaining": ["https://home.test"],
+        "plusLabel": "Add another backend URL",
+    }, result
     assert result["modalClass"] == "backend-edit-modal", result
     assert "leave blank to keep current" in result["html"]
     assert "tested before they replace" in result["html"]
+    assert "working address stays preferred" in result["html"]
     assert 'const edit = el("button", "btn btn-sm", "Edit");' in ui_source
     assert "edit.onclick = () => modalEditBackend(b" in ui_source
     assert "if (result.connection_changed) resetRemoteBackendConnection(b.id);" in ui_source
     assert ".backend-edit-grid{display:grid;grid-template-columns:" in css_source
+    assert ".backend-url-row{display:flex;align-items:center;gap:6px;min-width:0}" in css_source
+    assert "transition:opacity .25s var(--ease)" in css_source
     assert "grid-template-columns:repeat(4,minmax(0,1fr))" in css_source
-    assert ".be-actions{grid-template-columns:repeat(2,minmax(0,1fr))}" in css_source
+    assert (".be-actions{grid-column:1;grid-row:3;" +
+            "grid-template-columns:repeat(2,minmax(0,1fr))}") in css_source
+
+    active_url = extract("activeBackendUrl")
+    sync_location = extract("syncBackendLocation")
+    status_script = r"""
+const state={remoteOk:{7:false}};
+const window={matchMedia:()=>({matches:false})};
+let scheduled=null,nextTimer=1;
+const setTimeout=fn=>{scheduled=fn;return nextTimer++;};
+const clearTimeout=id=>{if(id)scheduled=null;};
+class Classes{constructor(){this.names=new Set();}toggle(name,on){
+  if(on)this.names.add(name);else this.names.delete(name);}}
+const layers=[{textContent:""},{textContent:""}];
+const track={dataset:{front:"0"},querySelectorAll:()=>layers};
+const version={textContent:""};
+const root={dataset:{},classList:new Classes(),attributes:{},isConnected:true,
+  querySelector:selector=>selector===".be-url-track"?track:version,
+  setAttribute:(name,value)=>{root.attributes[name]=value;}};
+__CONFIGURED__
+__ACTIVE__
+__SYNC__
+const backend={id:7,url:"https://home.test",urls:["https://home.test","https://vpn.test"],
+  active_url:"https://vpn.test",remote_version:"1.2.3"};
+syncBackendLocation(root,backend);
+const before={front:track.dataset.front,shown:layers[0].textContent,
+  queued:typeof scheduled==="function",label:root.attributes["aria-label"],
+  cycling:root.classList.names.has("cycling")};
+const tick=scheduled;tick();
+const after={front:track.dataset.front,shown:layers[1].textContent,
+  current:root.dataset.currentUrl};
+state.remoteOk[7]=true;
+syncBackendLocation(root,backend);
+const connected={front:track.dataset.front,shown:layers[0].textContent,
+  cycling:root.classList.names.has("cycling"),version:version.textContent};
+console.log(JSON.stringify({before,after,connected}));
+""".replace("__CONFIGURED__", configured).replace(
+        "__ACTIVE__", active_url).replace("__SYNC__", sync_location)
+    status_proc = subprocess.run(
+        ["node", "--input-type=module", "-e", status_script], capture_output=True, text=True)
+    assert status_proc.returncode == 0, status_proc.stderr[:700]
+    status = json.loads(status_proc.stdout)
+    assert status["before"] == {
+        "front": "0", "shown": "https://home.test", "queued": True,
+        "label": "https://home.test or https://vpn.test · v1.2.3", "cycling": True,
+    }, status
+    assert status["after"] == {
+        "front": "1", "shown": "https://vpn.test", "current": "https://vpn.test",
+    }, status
+    assert status["connected"] == {
+        "front": "0", "shown": "https://vpn.test", "cycling": False,
+        "version": " · v1.2.3",
+    }, status
 
 
 def check_drawer_drag(ui_source: str) -> None:
