@@ -1,23 +1,27 @@
 # Puppy 🐾
 
 Persistent AI coding session manager. A web console for organizing and driving
-**Claude Code** and **Codex** CLI sessions (subscription-authenticated, official
-binaries only), with cross-engine session switching, interactive permission
-approvals, multi-backend support and built-in web terminals.
+**Claude Code**, **Codex**, and **OpenCode** CLI sessions, with cross-engine
+session switching, interactive permission approvals, multi-backend support and
+built-in web terminals.
 
 ## How it works
 
-- **Backend** (`puppy/`, Python 3.9+ / aiohttp): spawns the official `claude` /
-  `codex` binaries per turn in their headless JSONL modes, normalizes their event
-  streams into puppy's own transcript (sqlite), and streams everything to the
-  browser over websockets. Engine-native sessions are resumed by id
-  (`claude --resume`, `codex exec resume`); puppy's DB is the canonical record.
+- **Backend** (`puppy/`, Python 3.9+ / aiohttp): spawns the installed `claude`,
+  `codex`, or `opencode` binary per turn, drives its structured JSONL/ACP
+  interface, normalizes events into Puppy's own transcript (sqlite), and streams
+  everything to the browser over websockets. Engine-native sessions are resumed
+  by id; Puppy's DB remains the canonical record.
 - **Frontend** (`puppy/static/`, vanilla JS SPA): left sidebar with sessions and
   backends, tabbed main area with concurrent chat sessions and xterm.js
   terminals. Responsive - works on mobile.
-- **Engine switching**: a session can be moved claude ⇄ codex at any point. The
-  new engine starts a fresh native session seeded with a transcript handoff in
-  the same working directory.
+- **Engine switching**: a session can move between any installed engines at any
+  point. The new engine starts a fresh native session seeded with a transcript
+  handoff in the same working directory.
+- **OpenCode providers**: each node discovers its own OpenCode model catalog.
+  Settings → Engines lets the operator choose the subset exposed by Puppy;
+  provider credentials, plugins, project rules, and native sessions stay owned
+  by that node's ordinary OpenCode installation.
 - **Scratch workspaces**: a session can start in a private, disposable workspace
   without choosing a project directory. Its transcript remains durable while
   its files live under the host's temporary filesystem and are removed with the
@@ -67,8 +71,9 @@ approvals, multi-backend support and built-in web terminals.
 ## Requirements
 
 - Python 3.9+ with `aiohttp`
-- `claude` (Claude Code) and/or `codex` CLIs installed and logged in
-  (`claude login` / `codex login`) as the user running puppy
+- One or more supported CLIs installed for the user running Puppy: `claude`
+  (Claude Code), `codex`, and/or `opencode`. Claude/Codex use their normal login
+  flow; OpenCode uses whichever providers that installation has authenticated.
 - No other daemons, no build step, no npm. Vendored JS libs live in
   `puppy/static/vendor/`.
 
@@ -103,7 +108,7 @@ reports an independently versioned controller/backend protocol.
 
 Persistent private state lives in `data/` (gitignored): `config.json` (instance
 name, bind host/port, api token, terminal command, usage-refresh interval,
-upload-size limit),
+upload-size limit, and each node's selected OpenCode model IDs),
 `puppy.db` (sessions, transcripts, users), backend TLS identities, and `puppy.log`. Scratch-session files are the
 intentional exception: they live in a mode-0700, instance-specific namespace
 under the OS temporary directory and are disposable. The repo itself is clean
@@ -113,7 +118,7 @@ archives from a trusted source.
 
 ## Compliance
 
-Puppy only drives the unmodified official vendor binaries; login happens through
-each vendor's own flow on the host (`claude login`, `codex login`). No tokens
+Puppy drives installed CLI interfaces and leaves login/provider setup with those
+CLIs (`claude login`, `codex login`, or OpenCode's provider auth). No credentials
 are extracted or proxied to provider APIs. Intended for personal, single-user
-use with your own subscriptions.
+use with your own accounts.

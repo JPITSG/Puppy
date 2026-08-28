@@ -1277,6 +1277,25 @@ function engineInfo(bid, key) {
   return (Array.isArray(list) && list.find(e => e.key === key)) || state.engMap[key] || null;
 }
 
+function engineReady(engine) {
+  return !!engine && !!engine.installed &&
+    (engine.availability_only === true || engine.auth === "ok");
+}
+
+function engineStatusText(engine) {
+  if (!engine || !engine.installed)
+    return engine && engine.availability_only === true ? "No binary" : "Missing";
+  if (engine.availability_only === true) return "Ready";
+  return engine.auth === "ok" ? "Ready" : "No auth";
+}
+
+function effortOptionsForModel(engine, model) {
+  const match = ((engine && engine.model_options) || [])
+    .find(option => option && option.value === model);
+  if (match && Array.isArray(match.effort_options)) return match.effort_options;
+  return [...((engine && engine.effort_options) || [])];
+}
+
 const headWord = (s) => (String(s).match(/^[^\s\-_/]+/) || [""])[0];
 const tailWords = (s) => String(s).slice(headWord(s).length).replace(/^[\s\-_/]+/, "");
 
@@ -3013,6 +3032,13 @@ function backendSupportsEngineUpgrade(bid) {
     backend.capabilities.includes("engine-upgrade");
 }
 
+function backendSupportsEngineModelSelection(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(item => item.id === bid);
+  return !!backend && Array.isArray(backend.capabilities) &&
+    backend.capabilities.includes("engine-model-selection");
+}
+
 function backendSupportsSystemPrompt(bid) {
   if (!bid) return true;
   const backend = state.backends.find(item => item.id === bid);
@@ -3843,13 +3869,13 @@ function renderFootEngines() {
       row.appendChild(ico);
       row.appendChild(document.createTextNode(e.label));
       const pct = weeklyQuotaLeft(e);
-      const healthy = e.installed && e.auth === "ok";
+      const healthy = engineReady(e);
       /* Two independent signals in one line, so each gets its own element: the
          engine's own health, and what is left of the weekly allowance. Sharing
          a colour would let a low quota make a working engine look broken. */
       const st = el("span", "st");
       const word = el("span", "st-word " + (healthy ? "ok" : "bad"),
-        !e.installed ? "Missing" : (e.auth === "ok" ? "Ready" : "No auth"));
+        engineStatusText(e));
       // ready, but the CLI is behind its latest release
       if (healthy && e.update_available === true) word.classList.add("stale");
       st.appendChild(word);
@@ -6768,6 +6794,11 @@ class SessionView {
         b.onclick = () => this.respondApproval(req, "allow", [sug]);
         btns.appendChild(b);
       }
+      if (sug.type === "allowAlways") {
+        const b = el("button", "btn btn-sm", sug.label || "Always allow");
+        b.onclick = () => this.respondApproval(req, "allow", [sug]);
+        btns.appendChild(b);
+      }
     }
     this.approvalEl.appendChild(btns);
     this.scrollBottom(true);
@@ -6989,28 +7020,35 @@ class SessionView {
 
   composerChoiceSpec(kind, native = false) {
     const s = this.session || {};
-    const eng = state.engMap[s.engine];
+    const eng = engineInfo(this.tab.bid, s.engine);
     const eff = this.effectiveConfig();
     if (kind === "perm") return {
       options: [...((eng && eng.permission_options) || [])],
       selected: s.permission_mode || "",
     };
     if (kind === "effort") return {
-      options: [...((eng && eng.effort_options) || [])],
+      options: effortOptionsForModel(eng, eff.model || ""),
       selected: eff.effort || "",
     };
     const options = [...((eng && eng.model_options) || [])];
     const current = eff.model || "";
     const custom = !!current && !options.some(option => option.value === current);
+    const customAllowed = !eng || eng.allow_custom_model !== false;
     if (native && custom) {
       options.push({ value: "__current_custom__", label: `Current: ${current}` });
-      options.push({ value: "__custom__", label: "Custom…" });
+      if (customAllowed) options.push({ value: "__custom__", label: "Custom…" });
       return { options, selected: "__current_custom__" };
     }
-    options.push({
-      value: "__custom__", label: custom ? `Custom… (${current})` : "Custom…"
+    if (customAllowed) {
+      options.push({
+        value: "__custom__", label: custom ? `Custom… (${current})` : "Custom…"
+      });
+      return { options, selected: custom ? "__custom__" : current };
+    }
+    if (custom) options.unshift({
+      value: "__current_custom__", label: `Current: ${current}`, disabled: true
     });
-    return { options, selected: custom ? "__custom__" : current };
+    return { options, selected: custom ? "__current_custom__" : current };
   }
 
   syncNativeComposerChoices() {
@@ -8006,6 +8044,10 @@ class SettingsView {
     this.engineUpgradeState = new Map();   // "bid:engine" -> "running" | "idle"
     this.engineUpgradePollTimer = null;
     this.engineUpgradePollGeneration = 0;
+    /* Engine polls may repaint a node while someone is between choosing a
+       catalog model and pressing the check button. Keep that unsaved choice
+       on the view so a status refresh cannot make the control jump back. */
+    this.modelPickerDrafts = new Map();
     this.localEngineGroup = null;
     this.root = el("div", "view settings");
     this.root.innerHTML = `<div class="settings-scroll"><div class="settings-inner"></div></div>`;
@@ -8026,6 +8068,7 @@ class SettingsView {
     this.backendAutoToggles.clear();
     this.upgradeReadiness.clear();
     this.upgradesInProgress.clear();
+    this.modelPickerDrafts.clear();
     this.localEngineGroup = null;
     this.root.remove();
   }
@@ -8364,6 +8407,123 @@ class SettingsView {
     this.syncUpgradeButtons();
   }
 
+  engineModelPicker(bid, nodeName, engine) {
+    const root = el("div", "engine-model-config");
+    const head = el("div", "engine-model-head");
+    head.appendChild(el("span", "engine-model-title", "Models available in Puppy"));
+    head.appendChild(el("span", "engine-model-copy",
+      "Choose from the catalog reported by this node."));
+    root.appendChild(head);
+
+    const selected = Array.isArray(engine.selected_models) ? [...engine.selected_models] : [];
+    const catalog = Array.isArray(engine.model_catalog) ? engine.model_catalog : [];
+    const byId = new Map(catalog.map(model => [model.value, model]));
+    const draftKey = `${Number(bid) || 0}:${engine.key}`;
+    const supported = backendSupportsEngineModelSelection(bid);
+    const unavailable = !engine.installed || !supported;
+
+    if (!supported) {
+      root.appendChild(el("div", "engine-model-note warn",
+        "Backend upgrade required to manage this catalog."));
+    } else if (!engine.installed) {
+      root.appendChild(el("div", "engine-model-note",
+        "Install OpenCode on this node to discover and select models."));
+    } else {
+      const add = el("div", "engine-model-add");
+      const select = document.createElement("select");
+      select.setAttribute("aria-label", `${nodeName} ${engine.label} model to add`);
+      const remaining = catalog.filter(model => !selected.includes(model.value));
+      const placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.textContent = remaining.length ? "Select a model…" : "All discovered models selected";
+      placeholder.disabled = true;
+      let draft = this.modelPickerDrafts.get(draftKey) || "";
+      if (!remaining.some(model => model.value === draft)) {
+        this.modelPickerDrafts.delete(draftKey);
+        draft = "";
+      }
+      placeholder.selected = !draft;
+      select.appendChild(placeholder);
+      for (const model of remaining) {
+        const option = document.createElement("option");
+        option.value = model.value;
+        option.textContent = `${model.provider_label || model.provider || "Provider"} · ` +
+          `${model.label || model.value}`;
+        option.title = model.hint || model.value;
+        option.selected = model.value === draft;
+        select.appendChild(option);
+      }
+      select.disabled = !remaining.length;
+      const button = el("button", "icon-btn engine-model-add-button");
+      button.type = "button";
+      button.appendChild(checkIcon(13));
+      button.disabled = !draft;
+      button.setAttribute("aria-label", `Add model to ${nodeName}`);
+      select.onchange = () => {
+        if (select.value) this.modelPickerDrafts.set(draftKey, select.value);
+        else this.modelPickerDrafts.delete(draftKey);
+        button.disabled = !select.value;
+      };
+      add.appendChild(select);
+      add.appendChild(button);
+      root.appendChild(add);
+
+      const save = async models => {
+        root.classList.add("saving");
+        select.disabled = true;
+        button.disabled = true;
+        try {
+          const result = await api(bid, `engines/${encodeURIComponent(engine.key)}/models`, {
+            method: "PATCH", body: { models }, timeoutMs: ENGINE_POLL_TIMEOUT,
+          });
+          this.modelPickerDrafts.delete(draftKey);
+          applyEnginesPayload(bid, result);
+          toast(`${nodeName}: ${engine.label} models updated`, "ok");
+        } catch (error) {
+          root.classList.remove("saving");
+          select.disabled = !remaining.length;
+          button.disabled = !select.value;
+          toast(`${nodeName}: ${error.message}`, "error", 7000);
+        }
+      };
+      button.onclick = () => {
+        if (select.value) save(selected.concat(select.value));
+      };
+
+      const list = el("div", "engine-model-selected");
+      if (!selected.length) {
+        list.appendChild(el("div", "engine-model-note empty",
+          "No models selected — new OpenCode sessions stay unavailable on this node."));
+      } else for (const modelId of selected) {
+        const model = byId.get(modelId);
+        const chip = el("div", "engine-model-chip" + (model ? "" : " unavailable"));
+        const words = el("span", "engine-model-chip-words");
+        words.appendChild(el("span", "engine-model-chip-name", model ?
+          `${model.provider_label || model.provider || "Provider"} · ${model.label || modelId}` :
+          modelId));
+        words.appendChild(el("span", "engine-model-chip-id", modelId));
+        chip.appendChild(words);
+        const remove = el("button", "engine-model-remove");
+        remove.type = "button";
+        remove.appendChild(xIcon(11));
+        remove.setAttribute("aria-label", `Remove ${modelId} from ${nodeName}`);
+        remove.onclick = () => save(selected.filter(value => value !== modelId));
+        chip.appendChild(remove);
+        list.appendChild(chip);
+      }
+      root.appendChild(list);
+      enhanceChoiceSelect(select);
+    }
+    if (engine.model_catalog_error) {
+      const error = el("div", "engine-model-note warn",
+        `Catalog refresh issue · ${engine.model_catalog_error}`);
+      error.setAttribute("aria-label", error.textContent);
+      root.appendChild(error);
+    }
+    root.classList.toggle("disabled", unavailable);
+    return root;
+  }
+
   engineRow(bid, nodeName, e2) {
     const row = el("div", "engine-row");
     const identity = el("div", "engine-row-identity");
@@ -8383,8 +8543,9 @@ class SettingsView {
     version.setAttribute("aria-label", described);
     if (described !== version.textContent) version.title = described;
     statuses.appendChild(version);
-    statuses.appendChild(el("span", "pill " + (e2.auth === "ok" ? "ok" : "bad"),
-      "Auth: " + e2.auth));
+    const ready = engineReady(e2);
+    statuses.appendChild(el("span", "pill " + (ready ? "ok" : "bad"),
+      e2.availability_only === true ? engineStatusText(e2) : "Auth: " + e2.auth));
     row.appendChild(identity);
     row.appendChild(statuses);
     const action = this.engineUpdateButton(bid, nodeName, e2);
@@ -8518,7 +8679,13 @@ class SettingsView {
         note.setAttribute("aria-label", note.textContent);
         body.appendChild(note);
       } else {
-        engines.forEach(e2 => body.appendChild(this.engineRow(bid, name, e2)));
+        engines.forEach(e2 => {
+          const entry = el("div", "engine-entry");
+          entry.appendChild(this.engineRow(bid, name, e2));
+          if (e2.model_selection_supported)
+            entry.appendChild(this.engineModelPicker(bid, name, e2));
+          body.appendChild(entry);
+        });
         /* Silence is only trustworthy while the check itself works: say so
            when the latest-version lookup is the thing that is unavailable. */
         const stale = engines.find(e2 => e2.installed && e2.latest_check_error);
@@ -10240,7 +10407,16 @@ async function modalNewSession(groupId = null) {
     const sequence = ++engineLoadSequence;
     let loaded = [];
     try {
-      if (bid === 0) loaded = state.engines;
+      if (bid === 0) {
+        if (state.engines.some(engine => engine.model_selection_supported &&
+            engine.model_catalog_loaded !== true)) {
+          const result = await api(0, "engines", { timeoutMs: ENGINE_POLL_TIMEOUT });
+          if (!result || !Array.isArray(result.engines))
+            throw new Error("instance returned an invalid engines response");
+          rememberEnginePayload(0, result);
+        }
+        loaded = state.engines;
+      }
       else {
         if (!Object.prototype.hasOwnProperty.call(state.engCache, bid)) {
           const result = await api(bid, "engines", { timeoutMs: ENGINE_POLL_TIMEOUT });
@@ -10270,7 +10446,7 @@ async function modalNewSession(groupId = null) {
       card.dataset.key = e2.key;
       card.innerHTML = `<div class="ep-ico prov ${PROVIDERS[e2.key] ? "prov-" + PROVIDERS[e2.key] : ""}">${PROVIDERS[e2.key] ? "" : esc((e2.key[0] || "?").toUpperCase())}</div>
         <div class="ep-name">${esc(e2.label)}</div>
-        <div class="ep-sub">${e2.installed ? (e2.auth === "ok" ? "Ready" : "No auth") : "Missing"}</div>`;
+        <div class="ep-sub">${engineStatusText(e2)}</div>`;
       card.onclick = () => pick(e2.key);
       engBox.appendChild(card);
     }
@@ -10285,15 +10461,29 @@ async function modalNewSession(groupId = null) {
       for (const o of opts) {
         const opt = document.createElement("option");
         opt.value = o.value; opt.textContent = o.label; opt.title = o.hint || "";
+        opt.disabled = !!o.disabled;
         if (o.value === selected) opt.selected = true;
         sel.appendChild(opt);
       }
       refreshChoiceSelect(sel);
     };
     fill(permSel, e2 ? e2.permission_options : [], e2 ? e2.default_permission : "");
-    fill(modelSel, (e2 ? e2.model_options : []).concat([{ value: "__custom__", label: "Custom…" }]), "");
-    fill(effortSel, e2 ? e2.effort_options : [], "");
-    modelSel.onchange();
+    const modelOptions = [...((e2 && e2.model_options) || [])];
+    if (!e2 || e2.allow_custom_model !== false)
+      modelOptions.push({ value: "__custom__", label: "Custom…" });
+    if (!modelOptions.length)
+      modelOptions.push({ value: "", label: "Choose models in Settings → Engines", disabled: true });
+    fill(modelSel, modelOptions, modelOptions[0].value);
+    modelSel.disabled = !e2 || (e2.allow_custom_model === false &&
+      !(e2.model_options || []).length);
+    refreshChoiceSelect(modelSel);
+    const syncEffort = () => {
+      const model = modelSel.value === "__custom__" ? "" : modelSel.value;
+      fill(effortSel, effortOptionsForModel(e2, model), "");
+      customWrap.classList.toggle("hidden", modelSel.value !== "__custom__");
+    };
+    modelSel.onchange = syncEffort;
+    syncEffort();
   }
   beSel.onchange = () => { syncWorkspaceSupport(); loadEngines(); };
   syncWorkspaceSupport();
@@ -10410,7 +10600,7 @@ function openBrowserFromMenu(groupId = null) {
 function modalSwitchEngine(view) {
   const s = view.session;
   if (!s) return;
-  const engines = state.engines;
+  const engines = view.tab.bid ? (state.engCache[view.tab.bid] || []) : state.engines;
   const { m, close } = modal(`<h2>Switch engine</h2>
     <p class="hint">The session keeps its transcript and working directory. The new engine starts a fresh
     native session seeded with a handoff of the conversation so far. Same-engine reseed is allowed
@@ -10418,14 +10608,14 @@ function modalSwitchEngine(view) {
     <div class="engine-pick" id="se-engines"></div>
     <div class="m-btns"><button class="btn" id="se-cancel">Cancel</button><button class="btn btn-pri" id="se-go">Switch</button></div>`);
   const box = m.querySelector("#se-engines");
-  let pick = s.engine === "claude" ? "codex" : "claude";
+  let pick = (engines.find(engine => engine.key !== s.engine) || engines[0] || {}).key || "";
   const render = () => {
     box.innerHTML = "";
     for (const e2 of engines) {
       const card = el("div", "ep" + (pick === e2.key ? " sel" : ""));
       card.innerHTML = `<div class="ep-ico prov ${PROVIDERS[e2.key] ? "prov-" + PROVIDERS[e2.key] : ""}">${PROVIDERS[e2.key] ? "" : esc((e2.key[0] || "?").toUpperCase())}</div>
         <div class="ep-name">${esc(e2.label)}</div>
-        <div class="ep-sub">${e2.key === s.engine ? "Current (reseed)" : (e2.auth === "ok" ? "Ready" : "No auth")}</div>`;
+        <div class="ep-sub">${e2.key === s.engine ? "Current (reseed)" : engineStatusText(e2)}</div>`;
       card.onclick = () => { pick = e2.key; render(); };
       box.appendChild(card);
     }

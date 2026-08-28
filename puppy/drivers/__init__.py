@@ -3,8 +3,9 @@ from __future__ import annotations
 
 from puppy.drivers.claude import ClaudeDriver
 from puppy.drivers.codex import CodexDriver
+from puppy.drivers.opencode import OpenCodeDriver
 
-_DRIVERS = {d.key: d for d in (ClaudeDriver(), CodexDriver())}
+_DRIVERS = {d.key: d for d in (ClaudeDriver(), CodexDriver(), OpenCodeDriver())}
 
 
 def get_driver(key: str):

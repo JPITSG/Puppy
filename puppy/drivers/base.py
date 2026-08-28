@@ -25,6 +25,7 @@ Actions returned by parse_line() (consumed by the runner):
     {"a": "model", "model": "..."}                   engine reported its model
     {"a": "approval", "req": {...}}                  interactive permission request
     {"a": "approval_cancel", "request_id": "..."}
+    {"a": "stdin", "data": {...}}                    continue a JSONL handshake
     {"a": "rate_limit", "info": {...}}
     {"a": "result", "data": {...}}                   turn finished (also persisted)
 """
@@ -131,6 +132,17 @@ class Driver:
     # True: prompt + control messages flow over stdin as JSONL (claude style).
     # False: prompt is part of argv, stdin closed (codex style).
     uses_stdin_stream = False
+    # Some multi-provider CLIs deliberately leave authentication to whichever
+    # provider/model a turn selects.  Their node health is binary availability,
+    # not a single global login verdict.
+    availability_only = False
+    # Dynamic model catalogs are opt-in.  Static drivers keep the existing
+    # model_options() contract and expose no configuration control.
+    model_selection_supported = False
+    allow_custom_model = True
+    # Loading a native session in a replacement temporary workspace is unsafe
+    # for engines which bind permissions and tool routing to the creation cwd.
+    resume_requires_same_cwd = False
     # Optional advisory source for latest-version checks. New registry kinds
     # belong in cli_releases; engine-specific package identity stays here.
     release_source = None
@@ -151,9 +163,38 @@ class Driver:
         Free-text overrides are still allowed; this only feeds the picker UI."""
         return []
 
+    async def refresh_model_options(self, force: bool = False) -> None:
+        """Refresh a driver-owned dynamic catalog. Static drivers do nothing."""
+        return None
+
+    def model_catalog(self):
+        """All discoverable choices before a node-owned visibility filter."""
+        return []
+
+    def model_catalog_error(self) -> str:
+        return ""
+
+    def model_catalog_loaded(self) -> bool:
+        return True
+
+    def selected_models(self):
+        """Persisted visible model IDs for a configurable dynamic catalog."""
+        return []
+
+    def set_selected_models(self, values) -> list:
+        raise ValueError("{} does not have configurable models".format(self.label))
+
+    def default_model(self) -> str:
+        """Model used when a new/reseeded session does not name one."""
+        return ""
+
     def effort_options(self):
         """[{value, label, hint}] - reasoning effort levels ('' = engine default)."""
         return []
+
+    def effort_options_for_model(self, model: str):
+        """A dynamic driver may expose variants specific to one model."""
+        return self.effort_options()
 
     def build_cmd(self, session: dict, first_turn: bool, prompt: str, pinned_id: str,
                   browser_mcp=None, system_prompt: str = "") -> list:
@@ -164,6 +205,16 @@ class Driver:
         system_prompt is the node owner's additive guidance for every turn."""
         raise NotImplementedError
 
+    def build_env(self, session: dict, first_turn: bool, prompt: str, pinned_id: str,
+                  browser_mcp=None, system_prompt: str = "") -> dict:
+        """Per-turn environment additions. Credentials remain CLI-owned."""
+        return {}
+
+    def turn_context(self, session: dict, first_turn: bool, prompt: str, pinned_id: str,
+                     browser_mcp=None, system_prompt: str = "") -> dict:
+        """Driver scratch state shared across streamed protocol messages."""
+        return {}
+
     def initial_stdin(self, session: dict, prompt: str) -> list:
         """JSON objects to write to stdin right after spawn (stdin-stream engines)."""
         return []
@@ -173,11 +224,16 @@ class Driver:
         raise NotImplementedError
 
     def approval_payload(self, request_id: str, behavior: str, original_input: dict,
-                         message: str = "", updated_permissions=None) -> dict:
+                         message: str = "", updated_permissions=None,
+                         request=None) -> dict:
         """stdin JSON answering an approval request (stdin-stream engines)."""
         raise NotImplementedError
 
-    def interrupt_payload(self):
+    def cancel_approval_payload(self, request: dict):
+        """Protocol response for a pending approval cancelled with its turn."""
+        return None
+
+    def interrupt_payload(self, session=None):
         """stdin JSON requesting a graceful interrupt, or None (-> signal only)."""
         return None
 
@@ -193,7 +249,10 @@ class Driver:
             if shutil.which(self.binary):
                 st["installed"] = True
                 st["version"] = await self._run_quick([self.binary, "--version"])
-                st.update(await self._auth_status())
+                if self.availability_only:
+                    st.update(auth="ok", detail="binary available")
+                else:
+                    st.update(await self._auth_status())
             _status_cache[self.key] = (now, dict(st))
             probed_at = now
         # Quotas can change between the relatively expensive version/auth
@@ -203,7 +262,7 @@ class Driver:
         st.update(cli_releases.status(self, st.get("version", "")))
         st.update(self._extra_status())
         # outside the cache: evidence must land and lift without waiting 5 min
-        return apply_auth_evidence(self, st)
+        return st if self.availability_only else apply_auth_evidence(self, st)
 
     def _extra_status(self) -> dict:
         """Engine-specific extras merged into status() (e.g. quota info)."""
@@ -250,7 +309,12 @@ def clean_env(env: dict) -> dict:
     """Strip vars from a possibly-nested agent environment so spawned CLIs start clean."""
     out = dict(env)
     for k in list(out):
-        if k.startswith("CLAUDE_") or k in ("CLAUDECODE", "ANTHROPIC_MODEL", "CODEX_HOME_OVERRIDE"):
+        if k.startswith("CLAUDE_") or k in (
+                "CLAUDECODE", "ANTHROPIC_MODEL", "CODEX_HOME_OVERRIDE",
+                # A Puppy process may itself have been launched by OpenCode.
+                # Its turn-scoped inline config must never leak into a child
+                # engine; the OpenCode driver installs its own value explicitly.
+                "OPENCODE_CONFIG_CONTENT"):
             out.pop(k, None)
     return out
 

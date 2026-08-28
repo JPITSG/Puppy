@@ -103,9 +103,13 @@ def check_descriptor_validation() -> None:
     Candidate.upgrade_source = {"kind": "self", "args": ["update", "--yes"]}
     assert cli_upgrade.supported(Candidate())
 
+    expected_updaters = {
+        "claude": ["update"], "codex": ["update"], "opencode": ["upgrade"],
+    }
     for driver in drivers.all_drivers():
         # The shipped engines delegate to their own updater and nothing else.
-        assert driver.upgrade_source == {"kind": "self", "args": ["update"]}, driver.key
+        assert driver.upgrade_source == {
+            "kind": "self", "args": expected_updaters[driver.key]}, driver.key
         assert cli_upgrade.supported(driver), driver.key
 
 

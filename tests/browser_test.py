@@ -43,6 +43,7 @@ os.environ["PUPPY_BROWSER_STUB_LOG"] = str(STUB_LOG)
 from puppy import browser, browser_agent, config, db, runner as session_runner  # noqa: E402
 from puppy.drivers.claude import ClaudeDriver  # noqa: E402
 from puppy.drivers.codex import CodexDriver  # noqa: E402
+from puppy.drivers.opencode import OpenCodeDriver  # noqa: E402
 from puppy.web import build_app  # noqa: E402
 
 STUB = r'''#!/usr/bin/env python3
@@ -1532,6 +1533,97 @@ console.log(JSON.stringify({before,dirty,resetState,saved,remote,unsupported,cal
     assert [call["method"] for call in result["calls"]] == ["PATCH", "GET"], result
 
 
+def check_opencode_model_picker(ui_source: str, css_source: str) -> None:
+    """A status repaint must not eat the model chosen before the check click."""
+    start = ui_source.index("\n  engineModelPicker(") + 1
+    brace = ui_source.index("{", start)
+    depth = 0
+    end = None
+    for index in range(brace, len(ui_source)):
+        if ui_source[index] == "{":
+            depth += 1
+        elif ui_source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                end = index + 1
+                break
+    assert end is not None
+    method = ui_source[start:end]
+    script = r"""
+class Classes {
+  constructor(value=""){this.names=new Set(String(value).split(/\s+/).filter(Boolean));}
+  add(...names){names.forEach(name=>this.names.add(name));}
+  remove(...names){names.forEach(name=>this.names.delete(name));}
+  toggle(name,on){on?this.add(name):this.remove(name);}
+}
+class Element {
+  constructor(tag,cls="",text=""){
+    this.tagName=String(tag).toUpperCase();this.className=cls;this.textContent=text;
+    this.children=[];this.attributes={};this.disabled=false;this.value="";
+    this.options=[];this.classList=new Classes(cls);this.isConnected=true;
+  }
+  appendChild(child){
+    this.children.push(child);
+    if(this.tagName==="SELECT"&&child.tagName==="OPTION"){
+      this.options.push(child);
+      if(child.selected){this.value=child.value;this.selectedIndex=this.options.length-1;}
+    }
+    return child;
+  }
+  setAttribute(name,value){this.attributes[name]=String(value);}
+}
+const document={createElement:tag=>new Element(tag)};
+const el=(tag,cls,text)=>new Element(tag,cls||"",text===undefined?"":text);
+const checkIcon=()=>new Element("svg"),xIcon=()=>new Element("svg");
+const enhanceChoiceSelect=()=>{};
+const backendSupportsEngineModelSelection=()=>true;
+const ENGINE_POLL_TIMEOUT=15000;
+const calls=[];
+const api=async(bid,path,options)=>{calls.push({bid,path,options});return {
+  engines:[],usage_refresh:{},auto_upgrade:{}};};
+const applyEnginesPayload=()=>{};
+const toast=()=>{};
+const proto={
+__METHOD__
+};
+const view=Object.assign(Object.create(proto),{modelPickerDrafts:new Map()});
+const engine={key:"opencode",label:"OpenCode",installed:true,
+  selected_models:["provider/first"],model_catalog:[
+    {value:"provider/first",label:"First",provider_label:"Provider"},
+    {value:"provider/second",label:"Second",provider_label:"Provider"}],
+  model_catalog_error:""};
+const first=view.engineModelPicker(0,"Local",engine);
+const select1=first.children[1].children[0];
+const add1=first.children[1].children[1];
+select1.value="provider/second";select1.onchange();
+const chosen={value:select1.value,disabled:add1.disabled,
+  draft:view.modelPickerDrafts.get("0:opencode")};
+const second=view.engineModelPicker(0,"Local",engine);
+const select2=second.children[1].children[0];
+const add2=second.children[1].children[1];
+const restored={value:select2.value,disabled:add2.disabled,
+  draft:view.modelPickerDrafts.get("0:opencode")};
+add2.onclick();
+await new Promise(resolve=>setTimeout(resolve,0));
+console.log(JSON.stringify({chosen,restored,draftAfterSave:view.modelPickerDrafts.size,
+  request:calls[0]}));
+""".replace("__METHOD__", method)
+    proc = subprocess.run(["node", "--input-type=module", "-e", script],
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:700]
+    result = json.loads(proc.stdout.strip())
+    expected = {"value": "provider/second", "disabled": False,
+                "draft": "provider/second"}
+    assert result["chosen"] == expected, result
+    assert result["restored"] == expected, result
+    assert result["draftAfterSave"] == 0, result
+    assert result["request"]["path"] == "engines/opencode/models", result
+    assert result["request"]["options"]["body"] == {
+        "models": ["provider/first", "provider/second"]}, result
+    assert ".engine-model-config{" in css_source
+    assert ".engine-model-selected{" in css_source
+
+
 def check_double_activation_survives_rerender(ui_source: str) -> None:
     """A backend name rebuilt between clicks must still complete the gesture."""
     def extract_function(marker: str) -> str:
@@ -2184,6 +2276,30 @@ async def main() -> None:
                 system_prompt="")
             assert codex_without_guidance[-1] == "plain"
 
+            opencode = OpenCodeDriver()
+            opencode_env = opencode.build_env(
+                agent_session, True, "hello", "native-3", browser_mcp=descriptor,
+                system_prompt=custom_prompt)
+            inline = json.loads(opencode_env["OPENCODE_CONFIG_CONTENT"])
+            opencode_agent = inline["agent"]["puppy_console"]
+            assert inline["default_agent"] == "puppy_console"
+            assert opencode_agent["prompt"] == custom_prompt + "\n\n" + policy
+            opencode_ctx = opencode.turn_context(
+                agent_session, True, "hello", "native-3", browser_mcp=descriptor,
+                system_prompt=custom_prompt)
+            assert opencode_ctx["mcp_servers"][0]["command"] == descriptor["command"]
+            assert any(item["name"] == "PUPPY_BROWSER_TURN_ID" and
+                       item["value"] == turn_id
+                       for item in opencode_ctx["mcp_servers"][0]["env"])
+            opencode_plain = json.loads(opencode.build_env(
+                agent_session, True, "plain", "native-4", browser_mcp=None,
+                system_prompt=custom_prompt)["OPENCODE_CONFIG_CONTENT"])
+            assert opencode_plain["agent"]["puppy_console"]["prompt"] == custom_prompt
+            opencode_without_guidance = json.loads(opencode.build_env(
+                agent_session, True, "plain", "native-5", browser_mcp=None,
+                system_prompt="")["OPENCODE_CONFIG_CONTENT"])
+            assert "prompt" not in opencode_without_guidance["agent"]["puppy_console"]
+
             mcp_env = dict(os.environ)
             mcp_env.update(descriptor["env"])
             base64_stub = base64.b64encode(b"stub-jpeg-frame-bytes").decode()
@@ -2669,6 +2785,7 @@ async def main() -> None:
             check_user_message_copy(ui_source)
             check_queue_pause_ui(ui_source, css_source)
             check_system_prompt_settings(ui_source, css_source)
+            check_opencode_model_picker(ui_source, css_source)
             check_double_activation_survives_rerender(ui_source)
             check_browser_disable_closes_scoped_tabs(ui_source)
             check_quota_math(ui_source)

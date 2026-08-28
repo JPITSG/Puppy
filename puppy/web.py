@@ -104,18 +104,27 @@ async def h_ping(request: web.Request):
     return web.json_response(payload)
 
 
-async def _engines_payload(refresh_usage: bool = True):
+async def _engines_payload(refresh_usage: bool = True, refresh_models: bool = True):
     if refresh_usage:
         await usage_refresh.maybe_refresh()
     engines = []
     for d in all_drivers():
         st = await d.status()
+        if refresh_models and d.model_selection_supported and st.get("installed"):
+            await d.refresh_model_options()
         engines.append({
             "key": d.key, "label": d.label, **st,
+            "availability_only": d.availability_only,
             "permission_options": d.permission_options(),
             "default_permission": d.default_permission(),
             "model_options": d.model_options(),
             "effort_options": d.effort_options(),
+            "allow_custom_model": d.allow_custom_model,
+            "model_selection_supported": d.model_selection_supported,
+            "model_catalog": d.model_catalog(),
+            "model_catalog_loaded": d.model_catalog_loaded(),
+            "selected_models": d.selected_models(),
+            "model_catalog_error": d.model_catalog_error(),
             "rate_limit": db.meta_get(f"rate_limit.{d.key}"),
         })
     return engines
@@ -133,7 +142,7 @@ def _node_user() -> str:
 async def h_state(request: web.Request):
     # Keep initial app/auth entry fast. The browser immediately follows with
     # an asynchronous engine poll, which performs a due account refresh.
-    engines = await _engines_payload(refresh_usage=False)
+    engines = await _engines_payload(refresh_usage=False, refresh_models=False)
     session_state = runner.sessions_payload()
     return web.json_response({
         "version": __version__,
@@ -186,8 +195,40 @@ async def h_engines_refresh(request: web.Request):
     drivers = all_drivers()
     driver_base.invalidate_status()
     await cli_releases.refresh_if_due(drivers, force=True)
+    await asyncio.gather(*(driver.refresh_model_options(force=True)
+                           for driver in drivers if driver.model_selection_supported))
     return web.json_response({
         "engines": await _engines_payload(refresh_usage=False),
+        "usage_refresh": usage_refresh.payload(),
+        "auto_upgrade": cli_auto_upgrade.payload(),
+    })
+
+
+async def h_engine_models_patch(request: web.Request):
+    """Persist one node's visible subset of a dynamic engine catalog."""
+    key = str(request.match_info.get("key") or "")
+    try:
+        driver = get_driver(key)
+    except KeyError:
+        return web.json_response({"error": "unknown engine"}, status=404)
+    if not driver.model_selection_supported:
+        return web.json_response(
+            {"error": "{} does not have configurable models".format(driver.label)},
+            status=400)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid model selection request"}, status=400)
+    if not isinstance(body, dict) or not isinstance(body.get("models"), list):
+        return web.json_response({"error": "models must be a list"}, status=400)
+    await driver.refresh_model_options()
+    try:
+        selected = driver.set_selected_models(body["models"])
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    return web.json_response({
+        "ok": True, "selected_models": selected,
+        "engines": await _engines_payload(refresh_usage=False, refresh_models=False),
         "usage_refresh": usage_refresh.payload(),
         "auto_upgrade": cli_auto_upgrade.payload(),
     })
@@ -288,6 +329,7 @@ async def h_session_create(request: web.Request):
         driver = get_driver(engine)
     except KeyError:
         return web.json_response({"error": f"unknown engine '{engine}'"}, status=400)
+    await driver.refresh_model_options()
     workspace_kind = str(body.get("workspace_kind") or workspaces.KIND_DIRECTORY)
     if workspace_kind not in workspaces.KINDS:
         return web.json_response({"error": "unknown workspace kind"}, status=400)
@@ -308,12 +350,20 @@ async def h_session_create(request: web.Request):
     perm = body.get("permission_mode") or driver.default_permission()
     if perm not in [o["value"] for o in driver.permission_options()]:
         perm = driver.default_permission()
+    model = str(body.get("model") or "").strip()[:config.MAX_MODEL_ID_CHARS]
+    if not model:
+        model = driver.default_model()
+    allowed_models = [str(option.get("value") or "") for option in driver.model_options()]
+    if not driver.allow_custom_model and (not model or model not in allowed_models):
+        message = ("Select at least one {} model in Settings → Engines first".format(
+            driver.label) if not allowed_models else
+            "That {} model is not enabled on this node".format(driver.label))
+        return web.json_response({"error": message}, status=400)
     effort = str(body.get("effort") or "").strip()
-    if effort not in [o["value"] for o in driver.effort_options()]:
+    if effort not in [o["value"] for o in driver.effort_options_for_model(model)]:
         effort = ""
     color = body.get("color") if body.get("color") in db.SESSION_COLORS else random.choice(db.SESSION_COLORS)
     name = str(body.get("name") or "").strip()[:80]
-    model = str(body.get("model") or "").strip()[:60]
     created_workspace = ""
     if workspace_kind == workspaces.KIND_TEMPORARY:
         try:
@@ -357,16 +407,33 @@ async def h_session_patch(request: web.Request):
     s = _session_or_404(request)
     body = await request.json()
     fields = {}
-    config = {}
+    turn_config = {}
     if "name" in body:
         fields["name"] = str(body["name"]).strip()[:80]
     if "model" in body:
-        config["model"] = str(body["model"]).strip()[:60]
+        driver = get_driver(s["engine"])
+        await driver.refresh_model_options()
+        model = str(body["model"] or "").strip()[:config.MAX_MODEL_ID_CHARS]
+        if not model:
+            model = driver.default_model()
+        allowed = [str(option.get("value") or "") for option in driver.model_options()]
+        if not driver.allow_custom_model and (not model or model not in allowed):
+            return web.json_response(
+                {"error": "That {} model is not enabled on this node".format(driver.label)},
+                status=400)
+        turn_config["model"] = model
     if "effort" in body:
         driver = get_driver(s["engine"])
         val = str(body["effort"]).strip()
-        if val in [o["value"] for o in driver.effort_options()]:
-            config["effort"] = val
+        model = turn_config.get("model", s.get("model") or driver.default_model())
+        if val in [o["value"] for o in driver.effort_options_for_model(model)]:
+            turn_config["effort"] = val
+    if "model" in turn_config and "effort" not in turn_config:
+        driver = get_driver(s["engine"])
+        current_effort = str(s.get("effort") or "")
+        if current_effort not in [o["value"] for o in
+                                  driver.effort_options_for_model(turn_config["model"])]:
+            turn_config["effort"] = ""
     if "color" in body and body["color"] in db.SESSION_COLORS:
         fields["color"] = body["color"]
     if "archived" in body:
@@ -382,9 +449,9 @@ async def h_session_patch(request: web.Request):
     # and applies in order - prompts sent before it keep the configuration they
     # were written under. With nothing pending it applies like any other field.
     # True means the hub took charge of it (queued, or already in force there).
-    queued_config = bool(config) and runner.hub(s["id"]).queue_config(config)
+    queued_config = bool(turn_config) and runner.hub(s["id"]).queue_config(turn_config)
     if not queued_config:
-        fields.update(config)
+        fields.update(turn_config)
     if fields:
         db.touch_session(s["id"], **fields)
         runner.broadcast_sessions()
@@ -462,6 +529,12 @@ async def h_session_switch(request: web.Request):
         driver = get_driver(engine)
     except KeyError:
         return web.json_response({"error": f"unknown engine '{engine}'"}, status=400)
+    await driver.refresh_model_options()
+    model = driver.default_model()
+    if not driver.allow_custom_model and not model:
+        return web.json_response({
+            "error": "Select at least one {} model in Settings → Engines first".format(
+                driver.label)}, status=400)
     h = runner.hub(s["id"])
     if h.status == "running":
         return web.json_response({"error": "turn in progress - interrupt first"}, status=409)
@@ -478,7 +551,7 @@ async def h_session_switch(request: web.Request):
         "from": old, "to": engine,
         "from_model": used["model"], "from_effort": used["effort"],
     })
-    db.touch_session(s["id"], engine=engine, native_session_id="", model="", effort="",
+    db.touch_session(s["id"], engine=engine, native_session_id="", model=model, effort="",
                      last_model="", used_config="", permission_mode=driver.default_permission())
     h.broadcast({"type": "event", "event": ev})
     h.broadcast({"type": "session_meta",
@@ -1086,6 +1159,7 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     r.add_post("/api/engines/usage-refresh", h_usage_refresh_post)
     r.add_patch("/api/engines/usage-refresh", h_usage_refresh_patch)
     r.add_post("/api/engines/refresh", h_engines_refresh)
+    r.add_patch("/api/engines/{key:[A-Za-z0-9_-]{1,32}}/models", h_engine_models_patch)
     r.add_get("/api/engines/auto-upgrade", h_engine_auto_upgrade_get)
     r.add_patch("/api/engines/auto-upgrade", h_engine_auto_upgrade_patch)
     r.add_post("/api/engines/{key:[A-Za-z0-9_-]{1,32}}/upgrade", h_engine_upgrade)

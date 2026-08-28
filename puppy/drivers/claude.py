@@ -107,7 +107,8 @@ class ClaudeDriver(Driver):
              "content": [{"type": "text", "text": prompt}]}},
         ]
 
-    def approval_payload(self, request_id, behavior, original_input, message="", updated_permissions=None):
+    def approval_payload(self, request_id, behavior, original_input, message="",
+                         updated_permissions=None, request=None):
         if behavior == "allow":
             resp = {"behavior": "allow", "updatedInput": original_input or {}}
             if updated_permissions:
@@ -117,7 +118,7 @@ class ClaudeDriver(Driver):
         return {"type": "control_response",
                 "response": {"subtype": "success", "request_id": request_id, "response": resp}}
 
-    def interrupt_payload(self):
+    def interrupt_payload(self, session=None):
         return {"type": "control_request", "request_id": "int_1",
                 "request": {"subtype": "interrupt"}}
 

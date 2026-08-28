@@ -165,7 +165,7 @@ the additive `engine-upgrade` capability:
 - `POST /api/engines/refresh` forces one immediate installed-version re-probe
   and one latest-release check on this node.
 - `POST /api/engines/{key}/upgrade` runs that engine's own updater
-  (`claude update`, `codex update`).
+  (`claude update`, `codex update`, `opencode upgrade`).
 
 The command is fixed by the driver, never by the request: the body is ignored
 and the engine key must already be registered on the node. Puppy deliberately
@@ -185,6 +185,22 @@ a reconnecting controller rejoins a run already in flight. Engines are spawned
 per turn, so nothing restarts afterwards; the node re-probes the version itself
 when the updater exits, because a zero exit status alone does not prove the
 version moved.
+
+## OpenCode models
+
+OpenCode is registered in the headless artifact just like it is in the full
+runtime. Its status is binary availability only: provider authentication is
+model-specific, so a found binary reports `Ready` and an absent one reports
+`No binary` rather than attempting one global auth verdict.
+
+An installed node discovers its catalog from `opencode models --verbose` and
+advertises the additive `engine-model-selection` capability. The authenticated
+`PATCH /api/engines/opencode/models` route accepts `{ "models": [...] }` and
+persists the subset this node exposes to Puppy sessions. Catalogs and selections
+are node-owned: a controller never copies provider names, credentials, or a
+local path to another backend. Turns run through `opencode acp`, resume the
+native session ID, relay tool approvals/cancellation, and receive the same
+turn-scoped managed-browser MCP server when Browser is enabled on that node.
 
 ## System prompts
 

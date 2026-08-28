@@ -14,7 +14,7 @@
   --warn:#ffb64d; --warn-dim:rgba(255,182,77,.12);
   --err:#ff6b81; --err-dim:rgba(255,107,129,.12);
   --violet:#9d7bff; --cyan:#4dc6ff;
-  --claude:#e0784f; --codex:#4dd0c4; --term:#22e5a4;
+  --claude:#e0784f; --codex:#4dd0c4; --opencode:#9d7bff; --term:#22e5a4;
   --r-sm:8px; --r-md:11px; --r-lg:15px;
   /* button system: one height scale + themeable face/lift tokens so every
      control (btn, icon-btn, send, mini pill) shares the same material */
@@ -264,6 +264,7 @@ a{color:var(--acc2)}
 .engine-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0;color:var(--txt3);background:currentColor}
 .engine-dot.claude{color:var(--claude)}
 .engine-dot.codex{color:var(--codex)}
+.engine-dot.opencode{color:var(--opencode)}
 .sess-item .si-name{flex:1;min-width:0;font-size:13px;font-weight:570;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sess-item .si-sub{flex:1;min-width:0;font-size:11px;color:var(--txt3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:var(--mono)}
 .sess-item .si-sub.warn{color:var(--warn)}
@@ -714,6 +715,7 @@ select.choice-native{display:none!important}
 .tab .t-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;color:var(--txt3);background:currentColor}
 .tab .t-dot.claude{color:var(--claude)}
 .tab .t-dot.codex{color:var(--codex)}
+.tab .t-dot.opencode{color:var(--opencode)}
 .tab .t-dot.term{
   width:12px;height:12px;border-radius:0;background:none;color:var(--txt3);
 }
@@ -832,6 +834,7 @@ select.choice-native{display:none!important}
 .chip .dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
 .chip.eng-claude .dot{background:var(--claude)}
 .chip.eng-codex .dot{background:var(--codex)}
+.chip.eng-opencode .dot{background:var(--opencode)}
 .chip.cwd.warn{color:var(--warn);border-color:rgba(255,182,77,.35);background:var(--warn-dim)}
 /* the one chip that is a control: a live browser this session launched */
 .chip.browser{
@@ -1451,6 +1454,58 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 }
 .engine-update.busy{cursor:wait}
 .engine-version{max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.engine-model-config{
+  margin:0 0 9px 30px;padding:10px 11px;border:1px solid var(--line);
+  border-radius:var(--r-md);background:var(--panel2);min-width:0;
+  transition:opacity .15s var(--ease),border-color .15s var(--ease);
+}
+.engine-model-config.saving{opacity:.58;pointer-events:none}
+.engine-model-head{display:flex;align-items:baseline;gap:7px 10px;min-width:0;flex-wrap:wrap}
+.engine-model-title{
+  color:var(--txt2);font:650 10px/1.25 var(--sans);letter-spacing:.075em;text-transform:uppercase;
+}
+.engine-model-copy{color:var(--txt3);font:10.5px/1.35 var(--sans)}
+.engine-model-add{
+  display:grid;grid-template-columns:minmax(0,1fr) 36px;align-items:center;gap:7px;
+  min-width:0;margin-top:8px;
+}
+.engine-model-add>select{height:36px;margin:0}
+.engine-model-add>.choice-control{min-width:0;margin:0}
+.engine-model-add-button{
+  width:36px;height:36px;border-color:var(--line2);background:var(--panel);
+}
+.engine-model-add-button svg,.engine-model-remove svg{display:block}
+.engine-model-selected{
+  display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:8px;min-width:0;
+}
+.engine-model-chip{
+  display:grid;grid-template-columns:minmax(0,1fr) 27px;align-items:stretch;min-width:0;
+  border:1px solid var(--line);border-radius:var(--r-sm);background:var(--panel);
+}
+.engine-model-chip.unavailable{border-color:rgba(255,182,77,.28)}
+.engine-model-chip-words{
+  display:flex;flex-direction:column;justify-content:center;gap:2px;min-width:0;padding:6px 8px;
+}
+.engine-model-chip-name{
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--txt2);
+  font:11px/1.2 var(--sans);
+}
+.engine-model-chip-id{
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--txt3);
+  font:9px/1.2 var(--mono);
+}
+.engine-model-remove{
+  display:flex;align-items:center;justify-content:center;width:27px;min-width:27px;padding:0;
+  border:0;border-left:1px solid var(--line);border-radius:0 var(--r-sm) var(--r-sm) 0;
+  background:transparent;color:var(--txt3);cursor:pointer;
+  transition:background .15s var(--ease),color .15s var(--ease),transform .12s var(--ease);
+}
+@media (hover:hover){.engine-model-remove:hover{background:var(--hov);color:var(--err)}}
+.engine-model-remove:active{background:var(--hov);transform:scale(.94)}
+.engine-model-remove:focus-visible{outline:1px solid var(--acc);outline-offset:-2px}
+.engine-model-note{margin-top:7px;color:var(--txt3);font:10.5px/1.4 var(--sans)}
+.engine-model-note.warn{color:var(--warn)}
+.engine-model-note.empty{grid-column:1/-1;margin:1px 0 0}
 .engine-node-message,.usage-refresh-note,.eau-note{
   font-family:var(--sans);font-size:10.5px;font-weight:400;
 }
@@ -1742,7 +1797,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 }
 .modal h2{font-size:15px;margin-bottom:14px;display:flex;align-items:center;gap:9px}
 .modal .m-btns{display:flex;gap:8px;justify-content:flex-end;margin-top:14px}
-.engine-pick{display:flex;gap:8px;margin-bottom:10px}
+.engine-pick{display:grid;grid-template-columns:repeat(auto-fit,minmax(90px,1fr));gap:8px;margin-bottom:10px}
 .engine-pick .ep{
   flex:1;padding:11px 10px;border-radius:var(--r-md);border:1px solid var(--line2);cursor:pointer;
   text-align:center;background-color:var(--panel);background-image:var(--btn-face);user-select:none;
@@ -1945,6 +2000,10 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   .engine-row-statuses{grid-area:statuses;justify-content:flex-start;padding-left:17px}
   .engine-row-actions{grid-area:actions;justify-content:flex-end}
   .engine-update{height:32px;min-width:0;padding-left:14px;padding-right:14px}
+  .engine-model-config{margin-left:30px;padding:9px 9px 10px}
+  .engine-model-selected{grid-template-columns:minmax(0,1fr)}
+  .engine-model-head{display:block}
+  .engine-model-copy{display:block;margin-top:3px}
   .engine-node-message{padding-left:26px}
   /* Give the address the full phone row: unlike the short display name, the
      two LAN/VPN origins often differ near their right edge. Controls form a

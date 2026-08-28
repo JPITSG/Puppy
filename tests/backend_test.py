@@ -81,6 +81,169 @@ def exercise_driver_normalization() -> None:
     assert lifecycle == []
 
 
+def exercise_opencode_driver() -> None:
+    """Pin catalog parsing and the full no-model ACP handshake/state machine."""
+    from puppy import runner
+    from puppy.drivers.opencode import OpenCodeDriver, parse_model_catalog
+    catalog = parse_model_catalog("""provider/model-a
+{
+  "id": "model-a",
+  "providerID": "provider",
+  "name": "Model A",
+  "limit": {"context": 128000, "output": 8192},
+  "capabilities": {"input": {"text": true, "image": true}},
+  "variants": {"high": {}, "max": {}}
+}
+second/model-b
+{
+  "id": "model-b",
+  "providerID": "second",
+  "name": "Model B",
+  "variants": {}
+}
+""")
+    assert [model["value"] for model in catalog] == \
+        ["provider/model-a", "second/model-b"]
+    assert catalog[0]["label"] == "Model A"
+    assert "128k context" in catalog[0]["hint"] and "image input" in catalog[0]["hint"]
+    assert [item["value"] for item in catalog[0]["effort_options"]] == \
+        ["", "high", "max"]
+
+    driver = OpenCodeDriver()
+    assert runner._starts_fresh_native_session(
+        {"native_session_id": ""}, False, driver) is True
+    assert runner._starts_fresh_native_session(
+        {"native_session_id": "ses_existing"}, False, driver) is False
+    assert runner._starts_fresh_native_session(
+        {"native_session_id": "ses_existing"}, True, driver) is True
+    assert runner._starts_fresh_native_session(
+        {"native_session_id": "ses_existing"}, True, CodexDriver()) is False
+    session = {
+        "cwd": "/tmp", "native_session_id": "", "model": "provider/model-a",
+        "effort": "high", "permission_mode": "manual",
+    }
+    browser = {
+        "name": "puppy_browser", "command": "/tmp/browser-agent",
+        "args": ["--session", "9"], "env": {"PUPPY_SOCKET": "/tmp/socket"},
+        "engine_guidance": "Use the shared browser.",
+    }
+    inline = json.loads(driver.build_env(
+        session, True, "hello", "pin", browser_mcp=browser,
+        system_prompt="Be concise.")["OPENCODE_CONFIG_CONTENT"])
+    agent = inline["agent"]["puppy_console"]
+    assert inline["default_agent"] == "puppy_console"
+    assert "Be concise." in agent["prompt"] and "Use the shared browser." in agent["prompt"]
+    assert agent["permission"]["*"] == "ask" and agent["permission"]["read"] == "allow"
+
+    ctx = driver.turn_context(session, True, "hello", "pin", browser_mcp=browser)
+    assert ctx["mcp_servers"] == [{
+        "name": "puppy_browser", "command": "/tmp/browser-agent",
+        "args": ["--session", "9"],
+        "env": [{"name": "PUPPY_SOCKET", "value": "/tmp/socket"}],
+    }]
+    initial = driver.initial_stdin(session, "hello")[0]
+    assert initial["method"] == "initialize" and initial["params"]["protocolVersion"] == 1
+    actions = driver.parse_line(json.dumps({
+        "jsonrpc": "2.0", "id": "puppy:initialize", "result": {
+            "agentCapabilities": {"loadSession": True}}}), ctx)
+    assert actions[0]["data"]["method"] == "session/new"
+
+    options = [
+        {"id": "model", "currentValue": "provider/default",
+         "options": [{"value": "provider/default"}, {"value": "provider/model-a"}]},
+        {"id": "mode", "currentValue": "build",
+         "options": [{"value": "build"}, {"value": "puppy_console"}]},
+    ]
+    actions = driver.parse_line(json.dumps({
+        "jsonrpc": "2.0", "id": "puppy:session",
+        "result": {"sessionId": "ses_test", "configOptions": options}}), ctx)
+    assert actions[0] == {"a": "native_id", "id": "ses_test"}
+    assert actions[1]["data"]["params"]["configId"] == "mode"
+
+    options[1]["currentValue"] = "puppy_console"
+    actions = driver.parse_line(json.dumps({
+        "jsonrpc": "2.0", "id": "puppy:config", "result": {"configOptions": options}}), ctx)
+    assert actions[-1]["data"]["params"] == {
+        "sessionId": "ses_test", "configId": "model", "value": "provider/model-a"}
+
+    model_options = [
+        {"id": "model", "currentValue": "provider/model-a"},
+        {"id": "effort", "currentValue": "none",
+         "options": [{"value": "none"}, {"value": "high"}]},
+        {"id": "mode", "currentValue": "puppy_console"},
+    ]
+    actions = driver.parse_line(json.dumps({
+        "jsonrpc": "2.0", "id": "puppy:config",
+        "result": {"configOptions": model_options}}), ctx)
+    assert actions[0] == {"a": "model", "model": "provider/model-a"}
+    assert actions[-1]["data"]["params"]["configId"] == "effort"
+    model_options[1]["currentValue"] = "high"
+    actions = driver.parse_line(json.dumps({
+        "jsonrpc": "2.0", "id": "puppy:config",
+        "result": {"configOptions": model_options}}), ctx)
+    assert actions[-1]["data"]["method"] == "session/prompt"
+    assert actions[-1]["data"]["params"]["prompt"] == [{"type": "text", "text": "hello"}]
+
+    update = lambda value: json.dumps({
+        "jsonrpc": "2.0", "method": "session/update",
+        "params": {"sessionId": "ses_test", "update": value}})
+    actions = driver.parse_line(update({
+        "sessionUpdate": "agent_thought_chunk",
+        "content": {"type": "text", "text": "considering"}}), ctx)
+    assert actions[-1]["msg"] == {"type": "delta", "block": "thinking",
+                                   "text": "considering"}
+    actions = driver.parse_line(update({
+        "sessionUpdate": "agent_message_chunk",
+        "content": {"type": "text", "text": "Before tool."}}), ctx)
+    assert actions[0]["kind"] == "thinking"
+    actions = driver.parse_line(update({
+        "sessionUpdate": "tool_call", "toolCallId": "call-1", "kind": "execute",
+        "title": "Run check", "status": "in_progress", "rawInput": {"command": "true"}}), ctx)
+    assert [action.get("kind") for action in actions if action.get("a") == "event"] == \
+        ["assistant", "tool_use"]
+    actions = driver.parse_line(update({
+        "sessionUpdate": "tool_call_update", "toolCallId": "call-1", "kind": "execute",
+        "title": "Run check", "status": "completed", "rawOutput": {"output": "ok"}}), ctx)
+    assert actions[-1]["kind"] == "tool_result" and actions[-1]["data"]["is_error"] is False
+
+    approval = driver.parse_line(json.dumps({
+        "jsonrpc": "2.0", "id": 7, "method": "session/request_permission",
+        "params": {"sessionId": "ses_test", "toolCall": {
+            "toolCallId": "call-2", "kind": "execute", "title": "Run command",
+            "rawInput": {"command": "make test"}}, "options": [
+                {"optionId": "once", "kind": "allow_once"},
+                {"optionId": "always", "kind": "allow_always"},
+                {"optionId": "reject", "kind": "reject_once"},
+            ]}}), ctx)[0]["req"]
+    assert approval["request_id"] == "7" and approval["suggestions"][0]["type"] == "allowAlways"
+    reply = driver.approval_payload(
+        "7", "allow", approval["input"], updated_permissions=[{"type": "allowAlways"}],
+        request=approval)
+    assert reply == {"jsonrpc": "2.0", "id": 7,
+                     "result": {"outcome": {"outcome": "selected", "optionId": "always"}}}
+
+    driver.parse_line(update({
+        "sessionUpdate": "agent_message_chunk",
+        "content": {"type": "text", "text": "Done."}}), ctx)
+    actions = driver.parse_line(json.dumps({
+        "jsonrpc": "2.0", "id": "puppy:prompt", "result": {
+            "stopReason": "end_turn", "usage": {
+                "inputTokens": 10, "outputTokens": 4, "totalTokens": 14}}}), ctx)
+    assert actions[0] == {"a": "event", "kind": "assistant", "data": {"text": "Done."}}
+    assert actions[-1]["data"]["usage"] == {
+        "input_tokens": 10, "output_tokens": 4, "total_tokens": 14}
+
+    resumed = dict(session, native_session_id="ses_existing", effort="")
+    resume_ctx = driver.turn_context(resumed, False, "again", "pin")
+    actions = driver.parse_line(json.dumps({
+        "jsonrpc": "2.0", "id": "puppy:initialize", "result": {}}), resume_ctx)
+    assert actions[0]["data"]["method"] == "session/resume"
+    actions = driver.parse_line(json.dumps({
+        "jsonrpc": "2.0", "id": "puppy:session",
+        "error": {"code": -32601, "message": "Method not found"}}), resume_ctx)
+    assert actions[0]["data"]["method"] == "session/load"
+
+
 def exercise_activity_blocks(session_hub_cls) -> None:
     """Queued turns retain one start time and become idle only after the tail."""
     hub = session_hub_cls(-1)
@@ -308,6 +471,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "engine-usage-refresh" in ping["capabilities"]
         assert "engine-usage-refresh-manual" in ping["capabilities"]
         assert "engine-upgrade" in ping["capabilities"]
+        assert "engine-model-selection" in ping["capabilities"]
         assert "file-uploads" in ping["capabilities"]
         assert "queue-pause" in ping["capabilities"]
         assert "system-prompt" in ping["capabilities"]
@@ -397,6 +561,18 @@ async def exercise_node(url: str, token: str, expected_version: str,
         async with http.get(url + "/api/engines", headers=good, ssl=pinned) as response:
             engine_payload = await response.json()
             assert response.status == 200, engine_payload
+        by_key = {engine["key"]: engine for engine in engine_payload["engines"]}
+        assert set(("claude", "codex", "opencode")).issubset(by_key)
+        opencode = by_key["opencode"]
+        assert opencode["availability_only"] is True
+        assert opencode["model_selection_supported"] is True
+        assert opencode["allow_custom_model"] is False
+        assert isinstance(opencode["model_catalog"], list)
+        assert isinstance(opencode["selected_models"], list)
+        assert isinstance(opencode["model_catalog_error"], str)
+        if opencode["installed"]:
+            assert opencode["auth"] == "ok"
+            assert opencode["detail"] == "binary available"
         for engine in engine_payload["engines"]:
             assert isinstance(engine["latest_version"], str)
             assert engine["update_available"] in (True, False, None)
@@ -408,6 +584,37 @@ async def exercise_node(url: str, token: str, expected_version: str,
             assert engine["upgrade_result"] is None or \
                 isinstance(engine["upgrade_result"], dict)
             assert isinstance(engine["version_checked_at"], (int, float))
+        # Dynamic model selection is the same authenticated node-owned route in
+        # the full and headless runtimes. It is deliberately unavailable on
+        # static drivers and never accepts an arbitrary unreported model ID.
+        async with http.patch(url + "/api/engines/codex/models", headers=good,
+                              ssl=pinned, json={"models": []}) as response:
+            assert response.status == 400, await response.text()
+        async with http.patch(url + "/api/engines/no-such-engine/models", headers=good,
+                              ssl=pinned, json={"models": []}) as response:
+            assert response.status == 404, await response.text()
+        async with http.patch(url + "/api/engines/opencode/models", ssl=pinned,
+                              json={"models": []}) as response:
+            assert response.status == 401, await response.text()
+        async with http.patch(url + "/api/engines/opencode/models", headers=good,
+                              ssl=pinned, json={"models": []}) as response:
+            selected = await response.json()
+            assert response.status == 200, selected
+        assert next(engine for engine in selected["engines"]
+                    if engine["key"] == "opencode")["selected_models"] == []
+        if opencode["model_catalog"]:
+            first_model = opencode["model_catalog"][0]["value"]
+            async with http.patch(url + "/api/engines/opencode/models", headers=good,
+                                  ssl=pinned, json={"models": [first_model]}) as response:
+                selected = await response.json()
+                assert response.status == 200, selected
+            selected_opencode = next(engine for engine in selected["engines"]
+                                     if engine["key"] == "opencode")
+            assert selected_opencode["selected_models"] == [first_model]
+            assert selected_opencode["model_options"][0]["value"] == first_model
+            async with http.patch(url + "/api/engines/opencode/models", headers=good,
+                                  ssl=pinned, json={"models": []}) as response:
+                assert response.status == 200, await response.text()
         # The headless surface serves the same version-refresh route as the
         # console; a node that cannot re-check must not advertise the button.
         async with http.post(url + "/api/engines/refresh",
@@ -1718,6 +1925,7 @@ async def main() -> None:
         assert "remote-upgrade" not in pairing["capabilities"]  # pairing command is not launcher-managed
         assert "shutdown-notice" in pairing["capabilities"]
         assert "queue-pause" in pairing["capabilities"]
+        assert "engine-model-selection" in pairing["capabilities"]
         assert pairing["max_upload_size_mb"] == 3
         assert (backend_data / "config.json").stat().st_mode & 0o777 == 0o600
         identity_manifest = json.loads(
@@ -1734,6 +1942,7 @@ async def main() -> None:
             "--max-upload-size-mb", "4",
         ], text=True))
         assert "terminal" in enabled_pairing["capabilities"]
+        assert "engine-model-selection" in enabled_pairing["capabilities"]
         assert enabled_pairing["usage_refresh_minutes"] == 30
         assert enabled_pairing["max_upload_size_mb"] == 4
         assert "pinned-tls" in enabled_pairing["capabilities"]
@@ -1811,6 +2020,7 @@ async def main() -> None:
         await exercise_interrupted_notify_report(puppy_web)
 
         config.load()
+        exercise_opencode_driver()
         controller_token = "controller-test-token-0123456789abcdef"
         config.set_value("auth.api_token", controller_token)
         config.set_value("engines.usage_refresh_minutes", 0)

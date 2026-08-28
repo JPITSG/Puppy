@@ -65,6 +65,12 @@ def parse_used_config(raw):
     return {"model": str(data.get("model") or ""), "effort": str(data.get("effort") or "")}
 
 
+def _starts_fresh_native_session(session: dict, workspace_reset: bool, driver) -> bool:
+    """Whether this turn must allocate a new engine-native conversation."""
+    return not session.get("native_session_id") or \
+        (workspace_reset and driver.resume_requires_same_cwd)
+
+
 def session_payload(session):
     if session is None:
         return None
@@ -601,10 +607,19 @@ class SessionHub:
 
     async def _interrupt_proc(self, proc, driver=None) -> None:
         try:
+            session = db.get_session(self.id) or {}
             if driver is None:
-                session = db.get_session(self.id)
                 driver = get_driver(session["engine"])
-            payload = driver.interrupt_payload()
+            if self.pending_approval is not None:
+                cancelled = driver.cancel_approval_payload(self.pending_approval)
+                if cancelled is not None and proc.stdin is not None and \
+                        not proc.stdin.is_closing():
+                    await self._write_stdin(cancelled)
+                rid = self.pending_approval.get("request_id", "")
+                self.pending_approval = None
+                self.broadcast({"type": "approval_resolved", "request_id": rid,
+                                "behavior": "cancelled"})
+            payload = driver.interrupt_payload(session)
             if payload is not None and proc.stdin is not None and not proc.stdin.is_closing():
                 await self._write_stdin(payload)
         except Exception as e:
@@ -635,7 +650,9 @@ class SessionHub:
         driver = get_driver(session["engine"])
         try:
             payload = driver.approval_payload(request_id, behavior, pending.get("input") or {},
-                                              message=message, updated_permissions=updated_permissions)
+                                              message=message,
+                                              updated_permissions=updated_permissions,
+                                              request=pending)
             await self._write_stdin(payload)
         except Exception as e:
             log.error("approval write failed for session %s: %s", self.id, e)
@@ -740,14 +757,16 @@ class SessionHub:
             db.touch_session(self.id, status="running")
             broadcast_sessions()
 
-            do_handoff = (not session.get("native_session_id")) and \
+            fresh_native_session = _starts_fresh_native_session(
+                session, workspace_reset, driver)
+            do_handoff = fresh_native_session and \
                 (workspace_reset or handoff.needs_handoff(session))
             # ahead of the prompt: the divider introduces the turns below it
             self._note_turn_config(session)
             user_ev = self._emit("user", {"text": text})
 
             prompt = text
-            first_turn = not session.get("native_session_id")
+            first_turn = fresh_native_session
             if do_handoff:
                 prompt = handoff.build(session, exclude_seq=user_ev["seq"]) + text
                 self.broadcast({"type": "status", "text": "Seeding new engine with handoff..."})
@@ -760,7 +779,17 @@ class SessionHub:
                 session, first_turn, prompt, pinned, browser_mcp=browser_mcp,
                 system_prompt=system_prompts.custom_prompt())
             env = clean_env(dict(os.environ))
-            env.setdefault("HOME", "/root")
+            runtime_home = os.path.expanduser("~")
+            if runtime_home and runtime_home != "~":
+                env.setdefault("HOME", runtime_home)
+            env.update(driver.build_env(
+                session, first_turn, prompt, pinned, browser_mcp=browser_mcp,
+                system_prompt=system_prompts.custom_prompt()))
+            ctx = driver.turn_context(
+                session, first_turn, prompt, pinned, browser_mcp=browser_mcp,
+                system_prompt=system_prompts.custom_prompt())
+            if not isinstance(ctx, dict):
+                ctx = {}
 
             cwd = session["cwd"]
             if not os.path.isdir(cwd):
@@ -789,7 +818,6 @@ class SessionHub:
 
             timeout = float(config.get("sessions.turn_timeout", 7200))
             deadline = time.time() + timeout
-            ctx = {}
             while True:
                 remaining = deadline - time.time()
                 if remaining <= 0:
@@ -847,6 +875,10 @@ class SessionHub:
                             self.pending_approval = None
                         self.broadcast({"type": "approval_resolved",
                                         "request_id": act.get("request_id", ""), "behavior": "cancelled"})
+                    elif a == "stdin":
+                        payload = act.get("data")
+                        if isinstance(payload, dict):
+                            await self._write_stdin(payload)
                     elif a == "rate_limit":
                         # stamped so consoles can say how fresh the figure is;
                         # additive beside the CLI's own camelCase keys
@@ -855,6 +887,9 @@ class SessionHub:
                         db.meta_set(f"rate_limit.{session['engine']}", info)
                         self.broadcast({"type": "rate_limit", "engine": session["engine"], "info": info})
                     elif a == "result":
+                        if self.interrupted and act["data"].get("stop_reason") in \
+                                ("cancelled", "canceled"):
+                            continue
                         got_result = True
                         # Every engine's turn reports how long it took: drivers
                         # whose CLI times its own work keep that figure, the
