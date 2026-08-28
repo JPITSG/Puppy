@@ -686,9 +686,9 @@ console.log(JSON.stringify({before,after,connected}));
         "front": "0", "shown": "https://vpn.test", "cycling": False,
         "version": " · v1.2.3",
     }, status
-    # The Engines card must use the same active/cycling address treatment as
-    # the Backends card.  A failed node gets a compact, deliberately aligned
-    # callout rather than a loose line of text beneath a right-aligned URL.
+    # Engines and Backends share the same compact active/cycling address node;
+    # neither may let its URL track consume spare row width and strand the
+    # version. A failed engine node also gets a deliberately aligned callout.
     assert "group.setMeta(backend);" in ui_source
     assert "const group = this.engineGroup(b.name, b, b.id);" in ui_source
     assert "locationEl = backendLocationNode(value);" in ui_source
@@ -718,8 +718,10 @@ console.log(JSON.stringify({before,after,connected}));
     assert "background:var(--err);-webkit-mask:var(--alert-triangle)" in css_source
     assert (".engine-node-stale{display:flex;align-items:flex-start;gap:7px;" +
             "padding-left:12px") in css_source
-    assert ".engine-node-meta .be-url-track{display:grid;flex:0 1 auto}" in css_source
-    assert ".engine-node-meta .be-url-layer{position:static;grid-area:1/1}" in css_source
+    assert (".be-url-track{\n  position:relative;display:grid;flex:0 1 auto;" in
+            css_source)
+    assert (".be-url-layer{\n  position:static;grid-area:1/1;" in css_source)
+    assert "display:block;flex:1 1 auto" not in css_source
     assert ('if (status === "bad" && refresh && ' +
             'refresh.classList.contains("refreshing")) {') in ui_source
     assert 'refresh.disabled = status === "bad"' not in ui_source

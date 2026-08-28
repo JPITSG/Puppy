@@ -1386,11 +1386,6 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   overflow:hidden;white-space:nowrap;
   color:inherit;font:inherit;
 }
-/* In the Engines header the address and version are one compact phrase. The
-   two URL layers still overlap so disconnected addresses can cross-fade, but
-   their widest value sizes the phrase instead of pushing its version away. */
-.engine-node-meta .be-url-track{display:grid;flex:0 1 auto}
-.engine-node-meta .be-url-layer{position:static;grid-area:1/1}
 .engine-node-refresh{
   position:relative;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;
   width:20px;height:20px;margin:0 0 0 8px;padding:0;border:0;border-radius:var(--btn-r);
@@ -1464,9 +1459,15 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   display:flex;align-items:center;flex:1 1 auto;min-width:0;overflow:hidden;white-space:nowrap;
   color:var(--txt3);font-family:var(--mono);font-size:11.5px;
 }
-.be-url-track{position:relative;display:block;flex:1 1 auto;min-width:0;height:1.35em;overflow:hidden}
+/* The address and version are one compact phrase everywhere this shared node
+   appears. Its two URL layers occupy one grid cell, so disconnected addresses
+   can cross-fade without a flex track consuming the row's spare width and
+   pushing the version away. The widest configured URL keeps the row stable. */
+.be-url-track{
+  position:relative;display:grid;flex:0 1 auto;min-width:0;height:1.35em;overflow:hidden;
+}
 .be-url-layer{
-  position:absolute;inset:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  position:static;grid-area:1/1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
   opacity:0;transition:opacity .25s var(--ease);
 }
 .be-url-track[data-front="0"] .be-url-layer:first-child,
