@@ -2779,9 +2779,9 @@ function syncBackendLocation(root, backend) {
   if (!connected && values.length > 1 && typeof window.matchMedia === "function" &&
       window.matchMedia("(prefers-reduced-motion: reduce)").matches)
     values = [values.join(" / ")];
-  const version = backend.remote_version ? ` · v${backend.remote_version}` : "";
+  const version = backend.remote_version ? `v${backend.remote_version}` : "";
   const allLabel = [(connected ? values[0] : values.join(" or ")) || "No URL", version]
-    .filter(Boolean).join("");
+    .filter(Boolean).join(" · ");
   root.setAttribute("aria-label", allLabel);
   root.classList.toggle("cycling", values.length > 1);
   const track = root.querySelector(".be-url-track");

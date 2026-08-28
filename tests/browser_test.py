@@ -684,7 +684,7 @@ console.log(JSON.stringify({before,after,connected}));
     }, status
     assert status["connected"] == {
         "front": "0", "shown": "https://vpn.test", "cycling": False,
-        "version": " · v1.2.3",
+        "version": "v1.2.3",
     }, status
     # Engines and Backends share the same compact active/cycling address node;
     # neither may let its URL track consume spare row width and strand the
@@ -722,6 +722,9 @@ console.log(JSON.stringify({before,after,connected}));
             css_source)
     assert (".be-url-layer{\n  position:static;grid-area:1/1;" in css_source)
     assert "display:block;flex:1 1 auto" not in css_source
+    assert '.be-url-version:not(:empty){margin-left:1ch}' in css_source
+    assert '.be-url-version:not(:empty)::before{content:"·";margin-right:1ch}' \
+        in css_source
     assert ('if (status === "bad" && refresh && ' +
             'refresh.classList.contains("refreshing")) {') in ui_source
     assert 'refresh.disabled = status === "bad"' not in ui_source

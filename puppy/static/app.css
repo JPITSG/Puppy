@@ -1473,6 +1473,10 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .be-url-track[data-front="0"] .be-url-layer:first-child,
 .be-url-track[data-front="1"] .be-url-layer:last-child{opacity:1}
 .be-url-version{flex:0 0 auto}
+/* Flex-item boundary whitespace collapses, which visually glued the middle
+   dot to the URL. Make both spaces part of layout, not text formatting. */
+.be-url-version:not(:empty){margin-left:1ch}
+.be-url-version:not(:empty)::before{content:"·";margin-right:1ch}
 .be-auto{
   position:relative;display:inline-flex;align-items:center;gap:6px;min-width:0;margin:0;
   color:var(--txt3);font:10px/1.25 var(--sans);text-transform:none;letter-spacing:0;
