@@ -144,6 +144,15 @@ consume model tokens, concurrent polls coalesce, and failed attempts are
 rate-limited. Codex currently supplies a direct account snapshot; its existing
 local rollout record remains the fallback if the account read is unavailable.
 
+## Engine order
+
+Each node owns the order in which its engines appear in status lists and engine
+pickers. `PATCH /api/engines/order` accepts an `order` array containing every
+engine key registered on that node exactly once, persists it in the node's
+private configuration, and applies it to subsequent engine payloads. Nodes
+advertise the route with the additive `engine-order` capability; a controller
+leaves engine rows on older backends non-draggable until they are upgraded.
+
 ## Engine versions and upgrades
 
 Every engine payload reports the installed CLI version, the latest published

@@ -1106,6 +1106,121 @@ console.log(JSON.stringify(out));
     assert rounded == [11, 32, 81, 60, None, 0], values
 
 
+def check_engine_order_ui(ui_source: str, css_source: str) -> None:
+    """Exercise the real engine handle with pointer, cancel, and keyboard input."""
+    def method(name):
+        start = ui_source.index("\n  " + name + "(") + 1
+        brace = ui_source.index("{", start)
+        depth = 0
+        for index in range(brace, len(ui_source)):
+            if ui_source[index] == "{":
+                depth += 1
+            elif ui_source[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    return ui_source[start:index + 1]
+        raise AssertionError("unbalanced SettingsView." + name)
+
+    def function(name):
+        start = ui_source.index("function " + name + "(")
+        brace = ui_source.index("{", start)
+        depth = 0
+        for index in range(brace, len(ui_source)):
+            if ui_source[index] == "{":
+                depth += 1
+            elif ui_source[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    return ui_source[start:index + 1]
+        raise AssertionError("unbalanced " + name)
+
+    script = r"""
+class Classes {
+  constructor(){this.values=new Set();}
+  add(...names){names.forEach(name=>this.values.add(name));}
+  remove(...names){names.forEach(name=>this.values.delete(name));}
+  contains(name){return this.values.has(name);}
+}
+class Node {
+  constructor(kind,key="") { this.kind=kind;this.dataset={};this.children=[];this.parentElement=null;
+    this.listeners={};this.classList=new Classes();this.attributes={};this.disabled=false;
+    this.isConnected=true;if(key){this.dataset.engineKey=key;this.dataset.engineLabel=key.toUpperCase();} }
+  matches(selector){return selector===".engine-row"&&this.kind==="row";}
+  appendChild(node){if(node.parentElement){const i=node.parentElement.children.indexOf(node);
+    if(i>=0)node.parentElement.children.splice(i,1);}node.parentElement=this;this.children.push(node);return node;}
+  insertBefore(node,before){if(node.parentElement){const i=node.parentElement.children.indexOf(node);
+    if(i>=0)node.parentElement.children.splice(i,1);}const at=this.children.indexOf(before);
+    node.parentElement=this;this.children.splice(at<0?this.children.length:at,0,node);return node;}
+  querySelector(selector){return selector===".engine-drag-handle"?this.handle:null;}
+  addEventListener(kind,fn){(this.listeners[kind] ||= []).push(fn);}
+  emit(kind,values={}){const event=Object.assign({pointerId:1,pointerType:"touch",button:0,
+    isPrimary:true,clientY:0,key:"",prevented:false,preventDefault(){this.prevented=true;}},values);
+    for(const fn of this.listeners[kind]||[])fn(event);return event;}
+  setAttribute(name,value){this.attributes[name]=String(value);}
+  focus(){this.focused=true;}setPointerCapture(){this.captured=true;}releasePointerCapture(){this.captured=false;}
+  getBoundingClientRect(){const at=this.parentElement?this.parentElement.children.indexOf(this):0;
+    return {top:at*40,height:40,left:0,width:200};}
+}
+const animateChildReorder=(container,selector,mutate)=>mutate();
+%s
+%s
+%s
+const proto={
+%s,
+%s,
+%s,
+%s
+};
+const commits=[];
+const view=Object.assign(Object.create(proto),{enginePointerDrag:null,engineOrderSaving:new Set(),
+  syncRemoteState(){this.synced=true;},
+  commitEngineOrder(bid,nodeName,body,previous,status,focus=""){
+    commits.push({bid,nodeName,previous:[...previous],next:this.engineOrderKeys(body),focus});
+  }});
+const body=new Node("body");body.dataset.backendId="0";
+const status={textContent:""};
+const make=key=>{const row=new Node("row",key),handle=new Node("handle");
+  row.handle=handle;handle.parentElement=row;return {row,handle};};
+const a=make("claude"),b=make("codex");body.appendChild(a.row);body.appendChild(b.row);
+view.wireEngineOrderHandle(a.row,a.handle,body,0,"Local",status);
+view.wireEngineOrderHandle(b.row,b.handle,body,0,"Local",status);
+view.syncEngineOrderHandles(body);
+const initialLabel=a.handle.attributes["aria-label"];
+a.handle.emit("pointerdown",{clientY:10});
+body.emit("pointermove",{clientY:75});
+const during={keys:view.engineOrderKeys(body),dragging:a.row.classList.contains("dragging"),
+  reordering:body.classList.contains("reordering")};
+body.emit("pointerup",{clientY:75});
+const pointerOrder=view.engineOrderKeys(body);
+a.handle.emit("pointerdown",{clientY:70});body.emit("pointermove",{clientY:0});
+body.emit("pointercancel",{clientY:0});
+const cancelOrder=view.engineOrderKeys(body);
+a.handle.emit("keydown",{key:"ArrowUp",pointerId:2});
+console.log(JSON.stringify({initialLabel,during,pointerOrder,cancelOrder,
+  keyboardOrder:view.engineOrderKeys(body),commits,status:status.textContent}));
+""" % (function("reorderChildren"), function("moveDragSlot"),
+         function("restoreDragSlots"), method("engineOrderKeys"),
+         method("syncEngineOrderHandles"), method("cancelEnginePointerDrag"),
+         method("wireEngineOrderHandle"))
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:800]
+    result = json.loads(proc.stdout.strip())
+    assert "position 1 of 2" in result["initialLabel"], result
+    assert result["during"] == {
+        "keys": ["codex", "claude"], "dragging": True, "reordering": True}, result
+    assert result["pointerOrder"] == ["codex", "claude"], result
+    assert result["cancelOrder"] == ["codex", "claude"], result
+    assert result["keyboardOrder"] == ["claude", "codex"], result
+    assert len(result["commits"]) == 2, result
+    assert result["commits"][0]["next"] == ["codex", "claude"], result
+    assert result["commits"][1]["focus"] == "claude", result
+    assert "moved to position 1 of 2" in result["status"], result
+    assert 'api(bid, "engines/order"' in ui_source
+    assert 'backend.capabilities.includes("engine-order")' in ui_source
+    assert "touch-action:none" in css_source[css_source.index(".engine-drag-handle{"):]
+    assert ".engine-row-list.reordering .engine-row" in css_source
+
+
 async def main() -> None:
     stub = TEST_ROOT / "stub-chromium"
     stub.write_text(STUB, encoding="utf-8")
@@ -1556,6 +1671,7 @@ async def main() -> None:
             check_double_activation_survives_rerender(ui_source)
             check_browser_disable_closes_scoped_tabs(ui_source)
             check_quota_math(ui_source)
+            check_engine_order_ui(ui_source, css_source)
             # one checkbox face app-wide: a native checkbox is painted by the
             # browser, ignores the theme and differs per platform, so the form
             # input and the drawn menu mark share one rule and one tick path

@@ -255,6 +255,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "engine-usage-refresh" in ping["capabilities"]
         assert "engine-usage-refresh-manual" in ping["capabilities"]
         assert "engine-upgrade" in ping["capabilities"]
+        assert "engine-order" in ping["capabilities"]
         assert "file-uploads" in ping["capabilities"]
         # browser surface: capability is static, enablement is node config
         # (off in this deployment), availability is probed on demand
@@ -303,6 +304,25 @@ async def exercise_node(url: str, token: str, expected_version: str,
         async with http.get(url + "/api/engines", headers=good, ssl=pinned) as response:
             engine_payload = await response.json()
             assert response.status == 200, engine_payload
+        engine_keys = [engine["key"] for engine in engine_payload["engines"]]
+        reordered_keys = list(reversed(engine_keys))
+        async with http.patch(url + "/api/engines/order", headers=good, ssl=pinned,
+                              json={"order": reordered_keys}) as response:
+            reordered = await response.json()
+            assert response.status == 200, reordered
+        assert reordered == {"ok": True, "order": reordered_keys}
+        async with http.get(url + "/api/engines", headers=good, ssl=pinned) as response:
+            ordered_payload = await response.json()
+            assert response.status == 200, ordered_payload
+        assert [engine["key"] for engine in ordered_payload["engines"]] == reordered_keys
+        for invalid_order in (reordered_keys[:-1], reordered_keys + reordered_keys[:1],
+                              ["not-a-registered-engine"]):
+            async with http.patch(url + "/api/engines/order", headers=good, ssl=pinned,
+                                  json={"order": invalid_order}) as response:
+                assert response.status == 400, await response.text()
+        async with http.patch(url + "/api/engines/order", ssl=pinned,
+                              json={"order": reordered_keys}) as response:
+            assert response.status == 401, await response.text()
         for engine in engine_payload["engines"]:
             assert isinstance(engine["latest_version"], str)
             assert engine["update_available"] in (True, False, None)
@@ -321,6 +341,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
             rechecked = await response.json()
             assert response.status == 200, rechecked
         assert isinstance(rechecked["engines"], list)
+        assert [engine["key"] for engine in rechecked["engines"]] == reordered_keys
         assert "usage_refresh" in rechecked
         async with http.post(url + "/api/engines/not-an-engine/upgrade",
                              headers=good, ssl=pinned) as response:

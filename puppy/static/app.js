@@ -366,6 +366,24 @@ function refreshIcon(size = 10) {
   return svg;
 }
 
+function dragHandleIcon(size = 13) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 14 14");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  for (const x of [4.25, 9.75]) for (const y of [3, 7, 11]) {
+    const dot = document.createElementNS(NS, "circle");
+    dot.setAttribute("cx", String(x));
+    dot.setAttribute("cy", String(y));
+    dot.setAttribute("r", "1.15");
+    dot.setAttribute("fill", "currentColor");
+    svg.appendChild(dot);
+  }
+  return svg;
+}
+
 function copyIcon(done = false) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
@@ -2761,6 +2779,13 @@ function backendSupportsEngineAutoUpgrade(bid) {
   const backend = state.backends.find(b => b.id === bid);
   return backendHasCapability(backend, "engine-auto-upgrade") &&
     backendSupportsEngineUpgrade(bid);
+}
+
+function backendSupportsEngineOrder(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(item => item.id === bid);
+  return !!backend && Array.isArray(backend.capabilities) &&
+    backend.capabilities.includes("engine-order");
 }
 
 function backendSupportsUploadPreviews(bid) {
@@ -7465,6 +7490,8 @@ class SettingsView {
     this.engineUpgradeState = new Map();   // "bid:engine" -> "running" | "idle"
     this.engineUpgradePollTimer = null;
     this.engineUpgradePollGeneration = 0;
+    this.enginePointerDrag = null;
+    this.engineOrderSaving = new Set();
     this.localEngineGroup = null;
     this.root = el("div", "view settings");
     this.root.innerHTML = `<div class="settings-scroll"><div class="settings-inner"></div></div>`;
@@ -7474,7 +7501,9 @@ class SettingsView {
     this.renderGeneration++;
     this.stopUpgradeReadinessPolling();
     this.stopEngineUpgradePolling();
+    this.cancelEnginePointerDrag(false);
     this.engineUpgradeState.clear();
+    this.engineOrderSaving.clear();
     this.remoteEngineGroups.clear();
     this.remoteBackendDots.clear();
     this.remoteBackendMeta.clear();
@@ -7823,9 +7852,214 @@ class SettingsView {
     this.syncUpgradeButtons();
   }
 
-  engineRow(bid, nodeName, e2) {
-    const row = el("div", "engine-row");
+  engineRecords(bid) {
+    if (!bid) return state.engines;
+    return Object.prototype.hasOwnProperty.call(state.engCache, bid) ?
+      state.engCache[bid] : null;
+  }
+
+  setEngineRecordOrder(bid, order) {
+    const current = this.engineRecords(bid);
+    if (!Array.isArray(current) || !Array.isArray(order)) return false;
+    const records = new Map(current.map(engine => [engine.key, engine]));
+    const seen = new Set();
+    const reordered = [];
+    for (const key of order) {
+      if (seen.has(key) || !records.has(key)) return false;
+      seen.add(key);
+      reordered.push(records.get(key));
+    }
+    /* A driver added while this Settings view was open belongs at the end. */
+    for (const engine of current) if (!seen.has(engine.key)) reordered.push(engine);
+    if (bid) state.engCache[bid] = reordered;
+    else {
+      state.engines = reordered;
+      state.engMap = {};
+      state.engines.forEach(engine => state.engMap[engine.key] = engine);
+    }
+    return true;
+  }
+
+  engineOrderKeys(body) {
+    return reorderChildren(body, ".engine-row")
+      .map(row => row.dataset.engineKey).filter(Boolean);
+  }
+
+  syncEngineOrderHandles(body) {
+    const rows = reorderChildren(body, ".engine-row");
+    const saving = this.engineOrderSaving.has(Number(body.dataset.backendId || 0));
+    rows.forEach((row, index) => {
+      const handle = row.querySelector(".engine-drag-handle");
+      if (!handle) return;
+      const label = row.dataset.engineLabel || row.dataset.engineKey || "Engine";
+      handle.disabled = saving;
+      handle.setAttribute("aria-label",
+        `Reorder ${label}, position ${index + 1} of ${rows.length}. ` +
+        "Drag, or use the up and down arrow keys.");
+    });
+  }
+
+  cancelEnginePointerDrag(restore = true) {
+    const context = this.enginePointerDrag;
+    if (!context) return;
+    this.enginePointerDrag = null;
+    if (restore && context.active)
+      restoreDragSlots(context, ".engine-row");
+    context.row.classList.remove("dragging");
+    context.handle.classList.remove("grabbing");
+    context.body.classList.remove("reordering");
+    try { context.body.releasePointerCapture(context.pointerId); } catch (error) {}
+    this.syncEngineOrderHandles(context.body);
+  }
+
+  async commitEngineOrder(bid, nodeName, body, previousOrder, status, focusKey = "") {
+    const order = this.engineOrderKeys(body);
+    if (!order.length || (order.length === previousOrder.length &&
+        order.every((key, index) => key === previousOrder[index]))) {
+      this.syncEngineOrderHandles(body);
+      return;
+    }
+    if (this.engineOrderSaving.has(bid) || !this.setEngineRecordOrder(bid, order)) {
+      this.setEngineRecordOrder(bid, previousOrder);
+      this.syncRemoteState();
+      return;
+    }
+    this.engineOrderSaving.add(bid);
+    status.textContent = `Saving ${nodeName} engine order…`;
+    syncRemoteStateViews();
+    const focusMovedHandle = () => {
+      if (!focusKey || !this.root.isConnected) return;
+      const liveBody = Array.from(this.root.querySelectorAll(".engine-row-list"))
+        .find(item => Number(item.dataset.backendId || 0) === bid);
+      if (!liveBody) return;
+      const row = reorderChildren(liveBody, ".engine-row")
+        .find(item => item.dataset.engineKey === focusKey);
+      const handle = row && row.querySelector(".engine-drag-handle");
+      if (handle) handle.focus({ preventScroll: true });
+    };
+    try {
+      const result = await api(bid, "engines/order", {
+        method: "PATCH", body: { order }, timeoutMs: ENGINE_POLL_TIMEOUT,
+      });
+      if (!result || !Array.isArray(result.order) || result.order.length !== order.length ||
+          result.order.some((key, index) => key !== order[index]))
+        throw new Error("node returned an invalid engine order");
+      /* A status poll may have landed while the PATCH was in flight. The node
+         has now committed this order, so apply it to the freshest records. */
+      this.setEngineRecordOrder(bid, order);
+      status.textContent = `${nodeName} engine order saved.`;
+    } catch (error) {
+      this.setEngineRecordOrder(bid, previousOrder);
+      status.textContent = `${nodeName} engine order was not saved.`;
+      toast(`${nodeName}: ${error.message}`, "error", 6500);
+    } finally {
+      this.engineOrderSaving.delete(bid);
+      syncRemoteStateViews();
+      requestAnimationFrame(focusMovedHandle);
+    }
+  }
+
+  wireEngineOrderHandle(row, handle, body, bid, nodeName, status) {
+    handle.addEventListener("pointerdown", event => {
+      if (event.isPrimary === false || event.button !== 0 || handle.disabled ||
+          this.engineOrderSaving.has(bid)) return;
+      this.cancelEnginePointerDrag();
+      handle.focus({ preventScroll: true });
+      const context = {
+        bid, body, container: body, row, handle, pointerId: event.pointerId,
+        startY: event.clientY, active: false,
+        originalOrder: reorderChildren(body, ".engine-row"),
+        previousOrder: this.engineOrderKeys(body),
+      };
+      this.enginePointerDrag = context;
+      /* Capture belongs to the stable list, not the row being moved. Chromium
+         releases capture when a captured element is reinserted into the DOM,
+         which would otherwise cancel the drag at the first crossed midpoint. */
+      try { body.setPointerCapture(event.pointerId); } catch (error) {}
+      event.preventDefault();
+    });
+    body.addEventListener("pointermove", event => {
+      const context = this.enginePointerDrag;
+      if (!context || context.handle !== handle || context.pointerId !== event.pointerId) return;
+      if (!context.active && Math.abs(event.clientY - context.startY) < 4) return;
+      if (!context.active) {
+        context.active = true;
+        row.classList.add("dragging");
+        handle.classList.add("grabbing");
+        body.classList.add("reordering");
+      }
+      event.preventDefault();
+      if (moveDragSlot(body, row, ".engine-row", event.clientY, false))
+        this.syncEngineOrderHandles(body);
+    });
+    const finish = (event, cancelled) => {
+      const context = this.enginePointerDrag;
+      if (!context || context.handle !== handle || context.pointerId !== event.pointerId) return;
+      this.enginePointerDrag = null;
+      try { body.releasePointerCapture(event.pointerId); } catch (error) {}
+      row.classList.remove("dragging");
+      handle.classList.remove("grabbing");
+      body.classList.remove("reordering");
+      if (!context.active) {
+        if (context.pendingUpdate) this.syncRemoteState();
+        return;
+      }
+      if (cancelled) {
+        restoreDragSlots(context, ".engine-row");
+        this.syncEngineOrderHandles(body);
+        status.textContent = "Engine reorder canceled.";
+        this.syncRemoteState();
+        return;
+      }
+      const order = this.engineOrderKeys(body);
+      const position = order.indexOf(row.dataset.engineKey) + 1;
+      status.textContent = `${row.dataset.engineLabel} moved to position ${position} ` +
+        `of ${order.length}.`;
+      this.commitEngineOrder(bid, nodeName, body, context.previousOrder, status);
+    };
+    body.addEventListener("pointerup", event => finish(event, false));
+    body.addEventListener("pointercancel", event => finish(event, true));
+    body.addEventListener("lostpointercapture", event => finish(event, true));
+    handle.addEventListener("keydown", event => {
+      if (handle.disabled || this.engineOrderSaving.has(bid)) return;
+      const rows = reorderChildren(body, ".engine-row");
+      const from = rows.indexOf(row);
+      let to = from;
+      if (event.key === "ArrowUp") to = Math.max(0, from - 1);
+      else if (event.key === "ArrowDown") to = Math.min(rows.length - 1, from + 1);
+      else if (event.key === "Home") to = 0;
+      else if (event.key === "End") to = rows.length - 1;
+      else return;
+      event.preventDefault();
+      if (to === from) return;
+      const previousOrder = this.engineOrderKeys(body);
+      animateChildReorder(body, ".engine-row", () => {
+        const siblings = rows.filter(item => item !== row);
+        if (to < siblings.length) body.insertBefore(row, siblings[to]);
+        else body.appendChild(row);
+      });
+      this.syncEngineOrderHandles(body);
+      const order = this.engineOrderKeys(body);
+      status.textContent = `${row.dataset.engineLabel} moved to position ${to + 1} ` +
+        `of ${order.length}.`;
+      this.commitEngineOrder(bid, nodeName, body, previousOrder, status,
+        row.dataset.engineKey);
+    });
+  }
+
+  engineRow(bid, nodeName, e2, orderContext = null) {
+    const row = el("div", "engine-row" + (orderContext ? " orderable" : ""));
+    row.dataset.engineKey = e2.key;
+    row.dataset.engineLabel = e2.label;
+    row.setAttribute("role", "listitem");
     const identity = el("div", "engine-row-identity");
+    let handle = null;
+    if (orderContext) {
+      handle = el("button", "engine-drag-handle");
+      handle.type = "button";
+      handle.appendChild(dragHandleIcon());
+      identity.appendChild(handle);
+    }
     identity.appendChild(el("span", "engine-dot " + e2.key));
     identity.appendChild(el("span", "engine-row-name", e2.label));
     const statuses = el("div", "engine-row-statuses");
@@ -7853,6 +8087,9 @@ class SettingsView {
       row.appendChild(actions);
       row.classList.add("has-actions");
     }
+    if (handle)
+      this.wireEngineOrderHandle(row, handle, orderContext.body, bid, nodeName,
+        orderContext.status);
     return row;
   }
 
@@ -7921,7 +8158,10 @@ class SettingsView {
       head.appendChild(refresh);
     }
     const body = el("div", "engine-node-body");
-    root.appendChild(head); root.appendChild(body);
+    const orderStatus = el("div", "engine-order-status");
+    orderStatus.setAttribute("role", "status");
+    orderStatus.setAttribute("aria-live", "polite");
+    root.appendChild(head); root.appendChild(body); root.appendChild(orderStatus);
 
     const update = ({ status = "pending", engines = null, message = "", detail = "" }) => {
       dot.className = "gdot " + status;
@@ -7929,6 +8169,10 @@ class SettingsView {
       dot.setAttribute("aria-label", detail ? `${statusLabel}: ${detail}` : statusLabel);
       if (refresh && !refresh.classList.contains("refreshing"))
         refresh.disabled = status === "bad";
+      if (this.enginePointerDrag && this.enginePointerDrag.body.parentElement === body) {
+        this.enginePointerDrag.pendingUpdate = true;
+        return;
+      }
       body.innerHTML = "";
       if (message || engines === null) {
         const note = el("div", "engine-node-message", message || "Checking engines…");
@@ -7937,7 +8181,15 @@ class SettingsView {
       } else if (!engines.length) {
         body.appendChild(el("div", "engine-node-message", "No engines reported"));
       } else {
-        engines.forEach(e2 => body.appendChild(this.engineRow(bid, name, e2)));
+        const list = el("div", "engine-row-list");
+        list.dataset.backendId = String(bid);
+        list.setAttribute("role", "list");
+        list.setAttribute("aria-label", `${name} engines`);
+        body.appendChild(list);
+        const orderable = backendSupportsEngineOrder(bid) && engines.length > 1;
+        const orderContext = orderable ? { body: list, status: orderStatus } : null;
+        engines.forEach(e2 => list.appendChild(this.engineRow(bid, name, e2, orderContext)));
+        this.syncEngineOrderHandles(list);
         /* Silence is only trustworthy while the check itself works: say so
            when the latest-version lookup is the thing that is unavailable. */
         const stale = engines.find(e2 => e2.installed && e2.latest_check_error);
@@ -8572,7 +8824,9 @@ class SettingsView {
 
     /* engines */
     const c2 = el("div", "card");
-    c2.innerHTML = `<h2>Engines</h2>`;
+    c2.innerHTML = `<h2>Engines</h2>
+      <p class="usage-refresh-copy">Drag engines within a node to choose the order
+        Puppy uses in status lists and engine pickers.</p>`;
     const localGroup = this.engineGroup(settings.instance_name,
       `this instance · v${settings.version}`, 0);
     localGroup.update({ status: "ok", engines: state.engines });
@@ -9592,7 +9846,8 @@ function openBrowserFromMenu(groupId = null) {
 function modalSwitchEngine(view) {
   const s = view.session;
   if (!s) return;
-  const engines = state.engines;
+  const engines = view.tab.bid && Array.isArray(state.engCache[view.tab.bid]) ?
+    state.engCache[view.tab.bid] : state.engines;
   const { m, close } = modal(`<h2>Switch engine</h2>
     <p class="hint">The session keeps its transcript and working directory. The new engine starts a fresh
     native session seeded with a handoff of the conversation so far. Same-engine reseed is allowed

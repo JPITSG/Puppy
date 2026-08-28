@@ -102,11 +102,24 @@ async def h_ping(request: web.Request):
     return web.json_response(payload)
 
 
+def _ordered_drivers():
+    """Registered drivers in this node's durable presentation order."""
+    drivers = all_drivers()
+    try:
+        order = config.normalize_engine_order(config.get("engines.order", []))
+    except ValueError:
+        order = []
+    rank = {key: index for index, key in enumerate(order)}
+    natural = {driver.key: index for index, driver in enumerate(drivers)}
+    return sorted(drivers, key=lambda driver: (
+        rank.get(driver.key, len(rank) + natural[driver.key]), natural[driver.key]))
+
+
 async def _engines_payload(refresh_usage: bool = True):
     if refresh_usage:
         await usage_refresh.maybe_refresh()
     engines = []
-    for d in all_drivers():
+    for d in _ordered_drivers():
         st = await d.status()
         engines.append({
             "key": d.key, "label": d.label, **st,
@@ -160,6 +173,27 @@ async def h_engines(request: web.Request):
         # additive: lets the console label this node's shells "user @ node"
         "user": _node_user(),
     })
+
+
+async def h_engine_order_patch(request: web.Request):
+    """Persist one exact permutation of the engines registered on this node."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid engine order request"}, status=400)
+    if not isinstance(body, dict) or "order" not in body:
+        return web.json_response({"error": "engine order is required"}, status=400)
+    try:
+        order = config.normalize_engine_order(body["order"])
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    registered = [driver.key for driver in all_drivers()]
+    if len(order) != len(registered) or set(order) != set(registered):
+        return web.json_response({
+            "error": "engine order must contain each registered engine exactly once",
+        }, status=400)
+    config.set_value("engines.order", order)
+    return web.json_response({"ok": True, "order": order})
 
 
 async def h_usage_refresh_get(request: web.Request):
@@ -1054,6 +1088,7 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     r.add_get("/api/ping", h_ping)
     r.add_get("/api/node", h_ping)
     r.add_get("/api/engines", h_engines)
+    r.add_patch("/api/engines/order", h_engine_order_patch)
     r.add_get("/api/engines/usage-refresh", h_usage_refresh_get)
     r.add_post("/api/engines/usage-refresh", h_usage_refresh_post)
     r.add_patch("/api/engines/usage-refresh", h_usage_refresh_patch)

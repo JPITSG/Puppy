@@ -1376,10 +1376,34 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   display:grid;grid-template-columns:minmax(110px,1fr) auto;align-items:center;gap:8px 14px;
   min-width:0;padding:8px 0 8px 13px;
 }
+.engine-row.orderable{padding-left:0}
 /* the action column only exists while an engine has an update to offer, so a
    settled node keeps the two-column reading it has today */
 .engine-row.has-actions{grid-template-columns:minmax(110px,1fr) auto auto}
 .engine-row-identity{display:flex;align-items:center;gap:8px;min-width:0}
+.engine-drag-handle{
+  display:inline-flex;align-items:center;justify-content:center;position:relative;flex:0 0 24px;
+  width:24px;height:24px;padding:0;border:1px solid var(--line);border-radius:var(--btn-r);
+  background:var(--panel2);color:var(--txt3);cursor:grab;touch-action:none;user-select:none;
+  transition:color .15s var(--ease),border-color .15s var(--ease),background .15s var(--ease),
+             transform .12s var(--ease);
+}
+.engine-drag-handle svg{display:block;pointer-events:none}
+@media (hover:hover){
+  .engine-drag-handle:hover{color:var(--txt);border-color:var(--line3);background:var(--hov)}
+}
+.engine-drag-handle:active,.engine-drag-handle.grabbing{
+  color:var(--acc2);border-color:rgba(90,162,245,.55);background:var(--acc-dim);
+  cursor:grabbing;transform:scale(.94);
+}
+.engine-drag-handle:focus-visible{outline:1px solid var(--acc);outline-offset:2px}
+.engine-drag-handle:disabled{cursor:wait;opacity:.42}
+.engine-row.dragging{opacity:.34}
+.engine-row-list.reordering .engine-row{will-change:transform}
+.engine-order-status{
+  position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;
+  clip:rect(0,0,0,0);white-space:nowrap;border:0;
+}
 .engine-row-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--txt);font-size:13px;font-weight:500}
 .engine-row-statuses{display:flex;align-items:center;justify-content:flex-end;gap:6px;min-width:0;flex-wrap:wrap}
 .engine-row-statuses .pill{min-width:0}
@@ -1805,8 +1829,11 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
     grid-template-areas:"identity actions" "statuses statuses";
     gap:5px 10px;padding:9px 0 10px 13px;
   }
+  .engine-row.orderable{padding-left:0}
+  .engine-drag-handle{width:30px;height:30px;flex-basis:30px}
   .engine-row-identity{grid-area:identity}
   .engine-row-statuses{grid-area:statuses;justify-content:flex-start;padding-left:17px}
+  .engine-row.orderable .engine-row-statuses{padding-left:55px}
   .engine-row-actions{grid-area:actions;justify-content:flex-end}
   .engine-update{height:32px;min-width:0;padding-left:14px;padding-right:14px}
   .engine-node-message{padding-left:26px}
