@@ -588,6 +588,7 @@ class Manager:
         self.page_target = ""
         self.page_session = ""
         self.screencasting = False
+        self.viewport_repair_task = None
         self.started_at = 0.0
         self.viewport = {"width": DEFAULT_VIEWPORT_W, "height": DEFAULT_VIEWPORT_H}
         self.frame_meta = dict(self.viewport)
@@ -743,6 +744,9 @@ class Manager:
     async def _teardown(self) -> None:
         self.running = False
         self._cancel_idle()
+        if self.viewport_repair_task is not None:
+            self.viewport_repair_task.cancel()
+            self.viewport_repair_task = None
         for fut in list(self.pending.values()):
             if not fut.done():
                 fut.set_exception(BrowserError("browser exited"))
@@ -847,6 +851,16 @@ class Manager:
             metadata = params.get("metadata") or {}
             width = int(metadata.get("deviceWidth") or 0)
             height = int(metadata.get("deviceHeight") or 0)
+            # Chromium can silently reset only the screencast surface on the
+            # first navigation after a device-metrics override. The DOM keeps
+            # the requested viewport, but forwarding that stale landscape
+            # frame leaves most of a portrait/split viewer black until another
+            # resize. Drop it and repair the stream without user intervention.
+            if width > 0 and height > 0 and \
+                    (width != self.viewport["width"] or
+                     height != self.viewport["height"]):
+                self._schedule_viewport_repair(width, height)
+                return
             if width > 0 and height > 0 and \
                     (width != self.frame_meta["width"] or height != self.frame_meta["height"]):
                 self.frame_meta = {"width": width, "height": height}
@@ -984,23 +998,59 @@ class Manager:
 
     async def resize_viewport(self, size: dict) -> None:
         """Make the page's real CSS viewport follow the latest viewer pane."""
-        async with self.viewport_lock:
-            if size == self.viewport:
-                return
-            session = self.page_session
-            if not session or not self.running:
-                return
-            try:
-                await self._apply_viewport(session, size)
-            except BrowserError as exc:
-                log.debug("Browser %s viewport resize skipped: %s", self.browser_id, exc)
-                return
-            self.viewport = dict(size)
-            # A damage frame normally follows the emulation change. Update the
-            # mapping immediately too, so input never remains on the old size.
-            self.frame_meta = dict(size)
+        async with self.attach_lock:
+            async with self.viewport_lock:
+                if size == self.viewport:
+                    return
+                session = self.page_session
+                if not session or not self.running:
+                    return
+                try:
+                    await self._apply_viewport(session, size)
+                except BrowserError as exc:
+                    log.debug("Browser %s viewport resize skipped: %s", self.browser_id, exc)
+                    return
+                self.viewport = dict(size)
+                # A damage frame normally follows the emulation change. Update
+                # the mapping immediately, so input never uses the old size.
+                self.frame_meta = dict(size)
         self._broadcast_json({"type": "frame_meta", **self.frame_meta})
         await self._send_fresh_frame()
+
+    def _schedule_viewport_repair(self, width: int, height: int) -> None:
+        if self.viewport_repair_task is not None and \
+                not self.viewport_repair_task.done():
+            return
+        log.debug("Browser %s repairing stale screencast surface %sx%s (viewport %sx%s)",
+                  self.browser_id, width, height,
+                  self.viewport["width"], self.viewport["height"])
+        self.viewport_repair_task = asyncio.ensure_future(
+            self._repair_screencast_viewport())
+
+    async def _repair_screencast_viewport(self) -> None:
+        task = asyncio.current_task()
+        try:
+            async with self.attach_lock:
+                async with self.viewport_lock:
+                    if not self.running or not self.page_session:
+                        return
+                    session = self.page_session
+                    size = dict(self.viewport)
+                    await self._stop_screencast()
+                    await self._apply_viewport(session, size)
+                    self.frame_meta = dict(size)
+                    if self.viewers:
+                        await self._start_screencast()
+            self._broadcast_json({"type": "frame_meta", **self.frame_meta})
+            await self._send_fresh_frame()
+        except asyncio.CancelledError:
+            raise
+        except BrowserError as exc:
+            log.debug("Browser %s screencast viewport repair skipped: %s",
+                      self.browser_id, exc)
+        finally:
+            if self.viewport_repair_task is task:
+                self.viewport_repair_task = None
 
     async def _show_start_page(self) -> None:
         """Paint the identifying ready card into the launch tab's blank

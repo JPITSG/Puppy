@@ -4,9 +4,9 @@
 A stub "chromium" speaks just enough of the --remote-debugging-pipe CDP
 contract (fds 3/4, NUL-framed JSON) to exercise the probe, the node-owned
 enable gate, isolated named instances, ID retention, sandbox flag selection,
-the screencast/input websocket, pane-driven viewport sizing and input scaling,
-URL normalization, the private per-turn MCP bridge, hidden model guidance,
-background first-use tab
+the screencast/input websocket, pane-driven viewport sizing, navigation-surface
+recovery and input scaling, URL normalization, the private per-turn MCP bridge,
+hidden model guidance, background first-use tab
 events, close-and-replace behavior, and crash reporting. No real browser is
 installed or launched and nothing reaches the network.
 """
@@ -62,6 +62,7 @@ signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
 FRAME = base64.b64encode(b"stub-jpeg-frame-bytes").decode()
+STALE_FRAME = base64.b64encode(b"stale-screencast-surface").decode()
 PAGE = {"targetId": "stub-page-1", "type": "page", "title": "stub",
         "url": "about:blank", "attached": False}
 
@@ -77,6 +78,8 @@ def record(name, payload):
 
 buffer = b""
 casting = False
+viewport_width, viewport_height = 1280, 800
+frame_session = 10
 while True:
     chunk = os.read(3, 65536)
     if not chunk:
@@ -88,6 +91,7 @@ while True:
         method = msg.get("method", "")
         params = msg.get("params") or {}
         result = {}
+        emit_frame = None
         if method == "Browser.getVersion":
             result = {"product": "StubChrome/152"}
         elif method == "Target.getTargets":
@@ -117,6 +121,12 @@ while True:
             record("media.jsonl", {"features": params.get("features")})
         elif method == "Emulation.setDeviceMetricsOverride":
             record("viewport.jsonl", params)
+            width = int(params.get("width") or viewport_width)
+            height = int(params.get("height") or viewport_height)
+            same_size = width == viewport_width and height == viewport_height
+            viewport_width, viewport_height = width, height
+            if casting and same_size:
+                emit_frame = (viewport_width, viewport_height, FRAME)
         elif method == "Page.getFrameTree":
             result = {"frameTree": {"frame": {"id": "f1", "url": PAGE["url"]}}}
         elif method == "Page.setDocumentContent":
@@ -129,6 +139,7 @@ while True:
         elif method == "Page.startScreencast":
             record("screencast.jsonl", params)
             casting = True
+            emit_frame = (viewport_width, viewport_height, FRAME)
         elif method == "Page.stopScreencast":
             casting = False
         elif method == "Page.navigate":
@@ -140,6 +151,8 @@ while True:
             PAGE["url"] = url
             send({"method": "Target.targetInfoChanged", "params": {"targetInfo": dict(PAGE)}})
             result = {"frameId": "f1"}
+            if url == "stub://surface-reset":
+                emit_frame = (1280, 657, STALE_FRAME)
         elif method.startswith("Input."):
             record("input.jsonl", {"method": method, "params": params})
         elif method == "Browser.close":
@@ -147,12 +160,13 @@ while True:
             raise SystemExit(0)
         if msg.get("id") is not None:
             send({"id": msg.get("id"), "result": result})
-        if method == "Page.startScreencast" and casting:
-            for n in (11, 12):
-                send({"method": "Page.screencastFrame", "sessionId": "stub-sess-1",
-                      "params": {"data": FRAME, "sessionId": n,
-                                 "metadata": {"deviceWidth": 1280, "deviceHeight": 800,
-                                              "offsetTop": 0, "pageScaleFactor": 1}}})
+        if emit_frame is not None and casting:
+            frame_session += 1
+            width, height, data = emit_frame
+            send({"method": "Page.screencastFrame", "sessionId": "stub-sess-1",
+                  "params": {"data": data, "sessionId": frame_session,
+                             "metadata": {"deviceWidth": width, "deviceHeight": height,
+                                          "offsetTop": 0, "pageScaleFactor": 1}}})
 '''
 
 
@@ -1576,6 +1590,31 @@ async def main() -> None:
             navs = await wait_for(lambda: read_lines("navigations.jsonl"),
                                   message="navigation")
             assert navs[0]["url"] == "http://openhab.lan/start", navs
+
+            # Chromium sometimes keeps the requested DOM viewport but resets
+            # its screencast surface on the first navigation. A mismatched
+            # frame is never painted; the node reapplies the same metrics and
+            # restarts the stream without waiting for another user resize.
+            repair_text_start = len(texts)
+            repair_frame_start = len(frames)
+            repair_viewports = len(read_lines("viewport.jsonl"))
+            repair_casts = len(read_lines("screencast.jsonl"))
+            await ws.send_json({"type": "navigate", "url": "stub://surface-reset"})
+            await wait_for(
+                lambda: len(read_lines("viewport.jsonl")) > repair_viewports,
+                message="stale screencast viewport repair")
+            await wait_for(
+                lambda: len(read_lines("screencast.jsonl")) > repair_casts,
+                message="screencast restart after navigation")
+            await wait_for(lambda: len(frames) > repair_frame_start,
+                           message="fresh frame after viewport repair")
+            assert b"stale-screencast-surface" not in frames[repair_frame_start:]
+            repair_meta = [item for item in texts[repair_text_start:]
+                           if item.get("type") == "frame_meta"]
+            assert not any(item.get("width") == 1280 and
+                           item.get("height") == 657 for item in repair_meta), repair_meta
+            assert read_lines("viewport.jsonl")[-1]["width"] == 900
+            assert read_lines("viewport.jsonl")[-1]["height"] == 540
 
             async with http.get(url + "/api/browser/status", headers=headers) as r:
                 running = await read_json(r)
