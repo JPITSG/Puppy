@@ -678,6 +678,10 @@ console.log(JSON.stringify({before,after,connected}));
     assert ".engine-node-meta .be-url{" in css_source
     assert ".engine-node-message.engine-node-unavailable{" in css_source
     assert "border-left:2px solid rgba(255,107,129,.72)" in css_source
+    assert "--alert-triangle:url(" in css_source
+    assert ".engine-node-message.engine-node-stale::before{" in css_source
+    assert "background:var(--err);-webkit-mask:var(--alert-triangle)" in css_source
+    assert ".engine-node-stale{display:flex;padding-left:12px" in css_source
 
 
 def check_drawer_drag(ui_source: str) -> None:
