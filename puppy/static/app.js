@@ -3646,6 +3646,9 @@ async function refreshEngineVersions(bid, button, nodeName) {
   button.disabled = true;
   button.classList.add("refreshing");
   button.setAttribute("aria-busy", "true");
+  /* Settings groups read the live button state: an unavailable node becomes
+     "Checking backend…" for this request, then resolves from the result. */
+  syncRemoteStateViews();
   try {
     applyEnginesPayload(bid, await api(bid, "engines/refresh",
       { method: "POST", timeoutMs: ENGINE_REFRESH_TIMEOUT }));
@@ -3657,6 +3660,7 @@ async function refreshEngineVersions(bid, button, nodeName) {
       button.classList.remove("refreshing");
       button.removeAttribute("aria-busy");
     }
+    syncRemoteStateViews();
   }
 }
 
@@ -8244,11 +8248,15 @@ class SettingsView {
     root.appendChild(head); root.appendChild(body);
 
     const update = ({ status = "pending", engines = null, message = "", detail = "" }) => {
+      if (status === "bad" && refresh && refresh.classList.contains("refreshing")) {
+        status = "pending";
+        engines = null;
+        message = "";
+        detail = "";
+      }
       dot.className = "gdot " + status;
       const statusLabel = status === "ok" ? "available" : status === "bad" ? "unavailable" : "checking";
       dot.setAttribute("aria-label", detail ? `${statusLabel}: ${detail}` : statusLabel);
-      if (refresh && !refresh.classList.contains("refreshing"))
-        refresh.disabled = status === "bad";
       body.innerHTML = "";
       if (message || engines === null) {
         const checkingBackend = status === "pending" && engines === null && !!bid;

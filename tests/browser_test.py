@@ -692,6 +692,73 @@ console.log(JSON.stringify({before,after,connected}));
     assert "background:var(--err);-webkit-mask:var(--alert-triangle)" in css_source
     assert (".engine-node-stale{display:flex;align-items:flex-start;gap:7px;" +
             "padding-left:12px") in css_source
+    assert ".engine-node-meta .be-url-track{display:grid;flex:0 1 auto}" in css_source
+    assert ".engine-node-meta .be-url-layer{position:static;grid-area:1/1}" in css_source
+    assert ('if (status === "bad" && refresh && ' +
+            'refresh.classList.contains("refreshing")) {') in ui_source
+    assert 'refresh.disabled = status === "bad"' not in ui_source
+
+    # A manual retry announces both edges of the attempt, remains gated while
+    # in flight, and always restores the button even when the backend is still
+    # unreachable. Settings uses those announcements to paint its checking row.
+    refresh_source = "async " + extract("refreshEngineVersions")
+    refresh_script = r"""
+const ENGINE_REFRESH_TIMEOUT=1234;
+let shouldFail=true,synced=0,applied=0;const calls=[],errors=[];
+const syncRemoteStateViews=()=>{synced++;};
+const api=async(bid,path,options)=>{calls.push({bid,path,options});
+  if(shouldFail)throw new Error("still unavailable");return {engines:[],usage_refresh:{}};};
+const applyEnginesPayload=()=>{applied++;};
+const toast=(text,kind)=>{errors.push({text,kind});};
+class Classes{constructor(){this.names=new Set();}add(name){this.names.add(name);}
+  remove(name){this.names.delete(name);}contains(name){return this.names.has(name);}}
+const makeButton=()=>({disabled:false,isConnected:true,classList:new Classes(),attributes:{},
+  setAttribute(name,value){this.attributes[name]=String(value);},
+  removeAttribute(name){delete this.attributes[name];}});
+__REFRESH__
+const failedButton=makeButton();
+const failedTask=refreshEngineVersions(7,failedButton,"Laptop");
+const failedDuring={disabled:failedButton.disabled,
+  refreshing:failedButton.classList.contains("refreshing"),
+  busy:failedButton.attributes["aria-busy"],synced};
+await failedTask;
+const failedAfter={disabled:failedButton.disabled,
+  refreshing:failedButton.classList.contains("refreshing"),
+  busy:failedButton.attributes["aria-busy"]||null,synced,applied,errors:errors.length};
+shouldFail=false;
+const goodButton=makeButton();
+const goodTask=refreshEngineVersions(7,goodButton,"Laptop");
+const goodDuring={disabled:goodButton.disabled,
+  refreshing:goodButton.classList.contains("refreshing"),synced};
+await goodTask;
+const goodAfter={disabled:goodButton.disabled,
+  refreshing:goodButton.classList.contains("refreshing"),synced,applied};
+console.log(JSON.stringify({failedDuring,failedAfter,goodDuring,goodAfter,calls}));
+""".replace("__REFRESH__", refresh_source)
+    refresh_proc = subprocess.run(
+        ["node", "--input-type=module", "-e", refresh_script],
+        capture_output=True, text=True)
+    assert refresh_proc.returncode == 0, refresh_proc.stderr[:700]
+    refreshed = json.loads(refresh_proc.stdout)
+    assert refreshed["failedDuring"] == {
+        "disabled": True, "refreshing": True, "busy": "true", "synced": 1,
+    }, refreshed
+    assert refreshed["failedAfter"] == {
+        "disabled": False, "refreshing": False, "busy": None,
+        "synced": 2, "applied": 0, "errors": 1,
+    }, refreshed
+    assert refreshed["goodDuring"] == {
+        "disabled": True, "refreshing": True, "synced": 3,
+    }, refreshed
+    assert refreshed["goodAfter"] == {
+        "disabled": False, "refreshing": False, "synced": 4, "applied": 1,
+    }, refreshed
+    assert refreshed["calls"] == [
+        {"bid": 7, "path": "engines/refresh",
+         "options": {"method": "POST", "timeoutMs": 1234}},
+        {"bid": 7, "path": "engines/refresh",
+         "options": {"method": "POST", "timeoutMs": 1234}},
+    ], refreshed
 
 
 def check_drawer_drag(ui_source: str) -> None:

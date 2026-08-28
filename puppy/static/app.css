@@ -1382,9 +1382,15 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   color:var(--txt3);font:10px var(--mono);
 }
 .engine-node-meta .be-url{
-  display:flex;align-items:center;width:100%;min-width:0;overflow:hidden;white-space:nowrap;
+  display:inline-flex;align-items:center;width:auto;max-width:100%;min-width:0;
+  overflow:hidden;white-space:nowrap;
   color:inherit;font:inherit;
 }
+/* In the Engines header the address and version are one compact phrase. The
+   two URL layers still overlap so disconnected addresses can cross-fade, but
+   their widest value sizes the phrase instead of pushing its version away. */
+.engine-node-meta .be-url-track{display:grid;flex:0 1 auto}
+.engine-node-meta .be-url-layer{position:static;grid-area:1/1}
 .engine-node-refresh{
   position:relative;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;
   width:20px;height:20px;margin:0 0 0 8px;padding:0;border:0;border-radius:var(--btn-r);
