@@ -677,7 +677,9 @@ console.log(JSON.stringify({before,after,connected}));
     assert '(status === "bad" ? " engine-node-unavailable" : "")' in ui_source
     assert ".engine-node-meta .be-url{" in css_source
     assert ".engine-node-message.engine-node-unavailable{" in css_source
-    assert "border-left:2px solid rgba(255,107,129,.72)" in css_source
+    assert "display:inline-grid;grid-template-columns:6px auto" in css_source
+    assert "margin:5px 0 3px;padding:5px 0;" in css_source
+    assert ".engine-node-message.engine-node-unavailable::before{justify-self:center}" in css_source
     assert "--alert-triangle:url(" in css_source
     assert ".engine-node-message.engine-node-stale::before{" in css_source
     assert "background:var(--err);-webkit-mask:var(--alert-triangle)" in css_source
