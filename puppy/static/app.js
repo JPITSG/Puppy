@@ -8251,9 +8251,19 @@ class SettingsView {
         refresh.disabled = status === "bad";
       body.innerHTML = "";
       if (message || engines === null) {
+        const checkingBackend = status === "pending" && engines === null && !!bid;
+        const noteText = message || (checkingBackend ? "Checking backend…" : "Checking engines…");
         const note = el("div", "engine-node-message" +
-          (status === "bad" ? " engine-node-unavailable" : ""),
-          message || "Checking engines…");
+          (status === "bad" ? " engine-node-unavailable" : "") +
+          (checkingBackend ? " engine-node-checking" : ""));
+        if (checkingBackend) {
+          const icon = el("span", "engine-node-checking-icon");
+          icon.appendChild(refreshIcon(10));
+          note.appendChild(icon);
+          note.appendChild(el("span", "engine-node-checking-text", noteText));
+        } else {
+          note.textContent = noteText;
+        }
         note.setAttribute("aria-label", detail || note.textContent);
         body.appendChild(note);
       } else if (!engines.length) {
