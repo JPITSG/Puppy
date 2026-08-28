@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hmac
+import logging
 
 from aiohttp import web
 
@@ -9,6 +10,8 @@ from puppy import config, protocol, runner
 from puppy.web import register_execution_api
 
 from . import upgrade
+
+log = logging.getLogger("puppy_backend.app")
 
 
 @web.middleware
@@ -18,10 +21,15 @@ async def token_middleware(request: web.Request, handler):
     if not supplied or not expected or not hmac.compare_digest(supplied, expected):
         return web.json_response({"error": "auth required"}, status=401,
                                  headers={"Cache-Control": "no-store"})
-    if request.app.get("puppy_upgrade_draining") and request.path != protocol.UPGRADE_API_PATH and \
+    draining = request.app.get("puppy_upgrade_draining") or \
+        request.app.get("puppy_shutdown_draining")
+    if draining and request.path != protocol.UPGRADE_API_PATH and \
             (request.method not in ("GET", "HEAD", "OPTIONS") or
              request.path.startswith("/api/ws/")):
-        return web.json_response({"error": "backend is restarting for an upgrade"}, status=503)
+        message = ("backend is restarting for an upgrade" if
+                   request.app.get("puppy_upgrade_draining") else
+                   "backend is shutting down")
+        return web.json_response({"error": message}, status=503)
     request["user"] = "@token"
     response = await handler(request)
     if request.path.startswith("/api/") and not response.prepared:
@@ -44,10 +52,24 @@ def build_app(include_terminal: bool = True, transport=None,
         "host": "127.0.0.1", "port": 10888, "tls": False,
     })
     app["puppy_upgrade_draining"] = False
+    app["puppy_shutdown_draining"] = False
+    app["puppy_shutdown_notice_sent"] = False
     register_execution_api(app, include_terminal=include_terminal)
     upgrade.register(app)
 
     async def on_shutdown(_app):
+        _app["puppy_shutdown_draining"] = True
+        # Set the runner's drain latch before the bounded socket write: a turn
+        # finishing during that small window must not start its queued successor.
+        runner.begin_shutdown()
+        if not _app["puppy_shutdown_notice_sent"]:
+            _app["puppy_shutdown_notice_sent"] = True
+            reason = "restart" if _app.get("puppy_upgrade_draining") else "shutdown"
+            try:
+                await runner.announce_node_stopping(reason)
+            except Exception:
+                # A lifecycle hint must never obstruct the shutdown it reports.
+                log.warning("could not send graceful shutdown notice", exc_info=True)
         await runner.shutdown()
 
     app.on_shutdown.append(on_shutdown)

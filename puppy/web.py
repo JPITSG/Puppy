@@ -88,6 +88,8 @@ async def h_ping(request: web.Request):
         "uploads": uploads.settings_payload(),
         "browser": browser.ping_payload(),
     }
+    if request.app.get("puppy_role") == "backend":
+        payload["shutting_down"] = bool(request.app.get("puppy_shutdown_draining"))
     upgrade = request.app.get("puppy_upgrade")
     if callable(upgrade):
         upgrade = upgrade()
@@ -892,10 +894,14 @@ async def ws_session(request: web.Request):
                     "text": "backup or restore in progress",
                 })
                 continue
-            if request.app.get("puppy_upgrade_draining"):
+            if request.app.get("puppy_upgrade_draining") or \
+                    request.app.get("puppy_shutdown_draining"):
+                message = ("backend is restarting for an upgrade" if
+                           request.app.get("puppy_upgrade_draining") else
+                           "backend is shutting down")
                 await ws.send_json({
                     "type": "toast", "level": "error",
-                    "text": "backend is restarting for an upgrade",
+                    "text": message,
                 })
                 continue
             if t == "approval_response":

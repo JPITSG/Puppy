@@ -276,10 +276,13 @@ def check_reconnect_status(ui_source: str) -> None:
         "visibleStatusText", "renderStatus", "setReconnecting", "setStatus")]
     script = """
 const esc = value => String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;");
+let stopping = "";
+const remoteStoppingMessage = () => stopping;
 const proto = {
 %s
 };
 const view = Object.assign(Object.create(proto), {
+  tab: {bid: 7},
   reconnecting: false,
   statusText: "thinking 42 tokens",
   statusEl: {innerHTML: ""},
@@ -295,9 +298,13 @@ view.setReconnecting(true);
 const lost = take();
 view.setStatus("using shell");
 const changedWhileLost = take();
+stopping = "Backend shutting down…";
+view.renderStatus();
+const gracefulStop = take();
+stopping = "";
 view.setReconnecting(false);
 const recovered = take();
-console.log(JSON.stringify({before, lost, changedWhileLost, recovered}));
+console.log(JSON.stringify({before, lost, changedWhileLost, gracefulStop, recovered}));
 """ % ",\n".join(methods)
     proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:400]
@@ -307,9 +314,80 @@ console.log(JSON.stringify({before, lost, changedWhileLost, recovered}));
     assert result["lost"]["activity"] == "thinking 42 tokens", result
     assert "connection lost" in result["changedWhileLost"]["header"], result
     assert result["changedWhileLost"]["activity"] == "using shell", result
+    assert "Backend shutting down" in result["gracefulStop"]["header"], result
+    assert "connection lost" not in result["gracefulStop"]["header"], result
     assert "using shell" in result["recovered"]["header"], result
     assert "connection lost" not in result["recovered"]["header"], result
     assert result["recovered"]["live"] == "using shell", result
+
+
+def check_backend_shutdown_notice(ui_source: str) -> None:
+    """A lifecycle notice immediately retires only that backend's live state."""
+    def function(name):
+        start = ui_source.index("function " + name + "(")
+        brace = ui_source.index(") {", start) + 2
+        depth = 0
+        for index in range(brace, len(ui_source)):
+            if ui_source[index] == "{":
+                depth += 1
+            elif ui_source[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    return ui_source[start:index + 1]
+        raise AssertionError("unbalanced " + name)
+
+    source = "\n".join(function(name) for name in (
+        "remoteStoppingMessage", "handleRemoteNodeStopping", "clearRemoteNodeStopping"))
+    script = r"""
+const state = {
+  backends: [{id: 7, name: "laptop"}, {id: 8, name: "other"}],
+  remoteStopping: {}, remoteOk: {7: true, 8: true}, remoteErrors: {},
+  remoteSessions: {
+    7: [{id: 11, status: "running", active_since: 100},
+        {id: 12, status: "idle", active_since: null}],
+    8: [{id: 21, status: "running", active_since: 200}],
+  },
+  views: {},
+};
+const remotePollSequence = {7: 3};
+const sessionActivityAnchors = new Map([["7:11", 10], ["8:21", 20]]);
+let rendered = 0, synced = 0, stopped = 0, cleared = 0, otherStopped = 0;
+state.views = {
+  matching: {tab: {bid: 7}, handleNodeStopping(message) {
+    if (message.includes("restarting")) stopped++;
+  }, clearNodeStopping() { cleared++; }},
+  other: {tab: {bid: 8}, handleNodeStopping() { otherStopped++; }},
+};
+const renderTabs = () => { rendered++; };
+const syncRemoteStateViews = () => { synced++; };
+%s
+handleRemoteNodeStopping(7, {type: "node_stopping", reason: "restart"});
+const stoppedState = {
+  ok: state.remoteOk[7], error: state.remoteErrors[7],
+  notice: state.remoteStopping[7], sessions: state.remoteSessions[7],
+  other: state.remoteSessions[8][0], localAnchorGone: !sessionActivityAnchors.has("7:11"),
+  otherAnchorKept: sessionActivityAnchors.has("8:21"), sequence: remotePollSequence[7],
+  rendered, synced, stopped, otherStopped,
+};
+clearRemoteNodeStopping(7);
+const clearedState = {notice: state.remoteStopping[7] || null,
+  error: state.remoteErrors[7] || null, cleared};
+console.log(JSON.stringify({stoppedState, clearedState}));
+""" % source
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:500]
+    result = json.loads(proc.stdout.strip())
+    stopped = result["stoppedState"]
+    assert stopped["ok"] is False and "restarting" in stopped["error"], stopped
+    assert stopped["notice"]["reason"] == "restart", stopped
+    assert all(row["status"] == "idle" and row["active_since"] is None
+               for row in stopped["sessions"]), stopped
+    assert stopped["other"]["status"] == "running", stopped
+    assert stopped["localAnchorGone"] and stopped["otherAnchorKept"], stopped
+    assert stopped["sequence"] == 4, stopped
+    assert stopped["rendered"] == 1 and stopped["synced"] == 1, stopped
+    assert stopped["stopped"] == 1 and stopped["otherStopped"] == 0, stopped
+    assert result["clearedState"] == {"notice": None, "error": None, "cleared": 1}, result
 
 
 def check_thinking_icons(ui_source: str) -> None:
@@ -1548,6 +1626,7 @@ async def main() -> None:
             css_source = (BASE / "puppy" / "static" / "app.css").read_text()
             check_free_identifiers(ui_source)
             check_reconnect_status(ui_source)
+            check_backend_shutdown_notice(ui_source)
             check_thinking_icons(ui_source)
             check_backend_editor(ui_source, css_source)
             check_drawer_drag(ui_source)
@@ -1583,9 +1662,17 @@ async def main() -> None:
             # frozen in the background. Successful transport evidence clears
             # only the overlay; it never overwrites model activity again.
             assert ui_source.count("wakeSessionConnections();") == 2
+            assert ui_source.count("wakeRemoteUpdateConnections();") == 2
             assert ui_source.count("this.setReconnecting(false);") == 2
             assert "this.setReconnecting(true);" in ui_source
             assert 'this.setStatus("connection lost' not in ui_source
+            # Compatible headless nodes get one lightweight list watcher. Its
+            # explicit lifecycle event, not an ordinary socket close, is what
+            # retires cached running state immediately.
+            assert 'new WebSocket(wsUrl(bid, "ws/updates"))' in ui_source
+            assert 'message.type !== "node_stopping"' in ui_source
+            assert 'backend.capabilities.includes("shutdown-notice")' in ui_source
+            assert "if (state.remoteStopping[bid] && !recoveredFromStopping) return;" in ui_source
             # The scroll container is the touch-action boundary on Chromium;
             # without its own pan-y rule a close drag is cancelled before the
             # pointer stream reaches the drawer, while vertical scroll remains native.

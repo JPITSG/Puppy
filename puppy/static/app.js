@@ -1713,6 +1713,7 @@ const state = {
   remoteSessions: {},     // bid -> sessions[]
   remoteOk: {},           // bid -> bool
   remoteErrors: {},       // bid -> latest reachability error
+  remoteStopping: {},     // bid -> graceful node lifecycle notice
   engCache: {},           // bid -> engines[]
   nodeUsers: {},          // bid -> account the node's puppy process runs as
   notify: { configured: false, enabled: false },   // completion-alert bell
@@ -1746,6 +1747,7 @@ const ENGINE_REFRESH_TIMEOUT = 30000;
 const remotePollSequence = {};
 let remotePollTimer = null;
 let remotePollingGeneration = 0;
+const remoteUpdateConnections = new Map();
 
 /* Browser-clock anchors for uninterrupted work blocks. The server sends both
    active_since and server_time so a controller can display a remote duration
@@ -1828,6 +1830,7 @@ function reportRemoteCompletion(bid, session, startedAt, now) {
 function reconcileRemoteState() {
   const live = new Set(state.backends.map(backend => String(backend.id)));
   for (const bucket of [state.remoteSessions, state.remoteOk, state.remoteErrors,
+                        state.remoteStopping,
                         state.engCache, state.remoteEngineErrors,
                         state.remoteEngineCheckedAt, state.remoteNodeCheckedAt,
                         state.remoteUsageRefresh, state.remoteUploadSettings,
@@ -1838,6 +1841,7 @@ function reconcileRemoteState() {
     const bid = key.slice(0, key.indexOf(":"));
     if (bid !== "0" && !live.has(bid)) sessionActivityAnchors.delete(key);
   }
+  syncRemoteUpdateConnections();
 }
 
 /* A backend ID survives a connection edit, but everything learned through its
@@ -1846,8 +1850,10 @@ function reconcileRemoteState() {
 function resetRemoteBackendConnection(bid) {
   bid = Number(bid) || 0;
   if (!bid) return;
+  closeRemoteUpdateConnection(bid);
   remotePollSequence[bid] = Number(remotePollSequence[bid] || 0) + 1;
   for (const bucket of [state.remoteSessions, state.remoteOk, state.remoteErrors,
+                        state.remoteStopping,
                         state.engCache, state.remoteEngineErrors,
                         state.remoteEngineCheckedAt, state.remoteNodeCheckedAt,
                         state.remoteUsageRefresh, state.remoteUploadSettings,
@@ -1864,6 +1870,7 @@ function remoteAvailability(bid) {
 }
 
 function remoteAvailabilityTitle(bid) {
+  if (state.remoteStopping[bid]) return state.remoteStopping[bid].message;
   const status = remoteAvailability(bid);
   if (status === "pending") return "checking";
   if (status === "bad")
@@ -2280,6 +2287,139 @@ function syncRemoteStateViews() {
   }
 }
 
+function remoteStoppingMessage(bid) {
+  const notice = state.remoteStopping[Number(bid) || 0];
+  return notice && notice.message ? notice.message : "";
+}
+
+/* A graceful headless-node stop is different from discovering an outage on
+   the next poll: it is authoritative now. Retire every cached running marker
+   without firing a false "completed" notification, and let each open view
+   replace its live controls with the same lifecycle wording. */
+function handleRemoteNodeStopping(rawBid, notice = {}) {
+  const backend = state.backends.find(item => String(item.id) === String(rawBid));
+  if (!backend) return;
+  const bid = backend.id;
+  const restarting = notice.reason === "restart";
+  const message = restarting ? "Backend restarting…" : "Backend shutting down…";
+  remotePollSequence[bid] = Number(remotePollSequence[bid] || 0) + 1;
+  state.remoteStopping[bid] = { reason: restarting ? "restart" : "shutdown", message };
+  state.remoteOk[bid] = false;
+  state.remoteErrors[bid] = message;
+  if (Array.isArray(state.remoteSessions[bid])) {
+    for (const session of state.remoteSessions[bid]) {
+      session.status = "idle";
+      session.active_since = null;
+    }
+  }
+  for (const key of [...sessionActivityAnchors.keys()])
+    if (key.startsWith(`${bid}:`)) sessionActivityAnchors.delete(key);
+  for (const view of Object.values(state.views)) {
+    if (!view || !view.tab || Number(view.tab.bid || 0) !== Number(bid)) continue;
+    if (typeof view.handleNodeStopping === "function") view.handleNodeStopping(message);
+  }
+  renderTabs();
+  syncRemoteStateViews();
+}
+
+function clearRemoteNodeStopping(rawBid) {
+  const bid = Number(rawBid) || 0;
+  if (!bid || !state.remoteStopping[bid]) return;
+  delete state.remoteStopping[bid];
+  delete state.remoteErrors[bid];
+  for (const view of Object.values(state.views)) {
+    if (!view || !view.tab || Number(view.tab.bid || 0) !== bid) continue;
+    if (typeof view.clearNodeStopping === "function") view.clearNodeStopping();
+  }
+}
+
+function closeRemoteUpdateConnection(rawBid) {
+  const bid = Number(rawBid) || 0;
+  const entry = remoteUpdateConnections.get(bid);
+  if (!entry) return;
+  remoteUpdateConnections.delete(bid);
+  entry.sequence++;
+  if (entry.timer !== null) clearTimeout(entry.timer);
+  entry.timer = null;
+  if (entry.ws) try { entry.ws.close(); } catch (error) {}
+  entry.ws = null;
+}
+
+function connectRemoteUpdates(backend) {
+  const bid = Number(backend && backend.id) || 0;
+  if (!bid || !state.authed || !backendSupportsShutdownNotice(backend)) return;
+  let entry = remoteUpdateConnections.get(bid);
+  if (!entry) {
+    entry = { ws: null, timer: null, retry: 800, sequence: 0, sawStopping: false };
+    remoteUpdateConnections.set(bid, entry);
+  }
+  if (entry.ws && (entry.ws.readyState === 0 || entry.ws.readyState === 1)) return;
+  if (entry.timer !== null) {
+    clearTimeout(entry.timer);
+    entry.timer = null;
+  }
+  const sequence = ++entry.sequence;
+  const ws = new WebSocket(wsUrl(bid, "ws/updates"));
+  entry.ws = ws;
+  const current = () => remoteUpdateConnections.get(bid) === entry &&
+    entry.sequence === sequence && entry.ws === ws;
+  ws.onopen = () => {
+    if (!current()) { try { ws.close(); } catch (error) {} return; }
+    entry.retry = 800;
+    if (entry.sawStopping) {
+      entry.sawStopping = false;
+      clearRemoteNodeStopping(bid);
+    }
+    noteRemoteSocketReachable(bid, true);
+  };
+  ws.onmessage = event => {
+    if (!current()) return;
+    let message;
+    try { message = JSON.parse(event.data); } catch (error) { return; }
+    if (message.type !== "node_stopping") return;
+    entry.sawStopping = true;
+    handleRemoteNodeStopping(bid, message);
+  };
+  ws.onclose = () => {
+    if (!current()) return;
+    entry.ws = null;
+    const live = state.backends.find(item => item.id === bid);
+    if (!state.authed || !backendSupportsShutdownNotice(live)) return;
+    const delay = Math.round(entry.retry * (.85 + Math.random() * .3));
+    entry.retry = Math.min(entry.retry * 1.7, 15000);
+    entry.timer = setTimeout(() => {
+      entry.timer = null;
+      connectRemoteUpdates(live);
+    }, delay);
+  };
+  ws.onerror = () => { try { ws.close(); } catch (error) {} };
+}
+
+function syncRemoteUpdateConnections() {
+  const desired = new Map(state.backends
+    .filter(backendSupportsShutdownNotice).map(backend => [Number(backend.id), backend]));
+  for (const bid of [...remoteUpdateConnections.keys()])
+    if (!desired.has(bid)) closeRemoteUpdateConnection(bid);
+  if (!state.authed) return;
+  for (const backend of desired.values()) connectRemoteUpdates(backend);
+}
+
+function wakeRemoteUpdateConnections() {
+  syncRemoteUpdateConnections();
+  for (const [bid, entry] of remoteUpdateConnections) {
+    if (entry.ws && (entry.ws.readyState === 0 || entry.ws.readyState === 1)) continue;
+    if (entry.timer !== null) clearTimeout(entry.timer);
+    entry.timer = null;
+    entry.retry = 800;
+    const backend = state.backends.find(item => item.id === bid);
+    if (backend) connectRemoteUpdates(backend);
+  }
+}
+
+function stopRemoteUpdateConnections() {
+  for (const bid of [...remoteUpdateConnections.keys()]) closeRemoteUpdateConnection(bid);
+}
+
 async function pollLocalEngines(forceEngines = false) {
   const now = Date.now();
   if (!forceEngines && now - Number(state.localEngineCheckedAt || 0) < REMOTE_ENGINE_REFRESH)
@@ -2330,8 +2470,24 @@ async function pollRemoteBackend(backend, forceEngines = false) {
   if (!remotePollIsCurrent(bid, sequence)) return;
   if (failure) {
     state.remoteOk[bid] = false;
-    state.remoteErrors[bid] = failure.message || "backend unavailable";
+    state.remoteErrors[bid] = remoteStoppingMessage(bid) ||
+      failure.message || "backend unavailable";
     return;
+  }
+
+  /* The old process can finish an already accepted HTTP request during its
+     grace window. Only a fresh node descriptor saying it is no longer
+     draining clears an explicit lifecycle notice; ordinary traffic from the
+     departing process must not paint it green again. */
+  if (state.remoteStopping[bid]) {
+    try {
+      const node = await api(bid, "node", { timeoutMs: REMOTE_POLL_TIMEOUT });
+      if (!remotePollIsCurrent(bid, sequence)) return;
+      if (!node || node.shutting_down !== false) return;
+      clearRemoteNodeStopping(bid);
+    } catch (error) {
+      return;
+    }
   }
 
   state.remoteSessions[bid] = payload.sessions;
@@ -2427,16 +2583,19 @@ function stopRemotePolling() {
   remotePollingGeneration++;
   if (remotePollTimer !== null) clearTimeout(remotePollTimer);
   remotePollTimer = null;
+  stopRemoteUpdateConnections();
 }
 
 /* With the controller proxy's upstream-first handshake, a remote socket open
    or message is direct proof that the backend is reachable. Let that newer
    evidence invalidate an older in-flight HTTP failure and refresh the lists. */
-function noteRemoteSocketReachable(bid) {
+function noteRemoteSocketReachable(bid, recoveredFromStopping = false) {
   if (!bid) return;
   const backend = state.backends.find(item => String(item.id) === String(bid));
   if (!backend) return;
   bid = backend.id;
+  if (state.remoteStopping[bid] && !recoveredFromStopping) return;
+  if (recoveredFromStopping) clearRemoteNodeStopping(bid);
   if (state.remoteOk[bid] === true) return;
   remotePollSequence[bid] = (remotePollSequence[bid] || 0) + 1;
   state.remoteOk[bid] = true;
@@ -2458,6 +2617,7 @@ window.addEventListener("online", () => {
   if (state.authed) {
     connectUpdates();
     wakeSessionConnections();
+    wakeRemoteUpdateConnections();
     pollRemotes({ forceEngines: true })
       .catch(error => console.warn("online remote poll failed", error));
   }
@@ -2466,6 +2626,7 @@ document.addEventListener("visibilitychange", () => {
   if (state.authed && document.visibilityState === "visible") {
     connectUpdates();
     wakeSessionConnections();
+    wakeRemoteUpdateConnections();
     pollRemotes({ forceEngines: true })
       .catch(error => console.warn("resume remote poll failed", error));
   }
@@ -2753,6 +2914,11 @@ function backendHasCapability(backend, capability) {
   return Array.isArray(backend.capabilities) && backend.capabilities.includes(capability);
 }
 
+function backendSupportsShutdownNotice(backend) {
+  return !!backend && backend.role === "backend" && Number(backend.protocol || 0) > 0 &&
+    Array.isArray(backend.capabilities) && backend.capabilities.includes("shutdown-notice");
+}
+
 /* Distinct from backendSupportsAutoUpgrade below, which answers whether the
    backend *package* may be replaced over the signed contract. This one is about
    the engine CLIs on that node. */
@@ -2944,7 +3110,7 @@ function renderSidebar() {
     const list = allSessions.filter(s => state.showArchived || !s.archived);
     if (!list.length) {
       let message = "No sessions yet";
-      if (!g.ok) message = "Backend unavailable";
+      if (!g.ok) message = remoteStoppingMessage(g.bid) || "Backend unavailable";
       else if (!state.showArchived && allSessions.some(s => s.archived)) message = "Archived sessions hidden";
       else if (showGroups) message = g.bid === 0 ? "No local sessions" : "No sessions attached";
       body.appendChild(el("div", "sess-group-empty" + (showGroups ? "" : " standalone"), message));
@@ -3586,7 +3752,8 @@ function renderFootEngines() {
       wireNodeGroupDrag(group, head, key);
     }
     if (g.bid && state.remoteOk[g.bid] === false) {
-      body.appendChild(el("div", "foot-engine-empty", "backend unavailable"));
+      body.appendChild(el("div", "foot-engine-empty",
+        remoteStoppingMessage(g.bid) || "backend unavailable"));
     } else if (g.engines === null) {
       body.appendChild(el("div", "foot-engine-empty", "checking engines…"));
     } else if (!g.engines.length) {
@@ -5218,6 +5385,7 @@ class SessionView {
     this.liveKind = null;
     this.statusText = "";     // model activity; the header and transcript foot mirror it
     this.reconnecting = false; // transport state overlays activity without replacing it
+    this.shutdownSeen = false; // its next socket open proves the node restarted
     this.statusRow = null;    // standalone foot row, used when no thinking block is live
     this.queued = [];         // last queue payload, re-rendered when the list expands
     this.queueOpen = false;   // whether the tail past QUEUE_ROWS is showing
@@ -5465,12 +5633,19 @@ class SessionView {
       }
       this.retry = 800;
       this.setReconnecting(false);
-      noteRemoteSocketReachable(this.tab.bid);
+      const recovered = this.shutdownSeen;
+      this.shutdownSeen = false;
+      noteRemoteSocketReachable(this.tab.bid, recovered);
     };
     ws.onmessage = (ev) => {
       if (sequence !== this.connectionSequence || this.ws !== ws) return;
-      this.setReconnecting(false); // a message is proof even in unusual WebSocket shims
       let d; try { d = JSON.parse(ev.data); } catch (e) { return; }
+      if (d.type === "node_stopping") {
+        this.shutdownSeen = true;
+        handleRemoteNodeStopping(this.tab.bid, d);
+        return;
+      }
+      this.setReconnecting(false); // a message is proof even in unusual WebSocket shims
       noteRemoteSocketReachable(this.tab.bid);
       this.handle(d);
     };
@@ -5552,6 +5727,24 @@ class SessionView {
 
   syncRemoteState() {
     this.syncUploadButton();
+    const stopping = !!remoteStoppingMessage(this.tab.bid);
+    this.sendBtn.disabled = stopping;
+    this.queueBtn.disabled = stopping;
+    this.renderStatus();
+  }
+
+  handleNodeStopping() {
+    this.shutdownSeen = true;
+    this.status = "idle";
+    this.clearLive();
+    this.hideApproval();
+    this.updateRunState();
+    this.syncRemoteState();
+  }
+
+  clearNodeStopping() {
+    this.shutdownSeen = false;
+    this.syncRemoteState();
   }
 
   syncUploadButton() {
@@ -5773,7 +5966,8 @@ class SessionView {
         break;
     }
     const runningKinds = { user: 1, assistant: 1, thinking: 1, tool_use: 1, tool_result: 1 };
-    if (d.type === "delta" || (d.type === "event" && runningKinds[d.event.kind])) {
+    if (!remoteStoppingMessage(this.tab.bid) &&
+        (d.type === "delta" || (d.type === "event" && runningKinds[d.event.kind]))) {
       const becameRunning = this.status !== "running";
       this.status = "running"; this.updateRunState();
       if (becameRunning) noteSessionActivity(this.tab.bid, this.tab.sid, true);
@@ -5862,7 +6056,8 @@ class SessionView {
   }
 
   visibleStatusText() {
-    return this.reconnecting ? "connection lost · reconnecting…" : this.statusText;
+    return remoteStoppingMessage(this.tab.bid) ||
+      (this.reconnecting ? "connection lost · reconnecting…" : this.statusText);
   }
 
   renderStatus() {
@@ -7054,13 +7249,20 @@ class TermView {
     this.host.appendChild(d);
     this.syncRemoteState();
   }
+  handleNodeStopping() {
+    this.showDead();
+  }
+  clearNodeStopping() {
+    this.syncRemoteState();
+  }
   syncRemoteState() {
     const dead = this.root.querySelector(".term-dead");
     if (!dead) return;
     const message = dead.querySelector(".term-dead-message");
     const button = dead.querySelector(".term-dead-new");
     const unavailable = !!this.tab.bid && state.remoteOk[this.tab.bid] === false;
-    message.textContent = unavailable ? "Backend unavailable" : "Terminal ended";
+    message.textContent = remoteStoppingMessage(this.tab.bid) ||
+      (unavailable ? "Backend unavailable" : "Terminal ended");
     button.textContent = unavailable ? "Waiting for backend…" : "New shell";
     button.disabled = unavailable;
   }
@@ -7355,6 +7557,8 @@ class BrowserView {
     ws.onmessage = ev => {
       if (sequence !== this.connectionSequence || this.ws !== ws) return;
       noteRemoteSocketReachable(this.tab.bid);
+      const stopping = remoteStoppingMessage(this.tab.bid);
+      if (stopping) { this.showDead(stopping, true); return; }
       if (typeof ev.data !== "string") { this.showFrame(ev.data); return; }
       let d = null;
       try { d = JSON.parse(ev.data); } catch (error) { return; }
@@ -7380,7 +7584,10 @@ class BrowserView {
     ws.onclose = () => {
       if (sequence !== this.connectionSequence || this.ws !== ws) return;
       this.ws = null;
-      if (!this.closed) this.showDead("Connection closed");
+      if (!this.closed) {
+        const stopping = remoteStoppingMessage(this.tab.bid);
+        this.showDead(stopping || "Connection closed", !!stopping);
+      }
     };
     ws.onerror = () => { try { ws.close(); } catch (e) {} };
   }
@@ -7433,6 +7640,33 @@ class BrowserView {
     actions.appendChild(close);
     dead.appendChild(actions);
     this.stage.appendChild(dead);
+  }
+
+  handleNodeStopping(message) {
+    this.showDead(message, true);
+    this.syncRemoteState();
+  }
+
+  clearNodeStopping() {
+    const dead = this.root.querySelector(".br-dead");
+    if (dead) {
+      if (dead.querySelector(".term-dead-message").textContent.includes("Backend"))
+        dead.querySelector(".term-dead-message").textContent = "Browser ended";
+      const reconnect = dead.querySelector(".btn-pri");
+      reconnect.textContent = "Reconnect";
+      reconnect.disabled = false;
+    }
+  }
+
+  syncRemoteState() {
+    const stopping = remoteStoppingMessage(this.tab.bid);
+    if (!stopping) return;
+    this.showDead(stopping, true);
+    const reconnect = this.root.querySelector(".br-dead .btn-pri");
+    if (reconnect) {
+      reconnect.textContent = "Waiting for backend…";
+      reconnect.disabled = true;
+    }
   }
 
   destroy() {

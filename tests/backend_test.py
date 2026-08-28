@@ -94,6 +94,36 @@ def exercise_activity_blocks(session_hub_cls) -> None:
     assert hub.status == "idle" and hub.active_since is None
 
 
+async def exercise_shutdown_broadcast(runner_module) -> None:
+    """Both node and open-session watchers receive the same bounded notice."""
+    class Capture:
+        def __init__(self):
+            self.messages = []
+
+        async def send_json(self, payload):
+            self.messages.append(payload)
+
+    hub_id = -9002
+    hub = runner_module.SessionHub(hub_id)
+    updates = Capture()
+    session = Capture()
+    runner_module._hubs[hub_id] = hub
+    runner_module.updates_attach(updates)
+    hub.attach(session)
+    try:
+        await runner_module.announce_node_stopping("restart")
+        for capture in (updates, session):
+            assert len(capture.messages) == 1
+            notice = capture.messages[0]
+            assert notice["type"] == "node_stopping"
+            assert notice["reason"] == "restart"
+            assert isinstance(notice["server_time"], (int, float))
+    finally:
+        hub.detach(session)
+        runner_module.updates_detach(updates)
+        runner_module._hubs.pop(hub_id, None)
+
+
 def exercise_host_cpu_math(host_metrics_module) -> None:
     previous = host_metrics_module._parse_cpu_stat(
         "intr 1\ncpu 100 10 20 400 50 5 6 9 1000 1000\n")
@@ -211,6 +241,29 @@ def stop_process(process: subprocess.Popen) -> None:
         process.wait(timeout=5)
 
 
+async def stop_process_with_notice(process: subprocess.Popen, url: str, token: str,
+                                   fingerprint: str = "") -> None:
+    """SIGTERM must announce the node lifecycle before its sockets disappear."""
+    headers = {"X-Puppy-Token": token}
+    async with aiohttp.ClientSession() as http:
+        updates = await http.ws_connect(
+            url + "/api/ws/updates", headers=headers, ssl=ssl_pin(fingerprint))
+        first = await updates.receive_json(timeout=3)
+        assert first["type"] == "sessions"
+        process.terminate()
+        notice = await updates.receive_json(timeout=3)
+        assert notice["type"] == "node_stopping", notice
+        assert notice["reason"] == "shutdown", notice
+        assert isinstance(notice["server_time"], (int, float)), notice
+        await updates.close()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+        raise AssertionError("backend did not finish its graceful shutdown")
+
+
 def ssl_pin(fingerprint: str):
     return aiohttp.Fingerprint(bytes.fromhex(fingerprint)) if fingerprint else True
 
@@ -256,6 +309,8 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "engine-usage-refresh-manual" in ping["capabilities"]
         assert "engine-upgrade" in ping["capabilities"]
         assert "file-uploads" in ping["capabilities"]
+        assert "shutdown-notice" in ping["capabilities"]
+        assert ping["shutting_down"] is False
         # browser surface: capability is static, enablement is node config
         # (off in this deployment), availability is probed on demand
         assert "browser" in ping["capabilities"]
@@ -619,6 +674,7 @@ async def exercise_controller(url: str, token: str, backend_url: str,
             assert response.status == 200
         assert full_ping["role"] == "full" and full_ping["protocol"] == 1
         assert "terminal" in full_ping["capabilities"]
+        assert "shutdown-notice" not in full_ping["capabilities"]
 
         updates = await http.ws_connect(url + "/api/ws/updates", headers=headers)
         first = await updates.receive_json(timeout=3)
@@ -669,6 +725,7 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert "engine-usage-refresh" in stored["capabilities"]
         assert "engine-upgrade" in stored["capabilities"]
         assert "file-uploads" in stored["capabilities"]
+        assert "shutdown-notice" in stored["capabilities"]
         assert "terminal" not in stored["capabilities"]
         assert "remote-upgrade" in stored["capabilities"]
         assert "pinned-tls" in stored["capabilities"]
@@ -858,11 +915,26 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         # Enabling the controller-owned policy wakes its background worker.
         # The node's live readiness remains authoritative, then the exact same
         # signed/restart/rollback pipeline used by the manual action runs.
+        lifecycle_updates = await http.ws_connect(
+            url + f"/api/b/{stored['id']}/ws/updates", headers=headers)
+        lifecycle_snapshot = await lifecycle_updates.receive_json(timeout=3)
+        assert lifecycle_snapshot["type"] == "sessions"
         async with http.patch(url + f"/api/backends/{stored['id']}", headers=headers,
                               json={"auto_upgrade": True}) as response:
             toggled = await response.json()
             assert response.status == 200, toggled
         assert toggled["backend"]["auto_upgrade"] is True
+
+        lifecycle_notice = None
+        notice_deadline = asyncio.get_event_loop().time() + 90
+        while asyncio.get_event_loop().time() < notice_deadline:
+            message = await lifecycle_updates.receive_json(timeout=90)
+            if message.get("type") == "node_stopping":
+                lifecycle_notice = message
+                break
+        assert lifecycle_notice is not None, "remote restart sent no lifecycle notice"
+        assert lifecycle_notice["reason"] == "restart", lifecycle_notice
+        await lifecycle_updates.close()
 
         deadline = asyncio.get_event_loop().time() + 120
         refreshed = None
@@ -1385,7 +1457,7 @@ async def main() -> None:
         ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         await wait_for_backend(disabled_url, disabled_process)
         await exercise_node(disabled_url, backend_token, __version__, upgrade_enabled=False)
-        stop_process(disabled_process)
+        await stop_process_with_notice(disabled_process, disabled_url, backend_token)
         disabled_process = None
 
         old_version = previous_patch_version()
@@ -1409,6 +1481,7 @@ async def main() -> None:
         assert "pinned-tls" in pairing["capabilities"]
         assert "terminal" not in pairing["capabilities"]
         assert "remote-upgrade" not in pairing["capabilities"]  # pairing command is not launcher-managed
+        assert "shutdown-notice" in pairing["capabilities"]
         assert pairing["max_upload_size_mb"] == 3
         assert (backend_data / "config.json").stat().st_mode & 0o777 == 0o600
         identity_manifest = json.loads(
@@ -1452,7 +1525,8 @@ async def main() -> None:
         await wait_for_backend(backend_url, process, backend_fingerprint)
         await exercise_node(backend_url, backend_token, old_version, upgrade_enabled=False,
                             fingerprint=backend_fingerprint)
-        stop_process(process)
+        await stop_process_with_notice(
+            process, backend_url, backend_token, backend_fingerprint)
         process = None
 
         process = subprocess.Popen([
@@ -1504,6 +1578,7 @@ async def main() -> None:
         config.set_value("engines.usage_refresh_minutes", 0)
         db.connect()
         exercise_activity_blocks(runner.SessionHub)
+        await exercise_shutdown_broadcast(runner)
         await exercise_queue_persistence(runner, db)
         exercise_session_show_meta(runner, db)
         await exercise_auth_probes(temp_root / "auth-probes")

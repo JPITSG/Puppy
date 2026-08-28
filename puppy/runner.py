@@ -166,6 +166,33 @@ def broadcast_update(payload: dict) -> None:
         asyncio.ensure_future(_safe_send(ws, payload, _updates_watchers))
 
 
+async def announce_node_stopping(reason: str = "shutdown") -> None:
+    """Best-effort lifecycle notice while authenticated sockets are still open.
+
+    Headless runtimes call this from aiohttp's shutdown signal, before the
+    ordinary turn grace window begins.  Awaiting the writes for a short,
+    bounded interval makes a SIGTERM useful to connected consoles without ever
+    allowing a slow client to delay machine shutdown materially.
+    """
+    payload = {
+        "type": "node_stopping",
+        "reason": "restart" if reason == "restart" else "shutdown",
+        "server_time": time.time(),
+    }
+    sockets = set(_updates_watchers)
+    for h in _hubs.values():
+        sockets.update(h.watchers)
+    if not sockets:
+        return
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*(_safe_send(ws, payload) for ws in sockets),
+                           return_exceptions=True),
+            timeout=1.0)
+    except asyncio.TimeoutError:
+        log.debug("shutdown notice timed out for one or more websocket watchers")
+
+
 async def _safe_send(ws, payload, pool=None) -> None:
     try:
         await ws.send_json(payload)
@@ -837,9 +864,14 @@ class SessionHub:
 _draining = False
 
 
-async def shutdown() -> None:
+def begin_shutdown() -> None:
+    """Synchronously stop a finishing turn from consuming queued work."""
     global _draining
     _draining = True
+
+
+async def shutdown() -> None:
+    begin_shutdown()
     # Restarts are often triggered by an agent running INSIDE puppy (the user
     # drives puppy development through puppy). Give in-flight turns a grace
     # window to finish instead of SIGKILLing them mid-answer; supervisor's

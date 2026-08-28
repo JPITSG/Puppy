@@ -91,6 +91,7 @@ def enabled(tls_enabled=None) -> bool:
 
 def capabilities(include_terminal: bool, tls_enabled: bool = False) -> list:
     caps = protocol.execution_capabilities(include_terminal)
+    caps.append(protocol.SHUTDOWN_NOTICE_CAPABILITY)
     if tls_enabled:
         caps.append(protocol.TLS_PIN_CAPABILITY)
     if enabled(tls_enabled):

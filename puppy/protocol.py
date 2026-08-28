@@ -37,6 +37,11 @@ ENGINE_AUTO_UPGRADE_CAPABILITY = "engine-auto-upgrade"
 # URL a page held. Older nodes store the same files but expose no way to read
 # them back; the controller falls back to the named-file chip there.
 UPLOAD_PREVIEW_CAPABILITY = "upload-preview"
+# A headless node sends one best-effort ``node_stopping`` event to its update
+# and session WebSockets before graceful shutdown waits for/interrupts turns.
+# Full WebUI runtimes do not advertise this: only the separately managed
+# backend process owns this lifecycle signal.
+SHUTDOWN_NOTICE_CAPABILITY = "shutdown-notice"
 
 BASE_CAPABILITIES = (
     "sessions",

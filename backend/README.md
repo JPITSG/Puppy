@@ -193,6 +193,19 @@ session websocket accepts `requeue_held` / `discard_held` with the same
 stale-index guard as `unqueue`. A prompt is consumed durably the moment its
 turn starts, so a crash never runs one twice.
 
+## Graceful shutdown notice
+
+Headless nodes advertise the additive `shutdown-notice` capability. While
+authenticated update and session WebSockets are still open, a graceful stop
+sends one `node_stopping` event with `reason: "shutdown"` (or `"restart"` for a
+managed upgrade) before entering the ordinary turn grace window. Connected
+consoles can immediately mark that backend unavailable, retire cached running
+session state, and disable live controls instead of waiting for their next
+poll or TCP timeout. The write is best effort and bounded to one second, so a
+slow browser can never hold up machine shutdown. Abrupt power loss or a laptop
+whose network disappears before the OS runs service shutdown cannot emit the
+notice and remains covered by the existing reconnect/poll path.
+
 ## Unattended engine updates
 
 A node can install its own engine CLI updates on a schedule. It adds no upgrade
