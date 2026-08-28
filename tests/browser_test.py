@@ -700,7 +700,9 @@ console.log(JSON.stringify({before,after,connected}));
     assert '(loading ? " engine-node-loading" : "")' in ui_source
     assert '"engine-node-message engine-node-empty", "No engines reported"' in ui_source
     assert "icon.appendChild(refreshIcon(10));" in ui_source
-    assert ".engine-node-meta .be-url{" in css_source
+    assert (".engine-node-meta .be-url{\n  display:inline-flex;align-items:baseline;" in
+            css_source)
+    assert (".be-row .be-url{\n  display:flex;align-items:baseline;" in css_source)
     assert (".engine-node-message.engine-node-unavailable," +
             ".engine-node-message.engine-node-loading,") in css_source
     assert ".engine-node-message.engine-node-empty{" in css_source
