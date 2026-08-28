@@ -922,6 +922,18 @@ async def ws_session(request: web.Request):
                 res = h.unqueue(idx, data.get("text") or "")
                 if "error" in res:
                     await ws.send_json({"type": "toast", "level": "error", "text": res["error"]})
+            elif t == "set_queue_paused":
+                try:
+                    idx = int(data.get("index", -1))
+                except (TypeError, ValueError):
+                    idx = -1
+                paused = data.get("paused")
+                if not isinstance(paused, bool):
+                    res = {"error": "pause state must be true or false"}
+                else:
+                    res = h.set_queue_paused(idx, data.get("text") or "", paused)
+                if "error" in res:
+                    await ws.send_json({"type": "toast", "level": "error", "text": res["error"]})
             elif t in ("requeue_held", "discard_held"):
                 try:
                     idx = int(data.get("index", -1))

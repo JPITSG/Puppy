@@ -309,6 +309,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "engine-usage-refresh-manual" in ping["capabilities"]
         assert "engine-upgrade" in ping["capabilities"]
         assert "file-uploads" in ping["capabilities"]
+        assert "queue-pause" in ping["capabilities"]
         assert "shutdown-notice" in ping["capabilities"]
         assert ping["shutting_down"] is False
         # browser surface: capability is static, enablement is node config
@@ -674,6 +675,7 @@ async def exercise_controller(url: str, token: str, backend_url: str,
             assert response.status == 200
         assert full_ping["role"] == "full" and full_ping["protocol"] == 1
         assert "terminal" in full_ping["capabilities"]
+        assert "queue-pause" in full_ping["capabilities"]
         assert "shutdown-notice" not in full_ping["capabilities"]
 
         updates = await http.ws_connect(url + "/api/ws/updates", headers=headers)
@@ -725,6 +727,7 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert "engine-usage-refresh" in stored["capabilities"]
         assert "engine-upgrade" in stored["capabilities"]
         assert "file-uploads" in stored["capabilities"]
+        assert "queue-pause" in stored["capabilities"]
         assert "shutdown-notice" in stored["capabilities"]
         assert "terminal" not in stored["capabilities"]
         assert "remote-upgrade" in stored["capabilities"]
@@ -1359,7 +1362,8 @@ async def exercise_queue_persistence(runner, db) -> None:
         for text in ("second", "third"):
             h.send_message(text)
         assert h.queue == ["second", "third"]
-        assert db.meta_get("session_queue.{}".format(sid)) ==             {"queue": ["second", "third"], "held": []}
+        assert db.meta_get("session_queue.{}".format(sid)) == {
+            "queue": ["second", "third"], "held": [], "paused": []}
 
         # a deploy kill parks the queue durably instead of discarding it
         await h.kill()
@@ -1398,6 +1402,110 @@ async def exercise_queue_persistence(runner, db) -> None:
         runner.drop_hub(sid)
         db.delete_session(sid)
     assert db.meta_get("session_queue.{}".format(sid)) is None
+
+
+async def exercise_queue_pause(runner, db) -> None:
+    """Pausing is ordered, durable, stale-safe, and distinct from held work."""
+    sid = db.create_session("queue pause", "claude", "/tmp", "", "", "blue", "auto")
+    try:
+        h = runner.hub(sid)
+        pending_config = {
+            "kind": "config", "fields": {"model": "paused-model"},
+            "key": 'config:{"model": "paused-model"}',
+        }
+        h.status = "running"
+        h.active_since = time.time() - 5
+        h.queue = ["second", pending_config, "third", "fourth"]
+        h._broadcast_queue()
+
+        # Only prompts can be paused, and the same stale text guard used by X
+        # prevents a shifted index from changing some other prompt.
+        assert "error" in h.set_queue_paused(1, pending_config["key"], True)
+        assert "error" in h.set_queue_paused(2, "not third", True)
+        assert h.set_queue_paused(2, "third", True) == {"ok": True, "paused": True}
+        assert h.snapshot()["paused"] == [2]
+        assert db.meta_get("session_queue.{}".format(sid))["paused"] == [2]
+
+        # Earlier work still runs. Consuming it shifts the paused index, then
+        # the queue stops before applying the configuration tied to "third".
+        assert h._take_next_turn() == "second"
+        assert h.queue == [pending_config, "third", "fourth"]
+        assert h._paused_wire() == [1]
+        before_model = db.get_session(sid)["model"]
+        assert h._take_next_turn() is None
+        assert h.status == "idle" and h.queue == [pending_config, "third", "fourth"]
+        assert db.get_session(sid)["model"] == before_model
+
+        # Play resumes an idle front prompt immediately, applying its preceding
+        # configuration first and leaving the rest of the queue in order.
+        started = []
+        h._start_turn = lambda text: (started.append(text),
+                                      setattr(h, "status", "running"))
+        assert h.set_queue_paused(1, "third", False) == {"ok": True, "paused": False}
+        assert started == ["third"]
+        assert h.queue == ["fourth"] and h._paused_wire() == []
+        assert db.get_session(sid)["model"] == "paused-model"
+
+        # Removing a paused row clears its sidecar state. A kill instead moves
+        # the prose to held, where resend/discard already supply the only state
+        # transition and pause must not leak through.
+        h.status = "idle"       # "fourth" has now reached the paused frontier
+        h.queue.append("fifth")
+        assert h.set_queue_paused(0, "fourth", True) == {"ok": True, "paused": True}
+        assert h.unqueue(0, "fourth") == {"ok": True}
+        assert started == ["third", "fifth"]
+        assert h.queue == [] and h._paused_wire() == []
+        h.status = "running"
+        h.queue = ["held after stop"]
+        assert h.set_queue_paused(0, "held after stop", True) == {
+            "ok": True, "paused": True}
+        await h.kill()
+        assert h.queue == [] and h.held == ["held after stop"]
+        assert h.snapshot()["paused"] == []
+    finally:
+        runner.drop_hub(sid)
+        db.delete_session(sid)
+
+
+async def exercise_queue_pause_websocket(url: str, token: str, runner, db) -> None:
+    """The authenticated session socket carries the additive pause contract."""
+    sid = db.create_session("queue pause socket", "claude", "/tmp", "", "",
+                            "blue", "auto")
+    h = runner.hub(sid)
+    h.status = "running"
+    h.queue = ["socket queued prompt"]
+    h._broadcast_queue()
+    ws = None
+    try:
+        async with aiohttp.ClientSession() as http:
+            ws = await http.ws_connect(
+                url + "/api/ws/session/{}".format(sid),
+                headers={"X-Puppy-Token": token})
+            snapshot = await ws.receive_json(timeout=3)
+            assert snapshot["queued"] == ["socket queued prompt"]
+            assert snapshot["paused"] == []
+
+            await ws.send_json({"type": "set_queue_paused", "index": 0,
+                                "text": "socket queued prompt", "paused": True})
+            paused = await ws.receive_json(timeout=3)
+            assert paused["type"] == "queued" and paused["paused"] == [0], paused
+
+            await ws.send_json({"type": "set_queue_paused", "index": 0,
+                                "text": "socket queued prompt", "paused": "yes"})
+            rejected = await ws.receive_json(timeout=3)
+            assert rejected["type"] == "toast" and \
+                "true or false" in rejected["text"], rejected
+            await ws.close()
+            ws = None
+    finally:
+        if ws is not None:
+            await ws.close()
+        h.queue.clear()
+        h.paused_queue.clear()
+        h.status = "idle"
+        h._persist_queue()
+        runner.drop_hub(sid)
+        db.delete_session(sid)
 
 
 async def main() -> None:
@@ -1482,6 +1590,7 @@ async def main() -> None:
         assert "terminal" not in pairing["capabilities"]
         assert "remote-upgrade" not in pairing["capabilities"]  # pairing command is not launcher-managed
         assert "shutdown-notice" in pairing["capabilities"]
+        assert "queue-pause" in pairing["capabilities"]
         assert pairing["max_upload_size_mb"] == 3
         assert (backend_data / "config.json").stat().st_mode & 0o777 == 0o600
         identity_manifest = json.loads(
@@ -1580,6 +1689,7 @@ async def main() -> None:
         exercise_activity_blocks(runner.SessionHub)
         await exercise_shutdown_broadcast(runner)
         await exercise_queue_persistence(runner, db)
+        await exercise_queue_pause(runner, db)
         exercise_session_show_meta(runner, db)
         await exercise_auth_probes(temp_root / "auth-probes")
         exercise_auth_evidence(temp_root / "auth-evidence", db)
@@ -1605,6 +1715,8 @@ async def main() -> None:
         await site.start()
         sock = site._server.sockets[0]
         controller_url = f"http://127.0.0.1:{sock.getsockname()[1]}"
+        await exercise_queue_pause_websocket(
+            controller_url, controller_token, runner, db)
         await exercise_controller(controller_url, controller_token, backend_url,
                                   backend_token, backend_fingerprint, old_version, state_dir)
         await exercise_proxy_recovery(controller_url, controller_token)

@@ -366,6 +366,34 @@ function refreshIcon(size = 10) {
   return svg;
 }
 
+/* Queue controls use action icons: a waiting prompt shows pause, while one
+   already paused shows play so the next click's effect is unambiguous. */
+function queuePauseIcon(paused, size = 10) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 12 12");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  if (paused) {
+    const play = document.createElementNS(NS, "path");
+    play.setAttribute("d", "M4 2.7 9 6 4 9.3Z");
+    play.setAttribute("fill", "currentColor");
+    svg.appendChild(play);
+  } else {
+    for (const x of [3.6, 7.2]) {
+      const bar = document.createElementNS(NS, "path");
+      bar.setAttribute("d", `M${x} 2.8V9.2`);
+      bar.setAttribute("fill", "none");
+      bar.setAttribute("stroke", "currentColor");
+      bar.setAttribute("stroke-width", "1.55");
+      bar.setAttribute("stroke-linecap", "round");
+      svg.appendChild(bar);
+    }
+  }
+  return svg;
+}
+
 function copyIcon(done = false) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
@@ -2982,6 +3010,16 @@ function backendSupportsFileUploads(bid) {
     backend.capabilities.includes("file-uploads");
 }
 
+function backendSupportsQueuePause(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(item => item.id === bid);
+  /* Pausing adds a session-socket operation. Do not infer it for legacy or
+     older remote nodes: their ordinary message queue remains fully usable,
+     just without a control they cannot honor. */
+  return !!backend && Array.isArray(backend.capabilities) &&
+    backend.capabilities.includes("queue-pause");
+}
+
 function normalizeUploadSettings(value) {
   if (!value || typeof value !== "object") return null;
   const megabytes = Number(value.max_file_size_mb);
@@ -5388,6 +5426,7 @@ class SessionView {
     this.shutdownSeen = false; // its next socket open proves the node restarted
     this.statusRow = null;    // standalone foot row, used when no thinking block is live
     this.queued = [];         // last queue payload, re-rendered when the list expands
+    this.pausedQueue = [];    // indexes into queued; held/config rows are never pausable
     this.queueOpen = false;   // whether the tail past QUEUE_ROWS is showing
     this.oldestSeq = null;
     this.history = [];        // sent messages, oldest first (shell-style recall)
@@ -5897,7 +5936,8 @@ class SessionView {
         this.history = d.events.filter(ev => ev.kind === "user")
           .map(ev => (ev.data && ev.data.text) || "").filter(Boolean);
         this.histIdx = null;
-        this.renderQueue(d.queued || [], d.held || []);   // before updateHead: pickers read the queue
+        this.renderQueue(d.queued || [], d.held || [], d.paused || []);
+        // before updateHead: pickers read the queue
         this.updateHead();
         this.updateRunState();
         this.syncLiveStatus();
@@ -5936,7 +5976,7 @@ class SessionView {
         this.hideApproval();
         break;
       case "queued":
-        this.renderQueue(d.queued || [], d.held || []);
+        this.renderQueue(d.queued || [], d.held || [], d.paused || []);
         this.updateHead();   // the pickers speak for whatever is now last in line
         break;
       case "turn_done":
@@ -6708,10 +6748,11 @@ class SessionView {
     return parts.join(" · ") || "setting change";
   }
 
-  queueRow(item, marker, held) {
+  queueRow(item, marker, held, paused = false) {
     const cfg = !!(item && typeof item === "object");
     const ident = cfg ? item.key || "" : item;
-    const row = el("div", "q-item" + (cfg ? " q-cfg" : "") + (held ? " q-held" : ""));
+    const row = el("div", "q-item" + (cfg ? " q-cfg" : "") +
+      (held ? " q-held" : "") + (paused ? " q-paused" : ""));
     row.appendChild(el("span", "q-n" + (held ? " q-bang" : ""), marker));
     let text;
     if (cfg) text = this.describeQueuedConfig(item);
@@ -6726,16 +6767,25 @@ class SessionView {
     }
     const t = el("span", "q-t", text);
     t.setAttribute("aria-label", (held ? "held after an interruption · " : "") +
+      (paused ? "paused · " : "") +
       (cfg ? text : item));
     row.appendChild(t);
     return { row, ident, cfg };
   }
 
-  renderQueue(q, held) {
+  renderQueue(q, held, paused) {
     const box = this.queueEl;
     this.queued = q;
     this.held = Array.isArray(held) ? held : (this.held || []);
+    if (Array.isArray(paused)) {
+      this.pausedQueue = [...new Set(paused.filter(index =>
+        Number.isInteger(index) && index >= 0 && index < q.length &&
+        typeof q[index] === "string"))];
+    } else {
+      this.pausedQueue = this.pausedQueue || [];
+    }
     held = this.held;
+    const pausedSet = new Set(this.pausedQueue);
     box.innerHTML = "";
     if (!q.length && !held.length) { box.classList.add("hidden"); this.queueOpen = false; return; }
     box.classList.remove("hidden");
@@ -6767,7 +6817,18 @@ class SessionView {
        - each row is a single line that fades out at whatever width is going. */
     const shown = this.queueOpen ? q : q.slice(0, QUEUE_ROWS);
     shown.forEach((item, i) => {
-      const { row, ident, cfg } = this.queueRow(item, String(i + 1), false);
+      const isPaused = pausedSet.has(i);
+      const { row, ident, cfg } = this.queueRow(item, String(i + 1), false, isPaused);
+      if (!cfg && backendSupportsQueuePause(this.tab.bid)) {
+        const toggle = el("button", "q-pause");
+        toggle.type = "button";
+        toggle.appendChild(queuePauseIcon(isPaused, 11));
+        toggle.setAttribute("aria-label",
+          isPaused ? "Resume this queued message" : "Pause this queued message");
+        toggle.setAttribute("aria-pressed", String(isPaused));
+        toggle.onclick = () => this.setQueuePaused(i, ident, !isPaused);
+        row.appendChild(toggle);
+      }
       const x = el("button", "q-x");
       x.type = "button";
       x.appendChild(xIcon(12));   // even size in an even box: no half-pixel centring
@@ -6791,6 +6852,10 @@ class SessionView {
   unqueue(index, text) {
     if (!this.ws || this.ws.readyState !== 1) { toast("not connected", "error"); return; }
     this.ws.send(JSON.stringify({ type: "unqueue", index, text }));
+  }
+  setQueuePaused(index, text, paused) {
+    if (!this.ws || this.ws.readyState !== 1) { toast("not connected", "error"); return; }
+    this.ws.send(JSON.stringify({ type: "set_queue_paused", index, text, paused }));
   }
   heldOp(type, index, text) {
     if (!this.ws || this.ws.readyState !== 1) { toast("not connected", "error"); return; }

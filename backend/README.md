@@ -184,7 +184,14 @@ version moved.
 
 Prompts queued behind a running turn are written through to the node's database
 on every change, so they belong to the user rather than to the process. A
-shutdown or engine kill parks whatever had not started as *held* items, and a
+console connected to a node advertising `queue-pause` may pause any ordinary
+queued prompt. The node publishes its indexes in the additive `paused` array;
+when a paused prompt reaches the front, it and everything ordered behind it
+wait until the console sends `set_queue_paused` to resume it. Pending
+model/effort changes are not separately pausable because they belong to the
+prompt after them.
+
+A shutdown or engine kill parks whatever had not started as *held* items, and a
 restart restores them as held: visible in the console with a warning mark, run
 again only on an explicit re-send, never automatically - the transcript they
 were queued behind may have ended mid-thought. The session snapshot and queue

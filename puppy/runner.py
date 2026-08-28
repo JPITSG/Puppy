@@ -206,6 +206,10 @@ class SessionHub:
         self.id = session_id
         self.watchers = set()
         self.queue = []
+        # Indexes in ``queue`` whose prompt must not start automatically.  The
+        # queue itself deliberately stays in its old string/config wire shape;
+        # an additive parallel list lets older consoles keep rendering it.
+        self.paused_queue = set()
         # Work that survived a restart or an engine kill. Held items never run
         # on their own: the world may have moved since they were written, so
         # each one waits for an explicit re-send (or discard) in the console.
@@ -279,6 +283,7 @@ class SessionHub:
             "active_since": self.active_since if self.status == "running" else None,
             "server_time": time.time(),
             "queued": self._queue_wire(),
+            "paused": self._paused_wire(),
             "held": self._held_wire(),
             "pending_approval": self.pending_approval,
             "uploads": uploads.settings_payload(),
@@ -309,6 +314,26 @@ class SessionHub:
                 out.append(item)
         return out
 
+    def _paused_wire(self) -> list:
+        """Queue indexes paused by the user, scrubbed against the live queue.
+
+        Only prompt strings can be paused. Pending configuration changes keep
+        their ordered relationship to those prompts and held work already has
+        its own explicit resend state.
+        """
+        return sorted(index for index in self.paused_queue
+                      if 0 <= index < len(self.queue) and
+                      not _is_queued_config(self.queue[index]))
+
+    def _pop_queue(self, index: int):
+        """Pop one queue entry and keep every paused index aligned with it."""
+        item = self.queue.pop(index)
+        self.paused_queue = {
+            paused - 1 if paused > index else paused
+            for paused in self.paused_queue if paused != index
+        }
+        return item
+
     def _persist_queue(self) -> None:
         """Write-through on every mutation: queued work belongs to the user,
         not to this process, so it must survive puppy being restarted or
@@ -317,7 +342,8 @@ class SessionHub:
         try:
             key = "session_queue.{}".format(self.id)
             if self.queue or self.held:
-                db.meta_set(key, {"queue": self.queue, "held": self.held})
+                db.meta_set(key, {"queue": self.queue, "held": self.held,
+                                  "paused": self._paused_wire()})
             else:
                 db.meta_set(key, None)
         except Exception as exc:
@@ -326,7 +352,7 @@ class SessionHub:
     def _broadcast_queue(self) -> None:
         self._persist_queue()
         self.broadcast({"type": "queued", "queued": self._queue_wire(),
-                        "held": self._held_wire()})
+                        "paused": self._paused_wire(), "held": self._held_wire()})
 
     # ---- public ops ----
 
@@ -383,7 +409,7 @@ class SessionHub:
             tail["fields"] = merged
             tail["key"] = _queued_config_key(merged)
         elif tail:
-            self.queue.pop()
+            self._pop_queue(len(self.queue) - 1)
         elif merged:
             self.queue.append({"kind": "config", "fields": merged,
                                "key": _queued_config_key(merged)})
@@ -403,9 +429,37 @@ class SessionHub:
         ident = item.get("key") if _is_queued_config(item) else item
         if ident != text:
             return {"error": "that message already started"}
-        self.queue.pop(index)
-        self._broadcast_queue()
+        self._pop_queue(index)
+        if not self._start_queue_if_ready():
+            self._broadcast_queue()
         return {"ok": True}
+
+    def set_queue_paused(self, index: int, text: str, paused: bool) -> dict:
+        """Pause or resume one still-waiting prompt.
+
+        The text guard makes an index shifted by a finishing turn harmless,
+        just like ``unqueue``. A paused prompt stops the queue at its position:
+        skipping over it could also skip across an ordered model/effort change
+        and run later prose under configuration it was not submitted with.
+        """
+        if not 0 <= index < len(self.queue):
+            return {"error": "that message already started"}
+        item = self.queue[index]
+        if _is_queued_config(item):
+            return {"error": "setting changes cannot be paused"}
+        if item != text:
+            return {"error": "that message already started"}
+        if paused:
+            self.paused_queue.add(index)
+        else:
+            self.paused_queue.discard(index)
+
+        # Resuming the prompt at the front of an otherwise-idle queue should
+        # start it now; requiring another submit would leave it stranded.
+        if not paused and self._start_queue_if_ready():
+            return {"ok": True, "paused": False}
+        self._broadcast_queue()
+        return {"ok": True, "paused": paused}
 
     def _held_matches(self, index: int, ident: str):
         """The item at index, but only if ident still names it - the same
@@ -448,6 +502,7 @@ class SessionHub:
         count = len(self.queue)
         if count:
             self.queue.clear()
+            self.paused_queue.clear()
             self._broadcast_queue()
         return count
 
@@ -462,6 +517,17 @@ class SessionHub:
         # first persisted event have a chance to yield the event loop.
         broadcast_sessions()
 
+    def _start_queue_if_ready(self) -> bool:
+        """Start the front prompt when an idle queue mutation unblocks it."""
+        if self.status == "running":
+            return False
+        next_turn = self._take_next_turn()
+        if next_turn is None:
+            return False
+        self._broadcast_queue()
+        self._start_turn(next_turn)
+        return True
+
     def _take_next_turn(self):
         """Advance within an activity block, or close it when the queue is
         empty. Pending model/effort changes at the front apply now - everything
@@ -474,14 +540,23 @@ class SessionHub:
             self.status = "idle"
             self.active_since = None
             return None
+        # Look through leading configuration entries before mutating anything.
+        # If their following prompt is paused, both the prompt and its settings
+        # must remain in place until the user resumes it.
+        next_prompt = next((index for index, item in enumerate(self.queue)
+                            if not _is_queued_config(item)), None)
+        if next_prompt is not None and next_prompt in self.paused_queue:
+            self.status = "idle"
+            self.active_since = None
+            return None
         applied = False
         while self.queue and _is_queued_config(self.queue[0]):
-            self._apply_queued_config(self.queue.pop(0).get("fields") or {})
+            self._apply_queued_config(self._pop_queue(0).get("fields") or {})
             applied = True
         if applied:
             self._broadcast_queue()
         if self.queue:
-            item = self.queue.pop(0)
+            item = self._pop_queue(0)
             self._persist_queue()   # consumed: a crash must not run it twice
             return item
         self.status = "idle"
@@ -570,6 +645,10 @@ class SessionHub:
             # ended mid-thought.
             self.held.extend(self.queue)
             self.queue.clear()
+            # Held work is already stopped and has resend/discard controls of
+            # its own. Carrying pause into that state would be redundant and
+            # would make a later explicit resend surprisingly stay blocked.
+            self.paused_queue.clear()
             self._broadcast_queue()
         proc = self.proc
         if proc is None or proc.returncode is not None:

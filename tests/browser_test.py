@@ -1018,6 +1018,26 @@ function clearTimeout() { timer=null; }
     assert result["toasts"] == [], result
 
 
+def check_queue_pause_ui(ui_source: str, css_source: str) -> None:
+    """Pause/play belongs only to ordinary queued prompts and stays compact."""
+    start = ui_source.index("\n  renderQueue(q, held, paused)")
+    end = ui_source.index("\n  unqueue(index, text)", start)
+    render = ui_source[start:end]
+    held_start = render.index("held.forEach")
+    queued_start = render.index("shown.forEach")
+    assert "q-pause" not in render[held_start:queued_start]
+    assert 'if (!cfg && backendSupportsQueuePause(this.tab.bid))' in render
+    assert render.index('el("button", "q-pause")') < render.index('el("button", "q-x")', queued_start)
+    assert 'queuePauseIcon(isPaused, 11)' in render
+    assert 'isPaused ? "Resume this queued message" : "Pause this queued message"' in render
+    assert 'this.setQueuePaused(i, ident, !isPaused)' in render
+    assert 'type: "set_queue_paused", index, text, paused' in ui_source
+    assert 'backend.capabilities.includes("queue-pause")' in ui_source
+    assert '.queue-strip .q-pause{' in css_source
+    assert 'width:16px;height:16px;' in css_source
+    assert '.queue-strip .q-item.q-paused .q-t{opacity:.58}' in css_source
+
+
 def check_double_activation_survives_rerender(ui_source: str) -> None:
     """A backend name rebuilt between clicks must still complete the gesture."""
     def extract_function(marker: str) -> str:
@@ -1632,6 +1652,7 @@ async def main() -> None:
             check_drawer_drag(ui_source)
             check_desktop_side_drag(ui_source)
             check_user_message_copy(ui_source)
+            check_queue_pause_ui(ui_source, css_source)
             check_double_activation_survives_rerender(ui_source)
             check_browser_disable_closes_scoped_tabs(ui_source)
             check_quota_math(ui_source)

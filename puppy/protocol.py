@@ -42,12 +42,17 @@ UPLOAD_PREVIEW_CAPABILITY = "upload-preview"
 # Full WebUI runtimes do not advertise this: only the separately managed
 # backend process owns this lifecycle signal.
 SHUTDOWN_NOTICE_CAPABILITY = "shutdown-notice"
+# Session snapshots/broadcasts expose paused queue indexes and the session
+# socket accepts ``set_queue_paused``. Older controllers ignore the field;
+# newer controllers hide the control until a remote node advertises support.
+QUEUE_PAUSE_CAPABILITY = "queue-pause"
 
 BASE_CAPABILITIES = (
     "sessions",
     "session-stream",
     "approvals",
     "message-queue",
+    QUEUE_PAUSE_CAPABILITY,
     # model/effort changes made while work is pending hold their place in the
     # message queue ({kind:"config"} items) instead of applying immediately
     "queued-config",
