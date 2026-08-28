@@ -55,7 +55,11 @@ VERSION_TIMEOUT = 12.0
 START_TIMEOUT = 20.0
 CALL_TIMEOUT = 10.0
 IDLE_STOP_SECONDS = 900        # no viewers this long -> browser exits
-VIEWPORT_W, VIEWPORT_H = 1280, 800
+# Chromium needs a usable size before the first viewer arrives. Once one does,
+# its visible pane replaces this default with a bounded, same-aspect viewport.
+DEFAULT_VIEWPORT_W, DEFAULT_VIEWPORT_H = 1280, 800
+MIN_VIEWPORT_W, MIN_VIEWPORT_H = 160, 120
+MAX_VIEWPORT_W, MAX_VIEWPORT_H = 3840, 2160
 SCREENCAST_QUALITY = 70
 MAX_CDP_BUFFER = 32 * 1024 * 1024
 MAX_TEXT_BACKLOG = 64          # queued small messages per viewer
@@ -363,7 +367,7 @@ def launch_argv(binary: str, profile_dir: str, as_root: bool) -> list:
         "--disable-background-networking",
         "--disable-component-update",
         "--mute-audio",
-        "--window-size={},{}".format(VIEWPORT_W, VIEWPORT_H),
+        "--window-size={},{}".format(DEFAULT_VIEWPORT_W, DEFAULT_VIEWPORT_H),
         "--user-data-dir=" + profile_dir,
     ]
     if as_root:
@@ -526,6 +530,34 @@ def _normalize_url(text: str) -> str:
     return ("http://" if plain else "https://") + value
 
 
+def _normalize_viewport(width, height):
+    """Validate a viewer's CSS-pixel pane size and bound rendering cost.
+
+    Transient hidden/zero-sized panes are ignored rather than collapsing the
+    page. Oversized panes are reduced as a pair so their aspect ratio (and the
+    input mapping that depends on it) remains intact.
+    """
+    if isinstance(width, bool) or isinstance(height, bool):
+        return None
+    try:
+        width = float(width)
+        height = float(height)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(width) or not math.isfinite(height):
+        return None
+    width = int(round(width))
+    height = int(round(height))
+    if width < MIN_VIEWPORT_W or height < MIN_VIEWPORT_H:
+        return None
+    scale = min(1.0, MAX_VIEWPORT_W / width, MAX_VIEWPORT_H / height)
+    width = int(round(width * scale))
+    height = int(round(height * scale))
+    if width < MIN_VIEWPORT_W or height < MIN_VIEWPORT_H:
+        return None
+    return {"width": width, "height": height}
+
+
 class Manager:
     """One isolated managed browser instance and its viewers."""
 
@@ -541,6 +573,7 @@ class Manager:
             pass
         self.lock = asyncio.Lock()
         self.attach_lock = asyncio.Lock()
+        self.viewport_lock = asyncio.Lock()
         self.agent_lock = asyncio.Lock()
         self.closed = False
         self.running = False
@@ -556,7 +589,8 @@ class Manager:
         self.page_session = ""
         self.screencasting = False
         self.started_at = 0.0
-        self.frame_meta = {"width": VIEWPORT_W, "height": VIEWPORT_H}
+        self.viewport = {"width": DEFAULT_VIEWPORT_W, "height": DEFAULT_VIEWPORT_H}
+        self.frame_meta = dict(self.viewport)
         self.nav = {"url": "about:blank", "title": "", "can_back": False,
                     "can_forward": False}
         self.agent_refs = {}
@@ -650,7 +684,8 @@ class Manager:
             self.page_target = ""
             self.page_session = ""
             self.screencasting = False
-            self.frame_meta = {"width": VIEWPORT_W, "height": VIEWPORT_H}
+            self.viewport = {"width": DEFAULT_VIEWPORT_W, "height": DEFAULT_VIEWPORT_H}
+            self.frame_meta = dict(self.viewport)
             self.nav = {"url": "about:blank", "title": "", "can_back": False,
                         "can_forward": False}
             self.agent_refs = {}
@@ -906,6 +941,11 @@ class Manager:
             await self.call("Page.enable", session=session)
             await self.call("DOM.enable", session=session)
             try:
+                async with self.viewport_lock:
+                    await self._apply_viewport(session, self.viewport)
+            except BrowserError:
+                pass   # keep streaming even if an unusual Chromium rejects emulation
+            try:
                 await self.apply_color_scheme()
             except BrowserError:
                 pass   # a rendering hint is never worth failing an attach over
@@ -935,6 +975,33 @@ class Manager:
             "features": [{"name": "prefers-color-scheme", "value": color_scheme()}],
         }, session=self.page_session)
 
+    async def _apply_viewport(self, session: str, size: dict) -> None:
+        await self.call("Emulation.setDeviceMetricsOverride", {
+            "width": size["width"], "height": size["height"],
+            "deviceScaleFactor": 1, "mobile": False,
+            "screenWidth": size["width"], "screenHeight": size["height"],
+        }, session=session)
+
+    async def resize_viewport(self, size: dict) -> None:
+        """Make the page's real CSS viewport follow the latest viewer pane."""
+        async with self.viewport_lock:
+            if size == self.viewport:
+                return
+            session = self.page_session
+            if not session or not self.running:
+                return
+            try:
+                await self._apply_viewport(session, size)
+            except BrowserError as exc:
+                log.debug("Browser %s viewport resize skipped: %s", self.browser_id, exc)
+                return
+            self.viewport = dict(size)
+            # A damage frame normally follows the emulation change. Update the
+            # mapping immediately too, so input never remains on the old size.
+            self.frame_meta = dict(size)
+        self._broadcast_json({"type": "frame_meta", **self.frame_meta})
+        await self._send_fresh_frame()
+
     async def _show_start_page(self) -> None:
         """Paint the identifying ready card into the launch tab's blank
         document. Cosmetic only: a failure here never fails a launch."""
@@ -961,7 +1028,7 @@ class Manager:
             return
         await self.call("Page.startScreencast", {
             "format": "jpeg", "quality": SCREENCAST_QUALITY,
-            "maxWidth": VIEWPORT_W, "maxHeight": VIEWPORT_H,
+            "maxWidth": MAX_VIEWPORT_W, "maxHeight": MAX_VIEWPORT_H,
         }, session=self.page_session)
         self.screencasting = True
 
@@ -1074,14 +1141,18 @@ class Manager:
         elif kind == "reload":
             if self.page_session:
                 self._fire("Page.reload", session=self.page_session)
+        elif kind == "viewport":
+            size = _normalize_viewport(data.get("width"), data.get("height"))
+            if size is not None:
+                await self.resize_viewport(size)
         elif kind == "color_scheme":
             await set_color_scheme(data.get("value"))
 
     def _point(self, data: dict) -> tuple:
         nx = min(1.0, max(0.0, float(data.get("nx") or 0.0)))
         ny = min(1.0, max(0.0, float(data.get("ny") or 0.0)))
-        return (round(nx * self.frame_meta["width"], 2),
-                round(ny * self.frame_meta["height"], 2))
+        return (round(nx * self.viewport["width"], 2),
+                round(ny * self.viewport["height"], 2))
 
     @staticmethod
     def _modifiers(data: dict) -> int:
@@ -1302,7 +1373,7 @@ class Manager:
         lines = [
             "Page: {}".format(self.nav.get("title") or "(untitled)"),
             "URL: {}".format(self.nav.get("url") or "about:blank"),
-            "Viewport: {}x{}".format(self.frame_meta["width"], self.frame_meta["height"]),
+            "Viewport: {}x{}".format(self.viewport["width"], self.viewport["height"]),
             "Accessibility snapshot:",
         ]
         seen = set()
@@ -1383,7 +1454,7 @@ class Manager:
         if include_text:
             payload["text"] = self._agent_page_text(
                 "Captured the {}x{} viewport.".format(
-                    self.frame_meta["width"], self.frame_meta["height"]))
+                    self.viewport["width"], self.viewport["height"]))
         return payload
 
     async def _agent_navigate(self, params: dict) -> dict:
@@ -1425,8 +1496,8 @@ class Manager:
                     round(sum(float(value) for value in quad[1::2]) / 4, 2))
         if "x" not in params or "y" not in params:
             raise BrowserError("click requires an element ref or both x and y")
-        x = self._bounded_number(params.get("x"), 0, self.frame_meta["width"], "x")
-        y = self._bounded_number(params.get("y"), 0, self.frame_meta["height"], "y")
+        x = self._bounded_number(params.get("x"), 0, self.viewport["width"], "x")
+        y = self._bounded_number(params.get("y"), 0, self.viewport["height"], "y")
         return x, y
 
     async def _agent_click(self, params: dict) -> dict:
@@ -1501,8 +1572,8 @@ class Manager:
         dy = self._bounded_number(params.get("delta_y"), -2000, 2000, "delta_y")
         await self.call("Input.dispatchMouseEvent", {
             "type": "mouseWheel",
-            "x": self.frame_meta["width"] / 2,
-            "y": self.frame_meta["height"] / 2,
+            "x": self.viewport["width"] / 2,
+            "y": self.viewport["height"] / 2,
             "deltaX": dx, "deltaY": dy, "modifiers": 0,
         }, session=self.page_session)
         return {"text": self._agent_page_text(

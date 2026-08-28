@@ -7365,6 +7365,9 @@ class BrowserView {
     this.urlFocused = false;
     this.lastUrl = "";
     this.moveQueued = null;
+    this.lastViewport = "";
+    this.viewportTimer = null;
+    this.resizeObs = null;
     this.root = el("div", "view browser");
     this.root.innerHTML = `
       <div class="br-bar">
@@ -7416,6 +7419,7 @@ class BrowserView {
 
   onShow(focus = true) {
     if (!this.started) { this.started = true; this.start(); }
+    else this.queueViewport();
     if (!focus || this.isDead()) return;
     if (this.typeRow.classList.contains("hidden")) this.stage.focus({ preventScroll: true });
     else this.ime.focus({ preventScroll: true });
@@ -7444,6 +7448,35 @@ class BrowserView {
   sendColorScheme() {
     this.send({ type: "color_scheme", value: currentTheme() });
   }
+  /* Chromium receives CSS pixels, not device pixels: responsive pages should
+     see exactly the room the WebUI gives them without making retina phones
+     stream an unnecessarily huge image. Oversized panes retain their aspect. */
+  viewportSize() {
+    let width = Math.floor(this.stage.clientWidth);
+    let height = Math.floor(this.stage.clientHeight);
+    if (width < 160 || height < 120) return null;
+    const scale = Math.min(1, 3840 / width, 2160 / height);
+    width = Math.round(width * scale);
+    height = Math.round(height * scale);
+    if (width < 160 || height < 120) return null;
+    return { width, height };
+  }
+  sendViewport(force = false) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    const size = this.viewportSize();
+    if (!size) return;
+    const key = `${size.width}x${size.height}`;
+    if (!force && key === this.lastViewport) return;
+    this.ws.send(JSON.stringify({ type: "viewport", ...size }));
+    this.lastViewport = key;
+  }
+  queueViewport() {
+    if (this.viewportTimer !== null) clearTimeout(this.viewportTimer);
+    this.viewportTimer = setTimeout(() => {
+      this.viewportTimer = null;
+      this.sendViewport();
+    }, 80);
+  }
   showTyping(on) {
     this.typeRow.classList.toggle("hidden", !on);
     this.kbdBtn.classList.toggle("on", !!on);
@@ -7466,6 +7499,8 @@ class BrowserView {
   }
 
   start() {
+    this.resizeObs = new ResizeObserver(() => this.queueViewport());
+    this.resizeObs.observe(this.stage);
     const buttons = ["left", "middle", "right"];
     const mouse = (kind, e) => {
       const p = this.point(e.clientX, e.clientY);
@@ -7622,6 +7657,8 @@ class BrowserView {
       }
       noteRemoteSocketReachable(this.tab.bid);
       this.sendColorScheme();
+      this.lastViewport = "";
+      this.sendViewport(true);
     };
     ws.onmessage = ev => {
       if (sequence !== this.connectionSequence || this.ws !== ws) return;
@@ -7741,6 +7778,11 @@ class BrowserView {
   destroy() {
     this.closed = true;
     this.connectionSequence++;
+    if (this.resizeObs) { this.resizeObs.disconnect(); this.resizeObs = null; }
+    if (this.viewportTimer !== null) {
+      clearTimeout(this.viewportTimer);
+      this.viewportTimer = null;
+    }
     if (this.ws) { try { this.ws.close(); } catch (e) {} }
     this.ws = null;
     if (this.frameUrl) { URL.revokeObjectURL(this.frameUrl); this.frameUrl = null; }

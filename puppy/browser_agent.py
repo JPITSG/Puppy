@@ -108,7 +108,7 @@ TOOLS = [
     _tool(
         "click",
         "Click an element from the latest snapshot by ref, or click viewport "
-        "coordinates from a screenshot (1280x800 unless snapshot says otherwise).",
+        "coordinates from a screenshot using its reported viewport size.",
         {
             "ref": {"type": "string", "description": "Element ref such as b3."},
             "x": {"type": "number", "description": "Viewport x coordinate."},

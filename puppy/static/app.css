@@ -1317,8 +1317,8 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .br-url:focus{border-color:var(--acc)}
 .br-url::placeholder{color:var(--txt3)}
 /* The stage owns every gesture: no native scroll, zoom, or context menus.
-   The image keeps its intrinsic aspect, so its box IS the remote viewport
-   and pointer math never has to undo letterboxing. */
+   Its content size drives the real remote viewport. The image keeps that
+   intrinsic aspect, so pointer math never has to undo letterboxing. */
 .br-stage{
   flex:1;min-height:0;margin:2px 8px 8px;position:relative;display:flex;
   align-items:flex-start;justify-content:center;border-radius:var(--r-md);

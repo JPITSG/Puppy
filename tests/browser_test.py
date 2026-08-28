@@ -4,8 +4,9 @@
 A stub "chromium" speaks just enough of the --remote-debugging-pipe CDP
 contract (fds 3/4, NUL-framed JSON) to exercise the probe, the node-owned
 enable gate, isolated named instances, ID retention, sandbox flag selection,
-the screencast/input websocket, viewer input scaling, URL normalization, the
-private per-turn MCP bridge, hidden model guidance, background first-use tab
+the screencast/input websocket, pane-driven viewport sizing and input scaling,
+URL normalization, the private per-turn MCP bridge, hidden model guidance,
+background first-use tab
 events, close-and-replace behavior, and crash reporting. No real browser is
 installed or launched and nothing reaches the network.
 """
@@ -114,6 +115,8 @@ while True:
             record("dom.jsonl", {"method": method, "params": params})
         elif method == "Emulation.setEmulatedMedia":
             record("media.jsonl", {"features": params.get("features")})
+        elif method == "Emulation.setDeviceMetricsOverride":
+            record("viewport.jsonl", params)
         elif method == "Page.getFrameTree":
             result = {"frameTree": {"frame": {"id": "f1", "url": PAGE["url"]}}}
         elif method == "Page.setDocumentContent":
@@ -124,6 +127,7 @@ while True:
             result = {"currentIndex": 1, "entries": [
                 {"id": 1, "url": "about:blank"}, {"id": 2, "url": PAGE["url"]}]}
         elif method == "Page.startScreencast":
+            record("screencast.jsonl", params)
             casting = True
         elif method == "Page.stopScreencast":
             casting = False
@@ -879,6 +883,51 @@ console.log(JSON.stringify({anchored,paused,partialClosed,majorityOpen,
     assert result["nextSideTap"] and result["gestureClickBlocked"], result
 
 
+def check_browser_viewport(ui_source: str) -> None:
+    """Run the real BrowserView sizing methods without constructing its DOM."""
+    start = ui_source.index("class BrowserView {")
+    end = ui_source.index("/* ================= SettingsView", start)
+    browser_view = ui_source[start:end]
+    script = r"""
+const WebSocket={OPEN:1};
+let nextTimer=0,cleared=0;
+const timers=new Map();
+const setTimeout=(fn,delay)=>{const id=++nextTimer;timers.set(id,{fn,delay});return id;};
+const clearTimeout=id=>{if(timers.delete(id))cleared++;};
+%s
+const sent=[];
+const view=Object.create(BrowserView.prototype);
+view.stage={clientWidth:901.9,clientHeight:543.8};
+view.ws={readyState:WebSocket.OPEN,send:value=>sent.push(JSON.parse(value))};
+view.lastViewport="";view.viewportTimer=null;
+view.sendViewport();
+view.sendViewport();
+view.stage.clientWidth=7680;view.stage.clientHeight=4320;
+view.sendViewport();
+view.stage.clientWidth=100;view.stage.clientHeight=100;
+view.sendViewport();
+view.stage.clientWidth=1000;view.stage.clientHeight=600;
+view.queueViewport();
+view.stage.clientWidth=1001;view.stage.clientHeight=601;
+view.queueViewport();
+const [queuedId,queued]=[...timers.entries()][0];
+timers.delete(queuedId);
+queued.fn();
+console.log(JSON.stringify({sent,cleared,timers:timers.size,delay:queued.delay}));
+""" % browser_view
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:700]
+    result = json.loads(proc.stdout)
+    assert result == {
+        "sent": [
+            {"type": "viewport", "width": 901, "height": 543},
+            {"type": "viewport", "width": 3840, "height": 2160},
+            {"type": "viewport", "width": 1001, "height": 601},
+        ],
+        "cleared": 1, "timers": 0, "delay": 80,
+    }, result
+
+
 def check_desktop_side_drag(ui_source: str) -> None:
     """Run the real desktop sidebar drag against a pointer-event DOM.
 
@@ -1411,6 +1460,13 @@ async def main() -> None:
             # and the non-root argv never carries the flag
             assert "--no-sandbox" not in browser.launch_argv("/x", "/p", as_root=False)
             assert "--no-sandbox" in browser.launch_argv("/x", "/p", as_root=True)
+            assert "--window-size=1280,800" in \
+                browser.launch_argv("/x", "/p", as_root=False)
+            assert browser._normalize_viewport(900, 540) == {"width": 900, "height": 540}
+            assert browser._normalize_viewport(159, 540) is None
+            assert browser._normalize_viewport(float("nan"), 540) is None
+            assert browser._normalize_viewport(7680, 4320) == \
+                {"width": 3840, "height": 2160}
 
             catalog = json.loads(Path(browser._catalog_path()).read_text())
             assert set(created_ids) <= set(catalog["ids"]), catalog
@@ -1459,7 +1515,26 @@ async def main() -> None:
             meta = next(t for t in texts if t.get("type") == "frame_meta")
             assert meta["width"] == 1280 and meta["height"] == 800, meta
 
-            # normalized input coordinates scale by the streamed viewport
+            # The real Chromium viewport follows the viewer pane, its stream
+            # ceiling permits that negotiated size, and normalized input uses
+            # the new CSS-pixel dimensions rather than the launch default.
+            await ws.send_json({"type": "viewport", "width": 900, "height": 540})
+            viewports = await wait_for(
+                lambda: read_lines("viewport.jsonl")
+                if read_lines("viewport.jsonl") and
+                read_lines("viewport.jsonl")[-1].get("width") == 900 else None,
+                message="dynamic browser viewport")
+            assert viewports[-1]["height"] == 540, viewports[-1]
+            assert viewports[-1]["deviceScaleFactor"] == 1
+            assert viewports[-1]["mobile"] is False
+            await wait_for(
+                lambda: next((t for t in texts if t.get("type") == "frame_meta" and
+                              t.get("width") == 900 and t.get("height") == 540), None),
+                message="resized frame metadata")
+            casts = read_lines("screencast.jsonl")
+            assert casts and casts[0]["maxWidth"] == 3840 and \
+                casts[0]["maxHeight"] == 2160, casts
+
             await ws.send_json({"type": "mouse", "kind": "down", "nx": 0.5, "ny": 0.25,
                                 "button": "left", "clickCount": 1})
             await ws.send_json({"type": "mouse", "kind": "up", "nx": 0.5, "ny": 0.25,
@@ -1470,7 +1545,7 @@ async def main() -> None:
                 lambda: read_lines("input.jsonl") if len(read_lines("input.jsonl")) >= 4
                 else None, message="forwarded input")
             press = next(i for i in inputs if i["params"].get("type") == "mousePressed")
-            assert press["params"]["x"] == 640 and press["params"]["y"] == 200, press
+            assert press["params"]["x"] == 450 and press["params"]["y"] == 135, press
             key = next(i for i in inputs if i["method"] == "Input.dispatchKeyEvent")
             assert key["params"]["text"] == "a", key
             insert = next(i for i in inputs if i["method"] == "Input.insertText")
@@ -1612,6 +1687,7 @@ async def main() -> None:
                 tools = {tool["name"]: tool for tool in listed["result"]["tools"]}
                 assert {"new_browser", "snapshot", "screenshot", "navigate",
                         "click", "type"} <= set(tools)
+                assert "reported viewport size" in tools["click"]["description"]
                 assert "browser_id" in tools["snapshot"]["inputSchema"]["properties"]
                 assert "browser_id" not in tools["new_browser"]["inputSchema"]["properties"]
 
@@ -1749,6 +1825,7 @@ async def main() -> None:
             check_thinking_icons(ui_source)
             check_backend_editor(ui_source, css_source)
             check_drawer_drag(ui_source)
+            check_browser_viewport(ui_source)
             check_desktop_side_drag(ui_source)
             check_user_message_copy(ui_source)
             check_queue_pause_ui(ui_source, css_source)
@@ -1848,6 +1925,17 @@ async def main() -> None:
             # the owning chat advertises its live browsers as clickable bubbles
             assert "syncBrowserChips()" in ui_source
             assert 'type: "color_scheme", value: currentTheme()' in ui_source
+            # The managed page's CSS viewport follows the visible browser
+            # stage. Hidden/transient sizes are ignored, resize bursts are
+            # collapsed, and teardown disconnects the observer.
+            assert "this.stage.clientWidth" in ui_source
+            assert "this.stage.clientHeight" in ui_source
+            assert 'this.resizeObs = new ResizeObserver(() => this.queueViewport());' \
+                in ui_source
+            assert 'this.ws.send(JSON.stringify({ type: "viewport", ...size }));' \
+                in ui_source
+            assert "this.sendViewport(true);" in ui_source
+            assert "if (this.resizeObs) { this.resizeObs.disconnect();" in ui_source
             # the settings switch is seeded before the availability probe, so it
             # cannot render off and then visibly flip on
             assert "input.checked = browserEnabledFor(bid);" in ui_source
