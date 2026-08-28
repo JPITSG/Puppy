@@ -8259,23 +8259,26 @@ class SettingsView {
       dot.setAttribute("aria-label", detail ? `${statusLabel}: ${detail}` : statusLabel);
       body.innerHTML = "";
       if (message || engines === null) {
-        const checkingBackend = status === "pending" && engines === null && !!bid;
+        const loading = status !== "bad";
+        const checkingBackend = loading && status === "pending" && engines === null && !!bid;
         const noteText = message || (checkingBackend ? "Checking backend…" : "Checking engines…");
         const note = el("div", "engine-node-message" +
           (status === "bad" ? " engine-node-unavailable" : "") +
-          (checkingBackend ? " engine-node-checking" : ""));
-        if (checkingBackend) {
-          const icon = el("span", "engine-node-checking-icon");
+          (loading ? " engine-node-loading" : ""));
+        if (loading) {
+          const icon = el("span", "engine-node-loading-icon");
           icon.appendChild(refreshIcon(10));
           note.appendChild(icon);
-          note.appendChild(el("span", "engine-node-checking-text", noteText));
+          note.appendChild(el("span", "engine-node-loading-text", noteText));
         } else {
           note.textContent = noteText;
         }
         note.setAttribute("aria-label", detail || note.textContent);
         body.appendChild(note);
       } else if (!engines.length) {
-        body.appendChild(el("div", "engine-node-message", "No engines reported"));
+        const note = el("div", "engine-node-message engine-node-empty", "No engines reported");
+        note.setAttribute("aria-label", note.textContent);
+        body.appendChild(note);
       } else {
         engines.forEach(e2 => body.appendChild(this.engineRow(bid, name, e2)));
         /* Silence is only trustworthy while the check itself works: say so

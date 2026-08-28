@@ -675,17 +675,23 @@ console.log(JSON.stringify({before,after,connected}));
     assert "const group = this.engineGroup(b.name, b, b.id);" in ui_source
     assert "locationEl = backendLocationNode(value);" in ui_source
     assert '(status === "bad" ? " engine-node-unavailable" : "")' in ui_source
-    assert 'const checkingBackend = status === "pending" && engines === null && !!bid;' in ui_source
+    assert 'const loading = status !== "bad";' in ui_source
+    assert ('const checkingBackend = loading && status === "pending" && ' +
+            'engines === null && !!bid;') in ui_source
     assert 'checkingBackend ? "Checking backend…" : "Checking engines…"' in ui_source
+    assert '(loading ? " engine-node-loading" : "")' in ui_source
+    assert '"engine-node-message engine-node-empty", "No engines reported"' in ui_source
     assert "icon.appendChild(refreshIcon(10));" in ui_source
     assert ".engine-node-meta .be-url{" in css_source
     assert (".engine-node-message.engine-node-unavailable," +
-            ".engine-node-message.engine-node-checking{") in css_source
+            ".engine-node-message.engine-node-loading,") in css_source
+    assert ".engine-node-message.engine-node-empty{" in css_source
     assert "display:inline-grid;grid-template-columns:6px auto" in css_source
     assert "margin:5px 0 3px;padding:5px 0;" in css_source
     assert "font-family:var(--sans);font-size:11.5px;font-weight:400;" in css_source
-    assert ".engine-node-checking-icon svg{display:block;flex:0 0 auto;animation:spin" in css_source
-    assert ".engine-node-message.engine-node-unavailable::before{justify-self:center}" in css_source
+    assert ".engine-node-loading-icon svg{display:block;flex:0 0 auto;animation:spin" in css_source
+    assert (".engine-node-message.engine-node-unavailable::before," +
+            "\n.engine-node-message.engine-node-empty::before{justify-self:center}") in css_source
     assert "--alert-triangle:url(" in css_source
     assert ".engine-node-message.engine-node-stale::before{" in css_source
     assert 'content:"";display:block;align-self:center;' in css_source
