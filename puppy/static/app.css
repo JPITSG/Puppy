@@ -266,6 +266,7 @@ a{color:var(--acc2)}
   -webkit-mask:url("/static/vendor/opencode.svg") center/contain no-repeat;
           mask:url("/static/vendor/opencode.svg") center/contain no-repeat;
 }
+.si-row.sub .prov-opencode{color:var(--txt3)}
 @media (hover:hover){.sess-item:hover{background:rgba(255,255,255,.045)}}
 .sess-item:active{background:var(--hov)}
 .sess-item.active{background:var(--acc-dim);border-color:rgba(90,162,245,.25)}

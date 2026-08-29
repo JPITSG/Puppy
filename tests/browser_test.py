@@ -1574,6 +1574,7 @@ def check_session_provider_marks(css_source: str) -> None:
     """Detailed compact marks grow without changing the session-row layout slot."""
     assert '.si-row.sub .prov-anthropic,.si-row.sub .prov-openai{' in css_source
     assert "width:13px;height:13px;margin:-1px" in css_source
+    assert ".si-row.sub .prov-opencode{color:var(--txt3)}" in css_source
 
 
 def check_double_activation_survives_rerender(ui_source: str) -> None:
