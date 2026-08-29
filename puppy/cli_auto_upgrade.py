@@ -41,7 +41,6 @@ log = logging.getLogger("puppy.cli_auto_upgrade")
 CYCLE_SECONDS = 60.0
 # How long after a scheduled time a run may still begin.
 WINDOW_SECONDS = 2 * 60 * 60
-MODES = ("now", "at")
 AT_RE = re.compile(r"^([01][0-9]|2[0-3]):([0-5][0-9])$")
 LEDGER_PREFIX = "engine_upgrade_attempt."
 
@@ -51,21 +50,8 @@ _wake: Optional[asyncio.Event] = None
 
 # ---- settings ----
 
-def normalize(value) -> dict:
-    """Coerce any stored or imported shape into a usable setting."""
-    if not isinstance(value, dict):
-        value = {}
-    mode = str(value.get("mode") or "now").strip().lower()
-    at = str(value.get("at") or "03:30").strip()
-    return {
-        "enabled": bool(value.get("enabled")),
-        "mode": mode if mode in MODES else "now",
-        "at": at if AT_RE.match(at) else "03:30",
-    }
-
-
 def settings() -> dict:
-    return normalize(config.get("engines.auto_upgrade"))
+    return config.normalize_engine_auto_upgrade(config.get("engines.auto_upgrade"))
 
 
 def set_settings(value) -> dict:
@@ -131,7 +117,8 @@ def _window_open(now: float, at: str) -> bool:
 
 def due_now(config_value: dict = None, now: float = None) -> bool:
     """Is the clock permitting a run right now?"""
-    cfg = normalize(config_value) if config_value is not None else settings()
+    cfg = config.normalize_engine_auto_upgrade(config_value) \
+        if config_value is not None else settings()
     if not cfg["enabled"]:
         return False
     if cfg["mode"] == "now":

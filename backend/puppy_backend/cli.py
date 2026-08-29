@@ -165,8 +165,8 @@ def _configure(args, parser: argparse.ArgumentParser):
     elif args.tls_mode is not None:
         config.set_value("backend.tls_mode", args.tls_mode)
     elif not existing_config and args.command != "self-test":
-        # New headless installations start secure. Existing pre-TLS configs
-        # merge the disabled default so an upgrade never changes their scheme.
+        # Fresh headless installations start secure. A configured node keeps
+        # the explicit transport mode already present in its current config.
         config.set_value("backend.tls_mode", "auto")
     return config
 

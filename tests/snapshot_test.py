@@ -200,19 +200,38 @@ async def main() -> None:
             lambda: snapshots._validate_database(invalid_draft_db), "invalid session draft")
         invalid_draft_db.unlink()
 
-        legacy_draft_db = TEST_ROOT / "legacy-without-drafts.db"
-        db.backup_to(str(legacy_draft_db))
-        legacy_connection = sqlite3.connect(str(legacy_draft_db))
-        legacy_connection.execute("DROP TABLE session_drafts")
-        legacy_connection.commit()
-        legacy_connection.close()
-        assert snapshots._validate_database(legacy_draft_db) == 2
-        legacy_draft_db.unlink()
+        incomplete_draft_db = TEST_ROOT / "missing-drafts.db"
+        db.backup_to(str(incomplete_draft_db))
+        incomplete_connection = sqlite3.connect(str(incomplete_draft_db))
+        incomplete_connection.execute("DROP TABLE session_drafts")
+        incomplete_connection.commit()
+        incomplete_connection.close()
+        expect_snapshot_error(
+            lambda: snapshots._validate_database(incomplete_draft_db),
+            "schema is not current")
+        incomplete_draft_db.unlink()
+        tab_id = "s:0:{}".format(scratch_id)
+        pane_id = "pane:snapshot"
         ui = {
             "puppy.theme": "light",
-            "puppy.tabs": json.dumps({"active": "s:0:{}".format(scratch_id)}),
-            "puppy.draft.s:0:{}".format(scratch_id): "unfinished prompt",
+            "puppy.tabs": json.dumps({
+                "version": 2,
+                "tabs": [{"id": tab_id, "type": "session", "bid": 0,
+                          "sid": scratch_id, "ended": False}],
+                "active": tab_id,
+                "activeGroup": pane_id,
+                "layout": {"kind": "pane", "id": pane_id,
+                           "tabs": [tab_id], "active": tab_id},
+            }, separators=(",", ":")),
+            "puppy.draft.s:0:{}".format(scratch_id): json.dumps({
+                "_puppy_draft": 1, "text": "unfinished prompt",
+                "base_revision": 1, "submitted": False,
+            }, separators=(",", ":")),
         }
+        expect_snapshot_error(
+            lambda: snapshots.validate_ui_state({
+                "puppy.tabs": json.dumps({"active": tab_id})}),
+            "not current")
 
         listener_handoff.create(
             {"puppy_runtime_id": "pre-snapshot-runtime"}, "snapshot-user",
@@ -264,22 +283,28 @@ async def main() -> None:
             "Keep answers concise.\nPreserve operator terminology."
         assert config.get("system_prompt.browser") == \
             "Use the shared browser before standalone automation."
-        older_config = config.export_data()
-        older_config.pop("system_prompt", None)
-        normalized_older = config.normalize_import(older_config)
-        assert normalized_older["system_prompt"] == {
-            "custom": "", "browser": config.DEFAULT_BROWSER_SYSTEM_PROMPT}
-        assert "opencode" not in normalized_older["engines"]
-        older_cwd_config = config.export_data()
-        older_cwd_config["sessions"].pop("default_cwd", None)
-        normalized_older_cwd = config.normalize_import(older_cwd_config)
-        assert normalized_older_cwd["sessions"]["default_cwd"] == \
-            config.DEFAULTS["sessions"]["default_cwd"]
-        legacy_selection = config.export_data()
-        legacy_selection["engines"]["opencode"] = {
+        missing_prompts = config.export_data()
+        missing_prompts.pop("system_prompt", None)
+        missing_cwd = config.export_data()
+        missing_cwd["sessions"].pop("default_cwd", None)
+        unknown_selection = config.export_data()
+        unknown_selection["engines"]["opencode"] = {
             "models": ["provider/model-a", "second/model-b"]}
-        normalized_legacy = config.normalize_import(legacy_selection)
-        assert "opencode" not in normalized_legacy["engines"]
+        for invalid in (missing_prompts, missing_cwd, unknown_selection):
+            try:
+                config.normalize_import(invalid)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("outdated config shape was accepted")
+        noncanonical = config.export_data()
+        noncanonical["web"]["port"] = float(noncanonical["web"]["port"])
+        try:
+            config.normalize_import(noncanonical)
+        except ValueError as exc:
+            assert "canonical" in str(exc), str(exc)
+        else:
+            raise AssertionError("noncanonical config values were accepted")
         assert config.get("engines.auto_upgrade") == \
             {"enabled": True, "mode": "at", "at": "04:15"}
         # an unattended upgrade schedule must survive import validation intact
@@ -400,6 +425,18 @@ async def main() -> None:
         tamper_root = TEST_ROOT / "tamper"
         with tarfile.open(str(archive_path), "r:gz") as archive:
             archive.extractall(str(tamper_root))  # trusted archive generated above
+        tamper_stage = tamper_root / snapshots.ARCHIVE_ROOT
+        manifest_path = tamper_stage / "manifest.json"
+        original_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        unknown_manifest = dict(original_manifest, obsolete_field=True)
+        manifest_path.write_text(json.dumps(unknown_manifest), encoding="utf-8")
+        noncurrent_manifest = TEST_ROOT / "noncurrent-manifest.tar.gz"
+        with tarfile.open(str(noncurrent_manifest), "w:gz") as archive:
+            archive.add(str(tamper_stage), arcname=snapshots.ARCHIVE_ROOT)
+        expect_snapshot_error(
+            lambda: snapshots.stage_import(str(noncurrent_manifest)),
+            "unsupported Puppy snapshot format")
+        manifest_path.write_text(json.dumps(original_manifest), encoding="utf-8")
         (tamper_root / snapshots.ARCHIVE_ROOT / "ui.json").write_text(
             '{"puppy.theme":"tampered"}', encoding="utf-8")
         tampered = TEST_ROOT / "tampered.tar.gz"

@@ -24,13 +24,8 @@ _lock_loop = None
 
 
 def minutes() -> int:
-    try:
-        return config.normalize_usage_refresh_minutes(
-            config.get("engines.usage_refresh_minutes",
-                       config.DEFAULT_USAGE_REFRESH_MINUTES))
-    except ValueError:
-        # Invalid hand-edited config should not cause an unbounded request loop.
-        return config.DEFAULT_USAGE_REFRESH_MINUTES
+    return config.normalize_usage_refresh_minutes(
+        config.get("engines.usage_refresh_minutes"))
 
 
 def payload() -> dict:

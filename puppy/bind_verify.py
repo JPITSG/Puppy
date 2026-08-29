@@ -59,8 +59,7 @@ def normalize_bind_port(value) -> int:
     elif isinstance(value, int):
         port = value
     elif isinstance(value, float) and math.isfinite(value) and value == int(value):
-        # Keep compatibility with hand-written config.json values and imported
-        # numeric settings that represent a whole port as 10888.0.
+        # JSON/API numeric inputs may represent a whole port as 10888.0.
         port = int(value)
     else:
         raise BindVerificationError(

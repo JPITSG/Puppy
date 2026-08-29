@@ -75,12 +75,9 @@ def session_payload(session):
     if session is None:
         return None
     out = dict(session)
-    out["workspace_kind"] = out.get("workspace_kind") or workspaces.KIND_DIRECTORY
     out["workspace_missing"] = workspaces.is_temporary(out) and not workspaces.is_available(out)
-    out["used_config"] = parse_used_config(out.get("used_config"))
-    # a real boolean on the wire; absent on a node too old to know the column,
-    # where the console reads the omission as "shown"
-    out["show_meta"] = out.get("show_meta", 1) != 0
+    out["used_config"] = parse_used_config(out["used_config"])
+    out["show_meta"] = out["show_meta"] != 0
     return out
 
 
@@ -106,12 +103,12 @@ def sessions_payload() -> dict:
             "updated_at": s["updated_at"], "model": s["model"], "last_model": s["last_model"],
             "effort": s["effort"], "color": s["color"], "permission_mode": s["permission_mode"],
             "has_native": bool(s["native_session_id"]),
-            "workspace_kind": s.get("workspace_kind") or workspaces.KIND_DIRECTORY,
+            "workspace_kind": s["workspace_kind"],
             "workspace_missing": workspaces.is_temporary(s) and not workspaces.is_available(s),
             # the sidebar menu is the way back once the head is hidden, so the
             # list has to carry this too - reading it only from the single
             # session payload left that menu permanently showing "on"
-            "show_meta": s.get("show_meta", 1) != 0,
+            "show_meta": s["show_meta"] != 0,
         })
     return {"type": "sessions", "server_time": now, "sessions": sessions}
 

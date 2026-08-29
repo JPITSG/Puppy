@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import random
 import sqlite3
 import threading
 import time
@@ -34,24 +33,24 @@ SESSION_COLORS = ["#e0784f", "#4dd0c4", "#9d7bff", "#4dc6ff", "#22e5a4",
                   "#4a4fd8", "#b56cf0", "#e56ce0", "#d94f6e", "#b07d2e"]
 
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS meta (
+CREATE TABLE meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS users (
+CREATE TABLE users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT NOT NULL UNIQUE,
     pwhash TEXT NOT NULL,
     created_at REAL NOT NULL
 );
-CREATE TABLE IF NOT EXISTS web_sessions (
+CREATE TABLE web_sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     token_hash TEXT NOT NULL UNIQUE,
     username TEXT NOT NULL,
     created_at REAL NOT NULL,
     expires_at REAL NOT NULL
 );
-CREATE TABLE IF NOT EXISTS backends (
+CREATE TABLE backends (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     url TEXT NOT NULL,
@@ -65,7 +64,7 @@ CREATE TABLE IF NOT EXISTS backends (
     auto_upgrade INTEGER NOT NULL DEFAULT 0,
     created_at REAL NOT NULL
 );
-CREATE TABLE IF NOT EXISTS sessions (
+CREATE TABLE sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL DEFAULT '',
     engine TEXT NOT NULL,
@@ -87,7 +86,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
-CREATE TABLE IF NOT EXISTS events (
+CREATE TABLE events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id INTEGER NOT NULL,
     seq INTEGER NOT NULL,
@@ -95,15 +94,15 @@ CREATE TABLE IF NOT EXISTS events (
     payload TEXT NOT NULL,
     created_at REAL NOT NULL
 );
-CREATE TABLE IF NOT EXISTS session_drafts (
+CREATE TABLE session_drafts (
     session_id INTEGER PRIMARY KEY,
     text TEXT NOT NULL DEFAULT '',
     revision INTEGER NOT NULL DEFAULT 0,
     updated_at REAL NOT NULL,
     FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
-CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, seq);
-CREATE INDEX IF NOT EXISTS idx_websessions_exp ON web_sessions(expires_at);
+CREATE INDEX idx_events_session ON events(session_id, seq);
+CREATE INDEX idx_websessions_exp ON web_sessions(expires_at);
 """
 
 
@@ -115,60 +114,81 @@ def connect() -> sqlite3.Connection:
         config.ensure_dirs()
         conn = sqlite3.connect(config.DB_PATH, check_same_thread=False)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.executescript(SCHEMA)
-        _migrate(conn)
-        conn.commit()
+        try:
+            existing = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' LIMIT 1"
+            ).fetchone()
+            if existing is None:
+                conn.executescript(SCHEMA)
+            else:
+                require_current_schema(conn)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.commit()
+        except Exception:
+            conn.close()
+            raise
         _conn = conn
         return _conn
 
 
-def _migrate(conn) -> None:
-    cols = [r["name"] for r in conn.execute("PRAGMA table_info(sessions)")]
-    if "effort" not in cols:
-        conn.execute("ALTER TABLE sessions ADD COLUMN effort TEXT NOT NULL DEFAULT ''")
-    if "sort_order" not in cols:
-        conn.execute("ALTER TABLE sessions ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0")
-        conn.execute("UPDATE sessions SET sort_order=id")
-    if "color" not in cols:
-        conn.execute("ALTER TABLE sessions ADD COLUMN color TEXT NOT NULL DEFAULT ''")
-        for (sid,) in conn.execute("SELECT id FROM sessions").fetchall():
-            conn.execute("UPDATE sessions SET color=? WHERE id=?",
-                         (random.choice(SESSION_COLORS), sid))
-    if "workspace_kind" not in cols:
-        conn.execute(
-            "ALTER TABLE sessions ADD COLUMN workspace_kind TEXT NOT NULL DEFAULT 'directory'")
-    if "show_meta" not in cols:
-        # existing sessions keep the bar: hiding it is a deliberate per-session
-        # choice, never something an upgrade does to a transcript
-        conn.execute("ALTER TABLE sessions ADD COLUMN show_meta INTEGER NOT NULL DEFAULT 1")
-    if "used_config" not in cols:
-        # existing sessions start unmarked: the first turn after this upgrade
-        # records what it ran with, and only later changes mark the transcript
-        conn.execute("ALTER TABLE sessions ADD COLUMN used_config TEXT NOT NULL DEFAULT ''")
-    backend_cols = {r["name"] for r in conn.execute("PRAGMA table_info(backends)")}
-    if "protocol" not in backend_cols:
-        conn.execute("ALTER TABLE backends ADD COLUMN protocol INTEGER NOT NULL DEFAULT 0")
-    if "capabilities" not in backend_cols:
-        conn.execute("ALTER TABLE backends ADD COLUMN capabilities TEXT NOT NULL DEFAULT '[]'")
-    if "remote_version" not in backend_cols:
-        conn.execute("ALTER TABLE backends ADD COLUMN remote_version TEXT NOT NULL DEFAULT ''")
-    if "role" not in backend_cols:
-        conn.execute("ALTER TABLE backends ADD COLUMN role TEXT NOT NULL DEFAULT ''")
-    if "tls_fingerprint" not in backend_cols:
-        conn.execute("ALTER TABLE backends ADD COLUMN tls_fingerprint TEXT NOT NULL DEFAULT ''")
-    if "auto_upgrade" not in backend_cols:
-        conn.execute("ALTER TABLE backends ADD COLUMN auto_upgrade INTEGER NOT NULL DEFAULT 0")
-    if "urls" not in backend_cols:
-        # Keep the original scalar column as a compatibility primary address,
-        # while moving routing to an ordered JSON list. Every pre-failover row
-        # therefore retains exactly the connection it had before migration.
-        conn.execute("ALTER TABLE backends ADD COLUMN urls TEXT NOT NULL DEFAULT '[]'")
-        for row in conn.execute("SELECT id,url FROM backends").fetchall():
-            conn.execute("UPDATE backends SET urls=? WHERE id=?",
-                         (json.dumps([row["url"]], separators=(",", ":")), row["id"]))
+class SchemaMismatchError(RuntimeError):
+    pass
+
+
+def _quoted_identifier(value: str) -> str:
+    return '"{}"'.format(value.replace('"', '""'))
+
+
+def _schema_layout(conn) -> dict:
+    objects = tuple(sorted(
+        (str(row[0]), str(row[1])) for row in conn.execute(
+            "SELECT type,name FROM sqlite_master "
+            "WHERE type IN ('table','view','trigger') AND name NOT LIKE 'sqlite_%'")))
+    tables = [name for kind, name in objects if kind == "table"]
+    layout = {"objects": objects, "tables": {}}
+    for table in tables:
+        quoted_table = _quoted_identifier(table)
+        columns = tuple(sorted(
+            (str(row[1]), str(row[2]).upper(), int(row[3]), row[4], int(row[5]),
+             int(row[6]))
+            for row in conn.execute("PRAGMA table_xinfo({})".format(quoted_table))))
+        foreign_keys = tuple(sorted(
+            (str(row[2]), str(row[3]), str(row[4]), str(row[5]),
+             str(row[6]), str(row[7]))
+            for row in conn.execute("PRAGMA foreign_key_list({})".format(quoted_table))))
+        indexes = []
+        for row in conn.execute("PRAGMA index_list({})".format(quoted_table)).fetchall():
+            index_name = str(row[1])
+            quoted_index = _quoted_identifier(index_name)
+            index_columns = tuple(
+                (int(item[1]), None if item[2] is None else str(item[2]),
+                 int(item[3]), str(item[4]), int(item[5]))
+                for item in
+                conn.execute("PRAGMA index_xinfo({})".format(quoted_index)).fetchall())
+            indexes.append((index_name, int(row[2]), str(row[3]), int(row[4]),
+                            index_columns))
+        layout["tables"][table] = {
+            "columns": columns,
+            "foreign_keys": foreign_keys,
+            "indexes": tuple(sorted(indexes)),
+        }
+    return layout
+
+
+def require_current_schema(conn) -> None:
+    """Reject a populated database unless its schema is exactly current."""
+    expected = sqlite3.connect(":memory:")
+    expected.row_factory = sqlite3.Row
+    try:
+        expected.executescript(SCHEMA)
+        wanted = _schema_layout(expected)
+    finally:
+        expected.close()
+    if _schema_layout(conn) != wanted:
+        raise SchemaMismatchError(
+            "database schema is not current; update it manually before starting Puppy")
 
 
 def query(sql: str, args=()) -> list:

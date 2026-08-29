@@ -1206,11 +1206,15 @@ first.view.receiveDraft({type:"draft",text:"peer prose",revision:7,updated_at:7,
 const uploadPreserved={count:first.view.attachments.length,
   uploading:first.view.attachments[0].uploading,text:first.view.ta.value};
 
-storage.set("puppy.draft.s:0:43", "legacy offline text");
-const legacy=makeView("s:0:43");
-legacy.view.draftReady=false;
-legacy.view.draftJournal=readDraftJournal("s:0:43");
-legacy.view.initializeDraft({text:"",revision:0,updated_at:null});
+storage.set("puppy.draft.s:0:43", "local-only text");
+const localOnly=makeView("s:0:43");
+localOnly.view.draftSupported=false;
+localOnly.view.draftReady=false;
+localOnly.view.draftJournal=readLocalDraft("s:0:43");
+localOnly.view.ta.value=localOnly.view.draftJournal.text;
+localOnly.view.initializeDraft(null);
+storage.set("puppy.draft.s:0:47", "not a versioned journal");
+const invalidJournal=readDraftJournal("s:0:47");
 
 writeDraftJournal("s:0:44", "stale submitted text", 0, true);
 const stale=makeView("s:0:44");
@@ -1236,7 +1240,7 @@ offline.view.initializeDraft({text:"server while away",revision:8,updated_at:9})
 
 console.log(JSON.stringify({sent:first.sent,pendingJournal,journalCleared,followed,
   whilePending,afterAck,latest:first.view.ta.value,sharedAttachment,uploadPreserved,
-  legacy:{text:legacy.view.ta.value,sent:legacy.sent},
+  localOnly:{text:localOnly.view.ta.value,sent:localOnly.sent},invalidJournal,
   stale:{text:stale.view.ta.value,sent:stale.sent,
          journal:storage.has("puppy.draft.s:0:44")},
   unacked:{text:unacked.view.ta.value,sent:unacked.sent},
@@ -1264,8 +1268,8 @@ console.log(JSON.stringify({sent:first.sent,pendingJournal,journalCleared,follow
         "prose": ""}, result
     assert result["uploadPreserved"] == {
         "count": 1, "uploading": True, "text": "peer prose"}, result
-    assert result["legacy"]["text"] == "legacy offline text", result
-    assert result["legacy"]["sent"][0]["text"] == "legacy offline text", result
+    assert result["localOnly"]["text"] == "local-only text", result
+    assert result["localOnly"]["sent"] == [] and result["invalidJournal"] is None, result
     assert result["stale"] == {
         "text": "newer server text", "sent": [], "journal": False}, result
     assert result["unacked"]["text"] == "unacknowledged edit", result
@@ -2100,25 +2104,32 @@ async def main() -> None:
 
     config.load()
     db.connect()
-    # Phase-2 catalogs could map several sessions to one Browser. The visible
-    # owner migration preserves a recorded owner, drops ambiguous duplicates,
-    # and every subsequent handoff stays bijective without mutating its input.
-    old_records = {
+    catalog_path = Path(browser._catalog_path())
+    catalog_path.parent.mkdir(parents=True, exist_ok=True)
+    invalid_catalog = '{"version":0,"ids":{},"bindings":{}}'
+    catalog_path.write_text(invalid_catalog, encoding="utf-8")
+    try:
+        browser._load_catalog()
+    except browser.BrowserError as exc:
+        assert "not current" in str(exc), str(exc)
+    else:
+        raise AssertionError("noncurrent browser catalog was accepted")
+    assert catalog_path.read_text(encoding="utf-8") == invalid_catalog
+    catalog_path.unlink()
+    # Every handoff keeps the current one-browser/one-session catalog bijective
+    # without mutating its input.
+    current_records = {
         "A1B2": {"created_at": 1.0, "closed_at": None,
                  "origin": "agent", "owner_session": 11},
         "C3D4": {"created_at": 2.0, "closed_at": None,
-                 "origin": "user", "owner_session": None},
+                 "origin": "user", "owner_session": 13},
     }
-    old_bindings = {11: "A1B2", 12: "A1B2", 13: "C3D4"}
-    normalized_records, normalized_bindings = browser._normalize_catalog_ownership(
-        old_records, old_bindings)
-    assert normalized_bindings == {11: "A1B2", 13: "C3D4"}
-    assert normalized_records["A1B2"]["owner_session"] == 11
+    current_bindings = {11: "A1B2", 13: "C3D4"}
     moved_records, moved_bindings, moved_ids = browser._rebind_catalog(
-        normalized_records, normalized_bindings, "C3D4", 11)
+        current_records, current_bindings, "C3D4", 11)
     assert moved_bindings == {11: "C3D4"} and moved_ids == {"A1B2", "C3D4"}
     assert moved_records["A1B2"]["owner_session"] is None
-    assert normalized_bindings == {11: "A1B2", 13: "C3D4"}
+    assert current_bindings == {11: "A1B2", 13: "C3D4"}
     assert browser._redact_diagnostic_url(
         "https://user:pass@example.test/path?token=secret#fragment") == \
         "https://example.test/path"

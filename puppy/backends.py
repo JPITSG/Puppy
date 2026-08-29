@@ -134,14 +134,11 @@ def _backend_urls(backend: dict) -> list:
         try:
             value = json.loads(value)
         except Exception:
-            value = None
+            return []
     try:
         return _normalize_urls(value)
     except ValueError:
-        try:
-            return [_base_url(backend.get("url"))]
-        except ValueError:
-            return []
+        return []
 
 
 def _request_urls(body: dict, backend=None) -> list:
@@ -214,7 +211,7 @@ def list_backends() -> list:
             caps = []
         item["capabilities"] = caps if isinstance(caps, list) else []
         item["urls"] = _backend_urls(item)
-        item["url"] = item["urls"][0] if item["urls"] else str(item.get("url") or "")
+        item["url"] = item["urls"][0] if item["urls"] else ""
         active = _active_urls.get(int(item["id"]))
         item["active_url"] = active if active in item["urls"] else ""
         item["auto_upgrade"] = bool(item.get("auto_upgrade"))

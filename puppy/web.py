@@ -517,12 +517,12 @@ async def h_session_switch(request: web.Request):
     old = s["engine"]
     # Snapshot what the outgoing engine actually ran, so the transcript divider can
     # name both configurations - a model picked but never sent anything never ran,
-    # and must not be recorded as if it had. (Sessions last used before this became
-    # tracked have no such record and fall back to their selection.) The incoming
+    # and must not be recorded as if it had. A session with no completed turn has
+    # no such record and falls back to its selection. The incoming
     # engine is reset to its defaults just below and its model is chosen later, so
     # the WebUI resolves that side from what runs next rather than from here.
-    used = runner.parse_used_config(s.get("used_config")) or \
-        {"model": s.get("model") or s.get("last_model") or "", "effort": s.get("effort") or ""}
+    used = runner.parse_used_config(s["used_config"]) or \
+        {"model": s["model"] or s["last_model"], "effort": s["effort"]}
     ev = db.add_event(s["id"], "engine_switch", {
         "from": old, "to": engine,
         "from_model": used["model"], "from_effort": used["effort"],

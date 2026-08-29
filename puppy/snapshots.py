@@ -118,6 +118,20 @@ def validate_ui_state(value) -> dict:
             raise SnapshotError("browser state contains an invalid key")
         if not isinstance(item, str):
             raise SnapshotError("browser state values must be strings")
+        if key == "puppy.tabs":
+            try:
+                tabs = json.loads(item)
+            except Exception as exc:
+                raise SnapshotError("browser tab state is invalid") from exc
+            if not isinstance(tabs, dict) or tabs.get("version") != 2 or \
+                    set(tabs) != {"version", "tabs", "active", "activeGroup", "layout"} or \
+                    not isinstance(tabs.get("tabs"), list) or \
+                    not isinstance(tabs.get("layout"), dict) or \
+                    (tabs.get("active") is not None and
+                     not isinstance(tabs.get("active"), str)) or \
+                    (tabs.get("activeGroup") is not None and
+                     not isinstance(tabs.get("activeGroup"), str)):
+                raise SnapshotError("browser tab state is not current")
         size += len(key.encode("utf-8")) + len(item.encode("utf-8"))
         if size > MAX_UI_BYTES:
             raise SnapshotError("browser state is too large")
@@ -537,64 +551,30 @@ def _validate_database(path: Path) -> int:
             raise SnapshotError("snapshot database contains unsupported executable schema")
         if any("VIRTUAL TABLE" in str(row["sql"] or "").upper() for row in objects):
             raise SnapshotError("snapshot database contains an unsupported virtual table")
-        tables = {row["name"] for row in objects if row["type"] == "table"}
-        required = {"meta", "users", "web_sessions", "backends", "sessions", "events"}
-        if not required.issubset(tables):
-            raise SnapshotError("snapshot database is missing required tables")
-        required_columns = {
-            "meta": {"key", "value"},
-            "users": {"id", "username", "pwhash", "created_at"},
-            "web_sessions": {"id", "token_hash", "username", "created_at", "expires_at"},
-            # auto_upgrade and urls are intentionally optional here: older
-            # archives gain the safe-off policy and a one-address failover list
-            # through db._migrate() immediately after installation.
-            "backends": {"id", "name", "url", "token", "protocol", "capabilities",
-                         "remote_version", "role", "tls_fingerprint", "created_at"},
-            "sessions": {"id", "name", "engine", "cwd", "model", "effort", "color",
-                         "permission_mode", "native_session_id", "last_model", "status",
-                         "archived", "workspace_kind", "sort_order", "created_at", "updated_at"},
-            "events": {"id", "session_id", "seq", "kind", "payload", "created_at"},
-        }
-        for table, columns in required_columns.items():
-            actual = {
-                row["name"] for row in connection.execute("PRAGMA table_info({})".format(table))}
-            if not columns.issubset(actual):
+        try:
+            db.require_current_schema(connection)
+        except db.SchemaMismatchError as exc:
+            raise SnapshotError("snapshot database schema is not current") from exc
+        for row in connection.execute("SELECT url,urls FROM backends"):
+            try:
+                urls = json.loads(row["urls"])
+            except Exception as exc:
                 raise SnapshotError(
-                    "snapshot database has an incompatible {} table".format(table))
-        backend_columns = {
-            row["name"] for row in connection.execute("PRAGMA table_info(backends)")}
-        if "urls" in backend_columns:
-            for row in connection.execute("SELECT url,urls FROM backends"):
-                try:
-                    urls = json.loads(row["urls"])
-                except Exception as exc:
-                    raise SnapshotError(
-                        "snapshot database contains an invalid backend URL list") from exc
-                if not isinstance(urls, list) or not 0 < len(urls) <= 8 or \
-                        not all(isinstance(value, str) and value for value in urls) or \
-                        urls[0] != row["url"] or len(set(urls)) != len(urls):
-                    raise SnapshotError(
-                        "snapshot database contains an invalid backend URL list")
-        # Older archives predate server-side drafts and gain the table through
-        # db._migrate() after installation. If the table is present, validate
-        # it as strictly as every other durable user-data surface.
-        if "session_drafts" in tables:
-            draft_columns = {
-                row["name"] for row in
-                connection.execute("PRAGMA table_info(session_drafts)")}
-            if not {"session_id", "text", "revision", "updated_at"}.issubset(
-                    draft_columns):
+                    "snapshot database contains an invalid backend URL list") from exc
+            if not isinstance(urls, list) or not 0 < len(urls) <= 8 or \
+                    not all(isinstance(value, str) and value for value in urls) or \
+                    urls[0] != row["url"] or len(set(urls)) != len(urls):
                 raise SnapshotError(
-                    "snapshot database has an incompatible session_drafts table")
-            invalid_draft = connection.execute(
-                "SELECT 1 FROM session_drafts d LEFT JOIN sessions s ON s.id=d.session_id "
-                "WHERE s.id IS NULL OR typeof(d.text)!='text' OR "
-                "typeof(d.revision)!='integer' OR d.revision<0 OR "
-                "typeof(d.updated_at) NOT IN ('integer','real') OR "
-                "d.updated_at<0 OR length(d.text)>? LIMIT 1",
-                (db.MAX_DRAFT_CHARS,)).fetchone()
-            if invalid_draft is not None:
-                raise SnapshotError("snapshot database contains an invalid session draft")
+                    "snapshot database contains an invalid backend URL list")
+        invalid_draft = connection.execute(
+            "SELECT 1 FROM session_drafts d LEFT JOIN sessions s ON s.id=d.session_id "
+            "WHERE s.id IS NULL OR typeof(d.text)!='text' OR "
+            "typeof(d.revision)!='integer' OR d.revision<0 OR "
+            "typeof(d.updated_at) NOT IN ('integer','real') OR "
+            "d.updated_at<0 OR length(d.text)>? LIMIT 1",
+            (db.MAX_DRAFT_CHARS,)).fetchone()
+        if invalid_draft is not None:
+            raise SnapshotError("snapshot database contains an invalid session draft")
         invalid_workspace = connection.execute(
             "SELECT 1 FROM sessions WHERE workspace_kind NOT IN ('directory','temporary') "
             "LIMIT 1").fetchone()
@@ -616,7 +596,12 @@ def _validate_database(path: Path) -> int:
 
 
 def _verify_manifest(root: Path, manifest: dict) -> None:
-    if not isinstance(manifest, dict) or manifest.get("product") != PRODUCT or \
+    required_manifest = {
+        "format", "product", "source_version", "created_at", "source_data_dir",
+        "sessions", "scratch_saved", "scratch_missing", "files",
+    }
+    if not isinstance(manifest, dict) or set(manifest) != required_manifest or \
+            manifest.get("product") != PRODUCT or \
             not isinstance(manifest.get("format"), int) or \
             isinstance(manifest.get("format"), bool) or \
             manifest.get("format") != FORMAT_VERSION:
@@ -693,13 +678,9 @@ def _prepare_scratch(candidate_db: Path, root: Path, manifest: dict) -> List[str
             connection.execute(
                 "UPDATE events SET payload=replace(payload, ?, ?)",
                 (source_data + "/uploads/", destination_data + "/uploads/"))
-            has_drafts = connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_drafts'"
-            ).fetchone()
-            if has_drafts:
-                connection.execute(
-                    "UPDATE session_drafts SET text=replace(text, ?, ?)",
-                    (source_data + "/uploads/", destination_data + "/uploads/"))
+            connection.execute(
+                "UPDATE session_drafts SET text=replace(text, ?, ?)",
+                (source_data + "/uploads/", destination_data + "/uploads/"))
         connection.execute("UPDATE sessions SET status='idle'")
         connection.commit()
         return created

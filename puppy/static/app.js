@@ -733,9 +733,8 @@ function saveStringSet(key, values) {
   try { lsSet(key, JSON.stringify([...values])); } catch (_) { /* storage is optional */ }
 }
 
-/* Server-side drafts are authoritative. This local record is only a crash
-   journal between a browser edit and its server acknowledgement. Raw strings
-   from older Puppy versions remain readable and are migrated on first sync. */
+/* Server-side drafts are authoritative. This versioned local record is only a
+   crash journal between a browser edit and its server acknowledgement. */
 const DRAFT_JOURNAL_VERSION = 1;
 const DEFAULT_DRAFT_MAX_CHARS = 256 * 1024;
 function readDraftJournal(tabId) {
@@ -748,8 +747,15 @@ function readDraftJournal(tabId) {
         value.base_revision >= 0)
       return { text: value.text, baseRevision: value.base_revision,
         submitted: value.submitted === true };
-  } catch (_) { /* an old draft is ordinary text, not JSON */ }
-  return { text: raw, baseRevision: 0, submitted: false };
+  } catch (_) { /* invalid or incomplete journal */ }
+  return null;
+}
+
+/* Nodes without shared-draft support use an intentionally local plain string.
+   It is a separate live protocol mode, not another journal format. */
+function readLocalDraft(tabId) {
+  const raw = lsGet("puppy.draft." + tabId);
+  return raw === null ? null : { text: raw, baseRevision: 0, submitted: false };
 }
 
 function writeDraftJournal(tabId, text, baseRevision, submitted = false) {
@@ -2197,8 +2203,8 @@ function syncTabOrderFromLayout() {
 }
 
 /* Saved layouts are browser-owned state, but still normalize them strictly:
-   stale tabs disappear, duplicate membership is ignored, empty branches
-   collapse, and old flat tab archives become one pane. */
+   stale tabs disappear, duplicate membership is ignored, and empty branches
+   collapse. */
 function normalizeWorkspace() {
   const validTabs = new Set(state.tabs.map(tab => tab.id));
   const assignedTabs = new Set();
@@ -2317,12 +2323,12 @@ function storedTabs(value) {
 function loadTabs() {
   try {
     const d = JSON.parse(lsGet("puppy.tabs") || "null");
-    if (d && Array.isArray(d.tabs)) {
+    if (d && d.version === 2 && Array.isArray(d.tabs) && d.layout &&
+        typeof d.layout === "object" && !Array.isArray(d.layout)) {
       state.tabs = storedTabs(d.tabs);
       state.active = typeof d.active === "string" ? d.active : null;
       state.activeGroup = typeof d.activeGroup === "string" ? d.activeGroup : null;
-      state.layout = d.layout && typeof d.layout === "object" ? d.layout :
-        newPane(state.tabs.map(tab => tab.id), state.active);
+      state.layout = d.layout;
     }
   } catch (e) {}
 }
@@ -2387,9 +2393,8 @@ async function enterApp() {
   const valid = state.tabs.filter(t => {
     if (t.type === "session")
       return t.bid ? true : state.sessions.some(s => s.id === t.sid);
-    /* Pre-ID singleton tabs cannot identify a logical browser on an upgraded
-       node. Drop them instead of silently creating an unnamed extra instance;
-       retain them only for older remote nodes using the compatibility route. */
+    /* Instance-capable nodes require a logical Browser ID. Unidentified tabs
+       are valid only for remote nodes that expose the singleton route. */
     if (t.type === "browser" && !t.browserId && browserInstancesFor(t.bid || 0))
       return false;
     return true;
@@ -5715,7 +5720,8 @@ class SessionView {
     this.draftAckSeq = 0;
     this.draftDeferred = null;
     this.draftTouchedBeforeReady = false;
-    this.draftJournal = readDraftJournal(this.tab.id);
+    this.draftJournal = this.draftSupported ? readDraftJournal(this.tab.id) :
+      readLocalDraft(this.tab.id);
     this.fileDragDepth = 0;
     this.nativeComposerChoices = prefersNativeChoices();
     this.browserChipKey = null;   // set of linked-browser bubbles now rendered
@@ -6217,8 +6223,8 @@ class SessionView {
         !Number.isInteger(value.revision) || value.revision < 0) {
       this.draftSupported = false;
       this.draftReady = false;
-      const local = readDraftJournal(this.tab.id);
-      if (local) lsSet("puppy.draft." + this.tab.id, local.text);
+      if (this.draftJournal)
+        lsSet("puppy.draft." + this.tab.id, this.draftJournal.text);
       return;
     }
     this.draftSupported = true;
@@ -10703,7 +10709,6 @@ async function modalNewSession(groupId = null) {
   /* Every new session starts from the configured default, never from wherever
      the last one happened to be pointed. */
   cwdInp.value = state.defaultCwd || "/";
-  lsDel("puppy.lastcwd");   // drop what older builds remembered
   let engines = [];
   let engine = null;
   let engineLoadSequence = 0;

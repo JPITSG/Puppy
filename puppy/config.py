@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import copy
 import json
-import logging
 import math
 import os
 import re
@@ -19,8 +18,6 @@ CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
 DB_PATH = os.path.join(DATA_DIR, "puppy.db")
 LOG_PATH = os.path.join(DATA_DIR, "puppy.log")
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-
-log = logging.getLogger("puppy.config")
 
 DEFAULT_USAGE_REFRESH_MINUTES = 15
 MAX_USAGE_REFRESH_MINUTES = 24 * 60
@@ -93,27 +90,6 @@ _lock = threading.Lock()
 _config = None
 
 
-def _merge(base: dict, patch: dict) -> dict:
-    out = copy.deepcopy(base)
-    for k, v in patch.items():
-        if isinstance(v, dict) and isinstance(out.get(k), dict):
-            out[k] = _merge(out[k], v)
-        else:
-            out[k] = copy.deepcopy(v)
-    return out
-
-
-def _drop_retired_settings(cfg: dict) -> dict:
-    """Remove settings whose feature no longer exists, including old archives."""
-    engines = cfg.get("engines")
-    opencode = engines.get("opencode") if isinstance(engines, dict) else None
-    if isinstance(opencode, dict):
-        opencode.pop("models", None)
-        if not opencode:
-            engines.pop("opencode", None)
-    return cfg
-
-
 def ensure_dirs() -> None:
     os.makedirs(DATA_DIR, exist_ok=True)
     try:
@@ -128,19 +104,20 @@ def load() -> dict:
         if _config is not None:
             return _config
         ensure_dirs()
-        raw = {}
         if os.path.exists(CONFIG_PATH):
             try:
                 with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                     raw = json.load(f)
             except Exception as e:
-                log.error("config.json unreadable (%s), using defaults", e)
-        cfg = _drop_retired_settings(
-            _merge(DEFAULTS, raw if isinstance(raw, dict) else {}))
-        if not cfg["auth"].get("api_token"):
+                raise RuntimeError("config.json is unreadable: {}".format(e)) from e
+            cfg = normalize_import(raw)
+        else:
+            cfg = copy.deepcopy(DEFAULTS)
             cfg["auth"]["api_token"] = secrets.token_urlsafe(32)
+            cfg = normalize_import(cfg)
         _config = cfg
-        _save_locked()
+        if not os.path.exists(CONFIG_PATH):
+            _save_locked()
         return _config
 
 
@@ -189,13 +166,19 @@ def export_data() -> dict:
 
 
 def _validate_shape(reference, value, path: str = "config") -> None:
-    """Reject type-confused backup data while permitting future unknown keys."""
+    """Require the complete current config shape and reject unknown fields."""
     if isinstance(reference, dict):
         if not isinstance(value, dict):
             raise ValueError("{} must be an object".format(path))
-        for key, child in value.items():
-            if key in reference:
-                _validate_shape(reference[key], child, "{}.{}".format(path, key))
+        missing = sorted(set(reference) - set(value))
+        unknown = sorted(set(value) - set(reference))
+        if missing:
+            raise ValueError("{} is missing {}".format(path, ", ".join(missing)))
+        if unknown:
+            raise ValueError("{} contains unknown fields: {}".format(
+                path, ", ".join(unknown)))
+        for key, child in reference.items():
+            _validate_shape(child, value[key], "{}.{}".format(path, key))
         return
     if isinstance(reference, bool):
         valid = isinstance(value, bool)
@@ -216,17 +199,22 @@ def normalize_engine_auto_upgrade(value) -> dict:
 
     Shared by the API and by backup import so a hand-edited archive cannot
     install a schedule the scheduler would then have to second-guess."""
-    if value is None:
-        value = {}
     if not isinstance(value, dict):
         raise ValueError("config.engines.auto_upgrade must be an object")
-    enabled = value.get("enabled", False)
+    if set(value) != {"enabled", "mode", "at"}:
+        raise ValueError(
+            "config.engines.auto_upgrade must contain enabled, mode, and at")
+    enabled = value["enabled"]
     if type(enabled) is not bool:
         raise ValueError("config.engines.auto_upgrade.enabled must be true or false")
-    mode = str(value.get("mode") or "now").strip().lower()
+    mode = value["mode"]
+    if not isinstance(mode, str):
+        raise ValueError("config.engines.auto_upgrade.mode must be text")
     if mode not in ENGINE_AUTO_UPGRADE_MODES:
         raise ValueError("config.engines.auto_upgrade.mode must be 'now' or 'at'")
-    at = str(value.get("at") or "03:30").strip()
+    at = value["at"]
+    if not isinstance(at, str):
+        raise ValueError("config.engines.auto_upgrade.at must be text")
     if not _ENGINE_AT_RE.match(at):
         raise ValueError("config.engines.auto_upgrade.at must be HH:MM in 24-hour form")
     return {"enabled": enabled, "mode": mode, "at": at}
@@ -290,7 +278,7 @@ def normalize_import(data: dict) -> dict:
     if not isinstance(data, dict):
         raise ValueError("config must be an object")
     _validate_shape(DEFAULTS, data)
-    merged = _drop_retired_settings(_merge(DEFAULTS, data))
+    merged = copy.deepcopy(data)
     for section in ("web", "backend"):
         port = merged.get(section, {}).get("port")
         if not _finite_number(port) or not 1 <= port <= 65535 or port != int(port):
@@ -323,7 +311,23 @@ def normalize_import(data: dict) -> dict:
         raise ValueError("config.backend.tls_mode is invalid")
     if merged.get("browser", {}).get("color_scheme") not in ("dark", "light"):
         raise ValueError("config.browser.color_scheme is invalid")
+    if not _same_shape_and_values(data, merged):
+        raise ValueError(
+            "config values are not in the current canonical form; update them manually")
     return merged
+
+
+def _same_shape_and_values(left, right) -> bool:
+    """Compare JSON-compatible values without treating integers and floats alike."""
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return set(left) == set(right) and all(
+            _same_shape_and_values(left[key], right[key]) for key in left)
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            _same_shape_and_values(a, b) for a, b in zip(left, right))
+    return left == right
 
 
 def replace_all(data: dict) -> None:

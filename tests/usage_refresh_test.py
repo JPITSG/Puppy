@@ -223,12 +223,15 @@ async def main() -> None:
             async with http.post(url + "/api/engines/usage-refresh") as response:
                 assert response.status == 401
 
-        # Archives produced before this setting existed inherit the current
-        # default; malformed archives still fail closed.
-        old_config = config.export_data()
-        old_config.pop("engines")
-        assert config.normalize_import(old_config)["engines"][
-            "usage_refresh_minutes"] == config.DEFAULT_USAGE_REFRESH_MINUTES
+        # Persisted config must carry the complete current shape.
+        incomplete = config.export_data()
+        incomplete.pop("engines")
+        try:
+            config.normalize_import(incomplete)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("incomplete config was accepted")
         malformed = config.export_data()
         malformed["engines"]["usage_refresh_minutes"] = "15"
         try:

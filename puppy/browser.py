@@ -690,7 +690,9 @@ class Manager:
 
     def __init__(self, browser_id: str, origin: str = "user", owner_session=None):
         self.browser_id = normalize_browser_id(browser_id)
-        self.origin = origin if origin in ("agent", "user", "legacy") else "user"
+        if origin not in ("agent", "user", "legacy"):
+            raise BrowserError("invalid browser origin")
+        self.origin = origin
         self.owner_session = int(owner_session) if owner_session is not None else None
         self.root = _instance_root(self.browser_id)
         os.makedirs(self.root, exist_ok=True)
@@ -2908,63 +2910,43 @@ def _rebind_catalog(records: dict, bindings: dict, browser_id: str,
     return new_records, new_bindings, affected
 
 
-def _normalize_catalog_ownership(records: dict, bindings: dict) -> tuple:
-    """Migrate older many-to-one mappings to an unambiguous visible owner."""
-    selected = {}
-    claimed_browsers = set()
-    # The record owner predates the visible handoff API and is the safest
-    # choice when an older catalog mapped several chats to one browser.
-    for browser_id in sorted(records):
-        record = records[browser_id]
-        session_id = record.get("owner_session")
-        if record.get("closed_at") is None and session_id is not None and \
-                session_id not in selected:
-            selected[session_id] = browser_id
-            claimed_browsers.add(browser_id)
-    for session_id, browser_id in bindings.items():
-        if session_id in selected or browser_id in claimed_browsers:
-            continue
-        selected[session_id] = browser_id
-        claimed_browsers.add(browser_id)
-    normalized_records = {key: dict(value) for key, value in records.items()}
-    owners = {browser_id: session_id for session_id, browser_id in selected.items()}
-    for browser_id, record in normalized_records.items():
-        record["owner_session"] = owners.get(browser_id) \
-            if record.get("closed_at") is None else None
-    return normalized_records, selected
-
-
 def _load_catalog() -> tuple:
     path = _catalog_path()
     try:
         with open(path, "r", encoding="utf-8") as handle:
             raw = json.load(handle)
     except FileNotFoundError:
-        raw = {}
+        _write_catalog({}, {})
+        return {}, {}
     except Exception as exc:
-        log.warning("could not read managed browser ID history: %s", exc)
-        raw = {}
-    raw_ids = raw.get("ids") if isinstance(raw, dict) else {}
+        raise BrowserError("managed browser catalog is unreadable") from exc
+    if not isinstance(raw, dict) or set(raw) != {"version", "ids", "bindings"} or \
+            type(raw.get("version")) is not int or raw["version"] != CATALOG_VERSION or \
+            not isinstance(raw.get("ids"), dict) or \
+            not isinstance(raw.get("bindings"), dict):
+        raise BrowserError(
+            "managed browser catalog is not current; update it manually before starting Puppy")
+    raw_ids = raw["ids"]
     records = {}
-    changed = not isinstance(raw_ids, dict)
+    changed = False
     now = time.time()
     cutoff = now - ID_RETENTION_SECONDS
-    for browser_id, record in (raw_ids.items() if isinstance(raw_ids, dict) else []):
+    for browser_id, record in raw_ids.items():
         if not isinstance(browser_id, str) or not BROWSER_ID_RE.fullmatch(browser_id) or \
-                not isinstance(record, dict):
-            changed = True
-            continue
-        try:
-            created_at = float(record.get("created_at"))
-            closed_raw = record.get("closed_at")
-            closed_at = None if closed_raw is None else float(closed_raw)
-        except (TypeError, ValueError):
-            changed = True
-            continue
+                not isinstance(record, dict) or \
+                set(record) != {"created_at", "closed_at", "origin", "owner_session"}:
+            raise BrowserError("managed browser catalog contains an invalid record")
+        created_raw = record["created_at"]
+        closed_raw = record["closed_at"]
+        if type(created_raw) is not float or \
+                (closed_raw is not None and
+                 type(closed_raw) is not float):
+            raise BrowserError("managed browser catalog contains an invalid timestamp")
+        created_at = float(created_raw)
+        closed_at = None if closed_raw is None else float(closed_raw)
         if not math.isfinite(created_at) or created_at <= 0 or \
                 (closed_at is not None and (not math.isfinite(closed_at) or closed_at <= 0)):
-            changed = True
-            continue
+            raise BrowserError("managed browser catalog contains an invalid timestamp")
         if closed_at is not None and closed_at < cutoff:
             changed = True
             try:
@@ -2972,47 +2954,39 @@ def _load_catalog() -> tuple:
             except Exception as exc:
                 log.warning("could not prune Browser %s storage: %s", browser_id, exc)
             continue
-        origin = record.get("origin")
+        origin = record["origin"]
         if origin not in ("agent", "user", "legacy"):
-            origin = "user"
-            changed = True
-        owner = record.get("owner_session")
-        try:
-            owner = int(owner) if owner is not None else None
-        except (TypeError, ValueError):
-            owner = None
-            changed = True
-        if owner is not None and owner <= 0:
-            owner = None
-            changed = True
+            raise BrowserError("managed browser catalog contains an invalid origin")
+        owner = record["owner_session"]
+        if owner is not None and (type(owner) is not int or owner <= 0):
+            raise BrowserError("managed browser catalog contains an invalid owner")
+        if closed_at is not None and owner is not None:
+            raise BrowserError("closed browser catalog record has an owner")
         records[browser_id] = {
             "created_at": created_at,
             "closed_at": closed_at,
             "origin": origin,
             "owner_session": owner,
         }
-    raw_bindings = raw.get("bindings") if isinstance(raw, dict) else {}
+    raw_bindings = raw["bindings"]
     bindings = {}
-    if isinstance(raw_bindings, dict):
-        for raw_session, browser_id in raw_bindings.items():
-            try:
-                session_id = int(raw_session)
-            except (TypeError, ValueError):
-                changed = True
-                continue
-            if session_id > 0 and browser_id in records and \
-                    records[browser_id]["closed_at"] is None:
-                bindings[session_id] = browser_id
-            else:
-                changed = True
-    elif raw_bindings is not None:
-        changed = True
-    normalized_records, normalized_bindings = _normalize_catalog_ownership(
-        records, bindings)
-    if normalized_records != records or normalized_bindings != bindings:
-        changed = True
-    records, bindings = normalized_records, normalized_bindings
-    if changed or not os.path.exists(path):
+    for raw_session, browser_id in raw_bindings.items():
+        try:
+            session_id = int(raw_session)
+        except (TypeError, ValueError) as exc:
+            raise BrowserError("managed browser catalog contains an invalid binding") from exc
+        if str(session_id) != raw_session or session_id <= 0 or \
+                browser_id not in records or records[browser_id]["closed_at"] is not None or \
+                browser_id in bindings.values():
+            raise BrowserError("managed browser catalog contains an invalid binding")
+        bindings[session_id] = browser_id
+    owners = {
+        browser_id: record["owner_session"] for browser_id, record in records.items()
+        if record["owner_session"] is not None
+    }
+    if owners != {browser_id: session_id for session_id, browser_id in bindings.items()}:
+        raise BrowserError("managed browser catalog ownership is inconsistent")
+    if changed:
         _write_catalog(records, bindings)
     return records, bindings
 
@@ -3090,10 +3064,6 @@ class BrowserRegistry:
                 continue
             _kill_stale_instance(os.path.join(root, "profile"),
                                  os.path.join(root, "chrome.pid"))
-        # Reclaim the pre-instance layout after an ungraceful upgrade too.
-        _kill_stale_instance(os.path.join(_browser_root(), "profile"),
-                             os.path.join(_browser_root(), "chrome.pid"))
-
     def _prune(self) -> None:
         cutoff = time.time() - ID_RETENTION_SECONDS
         removed = []

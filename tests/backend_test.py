@@ -8,7 +8,6 @@ import os
 from pathlib import Path
 import shutil
 import socket
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -2376,24 +2375,6 @@ async def main() -> None:
         # Import the full application only after its independent data path is set.
         controller_data = temp_root / "controller-data"
         controller_data.mkdir()
-        old_db = sqlite3.connect(str(controller_data / "puppy.db"))
-        old_db.execute(
-            "CREATE TABLE backends (id INTEGER PRIMARY KEY AUTOINCREMENT, "
-            "name TEXT NOT NULL, url TEXT NOT NULL, token TEXT NOT NULL, created_at REAL NOT NULL)")
-        old_db.execute(
-            "CREATE TABLE sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, "
-            "name TEXT NOT NULL DEFAULT '', engine TEXT NOT NULL, cwd TEXT NOT NULL, "
-            "model TEXT NOT NULL DEFAULT '', effort TEXT NOT NULL DEFAULT '', "
-            "color TEXT NOT NULL DEFAULT '', permission_mode TEXT NOT NULL DEFAULT '', "
-            "native_session_id TEXT NOT NULL DEFAULT '', last_model TEXT NOT NULL DEFAULT '', "
-            "status TEXT NOT NULL DEFAULT 'idle', archived INTEGER NOT NULL DEFAULT 0, "
-            "sort_order INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL, "
-            "updated_at REAL NOT NULL)")
-        old_db.execute(
-            "INSERT INTO backends(name,url,token,created_at) VALUES(?,?,?,?)",
-            ("legacy-node", "http://192.0.2.44:10888", "legacy-token", time.time()))
-        old_db.commit()
-        old_db.close()
         os.environ["PUPPY_DATA"] = str(controller_data)
         # config binds its data path at import time, so an earlier import of it
         # anywhere above would silently point this whole test at the real
@@ -2428,18 +2409,6 @@ async def main() -> None:
         exercise_host_cpu_math(host_metrics)
         await exercise_upgrade_readiness(
             backend_upgrade, runner, terminal, temp_root / "readiness")
-        assert "tls_fingerprint" in {
-            row["name"] for row in db.query("PRAGMA table_info(backends)")}
-        assert "auto_upgrade" in {
-            row["name"] for row in db.query("PRAGMA table_info(backends)")}
-        assert "urls" in {
-            row["name"] for row in db.query("PRAGMA table_info(backends)")}
-        migrated_urls = db.query_one(
-            "SELECT urls FROM backends WHERE name='legacy-node'")["urls"]
-        assert json.loads(migrated_urls) == ["http://192.0.2.44:10888"]
-        db.execute("DELETE FROM backends WHERE name='legacy-node'")
-        assert "workspace_kind" in {
-            row["name"] for row in db.query("PRAGMA table_info(sessions)")}
         app = build_app()
         controller_runner = web.AppRunner(app)
         await controller_runner.setup()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from http.cookies import SimpleCookie
+import json
 import os
 from pathlib import Path
 import shutil
@@ -523,9 +524,19 @@ async def main() -> None:
             assert restart_calls == []
 
             ui_state = {
-                "puppy.tabs": '{"tabs":[],"active":null}',
+                "puppy.tabs": json.dumps({
+                    "version": 2, "tabs": [], "active": None,
+                    "activeGroup": "pane:handoff",
+                    "layout": {"kind": "pane", "id": "pane:handoff",
+                               "tabs": [], "active": None},
+                }, separators=(",", ":")),
                 "puppy.theme": "light",
-                "puppy.draft.7": "</script><script>unsafe()</script>",
+                "puppy.draft.7": json.dumps({
+                    "_puppy_draft": 1,
+                    "text": "</script><script>unsafe()</script>",
+                    "base_revision": 0,
+                    "submitted": False,
+                }, separators=(",", ":")),
             }
             async with http.post(origin + "/api/settings/bind/activate",
                                  headers=browser_headers,
