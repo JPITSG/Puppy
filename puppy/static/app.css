@@ -1654,6 +1654,15 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   display:block;min-height:108px;max-height:360px;margin-top:9px;resize:vertical;
   font:12px/1.55 var(--mono);tab-size:2;
 }
+/* Chromium/WebKit otherwise paints a native white resize tile over Puppy's
+   themed textarea corner. Keep desktop resizing, but draw the grip from theme
+   ink so there is no foreign square in either color scheme. */
+.system-prompt-textarea::-webkit-resizer{
+  border:0;background:linear-gradient(135deg,
+    transparent 0 47%,var(--txt3) 48% 53%,transparent 54% 66%,
+    var(--txt3) 67% 72%,transparent 73%);
+  opacity:.68;
+}
 .system-prompt-browser-text{min-height:164px}
 .system-prompt-reset{flex:0 0 auto;margin-top:0;white-space:nowrap}
 .system-prompt-actions{
@@ -2009,6 +2018,9 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
     touch-action:pan-y pinch-zoom;
   }
   .app.side-open .drawer-edge{pointer-events:none}
+  /* A touch screen cannot use the desktop drag grip; suppressing resize also
+     prevents mobile WebKit/Chromium from reserving and painting its corner. */
+  .system-prompt-textarea{resize:none}
 }
 @media (prefers-reduced-motion:reduce){
   *{animation:none!important;transition:none!important;scroll-behavior:auto!important}

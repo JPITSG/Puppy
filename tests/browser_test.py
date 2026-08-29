@@ -1430,6 +1430,9 @@ def check_system_prompt_settings(ui_source: str, css_source: str) -> None:
     assert ".system-prompt-section+.system-prompt-section{" in css_source
     assert ".system-prompt-section-head{" in css_source
     assert ".system-prompt-textarea{" in css_source
+    assert ".system-prompt-textarea::-webkit-resizer{" in css_source
+    assert "var(--txt3) 67% 72%,transparent 73%);" in css_source
+    assert ".system-prompt-textarea{resize:none}" in css_source
     assert ".system-prompt-browser-text{min-height:220px}" in css_source
 
     start = ui_source.index("\n  systemPromptCard(") + 1
