@@ -1586,6 +1586,12 @@ def check_switch_engine_initial_selection(ui_source: str) -> None:
     assert expected in ui_source
 
 
+def check_engine_picker_alignment(css_source: str) -> None:
+    """Provider marks use equal block boxes so every card's text rows align."""
+    assert ".engine-pick .ep .ep-ico{display:flex;width:18px;height:18px;" \
+        in css_source
+
+
 def check_double_activation_survives_rerender(ui_source: str) -> None:
     """A backend name rebuilt between clicks must still complete the gesture."""
     def extract_function(marker: str) -> str:
@@ -2750,6 +2756,7 @@ async def main() -> None:
             check_opencode_chat_models(ui_source, css_source)
             check_session_provider_marks(css_source)
             check_switch_engine_initial_selection(ui_source)
+            check_engine_picker_alignment(css_source)
             check_double_activation_survives_rerender(ui_source)
             check_browser_disable_closes_scoped_tabs(ui_source)
             check_quota_math(ui_source)

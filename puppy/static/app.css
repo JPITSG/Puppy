@@ -1771,7 +1771,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 @media (hover:hover){.engine-pick .ep:hover{border-color:var(--line3);background-image:var(--btn-face-hi)}}
 .engine-pick .ep:active{box-shadow:var(--btn-press)}
 /* provider logos in company colors */
-.engine-pick .ep .ep-ico{width:18px;height:18px;margin:0 auto 6px;font-size:13px;color:var(--txt2)}
+.engine-pick .ep .ep-ico{display:flex;width:18px;height:18px;margin:0 auto 6px;font-size:13px;color:var(--txt2)}
 .engine-pick .ep .ep-ico.prov-anthropic{background:#d97757}
 .engine-pick .ep .ep-ico.prov-openai{background:#10a37f}
 .engine-pick .ep .ep-ico.prov-opencode{
