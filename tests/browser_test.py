@@ -2751,6 +2751,10 @@ async def main() -> None:
             assert ui_source.count("this.setReconnecting(false);") == 2
             assert "this.setReconnecting(true);" in ui_source
             assert 'this.setStatus("Connection lost' not in ui_source
+            # The metadata strip already scrolls horizontally. Its engine/model
+            # identity must use its full intrinsic width rather than inheriting
+            # the generic 160px phone cap and clipping the selected model ID.
+            assert ".chat-meta-scroll .chip.eng{max-width:none}" in css_source
             # Compatible headless nodes get one lightweight list watcher. Its
             # explicit lifecycle event, not an ordinary socket close, is what
             # retires cached running state immediately.

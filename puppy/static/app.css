@@ -829,6 +829,10 @@ select.choice-native{display:none!important}
 }
 .chat-meta-scroll::-webkit-scrollbar{display:none}
 .chat-meta-scroll .chip,.chat-meta-scroll .chat-status{flex:0 0 auto}
+/* The engine/model pair is session identity, not incidental metadata. Let the
+   existing horizontal strip carry its full width on every viewport instead of
+   clipping it at the generic chip cap (160px on phones). */
+.chat-meta-scroll .chip.eng{max-width:none}
 /* Hidden per session: the whole strip goes, ⋮ included, which is the point of
    reclaiming the row. The same toggle sits in the session's sidebar menu, so
    it can always be turned back on. */
