@@ -1577,6 +1577,13 @@ def check_session_provider_marks(css_source: str) -> None:
     assert ".si-row.sub .prov-opencode{color:var(--txt3)}" in css_source
 
 
+def check_switch_engine_initial_selection(ui_source: str) -> None:
+    """The switch modal initially selects the session's current engine."""
+    expected = ('let pick = (engines.find(engine => engine.key === s.engine) || '
+                'engines[0] || {}).key || "";')
+    assert expected in ui_source
+
+
 def check_double_activation_survives_rerender(ui_source: str) -> None:
     """A backend name rebuilt between clicks must still complete the gesture."""
     def extract_function(marker: str) -> str:
@@ -2740,6 +2747,7 @@ async def main() -> None:
             check_system_prompt_settings(ui_source, css_source)
             check_opencode_chat_models(ui_source, css_source)
             check_session_provider_marks(css_source)
+            check_switch_engine_initial_selection(ui_source)
             check_double_activation_survives_rerender(ui_source)
             check_browser_disable_closes_scoped_tabs(ui_source)
             check_quota_math(ui_source)

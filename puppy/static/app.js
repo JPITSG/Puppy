@@ -10488,7 +10488,7 @@ function modalSwitchEngine(view) {
     <div class="engine-pick" id="se-engines"></div>
     <div class="m-btns"><button class="btn" id="se-cancel">Cancel</button><button class="btn btn-pri" id="se-go">Switch</button></div>`);
   const box = m.querySelector("#se-engines");
-  let pick = (engines.find(engine => engine.key !== s.engine) || engines[0] || {}).key || "";
+  let pick = (engines.find(engine => engine.key === s.engine) || engines[0] || {}).key || "";
   const render = () => {
     box.innerHTML = "";
     for (const e2 of engines) {
