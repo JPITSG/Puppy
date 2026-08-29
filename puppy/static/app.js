@@ -971,10 +971,18 @@ const DOUBLE_ACTIVATION_MS = 700;
 const DOUBLE_ACTIVATION_DISTANCE = 18;
 let pendingDoubleActivation = null;
 
-function wireDoubleClickOrTouch(target, activate, activationKey) {
+function wireDoubleClickOrTouch(target, activate, activationKey, ignoredSelector = "") {
   const pointerForClick = activationPointer(target);
   target.addEventListener("click", event => {
     const pointerType = pointerForClick(event);
+    /* A disclosure surface may contain its ordinary single-click arrow. Let
+       that button act once and prevent its bubbling click (including the
+       synthetic click below) from being interpreted as a second activation. */
+    if (ignoredSelector && event.target && typeof event.target.closest === "function" &&
+        event.target.closest(ignoredSelector)) {
+      pendingDoubleActivation = null;
+      return;
+    }
     if (pointerType === "touch") {
       pendingDoubleActivation = null;
     } else {
@@ -3893,7 +3901,6 @@ function renderFootEngines() {
       const key = g.bid ? `remote:${g.bid}` : "local";
       const disclosure = disclosureButton(`${g.name} engine status`, body,
         collapsedStatusBackends, "puppy.collapsed.status-backends", key);
-      wireDoubleClickOrTouch(name, () => disclosure.click(), `status:${key}`);
       head.appendChild(name);
       if (g.version) {
         const version = el("span", "foot-engine-version", `· v${g.version}`);
@@ -3901,6 +3908,8 @@ function renderFootEngines() {
         head.appendChild(version);
       }
       head.appendChild(disclosure);
+      wireDoubleClickOrTouch(head, () => disclosure.click(), `status:${key}`,
+        ".disclosure-toggle");
       group.appendChild(head);
       group.dataset.nodeKey = key;
       wireNodeGroupDrag(group, head, key);

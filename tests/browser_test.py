@@ -1742,6 +1742,18 @@ def check_sidebar_icon_alignment(css_source: str) -> None:
     assert "margin-left:6px;position:relative;top:-1px;" in css_source
 
 
+def check_status_header_activation(ui_source: str, css_source: str) -> None:
+    """The complete backend-status header toggles, while its arrow acts once."""
+    start = ui_source.index("function renderFootEngines()")
+    end = ui_source.index("\nfunction ", start + 1)
+    render = ui_source[start:end]
+    assert ('wireDoubleClickOrTouch(head, () => disclosure.click(), `status:${key}`,\n'
+            '        ".disclosure-toggle");') in render
+    assert "wireDoubleClickOrTouch(name, () => disclosure.click()" not in render
+    assert (".foot-engine-head{display:flex;align-items:center;gap:6px;min-width:0;" +
+            "color:var(--txt3);cursor:pointer}") in css_source
+
+
 def check_switch_engine_initial_selection(ui_source: str) -> None:
     """The switch modal initially selects the session's current engine."""
     expected = ('let pick = (engines.find(engine => engine.key === s.engine) || '
@@ -1791,7 +1803,7 @@ class Target {
   addEventListener(kind,fn) { (this.listeners[kind] ||= []).push(fn); }
   emit(kind,values={}) {
     const event=Object.assign({isPrimary:true,pointerType:"",detail:0,timeStamp:0,
-      clientX:0,clientY:0,prevented:false,stopped:false,
+      clientX:0,clientY:0,prevented:false,stopped:false,target:this,
       preventDefault(){this.prevented=true;},stopPropagation(){this.stopped=true;}},values);
     for(const fn of this.listeners[kind] || []) fn(event);
     return event;
@@ -1802,9 +1814,11 @@ class Target {
 const activations=[];
 const make=(key,label)=>{const target=new Target();
   wireDoubleClickOrTouch(target,()=>activations.push(label),key);return target;};
-const click=(target,detail,time,x=20,pointerType="mouse")=>{
-  target.emit("pointerdown",{pointerType,timeStamp:time-20,clientX:x,clientY:10});
-  return target.emit("click",{pointerType,detail,timeStamp:time,clientX:x,clientY:10});
+const click=(target,detail,time,x=20,pointerType="mouse",eventTarget=target)=>{
+  target.emit("pointerdown",{pointerType,timeStamp:time-20,clientX:x,clientY:10,
+    target:eventTarget});
+  return target.emit("click",{pointerType,detail,timeStamp:time,clientX:x,clientY:10,
+    target:eventTarget});
 };
 
 const oldName=make("sessions:remote:7","old");
@@ -1831,18 +1845,31 @@ const rapidTarget=make("sessions:remote:11","rapid");
 const rapid=[1,2,3,4,5,6].map((detail,index)=>
   click(rapidTarget,detail,2600 + index * 70,20));
 const touch=click(make("sessions:remote:10","touch"),1,2800,20,"touch");
-console.log(JSON.stringify({activations,first,replacement,native,rapid,touch}));
+pendingDoubleActivation=null;
+const wholeHead=new Target();
+wireDoubleClickOrTouch(wholeHead,()=>activations.push("whole status head"),
+  "status:local",".disclosure-toggle");
+const arrow={closest:selector=>selector===".disclosure-toggle"?arrow:null};
+const version={closest:()=>null};
+const nestedArrow=click(wholeHead,1,3000,20,"touch",arrow);
+const versionTap=click(wholeHead,1,3100,40,"touch",version);
+console.log(JSON.stringify({activations,first,replacement,native,rapid,touch,
+  nestedArrow,versionTap}));
 """ % (activation_pointer, fallback)
     proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:600]
     result = json.loads(proc.stdout.strip())
     assert result["activations"] == [
-        "replacement", "native", "rapid", "rapid", "rapid", "touch"], result
+        "replacement", "native", "rapid", "rapid", "rapid", "touch",
+        "whole status head"], result
     assert not result["first"]["prevented"] and not result["first"]["stopped"], result
     for key in ("replacement", "native", "touch"):
         assert result[key]["prevented"] and result[key]["stopped"], result
     assert [event["prevented"] for event in result["rapid"]] == [
         False, True, False, True, False, True], result
+    assert not result["nestedArrow"]["prevented"] and \
+        not result["nestedArrow"]["stopped"], result
+    assert result["versionTap"]["prevented"] and result["versionTap"]["stopped"], result
 
 
 def check_browser_disable_closes_scoped_tabs(ui_source: str) -> None:
@@ -2931,6 +2958,7 @@ async def main() -> None:
             check_opencode_chat_models(ui_source, css_source)
             check_session_provider_marks(css_source)
             check_sidebar_icon_alignment(css_source)
+            check_status_header_activation(ui_source, css_source)
             check_switch_engine_initial_selection(ui_source)
             check_engine_picker_alignment(css_source)
             check_browser_chip_order(ui_source)
