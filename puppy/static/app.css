@@ -247,6 +247,12 @@ a{color:var(--acc2)}
   font-size:9px;font-weight:700;color:var(--txt3);background:none;
 }
 .prov-anthropic,.prov-openai{background:var(--txt3)}
+/* Compact session sub-rows have a 16.5px line box. Draw these detailed marks
+   at 13px, while negative margins preserve their original 11px layout slot so
+   workspace labels stay aligned with session names and row height is unchanged. */
+.si-row.sub .prov-anthropic,.si-row.sub .prov-openai{
+  width:13px;height:13px;margin:-1px;
+}
 .prov-anthropic{
   -webkit-mask:url("/static/vendor/anthropic.svg") center/contain no-repeat;
           mask:url("/static/vendor/anthropic.svg") center/contain no-repeat;

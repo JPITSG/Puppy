@@ -1570,6 +1570,12 @@ def check_opencode_chat_models(ui_source: str, css_source: str) -> None:
         "className": "prov-opencode", "text": "OC", "label": "OpenCode"}
 
 
+def check_session_provider_marks(css_source: str) -> None:
+    """Detailed compact marks grow without changing the session-row layout slot."""
+    assert '.si-row.sub .prov-anthropic,.si-row.sub .prov-openai{' in css_source
+    assert "width:13px;height:13px;margin:-1px" in css_source
+
+
 def check_double_activation_survives_rerender(ui_source: str) -> None:
     """A backend name rebuilt between clicks must still complete the gesture."""
     def extract_function(marker: str) -> str:
@@ -2732,6 +2738,7 @@ async def main() -> None:
             check_queue_pause_ui(ui_source, css_source)
             check_system_prompt_settings(ui_source, css_source)
             check_opencode_chat_models(ui_source, css_source)
+            check_session_provider_marks(css_source)
             check_double_activation_survives_rerender(ui_source)
             check_browser_disable_closes_scoped_tabs(ui_source)
             check_quota_math(ui_source)
