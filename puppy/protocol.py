@@ -62,6 +62,14 @@ QUEUE_PAUSE_CAPABILITY = "queue-pause"
 # existing session socket accepts and broadcasts draft edits. Older remote
 # nodes keep the console's local-only compatibility path.
 SESSION_DRAFT_CAPABILITY = "session-drafts"
+# Remote-workspace surfaces are two independent additive roles. A provider can
+# lease one local project directory to its controller and serve the streamed
+# manifest/fetch/apply protocol over it; a mirror host can run linked sessions
+# whose engine works in a private synchronized copy behind per-turn sync
+# barriers. Nodes never contact each other: every byte is brokered by the
+# controller over the channels it already authenticates.
+WORKSPACE_PROVIDER_CAPABILITY = "workspace-provider"
+WORKSPACE_MIRROR_CAPABILITY = "workspace-mirror"
 
 BASE_CAPABILITIES = (
     "sessions",
@@ -88,6 +96,8 @@ BASE_CAPABILITIES = (
     UPLOAD_PREVIEW_CAPABILITY,
     ENGINE_AUTO_UPGRADE_CAPABILITY,
     SYSTEM_PROMPT_CAPABILITY,
+    WORKSPACE_PROVIDER_CAPABILITY,
+    WORKSPACE_MIRROR_CAPABILITY,
 )
 TERMINAL_CAPABILITY = "terminal"
 # POST /api/notify/exec runs a controller-supplied completion command. It is

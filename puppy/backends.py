@@ -229,6 +229,34 @@ def get_backend(bid: int):
     return backend
 
 
+def node_channel(bid: int):
+    """Transport facts for one node: ordered URLs, token, TLS pin, or None.
+
+    Node 0 is this controller itself, reached over loopback with its own API
+    token, so brokered features (the workspace-link relay) drive local and
+    remote nodes through one identical code path."""
+    if not bid:
+        host = str(config.get("web.host", "127.0.0.1") or "127.0.0.1")
+        if host in ("0.0.0.0", "::", "*", ""):
+            host = "127.0.0.1"
+        if ":" in host and not host.startswith("["):
+            host = "[{}]".format(host)
+        port = int(config.get("web.port", 10888))
+        return {"bid": 0, "name": str(config.get("instance_name") or "this node"),
+                "urls": ["http://{}:{}".format(host, port)],
+                "token": str(config.get("auth.api_token") or ""),
+                "ssl": True,
+                "capabilities": list(protocol.execution_capabilities())}
+    backend = get_backend(bid)
+    if backend is None:
+        return None
+    return {"bid": bid, "name": str(backend.get("name") or str(bid)),
+            "urls": _ordered_backend_urls(backend),
+            "token": backend["token"],
+            "ssl": _ssl_pin(backend.get("tls_fingerprint") or ""),
+            "capabilities": _backend_capabilities(backend)}
+
+
 def _backend_capabilities(backend: dict) -> list:
     value = backend.get("capabilities") or []
     if isinstance(value, str):

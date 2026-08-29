@@ -18,7 +18,7 @@ from puppy import (__version__, auth, backends, bind_verify, browser,
                    cli_auto_upgrade, cli_releases,
                    cli_upgrade, config, db, host_metrics, listener_handoff, notify,
                    protocol, runner, snapshots, system_prompts, terminal, uploads,
-                   usage_refresh, workspaces)
+                   usage_refresh, workspace_links, workspace_sync, workspaces)
 from puppy.drivers import all_drivers, get_driver
 from puppy.drivers import base as driver_base
 
@@ -82,6 +82,9 @@ async def h_ping(request: web.Request):
         "name": config.get("instance_name"),
         "version": __version__,
         "protocol": protocol.API_PROTOCOL,
+        # stable machine identity: lets a controller notice that an execution
+        # node and a workspace node are one box and skip the mirror entirely
+        "node_uuid": db.node_uuid(),
         "role": request.app.get("puppy_role", "full"),
         "capabilities": list(request.app.get(
             "puppy_capabilities", protocol.execution_capabilities())),
@@ -152,6 +155,7 @@ async def h_state(request: web.Request):
         "backends": backends.list_backends(),
         "sessions": session_state["sessions"],
         "server_time": session_state["server_time"],
+        "workspace_links": workspace_links.public_links(),
         "default_cwd": config.get("sessions.default_cwd", "/"),
         "uploads": uploads.settings_payload(),
         "session_colors": db.SESSION_COLORS,
@@ -302,7 +306,37 @@ async def h_session_create(request: web.Request):
     if workspace_kind not in workspaces.KINDS:
         return web.json_response({"error": "unknown workspace kind"}, status=400)
     cwd = ""
-    if workspace_kind == workspaces.KIND_DIRECTORY:
+    workspace_json = ""
+    mirror_uid = ""
+    link = body.get("workspace")
+    if link is not None:
+        # controller-brokered remote workspace: the engine works in a private
+        # stable mirror here while the project lives on the descriptor's node
+        if not isinstance(link, dict) or workspace_kind != workspaces.KIND_DIRECTORY:
+            return web.json_response(
+                {"error": "invalid linked workspace descriptor"}, status=400)
+        root = str(link.get("root") or "").strip()
+        if not root.startswith("/") or len(root) > 4096:
+            return web.json_response(
+                {"error": "linked workspace root must be an absolute path"},
+                status=400)
+        node = str(link.get("node") or "").strip()[:80]
+        label = str(link.get("label") or "").strip()[:512] or \
+            ("{}:{}".format(node, root) if node else root)
+        uid = link.get("uid") if isinstance(link.get("uid"), str) else ""
+        uid = uid or workspace_sync.new_mirror_uid()
+        try:
+            cwd = workspace_sync.allocate_mirror(
+                uid, os.path.basename(root.rstrip("/")) or "project")
+        except (workspace_sync.SyncError, OSError) as exc:
+            return web.json_response(
+                {"error": "cannot allocate the workspace mirror: {}".format(exc)},
+                status=400)
+        mirror_uid = uid
+        workspace_json = json.dumps(
+            {"uid": uid, "root": root, "node": node, "label": label},
+            separators=(",", ":"))
+    elif workspace_kind == workspaces.KIND_DIRECTORY:
         cwd = os.path.abspath(
             str(body.get("cwd") or "").strip() or config.get("sessions.default_cwd", "/"))
         if not os.path.isdir(cwd):
@@ -339,10 +373,16 @@ async def h_session_create(request: web.Request):
             return web.json_response({"error": str(exc)}, status=500)
     try:
         sid = db.create_session(name, engine, cwd, model, effort, color, perm,
-                                workspace_kind=workspace_kind)
+                                workspace_kind=workspace_kind,
+                                workspace=workspace_json)
     except Exception:
         if created_workspace:
             workspaces.discard_created(created_workspace)
+        if mirror_uid:
+            try:
+                workspace_sync.remove_mirror(mirror_uid)
+            except workspace_sync.SyncError as exc:
+                log.warning("mirror rollback failed: %s", exc)
         raise
     runner.broadcast_sessions()
     log.info("session %s created engine=%s workspace=%s cwd=%s",
@@ -438,6 +478,12 @@ async def h_session_delete(request: web.Request):
         workspace_removed = workspaces.remove_temporary(s)
     except workspaces.WorkspaceError as exc:
         return web.json_response({"error": str(exc)}, status=500)
+    descriptor = workspace_sync.session_workspace(s)
+    if descriptor is not None:
+        try:
+            workspace_sync.remove_mirror(descriptor.get("uid"))
+        except workspace_sync.SyncError as exc:
+            log.warning("session %s mirror cleanup skipped: %s", s["id"], exc)
     runner.drop_hub(s["id"])
     shutil.rmtree(os.path.join(config.DATA_DIR, "uploads", str(s["id"])), ignore_errors=True)
     try:
@@ -1209,6 +1255,7 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
         r.add_post("/api/notify/exec", h_notify_exec)
     browser.register(app)
     uploads.register(app)
+    workspace_sync.register(app)
 
 
 def build_app() -> web.Application:
@@ -1233,7 +1280,9 @@ def build_app() -> web.Application:
 
     auth.register(app)
     backends.register(app)
+    workspace_links.register(app)
     app.on_startup.append(backends.start_auto_upgrade_worker)
+    app.on_startup.append(workspace_links.start_worker)
 
     r.add_get("/api/state", h_state)
     r.add_get("/api/notify", h_notify_get)
@@ -1260,6 +1309,7 @@ def build_app() -> web.Application:
     async def on_shutdown(app):
         await bind_verify.close_all(app)
         await backends.stop_auto_upgrade_worker(app)
+        await workspace_links.stop_worker(app)
         await runner.shutdown()
         await backends.close_client()
 

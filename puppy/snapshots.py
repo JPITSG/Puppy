@@ -98,6 +98,17 @@ def blockers() -> List[str]:
     if active_uploads:
         reasons.append("{} active file upload{}".format(
             active_uploads, "" if active_uploads == 1 else "s"))
+    # Mirrors are rebuildable caches and stay outside snapshot coverage, but a
+    # mirror holding changes its authoritative project has not accepted yet is
+    # user data this archive would silently omit. Idle sessions carry the flag
+    # only after a failed post-turn sync, so this clears itself once the
+    # controller finishes that sync.
+    dirty = [str(row["id"]) for row in db.query(
+        "SELECT id FROM sessions WHERE ws_dirty=1")]
+    if dirty:
+        reasons.append(
+            "unsynced remote-workspace changes in session(s): {}".format(
+                ", ".join(dirty)))
     # Imported lazily to keep module initialization acyclic. A controller-side
     # automatic upgrade is a durable external mutation just like a manual one,
     # so backup/restore must not race its artifact replacement and restart.

@@ -12,7 +12,7 @@ import time
 import uuid
 
 from puppy import (browser_agent, config, db, handoff, notify, system_prompts,
-                   uploads, workspaces)
+                   uploads, workspace_sync, workspaces)
 from puppy.drivers import get_driver
 from puppy.drivers import base as driver_base
 from puppy.drivers.base import clean_env
@@ -78,6 +78,9 @@ def session_payload(session):
     out["workspace_missing"] = workspaces.is_temporary(out) and not workspaces.is_available(out)
     out["used_config"] = parse_used_config(out["used_config"])
     out["show_meta"] = out["show_meta"] != 0
+    # raw descriptor JSON becomes a structured object (or None) on the wire
+    out["workspace"] = workspace_sync.session_workspace(out)
+    out["ws_dirty"] = bool(out.get("ws_dirty"))
     return out
 
 
@@ -105,6 +108,11 @@ def sessions_payload() -> dict:
             "has_native": bool(s["native_session_id"]),
             "workspace_kind": s["workspace_kind"],
             "workspace_missing": workspaces.is_temporary(s) and not workspaces.is_available(s),
+            "workspace": workspace_sync.session_workspace(s),
+            "ws_dirty": bool(s["ws_dirty"]),
+            # non-empty while a turn holds at a sync barrier; the controller's
+            # watcher reads this to know a linked session needs service
+            "workspace_phase": (h._ws_phase if h else ""),
             # the sidebar menu is the way back once the head is hidden, so the
             # list has to carry this too - reading it only from the single
             # session payload left that menu permanently showing "on"
@@ -160,6 +168,26 @@ async def detach_for_restore() -> None:
             pass
     _updates_watchers.clear()
     _hubs.clear()
+
+
+_workspace_hooks = []   # in-process controller broker: fn(session_id, phase)
+
+
+def register_workspace_hook(fn) -> None:
+    """The controller broker asks to hear local sessions' barrier phases.
+
+    Remote execution nodes have no broker; their controllers observe the same
+    phases through the updates websocket instead."""
+    if fn not in _workspace_hooks:
+        _workspace_hooks.append(fn)
+
+
+def _notify_workspace_phase(session_id: int, phase: str) -> None:
+    for hook in list(_workspace_hooks):
+        try:
+            hook(session_id, phase)
+        except Exception:
+            log.exception("workspace hook failed for session %s", session_id)
 
 
 def broadcast_sessions() -> None:
@@ -260,6 +288,17 @@ class SessionHub:
         # Draft mutations from several session sockets are serialized through
         # one lock so every watcher observes the same revision order.
         self._draft_lock = asyncio.Lock()
+        # Remote-workspace barrier state. While _ws_phase is set, the turn is
+        # holding for the controller to reconcile the mirror; the grant route
+        # (or the in-process hook for local sessions) releases it. _ws_map
+        # rewrites the private mirror prefix to the authoritative project path
+        # in everything persisted or shown, and back again for approval edits.
+        self._ws_phase = ""
+        self._ws_event = None
+        self._ws_result = None
+        self._ws_progress_at = 0.0
+        self._ws_map = None
+        self._interrupt_count = 0
 
     # ---- watchers ----
 
@@ -391,7 +430,7 @@ class SessionHub:
             "queued": self._queue_wire(),
             "paused": self._paused_wire(),
             "held": self._held_wire(),
-            "pending_approval": self.pending_approval,
+            "pending_approval": self._scrub_value(self.pending_approval),
             "uploads": uploads.settings_payload(),
             "draft": db.get_session_draft(self.id),
             "draft_max_chars": db.MAX_DRAFT_CHARS,
@@ -737,6 +776,10 @@ class SessionHub:
             self.clear_queue()
         if self.status != "running":
             return
+        # counted separately from the sticky flag: a post-turn sync barrier
+        # aborts only on a stop pressed after it began, never on the stop
+        # that ended the engine turn it is trying to persist
+        self._interrupt_count += 1
         already_interrupted = self.interrupted
         self.interrupted = True
         if not already_interrupted:
@@ -794,8 +837,9 @@ class SessionHub:
         driver = get_driver(session["engine"])
         try:
             payload = driver.approval_payload(request_id, behavior, pending.get("input") or {},
-                                              message=message,
-                                              updated_permissions=updated_permissions,
+                                              message=self._unscrub_value(message),
+                                              updated_permissions=self._unscrub_value(
+                                                  updated_permissions),
                                               request=pending)
             await self._write_stdin(payload)
         except Exception as e:
@@ -832,6 +876,125 @@ class SessionHub:
         except asyncio.TimeoutError:
             self._signal_if_alive(proc, signal.SIGKILL)
 
+    # ---- remote workspace ----
+
+    def workspace_barrier_active(self) -> bool:
+        """Whether this session's mirror is holding at a sync barrier."""
+        return bool(self._ws_phase)
+
+    def workspace_grant(self, body: dict) -> dict:
+        """Controller-reported progress or result for a sync barrier."""
+        if body.get("progress"):
+            if not self._ws_phase:
+                return {"ok": False, "error": "no sync barrier is waiting"}
+            self._ws_progress_at = time.monotonic()
+            return {"ok": True, "phase": self._ws_phase}
+        phase = str(body.get("phase") or "")
+        if self._ws_phase and phase == self._ws_phase:
+            self._ws_result = dict(body)
+            self._ws_progress_at = time.monotonic()
+            if self._ws_event is not None:
+                self._ws_event.set()
+            return {"ok": True, "phase": phase}
+        if phase == "idle" and self.status != "running":
+            # a parked mirror was reconciled between turns: keep the durable
+            # dirty flag truthful so blockers and badges clear themselves
+            if body.get("ok") and body.get("clean"):
+                try:
+                    db.touch_session(self.id, ws_dirty=0)
+                except Exception:
+                    log.warning("could not clear the dirty flag for session %s",
+                                self.id)
+                broadcast_sessions()
+            return {"ok": True, "phase": "idle"}
+        return {"ok": False, "error": "no matching sync barrier is waiting"}
+
+    async def _workspace_barrier(self, phase: str) -> dict:
+        """Hold the turn at a sync barrier until a controller grant.
+
+        Pre-turn, the engine must not start on a stale mirror; post-turn, the
+        turn is not complete until the authoritative project durably holds its
+        changes. The hub stays status='running' throughout, so queues, the
+        shutdown grace window, and idle gating need no special cases.
+        """
+        self._ws_phase = phase
+        self._ws_event = asyncio.Event()
+        self._ws_result = None
+        self._ws_progress_at = time.monotonic()
+        started = time.monotonic()
+        interrupts_before = self._interrupt_count
+        self.broadcast({"type": "status", "text": "Syncing workspace files..."})
+        broadcast_sessions()   # watchers see workspace_phase and service it
+        _notify_workspace_phase(self.id, phase)
+        # generous while a controller keeps reporting progress, strict when
+        # nothing claims the barrier at all
+        hard_limit = 1800.0 if phase == "pre" else 900.0
+        quiet_limit = 240.0
+        try:
+            while not self._ws_event.is_set():
+                try:
+                    await asyncio.wait_for(self._ws_event.wait(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    pass
+                if phase == "pre" and self.interrupted:
+                    return {"ok": False, "interrupted": True}
+                if phase == "post" and self._interrupt_count > interrupts_before:
+                    return {"ok": False,
+                            "error": "sync wait stopped by the user"}
+                if _draining:
+                    return {"ok": False, "error": "node is shutting down"}
+                now = time.monotonic()
+                if now - started > hard_limit or \
+                        now - self._ws_progress_at > quiet_limit:
+                    return {"ok": False,
+                            "error": "no controller completed the workspace "
+                                     "sync in time"}
+            result = self._ws_result
+            if not isinstance(result, dict):
+                return {"ok": False, "error": "invalid sync grant"}
+            return result
+        finally:
+            self._ws_phase = ""
+            self._ws_event = None
+            self._ws_result = None
+            broadcast_sessions()
+
+    def _park_queue(self) -> None:
+        """Move waiting prompts to held, like a restart does: the failure
+        that stopped this turn would stop each of them identically."""
+        if not self.queue:
+            return
+        self.held.extend(self.queue)
+        self.queue.clear()
+        self.paused_queue.clear()
+        self._broadcast_queue()
+
+    def _scrub_value(self, value):
+        """Present the authoritative project path instead of the mirror."""
+        if not self._ws_map:
+            return value
+        prefix, label = self._ws_map
+        if isinstance(value, str):
+            return value.replace(prefix, label) if prefix in value else value
+        if isinstance(value, list):
+            return [self._scrub_value(item) for item in value]
+        if isinstance(value, dict):
+            return {key: self._scrub_value(item) for key, item in value.items()}
+        return value
+
+    def _unscrub_value(self, value):
+        """User-authored approval edits travel back in the engine's paths."""
+        if not self._ws_map:
+            return value
+        prefix, label = self._ws_map
+        if isinstance(value, str):
+            return value.replace(label, prefix) if label in value else value
+        if isinstance(value, list):
+            return [self._unscrub_value(item) for item in value]
+        if isinstance(value, dict):
+            return {key: self._unscrub_value(item) for key, item in value.items()}
+        return value
+
     # ---- turn internals ----
 
     async def _write_stdin(self, obj: dict) -> None:
@@ -843,7 +1006,7 @@ class SessionHub:
             await proc.stdin.drain()
 
     def _emit(self, kind: str, data: dict) -> dict:
-        ev = db.add_event(self.id, kind, data)
+        ev = db.add_event(self.id, kind, self._scrub_value(data))
         self.broadcast({"type": "event", "event": ev})
         return ev
 
@@ -883,9 +1046,15 @@ class SessionHub:
     async def _run_turn(self, text: str) -> None:
         got_result = False
         user_event_persisted = False
+        engine_ran = False
+        descriptor = None
         self._block_status = "error"   # until a result says otherwise
         try:
             session = db.get_session(self.id)
+            descriptor = workspace_sync.session_workspace(session)
+            self._ws_map = ((session["cwd"],
+                             str(descriptor.get("root") or session["cwd"]))
+                            if descriptor else None)
             try:
                 session, workspace_reset = workspaces.ensure_session(session)
             except workspaces.WorkspaceError as exc:
@@ -911,6 +1080,31 @@ class SessionHub:
             user_ev = self._emit("user", {"text": text})
             user_event_persisted = True
 
+            if descriptor is not None:
+                grant = await self._workspace_barrier("pre")
+                if grant.get("interrupted"):
+                    self._emit("info", {
+                        "subtype": "interrupted",
+                        "text": "Turn interrupted while syncing the workspace"})
+                    return
+                if not grant.get("ok"):
+                    self._emit("error", {"text": "Workspace sync failed: {}".format(
+                        grant.get("error") or "unknown error")})
+                    self._park_queue()
+                    return
+                if grant.get("conflicts"):
+                    self._emit("info", {
+                        "subtype": "workspace_conflicts",
+                        "text": "{} path(s) differ between the project and this "
+                                "session's copy; conflicting paths keep their "
+                                "local state this turn - resolve them from the "
+                                "workspace chip.".format(grant["conflicts"])})
+                try:
+                    db.touch_session(self.id, ws_dirty=1)
+                except Exception:
+                    log.warning("could not mark session %s workspace dirty",
+                                self.id)
+
             prompt = text
             first_turn = fresh_native_session
             if do_handoff:
@@ -921,19 +1115,30 @@ class SessionHub:
             self._active_turn_id = pinned
             self._browser_activity_announced = set()
             browser_mcp = browser_agent.turn_mcp(self.id, pinned)
+            system_prompt_text = system_prompts.custom_prompt()
+            if descriptor is not None:
+                note = ("This session's working directory is a Puppy-managed "
+                        "private mirror of the authoritative project at {}. "
+                        "Work normally with local paths; Puppy synchronizes "
+                        "your changes with the authoritative project between "
+                        "turns. Prefer project-relative paths when telling "
+                        "the user where things are.").format(
+                            descriptor.get("label") or descriptor.get("root") or "")
+                system_prompt_text = "{}\n\n{}".format(
+                    system_prompt_text, note).strip() if system_prompt_text else note
             argv = driver.build_cmd(
                 session, first_turn, prompt, pinned, browser_mcp=browser_mcp,
-                system_prompt=system_prompts.custom_prompt())
+                system_prompt=system_prompt_text)
             env = clean_env(dict(os.environ))
             runtime_home = os.path.expanduser("~")
             if runtime_home and runtime_home != "~":
                 env.setdefault("HOME", runtime_home)
             env.update(driver.build_env(
                 session, first_turn, prompt, pinned, browser_mcp=browser_mcp,
-                system_prompt=system_prompts.custom_prompt()))
+                system_prompt=system_prompt_text))
             ctx = driver.turn_context(
                 session, first_turn, prompt, pinned, browser_mcp=browser_mcp,
-                system_prompt=system_prompts.custom_prompt())
+                system_prompt=system_prompt_text)
             if not isinstance(ctx, dict):
                 ctx = {}
 
@@ -951,6 +1156,7 @@ class SessionHub:
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,   # own process group so signals reach wrapper + children
                 limit=STREAM_LIMIT)
+            engine_ran = True
 
             stderr_task = asyncio.ensure_future(self._pump_stderr(self.proc))
 
@@ -986,7 +1192,7 @@ class SessionHub:
                     if a == "event":
                         self._emit(act["kind"], act["data"])
                     elif a == "transient":
-                        self.broadcast(act["msg"])
+                        self.broadcast(self._scrub_value(act["msg"]))
                     elif a == "native_id":
                         nid = act.get("id") or ""
                         if nid and nid != session.get("native_session_id"):
@@ -1014,8 +1220,11 @@ class SessionHub:
                             self.broadcast({"type": "session_meta",
                                             "session": session_payload(db.get_session(self.id))})
                     elif a == "approval":
+                        # stored raw: the reply must echo the engine's own
+                        # paths, so only the broadcast copy is rewritten
                         self.pending_approval = act["req"]
-                        self.broadcast({"type": "approval_request", "req": act["req"]})
+                        self.broadcast({"type": "approval_request",
+                                        "req": self._scrub_value(act["req"])})
                     elif a == "approval_cancel":
                         if self.pending_approval and self.pending_approval.get("request_id") == act.get("request_id"):
                             self.pending_approval = None
@@ -1100,6 +1309,33 @@ class SessionHub:
                     driver_base.invalidate_status(session["engine"])
                 except Exception:
                     pass
+            if descriptor is not None and engine_ran:
+                # the turn is not over until the authoritative project holds
+                # this turn's files; an unserviced barrier leaves the durable
+                # dirty flag set and the controller retries while idle
+                try:
+                    grant = await self._workspace_barrier("post")
+                    if grant.get("ok"):
+                        if grant.get("clean"):
+                            db.touch_session(self.id, ws_dirty=0)
+                        if grant.get("conflicts"):
+                            self._emit("info", {
+                                "subtype": "workspace_conflicts",
+                                "text": "{} path(s) changed on both sides "
+                                        "during this turn; both versions are "
+                                        "preserved - resolve them from the "
+                                        "workspace chip.".format(
+                                            grant["conflicts"])})
+                    else:
+                        self._emit("info", {
+                            "subtype": "workspace_sync_pending",
+                            "text": "Workspace sync did not complete: {}. This "
+                                    "node keeps the changes and Puppy retries "
+                                    "automatically.".format(
+                                        grant.get("error") or "unknown error")})
+                except Exception:
+                    log.exception("post-turn workspace barrier failed for "
+                                  "session %s", self.id)
             block_started = self.active_since
             nxt = self._take_next_turn()
             continued = nxt is not None

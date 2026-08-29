@@ -7,6 +7,7 @@ import os
 import sqlite3
 import threading
 import time
+import uuid
 
 from puppy import config
 
@@ -80,6 +81,11 @@ CREATE TABLE sessions (
     status TEXT NOT NULL DEFAULT 'idle',
     archived INTEGER NOT NULL DEFAULT 0,
     workspace_kind TEXT NOT NULL DEFAULT 'directory',
+    -- linked remote-workspace descriptor JSON ({uid, root, node, label});
+    -- '' for ordinary sessions. ws_dirty means the private mirror may hold
+    -- changes the authoritative project has not durably accepted yet.
+    workspace TEXT NOT NULL DEFAULT '',
+    ws_dirty INTEGER NOT NULL DEFAULT 0,
     -- whether the chat head (engine/model, node, cwd) is shown; on by default
     show_meta INTEGER NOT NULL DEFAULT 1,
     sort_order INTEGER NOT NULL DEFAULT 0,
@@ -101,6 +107,23 @@ CREATE TABLE session_drafts (
     updated_at REAL NOT NULL,
     FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
+CREATE TABLE workspace_links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid TEXT NOT NULL UNIQUE,
+    exec_backend INTEGER NOT NULL,
+    session_id INTEGER NOT NULL,
+    ws_backend INTEGER NOT NULL,
+    root TEXT NOT NULL,
+    lease TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'init',
+    generation INTEGER NOT NULL DEFAULT 0,
+    conflicts TEXT NOT NULL DEFAULT '[]',
+    resolutions TEXT NOT NULL DEFAULT '{}',
+    last_error TEXT NOT NULL DEFAULT '',
+    last_sync_at REAL,
+    created_at REAL NOT NULL
+);
+CREATE UNIQUE INDEX idx_wslinks_session ON workspace_links(exec_backend, session_id);
 CREATE INDEX idx_events_session ON events(session_id, seq);
 CREATE INDEX idx_websessions_exp ON web_sessions(expires_at);
 """
@@ -261,6 +284,20 @@ def replace_from(path: str) -> None:
 
 # ---- meta helpers ----
 
+def node_uuid() -> str:
+    """Stable identity for this node across pairings, names, and URLs.
+
+    Lets a controller notice that two backend records - or a backend and the
+    controller itself - are one machine, so a "remote" workspace on the same
+    node degrades to a plain direct-directory session instead of a mirror.
+    """
+    value = meta_get("node.uuid")
+    if not isinstance(value, str) or len(value) != 32:
+        value = uuid.uuid4().hex
+        meta_set("node.uuid", value)
+    return value
+
+
 def meta_get(key: str, default=None):
     row = query_one("SELECT value FROM meta WHERE key=?", (key,))
     if row is None:
@@ -280,7 +317,8 @@ def meta_set(key: str, value) -> None:
 
 def create_session(name: str, engine: str, cwd: str, model: str, effort: str,
                    color: str, permission_mode: str,
-                   workspace_kind: str = "directory") -> int:
+                   workspace_kind: str = "directory",
+                   workspace: str = "") -> int:
     """Create a session and assign its sticky order in one transaction."""
     with _lock:
         conn = connect()
@@ -291,10 +329,10 @@ def create_session(name: str, engine: str, cwd: str, model: str, effort: str,
                 "SELECT COALESCE(MAX(sort_order),0)+1 AS n FROM sessions").fetchone()
             cursor = conn.execute(
                 "INSERT INTO sessions(name,engine,cwd,model,effort,color,permission_mode,"
-                "workspace_kind,sort_order,created_at,updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                "workspace_kind,workspace,sort_order,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (name, engine, cwd, model, effort, color, permission_mode,
-                 workspace_kind, row["n"], now, now))
+                 workspace_kind, workspace, row["n"], now, now))
             session_id = int(cursor.lastrowid)
             conn.commit()
             return session_id
