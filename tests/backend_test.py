@@ -252,6 +252,67 @@ second/model-b
     assert actions[0]["data"]["method"] == "session/load"
 
 
+async def exercise_opencode_binary_fallback(root) -> None:
+    """The official per-user install must work outside a login-shell PATH."""
+    from puppy import cli_upgrade
+    from puppy.drivers import base as driver_base
+    from puppy.drivers.opencode import OpenCodeDriver
+
+    root = Path(root)
+    home = root / "home"
+    binary = home / ".opencode" / "bin" / "opencode"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("""#!{python}
+import json
+import sys
+
+if sys.argv[1:] == ["--version"]:
+    print("1.2.3")
+elif sys.argv[1:] == ["models", "--verbose"]:
+    print("fallback/model-a")
+    print(json.dumps({{
+        "id": "model-a", "providerID": "fallback", "name": "Model A",
+        "variants": {{"high": {{}}}},
+    }}))
+else:
+    raise SystemExit(2)
+""".format(python=sys.executable), encoding="utf-8")
+    binary.chmod(0o755)
+
+    saved_home = os.environ.get("HOME")
+    saved_path = os.environ.get("PATH")
+    try:
+        os.environ["HOME"] = str(home)
+        # Deliberately exclude the fake install: this is the systemd case.
+        os.environ["PATH"] = "/usr/bin:/bin"
+        driver = OpenCodeDriver()
+        assert driver.resolved_binary() == str(binary)
+
+        driver_base.invalidate_status("opencode")
+        status = await driver.status()
+        assert status["installed"] is True
+        assert status["version"] == "1.2.3"
+        assert status["auth"] == "ok" and status["detail"] == "binary available"
+
+        await driver.refresh_model_options(force=True)
+        assert [item["value"] for item in driver.model_options()] == \
+            ["", "fallback/model-a"]
+        session = {"cwd": "/tmp"}
+        assert driver.build_cmd(session, True, "hello", "pin")[:2] == \
+            [str(binary), "acp"]
+        assert cli_upgrade._argv(driver) == [str(binary), "upgrade"]
+    finally:
+        driver_base.invalidate_status("opencode")
+        if saved_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = saved_home
+        if saved_path is None:
+            os.environ.pop("PATH", None)
+        else:
+            os.environ["PATH"] = saved_path
+
+
 def exercise_activity_blocks(session_hub_cls) -> None:
     """Queued turns retain one start time and become idle only after the tail."""
     hub = session_hub_cls(-1)
@@ -2005,6 +2066,7 @@ async def main() -> None:
 
         config.load()
         exercise_opencode_driver()
+        await exercise_opencode_binary_fallback(temp_root / "opencode-fallback")
         controller_token = "controller-test-token-0123456789abcdef"
         config.set_value("auth.api_token", controller_token)
         config.set_value("engines.usage_refresh_minutes", 0)

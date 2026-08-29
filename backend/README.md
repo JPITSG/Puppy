@@ -201,6 +201,12 @@ Turns run through `opencode acp`, resume the native session ID, relay tool
 approvals/cancellation, and receive the same turn-scoped managed-browser MCP
 server when Browser is enabled on that node.
 
+Puppy resolves OpenCode from the service's `PATH` first. It also checks the
+official install script's per-user fallback at `$HOME/.opencode/bin/opencode`,
+because systemd and Supervisor do not source the interactive shell file which
+the installer updates. Run the backend with the same `HOME` as the account that
+owns OpenCode's installation and provider credentials.
+
 ## System prompts
 
 Each node stores its own two-layer prompt setting. The custom layer is added to

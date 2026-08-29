@@ -19,7 +19,6 @@ import asyncio
 import logging
 import os
 import re
-import shutil
 import signal
 import time
 from typing import Dict, List, Optional
@@ -65,7 +64,7 @@ def _argv(driver) -> Optional[List[str]]:
     args = _source(driver)
     if args is None:
         return None
-    binary = shutil.which(driver.binary)
+    binary = driver.resolved_binary()
     if not binary:
         return None
     return [binary] + args

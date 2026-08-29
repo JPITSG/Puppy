@@ -18,7 +18,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import time
 
 from puppy import __version__
@@ -272,6 +271,10 @@ class OpenCodeDriver(Driver):
     key = "opencode"
     label = "OpenCode"
     binary = "opencode"
+    # The official curl installer uses this when no custom/XDG/HOME-bin target
+    # wins, then updates interactive shell files. A service manager does not
+    # source those files, so check the documented installation directly too.
+    binary_fallbacks = ("~/.opencode/bin/opencode",)
     uses_stdin_stream = True
     availability_only = True
     dynamic_model_options = True
@@ -307,7 +310,8 @@ class OpenCodeDriver(Driver):
         now = time.time()
         if not force and self._catalog_ts and now - self._catalog_ts < CATALOG_TTL_SECONDS:
             return
-        if not shutil.which(self.binary):
+        binary = self.resolved_binary()
+        if not binary:
             self._catalog = []
             self._catalog_error = "OpenCode binary not found"
             self._catalog_ts = now
@@ -324,7 +328,7 @@ class OpenCodeDriver(Driver):
                 if runtime_home and runtime_home != "~":
                     env.setdefault("HOME", runtime_home)
                 process = await asyncio.create_subprocess_exec(
-                    self.binary, "models", "--verbose", cwd="/", env=env,
+                    binary, "models", "--verbose", cwd="/", env=env,
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
                 try:
                     output = await asyncio.wait_for(
@@ -409,7 +413,8 @@ class OpenCodeDriver(Driver):
 
     def build_cmd(self, session, first_turn, prompt, pinned_id, browser_mcp=None,
                   system_prompt=""):
-        return [self.binary, "acp", "--cwd", session["cwd"]]
+        return [self.resolved_binary() or self.binary,
+                "acp", "--cwd", session["cwd"]]
 
     def build_env(self, session, first_turn, prompt, pinned_id, browser_mcp=None,
                   system_prompt=""):

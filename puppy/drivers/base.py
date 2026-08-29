@@ -129,6 +129,11 @@ class Driver:
     key = "base"
     label = "Base"
     binary = "false"
+    # Vendor installers sometimes place a CLI in a documented per-user path
+    # and add it only to interactive shell startup files. Services do not read
+    # those files, so a driver may declare narrow, vendor-owned fallbacks while
+    # ordinary PATH lookup remains authoritative.
+    binary_fallbacks = ()
     # True: prompt + control messages flow over stdin as JSONL (claude style).
     # False: prompt is part of argv, stdin closed (codex style).
     uses_stdin_stream = False
@@ -155,6 +160,27 @@ class Driver:
     def permission_options(self):
         """[{value, label, hint}] - engine-specific permission/sandbox levels."""
         return []
+
+    def resolved_binary(self) -> str:
+        """Executable used by probes, turns, discovery, and upgrades.
+
+        Fallbacks must expand to absolute paths. This prevents an engine from
+        accidentally treating Puppy's working directory as an executable
+        search path while still supporting documented per-user installers.
+        """
+        found = shutil.which(self.binary)
+        if found:
+            return found
+        for raw in self.binary_fallbacks:
+            if not isinstance(raw, str) or not raw:
+                continue
+            candidate = os.path.expanduser(raw)
+            if not os.path.isabs(candidate):
+                continue
+            found = shutil.which(candidate)
+            if found:
+                return found
+        return ""
 
     def default_permission(self) -> str:
         return ""
@@ -236,9 +262,10 @@ class Driver:
             probed_at = cached[0]
         else:
             st = {"installed": False, "version": "", "auth": "unknown", "detail": ""}
-            if shutil.which(self.binary):
+            binary = self.resolved_binary()
+            if binary:
                 st["installed"] = True
-                st["version"] = await self._run_quick([self.binary, "--version"])
+                st["version"] = await self._run_quick([binary, "--version"])
                 if self.availability_only:
                     st.update(auth="ok", detail="binary available")
                 else:
