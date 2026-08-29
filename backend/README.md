@@ -115,6 +115,33 @@ the old files were cleared. Startup cleanup removes only unreferenced,
 service-owned directories inside the validated private namespace; normal
 working directories are never removed.
 
+## Remote workspaces
+
+Two additive capabilities let a controller pair one node's session with
+another node's project directory. `workspace-provider` means this node can
+lease a local directory to its controller and serve the streamed
+manifest/fetch/apply protocol over it (`/api/workspace/leases…`), with every
+write staged beside its target, SHA-256 verified, compare-and-swap checked
+against what the sender scanned, and committed under an fsync'd crash journal;
+paths are resolved descriptor-relative with `O_NOFOLLOW`, so no symlink can
+escape the leased root, and symlinks themselves travel verbatim as entries
+that are never followed. `workspace-mirror` means this node can host linked
+sessions: session create accepts a `workspace` descriptor, the engine runs in
+a stable private mirror under `data/mirrors/`, and each turn holds at pre/post
+sync barriers (`/api/sessions/{sid}/workspace/…` plus the `grant` route) until
+the controller reports the reconcile durable. The mirror only accepts applies
+at a barrier or while the session is idle, and a mirror holding changes its
+project has not accepted yet is flagged `ws_dirty`, retried by the controller,
+and blocks backup export until resolved.
+
+Nodes never contact each other and never see each other's tokens: the
+controller relays every byte of both directions over the same authenticated,
+optionally TLS-pinned channels it already uses. Divergent edits to the same
+path are never merged or overwritten silently - they surface as conflicts that
+keep both versions until the user picks a side. Mirrors and lease metadata are
+rebuildable and stay outside snapshot coverage, like the engines' native
+session stores.
+
 ## Session activity timing
 
 Session-list responses and update events include `server_time`. A running
