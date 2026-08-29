@@ -256,7 +256,9 @@ a{color:var(--acc2)}
           mask:url("/static/vendor/openai.svg") center/contain no-repeat;
 }
 .prov-opencode{
-  width:15px;color:var(--opencode);font-size:7px;font-weight:800;letter-spacing:-.04em;
+  width:17px;height:11px;color:var(--opencode);background:currentColor;font-size:0;
+  -webkit-mask:url("/static/vendor/opencode.svg") center/contain no-repeat;
+          mask:url("/static/vendor/opencode.svg") center/contain no-repeat;
 }
 @media (hover:hover){.sess-item:hover{background:rgba(255,255,255,.045)}}
 .sess-item:active{background:var(--hov)}
@@ -1764,7 +1766,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .engine-pick .ep .ep-ico.prov-anthropic{background:#d97757}
 .engine-pick .ep .ep-ico.prov-openai{background:#10a37f}
 .engine-pick .ep .ep-ico.prov-opencode{
-  color:var(--opencode);font-size:10px;font-weight:800;letter-spacing:-.04em;
+  width:22px;height:18px;color:var(--opencode);
 }
 .engine-pick .ep.sel{border-color:rgba(90,162,245,.6);background:var(--acc-dim)}
 .engine-pick .ep .ep-name{font-size:12.5px;font-weight:650}

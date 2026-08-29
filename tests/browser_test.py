@@ -1542,7 +1542,7 @@ console.log(JSON.stringify({before,dirty,resetState,saved,remote,unsupported,cal
 
 
 def check_opencode_chat_models(ui_source: str, css_source: str) -> None:
-    """Discovered models stay in session controls and OpenCode uses its OC mark."""
+    """Discovered models stay in controls and OpenCode uses its square OC mark."""
     assert "engineModelPicker(" not in ui_source
     assert "engine-model-selection" not in ui_source
     assert "engines/${encodeURIComponent(engine.key)}/models" not in ui_source
@@ -1551,7 +1551,14 @@ def check_opencode_chat_models(ui_source: str, css_source: str) -> None:
     assert 'opencode: "OC"' in ui_source
     assert 'opencode: "OpenCode"' in ui_source
     assert '.prov-opencode{' in css_source
+    assert 'url("/static/vendor/opencode.svg") center/contain no-repeat' in css_source
+    assert "width:17px;height:11px" in css_source
+    assert "width:22px;height:18px;color:var(--opencode)" in css_source
     assert ".engine-model-config{" not in css_source
+
+    mark_source = (BASE / "puppy" / "static" / "vendor" / "opencode.svg").read_text()
+    assert 'viewBox="0 0 31 20"' in mark_source
+    assert 'M0 0h15v20H0zM4 4h7v12H4zM19 0h12v4h-8v12h8v4H19z' in mark_source
 
     start = ui_source.index("const PROVIDERS =")
     end = ui_source.index("\nfunction provIcon(", start)
