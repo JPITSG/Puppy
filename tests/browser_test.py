@@ -396,6 +396,11 @@ def check_free_identifiers(ui_source: str) -> None:
                            "\n  ".join(sorted(set(offenders))))
 
 
+def check_static_template_styles(ui_source: str) -> None:
+    """Static template presentation belongs to app.css, not style attributes."""
+    assert 'style="' not in ui_source
+
+
 def check_reconnect_status(ui_source: str) -> None:
     """A transport outage must overlay, not destroy, model activity text.
 
@@ -2765,6 +2770,7 @@ async def main() -> None:
             ui_source = (BASE / "puppy" / "static" / "app.js").read_text()
             css_source = (BASE / "puppy" / "static" / "app.css").read_text()
             check_free_identifiers(ui_source)
+            check_static_template_styles(ui_source)
             check_reconnect_status(ui_source)
             check_backend_shutdown_notice(ui_source)
             check_interrupted_completion(ui_source)

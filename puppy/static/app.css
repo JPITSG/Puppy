@@ -13,9 +13,21 @@
   --ok:#22e5a4; --ok-dim:rgba(34,229,164,.12);
   --warn:#ffb64d; --warn-dim:rgba(255,182,77,.12);
   --err:#ff6b81; --err-dim:rgba(255,107,129,.12);
+  /* State lines keep their hierarchy while following each theme's palette. */
+  --focus-line:rgba(90,162,245,.55); --focus-ring:rgba(90,162,245,.12);
+  --focus-ring-soft:rgba(90,162,245,.10); --focus-stage-ring:rgba(90,162,245,.4);
+  --acc-line-soft:rgba(90,162,245,.28); --acc-line:rgba(90,162,245,.58);
+  --acc-line-hi:rgba(90,162,245,.62);
+  --ok-line:rgba(34,229,164,.4);
+  --warn-line-soft:rgba(255,182,77,.28); --warn-line:rgba(255,182,77,.4);
+  --warn-line-hi:rgba(255,182,77,.6);
+  --err-line-soft:rgba(255,107,129,.3); --err-line:rgba(255,107,129,.4);
+  --err-line-hi:rgba(255,107,129,.55); --err-ring-soft:rgba(255,107,129,.08);
   --violet:#9d7bff; --cyan:#4dc6ff;
   --claude:#e0784f; --codex:#4dd0c4; --opencode:#9d7bff; --term:#22e5a4;
   --r-sm:8px; --r-md:11px; --r-lg:15px;
+  /* Full form fields and dense settings rows are two distinct control tiers. */
+  --field-h:36px; --settings-control-h:30px;
   /* button system: one height scale + themeable face/lift tokens so every
      control (btn, icon-btn, send, mini pill) shares the same material */
   /* --btn-r is the single knob for every button corner: 2px is a hairline
@@ -272,7 +284,7 @@ a{color:var(--acc2)}
 .si-row.sub .prov-opencode{color:var(--txt3)}
 @media (hover:hover){.sess-item:hover{background:rgba(255,255,255,.045)}}
 .sess-item:active{background:var(--hov)}
-.sess-item.active{background:var(--acc-dim);border-color:rgba(90,162,245,.25)}
+.sess-item.active{background:var(--acc-dim);border-color:var(--acc-line-soft)}
 .sess-item.archived{opacity:.5}
 .sess-item.dragging{opacity:.28}
 .sess-group-body.reordering .sess-item{will-change:transform}
@@ -456,11 +468,16 @@ button{
 input[type=text],input[type=password],input[type=number],input[type=time],select,textarea{
   font:inherit;font-size:13px;color:var(--txt);background:var(--panel2);
   -webkit-appearance:none;appearance:none;
-  border:1px solid var(--line2);border-radius:var(--r-sm);padding:8px 10px;width:100%;
+  border:1px solid var(--line2);border-radius:var(--r-sm);width:100%;
   outline:none;transition:border-color .15s,box-shadow .15s;
 }
-input:focus,select:focus,textarea:focus{
-  border-color:rgba(90,162,245,.55);box-shadow:0 0 0 3px rgba(90,162,245,.12);
+input[type=text],input[type=password],input[type=number],input[type=time],select{
+  height:var(--field-h);padding:0 10px;line-height:1.2;
+}
+textarea{padding:8px 10px}
+input[type=text]:focus,input[type=password]:focus,input[type=number]:focus,
+input[type=time]:focus,select:focus,textarea:focus{
+  border-color:var(--focus-line);box-shadow:0 0 0 3px var(--focus-ring);
 }
 label,.field-lbl{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--txt3);margin-bottom:10px}
 /* every control a label can wrap, or the odd one out sits tighter to its
@@ -502,7 +519,7 @@ label input,label select,label textarea{margin-top:5px;text-transform:none;lette
 select.choice-native{display:none!important}
 .choice-control{display:block;min-width:0;margin-top:5px;text-transform:none;letter-spacing:0}
 .choice-button{
-  width:100%;height:36px;padding:0 9px 0 10px;border:1px solid var(--line2);
+  width:100%;height:var(--field-h);padding:0 9px 0 10px;border:1px solid var(--line2);
   border-radius:var(--r-sm);display:flex;align-items:center;gap:8px;cursor:pointer;
   color:var(--txt);background-color:var(--panel);background-image:var(--btn-face);
   box-shadow:var(--btn-lift);font:13px/1 var(--sans);text-align:left;outline:none;
@@ -510,7 +527,7 @@ select.choice-native{display:none!important}
 }
 @media (hover:hover){.choice-button:not(:disabled):hover{border-color:var(--line3);background-image:var(--btn-face-hi)}}
 .choice-button:focus-visible,.choice-control.open .choice-button{
-  border-color:rgba(90,162,245,.58);box-shadow:0 0 0 3px rgba(90,162,245,.12),var(--btn-lift);
+  border-color:var(--focus-line);box-shadow:0 0 0 3px var(--focus-ring),var(--btn-lift);
 }
 .choice-button:disabled{cursor:not-allowed;opacity:.45}
 .choice-value{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -713,12 +730,10 @@ select.choice-native{display:none!important}
 }
 .workspace-pane.focused>.tabbar .tab.active{
   background:linear-gradient(180deg,var(--tab-active-focus-bg),var(--bg) 92%);
-  border-color:rgba(90,162,245,.58);
-  border-color:color-mix(in srgb,var(--acc) 58%,var(--line2));
+  border-color:var(--acc-line);
 }
 .workspace-pane.focused>.tabbar::after{
-  background:rgba(90,162,245,.24);
-  background:color-mix(in srgb,var(--acc) 28%,var(--line));
+  background:var(--acc-line-soft);
 }
 /* Rasterising a 1px divider and the tab face that hides it can disagree on the
    final device row at fractional zoom, leaving the divider visible under the
@@ -861,16 +876,16 @@ select.choice-native{display:none!important}
 .chip.eng-claude .dot{background:var(--claude)}
 .chip.eng-codex .dot{background:var(--codex)}
 .chip.eng-opencode .dot{background:var(--opencode)}
-.chip.cwd.warn{color:var(--warn);border-color:rgba(255,182,77,.35);background:var(--warn-dim)}
+.chip.cwd.warn{color:var(--warn);border-color:var(--warn-line);background:var(--warn-dim)}
 /* the one chip that is a control: a live browser this session launched */
 .chip.browser{
   gap:5px;cursor:pointer;color:var(--acc2);background:var(--acc-dim);
-  border-color:rgba(90,162,245,.28);-webkit-appearance:none;appearance:none;
+  border-color:var(--acc-line-soft);-webkit-appearance:none;appearance:none;
   transition:border-color .15s var(--ease),color .15s var(--ease),transform .12s var(--ease);
 }
 .chip.browser svg{flex-shrink:0;opacity:.85}
 @media (hover:hover){
-  .chip.browser:hover{border-color:rgba(90,162,245,.55);color:var(--txt)}
+  .chip.browser:hover{border-color:var(--focus-line);color:var(--txt)}
   .chip.browser:hover svg{opacity:1}
 }
 .chip.browser:active{transform:scale(.96)}
@@ -982,7 +997,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   align-self:stretch;background:var(--panel);border:1px solid var(--line);border-radius:var(--r-md);
   overflow:hidden;font-size:12.5px;
 }
-.tool-card.err{border-color:rgba(255,107,129,.4)}
+.tool-card.err{border-color:var(--err-line)}
 .tool-head{
   display:flex;align-items:center;gap:8px;padding:7px 11px;cursor:pointer;user-select:none;color:var(--txt2);
 }
@@ -1035,7 +1050,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
    of the line and takes the emphasis the engine carries on a switch */
 .switch-line.cfg-line .sw-cfg{color:var(--txt2);opacity:1}
 .err-card{
-  align-self:stretch;background:var(--err-dim);border:1px solid rgba(255,107,129,.4);
+  align-self:stretch;background:var(--err-dim);border:1px solid var(--err-line);
   border-radius:var(--r-md);padding:9px 13px;font-size:12.5px;color:var(--err);white-space:pre-wrap;
   font-family:var(--mono);
 }
@@ -1046,7 +1061,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .approval{
   margin:0 calc(16px + var(--sbw,0px)) 8px 16px;padding:12px 14px;border-radius:var(--r-md);flex-shrink:0;
   background:linear-gradient(180deg,var(--warn-dim),rgba(255,182,77,.05));
-  border:1px solid rgba(255,182,77,.45);
+  border:1px solid var(--warn-line);
   box-shadow:0 -8px 30px -18px rgba(255,182,77,.5);
   max-width:900px;width:calc(100% - 32px - var(--sbw,0px));align-self:center;
 }
@@ -1151,8 +1166,8 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 }
 /* browsers with field-sizing: the textarea sizes itself natively - no JS at all */
 .composer textarea.fs-content{field-sizing:content;height:auto!important}
-.composer-box:focus-within{border-color:rgba(90,162,245,.5);box-shadow:0 0 0 3px rgba(90,162,245,.1)}
-.composer-box.file-drag{border-color:rgba(90,162,245,.62);box-shadow:0 0 0 3px rgba(90,162,245,.1)}
+.composer-box:focus-within{border-color:var(--focus-line);box-shadow:0 0 0 3px var(--focus-ring)}
+.composer-box.file-drag{border-color:var(--acc-line-hi);box-shadow:0 0 0 3px var(--focus-ring-soft)}
 .composer-box.file-drag::after{
   content:attr(data-drop-hint);position:absolute;z-index:4;top:5px;right:5px;bottom:5px;left:5px;
   pointer-events:none;
@@ -1160,8 +1175,8 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   border:1px dashed var(--line3);border-radius:calc(var(--r-lg) - 3px);
   background:var(--panel2);color:var(--txt2);font:11px/1.35 var(--sans);letter-spacing:.025em;
 }
-.composer-box.file-drag.drop-rejected{border-color:rgba(217,66,89,.55);box-shadow:0 0 0 3px rgba(217,66,89,.08)}
-.composer-box.file-drag.drop-rejected::after{border-color:rgba(217,66,89,.38);color:var(--err)}
+.composer-box.file-drag.drop-rejected{border-color:var(--err-line-hi);box-shadow:0 0 0 3px var(--err-ring-soft)}
+.composer-box.file-drag.drop-rejected::after{border-color:var(--err-line);color:var(--err)}
 .composer textarea{
   border:none;background:none;box-shadow:none!important;resize:none;padding:2px 3px;
   /* integer line-height: fractional line heights (1.45*13.5=19.575px) make every
@@ -1381,7 +1396,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   overflow:hidden;background:#000;outline:none;touch-action:none;
   -webkit-user-select:none;user-select:none;
 }
-.br-stage:focus-visible{box-shadow:0 0 0 2px rgba(90,162,245,.4)}
+.br-stage:focus-visible{box-shadow:0 0 0 2px var(--focus-stage-ring)}
 .br-screen{
   display:none;max-width:100%;max-height:100%;width:auto;height:auto;
   margin:auto;-webkit-user-drag:none;
@@ -1430,10 +1445,14 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .kv{display:flex;align-items:center;gap:10px;padding:6px 0;font-size:13px;flex-wrap:wrap}
 .kv .k{color:var(--txt3);min-width:130px;font-size:12px}
 .kv .v{font-family:var(--mono);font-size:12px;word-break:break-all}
+.api-token-control{cursor:pointer}
+.settings-actions{
+  display:flex;align-items:center;justify-content:flex-start;gap:8px;flex-wrap:wrap;margin-top:10px;
+}
 .pill{font-size:10px;font-family:var(--mono);padding:2px 8px;border-radius:99px;border:1px solid var(--line2)}
-.pill.ok{color:var(--ok);border-color:rgba(34,229,164,.4);background:var(--ok-dim)}
-.pill.bad{color:var(--err);border-color:rgba(255,107,129,.4);background:var(--err-dim)}
-.pill.warn{color:var(--warn);border-color:rgba(255,182,77,.4);background:var(--warn-dim)}
+.pill.ok{color:var(--ok);border-color:var(--ok-line);background:var(--ok-dim)}
+.pill.bad{color:var(--err);border-color:var(--err-line);background:var(--err-dim)}
+.pill.warn{color:var(--warn);border-color:var(--warn-line);background:var(--warn-dim)}
 .engine-node+.engine-node{border-top:1px solid var(--line);margin-top:9px;padding-top:12px}
 .engine-node-head{display:flex;align-items:center;gap:7px;min-width:0;padding:0 0 3px}
 .engine-node-name{
@@ -1476,9 +1495,9 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .engine-row-statuses .pill{min-width:0}
 .engine-row-actions{display:flex;align-items:center;justify-content:flex-end;min-width:0}
 .engine-update{flex:0 0 auto;min-width:82px}
-.engine-update.wants-update{color:var(--warn);border-color:rgba(255,182,77,.4);background:var(--warn-dim)}
+.engine-update.wants-update{color:var(--warn);border-color:var(--warn-line);background:var(--warn-dim)}
 @media (hover:hover){
-  .engine-update.wants-update:hover{color:var(--warn);border-color:rgba(255,182,77,.6)}
+  .engine-update.wants-update:hover{color:var(--warn);border-color:var(--warn-line-hi)}
 }
 .engine-update.busy{cursor:wait}
 .engine-version{max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -1510,9 +1529,9 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .engine-node-message.engine-node-empty::before{justify-self:center}
 .be-row{
   display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:10px 16px;
-  padding:10px 0;border-bottom:1px solid var(--line);
+  padding:10px 0;
 }
-.be-row:last-child{border-bottom:none}
+.be-row+.be-row,.usage-refresh-row+.usage-refresh-row,.eau-row+.eau-row{border-top:1px solid var(--line)}
 .be-details{display:grid;grid-template-columns:20px minmax(0,1fr);align-items:center;gap:9px;min-width:0}
 .be-identity{min-width:0}
 .be-name-row{display:flex;align-items:center;gap:7px;min-width:0}
@@ -1554,9 +1573,9 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   position:absolute;left:3px;top:3px;width:8px;height:8px;border-radius:50%;
   background:var(--txt3);transition:transform .15s var(--ease),background .15s;
 }
-.be-auto input:checked+.be-auto-track{border-color:rgba(90,162,245,.65);background:var(--acc-dim)}
+.be-auto input:checked+.be-auto-track{border-color:var(--acc-line);background:var(--acc-dim)}
 .be-auto input:checked+.be-auto-track>span{transform:translateX(12px);background:var(--acc2)}
-.be-auto input:focus-visible+.be-auto-track{box-shadow:0 0 0 3px rgba(90,162,245,.12)}
+.be-auto input:focus-visible+.be-auto-track{box-shadow:0 0 0 3px var(--focus-ring)}
 @media (hover:hover){.be-auto:hover .be-auto-track{border-color:var(--line3)}}
 .be-auto.disabled{cursor:not-allowed;opacity:.45}
 .be-auto-existing{flex:0 0 auto;min-height:22px}
@@ -1596,7 +1615,8 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .backend-url-row{display:flex;align-items:center;gap:6px;min-width:0}
 .backend-url-row input{flex:1 1 auto;min-width:0;margin:0;font-family:var(--mono);font-size:12px}
 .backend-url-action{
-  width:34px;height:34px;flex:0 0 34px;border-color:var(--line2);background:var(--panel2);
+  width:var(--field-h);height:var(--field-h);flex:0 0 var(--field-h);
+  border-color:var(--line2);background:var(--panel2);
 }
 .backend-url-row:first-child .backend-url-action{color:var(--acc2)}
 .backend-url-field>small{
@@ -1610,17 +1630,18 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .config-textarea{display:block;height:72px;min-height:72px;max-height:72px;resize:none}
 .backend-edit-help{margin:-5px 0 9px;color:var(--txt3);font-size:10.5px;line-height:1.45}
 .backend-edit-error{
-  margin:0;padding:8px 10px;border:1px solid rgba(255,107,129,.3);border-radius:var(--r-sm);
+  margin:0;padding:8px 10px;border:1px solid var(--err-line-soft);border-radius:var(--r-sm);
   background:var(--err-dim);color:var(--err);font-size:11.5px;line-height:1.4;
 }
 .settings-form{display:grid;grid-template-columns:1fr 1fr;gap:0 14px;margin-top:8px}
+.settings-form.backend-add-form{margin-top:12px}
 .settings-form .full{grid-column:1/-1}
 .bind-fields{display:grid;grid-template-columns:minmax(0,1fr) 132px;gap:0 14px;min-width:0}
 .bind-fields>*{min-width:0}
 .bind-help{margin:-5px 0 7px;color:var(--txt3);font-size:10.5px;line-height:1.45}
 .bind-pending{
   display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;
-  margin:5px 0 7px;padding:8px 8px 8px 10px;border:1px solid rgba(255,182,77,.28);
+  margin:5px 0 7px;padding:8px 8px 8px 10px;border:1px solid var(--warn-line-soft);
   border-radius:var(--r-md);background:var(--warn-dim);color:var(--warn);
   font-size:11px;line-height:1.45;
 }
@@ -1655,7 +1676,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .system-prompt-copy{max-width:720px;margin:0 0 12px;color:var(--txt2);font-size:12px;line-height:1.55}
 .system-prompt-node{width:min(360px,100%);margin:0 0 14px}
 .system-prompt-node-label{display:block}
-.system-prompt-node select{height:34px}
+.system-prompt-node select{height:var(--field-h)}
 .system-prompt-section{min-width:0;padding:2px 0 0}
 .system-prompt-section+.system-prompt-section{
   margin-top:16px;padding-top:16px;border-top:1px solid var(--line);
@@ -1690,9 +1711,8 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .usage-refresh-copy{max-width:720px;margin:0 0 9px;color:var(--txt2);font-size:12px;line-height:1.55}
 .usage-refresh-row{
   display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:10px 18px;
-  min-width:0;padding:11px 0;border-top:1px solid var(--line);
+  min-width:0;padding:11px 0;
 }
-.usage-refresh-row:first-child{border-top:0}
 .usage-refresh-identity{min-width:0}
 .usage-refresh-name{
   min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--txt3);
@@ -1704,8 +1724,10 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 }
 .usage-refresh-controls{display:flex;align-items:center;justify-content:flex-end;gap:7px;min-width:0}
 .usage-refresh-controls input{
-  width:74px;height:30px;margin:0;padding:5px 7px;text-align:center;font-family:var(--mono);font-size:12px;
+  width:74px;height:var(--settings-control-h);margin:0;padding:0 7px;
+  text-align:center;font-family:var(--mono);font-size:12px;
 }
+.usage-refresh-controls .btn{height:var(--settings-control-h)}
 /* Chromium reserves room for the number stepper even when it hides the arrows
    until hover. Keep them visible so the value never looks off-centre. */
 .usage-refresh-controls input[type=number]::-webkit-inner-spin-button,
@@ -1717,9 +1739,8 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
    and the row is a name and a switch; on, it grows the schedule in place. */
 .eau-row{
   display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;
-  gap:10px 14px;min-width:0;padding:11px 0;border-top:1px solid var(--line);
+  gap:10px 14px;min-width:0;padding:11px 0;
 }
-.eau-row:first-child{border-top:0}
 /* Placed explicitly, not auto-flowed: an off row has no schedule element, so
    the switch would fall into the middle column and sit a gap-width left of the
    switches on rows that do. The last column ends at the card edge either way. */
@@ -1739,12 +1760,12 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .eau-switch{flex:0 0 auto}
 /* two mutually exclusive choices, sized for a thumb and legible at 10px */
 .seg{
-  display:inline-flex;flex:0 0 auto;padding:2px;gap:2px;
+  display:inline-flex;flex:0 0 auto;height:var(--settings-control-h);padding:2px;gap:2px;
   background:var(--panel2);border:1px solid var(--line2);border-radius:var(--btn-r);
 }
 .seg-btn{
   appearance:none;border:0;border-radius:calc(var(--btn-r) - 2px);cursor:pointer;
-  padding:0 10px;height:26px;min-width:0;white-space:nowrap;
+  padding:0 10px;height:100%;min-width:0;white-space:nowrap;
   background:transparent;color:var(--txt3);font:11.5px/1 var(--sans);
   transition:background .14s var(--ease),color .14s var(--ease);
 }
@@ -1755,7 +1776,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 /* the base field rule matches input[type=time] by attribute, which out-weighs a
    bare class - scope these so the control keeps its own width */
 .eau-when .eau-time{
-  flex:0 0 auto;width:112px;height:30px;margin:0;padding:0 8px;text-align:center;
+  flex:0 0 auto;width:112px;height:var(--settings-control-h);margin:0;padding:0 8px;text-align:center;
   font-family:var(--mono);font-size:12px;
 }
 .eau-when .eau-time:disabled{opacity:.45;cursor:not-allowed}
@@ -1772,6 +1793,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 }
 .modal h2{font-size:15px;margin-bottom:14px;display:flex;align-items:center;gap:9px}
 .modal .m-btns{display:flex;gap:8px;justify-content:flex-end;margin-top:14px}
+.modal-copy{color:var(--txt2);font-size:13px;line-height:1.55}
 .engine-pick{display:grid;grid-template-columns:repeat(auto-fit,minmax(90px,1fr));gap:8px;margin-bottom:10px}
 .engine-pick .ep{
   flex:1;padding:11px 10px;border-radius:var(--r-md);border:1px solid var(--line2);cursor:pointer;
@@ -1787,7 +1809,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .engine-pick .ep .ep-ico.prov-opencode{
   width:22px;height:18px;color:var(--opencode);
 }
-.engine-pick .ep.sel{border-color:rgba(90,162,245,.6);background:var(--acc-dim)}
+.engine-pick .ep.sel{border-color:var(--acc-line);background:var(--acc-dim)}
 .engine-pick .ep .ep-name{font-size:12.5px;font-weight:650}
 .engine-pick .ep .ep-sub{font-size:10px;color:var(--txt3);font-family:var(--mono)}
 .workspace-pick{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:6px}
@@ -1800,7 +1822,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 }
 @media (hover:hover){.workspace-pick .wp:not(:disabled):hover{border-color:var(--line3);background-image:var(--btn-face-hi)}}
 .workspace-pick .wp:not(:disabled):active{box-shadow:var(--btn-press)}
-.workspace-pick .wp.sel{border-color:rgba(90,162,245,.6);background:var(--acc-dim)}
+.workspace-pick .wp.sel{border-color:var(--acc-line);background:var(--acc-dim)}
 .workspace-pick .wp:disabled{cursor:not-allowed;opacity:.45}
 .workspace-pick .wp-name{font-size:12.5px;font-weight:650}
 .workspace-pick .wp-sub{max-width:100%;font:10px var(--mono);color:var(--txt3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -1823,6 +1845,9 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 @media (hover:hover){.dirpick button:not(:disabled):hover{background:var(--hov);color:var(--txt)}}
 .dirpick button:active{background:var(--hov);filter:brightness(.95)}
 .hint{font-size:11px;color:var(--txt3);margin-top:-4px;margin-bottom:10px;text-transform:none;letter-spacing:0}
+.new-session-mkdir{margin:8px 0}
+.new-session-color{margin-top:8px}
+.open-session-list{max-height:50vh;overflow-y:auto;margin-top:10px}
 
 /* ---------- auth ---------- */
 .auth-shell{
@@ -1844,7 +1869,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .auth-sub{font-size:12px;color:var(--txt3);margin-bottom:18px}
 .auth-card form{text-align:left}
 .auth-err{
-  background:var(--err-dim);border:1px solid rgba(255,107,129,.4);color:var(--err);
+  background:var(--err-dim);border:1px solid var(--err-line);color:var(--err);
   border-radius:var(--r-sm);font-size:12px;padding:8px 10px;margin-bottom:12px;
 }
 
@@ -2001,16 +2026,17 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   .eau-identity{grid-column:1;grid-row:1}
   .eau-switch{grid-column:2;grid-row:1}
   .eau-when{grid-column:1/-1;grid-row:2;flex-wrap:wrap}
+  .eau-when{--settings-control-h:34px}
   .eau-when .seg{flex:1 1 auto}
-  .eau-when .seg-btn{flex:1 1 0;height:32px;font-size:12px}
-  .eau-when .eau-time{flex:0 0 auto;width:min(130px,40vw);height:32px}
+  .eau-when .seg-btn{flex:1 1 0;font-size:12px}
+  .eau-when .eau-time{flex:0 0 auto;width:min(130px,40vw)}
   /* a failed run explains itself here; truncating it to an ellipsis on the
      narrowest screen would hide the one thing worth reading */
   .eau-note{white-space:normal;overflow:visible;text-overflow:clip;line-height:1.45}
   .usage-refresh-row{grid-template-columns:minmax(0,1fr);gap:8px;padding:12px 0}
-  .usage-refresh-controls{justify-content:flex-start}
-  .usage-refresh-controls input{width:min(120px,40vw);height:34px}
-  .usage-refresh-controls .btn{height:34px;margin-left:auto}
+  .usage-refresh-controls{--settings-control-h:34px;justify-content:flex-start}
+  .usage-refresh-controls input{width:min(120px,40vw)}
+  .usage-refresh-controls .btn{margin-left:auto}
   .system-prompt-section-head{display:grid;grid-template-columns:minmax(0,1fr)}
   .system-prompt-reset{justify-self:start;height:32px}
   .system-prompt-textarea{font-size:16px;line-height:1.45}
@@ -2043,6 +2069,15 @@ html.light{
   --ok:#0b9e71; --ok-dim:rgba(11,158,113,.10);
   --warn:#b26205; --warn-dim:rgba(178,98,5,.10);
   --err:#d6455d; --err-dim:rgba(214,69,93,.10);
+  --focus-line:rgba(59,130,224,.55); --focus-ring:rgba(59,130,224,.12);
+  --focus-ring-soft:rgba(59,130,224,.10); --focus-stage-ring:rgba(59,130,224,.4);
+  --acc-line-soft:rgba(59,130,224,.28); --acc-line:rgba(59,130,224,.58);
+  --acc-line-hi:rgba(59,130,224,.62);
+  --ok-line:rgba(11,158,113,.4);
+  --warn-line-soft:rgba(178,98,5,.28); --warn-line:rgba(178,98,5,.4);
+  --warn-line-hi:rgba(178,98,5,.6);
+  --err-line-soft:rgba(214,69,93,.3); --err-line:rgba(214,69,93,.4);
+  --err-line-hi:rgba(214,69,93,.55); --err-ring-soft:rgba(214,69,93,.08);
   --violet:#7c5bd6; --cyan:#0e8bc4;
   /* buttons: opaque white face, ink-tinted lift, deeper accents so white
      label text keeps its contrast on the primary/send fills */

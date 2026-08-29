@@ -9258,8 +9258,8 @@ class SettingsView {
       </div>` : ""}
       <div class="kv"><span class="k">Version</span><span class="v">${esc(settings.version)}</span></div>
       <div class="kv"><span class="k">API token</span><span class="v" id="set-token"
-        role="button" tabindex="0" aria-label="Reveal API token" style="cursor:pointer">••••••••••••</span></div>
-      <div class="m-btns" style="justify-content:flex-start;margin-top:10px">
+        role="button" tabindex="0" aria-label="Reveal API token" class="api-token-control">••••••••••••</span></div>
+      <div class="settings-actions">
         <button class="btn btn-pri btn-sm" id="set-save">Save</button>
         <button class="btn btn-sm btn-ghost" id="set-logout">Log out</button>
       </div>
@@ -9630,16 +9630,16 @@ class SettingsView {
     /* backends */
     const c3 = el("div", "card");
     c3.innerHTML = `<h2>Backends</h2><div id="be-list"></div>
-      <div class="settings-form" style="margin-top:12px">
-        <label>Name <span style="text-transform:none">(optional)</span><input type="text" id="be-name"></label>
+      <div class="settings-form backend-add-form">
+        <label>Name <span class="field-optional">(optional)</span><input type="text" id="be-name"></label>
         <div class="backend-url-field"><span class="backend-url-caption">URLs</span>
           <div class="backend-url-editor" id="be-urls"></div>
           <small>First reachable address is used; the working address stays preferred.</small></div>
         <label class="full">API token<input type="password" id="be-token" autocomplete="off"></label>
-        <label class="full">TLS certificate SHA-256 <span style="text-transform:none">(optional)</span>
+        <label class="full">TLS certificate SHA-256 <span class="field-optional">(optional)</span>
           <input type="text" id="be-tls" autocomplete="off" spellcheck="false"
             placeholder="Supplied automatically by pairing JSON"></label>
-        <label class="full">Pairing JSON <span style="text-transform:none">(optional)</span>
+        <label class="full">Pairing JSON <span class="field-optional">(optional)</span>
           <textarea class="config-textarea" id="be-pairing" rows="3"
             placeholder="Paste puppy-backend pairing output"></textarea></label>
         <label class="be-auto be-auto-add full">
@@ -10026,7 +10026,7 @@ function modal(html, className = "") {
 
 function modalConfirm(title, text) {
   return new Promise((resolve) => {
-    const { m, close } = modal(`<h2>${esc(title)}</h2><p style="color:var(--txt2);font-size:13px">${esc(text || "")}</p>
+    const { m, close } = modal(`<h2>${esc(title)}</h2><p class="modal-copy">${esc(text || "")}</p>
       <div class="m-btns"><button class="btn" id="mc-no">Cancel</button><button class="btn btn-danger btn-solid" id="mc-yes">Confirm</button></div>`);
     m.querySelector("#mc-no").onclick = () => { close(); resolve(false); };
     m.querySelector("#mc-yes").onclick = () => { close(); resolve(true); };
@@ -10035,7 +10035,7 @@ function modalConfirm(title, text) {
 
 function modalNotice(title, text) {
   const { m, close } = modal(`<h2>${esc(title)}</h2>
-    <p style="color:var(--txt2);font-size:13px;line-height:1.55">${esc(text || "")}</p>
+    <p class="modal-copy">${esc(text || "")}</p>
     <div class="m-btns"><button class="btn btn-pri" id="mn-ok">OK</button></div>`);
   m.querySelector("#mn-ok").onclick = close;
 }
@@ -10184,17 +10184,17 @@ async function modalNewSession(groupId = null) {
     <div id="ns-dir-fields">
       <label>Working directory<input type="text" id="ns-cwd" spellcheck="false"></label>
       <div class="dirpick hidden" id="ns-dirs"></div>
-      <label class="check" style="margin:8px 0"><input type="checkbox" id="ns-mkdir"> Create directory if missing</label>
+      <label class="check new-session-mkdir"><input type="checkbox" id="ns-mkdir"> Create directory if missing</label>
     </div>
     <p class="hint scratch-note hidden" id="ns-scratch-note">Puppy creates a private empty workspace in the host's temporary storage (normally /tmp). It survives Puppy restarts and is deleted with this session, but the host may clear it—commonly on reboot. The transcript is kept and Puppy can start a fresh workspace.</p>
-    <label>Name <span style="text-transform:none;letter-spacing:0">(optional, auto from first message)</span><input type="text" id="ns-name"></label>
+    <label>Name <span class="field-optional">(optional, auto from first message)</span><input type="text" id="ns-name"></label>
     <div class="field-row">
       <label>Model<select id="ns-model"></select></label>
       <label>Effort<select id="ns-effort"></select></label>
       <label>Permissions<select id="ns-perm"></select></label>
     </div>
     <label class="hidden" id="ns-model-custom-wrap">Custom model<input type="text" id="ns-model-custom" placeholder="Model ID"></label>
-    <div class="field-lbl" style="margin-top:8px">Color<div class="swatch-row" id="ns-colors"></div></div>
+    <div class="field-lbl new-session-color">Color<div class="swatch-row" id="ns-colors"></div></div>
     <div class="m-btns"><button class="btn" id="ns-cancel">Cancel</button><button class="btn btn-pri" id="ns-go">Start session</button></div>`,
     "new-session-modal");
 
@@ -10394,7 +10394,7 @@ async function modalNewSession(groupId = null) {
 function modalOpenSession(groupId = null) {
   const groups = [{ bid: 0, name: backendName(0), sessions: state.sessions }]
     .concat(state.backends.map(b => ({ bid: b.id, name: b.name, sessions: state.remoteSessions[b.id] || [] })));
-  let html = `<h2>Open session</h2><input type="text" id="os-filter" placeholder="Filter…"><div id="os-list" style="max-height:50vh;overflow-y:auto;margin-top:10px"></div>`;
+  let html = `<h2>Open session</h2><input type="text" id="os-filter" placeholder="Filter…"><div id="os-list" class="open-session-list"></div>`;
   const { m, close } = modal(html);
   const list = m.querySelector("#os-list");
   const filterInp = m.querySelector("#os-filter");
@@ -10434,7 +10434,7 @@ function modalNewTerminal(groupId = null) {
     .concat(state.backends.filter(b => backendHasCapability(b, "terminal")));
   const { m, close } = modal(`<h2>New terminal</h2>
     <label>Backend<select id="nt-be">${beOpts.map(b => `<option value="${b.id}">${esc(b.name)}</option>`).join("")}</select></label>
-    <label>Command <span style="text-transform:none">(optional)</span><input type="text" id="nt-cmd" placeholder="Default shell — or e.g. ssh user@host"></label>
+    <label>Command <span class="field-optional">(optional)</span><input type="text" id="nt-cmd" placeholder="Default shell — or e.g. ssh user@host"></label>
     <div class="m-btns"><button class="btn" id="nt-cancel">Cancel</button><button class="btn btn-pri" id="nt-go">Open</button></div>`);
   m.querySelector("#nt-cancel").onclick = close;
   const go = () => {
