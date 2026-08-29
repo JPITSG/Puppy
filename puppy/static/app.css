@@ -221,11 +221,14 @@ a{color:var(--acc2)}
 .si-be{font-size:9.5px;color:var(--txt3);flex-shrink:0}
 .si-be.active-time{
   color:var(--txt2);font-family:var(--mono);font-variant-numeric:tabular-nums;
+  position:relative;top:1px;
 }
 .si-be.idle{letter-spacing:.08em}
 .sess-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0;color:var(--txt3);background:currentColor}
-/* dot (9px) and prov icon (11px) share a column: pad the dot so centers align */
-.si-row .sess-dot{margin:0 1px}
+/* dot (9px) and prov icon (11px) share a column: pad the dot so centres align.
+   The name font's visible band sits 1px below its line-box centre at this size;
+   nudge only the dot's paint (not the row or its baseline) to meet it. */
+.si-row .sess-dot{margin:0 1px;position:relative;top:1px}
 /* a running session spins instead of pulsing: same shape as the header status
    spinner, same size as the idle dot, drawn in the session's own colour.
    border-box keeps the outer size, so only the fill turns into a ring. */
@@ -315,6 +318,10 @@ a{color:var(--acc2)}
 }
 .foot-engine-group+.foot-engine-group{border-top:1px solid var(--line);margin-top:3px;padding-top:7px}
 .foot-engine-head{display:flex;align-items:center;gap:6px;min-width:0;color:var(--txt3)}
+/* Uppercase 9px node labels paint a pixel above their centred line box. Keep
+   the header hit target fixed and lift only the status mark and arrow ink. */
+.foot-engine-head>.foot-ico{position:relative;top:-1px}
+.foot-engine-head>.disclosure-toggle svg{position:relative;top:-1px}
 .foot-engine-group.dragging{opacity:.28}
 .foot-engines.reordering .foot-engine-group{will-change:transform}
 .foot-engine-name{
@@ -347,7 +354,10 @@ a{color:var(--acc2)}
   color:var(--txt3);font:9.5px var(--mono);font-variant-numeric:tabular-nums;
   white-space:nowrap;
 }
-.conn-dot{width:8px;height:8px;flex:0 0 auto;margin-left:6px;border-radius:50%;background:var(--err);transition:background .3s}
+.conn-dot{
+  width:8px;height:8px;flex:0 0 auto;margin-left:6px;position:relative;top:-1px;
+  border-radius:50%;background:var(--err);transition:background .3s;
+}
 .conn-dot.ok{background:var(--ok)}
 .side-backdrop,.drawer-edge{display:none}
 

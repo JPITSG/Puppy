@@ -1579,6 +1579,20 @@ def check_session_provider_marks(css_source: str) -> None:
     assert ".si-row.sub .prov-opencode{color:var(--txt3)}" in css_source
 
 
+def check_sidebar_icon_alignment(css_source: str) -> None:
+    """Sidebar marks keep their measured optical offsets from adjacent text."""
+    assert ".sess-group-title{" in css_source
+    assert ".si-row{display:flex;align-items:center;" in css_source
+    assert ".si-row .sess-dot{margin:0 1px;position:relative;top:1px}" in css_source
+    assert "font-variant-numeric:tabular-nums;\n  position:relative;top:1px;" in css_source
+    assert ".foot-engine-head{display:flex;align-items:center;" in css_source
+    assert ".foot-eng{display:flex;align-items:center;" in css_source
+    assert ".foot-engine-head>.foot-ico{position:relative;top:-1px}" in css_source
+    assert ".foot-engine-head>.disclosure-toggle svg{position:relative;top:-1px}" in css_source
+    assert ".conn-state{display:flex;align-items:center;" in css_source
+    assert "margin-left:6px;position:relative;top:-1px;" in css_source
+
+
 def check_switch_engine_initial_selection(ui_source: str) -> None:
     """The switch modal initially selects the session's current engine."""
     expected = ('let pick = (engines.find(engine => engine.key === s.engine) || '
@@ -2765,6 +2779,7 @@ async def main() -> None:
             check_system_prompt_settings(ui_source, css_source)
             check_opencode_chat_models(ui_source, css_source)
             check_session_provider_marks(css_source)
+            check_sidebar_icon_alignment(css_source)
             check_switch_engine_initial_selection(ui_source)
             check_engine_picker_alignment(css_source)
             check_browser_chip_order(ui_source)
