@@ -575,6 +575,26 @@ def _validate_database(path: Path) -> int:
                         urls[0] != row["url"] or len(set(urls)) != len(urls):
                     raise SnapshotError(
                         "snapshot database contains an invalid backend URL list")
+        # Older archives predate server-side drafts and gain the table through
+        # db._migrate() after installation. If the table is present, validate
+        # it as strictly as every other durable user-data surface.
+        if "session_drafts" in tables:
+            draft_columns = {
+                row["name"] for row in
+                connection.execute("PRAGMA table_info(session_drafts)")}
+            if not {"session_id", "text", "revision", "updated_at"}.issubset(
+                    draft_columns):
+                raise SnapshotError(
+                    "snapshot database has an incompatible session_drafts table")
+            invalid_draft = connection.execute(
+                "SELECT 1 FROM session_drafts d LEFT JOIN sessions s ON s.id=d.session_id "
+                "WHERE s.id IS NULL OR typeof(d.text)!='text' OR "
+                "typeof(d.revision)!='integer' OR d.revision<0 OR "
+                "typeof(d.updated_at) NOT IN ('integer','real') OR "
+                "d.updated_at<0 OR length(d.text)>? LIMIT 1",
+                (db.MAX_DRAFT_CHARS,)).fetchone()
+            if invalid_draft is not None:
+                raise SnapshotError("snapshot database contains an invalid session draft")
         invalid_workspace = connection.execute(
             "SELECT 1 FROM sessions WHERE workspace_kind NOT IN ('directory','temporary') "
             "LIMIT 1").fetchone()
@@ -673,6 +693,13 @@ def _prepare_scratch(candidate_db: Path, root: Path, manifest: dict) -> List[str
             connection.execute(
                 "UPDATE events SET payload=replace(payload, ?, ?)",
                 (source_data + "/uploads/", destination_data + "/uploads/"))
+            has_drafts = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_drafts'"
+            ).fetchone()
+            if has_drafts:
+                connection.execute(
+                    "UPDATE session_drafts SET text=replace(text, ?, ?)",
+                    (source_data + "/uploads/", destination_data + "/uploads/"))
         connection.execute("UPDATE sessions SET status='idle'")
         connection.commit()
         return created

@@ -1131,6 +1131,150 @@ console.log(JSON.stringify({sent,cleared,timers:timers.size,delay:queued.delay})
     }, result
 
 
+def check_session_draft_sync(ui_source: str) -> None:
+    """Exercise the real composer reconciliation without constructing its DOM."""
+    draft_helpers = ui_source[
+        ui_source.index("const DRAFT_JOURNAL_VERSION"):
+        ui_source.index("function snapshotBrowserState")]
+    attachment_helpers = ui_source[
+        ui_source.index("const ATTACHMENT_PREVIEW_TYPES"):
+        ui_source.index("function dataTransferHasFiles")]
+    start = ui_source.index("class SessionView {")
+    session_view = ui_source[start:ui_source.index("class TermView", start)]
+    script = r"""
+const storage=new Map();
+const lsGet=key=>storage.has(key)?storage.get(key):null;
+const lsSet=(key,value)=>storage.set(key,String(value));
+const lsDel=key=>storage.delete(key);
+const WebSocket={OPEN:1};
+const URL={revoked:[],revokeObjectURL(value){this.revoked.push(value);}};
+const fmtBytes=value=>String(value)+" B";
+%s
+%s
+%s
+function makeView(id="s:0:42") {
+  const sent=[];
+  const view=Object.create(SessionView.prototype);
+  Object.assign(view, {
+    tab:{id,bid:0,sid:42}, closed:false,
+    ta:{value:"",selectionStart:0,selectionEnd:0,
+      setSelectionRange(start,end){this.selectionStart=start;this.selectionEnd=end;}},
+    attachments:[],histAttach:null,histIdx:null,histDraft:"",sentThumbs:new Map(),
+    draftSupported:true,draftReady:true,draftRevision:0,
+    draftClientId:"device-a",draftClientSeq:0,draftLatestSeq:0,draftAckSeq:0,
+    draftDeferred:null,draftTouchedBeforeReady:false,draftJournal:null,
+    ws:{readyState:WebSocket.OPEN,send:value=>sent.push(JSON.parse(value))},
+    renderAttachments(){},resizeComposer(){},
+  });
+  return {view,sent};
+}
+
+const first=makeView();
+first.view.ta.value="Test";
+first.view.ta.selectionStart=first.view.ta.selectionEnd=4;
+first.view.saveDraft();
+const pendingJournal=JSON.parse(storage.get("puppy.draft.s:0:42"));
+first.view.receiveDraft({type:"draft",text:"Test",revision:1,updated_at:1,
+  client_id:"device-a",client_seq:1});
+const journalCleared=!storage.has("puppy.draft.s:0:42");
+first.view.receiveDraft({type:"draft",text:"from device b",revision:2,updated_at:2,
+  client_id:"device-b",client_seq:1});
+const followed=first.view.ta.value;
+
+first.view.ta.value="local winner";
+first.view.saveDraft();
+first.view.receiveDraft({type:"draft",text:"peer in flight",revision:3,updated_at:3,
+  client_id:"device-b",client_seq:2});
+const whilePending={text:first.view.ta.value,deferred:first.view.draftDeferred.text};
+first.view.receiveDraft({type:"draft",text:"local winner",revision:4,updated_at:4,
+  client_id:"device-a",client_seq:2});
+const afterAck={text:first.view.ta.value,deferred:first.view.draftDeferred,
+  journal:storage.has("puppy.draft.s:0:42")};
+first.view.receiveDraft({type:"draft",text:"latest peer",revision:5,updated_at:5,
+  client_id:"device-b",client_seq:3});
+
+const imagePath="/private/uploads/42/1700000000000-abcdef0123/photo.png";
+const marker=`${ATTACH_IMAGE_PREFIX}${imagePath}${ATTACH_IMAGE_SUFFIX}`;
+first.view.receiveDraft({type:"draft",text:marker,revision:6,updated_at:6,
+  client_id:"device-b",client_seq:4});
+const sharedAttachment={count:first.view.attachments.length,
+  path:first.view.attachments[0].path,prose:first.view.ta.value};
+first.view.attachments.push({path:"",url:"blob:upload",ownsUrl:true,uploading:true,
+  removed:false,controller:null});
+first.view.receiveDraft({type:"draft",text:"peer prose",revision:7,updated_at:7,
+  client_id:"device-b",client_seq:5});
+const uploadPreserved={count:first.view.attachments.length,
+  uploading:first.view.attachments[0].uploading,text:first.view.ta.value};
+
+storage.set("puppy.draft.s:0:43", "legacy offline text");
+const legacy=makeView("s:0:43");
+legacy.view.draftReady=false;
+legacy.view.draftJournal=readDraftJournal("s:0:43");
+legacy.view.initializeDraft({text:"",revision:0,updated_at:null});
+
+writeDraftJournal("s:0:44", "stale submitted text", 0, true);
+const stale=makeView("s:0:44");
+stale.view.draftReady=false;
+stale.view.draftJournal=readDraftJournal("s:0:44");
+stale.view.initializeDraft({text:"newer server text",revision:3,updated_at:8});
+
+writeDraftJournal("s:0:45", "unacknowledged edit", 0);
+const unacked=makeView("s:0:45");
+unacked.view.draftReady=false;
+unacked.view.draftJournal=readDraftJournal("s:0:45");
+unacked.view.initializeDraft({text:"accepted prefix",revision:3,updated_at:8});
+
+const offline=makeView("s:0:46");
+offline.view.ws=null;
+offline.view.ta.value="typed while disconnected";
+offline.view.saveDraft();
+const offlineBefore={ready:offline.view.draftReady,
+  touched:offline.view.draftTouchedBeforeReady};
+offline.view.ws={readyState:WebSocket.OPEN,
+  send:value=>offline.sent.push(JSON.parse(value))};
+offline.view.initializeDraft({text:"server while away",revision:8,updated_at:9});
+
+console.log(JSON.stringify({sent:first.sent,pendingJournal,journalCleared,followed,
+  whilePending,afterAck,latest:first.view.ta.value,sharedAttachment,uploadPreserved,
+  legacy:{text:legacy.view.ta.value,sent:legacy.sent},
+  stale:{text:stale.view.ta.value,sent:stale.sent,
+         journal:storage.has("puppy.draft.s:0:44")},
+  unacked:{text:unacked.view.ta.value,sent:unacked.sent},
+  offline:{before:offlineBefore,text:offline.view.ta.value,sent:offline.sent}}));
+""" % (draft_helpers, attachment_helpers, session_view)
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:1000]
+    result = json.loads(proc.stdout)
+    assert result["sent"] == [
+        {"type": "draft", "text": "Test", "client_id": "device-a", "client_seq": 1},
+        {"type": "draft", "text": "local winner", "client_id": "device-a",
+         "client_seq": 2},
+    ], result
+    assert result["pendingJournal"] == {
+        "_puppy_draft": 1, "text": "Test", "base_revision": 0,
+        "submitted": False}, result
+    assert result["journalCleared"] and result["followed"] == "from device b", result
+    assert result["whilePending"] == {
+        "text": "local winner", "deferred": "peer in flight"}, result
+    assert result["afterAck"] == {
+        "text": "local winner", "deferred": None, "journal": False}, result
+    assert result["latest"] == "peer prose", result
+    assert result["sharedAttachment"] == {
+        "count": 1, "path": "/private/uploads/42/1700000000000-abcdef0123/photo.png",
+        "prose": ""}, result
+    assert result["uploadPreserved"] == {
+        "count": 1, "uploading": True, "text": "peer prose"}, result
+    assert result["legacy"]["text"] == "legacy offline text", result
+    assert result["legacy"]["sent"][0]["text"] == "legacy offline text", result
+    assert result["stale"] == {
+        "text": "newer server text", "sent": [], "journal": False}, result
+    assert result["unacked"]["text"] == "unacknowledged edit", result
+    assert result["unacked"]["sent"][0]["text"] == "unacknowledged edit", result
+    assert result["offline"]["before"] == {"ready": False, "touched": True}, result
+    assert result["offline"]["text"] == "typed while disconnected", result
+    assert result["offline"]["sent"][0]["text"] == "typed while disconnected", result
+
+
 def check_browser_handoff_ui(ui_source: str, css_source: str) -> None:
     """The identified browser owns a compact, responsive chat-link strip."""
     start = ui_source.index("class BrowserView {")
@@ -2778,6 +2922,7 @@ async def main() -> None:
             check_backend_editor(ui_source, css_source)
             check_drawer_drag(ui_source)
             check_browser_viewport(ui_source)
+            check_session_draft_sync(ui_source)
             check_browser_handoff_ui(ui_source, css_source)
             check_desktop_side_drag(ui_source)
             check_user_message_copy(ui_source)

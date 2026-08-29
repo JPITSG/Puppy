@@ -58,6 +58,10 @@ SHUTDOWN_NOTICE_CAPABILITY = "shutdown-notice"
 # socket accepts ``set_queue_paused``. Older controllers ignore the field;
 # newer controllers hide the control until a remote node advertises support.
 QUEUE_PAUSE_CAPABILITY = "queue-pause"
+# The session snapshot carries a durable, versioned composer draft and the
+# existing session socket accepts and broadcasts draft edits. Older remote
+# nodes keep the console's local-only compatibility path.
+SESSION_DRAFT_CAPABILITY = "session-drafts"
 
 BASE_CAPABILITIES = (
     "sessions",
@@ -65,6 +69,7 @@ BASE_CAPABILITIES = (
     "approvals",
     "message-queue",
     QUEUE_PAUSE_CAPABILITY,
+    SESSION_DRAFT_CAPABILITY,
     # model/effort changes made while work is pending hold their place in the
     # message queue ({kind:"config"} items) instead of applying immediately
     "queued-config",

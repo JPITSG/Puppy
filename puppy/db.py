@@ -16,6 +16,12 @@ log = logging.getLogger("puppy.db")
 _conn = None
 _lock = threading.RLock()
 
+# On Send, the same composer value travels once as the message and once as the
+# conditional draft-consume guard. A quarter-million Unicode code points keeps
+# even maximally JSON-escaped text below the 4 MiB session-frame ceiling while
+# remaining far beyond an ordinary interactive prompt.
+MAX_DRAFT_CHARS = 256 * 1024
+
 # Selectable session dot colors - gray is reserved for the Settings tab. The
 # second ten fill the hue gaps the first ten left (yellow-green through green,
 # and magenta) and lean on lightness where hue alone would not separate them:
@@ -88,6 +94,13 @@ CREATE TABLE IF NOT EXISTS events (
     kind TEXT NOT NULL,
     payload TEXT NOT NULL,
     created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS session_drafts (
+    session_id INTEGER PRIMARY KEY,
+    text TEXT NOT NULL DEFAULT '',
+    revision INTEGER NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL,
+    FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, seq);
 CREATE INDEX IF NOT EXISTS idx_websessions_exp ON web_sessions(expires_at);
@@ -298,6 +311,98 @@ def reorder_sessions(ids: list) -> None:
         conn.commit()
 
 
+def get_session_draft(session_id: int) -> dict:
+    """Return the authoritative composer draft and its monotonic version."""
+    row = query_one(
+        "SELECT text,revision,updated_at FROM session_drafts WHERE session_id=?",
+        (int(session_id),))
+    if row is None:
+        return {"text": "", "revision": 0, "updated_at": None}
+    return {
+        "text": str(row["text"] or ""),
+        "revision": max(0, int(row["revision"])),
+        "updated_at": float(row["updated_at"]),
+    }
+
+
+def set_session_draft(session_id: int, text: str) -> tuple:
+    """Replace one draft and return ``(previous, current)`` atomically.
+
+    Revisions advance even when two clients submit the same text. This gives
+    every accepted socket edit a unique total order and its sender an
+    unambiguous acknowledgement.
+    """
+    if not isinstance(text, str):
+        raise TypeError("draft text must be text")
+    if len(text) > MAX_DRAFT_CHARS:
+        raise ValueError("draft cannot exceed {} characters".format(MAX_DRAFT_CHARS))
+    session_id = int(session_id)
+    with _lock:
+        conn = connect()
+        try:
+            row = conn.execute(
+                "SELECT text,revision,updated_at FROM session_drafts WHERE session_id=?",
+                (session_id,)).fetchone()
+            previous = {
+                "text": str(row["text"] or "") if row else "",
+                "revision": max(0, int(row["revision"])) if row else 0,
+                "updated_at": float(row["updated_at"]) if row else None,
+            }
+            revision = previous["revision"] + 1
+            updated_at = time.time()
+            conn.execute(
+                "INSERT INTO session_drafts(session_id,text,revision,updated_at) "
+                "VALUES(?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET "
+                "text=excluded.text,revision=excluded.revision,updated_at=excluded.updated_at",
+                (session_id, text, revision, updated_at))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    return previous, {
+        "text": text, "revision": revision, "updated_at": updated_at,
+    }
+
+
+def consume_session_draft(session_id: int, expected_text: str) -> tuple:
+    """Clear a submitted draft only if no other client has replaced it.
+
+    Returns ``(consumed, previous, current)``. A mismatch is intentionally a
+    no-op: another device's newer contents must survive this device sending an
+    older shared value.
+    """
+    if not isinstance(expected_text, str):
+        raise TypeError("draft text must be text")
+    if len(expected_text) > MAX_DRAFT_CHARS:
+        raise ValueError("draft cannot exceed {} characters".format(MAX_DRAFT_CHARS))
+    session_id = int(session_id)
+    with _lock:
+        conn = connect()
+        try:
+            row = conn.execute(
+                "SELECT text,revision,updated_at FROM session_drafts WHERE session_id=?",
+                (session_id,)).fetchone()
+            previous = {
+                "text": str(row["text"] or "") if row else "",
+                "revision": max(0, int(row["revision"])) if row else 0,
+                "updated_at": float(row["updated_at"]) if row else None,
+            }
+            if row is None or previous["text"] != expected_text:
+                return False, previous, dict(previous)
+            revision = previous["revision"] + 1
+            updated_at = time.time()
+            conn.execute(
+                "UPDATE session_drafts SET text='',revision=?,updated_at=? WHERE session_id=?",
+                (revision, updated_at, session_id))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    return True, previous, {
+        "text": "", "revision": revision, "updated_at": updated_at,
+    }
+
+
 def touch_session(session_id: int, **fields) -> None:
     fields["updated_at"] = time.time()
     keys = ", ".join(f"{k}=?" for k in fields)
@@ -339,6 +444,7 @@ def delete_session(session_id: int) -> None:
     with _lock:
         conn = connect()
         conn.execute("DELETE FROM events WHERE session_id=?", (session_id,))
+        conn.execute("DELETE FROM session_drafts WHERE session_id=?", (session_id,))
         conn.execute("DELETE FROM sessions WHERE id=?", (session_id,))
         # the durable queue/held record rides under this session's meta key
         conn.execute("DELETE FROM meta WHERE key=?",

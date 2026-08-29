@@ -158,6 +158,19 @@ def _attachment_upload_ids(session_id: int, text: str) -> set:
     return found
 
 
+def upload_is_referenced(session_id: int, upload_id: str, retained=()) -> bool:
+    """Whether durable or in-flight session text still owns one upload."""
+    session_id = int(session_id)
+    if any(upload_id in _attachment_upload_ids(session_id, text)
+           for text in retained or () if isinstance(text, str)):
+        return True
+    referenced = db.query_one(
+        "SELECT 1 FROM events WHERE session_id=? AND kind='user' "
+        "AND instr(payload, ?) > 0 LIMIT 1",
+        (session_id, upload_id))
+    return referenced is not None
+
+
 def discard_abandoned(session_id: int, abandoned, retained=()) -> int:
     """Remove queue-owned uploads which no remaining durable text references.
 
@@ -182,17 +195,14 @@ def discard_abandoned(session_id: int, abandoned, retained=()) -> int:
     for upload_id in sorted(abandoned_ids - retained_ids):
         try:
             # The random id is JSON-safe and appears unchanged inside a user
-            # event payload.  A false positive only retains a file; it can
-            # never authorize deletion of a different upload.
-            referenced = db.query_one(
-                "SELECT 1 FROM events WHERE session_id=? AND kind='user' "
-                "AND instr(payload, ?) > 0 LIMIT 1",
-                (session_id, upload_id))
+            # event payload. A false positive only retains a file; it can never
+            # authorize deletion of a different upload.
+            referenced = upload_is_referenced(session_id, upload_id)
         except Exception as exc:
             log.warning("could not check session %s upload %s references: %s",
                         session_id, upload_id, exc)
             continue
-        if referenced is not None:
+        if referenced:
             continue
         try:
             target = _validated_upload_file(session_id, upload_id)
@@ -332,6 +342,23 @@ async def h_session_upload_delete(request: web.Request):
     upload_id = request.match_info.get("upload_id", "")
     if not UPLOAD_ID.fullmatch(upload_id):
         return web.json_response({"error": "invalid upload id"}, status=400)
+    # A browser may request deletion just before its draft-update frame reaches
+    # this coroutine, and another browser may concurrently keep or re-add the
+    # same chip. Never remove bytes while any shared/in-flight text still owns
+    # them; an unambiguous later cleanup or session deletion owns the bytes.
+    from puppy import runner
+    try:
+        hub = runner.hub(session_id)
+        retained = [db.get_session_draft(session_id)["text"]]
+        retained.extend(item for item in hub.queue + hub.held if isinstance(item, str))
+        if hub._active_prompt_text:
+            retained.append(hub._active_prompt_text)
+        if upload_is_referenced(session_id, upload_id, retained):
+            return web.json_response({"ok": True, "removed": False, "referenced": True})
+    except Exception as exc:
+        log.warning("session %s upload %s reference check failed: %s",
+                    session_id, upload_id, exc)
+        return web.json_response({"error": "could not verify upload references"}, status=409)
     try:
         target = _validated_upload_file(session_id, upload_id)
     except FileNotFoundError:

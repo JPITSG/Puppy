@@ -260,11 +260,24 @@ class SessionHub:
         # the turn closes so cancelling a duplicate queued marker cannot race
         # that event write and remove bytes the active turn still needs.
         self._active_prompt_text = ""
+        # Draft mutations from several session sockets are serialized through
+        # one lock so every watcher observes the same revision order.
+        self._draft_lock = asyncio.Lock()
 
     # ---- watchers ----
 
     def attach(self, ws) -> None:
         self.watchers.add(ws)
+
+    async def attach_with_snapshot(self, ws) -> None:
+        """Attach without allowing a newer draft to overtake its snapshot."""
+        async with self._draft_lock:
+            self.attach(ws)
+            try:
+                await ws.send_json(self.snapshot())
+            except Exception:
+                self.detach(ws)
+                raise
 
     def detach(self, ws) -> None:
         self.watchers.discard(ws)
@@ -272,6 +285,82 @@ class SessionHub:
     def broadcast(self, payload: dict) -> None:
         for ws in list(self.watchers):
             asyncio.ensure_future(_safe_send(ws, payload, self.watchers))
+
+    async def _broadcast_draft(self, payload: dict) -> None:
+        """Write one ordered draft frame to every attached viewer."""
+        sockets = list(self.watchers)
+        if not sockets:
+            return
+        await asyncio.gather(
+            *(_safe_send(ws, payload, self.watchers) for ws in sockets),
+            return_exceptions=True)
+
+    @staticmethod
+    def _draft_identity(client_id, client_seq) -> dict:
+        client_id = str(client_id or "")[:80]
+        try:
+            client_seq = int(client_seq)
+        except (TypeError, ValueError):
+            client_seq = 0
+        return {"client_id": client_id, "client_seq": max(0, client_seq)}
+
+    def _draft_payload(self, record: dict, client_id="", client_seq=0,
+                       consumed=None) -> dict:
+        payload = {"type": "draft", **record,
+                   **self._draft_identity(client_id, client_seq)}
+        if consumed is not None:
+            payload["consumed"] = bool(consumed)
+        return payload
+
+    async def update_draft(self, text, client_id="", client_seq=0) -> dict:
+        """Persist and fan out one full composer value in a total order."""
+        if not isinstance(text, str):
+            return {"error": "draft text must be text"}
+        if len(text) > db.MAX_DRAFT_CHARS:
+            return {"error": "draft cannot exceed {} characters".format(
+                db.MAX_DRAFT_CHARS)}
+        async with self._draft_lock:
+            if db.get_session(self.id) is None:
+                return {"error": "session gone"}
+            try:
+                _, current = db.set_session_draft(self.id, text)
+            except Exception:
+                log.exception("could not persist draft for session %s", self.id)
+                return {"error": "could not save draft"}
+            payload = self._draft_payload(current, client_id, client_seq)
+            await self._broadcast_draft(payload)
+            # Do not delete an upload merely because this revision dropped its
+            # marker. A concurrent client may already have sent a later full
+            # draft which still carries it but whose frame has not reached us
+            # yet. Session deletion remains the unambiguous cleanup boundary.
+            return payload
+
+    async def consume_draft(self, expected_text, client_id="", client_seq=0,
+                            recipient=None) -> dict:
+        """Clear the value just sent without erasing a concurrent newer edit."""
+        if not isinstance(expected_text, str):
+            return {"error": "draft text must be text"}
+        if len(expected_text) > db.MAX_DRAFT_CHARS:
+            return {"error": "draft cannot exceed {} characters".format(
+                db.MAX_DRAFT_CHARS)}
+        async with self._draft_lock:
+            try:
+                consumed, previous, current = db.consume_session_draft(
+                    self.id, expected_text)
+            except Exception:
+                log.exception("could not consume draft for session %s", self.id)
+                return {"error": "could not save draft"}
+            payload = self._draft_payload(
+                current, client_id, client_seq, consumed=consumed)
+            if consumed:
+                await self._broadcast_draft(payload)
+                self._discard_abandoned_uploads([previous["text"]])
+            elif recipient is not None:
+                # Other viewers already have this revision. The sender still
+                # needs the authoritative value so its optimistic clear cannot
+                # hide a concurrent edit.
+                await _safe_send(recipient, payload, self.watchers)
+            return payload
 
     def browser_turn_active(self, turn_id: str) -> bool:
         """Whether a per-turn browser bridge still belongs to this engine."""
@@ -307,6 +396,8 @@ class SessionHub:
             "held": self._held_wire(),
             "pending_approval": self.pending_approval,
             "uploads": uploads.settings_payload(),
+            "draft": db.get_session_draft(self.id),
+            "draft_max_chars": db.MAX_DRAFT_CHARS,
         }
 
     def _queue_wire(self) -> list:
@@ -374,14 +465,18 @@ class SessionHub:
         self.broadcast({"type": "queued", "queued": self._queue_wire(),
                         "paused": self._paused_wire(), "held": self._held_wire()})
 
-    def _discard_abandoned_uploads(self, items) -> None:
+    def _discard_abandoned_uploads(self, items, retained=()) -> None:
         abandoned = [item for item in items if isinstance(item, str)]
         if not abandoned:
             return
-        retained = [item for item in self.queue + self.held if isinstance(item, str)]
-        if self._active_prompt_text:
-            retained.append(self._active_prompt_text)
         try:
+            retained = list(retained or ()) + [
+                item for item in self.queue + self.held if isinstance(item, str)]
+            # A cancelled queued/held prompt may share a staged file with the
+            # live composer on another device. The durable draft is an owner.
+            retained.append(db.get_session_draft(self.id)["text"])
+            if self._active_prompt_text:
+                retained.append(self._active_prompt_text)
             uploads.discard_abandoned(self.id, abandoned, retained)
         except Exception as exc:
             # Queue controls must remain usable even if private storage has

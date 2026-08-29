@@ -15,6 +15,11 @@ built-in web terminals.
 - **Frontend** (`puppy/static/`, vanilla JS SPA): left sidebar with sessions and
   backends, tabbed main area with concurrent chat sessions and xterm.js
   terminals. Responsive - works on mobile.
+- **Shared drafts**: each chat composer is written through to its session node
+  and streamed to every open console. Unsent prose and staged attachment chips
+  therefore follow the same chat across desktop/mobile browsers and survive a
+  browser, device, or Puppy restart. A small local journal covers edits whose
+  server acknowledgement was interrupted.
 - **Engine switching**: a session can move between any installed engines at any
   point. The new engine starts a fresh native session seeded with a transcript
   handoff in the same working directory.
@@ -117,7 +122,8 @@ an independently versioned controller/backend protocol.
 Persistent private state lives in `data/` (gitignored): `config.json` (instance
 name, bind host/port, api token, default working directory, terminal command,
 usage-refresh interval, and upload-size limit),
-`puppy.db` (sessions, transcripts, users), backend TLS identities, and `puppy.log`. Scratch-session files are the
+`puppy.db` (sessions, transcripts, shared drafts, users), backend TLS identities,
+and `puppy.log`. Scratch-session files are the
 intentional exception: they live in a mode-0700, instance-specific namespace
 under the OS temporary directory and are disposable. The repo itself is clean
 code, safe to publish. Export archives contain password hashes, API/backend

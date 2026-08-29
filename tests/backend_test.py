@@ -543,6 +543,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "engine-model-selection" not in ping["capabilities"]
         assert "file-uploads" in ping["capabilities"]
         assert "queue-pause" in ping["capabilities"]
+        assert "session-drafts" in ping["capabilities"]
         assert "system-prompt" in ping["capabilities"]
         assert "shutdown-notice" in ping["capabilities"]
         assert ping["shutting_down"] is False
@@ -800,7 +801,39 @@ async def exercise_node(url: str, token: str, expected_version: str,
 
             session_ws = await http.ws_connect(
                 url + f"/api/ws/session/{normal['id']}", headers=good, ssl=pinned)
-            assert (await session_ws.receive_json(timeout=3))["type"] == "snapshot"
+            first_snapshot = await session_ws.receive_json(timeout=3)
+            assert first_snapshot["type"] == "snapshot"
+            assert first_snapshot["draft"] == {
+                "text": "", "revision": 0, "updated_at": None}
+            peer_ws = await http.ws_connect(
+                url + f"/api/ws/session/{normal['id']}", headers=good, ssl=pinned)
+            assert (await peer_ws.receive_json(timeout=3))["draft"]["revision"] == 0
+            await session_ws.send_json({
+                "type": "draft", "text": "Test", "client_id": "device-a",
+                "client_seq": 1,
+            })
+            first_draft = await session_ws.receive_json(timeout=3)
+            peer_draft = await peer_ws.receive_json(timeout=3)
+            assert first_draft == peer_draft
+            assert first_draft["type"] == "draft"
+            assert first_draft["text"] == "Test" and first_draft["revision"] == 1
+            assert first_draft["client_id"] == "device-a"
+            assert first_draft["client_seq"] == 1
+            await peer_ws.close()
+            later_ws = await http.ws_connect(
+                url + f"/api/ws/session/{normal['id']}", headers=good, ssl=pinned)
+            later_snapshot = await later_ws.receive_json(timeout=3)
+            assert later_snapshot["draft"]["text"] == "Test"
+            assert later_snapshot["draft"]["revision"] == 1
+            await later_ws.send_json({
+                "type": "draft", "text": "", "client_id": "device-b",
+                "client_seq": 9,
+            })
+            cleared_a = await session_ws.receive_json(timeout=3)
+            cleared_b = await later_ws.receive_json(timeout=3)
+            assert cleared_a == cleared_b
+            assert cleared_a["text"] == "" and cleared_a["revision"] == 2
+            await later_ws.close()
             await session_ws.send_json([])
             rejected_socket_object = await session_ws.receive_json(timeout=3)
             assert rejected_socket_object["type"] == "toast", rejected_socket_object
@@ -999,6 +1032,7 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert full_ping["role"] == "full" and full_ping["protocol"] == 1
         assert "terminal" in full_ping["capabilities"]
         assert "queue-pause" in full_ping["capabilities"]
+        assert "session-drafts" in full_ping["capabilities"]
         assert "browser-handoff" in full_ping["capabilities"]
         assert "browser-file-workflows" in full_ping["capabilities"]
         assert "shutdown-notice" not in full_ping["capabilities"]
@@ -1053,6 +1087,7 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert "engine-upgrade" in stored["capabilities"]
         assert "file-uploads" in stored["capabilities"]
         assert "queue-pause" in stored["capabilities"]
+        assert "session-drafts" in stored["capabilities"]
         assert "browser-handoff" in stored["capabilities"]
         assert "browser-file-workflows" in stored["capabilities"]
         assert "shutdown-notice" in stored["capabilities"]
@@ -1875,6 +1910,121 @@ async def exercise_queue_pause(runner, db) -> None:
         db.delete_session(sid)
 
 
+async def exercise_session_drafts(runner, db, uploads, config) -> None:
+    """Drafts are ordered, durable, conflict-safe, and own staged uploads."""
+    sid = db.create_session("draft sync", "claude", "/tmp", "", "", "blue", "auto")
+    session_root = Path(config.DATA_DIR).resolve() / "uploads" / str(sid)
+
+    class Watcher:
+        def __init__(self):
+            self.messages = []
+
+        async def send_json(self, value):
+            self.messages.append(value)
+
+    first = Watcher()
+    second = Watcher()
+    h = runner.hub(sid)
+    h.attach(first)
+    h.attach(second)
+    try:
+        assert h.snapshot()["draft"] == {
+            "text": "", "revision": 0, "updated_at": None}
+        assert h.snapshot()["draft_max_chars"] == db.MAX_DRAFT_CHARS
+        saved = await h.update_draft("Test", "device-a", 1)
+        assert saved["revision"] == 1 and saved["text"] == "Test"
+        assert first.messages[-1] == second.messages[-1] == saved
+        assert db.get_session_draft(sid)["text"] == "Test"
+
+        newer = await h.update_draft("edited elsewhere", "device-b", 4)
+        stale = await h.consume_draft("Test", "device-a", 2, recipient=first)
+        assert stale["consumed"] is False
+        assert stale["text"] == "edited elsewhere"
+        assert stale["revision"] == newer["revision"] == 2
+        assert db.get_session_draft(sid)["text"] == "edited elsewhere"
+
+        too_large = await h.update_draft("x" * (db.MAX_DRAFT_CHARS + 1))
+        assert "cannot exceed" in too_large["error"]
+        assert db.get_session_draft(sid)["revision"] == 2
+
+        class GateWatcher:
+            def __init__(self):
+                self.messages = []
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def send_json(self, value):
+                self.messages.append(value)
+                if value.get("type") == "snapshot":
+                    self.started.set()
+                    await self.release.wait()
+
+        joining = GateWatcher()
+        attach_task = asyncio.create_task(h.attach_with_snapshot(joining))
+        await joining.started.wait()
+        ordered_task = asyncio.create_task(
+            h.update_draft("ordered after snapshot", "device-b", 5))
+        await asyncio.sleep(0)
+        assert not ordered_task.done()
+        joining.release.set()
+        await attach_task
+        ordered = await ordered_task
+        assert [item["type"] for item in joining.messages] == ["snapshot", "draft"]
+        assert joining.messages[0]["draft"]["revision"] == 2
+        assert joining.messages[1]["revision"] == ordered["revision"] == 3
+        h.detach(joining)
+
+        def uploaded(name: str):
+            directory = uploads._new_upload_directory(sid)
+            path = directory / name
+            path.write_bytes(b"draft attachment")
+            path.chmod(0o600)
+            marker = "[file attached: {} ({}, 16 B) — inspect it with your file tools]".format(
+                path, name)
+            return path, marker
+
+        abandoned_path, abandoned_marker = uploaded("draft-only.txt")
+        await h.update_draft(abandoned_marker, "device-a", 3)
+        assert abandoned_path.exists()
+        await h.update_draft("", "device-a", 4)
+        # A full-document update from another socket may already be in flight
+        # with this marker. Keep draft-only bytes until session deletion rather
+        # than accepting that later revision with a broken attachment.
+        assert abandoned_path.exists()
+
+        retained_path, retained_marker = uploaded("also-queued.txt")
+        await h.update_draft(retained_marker, "device-a", 5)
+        h.status = "running"  # clearing must not start the retained prompt
+        h.queue = [retained_marker]
+        await h.update_draft("", "device-a", 6)
+        assert retained_path.exists()
+        assert h.clear_queue() == 1
+        assert not retained_path.exists()
+        h.status = "idle"
+
+        durable = await h.update_draft("survives a restart", "device-a", 7)
+        h.detach(first)
+        h.detach(second)
+        runner.drop_hub(sid)
+        await asyncio.sleep(0)
+        h = runner.hub(sid)
+        assert h.snapshot()["draft"] == {
+            "text": "survives a restart", "revision": durable["revision"],
+            "updated_at": durable["updated_at"],
+        }
+    finally:
+        h.status = "idle"
+        h.queue.clear()
+        h.held.clear()
+        h.paused_queue.clear()
+        h._persist_queue()
+        runner.drop_hub(sid)
+        shutil.rmtree(session_root, ignore_errors=True)
+        db.delete_session(sid)
+    assert db.query_one(
+        "SELECT 1 FROM session_drafts WHERE session_id=?", (sid,)) is None
+
+
 def exercise_abandoned_upload_cleanup(runner, db, uploads, config) -> None:
     """Queue cancellation removes only uploads with no surviving reference."""
     sid = db.create_session("upload cleanup", "claude", "/tmp", "", "", "blue", "auto")
@@ -2163,6 +2313,7 @@ async def main() -> None:
         assert "remote-upgrade" not in pairing["capabilities"]  # pairing command is not launcher-managed
         assert "shutdown-notice" in pairing["capabilities"]
         assert "queue-pause" in pairing["capabilities"]
+        assert "session-drafts" in pairing["capabilities"]
         assert "engine-model-selection" not in pairing["capabilities"]
         assert pairing["max_upload_size_mb"] == 3
         assert (backend_data / "config.json").stat().st_mode & 0o777 == 0o600
@@ -2269,6 +2420,7 @@ async def main() -> None:
         await exercise_shutdown_broadcast(runner)
         await exercise_queue_persistence(runner, db)
         await exercise_queue_pause(runner, db)
+        await exercise_session_drafts(runner, db, uploads, config)
         exercise_abandoned_upload_cleanup(runner, db, uploads, config)
         exercise_session_show_meta(runner, db)
         await exercise_auth_probes(temp_root / "auth-probes")

@@ -172,7 +172,8 @@ async def main() -> None:
         (nested / "file.txt").write_text("scratch contents", encoding="utf-8")
         os.symlink("nested/file.txt", str(original_scratch / "safe-link"))
 
-        upload = Path(config.DATA_DIR) / "uploads" / str(directory_id) / "image.png"
+        upload = (Path(config.DATA_DIR) / "uploads" / str(directory_id) /
+                  "1700000000000-abcdef0123" / "image.png")
         upload.parent.mkdir(parents=True)
         upload.write_bytes(b"saved-upload")
         tls_dir = Path(config.DATA_DIR) / "tls"
@@ -184,6 +185,29 @@ async def main() -> None:
             "text": "image at {}".format(upload),
         })
         db.add_event(scratch_id, "assistant", {"text": "remembered transcript"})
+        directory_draft = "still editing\n\n[image attached: {} — view it with your image/file tools]".format(
+            upload)
+        db.set_session_draft(directory_id, directory_draft)
+        db.set_session_draft(scratch_id, "unfinished prompt")
+        invalid_draft_db = TEST_ROOT / "invalid-draft.db"
+        db.backup_to(str(invalid_draft_db))
+        invalid_connection = sqlite3.connect(str(invalid_draft_db))
+        invalid_connection.execute(
+            "UPDATE session_drafts SET revision=-1 WHERE session_id=?", (scratch_id,))
+        invalid_connection.commit()
+        invalid_connection.close()
+        expect_snapshot_error(
+            lambda: snapshots._validate_database(invalid_draft_db), "invalid session draft")
+        invalid_draft_db.unlink()
+
+        legacy_draft_db = TEST_ROOT / "legacy-without-drafts.db"
+        db.backup_to(str(legacy_draft_db))
+        legacy_connection = sqlite3.connect(str(legacy_draft_db))
+        legacy_connection.execute("DROP TABLE session_drafts")
+        legacy_connection.commit()
+        legacy_connection.close()
+        assert snapshots._validate_database(legacy_draft_db) == 2
+        legacy_draft_db.unlink()
         ui = {
             "puppy.theme": "light",
             "puppy.tabs": json.dumps({"active": "s:0:{}".format(scratch_id)}),
@@ -217,6 +241,7 @@ async def main() -> None:
         config.set_value("notify.enabled", False)
         config.set_value("notify.command", "mutated")
         db.execute("DELETE FROM events")
+        db.execute("DELETE FROM session_drafts")
         db.execute("DELETE FROM sessions")
         db.execute("DELETE FROM backends")
         shutil.rmtree(Path(config.DATA_DIR) / "uploads")
@@ -303,12 +328,18 @@ async def main() -> None:
         assert (Path(restored_scratch["cwd"]) / "safe-link").read_text(
             encoding="utf-8") == "scratch contents"
         assert not original_scratch.exists()
-        assert (Path(config.DATA_DIR) / "uploads" / str(directory_id) /
-                "image.png").read_bytes() == b"saved-upload"
+        restored_upload = (Path(config.DATA_DIR) / "uploads" / str(directory_id) /
+                           "1700000000000-abcdef0123" / "image.png")
+        assert restored_upload.read_bytes() == b"saved-upload"
         assert tls_key.read_bytes() == b"saved-private-tls-material"
         assert tls_key.stat().st_mode & 0o777 == 0o600
         assert str(Path(config.DATA_DIR).resolve() / "uploads") in \
             db.get_events(directory_id)[0]["data"]["text"]
+        assert db.get_session_draft(scratch_id)["text"] == "unfinished prompt"
+        restored_directory_draft = db.get_session_draft(directory_id)
+        assert restored_directory_draft["revision"] == 1
+        assert restored_directory_draft["text"] == directory_draft
+        assert str(restored_upload) in restored_directory_draft["text"]
         assert project_file.read_text(encoding="utf-8") == "changed after export"
 
         unsupported = Path(restored_scratch["cwd"]) / "named-pipe"

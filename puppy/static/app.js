@@ -595,6 +595,44 @@ function saveStringSet(key, values) {
   try { lsSet(key, JSON.stringify([...values])); } catch (_) { /* storage is optional */ }
 }
 
+/* Server-side drafts are authoritative. This local record is only a crash
+   journal between a browser edit and its server acknowledgement. Raw strings
+   from older Puppy versions remain readable and are migrated on first sync. */
+const DRAFT_JOURNAL_VERSION = 1;
+const DEFAULT_DRAFT_MAX_CHARS = 256 * 1024;
+function readDraftJournal(tabId) {
+  const raw = lsGet("puppy.draft." + tabId);
+  if (raw === null) return null;
+  try {
+    const value = JSON.parse(raw);
+    if (value && value._puppy_draft === DRAFT_JOURNAL_VERSION &&
+        typeof value.text === "string" && Number.isInteger(value.base_revision) &&
+        value.base_revision >= 0)
+      return { text: value.text, baseRevision: value.base_revision,
+        submitted: value.submitted === true };
+  } catch (_) { /* an old draft is ordinary text, not JSON */ }
+  return { text: raw, baseRevision: 0, submitted: false };
+}
+
+function writeDraftJournal(tabId, text, baseRevision, submitted = false) {
+  try {
+    lsSet("puppy.draft." + tabId, JSON.stringify({
+      _puppy_draft: DRAFT_JOURNAL_VERSION,
+      text: String(text || ""),
+      base_revision: Math.max(0, Number(baseRevision) || 0),
+      submitted: submitted === true,
+    }));
+  } catch (_) { /* storage is optional; the socket remains authoritative */ }
+}
+
+function newDraftClientId() {
+  try {
+    if (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function")
+      return globalThis.crypto.randomUUID();
+  } catch (_) {}
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
 function snapshotBrowserState() {
   saveTabs();
   const values = {};
@@ -3059,6 +3097,15 @@ function backendSupportsQueuePause(bid) {
     backend.capabilities.includes("queue-pause");
 }
 
+function backendSupportsSessionDrafts(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(item => item.id === bid);
+  /* Draft persistence adds messages and snapshot state to the session socket.
+     Never send them to an older remote node based on protocol inference. */
+  return !!backend && Array.isArray(backend.capabilities) &&
+    backend.capabilities.includes("session-drafts");
+}
+
 function normalizeUploadSettings(value) {
   if (!value || typeof value !== "object") return null;
   const megabytes = Number(value.max_file_size_mb);
@@ -5507,10 +5554,21 @@ class SessionView {
     this.histIdx = null;
     this.histDraft = "";
     this.ctrlCStreak = 0;     // composer-only: second consecutive Ctrl-C clears the queue
-    this.attachments = [];    // staged server files, retained only when their message is sent
+    this.attachments = [];    // staged server files represented by draft marker lines
     this.histAttach = null;   // staged attachments parked while history recall is active
     this.sentThumbs = new Map();  // path -> object URL, so recall can re-show previews
     this.uploadPolicy = uploadSettingsFor(this.tab.bid);
+    this.draftSupported = backendSupportsSessionDrafts(this.tab.bid);
+    this.draftMaxChars = DEFAULT_DRAFT_MAX_CHARS;
+    this.draftReady = false;      // true after this socket's authoritative snapshot
+    this.draftRevision = 0;
+    this.draftClientId = newDraftClientId();
+    this.draftClientSeq = 0;
+    this.draftLatestSeq = 0;
+    this.draftAckSeq = 0;
+    this.draftDeferred = null;
+    this.draftTouchedBeforeReady = false;
+    this.draftJournal = readDraftJournal(this.tab.id);
     this.fileDragDepth = 0;
     this.nativeComposerChoices = prefersNativeChoices();
     this.browserChipKey = null;   // set of linked-browser bubbles now rendered
@@ -5640,13 +5698,13 @@ class SessionView {
     }
     this._lastTaH = 0;
 
-    // the draft is stored in sendable form, so staged attachments survive a reload
-    const draft = lsGet("puppy.draft." + this.tab.id);
-    if (draft) {
-      const restored = splitAttachmentMarkers(draft);
+    // Paint the crash journal immediately; the socket snapshot decides whether
+    // it is still newer than the durable shared value.
+    if (this.draftJournal && this.draftJournal.text) {
+      const restored = splitAttachmentMarkers(this.draftJournal.text);
       this.ta.value = restored.text;
       this.attachments = restored.attachments;
-      this.renderAttachments();
+      this.renderAttachments(false);
       this.resizeComposer();
     }
     this.ta.addEventListener("input", () => {
@@ -5739,6 +5797,10 @@ class SessionView {
     const sequence = ++this.connectionSequence;
     const ws = new WebSocket(wsUrl(this.tab.bid, `ws/session/${this.tab.sid}`));
     this.ws = ws;
+    this.draftReady = false;
+    this.draftLatestSeq = 0;
+    this.draftAckSeq = 0;
+    this.draftDeferred = null;
     ws.onopen = () => {
       if (this.closed || sequence !== this.connectionSequence || this.ws !== ws) {
         try { ws.close(); } catch (error) {}
@@ -5765,6 +5827,7 @@ class SessionView {
     ws.onclose = () => {
       if (sequence !== this.connectionSequence || this.ws !== ws) return;
       this.ws = null;
+      this.draftReady = false;
       if (this.closed) return;
       this.setReconnecting(true);
       const delay = Math.round(this.retry * (.85 + Math.random() * .3));
@@ -5792,8 +5855,18 @@ class SessionView {
     this.reconnectTimer = null;
     window.removeEventListener("resize", this._onResize);
     if (this.ws) try { this.ws.close(); } catch (e) {}
-    this.releaseHistoryAttachments();
-    for (const attachment of [...this.attachments]) this.removeAttachment(attachment, true);
+    /* Closing a view is not deleting its shared draft. Abort only bytes still
+       in flight and release browser-owned previews; completed server uploads
+       remain owned by the durable draft and can reopen on another device. */
+    const staged = new Set([...(this.histAttach || []), ...this.attachments]);
+    this.histAttach = null;
+    this.attachments = [];
+    for (const attachment of staged) {
+      attachment.removed = true;
+      if (attachment.controller) attachment.controller.abort();
+      if (attachment.url && attachment.ownsUrl) URL.revokeObjectURL(attachment.url);
+      attachment.url = "";
+    }
     for (const url of this.sentThumbs.values()) URL.revokeObjectURL(url);
     this.sentThumbs.clear();
     /* the menus now sit on <body>, so closing this view no longer takes them
@@ -5933,13 +6006,216 @@ class SessionView {
     this.saveDraft();
   }
 
-  /* Keep the stored draft in the form the message would be sent in: reopening the
-     tab parses its markers back into chips instead of showing bracket lines. */
-  saveDraft() {
+  /* Keep the draft in the form the message would be sent in: attachment marker
+     lines make the same value portable to another browser without a second
+     attachment data model. */
+  draftValue() {
     const markers = this.attachments.filter(a => a.path).map(attachmentMarkerLine).join("\n");
     const text = this.ta.value;
-    lsSet("puppy.draft." + this.tab.id,
-          markers ? (text ? text + "\n\n" + markers : markers) : text);
+    return markers ? (text ? text + "\n\n" + markers : markers) : text;
+  }
+
+  saveDraft() {
+    const text = this.draftValue();
+    if (!this.draftSupported) {
+      lsSet("puppy.draft." + this.tab.id, text);
+      if (!this.draftReady) this.draftTouchedBeforeReady = true;
+      return text;
+    }
+    writeDraftJournal(this.tab.id, text, this.draftRevision);
+    this.draftJournal = {
+      text, baseRevision: this.draftRevision, submitted: false,
+    };
+    if (!this.draftReady) {
+      this.draftTouchedBeforeReady = true;
+      return text;
+    }
+    if (!this.sendDraft(text)) {
+      this.draftReady = false;
+      this.draftTouchedBeforeReady = true;
+    }
+    return text;
+  }
+
+  sendDraft(text) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return 0;
+    const clientSeq = ++this.draftClientSeq;
+    this.draftLatestSeq = clientSeq;
+    this.ws.send(JSON.stringify({
+      type: "draft", text,
+      client_id: this.draftClientId, client_seq: clientSeq,
+    }));
+    return clientSeq;
+  }
+
+  clearDraftJournal() {
+    lsDel("puppy.draft." + this.tab.id);
+    this.draftJournal = null;
+  }
+
+  checkpointDraftJournal(baseRevision) {
+    if (!this.draftJournal) return;
+    this.draftJournal.baseRevision = baseRevision;
+    writeDraftJournal(this.tab.id, this.draftJournal.text, baseRevision,
+      this.draftJournal.submitted);
+  }
+
+  /* Reconcile the crash journal only after seeing the server revision. An
+     unacknowledged edit is replayed even if the server accepted an earlier
+     keystroke before the connection died. A pending Send is more conservative:
+     a newer server revision means it may already have been accepted, so do not
+     resurrect it as a duplicate draft. */
+  initializeDraft(value) {
+    if (!value || typeof value.text !== "string" ||
+        !Number.isInteger(value.revision) || value.revision < 0) {
+      this.draftSupported = false;
+      this.draftReady = false;
+      const local = readDraftJournal(this.tab.id);
+      if (local) lsSet("puppy.draft." + this.tab.id, local.text);
+      return;
+    }
+    this.draftSupported = true;
+    const serverText = value.text;
+    const serverRevision = value.revision;
+    const journal = readDraftJournal(this.tab.id);
+    const touched = this.draftTouchedBeforeReady;
+    this.draftRevision = serverRevision;
+    this.draftReady = true;
+    this.draftTouchedBeforeReady = false;
+
+    if (touched) {
+      const text = this.draftValue();
+      writeDraftJournal(this.tab.id, text, serverRevision);
+      this.draftJournal = {
+        text, baseRevision: serverRevision, submitted: false,
+      };
+      if (!this.sendDraft(text)) {
+        this.draftReady = false;
+        this.draftTouchedBeforeReady = true;
+      }
+      return;
+    }
+    if (journal && journal.text !== serverText &&
+        (!journal.submitted || serverRevision <= journal.baseRevision)) {
+      this.applySharedDraft(journal.text);
+      writeDraftJournal(this.tab.id, journal.text, serverRevision);
+      this.draftJournal = {
+        text: journal.text, baseRevision: serverRevision,
+        submitted: false,
+      };
+      if (!this.sendDraft(journal.text)) {
+        this.draftReady = false;
+        this.draftTouchedBeforeReady = true;
+      }
+      return;
+    }
+    this.applySharedDraft(serverText);
+    this.clearDraftJournal();
+  }
+
+  receiveDraft(value) {
+    if (!value || typeof value.text !== "string" ||
+        !Number.isInteger(value.revision) || value.revision < 0) return;
+    // Once a local save found the socket closed, only the next locked snapshot
+    // may reconcile it. A final buffered frame from the dying socket must not
+    // erase that unsent crash journal.
+    if (!this.draftReady) return;
+    const own = value.client_id && value.client_id === this.draftClientId;
+    const clientSeq = Number(value.client_seq) || 0;
+    const previousRevision = this.draftRevision;
+    if (value.revision < previousRevision) return;
+    this.draftRevision = Math.max(previousRevision, value.revision);
+
+    if (own) {
+      this.draftAckSeq = Math.max(this.draftAckSeq, clientSeq);
+      if (clientSeq < this.draftLatestSeq) {
+        this.checkpointDraftJournal(this.draftRevision);
+        return;
+      }
+      if (value.consumed === false) {
+        this.applySharedDraft(value.text);
+        this.clearDraftJournal();
+      } else if (this.draftValue() === value.text) {
+        this.clearDraftJournal();
+      } else {
+        // A local edit happened after the acknowledged frame but before its
+        // echo arrived. Make sure that value has its own frame and journal.
+        this.saveDraft();
+      }
+      const deferred = this.draftDeferred;
+      this.draftDeferred = null;
+      if (deferred && deferred.revision > this.draftRevision)
+        this.receiveDraft(deferred);
+      return;
+    }
+
+    if (value.revision === previousRevision) return;
+    if (this.draftAckSeq < this.draftLatestSeq) {
+      if (!this.draftDeferred || value.revision > this.draftDeferred.revision)
+        this.draftDeferred = value;
+      return;
+    }
+    this.applySharedDraft(value.text);
+    this.clearDraftJournal();
+  }
+
+  /* Replace prose and completed attachment chips while preserving local uploads
+     still in flight. Matching local image blobs are reused; everything else is
+     released locally and the server's reference cleanup owns the stored file. */
+  applySharedDraft(text) {
+    const restored = splitAttachmentMarkers(text);
+    const sources = [...(this.histAttach || []), ...this.attachments];
+    const byPath = new Map();
+    for (const source of sources)
+      if (source.path && !byPath.has(source.path)) byPath.set(source.path, source);
+    const reused = new Set();
+    for (const attachment of restored.attachments) {
+      const source = byPath.get(attachment.path);
+      if (!source) continue;
+      reused.add(source);
+      attachment.uploadId = source.uploadId || "";
+      attachment.url = source.url || "";
+      attachment.ownsUrl = !!source.ownsUrl;
+      attachment.preview = source.preview;
+      attachment.size = source.size;
+      attachment.sizeText = source.sizeText;
+      attachment.contentType = source.contentType;
+    }
+    const uploading = [];
+    for (const source of sources) {
+      if (source.uploading && !source.removed) {
+        if (!uploading.includes(source)) uploading.push(source);
+        continue;
+      }
+      if (reused.has(source)) continue;
+      source.removed = true;
+      if (source.controller) source.controller.abort();
+      if (source.url && source.ownsUrl) URL.revokeObjectURL(source.url);
+      source.url = "";
+    }
+    this.histAttach = null;
+    this.histIdx = null;
+    this.histDraft = "";
+    this.attachments = restored.attachments.concat(uploading);
+
+    const oldText = this.ta.value;
+    const oldStart = this.ta.selectionStart;
+    const oldEnd = this.ta.selectionEnd;
+    let prefix = 0;
+    while (prefix < oldText.length && prefix < restored.text.length &&
+           oldText[prefix] === restored.text[prefix]) prefix++;
+    let suffix = 0;
+    while (suffix < oldText.length - prefix && suffix < restored.text.length - prefix &&
+           oldText[oldText.length - 1 - suffix] ===
+             restored.text[restored.text.length - 1 - suffix]) suffix++;
+    const oldChangedEnd = oldText.length - suffix;
+    const newChangedEnd = restored.text.length - suffix;
+    const remap = position => position <= prefix ? position :
+      position >= oldChangedEnd ? newChangedEnd + (position - oldChangedEnd) : newChangedEnd;
+    this.ta.value = restored.text;
+    try { this.ta.setSelectionRange(remap(oldStart), remap(oldEnd)); } catch (_) {}
+    this.renderAttachments(false);
+    this.resizeComposer();
   }
 
   /* Recall a sent message: its attachment markers become chips again, and the
@@ -5956,8 +6232,8 @@ class SessionView {
     this.setComposer(recalled.text);
   }
 
-  /* History mode ended without walking back to the draft, so the attachments it
-     parked are unreachable: discard the uploads they still own. */
+  /* History mode ended without walking back to the draft, so release the local
+     attachment objects it parked. Shared server bytes follow session lifecycle. */
   releaseHistoryAttachments() {
     if (!this.histAttach) return;
     const parked = this.histAttach;
@@ -5990,10 +6266,14 @@ class SessionView {
     switch (d.type) {
       case "snapshot":
         this.session = d.session;
+        if (Number.isInteger(d.draft_max_chars) && d.draft_max_chars > 0)
+          this.draftMaxChars = d.draft_max_chars;
         if (d.uploads) {
           const policy = rememberUploadSettings(this.tab.bid, d.uploads);
           if (policy) this.uploadPolicy = policy;
         }
+        if (Object.prototype.hasOwnProperty.call(d, "draft")) this.initializeDraft(d.draft);
+        else this.initializeDraft(null);  // older remote node: local-only compatibility
         this.syncUploadButton();
         this.status = d.status;
         noteSessionActivity(this.tab.bid, this.tab.sid, d.status === "running",
@@ -6018,6 +6298,9 @@ class SessionView {
         if (d.pending_approval) this.showApproval(d.pending_approval);
         else this.hideApproval();
         this.scrollBottom(true);
+        break;
+      case "draft":
+        this.receiveDraft(d);
         break;
       case "event": {
         const follow = this.atBottom();   // before clearLive reshapes the tail
@@ -6713,11 +6996,16 @@ class SessionView {
       attachment.url = "";
     }
     this.attachments = this.attachments.filter(item => item !== attachment);
-    if (attachment.uploadId) this.discardServerUpload(attachment.uploadId, quiet);
     this.renderAttachments();
+    /* A shared draft is a full-document last-writer-wins stream. Another
+       browser may already have sent a later edit which still contains this
+       marker, so deleting the bytes here could leave that accepted edit with
+       a broken chip. Session deletion cleans these private staged bytes. */
+    if (attachment.uploadId && !this.draftSupported)
+      this.discardServerUpload(attachment.uploadId, quiet);
   }
 
-  renderAttachments() {
+  renderAttachments(persist = true) {
     this.attachStrip.innerHTML = "";
     this.attachStrip.classList.toggle("hidden", !this.attachments.length);
     for (const a of this.attachments) {
@@ -6735,12 +7023,22 @@ class SessionView {
     if (this.attachButton)
       this.attachButton.classList.toggle("uploading",
         this.attachments.some(attachment => attachment.uploading));
-    if (!this.closed) this.saveDraft();   // teardown must not rewrite the draft
+    if (persist && !this.closed) this.saveDraft();
   }
 
   submit() {
+    const draft = this.draftValue();
     let text = this.ta.value.trim();
     if (!text && !this.attachments.length) return;
+    if (this.draftSupported && !this.draftReady) {
+      toast("Draft is still syncing; wait for the session to reconnect", "error");
+      return;
+    }
+    if (this.draftSupported && this.draftReady && draft.length > this.draftMaxChars) {
+      toast(`Draft is too long (${draft.length.toLocaleString()} / ${this.draftMaxChars.toLocaleString()} characters)`,
+        "error", 6500);
+      return;
+    }
     if (this.attachments.some(attachment => attachment.uploading)) {
       toast("Wait for file uploads to finish", "error");
       return;
@@ -6751,9 +7049,22 @@ class SessionView {
       text = text ? text + "\n\n" + lines : lines;
       this.attachments.forEach(a => this.retireSentAttachment(a));
       this.attachments = [];
-      this.renderAttachments();
+      this.renderAttachments(false);
     }
-    this.ws.send(JSON.stringify({ type: "message", text }));
+    const message = { type: "message", text };
+    if (this.draftSupported && this.draftReady) {
+      writeDraftJournal(this.tab.id, draft, this.draftRevision, true);
+      this.draftJournal = {
+        text: draft, baseRevision: this.draftRevision,
+        submitted: true,
+      };
+      const clientSeq = ++this.draftClientSeq;
+      this.draftLatestSeq = clientSeq;
+      message.draft = draft;
+      message.draft_client_id = this.draftClientId;
+      message.draft_client_seq = clientSeq;
+    }
+    this.ws.send(JSON.stringify(message));
     this.ta.value = "";
     this.resizeComposer();
     this.histIdx = null; this.histDraft = "";
@@ -6762,7 +7073,8 @@ class SessionView {
     // message echoes back as a transcript event (even if it was queued)
     this._forceScroll = true;
     this.scrollBottom(true);
-    lsDel("puppy.draft." + this.tab.id);
+    if (!this.draftSupported || !this.draftReady)
+      lsDel("puppy.draft." + this.tab.id);
     this.status = "running";
     noteSessionActivity(this.tab.bid, this.tab.sid, true);
     this.updateRunState();

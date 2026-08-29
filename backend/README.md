@@ -246,6 +246,23 @@ session websocket accepts `requeue_held` / `discard_held` with the same
 stale-index guard as `unqueue`. A prompt is consumed durably the moment its
 turn starts, so a crash never runs one twice.
 
+## Shared composer drafts
+
+Nodes advertising the additive `session-drafts` capability persist one
+versioned composer value per session. The initial session-WebSocket snapshot
+carries that value and later `draft` frames are written through to SQLite and
+broadcast in a single revision order, so two open consoles follow one another
+and a different device can resume after a power cycle. Sending a prompt clears
+only the exact value submitted; an edit accepted from another console in the
+meantime is preserved.
+
+Attachment marker lines are part of the same value, so staged chips and image
+previews restore from the node-owned upload rather than a browser-only blob.
+Draft-only files are retained until an unambiguous lifecycle boundary instead
+of being eagerly deleted while another console may still have an update in
+flight. Older nodes omit the capability and keep their existing local-browser
+draft behavior.
+
 ## Graceful shutdown notice
 
 Headless nodes advertise the additive `shutdown-notice` capability. While

@@ -940,9 +940,11 @@ async def ws_session(request: web.Request):
     ws = web.WebSocketResponse(heartbeat=30, max_msg_size=1 << 22)
     await ws.prepare(request)
     h = runner.hub(s["id"])
-    h.attach(ws)
     try:
-        await ws.send_json(h.snapshot())
+        # Draft changes are serialized with this first frame so a just-joined
+        # device cannot receive revision N+1 and then be rolled back by an
+        # overtaking revision-N snapshot.
+        await h.attach_with_snapshot(ws)
         async for msg in ws:
             if msg.type != WSMsgType.TEXT:
                 if msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
@@ -981,10 +983,39 @@ async def ws_session(request: web.Request):
                     updated_permissions=data.get("updated_permissions"))
             elif t == "message":
                 text = data.get("text", "")
+                supplied_draft = data.get("draft")
+                if "draft" in data and not isinstance(supplied_draft, str):
+                    await ws.send_json({
+                        "type": "toast", "level": "error",
+                        "text": "draft text must be text",
+                    })
+                    continue
+                if isinstance(supplied_draft, str) and \
+                        len(supplied_draft) > db.MAX_DRAFT_CHARS:
+                    await ws.send_json({
+                        "type": "toast", "level": "error",
+                        "text": "draft cannot exceed {} characters".format(
+                            db.MAX_DRAFT_CHARS),
+                    })
+                    continue
                 res = h.send_message(text) if isinstance(text, str) else \
                     {"error": "message text must be text"}
                 if "error" in res:
                     await ws.send_json({"type": "toast", "level": "error", "text": res["error"]})
+                elif isinstance(supplied_draft, str):
+                    draft_result = await h.consume_draft(
+                        supplied_draft, data.get("draft_client_id", ""),
+                        data.get("draft_client_seq", 0), recipient=ws)
+                    if "error" in draft_result:
+                        await ws.send_json({"type": "toast", "level": "error",
+                                            "text": draft_result["error"]})
+            elif t == "draft":
+                draft_result = await h.update_draft(
+                    data.get("text"), data.get("client_id", ""),
+                    data.get("client_seq", 0))
+                if "error" in draft_result:
+                    await ws.send_json({"type": "toast", "level": "error",
+                                        "text": draft_result["error"]})
             elif t == "unqueue":
                 try:
                     idx = int(data.get("index", -1))
