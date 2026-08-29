@@ -6103,11 +6103,10 @@ class SessionView {
     this.browserChipKey = key;
     const scroll = this.root.querySelector(".chat-meta-scroll");
     for (const stale of scroll.querySelectorAll(".chip.browser")) stale.remove();
-    /* Right behind the engine chip: the meta strip scrolls horizontally, and a
-       live browser the user has not noticed is worth more of that first screen
-       than the static backend and path chips behind it. */
-    const anchor = scroll.querySelector(".chip.be") ||
-      this.root.querySelector(".chat-status");
+    /* Browser controls finish the pill group: engine, backend and workspace
+       identify the session first, then its live browsers sit immediately before
+       the transient activity text. */
+    const anchor = scroll.querySelector(".chat-status");
     for (const t of live) {
       const chip = el("button", "chip browser");
       chip.type = "button";

@@ -1592,6 +1592,16 @@ def check_engine_picker_alignment(css_source: str) -> None:
         in css_source
 
 
+def check_browser_chip_order(ui_source: str) -> None:
+    """Live browsers follow the directory pill and precede activity text."""
+    start = ui_source.index("  syncBrowserChips() {")
+    end = ui_source.index("\n  updateHead() {", start)
+    method = ui_source[start:end]
+    assert 'const anchor = scroll.querySelector(".chat-status");' in method
+    assert 'scroll.insertBefore(chip, anchor);' in method
+    assert 'scroll.querySelector(".chip.be")' not in method
+
+
 def check_double_activation_survives_rerender(ui_source: str) -> None:
     """A backend name rebuilt between clicks must still complete the gesture."""
     def extract_function(marker: str) -> str:
@@ -2757,6 +2767,7 @@ async def main() -> None:
             check_session_provider_marks(css_source)
             check_switch_engine_initial_selection(ui_source)
             check_engine_picker_alignment(css_source)
+            check_browser_chip_order(ui_source)
             check_double_activation_survives_rerender(ui_source)
             check_browser_disable_closes_scoped_tabs(ui_source)
             check_quota_math(ui_source)
