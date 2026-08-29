@@ -1144,6 +1144,8 @@ def check_browser_handoff_ui(ui_source: str, css_source: str) -> None:
     assert ".br-copy-id{width:27px;height:27px;" in css_source
     assert ".br-owner-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}" \
         in css_source
+    assert ".br-handoff{display:flex;align-items:center;gap:6px;" in css_source
+    assert ".br-unlink{width:30px;height:28px;" in css_source
     assert "@media(max-width:560px){" in css_source
     assert ".br-meta{display:grid;grid-template-columns:auto minmax(0,1fr);" \
         in css_source

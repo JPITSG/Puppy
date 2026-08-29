@@ -1356,10 +1356,12 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .br-owner:not(:disabled):hover{color:var(--txt)}
 .br-owner svg{flex:0 0 auto;color:var(--txt3)}
 .br-owner-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.br-handoff{display:flex;align-items:center;gap:5px;min-width:0;margin-left:auto}
+.br-handoff{display:flex;align-items:center;gap:6px;min-width:0;margin-left:auto}
 .br-use{height:28px;min-width:0;max-width:230px;overflow:hidden;text-overflow:ellipsis;
   white-space:nowrap;font-size:11px}
-.br-unlink{width:28px;height:28px;flex:0 0 auto}
+/* Match the 30px keyboard control above: their centres share one vertical axis,
+   and the matching 6px gaps align .br-use's right edge with .br-url's. */
+.br-unlink{width:30px;height:28px;flex:0 0 auto}
 /* The stage owns every gesture: no native scroll, zoom, or context menus.
    Its content size drives the real remote viewport. The image keeps that
    intrinsic aspect, so pointer math never has to undo letterboxing. */
