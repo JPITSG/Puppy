@@ -476,8 +476,16 @@ async def h_session_workspace_reset(request: web.Request):
 
 async def h_session_message(request: web.Request):
     s = _session_or_404(request)
-    body = await request.json()
-    res = runner.hub(s["id"]).send_message(body.get("text") or "")
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid message request"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "message request must be an object"}, status=400)
+    text = body.get("text", "")
+    if not isinstance(text, str):
+        return web.json_response({"error": "message text must be text"}, status=400)
+    res = runner.hub(s["id"]).send_message(text)
     status = 400 if "error" in res else 200
     return web.json_response(res, status=status)
 
@@ -490,7 +498,12 @@ async def h_session_interrupt(request: web.Request):
 
 async def h_session_switch(request: web.Request):
     s = _session_or_404(request)
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid engine switch request"}, status=400)
+    if not isinstance(body, dict) or not isinstance(body.get("engine"), str):
+        return web.json_response({"error": "engine must be text"}, status=400)
     engine = body.get("engine") or ""
     try:
         driver = get_driver(engine)
@@ -516,20 +529,32 @@ async def h_session_switch(request: web.Request):
     })
     db.touch_session(s["id"], engine=engine, native_session_id="", model=model, effort="",
                      last_model="", used_config="", permission_mode=driver.default_permission())
+    discarded_config_changes = h.discard_pending_config()
     h.broadcast({"type": "event", "event": ev})
     h.broadcast({"type": "session_meta",
                  "session": runner.session_payload(db.get_session(s["id"]))})
     runner.broadcast_sessions()
     log.info("session %s switched %s -> %s", s["id"], old, engine)
     return web.json_response(
-        {"ok": True, "session": runner.session_payload(db.get_session(s["id"]))})
+        {"ok": True, "discarded_config_changes": discarded_config_changes,
+         "session": runner.session_payload(db.get_session(s["id"]))})
 
 
 async def h_session_events(request: web.Request):
     s = _session_or_404(request)
     before = request.query.get("before_seq")
-    limit = min(500, int(request.query.get("limit", "200")))
-    events = db.get_events(s["id"], before_seq=int(before) if before else None, limit=limit)
+    try:
+        limit = int(request.query.get("limit", "200"))
+        before_seq = int(before) if before is not None else None
+    except (TypeError, ValueError):
+        return web.json_response({"error": "event cursor and limit must be integers"},
+                                 status=400)
+    if not 1 <= limit <= 500:
+        return web.json_response({"error": "event limit must be between 1 and 500"},
+                                 status=400)
+    if before_seq is not None and before_seq < 1:
+        return web.json_response({"error": "event cursor must be positive"}, status=400)
+    events = db.get_events(s["id"], before_seq=before_seq, limit=limit)
     return web.json_response({"events": events})
 
 
@@ -927,6 +952,10 @@ async def ws_session(request: web.Request):
                 data = json.loads(msg.data)
             except Exception:
                 continue
+            if not isinstance(data, dict):
+                await ws.send_json({"type": "toast", "level": "error",
+                                    "text": "session message must be an object"})
+                continue
             t = data.get("type")
             if request.app.get("puppy_snapshot_busy"):
                 await ws.send_json({
@@ -951,7 +980,9 @@ async def ws_session(request: web.Request):
                     message=data.get("message", ""),
                     updated_permissions=data.get("updated_permissions"))
             elif t == "message":
-                res = h.send_message(data.get("text") or "")
+                text = data.get("text", "")
+                res = h.send_message(text) if isinstance(text, str) else \
+                    {"error": "message text must be text"}
                 if "error" in res:
                     await ws.send_json({"type": "toast", "level": "error", "text": res["error"]})
             elif t == "unqueue":

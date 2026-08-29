@@ -34,6 +34,15 @@ PREVIEW_CONTENT_TYPES = {
     ".gif": "image/gif",
 }
 
+# Attachment markers are persisted as ordinary user-message text.  Keep the
+# server-side spellings beside the storage lifecycle code so queue cancellation
+# can recognize the uploads it made unreachable without treating arbitrary
+# paths mentioned in prose as files to delete.
+ATTACH_IMAGE_PREFIX = "[image attached: "
+ATTACH_IMAGE_SUFFIX = " — view it with your image/file tools]"
+ATTACH_FILE_PREFIX = "[file attached: "
+ATTACH_FILE_SUFFIX = " — inspect it with your file tools]"
+
 _active_uploads = 0
 
 
@@ -129,6 +138,79 @@ def _validated_upload_file(session_id: int, upload_id: str) -> Path:
             child_info.st_uid != int(uid_getter()):
         raise OSError("uploaded file failed safety validation")
     return children[0]
+
+
+def _attachment_upload_ids(session_id: int, text: str) -> set:
+    """Upload ids named by well-formed attachment marker lines in ``text``."""
+    if not isinstance(text, str) or not text:
+        return set()
+    root = str(Path(config.DATA_DIR).resolve() / "uploads" / str(int(session_id))) + "/"
+    pattern = re.compile(re.escape(root) + r"(\d{13}-[0-9a-f]{10})/")
+    found = set()
+    for line in text.splitlines():
+        if line.startswith(ATTACH_IMAGE_PREFIX) and line.endswith(ATTACH_IMAGE_SUFFIX):
+            marker = line[len(ATTACH_IMAGE_PREFIX):-len(ATTACH_IMAGE_SUFFIX)]
+        elif line.startswith(ATTACH_FILE_PREFIX) and line.endswith(ATTACH_FILE_SUFFIX):
+            marker = line[len(ATTACH_FILE_PREFIX):-len(ATTACH_FILE_SUFFIX)]
+        else:
+            continue
+        found.update(match.group(1) for match in pattern.finditer(marker))
+    return found
+
+
+def discard_abandoned(session_id: int, abandoned, retained=()) -> int:
+    """Remove queue-owned uploads which no remaining durable text references.
+
+    Sent attachments are durable transcript data and must remain available for
+    previews and history recall.  A prompt cancelled before it starts has no
+    transcript event, however, so its newly uploaded files would otherwise be
+    stranded until the whole session is deleted.  Fail closed on any database
+    or path-validation uncertainty: retaining private bytes is safer than
+    deleting a file which another message still names.
+    """
+    session_id = int(session_id)
+    abandoned_ids = set()
+    for text in abandoned or ():
+        abandoned_ids.update(_attachment_upload_ids(session_id, text))
+    if not abandoned_ids:
+        return 0
+
+    retained_ids = set()
+    for text in retained or ():
+        retained_ids.update(_attachment_upload_ids(session_id, text))
+    removed = 0
+    for upload_id in sorted(abandoned_ids - retained_ids):
+        try:
+            # The random id is JSON-safe and appears unchanged inside a user
+            # event payload.  A false positive only retains a file; it can
+            # never authorize deletion of a different upload.
+            referenced = db.query_one(
+                "SELECT 1 FROM events WHERE session_id=? AND kind='user' "
+                "AND instr(payload, ?) > 0 LIMIT 1",
+                (session_id, upload_id))
+        except Exception as exc:
+            log.warning("could not check session %s upload %s references: %s",
+                        session_id, upload_id, exc)
+            continue
+        if referenced is not None:
+            continue
+        try:
+            target = _validated_upload_file(session_id, upload_id)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            log.warning("abandoned session %s upload %s failed safety validation: %s",
+                        session_id, upload_id, exc)
+            continue
+        try:
+            target.unlink()
+            target.parent.rmdir()
+            removed += 1
+            log.info("discarded abandoned session %s upload %s", session_id, upload_id)
+        except OSError as exc:
+            log.warning("abandoned session %s upload %s could not be discarded: %s",
+                        session_id, upload_id, exc)
+    return removed
 
 
 async def h_settings_get(_request: web.Request):

@@ -10483,7 +10483,8 @@ function modalSwitchEngine(view) {
   const { m, close } = modal(`<h2>Switch engine</h2>
     <p class="hint">The session keeps its transcript and working directory. The new engine starts a fresh
     native session seeded with a handoff of the conversation so far. Same-engine reseed is allowed
-    (rebuilds context from the transcript).</p>
+    (rebuilds context from the transcript). Queued prompts remain; pending model and reasoning
+    changes are cleared because they belong to the previous engine configuration.</p>
     <div class="engine-pick" id="se-engines"></div>
     <div class="m-btns"><button class="btn" id="se-cancel">Cancel</button><button class="btn btn-pri" id="se-go">Switch</button></div>`);
   const box = m.querySelector("#se-engines");
@@ -10508,7 +10509,9 @@ function modalSwitchEngine(view) {
       view.session = r.session;
       view.updateHead();
       close();
-      toast(`Switched to ${pick}`, "ok");
+      const cleared = Math.max(0, Number(r.discarded_config_changes) || 0);
+      toast(`Switched to ${pick}` + (cleared
+        ? ` · cleared ${cleared} pending setting change${cleared === 1 ? "" : "s"}` : ""), "ok");
     } catch (e) { toast(e.message, "error"); }
   };
 }

@@ -777,6 +777,39 @@ async def exercise_node(url: str, token: str, expected_version: str,
                 assert response.status == 200, normal_created
             normal = normal_created["session"]
             assert normal["workspace_kind"] == "directory"
+
+            # Malformed direct clients get bounded 4xx responses and cannot
+            # turn a negative SQLite LIMIT into an unbounded transcript read.
+            for payload in ([], {"text": ["not text"]}):
+                async with http.post(
+                        url + f"/api/sessions/{normal['id']}/message",
+                        headers=good, json=payload, ssl=pinned) as response:
+                    rejected_message = await response.json()
+                    assert response.status == 400, rejected_message
+            for query in ("limit=nope", "limit=-1", "limit=0", "limit=501",
+                          "before_seq=nope", "before_seq=0"):
+                async with http.get(
+                        url + f"/api/sessions/{normal['id']}/events?{query}",
+                        headers=good, ssl=pinned) as response:
+                    rejected_events = await response.json()
+                    assert response.status == 400, (query, rejected_events)
+            async with http.get(
+                    url + f"/api/sessions/{normal['id']}/events?limit=1",
+                    headers=good, ssl=pinned) as response:
+                assert response.status == 200, await response.text()
+
+            session_ws = await http.ws_connect(
+                url + f"/api/ws/session/{normal['id']}", headers=good, ssl=pinned)
+            assert (await session_ws.receive_json(timeout=3))["type"] == "snapshot"
+            await session_ws.send_json([])
+            rejected_socket_object = await session_ws.receive_json(timeout=3)
+            assert rejected_socket_object["type"] == "toast", rejected_socket_object
+            await session_ws.send_json({"type": "message", "text": ["not text"]})
+            rejected_socket_text = await session_ws.receive_json(timeout=3)
+            assert rejected_socket_text["type"] == "toast", rejected_socket_text
+            assert "must be text" in rejected_socket_text["text"]
+            await session_ws.close()
+
             executable = b"MZ\x00arbitrary executable payload\n"
             async with http.post(
                     url + f"/api/sessions/{normal['id']}/upload", headers={
@@ -1842,6 +1875,166 @@ async def exercise_queue_pause(runner, db) -> None:
         db.delete_session(sid)
 
 
+def exercise_abandoned_upload_cleanup(runner, db, uploads, config) -> None:
+    """Queue cancellation removes only uploads with no surviving reference."""
+    sid = db.create_session("upload cleanup", "claude", "/tmp", "", "", "blue", "auto")
+    session_root = Path(config.DATA_DIR).resolve() / "uploads" / str(sid)
+
+    def uploaded(name: str):
+        directory = uploads._new_upload_directory(sid)
+        path = directory / name
+        path.write_bytes(b"private attachment")
+        path.chmod(0o600)
+        marker = "[file attached: {} ({}, 18 B) — inspect it with your file tools]".format(
+            path, name)
+        return path, marker
+
+    h = runner.hub(sid)
+    h.status = "running"  # cancellation must not auto-start a remaining prompt
+    try:
+        abandoned_path, abandoned_marker = uploaded("abandoned.txt")
+        h.queue = [abandoned_marker]
+        assert h.unqueue(0, abandoned_marker) == {"ok": True}
+        assert not abandoned_path.exists()
+
+        shared_path, shared_marker = uploaded("shared.txt")
+        h.queue = [shared_marker, shared_marker]
+        assert h.unqueue(0, shared_marker) == {"ok": True}
+        assert shared_path.exists()  # the second queued prompt still owns it
+        assert h.unqueue(0, shared_marker) == {"ok": True}
+        assert not shared_path.exists()
+
+        sent_path, sent_marker = uploaded("sent.txt")
+        db.add_event(sid, "user", {"text": sent_marker})
+        h.queue = [sent_marker]
+        assert h.unqueue(0, sent_marker) == {"ok": True}
+        assert sent_path.exists()  # durable transcript previews must survive
+
+        active_path, active_marker = uploaded("active.txt")
+        h._active_prompt_text = active_marker
+        h.queue = [active_marker]
+        assert h.unqueue(0, active_marker) == {"ok": True}
+        assert active_path.exists()
+        h._active_prompt_text = ""
+        assert uploads.discard_abandoned(sid, [active_marker]) == 1
+        assert not active_path.exists()
+
+        held_path, held_marker = uploaded("held.txt")
+        h.held = [held_marker]
+        assert h.discard_held(0, held_marker) == {"ok": True}
+        assert not held_path.exists()
+
+        first_path, first_marker = uploaded("first.txt")
+        second_path, second_marker = uploaded("second.txt")
+        h.queue = [first_marker, second_marker]
+        assert h.clear_queue() == 2
+        assert not first_path.exists() and not second_path.exists()
+
+        prose_path, _marker = uploaded("plain-prose.txt")
+        prose = "A path mentioned as prose must stay: {}".format(prose_path)
+        h.queue = [prose]
+        assert h.unqueue(0, prose) == {"ok": True}
+        assert prose_path.exists()
+    finally:
+        h.status = "idle"
+        h.queue.clear()
+        h.held.clear()
+        h.paused_queue.clear()
+        h._active_prompt_text = ""
+        h._persist_queue()
+        runner.drop_hub(sid)
+        shutil.rmtree(session_root, ignore_errors=True)
+        db.delete_session(sid)
+
+
+def exercise_auth_hardening(auth) -> None:
+    """Unknown accounts pay the real work factor and limiter state stays bounded."""
+    captured = []
+    original_verify = auth.verify_password
+    auth.verify_password = lambda _password, stored: captured.append(stored) or False
+    try:
+        assert auth.check_login("definitely-missing-user", "wrong") is False
+    finally:
+        auth.verify_password = original_verify
+    assert captured and int(captured[0].split("$")[1]) == auth.PBKDF2_ITERS
+
+    auth._attempts.clear()
+    auth._attempts_last_prune = time.monotonic() - auth.RATE_LIMIT_PRUNE_SECONDS
+    auth._attempts["expired"] = [time.monotonic() - 301]
+    assert auth._rate_limited("fresh", limit=2, window=300) is False
+    assert "expired" not in auth._attempts
+    assert auth._rate_limited("fresh", limit=2, window=300) is False
+    assert auth._rate_limited("fresh", limit=2, window=300) is True
+    for index in range(auth.RATE_LIMIT_MAX_KEYS + 20):
+        auth._rate_limited("peer-{}".format(index), limit=2, window=300)
+    assert len(auth._attempts) <= auth.RATE_LIMIT_MAX_KEYS
+    auth._attempts.clear()
+    auth._attempts_last_prune = time.monotonic()
+
+
+async def exercise_auth_endpoint(url: str, auth) -> None:
+    """A caller cannot mint limiter identities with a Forwarded header."""
+    seen = []
+    original = auth._rate_limited
+    auth._rate_limited = lambda key: seen.append(key) or True
+    try:
+        async with aiohttp.ClientSession() as http:
+            async with http.post(url + "/api/auth/login",
+                                 headers={"X-Forwarded-For": "198.51.100.77"},
+                                 json={"username": "user", "password": "wrong"}) as response:
+                assert response.status == 429, await response.text()
+            async with http.post(url + "/api/auth/login", json=[]) as response:
+                assert response.status == 400, await response.text()
+    finally:
+        auth._rate_limited = original
+    assert seen == ["127.0.0.1"], seen
+
+
+async def exercise_engine_switch_queue(url: str, token: str, runner, db) -> None:
+    """An engine switch keeps prompt work but retires old-engine settings."""
+    sid = db.create_session("switch queue", "claude", "/tmp", "old-model", "high",
+                            "blue", "auto")
+    h = runner.hub(sid)
+    queued_config = {
+        "kind": "config", "fields": {"model": "claude-only", "effort": "max"},
+        "key": runner._queued_config_key({"model": "claude-only", "effort": "max"}),
+    }
+    held_config = {
+        "kind": "config", "fields": {"model": "held-claude-only"},
+        "key": runner._queued_config_key({"model": "held-claude-only"}),
+    }
+    h.queue = [queued_config, "paused prompt"]
+    h.paused_queue = {1}
+    h.held = [held_config, "held prompt"]
+    h._persist_queue()
+    try:
+        async with aiohttp.ClientSession() as http:
+            headers = {"X-Puppy-Token": token}
+            for payload in ([], {"engine": ["codex"]}):
+                async with http.post(
+                        url + "/api/sessions/{}/switch".format(sid), headers=headers,
+                        json=payload) as response:
+                    assert response.status == 400, await response.text()
+            async with http.post(
+                    url + "/api/sessions/{}/switch".format(sid), headers=headers,
+                    json={"engine": "codex"}) as response:
+                switched = await response.json()
+                assert response.status == 200, switched
+        assert switched["discarded_config_changes"] == 2
+        assert switched["session"]["engine"] == "codex"
+        assert h.queue == ["paused prompt"] and h._paused_wire() == [0]
+        assert h.held == ["held prompt"]
+        assert db.meta_get("session_queue.{}".format(sid)) == {
+            "queue": ["paused prompt"], "held": ["held prompt"], "paused": [0]}
+    finally:
+        h.queue.clear()
+        h.held.clear()
+        h.paused_queue.clear()
+        h._persist_queue()
+        runner.drop_hub(sid)
+        db.delete_session(sid)
+
+
 async def exercise_queue_pause_websocket(url: str, token: str, runner, db) -> None:
     """The authenticated session socket carries the additive pause contract."""
     sid = db.create_session("queue pause socket", "claude", "/tmp", "", "",
@@ -2056,7 +2249,7 @@ async def main() -> None:
         # instance's data directory. Fail loudly instead of writing there.
         assert "puppy.config" not in sys.modules, \
             "puppy.config was imported before the test data path was set"
-        from puppy import config, db, host_metrics, runner, terminal
+        from puppy import auth, config, db, host_metrics, runner, terminal, uploads
         from backend.puppy_backend import upgrade as backend_upgrade
         from puppy import web as puppy_web
         from puppy.web import build_app
@@ -2071,10 +2264,12 @@ async def main() -> None:
         config.set_value("auth.api_token", controller_token)
         config.set_value("engines.usage_refresh_minutes", 0)
         db.connect()
+        exercise_auth_hardening(auth)
         exercise_activity_blocks(runner.SessionHub)
         await exercise_shutdown_broadcast(runner)
         await exercise_queue_persistence(runner, db)
         await exercise_queue_pause(runner, db)
+        exercise_abandoned_upload_cleanup(runner, db, uploads, config)
         exercise_session_show_meta(runner, db)
         await exercise_auth_probes(temp_root / "auth-probes")
         exercise_auth_evidence(temp_root / "auth-evidence", db)
@@ -2100,7 +2295,10 @@ async def main() -> None:
         await site.start()
         sock = site._server.sockets[0]
         controller_url = f"http://127.0.0.1:{sock.getsockname()[1]}"
+        await exercise_auth_endpoint(controller_url, auth)
         await exercise_queue_pause_websocket(
+            controller_url, controller_token, runner, db)
+        await exercise_engine_switch_queue(
             controller_url, controller_token, runner, db)
         await exercise_controller(controller_url, controller_token, backend_url,
                                   backend_token, backend_fingerprint, old_version, state_dir)

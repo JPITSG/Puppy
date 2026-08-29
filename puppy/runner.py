@@ -255,6 +255,11 @@ class SessionHub:
         # turn. Each distinct browser it touches is announced once to the UI.
         self._active_turn_id = ""
         self._browser_activity_announced = set()
+        # The active prompt normally becomes a durable user event at the start
+        # of _run_turn.  Keep it visible to attachment reference checks until
+        # the turn closes so cancelling a duplicate queued marker cannot race
+        # that event write and remove bytes the active turn still needs.
+        self._active_prompt_text = ""
 
     # ---- watchers ----
 
@@ -369,6 +374,21 @@ class SessionHub:
         self.broadcast({"type": "queued", "queued": self._queue_wire(),
                         "paused": self._paused_wire(), "held": self._held_wire()})
 
+    def _discard_abandoned_uploads(self, items) -> None:
+        abandoned = [item for item in items if isinstance(item, str)]
+        if not abandoned:
+            return
+        retained = [item for item in self.queue + self.held if isinstance(item, str)]
+        if self._active_prompt_text:
+            retained.append(self._active_prompt_text)
+        try:
+            uploads.discard_abandoned(self.id, abandoned, retained)
+        except Exception as exc:
+            # Queue controls must remain usable even if private storage has
+            # become unavailable.  The upload helper itself also fails closed.
+            log.warning("could not discard abandoned uploads for session %s: %s",
+                        self.id, exc)
+
     # ---- public ops ----
 
     def send_message(self, text: str) -> dict:
@@ -433,6 +453,29 @@ class SessionHub:
         self._broadcast_queue()
         return True
 
+    def discard_pending_config(self) -> int:
+        """Drop engine-specific queued/held settings during an engine reseed.
+
+        Prompt text remains in place, including its pause indexes.  Model ids
+        and effort variants belong to the engine which validated them and must
+        never be applied later to the replacement engine.
+        """
+        count = 0
+        for index in range(len(self.queue) - 1, -1, -1):
+            if _is_queued_config(self.queue[index]):
+                self._pop_queue(index)
+                count += 1
+        kept = []
+        for item in self.held:
+            if _is_queued_config(item):
+                count += 1
+            else:
+                kept.append(item)
+        if count:
+            self.held = kept
+            self._broadcast_queue()
+        return count
+
     def unqueue(self, index: int, text: str) -> dict:
         """Drop a message or pending change that is still waiting. The index is
         guarded by the item's text (its key, for a change) so a turn finishing
@@ -444,9 +487,13 @@ class SessionHub:
         ident = item.get("key") if _is_queued_config(item) else item
         if ident != text:
             return {"error": "that message already started"}
-        self._pop_queue(index)
+        removed = self._pop_queue(index)
         if not self._start_queue_if_ready():
             self._broadcast_queue()
+        # Persist the queue mutation first.  A crash may leave an orphan for a
+        # later cleanup, but must never restore a prompt whose file was already
+        # deleted.
+        self._discard_abandoned_uploads([removed])
         return {"ok": True}
 
     def set_queue_paused(self, index: int, text: str, paused: bool) -> dict:
@@ -506,19 +553,23 @@ class SessionHub:
         return result
 
     def discard_held(self, index: int, ident: str) -> dict:
-        if self._held_matches(index, ident) is None:
+        item = self._held_matches(index, ident)
+        if item is None:
             return {"error": "that held item is gone"}
         self.held.pop(index)
         self._broadcast_queue()
+        self._discard_abandoned_uploads([item])
         return {"ok": True}
 
     def clear_queue(self) -> int:
         """Drop everything that has not started yet and return the count."""
         count = len(self.queue)
         if count:
+            removed = list(self.queue)
             self.queue.clear()
             self.paused_queue.clear()
             self._broadcast_queue()
+            self._discard_abandoned_uploads(removed)
         return count
 
     def _start_turn(self, text: str) -> None:
@@ -528,6 +579,7 @@ class SessionHub:
         self.status = "running"
         self.interrupted = False
         self._proc_ready = False
+        self._active_prompt_text = text
         self.turn_task = asyncio.ensure_future(self._run_turn(text))
         # Publish the active block immediately, before process startup and the
         # first persisted event have a chance to yield the event loop.
@@ -738,6 +790,7 @@ class SessionHub:
 
     async def _run_turn(self, text: str) -> None:
         got_result = False
+        user_event_persisted = False
         self._block_status = "error"   # until a result says otherwise
         try:
             session = db.get_session(self.id)
@@ -764,6 +817,7 @@ class SessionHub:
             # ahead of the prompt: the divider introduces the turns below it
             self._note_turn_config(session)
             user_ev = self._emit("user", {"text": text})
+            user_event_persisted = True
 
             prompt = text
             first_turn = fresh_native_session
@@ -934,6 +988,9 @@ class SessionHub:
             except Exception:
                 pass
         finally:
+            self._active_prompt_text = ""
+            if not user_event_persisted:
+                self._discard_abandoned_uploads([text])
             self._active_turn_id = ""
             self._browser_activity_announced = set()
             if self.pending_approval is not None:

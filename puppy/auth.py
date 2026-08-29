@@ -21,12 +21,17 @@ log = logging.getLogger("puppy.auth")
 COOKIE_NAME = "puppy_session"
 SESSION_TTL = 30 * 24 * 3600
 PBKDF2_ITERS = 300_000
+_DUMMY_PWHASH = "pbkdf2_sha256${}$unknown-user-salt${}".format(
+    PBKDF2_ITERS, "00" * 32)
+RATE_LIMIT_MAX_KEYS = 4096
+RATE_LIMIT_PRUNE_SECONDS = 60
 
 PUBLIC_PREFIXES = ("/static/", "/api/settings/bind/verify/",
                    "/api/settings/bind/handoff/")
 PUBLIC_PATHS = {"/", "/favicon.ico", "/api/auth/status", "/api/auth/login", "/api/auth/setup"}
 
 _attempts = {}  # key -> [timestamps]
+_attempts_last_prune = 0.0
 
 
 def hash_password(password: str) -> str:
@@ -56,19 +61,37 @@ def create_user(username: str, password: str) -> None:
 def check_login(username: str, password: str) -> bool:
     row = db.query_one("SELECT pwhash FROM users WHERE username=?", (username,))
     if row is None:
-        # constant-ish time for unknown users
-        verify_password(password, "pbkdf2_sha256$1000$00$00")
+        # Match a current real account's work factor.  A deliberately different
+        # digest keeps the result false without exposing whether the query found
+        # a username through a several-hundred-fold timing gap.
+        verify_password(password, _DUMMY_PWHASH)
         return False
     return verify_password(password, row["pwhash"])
 
 
 def _rate_limited(key: str, limit: int = 6, window: int = 300) -> bool:
-    now = time.time()
+    global _attempts_last_prune
+    now = time.monotonic()
+    if now - _attempts_last_prune >= RATE_LIMIT_PRUNE_SECONDS:
+        for current, timestamps in list(_attempts.items()):
+            recent = [stamp for stamp in timestamps if now - stamp < window]
+            if recent:
+                _attempts[current] = recent
+            else:
+                _attempts.pop(current, None)
+        _attempts_last_prune = now
     lst = [t for t in _attempts.get(key, []) if now - t < window]
-    _attempts[key] = lst
+    # Dict insertion order is our bounded least-recently-seen ledger.  Moving
+    # this peer to the end keeps saturated attack traffic O(1) between the
+    # infrequent global expiry sweeps.
+    _attempts.pop(key, None)
     if len(lst) >= limit:
+        _attempts[key] = lst
         return True
+    if len(_attempts) >= RATE_LIMIT_MAX_KEYS:
+        _attempts.pop(next(iter(_attempts)), None)
     lst.append(now)
+    _attempts[key] = lst
     return False
 
 
@@ -168,16 +191,27 @@ async def h_setup(request: web.Request):
 
 
 async def h_login(request: web.Request):
-    body = await request.json()
-    username = (body.get("username") or "").strip()
-    password = body.get("password") or ""
-    peer = request.headers.get("X-Forwarded-For", request.remote or "?").split(",")[0].strip()
-    if _rate_limited(f"{peer}|{username}"):
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid login request"}, status=400)
+    if not isinstance(body, dict) or not isinstance(body.get("username", ""), str) or \
+            not isinstance(body.get("password", ""), str):
+        return web.json_response({"error": "invalid login request"}, status=400)
+    username = body.get("username", "").strip()
+    password = body.get("password", "")
+    # Forwarded headers are caller-controlled unless an explicitly trusted
+    # proxy rewrites them.  request.remote is the authenticated transport peer;
+    # proxy deployments safely share one failure bucket rather than allowing a
+    # public client to mint unlimited identities and bypass the limiter.
+    peer = str(request.remote or "?")[:128]
+    if _rate_limited(peer):
         return web.json_response({"error": "too many attempts, wait a few minutes"}, status=429)
     if not check_login(username, password):
         log.warning("failed login for %r from %s", username, peer)
         return web.json_response({"error": "invalid credentials"}, status=403)
     token = issue_session(username)
+    _attempts.pop(peer, None)
     log.info("login %r from %s", username, peer)
     resp = web.json_response({"ok": True, "username": username})
     resp.set_cookie(COOKIE_NAME, token, max_age=SESSION_TTL, httponly=True, samesite="Strict", path="/")
