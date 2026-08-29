@@ -8986,8 +8986,8 @@ class SettingsView {
       "Added to every new model turn this node starts. Leave blank to add nothing."));
     customHead.appendChild(customCopy);
     const custom = document.createElement("textarea");
-    custom.className = "system-prompt-textarea";
-    custom.rows = 5;
+    custom.className = "system-prompt-textarea config-textarea";
+    custom.rows = 3;
     custom.placeholder = "No custom system prompt";
     custom.setAttribute("aria-label", "Your custom system prompt");
     customSection.appendChild(customHead);
@@ -9007,8 +9007,8 @@ class SettingsView {
     browserHead.appendChild(browserCopy);
     browserHead.appendChild(reset);
     const browserText = document.createElement("textarea");
-    browserText.className = "system-prompt-textarea system-prompt-browser-text";
-    browserText.rows = 8;
+    browserText.className = "system-prompt-textarea config-textarea";
+    browserText.rows = 3;
     browserText.setAttribute("aria-label", "Puppy browser system prompt");
     browserSection.appendChild(browserHead);
     browserSection.appendChild(browserText);
@@ -9641,7 +9641,8 @@ class SettingsView {
           <input type="text" id="be-tls" autocomplete="off" spellcheck="false"
             placeholder="Supplied automatically by pairing JSON"></label>
         <label class="full">Pairing JSON <span style="text-transform:none">(optional)</span>
-          <textarea id="be-pairing" rows="3" placeholder="Paste puppy-backend pairing output"></textarea></label>
+          <textarea class="config-textarea" id="be-pairing" rows="3"
+            placeholder="Paste puppy-backend pairing output"></textarea></label>
         <label class="be-auto be-auto-add full">
           <input type="checkbox" id="be-auto"
             aria-label="Upgrade this headless backend automatically when it is outdated and idle">
@@ -10075,7 +10076,7 @@ function modalEditBackend(backend, onSaved) {
         <label class="full">TLS certificate SHA-256 <span class="field-optional">(optional)</span>
           <input type="text" id="backend-edit-tls" autocomplete="off" spellcheck="false"></label>
         <label class="full">Pairing JSON <span class="field-optional">(optional)</span>
-          <textarea id="backend-edit-pairing" rows="3"
+          <textarea class="config-textarea" id="backend-edit-pairing" rows="3"
             placeholder="Paste new puppy-backend pairing output"></textarea></label>
         <p class="backend-edit-help full">Pairing JSON supplies the primary URL, token and certificate. Other entered URLs remain as fallbacks; the display name stays as entered.</p>
         <p class="backend-edit-error full hidden" role="alert"></p>

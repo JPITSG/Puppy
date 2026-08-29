@@ -1430,10 +1430,15 @@ def check_system_prompt_settings(ui_source: str, css_source: str) -> None:
     assert ".system-prompt-section+.system-prompt-section{" in css_source
     assert ".system-prompt-section-head{" in css_source
     assert ".system-prompt-textarea{" in css_source
-    assert ".system-prompt-textarea::-webkit-resizer{" in css_source
-    assert "var(--txt3) 67% 72%,transparent 73%);" in css_source
-    assert ".system-prompt-textarea{resize:none}" in css_source
-    assert ".system-prompt-browser-text{min-height:220px}" in css_source
+    assert ".config-textarea{display:block;height:72px;min-height:72px;" \
+           "max-height:72px;resize:none}" in css_source
+    assert "system-prompt-textarea::-webkit-resizer" not in css_source
+    assert 'custom.className = "system-prompt-textarea config-textarea";' in ui_source
+    assert 'browserText.className = "system-prompt-textarea config-textarea";' in ui_source
+    assert 'class="config-textarea" id="be-pairing" rows="3"' in ui_source
+    assert 'class="config-textarea" id="backend-edit-pairing" rows="3"' in ui_source
+    assert ui_source.count('class="config-textarea"') == 2
+    assert "custom.rows = 3;" in ui_source and "browserText.rows = 3;" in ui_source
 
     start = ui_source.index("\n  systemPromptCard(") + 1
     brace = ui_source.index("{", start)

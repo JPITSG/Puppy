@@ -1586,7 +1586,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .backend-edit-intro{margin:-4px 0 14px;color:var(--txt2);font-size:12.5px;line-height:1.5}
 .backend-edit-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:0 14px}
 .backend-edit-grid .full{grid-column:1/-1}
-.backend-edit-grid textarea{resize:vertical;min-height:72px;max-height:180px}
+.config-textarea{display:block;height:72px;min-height:72px;max-height:72px;resize:none}
 .backend-edit-help{margin:-5px 0 9px;color:var(--txt3);font-size:10.5px;line-height:1.45}
 .backend-edit-error{
   margin:0;padding:8px 10px;border:1px solid rgba(255,107,129,.3);border-radius:var(--r-sm);
@@ -1651,19 +1651,9 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   max-width:680px;margin:3px 0 0;color:var(--txt3);font-size:10.5px;line-height:1.5;
 }
 .system-prompt-textarea{
-  display:block;min-height:108px;max-height:360px;margin-top:9px;resize:vertical;
+  margin-top:9px;
   font:12px/1.55 var(--mono);tab-size:2;
 }
-/* Chromium/WebKit otherwise paints a native white resize tile over Puppy's
-   themed textarea corner. Keep desktop resizing, but draw the grip from theme
-   ink so there is no foreign square in either color scheme. */
-.system-prompt-textarea::-webkit-resizer{
-  border:0;background:linear-gradient(135deg,
-    transparent 0 47%,var(--txt3) 48% 53%,transparent 54% 66%,
-    var(--txt3) 67% 72%,transparent 73%);
-  opacity:.68;
-}
-.system-prompt-browser-text{min-height:164px}
 .system-prompt-reset{flex:0 0 auto;margin-top:0;white-space:nowrap}
 .system-prompt-actions{
   display:flex;align-items:center;justify-content:space-between;gap:10px;
@@ -2002,8 +1992,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   .usage-refresh-controls .btn{height:34px;margin-left:auto}
   .system-prompt-section-head{display:grid;grid-template-columns:minmax(0,1fr)}
   .system-prompt-reset{justify-self:start;height:32px}
-  .system-prompt-textarea{min-height:132px;font-size:16px;line-height:1.45}
-  .system-prompt-browser-text{min-height:220px}
+  .system-prompt-textarea{font-size:16px;line-height:1.45}
   .system-prompt-actions{display:grid;grid-template-columns:minmax(0,1fr) auto}
   .system-prompt-actions .btn{height:34px}
 }
@@ -2018,9 +2007,6 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
     touch-action:pan-y pinch-zoom;
   }
   .app.side-open .drawer-edge{pointer-events:none}
-  /* A touch screen cannot use the desktop drag grip; suppressing resize also
-     prevents mobile WebKit/Chromium from reserving and painting its corner. */
-  .system-prompt-textarea{resize:none}
 }
 @media (prefers-reduced-motion:reduce){
   *{animation:none!important;transition:none!important;scroll-behavior:auto!important}
