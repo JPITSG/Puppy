@@ -1433,12 +1433,24 @@ function menuCheckRow(label, on, fn) {
   return button;
 }
 
+/* A linked remote workspace rides on the session as a structured descriptor.
+   Everything user-facing shows its authoritative project path, never the
+   node-private mirror directory the engine actually runs in. */
+function sessionWorkspace(session) {
+  const ws = session && session.workspace;
+  return ws && typeof ws === "object" && ws.root ? ws : null;
+}
+
 function workspaceLabel(session, n = 26) {
+  const ws = sessionWorkspace(session);
+  if (ws) return tailPath(ws.root, n);
   if (!isScratchWorkspace(session)) return tailPath((session && session.cwd) || "", n);
   return session.workspace_missing ? "Scratch workspace expired" : "Scratch workspace";
 }
 
 function workspaceTitle(session) {
+  const ws = sessionWorkspace(session);
+  if (ws) return `${ws.root} · files on ${ws.node || "another node"}`;
   if (!isScratchWorkspace(session)) return (session && session.cwd) || "";
   if (session.workspace_missing)
     return "The host cleared this scratch workspace. It will be recreated before the next turn.";
@@ -1446,6 +1458,12 @@ function workspaceTitle(session) {
 }
 
 function sessionDeleteMessage(session) {
+  const ws = sessionWorkspace(session);
+  if (ws) {
+    return "The transcript and this node's private synchronized copy are removed permanently." +
+      (session.ws_dirty ? " Changes not yet synced to the project are lost." : "") +
+      ` The project on ${ws.node || "the workspace node"} is not touched.`;
+  }
   return isScratchWorkspace(session)
     ? "The transcript and all files in its scratch workspace are removed permanently."
     : "The puppy transcript is removed permanently. Files in the working directory are not touched.";
@@ -1946,6 +1964,7 @@ const state = {
   uploadSettings: null,   // local per-file upload policy
   localEngineCheckedAt: 0,
   backends: [],           // remote backends [{id,name,url,urls,active_url}]
+  workspaceLinks: [],     // controller-brokered remote-workspace links
   sessions: [],           // local sessions (live via updates ws)
   remoteSessions: {},     // bid -> sessions[]
   remoteOk: {},           // bid -> bool
@@ -2286,7 +2305,7 @@ function saveTabs() {
       version: 2,
       tabs: state.tabs.map(t => ({
         id: t.id, type: t.type, bid: t.bid, sid: t.sid, title: t.title,
-        browserId: t.browserId, cmd: t.cmd, ended: t.ended === true,
+        browserId: t.browserId, cmd: t.cmd, cwd: t.cwd, ended: t.ended === true,
       })),
       active: state.active,
       activeGroup: state.activeGroup,
@@ -2311,6 +2330,7 @@ function storedTabs(value) {
       tab.browserId = item.browserId.toUpperCase();
     if (typeof item.title === "string") tab.title = item.title.slice(0, 1000);
     if (typeof item.cmd === "string") tab.cmd = item.cmd.slice(0, 10000);
+    if (typeof item.cwd === "string") tab.cwd = item.cwd.slice(0, 4096);
     /* A shell the user ended is restored as ended: reopening the tab must not
        silently start a second login session on that host. */
     if (item.ended === true) tab.ended = true;
@@ -2420,6 +2440,7 @@ async function refreshState() {
   state.engMap = {};
   state.engines.forEach(e => state.engMap[e.key] = e);
   state.backends = Array.isArray(s.backends) ? s.backends : [];
+  state.workspaceLinks = Array.isArray(s.workspace_links) ? s.workspace_links : [];
   state.browser = { enabled: !!(s.browser && s.browser.enabled) };
   state.sessions = Array.isArray(s.sessions) ? s.sessions : [];
   ingestSessionActivity(0, state.sessions, s.server_time);
@@ -2471,6 +2492,10 @@ function connectUpdates() {
         renderSidebar();
       } else if (d.type === "browser_activity") {
         handleBrowserActivity(0, d.session_id, d.turn_id, d.browser_id);
+      } else if (d.type === "workspace_links" && Array.isArray(d.links)) {
+        state.workspaceLinks = d.links;
+        renderSidebar();
+        refreshWorkspaceChips();
       }
     } catch (e) {}
   };
@@ -3201,6 +3226,37 @@ function backendSupportsScratch(bid) {
     Array.isArray(backend.capabilities) && backend.capabilities.includes("temporary-workspaces");
 }
 
+/* Remote-workspace roles are two independent additive capabilities: a node
+   can host linked sessions (mirror) and/or share its directories (provider).
+   Never inferred for protocol-0 nodes. */
+function backendSupportsWorkspaceMirror(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(b => b.id === bid);
+  return !!backend && Array.isArray(backend.capabilities) &&
+    backend.capabilities.includes("workspace-mirror");
+}
+
+function backendSupportsWorkspaceProvider(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(b => b.id === bid);
+  return !!backend && Array.isArray(backend.capabilities) &&
+    backend.capabilities.includes("workspace-provider");
+}
+
+/* The controller-side link record behind one linked session, if this console
+   is the controller that brokered it. */
+function linkForSession(bid, sid) {
+  return (state.workspaceLinks || []).find(l =>
+    l.exec_backend === (bid || 0) && l.session_id === sid) || null;
+}
+
+function refreshWorkspaceChips() {
+  for (const view of Object.values(state.views)) {
+    if (view && view.session && typeof view.updateHead === "function")
+      view.updateHead();
+  }
+}
+
 function backendSupportsUsageRefresh(bid) {
   if (!bid) return true;
   const backend = state.backends.find(b => b.id === bid);
@@ -3435,6 +3491,17 @@ function renderSidebar() {
         workspaceLabel(s));
       workspace.setAttribute("aria-label", workspaceTitle(s));
       r2.appendChild(workspace);
+      if (sessionWorkspace(s)) {
+        const wsLink = linkForSession(g.bid, s.id);
+        const st = wsLink ? wsLink.state : (s.ws_dirty ? "pending" : "");
+        const mark = el("span", "si-ws" +
+          (st === "conflict" || st === "pending" ? " warn" :
+           st === "error" ? " err" :
+           st === "syncing" || st === "init" ? " busy" : ""), "⇄");
+        mark.setAttribute("aria-label",
+          "Linked workspace" + (st ? " · " + st : ""));
+        r2.appendChild(mark);
+      }
       item.appendChild(r1); item.appendChild(r2);
       const pointerForClick = activationPointer(item);
       item.onclick = event => {
@@ -3575,7 +3642,16 @@ function sessionContextMenu(ev, bid, s) {
   menu.appendChild(menuCheckRow("Show status bar", sessionShowsMeta(s),
     () => patch({ show_meta: !sessionShowsMeta(s) })));
   menu.appendChild(el("div", "menu-sep"));
-  add(isScratchWorkspace(s) ? "Copy workspace path" : "Copy cwd", () => copyWithToast(s.cwd));
+  const sessionWs = sessionWorkspace(s);
+  add(isScratchWorkspace(s) ? "Copy workspace path" :
+      sessionWs ? "Copy project path" : "Copy cwd",
+      () => copyWithToast(sessionWs ? sessionWs.root : s.cwd));
+  if (sessionWs) {
+    add("Workspace details", () => modalWorkspaceLink(bid, s));
+    const wsLink = linkForSession(bid, s.id);
+    if (wsLink) add(`Terminal on ${wsLink.ws_name || "workspace node"}`,
+      () => openTermTab(wsLink.ws_backend, "", null, wsLink.root));
+  }
   if (s.has_native) add("Copy native session id", async () => {
     try {
       const r = await api(bid, `sessions/${s.id}`);
@@ -3602,7 +3678,12 @@ function sessionContextMenu(ev, bid, s) {
     const ok = await modalConfirm("Delete session?", sessionDeleteMessage(s));
     if (!ok) return;
     try {
-      await api(bid, `sessions/${s.id}`, { method: "DELETE" });
+      /* a linked session cascades through its controller-side link so the
+         lease and sync records go with it */
+      const wsLink = sessionWorkspace(s) && linkForSession(bid, s.id);
+      if (wsLink) await api(0, `workspaces/${wsLink.id}?with_session=1`,
+        { method: "DELETE" });
+      else await api(bid, `sessions/${s.id}`, { method: "DELETE" });
       closeTab(`s:${bid}:${s.id}`);
       refreshGroup(bid);
       toast("Session deleted");
@@ -4159,9 +4240,10 @@ function openSessionTab(bid, sid, meta, groupId = null) {
   activateTab(id);
 }
 
-function openTermTab(bid, cmd, groupId = null) {
+function openTermTab(bid, cmd, groupId = null, cwd = "") {
   const id = `t:${Date.now()}:${termSeq++}`;
   state.tabs.push({ id, type: "term", bid: bid || 0, cmd: cmd || "",
+    cwd: cwd || "",
     title: cmd ? cmd.slice(0, 24) : shellTabTitle({ bid: bid || 0 }) });
   putTabInPane(id, groupId);
   activateTab(id);
@@ -6596,6 +6678,45 @@ class SessionView {
     }
   }
 
+  syncWorkspaceChip() {
+    const scroll = this.root.querySelector(".chat-meta-scroll");
+    const existing = scroll.querySelector(".chip.ws");
+    const s = this.session;
+    const ws = s && sessionWorkspace(s);
+    if (!ws) {
+      if (existing) existing.remove();
+      return;
+    }
+    const link = linkForSession(this.tab.bid, s.id);
+    const st = link ? link.state : (s.ws_dirty ? "pending" : "");
+    const labels = { init: "Preparing", syncing: "Syncing", ok: "Synced",
+                     conflict: "Conflicts", error: "Sync error",
+                     pending: "Sync pending" };
+    const text = labels[st] || "Linked";
+    const cls = "chip ws" +
+      (st === "conflict" || st === "pending" ? " warn" :
+       st === "error" ? " err" : st === "syncing" || st === "init" ? " busy" : "");
+    let chip = existing;
+    if (!chip) {
+      chip = el("button", cls);
+      chip.type = "button";
+      /* immediately after the workspace path chip: engine, backend, path,
+         then this link's live sync state */
+      const cwdChip = scroll.querySelector(".chip.cwd");
+      scroll.insertBefore(chip, cwdChip ? cwdChip.nextSibling :
+        scroll.querySelector(".chat-status"));
+    }
+    chip.className = cls;
+    chip.textContent = "";
+    chip.appendChild(el("span", "ws-glyph", "⇄"));
+    chip.appendChild(el("span", "chip-text", text));
+    chip.removeAttribute("title");
+    chip.removeAttribute("data-tip");
+    chip.setAttribute("aria-label",
+      `Linked workspace · ${ws.label || ws.root} · ${text}`);
+    chip.onclick = () => modalWorkspaceLink(this.tab.bid, s);
+  }
+
   updateHead() {
     const s = this.session;
     if (!s) return;
@@ -6613,6 +6734,7 @@ class SessionView {
     cwd.setAttribute("aria-label", workspaceTitle(s));
     cwd.classList.toggle("warn", !!s.workspace_missing);
     this.root.querySelector(".chip.be").textContent = backendName(this.tab.bid);
+    this.syncWorkspaceChip();
     this.syncBrowserChips();
     const setMini = (cls, label, value, pending = false) => {
       const control = this.root.querySelector(".mini." + cls);
@@ -7853,6 +7975,7 @@ class TermView {
     if (this.dataSub) { this.dataSub.dispose(); this.dataSub = null; }
     const params = new URLSearchParams({ cols: this.term.cols, rows: this.term.rows });
     if (this.tab.cmd) params.set("cmd", this.tab.cmd);
+    if (this.tab.cwd) params.set("cwd", this.tab.cwd);
     const ws = new WebSocket(wsUrl(this.tab.bid, "ws/term?" + params.toString()));
     ws.binaryType = "arraybuffer";
     this.ws = ws;
@@ -10718,8 +10841,12 @@ async function modalNewSession(groupId = null) {
         <button type="button" class="wp" data-kind="temporary" aria-pressed="false">
           <span class="wp-name">Scratch</span><span class="wp-sub">No folder to choose</span>
         </button>
+        <button type="button" class="wp" data-kind="remote" aria-pressed="false">
+          <span class="wp-name">Remote</span><span class="wp-sub">Files on another node</span>
+        </button>
       </div>
     </div>
+    <label id="ns-wsbe-wrap" class="hidden">Files on node<select id="ns-wsbe"></select></label>
     <div id="ns-dir-fields">
       <label>Working directory<input type="text" id="ns-cwd" spellcheck="false"></label>
       <div class="dirpick hidden" id="ns-dirs"></div>
@@ -10748,6 +10875,9 @@ async function modalNewSession(groupId = null) {
   const directoryFields = m.querySelector("#ns-dir-fields");
   const scratchNote = m.querySelector("#ns-scratch-note");
   const scratchButton = workspaceBox.querySelector('[data-kind="temporary"]');
+  const remoteButton = workspaceBox.querySelector('[data-kind="remote"]');
+  const wsbeWrap = m.querySelector("#ns-wsbe-wrap");
+  const wsbeSel = m.querySelector("#ns-wsbe");
   let workspaceKind = "directory";
   modelSel.onchange = () => customWrap.classList.toggle("hidden", modelSel.value !== "__custom__");
 
@@ -10789,19 +10919,44 @@ async function modalNewSession(groupId = null) {
 
   function pickWorkspace(kind) {
     if (kind === "temporary" && scratchButton.disabled) return;
+    if (kind === "remote" && remoteButton.disabled) return;
     workspaceKind = kind;
     workspaceBox.querySelectorAll(".wp").forEach(button => {
       const selected = button.dataset.kind === kind;
       button.classList.toggle("sel", selected);
       button.setAttribute("aria-pressed", selected ? "true" : "false");
     });
-    directoryFields.classList.toggle("hidden", kind !== "directory");
+    /* remote reuses the directory fields: the same path input and browser,
+       just aimed at the node the files live on */
+    directoryFields.classList.toggle("hidden", kind === "temporary");
     scratchNote.classList.toggle("hidden", kind !== "temporary");
-    if (kind !== "directory") dirBox.classList.add("hidden");
+    wsbeWrap.classList.toggle("hidden", kind !== "remote");
+    dirBox.classList.add("hidden");
   }
   workspaceBox.querySelectorAll(".wp").forEach(button => {
     button.onclick = () => pickWorkspace(button.dataset.kind);
   });
+
+  function renderWsNodes() {
+    const execBid = parseInt(beSel.value, 10);
+    const nodes = [{ id: 0, name: backendName(0) }].concat(
+      state.backends.filter(b => backendSupportsWorkspaceProvider(b.id)));
+    const previous = wsbeSel.value;
+    wsbeSel.innerHTML = "";
+    for (const node of nodes) {
+      const opt = document.createElement("option");
+      opt.value = String(node.id);
+      opt.textContent = node.name + (node.id === execBid ? " (same node)" : "");
+      wsbeSel.appendChild(opt);
+    }
+    /* default the files to a node other than the one running the engine -
+       that is the whole point of a remote workspace */
+    const other = nodes.find(node => node.id !== execBid);
+    const keep = nodes.some(node => String(node.id) === previous);
+    wsbeSel.value = keep ? previous : String(other ? other.id : execBid);
+    refreshChoiceSelect(wsbeSel);
+  }
+  wsbeSel.onchange = () => dirBox.classList.add("hidden");
 
   function syncWorkspaceSupport() {
     const supported = backendSupportsScratch(parseInt(beSel.value, 10));
@@ -10813,6 +10968,16 @@ async function modalNewSession(groupId = null) {
     scratchButton.querySelector(".wp-sub").textContent = supported ?
       "No folder to choose" : "Backend upgrade required";
     if (!supported && workspaceKind === "temporary") pickWorkspace("directory");
+    const mirrorable = backendSupportsWorkspaceMirror(parseInt(beSel.value, 10));
+    remoteButton.disabled = !mirrorable;
+    remoteButton.removeAttribute("title");
+    remoteButton.removeAttribute("data-tip");
+    if (mirrorable) remoteButton.removeAttribute("aria-label");
+    else remoteButton.setAttribute("aria-label", "Remote workspace · backend upgrade required");
+    remoteButton.querySelector(".wp-sub").textContent = mirrorable ?
+      "Files on another node" : "Backend upgrade required";
+    if (!mirrorable && workspaceKind === "remote") pickWorkspace("directory");
+    renderWsNodes();
   }
 
   async function loadEngines() {
@@ -10905,20 +11070,37 @@ async function modalNewSession(groupId = null) {
   syncWorkspaceSupport();
   await loadEngines();
 
-  /* directory browser - follows whichever node the session will run on */
-  wireDirectoryPicker(cwdInp, dirBox, () => parseInt(beSel.value, 10));
+  /* directory browser - follows the node whose filesystem holds the files:
+     the execution node normally, the workspace node for a remote link */
+  wireDirectoryPicker(cwdInp, dirBox, () => workspaceKind === "remote" ?
+    parseInt(wsbeSel.value, 10) : parseInt(beSel.value, 10));
 
   m.querySelector("#ns-cancel").onclick = close;
   m.querySelector("#ns-go").onclick = async () => {
     const bid = parseInt(beSel.value, 10);
     if (!engine) { toast("Pick an engine", "error"); return; }
+    const shared = {
+      engine, name: m.querySelector("#ns-name").value,
+      model: modelSel.value === "__custom__" ? customInp.value.trim() : modelSel.value,
+      effort: effortSel.value, permission_mode: permSel.value, color: nsColor,
+    };
     try {
+      if (workspaceKind === "remote") {
+        const r = await api(0, "workspaces/sessions", { method: "POST", body: {
+          ...shared, backend: bid,
+          workspace_backend: parseInt(wsbeSel.value, 10),
+          root: cwdInp.value.trim(),
+          mkdir: m.querySelector("#ns-mkdir").checked,
+        }, timeoutMs: 120000 });
+        close();
+        if (r.same_node) toast("Both picks are the same machine - using the directory directly");
+        if (r.bid) await pollRemotes();
+        openSessionTab(r.bid || 0, r.session.id, r.session, groupId);
+        return;
+      }
       const r = await api(bid, "sessions", { method: "POST", body: {
-        engine, workspace_kind: workspaceKind,
+        ...shared, workspace_kind: workspaceKind,
         cwd: workspaceKind === "directory" ? cwdInp.value.trim() : "",
-        name: m.querySelector("#ns-name").value,
-        model: modelSel.value === "__custom__" ? customInp.value.trim() : modelSel.value,
-        effort: effortSel.value, permission_mode: permSel.value, color: nsColor,
         mkdir: workspaceKind === "directory" && m.querySelector("#ns-mkdir").checked,
       }});
       close();
@@ -10967,6 +11149,140 @@ function modalOpenSession(groupId = null) {
 }
 
 /* new terminal */
+/* Linked-workspace detail sheet: where the files live, the live sync state,
+   manual sync, per-path conflict resolution, and a shell on the file node. */
+function modalWorkspaceLink(bid, session) {
+  const ws = sessionWorkspace(session);
+  if (!ws) return;
+  const { m, close } = modal(`<h2>Linked workspace</h2>
+    <div class="ws-facts"></div>
+    <div class="ws-conflict-box hidden">
+      <div class="field-lbl">Conflicts</div>
+      <p class="hint ws-conflict-hint">These paths changed on both sides. Pick which
+      version wins; the losing bytes are kept on the controller.</p>
+      <div class="ws-conflicts"></div>
+      <button class="btn btn-pri ws-apply hidden" id="wsl-apply">Apply choices</button>
+    </div>
+    <p class="hint ws-nolink hidden">This console has no link record for this session,
+    so it cannot sync it. The controller that created the link manages synchronization.</p>
+    <div class="m-btns">
+      <button class="btn" id="wsl-close">Close</button>
+      <button class="btn hidden" id="wsl-term">Terminal</button>
+      <button class="btn btn-pri" id="wsl-sync">Sync now</button>
+    </div>`, "ws-link-modal");
+  const facts = m.querySelector(".ws-facts");
+  const conflictWrap = m.querySelector(".ws-conflict-box");
+  const conflictBox = m.querySelector(".ws-conflicts");
+  const applyBtn = m.querySelector("#wsl-apply");
+  const noLink = m.querySelector(".ws-nolink");
+  const syncBtn = m.querySelector("#wsl-sync");
+  const termBtn = m.querySelector("#wsl-term");
+  const choices = {};
+  const stateText = (st) => ({ init: "preparing first sync", syncing: "syncing",
+    ok: "synced", conflict: "conflicts need a decision",
+    error: "sync error" }[st] || st || "no link record");
+
+  const fact = (label, value, cls = "") => {
+    const row = el("div", "ws-fact");
+    row.appendChild(el("span", "wsf-l", label));
+    row.appendChild(el("span", "wsf-v" + (cls ? " " + cls : ""), value));
+    facts.appendChild(row);
+  };
+
+  const render = () => {
+    const link = linkForSession(bid, session.id);
+    facts.innerHTML = "";
+    fact("Project", ws.root);
+    fact("Files on", link ? link.ws_name : (ws.node || "another node"));
+    fact("Runs on", link ? link.exec_name : backendName(bid));
+    const st = link ? link.state : "";
+    fact("State", stateText(st),
+      st === "conflict" ? "warn" : st === "error" ? "err" :
+      st === "ok" ? "ok" : "");
+    if (link && link.last_error) fact("Last error", link.last_error, "err");
+    if (link) fact("Last sync", link.last_sync_at ?
+      fmtTime(link.last_sync_at) + " · pass " + link.generation : "not yet");
+    noLink.classList.toggle("hidden", !!link);
+    syncBtn.classList.toggle("hidden", !link);
+    const canShell = link && (link.ws_backend === 0 || backendHasCapability(
+      state.backends.find(b => b.id === link.ws_backend), "terminal"));
+    termBtn.classList.toggle("hidden", !canShell);
+    if (link) termBtn.textContent = "Terminal on " + link.ws_name;
+
+    const conflicts = (link && link.conflicts) || [];
+    conflictWrap.classList.toggle("hidden", !conflicts.length);
+    conflictBox.innerHTML = "";
+    for (const item of conflicts) {
+      const row = el("div", "wsc-row");
+      const path = el("div", "wsc-path", item.path);
+      path.setAttribute("aria-label", item.path);
+      const pickBtn = (side, label, kind) => {
+        const b = el("button", "btn wsc-pick" +
+          (choices[item.path] === side ? " sel" : ""),
+          `${label} (${kind})`);
+        b.type = "button";
+        b.onclick = () => {
+          choices[item.path] = choices[item.path] === side ? undefined : side;
+          if (choices[item.path] === undefined) delete choices[item.path];
+          render();
+        };
+        return b;
+      };
+      const picks = el("div", "wsc-picks");
+      picks.appendChild(pickBtn("workspace", "Keep project", item.workspace));
+      picks.appendChild(pickBtn("session", "Keep session", item.session));
+      row.appendChild(path);
+      row.appendChild(picks);
+      conflictBox.appendChild(row);
+    }
+    applyBtn.classList.toggle("hidden", !Object.keys(choices).length);
+  };
+  render();
+  /* link state moves on its own (broadcasts land in state.workspaceLinks);
+     the sheet re-reads it while open and the timer retires with the DOM */
+  const timer = setInterval(() => {
+    if (!m.isConnected) { clearInterval(timer); return; }
+    render();
+  }, 2000);
+
+  m.querySelector("#wsl-close").onclick = close;
+  termBtn.onclick = () => {
+    const link = linkForSession(bid, session.id);
+    if (link) { close(); openTermTab(link.ws_backend, "", null, link.root); }
+  };
+  syncBtn.onclick = async () => {
+    const link = linkForSession(bid, session.id);
+    if (!link) return;
+    syncBtn.disabled = true;
+    try {
+      const r = await api(0, `workspaces/${link.id}/sync`,
+        { method: "POST", timeoutMs: 180000 });
+      if (r && r.link) {
+        state.workspaceLinks = state.workspaceLinks.map(
+          l => l.id === r.link.id ? r.link : l);
+      }
+      toast("Workspace synced");
+    } catch (e) { toast(e.message, "error"); }
+    syncBtn.disabled = false;
+    render();
+    refreshWorkspaceChips();
+    renderSidebar();
+  };
+  applyBtn.onclick = async () => {
+    const link = linkForSession(bid, session.id);
+    if (!link || !Object.keys(choices).length) return;
+    applyBtn.disabled = true;
+    try {
+      await api(0, `workspaces/${link.id}/resolve`,
+        { method: "POST", body: { choices } });
+      for (const key of Object.keys(choices)) delete choices[key];
+      toast("Resolving conflicts…");
+    } catch (e) { toast(e.message, "error"); }
+    applyBtn.disabled = false;
+    render();
+  };
+}
+
 function modalNewTerminal(groupId = null) {
   const beOpts = [{ id: 0, name: backendName(0) }]
     .concat(state.backends.filter(b => backendHasCapability(b, "terminal")));

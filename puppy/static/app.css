@@ -295,6 +295,11 @@ a{color:var(--acc2)}
 .sess-item .si-name{flex:1;min-width:0;font-size:13px;font-weight:570;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sess-item .si-sub{flex:1;min-width:0;font-size:11px;color:var(--txt3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:var(--mono)}
 .sess-item .si-sub.warn{color:var(--warn)}
+/* linked-workspace marker: quiet when synced, tinted when it needs a look */
+.sess-item .si-ws{flex:0 0 auto;font:11px var(--mono);color:var(--txt3);line-height:1}
+.sess-item .si-ws.warn{color:var(--warn)}
+.sess-item .si-ws.err{color:var(--err)}
+.sess-item .si-ws.busy{color:var(--acc2)}
 .linklike{
   display:inline-flex;align-items:center;background:none;border:none;color:var(--txt3);
   font:inherit;font-size:11px;line-height:1;cursor:pointer;padding:8px 6px;border-radius:var(--btn-r);
@@ -890,6 +895,20 @@ select.choice-native{display:none!important}
 }
 .chip.browser:active{transform:scale(.96)}
 .chip.browser:focus-visible{outline:1px solid var(--acc);outline-offset:2px}
+/* the linked-workspace chip is a control too: it opens the link sheet */
+.chip.ws{
+  gap:5px;cursor:pointer;color:var(--txt2);
+  -webkit-appearance:none;appearance:none;
+  transition:border-color .15s var(--ease),color .15s var(--ease),
+    background .15s var(--ease),transform .12s var(--ease);
+}
+.chip.ws .ws-glyph{font-size:12px;line-height:1;opacity:.85}
+.chip.ws.busy{color:var(--acc2);border-color:var(--acc-line-soft);background:var(--acc-dim)}
+.chip.ws.warn{color:var(--warn);border-color:var(--warn-line);background:var(--warn-dim)}
+.chip.ws.err{color:var(--err);border-color:var(--err-line);background:var(--err-dim)}
+@media (hover:hover){.chip.ws:hover{border-color:var(--focus-line);color:var(--txt)}}
+.chip.ws:active{transform:scale(.96)}
+.chip.ws:focus-visible{outline:1px solid var(--acc);outline-offset:2px}
 .chat-status{
   display:flex;align-items:center;gap:var(--meta-gap,9px);min-width:0;max-width:340px;
   font-size:11.5px;color:var(--acc2);font-family:var(--mono);
@@ -1812,7 +1831,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .engine-pick .ep.sel{border-color:var(--acc-line);background:var(--acc-dim)}
 .engine-pick .ep .ep-name{font-size:12.5px;font-weight:650}
 .engine-pick .ep .ep-sub{font-size:10px;color:var(--txt3);font-family:var(--mono)}
-.workspace-pick{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:6px}
+.workspace-pick{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:6px}
 .workspace-pick .wp{
   min-width:0;padding:9px 11px;border:1px solid var(--line2);border-radius:var(--r-md);
   display:flex;flex-direction:column;align-items:flex-start;gap:3px;cursor:pointer;
@@ -1827,6 +1846,25 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .workspace-pick .wp-name{font-size:12.5px;font-weight:650}
 .workspace-pick .wp-sub{max-width:100%;font:10px var(--mono);color:var(--txt3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .scratch-note{margin-top:0}
+/* linked-workspace sheet */
+.ws-link-modal .ws-facts{display:flex;flex-direction:column;gap:6px;margin:10px 0 4px}
+.ws-fact{display:flex;gap:10px;align-items:baseline;min-width:0}
+.ws-fact .wsf-l{flex:0 0 84px;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--txt3)}
+.ws-fact .wsf-v{flex:1;min-width:0;font:12px var(--mono);color:var(--txt2);overflow-wrap:anywhere}
+.ws-fact .wsf-v.ok{color:var(--ok)}
+.ws-fact .wsf-v.warn{color:var(--warn)}
+.ws-fact .wsf-v.err{color:var(--err)}
+.ws-conflict-box{margin-top:12px}
+.ws-conflict-hint{margin:4px 0 0}
+.wsc-row{
+  display:flex;flex-direction:column;gap:6px;padding:8px 10px;margin-top:8px;
+  border:1px solid var(--warn-line);border-radius:var(--r-md);background:var(--warn-dim);
+}
+.wsc-path{font:12px var(--mono);color:var(--txt);overflow-wrap:anywhere}
+.wsc-picks{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.wsc-pick{font-size:11.5px}
+.wsc-pick.sel{border-color:var(--acc-line);background:var(--acc-dim);color:var(--txt)}
+.ws-apply{margin-top:10px;width:100%}
 .dirpick{border:1px solid var(--line);border-radius:var(--r-sm);max-height:180px;overflow-y:auto;margin-top:6px;background:var(--panel)}
 .dirpick button{
   display:flex;align-items:center;gap:6px;width:100%;min-height:28px;text-align:left;
