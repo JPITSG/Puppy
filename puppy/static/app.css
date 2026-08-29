@@ -1879,9 +1879,18 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   background:var(--panel2);border:1px solid var(--line2);border-left:3px solid var(--acc);
   border-radius:var(--r-md);padding:10px 14px;font-size:12.5px;
   box-shadow:0 14px 40px -14px rgba(0,0,0,.9);animation:toast-in .25s var(--ease);
+  touch-action:pan-y pinch-zoom;
 }
 .toast.err{border-left-color:var(--err)}
 .toast.ok{border-left-color:var(--ok)}
+.toast.toast-touch{animation:none}
+.toast.toast-swiping{transition:none;user-select:none;will-change:transform,opacity}
+.toast.toast-swipe-settling{
+  transition:transform .18s var(--ease),opacity .18s linear;will-change:transform,opacity;
+}
+.toast.toast-swipe-dismissing{
+  transform:translate3d(calc(100% + 24px),0,0);opacity:0;pointer-events:none;
+}
 @keyframes toast-in{from{transform:translateY(8px);opacity:0}to{transform:none;opacity:1}}
 
 /* ---------- tooltips ---------- */

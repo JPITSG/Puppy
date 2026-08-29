@@ -477,10 +477,148 @@ const esc = (s) => String(s == null ? "" : s)
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
   .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 
+const TOAST_SWIPE_INTENT_PX = 8;
+const TOAST_SWIPE_FLING_PX = 28;
+const TOAST_SWIPE_FLING_VELOCITY = .55;
+const TOAST_SWIPE_SETTLE_MS = 180;
+
+/* A toast sits against the right edge, so a rightward finger swipe has one
+   unambiguous destination. Pointer type is checked per gesture rather than by
+   viewport size: mouse use on a tablet remains ordinary, while touch on a
+   convertible still works. Vertical intent is left to native page scrolling. */
+function wireToastSwipe(target, dismiss, pause, resume) {
+  let gesture = null;
+  let settleTimer = null;
+
+  const record = (current, position, time) => {
+    current.samples.push({ position, time });
+    const cutoff = time - 100;
+    while (current.samples.length > 1 && current.samples[0].time < cutoff)
+      current.samples.shift();
+  };
+
+  const velocity = current => {
+    const first = current.samples[0];
+    const last = current.samples[current.samples.length - 1];
+    const elapsed = last && first ? last.time - first.time : 0;
+    return elapsed > 0 ? (last.position - first.position) / elapsed : 0;
+  };
+
+  const clearSettle = () => {
+    if (settleTimer !== null) clearTimeout(settleTimer);
+    settleTimer = null;
+    target.classList.remove("toast-swipe-settling", "toast-swipe-dismissing");
+    target.style.removeProperty("transform");
+    target.style.removeProperty("opacity");
+  };
+
+  const settleBack = () => {
+    target.classList.remove("toast-swiping");
+    target.classList.add("toast-swipe-settling");
+    void target.offsetWidth;
+    target.style.transform = "translate3d(0,0,0)";
+    target.style.opacity = "1";
+    settleTimer = setTimeout(() => {
+      clearSettle();
+      resume();
+    }, TOAST_SWIPE_SETTLE_MS + 40);
+  };
+
+  const settleOut = () => {
+    target.classList.remove("toast-swiping");
+    target.classList.add("toast-swipe-settling", "toast-swipe-dismissing");
+    /* Preserve the finger-owned inline frame for one layout, then expose the
+       class-owned offscreen endpoint so the transition starts exactly there. */
+    void target.offsetWidth;
+    target.style.removeProperty("transform");
+    target.style.removeProperty("opacity");
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      if (settleTimer !== null) clearTimeout(settleTimer);
+      settleTimer = null;
+      dismiss();
+    };
+    target.addEventListener("transitionend", finish, { once: true });
+    settleTimer = setTimeout(finish, TOAST_SWIPE_SETTLE_MS + 40);
+  };
+
+  const move = (current, event) => {
+    const dx = event.clientX - current.startX;
+    const dy = event.clientY - current.startY;
+    if (!current.axis) {
+      const ax = Math.abs(dx);
+      const ay = Math.abs(dy);
+      if (Math.max(ax, ay) < TOAST_SWIPE_INTENT_PX) return;
+      if (ay > ax * 1.1) { current.axis = "vertical"; return; }
+      if (ax <= ay * 1.1) return;
+      current.axis = dx > 0 ? "right" : "left";
+      if (current.axis === "right") target.classList.add("toast-swiping");
+    }
+    if (current.axis !== "right") return;
+    event.preventDefault();
+    current.position = Math.max(0, dx);
+    target.style.transform = `translate3d(${Math.round(current.position)}px,0,0)`;
+    target.style.opacity = String(Math.max(0, 1 - current.position / current.width));
+    record(current, current.position, event.timeStamp);
+  };
+
+  const finish = (event, cancelled = false) => {
+    const current = gesture;
+    if (!current || event.pointerId !== current.id) return;
+    if (!cancelled) move(current, event); // retain a one-frame finger flick
+    gesture = null;
+    try { target.releasePointerCapture(current.id); } catch (error) {}
+    if (current.axis !== "right") { resume(); return; }
+    event.preventDefault();
+    const distance = Math.min(120, Math.max(56, current.width * .32));
+    const flung = current.position >= TOAST_SWIPE_FLING_PX &&
+      velocity(current) >= TOAST_SWIPE_FLING_VELOCITY;
+    if (!cancelled && (current.position >= distance || flung)) settleOut();
+    else settleBack();
+  };
+
+  target.addEventListener("pointerdown", event => {
+    if (event.pointerType !== "touch" || event.isPrimary === false || gesture) return;
+    clearSettle();
+    target.classList.add("toast-touch");
+    gesture = {
+      id: event.pointerId, startX: event.clientX, startY: event.clientY,
+      width: Math.max(1, target.getBoundingClientRect().width),
+      axis: "", position: 0,
+      samples: [{ position: 0, time: event.timeStamp }],
+    };
+    pause();
+    try { target.setPointerCapture(event.pointerId); } catch (error) {}
+  });
+  target.addEventListener("pointermove", event => {
+    if (gesture && event.pointerId === gesture.id) move(gesture, event);
+  }, { passive: false });
+  target.addEventListener("pointerup", event => finish(event));
+  target.addEventListener("pointercancel", event => finish(event, true));
+}
+
 function toast(text, level = "info", ms = 4200) {
   const t = el("div", "toast " + (level === "error" ? "err" : level === "ok" ? "ok" : ""), text);
   $("toasts").appendChild(t);
-  setTimeout(() => t.remove(), ms);
+  const deadline = Date.now() + ms;
+  let removalTimer = null;
+  const remove = () => {
+    if (removalTimer !== null) clearTimeout(removalTimer);
+    removalTimer = null;
+    t.remove();
+  };
+  const pauseRemoval = () => {
+    if (removalTimer !== null) clearTimeout(removalTimer);
+    removalTimer = null;
+  };
+  const resumeRemoval = () => {
+    if (!t.isConnected) return;
+    removalTimer = setTimeout(remove, Math.max(800, deadline - Date.now()));
+  };
+  wireToastSwipe(t, remove, pauseRemoval, resumeRemoval);
+  removalTimer = setTimeout(remove, ms);
 }
 
 /* Clipboard.writeText is unavailable on some plain-HTTP deployments. Keep one

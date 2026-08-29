@@ -1742,6 +1742,140 @@ def check_sidebar_icon_alignment(css_source: str) -> None:
     assert "margin-left:6px;position:relative;top:-1px;" in css_source
 
 
+def check_toast_touch_swipe(ui_source: str, css_source: str) -> None:
+    """Only a deliberate rightward finger gesture dismisses an event toast."""
+    start = ui_source.index("const TOAST_SWIPE_INTENT_PX = ")
+    end = ui_source.index("\nfunction toast(", start)
+    swipe_source = ui_source[start:end]
+    script = r"""
+let nextTimer=0;
+const timers=new Map();
+const setTimeout=(fn)=>{const id=++nextTimer;timers.set(id,fn);return id;};
+const clearTimeout=id=>timers.delete(id);
+const flushTimers=()=>{const due=[...timers.values()];timers.clear();due.forEach(fn=>fn());};
+
+class ClassList {
+  constructor(){this.values=new Set();}
+  add(...names){names.forEach(name=>this.values.add(name));}
+  remove(...names){names.forEach(name=>this.values.delete(name));}
+  contains(name){return this.values.has(name);}
+}
+class Target {
+  constructor(){
+    this.listeners={};this.classList=new ClassList();this.width=300;this.captured=false;
+    this.style={transform:"",opacity:"",removeProperty(name){this[name]="";}};
+  }
+  addEventListener(kind,fn,options={}){
+    (this.listeners[kind] ||= []).push({fn,once:!!(options&&options.once)});
+  }
+  emit(kind,values={}){
+    const event=Object.assign({pointerId:1,pointerType:"touch",isPrimary:true,
+      clientX:0,clientY:0,timeStamp:0,prevented:false,
+      preventDefault(){this.prevented=true;}},values);
+    for(const entry of [...(this.listeners[kind]||[])]){
+      entry.fn(event);
+      if(entry.once){const list=this.listeners[kind];const at=list.indexOf(entry);
+        if(at>=0)list.splice(at,1);}
+    }
+    return event;
+  }
+  getBoundingClientRect(){return {width:this.width};}
+  setPointerCapture(){this.captured=true;}
+  releasePointerCapture(){this.captured=false;}
+  get offsetWidth(){return this.width;}
+}
+%s
+const make=()=>{
+  const target=new Target();const stats={paused:0,resumed:0,dismissed:0};
+  wireToastSwipe(target,()=>stats.dismissed++,()=>stats.paused++,()=>stats.resumed++);
+  return {target,stats};
+};
+const fire=(item,kind,x,y,time,extra={})=>item.target.emit(kind,
+  Object.assign({clientX:x,clientY:y,timeStamp:time},extra));
+
+const mouse=make();
+fire(mouse,"pointerdown",0,0,0,{pointerType:"mouse"});
+fire(mouse,"pointermove",150,0,20,{pointerType:"mouse"});
+fire(mouse,"pointerup",150,0,30,{pointerType:"mouse"});
+
+const vertical=make();
+fire(vertical,"pointerdown",100,100,100);
+const verticalMove=fire(vertical,"pointermove",120,145,120);
+fire(vertical,"pointerup",120,150,140);
+
+const left=make();
+fire(left,"pointerdown",100,20,160);
+const leftMove=fire(left,"pointermove",10,20,180);
+fire(left,"pointerup",0,20,200);
+
+const short=make();
+fire(short,"pointerdown",0,20,220);
+const shortMove=fire(short,"pointermove",60,20,340);
+const shortLive=short.target.style.transform;
+const shortUp=fire(short,"pointerup",60,20,360);
+const shortBefore={transform:short.target.style.transform,
+  settling:short.target.classList.contains("toast-swipe-settling")};
+flushTimers();
+const shortAfter={transform:short.target.style.transform,
+  settling:short.target.classList.contains("toast-swipe-settling")};
+
+const long=make();
+fire(long,"pointerdown",0,20,400);
+fire(long,"pointermove",105,20,600);
+const longUp=fire(long,"pointerup",105,20,620);
+const longAnimating=long.target.classList.contains("toast-swipe-dismissing");
+flushTimers();
+
+const fast=make();
+fire(fast,"pointerdown",0,20,700);
+fire(fast,"pointermove",35,20,720);
+fire(fast,"pointerup",45,20,730);
+flushTimers();
+
+const cancelled=make();
+fire(cancelled,"pointerdown",0,20,800);
+fire(cancelled,"pointermove",80,20,820);
+fire(cancelled,"pointercancel",80,20,830);
+flushTimers();
+
+console.log(JSON.stringify({mouse:mouse.stats,vertical:vertical.stats,left:left.stats,
+  short:short.stats,long:long.stats,fast:fast.stats,cancelled:cancelled.stats,
+  prevented:{vertical:verticalMove.prevented,left:leftMove.prevented,
+    shortMove:shortMove.prevented,shortUp:shortUp.prevented,longUp:longUp.prevented},
+  shortLive,shortBefore,shortAfter,longAnimating}));
+""" % swipe_source
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:700]
+    result = json.loads(proc.stdout.strip())
+    assert result["mouse"] == {"paused": 0, "resumed": 0, "dismissed": 0}, result
+    assert result["vertical"] == {"paused": 1, "resumed": 1, "dismissed": 0}, result
+    assert result["left"] == {"paused": 1, "resumed": 1, "dismissed": 0}, result
+    assert result["short"] == {"paused": 1, "resumed": 1, "dismissed": 0}, result
+    assert result["long"] == {"paused": 1, "resumed": 0, "dismissed": 1}, result
+    assert result["fast"] == {"paused": 1, "resumed": 0, "dismissed": 1}, result
+    assert result["cancelled"] == {"paused": 1, "resumed": 1, "dismissed": 0}, result
+    assert result["prevented"] == {
+        "vertical": False, "left": False, "shortMove": True,
+        "shortUp": True, "longUp": True}, result
+    assert result["shortLive"] == "translate3d(60px,0,0)", result
+    assert result["shortBefore"]["settling"] and \
+        result["shortBefore"]["transform"] == "translate3d(0,0,0)", result
+    assert not result["shortAfter"]["settling"] and \
+        result["shortAfter"]["transform"] == "", result
+    assert result["longAnimating"], result
+
+    toast_start = ui_source.index("function toast(")
+    toast_end = ui_source.index("\n/* Clipboard", toast_start)
+    toast_source = ui_source[toast_start:toast_end]
+    assert "wireToastSwipe(t, remove, pauseRemoval, resumeRemoval);" in toast_source
+    css_start = css_source.index(".toast{")
+    css_end = css_source.index("@keyframes toast-in", css_start)
+    toast_css = css_source[css_start:css_end]
+    assert "touch-action:pan-y pinch-zoom;" in toast_css
+    assert ".toast.toast-swiping{" in toast_css
+    assert ".toast.toast-swipe-dismissing{" in toast_css
+
+
 def check_status_header_activation(ui_source: str, css_source: str) -> None:
     """The complete backend-status header toggles, while its arrow acts once."""
     start = ui_source.index("function renderFootEngines()")
@@ -2958,6 +3092,7 @@ async def main() -> None:
             check_opencode_chat_models(ui_source, css_source)
             check_session_provider_marks(css_source)
             check_sidebar_icon_alignment(css_source)
+            check_toast_touch_swipe(ui_source, css_source)
             check_status_header_activation(ui_source, css_source)
             check_switch_engine_initial_selection(ui_source)
             check_engine_picker_alignment(css_source)
