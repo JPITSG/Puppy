@@ -5694,6 +5694,9 @@ class SessionView {
     this.switchLines = [];    // engine-switch dividers, re-labelled as state arrives
     this.liveEl = null;
     this.liveKind = null;
+    this.liveTextNode = null;
+    this.livePendingText = "";
+    this.liveFrame = null;
     this.statusText = "";     // model activity; the header and transcript foot mirror it
     this.reconnecting = false; // transport state overlays activity without replacing it
     this.shutdownSeen = false; // its next socket open proves the node restarted
@@ -5718,6 +5721,8 @@ class SessionView {
     this.draftClientSeq = 0;
     this.draftLatestSeq = 0;
     this.draftAckSeq = 0;
+    this.draftInFlightSeq = 0;
+    this.draftPendingText = null;
     this.draftDeferred = null;
     this.draftTouchedBeforeReady = false;
     this.draftJournal = this.draftSupported ? readDraftJournal(this.tab.id) :
@@ -5953,6 +5958,8 @@ class SessionView {
     this.draftReady = false;
     this.draftLatestSeq = 0;
     this.draftAckSeq = 0;
+    this.draftInFlightSeq = 0;
+    this.draftPendingText = null;
     this.draftDeferred = null;
     ws.onopen = () => {
       if (this.closed || sequence !== this.connectionSequence || this.ws !== ws) {
@@ -5981,6 +5988,8 @@ class SessionView {
       if (sequence !== this.connectionSequence || this.ws !== ws) return;
       this.ws = null;
       this.draftReady = false;
+      this.draftInFlightSeq = 0;
+      this.draftPendingText = null;
       if (this.closed) return;
       this.setReconnecting(true);
       const delay = Math.round(this.retry * (.85 + Math.random() * .3));
@@ -6008,6 +6017,7 @@ class SessionView {
     this.reconnectTimer = null;
     window.removeEventListener("resize", this._onResize);
     if (this.ws) try { this.ws.close(); } catch (e) {}
+    this.clearLive();
     /* Closing a view is not deleting its shared draft. Abort only bytes still
        in flight and release browser-owned previews; completed server uploads
        remain owned by the durable draft and can reopen on another device. */
@@ -6192,8 +6202,21 @@ class SessionView {
 
   sendDraft(text) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return 0;
+    /* Keep the crash journal current on every edit, but place at most one
+       ordinary full-value frame on the wire until its echo arrives. The latest
+       value replaces any unsent intermediate keystrokes. */
+    if (this.draftInFlightSeq) {
+      this.draftPendingText = text;
+      return this.draftInFlightSeq;
+    }
+    return this.sendDraftNow(text);
+  }
+
+  sendDraftNow(text) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return 0;
     const clientSeq = ++this.draftClientSeq;
     this.draftLatestSeq = clientSeq;
+    this.draftInFlightSeq = clientSeq;
     this.ws.send(JSON.stringify({
       type: "draft", text,
       client_id: this.draftClientId, client_seq: clientSeq,
@@ -6281,6 +6304,18 @@ class SessionView {
 
     if (own) {
       this.draftAckSeq = Math.max(this.draftAckSeq, clientSeq);
+      if (clientSeq === this.draftInFlightSeq) {
+        this.draftInFlightSeq = 0;
+        if (this.draftPendingText !== null) {
+          const pending = this.draftPendingText;
+          this.draftPendingText = null;
+          if (!this.sendDraftNow(pending)) {
+            this.draftReady = false;
+            this.draftTouchedBeforeReady = true;
+            return;
+          }
+        }
+      }
       if (clientSeq < this.draftLatestSeq) {
         this.checkpointDraftJournal(this.draftRevision);
         return;
@@ -6303,7 +6338,8 @@ class SessionView {
     }
 
     if (value.revision === previousRevision) return;
-    if (this.draftAckSeq < this.draftLatestSeq) {
+    if (this.draftAckSeq < this.draftLatestSeq ||
+        this.draftPendingText !== null) {
       if (!this.draftDeferred || value.revision > this.draftDeferred.revision)
         this.draftDeferred = value;
       return;
@@ -6434,12 +6470,18 @@ class SessionView {
         this.retry = 800;
         // the transcript is being rebuilt: retire the watcher on the old button
         if (this._stopLoadOlder) this._stopLoadOlder();
+        this.clearLive();
         this.inner.innerHTML = "";
         this.toolCards = {};
         this.switchLines = [];
         this.oldestSeq = d.events.length ? d.events[0].seq : null;
         if (d.events.length >= 200) this.addLoadOlder();
-        d.events.forEach(ev => this.renderEvent(ev, false));
+        const transcript = document.createDocumentFragment();
+        d.events.forEach(ev => {
+          const node = this.buildEventNode(ev);
+          if (node) transcript.appendChild(node);
+        });
+        this.inner.appendChild(transcript);
         this.history = d.events.filter(ev => ev.kind === "user")
           .map(ev => (ev.data && ev.data.text) || "").filter(Boolean);
         this.histIdx = null;
@@ -6745,7 +6787,7 @@ class SessionView {
   syncSwitchLines() {
     const s = this.session || {};
     const lines = this.switchLines
-      .filter(n => n.isConnected || !n.parentNode)
+      .filter(n => n.isConnected || !n.parentNode || n.parentNode.nodeType === 11)
       .sort((a, b) => a._switch.seq - b._switch.seq);
     this.switchLines = lines;
     lines.forEach((node, i) => {
@@ -6914,7 +6956,6 @@ class SessionView {
 
   /* live streaming bubble */
   appendLive(block, text) {
-    const follow = this.atBottom();
     if (this.liveEl && this.liveKind !== block) this.clearLive();
     if (!this.liveEl) {
       this.liveKind = block;
@@ -6932,14 +6973,40 @@ class SessionView {
         this.liveEl.appendChild(el("span", "cursor"));
       }
       this.inner.appendChild(this.liveEl);
+      const target = block === "thinking" ?
+        this.liveEl.querySelector(".tbody") : this.liveEl.querySelector(".md");
+      this.liveTextNode = document.createTextNode("");
+      target.appendChild(this.liveTextNode);
       this.syncLiveStatus();
     }
-    const target = block === "thinking" ? this.liveEl.querySelector(".tbody") : this.liveEl.querySelector(".md");
-    target.textContent += text;
+    this.livePendingText += text;
+    if (this.liveFrame === null) {
+      this.liveFrame = requestAnimationFrame(() => {
+        this.liveFrame = null;
+        this.flushLive();
+      });
+    }
+  }
+  flushLive() {
+    if (this.liveFrame !== null) {
+      cancelAnimationFrame(this.liveFrame);
+      this.liveFrame = null;
+    }
+    if (!this.liveTextNode || !this.livePendingText) return;
+    const follow = this.atBottom();
+    const text = this.livePendingText;
+    this.livePendingText = "";
+    this.liveTextNode.appendData(text);
     if (follow) this.scrollBottom(true);
   }
   clearLive() {
-    if (this.liveEl) { this.liveEl.remove(); this.liveEl = null; this.liveKind = null; }
+    if (this.liveFrame !== null) cancelAnimationFrame(this.liveFrame);
+    this.liveFrame = null;
+    this.livePendingText = "";
+    this.liveTextNode = null;
+    if (this.liveEl) this.liveEl.remove();
+    this.liveEl = null;
+    this.liveKind = null;
   }
   /* The foot of the transcript always says what the header says while a turn
      runs. A streaming thinking block carries it in its summary; the rest of the
@@ -7211,6 +7278,13 @@ class SessionView {
         text: draft, baseRevision: this.draftRevision,
         submitted: true,
       };
+      /* A queued latest edit must reach the server before consume_draft checks
+         the message's exact value. This is the sole bounded exception to the
+         one-unacknowledged-draft rule and only occurs at Send. */
+      if (this.draftPendingText !== null) {
+        this.draftPendingText = null;
+        this.sendDraftNow(draft);
+      }
       const clientSeq = ++this.draftClientSeq;
       this.draftLatestSeq = clientSeq;
       message.draft = draft;

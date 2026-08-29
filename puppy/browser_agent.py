@@ -387,6 +387,7 @@ def turn_mcp(session_id: int, turn_id: str):
     from puppy import browser
     if not browser.enabled():
         return None
+    policy = system_prompts.browser_prompt()
     return {
         "name": SERVER_NAME,
         "command": sys.executable,
@@ -394,7 +395,7 @@ def turn_mcp(session_id: int, turn_id: str):
         # MCP server instructions are handled inconsistently by engine clients.
         # Drivers use this same policy through their strongest additive channel
         # so tool selection does not depend on MCP initialization presentation.
-        "engine_guidance": system_prompts.browser_prompt(),
+        "engine_guidance": policy,
         "env": {
             "PYTHONPATH": _package_search_path(),
             "PUPPY_BROWSER_SOCKET": socket_path(),

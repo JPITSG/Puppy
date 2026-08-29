@@ -467,8 +467,8 @@ class OpenCodeDriver(Driver):
             "setting": "",
             "config_options": [],
             "stream_block": "",
-            "stream_text": "",
-            "stream_thinking": "",
+            "stream_text": [],
+            "stream_thinking": [],
             "tools": {},
             "last_plan": "",
             "model_seen": "",
@@ -487,16 +487,16 @@ class OpenCodeDriver(Driver):
     @staticmethod
     def _flush_stream(ctx: dict) -> list:
         actions = []
-        thinking = ctx.get("stream_thinking") or ""
-        text = ctx.get("stream_text") or ""
+        thinking = "".join(ctx.get("stream_thinking") or [])
+        text = "".join(ctx.get("stream_text") or [])
         # The active block normally makes only one side non-empty. Preserve a
         # deterministic order if an unusual server batches both before a tool.
         if thinking:
             actions.append({"a": "event", "kind": "thinking", "data": {"text": thinking}})
         if text:
             actions.append({"a": "event", "kind": "assistant", "data": {"text": text}})
-        ctx["stream_thinking"] = ""
-        ctx["stream_text"] = ""
+        ctx["stream_thinking"] = []
+        ctx["stream_text"] = []
         ctx["stream_block"] = ""
         return actions
 
@@ -509,7 +509,7 @@ class OpenCodeDriver(Driver):
             actions.extend(self._flush_stream(ctx))
         ctx["stream_block"] = block
         key = "stream_thinking" if block == "thinking" else "stream_text"
-        ctx[key] = (ctx.get(key) or "") + text
+        ctx[key].append(text)
         actions.append({"a": "transient", "msg": {
             "type": "delta", "block": block, "text": text}})
         return actions

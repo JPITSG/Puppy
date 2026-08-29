@@ -1149,6 +1149,7 @@ const lsDel=key=>storage.delete(key);
 const WebSocket={OPEN:1};
 const URL={revoked:[],revokeObjectURL(value){this.revoked.push(value);}};
 const fmtBytes=value=>String(value)+" B";
+const noteSessionActivity=()=>{};
 %s
 %s
 %s
@@ -1161,10 +1162,13 @@ function makeView(id="s:0:42") {
       setSelectionRange(start,end){this.selectionStart=start;this.selectionEnd=end;}},
     attachments:[],histAttach:null,histIdx:null,histDraft:"",sentThumbs:new Map(),
     draftSupported:true,draftReady:true,draftRevision:0,
+    draftMaxChars:100000,status:"idle",_forceScroll:false,
     draftClientId:"device-a",draftClientSeq:0,draftLatestSeq:0,draftAckSeq:0,
+    draftInFlightSeq:0,draftPendingText:null,
     draftDeferred:null,draftTouchedBeforeReady:false,draftJournal:null,
     ws:{readyState:WebSocket.OPEN,send:value=>sent.push(JSON.parse(value))},
-    renderAttachments(){},resizeComposer(){},
+    renderAttachments(){},resizeComposer(){},releaseHistoryAttachments(){},
+    scrollBottom(){},updateRunState(){},setStatus(){},
   });
   return {view,sent};
 }
@@ -1238,13 +1242,45 @@ offline.view.ws={readyState:WebSocket.OPEN,
   send:value=>offline.sent.push(JSON.parse(value))};
 offline.view.initializeDraft({text:"server while away",revision:8,updated_at:9});
 
+const burst=makeView("s:0:48");
+burst.view.ta.value="a";
+burst.view.saveDraft();
+burst.view.ta.value="ab";
+burst.view.saveDraft();
+burst.view.ta.value="latest";
+burst.view.saveDraft();
+const burstBeforeAck=burst.sent.slice();
+burst.view.receiveDraft({type:"draft",text:"a",revision:1,updated_at:10,
+  client_id:"device-a",client_seq:1});
+const burstAfterFirstAck=burst.sent.slice();
+burst.view.receiveDraft({type:"draft",text:"latest",revision:2,updated_at:11,
+  client_id:"device-a",client_seq:2});
+
+const submission=makeView("s:0:49");
+submission.view.ta.value="first";
+submission.view.saveDraft();
+submission.view.ta.value="send this exact value";
+submission.view.saveDraft();
+submission.view.submit();
+const submissionSent=submission.sent.slice();
+submission.view.receiveDraft({type:"draft",text:"first",revision:1,updated_at:12,
+  client_id:"device-a",client_seq:1});
+submission.view.receiveDraft({type:"draft",text:"send this exact value",revision:2,
+  updated_at:13,client_id:"device-a",client_seq:2});
+submission.view.receiveDraft({type:"draft",text:"",revision:3,updated_at:14,
+  client_id:"device-a",client_seq:3,consumed:true});
+
 console.log(JSON.stringify({sent:first.sent,pendingJournal,journalCleared,followed,
   whilePending,afterAck,latest:first.view.ta.value,sharedAttachment,uploadPreserved,
   localOnly:{text:localOnly.view.ta.value,sent:localOnly.sent},invalidJournal,
   stale:{text:stale.view.ta.value,sent:stale.sent,
          journal:storage.has("puppy.draft.s:0:44")},
   unacked:{text:unacked.view.ta.value,sent:unacked.sent},
-  offline:{before:offlineBefore,text:offline.view.ta.value,sent:offline.sent}}));
+  offline:{before:offlineBefore,text:offline.view.ta.value,sent:offline.sent},
+  burst:{beforeAck:burstBeforeAck,afterFirstAck:burstAfterFirstAck,
+         journal:storage.has("puppy.draft.s:0:48")},
+  submission:{sent:submissionSent,text:submission.view.ta.value,
+              journal:storage.has("puppy.draft.s:0:49")}}));
 """ % (draft_helpers, attachment_helpers, session_view)
     proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:1000]
@@ -1277,6 +1313,122 @@ console.log(JSON.stringify({sent:first.sent,pendingJournal,journalCleared,follow
     assert result["offline"]["before"] == {"ready": False, "touched": True}, result
     assert result["offline"]["text"] == "typed while disconnected", result
     assert result["offline"]["sent"][0]["text"] == "typed while disconnected", result
+    assert result["burst"] == {
+        "beforeAck": [
+            {"type": "draft", "text": "a", "client_id": "device-a",
+             "client_seq": 1},
+        ],
+        "afterFirstAck": [
+            {"type": "draft", "text": "a", "client_id": "device-a",
+             "client_seq": 1},
+            {"type": "draft", "text": "latest", "client_id": "device-a",
+             "client_seq": 2},
+        ],
+        "journal": False,
+    }, result
+    assert result["submission"] == {
+        "sent": [
+            {"type": "draft", "text": "first", "client_id": "device-a",
+             "client_seq": 1},
+            {"type": "draft", "text": "send this exact value",
+             "client_id": "device-a", "client_seq": 2},
+            {"type": "message", "text": "send this exact value",
+             "draft": "send this exact value", "draft_client_id": "device-a",
+             "draft_client_seq": 3},
+        ],
+        "text": "",
+        "journal": False,
+    }, result
+
+
+def check_transcript_batching(ui_source: str) -> None:
+    """Stream chunks paint once per frame and snapshots append as one batch."""
+    snapshot = ui_source[
+        ui_source.index('      case "snapshot":'):
+        ui_source.index('      case "draft":')]
+    assert "const transcript = document.createDocumentFragment();" in snapshot
+    assert "this.inner.appendChild(transcript);" in snapshot
+    assert "this.renderEvent(ev, false)" not in snapshot
+
+    def method(name):
+        start = ui_source.index("\n  " + name + "(") + 1
+        brace = ui_source.index("{", start)
+        depth = 0
+        for index in range(brace, len(ui_source)):
+            if ui_source[index] == "{":
+                depth += 1
+            elif ui_source[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    return ui_source[start:index + 1]
+        raise AssertionError("unbalanced SessionView." + name)
+
+    script = r"""
+let nextFrame=1;
+const frames=new Map();
+const cancelled=[];
+const requestAnimationFrame=fn=>{const id=nextFrame++;frames.set(id,fn);return id;};
+const cancelAnimationFrame=id=>{cancelled.push(id);frames.delete(id);};
+class FakeNode {
+  constructor(className="") { this.className=className;this.children=[];
+    this.parentNode=null;this.removed=false; }
+  appendChild(node) { node.parentNode=this;this.children.push(node);return node; }
+  querySelector(selector) {
+    const cls=selector.slice(1);
+    for (const child of this.children) {
+      if ((child.className || "").split(/\s+/).includes(cls)) return child;
+      if (child.querySelector) { const found=child.querySelector(selector);if(found)return found; }
+    }
+    return null;
+  }
+  remove() { this.removed=true;if(!this.parentNode)return;
+    this.parentNode.children=this.parentNode.children.filter(n=>n!==this);
+    this.parentNode=null; }
+}
+const el=(tag,className)=>new FakeNode(className || "");
+const document={createTextNode(value){return {data:value,parentNode:null,writes:0,
+  appendData(text){this.data+=text;this.writes++;}};}};
+const proto={
+%s
+};
+const inner=new FakeNode("inner");
+let scrolls=0;
+const view=Object.assign(Object.create(proto),{
+  liveEl:null,liveKind:null,liveTextNode:null,livePendingText:"",liveFrame:null,
+  inner,statusText:"",syncLiveStatus(){},atBottom(){return true;},
+  scrollBottom(){scrolls++;},
+});
+view.appendLive("text","one");
+view.appendLive("text"," two");
+view.appendLive("text"," three");
+const textNode=view.liveTextNode;
+const before={queued:frames.size,text:textNode.data,writes:textNode.writes,
+  bubbles:inner.children.length};
+const first=[...frames.entries()][0];frames.delete(first[0]);first[1]();
+const after={queued:frames.size,text:textNode.data,writes:textNode.writes,scrolls};
+view.appendLive("text"," four");
+view.appendLive("text"," five");
+const second=[...frames.entries()][0];frames.delete(second[0]);second[1]();
+const secondPaint={text:textNode.data,writes:textNode.writes,scrolls};
+view.appendLive("text"," discarded");
+view.clearLive();
+const cleared={queued:frames.size,text:textNode.data,writes:textNode.writes,
+  bubbles:inner.children.length,cancelled:cancelled.length,live:view.liveEl};
+console.log(JSON.stringify({before,after,secondPaint,cleared}));
+""" % ",\n".join(method(name) for name in (
+        "appendLive", "flushLive", "clearLive"))
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:1000]
+    result = json.loads(proc.stdout)
+    assert result == {
+        "before": {"queued": 1, "text": "", "writes": 0, "bubbles": 1},
+        "after": {"queued": 0, "text": "one two three", "writes": 1,
+                  "scrolls": 1},
+        "secondPaint": {"text": "one two three four five", "writes": 2,
+                        "scrolls": 2},
+        "cleared": {"queued": 0, "text": "one two three four five",
+                    "writes": 2, "bubbles": 0, "cancelled": 1, "live": None},
+    }, result
 
 
 def check_browser_handoff_ui(ui_source: str, css_source: str) -> None:
@@ -2524,6 +2676,7 @@ async def main() -> None:
             assert "briefly state the concrete reason" in policy
             assert descriptor["env"]["PUPPY_BROWSER_SESSION_ID"] == str(agent_sid)
             assert descriptor["env"]["PUPPY_BROWSER_TURN_ID"] == turn_id
+            expected_instructions = policy + " " + browser_agent.TOOL_INSTRUCTIONS
             assert Path(descriptor["env"]["PUPPY_BROWSER_SOCKET"]).stat().st_mode & 0o777 \
                 == 0o600
 
@@ -2627,6 +2780,7 @@ async def main() -> None:
                 })
                 assert initialized["result"]["serverInfo"]["version"] == "4"
                 instructions = initialized["result"].get("instructions", "")
+                assert instructions == expected_instructions
                 assert policy in instructions and \
                     "default for interactive web navigation" in instructions and \
                     "Do not launch or install Chrome" in instructions and \
@@ -3095,6 +3249,7 @@ async def main() -> None:
             check_drawer_drag(ui_source)
             check_browser_viewport(ui_source)
             check_session_draft_sync(ui_source)
+            check_transcript_batching(ui_source)
             check_browser_handoff_ui(ui_source, css_source)
             check_desktop_side_drag(ui_source)
             check_user_message_copy(ui_source)

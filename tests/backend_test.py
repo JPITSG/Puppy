@@ -204,10 +204,15 @@ second/model-b
         "content": {"type": "text", "text": "Before tool."}}), ctx)
     assert actions[0]["kind"] == "thinking"
     actions = driver.parse_line(update({
+        "sessionUpdate": "agent_message_chunk",
+        "content": {"type": "text", "text": " More."}}), ctx)
+    assert actions[-1]["msg"]["text"] == " More."
+    actions = driver.parse_line(update({
         "sessionUpdate": "tool_call", "toolCallId": "call-1", "kind": "execute",
         "title": "Run check", "status": "in_progress", "rawInput": {"command": "true"}}), ctx)
     assert [action.get("kind") for action in actions if action.get("a") == "event"] == \
         ["assistant", "tool_use"]
+    assert actions[0]["data"]["text"] == "Before tool. More."
     actions = driver.parse_line(update({
         "sessionUpdate": "tool_call_update", "toolCallId": "call-1", "kind": "execute",
         "title": "Run check", "status": "completed", "rawOutput": {"output": "ok"}}), ctx)

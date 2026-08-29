@@ -1,9 +1,15 @@
 """Node-owned model prompt settings and their shared execution API."""
 from __future__ import annotations
 
-from aiohttp import web
+from typing import TYPE_CHECKING
 
 from puppy import config
+
+# Browser MCP children import the value accessors below on every turn. Keep the
+# comparatively heavy WebUI package off that startup path; handlers import it
+# only after the full aiohttp application is already running.
+if TYPE_CHECKING:
+    from aiohttp import web
 
 
 def custom_prompt() -> str:
@@ -34,10 +40,12 @@ def payload() -> dict:
 
 
 async def h_get(request: web.Request):
+    from aiohttp import web
     return web.json_response({"system_prompt": payload()})
 
 
 async def h_patch(request: web.Request):
+    from aiohttp import web
     try:
         body = await request.json()
     except Exception:
