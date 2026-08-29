@@ -1,10 +1,10 @@
 """One-use browser handoff for verified WebUI listener restarts.
 
 The bind verifier proves that a browser can reach a proposed endpoint before
-it is saved.  This module carries that proof through a supervised restart: a
-short-lived capability survives in Puppy's private data directory, the old
-process queues the existing graceful restart helper, and only the newly
-started configured listener may claim it.
+it is saved. This module carries that proof through a deployment-owned restart:
+a short-lived capability survives in Puppy's private data directory, the old
+process calls a verified restart adapter, and only the newly started configured
+listener may claim it.
 
 The capability is deliberately transient and excluded from state snapshots.
 It contains a hash of the browser token, not the token itself.
@@ -33,6 +33,8 @@ from puppy import config
 HANDOFF_TTL = 40 * 60
 HANDOFF_PREFIX = "/api/settings/bind/handoff/"
 MAX_RECORD_BYTES = 3 * 1024 * 1024
+RESTART_HOOK_ENV = "PUPPY_RESTART_HOOK"
+RESTART_PROBE_TIMEOUT = 4.0
 
 _lock = threading.Lock()
 
@@ -234,28 +236,73 @@ def cleanup() -> None:
             pass
 
 
-def queue_service_restart() -> int:
-    """Launch restart.sh only when this process is supervisord's Puppy child."""
-    supervisorctl = Path("/usr/bin/supervisorctl")
-    restart_script = Path(config.BASE_DIR).resolve() / "restart.sh"
-    if not supervisorctl.is_file() or not restart_script.is_file() or \
-            restart_script.is_symlink():
+def _restart_hook() -> Path:
+    """Return a deployment-owned executable safe for this service to invoke."""
+    raw = os.environ.get(RESTART_HOOK_ENV, "")
+    if not raw:
         raise ListenerHandoffError(
-            "automatic restart is unavailable on this installation", status=503)
+            "automatic restart requires a deployment restart hook", status=503)
+    if "\x00" in raw:
+        raise ListenerHandoffError("the deployment restart hook is invalid", status=503)
+    path = Path(raw)
+    if not path.is_absolute():
+        raise ListenerHandoffError(
+            "the deployment restart hook must be an absolute path", status=503)
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise ListenerHandoffError(
+            "the deployment restart hook is unavailable", status=503) from exc
+    uid_getter = getattr(os, "geteuid", None) or getattr(os, "getuid")
+    allowed_owners = {0, int(uid_getter())}
+    unsafe_write_bits = stat.S_IWGRP | stat.S_IWOTH
+    execute_bits = stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+    if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or \
+            info.st_uid not in allowed_owners or \
+            (info.st_mode & unsafe_write_bits) or not (info.st_mode & execute_bits):
+        raise ListenerHandoffError(
+            "the deployment restart hook has unsafe ownership or permissions", status=503)
+    return path
+
+
+def _restart_environment() -> dict:
+    environment = dict(os.environ)
+    environment["PUPPY_DATA"] = os.path.abspath(config.DATA_DIR)
+    return environment
+
+
+def queue_restart() -> int:
+    """Verify and launch the deployment's restart adapter without a shell.
+
+    The adapter contract is two fixed commands: ``probe PID`` must prove it can
+    target this exact runtime, and ``restart PID`` must safely queue its restart.
+    Deployment-specific process-manager knowledge stays outside Puppy.
+    """
+    hook = _restart_hook()
+    pid = str(os.getpid())
+    environment = _restart_environment()
     try:
         probe = subprocess.run(
-            [str(supervisorctl), "pid", "puppy"], stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, timeout=4, check=False)
-        managed_pid = int(probe.stdout.strip()) if probe.returncode == 0 else 0
-    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            [str(hook), "probe", pid], stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            cwd="/", env=environment, timeout=RESTART_PROBE_TIMEOUT,
+            check=False)
+    except subprocess.TimeoutExpired as exc:
         raise ListenerHandoffError(
-            "could not verify Puppy's supervisor process", status=503) from exc
-    if managed_pid != os.getpid():
+            "the deployment restart hook probe timed out", status=503) from exc
+    except OSError as exc:
         raise ListenerHandoffError(
-            "this Puppy process is not managed by supervisord as 'puppy'", status=503)
+            "could not run the deployment restart hook probe", status=503) from exc
+    if probe.returncode != 0:
+        raise ListenerHandoffError(
+            "the deployment restart hook could not verify this Puppy process",
+            status=503)
+    # Re-check the file after the external probe before starting its mutating
+    # command. This catches accidental removal or permission changes cleanly.
+    hook = _restart_hook()
     try:
         process = subprocess.Popen(
-            ["/bin/sh", str(restart_script)], cwd=str(config.BASE_DIR),
+            [str(hook), "restart", pid], cwd="/", env=environment,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True)
     except OSError as exc:
@@ -292,7 +339,7 @@ def activate(app: web.Application, user: str, token: str, browser_state: dict,
         record["queued_at"] = time.time()
         _save_locked(record)
         try:
-            (restart or queue_service_restart)()
+            (restart or queue_restart)()
         except Exception:
             record["status"] = "prepared"
             record.pop("queued_at", None)

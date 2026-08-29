@@ -1060,8 +1060,8 @@ async def shutdown() -> None:
     begin_shutdown()
     # Restarts are often triggered by an agent running INSIDE puppy (the user
     # drives puppy development through puppy). Give in-flight turns a grace
-    # window to finish instead of SIGKILLing them mid-answer; supervisor's
-    # stopwaitsecs must stay above this.
+    # window to finish instead of SIGKILLing them mid-answer; the host service's
+    # stop timeout must stay above this.
     grace = float(config.get("sessions.shutdown_grace", 60))
     deadline = time.time() + grace
     running = [h.id for h in _hubs.values() if h.status == "running"]

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""External supervisor/rollback launcher for an upgradeable Puppy backend.
+"""External lifecycle/rollback launcher for an upgradeable Puppy backend.
 
-Supervisor runs this stable stdlib-only process. It runs the zipapp as a child,
-recognizes the reserved upgrade exit code, health-checks the replacement, and
-restores the retained artifact before restarting if validation fails. Pending
-state survives launcher crashes and host reboots.
+A host service starts this stable stdlib-only process. It runs the zipapp as a
+child, recognizes the reserved upgrade exit code, health-checks the replacement,
+and restores the retained artifact before restarting if validation fails.
+Pending state survives launcher crashes and host reboots.
 """
 from __future__ import annotations
 

@@ -37,8 +37,8 @@ def initialize_runtime() -> None:
     config.load()
     db.connect()
     workspaces.cleanup_orphans()
-    # a previous unclean shutdown can leave sessions stuck on 'running';
-    # nothing is actually running at boot (and restart.sh keys off this)
+    # A previous unclean shutdown can leave sessions stuck on 'running';
+    # nothing is actually running when this new runtime initializes.
     db.execute("UPDATE sessions SET status='idle' WHERE status!='idle'")
 
 

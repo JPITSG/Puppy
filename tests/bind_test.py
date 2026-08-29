@@ -10,6 +10,7 @@ import shutil
 import socket
 import sys
 import tempfile
+import time
 from urllib.parse import urlsplit
 import warnings
 
@@ -45,7 +46,95 @@ async def json_response(response):
         return {"error": await response.text()}
 
 
+def _write_hook(path: Path, source: str, mode: int = 0o700) -> None:
+    path.write_text("#!/bin/sh\n" + source, encoding="utf-8")
+    path.chmod(mode)
+
+
+def _expect_hook_error(fragment: str) -> None:
+    try:
+        listener_handoff.queue_restart()
+    except listener_handoff.ListenerHandoffError as exc:
+        assert fragment in str(exc).lower(), str(exc)
+        assert exc.status == 503
+    else:
+        raise AssertionError("unsafe restart hook was accepted")
+
+
+def test_restart_hook_contract() -> None:
+    hooks = TEST_ROOT / "restart hooks"
+    hooks.mkdir()
+    record = hooks / "restart record"
+    valid = hooks / "valid hook"
+    _write_hook(valid, """
+case "$1" in
+  probe) [ "$2" = "$PUPPY_TEST_EXPECT_PID" ] ;;
+  restart) printf '%s\n%s\n%s\n' "$1" "$2" "$PUPPY_DATA" > "$PUPPY_TEST_RECORD" ;;
+  *) exit 2 ;;
+esac
+""")
+    saved_hook = os.environ.get(listener_handoff.RESTART_HOOK_ENV)
+    saved_timeout = listener_handoff.RESTART_PROBE_TIMEOUT
+    os.environ.update({
+        listener_handoff.RESTART_HOOK_ENV: str(valid),
+        "PUPPY_TEST_EXPECT_PID": str(os.getpid()),
+        "PUPPY_TEST_RECORD": str(record),
+    })
+    try:
+        child = listener_handoff.queue_restart()
+        deadline = time.monotonic() + 2
+        while not record.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert record.read_text(encoding="utf-8").splitlines() == [
+            "restart", str(os.getpid()), os.path.abspath(config.DATA_DIR)]
+        os.waitpid(child, 0)
+
+        os.environ.pop(listener_handoff.RESTART_HOOK_ENV, None)
+        _expect_hook_error("requires a deployment restart hook")
+        os.environ[listener_handoff.RESTART_HOOK_ENV] = "relative-hook"
+        _expect_hook_error("absolute path")
+
+        unsafe = hooks / "unsafe hook"
+        _write_hook(unsafe, "exit 0\n", mode=0o722)
+        os.environ[listener_handoff.RESTART_HOOK_ENV] = str(unsafe)
+        _expect_hook_error("unsafe ownership or permissions")
+
+        linked = hooks / "linked hook"
+        linked.symlink_to(valid)
+        os.environ[listener_handoff.RESTART_HOOK_ENV] = str(linked)
+        _expect_hook_error("unsafe ownership or permissions")
+
+        wrong_process = hooks / "wrong process"
+        _write_hook(wrong_process, "exit 9\n")
+        os.environ[listener_handoff.RESTART_HOOK_ENV] = str(wrong_process)
+        _expect_hook_error("could not verify this puppy process")
+
+        timeout = hooks / "timeout hook"
+        _write_hook(timeout, "while :; do :; done\n")
+        os.environ[listener_handoff.RESTART_HOOK_ENV] = str(timeout)
+        listener_handoff.RESTART_PROBE_TIMEOUT = 0.05
+        _expect_hook_error("probe timed out")
+        listener_handoff.RESTART_PROBE_TIMEOUT = saved_timeout
+
+        vanished = hooks / "vanished hook"
+        _write_hook(vanished, """
+if [ "$1" = probe ]; then rm -- "$0"; exit 0; fi
+exit 1
+""")
+        os.environ[listener_handoff.RESTART_HOOK_ENV] = str(vanished)
+        _expect_hook_error("unavailable")
+    finally:
+        listener_handoff.RESTART_PROBE_TIMEOUT = saved_timeout
+        if saved_hook is None:
+            os.environ.pop(listener_handoff.RESTART_HOOK_ENV, None)
+        else:
+            os.environ[listener_handoff.RESTART_HOOK_ENV] = saved_hook
+        os.environ.pop("PUPPY_TEST_EXPECT_PID", None)
+        os.environ.pop("PUPPY_TEST_RECORD", None)
+
+
 async def main() -> None:
+    test_restart_hook_contract()
     port = free_port()
     config.load()
     config.set_value("web.host", "127.0.0.1")

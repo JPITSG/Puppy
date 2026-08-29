@@ -17,6 +17,7 @@ from aiohttp import WSMsgType, web
 
 from puppy import config
 from puppy.drivers.base import clean_env
+from puppy.user_paths import service_home
 
 log = logging.getLogger("puppy.terminal")
 
@@ -43,7 +44,7 @@ async def ws_terminal(request: web.Request) -> web.WebSocketResponse:
         return ws
 
     cmd_str = request.query.get("cmd", "").strip() or config.get("terminal.command", "/bin/bash -l")
-    cwd = request.query.get("cwd", "").strip() or os.environ.get("HOME", "/root")
+    cwd = request.query.get("cwd", "").strip() or service_home()
     try:
         cols = max(10, min(500, int(request.query.get("cols", "80"))))
         rows = max(4, min(300, int(request.query.get("rows", "24"))))
@@ -61,7 +62,8 @@ async def ws_terminal(request: web.Request) -> web.WebSocketResponse:
 
     env = clean_env(dict(os.environ))
     env["TERM"] = "xterm-256color"
-    env.setdefault("HOME", "/root")
+    if not env.get("HOME"):
+        env["HOME"] = service_home()
 
     pid, master = pty.fork()
     if pid == 0:  # child

@@ -1457,7 +1457,7 @@ const COMMAND_NAMES = new Set((
   "bash sh zsh fish pwsh powershell cmd env export source python node deno bun npm npx pnpm yarn " +
   "pip pipx uv git gh curl wget ssh scp rsync cd ls cp mv rm mkdir rmdir touch chmod chown cat " +
   "sed awk grep rg find xargs printf echo tee make cmake ninja docker podman kubectl helm systemctl " +
-  "service supervisorctl go cargo rustc java javac gradle mvn dotnet terraform tofu ansible apt dnf yum brew"
+  "service go cargo rustc java javac gradle mvn dotnet terraform tofu ansible apt dnf yum brew"
 ).split(" "));
 
 function codeLanguage(code) {

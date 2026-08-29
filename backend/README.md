@@ -27,15 +27,17 @@ python3 -m backend.puppy_backend serve --data-dir backend/data
 
 Copy both generated files to the remote machine, install `aiohttp` (or use
 `requirements.txt`), and run the engine login commands as the same unprivileged
-Unix user that will run the service. Initialize the private configuration once:
+Unix user that will run the service. Initialize the private configuration once.
+The address below is reserved for documentation; replace it with an address
+actually assigned to the backend host.
 
 ```bash
 ./puppy-backend.pyz pairing \
-  --name buildbox-01 \
+  --name my-build-node \
   --data-dir ./data \
-  --bind 100.64.0.12 \
+  --bind 192.0.2.10 \
   --port 10888 \
-  --advertise-url https://100.64.0.12:10888 \
+  --advertise-url https://192.0.2.10:10888 \
   --auto-tls \
   --default-cwd /srv/projects \
   --usage-refresh-minutes 15 \
@@ -57,15 +59,16 @@ python3 ./puppy-backend-launcher.py \
   serve --data-dir ./data
 ```
 
-Use `puppy-backend.supervisor.conf` or `puppy-backend.service` as the service
-manager template. The launcher must remain the supervised process: launching
-the zipapp directly deliberately suppresses the `remote-upgrade` capability,
-even if it was enabled in configuration. The zipapp and its containing
-directory must be writable by the service user so it can retain and atomically
-replace the artifact; the stable launcher can remain root-owned and read-only.
-Artifact upgrades intentionally do not replace that stable launcher. When
-enabling TLS on an installation created before pinned health checks existed,
-copy the newly built launcher once before changing the backend to HTTPS.
+`puppy-backend.service` is an optional systemd example; other deployments can
+run the same launcher command through their own service lifecycle. The launcher
+must remain the long-running parent process: launching the zipapp directly
+deliberately suppresses the `remote-upgrade` capability, even if it was enabled
+in configuration. The zipapp and its containing directory must be writable by
+the service user so it can retain and atomically replace the artifact; the
+stable launcher can remain root-owned and read-only. Artifact upgrades
+intentionally do not replace that stable launcher. When enabling TLS on an
+installation created before pinned health checks existed, copy the newly built
+launcher once before changing the backend to HTTPS.
 
 Fresh headless data directories default to automatic TLS; `--auto-tls` is kept
 explicit in deployment commands so the intended transport is visible. HTTPS
@@ -203,7 +206,7 @@ server when Browser is enabled on that node.
 
 Puppy resolves OpenCode from the service's `PATH` first. It also checks the
 official install script's per-user fallback at `$HOME/.opencode/bin/opencode`,
-because systemd and Supervisor do not source the interactive shell file which
+because non-interactive services normally do not source the shell file which
 the installer updates. Run the backend with the same `HOME` as the account that
 owns OpenCode's installation and provider credentials.
 
@@ -333,8 +336,8 @@ derived from that backend's API token. The backend then:
    previous artifact before restarting it.
 
 Pending state and the last result live under `data/upgrade/` with private
-permissions, so a launcher/Supervisor crash or host reboot during replacement
-continues the same validation or rollback on the next start. Replays and
+permissions, so a launcher crash or host reboot during replacement continues
+the same validation or rollback on the next start. Replays and
 downgrades are rejected because the target version must be newer than the
 running version. TLS-enabled nodes advertise remote upgrade support only when
 the active launcher declares pinned-certificate health-check support.

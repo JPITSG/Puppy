@@ -25,6 +25,7 @@ import shutil
 import time
 
 from puppy.drivers.base import Driver, clean_env
+from puppy.user_paths import service_home
 
 log = logging.getLogger("puppy.drivers.codex")
 
@@ -59,7 +60,7 @@ def _with_runtime_guidance(prompt: str, system_prompt: str, browser_mcp) -> str:
 
 
 def _codex_home() -> str:
-    return os.environ.get("CODEX_HOME") or os.path.join(os.environ.get("HOME", "/root"), ".codex")
+    return os.environ.get("CODEX_HOME") or os.path.join(service_home(), ".codex")
 
 
 _models_cache = {"ts": 0.0, "models": None}

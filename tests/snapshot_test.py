@@ -49,7 +49,7 @@ def malicious_archive(path: Path, member: tarfile.TarInfo, payload: bytes = b"")
         archive.addfile(member, io.BytesIO(payload) if member.isreg() else None)
 
 
-async def exercise_http(archive_ui: dict, session_id: int) -> None:
+async def exercise_http(archive_ui: dict, session_id: int, project: Path) -> None:
     token = config.get("auth.api_token")
     app = build_app()
     runner = web.AppRunner(app)
@@ -115,6 +115,7 @@ async def exercise_http(archive_ui: dict, session_id: int) -> None:
             assert restored["ui"] == archive_ui
             assert restored["sessions"] == 2
             assert config.get("instance_name") == "saved-instance"
+            assert config.get("sessions.default_cwd") == str(project)
             assert config.get("engines.usage_refresh_minutes") == 30
             assert config.get("engines.opencode") is None
             assert config.get("uploads.max_file_size_mb") == 19
@@ -228,6 +229,7 @@ async def main() -> None:
         assert not handoff_path.exists()
         assert restored["ui"] == ui
         assert config.get("instance_name") == "saved-instance"
+        assert config.get("sessions.default_cwd") == str(project)
         assert config.get("engines.usage_refresh_minutes") == 30
         assert config.get("engines.opencode") is None
         assert config.get("uploads.max_file_size_mb") == 19
@@ -243,6 +245,11 @@ async def main() -> None:
         assert normalized_older["system_prompt"] == {
             "custom": "", "browser": config.DEFAULT_BROWSER_SYSTEM_PROMPT}
         assert "opencode" not in normalized_older["engines"]
+        older_cwd_config = config.export_data()
+        older_cwd_config["sessions"].pop("default_cwd", None)
+        normalized_older_cwd = config.normalize_import(older_cwd_config)
+        assert normalized_older_cwd["sessions"]["default_cwd"] == \
+            config.DEFAULTS["sessions"]["default_cwd"]
         legacy_selection = config.export_data()
         legacy_selection["engines"]["opencode"] = {
             "models": ["provider/model-a", "second/model-b"]}
@@ -310,7 +317,7 @@ async def main() -> None:
             lambda: snapshots.create_archive(ui), "unsupported file type")
         unsupported.unlink()
 
-        await exercise_http(ui, directory_id)
+        await exercise_http(ui, directory_id, project)
 
         # A failed database install must put config and filesystem trees back.
         config.set_value("instance_name", "rollback-current")

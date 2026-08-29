@@ -11,6 +11,8 @@ import secrets
 import socket
 import threading
 
+from puppy.user_paths import service_home
+
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.environ.get("PUPPY_DATA") or os.path.join(BASE_DIR, "data")
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
@@ -80,7 +82,7 @@ DEFAULTS = {
         "custom": "",
         "browser": DEFAULT_BROWSER_SYSTEM_PROMPT,
     },
-    "sessions": {"default_cwd": "/etc/scripts", "turn_timeout": 7200,
+    "sessions": {"default_cwd": service_home(), "turn_timeout": 7200,
                  "shutdown_grace": 60},
     # prompt-completion command: run `command` on backend id `backend` (0 =
     # this instance) when a session finishes its work; `enabled` is the bell

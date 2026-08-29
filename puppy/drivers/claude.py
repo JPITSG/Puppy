@@ -17,6 +17,7 @@ import json
 import os
 
 from puppy.drivers.base import Driver, stringify_content
+from puppy.user_paths import service_home
 
 
 class ClaudeDriver(Driver):
@@ -239,7 +240,7 @@ class ClaudeDriver(Driver):
         return []
 
     def auth_touch_paths(self):
-        home = os.environ.get("HOME", "/root")
+        home = service_home()
         return [os.path.join(home, ".claude", ".credentials.json")]
 
     async def _auth_status(self):
@@ -264,7 +265,7 @@ class ClaudeDriver(Driver):
                 return {"auth": "ok",
                         "detail": "logged in" + (" · " + " · ".join(bits) if bits else "")}
             return {"auth": "missing", "detail": "run `claude login` as this user"}
-        home = os.environ.get("HOME", "/root")
+        home = service_home()
         cred = os.path.join(home, ".claude", ".credentials.json")
         if os.path.exists(cred):
             return {"auth": "ok", "detail": "credentials file present (auth verb unavailable)"}

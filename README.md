@@ -44,7 +44,7 @@ built-in web terminals.
   registered backends.
 - **Lockout-safe binding**: a new WebUI bind IP or port is committed only after
   the current browser reaches a short-lived, one-use proof on that exact
-  endpoint. Puppy then queues its idle-aware supervised restart; the page waits
+  endpoint. Puppy then queues its idle-aware deployment restart; the page waits
   for the replacement listener and securely carries its login, tabs, layout and
   ordinary drafts to the new origin before reconnecting. Failed verification
   leaves the setting unchanged, and an already-pending listener can be proved
@@ -70,6 +70,7 @@ built-in web terminals.
 
 ## Requirements
 
+- Linux with Bash
 - Python 3.9+ with `aiohttp`
 - One or more supported CLIs installed for the user running Puppy: `claude`
   (Claude Code), `codex`, and/or `opencode`. Claude/Codex use their normal login
@@ -83,12 +84,19 @@ built-in web terminals.
 ./run.sh                      # listens on 0.0.0.0:10888 by default
 ```
 
-Supervisord deployment:
+`run.sh` locates its own checkout and uses `python3` from `PATH`. Set
+`PUPPY_PYTHON` to an absolute interpreter path when the service should use a
+specific virtual environment. Run it under whichever service lifecycle your
+host uses.
 
-```
-cp puppy.supervisor.conf /etc/supervisor/conf.d/puppy.conf
-supervisorctl update
-```
+Automatic activation after a verified WebUI bind change is optional and
+deployment-owned. Set `PUPPY_RESTART_HOOK` to an absolute executable implementing
+two fixed commands: `hook probe PID` must return zero only when it can restart
+that exact Puppy process, and `hook restart PID` must queue an idle-aware,
+graceful restart. Puppy invokes both without a shell. The hook must be a regular,
+executable, non-symlink file owned by root or the Puppy service user and must not
+be group- or world-writable. Without a hook, the verified listener setting is
+saved and remains pending until the operator restarts Puppy manually.
 
 First visit prompts for the creation of the admin account.
 
@@ -100,15 +108,15 @@ backend/dist/puppy-backend.pyz serve --help
 ```
 
 See `backend/README.md` for pinned-TLS pairing, legacy network guidance,
-Supervisor/systemd templates, and the one-time launcher bootstrap needed for
-remote upgrades. The artifact contains no frontend or cookie-login surface and
-reports an independently versioned controller/backend protocol.
+an optional systemd unit, and the one-time launcher bootstrap needed for remote
+upgrades. The artifact contains no frontend or cookie-login surface and reports
+an independently versioned controller/backend protocol.
 
 ## Data & config
 
 Persistent private state lives in `data/` (gitignored): `config.json` (instance
-name, bind host/port, api token, terminal command, usage-refresh interval, and
-upload-size limit),
+name, bind host/port, api token, default working directory, terminal command,
+usage-refresh interval, and upload-size limit),
 `puppy.db` (sessions, transcripts, users), backend TLS identities, and `puppy.log`. Scratch-session files are the
 intentional exception: they live in a mode-0700, instance-specific namespace
 under the OS temporary directory and are disposable. The repo itself is clean
