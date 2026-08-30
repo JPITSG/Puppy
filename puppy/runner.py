@@ -650,6 +650,50 @@ class SessionHub:
         self._discard_abandoned_uploads([removed])
         return {"ok": True}
 
+    async def edit_queued(self, index: int, text: str) -> dict:
+        """Move one waiting prompt into the durable shared composer.
+
+        Queue identity is checked while holding the draft mutation lock. Once
+        acquired, the draft write, in-memory pop, paused-index remap, and
+        durable queue write all finish before this method yields again, so a
+        turn ending beside the click can neither run the edited prompt nor
+        remove a shifted neighbor.
+        """
+        if not isinstance(text, str):
+            return {"error": "message text must be text"}
+        if len(text) > db.MAX_DRAFT_CHARS:
+            return {"error": "that queued message is too long to edit"}
+        async with self._draft_lock:
+            if not 0 <= index < len(self.queue):
+                return {"error": "that message already started"}
+            item = self.queue[index]
+            if _is_queued_config(item):
+                return {"error": "setting changes cannot be edited as messages"}
+            if item != text:
+                return {"error": "that message already started"}
+            if db.get_session(self.id) is None:
+                return {"error": "session gone"}
+            try:
+                previous, current = db.set_session_draft(self.id, item)
+            except Exception:
+                log.exception("could not move queued message into draft for session %s",
+                              self.id)
+                return {"error": "could not save draft"}
+
+            removed = self._pop_queue(index)
+            started = self._start_queue_if_ready()
+            if not started:
+                self._broadcast_queue()
+            payload = self._draft_payload(current)
+            await self._broadcast_draft(payload)
+
+        # The queued prompt is now the durable draft, so any attachment marker
+        # it owns remains retained. The composer value it explicitly replaced
+        # is no longer an owner, while queued/held/active references remain
+        # protected by the ordinary abandoned-upload check.
+        self._discard_abandoned_uploads([removed, previous["text"]])
+        return {"ok": True, "started": started, "draft": payload}
+
     def set_queue_paused(self, index: int, text: str, paused: bool) -> dict:
         """Pause or resume one still-waiting prompt.
 

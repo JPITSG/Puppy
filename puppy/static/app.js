@@ -394,6 +394,24 @@ function queuePauseIcon(paused, size = 10) {
   return svg;
 }
 
+function queueEditIcon(size = 10) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 12 12");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS(NS, "path");
+  path.setAttribute("d", "M2.3 9.7 3 7.2l4.9-4.9a1 1 0 0 1 1.4 0l.4.4a1 1 0 0 1 0 1.4L4.8 9zM7.3 2.9l1.8 1.8");
+  path.setAttribute("fill", "none");
+  path.setAttribute("stroke", "currentColor");
+  path.setAttribute("stroke-width", "1.15");
+  path.setAttribute("stroke-linecap", "round");
+  path.setAttribute("stroke-linejoin", "round");
+  svg.appendChild(path);
+  return svg;
+}
+
 function copyIcon(done = false) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
@@ -3376,6 +3394,13 @@ function backendSupportsQueuePause(bid) {
     backend.capabilities.includes("queue-pause");
 }
 
+function backendSupportsQueueEdit(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(item => item.id === bid);
+  return !!backend && Array.isArray(backend.capabilities) &&
+    backend.capabilities.includes("queue-edit");
+}
+
 function backendSupportsQueueReorder(bid) {
   if (!bid) return true;
   const backend = state.backends.find(item => item.id === bid);
@@ -5894,6 +5919,8 @@ class SessionView {
     this.queueDrag = null;    // acknowledged server hold + native drag state
     this.queueDragSeq = 0;
     this.queuePendingRequest = "";
+    this.queueEditSeq = 0;
+    this.queueEditPending = null; // guarded queue -> shared-composer transaction
     this.queueOpen = false;   // whether the tail past QUEUE_ROWS is showing
     this.oldestSeq = null;
     this.history = [];        // sent messages, oldest first (shell-style recall)
@@ -6187,6 +6214,7 @@ class SessionView {
       this.draftReady = false;
       this.draftInFlightSeq = 0;
       this.draftPendingText = null;
+      this.cancelQueueEdit("Connection lost before the queued message could be edited");
       this.cancelQueueDrag(null, false);
       if (this.closed) return;
       this.setReconnecting(true);
@@ -6209,6 +6237,7 @@ class SessionView {
 
   destroy() {
     this.closed = true;
+    this.cancelQueueEdit("", false);
     this.cancelQueueDrag(null, true);
     if (this._stopLoadOlder) this._stopLoadOlder();
     this.clearFileDropTarget();
@@ -6394,6 +6423,11 @@ class SessionView {
   }
 
   saveDraft() {
+    /* A queued-message edit is an explicit full-composer replacement. Upload
+       completion and other asynchronous paints may call saveDraft while its
+       backend transaction is in flight; none may put the old value behind the
+       edit frame on the socket. */
+    if (this.queueEditPending) return this.queueEditPending.text;
     const text = this.draftValue();
     if (!this.draftSupported) {
       lsSet("puppy.draft." + this.tab.id, text);
@@ -6534,6 +6568,13 @@ class SessionView {
           }
         }
       }
+      /* Edit intentionally supersedes every composer value sent before its
+         socket frame. Do not let the acknowledgement for that older value
+         enqueue it again while the guarded queue transaction is in flight. */
+      if (this.queueEditPending) {
+        this.draftDeferred = null;
+        return;
+      }
       if (clientSeq < this.draftLatestSeq) {
         this.checkpointDraftJournal(this.draftRevision);
         return;
@@ -6556,6 +6597,14 @@ class SessionView {
     }
 
     if (value.revision === previousRevision) return;
+    /* Keep the explicit replacement visually atomic. The edit completion is
+       ordered after its draft broadcast and will apply it while discarding
+       local uploads; a genuinely newer peer revision is retained and wins. */
+    if (this.queueEditPending) {
+      if (!this.draftDeferred || value.revision > this.draftDeferred.revision)
+        this.draftDeferred = value;
+      return;
+    }
     if (this.draftAckSeq < this.draftLatestSeq ||
         this.draftPendingText !== null) {
       if (!this.draftDeferred || value.revision > this.draftDeferred.revision)
@@ -6566,10 +6615,10 @@ class SessionView {
     this.clearDraftJournal();
   }
 
-  /* Replace prose and completed attachment chips while preserving local uploads
-     still in flight. Matching local image blobs are reused; everything else is
-     released locally and the server's reference cleanup owns the stored file. */
-  applySharedDraft(text, caretAtEnd = false) {
+  /* Replace prose and completed attachment chips, ordinarily preserving local
+     uploads still in flight. An explicit queue edit replaces those too.
+     Matching local image blobs are reused; everything else is released. */
+  applySharedDraft(text, caretAtEnd = false, replaceUploading = false) {
     const restored = splitAttachmentMarkers(text);
     const sources = [...(this.histAttach || []), ...this.attachments];
     const byPath = new Map();
@@ -6590,13 +6639,15 @@ class SessionView {
     }
     const uploading = [];
     for (const source of sources) {
-      if (source.uploading && !source.removed) {
+      if (!replaceUploading && source.uploading && !source.removed) {
         if (!uploading.includes(source)) uploading.push(source);
         continue;
       }
       if (reused.has(source)) continue;
       source.removed = true;
       if (source.controller) source.controller.abort();
+      if (replaceUploading && source.uploadId)
+        this.discardServerUpload(source.uploadId, true);
       if (source.url && source.ownsUrl) URL.revokeObjectURL(source.url);
       source.url = "";
     }
@@ -6761,6 +6812,9 @@ class SessionView {
         break;
       case "queue_reorder_complete":
         this.queueReorderComplete(d);
+        break;
+      case "queue_edit_complete":
+        this.queueEditComplete(d);
         break;
       case "queue_reorder_cancelled":
         if (this.queuePendingRequest === d.request_id ||
@@ -7728,6 +7782,14 @@ class SessionView {
       const { row, ident, cfg } = this.queueRow(item, String(i + 1), false, isPaused);
       row.classList.add("q-live");
       row.dataset.queueIndex = String(i);
+      if (!cfg && this.draftSupported && backendSupportsQueueEdit(this.tab.bid)) {
+        const edit = el("button", "q-edit");
+        edit.type = "button";
+        edit.appendChild(queueEditIcon(11));
+        edit.setAttribute("aria-label", "Edit this queued message");
+        edit.onclick = () => this.editQueued(i, ident);
+        row.appendChild(edit);
+      }
       if (!cfg && backendSupportsQueuePause(this.tab.bid)) {
         const toggle = el("button", "q-pause");
         toggle.type = "button";
@@ -7768,6 +7830,7 @@ class SessionView {
       box.appendChild(less);
     }
     this.syncQueueFade();
+    this.syncQueueEditBusy();
   }
 
   prepareQueueDrag(row, event) {
@@ -7916,6 +7979,116 @@ class SessionView {
       this.updateRunState();
       this.setStatus("Starting next queued message…");
     }
+  }
+
+  syncQueueEditBusy() {
+    const busy = !!this.queueEditPending;
+    this.queueEl.classList.toggle("editing", busy);
+    if (busy) this.queueEl.setAttribute("aria-busy", "true");
+    else this.queueEl.removeAttribute("aria-busy");
+    this.queueEl.querySelectorAll(".q-live button").forEach(button => {
+      button.disabled = busy;
+    });
+    this.ta.readOnly = busy;
+  }
+
+  cancelQueueEdit(message = "", preserveDraft = true) {
+    const context = this.queueEditPending;
+    if (!context) return;
+    if (context.timer !== null) clearTimeout(context.timer);
+    this.queueEditPending = null;
+    this.syncQueueEditBusy();
+    if (preserveDraft && !this.closed) {
+      const text = this.draftValue();
+      writeDraftJournal(this.tab.id, text, this.draftRevision);
+      this.draftJournal = {
+        text, baseRevision: this.draftRevision, submitted: false,
+      };
+      if (!this.draftReady) this.draftTouchedBeforeReady = true;
+    }
+    if (message) toast(message, "error", 6500);
+  }
+
+  editQueued(index, text) {
+    if (this.queueEditPending) return;
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      toast("Not connected", "error");
+      return;
+    }
+    if (!this.draftSupported || !this.draftReady) {
+      toast("Draft is still syncing; wait for the session to reconnect", "error");
+      return;
+    }
+    const requestId = `${Date.now().toString(36)}-edit-${++this.queueEditSeq}`;
+    /* The click means the old full composer value is intentionally discarded.
+       Suppress a coalesced keystroke so its older frame cannot land after this
+       one, and journal the requested replacement across a sudden page crash. */
+    this.draftPendingText = null;
+    this.draftDeferred = null;
+    writeDraftJournal(this.tab.id, text, this.draftRevision);
+    this.draftJournal = {
+      text, baseRevision: this.draftRevision, submitted: false,
+    };
+    const context = { requestId, text, timer: null };
+    this.queueEditPending = context;
+    this.syncQueueEditBusy();
+    context.timer = setTimeout(() => {
+      if (this.queueEditPending !== context) return;
+      this.cancelQueueEdit("Backend did not confirm the queued-message edit");
+    }, 10000);
+    try {
+      this.ws.send(JSON.stringify({
+        type: "edit_queue", request_id: requestId, index, text,
+      }));
+    } catch (error) {
+      this.cancelQueueEdit("Could not edit the queued message");
+    }
+  }
+
+  queueEditComplete(message) {
+    const context = this.queueEditPending;
+    if (!context || context.requestId !== message.request_id) return;
+    if (context.timer !== null) clearTimeout(context.timer);
+    this.queueEditPending = null;
+    this.syncQueueEditBusy();
+    if (message.error) {
+      /* The server rejected the queue identity, so restore the composer value
+         whose pending transmission the explicit replacement superseded. */
+      this.saveDraft();
+      toast(message.error, "error", 6500);
+      return;
+    }
+    const draft = message.draft;
+    if (!draft || typeof draft.text !== "string" ||
+        !Number.isInteger(draft.revision) || draft.revision < 0) {
+      this.saveDraft();
+      toast("Backend returned an invalid edited draft", "error", 6500);
+      return;
+    }
+    /* A different device may have authored a later revision after this click.
+       Otherwise make this explicit replacement stronger than ordinary shared
+       draft updates: local uploads still in flight are discarded as part of
+       replacing everything that had been in the composer. */
+    const deferred = this.draftDeferred;
+    this.draftDeferred = null;
+    if (draft.revision >= this.draftRevision) {
+      this.draftRevision = draft.revision;
+      this.draftPendingText = null;
+      this.applySharedDraft(draft.text, true, true);
+      this.clearDraftJournal();
+    } else if (deferred && deferred.revision === this.draftRevision) {
+      /* A peer authored a newer value after the queue edit. Preserve that
+         normal last-writer-wins result instead of reviving our older one. */
+      this.applySharedDraft(deferred.text);
+      this.clearDraftJournal();
+    }
+    if (message.started) {
+      this.status = "running";
+      this.updateRunState();
+      this.setStatus("Starting next queued message…");
+    }
+    this.ta.focus();
+    scrollCaretIntoView(this.ta);
   }
 
   unqueue(index, text) {

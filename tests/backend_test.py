@@ -547,6 +547,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "engine-model-selection" not in ping["capabilities"]
         assert "file-uploads" in ping["capabilities"]
         assert "queue-pause" in ping["capabilities"]
+        assert "queue-edit" in ping["capabilities"]
         assert "queue-reorder" in ping["capabilities"]
         assert "session-drafts" in ping["capabilities"]
         assert "system-prompt" in ping["capabilities"]
@@ -1047,6 +1048,7 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert full_ping["role"] == "full" and full_ping["protocol"] == 1
         assert "terminal" in full_ping["capabilities"]
         assert "queue-pause" in full_ping["capabilities"]
+        assert "queue-edit" in full_ping["capabilities"]
         assert "queue-reorder" in full_ping["capabilities"]
         assert "session-drafts" in full_ping["capabilities"]
         assert "browser-handoff" in full_ping["capabilities"]
@@ -1103,6 +1105,7 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert "engine-upgrade" in stored["capabilities"]
         assert "file-uploads" in stored["capabilities"]
         assert "queue-pause" in stored["capabilities"]
+        assert "queue-edit" in stored["capabilities"]
         assert "queue-reorder" in stored["capabilities"]
         assert "session-drafts" in stored["capabilities"]
         assert "browser-handoff" in stored["capabilities"]
@@ -1960,6 +1963,38 @@ async def exercise_queue_pause(runner, db) -> None:
         assert h.unqueue(0, "remove me") == {"ok": True}
         assert h.queue == [] and h._paused_wire() == []
 
+        # Edit is one guarded queue -> durable-draft operation. It cannot move
+        # a shifted neighbor or a pending configuration row, and popping the
+        # prompt remaps pause state exactly like every other queue mutation.
+        h.status = "running"
+        h.queue = ["edit this", pending_config, "keep paused"]
+        h.paused_queue = {0, 2}
+        await h.update_draft("replace this composer")
+        assert "error" in await h.edit_queued(0, "not edit this")
+        assert "cannot be edited" in (await h.edit_queued(
+            1, pending_config["key"]))["error"]
+        edited = await h.edit_queued(0, "edit this")
+        assert edited["ok"] is True and edited["started"] is False
+        assert edited["draft"]["type"] == "draft"
+        assert edited["draft"]["text"] == "edit this"
+        assert db.get_session_draft(sid)["text"] == "edit this"
+        assert h.queue == [pending_config, "keep paused"]
+        assert h._paused_wire() == [1]
+        assert db.meta_get("session_queue.{}".format(sid)) == {
+            "queue": [pending_config, "keep paused"],
+            "held": [], "paused": [1],
+        }
+
+        # If the active turn ended just before the guarded edit arrived, the
+        # edited row is skipped and the next runnable prompt proceeds.
+        h.status = "idle"
+        h.queue = ["edit after finish", "run after edit"]
+        h.paused_queue.clear()
+        edited_idle = await h.edit_queued(0, "edit after finish")
+        assert edited_idle["ok"] is True and edited_idle["started"] is True
+        assert started[-1] == "run after edit" and h.queue == []
+        assert db.get_session_draft(sid)["text"] == "edit after finish"
+
         # A kill instead moves prose to held, where resend/discard already
         # supply the only state transition and pause must not leak through.
         h.status = "running"
@@ -2137,6 +2172,20 @@ async def exercise_session_drafts(runner, db, uploads, config) -> None:
         assert retained_path.exists()
         assert h.clear_queue() == 1
         assert not retained_path.exists()
+        h.status = "idle"
+
+        # Moving a queued prompt to the composer transfers ownership of its
+        # attachment marker instead of treating the queue removal as cancel.
+        replaced_path, replaced_marker = uploaded("replaced-composer.txt")
+        edited_path, edited_marker = uploaded("edited-from-queue.txt")
+        await h.update_draft(replaced_marker)
+        h.status = "running"
+        h.queue = [edited_marker]
+        moved = await h.edit_queued(0, edited_marker)
+        assert moved["ok"] is True and moved["draft"]["text"] == edited_marker
+        assert h.queue == [] and db.get_session_draft(sid)["text"] == edited_marker
+        assert not replaced_path.exists()
+        assert edited_path.exists()
         h.status = "idle"
 
         durable = await h.update_draft("survives a restart", "device-a", 7)
@@ -2371,11 +2420,46 @@ async def exercise_queue_pause_websocket(url: str, token: str, runner, db) -> No
             assert complete["ok"] is True and complete["started"] is False
             assert complete["queued"] == queued["queued"]
 
+            await ws.send_json({
+                "type": "edit_queue", "request_id": "stale-edit",
+                "index": 0, "text": "not the queued prompt",
+            })
+            rejected_edit = await ws.receive_json(timeout=3)
+            assert rejected_edit["type"] == "queue_edit_complete", rejected_edit
+            assert rejected_edit["request_id"] == "stale-edit"
+            assert "error" in rejected_edit
+
+            await ws.send_json({
+                "type": "edit_queue", "request_id": "socket-edit",
+                "index": 0, "text": "socket second prompt",
+            })
+            edit_frames = [await ws.receive_json(timeout=3) for _ in range(3)]
+            edited_queue = next(frame for frame in edit_frames
+                                if frame["type"] == "queued")
+            edited_draft = next(frame for frame in edit_frames
+                                if frame["type"] == "draft")
+            edit_complete = next(frame for frame in edit_frames
+                                 if frame["type"] == "queue_edit_complete")
+            assert edited_queue["queued"] == ["socket queued prompt"]
+            assert edited_queue["paused"] == [0]
+            assert edited_draft["text"] == "socket second prompt"
+            assert edit_complete["request_id"] == "socket-edit"
+            assert edit_complete["ok"] is True and edit_complete["started"] is False
+            assert edit_complete["draft"] == edited_draft
+            assert db.get_session_draft(sid)["text"] == "socket second prompt"
+
+            h.queue.append("socket third prompt")
+            h._broadcast_queue()
+            disconnect_queue = await ws.receive_json(timeout=3)
+            assert disconnect_queue["type"] == "queued"
+            assert disconnect_queue["queued"] == [
+                "socket queued prompt", "socket third prompt"]
+
             # A holder is released immediately when its owning socket leaves;
             # the 30-second lease is only a last-resort fail-open path.
             await ws.send_json({
                 "type": "begin_queue_reorder", "request_id": "disconnect-drag",
-                "queue_revision": queued["queue_revision"],
+                "queue_revision": disconnect_queue["queue_revision"],
             })
             ready = await ws.receive_json(timeout=3)
             assert ready["ok"] is True, ready
@@ -2487,6 +2571,7 @@ async def main() -> None:
         assert "remote-upgrade" not in pairing["capabilities"]  # pairing command is not launcher-managed
         assert "shutdown-notice" in pairing["capabilities"]
         assert "queue-pause" in pairing["capabilities"]
+        assert "queue-edit" in pairing["capabilities"]
         assert "queue-reorder" in pairing["capabilities"]
         assert "session-drafts" in pairing["capabilities"]
         assert "engine-model-selection" not in pairing["capabilities"]

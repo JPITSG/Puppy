@@ -59,6 +59,10 @@ SHUTDOWN_NOTICE_CAPABILITY = "shutdown-notice"
 # socket accepts ``set_queue_paused``. Older controllers ignore the field;
 # newer controllers hide the control until a remote node advertises support.
 QUEUE_PAUSE_CAPABILITY = "queue-pause"
+# The session socket can move one still-waiting prompt into the durable shared
+# composer in the same guarded operation that removes it from the queue. Older
+# nodes keep their cancel/pause controls and simply omit the Edit button.
+QUEUE_EDIT_CAPABILITY = "queue-edit"
 # The session socket can hold automatic dequeue while a client rearranges the
 # live queue, then atomically accept a revision-guarded permutation. Older
 # nodes keep their ordinary queue and pause controls without draggable rows.
@@ -82,6 +86,7 @@ BASE_CAPABILITIES = (
     "approvals",
     "message-queue",
     QUEUE_PAUSE_CAPABILITY,
+    QUEUE_EDIT_CAPABILITY,
     QUEUE_REORDER_CAPABILITY,
     SESSION_DRAFT_CAPABILITY,
     # model/effort changes made while work is pending hold their place in the

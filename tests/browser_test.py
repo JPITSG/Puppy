@@ -1270,27 +1270,36 @@ const WebSocket={OPEN:1};
 const URL={revoked:[],revokeObjectURL(value){this.revoked.push(value);}};
 const fmtBytes=value=>String(value)+" B";
 const noteSessionActivity=()=>{};
+const scrollCaretIntoView=()=>{};
+const toast=()=>{};
 %s
 %s
 %s
 function makeView(id="s:0:42") {
   const sent=[];
+  const queueClasses=new Set();
   const view=Object.create(SessionView.prototype);
   Object.assign(view, {
     tab:{id,bid:0,sid:42}, closed:false,
-    ta:{value:"",selectionStart:0,selectionEnd:0,
+    ta:{value:"",selectionStart:0,selectionEnd:0,readOnly:false,focused:false,
+      focus(){this.focused=true;},
       setSelectionRange(start,end){this.selectionStart=start;this.selectionEnd=end;}},
+    queueEl:{
+      classList:{toggle(name,on){if(on)queueClasses.add(name);else queueClasses.delete(name);}},
+      setAttribute(){},removeAttribute(){},querySelectorAll(){return[];},
+    },
     attachments:[],histAttach:null,histIdx:null,histDraft:"",sentThumbs:new Map(),
     draftSupported:true,draftReady:true,draftRevision:0,
     draftMaxChars:100000,status:"idle",_forceScroll:false,
     draftClientId:"device-a",draftClientSeq:0,draftLatestSeq:0,draftAckSeq:0,
     draftInFlightSeq:0,draftPendingText:null,
     draftDeferred:null,draftTouchedBeforeReady:false,draftJournal:null,
+    queueEditSeq:0,queueEditPending:null,
     ws:{readyState:WebSocket.OPEN,send:value=>sent.push(JSON.parse(value))},
     renderAttachments(){},resizeComposer(){},releaseHistoryAttachments(){},
-    scrollBottom(){},updateRunState(){},setStatus(){},
+    scrollBottom(){},updateRunState(){},setStatus(){},discardServerUpload(){},
   });
-  return {view,sent};
+  return {view,sent,queueClasses};
 }
 
 const first=makeView();
@@ -1390,6 +1399,31 @@ submission.view.receiveDraft({type:"draft",text:"send this exact value",revision
 submission.view.receiveDraft({type:"draft",text:"",revision:3,updated_at:14,
   client_id:"device-a",client_seq:3,consumed:true});
 
+/* Editing wins over a coalesced old composer and over saveDraft calls caused
+   by an upload completing behind the click. Its broadcast is held until the
+   direct completion can discard the replaced in-flight upload atomically. */
+const editing=makeView("s:0:50");
+editing.view.ta.value="old composer";
+editing.view.saveDraft();
+editing.view.ta.value="newest old composer";
+editing.view.saveDraft();
+let uploadAborted=false;
+editing.view.attachments=[{path:"",url:"blob:editing",ownsUrl:true,uploading:true,
+  removed:false,uploadId:"",controller:{abort(){uploadAborted=true;}}}];
+editing.view.editQueued(1,"queued replacement");
+const journalDuringEdit=JSON.parse(storage.get("puppy.draft.s:0:50"));
+editing.view.saveDraft();
+editing.view.receiveDraft({type:"draft",text:"old composer",revision:1,updated_at:15,
+  client_id:"device-a",client_seq:1});
+editing.view.receiveDraft({type:"draft",text:"queued replacement",revision:2,
+  updated_at:16,client_id:"",client_seq:0});
+const beforeEditComplete={text:editing.view.ta.value,sent:editing.sent.slice(),
+  readOnly:editing.view.ta.readOnly,deferred:editing.view.draftDeferred.text};
+editing.view.queueEditComplete({type:"queue_edit_complete",request_id:
+  editing.sent[1].request_id,ok:true,started:false,
+  draft:{type:"draft",text:"queued replacement",revision:2,updated_at:16,
+    client_id:"",client_seq:0}});
+
 console.log(JSON.stringify({sent:first.sent,pendingJournal,journalCleared,followed,
   whilePending,afterAck,latest:first.view.ta.value,sharedAttachment,uploadPreserved,
   localOnly:{text:localOnly.view.ta.value,sent:localOnly.sent,
@@ -1403,7 +1437,14 @@ console.log(JSON.stringify({sent:first.sent,pendingJournal,journalCleared,follow
   burst:{beforeAck:burstBeforeAck,afterFirstAck:burstAfterFirstAck,
          journal:storage.has("puppy.draft.s:0:48")},
   submission:{sent:submissionSent,text:submission.view.ta.value,
-              journal:storage.has("puppy.draft.s:0:49")}}));
+              journal:storage.has("puppy.draft.s:0:49")},
+  editing:{before:beforeEditComplete,journalDuringEdit,
+           text:editing.view.ta.value,caret:editing.view.ta.selectionStart,
+           readOnly:editing.view.ta.readOnly,focused:editing.view.ta.focused,
+           pending:editing.view.queueEditPending,uploadAborted,
+           revoked:URL.revoked.includes("blob:editing"),
+           attachments:editing.view.attachments.length,
+           journal:storage.has("puppy.draft.s:0:50")}}));
 """ % (draft_helpers, attachment_helpers, session_view)
     proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:1000]
@@ -1463,6 +1504,27 @@ console.log(JSON.stringify({sent:first.sent,pendingJournal,journalCleared,follow
              "draft_client_seq": 3},
         ],
         "text": "",
+        "journal": False,
+    }, result
+    assert result["editing"] == {
+        "before": {
+            "text": "newest old composer",
+            "sent": [
+                {"type": "draft", "text": "old composer",
+                 "client_id": "device-a", "client_seq": 1},
+                {"type": "edit_queue", "request_id": result["editing"]["before"]["sent"][1]["request_id"],
+                 "index": 1, "text": "queued replacement"},
+            ],
+            "readOnly": True,
+            "deferred": "queued replacement",
+        },
+        "journalDuringEdit": {
+            "_puppy_draft": 1, "text": "queued replacement",
+            "base_revision": 0, "submitted": False,
+        },
+        "text": "queued replacement", "caret": len("queued replacement"),
+        "readOnly": False, "focused": True, "pending": None,
+        "uploadAborted": True, "revoked": True, "attachments": 0,
         "journal": False,
     }, result
 
@@ -1821,27 +1883,47 @@ function clearTimeout() { timer=null; }
 
 
 def check_queue_controls_ui(ui_source: str, css_source: str) -> None:
-    """Pause/play and guarded dragging belong only to queued prompts."""
+    """Edit, pause/play, and guarded dragging belong only to queued prompts."""
     start = ui_source.index("\n  renderQueue(q, held, paused, revision)")
     end = ui_source.index("\n  unqueue(index, text)", start)
     render = ui_source[start:end]
     held_start = render.index("held.forEach")
     queued_start = render.index("shown.forEach")
     assert "q-pause" not in render[held_start:queued_start]
+    assert "q-edit" not in render[held_start:queued_start]
+    assert 'backendSupportsQueueEdit(this.tab.bid)' in render
+    assert 'el("button", "q-edit")' in render
+    assert 'queueEditIcon(11)' in render
+    assert '"Edit this queued message"' in render
+    assert 'this.editQueued(i, ident)' in render
     assert 'if (!cfg && backendSupportsQueuePause(this.tab.bid))' in render
-    assert render.index('el("button", "q-pause")') < render.index('el("button", "q-x")', queued_start)
+    edit_at = render.index('el("button", "q-edit")', queued_start)
+    pause_at = render.index('el("button", "q-pause")', queued_start)
+    cancel_at = render.index('el("button", "q-x")', queued_start)
+    assert edit_at < pause_at < cancel_at
     assert 'queuePauseIcon(isPaused, 11)' in render
     assert 'isPaused ? "Resume this queued message" : "Pause this queued message"' in render
     assert 'this.setQueuePaused(i, ident, !isPaused)' in render
     assert 'type: "set_queue_paused", index, text, paused' in ui_source
+    assert 'type: "edit_queue", request_id: requestId, index, text' in ui_source
+    assert 'case "queue_edit_complete"' in ui_source
+    assert "this.queueEditComplete(d);" in ui_source
     assert 'backend.capabilities.includes("queue-pause")' in ui_source
+    assert 'backend.capabilities.includes("queue-edit")' in ui_source
     assert 'backend.capabilities.includes("queue-reorder")' in ui_source
     assert 'type: "begin_queue_reorder", request_id: requestId' in ui_source
     assert 'type: "reorder_queue", request_id: context.requestId' in ui_source
     assert "!context.ready" in ui_source
     assert 'moveDragSlot(container, this.queueDrag.item, ".q-live"' in ui_source
+    assert "if (this.queueEditPending) {" in ui_source
+    assert "this.applySharedDraft(draft.text, true, true);" in ui_source
+    assert 'this.cancelQueueEdit("Connection lost before the queued message could be edited")' \
+        in ui_source
+    assert '.queue-strip .q-edit{' in css_source
+    assert '.queue-strip .q-edit::after{' in css_source
     assert '.queue-strip .q-pause{' in css_source
     assert 'width:16px;height:16px;' in css_source
+    assert '.queue-strip.editing .q-live button:disabled{' in css_source
     assert '.queue-strip .q-item.q-paused .q-t{opacity:.58}' in css_source
     assert '.queue-strip .q-item.q-sortable{cursor:grab;user-select:none}' in css_source
     assert '.queue-strip .q-live-list.reordering .q-live{will-change:transform}' in css_source
