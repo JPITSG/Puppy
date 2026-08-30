@@ -253,6 +253,7 @@ while True:
             casting = True
             emit_frame = (viewport_width, viewport_height, FRAME)
         elif method == "Page.stopScreencast":
+            record("screencast-stop.jsonl", {})
             casting = False
         elif method == "Page.navigate":
             url = params.get("url", "")
@@ -271,6 +272,7 @@ while True:
                 emit_frame = (1280, 657, STALE_FRAME)
         elif method in ("Page.reload", "Page.navigateToHistoryEntry"):
             emit_lifecycle = True
+            emit_frame = (viewport_width, viewport_height, FRAME)
         elif method.startswith("Input."):
             record("input.jsonl", {"method": method, "params": params})
             if method == "Input.insertText":
@@ -2732,6 +2734,28 @@ async def main() -> None:
                            item.get("height") == 657 for item in repair_meta), repair_meta
             assert read_lines("viewport.jsonl")[-1]["width"] == 900
             assert read_lines("viewport.jsonl")[-1]["height"] == 540
+
+            # A last-viewer detach schedules screencast shutdown. If a new
+            # WebSocket attaches before that task runs, the stale shutdown
+            # must not stop the replacement after its explicit first frame.
+            await ws.close()
+            await wait_for(
+                lambda: browser.manager().get(first_id).viewer_count() == 0,
+                message="browser viewer detach")
+            await asyncio.wait_for(reader, timeout=2)
+            texts, frames = [], []
+            ws = await http.ws_connect(
+                url + "/api/ws/browser/" + first_id, headers=headers)
+            reader = asyncio.ensure_future(collect_ws(ws, texts, frames))
+            await wait_for(lambda: frames, message="reconnected first frame")
+            instance = browser.manager().get(first_id)
+            stops_before = len(read_lines("screencast-stop.jsonl"))
+            await instance._stop_screencast_if_idle()
+            assert len(read_lines("screencast-stop.jsonl")) == stops_before
+            live_frame_start = len(frames)
+            await ws.send_json({"type": "reload"})
+            await wait_for(lambda: len(frames) > live_frame_start,
+                           message="live frame after stale viewer stop")
 
             async with http.get(url + "/api/browser/status", headers=headers) as r:
                 running = await read_json(r)

@@ -703,6 +703,7 @@ class Manager:
         self.lock = asyncio.Lock()
         self.attach_lock = asyncio.Lock()
         self.viewport_lock = asyncio.Lock()
+        self.screencast_lock = asyncio.Lock()
         self.agent_lock = asyncio.Lock()
         self.closed = False
         self.running = False
@@ -1376,24 +1377,47 @@ class Manager:
         if self.viewers:
             await self._send_fresh_frame()
 
-    async def _start_screencast(self) -> None:
+    async def _start_screencast_locked(self) -> None:
         if self.screencasting or not self.page_session:
             return
+        session = self.page_session
         await self.call("Page.startScreencast", {
             "format": "jpeg", "quality": SCREENCAST_QUALITY,
             "maxWidth": MAX_VIEWPORT_W, "maxHeight": MAX_VIEWPORT_H,
-        }, session=self.page_session)
-        self.screencasting = True
+        }, session=session)
+        if self.page_session == session:
+            self.screencasting = True
 
-    async def _stop_screencast(self) -> None:
+    async def _start_screencast(self) -> None:
+        async with self.screencast_lock:
+            await self._start_screencast_locked()
+
+    async def _stop_screencast_locked(self) -> None:
         if not self.screencasting:
             return
         self.screencasting = False
-        if self.page_session and self.running:
+        session = self.page_session
+        if session and self.running:
             try:
-                await self.call("Page.stopScreencast", session=self.page_session)
+                await self.call("Page.stopScreencast", session=session)
             except BrowserError:
                 pass
+
+    async def _stop_screencast(self) -> None:
+        async with self.screencast_lock:
+            await self._stop_screencast_locked()
+
+    async def _stop_screencast_if_idle(self) -> None:
+        """Retire the stream only if a stale detach is still authoritative.
+
+        A replacement WebSocket can attach before the last viewer's scheduled
+        stop runs. Check viewer state under the same lock as start/stop so that
+        old task cannot stop the replacement after its initial screenshot.
+        """
+        async with self.screencast_lock:
+            if self.viewers:
+                return
+            await self._stop_screencast_locked()
 
     async def _send_fresh_frame(self, viewer=None) -> None:
         """Screencast frames only arrive on damage; a still page would leave a
@@ -1469,7 +1493,7 @@ class Manager:
         if viewer is not None:
             viewer.close()
         if not self.viewers and self.running:
-            asyncio.ensure_future(self._stop_screencast())
+            asyncio.ensure_future(self._stop_screencast_if_idle())
             self._arm_idle()
 
     # ---- input from viewers ----
