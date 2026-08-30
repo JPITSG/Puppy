@@ -1848,7 +1848,7 @@ def check_queue_controls_ui(ui_source: str, css_source: str) -> None:
 
 
 def check_system_prompt_settings(ui_source: str, css_source: str) -> None:
-    """The prompt editor stays node-aware and Engine updates shares its card."""
+    """The prompt editor stays backend-aware and Engine updates shares its card."""
     assert ui_source.count("<h2>Engine updates</h2>") == 1
     section = ui_source.index('const autoSection = el("section", "engine-updates-section")')
     attach = ui_source.index("c2.appendChild(autoSection)", section)
@@ -1861,11 +1861,11 @@ def check_system_prompt_settings(ui_source: str, css_source: str) -> None:
     assert '"Browser guidance"' in ui_source
     assert '"Puppy browser guidance"' not in ui_source
     assert '"Reset to default"' in ui_source
-    remote_copy = ("Sent only when this node runs a model against a project "
-                   "stored on another node.")
+    remote_copy = ("Sent only when this backend runs a model against a project "
+                   "stored on another backend.")
     assert remote_copy in ui_source
-    guidance_copy = ("Sent to every model turn on nodes where Browser is enabled; "
-                     "it is not sent on nodes where Browser is off.")
+    guidance_copy = ("Sent to every model turn on backends where Browser is enabled; "
+                     "it is not sent on backends where Browser is off.")
     assert guidance_copy in ui_source.replace('" +\n      "', "")
     assert "browserNote.textContent = `Sent only for turns on ${node.name}" not in ui_source
     assert 'body.remote_workspace = record.remoteWorkspaceDraft' in ui_source
@@ -2017,6 +2017,95 @@ console.log(JSON.stringify({before,dirty,resetState,saved,remote,legacy,unsuppor
         ["PATCH", "GET", "GET", "PATCH"], result
     assert result["calls"][0]["body"]["remote_workspace"] == "REMOTE DEFAULT", result
     assert "remote_workspace" not in result["calls"][3]["body"], result
+
+
+def check_remote_workspace_picker(ui_source: str, css_source: str) -> None:
+    """Storage choices exclude the executor and explain an empty backend list."""
+    def function(name):
+        start = ui_source.index("function " + name + "(")
+        brace = ui_source.index("{", start)
+        depth = 0
+        for index in range(brace, len(ui_source)):
+            if ui_source[index] == "{":
+                depth += 1
+            elif ui_source[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    return ui_source[start:index + 1]
+        raise AssertionError("unbalanced " + name)
+
+    helpers = function("workspaceBackendChoices") + "\n" + \
+        function("renderWorkspaceBackendOptions")
+    script = r"""
+const provider=new Set([1,2,3]);
+const online=new Set([1,2,4]);
+const state={backends:[
+  {id:1,name:"Executor"},{id:2,name:"Storage"},
+  {id:3,name:"Offline"},{id:4,name:"No provider"}
+]};
+const backendName=bid=>bid===0?"Primary":"Backend "+bid;
+const backendSupportsWorkspaceProvider=bid=>provider.has(Number(bid));
+const backendConnectionAllowed=bid=>online.has(Number(bid));
+let refreshes=0;
+const refreshChoiceSelect=()=>{refreshes++;};
+const document={createElement:tag=>({tagName:tag.toUpperCase(),value:"",textContent:"",
+  disabled:false,selected:false})};
+class MockSelect {
+  constructor(){this.children=[];this.value="";this.disabled=false;}
+  set innerHTML(value){if(value!=="")throw new Error("unexpected markup");
+    this.children=[];this.value="";}
+  appendChild(option){this.children.push(option);return option;}
+  get options(){return this.children;}
+}
+__HELPERS__
+const remoteExecutor=new MockSelect();
+let choices=renderWorkspaceBackendOptions(remoteExecutor,1);
+const first={ids:choices.map(item=>item.id),values:remoteExecutor.options.map(o=>o.value),
+  labels:remoteExecutor.options.map(o=>o.textContent),value:remoteExecutor.value,
+  disabled:remoteExecutor.disabled};
+remoteExecutor.value="2";
+choices=renderWorkspaceBackendOptions(remoteExecutor,1);
+const preserved={ids:choices.map(item=>item.id),value:remoteExecutor.value};
+const localExecutor=new MockSelect();
+choices=renderWorkspaceBackendOptions(localExecutor,0);
+const local={ids:choices.map(item=>item.id),values:localExecutor.options.map(o=>o.value)};
+state.backends=[{id:3,name:"Offline"},{id:4,name:"No provider"}];
+const empty=new MockSelect();
+choices=renderWorkspaceBackendOptions(empty,0);
+const none={count:choices.length,value:empty.value,disabled:empty.disabled,
+  options:empty.options.map(o=>({value:o.value,text:o.textContent,
+    disabled:o.disabled,selected:o.selected}))};
+console.log(JSON.stringify({first,preserved,local,none,refreshes}));
+""".replace("__HELPERS__", helpers)
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:1000]
+    result = json.loads(proc.stdout)
+    assert result["first"] == {
+        "ids": [0, 2], "values": ["0", "2"],
+        "labels": ["Primary", "Storage"], "value": "0", "disabled": False,
+    }, result
+    assert result["preserved"] == {"ids": [0, 2], "value": "2"}, result
+    assert result["local"] == {"ids": [1, 2], "values": ["1", "2"]}, result
+    assert result["none"] == {
+        "count": 0, "value": "", "disabled": True,
+        "options": [{"value": "", "text": "No other backend available",
+                     "disabled": True, "selected": True}],
+    }, result
+    assert result["refreshes"] == 4, result
+
+    assert "Files on backend" in ui_source
+    assert "Files on another backend" in ui_source
+    assert "No other backend available" in ui_source
+    assert "No other backend is available for this remote workspace" in ui_source
+    assert "Files on node" not in ui_source
+    assert "Files on another node" not in ui_source
+    assert "(same node)" not in ui_source
+    assert 'aria-label="Backend the command runs on"' in ui_source
+    assert '<label>Backend<select id="nb-be">' in ui_source
+    assert '"No backend has its browser enabled' in ui_source
+    assert ".workspace-pick .wp{padding-left:8px;padding-right:8px}" in css_source
+    assert ".workspace-pick .wp-sub{" in css_source
+    assert "min-height:2.5em;white-space:normal;overflow:visible;" in css_source
 
 
 def check_opencode_chat_models(ui_source: str, css_source: str) -> None:
@@ -3510,6 +3599,7 @@ async def main() -> None:
             check_user_message_copy(ui_source)
             check_queue_controls_ui(ui_source, css_source)
             check_system_prompt_settings(ui_source, css_source)
+            check_remote_workspace_picker(ui_source, css_source)
             check_opencode_chat_models(ui_source, css_source)
             check_session_provider_marks(css_source)
             check_sidebar_icon_alignment(css_source)

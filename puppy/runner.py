@@ -1124,7 +1124,7 @@ class SessionHub:
                     return {"ok": False,
                             "error": "sync wait stopped by the user"}
                 if _draining:
-                    return {"ok": False, "error": "node is shutting down"}
+                    return {"ok": False, "error": "backend is shutting down"}
                 now = time.monotonic()
                 if now - started > hard_limit or \
                         now - self._ws_progress_at > quiet_limit:
@@ -1503,7 +1503,7 @@ class SessionHub:
                         self._emit("info", {
                             "subtype": "workspace_sync_pending",
                             "text": "Workspace sync did not complete: {}. This "
-                                    "node keeps the changes and Puppy retries "
+                                    "backend keeps the changes and Puppy retries "
                                     "automatically.".format(
                                         grant.get("error") or "unknown error")})
                 except Exception:

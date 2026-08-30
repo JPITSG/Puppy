@@ -1450,7 +1450,7 @@ function workspaceLabel(session, n = 26) {
 
 function workspaceTitle(session) {
   const ws = sessionWorkspace(session);
-  if (ws) return `${ws.root} · files on ${ws.node || "another node"}`;
+  if (ws) return `${ws.root} · files on ${ws.node || "another backend"}`;
   if (!isScratchWorkspace(session)) return (session && session.cwd) || "";
   if (session.workspace_missing)
     return "The host cleared this scratch workspace. It will be recreated before the next turn.";
@@ -1460,9 +1460,9 @@ function workspaceTitle(session) {
 function sessionDeleteMessage(session) {
   const ws = sessionWorkspace(session);
   if (ws) {
-    return "The transcript and this node's private synchronized copy are removed permanently." +
+    return "The transcript and this backend's private synchronized copy are removed permanently." +
       (session.ws_dirty ? " Changes not yet synced to the project are lost." : "") +
-      ` The project on ${ws.node || "the workspace node"} is not touched.`;
+      ` The project on ${ws.node || "the workspace backend"} is not touched.`;
   }
   return isScratchWorkspace(session)
     ? "The transcript and all files in its scratch workspace are removed permanently."
@@ -2831,7 +2831,7 @@ async function pollRemoteBackend(backend, forceEngines = false) {
       try { node = await api(bid, "node", { timeoutMs: REMOTE_POLL_TIMEOUT }); }
       catch (_) { node = await api(bid, "ping", { timeoutMs: REMOTE_POLL_TIMEOUT }); }
       if (!node || node.ok !== true || typeof node.version !== "string")
-        throw new Error("backend returned invalid node metadata");
+        throw new Error("backend returned invalid metadata");
       if (!remotePollIsCurrent(bid, sequence)) return;
       backend.remote_version = node.version;
       if (typeof node.role === "string") backend.role = node.role;
@@ -3013,7 +3013,7 @@ async function enableAddedBackendBrowser(added) {
   const capabilities = (added.remote && added.remote.capabilities) || [];
   if (Number(added.remote && added.remote.protocol || 0) !== 0 &&
       !(Array.isArray(capabilities) && capabilities.includes("browser"))) {
-    toast(`${name}: This node does not offer a managed browser`, "error", 7000);
+    toast(`${name}: This backend does not offer a managed browser`, "error", 7000);
     return;
   }
   try {
@@ -3051,7 +3051,7 @@ async function openNewBrowser(bid, groupId = null) {
     });
     const browserId = String(result && result.browser && result.browser.id || "").toUpperCase();
     if (!/^[A-Z0-9]{4}$/.test(browserId))
-      throw new Error("node returned an invalid browser ID");
+      throw new Error("backend returned an invalid browser ID");
     openBrowserTab(bid, browserId, groupId);
   } catch (error) {
     toast(`${backendName(bid)}: ${error.message || "Could not open browser"}`,
@@ -3737,7 +3737,7 @@ function sessionContextMenu(ev, bid, s) {
   if (sessionWs) {
     add("Workspace details", () => modalWorkspaceLink(bid, s));
     const wsLink = linkForSession(bid, s.id);
-    if (wsLink) add(`Terminal on ${wsLink.ws_name || "workspace node"}`,
+    if (wsLink) add(`Terminal on ${wsLink.ws_name || "workspace backend"}`,
       () => openTermTab(wsLink.ws_backend, "", null, wsLink.root));
   }
   if (s.has_native) add("Copy native session id", async () => {
@@ -4054,7 +4054,7 @@ function rememberEnginePayload(bid, result) {
 
 function applyEnginesPayload(bid, result) {
   if (!result || !Array.isArray(result.engines) || !result.usage_refresh)
-    throw new Error("node returned an invalid engine response");
+    throw new Error("backend returned an invalid engine response");
   rememberEnginePayload(bid, result);
   if (bid) {
     state.remoteOk[bid] = true;
@@ -8606,7 +8606,7 @@ class BrowserView {
     this.unlinkBtn.classList.toggle("hidden", !ownerId);
     const selected = currentBrowserSession(this.tab.bid);
     if (!selected) {
-      this.useBtn.textContent = "Select a session on this node";
+      this.useBtn.textContent = "Select a session on this backend";
       this.useBtn.title = "Select a session in the sidebar first";
       this.useBtn.disabled = true;
     } else if (selected.sid === ownerId) {
@@ -9493,7 +9493,7 @@ class SettingsView {
       set("Starting…", true, "update is starting");
       button.classList.add("busy");
     } else if (!e2.upgrade_supported || !backendSupportsEngineUpgrade(bid)) {
-      set("Update", true, "this node cannot update its engines from here");
+      set("Update", true, "this backend cannot update its engines from here");
     } else if (sessionsFor(bid).some(s => s.engine === e2.key && s.status === "running")) {
       set("Busy", true, "a session is using this engine - finish it first");
     } else {
@@ -9671,7 +9671,7 @@ class SettingsView {
     const describe = () => {
       if (!supported) return "Backend upgrade required";
       if (availability === "bad") return "Backend unavailable";
-      if (!current) return "Checking node setting…";
+      if (!current) return "Checking backend setting…";
       if (saving) return "Saving…";
       const attempts = current.last_attempts || {};
       const keys = Object.keys(attempts);
@@ -9971,7 +9971,7 @@ class SettingsView {
         setNote((st.product || "Browser available") +
           (st.sandbox === "no-sandbox" ? " · sandbox off (runs as root)" : ""), false);
       } else {
-        setNote(st.reason || "No usable browser on this node", true);
+        setNote(st.reason || "No usable browser on this backend", true);
       }
     };
     /* Only availability needs the probe: whether the toggle is on is already
@@ -10021,13 +10021,13 @@ class SettingsView {
   systemPromptCard(nodes, initialPayload, generation) {
     const card = el("div", "card system-prompt-card");
     card.innerHTML = `<h2>System prompt</h2>
-      <p class="system-prompt-copy">Prompt settings live on the node that runs the model.
-        Choose a node, then shape the instructions it adds to new turns.</p>`;
+      <p class="system-prompt-copy">Prompt settings live on the backend that runs the model.
+        Choose a backend, then shape the instructions it adds to new turns.</p>`;
 
     const nodeField = el("label", "system-prompt-node");
-    nodeField.appendChild(el("span", "system-prompt-node-label", "Node"));
+    nodeField.appendChild(el("span", "system-prompt-node-label", "Backend"));
     const select = document.createElement("select");
-    select.setAttribute("aria-label", "Node whose system prompt is being edited");
+    select.setAttribute("aria-label", "Backend whose system prompt is being edited");
     for (const node of nodes) {
       const option = document.createElement("option");
       option.value = String(node.bid);
@@ -10042,7 +10042,7 @@ class SettingsView {
     const customCopy = el("div", "system-prompt-section-copy");
     customCopy.appendChild(el("h3", "", "Your system prompt"));
     customCopy.appendChild(el("p", "",
-      "Added to every new model turn this node starts. Leave blank to add nothing."));
+      "Added to every new model turn this backend starts. Leave blank to add nothing."));
     customHead.appendChild(customCopy);
     const custom = document.createElement("textarea");
     custom.className = "system-prompt-textarea config-textarea";
@@ -10058,7 +10058,7 @@ class SettingsView {
     const remoteCopy = el("div", "system-prompt-section-copy");
     remoteCopy.appendChild(el("h3", "", "Remote workspace guidance"));
     remoteCopy.appendChild(el("p", "",
-      "Sent only when this node runs a model against a project stored on another node."));
+      "Sent only when this backend runs a model against a project stored on another backend."));
     const remoteReset = el("button", "btn btn-sm btn-ghost system-prompt-reset",
       "Reset to default");
     remoteReset.type = "button";
@@ -10077,8 +10077,8 @@ class SettingsView {
     const browserCopy = el("div", "system-prompt-section-copy");
     browserCopy.appendChild(el("h3", "", "Browser guidance"));
     const browserNote = el("p", "",
-      "Sent to every model turn on nodes where Browser is enabled; it is not sent " +
-      "on nodes where Browser is off.");
+      "Sent to every model turn on backends where Browser is enabled; it is not sent " +
+      "on backends where Browser is off.");
     browserCopy.appendChild(browserNote);
     const browserReset = el("button", "btn btn-sm btn-ghost system-prompt-reset",
       "Reset to default");
@@ -10113,13 +10113,13 @@ class SettingsView {
       if (!prompt || typeof prompt.custom !== "string" ||
           typeof prompt.browser !== "string" ||
           typeof prompt.browser_default !== "string")
-        throw new Error("node returned invalid system prompt settings");
+        throw new Error("backend returned invalid system prompt settings");
       const remoteWorkspaceSupported =
         typeof prompt.remote_workspace === "string" &&
         typeof prompt.remote_workspace_default === "string";
       const maxChars = Number(prompt.max_chars);
       if (!Number.isInteger(maxChars) || maxChars < 1)
-        throw new Error("node returned an invalid system prompt limit");
+        throw new Error("backend returned an invalid system prompt limit");
       return {
         loaded: true,
         custom: prompt.custom,
@@ -10293,13 +10293,13 @@ class SettingsView {
         record = normalized(result.system_prompt);
         record.saved = true;
         records.set(bid, record);
-        toast(`${node ? node.name : "Node"}: System prompt saved`, "ok");
+        toast(`${node ? node.name : "Backend"}: System prompt saved`, "ok");
       } catch (error) {
         if (generation !== this.renderGeneration || !card.isConnected) return;
         record.saving = false;
         record.error = error.message || "Could not save prompt settings";
         records.set(bid, record);
-        toast(`${node ? node.name : "Node"}: ${record.error}`, "error", 7000);
+        toast(`${node ? node.name : "Backend"}: ${record.error}`, "error", 7000);
       }
       if (bid === activeBid) paint();
     };
@@ -10566,9 +10566,9 @@ class SettingsView {
        same card so spacing remains legible without presenting two panels. */
     const autoSection = el("section", "engine-updates-section");
     autoSection.innerHTML = `<h2>Engine updates</h2>
-      <p class="usage-refresh-copy">Let a node install its own engine CLI updates using the
+      <p class="usage-refresh-copy">Let a backend install its own engine CLI updates using the
         same vendor updater the Update button runs. Each version is tried once: if an update
-        fails it is not retried until a newer one appears, and a node with a busy session
+        fails it is not retried until a newer one appears, and a backend with a busy session
         waits rather than replacing an engine underneath it.</p>`;
     const autoList = el("div", "eau-list");
     const localAuto = this.autoUpgradeRow(settings.instance_name, 0);
@@ -10594,7 +10594,7 @@ class SettingsView {
     /* account usage refresh */
     const usageCard = el("div", "card usage-refresh-card");
     usageCard.innerHTML = `<h2>Usage refresh</h2>
-      <p class="usage-refresh-copy">Choose how often each node asks its installed engines
+      <p class="usage-refresh-copy">Choose how often each backend asks its installed engines
         for current account-limit data. This read-only check does not start a turn or consume
         model tokens. Use 0 to disable it.</p>`;
     const usageList = el("div", "usage-refresh-list");
@@ -10612,11 +10612,11 @@ class SettingsView {
     usageCard.appendChild(usageList);
     this.inner.appendChild(usageCard);
 
-    /* per-node attachment limits */
+    /* per-backend attachment limits */
     const uploadCard = el("div", "card upload-limit-card");
     uploadCard.innerHTML = `<h2>File uploads</h2>
       <p class="usage-refresh-copy">Set the maximum size of one attached file on each
-        receiving node. Files stream directly to private session storage and may be any type.
+        receiving backend. Files stream directly to private session storage and may be any type.
         Use 0 to disable uploads.</p>`;
     const uploadList = el("div", "upload-limit-list");
     const localUploads = this.uploadLimitRow(settings.instance_name, 0);
@@ -10640,7 +10640,7 @@ class SettingsView {
     pollRemotes({ forceEngines: true })
       .catch(error => console.warn("settings remote poll failed", error));
 
-    /* completion alert: a command a chosen node runs when a session finishes */
+    /* completion alert: a command a chosen backend runs when a session finishes */
     const notifyCard = el("div", "card notify-card");
     notifyCard.innerHTML = `<div class="notify-head">
         <h2>Completion alert</h2>
@@ -10651,10 +10651,10 @@ class SettingsView {
         </label>
       </div>
       <p class="usage-refresh-copy">When a session finishes its work — its prompt and
-        anything queued behind it — run this command on a node: play a sound, ping your home
+        anything queued behind it — run this command on a backend: play a sound, ping your home
         automation, anything. Arm or silence it any time with the bell in the sidebar footer.</p>
       <div class="notify-fields">
-        <label>Run on<select id="nf-backend" aria-label="Node the command runs on"></select></label>
+        <label>Run on<select id="nf-backend" aria-label="Backend the command runs on"></select></label>
         <label>Command<input type="text" id="nf-cmd" autocomplete="off" autocapitalize="off"
           spellcheck="false" placeholder='e.g. mosquitto_pub -t puppy/done -m {session}'></label>
       </div>
@@ -10773,7 +10773,7 @@ class SettingsView {
             aria-label="Turn on the managed browser on this backend once it is added">
           <span class="be-auto-track" aria-hidden="true"><span></span></span>
           <span class="be-auto-copy"><span>Managed browser</span>
-            <small>Enabled once the backend is added, if its node supports one</small></span>
+            <small>Enabled once the backend is added, if that backend supports one</small></span>
         </label>
         <div class="full"><button class="btn btn-pri btn-sm" id="be-add">Add backend</button></div>
       </div>`;
@@ -11284,6 +11284,46 @@ function modalEditBackend(backend, onSaved) {
   return { m, close };
 }
 
+/* Storage choices for a linked workspace deliberately exclude the backend
+   running the engine. A duplicate record for the same physical machine can
+   still race through; the controller's backend-identity check remains the final
+   authority and safely degrades that rare case to a direct directory. */
+function workspaceBackendChoices(execBid) {
+  const executionBackend = Number(execBid) || 0;
+  return [{ id: 0, name: backendName(0) }].concat(state.backends)
+    .filter(backend => Number(backend.id) !== executionBackend &&
+      (!backend.id || (backendSupportsWorkspaceProvider(backend.id) &&
+        backendConnectionAllowed(backend.id))));
+}
+
+function renderWorkspaceBackendOptions(select, execBid) {
+  const choices = workspaceBackendChoices(execBid);
+  const previous = select.value;
+  select.innerHTML = "";
+  if (!choices.length) {
+    const empty = document.createElement("option");
+    empty.value = "";
+    empty.textContent = "No other backend available";
+    empty.disabled = empty.selected = true;
+    select.appendChild(empty);
+    select.value = "";
+    select.disabled = true;
+    refreshChoiceSelect(select);
+    return choices;
+  }
+  for (const backend of choices) {
+    const option = document.createElement("option");
+    option.value = String(backend.id);
+    option.textContent = backend.name;
+    select.appendChild(option);
+  }
+  select.disabled = false;
+  select.value = choices.some(backend => String(backend.id) === previous) ?
+    previous : String(choices[0].id);
+  refreshChoiceSelect(select);
+  return choices;
+}
+
 /* new session */
 async function modalNewSession(groupId = null) {
   const beOpts = [{ id: 0, name: backendName(0) }].concat(state.backends);
@@ -11303,11 +11343,11 @@ async function modalNewSession(groupId = null) {
           <span class="wp-name">Scratch</span><span class="wp-sub">No folder to choose</span>
         </button>
         <button type="button" class="wp" data-kind="remote" aria-pressed="false">
-          <span class="wp-name">Remote</span><span class="wp-sub">Files on another node</span>
+          <span class="wp-name">Remote</span><span class="wp-sub">Files on another backend</span>
         </button>
       </div>
     </div>
-    <label id="ns-wsbe-wrap" class="hidden">Files on node<select id="ns-wsbe"></select></label>
+    <label id="ns-wsbe-wrap" class="hidden">Files on backend<select id="ns-wsbe"></select></label>
     <div id="ns-dir-fields">
       <label>Working directory<input type="text" id="ns-cwd" spellcheck="false"></label>
       <div class="dirpick hidden" id="ns-dirs"></div>
@@ -11388,7 +11428,7 @@ async function modalNewSession(groupId = null) {
       button.setAttribute("aria-pressed", selected ? "true" : "false");
     });
     /* remote reuses the directory fields: the same path input and browser,
-       just aimed at the node the files live on */
+       just aimed at the backend where the files live */
     directoryFields.classList.toggle("hidden", kind === "temporary");
     scratchNote.classList.toggle("hidden", kind !== "temporary");
     wsbeWrap.classList.toggle("hidden", kind !== "remote");
@@ -11398,25 +11438,9 @@ async function modalNewSession(groupId = null) {
     button.onclick = () => pickWorkspace(button.dataset.kind);
   });
 
-  function renderWsNodes() {
+  function renderWsBackends() {
     const execBid = parseInt(beSel.value, 10);
-    const nodes = [{ id: 0, name: backendName(0) }].concat(
-      state.backends.filter(b => backendSupportsWorkspaceProvider(b.id) &&
-        backendConnectionAllowed(b.id)));
-    const previous = wsbeSel.value;
-    wsbeSel.innerHTML = "";
-    for (const node of nodes) {
-      const opt = document.createElement("option");
-      opt.value = String(node.id);
-      opt.textContent = node.name + (node.id === execBid ? " (same node)" : "");
-      wsbeSel.appendChild(opt);
-    }
-    /* default the files to a node other than the one running the engine -
-       that is the whole point of a remote workspace */
-    const other = nodes.find(node => node.id !== execBid);
-    const keep = nodes.some(node => String(node.id) === previous);
-    wsbeSel.value = keep ? previous : String(other ? other.id : execBid);
-    refreshChoiceSelect(wsbeSel);
+    return renderWorkspaceBackendOptions(wsbeSel, execBid);
   }
   wsbeSel.onchange = () => dirBox.classList.add("hidden");
 
@@ -11431,15 +11455,19 @@ async function modalNewSession(groupId = null) {
       "No folder to choose" : "Backend upgrade required";
     if (!supported && workspaceKind === "temporary") pickWorkspace("directory");
     const mirrorable = backendSupportsWorkspaceMirror(parseInt(beSel.value, 10));
-    remoteButton.disabled = !mirrorable;
+    const storageBackends = renderWsBackends();
+    const remoteAvailable = mirrorable && storageBackends.length > 0;
+    remoteButton.disabled = !remoteAvailable;
     remoteButton.removeAttribute("title");
     remoteButton.removeAttribute("data-tip");
-    if (mirrorable) remoteButton.removeAttribute("aria-label");
-    else remoteButton.setAttribute("aria-label", "Remote workspace · backend upgrade required");
-    remoteButton.querySelector(".wp-sub").textContent = mirrorable ?
-      "Files on another node" : "Backend upgrade required";
-    if (!mirrorable && workspaceKind === "remote") pickWorkspace("directory");
-    renderWsNodes();
+    if (remoteAvailable) remoteButton.removeAttribute("aria-label");
+    else remoteButton.setAttribute("aria-label", mirrorable ?
+      "Remote workspace · no other backend available" :
+      "Remote workspace · backend upgrade required");
+    remoteButton.querySelector(".wp-sub").textContent = !mirrorable ?
+      "Backend upgrade required" : storageBackends.length ?
+        "Files on another backend" : "No other backend available";
+    if (!remoteAvailable && workspaceKind === "remote") pickWorkspace("directory");
   }
 
   async function loadEngines() {
@@ -11534,8 +11562,8 @@ async function modalNewSession(groupId = null) {
   syncWorkspaceSupport();
   await loadEngines();
 
-  /* directory browser - follows the node whose filesystem holds the files:
-     the execution node normally, the workspace node for a remote link */
+  /* directory browser follows the backend whose filesystem holds the files:
+     the execution backend normally, the workspace backend for a remote link */
   wireDirectoryPicker(cwdInp, dirBox, () => workspaceKind === "remote" ?
     parseInt(wsbeSel.value, 10) : parseInt(beSel.value, 10));
 
@@ -11550,14 +11578,18 @@ async function modalNewSession(groupId = null) {
     };
     try {
       if (workspaceKind === "remote") {
+        const workspaceBackend = parseInt(wsbeSel.value, 10);
+        if (!Number.isInteger(workspaceBackend))
+          throw new Error("No other backend is available for this remote workspace");
         const r = await api(0, "workspaces/sessions", { method: "POST", body: {
           ...shared, backend: bid,
-          workspace_backend: parseInt(wsbeSel.value, 10),
+          workspace_backend: workspaceBackend,
           root: cwdInp.value.trim(),
           mkdir: m.querySelector("#ns-mkdir").checked,
         }, timeoutMs: 120000 });
         close();
-        if (r.same_node) toast("Both picks are the same machine - using the directory directly");
+        if (r.same_node)
+          toast("Both backends resolve to the same machine - using the directory directly");
         if (r.bid) await pollRemotes();
         openSessionTab(r.bid || 0, r.session.id, r.session, groupId);
         return;
@@ -11614,7 +11646,7 @@ function modalOpenSession(groupId = null) {
 
 /* new terminal */
 /* Linked-workspace detail sheet: where the files live, the live sync state,
-   manual sync, per-path conflict resolution, and a shell on the file node. */
+   manual sync, per-path conflict resolution, and a shell on the file backend. */
 function modalWorkspaceLink(bid, session) {
   const ws = sessionWorkspace(session);
   if (!ws) return;
@@ -11657,7 +11689,7 @@ function modalWorkspaceLink(bid, session) {
     const link = linkForSession(bid, session.id);
     facts.innerHTML = "";
     fact("Project", ws.root);
-    fact("Files on", link ? link.ws_name : (ws.node || "another node"));
+    fact("Files on", link ? link.ws_name : (ws.node || "another backend"));
     fact("Runs on", link ? link.exec_name : backendName(bid));
     const st = link ? link.state : "";
     fact("State", stateText(st),
@@ -11771,7 +11803,7 @@ function openBrowserFromMenu(groupId = null) {
     .concat(state.backends)
     .filter(node => browserEnabledFor(node.id));
   if (!nodes.length) {
-    toast("No node has its browser enabled · see Settings", "error", 6000);
+    toast("No backend has its browser enabled · see Settings", "error", 6000);
     openSettingsTab(groupId);
     return;
   }
@@ -11780,7 +11812,7 @@ function openBrowserFromMenu(groupId = null) {
     return;
   }
   const { m, close } = modal(`<h2>Open browser</h2>
-    <label>Node<select id="nb-be">${nodes.map(b =>
+    <label>Backend<select id="nb-be">${nodes.map(b =>
       `<option value="${b.id}">${esc(b.name)}</option>`).join("")}</select></label>
     <div class="m-btns"><button class="btn" id="nb-cancel">Cancel</button>
     <button class="btn btn-pri" id="nb-go">Open</button></div>`);

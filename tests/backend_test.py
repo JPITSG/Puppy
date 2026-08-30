@@ -567,7 +567,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
             assert response.status == 200, prompt_payload
         prompt_defaults = prompt_payload["system_prompt"]
         assert prompt_defaults["custom"] == ""
-        assert "coding engine runs on this node" in \
+        assert "coding engine runs on this backend" in \
             prompt_defaults["remote_workspace"]
         assert prompt_defaults["remote_workspace_default"] == \
             prompt_defaults["remote_workspace"]

@@ -51,11 +51,11 @@ DEFAULT_BROWSER_SYSTEM_PROMPT = (
 # embedding the authoritative absolute path: the latter is already rewritten
 # at the execution boundary, and project-relative paths are portable in chat.
 DEFAULT_REMOTE_WORKSPACE_SYSTEM_PROMPT = (
-    "This session uses a remote workspace. The coding engine runs on this node "
+    "This session uses a remote workspace. The coding engine runs on this backend "
     "against a Puppy-managed mirror, while the authoritative project is stored "
-    "on another node. Work normally in the current working directory; Puppy "
+    "on another backend. Work normally in the current working directory; Puppy "
     "synchronizes it between turns, so do not access or synchronize the storage "
-    "node yourself. Prefer project-relative paths when referring to files "
+    "backend yourself. Prefer project-relative paths when referring to files "
     "because the mirror's absolute path is an implementation detail."
 )
 

@@ -2037,6 +2037,13 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   .msg-user{max-width:94%}
 }
 @media (max-width:560px){
+  /* Keep all three workspace choices side by side without clipping the longer
+     backend wording. Grid items share height, so two-line subtitles stay
+     aligned and remain easy to scan on a narrow phone. */
+  .workspace-pick .wp{padding-left:8px;padding-right:8px}
+  .workspace-pick .wp-sub{
+    min-height:2.5em;white-space:normal;overflow:visible;text-overflow:clip;line-height:1.25;
+  }
   .engine-node-head{
     display:grid;grid-template-columns:6px minmax(0,1fr) auto;gap:2px 7px;align-items:center;
   }

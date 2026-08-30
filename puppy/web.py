@@ -243,7 +243,7 @@ async def h_engine_upgrade(request: web.Request):
     blockers = runner.engine_blockers(driver.key)
     if blockers:
         return web.json_response({
-            "error": "{} is busy on this node - finish or stop its sessions first".format(
+            "error": "{} is busy on this backend - finish or stop its sessions first".format(
                 driver.label),
             "blockers": blockers,
         }, status=409)
@@ -358,7 +358,7 @@ async def h_session_create(request: web.Request):
     allowed_models = [str(option.get("value") or "") for option in driver.model_options()]
     if not driver.allow_custom_model and model not in allowed_models:
         return web.json_response({
-            "error": "That {} model is not available on this node".format(driver.label)},
+            "error": "That {} model is not available on this backend".format(driver.label)},
             status=400)
     effort = str(body.get("effort") or "").strip()
     if effort not in [o["value"] for o in driver.effort_options_for_model(model)]:
@@ -426,7 +426,7 @@ async def h_session_patch(request: web.Request):
         allowed = [str(option.get("value") or "") for option in driver.model_options()]
         if not driver.allow_custom_model and model not in allowed:
             return web.json_response(
-                {"error": "That {} model is not available on this node".format(driver.label)},
+                {"error": "That {} model is not available on this backend".format(driver.label)},
                 status=400)
         turn_config["model"] = model
     if "effort" in body:

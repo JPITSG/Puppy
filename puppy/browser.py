@@ -273,7 +273,7 @@ async def probe(force: bool = False) -> dict:
                 binary = found
                 break
         if not binary:
-            result["reason"] = "No Chromium or Chrome binary found on this node's PATH"
+            result["reason"] = "No Chromium or Chrome binary found on this backend's PATH"
     if binary:
         result["binary"] = binary
         product = await _run_version(binary)
@@ -322,7 +322,7 @@ async def set_enabled(value: bool) -> dict:
     if value:
         st = await probe()
         if not st["available"]:
-            raise BrowserError(st["reason"] or "No usable browser on this node")
+            raise BrowserError(st["reason"] or "No usable browser on this backend")
     config.set_value("browser.enabled", bool(value))
     if not value and _manager is not None:
         await _manager.stop("Browser disabled")
@@ -763,14 +763,14 @@ class Manager:
             if self.closed:
                 raise BrowserError("Browser {} is closed".format(self.browser_id))
             if not enabled():
-                raise BrowserError("The browser is disabled on this node")
+                raise BrowserError("The browser is disabled on this backend")
             if self.running:
                 return
             st = await probe()
             if not enabled():
-                raise BrowserError("The browser is disabled on this node")
+                raise BrowserError("The browser is disabled on this backend")
             if not st["available"]:
-                raise BrowserError(st["reason"] or "No usable browser on this node")
+                raise BrowserError(st["reason"] or "No usable browser on this backend")
             profile = self._subdir("profile")
             home = self._subdir("home")
             downloads = self._subdir("downloads")
@@ -3235,7 +3235,7 @@ class BrowserRegistry:
     def _create_locked(self, origin: str, owner_session=None) -> Manager:
         """Register one instance while ``self.lock`` is held."""
         if not enabled():
-            raise BrowserError("The browser is disabled on this node")
+            raise BrowserError("The browser is disabled on this backend")
         browser_id = self._new_id()
         record = {
             "created_at": time.time(), "closed_at": None,
@@ -3272,7 +3272,7 @@ class BrowserRegistry:
 
     async def create(self, origin: str = "user", owner_session=None) -> Manager:
         if not enabled():
-            raise BrowserError("The browser is disabled on this node")
+            raise BrowserError("The browser is disabled on this backend")
         if origin not in ("agent", "user", "legacy"):
             raise BrowserError("invalid browser origin")
         owner_session = self._normalize_owner(owner_session)
@@ -3531,7 +3531,7 @@ async def ws_browser(request: web.Request):
     if not enabled():
         try:
             await ws.send_json({"type": "error",
-                                "text": "The browser is disabled on this node"})
+                                "text": "The browser is disabled on this backend"})
         except Exception:
             pass
         await ws.close()

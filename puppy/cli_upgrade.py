@@ -204,7 +204,7 @@ async def start(driver) -> dict:
         raise RuntimeError("the {} upgrade is already running".format(key))
     argv = _argv(driver)
     if argv is None:
-        raise RuntimeError("{} is not installed on this node".format(driver.label))
+        raise RuntimeError("{} is not installed on this backend".format(driver.label))
 
     # Claim this engine's slot before the first await: two clicks arriving
     # together must not both start a vendor updater for the same installation.

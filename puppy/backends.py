@@ -325,7 +325,7 @@ def node_channel(bid: int):
         if ":" in host and not host.startswith("["):
             host = "[{}]".format(host)
         port = int(config.get("web.port", 10888))
-        return {"bid": 0, "name": str(config.get("instance_name") or "this node"),
+        return {"bid": 0, "name": str(config.get("instance_name") or "this backend"),
                 "urls": ["http://{}:{}".format(host, port)],
                 "token": str(config.get("auth.api_token") or ""),
                 "ssl": True,

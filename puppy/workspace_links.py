@@ -81,7 +81,7 @@ def get_link_by_session(exec_bid: int, session_id: int):
 
 
 def _node_names() -> dict:
-    names = {0: str(config.get("instance_name") or "this node")}
+    names = {0: str(config.get("instance_name") or "this backend")}
     for backend in backends.list_backends():
         names[int(backend["id"])] = str(backend.get("name") or backend["id"])
     return names
@@ -175,7 +175,7 @@ def _headers(channel: dict) -> dict:
 async def _request_json(channel: dict, method: str, path: str,
                         body=None) -> dict:
     """One JSON API call against a node, with URL failover before send."""
-    last_error = "node is unreachable"
+    last_error = "backend is unreachable"
     urls = channel.get("urls") or []
     for index, url in enumerate(urls):
         try:
@@ -388,9 +388,9 @@ async def run_reconcile(link_id: int) -> dict:
         ws_channel = backends.node_channel(int(link["ws_backend"]))
         if exec_channel is None or ws_channel is None:
             _update_link(link_id, state="error",
-                         last_error="a linked node is no longer paired")
+                         last_error="a linked backend is no longer paired")
             _broadcast_links()
-            return {"ok": False, "error": "a linked node is no longer paired"}
+            return {"ok": False, "error": "a linked backend is no longer paired"}
         _update_link(link_id, state="syncing")
         _broadcast_links()
         mirror_prefix = "sessions/{}/workspace".format(link["session_id"])
