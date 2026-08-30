@@ -529,6 +529,13 @@ class SessionHub:
         session = db.get_session(self.id)
         if session is None:
             return {"error": "session gone"}
+        # The upgrade route checks the opposite direction before claiming its
+        # slot. Check here as well so a message cannot spawn an engine after
+        # its installed package has begun being rewritten in place.
+        from puppy import cli_upgrade
+        if cli_upgrade.is_running(session.get("engine") or ""):
+            return {"error": "{} is being updated - try again when it finishes".format(
+                str(session.get("engine") or "the engine"))}
         if not session["name"]:
             name = text.splitlines()[0][:48]
             db.touch_session(self.id, name=name)

@@ -2,8 +2,10 @@
 
 This adds no upgrade machinery. It decides *when* to call the existing
 ``cli_upgrade.start`` and nothing else, so an automatic run is byte-for-byte the
-run the Update button performs: driver-owned argv, one at a time, hard timeout,
-version re-probe afterwards.
+run the Update button performs: driver-owned argv, one run per engine, hard
+timeout, version re-probe afterwards. Every eligible engine in a scan is
+started before the worker waits for results, so different vendors can update
+concurrently.
 
 Two rules shape the schedule:
 
@@ -12,8 +14,8 @@ Two rules shape the schedule:
   same pair, whether it worked or not. A pair only changes when one of the two
   versions moves, which is exactly "the next current version + new version".
   The ledger is durable, so a restart does not hand a failing updater another
-  go. Being refused - busy sessions, another upgrade running, a backup in
-  flight - is not an attempt and consumes nothing.
+  go. Being refused - busy sessions, the same engine already upgrading, or a
+  backup in flight - is not an attempt and consumes nothing.
 
 * A window, not a moment. "At 03:30" means the run may start in the two hours
   after 03:30, so a node busy at the stroke of the hour still gets its update
@@ -161,7 +163,12 @@ def _skip_reason(driver, status: dict) -> Optional[str]:
 
 
 async def cycle(app=None) -> Optional[str]:
-    """One evaluation pass. Returns the engine key it started, if any."""
+    """Start every eligible engine, await them together, and return the first key.
+
+    Returning the first key preserves the original internal/test-facing
+    contract; all keys in ``started`` still run and have their ledgers recorded
+    during this pass.
+    """
     from puppy.drivers import all_drivers
     from puppy import runner
 
@@ -169,9 +176,8 @@ async def cycle(app=None) -> Optional[str]:
         return None
     if app is not None and app.get("puppy_snapshot_busy"):
         return None
-    if cli_upgrade.running_key() is not None:
-        return None
 
+    candidates = []
     for driver in all_drivers():
         key = str(driver.key)
         try:
@@ -185,6 +191,15 @@ async def cycle(app=None) -> Optional[str]:
         to_version = str(status.get("latest_version") or "")
         if attempted(key, from_version, to_version):
             continue
+        if runner.engine_blockers(key):
+            continue
+        candidates.append((driver, key, from_version, to_version))
+
+    # Claim every independent per-engine slot before awaiting a result. A
+    # manual run can win one slot while this scan is probing; that refusal does
+    # not prevent other eligible engines from updating in the same pass.
+    started = []
+    for driver, key, from_version, to_version in candidates:
         # Refusals are not attempts: the pair keeps its one run for later.
         if runner.engine_blockers(key):
             continue
@@ -192,19 +207,25 @@ async def cycle(app=None) -> Optional[str]:
             await cli_upgrade.start(driver)
         except RuntimeError as exc:
             log.info("automatic %s update deferred: %s", key, exc)
-            return None
+            continue
         log.info("automatic %s update started: %s -> %s",
                  key, from_version or "?", to_version or "?")
-        record = await _await_result(driver)
-        _record(key, from_version, to_version, record or {})
-        if record and record.get("ok") and record.get("changed"):
-            log.info("automatic %s update installed %s", key, record.get("to_version"))
-        else:
-            log.warning("automatic %s update did not take (%s); it will not be retried "
-                        "until a new version pair appears", key,
-                        (record or {}).get("error") or "version unchanged")
-        return key
-    return None
+        # The accepted start is the attempt. Reserve it durably before waiting
+        # so a restart during this updater—or while another, slower updater is
+        # still running—cannot grant the version pair a second run.
+        _record(key, from_version, to_version, {
+            "error": "update started; final result was not recorded",
+            "to_version": from_version,
+        })
+        started.append((driver, key, from_version, to_version))
+
+    if not started:
+        return None
+
+    # Each waiter finalizes its own durable record as soon as it finishes;
+    # a slow vendor must not delay the completed vendors' ledger updates.
+    await asyncio.gather(*(_await_and_record(*item) for item in started))
+    return started[0][1]
 
 
 async def _await_result(driver, timeout: float = None) -> Optional[dict]:
@@ -217,6 +238,23 @@ async def _await_result(driver, timeout: float = None) -> Optional[dict]:
             return state.get("upgrade_result")
         await asyncio.sleep(1.0)
     return None
+
+
+async def _await_and_record(driver, key: str, from_version: str,
+                            to_version: str) -> Optional[dict]:
+    record = await _await_result(driver)
+    final = record or {
+        "error": "upgrade result was not available",
+        "to_version": from_version,
+    }
+    _record(key, from_version, to_version, final)
+    if record and record.get("ok") and record.get("changed"):
+        log.info("automatic %s update installed %s", key, record.get("to_version"))
+    else:
+        log.warning("automatic %s update did not take (%s); it will not be retried "
+                    "until a new version pair appears", key,
+                    final.get("error") or "version unchanged")
+    return record
 
 
 def wake() -> None:

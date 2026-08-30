@@ -205,9 +205,11 @@ with the CLI it ships in.
 
 The run is refused with 409 while any session on that engine is running or has
 queued work, because the updater rewrites the installed package in place. Other
-engines' sessions are unaffected and do not block it. Only one upgrade runs per
-node at a time, it is bounded by a fifteen-minute timeout, and its output is
-captured and truncated rather than streamed.
+engines' sessions are unaffected and do not block it. New turns on the engine
+are refused until its update finishes. Each engine has one upgrade slot, so
+different vendor CLIs can update concurrently; every run is bounded by a
+fifteen-minute timeout, and its output is captured and truncated rather than
+streamed.
 
 It starts in the background and the POST returns immediately, so `upgrade_state`
 in the engine payload is the progress signal and `upgrade_result` the outcome -
@@ -318,9 +320,12 @@ Two rules bound the damage an unattended updater can do:
 - **One attempt per version pair.** A pair is (installed version -> latest
   version). Once the updater has *run* for a pair it never runs again for that
   same pair, successful or not, so a broken release cannot be retried in a loop.
-  The ledger is durable, so a restart does not grant a fresh attempt. Being
-  refused - busy sessions on that engine, another upgrade already running, a
-  backup in flight - is not an attempt and consumes nothing.
+  The accepted start reserves the durable ledger before Puppy waits for the
+  result, so a restart does not grant a fresh attempt. Being
+  refused - busy sessions on that engine, its updater already running, or a
+  backup in flight - is not an attempt and consumes nothing. One scan starts
+  every eligible engine before awaiting results, so independent vendors update
+  concurrently while retaining separate ledgers.
 - **A window, not a moment.** `at` permits a start during the two hours after
   the given time, so a node busy at the stroke of the hour still updates that
   night while one busy all window waits for the next day rather than replacing

@@ -5,7 +5,9 @@ already ships its own updater that knows npm / native / brew / standalone
 layouts, and that detection matrix moves with the CLI. A driver therefore
 declares only a fixed, argument-free self-update verb and this module owns the
 bounded subprocess around it: driver-owned argv (never client input), no shell,
-one run at a time, a hard timeout, and a capped transcript.
+at most one run per engine, a hard timeout, and a capped transcript. Different
+engine vendors may update concurrently; the vendor updater remains responsible
+for its own installation method and locking.
 
 The run is a detached background task. Callers start it and observe progress
 through the engine payload, which keeps the HTTP request short enough to survive
@@ -29,12 +31,9 @@ log = logging.getLogger("puppy.cli_upgrade")
 
 TIMEOUT_SECONDS = 15 * 60
 MAX_OUTPUT_CHARS = 8000
-# An engine updater usually shells out to a package manager writing into one
-# shared global prefix, so upgrades are serialized across every engine.
 _ARG_RE = re.compile(r"^-{0,2}[A-Za-z0-9][A-Za-z0-9._=-]*$")
 
 _runs: Dict[str, dict] = {}
-_running_key: Optional[str] = None
 
 
 def _source(driver) -> Optional[List[str]]:
@@ -70,8 +69,15 @@ def _argv(driver) -> Optional[List[str]]:
     return [binary] + args
 
 
-def running_key() -> Optional[str]:
-    return _running_key
+def is_running(key: str) -> bool:
+    """True while this engine's updater owns its per-engine slot."""
+    return (_runs.get(str(key)) or {}).get("state") == "running"
+
+
+def running_keys() -> List[str]:
+    """Engine keys whose independent vendor updaters are in flight."""
+    return sorted(key for key, record in _runs.items()
+                  if record.get("state") == "running")
 
 
 def state(driver) -> dict:
@@ -135,8 +141,7 @@ async def _spawn(argv: List[str]) -> tuple:
     return proc.returncode, out.decode(errors="replace") if out else ""
 
 
-async def _run(driver, argv: List[str], from_version: str) -> None:
-    global _running_key
+async def _run(driver, argv: List[str], from_version: str, token) -> None:
     key = str(driver.key)
     started_at = time.time()
     exit_code = None
@@ -167,7 +172,12 @@ async def _run(driver, argv: List[str], from_version: str) -> None:
     except Exception as exc:
         log.warning("%s latest-version refresh after upgrade failed: %s", key, exc)
 
-    record = _runs.setdefault(key, {})
+    record = _runs.get(key)
+    # A test reset or a newer run must never let this task overwrite that run's
+    # state. The token also closes the tiny gap between _run returning and its
+    # done callback being dispatched.
+    if record is None or record.get("token") is not token:
+        return
     record["state"] = "idle"
     record["result"] = {
         "ok": not error,
@@ -181,45 +191,41 @@ async def _run(driver, argv: List[str], from_version: str) -> None:
         "message": _last_line(output),
         "output": _tail(output),
     }
-    record.pop("task", None)
-    if _running_key == key:
-        _running_key = None
     log.info("%s upgrade finished: %s -> %s (%s)", key, from_version or "?",
              to_version or "?", error or "ok")
 
 
 async def start(driver) -> dict:
-    """Begin one upgrade in the background; raises RuntimeError when refused."""
-    global _running_key
+    """Begin this engine's upgrade; other engines may update concurrently."""
     key = str(driver.key)
     if not supported(driver):
         raise RuntimeError("{} does not support in-place upgrades".format(driver.label))
-    if _running_key is not None:
-        busy = _running_key
-        raise RuntimeError("an engine upgrade is already running"
-                           if busy == key else
-                           "the {} upgrade is still running".format(busy))
+    if is_running(key):
+        raise RuntimeError("the {} upgrade is already running".format(key))
     argv = _argv(driver)
     if argv is None:
         raise RuntimeError("{} is not installed on this node".format(driver.label))
 
-    # Claim the slot before the first await: two clicks arriving together must
-    # not both get past the check above and start competing package managers.
+    # Claim this engine's slot before the first await: two clicks arriving
+    # together must not both start a vendor updater for the same installation.
     record = _runs.setdefault(key, {})
+    token = object()
     record["state"] = "running"
     record["started_at"] = time.time()
     record["result"] = None
-    _running_key = key
+    record["token"] = token
+    record.pop("task", None)
     try:
         status = await driver.status()
         from_version = str(status.get("version") or "")
     except Exception:
         from_version = ""
-    task = asyncio.ensure_future(_run(driver, argv, from_version))
+    task = asyncio.ensure_future(_run(driver, argv, from_version, token))
     record["task"] = task
 
     def _done(finished) -> None:
-        global _running_key
+        if record.get("token") is not token:
+            return
         if record.get("state") == "running":
             record["state"] = "idle"
             record["result"] = {
@@ -228,8 +234,8 @@ async def start(driver) -> dict:
                 "to_version": from_version, "started_at": record.get("started_at"),
                 "finished_at": time.time(), "message": "", "output": "",
             }
-        if _running_key == key:
-            _running_key = None
+        record.pop("task", None)
+        record.pop("token", None)
         if not finished.cancelled() and finished.exception() is not None:
             log.warning("%s upgrade task failed: %s", key, finished.exception())
 
@@ -239,6 +245,8 @@ async def start(driver) -> dict:
 
 
 def reset_for_tests() -> None:
-    global _running_key
+    for record in _runs.values():
+        task = record.get("task")
+        if task is not None and not task.done():
+            task.cancel()
     _runs.clear()
-    _running_key = None

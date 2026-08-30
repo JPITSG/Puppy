@@ -37,6 +37,12 @@ from puppy.web import build_app  # noqa: E402
 STUB_BIN = TEST_ROOT / "bin"
 VERSION_FILE = TEST_ROOT / "installed-version"
 BEHAVIOUR_FILE = TEST_ROOT / "behaviour"
+STARTED_FILE = TEST_ROOT / "started"
+RELEASE_FILE = TEST_ROOT / "release"
+OTHER_VERSION_FILE = TEST_ROOT / "other-installed-version"
+OTHER_BEHAVIOUR_FILE = TEST_ROOT / "other-behaviour"
+OTHER_STARTED_FILE = TEST_ROOT / "other-started"
+OTHER_RELEASE_FILE = TEST_ROOT / "other-release"
 
 STUB = """#!/bin/sh
 if [ "$1" = "--version" ]; then cat "{version}"; exit 0; fi
@@ -47,6 +53,16 @@ if [ "$1" = "update" ]; then
     noop)   echo "already on the latest version"; exit 0;;
     fail)   echo "npm ERR! EACCES: permission denied" 1>&2; exit 7;;
     hang)   sleep 30; exit 0;;
+    hold)   : > "{started}"
+            i=0
+            while [ ! -f "{release}" ] && [ "$i" -lt 300 ]; do
+              sleep 0.1
+              i=$((i + 1))
+            done
+            [ -f "{release}" ] || exit 8
+            echo "2.0.0" > "{version}"
+            echo "updated to 2.0.0"
+            exit 0;;
   esac
 fi
 exit 3
@@ -72,15 +88,43 @@ class BareDriver(StubDriver):
     upgrade_source = None
 
 
+class OtherStubDriver(StubDriver):
+    key = "other"
+    label = "Other Stub Engine"
+    binary = "puppy-other-stub-engine"
+    release_source = {"kind": "npm", "package": "other-stub-cli"}
+
+
+def _write_stub_binary(binary: str, version: Path, behaviour: Path,
+                       started: Path, release: Path) -> None:
+    version.write_text("1.0.0\n", encoding="utf-8")
+    behaviour.write_text("ok", encoding="utf-8")
+    path = STUB_BIN / binary
+    path.write_text(STUB.format(
+        version=version, behaviour=behaviour, started=started, release=release),
+        encoding="utf-8")
+    path.chmod(0o755)
+
+
 def write_stub() -> None:
     STUB_BIN.mkdir(parents=True, exist_ok=True)
-    VERSION_FILE.write_text("1.0.0\n", encoding="utf-8")
-    BEHAVIOUR_FILE.write_text("ok", encoding="utf-8")
-    path = STUB_BIN / StubDriver.binary
-    path.write_text(STUB.format(version=VERSION_FILE, behaviour=BEHAVIOUR_FILE),
-                    encoding="utf-8")
-    path.chmod(0o755)
+    _write_stub_binary(StubDriver.binary, VERSION_FILE, BEHAVIOUR_FILE,
+                       STARTED_FILE, RELEASE_FILE)
+    _write_stub_binary(OtherStubDriver.binary, OTHER_VERSION_FILE, OTHER_BEHAVIOUR_FILE,
+                       OTHER_STARTED_FILE, OTHER_RELEASE_FILE)
     os.environ["PATH"] = "{}{}{}".format(STUB_BIN, os.pathsep, os.environ.get("PATH", ""))
+
+
+async def wait_file(path: Path, timeout: float = 5.0) -> None:
+    deadline = asyncio.get_event_loop().time() + timeout
+    while not path.exists():
+        assert asyncio.get_event_loop().time() < deadline, "{} was never created".format(path)
+        await asyncio.sleep(0.05)
+
+
+async def no_registry_refresh(_drivers) -> bool:
+    """The upgrade re-probe is exercised without contacting a real registry."""
+    return True
 
 
 def check_descriptor_validation() -> None:
@@ -223,6 +267,60 @@ async def exercise_http() -> None:
             assert "usage_refresh" in refreshed
             assert next(e for e in refreshed["engines"]
                         if e["key"] == "stub")["version"] == "3.0.0"
+
+            # Two different engine routes own independent slots. Hold both
+            # real subprocesses open until their marker files prove overlap.
+            VERSION_FILE.write_text("1.0.0\n", encoding="utf-8")
+            OTHER_VERSION_FILE.write_text("1.0.0\n", encoding="utf-8")
+            BEHAVIOUR_FILE.write_text("hold", encoding="utf-8")
+            OTHER_BEHAVIOUR_FILE.write_text("hold", encoding="utf-8")
+            for path in (STARTED_FILE, RELEASE_FILE, OTHER_STARTED_FILE,
+                         OTHER_RELEASE_FILE):
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+            driver_base.invalidate_status()
+            try:
+                async with http.post(
+                        url + "/api/engines/stub/upgrade", headers=headers) as response:
+                    assert response.status == 200, await response.text()
+                async with http.post(
+                        url + "/api/engines/other/upgrade", headers=headers) as response:
+                    assert response.status == 200, await response.text()
+                await asyncio.gather(wait_file(STARTED_FILE), wait_file(OTHER_STARTED_FILE))
+                assert cli_upgrade.running_keys() == ["other", "stub"]
+
+                # Same-engine deduplication remains strict while the other
+                # engine's updater is allowed to keep running beside it.
+                async with http.post(
+                        url + "/api/engines/stub/upgrade", headers=headers) as response:
+                    clash = await response.json()
+                    assert response.status == 409, clash
+                    assert "already running" in clash["error"]
+
+                # Once claimed, the slot also prevents a new turn from
+                # spawning that engine midway through its package rewrite.
+                guarded = db.create_session(
+                    "upgrade guard", "stub", str(TEST_ROOT), "", "", "blue", "auto")
+                async with http.post(
+                        url + "/api/sessions/{}/message".format(guarded), headers=headers,
+                        json={"text": "do not start yet"}) as response:
+                    rejected = await response.json()
+                    assert response.status == 400, rejected
+                    assert "being updated" in rejected["error"]
+            finally:
+                RELEASE_FILE.write_text("go", encoding="utf-8")
+                OTHER_RELEASE_FILE.write_text("go", encoding="utf-8")
+
+            first, second = await asyncio.gather(
+                wait_idle(http, url, headers, "stub"),
+                wait_idle(http, url, headers, "other"))
+            assert first["upgrade_result"]["changed"] is True, first
+            assert second["upgrade_result"]["changed"] is True, second
+            assert cli_upgrade.running_keys() == []
+            BEHAVIOUR_FILE.write_text("ok", encoding="utf-8")
+            OTHER_BEHAVIOUR_FILE.write_text("ok", encoding="utf-8")
     finally:
         await runner.cleanup()
 
@@ -243,16 +341,16 @@ async def check_timeout() -> None:
         assert state["upgrade_state"] == "idle", state
         assert state["upgrade_result"]["ok"] is False
         assert "timed out" in state["upgrade_result"]["error"], state
-        assert cli_upgrade.running_key() is None
+        assert cli_upgrade.running_keys() == []
     finally:
         cli_upgrade.TIMEOUT_SECONDS = original
         BEHAVIOUR_FILE.write_text("ok", encoding="utf-8")
 
 
-def seed_latest(version: str) -> None:
+def seed_latest(version: str, key: str = "stub", package: str = "stub-cli") -> None:
     """Publish a latest version for the stub without touching the network."""
-    cli_releases._cache["stub"] = {
-        "source": "npm:stub-cli", "latest_version": version,
+    cli_releases._cache[key] = {
+        "source": "npm:" + package, "latest_version": version,
         "checked_at": time.time(), "error": "",
     }
 
@@ -295,6 +393,10 @@ async def check_attempt_once() -> None:
     cli_auto_upgrade.forget("stub")
     cli_auto_upgrade.set_settings({"enabled": True, "mode": "now"})
     seed_latest("2.0.0")
+    # Keep the second test engine current so this test continues to isolate
+    # the original single-engine attempt-ledger behavior.
+    OTHER_VERSION_FILE.write_text("2.0.0\n")
+    seed_latest("2.0.0", "other", "other-stub-cli")
 
     # A busy engine defers without spending the pair's single attempt.
     busy = db.create_session("busy stub", "stub", str(TEST_ROOT), "", "", "blue", "auto")
@@ -329,26 +431,82 @@ async def check_attempt_once() -> None:
     cli_auto_upgrade.set_settings({"enabled": False})
 
 
+async def check_concurrent_automatic_updates() -> None:
+    """One scheduler pass starts all eligible vendor updaters before waiting."""
+    stub = drivers.get_driver("stub")
+    other = drivers.get_driver("other")
+    VERSION_FILE.write_text("1.0.0\n", encoding="utf-8")
+    OTHER_VERSION_FILE.write_text("1.0.0\n", encoding="utf-8")
+    BEHAVIOUR_FILE.write_text("hold", encoding="utf-8")
+    OTHER_BEHAVIOUR_FILE.write_text("hold", encoding="utf-8")
+    for path in (STARTED_FILE, RELEASE_FILE, OTHER_STARTED_FILE, OTHER_RELEASE_FILE):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+    driver_base.invalidate_status()
+    cli_upgrade.reset_for_tests()
+    cli_auto_upgrade.forget("stub")
+    cli_auto_upgrade.forget("other")
+    cli_auto_upgrade.set_settings({"enabled": True, "mode": "now"})
+    seed_latest("2.0.0")
+    seed_latest("2.0.0", "other", "other-stub-cli")
+
+    task = asyncio.create_task(cli_auto_upgrade.cycle(None))
+    result = None
+    try:
+        await asyncio.gather(wait_file(STARTED_FILE), wait_file(OTHER_STARTED_FILE))
+        assert cli_upgrade.running_keys() == ["other", "stub"]
+        assert cli_upgrade.state(stub)["upgrade_state"] == "running"
+        assert cli_upgrade.state(other)["upgrade_state"] == "running"
+        # Accepted starts reserve both pairs before either subprocess is
+        # released, so a process restart cannot grant a duplicate attempt.
+        for key in ("stub", "other"):
+            assert cli_auto_upgrade.attempted(key, "1.0.0", "2.0.0")
+            pending = cli_auto_upgrade.payload()["last_attempts"][key]
+            assert pending["ok"] is False
+            assert "final result was not recorded" in pending["error"]
+    finally:
+        RELEASE_FILE.write_text("go", encoding="utf-8")
+        OTHER_RELEASE_FILE.write_text("go", encoding="utf-8")
+        result = await asyncio.wait_for(task, timeout=15)
+
+    assert result == "stub"
+    assert cli_upgrade.running_keys() == []
+    assert cli_auto_upgrade.attempted("stub", "1.0.0", "2.0.0")
+    assert cli_auto_upgrade.attempted("other", "1.0.0", "2.0.0")
+    for key in ("stub", "other"):
+        record = cli_auto_upgrade.payload()["last_attempts"][key]
+        assert record["ok"] is True and record["installed_after"] == "2.0.0", record
+    BEHAVIOUR_FILE.write_text("ok", encoding="utf-8")
+    OTHER_BEHAVIOUR_FILE.write_text("ok", encoding="utf-8")
+    cli_auto_upgrade.set_settings({"enabled": False})
+
+
 async def main() -> None:
     try:
         write_stub()
         check_descriptor_validation()
         # Only the stubs from here on: the shipped engines would probe real
         # binaries and the real registry, which this test must not depend on.
-        drivers._DRIVERS = {"stub": StubDriver(), "bare": BareDriver()}
+        drivers._DRIVERS = {
+            "stub": StubDriver(), "bare": BareDriver(), "other": OtherStubDriver(),
+        }
         config.load()
         db.connect()
         auth.create_user("upgrade-user", "secret123")
         # Keep the registry out of it: this test must never touch the network.
         cli_releases.CHECK_INTERVAL_SECONDS = 10 ** 9
+        cli_releases._refresh = no_registry_refresh
         driver_base.invalidate_status()
         cli_upgrade.reset_for_tests()
         await exercise_http()
         await check_timeout()
         await check_schedule()
         await check_attempt_once()
-        print("engine version refresh, idle gate, upgrade, schedule and "
-              "attempt-once paths passed")
+        await check_concurrent_automatic_updates()
+        print("engine version refresh, idle gate, concurrent manual/automatic upgrades, "
+              "schedule and attempt-once paths passed")
     finally:
         shutil.rmtree(TEST_ROOT, ignore_errors=True)
 

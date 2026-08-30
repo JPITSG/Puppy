@@ -8706,6 +8706,7 @@ class SettingsView {
     this.upgradePollTimer = null;
     this.upgradePollGeneration = 0;
     this.engineUpgradeState = new Map();   // "bid:engine" -> "running" | "idle"
+    this.engineUpgradeStarts = new Set();  // POST accepted or rejected asynchronously
     this.engineUpgradePollTimer = null;
     this.engineUpgradePollGeneration = 0;
     this.localEngineGroup = null;
@@ -8718,6 +8719,7 @@ class SettingsView {
     this.stopUpgradeReadinessPolling();
     this.stopEngineUpgradePolling();
     this.engineUpgradeState.clear();
+    this.engineUpgradeStarts.clear();
     this.remoteEngineGroups.clear();
     this.remoteBackendDots.clear();
     this.remoteBackendMeta.clear();
@@ -8762,7 +8764,7 @@ class SettingsView {
       for (const engine of node.engines) {
         const id = `${node.bid}:${engine.key}`;
         const was = this.engineUpgradeState.get(id);
-        if (engine.upgrade_state === "running") {
+        if (engine.upgrade_state === "running" || this.engineUpgradeStarts.has(id)) {
           running = true;
           this.engineUpgradeState.set(id, "running");
         } else {
@@ -9104,8 +9106,10 @@ class SettingsView {
      appears only when there is something to do (or something already running).
      A settled, current node keeps the panel exactly as it reads today. */
   engineUpdateButton(bid, nodeName, e2) {
+    const id = `${bid}:${e2.key}`;
     const upgrading = e2.upgrade_state === "running";
-    if (!upgrading && !(e2.installed && e2.update_available === true)) return null;
+    const starting = this.engineUpgradeStarts.has(id);
+    if (!upgrading && !starting && !(e2.installed && e2.update_available === true)) return null;
     const button = el("button", "btn btn-sm engine-update", "Update");
     button.type = "button";
     const set = (text, disabled, description) => {
@@ -9116,6 +9120,9 @@ class SettingsView {
     const target = e2.latest_version ? `v${e2.latest_version}` : "the latest version";
     if (upgrading) {
       set("Updating…", true, "update is running");
+      button.classList.add("busy");
+    } else if (starting) {
+      set("Starting…", true, "update is starting");
       button.classList.add("busy");
     } else if (!e2.upgrade_supported || !backendSupportsEngineUpgrade(bid)) {
       set("Update", true, "this node cannot update its engines from here");
@@ -9130,13 +9137,25 @@ class SettingsView {
   }
 
   async startEngineUpgrade(bid, nodeName, e2) {
+    const id = `${bid}:${e2.key}`;
+    if (this.engineUpgradeStarts.has(id)) return;
+    this.engineUpgradeStarts.add(id);
+    this.syncRemoteState();
+    let accepted = false;
     try {
       const result = await api(bid, `engines/${encodeURIComponent(e2.key)}/upgrade`,
         { method: "POST", timeoutMs: 30000 });
+      accepted = true;
       applyEnginesPayload(bid, result);
       toast(`${nodeName}: updating ${e2.label}…`, "info");
     } catch (error) {
       toast(`${nodeName}: ${error.message}`, "error", 7000);
+    } finally {
+      this.engineUpgradeStarts.delete(id);
+      /* A successful updater can finish before its POST response is painted.
+         While starting, syncEngineUpgrades records a logical running edge, so
+         this sync reports that fast result exactly like a polled completion. */
+      if (!accepted) this.engineUpgradeState.delete(id);
       this.syncRemoteState();
     }
   }
