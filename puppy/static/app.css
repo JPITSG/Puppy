@@ -178,6 +178,8 @@ a{color:var(--acc2)}
 /* The first group needs no top padding: the scroller's 2px plus the actions'
    10px already give it the same 12px clearance the New session button has above. */
 #sess-groups>.sess-group:first-child>.sess-group-title{padding-top:0}
+.sess-group.dragging{opacity:.28}
+#sess-groups.reordering .sess-group{will-change:transform}
 .gdot{display:block;flex:0 0 6px;width:6px;height:6px;border-radius:50%;background:var(--txt3)}
 .gdot.ok{background:var(--ok)}
 .gdot.bad{background:var(--err)}
@@ -1100,7 +1102,11 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   font-family:var(--sans);font-size:10px;text-transform:uppercase;letter-spacing:.09em;
   color:var(--txt3);opacity:.85;margin-bottom:1px;
 }
+.queue-strip .q-live-list{display:flex;flex-direction:column;gap:1px;min-width:0}
 .queue-strip .q-item{display:flex;align-items:center;gap:7px;min-width:0}
+.queue-strip .q-item.q-sortable{cursor:grab;user-select:none}
+.queue-strip .q-item.q-sortable.dragging{opacity:.28;cursor:grabbing}
+.queue-strip .q-live-list.reordering .q-live{will-change:transform}
 .queue-strip .q-n{flex:0 0 auto;opacity:.55;font-variant-numeric:tabular-nums}
 /* each row is one line; the tail fades rather than ending in an ellipsis */
 .queue-strip .q-t{flex:1;min-width:0;white-space:nowrap;overflow:hidden}
@@ -1122,8 +1128,8 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 @media (hover:hover){.queue-strip .q-x:hover{background:var(--hov);color:var(--err)}}
 .queue-strip .q-x:active{transform:scale(.88);background:var(--hov);color:var(--err)}
 /* Only ordinary queued prompts receive this toggle. A paused prompt keeps its
-   position (and everything behind it) while the play icon remains easy to find
-   on both pointer and touch layouts. */
+   visible position while later runnable prompts may pass it; the play icon
+   remains easy to find on both pointer and touch layouts. */
 .queue-strip .q-pause{
   position:relative;flex:0 0 auto;
   display:inline-flex;align-items:center;justify-content:center;

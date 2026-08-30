@@ -1272,10 +1272,13 @@ submission.view.receiveDraft({type:"draft",text:"",revision:3,updated_at:14,
 
 console.log(JSON.stringify({sent:first.sent,pendingJournal,journalCleared,followed,
   whilePending,afterAck,latest:first.view.ta.value,sharedAttachment,uploadPreserved,
-  localOnly:{text:localOnly.view.ta.value,sent:localOnly.sent},invalidJournal,
+  localOnly:{text:localOnly.view.ta.value,sent:localOnly.sent,
+             caret:localOnly.view.ta.selectionStart},invalidJournal,
   stale:{text:stale.view.ta.value,sent:stale.sent,
-         journal:storage.has("puppy.draft.s:0:44")},
-  unacked:{text:unacked.view.ta.value,sent:unacked.sent},
+         journal:storage.has("puppy.draft.s:0:44"),
+         caret:stale.view.ta.selectionStart},
+  unacked:{text:unacked.view.ta.value,sent:unacked.sent,
+           caret:unacked.view.ta.selectionStart},
   offline:{before:offlineBefore,text:offline.view.ta.value,sent:offline.sent},
   burst:{beforeAck:burstBeforeAck,afterFirstAck:burstAfterFirstAck,
          journal:storage.has("puppy.draft.s:0:48")},
@@ -1306,9 +1309,12 @@ console.log(JSON.stringify({sent:first.sent,pendingJournal,journalCleared,follow
         "count": 1, "uploading": True, "text": "peer prose"}, result
     assert result["localOnly"]["text"] == "local-only text", result
     assert result["localOnly"]["sent"] == [] and result["invalidJournal"] is None, result
+    assert result["localOnly"]["caret"] == len("local-only text"), result
     assert result["stale"] == {
-        "text": "newer server text", "sent": [], "journal": False}, result
+        "text": "newer server text", "sent": [], "journal": False,
+        "caret": len("newer server text")}, result
     assert result["unacked"]["text"] == "unacknowledged edit", result
+    assert result["unacked"]["caret"] == len("unacknowledged edit"), result
     assert result["unacked"]["sent"][0]["text"] == "unacknowledged edit", result
     assert result["offline"]["before"] == {"ready": False, "touched": True}, result
     assert result["offline"]["text"] == "typed while disconnected", result
@@ -1694,9 +1700,9 @@ function clearTimeout() { timer=null; }
     assert result["toasts"] == [], result
 
 
-def check_queue_pause_ui(ui_source: str, css_source: str) -> None:
-    """Pause/play belongs only to ordinary queued prompts and stays compact."""
-    start = ui_source.index("\n  renderQueue(q, held, paused)")
+def check_queue_controls_ui(ui_source: str, css_source: str) -> None:
+    """Pause/play and guarded dragging belong only to queued prompts."""
+    start = ui_source.index("\n  renderQueue(q, held, paused, revision)")
     end = ui_source.index("\n  unqueue(index, text)", start)
     render = ui_source[start:end]
     held_start = render.index("held.forEach")
@@ -1709,9 +1715,16 @@ def check_queue_pause_ui(ui_source: str, css_source: str) -> None:
     assert 'this.setQueuePaused(i, ident, !isPaused)' in render
     assert 'type: "set_queue_paused", index, text, paused' in ui_source
     assert 'backend.capabilities.includes("queue-pause")' in ui_source
+    assert 'backend.capabilities.includes("queue-reorder")' in ui_source
+    assert 'type: "begin_queue_reorder", request_id: requestId' in ui_source
+    assert 'type: "reorder_queue", request_id: context.requestId' in ui_source
+    assert "!context.ready" in ui_source
+    assert 'moveDragSlot(container, this.queueDrag.item, ".q-live"' in ui_source
     assert '.queue-strip .q-pause{' in css_source
     assert 'width:16px;height:16px;' in css_source
     assert '.queue-strip .q-item.q-paused .q-t{opacity:.58}' in css_source
+    assert '.queue-strip .q-item.q-sortable{cursor:grab;user-select:none}' in css_source
+    assert '.queue-strip .q-live-list.reordering .q-live{will-change:transform}' in css_source
 
 
 def check_system_prompt_settings(ui_source: str, css_source: str) -> None:
@@ -1732,7 +1745,7 @@ def check_system_prompt_settings(ui_source: str, css_source: str) -> None:
     assert "browserNote.textContent = `Sent only for turns on ${node.name}" not in ui_source
     assert 'body: { custom: record.customDraft, browser: record.browserDraft }' in ui_source
     runner_source = (BASE / "puppy" / "runner.py").read_text()
-    assert "system_prompt=system_prompts.custom_prompt()" in runner_source
+    assert "system_prompt_text = system_prompts.custom_prompt()" in runner_source
     assert ".engine-updates-section{" in css_source
     assert ".system-prompt-section+.system-prompt-section{" in css_source
     assert ".system-prompt-section-head{" in css_source
@@ -2042,6 +2055,21 @@ def check_status_header_activation(ui_source: str, css_source: str) -> None:
     assert "wireDoubleClickOrTouch(name, () => disclosure.click()" not in render
     assert (".foot-engine-head{display:flex;align-items:center;gap:6px;min-width:0;" +
             "color:var(--txt3);cursor:pointer}") in css_source
+
+
+def check_shared_node_order(ui_source: str, css_source: str) -> None:
+    """The sidebar and status panel edit the same browser-local node order."""
+    sidebar = ui_source[
+        ui_source.index("function renderSidebar()"):
+        ui_source.index("\nfunction sessDot", ui_source.index("function renderSidebar()"))]
+    assert "sortNodeGroups(groups);" in sidebar
+    assert "wireNodeGroupDropZone(root);" in sidebar
+    assert 'wireNodeGroupDrag(group, t, key, ".sess-group");' in sidebar
+    assert 'selector = ".foot-engine-group"' in ui_source
+    assert 'restoreDragSlots(context, context.selector);' in ui_source
+    assert 'lsSet(NODE_ORDER_KEY, JSON.stringify(keys));' in ui_source
+    assert ".sess-group.dragging{opacity:.28}" in css_source
+    assert "#sess-groups.reordering .sess-group{will-change:transform}" in css_source
 
 
 def check_switch_engine_initial_selection(ui_source: str) -> None:
@@ -3253,13 +3281,14 @@ async def main() -> None:
             check_browser_handoff_ui(ui_source, css_source)
             check_desktop_side_drag(ui_source)
             check_user_message_copy(ui_source)
-            check_queue_pause_ui(ui_source, css_source)
+            check_queue_controls_ui(ui_source, css_source)
             check_system_prompt_settings(ui_source, css_source)
             check_opencode_chat_models(ui_source, css_source)
             check_session_provider_marks(css_source)
             check_sidebar_icon_alignment(css_source)
             check_toast_touch_swipe(ui_source, css_source)
             check_status_header_activation(ui_source, css_source)
+            check_shared_node_order(ui_source, css_source)
             check_switch_engine_initial_selection(ui_source)
             check_engine_picker_alignment(css_source)
             check_browser_chip_order(ui_source)

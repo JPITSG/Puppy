@@ -58,6 +58,10 @@ SHUTDOWN_NOTICE_CAPABILITY = "shutdown-notice"
 # socket accepts ``set_queue_paused``. Older controllers ignore the field;
 # newer controllers hide the control until a remote node advertises support.
 QUEUE_PAUSE_CAPABILITY = "queue-pause"
+# The session socket can hold automatic dequeue while a client rearranges the
+# live queue, then atomically accept a revision-guarded permutation. Older
+# nodes keep their ordinary queue and pause controls without draggable rows.
+QUEUE_REORDER_CAPABILITY = "queue-reorder"
 # The session snapshot carries a durable, versioned composer draft and the
 # existing session socket accepts and broadcasts draft edits. Older remote
 # nodes keep the console's local-only compatibility path.
@@ -77,6 +81,7 @@ BASE_CAPABILITIES = (
     "approvals",
     "message-queue",
     QUEUE_PAUSE_CAPABILITY,
+    QUEUE_REORDER_CAPABILITY,
     SESSION_DRAFT_CAPABILITY,
     # model/effort changes made while work is pending hold their place in the
     # message queue ({kind:"config"} items) instead of applying immediately

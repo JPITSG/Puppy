@@ -547,6 +547,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "engine-model-selection" not in ping["capabilities"]
         assert "file-uploads" in ping["capabilities"]
         assert "queue-pause" in ping["capabilities"]
+        assert "queue-reorder" in ping["capabilities"]
         assert "session-drafts" in ping["capabilities"]
         assert "system-prompt" in ping["capabilities"]
         assert "shutdown-notice" in ping["capabilities"]
@@ -1036,6 +1037,7 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert full_ping["role"] == "full" and full_ping["protocol"] == 1
         assert "terminal" in full_ping["capabilities"]
         assert "queue-pause" in full_ping["capabilities"]
+        assert "queue-reorder" in full_ping["capabilities"]
         assert "session-drafts" in full_ping["capabilities"]
         assert "browser-handoff" in full_ping["capabilities"]
         assert "browser-file-workflows" in full_ping["capabilities"]
@@ -1091,6 +1093,7 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert "engine-upgrade" in stored["capabilities"]
         assert "file-uploads" in stored["capabilities"]
         assert "queue-pause" in stored["capabilities"]
+        assert "queue-reorder" in stored["capabilities"]
         assert "session-drafts" in stored["capabilities"]
         assert "browser-handoff" in stored["capabilities"]
         assert "browser-file-workflows" in stored["capabilities"]
@@ -1852,7 +1855,8 @@ async def exercise_queue_persistence(runner, db) -> None:
 
 
 async def exercise_queue_pause(runner, db) -> None:
-    """Pausing is ordered, durable, stale-safe, and distinct from held work."""
+    """Pausing skips only that prompt, stays durable/stale-safe, and remains
+    distinct from held work."""
     sid = db.create_session("queue pause", "claude", "/tmp", "", "", "blue", "auto")
     try:
         h = runner.hub(sid)
@@ -1873,35 +1877,38 @@ async def exercise_queue_pause(runner, db) -> None:
         assert h.snapshot()["paused"] == [2]
         assert db.meta_get("session_queue.{}".format(sid))["paused"] == [2]
 
-        # Earlier work still runs. Consuming it shifts the paused index, then
-        # the queue stops before applying the configuration tied to "third".
+        # Earlier work still runs. Consuming it shifts the paused index; the
+        # later unpaused prompt then passes it and sees the intervening config.
         assert h._take_next_turn() == "second"
         assert h.queue == [pending_config, "third", "fourth"]
         assert h._paused_wire() == [1]
-        before_model = db.get_session(sid)["model"]
-        assert h._take_next_turn() is None
-        assert h.status == "idle" and h.queue == [pending_config, "third", "fourth"]
-        assert db.get_session(sid)["model"] == before_model
+        assert h._take_next_turn() == "fourth"
+        assert h.queue == ["third"] and h._paused_wire() == [0]
+        assert db.get_session(sid)["model"] == "paused-model"
+        assert h._take_next_turn() is None and h.status == "idle"
 
-        # Play resumes an idle front prompt immediately, applying its preceding
-        # configuration first and leaving the rest of the queue in order.
+        # Play resumes the only remaining prompt immediately.
         started = []
         h._start_turn = lambda text: (started.append(text),
                                       setattr(h, "status", "running"))
-        assert h.set_queue_paused(1, "third", False) == {"ok": True, "paused": False}
+        assert h.set_queue_paused(0, "third", False) == {"ok": True, "paused": False}
         assert started == ["third"]
-        assert h.queue == ["fourth"] and h._paused_wire() == []
+        assert h.queue == [] and h._paused_wire() == []
         assert db.get_session(sid)["model"] == "paused-model"
 
-        # Removing a paused row clears its sidecar state. A kill instead moves
-        # the prose to held, where resend/discard already supply the only state
-        # transition and pause must not leak through.
-        h.status = "idle"       # "fourth" has now reached the paused frontier
-        h.queue.append("fifth")
-        assert h.set_queue_paused(0, "fourth", True) == {"ok": True, "paused": True}
-        assert h.unqueue(0, "fourth") == {"ok": True}
+        # Pausing the front of an idle queue starts the later prompt rather
+        # than stranding it. Removing the paused row clears its sidecar state.
+        h.status = "idle"
+        h.queue = ["remove me", "fifth"]
+        assert h.set_queue_paused(0, "remove me", True) == {
+            "ok": True, "paused": True}
         assert started == ["third", "fifth"]
+        assert h.queue == ["remove me"] and h._paused_wire() == [0]
+        assert h.unqueue(0, "remove me") == {"ok": True}
         assert h.queue == [] and h._paused_wire() == []
+
+        # A kill instead moves prose to held, where resend/discard already
+        # supply the only state transition and pause must not leak through.
         h.status = "running"
         h.queue = ["held after stop"]
         assert h.set_queue_paused(0, "held after stop", True) == {
@@ -1909,6 +1916,79 @@ async def exercise_queue_pause(runner, db) -> None:
         await h.kill()
         assert h.queue == [] and h.held == ["held after stop"]
         assert h.snapshot()["paused"] == []
+    finally:
+        runner.drop_hub(sid)
+        db.delete_session(sid)
+
+
+async def exercise_queue_reorder(runner, db) -> None:
+    """A revision-guarded drag holds dequeue, remaps pause indexes, and resumes
+    from the user's chosen order when the hold is released."""
+    sid = db.create_session("queue reorder", "claude", "/tmp", "", "",
+                            "blue", "auto")
+    try:
+        h = runner.hub(sid)
+        pending_config = {
+            "kind": "config", "fields": {"model": "later-model"},
+            "key": 'config:{"model": "later-model"}',
+        }
+        h.status = "running"
+        h.queue = ["one", pending_config, "two", "three"]
+        h.paused_queue = {0, 3}
+        h._broadcast_queue()
+        revision = h.queue_revision
+        owner = object()
+        other = object()
+
+        assert "error" in h.begin_queue_reorder(owner, "stale", revision - 1)
+        assert h.begin_queue_reorder(owner, "drag-1", revision) == {
+            "ok": True, "queue_revision": revision}
+        assert "error" in h.begin_queue_reorder(other, "drag-2", revision)
+
+        # The turn finishes while the row is in flight. No prompt can start
+        # until the acknowledged holder commits or cancels.
+        h.status = "idle"
+        h.active_since = time.time() - 8
+        h._queue_waiting_completion = (h.active_since, False, "ok")
+        started = []
+        h._start_turn = lambda text: (started.append(text),
+                                      setattr(h, "status", "running"))
+        assert h._start_queue_if_ready() is False
+        assert h.queue[0] == "one"
+
+        result = h.reorder_queue(
+            owner, "drag-1", revision, [2, 1, 0, 3])
+        assert result["ok"] is True and result["started"] is True
+        assert started == ["two"]
+        assert h.queue == [pending_config, "one", "three"]
+        assert h._paused_wire() == [1, 2]
+        assert h._queue_reorder is None
+        assert h._queue_waiting_completion is None
+
+        # A malformed drop releases the lease but never mutates the queue.
+        h.status = "running"
+        h._broadcast_queue()
+        revision = h.queue_revision
+        assert h.begin_queue_reorder(owner, "drag-3", revision)["ok"] is True
+        before = list(h.queue)
+        rejected = h.reorder_queue(owner, "drag-3", revision, [0, 0, 1])
+        assert rejected["error"] == "invalid queue order"
+        assert h.queue == before and h._queue_reorder is None
+
+        # If every remaining prompt is paused, releasing the transition ends
+        # the deferred activity block instead of leaving it half-complete.
+        h.status = "idle"
+        h.queue = ["paused one", "paused two"]
+        h.paused_queue = {0, 1}
+        h.active_since = time.time() - 4
+        h._queue_waiting_completion = (h.active_since, False, "ok")
+        h._broadcast_queue()
+        revision = h.queue_revision
+        assert h.begin_queue_reorder(owner, "drag-4", revision)["ok"] is True
+        settled = h.finish_queue_reorder(owner, "drag-4")
+        assert settled["ok"] is True and settled["started"] is False
+        assert h.active_since is None and h.last_completion_status == "ok"
+        assert h._queue_waiting_completion is None
     finally:
         runner.drop_hub(sid)
         db.delete_session(sid)
@@ -2190,12 +2270,12 @@ async def exercise_engine_switch_queue(url: str, token: str, runner, db) -> None
 
 
 async def exercise_queue_pause_websocket(url: str, token: str, runner, db) -> None:
-    """The authenticated session socket carries the additive pause contract."""
+    """The authenticated socket carries pause and revision-guarded reorder."""
     sid = db.create_session("queue pause socket", "claude", "/tmp", "", "",
                             "blue", "auto")
     h = runner.hub(sid)
     h.status = "running"
-    h.queue = ["socket queued prompt"]
+    h.queue = ["socket queued prompt", "socket second prompt"]
     h._broadcast_queue()
     ws = None
     try:
@@ -2204,13 +2284,48 @@ async def exercise_queue_pause_websocket(url: str, token: str, runner, db) -> No
                 url + "/api/ws/session/{}".format(sid),
                 headers={"X-Puppy-Token": token})
             snapshot = await ws.receive_json(timeout=3)
-            assert snapshot["queued"] == ["socket queued prompt"]
+            assert snapshot["queued"] == [
+                "socket queued prompt", "socket second prompt"]
             assert snapshot["paused"] == []
+            assert isinstance(snapshot["queue_revision"], int)
 
             await ws.send_json({"type": "set_queue_paused", "index": 0,
                                 "text": "socket queued prompt", "paused": True})
             paused = await ws.receive_json(timeout=3)
             assert paused["type"] == "queued" and paused["paused"] == [0], paused
+
+            await ws.send_json({
+                "type": "begin_queue_reorder", "request_id": "socket-drag",
+                "queue_revision": paused["queue_revision"],
+            })
+            ready = await ws.receive_json(timeout=3)
+            assert ready == {
+                "type": "queue_reorder_ready", "request_id": "socket-drag",
+                "ok": True, "queue_revision": paused["queue_revision"],
+            }, ready
+            await ws.send_json({
+                "type": "reorder_queue", "request_id": "socket-drag",
+                "queue_revision": paused["queue_revision"], "order": [1, 0],
+            })
+            frames = [await ws.receive_json(timeout=3),
+                      await ws.receive_json(timeout=3)]
+            queued = next(frame for frame in frames if frame["type"] == "queued")
+            complete = next(frame for frame in frames
+                            if frame["type"] == "queue_reorder_complete")
+            assert queued["queued"] == [
+                "socket second prompt", "socket queued prompt"]
+            assert queued["paused"] == [1]
+            assert complete["ok"] is True and complete["started"] is False
+            assert complete["queued"] == queued["queued"]
+
+            # A holder is released immediately when its owning socket leaves;
+            # the 30-second lease is only a last-resort fail-open path.
+            await ws.send_json({
+                "type": "begin_queue_reorder", "request_id": "disconnect-drag",
+                "queue_revision": queued["queue_revision"],
+            })
+            ready = await ws.receive_json(timeout=3)
+            assert ready["ok"] is True, ready
 
             await ws.send_json({"type": "set_queue_paused", "index": 0,
                                 "text": "socket queued prompt", "paused": "yes"})
@@ -2219,6 +2334,8 @@ async def exercise_queue_pause_websocket(url: str, token: str, runner, db) -> No
                 "true or false" in rejected["text"], rejected
             await ws.close()
             ws = None
+            await asyncio.sleep(0)
+            assert h._queue_reorder is None
     finally:
         if ws is not None:
             await ws.close()
@@ -2317,6 +2434,7 @@ async def main() -> None:
         assert "remote-upgrade" not in pairing["capabilities"]  # pairing command is not launcher-managed
         assert "shutdown-notice" in pairing["capabilities"]
         assert "queue-pause" in pairing["capabilities"]
+        assert "queue-reorder" in pairing["capabilities"]
         assert "session-drafts" in pairing["capabilities"]
         assert "engine-model-selection" not in pairing["capabilities"]
         assert pairing["max_upload_size_mb"] == 3
@@ -2406,6 +2524,7 @@ async def main() -> None:
         await exercise_shutdown_broadcast(runner)
         await exercise_queue_persistence(runner, db)
         await exercise_queue_pause(runner, db)
+        await exercise_queue_reorder(runner, db)
         await exercise_session_drafts(runner, db, uploads, config)
         exercise_abandoned_upload_cleanup(runner, db, uploads, config)
         exercise_session_show_meta(runner, db)

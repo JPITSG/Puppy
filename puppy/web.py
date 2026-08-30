@@ -1082,6 +1082,26 @@ async def ws_session(request: web.Request):
                     res = h.set_queue_paused(idx, data.get("text") or "", paused)
                 if "error" in res:
                     await ws.send_json({"type": "toast", "level": "error", "text": res["error"]})
+            elif t == "begin_queue_reorder":
+                request_id = str(data.get("request_id") or "")[:80]
+                res = h.begin_queue_reorder(
+                    ws, request_id, data.get("queue_revision"))
+                await ws.send_json({
+                    "type": "queue_reorder_ready", "request_id": request_id,
+                    **res,
+                })
+            elif t in ("finish_queue_reorder", "reorder_queue"):
+                request_id = str(data.get("request_id") or "")[:80]
+                if t == "reorder_queue":
+                    res = h.reorder_queue(
+                        ws, request_id, data.get("queue_revision"),
+                        data.get("order"))
+                else:
+                    res = h.finish_queue_reorder(ws, request_id)
+                await ws.send_json({
+                    "type": "queue_reorder_complete", "request_id": request_id,
+                    **res,
+                })
             elif t in ("requeue_held", "discard_held"):
                 try:
                     idx = int(data.get("index", -1))

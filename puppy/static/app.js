@@ -3304,6 +3304,13 @@ function backendSupportsQueuePause(bid) {
     backend.capabilities.includes("queue-pause");
 }
 
+function backendSupportsQueueReorder(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(item => item.id === bid);
+  return !!backend && Array.isArray(backend.capabilities) &&
+    backend.capabilities.includes("queue-reorder");
+}
+
 function backendSupportsSessionDrafts(bid) {
   if (!bid) return true;
   const backend = state.backends.find(item => item.id === bid);
@@ -3391,6 +3398,11 @@ function renderSidebar() {
     dragSess.renderPending = true;
     return;
   }
+  if (dragNode && dragNode.item && dragNode.item.isConnected &&
+      dragNode.container === $("sess-groups")) {
+    dragNode.renderPending = true;
+    return;
+  }
   const root = $("sess-groups");
   root.innerHTML = "";
   const groups = [{ bid: 0, name: backendName(0), ok: true, status: "ok",
@@ -3401,6 +3413,8 @@ function renderSidebar() {
         terminal: backendHasCapability(b, "terminal"),
         browser: browserEnabledFor(b.id) };
     }));
+  sortNodeGroups(groups);
+  wireNodeGroupDropZone(root);
   const availableSessions = new Set();
   for (const group of groups)
     for (const session of sessionsFor(group.bid))
@@ -3452,6 +3466,8 @@ function renderSidebar() {
       }
       t.appendChild(disclosure);
       group.appendChild(t);
+      group.dataset.nodeKey = key;
+      wireNodeGroupDrag(group, t, key, ".sess-group");
     }
     const allSessions = sessionsFor(g.bid);
     const list = allSessions.filter(s => state.showArchived || !s.archived);
@@ -4009,10 +4025,10 @@ async function refreshEngineVersions(bid, button, nodeName) {
 }
 
 
-/* Node order in the status panel. A display preference for this browser, like
-   the collapse state of the very same boxes - not a property of the nodes, and
-   nothing the other side needs to know. Reuses the session reorder machinery
-   wholesale: same slot maths, same animation, same drag affordances. */
+/* One node order shared by the session sidebar and status panel. A display
+   preference for this browser, like the collapse state of the same boxes - not
+   a property of the nodes, and nothing the other side needs to know. The key
+   keeps its historical name so existing status-panel choices carry across. */
 const NODE_ORDER_KEY = "puppy.order.status-nodes";
 
 function nodeGroupKey(group) {
@@ -4045,23 +4061,32 @@ function cancelNodeDrag(item = null) {
   if (!dragNode || (item && dragNode.item !== item)) return;
   const context = dragNode;
   dragNode = null;
-  restoreDragSlots(context, ".foot-engine-group");
+  restoreDragSlots(context, context.selector);
   if (context.item) context.item.classList.remove("dragging");
   if (context.container) context.container.classList.remove("reordering");
+  if (context.renderPending)
+    setTimeout(() => {
+      if (dragNode) dragNode.renderPending = true;
+      else renderSidebar();
+    }, REORDER_MOTION_MS);
 }
 
 /* The head is the handle, not the whole box: the body holds engine rows and a
    usage-refresh button, and a drag starting on those would be a surprise. */
-function wireNodeGroupDrag(group, head, key) {
+function wireNodeGroupDrag(group, head, key, selector = ".foot-engine-group") {
   head.draggable = true;
   const blockTouchDrag = guardNativeTouchDrag(head);
   head.addEventListener("dragstart", (event) => {
     if (blockTouchDrag(event)) return;
+    if (event.target instanceof Element && event.target.closest("button")) {
+      event.preventDefault();
+      return;
+    }
     const container = group.parentElement;
     if (!container) return;
     dragNode = {
-      key, item: group, container,
-      originalOrder: reorderChildren(container, ".foot-engine-group"),
+      key, item: group, container, selector, renderPending: false,
+      originalOrder: reorderChildren(container, selector),
     };
     container.classList.add("reordering");
     requestAnimationFrame(() => {
@@ -4083,7 +4108,7 @@ function wireNodeGroupDropZone(root) {
   root.addEventListener("dragover", (event) => {
     if (!mine()) return;
     acceptReorderDrag(event);
-    moveDragSlot(root, dragNode.item, ".foot-engine-group", event.clientY, false);
+    moveDragSlot(root, dragNode.item, dragNode.selector, event.clientY, false);
   });
   root.addEventListener("drop", (event) => {
     if (!mine()) return;
@@ -4092,14 +4117,22 @@ function wireNodeGroupDropZone(root) {
     dragNode = null;
     context.item.classList.remove("dragging");
     root.classList.remove("reordering");
-    const keys = reorderChildren(root, ".foot-engine-group")
+    const keys = reorderChildren(root, context.selector)
       .map(node => node.dataset.nodeKey).filter(Boolean);
-    if (keys.length) lsSet(NODE_ORDER_KEY, JSON.stringify(keys));
+    if (keys.length) {
+      lsSet(NODE_ORDER_KEY, JSON.stringify(keys));
+      renderSidebar();
+    }
   });
 }
 
 function renderFootEngines() {
   const root = $("foot-engines");
+  if (dragNode && dragNode.item && dragNode.item.isConnected &&
+      dragNode.container === root) {
+    dragNode.renderPending = true;
+    return;
+  }
   root.innerHTML = "";
   const groups = [{ bid: 0, name: backendName(0), version: state.version || "",
                     engines: state.engines }]
@@ -5785,6 +5818,10 @@ class SessionView {
     this.statusRow = null;    // standalone foot row, used when no thinking block is live
     this.queued = [];         // last queue payload, re-rendered when the list expands
     this.pausedQueue = [];    // indexes into queued; held/config rows are never pausable
+    this.queueRevision = 0;   // duplicate-safe base for a full reorder permutation
+    this.queueDrag = null;    // acknowledged server hold + native drag state
+    this.queueDragSeq = 0;
+    this.queuePendingRequest = "";
     this.queueOpen = false;   // whether the tail past QUEUE_ROWS is showing
     this.oldestSeq = null;
     this.history = [];        // sent messages, oldest first (shell-style recall)
@@ -5943,6 +5980,8 @@ class SessionView {
     if (this.draftJournal && this.draftJournal.text) {
       const restored = splitAttachmentMarkers(this.draftJournal.text);
       this.ta.value = restored.text;
+      try { this.ta.setSelectionRange(restored.text.length, restored.text.length); }
+      catch (_) {}
       this.attachments = restored.attachments;
       this.renderAttachments(false);
       this.resizeComposer();
@@ -6072,6 +6111,7 @@ class SessionView {
       this.draftReady = false;
       this.draftInFlightSeq = 0;
       this.draftPendingText = null;
+      this.cancelQueueDrag(null, false);
       if (this.closed) return;
       this.setReconnecting(true);
       const delay = Math.round(this.retry * (.85 + Math.random() * .3));
@@ -6092,6 +6132,7 @@ class SessionView {
 
   destroy() {
     this.closed = true;
+    this.cancelQueueDrag(null, true);
     if (this._stopLoadOlder) this._stopLoadOlder();
     this.clearFileDropTarget();
     this.connectionSequence++;
@@ -6328,8 +6369,11 @@ class SessionView {
         !Number.isInteger(value.revision) || value.revision < 0) {
       this.draftSupported = false;
       this.draftReady = false;
-      if (this.draftJournal)
+      if (this.draftJournal) {
         lsSet("puppy.draft." + this.tab.id, this.draftJournal.text);
+        const end = this.ta.value.length;
+        try { this.ta.setSelectionRange(end, end); } catch (_) {}
+      }
       return;
     }
     this.draftSupported = true;
@@ -6355,7 +6399,7 @@ class SessionView {
     }
     if (journal && journal.text !== serverText &&
         (!journal.submitted || serverRevision <= journal.baseRevision)) {
-      this.applySharedDraft(journal.text);
+      this.applySharedDraft(journal.text, true);
       writeDraftJournal(this.tab.id, journal.text, serverRevision);
       this.draftJournal = {
         text: journal.text, baseRevision: serverRevision,
@@ -6367,7 +6411,7 @@ class SessionView {
       }
       return;
     }
-    this.applySharedDraft(serverText);
+    this.applySharedDraft(serverText, true);
     this.clearDraftJournal();
   }
 
@@ -6433,7 +6477,7 @@ class SessionView {
   /* Replace prose and completed attachment chips while preserving local uploads
      still in flight. Matching local image blobs are reused; everything else is
      released locally and the server's reference cleanup owns the stored file. */
-  applySharedDraft(text) {
+  applySharedDraft(text, caretAtEnd = false) {
     const restored = splitAttachmentMarkers(text);
     const sources = [...(this.histAttach || []), ...this.attachments];
     const byPath = new Map();
@@ -6484,7 +6528,12 @@ class SessionView {
     const remap = position => position <= prefix ? position :
       position >= oldChangedEnd ? newChangedEnd + (position - oldChangedEnd) : newChangedEnd;
     this.ta.value = restored.text;
-    try { this.ta.setSelectionRange(remap(oldStart), remap(oldEnd)); } catch (_) {}
+    try {
+      if (caretAtEnd)
+        this.ta.setSelectionRange(restored.text.length, restored.text.length);
+      else
+        this.ta.setSelectionRange(remap(oldStart), remap(oldEnd));
+    } catch (_) {}
     this.renderAttachments(false);
     this.resizeComposer();
   }
@@ -6567,7 +6616,8 @@ class SessionView {
         this.history = d.events.filter(ev => ev.kind === "user")
           .map(ev => (ev.data && ev.data.text) || "").filter(Boolean);
         this.histIdx = null;
-        this.renderQueue(d.queued || [], d.held || [], d.paused || []);
+        this.renderQueue(d.queued || [], d.held || [], d.paused || [],
+          d.queue_revision);
         // before updateHead: pickers read the queue
         this.updateHead();
         this.updateRunState();
@@ -6610,20 +6660,39 @@ class SessionView {
         this.hideApproval();
         break;
       case "queued":
-        this.renderQueue(d.queued || [], d.held || [], d.paused || []);
+        this.renderQueue(d.queued || [], d.held || [], d.paused || [],
+          d.queue_revision);
         this.updateHead();   // the pickers speak for whatever is now last in line
+        break;
+      case "queue_reorder_ready":
+        this.queueReorderReady(d);
+        break;
+      case "queue_reorder_complete":
+        this.queueReorderComplete(d);
+        break;
+      case "queue_reorder_cancelled":
+        if (this.queuePendingRequest === d.request_id ||
+            this.queueDrag && this.queueDrag.requestId === d.request_id) {
+          this.cancelQueueDrag(null, false);
+          this.queuePendingRequest = "";
+          this.renderQueue(this.queued, this.held, this.pausedQueue,
+            this.queueRevision);
+          toast(d.text || "Queue reorder cancelled", "error");
+        }
         break;
       case "turn_done":
         /* New nodes tell us whether this turn flowed directly into a queued
            one. On older nodes the pre-pop queue is the closest equivalent. */
+        const queueWaiting = d.queue_waiting === true;
         const continued = typeof d.continued === "boolean" ?
           d.continued : this.queued.length > 0;
         this.status = continued ? "running" : "idle";
         this.clearLive();
         this.updateRunState();
-        this.setStatus(continued ? "Starting next queued message…" : "");
+        this.setStatus(queueWaiting ? "Waiting for queue order…" :
+          continued ? "Starting next queued message…" : "");
         noteSessionActivity(this.tab.bid, this.tab.sid, continued, null, null,
-          d.completion_status);
+          queueWaiting ? "" : d.completion_status);
         break;
       case "session_meta":
         this.session = d.session;
@@ -7514,9 +7583,12 @@ class SessionView {
     return { row, ident, cfg };
   }
 
-  renderQueue(q, held, paused) {
+  renderQueue(q, held, paused, revision) {
     const box = this.queueEl;
+    if (this.queueDrag) this.cancelQueueDrag(null, true);
     this.queued = q;
+    if (Number.isInteger(revision) && revision >= 0)
+      this.queueRevision = revision;
     this.held = Array.isArray(held) ? held : (this.held || []);
     if (Array.isArray(paused)) {
       this.pausedQueue = [...new Set(paused.filter(index =>
@@ -7557,9 +7629,13 @@ class SessionView {
        click away. The per-item cap only keeps a runaway message out of the DOM
        - each row is a single line that fades out at whatever width is going. */
     const shown = this.queueOpen ? q : q.slice(0, QUEUE_ROWS);
+    const live = el("div", "q-live-list");
+    this.wireQueueDropZone(live);
     shown.forEach((item, i) => {
       const isPaused = pausedSet.has(i);
       const { row, ident, cfg } = this.queueRow(item, String(i + 1), false, isPaused);
+      row.classList.add("q-live");
+      row.dataset.queueIndex = String(i);
       if (!cfg && backendSupportsQueuePause(this.tab.bid)) {
         const toggle = el("button", "q-pause");
         toggle.type = "button";
@@ -7577,19 +7653,179 @@ class SessionView {
         cfg ? "Cancel this queued change" : "Cancel this queued message");
       x.onclick = () => this.unqueue(i, ident);   // full text, not the capped copy
       row.appendChild(x);
-      box.appendChild(row);
+      if (!cfg && q.length > 1 && backendSupportsQueueReorder(this.tab.bid))
+        this.wireQueueDrag(row);
+      live.appendChild(row);
     });
+    box.appendChild(live);
     if (q.length > shown.length) {
       const more = el("button", "q-more", `+${q.length - shown.length} more`);
-      more.onclick = () => { this.queueOpen = true; this.renderQueue(this.queued); };
+      more.onclick = () => {
+        this.queueOpen = true;
+        this.renderQueue(this.queued, this.held, this.pausedQueue,
+          this.queueRevision);
+      };
       box.appendChild(more);
     } else if (this.queueOpen && q.length > QUEUE_ROWS) {
       const less = el("button", "q-more", "Show fewer");
-      less.onclick = () => { this.queueOpen = false; this.renderQueue(this.queued); };
+      less.onclick = () => {
+        this.queueOpen = false;
+        this.renderQueue(this.queued, this.held, this.pausedQueue,
+          this.queueRevision);
+      };
       box.appendChild(less);
     }
     this.syncQueueFade();
   }
+
+  prepareQueueDrag(row, event) {
+    if (event.button !== 0 || event.pointerType === "touch" ||
+        (event.target instanceof Element && event.target.closest("button"))) return;
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    if (this.queueDrag) this.cancelQueueDrag(null, true);
+    const container = row.parentElement;
+    if (!container) return;
+    const requestId = `${Date.now().toString(36)}-${++this.queueDragSeq}`;
+    const context = {
+      requestId, item: row, container, ready: false, dragging: false,
+      revision: this.queueRevision,
+      originalOrder: reorderChildren(container, ".q-live"),
+      pointerRelease: null,
+    };
+    const release = () => {
+      if (this.queueDrag === context && !context.dragging)
+        this.cancelQueueDrag(row, true);
+    };
+    context.pointerRelease = release;
+    window.addEventListener("pointerup", release, { capture: true, once: true });
+    window.addEventListener("pointercancel", release, { capture: true, once: true });
+    this.queueDrag = context;
+    this.queuePendingRequest = requestId;
+    this.ws.send(JSON.stringify({
+      type: "begin_queue_reorder", request_id: requestId,
+      queue_revision: context.revision,
+    }));
+  }
+
+  wireQueueDrag(row) {
+    row.classList.add("q-sortable");
+    row.draggable = true;
+    const blockTouchDrag = guardNativeTouchDrag(row);
+    row.addEventListener("pointerdown", event => this.prepareQueueDrag(row, event));
+    row.addEventListener("dragstart", event => {
+      if (blockTouchDrag(event)) return;
+      const context = this.queueDrag;
+      if (!context || context.item !== row || !context.ready ||
+          (event.target instanceof Element && event.target.closest("button"))) {
+        event.preventDefault();
+        return;
+      }
+      context.dragging = true;
+      this.cleanupQueuePointer(context);
+      context.container.classList.add("reordering");
+      requestAnimationFrame(() => {
+        if (this.queueDrag === context) row.classList.add("dragging");
+      });
+      if (event.dataTransfer) {
+        event.dataTransfer.effectAllowed = "move";
+        try { event.dataTransfer.setData("text/plain", `puppy-queue:${context.requestId}`); }
+        catch (_) {}
+      }
+    });
+    row.addEventListener("dragend", () => this.cancelQueueDrag(row, true));
+  }
+
+  wireQueueDropZone(container) {
+    const mine = () => this.queueDrag && this.queueDrag.dragging &&
+      this.queueDrag.container === container;
+    container.addEventListener("dragenter", event => {
+      if (mine()) acceptReorderDrag(event);
+    });
+    container.addEventListener("dragover", event => {
+      if (!mine()) return;
+      acceptReorderDrag(event);
+      moveDragSlot(container, this.queueDrag.item, ".q-live", event.clientY, false);
+    });
+    container.addEventListener("drop", event => {
+      if (!mine()) return;
+      acceptReorderDrag(event);
+      const context = this.queueDrag;
+      const visibleOrder = reorderChildren(container, ".q-live")
+        .map(node => Number(node.dataset.queueIndex));
+      const visible = new Set(visibleOrder);
+      const order = visibleOrder.concat(
+        this.queued.map((_, index) => index).filter(index => !visible.has(index)));
+      this.queueDrag = null;
+      this.cleanupQueuePointer(context);
+      context.item.classList.remove("dragging");
+      container.classList.remove("reordering");
+      this.queuePendingRequest = context.requestId;
+      if (this.ws && this.ws.readyState === WebSocket.OPEN)
+        this.ws.send(JSON.stringify({
+          type: "reorder_queue", request_id: context.requestId,
+          queue_revision: context.revision, order,
+        }));
+      else
+        this.renderQueue(this.queued, this.held, this.pausedQueue,
+          this.queueRevision);
+    });
+  }
+
+  cleanupQueuePointer(context) {
+    if (!context || !context.pointerRelease) return;
+    window.removeEventListener("pointerup", context.pointerRelease, true);
+    window.removeEventListener("pointercancel", context.pointerRelease, true);
+    context.pointerRelease = null;
+  }
+
+  cancelQueueDrag(item = null, notifyServer = true) {
+    const context = this.queueDrag;
+    if (!context || (item && context.item !== item)) return;
+    this.queueDrag = null;
+    this.cleanupQueuePointer(context);
+    if (context.dragging)
+      restoreDragSlots(context, ".q-live");
+    if (context.item) context.item.classList.remove("dragging");
+    if (context.container) context.container.classList.remove("reordering");
+    if (notifyServer && this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.queuePendingRequest = context.requestId;
+      this.ws.send(JSON.stringify({
+        type: "finish_queue_reorder", request_id: context.requestId,
+      }));
+    } else if (this.queuePendingRequest === context.requestId) {
+      this.queuePendingRequest = "";
+    }
+  }
+
+  queueReorderReady(message) {
+    const context = this.queueDrag;
+    if (!context || context.requestId !== message.request_id) return;
+    if (message.ok === true && message.queue_revision === context.revision) {
+      context.ready = true;
+      return;
+    }
+    this.cancelQueueDrag(null, false);
+    if (this.queuePendingRequest === message.request_id)
+      this.queuePendingRequest = "";
+    toast(message.error || "Queue changed before it could be reordered", "error");
+  }
+
+  queueReorderComplete(message) {
+    if (message.request_id !== this.queuePendingRequest &&
+        (!this.queueDrag || message.request_id !== this.queueDrag.requestId)) return;
+    this.cancelQueueDrag(null, false);
+    this.queuePendingRequest = "";
+    if (Array.isArray(message.queued))
+      this.renderQueue(message.queued, message.held || [], message.paused || [],
+        message.queue_revision);
+    if (message.error) toast(message.error, "error");
+    if (message.started) {
+      this.status = "running";
+      this.updateRunState();
+      this.setStatus("Starting next queued message…");
+    }
+  }
+
   unqueue(index, text) {
     if (!this.ws || this.ws.readyState !== 1) { toast("Not connected", "error"); return; }
     this.ws.send(JSON.stringify({ type: "unqueue", index, text }));

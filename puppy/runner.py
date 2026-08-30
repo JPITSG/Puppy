@@ -23,6 +23,7 @@ _hubs = {}
 _updates_watchers = set()  # websockets watching the session list
 
 STREAM_LIMIT = 16 * 1024 * 1024
+QUEUE_REORDER_HOLD_SECONDS = 30
 
 
 def hub(session_id: int) -> "SessionHub":
@@ -244,6 +245,14 @@ class SessionHub:
         # queue itself deliberately stays in its old string/config wire shape;
         # an additive parallel list lets older consoles keep rendering it.
         self.paused_queue = set()
+        # Queue mutations carry a process-local revision so a drag can submit
+        # a permutation of duplicate prompts without relying on their text.
+        # The acknowledged hold prevents automatic dequeue while its owner has
+        # a row in flight; disconnect and a short lease both fail open.
+        self.queue_revision = 0
+        self._queue_reorder = None       # (watcher, request id)
+        self._queue_reorder_timer = None
+        self._queue_waiting_completion = None
         # Work that survived a restart or an engine kill. Held items never run
         # on their own: the world may have moved since they were written, so
         # each one waits for an explicit re-send (or discard) in the console.
@@ -317,6 +326,10 @@ class SessionHub:
 
     def detach(self, ws) -> None:
         self.watchers.discard(ws)
+        context = self._queue_reorder
+        if context is not None and context[0] is ws:
+            self._release_queue_reorder(ws, context[1])
+            self._resume_after_queue_reorder()
 
     def broadcast(self, payload: dict) -> None:
         for ws in list(self.watchers):
@@ -428,6 +441,7 @@ class SessionHub:
                                   if self.status == "idle" else ""),
             "server_time": time.time(),
             "queued": self._queue_wire(),
+            "queue_revision": self.queue_revision,
             "paused": self._paused_wire(),
             "held": self._held_wire(),
             "pending_approval": self._scrub_value(self.pending_approval),
@@ -497,8 +511,10 @@ class SessionHub:
             log.warning("could not persist queue for session %s: %s", self.id, exc)
 
     def _broadcast_queue(self) -> None:
+        self.queue_revision += 1
         self._persist_queue()
         self.broadcast({"type": "queued", "queued": self._queue_wire(),
+                        "queue_revision": self.queue_revision,
                         "paused": self._paused_wire(), "held": self._held_wire()})
 
     def _discard_abandoned_uploads(self, items, retained=()) -> None:
@@ -638,9 +654,9 @@ class SessionHub:
         """Pause or resume one still-waiting prompt.
 
         The text guard makes an index shifted by a finishing turn harmless,
-        just like ``unqueue``. A paused prompt stops the queue at its position:
-        skipping over it could also skip across an ordered model/effort change
-        and run later prose under configuration it was not submitted with.
+        just like ``unqueue``. Paused prompts remain in the visible order but
+        automatic dequeue skips over them; configuration rows encountered on
+        the way to a later runnable prompt still apply in their visible order.
         """
         if not 0 <= index < len(self.queue):
             return {"error": "that message already started"}
@@ -654,12 +670,127 @@ class SessionHub:
         else:
             self.paused_queue.discard(index)
 
-        # Resuming the prompt at the front of an otherwise-idle queue should
-        # start it now; requiring another submit would leave it stranded.
-        if not paused and self._start_queue_if_ready():
-            return {"ok": True, "paused": False}
+        # Either direction can expose runnable work in an otherwise-idle
+        # queue: pausing its first prompt may reveal the next one, while
+        # resuming may make the formerly-paused prompt runnable itself.
+        if self._start_queue_if_ready():
+            return {"ok": True, "paused": paused}
         self._broadcast_queue()
         return {"ok": True, "paused": paused}
+
+    def _queue_reorder_result(self, started=False, error="") -> dict:
+        result = {
+            "ok": not bool(error), "started": bool(started),
+            "queued": self._queue_wire(), "queue_revision": self.queue_revision,
+            "paused": self._paused_wire(), "held": self._held_wire(),
+        }
+        if error:
+            result["error"] = error
+        return result
+
+    def begin_queue_reorder(self, owner, request_id: str, revision: int) -> dict:
+        """Acquire the short scheduler hold used by one queue drag.
+
+        The UI does not let a native drag start until this acknowledgement is
+        received, so a turn finishing while a row is actually in flight cannot
+        consume any waiting item. The revision is a duplicate-safe snapshot
+        guard; prompt text is deliberately not used as an identity here.
+        """
+        request_id = str(request_id or "")[:80]
+        if not request_id:
+            return {"error": "queue reorder request is missing an id"}
+        if type(revision) is not int or revision != self.queue_revision:
+            return {"error": "the queue changed before the drag started"}
+        if len(self.queue) < 2:
+            return {"error": "the queue no longer has enough items to reorder"}
+        if self._queue_reorder is not None:
+            if self._queue_reorder == (owner, request_id):
+                return {"ok": True, "queue_revision": self.queue_revision}
+            return {"error": "another queue reorder is already in progress"}
+        self._queue_reorder = (owner, request_id)
+        loop = asyncio.get_event_loop()
+        self._queue_reorder_timer = loop.call_later(
+            QUEUE_REORDER_HOLD_SECONDS,
+            self._expire_queue_reorder, owner, request_id)
+        return {"ok": True, "queue_revision": self.queue_revision}
+
+    def _release_queue_reorder(self, owner, request_id: str) -> bool:
+        if self._queue_reorder != (owner, str(request_id or "")[:80]):
+            return False
+        self._queue_reorder = None
+        timer = self._queue_reorder_timer
+        self._queue_reorder_timer = None
+        if timer is not None:
+            timer.cancel()
+        return True
+
+    def _expire_queue_reorder(self, owner, request_id: str) -> None:
+        if not self._release_queue_reorder(owner, request_id):
+            return
+        self.broadcast({
+            "type": "queue_reorder_cancelled", "request_id": request_id,
+            "text": "Queue reorder timed out; automatic processing resumed",
+        })
+        self._resume_after_queue_reorder()
+
+    def _resume_after_queue_reorder(self) -> bool:
+        deferred = self._queue_waiting_completion
+        started = self._start_queue_if_ready()
+        if deferred is None:
+            return started
+        self._queue_waiting_completion = None
+        completion_status = ""
+        if not started:
+            completion_status = self._finish_activity_block(*deferred)
+        # Every viewer saw the preceding turn enter a temporary idle state.
+        # Tell all of them whether releasing the drag resumed the same activity
+        # block or finally completed it; the request response covers only the
+        # socket which owned the drag.
+        self.broadcast({
+            "type": "turn_done", "continued": started,
+            "queue_waiting": False, "completion_status": completion_status,
+        })
+        broadcast_sessions()
+        return started
+
+    def finish_queue_reorder(self, owner, request_id: str) -> dict:
+        """Release a drag which ended without changing the queue."""
+        if not self._release_queue_reorder(owner, request_id):
+            return self._queue_reorder_result(error="that queue reorder is no longer active")
+        return self._queue_reorder_result(
+            started=self._resume_after_queue_reorder())
+
+    def reorder_queue(self, owner, request_id: str, revision: int, order) -> dict:
+        """Apply one full old-index permutation and release its scheduler hold."""
+        if self._queue_reorder != (owner, str(request_id or "")[:80]):
+            return self._queue_reorder_result(error="that queue reorder is no longer active")
+        error = ""
+        if type(revision) is not int or revision != self.queue_revision:
+            error = "the queue changed while it was being reordered"
+        elif not isinstance(order, list) or \
+                any(type(index) is not int for index in order) or \
+                sorted(order) != list(range(len(self.queue))):
+            error = "invalid queue order"
+        if error:
+            self._release_queue_reorder(owner, request_id)
+            started = self._resume_after_queue_reorder()
+            return self._queue_reorder_result(started=started, error=error)
+
+        previous = list(self.queue)
+        previous_paused = set(self.paused_queue)
+        changed = any(old_index != new_index
+                      for new_index, old_index in enumerate(order))
+        if changed:
+            self.queue = [previous[index] for index in order]
+            self.paused_queue = {
+                new_index for new_index, old_index in enumerate(order)
+                if old_index in previous_paused
+            }
+        self._release_queue_reorder(owner, request_id)
+        started = self._resume_after_queue_reorder()
+        if changed and not started:
+            self._broadcast_queue()
+        return self._queue_reorder_result(started=started)
 
     def _held_matches(self, index: int, ident: str):
         """The item at index, but only if ident still names it - the same
@@ -736,9 +867,9 @@ class SessionHub:
 
     def _take_next_turn(self):
         """Advance within an activity block, or close it when the queue is
-        empty. Pending model/effort changes at the front apply now - everything
-        queued ahead of them has finished - so the next prompt taken runs under
-        the configuration that was current when it was sent."""
+        out of runnable prompts. Paused prompts stay visible but are skipped;
+        pending model/effort changes before the selected runnable prompt apply
+        in their visible order."""
         # A shutdown grace window only has to outlast the RUNNING turn. Feeding
         # it the next queued prompt would consume that prompt and then kill it
         # mid-answer; leaving the queue untouched lets kill() park it instead.
@@ -746,28 +877,50 @@ class SessionHub:
             self.status = "idle"
             self.active_since = None
             return None
-        # Look through leading configuration entries before mutating anything.
-        # If their following prompt is paused, both the prompt and its settings
-        # must remain in place until the user resumes it.
-        next_prompt = next((index for index, item in enumerate(self.queue)
-                            if not _is_queued_config(item)), None)
-        if next_prompt is not None and next_prompt in self.paused_queue:
+        # A row may move only after the server acknowledges this hold. Nothing
+        # can be consumed until the owner drops/cancels or the lease expires.
+        if self._queue_reorder is not None and self.queue:
+            self.status = "idle"
+            return None
+
+        prompt_indexes = [index for index, item in enumerate(self.queue)
+                          if not _is_queued_config(item)]
+        if not prompt_indexes:
+            applied = False
+            while self.queue:
+                self._apply_queued_config(
+                    self._pop_queue(0).get("fields") or {})
+                applied = True
+            if applied:
+                self._broadcast_queue()
             self.status = "idle"
             self.active_since = None
             return None
+        next_prompt = next((index for index in prompt_indexes
+                            if index not in self.paused_queue), None)
+        if next_prompt is None:
+            self.status = "idle"
+            self.active_since = None
+            return None
+
+        # Remove only configuration rows on the path to the selected prompt.
+        # Earlier paused prose remains where the user left it and will run
+        # later under whatever configuration its new execution position sees.
         applied = False
-        while self.queue and _is_queued_config(self.queue[0]):
-            self._apply_queued_config(self._pop_queue(0).get("fields") or {})
-            applied = True
+        scan = 0
+        while scan < next_prompt:
+            if _is_queued_config(self.queue[scan]):
+                self._apply_queued_config(
+                    self._pop_queue(scan).get("fields") or {})
+                next_prompt -= 1
+                applied = True
+            else:
+                scan += 1
         if applied:
             self._broadcast_queue()
-        if self.queue:
-            item = self._pop_queue(0)
-            self._persist_queue()   # consumed: a crash must not run it twice
-            return item
-        self.status = "idle"
-        self.active_since = None
-        return None
+        item = self._pop_queue(next_prompt)
+        self._persist_queue()   # consumed: a crash must not run it twice
+        return item
 
     def _apply_queued_config(self, fields: dict) -> None:
         clean = {k: v for k, v in fields.items() if k in ("model", "effort")}
@@ -777,6 +930,25 @@ class SessionHub:
         self.broadcast({"type": "session_meta",
                         "session": session_payload(db.get_session(self.id))})
         broadcast_sessions()
+
+    def _finish_activity_block(self, block_started, interrupted,
+                               block_status) -> str:
+        """Commit the one true idle transition for an activity block."""
+        completion_status = "interrupted" if interrupted else block_status
+        self.status = "idle"
+        self.active_since = None
+        self.last_completion_status = completion_status
+        try:
+            db.touch_session(self.id, status="idle")
+        except Exception:
+            pass
+        try:
+            notify.session_finished(
+                db.get_session(self.id), completion_status,
+                int(time.time() - block_started) if block_started else 0)
+        except Exception:
+            log.exception("completion notify failed for session %s", self.id)
+        return completion_status
 
     async def interrupt(self, clear_queue: bool = False) -> None:
         if clear_queue:
@@ -860,6 +1032,9 @@ class SessionHub:
         self.broadcast({"type": "approval_resolved", "request_id": request_id, "behavior": behavior})
 
     async def kill(self) -> None:
+        context = self._queue_reorder
+        if context is not None:
+            self._release_queue_reorder(context[0], context[1])
         if self.queue:
             # Parked, not discarded: these prompts were written by a person.
             # They come back after the restart marked as held, for an explicit
@@ -1344,26 +1519,29 @@ class SessionHub:
                     log.exception("post-turn workspace barrier failed for "
                                   "session %s", self.id)
             block_started = self.active_since
-            nxt = self._take_next_turn()
-            continued = nxt is not None
-            completion_status = "" if continued else (
-                "interrupted" if self.interrupted else self._block_status)
-            if not continued:
-                self.last_completion_status = completion_status
+            queue_waiting = self._queue_reorder is not None and bool(self.queue)
+            if queue_waiting:
+                # The acknowledged drag owns the transition. Mark the engine
+                # idle without ending the activity block; its drop/cancel path
+                # either starts the chosen next prompt or commits completion.
+                nxt = None
+                continued = False
+                completion_status = ""
+                self.status = "idle"
+                self._queue_waiting_completion = (
+                    block_started, self.interrupted, self._block_status)
                 try:
                     db.touch_session(self.id, status="idle")
                 except Exception:
                     pass
-                # the session went idle: its prompt and everything queued
-                # behind it finished - the moment the completion command means
-                try:
-                    notify.session_finished(
-                        db.get_session(self.id),
-                        completion_status,
-                        int(time.time() - block_started) if block_started else 0)
-                except Exception:
-                    log.exception("completion notify failed for session %s", self.id)
+            else:
+                nxt = self._take_next_turn()
+                continued = nxt is not None
+                completion_status = "" if continued else \
+                    self._finish_activity_block(
+                        block_started, self.interrupted, self._block_status)
             self.broadcast({"type": "turn_done", "continued": continued,
+                            "queue_waiting": queue_waiting,
                             "completion_status": completion_status})
             if continued:
                 self._broadcast_queue()

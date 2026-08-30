@@ -261,10 +261,19 @@ Prompts queued behind a running turn are written through to the node's database
 on every change, so they belong to the user rather than to the process. A
 console connected to a node advertising `queue-pause` may pause any ordinary
 queued prompt. The node publishes its indexes in the additive `paused` array;
-when a paused prompt reaches the front, it and everything ordered behind it
-wait until the console sends `set_queue_paused` to resume it. Pending
-model/effort changes are not separately pausable because they belong to the
-prompt after them.
+automatic dequeue skips those prompts while continuing with the next runnable
+one. Pending model/effort changes are not separately pausable; configuration
+rows encountered before the selected runnable prompt still apply in their
+visible order.
+
+Nodes advertising `queue-reorder` also accept a duplicate-safe full
+permutation guarded by the queue's additive process-local revision. A console
+acquires a short per-socket scheduler hold before a row becomes draggable and
+commits or cancels it on drop. If the active turn finishes while the row is in
+flight, no queued prompt starts until that decision arrives. Socket disconnect
+releases the hold immediately and a 30-second lease is the final fail-open, so
+a vanished browser cannot strand work. Prompt rows can move across the visible
+configuration rows, making the resulting execution order explicit.
 
 A shutdown or engine kill parks whatever had not started as *held* items, and a
 restart restores them as held: visible in the console with a warning mark, run
