@@ -63,6 +63,8 @@ DEFAULT_VIEWPORT_W, DEFAULT_VIEWPORT_H = 1280, 800
 MIN_VIEWPORT_W, MIN_VIEWPORT_H = 160, 120
 MAX_VIEWPORT_W, MAX_VIEWPORT_H = 3840, 2160
 SCREENCAST_QUALITY = 70
+SCREENCAST_CALL_TIMEOUT = 3.0
+VISUAL_REFRESH_DELAY = 0.75
 MAX_CDP_BUFFER = 32 * 1024 * 1024
 MAX_TEXT_BACKLOG = 64          # queued small messages per viewer
 MAX_URL_LENGTH = 4096
@@ -719,6 +721,8 @@ class Manager:
         self.page_session = ""
         self.screencasting = False
         self.viewport_repair_task = None
+        self.visual_refresh_task = None
+        self.frame_sequence = 0
         self.started_at = 0.0
         self.viewport = {"width": DEFAULT_VIEWPORT_W, "height": DEFAULT_VIEWPORT_H}
         self.frame_meta = dict(self.viewport)
@@ -824,6 +828,7 @@ class Manager:
             self.page_target = ""
             self.page_session = ""
             self.screencasting = False
+            self.frame_sequence = 0
             self.viewport = {"width": DEFAULT_VIEWPORT_W, "height": DEFAULT_VIEWPORT_H}
             self.frame_meta = dict(self.viewport)
             self.nav = {"url": "about:blank", "title": "", "can_back": False,
@@ -895,6 +900,9 @@ class Manager:
         if self.viewport_repair_task is not None:
             self.viewport_repair_task.cancel()
             self.viewport_repair_task = None
+        if self.visual_refresh_task is not None:
+            self.visual_refresh_task.cancel()
+            self.visual_refresh_task = None
         for fut in list(self.pending.values()):
             if not fut.done():
                 fut.set_exception(BrowserError("Browser exited"))
@@ -1077,6 +1085,7 @@ class Manager:
             key = "domcontentloaded" if method == "Page.domContentEventFired" else "load"
             self.agent_lifecycle[key] += 1
             self.agent_file_chooser = None
+            self._schedule_visual_refresh(0.25)
             return
         if method == "Runtime.consoleAPICalled" and event_session == self.page_session:
             args = [self._diagnostic_arg(item) for item in params.get("args") or []]
@@ -1160,7 +1169,10 @@ class Manager:
                 frame = base64.b64decode(params.get("data") or "")
             except Exception:
                 return
-            for viewer in list(self.viewers.values()):
+            viewers = list(self.viewers.values())
+            if viewers:
+                self.frame_sequence += 1
+            for viewer in viewers:
                 viewer.send_frame(frame)
         elif method == "Target.targetCreated":
             info = params.get("targetInfo") or {}
@@ -1188,6 +1200,7 @@ class Manager:
                 self.nav["title"] = info.get("title", self.nav["title"])
                 if changed:
                     self.agent_refs = {}
+                    self._schedule_visual_refresh()
                     asyncio.ensure_future(self._refresh_nav())
         elif method == "Target.targetDestroyed":
             tid = params.get("targetId")
@@ -1293,12 +1306,13 @@ class Manager:
             "features": [{"name": "prefers-color-scheme", "value": color_scheme()}],
         }, session=self.page_session)
 
-    async def _apply_viewport(self, session: str, size: dict) -> None:
+    async def _apply_viewport(self, session: str, size: dict,
+                              timeout: float = CALL_TIMEOUT) -> None:
         await self.call("Emulation.setDeviceMetricsOverride", {
             "width": size["width"], "height": size["height"],
             "deviceScaleFactor": 1, "mobile": False,
             "screenWidth": size["width"], "screenHeight": size["height"],
-        }, session=session)
+        }, session=session, timeout=timeout)
 
     async def resize_viewport(self, size: dict) -> None:
         """Make the page's real CSS viewport follow the latest viewer pane."""
@@ -1340,13 +1354,28 @@ class Manager:
                         return
                     session = self.page_session
                     size = dict(self.viewport)
+                    try:
+                        # Keep the old stream alive while Chromium is most
+                        # likely to reject emulation: during a navigation. The
+                        # restart still happens below even if this call fails.
+                        await self._apply_viewport(
+                            session, size, timeout=SCREENCAST_CALL_TIMEOUT)
+                        self.frame_meta = dict(size)
+                    except BrowserError as exc:
+                        log.debug("Browser %s viewport reapply skipped: %s",
+                                  self.browser_id, exc)
+                    if self.page_session != session or not self.running:
+                        return
                     await self._stop_screencast()
-                    await self._apply_viewport(session, size)
-                    self.frame_meta = dict(size)
                     if self.viewers:
-                        await self._start_screencast()
+                        try:
+                            await self._start_screencast()
+                        except BrowserError as exc:
+                            log.debug("Browser %s screencast restart deferred: %s",
+                                      self.browser_id, exc)
             self._broadcast_json({"type": "frame_meta", **self.frame_meta})
-            await self._send_fresh_frame()
+            if not await self._send_fresh_frame():
+                self._schedule_visual_refresh()
         except asyncio.CancelledError:
             raise
         except BrowserError as exc:
@@ -1384,7 +1413,7 @@ class Manager:
         await self.call("Page.startScreencast", {
             "format": "jpeg", "quality": SCREENCAST_QUALITY,
             "maxWidth": MAX_VIEWPORT_W, "maxHeight": MAX_VIEWPORT_H,
-        }, session=session)
+        }, session=session, timeout=SCREENCAST_CALL_TIMEOUT)
         if self.page_session == session:
             self.screencasting = True
 
@@ -1399,7 +1428,8 @@ class Manager:
         session = self.page_session
         if session and self.running:
             try:
-                await self.call("Page.stopScreencast", session=session)
+                await self.call("Page.stopScreencast", session=session,
+                                timeout=SCREENCAST_CALL_TIMEOUT)
             except BrowserError:
                 pass
 
@@ -1419,23 +1449,82 @@ class Manager:
                 return
             await self._stop_screencast_locked()
 
-    async def _send_fresh_frame(self, viewer=None) -> None:
+    async def _send_fresh_frame(self, viewer=None) -> bool:
         """Screencast frames only arrive on damage; a still page would leave a
         newcomer staring at nothing, so push one explicit screenshot."""
         if not self.page_session or not self.running:
-            return
+            return False
         try:
             shot = await self.call("Page.captureScreenshot",
                                    {"format": "jpeg", "quality": SCREENCAST_QUALITY},
-                                   session=self.page_session)
+                                   session=self.page_session,
+                                   timeout=SCREENCAST_CALL_TIMEOUT)
             frame = base64.b64decode(shot.get("data") or "")
         except Exception:
-            return
+            return False
         if not frame:
-            return
+            return False
         targets = [viewer] if viewer is not None else list(self.viewers.values())
+        if not targets:
+            return False
+        self.frame_sequence += 1
         for item in targets:
             item.send_frame(frame)
+        return True
+
+    def _schedule_visual_refresh(self, delay: float = VISUAL_REFRESH_DELAY) -> None:
+        """Expect one delivered frame after a known page-changing event."""
+        if not self.running or not self.page_session or not self.viewers:
+            return
+        if self.visual_refresh_task is not None and \
+                not self.visual_refresh_task.done():
+            self.visual_refresh_task.cancel()
+        marker = self.frame_sequence
+        session = self.page_session
+        self.visual_refresh_task = asyncio.ensure_future(
+            self._recover_visual_stream(marker, session, delay))
+
+    async def _recover_visual_stream(self, marker: int, session: str,
+                                     delay: float) -> None:
+        """Restart a silent damage stream, then provide one authoritative frame."""
+        task = asyncio.current_task()
+        try:
+            await asyncio.sleep(max(0.05, float(delay)))
+            if not self.running or not self.viewers or \
+                    self.page_session != session or self.frame_sequence != marker:
+                return
+            repair = self.viewport_repair_task
+            if repair is not None and repair is not task and not repair.done():
+                try:
+                    await asyncio.shield(repair)
+                except Exception:
+                    pass
+            if not self.running or not self.viewers or \
+                    self.page_session != session or self.frame_sequence != marker:
+                return
+            log.info("Browser %s recovering a silent screencast", self.browser_id)
+            for attempt in range(3):
+                if not self.running or not self.viewers or \
+                        self.page_session != session or self.frame_sequence != marker:
+                    return
+                try:
+                    await self._stop_screencast()
+                    if self.viewers and self.page_session == session:
+                        await self._start_screencast()
+                except BrowserError as exc:
+                    log.debug("Browser %s screencast recovery restart skipped: %s",
+                              self.browser_id, exc)
+                if self.frame_sequence != marker:
+                    return
+                if self.page_session == session and await self._send_fresh_frame():
+                    return
+                if attempt < 2:
+                    await asyncio.sleep(0.5 * (attempt + 1))
+        except asyncio.CancelledError:
+            raise
+        finally:
+            if self.visual_refresh_task is task:
+                self.visual_refresh_task = None
 
     async def _refresh_nav(self) -> None:
         if not self.page_session or not self.running:
@@ -1525,6 +1614,17 @@ class Manager:
                 await self.resize_viewport(size)
         elif kind == "color_scheme":
             await set_color_scheme(data.get("value"))
+        visual_delay = None
+        if kind == "mouse" and data.get("kind") == "up":
+            visual_delay = 0.35
+        elif kind == "key" and data.get("kind") == "down":
+            visual_delay = 0.35
+        elif kind in ("wheel", "insert_text", "color_scheme"):
+            visual_delay = 0.35
+        elif kind in ("navigate", "back", "forward", "reload"):
+            visual_delay = VISUAL_REFRESH_DELAY
+        if visual_delay is not None:
+            self._schedule_visual_refresh(visual_delay)
 
     def _point(self, data: dict) -> tuple:
         nx = min(1.0, max(0.0, float(data.get("nx") or 0.0)))

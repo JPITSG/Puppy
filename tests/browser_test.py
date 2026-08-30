@@ -92,6 +92,7 @@ buffer = b""
 casting = False
 viewport_width, viewport_height = 1280, 800
 frame_session = 10
+fail_next_viewport = False
 while True:
     chunk = os.read(3, 65536)
     if not chunk:
@@ -103,6 +104,7 @@ while True:
         method = msg.get("method", "")
         params = msg.get("params") or {}
         result = {}
+        response_error = None
         emit_frame = None
         emit_lifecycle = False
         if method == "Browser.getVersion":
@@ -227,13 +229,18 @@ while True:
         elif method == "Emulation.setEmulatedMedia":
             record("media.jsonl", {"features": params.get("features")})
         elif method == "Emulation.setDeviceMetricsOverride":
-            record("viewport.jsonl", params)
-            width = int(params.get("width") or viewport_width)
-            height = int(params.get("height") or viewport_height)
-            same_size = width == viewport_width and height == viewport_height
-            viewport_width, viewport_height = width, height
-            if casting and same_size:
-                emit_frame = (viewport_width, viewport_height, FRAME)
+            if fail_next_viewport:
+                fail_next_viewport = False
+                record("viewport-fail.jsonl", params)
+                response_error = {"message": "renderer is navigating"}
+            else:
+                record("viewport.jsonl", params)
+                width = int(params.get("width") or viewport_width)
+                height = int(params.get("height") or viewport_height)
+                same_size = width == viewport_width and height == viewport_height
+                viewport_width, viewport_height = width, height
+                if casting and same_size:
+                    emit_frame = (viewport_width, viewport_height, FRAME)
         elif method == "Page.getFrameTree":
             current = POPUP if active_target == POPUP["targetId"] else PAGE
             result = {"frameTree": {"frame": {"id": "f1", "url": current["url"]}}}
@@ -270,6 +277,11 @@ while True:
             emit_lifecycle = True
             if url == "http://stub.invalid/surface-reset":
                 emit_frame = (1280, 657, STALE_FRAME)
+            elif url == "http://stub.invalid/surface-reset-error":
+                fail_next_viewport = True
+                emit_frame = (1280, 657, STALE_FRAME)
+            elif url == "http://stub.invalid/no-frame":
+                emit_frame = None
         elif method in ("Page.reload", "Page.navigateToHistoryEntry"):
             emit_lifecycle = True
             emit_frame = (viewport_width, viewport_height, FRAME)
@@ -281,7 +293,10 @@ while True:
             send({"id": msg.get("id"), "result": {}})
             raise SystemExit(0)
         if msg.get("id") is not None:
-            send({"id": msg.get("id"), "result": result})
+            if response_error is not None:
+                send({"id": msg.get("id"), "error": response_error})
+            else:
+                send({"id": msg.get("id"), "result": result})
         if emit_lifecycle:
             session_id = "stub-sess-2" if active_target == POPUP["targetId"] \
                 else "stub-sess-1"
@@ -2734,6 +2749,36 @@ async def main() -> None:
                            item.get("height") == 657 for item in repair_meta), repair_meta
             assert read_lines("viewport.jsonl")[-1]["width"] == 900
             assert read_lines("viewport.jsonl")[-1]["height"] == 540
+
+            # A renderer can reject the viewport override while navigation is
+            # in flight. Repair must still restart the stream and send a fresh
+            # frame instead of leaving only status/URL messages alive.
+            failed_repair_frames = len(frames)
+            failed_repair_casts = len(read_lines("screencast.jsonl"))
+            failed_repair_calls = len(read_lines("viewport-fail.jsonl"))
+            await ws.send_json({"type": "navigate",
+                                "url": "http://stub.invalid/surface-reset-error"})
+            await wait_for(
+                lambda: len(read_lines("viewport-fail.jsonl")) > failed_repair_calls,
+                message="rejected viewport repair")
+            await wait_for(
+                lambda: len(read_lines("screencast.jsonl")) > failed_repair_casts,
+                message="stream restart after rejected viewport repair")
+            await wait_for(lambda: len(frames) > failed_repair_frames,
+                           message="fresh frame after rejected viewport repair")
+            assert browser.manager().get(first_id).screencasting is True
+
+            # If a known visual change produces no damage frame at all, the
+            # bounded event-driven watchdog restarts the cast and captures one.
+            silent_frames = len(frames)
+            silent_casts = len(read_lines("screencast.jsonl"))
+            await ws.send_json({"type": "navigate",
+                                "url": "http://stub.invalid/no-frame"})
+            await wait_for(
+                lambda: len(read_lines("screencast.jsonl")) > silent_casts,
+                timeout=3, message="silent screencast recovery")
+            await wait_for(lambda: len(frames) > silent_frames,
+                           message="watchdog recovery frame")
 
             # A last-viewer detach schedules screencast shutdown. If a new
             # WebSocket attaches before that task runs, the stale shutdown
