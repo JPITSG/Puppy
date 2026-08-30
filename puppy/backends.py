@@ -54,6 +54,22 @@ HEALTH_ONLINE_RECHECK = 30.0
 HEALTH_OFFLINE_RETRY_MIN = 8.0
 HEALTH_OFFLINE_RETRY_MAX = 120.0
 
+# Remote settings are node-owned, but an offline node cannot answer the Settings
+# page.  Keep the last authenticated values on the controller so every browser
+# (and a fresh browser after a controller restart) can render them read-only.
+# This is a rebuildable observation cache in the existing meta namespace, not a
+# second source of truth.  The exact version is rejected rather than migrated.
+LAST_KNOWN_VERSION = 1
+LAST_KNOWN_PREFIX = "backend_last_known."
+LAST_KNOWN_LIMITS = {
+    "engines": (list, 2 * 1024 * 1024),
+    "usage_refresh": (dict, 64 * 1024),
+    "auto_upgrade": (dict, 256 * 1024),
+    "uploads": (dict, 8 * 1024),
+    "browser": (dict, 8 * 1024),
+    "system_prompt": (dict, 1024 * 1024),
+}
+
 HOP_HEADERS = {"host", "connection", "upgrade", "sec-websocket-key", "sec-websocket-version",
                "sec-websocket-extensions", "sec-websocket-protocol", "cookie", "x-puppy-token",
                "content-length", "transfer-encoding", "accept-encoding"}
@@ -279,6 +295,109 @@ def _wake_health() -> None:
         _health_wake.set()
 
 
+def _last_known_key(bid: int) -> str:
+    return LAST_KNOWN_PREFIX + str(int(bid))
+
+
+def _validated_last_known_value(name: str, value):
+    spec = LAST_KNOWN_LIMITS.get(name)
+    if spec is None or not isinstance(value, spec[0]):
+        return None
+    try:
+        encoded = json.dumps(
+            value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if len(encoded) > spec[1]:
+            return None
+        # A detached JSON copy prevents callers from mutating cached objects.
+        return json.loads(encoded.decode("utf-8"))
+    except (TypeError, ValueError, UnicodeError):
+        return None
+
+
+def _load_last_known(bid: int):
+    value = db.meta_get(_last_known_key(bid))
+    if not isinstance(value, dict) or value.get("version") != LAST_KNOWN_VERSION:
+        return None
+    allowed = {"version", "node_uuid"}.union(LAST_KNOWN_LIMITS)
+    if set(value) - allowed:
+        return None
+    result = {"version": LAST_KNOWN_VERSION}
+    node_uuid = value.get("node_uuid")
+    if isinstance(node_uuid, str) and len(node_uuid) == 32:
+        result["node_uuid"] = node_uuid
+    for name in LAST_KNOWN_LIMITS:
+        if name not in value:
+            continue
+        normalized = _validated_last_known_value(name, value[name])
+        if normalized is None:
+            return None
+        result[name] = normalized
+    return result if len(result) > 1 else None
+
+
+def _clear_last_known(bid: int) -> None:
+    db.execute("DELETE FROM meta WHERE key=?", (_last_known_key(bid),))
+
+
+def _merge_last_known(bid: int, updates: dict) -> bool:
+    if not updates:
+        return False
+    row = db.query_one("SELECT value FROM meta WHERE key=?", (_last_known_key(bid),))
+    current = _load_last_known(bid)
+    # A present cache must match exactly.  Do not turn an authenticated poll
+    # into an implicit persisted-format migration; an operator upgrading a
+    # future cache version must replace it deliberately.
+    if row is not None and current is None:
+        return False
+    current = current or {"version": LAST_KNOWN_VERSION}
+    merged = dict(current)
+    node_uuid = updates.get("node_uuid")
+    if isinstance(node_uuid, str) and len(node_uuid) == 32:
+        merged["node_uuid"] = node_uuid
+    for name, value in updates.items():
+        if name not in LAST_KNOWN_LIMITS:
+            continue
+        normalized = _validated_last_known_value(name, value)
+        if normalized is not None:
+            merged[name] = normalized
+    if merged == current:
+        return False
+    db.meta_set(_last_known_key(bid), merged)
+    return True
+
+
+def _cache_remote_payload(bid: int, tail: str, payload: dict) -> bool:
+    """Remember settings/status learned through one authenticated node reply."""
+    if not isinstance(payload, dict):
+        return False
+    updates = {}
+    if tail in ("ping", "node"):
+        for name in ("uploads", "browser"):
+            if name in payload:
+                updates[name] = payload[name]
+        if "node_uuid" in payload:
+            updates["node_uuid"] = payload["node_uuid"]
+    elif tail == "engines" or tail.startswith("engines/"):
+        for name in ("engines", "usage_refresh", "auto_upgrade"):
+            if name in payload:
+                updates[name] = payload[name]
+    elif tail == "uploads/settings" and "uploads" in payload:
+        updates["uploads"] = payload["uploads"]
+    elif tail in ("browser/status", "browser/enabled") and \
+            type(payload.get("enabled")) is bool:
+        updates["browser"] = {"enabled": payload["enabled"]}
+    elif tail == "system-prompt" and "system_prompt" in payload:
+        updates["system_prompt"] = payload["system_prompt"]
+    return _merge_last_known(bid, updates)
+
+
+def _cacheable_remote_tail(tail: str) -> bool:
+    return tail in (
+        "ping", "node", "uploads/settings", "browser/status",
+        "browser/enabled", "system-prompt") or \
+        tail == "engines" or tail.startswith("engines/")
+
+
 def list_backends() -> list:
     rows = db.query(
         "SELECT id,name,url,urls,protocol,capabilities,remote_version,role,tls_fingerprint,"
@@ -299,6 +418,7 @@ def list_backends() -> list:
         item["auto_upgrade"] = bool(item.get("auto_upgrade"))
         item["upgrade_in_progress"] = item["id"] in _upgrades_in_progress
         item["availability"] = _availability(int(item["id"]))
+        item["last_known"] = _load_last_known(int(item["id"]))
         out.append(item)
     return out
 
@@ -567,7 +687,7 @@ def _store_metadata(bid: int, remote: dict) -> bool:
         db.execute(
             "UPDATE backends SET protocol=?,capabilities=?,remote_version=?,role=? WHERE id=?",
             (api_protocol, capabilities, remote_version, role, bid))
-    return changed
+    return _cache_remote_payload(bid, "ping", remote) or changed
 
 
 def _same_backend_connection(first: dict, second: dict) -> bool:
@@ -779,6 +899,7 @@ async def h_add(request: web.Request):
         "tls_fingerprint,auto_upgrade,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
         (name[:80], urls[0], _urls_json(urls), token, api_protocol, capabilities,
          remote_version, role, tls_fingerprint, int(auto_upgrade), time.time()))
+    _cache_remote_payload(bid, "ping", remote)
     _remember_active_url(bid, result["active_url"], urls)
     _mark_backend_online(bid)
     _broadcast_backends()
@@ -876,6 +997,7 @@ async def h_patch(request: web.Request):
             "error": "automatic upgrades require an upgrade-capable headless backend"
         }, status=409)
 
+    previous_last_known = _load_last_known(bid) if connection_changed else None
     if remote:
         api_protocol, capabilities, remote_version, role = _metadata(remote)
     else:
@@ -889,6 +1011,13 @@ async def h_patch(request: web.Request):
         (name, urls[0], _urls_json(urls), token, api_protocol, capabilities, remote_version, role,
          tls_fingerprint, int(enabled), bid))
     if connection_changed:
+        same_node = bool(
+            previous_last_known and
+            isinstance(previous_last_known.get("node_uuid"), str) and
+            previous_last_known.get("node_uuid") == remote.get("node_uuid"))
+        if not same_node:
+            _clear_last_known(bid)
+        _cache_remote_payload(bid, "ping", remote)
         _remember_active_url(bid, active_url, urls)
         _mark_backend_online(bid)
     if connection_changed or enabled != bool(backend.get("auto_upgrade")):
@@ -909,6 +1038,7 @@ async def h_patch(request: web.Request):
 async def h_delete(request: web.Request):
     bid = int(request.match_info["bid"])
     db.execute("DELETE FROM backends WHERE id=?", (bid,))
+    _clear_last_known(bid)
     _active_urls.pop(bid, None)
     _url_cursors.pop(bid, None)
     _auto_upgrade_retry_after.pop(bid, None)
@@ -1390,6 +1520,13 @@ async def proxy(request: web.Request):
                             changed = _store_metadata(bid, remote) or changed
                     except Exception:
                         pass  # proxy the authoritative response; metadata caching is best-effort
+                if 200 <= r.status < 300 and _cacheable_remote_tail(tail):
+                    try:
+                        response_payload = json.loads(payload.decode("utf-8"))
+                        changed = _cache_remote_payload(
+                            bid, tail, response_payload) or changed
+                    except Exception:
+                        pass  # cache observation is best-effort; proxy reply remains authoritative
                 if changed:
                     _broadcast_backends()
                 return web.Response(status=r.status, body=payload,

@@ -1965,6 +1965,7 @@ const state = {
   remoteUsageRefresh: {}, // bid -> account-usage refresh metadata
   remoteAutoUpgrade: {},  // bid -> unattended engine-update schedule
   remoteUploadSettings: {}, // bid -> remote per-file upload policy
+  remoteSystemPrompts: {}, // bid -> last authenticated node prompt settings
   tabs: [],               // [{id,type,bid,sid,browserId,title,cmd}]
   active: null,           // focused tab id (each pane also has its own active tab)
   activeGroup: null,      // focused workspace pane id
@@ -2074,7 +2075,9 @@ function reconcileRemoteState() {
                         state.remoteStopping,
                         state.engCache, state.remoteEngineErrors,
                         state.remoteEngineCheckedAt, state.remoteNodeCheckedAt,
-                        state.remoteUsageRefresh, state.remoteUploadSettings,
+                        state.remoteUsageRefresh, state.remoteAutoUpgrade,
+                        state.remoteUploadSettings, state.remoteSystemPrompts,
+                        state.remoteBrowser, state.nodeUsers,
                         remotePollSequence]) {
     for (const id of Object.keys(bucket)) if (!live.has(String(id))) delete bucket[id];
   }
@@ -2125,12 +2128,35 @@ function resetRemoteBackendConnection(bid) {
                         state.remoteStopping,
                         state.engCache, state.remoteEngineErrors,
                         state.remoteEngineCheckedAt, state.remoteNodeCheckedAt,
-                        state.remoteUsageRefresh, state.remoteUploadSettings,
+                        state.remoteUsageRefresh, state.remoteAutoUpgrade,
+                        state.remoteUploadSettings, state.remoteSystemPrompts,
                         state.remoteBrowser, state.nodeUsers]) {
     delete bucket[bid];
   }
   for (const key of [...sessionActivityAnchors.keys()])
     if (key.startsWith(`${bid}:`)) sessionActivityAnchors.delete(key);
+}
+
+/* The controller persists one exact-version observation cache per backend.
+   Hydrate it before availability is reconciled so a page opened while a node
+   is already offline still has the values that node last authenticated. */
+function hydrateBackendLastKnown(backends) {
+  for (const backend of backends || []) {
+    const bid = Number(backend && backend.id) || 0;
+    const known = backend && backend.last_known;
+    if (!bid || !known || typeof known !== "object" || known.version !== 1) continue;
+    if (Array.isArray(known.engines)) state.engCache[bid] = known.engines;
+    if (known.usage_refresh && typeof known.usage_refresh === "object")
+      state.remoteUsageRefresh[bid] = known.usage_refresh;
+    if (known.auto_upgrade && typeof known.auto_upgrade === "object")
+      state.remoteAutoUpgrade[bid] = known.auto_upgrade;
+    const uploads = normalizeUploadSettings(known.uploads);
+    if (uploads) state.remoteUploadSettings[bid] = uploads;
+    if (known.browser && typeof known.browser.enabled === "boolean")
+      state.remoteBrowser[bid] = { enabled: known.browser.enabled };
+    if (known.system_prompt && typeof known.system_prompt === "object")
+      state.remoteSystemPrompts[bid] = known.system_prompt;
+  }
 }
 
 function controllerBackendHealth(backend) {
@@ -2475,6 +2501,7 @@ async function refreshState() {
   state.engMap = {};
   state.engines.forEach(e => state.engMap[e.key] = e);
   state.backends = Array.isArray(s.backends) ? s.backends : [];
+  hydrateBackendLastKnown(state.backends);
   state.workspaceLinks = Array.isArray(s.workspace_links) ? s.workspace_links : [];
   state.browser = { enabled: !!(s.browser && s.browser.enabled) };
   state.sessions = Array.isArray(s.sessions) ? s.sessions : [];
@@ -2513,6 +2540,7 @@ function connectUpdates() {
         syncTabsWithSessions();
       } else if (d.type === "backends" && Array.isArray(d.backends)) {
         state.backends = d.backends;
+        hydrateBackendLastKnown(state.backends);
         const becameOnline = reconcileRemoteState();
         renderSidebar();
         syncRemoteStateViews();
@@ -9197,6 +9225,7 @@ class SettingsView {
     this.usageRows = new Map();
     this.autoUpgradeRows = new Map();
     this.uploadRows = new Map();
+    this.remoteBrowserToggles = new Map();
     this.upgradeButtons = new Map();
     this.backendAutoToggles = new Map();
     this.upgradeReadiness = new Map();
@@ -9208,6 +9237,7 @@ class SettingsView {
     this.engineUpgradePollTimer = null;
     this.engineUpgradePollGeneration = 0;
     this.localEngineGroup = null;
+    this.systemPromptSync = null;
     this.root = el("div", "view settings");
     this.root.innerHTML = `<div class="settings-scroll"><div class="settings-inner"></div></div>`;
     this.inner = this.root.querySelector(".settings-inner");
@@ -9224,11 +9254,13 @@ class SettingsView {
     this.usageRows.clear();
     this.autoUpgradeRows.clear();
     this.uploadRows.clear();
+    this.remoteBrowserToggles.clear();
     this.upgradeButtons.clear();
     this.backendAutoToggles.clear();
     this.upgradeReadiness.clear();
     this.upgradesInProgress.clear();
     this.localEngineGroup = null;
+    this.systemPromptSync = null;
     this.root.remove();
   }
   onShow() { this.render(); }
@@ -9511,7 +9543,7 @@ class SettingsView {
         state.engCache[bid] : null;
       if (reachable === false) {
         group.update({
-          status: "bad", engines: [], message: "Backend unavailable",
+          status: "bad", engines: cached, message: "Backend unavailable · showing last known values",
           detail: state.remoteErrors[bid] || "The controller cannot reach this backend",
         });
       } else if (reachable === true && cached === null) {
@@ -9520,6 +9552,11 @@ class SettingsView {
           message: state.remoteEngineErrors[bid] ?
             "Backend available · retrying engine status…" : "Loading engines…",
           detail: state.remoteEngineErrors[bid] || "",
+        });
+      } else if (reachable !== true && cached !== null) {
+        group.update({
+          status: "pending", engines: cached,
+          message: "Checking backend · showing last known values",
         });
       } else {
         group.update({
@@ -9565,6 +9602,24 @@ class SettingsView {
       row.update(state.remoteUploadSettings[bid] || null,
         remoteAvailability(bid), backendSupportsFileUploads(bid));
     }
+    for (const [bid, record] of this.remoteBrowserToggles) {
+      const availability = remoteAvailability(bid);
+      const unavailable = !backendConnectionAllowed(bid);
+      record.input.checked = browserEnabledFor(bid);
+      if (unavailable) {
+        record.input.disabled = true;
+        record.root.classList.add("disabled");
+        record.root.title = availability === "bad" ?
+          "Backend unavailable · showing last known value" :
+          "Checking backend · showing last known value";
+        record.wasOffline = true;
+      } else if (record.wasOffline) {
+        record.wasOffline = false;
+        this.wireBrowserToggle(
+          bid, record.input, null, this.renderGeneration, record.root, record);
+      }
+    }
+    if (this.systemPromptSync) this.systemPromptSync();
     this.syncUpgradeButtons();
   }
 
@@ -9626,6 +9681,8 @@ class SettingsView {
       button.classList.add("busy");
     } else if (!e2.upgrade_supported || !backendSupportsEngineUpgrade(bid)) {
       set("Update", true, "this backend cannot update its engines from here");
+    } else if (bid && !backendConnectionAllowed(bid)) {
+      set("Update", true, "the backend is unavailable");
     } else if (sessionsFor(bid).some(s => s.engine === e2.key && s.status === "running")) {
       set("Busy", true, "a session is using this engine - finish it first");
     } else {
@@ -9708,17 +9765,14 @@ class SettingsView {
     root.appendChild(head); root.appendChild(body);
 
     const update = ({ status = "pending", engines = null, message = "", detail = "" }) => {
-      if (status === "bad" && refresh && refresh.classList.contains("refreshing")) {
-        status = "pending";
-        engines = null;
-        message = "";
-        detail = "";
-      }
       dot.className = "gdot " + status;
+      root.classList.toggle("engine-node-offline-values",
+        status !== "ok" && Array.isArray(engines));
+      if (refresh) refresh.disabled = !!bid && status !== "ok";
       const statusLabel = status === "ok" ? "available" : status === "bad" ? "unavailable" : "checking";
       dot.setAttribute("aria-label", detail ? `${statusLabel}: ${detail}` : statusLabel);
       body.innerHTML = "";
-      if (message || engines === null) {
+      if (message) {
         const loading = status !== "bad";
         const checkingBackend = loading && status === "pending" && engines === null && !!bid;
         const noteText = message || (checkingBackend ? "Checking backend…" : "Checking engines…");
@@ -9735,6 +9789,17 @@ class SettingsView {
         }
         note.setAttribute("aria-label", detail || note.textContent);
         body.appendChild(note);
+      }
+      if (engines === null) {
+        if (!message) {
+          const note = el("div", "engine-node-message engine-node-loading");
+          const icon = el("span", "engine-node-loading-icon");
+          icon.appendChild(refreshIcon(10));
+          note.appendChild(icon);
+          note.appendChild(el("span", "engine-node-loading-text",
+            status === "pending" && bid ? "Checking backend…" : "Checking engines…"));
+          body.appendChild(note);
+        }
       } else if (!engines.length) {
         const note = el("div", "engine-node-message engine-node-empty", "No engines reported");
         note.setAttribute("aria-label", note.textContent);
@@ -9802,7 +9867,10 @@ class SettingsView {
 
     const describe = () => {
       if (!supported) return "Backend upgrade required";
-      if (availability === "bad") return "Backend unavailable";
+      if (availability === "bad") return current ?
+        "Backend unavailable · showing last known setting" : "Backend unavailable";
+      if (availability !== "ok") return current ?
+        "Checking backend · showing last known setting" : "Checking backend setting…";
       if (!current) return "Checking backend setting…";
       if (saving) return "Saving…";
       const attempts = current.last_attempts || {};
@@ -9828,7 +9896,7 @@ class SettingsView {
     };
 
     const paint = () => {
-      const usable = supported && availability !== "bad" && !!current && !saving;
+      const usable = supported && availability === "ok" && !!current && !saving;
       toggle.disabled = !usable;
       toggleRoot.classList.toggle("disabled", !usable);
       const on = !!(current && current.enabled);
@@ -9875,7 +9943,7 @@ class SettingsView {
     };
 
     const update = (metadata, reachable = "ok", canConfigure = true) => {
-      current = metadata;
+      if (metadata && typeof metadata === "object") current = metadata;
       availability = reachable;
       supported = canConfigure;
       paint();
@@ -9916,7 +9984,10 @@ class SettingsView {
     let saving = false;
     const describe = (metadata, reachable, canConfigure) => {
       if (!canConfigure) return "Backend upgrade required";
-      if (reachable === "bad") return "Backend unavailable";
+      if (reachable === "bad") return metadata ?
+        "Backend unavailable · showing last known setting" : "Backend unavailable";
+      if (reachable !== "ok") return metadata ?
+        "Checking backend · showing last known setting" : "Checking backend setting…";
       if (!metadata) return "Checking backend setting…";
       if (!metadata.enabled) return "Automatic refresh is off";
       if (metadata.last_error) return `Last refresh failed · ${metadata.last_error}`;
@@ -9927,15 +9998,15 @@ class SettingsView {
       return "Refreshes on the next engine-status check";
     };
     const update = (metadata, reachable = "ok", canConfigure = true) => {
-      current = metadata;
+      if (metadata && typeof metadata === "object") current = metadata;
       availability = reachable;
       supported = canConfigure;
-      if (metadata && document.activeElement !== interval)
-        interval.value = String(metadata.minutes);
-      const disabled = saving || !canConfigure || reachable === "bad" || !metadata;
+      if (current && document.activeElement !== interval)
+        interval.value = String(current.minutes);
+      const disabled = saving || !canConfigure || reachable !== "ok" || !current;
       interval.disabled = disabled;
       save.disabled = disabled;
-      const description = describe(metadata, reachable, canConfigure);
+      const description = describe(current, reachable, canConfigure);
       note.textContent = description;
       note.setAttribute("aria-label", description);
     };
@@ -10006,17 +10077,21 @@ class SettingsView {
     let saving = false;
     let loadError = "";
     const update = (metadata, reachable, canConfigure) => {
-      current = normalizeUploadSettings(metadata) || null;
+      const normalized = normalizeUploadSettings(metadata);
+      if (normalized) current = normalized;
       availability = reachable;
       supported = canConfigure;
       if (!saving && current && document.activeElement !== limit)
         limit.value = String(current.max_file_size_mb);
-      const disabled = saving || !canConfigure || reachable === "bad" || !current;
+      const disabled = saving || !canConfigure || reachable !== "ok" || !current;
       limit.disabled = disabled;
       save.disabled = disabled;
       let description;
       if (!canConfigure) description = "Backend upgrade required";
-      else if (reachable === "bad") description = "Backend unavailable";
+      else if (reachable === "bad") description = current ?
+        "Backend unavailable · showing last known setting" : "Backend unavailable";
+      else if (reachable !== "ok") description = current ?
+        "Checking backend · showing last known setting" : "Checking backend setting…";
       else if (!current) description = loadError || "Checking backend setting…";
       else if (!current.enabled) description = "File uploads are disabled";
       else description = `Any file type · ${current.max_file_size_mb} MiB maximum each`;
@@ -10027,7 +10102,7 @@ class SettingsView {
       if (!supported) return;
       if (bid && !backendConnectionAllowed(bid)) {
         loadError = "Backend unavailable";
-        update(null, remoteAvailability(bid), true);
+        update(current, remoteAvailability(bid), true);
         return;
       }
       try {
@@ -10040,7 +10115,7 @@ class SettingsView {
       } catch (error) {
         if (!root.isConnected) return;
         loadError = error.message || "Could not load upload setting";
-        update(null, bid ? remoteAvailability(bid) : "ok", true);
+        update(current, bid ? remoteAvailability(bid) : "ok", true);
       }
     };
     save.onclick = async () => {
@@ -10082,8 +10157,12 @@ class SettingsView {
   /* One wiring for the instance card and every backend row: probe the node's
      browser status, gate the toggle on availability, and surface the reason.
      A row variant (no note element) carries the reason via title + tap toast. */
-  async wireBrowserToggle(bid, input, note, generation, root = null) {
+  async wireBrowserToggle(bid, input, note, generation, root = null, existingRecord = null) {
     const name = backendName(bid);
+    const browserRecord = existingRecord || (bid && root ? {
+      input, root, wasOffline: false,
+    } : null);
+    if (browserRecord) this.remoteBrowserToggles.set(bid, browserRecord);
     const setNote = (text, warn) => {
       if (note) {
         note.textContent = text;
@@ -10092,7 +10171,9 @@ class SettingsView {
       if (root) root.title = text;
     };
     const apply = st => {
+      if (browserRecord) browserRecord.wasOffline = false;
       input.checked = !!st.enabled;
+      if (bid) state.remoteBrowser[bid] = { enabled: !!st.enabled };
       input.disabled = !st.available && !st.enabled;
       if (root) {
         root.classList.toggle("disabled", input.disabled);
@@ -10113,7 +10194,10 @@ class SettingsView {
     if (bid && !backendConnectionAllowed(bid)) {
       input.disabled = true;
       if (root) root.classList.add("disabled");
-      setNote("Backend unavailable", true);
+      if (browserRecord) browserRecord.wasOffline = true;
+      setNote(remoteAvailability(bid) === "bad" ?
+        "Backend unavailable · showing last known value" :
+        "Checking backend · showing last known value", true);
       return;
     }
     let status;
@@ -10275,6 +10359,11 @@ class SettingsView {
     } catch (error) {
       records.set(0, { loaded: false, loading: false, error: error.message });
     }
+    for (const node of nodes) {
+      if (!node.bid || !state.remoteSystemPrompts[node.bid]) continue;
+      try { records.set(node.bid, normalized(state.remoteSystemPrompts[node.bid])); }
+      catch (error) { /* an invalid observation is ignored and reloaded when online */ }
+    }
 
     const supported = bid => backendSupportsSystemPrompt(bid);
     const dirty = record => !!record && record.loaded &&
@@ -10293,12 +10382,14 @@ class SettingsView {
     const paint = () => {
       const record = records.get(activeBid);
       const canUse = supported(activeBid);
-      const editable = canUse && !!record && record.loaded && !record.saving;
+      const backendStatus = activeBid ? remoteAvailability(activeBid) : "ok";
+      const unavailable = !!activeBid && !backendConnectionAllowed(activeBid);
+      const editable = canUse && !unavailable && !!record && record.loaded && !record.saving;
       custom.disabled = browserText.disabled = !editable;
       remoteText.disabled = !editable || !record.remoteWorkspaceSupported;
       remoteReset.disabled = !editable || !record.remoteWorkspaceSupported;
       browserReset.disabled = !editable;
-      save.disabled = !canUse || (!!record && record.saving);
+      save.disabled = !canUse || unavailable || (!!record && record.saving);
       status.classList.remove("bad", "dirty");
       if (!canUse) {
         custom.value = remoteText.value = browserText.value = "";
@@ -10326,7 +10417,12 @@ class SettingsView {
           "Upgrade this backend to configure remote workspace guidance";
         if (document.activeElement !== browserText) browserText.value = record.browserDraft;
         save.textContent = record.saving ? "Saving…" : "Save prompt";
-        if (record.error) {
+        if (unavailable) {
+          status.textContent = backendStatus === "bad" ?
+            "Backend unavailable · showing last known prompt settings." :
+            "Checking backend · showing last known prompt settings.";
+          status.classList.add("bad");
+        } else if (record.error) {
           status.textContent = record.error;
           status.classList.add("bad");
         } else if (dirty(record)) {
@@ -10343,14 +10439,15 @@ class SettingsView {
     const load = async (force = false) => {
       const bid = activeBid;
       if (!supported(bid)) { paint(); return; }
+      const existing = records.get(bid);
       if (bid && !backendConnectionAllowed(bid)) {
-        records.set(bid, {
-          loaded: false, loading: false, error: "Backend unavailable",
-        });
+        if (!existing || !existing.loaded)
+          records.set(bid, {
+            loaded: false, loading: false, error: "Backend unavailable",
+          });
         paint();
         return;
       }
-      const existing = records.get(bid);
       if (!force && existing && existing.loaded) { paint(); return; }
       const serial = ++loadSerial;
       records.set(bid, { loaded: false, loading: true, error: "", request: serial });
@@ -10359,14 +10456,22 @@ class SettingsView {
         const result = await api(bid, "system-prompt", { timeoutMs: 10000 });
         if (generation !== this.renderGeneration || !card.isConnected) return;
         if (!records.get(bid) || records.get(bid).request !== serial) return;
-        records.set(bid, normalized(result.system_prompt));
+        const loaded = normalized(result.system_prompt);
+        records.set(bid, loaded);
+        if (bid) state.remoteSystemPrompts[bid] = result.system_prompt;
       } catch (error) {
         if (generation !== this.renderGeneration || !card.isConnected) return;
         if (!records.get(bid) || records.get(bid).request !== serial) return;
-        records.set(bid, {
-          loaded: false, loading: false,
-          error: error.message || "Could not load prompt settings",
-        });
+        if (existing && existing.loaded) {
+          existing.loading = false;
+          existing.error = error.message || "Could not refresh prompt settings";
+          records.set(bid, existing);
+        } else {
+          records.set(bid, {
+            loaded: false, loading: false,
+            error: error.message || "Could not load prompt settings",
+          });
+        }
       }
       if (bid === activeBid) paint();
     };
@@ -10425,6 +10530,7 @@ class SettingsView {
         record = normalized(result.system_prompt);
         record.saved = true;
         records.set(bid, record);
+        if (bid) state.remoteSystemPrompts[bid] = result.system_prompt;
         toast(`${node ? node.name : "Backend"}: System prompt saved`, "ok");
       } catch (error) {
         if (generation !== this.renderGeneration || !card.isConnected) return;
@@ -10439,6 +10545,7 @@ class SettingsView {
     const preferred = Number(this.systemPromptBid) || 0;
     if (nodes.some(node => node.bid === preferred)) activeBid = preferred;
     select.value = String(activeBid);
+    this.systemPromptSync = paint;
     paint();
     if (!records.has(activeBid)) Promise.resolve().then(() => load());
     return card;
@@ -10472,12 +10579,14 @@ class SettingsView {
     this.usageRows.clear();
     this.autoUpgradeRows.clear();
     this.uploadRows.clear();
+    this.remoteBrowserToggles.clear();
     this.upgradeButtons.clear();
     this.backendAutoToggles.clear();
     /* A hidden Settings tab is not polled. Re-enter through Checking rather
        than briefly enabling a button from an arbitrarily old ready result. */
     this.upgradeReadiness.clear();
     this.localEngineGroup = null;
+    this.systemPromptSync = null;
 
     /* instance */
     const c1 = el("div", "card");

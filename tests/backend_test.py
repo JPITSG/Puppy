@@ -1124,6 +1124,10 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert stored["availability"]["state"] == "online"
         assert stored["availability"]["reason"] == ""
         assert isinstance(stored["availability"]["checked_at"], (int, float))
+        assert stored["last_known"]["version"] == 1
+        assert len(stored["last_known"]["node_uuid"]) == 32
+        assert stored["last_known"]["browser"] == {"enabled": False}
+        assert stored["last_known"]["uploads"]["max_file_size_mb"] >= 0
         assert "token" not in stored
 
         async with http.get(
@@ -1217,6 +1221,11 @@ async def exercise_controller(url: str, token: str, backend_url: str,
             proxied_refresh = await response.json()
             assert response.status == 200, proxied_refresh
         assert proxied_refresh["usage_refresh"]["minutes"] == 0
+        async with http.get(url + f"/api/b/{stored['id']}/engines",
+                            headers=headers) as response:
+            proxied_engines = await response.json()
+            assert response.status == 200, proxied_engines
+        assert isinstance(proxied_engines["engines"], list)
         remote_updates = await http.ws_connect(
             url + f"/api/b/{stored['id']}/ws/updates", headers=headers)
         first = await remote_updates.receive_json(timeout=3)
@@ -1285,6 +1294,18 @@ async def exercise_controller(url: str, token: str, backend_url: str,
             proxied_policy = await response.json()
             assert response.status == 200, proxied_policy
         assert proxied_policy["uploads"]["max_file_size_mb"] == 9
+        async with http.get(url + "/api/backends", headers=headers) as response:
+            cached_backend = (await response.json())["backends"][0]
+            assert response.status == 200
+        last_known = cached_backend["last_known"]
+        assert last_known["version"] == 1
+        assert last_known["usage_refresh"]["minutes"] == 0
+        assert isinstance(last_known["engines"], list)
+        assert isinstance(last_known["auto_upgrade"]["enabled"], bool)
+        assert last_known["uploads"]["max_file_size_mb"] == 9
+        assert last_known["browser"] == {"enabled": False}
+        assert last_known["system_prompt"]["custom"] == \
+            "Controller-configured guidance."
         proxied_file = b"MZ" + (b"x" * (8 * 1024 * 1024)) + b"streamed-through-controller"
         controller_backends._active_urls.pop(stored["id"], None)
         async with http.post(
@@ -1352,6 +1373,10 @@ async def exercise_controller(url: str, token: str, backend_url: str,
             stopping_backend = (await response.json())["backends"][0]
         assert stopping_backend["availability"]["state"] == "offline", stopping_backend
         assert "restarting" in stopping_backend["availability"]["reason"].lower()
+        assert stopping_backend["last_known"]["uploads"]["max_file_size_mb"] == 9
+        assert stopping_backend["last_known"]["usage_refresh"]["minutes"] == 0
+        assert stopping_backend["last_known"]["system_prompt"]["custom"] == \
+            "Controller-configured guidance."
         await lifecycle_updates.close()
 
         deadline = asyncio.get_event_loop().time() + 120

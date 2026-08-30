@@ -1545,6 +1545,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .engine-row-statuses{display:flex;align-items:center;justify-content:flex-end;gap:6px;min-width:0;flex-wrap:wrap}
 .engine-row-statuses .pill{min-width:0}
 .engine-row-actions{display:flex;align-items:center;justify-content:flex-end;min-width:0}
+.engine-node-offline-values .engine-row{opacity:.48}
 .engine-update{flex:0 0 auto;min-width:82px}
 .engine-update.wants-update{color:var(--warn);border-color:var(--warn-line);background:var(--warn-dim)}
 @media (hover:hover){
@@ -1778,6 +1779,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   width:74px;height:var(--settings-control-h);margin:0;padding:0 7px;
   text-align:center;font-family:var(--mono);font-size:12px;
 }
+.usage-refresh-controls input:disabled{opacity:.5;cursor:not-allowed}
 .usage-refresh-controls .btn{height:var(--settings-control-h)}
 /* Chromium reserves room for the number stepper even when it hides the arrows
    until hover. Keep them visible so the value never looks off-centre. */

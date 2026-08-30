@@ -593,7 +593,8 @@ const state = {
   ],
   remoteSessions: {}, remoteOk: {7: true}, remoteErrors: {}, remoteStopping: {},
   engCache: {}, remoteEngineErrors: {}, remoteEngineCheckedAt: {},
-  remoteNodeCheckedAt: {}, remoteUsageRefresh: {}, remoteUploadSettings: {},
+  remoteNodeCheckedAt: {}, remoteUsageRefresh: {}, remoteAutoUpgrade: {},
+  remoteUploadSettings: {}, remoteSystemPrompts: {}, remoteBrowser: {}, nodeUsers: {},
 };
 const remotePollSequence = {};
 const REMOTE_POLL_TIMEOUT = 5000;
@@ -658,6 +659,65 @@ console.log(JSON.stringify({
         result["recoveredOnline"] is True and result["stoppingClears"] == 1, result
     assert "if (this.tab.bid && !backendConnectionAllowed(this.tab.bid))" in ui_source
     assert "backendConnectionAllowed(record.backend.id)" in ui_source
+
+
+def check_backend_last_known_settings(ui_source: str, css_source: str) -> None:
+    """A controller snapshot hydrates every node-owned Settings value."""
+    def function(name):
+        start = ui_source.index("function " + name + "(")
+        brace = ui_source.index("{", start)
+        depth = 0
+        for index in range(brace, len(ui_source)):
+            if ui_source[index] == "{":
+                depth += 1
+            elif ui_source[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    return ui_source[start:index + 1]
+        raise AssertionError("unbalanced " + name)
+
+    source = function("normalizeUploadSettings") + "\n" + \
+        function("hydrateBackendLastKnown")
+    script = r"""
+const state={engCache:{},remoteUsageRefresh:{},remoteAutoUpgrade:{},
+  remoteUploadSettings:{},remoteBrowser:{},remoteSystemPrompts:{}};
+%s
+hydrateBackendLastKnown([{id:7,last_known:{version:1,
+  engines:[{key:"codex",version:"9.8.7"}],
+  usage_refresh:{minutes:15,enabled:true},
+  auto_upgrade:{enabled:true,mode:"now",at:"03:30"},
+  uploads:{enabled:true,max_file_size_mb:8,max_file_size_bytes:8388608},
+  browser:{enabled:true},
+  system_prompt:{custom:"remember me"}}}]);
+hydrateBackendLastKnown([{id:8,last_known:{version:2,
+  usage_refresh:{minutes:99,enabled:true}}}]);
+console.log(JSON.stringify({engines:state.engCache[7],usage:state.remoteUsageRefresh[7],
+  auto:state.remoteAutoUpgrade[7],uploads:state.remoteUploadSettings[7],
+  browser:state.remoteBrowser[7],prompt:state.remoteSystemPrompts[7],
+  rejected:state.remoteUsageRefresh[8]||null}));
+""" % source
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:700]
+    result = json.loads(proc.stdout.strip())
+    assert result == {
+        "engines": [{"key": "codex", "version": "9.8.7"}],
+        "usage": {"minutes": 15, "enabled": True},
+        "auto": {"enabled": True, "mode": "now", "at": "03:30"},
+        "uploads": {"enabled": True, "max_file_size_mb": 8,
+                    "max_file_size_bytes": 8388608},
+        "browser": {"enabled": True},
+        "prompt": {"custom": "remember me"},
+        "rejected": None,
+    }, result
+    assert ui_source.count(
+        'if (metadata && typeof metadata === "object") current = metadata;') >= 2
+    assert "const normalized = normalizeUploadSettings(metadata);" in ui_source
+    assert "if (normalized) current = normalized;" in ui_source
+    assert "Backend unavailable · showing last known setting" in ui_source
+    assert "Backend unavailable · showing last known prompt settings." in ui_source
+    assert ".engine-node-offline-values .engine-row{opacity:.48}" in css_source
+    assert ".usage-refresh-controls input:disabled{opacity:.5;cursor:not-allowed}" \
+        in css_source
 
 
 def check_interrupted_completion(ui_source: str) -> None:
@@ -1030,12 +1090,13 @@ console.log(JSON.stringify({before,after,connected}));
     assert '.be-url-version:not(:empty)::before{content:"·";margin-right:1ch}' \
         in css_source
     assert ('if (status === "bad" && refresh && ' +
-            'refresh.classList.contains("refreshing")) {') in ui_source
-    assert 'refresh.disabled = status === "bad"' not in ui_source
+            'refresh.classList.contains("refreshing")) {') not in ui_source
+    assert 'if (refresh) refresh.disabled = !!bid && status !== "ok";' in ui_source
 
     # A manual retry announces both edges of the attempt, remains gated while
     # in flight, and always restores the button even when the backend is still
-    # unreachable. Settings uses those announcements to paint its checking row.
+    # unreachable. Settings keeps the last values painted and gates the retry
+    # again when its post-request availability sync still says offline.
     refresh_source = "async " + extract("refreshEngineVersions")
     refresh_script = r"""
 const ENGINE_REFRESH_TIMEOUT=1234;
@@ -2043,7 +2104,10 @@ const document={activeElement:null,createElement:tag=>new MockNode(tag)};
 const el=(tag,cls="",text="")=>new MockNode(tag,cls,text);
 const supported=new Set([0,1,2]);
 const backendSupportsSystemPrompt=bid=>supported.has(bid);
-const backendConnectionAllowed=()=>true;
+let backendAllowed=true;
+const backendConnectionAllowed=bid=>!bid||backendAllowed;
+const remoteAvailability=bid=>!bid||backendAllowed?"ok":"bad";
+const state={remoteSystemPrompts:{}};
 const calls=[],toasts=[];
 const payload=(custom,remote,browser)=>({custom,remote_workspace:remote,browser,
   remote_workspace_default:"REMOTE DEFAULT",browser_default:"DEFAULT",max_chars:100});
@@ -2091,6 +2155,11 @@ select.value="1";document.activeElement=select;select.onchange();
 await new Promise(resolve=>setTimeout(resolve,0));
 const remote={custom:custom.value,remoteWorkspace:remoteWorkspace.value,
   browser:browser.value,status:status.textContent};
+backendAllowed=false;view.systemPromptSync();
+const offline={custom:custom.value,remoteWorkspace:remoteWorkspace.value,
+  browser:browser.value,status:status.textContent,
+  disabled:custom.disabled&&remoteWorkspace.disabled&&browser.disabled&&save.disabled};
+backendAllowed=true;view.systemPromptSync();
 select.value="2";document.activeElement=select;select.onchange();
 await new Promise(resolve=>setTimeout(resolve,0));
 const legacy={custom:custom.value,browser:browser.value,
@@ -2100,7 +2169,7 @@ custom.value="LEGACY EDIT";custom.oninput();await save.onclick();
 select.value="3";document.activeElement=select;select.onchange();
 const unsupported={disabled:custom.disabled&&remoteWorkspace.disabled&&browser.disabled&&save.disabled,
   status:status.textContent};
-console.log(JSON.stringify({before,dirty,resetState,saved,remote,legacy,unsupported,calls}));
+console.log(JSON.stringify({before,dirty,resetState,saved,remote,offline,legacy,unsupported,calls}));
 """.replace("__METHOD__", method)
     proc = subprocess.run(["node", "--input-type=module", "-e", script],
                           capture_output=True, text=True)
@@ -2120,6 +2189,12 @@ console.log(JSON.stringify({before,dirty,resetState,saved,remote,legacy,unsuppor
     assert result["remote"]["custom"] == "REMOTE" and \
         result["remote"]["remoteWorkspace"] == "REMOTE WORKSPACE" and \
         result["remote"]["browser"] == "REMOTE BROWSER", result
+    assert result["offline"] == {
+        "custom": "REMOTE", "remoteWorkspace": "REMOTE WORKSPACE",
+        "browser": "REMOTE BROWSER",
+        "status": "Backend unavailable · showing last known prompt settings.",
+        "disabled": True,
+    }, result
     assert result["legacy"] == {
         "custom": "LEGACY", "browser": "LEGACY BROWSER",
         "remoteDisabled": True,
@@ -3647,6 +3722,7 @@ async def main() -> None:
             check_reconnect_status(ui_source)
             check_backend_shutdown_notice(ui_source)
             check_controller_backend_pooling(ui_source)
+            check_backend_last_known_settings(ui_source, css_source)
             check_interrupted_completion(ui_source)
             check_thinking_icons(ui_source)
             check_backend_editor(ui_source, css_source)
