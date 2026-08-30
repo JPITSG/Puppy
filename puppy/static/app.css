@@ -1434,12 +1434,16 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   overflow:hidden;background:#000;outline:none;touch-action:none;
   -webkit-user-select:none;user-select:none;
 }
-/* Paint the keyboard-focus ring over the frame, inside the clipped stage.
-   An outer shadow can be clipped by the pane while an ordinary inset shadow
-   sits below the <img>, leaving only the rounded corner wedges visible. */
+/* The live <img> fills this box, so both the permanent frame and keyboard
+   focus state must paint above it. A real border would change the measured
+   viewport and pointer mapping; this overlay is purely visual. Keep it above
+   the disconnected-state layer (z-index 20) as well. */
+.br-stage::after{
+  content:"";position:absolute;inset:0;z-index:21;pointer-events:none;
+  border:1px solid var(--line2);border-radius:inherit;
+}
 .br-stage:focus-visible::after{
-  content:"";position:absolute;inset:0;z-index:1;pointer-events:none;
-  border:2px solid var(--focus-stage-ring);border-radius:inherit;
+  border-color:var(--focus-stage-ring);border-width:2px;
 }
 .br-screen{
   display:none;max-width:100%;max-height:100%;width:auto;height:auto;
