@@ -1718,9 +1718,11 @@ def check_browser_handoff_ui(ui_source: str, css_source: str) -> None:
     assert '"Link to a session…"' in view
     assert '"Session linking requires an updated backend"' in view
     assert '"Browser closed"' in view and '"Checking session link…"' in view
-    # the picker lists this backend's sessions, opens the linked chat, and
-    # carries the unlink action; a pick moves the binding in one call
+    # The picker is only for choosing or unlinking a session; selecting a row
+    # moves the binding in one call and there is no separate open-session verb.
     assert "showLinkMenu(this.ownerBtn)" in view
+    assert 'add(`Open ${owner.name' not in view
+    assert "openSessionTab(bid, ownerId" not in view
     assert '"menuitemradio"' in view and "sessDot(s)" in view
     # pick-one rows use the plain choice check, not the settings checkbox
     assert 'choiceSvg("check")' in view and '"br-link-mark"' in view

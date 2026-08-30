@@ -8808,7 +8808,7 @@ class BrowserView {
     const ownerName = owner ? (owner.name || `Session ${ownerId}`) :
       (this.binding.sessionName || `Session ${ownerId}`);
     set(ownerName, { dot: (owner && owner.color) || "var(--txt3)", arrow: true,
-      aria: `Linked to ${ownerName} · open, move or unlink` });
+      aria: `Linked to ${ownerName} · move or unlink` });
   }
 
   async changeBinding(sessionId) {
@@ -8838,13 +8838,12 @@ class BrowserView {
 
   /* The whole linking flow lives here, on the browser's own tab: pick any
      session on this backend to link or move the browser (the node swaps
-     bindings atomically), jump to the linked chat, or unlink - no dependency
-     on which chat happens to be selected elsewhere. */
+     bindings atomically), or unlink - no dependency on which chat happens to
+     be selected elsewhere. */
   showLinkMenu(anchor) {
     if (closeAllMenus(anchor)) return;
     const bid = this.tab.bid;
     const ownerId = Number(this.binding.sessionId) || null;
-    const owner = ownerId ? findSessionMeta(bid, ownerId) : null;
     const menu = el("div", "menu dyn br-link-menu");
     menu._anchor = anchor;
     menu._ownerView = this.root;
@@ -8856,11 +8855,6 @@ class BrowserView {
       menu.appendChild(b);
       return b;
     };
-    if (owner) {
-      add(`Open ${owner.name || `Session ${ownerId}`}`,
-        () => openSessionTab(bid, ownerId, owner));
-      menu.appendChild(el("div", "menu-sep"));
-    }
     /* the user's own sidebar order; archived chats are offered only while one
        still holds the link, so its checked row always exists */
     const sessions = sessionsFor(bid).filter(s => !s.archived || s.id === ownerId);
