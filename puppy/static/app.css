@@ -1436,10 +1436,11 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 /* Session rows wear the sidebar's own coloured dot (and running spinner), so
    the picker scales past a screenful of chats without losing identity. */
 .br-link-menu{
+  display:flex;flex-direction:column;overflow:hidden;
   max-width:min(340px,calc(100vw - 16px));
-  max-height:min(340px,calc(100dvh - 16px));overflow-y:auto;
-  overscroll-behavior:contain;
+  max-height:min(340px,calc(100dvh - 16px));
 }
+.br-link-scroll{min-height:0;overflow-y:auto;overscroll-behavior:contain}
 .br-link-menu .sess-dot{flex:0 0 auto}
 .menu button.br-link-sess{gap:10px}
 /* the plain pick-one check of the choice menus, not the settings checkbox:

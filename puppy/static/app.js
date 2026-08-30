@@ -8845,6 +8845,11 @@ class BrowserView {
     const bid = this.tab.bid;
     const ownerId = Number(this.binding.sessionId) || null;
     const menu = el("div", "menu dyn br-link-menu");
+    /* Keep the native scrollport inside the framed menu. If the border and
+       scrollport share an element, Chromium paints the thumb through the
+       rounded top/bottom border when the list reaches either end. */
+    const scroll = el("div", "br-link-scroll");
+    menu.appendChild(scroll);
     menu._anchor = anchor;
     menu._ownerView = this.root;
     anchor.setAttribute("aria-expanded", "true");
@@ -8852,7 +8857,7 @@ class BrowserView {
       const b = el("button", "", label);
       b.type = "button";
       b.onclick = (e) => { e.stopPropagation(); menu.remove(); fn(); };
-      menu.appendChild(b);
+      scroll.appendChild(b);
       return b;
     };
     /* the user's own sidebar order; archived chats are offered only while one
@@ -8862,7 +8867,7 @@ class BrowserView {
       const none = el("button", "", "No sessions on this backend");
       none.type = "button";
       none.disabled = true;
-      menu.appendChild(none);
+      scroll.appendChild(none);
     }
     for (const s of sessions) {
       const linked = s.id === ownerId;
@@ -8883,10 +8888,10 @@ class BrowserView {
         menu.remove();
         this.changeBinding(s.id);
       };
-      menu.appendChild(row);
+      scroll.appendChild(row);
     }
     if (ownerId) {
-      menu.appendChild(el("div", "menu-sep"));
+      scroll.appendChild(el("div", "menu-sep"));
       add("Unlink browser", () => this.changeBinding(null));
     }
     /* on <body> like every dynamic menu: the pane stacking context would

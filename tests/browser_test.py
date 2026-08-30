@@ -1721,6 +1721,9 @@ def check_browser_handoff_ui(ui_source: str, css_source: str) -> None:
     # The picker is only for choosing or unlinking a session; selecting a row
     # moves the binding in one call and there is no separate open-session verb.
     assert "showLinkMenu(this.ownerBtn)" in view
+    assert 'const scroll = el("div", "br-link-scroll")' in view
+    assert "menu.appendChild(scroll)" in view
+    assert "scroll.appendChild(row)" in view
     assert 'add(`Open ${owner.name' not in view
     assert "openSessionTab(bid, ownerId" not in view
     assert '"menuitemradio"' in view and "sessDot(s)" in view
@@ -1749,6 +1752,11 @@ def check_browser_handoff_ui(ui_source: str, css_source: str) -> None:
         in css_source
     assert ".br-link-menu{" in css_source and "max-height:min(340px," in css_source
     assert "max-width:min(340px," in css_source and ".br-link-mark{" in css_source
+    # The menu frame must not also be the scrollport: native scrollbar thumbs
+    # otherwise paint over its top/bottom border at their travel limits.
+    assert "display:flex;flex-direction:column;overflow:hidden;" in css_source
+    assert ".br-link-scroll{min-height:0;overflow-y:auto;overscroll-behavior:contain}" \
+        in css_source
     assert ".br-handoff{" not in css_source and ".br-unlink{" not in css_source
     assert ".br-use{" not in css_source
     assert "@media(max-width:560px)" not in css_source
