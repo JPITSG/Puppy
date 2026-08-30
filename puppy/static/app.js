@@ -1124,11 +1124,15 @@ function guardNativeTouchDrag(target) {
   };
 }
 
-/* Backend names are explicit one-click disclosure targets on every input
-   device. Ignore the later clicks in a desktop double-click sequence so a
-   hurried activation cannot immediately undo itself. */
-function wireDisclosureName(target, disclosure) {
+/* A compact backend label or status line is an explicit one-click disclosure
+   target on every input device. Leave its real disclosure button alone: that
+   button already owns its click, and letting the delegated surface handle it
+   too would immediately undo the toggle. Ignore the later clicks in a desktop
+   double-click sequence so a hurried activation cannot undo itself either. */
+function wireDisclosureSurface(target, disclosure) {
   target.addEventListener("click", event => {
+    if (event.target === disclosure ||
+        (disclosure.contains && disclosure.contains(event.target))) return;
     event.preventDefault();
     event.stopPropagation();
     if (event.detail > 1) return;
@@ -3520,7 +3524,7 @@ function renderSidebar() {
       const key = g.bid ? `remote:${g.bid}` : "local";
       const disclosure = disclosureButton(`${g.name} sessions`, body,
         collapsedSessionBackends, "puppy.collapsed.session-backends", key);
-      wireDisclosureName(name, disclosure);
+      wireDisclosureSurface(name, disclosure);
       t.appendChild(dot);
       t.appendChild(name);
       if (g.browser) {
@@ -4250,7 +4254,7 @@ function renderFootEngines() {
         head.appendChild(version);
       }
       head.appendChild(disclosure);
-      wireDisclosureName(name, disclosure);
+      wireDisclosureSurface(head, disclosure);
       group.appendChild(head);
       group.dataset.nodeKey = key;
       wireNodeGroupDrag(group, head, key);

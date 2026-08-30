@@ -337,7 +337,7 @@ a{color:var(--acc2)}
   .sess-group-body.disclosure-animating,.foot-engine-body.disclosure-animating{transition:none}
 }
 .foot-engine-group+.foot-engine-group{border-top:1px solid var(--line);margin-top:3px;padding-top:7px}
-.foot-engine-head{display:flex;align-items:center;gap:6px;min-width:0;color:var(--txt3)}
+.foot-engine-head{display:flex;align-items:center;gap:6px;min-width:0;color:var(--txt3);cursor:pointer;}
 /* Uppercase 9px node labels paint a pixel above their centred line box. Keep
    the header hit target fixed and lift only the status mark and arrow ink. */
 .foot-engine-head>.foot-ico{position:relative;top:-1px}

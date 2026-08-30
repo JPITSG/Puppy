@@ -2521,11 +2521,12 @@ console.log(JSON.stringify({mouse:mouse.stats,vertical:vertical.stats,left:left.
 
 
 def check_status_header_activation(ui_source: str, css_source: str) -> None:
-    """Both backend-name labels are single-click disclosure targets."""
-    assert ui_source.count("wireDisclosureName(name, disclosure);") == 2
+    """Session names and complete status lines are one-click targets."""
+    assert ui_source.count("wireDisclosureSurface(name, disclosure);") == 1
+    assert ui_source.count("wireDisclosureSurface(head, disclosure);") == 1
     assert "wireDoubleClickOrTouch" not in ui_source
-    assert (".foot-engine-head{display:flex;align-items:center;gap:6px;min-width:0;" +
-            "color:var(--txt3)}") in css_source
+    assert ("display:flex;align-items:center;gap:6px;min-width:0;color:var(--txt3);" +
+            "cursor:pointer;") in css_source
     assert "user-select:none;cursor:pointer;" in css_source
 
 
@@ -2571,7 +2572,7 @@ def check_browser_chip_order(ui_source: str) -> None:
 
 
 def check_backend_name_single_activation(ui_source: str) -> None:
-    """One click toggles a backend name; later double-click events do not undo it."""
+    """One surface click toggles; its button and later double clicks do not."""
     def extract_function(marker: str) -> str:
         start = ui_source.index(marker)
         brace = ui_source.index("{", start)
@@ -2585,7 +2586,7 @@ def check_backend_name_single_activation(ui_source: str) -> None:
                     return ui_source[start:index + 1]
         raise AssertionError("unbalanced " + marker)
 
-    wire = extract_function("function wireDisclosureName(")
+    wire = extract_function("function wireDisclosureSurface(")
     script = r"""
 class Target {
   constructor() { this.listeners={}; }
@@ -2599,10 +2600,13 @@ class Target {
 }
 %s
 const target=new Target();
-const disclosure={clicks:0,click(){this.clicks++;}};
-wireDisclosureName(target,disclosure);
+const disclosure={clicks:0,child:{},click(){this.clicks++;},
+  contains(node){return node===this.child;}};
+wireDisclosureSurface(target,disclosure);
 const events=[1,2,3,0].map(detail=>target.emit("click",{detail}));
-console.log(JSON.stringify({clicks:disclosure.clicks,events}));
+const buttonEvent=target.emit("click",{detail:1,target:disclosure});
+const buttonChildEvent=target.emit("click",{detail:1,target:disclosure.child});
+console.log(JSON.stringify({clicks:disclosure.clicks,events,buttonEvent,buttonChildEvent}));
 """ % wire
     proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:600]
@@ -2610,6 +2614,10 @@ console.log(JSON.stringify({clicks:disclosure.clicks,events}));
     assert result["clicks"] == 2, result  # one physical click + programmatic activation
     assert all(event["prevented"] and event["stopped"]
                for event in result["events"]), result
+    assert not result["buttonEvent"]["prevented"] and \
+        not result["buttonEvent"]["stopped"], result
+    assert not result["buttonChildEvent"]["prevented"] and \
+        not result["buttonChildEvent"]["stopped"], result
 
 
 def check_browser_disable_closes_scoped_tabs(ui_source: str) -> None:
@@ -3852,9 +3860,10 @@ async def main() -> None:
             assert "position:absolute;z-index:1;top:6px;right:6px;width:27px;height:27px;" in css_source
             assert ".user-copy{opacity:.3}" in css_source
             assert ".code-copy:hover,.user-copy:hover{" in css_source
-            # Both backend-name labels use one click; later clicks in the same
-            # desktop double-click sequence cannot undo the first activation.
-            assert ui_source.count("wireDisclosureName(name, disclosure);") == 2
+            # Session labels and complete status lines use one click; later
+            # desktop double-click events cannot undo the first activation.
+            assert ui_source.count("wireDisclosureSurface(name, disclosure);") == 1
+            assert ui_source.count("wireDisclosureSurface(head, disclosure);") == 1
             assert "if (event.detail > 1) return;" in ui_source
             assert ui_source.count("event.detail > 0 && event.detail % 2 === 0") == 1
             # A node disable already stops its processes. The settings response
