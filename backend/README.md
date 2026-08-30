@@ -275,6 +275,20 @@ releases the hold immediately and a 30-second lease is the final fail-open, so
 a vanished browser cannot strand work. Prompt rows can move across the visible
 configuration rows, making the resulting execution order explicit.
 
+Nodes advertising `queued-engine-switch` extend the same ordering to engine
+changes: a switch requested while a turn runs or prompts wait joins the queue
+as an additive `{kind:"engine"}` row instead of being refused with 409, and
+the switch response carries the additive `queued` flag. Prompts sent before
+the row keep the engine they were written under; when its turn comes the row
+emits the ordinary `engine_switch` divider, resets the session to the target's
+defaults and starts a fresh native conversation, exactly like an immediate
+switch. Model/effort rows also carry the `engine` whose catalog validated
+them: a row orphaned by cancelling or reordering away its switch is skipped
+with a transcript note rather than applied to another engine, and re-sending
+a held setting from a previous engine is refused. Engine-CLI upgrades count
+queued switch targets as busy sessions, and a switch aimed at an engine whose
+updater is running is refused either way.
+
 A shutdown or engine kill parks whatever had not started as *held* items, and a
 restart restores them as held: visible in the console with a warning mark, run
 again only on an explicit re-send, never automatically - the transcript they

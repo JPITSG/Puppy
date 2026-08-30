@@ -63,6 +63,10 @@ QUEUE_PAUSE_CAPABILITY = "queue-pause"
 # composer in the same guarded operation that removes it from the queue. Older
 # nodes keep their cancel/pause controls and simply omit the Edit button.
 QUEUE_EDIT_CAPABILITY = "queue-edit"
+# The switch route queues an engine change behind running/queued work instead
+# of refusing it, and answers with the additive ``queued`` flag. Queue payloads
+# then contain {kind:"engine"} rows beside {kind:"config"} ones.
+QUEUED_ENGINE_SWITCH_CAPABILITY = "queued-engine-switch"
 # The session socket can hold automatic dequeue while a client rearranges the
 # live queue, then atomically accept a revision-guarded permutation. Older
 # nodes keep their ordinary queue and pause controls without draggable rows.
@@ -92,6 +96,11 @@ BASE_CAPABILITIES = (
     # model/effort changes made while work is pending hold their place in the
     # message queue ({kind:"config"} items) instead of applying immediately
     "queued-config",
+    # engine switches requested while work is pending join the same queue as
+    # additive {kind:"engine"} rows and apply in order; config rows also carry
+    # the engine that validated them. Older nodes keep refusing mid-turn
+    # switches with 409, and the console withholds the queued affordance.
+    QUEUED_ENGINE_SWITCH_CAPABILITY,
     "uploads",
     FILE_UPLOAD_CAPABILITY,
     "filesystem",

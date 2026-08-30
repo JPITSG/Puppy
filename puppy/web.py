@@ -415,11 +415,24 @@ async def h_session_patch(request: web.Request):
     body = await request.json()
     fields = {}
     turn_config = {}
+    pending = None
+    driver = None
+    if "model" in body or "effort" in body:
+        # Validate against the engine these fields will actually reach: the
+        # session's own engine plus every pending switch already queued. The
+        # hub re-checks that engine when the change is queued, so a switch
+        # landing during the refresh below fails loudly instead of misapplying.
+        pending = runner.hub(s["id"]).pending_config()
+        try:
+            driver = get_driver(pending["engine"])
+        except KeyError:
+            return web.json_response(
+                {"error": "unknown engine '{}'".format(pending["engine"])},
+                status=400)
+        await driver.refresh_model_options()
     if "name" in body:
         fields["name"] = str(body["name"]).strip()[:80]
     if "model" in body:
-        driver = get_driver(s["engine"])
-        await driver.refresh_model_options()
         model = str(body["model"] or "").strip()[:config.MAX_MODEL_ID_CHARS]
         if not model:
             model = driver.default_model()
@@ -430,14 +443,12 @@ async def h_session_patch(request: web.Request):
                 status=400)
         turn_config["model"] = model
     if "effort" in body:
-        driver = get_driver(s["engine"])
         val = str(body["effort"]).strip()
-        model = turn_config.get("model", s.get("model") or driver.default_model())
+        model = turn_config.get("model", pending["model"] or driver.default_model())
         if val in [o["value"] for o in driver.effort_options_for_model(model)]:
             turn_config["effort"] = val
     if "model" in turn_config and "effort" not in turn_config:
-        driver = get_driver(s["engine"])
-        current_effort = str(s.get("effort") or "")
+        current_effort = str(pending["effort"] or "")
         if current_effort not in [o["value"] for o in
                                   driver.effort_options_for_model(turn_config["model"])]:
             turn_config["effort"] = ""
@@ -455,10 +466,17 @@ async def h_session_patch(request: web.Request):
     # While a turn runs or prompts wait, a model/effort change joins the queue
     # and applies in order - prompts sent before it keep the configuration they
     # were written under. With nothing pending it applies like any other field.
-    # True means the hub took charge of it (queued, or already in force there).
-    queued_config = bool(turn_config) and runner.hub(s["id"]).queue_config(turn_config)
-    if not queued_config:
-        fields.update(turn_config)
+    # "handled" means the hub took charge (queued, or already in force there).
+    queued_config = False
+    if turn_config:
+        turn_config["engine"] = pending["engine"]
+        result = runner.hub(s["id"]).queue_config(turn_config)
+        if result.get("error"):
+            return web.json_response({"error": result["error"]}, status=409)
+        queued_config = bool(result.get("handled"))
+        if not queued_config:
+            fields.update({k: v for k, v in turn_config.items()
+                           if k in ("model", "effort")})
     if fields:
         db.touch_session(s["id"], **fields)
         runner.broadcast_sessions()
@@ -543,6 +561,12 @@ async def h_session_interrupt(request: web.Request):
 
 
 async def h_session_switch(request: web.Request):
+    """Switch a session's engine, or queue the switch behind pending work.
+
+    While a turn runs or prompts wait, the switch joins the message queue as
+    an ordered row - prompts sent before it keep the engine they were written
+    under - and applies exactly like a queued model change. With nothing
+    pending it applies immediately, as before."""
     s = _session_or_404(request)
     try:
         body = await request.json()
@@ -556,33 +580,20 @@ async def h_session_switch(request: web.Request):
     except KeyError:
         return web.json_response({"error": f"unknown engine '{engine}'"}, status=400)
     await driver.refresh_model_options()
-    model = driver.default_model()
-    h = runner.hub(s["id"])
-    if h.status == "running":
-        return web.json_response({"error": "turn in progress - interrupt first"}, status=409)
-    old = s["engine"]
-    # Snapshot what the outgoing engine actually ran, so the transcript divider can
-    # name both configurations - a model picked but never sent anything never ran,
-    # and must not be recorded as if it had. A session with no completed turn has
-    # no such record and falls back to its selection. The incoming
-    # engine is reset to its defaults just below and its model is chosen later, so
-    # the WebUI resolves that side from what runs next rather than from here.
-    used = runner.parse_used_config(s["used_config"]) or \
-        {"model": s["model"] or s["last_model"], "effort": s["effort"]}
-    ev = db.add_event(s["id"], "engine_switch", {
-        "from": old, "to": engine,
-        "from_model": used["model"], "from_effort": used["effort"],
-    })
-    db.touch_session(s["id"], engine=engine, native_session_id="", model=model, effort="",
-                     last_model="", used_config="", permission_mode=driver.default_permission())
-    discarded_config_changes = h.discard_pending_config()
-    h.broadcast({"type": "event", "event": ev})
-    h.broadcast({"type": "session_meta",
-                 "session": runner.session_payload(db.get_session(s["id"]))})
-    runner.broadcast_sessions()
-    log.info("session %s switched %s -> %s", s["id"], old, engine)
+    # No await between this guard and the queue/apply below. An updater claims
+    # its per-engine slot synchronously after its own blocker check, so a
+    # switch can neither land nor queue while the target's installed package
+    # is being rewritten, and the updater cannot miss a switch queued here.
+    if cli_upgrade.is_running(engine):
+        return web.json_response(
+            {"error": "{} is being updated - try again when it finishes".format(
+                driver.label)}, status=409)
+    result = runner.hub(s["id"]).request_engine_switch(
+        engine, driver.default_model())
+    if "error" in result:
+        return web.json_response({"error": result["error"]}, status=409)
     return web.json_response(
-        {"ok": True, "discarded_config_changes": discarded_config_changes,
+        {"ok": True, "queued": bool(result.get("queued")),
          "session": runner.session_payload(db.get_session(s["id"]))})
 
 

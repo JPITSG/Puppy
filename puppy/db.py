@@ -313,6 +313,10 @@ def meta_set(key: str, value) -> None:
             (key, json.dumps(value)))
 
 
+def meta_del(key: str) -> None:
+    execute("DELETE FROM meta WHERE key=?", (key,))
+
+
 # ---- session helpers ----
 
 def create_session(name: str, engine: str, cwd: str, model: str, effort: str,

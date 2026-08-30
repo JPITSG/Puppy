@@ -549,6 +549,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "queue-pause" in ping["capabilities"]
         assert "queue-edit" in ping["capabilities"]
         assert "queue-reorder" in ping["capabilities"]
+        assert "queued-engine-switch" in ping["capabilities"]
         assert "session-drafts" in ping["capabilities"]
         assert "system-prompt" in ping["capabilities"]
         assert "shutdown-notice" in ping["capabilities"]
@@ -1929,6 +1930,26 @@ async def exercise_queue_persistence(runner, db) -> None:
         assert h.held == ["third"]
         assert h.discard_held(0, "third") == {"ok": True}
         assert db.meta_get("session_queue.{}".format(sid)) is None
+
+        # Restore accepts only the current item shape: engine rows and tagged
+        # config rows come back held with recomputed cancel identities, while
+        # an old untagged config row is rejected rather than converted.
+        eng_fields = {"engine": "codex", "model": "gpt-x", "effort": ""}
+        tagged_fields = {"model": "claude-x", "engine": "claude"}
+        db.meta_set("session_queue.{}".format(sid), {
+            "queue": [{"kind": "engine", "fields": dict(eng_fields), "key": "stale"}],
+            "held": [{"kind": "config", "fields": dict(tagged_fields), "key": "stale"},
+                     {"kind": "config", "fields": {"model": "untagged"},
+                      "key": "stale"}],
+        })
+        runner.drop_hub(sid)
+        h = runner.hub(sid)
+        assert [item["fields"] for item in h.held] == [eng_fields, tagged_fields]
+        assert h.held[0]["key"] == runner._queued_engine_key(eng_fields)
+        assert h.held[1]["key"] == runner._queued_config_key(tagged_fields)
+        assert h.discard_held(1, h.held[1]["key"]) == {"ok": True}
+        assert h.discard_held(0, h.held[0]["key"]) == {"ok": True}
+        assert db.meta_get("session_queue.{}".format(sid)) is None
     finally:
         runner.drop_hub(sid)
         db.delete_session(sid)
@@ -2352,21 +2373,21 @@ async def exercise_auth_endpoint(url: str, auth) -> None:
 
 
 async def exercise_engine_switch_queue(url: str, token: str, runner, db) -> None:
-    """An engine switch keeps prompt work but retires old-engine settings."""
+    """An engine switch queues behind pending work, applies in order, and one
+    engine's validated settings can never reach another engine."""
+    from puppy.drivers import get_driver
+    codex_default = get_driver("codex").default_model()
+    codex_permission = get_driver("codex").default_permission()
     sid = db.create_session("switch queue", "claude", "/tmp", "old-model", "high",
                             "blue", "auto")
     h = runner.hub(sid)
-    queued_config = {
-        "kind": "config", "fields": {"model": "claude-only", "effort": "max"},
-        "key": runner._queued_config_key({"model": "claude-only", "effort": "max"}),
+    claude_cfg = {
+        "kind": "config", "fields": {"model": "claude-only", "engine": "claude"},
+        "key": runner._queued_config_key({"model": "claude-only", "engine": "claude"}),
     }
-    held_config = {
-        "kind": "config", "fields": {"model": "held-claude-only"},
-        "key": runner._queued_config_key({"model": "held-claude-only"}),
-    }
-    h.queue = [queued_config, "paused prompt"]
+    h.queue = [claude_cfg, "paused prompt"]
     h.paused_queue = {1}
-    h.held = [held_config, "held prompt"]
+    h.held = ["held prompt"]
     h._persist_queue()
     try:
         async with aiohttp.ClientSession() as http:
@@ -2376,22 +2397,110 @@ async def exercise_engine_switch_queue(url: str, token: str, runner, db) -> None
                         url + "/api/sessions/{}/switch".format(sid), headers=headers,
                         json=payload) as response:
                     assert response.status == 400, await response.text()
+            # Work is pending: the switch holds its place at the queue tail
+            # instead of applying, and nothing pending is discarded.
             async with http.post(
                     url + "/api/sessions/{}/switch".format(sid), headers=headers,
                     json={"engine": "codex"}) as response:
                 switched = await response.json()
                 assert response.status == 200, switched
-        assert switched["discarded_config_changes"] == 2
-        assert switched["session"]["engine"] == "codex"
+        assert switched["queued"] is True
+        assert switched["session"]["engine"] == "claude"
+        assert h.queue[:2] == [claude_cfg, "paused prompt"]
+        assert runner._is_queued_engine(h.queue[2])
+        assert h.queue[2]["fields"] == {
+            "engine": "codex", "model": codex_default, "effort": ""}
+        assert h._paused_wire() == [1] and h.held == ["held prompt"]
+        # an engine upgrade must treat the queued switch target as busy work
+        assert any(b["id"] == sid for b in runner.engine_blockers("codex"))
+        assert any(b["id"] == sid for b in runner.engine_blockers("claude"))
+
+        # A model picked while the switch waits belongs to its target and
+        # folds into the switch row; a stale validation tag is refused.
+        assert h.queue_config({"model": "o-mini", "engine": "codex"}) == \
+            {"handled": True}
+        assert h.queue[2]["fields"]["model"] == "o-mini"
+        assert "belongs to" in h.queue_config(
+            {"model": "sonnet", "engine": "claude"})["error"]
+        assert h.pending_config() == {
+            "engine": "codex", "model": "o-mini", "effort": ""}
+
+        # Re-picking collapses into the same pending row, resetting its
+        # model/effort to the newly chosen target's defaults.
+        assert h.request_engine_switch("claude", "") == {"queued": True}
+        assert len(h.queue) == 3 and h.queue[2]["fields"] == {
+            "engine": "claude", "model": "", "effort": ""}
+        assert h.request_engine_switch("codex", codex_default) == {"queued": True}
+
+        # A new prompt into the idle, fully paused queue starts itself: the
+        # claude model change applies while the session is still claude, the
+        # switch then lands on codex with a fresh native conversation, and the
+        # paused prompt keeps its place for later.
+        started = []
+        h._start_turn = lambda text: (started.append(text),
+                                      setattr(h, "status", "running"))
+        assert h.send_message("run now") == {"queued": True}
+        assert started == ["run now"]
         assert h.queue == ["paused prompt"] and h._paused_wire() == [0]
-        assert h.held == ["held prompt"]
-        assert db.meta_get("session_queue.{}".format(sid)) == {
-            "queue": ["paused prompt"], "held": ["held prompt"], "paused": [0]}
-    finally:
-        h.queue.clear()
-        h.held.clear()
-        h.paused_queue.clear()
+        session = db.get_session(sid)
+        assert session["engine"] == "codex"
+        assert session["model"] == codex_default and session["effort"] == ""
+        assert session["native_session_id"] == "" and session["last_model"] == ""
+        assert session["used_config"] == ""
+        assert session["permission_mode"] == codex_permission
+        divider = [e for e in db.get_events(sid) if e["kind"] == "engine_switch"][-1]
+        assert divider["data"] == {"from": "claude", "to": "codex",
+                                   "from_model": "claude-only", "from_effort": "high"}
+
+        # A row whose engine switch was cancelled is skipped with a note, not
+        # applied to whatever engine is current now.
+        h.status = "idle"
+        h._apply_queued_config({"model": "claude-x", "engine": "claude"})
+        assert db.get_session(sid)["model"] == codex_default
+        skipped = db.get_events(sid)[-1]
+        assert skipped["kind"] == "info" and \
+            skipped["data"]["subtype"] == "config_skipped"
+
+        # Held work survives switches for an explicit decision: a held switch
+        # re-applies (or re-queues) on demand, and a held setting validated by
+        # a different engine is refused rather than misapplied.
+        assert h.unqueue(0, "paused prompt") == {"ok": True}
+        eng_fields = {"engine": "claude", "model": "", "effort": ""}
+        eng_row = {"kind": "engine", "fields": dict(eng_fields),
+                   "key": runner._queued_engine_key(eng_fields)}
+        h.held = [eng_row]
+        assert h.requeue_held(0, eng_row["key"]) == {"ok": True}
+        assert h.held == [] and db.get_session(sid)["engine"] == "claude"
+        stale_fields = {"model": "gpt-x", "engine": "codex"}
+        stale_cfg = {"kind": "config", "fields": dict(stale_fields),
+                     "key": runner._queued_config_key(stale_fields)}
+        h.held = [stale_cfg]
+        assert "belongs to" in h.requeue_held(0, stale_cfg["key"])["error"]
+        assert h.held == [stale_cfg]
+        assert h.discard_held(0, stale_cfg["key"]) == {"ok": True}
+
+        # With nothing pending the route still switches immediately.
+        async with aiohttp.ClientSession() as http:
+            async with http.post(
+                    url + "/api/sessions/{}/switch".format(sid),
+                    headers={"X-Puppy-Token": token},
+                    json={"engine": "codex"}) as response:
+                switched = await response.json()
+                assert response.status == 200, switched
+        assert switched["queued"] is False
+        assert switched["session"]["engine"] == "codex"
+
+        # Deleting a session discards its queue before the asynchronous hub
+        # kill runs, so the durable queue record cannot be resurrected.
+        h.queue = ["deleted with the session"]
         h._persist_queue()
+        assert db.meta_get("session_queue.{}".format(sid)) is not None
+        runner.drop_hub(sid)
+        db.delete_session(sid)
+        for _ in range(4):
+            await asyncio.sleep(0)
+        assert db.meta_get("session_queue.{}".format(sid)) is None
+    finally:
         runner.drop_hub(sid)
         db.delete_session(sid)
 

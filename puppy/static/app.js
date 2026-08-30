@@ -3402,6 +3402,15 @@ function backendSupportsQueueReorder(bid) {
     backend.capabilities.includes("queue-reorder");
 }
 
+function backendSupportsQueuedEngineSwitch(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(item => item.id === bid);
+  /* Older nodes refuse a mid-turn switch with 409, so the modal keeps its
+     original wording there and the 409 surfaces as the usual error toast. */
+  return !!backend && Array.isArray(backend.capabilities) &&
+    backend.capabilities.includes("queued-engine-switch");
+}
+
 function backendSupportsSessionDrafts(bid) {
   if (!bid) return true;
   const backend = state.backends.find(item => item.id === bid);
@@ -6929,12 +6938,19 @@ class SessionView {
     const s = this.session;
     if (!s) return;
     this.root.classList.toggle("meta-hidden", !sessionShowsMeta(s));
+    const eff = this.effectiveConfig();
     const eng = this.root.querySelector(".chip.eng");
-    eng.className = "chip eng eng-" + s.engine;
+    const engLabel = key => (state.engMap[key] ? state.engMap[key].label : key);
+    eng.className = "chip eng eng-" + s.engine + (eff.queuedEngine ? " pending" : "");
     eng.querySelector(".dot").style.background = s.color || "";
-    eng.querySelector(".eng-label").textContent =
-      (state.engMap[s.engine] ? state.engMap[s.engine].label : s.engine) +
-      (s.last_model ? " · " + s.last_model.replace(/^claude-/, "") : (s.model ? " · " + s.model : ""));
+    eng.querySelector(".eng-label").textContent = eff.queuedEngine
+      ? engLabel(s.engine) + " → " +
+        (eff.engine === s.engine ? "reseed" : engLabel(eff.engine))
+      : engLabel(s.engine) +
+        (s.last_model ? " · " + s.last_model.replace(/^claude-/, "") : (s.model ? " · " + s.model : ""));
+    if (eff.queuedEngine)
+      eng.setAttribute("aria-label", "Engine switch queued · applies after the queue");
+    else eng.removeAttribute("aria-label");
     const cwd = this.root.querySelector(".chip.cwd");
     cwd.textContent = workspaceLabel(s, 34);
     cwd.removeAttribute("title");
@@ -6954,7 +6970,6 @@ class SessionView {
       const select = control.querySelector("select");
       (select || control).setAttribute("aria-label", title);
     };
-    const eff = this.effectiveConfig();
     setMini("perm", "Permission mode", s.permission_mode || "auto");
     setMini("model", "Model", eff.model || "auto", eff.queuedModel);
     setMini("effort", "Reasoning effort", eff.effort || "auto", eff.queuedEffort);
@@ -7688,10 +7703,20 @@ class SessionView {
     this.hideApproval();
   }
 
-  /* a queue entry is a prompt string, or a pending model/effort change */
+  /* a queue entry is a prompt string, or a pending change: an engine switch
+     ({kind:"engine"}), or a model/effort change tagged with the engine whose
+     catalog validated it (older nodes omit the tag - fall back to the
+     session's engine, which is all they can queue against) */
   describeQueuedConfig(item) {
-    const eng = engineInfo(this.tab.bid, (this.session || {}).engine);
+    const s = this.session || {};
+    const eng = engineInfo(this.tab.bid, item.engine || s.engine);
     const parts = [];
+    if (item.kind === "engine") {
+      parts.push("Engine → " + ((eng && eng.label) || item.engine || "?"));
+      if (item.model) parts.push("Model → " + (modelShorthand(eng, item.model) || item.model));
+      if (item.effort) parts.push("Effort → " + (effortShorthand(eng, item.effort) || item.effort));
+      return parts.join(" · ");
+    }
     if ("model" in item) parts.push("Model → " + (modelShorthand(eng, item.model) || "default"));
     if ("effort" in item) parts.push("Effort → " + (effortShorthand(eng, item.effort) || "default"));
     return parts.join(" · ") || "Setting change";
@@ -8160,15 +8185,26 @@ class SessionView {
     positionAnchoredMenu(menu, anchor);
   }
 
-  /* what the NEXT prompt will run under: the session's model/effort, then any
-     pending changes waiting in the queue, in order. The pickers and mini pills
-     speak about the next prompt, so they read this rather than the session. */
+  /* what the NEXT prompt will run under: the session's engine/model/effort,
+     then any pending changes waiting in the queue, in order. The pickers and
+     mini pills speak about the next prompt, so they read this rather than the
+     session. */
   effectiveConfig() {
     const s = this.session || {};
-    const out = { model: s.model || "", effort: s.effort || "",
-                  queuedModel: false, queuedEffort: false };
+    const out = { engine: s.engine || "", model: s.model || "", effort: s.effort || "",
+                  queuedEngine: false, queuedModel: false, queuedEffort: false };
     for (const item of this.queued || []) {
       if (!item || typeof item !== "object") continue;
+      if (item.kind === "engine") {
+        out.engine = item.engine || ""; out.queuedEngine = true;
+        out.model = item.model || ""; out.queuedModel = true;
+        out.effort = item.effort || ""; out.queuedEffort = true;
+        continue;
+      }
+      /* a row whose validating engine no longer matches its position is an
+         orphan the node will skip - reading it here would promise the wrong
+         configuration */
+      if (item.engine && item.engine !== out.engine) continue;
       if ("model" in item) { out.model = item.model || ""; out.queuedModel = true; }
       if ("effort" in item) { out.effort = item.effort || ""; out.queuedEffort = true; }
     }
@@ -8177,12 +8213,19 @@ class SessionView {
 
   composerChoiceSpec(kind, native = false) {
     const s = this.session || {};
-    const eng = engineInfo(this.tab.bid, s.engine);
     const eff = this.effectiveConfig();
-    if (kind === "perm") return {
-      options: [...((eng && eng.permission_options) || [])],
-      selected: s.permission_mode || "",
-    };
+    /* model/effort choices follow the queue (a pending switch means the next
+       prompt runs on its target); permission stays with the session's own
+       engine because it applies immediately, and an applied switch resets it
+       to the target's default anyway */
+    const eng = engineInfo(this.tab.bid, eff.engine || s.engine);
+    if (kind === "perm") {
+      const cur = engineInfo(this.tab.bid, s.engine);
+      return {
+        options: [...((cur && cur.permission_options) || [])],
+        selected: s.permission_mode || "",
+      };
+    }
     if (kind === "effort") return {
       options: effortOptionsForModel(eng, eff.model || ""),
       selected: eff.effort || "",
@@ -8338,7 +8381,7 @@ class SessionView {
   async applyModelChoice(value) {
     if (value === "__current_custom__") return;
     if (value !== "__custom__") { await this.patchSession({ model: value }); return; }
-    const current = (this.session && this.session.model) || "";
+    const current = this.effectiveConfig().model || "";
     const val = await modalPrompt("Model override",
       "Model for this session (empty = engine default).", current);
     if (val !== null) await this.patchSession({ model: val.trim() });
@@ -12070,23 +12113,33 @@ function modalSwitchEngine(view) {
   const s = view.session;
   if (!s) return;
   const engines = view.tab.bid ? (state.engCache[view.tab.bid] || []) : state.engines;
+  const canQueue = backendSupportsQueuedEngineSwitch(view.tab.bid);
+  /* what is already heading for the queue tail: a chat view knows its queue,
+     the sidebar's lightweight caller does not and falls back to the session */
+  const eff = typeof view.effectiveConfig === "function" ? view.effectiveConfig() : null;
+  const pendingEngine = eff && eff.queuedEngine ? eff.engine : "";
   const { m, close } = modal(`<h2>Switch engine</h2>
     <p class="hint">The session keeps its transcript and working directory. The new engine starts a fresh
     native session seeded with a handoff of the conversation so far. Same-engine reseed is allowed
-    (rebuilds context from the transcript). Queued prompts remain; pending model and reasoning
-    changes are cleared because they belong to the previous engine configuration.</p>
+    (rebuilds context from the transcript).${canQueue ? ` While a turn runs or prompts wait, the
+    switch joins the queue and applies in order - prompts sent before it keep the engine they
+    were written under.` : ` Queued prompts remain; pending model and reasoning changes are
+    cleared because they belong to the previous engine configuration.`}</p>
     <div class="engine-pick" id="se-engines"></div>
     <div class="m-btns"><button class="btn" id="se-cancel">Cancel</button><button class="btn btn-pri" id="se-go">Switch</button></div>`);
   const box = m.querySelector("#se-engines");
-  let pick = (engines.find(engine => engine.key === s.engine) || engines[0] || {}).key || "";
+  let pick = (engines.find(engine => engine.key === (pendingEngine || s.engine)) ||
+    engines[0] || {}).key || "";
   const render = () => {
     box.innerHTML = "";
     for (const e2 of engines) {
       const card = el("div", "ep" + (pick === e2.key ? " sel" : ""));
       const icon = provSpec(e2.key);
+      const sub = e2.key === pendingEngine ? "Switch queued" :
+        e2.key === s.engine ? "Current (reseed)" : engineStatusText(e2);
       card.innerHTML = `<div class="ep-ico prov ${icon.className}">${esc(icon.text)}</div>
         <div class="ep-name">${esc(e2.label)}</div>
-        <div class="ep-sub">${e2.key === s.engine ? "Current (reseed)" : engineStatusText(e2)}</div>`;
+        <div class="ep-sub">${esc(sub)}</div>`;
       card.onclick = () => { pick = e2.key; render(); };
       box.appendChild(card);
     }
@@ -12099,6 +12152,11 @@ function modalSwitchEngine(view) {
       view.session = r.session;
       view.updateHead();
       close();
+      if (r.queued) {
+        toast(`Engine switch to ${pick} queued · applies after the queue`, "ok");
+        return;
+      }
+      /* older nodes still report how many pending settings they cleared */
       const cleared = Math.max(0, Number(r.discarded_config_changes) || 0);
       toast(`Switched to ${pick}` + (cleared
         ? ` · cleared ${cleared} pending setting change${cleared === 1 ? "" : "s"}` : ""), "ok");

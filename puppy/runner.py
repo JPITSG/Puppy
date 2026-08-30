@@ -35,21 +35,96 @@ def hub(session_id: int) -> "SessionHub":
 
 
 def drop_hub(session_id: int) -> None:
+    """Forget a session's hub when the session itself is being deleted.
+
+    Queued and held work is discarded with its session before the asynchronous
+    kill() runs, so parking cannot resurrect the durable queue record that
+    db.delete_session removes. Shutdown keeps its parking semantics by calling
+    kill() directly instead."""
     h = _hubs.pop(session_id, None)
     if h:
+        h.queue.clear()
+        h.held.clear()
+        h.paused_queue.clear()
         asyncio.ensure_future(h.kill())
 
 
 # ---- session-list broadcasting ----
 
 def _is_queued_config(item) -> bool:
-    """Queue items are prompt strings, except pending model/effort changes."""
+    """Queue items are prompt strings, except pending model/effort changes
+    and pending engine switches."""
     return isinstance(item, dict) and item.get("kind") == "config"
+
+
+def _is_queued_engine(item) -> bool:
+    """A pending engine switch holding its place in the message queue."""
+    return isinstance(item, dict) and item.get("kind") == "engine"
 
 
 def _queued_config_key(fields: dict) -> str:
     """Stable identity a console echoes back to cancel a pending change."""
     return "config:" + json.dumps(fields, sort_keys=True)
+
+
+def _queued_engine_key(fields: dict) -> str:
+    """The same cancel identity for a pending engine switch; the distinct
+    prefix can never collide with a model/effort change."""
+    return "engine:" + json.dumps(fields, sort_keys=True)
+
+
+def _queued_item_key(item: dict) -> str:
+    return (_queued_engine_key if _is_queued_engine(item) else
+            _queued_config_key)(item.get("fields") or {})
+
+
+def _queued_item_wire(item):
+    """Wire form of one queue entry: prompts stay plain strings, so consoles
+    from before pending changes existed keep rendering them; a pending change
+    is an additive {kind, key, ...fields} entry. Config rows carry the engine
+    whose catalog validated them, engine rows the switch target."""
+    if not isinstance(item, dict):
+        return item
+    entry = {"kind": item.get("kind") or "config", "key": item.get("key") or ""}
+    entry.update(item.get("fields") or {})
+    return entry
+
+
+def _valid_restored_item(item) -> bool:
+    """Exactly the current queue-item shape; anything older is rejected rather
+    than converted (every config row must name the engine that validated it)."""
+    if isinstance(item, str):
+        return bool(item.strip())
+    fields = item.get("fields") if isinstance(item, dict) else None
+    if not isinstance(fields, dict) or not str(fields.get("engine") or ""):
+        return False
+    if _is_queued_engine(item):
+        return True
+    return _is_queued_config(item) and \
+        any(k in fields for k in ("model", "effort"))
+
+
+def _config_after(session: dict, items) -> dict:
+    """The {engine, model, effort} left in force after the given queue rows
+    apply in their visible order. Config rows whose validating engine no
+    longer matches the engine at their position are skipped, exactly as
+    application skips them."""
+    cfg = {"engine": str(session.get("engine") or ""),
+           "model": str(session.get("model") or ""),
+           "effort": str(session.get("effort") or "")}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        fields = item.get("fields") or {}
+        if _is_queued_engine(item):
+            cfg["engine"] = str(fields.get("engine") or "")
+            cfg["model"] = str(fields.get("model") or "")
+            cfg["effort"] = str(fields.get("effort") or "")
+        elif str(fields.get("engine") or "") == cfg["engine"]:
+            for k in ("model", "effort"):
+                if k in fields:
+                    cfg[k] = str(fields.get(k) or "")
+    return cfg
 
 
 def parse_used_config(raw):
@@ -131,17 +206,25 @@ def upgrade_blockers() -> list:
 
 
 def engine_blockers(engine: str) -> list:
-    """Busy sessions on one engine - replacing that CLI under them is unsafe.
+    """Busy sessions that would spawn one engine - replacing that CLI under
+    them is unsafe.
 
     An updater unlinks and rewrites the installed package, so only sessions
     that would spawn (or are running) this engine need to be idle; work on the
-    other engines is unaffected."""
+    other engines is unaffected. A queued engine switch commits the prompts
+    behind it to its target, so queued switch targets count as well. Held work
+    never runs on its own and its explicit re-send paths carry their own
+    updater guard."""
     out = []
     for h in _hubs.values():
         if h.status != "running" and not h.queue:
             continue
         session = db.get_session(h.id) or {}
-        if str(session.get("engine") or "") != str(engine):
+        engines = {str(session.get("engine") or "")}
+        for item in h.queue:
+            if _is_queued_engine(item):
+                engines.add(str((item.get("fields") or {}).get("engine") or ""))
+        if str(engine) not in engines:
             continue
         out.append({"id": h.id, "name": session.get("name") or "",
                     "running": h.status == "running", "queued": len(h.queue)})
@@ -260,9 +343,16 @@ class SessionHub:
         try:
             record = db.meta_get("session_queue.{}".format(session_id)) or {}
             restored = list(record.get("queue") or []) + list(record.get("held") or [])
-            self.held = [item for item in restored
-                         if isinstance(item, str) and item.strip() or
-                         _is_queued_config(item)]
+            for item in restored:
+                if not _valid_restored_item(item):
+                    continue
+                if isinstance(item, dict):
+                    # rebuilt in the current shape; the cancel identity is
+                    # recomputed rather than trusted from disk
+                    item = {"kind": item.get("kind"),
+                            "fields": dict(item.get("fields") or {})}
+                    item["key"] = _queued_item_key(item)
+                self.held.append(item)
             if record:
                 self._persist_queue()   # everything now lives under "held"
         except Exception as exc:
@@ -451,40 +541,21 @@ class SessionHub:
         }
 
     def _queue_wire(self) -> list:
-        """Wire form of the queue: prompts stay plain strings, so consoles from
-        before pending changes existed keep rendering them; a pending change is
-        an additive {kind:"config", key, model?, effort?} entry."""
-        out = []
-        for item in self.queue:
-            if _is_queued_config(item):
-                entry = {"kind": "config", "key": item.get("key") or ""}
-                entry.update(item.get("fields") or {})
-                out.append(entry)
-            else:
-                out.append(item)
-        return out
+        return [_queued_item_wire(item) for item in self.queue]
 
     def _held_wire(self) -> list:
-        out = []
-        for item in self.held:
-            if _is_queued_config(item):
-                entry = {"kind": "config", "key": item.get("key") or ""}
-                entry.update(item.get("fields") or {})
-                out.append(entry)
-            else:
-                out.append(item)
-        return out
+        return [_queued_item_wire(item) for item in self.held]
 
     def _paused_wire(self) -> list:
         """Queue indexes paused by the user, scrubbed against the live queue.
 
-        Only prompt strings can be paused. Pending configuration changes keep
-        their ordered relationship to those prompts and held work already has
-        its own explicit resend state.
+        Only prompt strings can be paused. Pending configuration and engine
+        rows keep their ordered relationship to those prompts and held work
+        already has its own explicit resend state.
         """
         return sorted(index for index in self.paused_queue
                       if 0 <= index < len(self.queue) and
-                      not _is_queued_config(self.queue[index]))
+                      isinstance(self.queue[index], str))
 
     def _pop_queue(self, index: int):
         """Pop one queue entry and keep every paused index aligned with it."""
@@ -506,7 +577,9 @@ class SessionHub:
                 db.meta_set(key, {"queue": self.queue, "held": self.held,
                                   "paused": self._paused_wire()})
             else:
-                db.meta_set(key, None)
+                # deleted, not nulled: an emptied record must not linger, and
+                # a session deletion racing a late kill() must not resurrect it
+                db.meta_del(key)
         except Exception as exc:
             log.warning("could not persist queue for session %s: %s", self.id, exc)
 
@@ -547,11 +620,14 @@ class SessionHub:
             return {"error": "session gone"}
         # The upgrade route checks the opposite direction before claiming its
         # slot. Check here as well so a message cannot spawn an engine after
-        # its installed package has begun being rewritten in place.
+        # its installed package has begun being rewritten in place. A new
+        # prompt joins the queue tail, so the engine it will spawn is whatever
+        # every pending switch ahead of it leaves in force.
+        engine = self.pending_config()["engine"]
         from puppy import cli_upgrade
-        if cli_upgrade.is_running(session.get("engine") or ""):
+        if cli_upgrade.is_running(engine):
             return {"error": "{} is being updated - try again when it finishes".format(
-                str(session.get("engine") or "the engine"))}
+                engine or "the engine")}
         if not session["name"]:
             name = text.splitlines()[0][:48]
             db.touch_session(self.id, name=name)
@@ -562,73 +638,165 @@ class SessionHub:
         if self.status == "running" or self.queue:
             self.queue.append(text)
             self._broadcast_queue()
+            # A queue idle only because every earlier prompt is paused stays
+            # idle on its own. This prompt is runnable now, so it pokes the
+            # scheduler itself instead of waiting for a later pause toggle.
+            if self.status != "running":
+                self._start_queue_if_ready()
             return {"queued": True}
         self._start_turn(text)
         return {"queued": False}
 
-    def queue_config(self, fields: dict) -> bool:
+    def pending_config(self) -> dict:
+        """The {engine, model, effort} in force after everything queued: what
+        the next newly queued prompt or change would run under."""
+        session = db.get_session(self.id) or {}
+        return _config_after(session, self.queue)
+
+    def queue_config(self, fields: dict) -> dict:
         """Hold a model/effort change until everything already queued has run:
         the user changed it after sending those prompts, so they belong to the
         configuration that was showing when they were written.
 
-        Only a real difference is held. Consecutive changes collapse into the
-        one pending entry, and each field is measured against what is already
-        in force at that point in the queue - fiddling with the pickers and
-        landing back on the current value leaves nothing pending, and trims a
-        pending entry that no longer changes anything.
+        ``fields["engine"]`` names the engine whose catalog validated the
+        change, and must match the engine in force at the queue tail (the
+        session's own engine plus every pending switch). A mismatch means the
+        session moved while the caller was validating, and is an explicit
+        error rather than a silent misapply.
 
-        True means the caller must not apply these fields to the session now."""
+        Only a real difference is held. Consecutive changes collapse into the
+        one pending entry, a change made while an engine switch is pending
+        folds into that switch, and each field is measured against what is
+        already in force at that point in the queue - fiddling with the
+        pickers and landing back on the current value leaves nothing pending,
+        and trims a pending entry that no longer changes anything.
+
+        {"handled": False} means the caller applies these fields now."""
         clean = {k: str(v) for k, v in fields.items() if k in ("model", "effort")}
+        tag = str(fields.get("engine") or "")
+
+        def moved(current):
+            return {"error": "that change belongs to {} - this session is on "
+                             "{} now, so pick it again".format(
+                                 tag, current or "another engine")}
+
         if not clean:
-            return False
-        if self.status != "running" and not self.queue:
-            return False
+            return {"handled": False}
         session = db.get_session(self.id) or {}
-        tail = self.queue[-1] if self.queue and _is_queued_config(self.queue[-1]) else None
+        if self.status != "running" and not self.queue:
+            if tag and tag != str(session.get("engine") or ""):
+                return moved(session.get("engine"))
+            return {"handled": False}
+        tail = self.queue[-1] if self.queue and isinstance(self.queue[-1], dict) \
+            else None
         # what runs just before the tail entry: the session's own configuration
         # plus every pending change queued ahead of it
-        base = {"model": session.get("model") or "", "effort": session.get("effort") or ""}
-        for item in self.queue:
-            if _is_queued_config(item) and item is not tail:
-                base.update(item.get("fields") or {})
-        merged = dict(tail.get("fields") or {}) if tail else {}
+        base = _config_after(session, [item for item in self.queue
+                                       if item is not tail])
+        if tail is not None and _is_queued_engine(tail):
+            # picked while this switch is pending: the pick belongs to its
+            # target, so the switch itself reseeds with it
+            merged = dict(tail.get("fields") or {})
+            if tag and tag != str(merged.get("engine") or ""):
+                return moved(merged.get("engine"))
+            merged.update(clean)
+            tail["fields"] = merged
+            tail["key"] = _queued_engine_key(merged)
+            self._broadcast_queue()
+            return {"handled": True}
+        if tag and tag != base["engine"]:
+            return moved(base["engine"])
+        # a plain tail row from another engine (a reorder can leave one) must
+        # not absorb picks validated for the engine now in force
+        absorb = tail is not None and \
+            str((tail.get("fields") or {}).get("engine") or "") == base["engine"]
+        merged = {k: v for k, v in (tail.get("fields") or {}).items()
+                  if k in ("model", "effort")} if absorb else {}
         merged.update(clean)
         merged = {k: v for k, v in merged.items() if v != base.get(k, "")}
-        if tail and merged:
-            tail["fields"] = merged
-            tail["key"] = _queued_config_key(merged)
-        elif tail:
+        if absorb and merged:
+            tail["fields"] = {**merged, "engine": base["engine"]}
+            tail["key"] = _queued_config_key(tail["fields"])
+        elif absorb:
             self._pop_queue(len(self.queue) - 1)
         elif merged:
-            self.queue.append({"kind": "config", "fields": merged,
-                               "key": _queued_config_key(merged)})
+            entry = {**merged, "engine": base["engine"]}
+            self.queue.append({"kind": "config", "fields": entry,
+                               "key": _queued_config_key(entry)})
         else:
-            return True   # already in force further down the queue: nothing to do
+            # already in force further down the queue: nothing to do
+            return {"handled": True}
         self._broadcast_queue()
-        return True
+        return {"handled": True}
 
-    def discard_pending_config(self) -> int:
-        """Drop engine-specific queued/held settings during an engine reseed.
-
-        Prompt text remains in place, including its pause indexes.  Model ids
-        and effort variants belong to the engine which validated them and must
-        never be applied later to the replacement engine.
-        """
-        count = 0
-        for index in range(len(self.queue) - 1, -1, -1):
-            if _is_queued_config(self.queue[index]):
-                self._pop_queue(index)
-                count += 1
-        kept = []
-        for item in self.held:
-            if _is_queued_config(item):
-                count += 1
+    def request_engine_switch(self, engine: str, model: str,
+                              effort: str = "") -> dict:
+        """Switch now when nothing is pending, otherwise hold the switch at
+        the queue tail so prompts sent before it keep the engine they were
+        written under. Consecutive requests collapse into the one pending
+        switch (last pick wins, its model/effort reset to the new target's
+        defaults), and a switch to the current engine stays meaningful:
+        applying it reseeds a fresh native session from the transcript."""
+        if db.get_session(self.id) is None:
+            return {"error": "session gone"}
+        fields = {"engine": str(engine or ""), "model": str(model or ""),
+                  "effort": str(effort or "")}
+        if self.status == "running" or self.queue:
+            tail = self.queue[-1] if self.queue and \
+                _is_queued_engine(self.queue[-1]) else None
+            if tail is not None:
+                tail["fields"] = fields
+                tail["key"] = _queued_engine_key(fields)
             else:
-                kept.append(item)
-        if count:
-            self.held = kept
+                self.queue.append({"kind": "engine", "fields": fields,
+                                   "key": _queued_engine_key(fields)})
             self._broadcast_queue()
-        return count
+            log.info("session %s queued engine switch -> %s", self.id, engine)
+            return {"queued": True}
+        if not self._apply_engine_switch(fields):
+            return {"error": "could not switch engines"}
+        return {"queued": False}
+
+    def _apply_engine_switch(self, fields: dict) -> bool:
+        """One engine transition: the divider event, a reset to the target's
+        defaults, and a fresh native conversation (whose first turn seeds the
+        new engine with the transcript handoff). Runs between turns, never
+        inside one."""
+        engine = str(fields.get("engine") or "")
+        session = db.get_session(self.id)
+        if session is None:
+            return False
+        try:
+            driver = get_driver(engine)
+        except KeyError:
+            self._emit("error", {
+                "text": "Cannot switch to unknown engine '{}'".format(engine)})
+            return False
+        old = session["engine"]
+        # Snapshot what the outgoing engine actually ran, so the transcript
+        # divider can name both configurations - a model picked but never sent
+        # anything never ran, and must not be recorded as if it had. A session
+        # with no completed turn has no such record and falls back to its
+        # selection. The incoming engine is reset to its defaults just below
+        # and its model is chosen later, so the WebUI resolves that side from
+        # what runs next rather than from here.
+        used = parse_used_config(session["used_config"]) or \
+            {"model": session["model"] or session["last_model"],
+             "effort": session["effort"]}
+        self._emit("engine_switch", {
+            "from": old, "to": engine,
+            "from_model": used["model"], "from_effort": used["effort"],
+        })
+        db.touch_session(
+            self.id, engine=engine, native_session_id="",
+            model=fields.get("model") or driver.default_model(),
+            effort=fields.get("effort") or "", last_model="", used_config="",
+            permission_mode=driver.default_permission())
+        self.broadcast({"type": "session_meta",
+                        "session": session_payload(db.get_session(self.id))})
+        broadcast_sessions()
+        log.info("session %s switched %s -> %s", self.id, old, engine)
+        return True
 
     def unqueue(self, index: int, text: str) -> dict:
         """Drop a message or pending change that is still waiting. The index is
@@ -638,7 +806,7 @@ class SessionHub:
         if not 0 <= index < len(self.queue):
             return {"error": "that message already started"}
         item = self.queue[index]
-        ident = item.get("key") if _is_queued_config(item) else item
+        ident = item.get("key") if isinstance(item, dict) else item
         if ident != text:
             return {"error": "that message already started"}
         removed = self._pop_queue(index)
@@ -667,8 +835,8 @@ class SessionHub:
             if not 0 <= index < len(self.queue):
                 return {"error": "that message already started"}
             item = self.queue[index]
-            if _is_queued_config(item):
-                return {"error": "setting changes cannot be edited as messages"}
+            if isinstance(item, dict):
+                return {"error": "queued changes cannot be edited as messages"}
             if item != text:
                 return {"error": "that message already started"}
             if db.get_session(self.id) is None:
@@ -705,8 +873,8 @@ class SessionHub:
         if not 0 <= index < len(self.queue):
             return {"error": "that message already started"}
         item = self.queue[index]
-        if _is_queued_config(item):
-            return {"error": "setting changes cannot be paused"}
+        if isinstance(item, dict):
+            return {"error": "queued changes cannot be paused"}
         if item != text:
             return {"error": "that message already started"}
         if paused:
@@ -842,23 +1010,45 @@ class SessionHub:
         if not 0 <= index < len(self.held):
             return None
         item = self.held[index]
-        current = item.get("key") if _is_queued_config(item) else item
+        current = item.get("key") if isinstance(item, dict) else item
         return item if current == ident else None
 
     def requeue_held(self, index: int, ident: str) -> dict:
         """Send one held item again, through the same paths a fresh submit
         takes: a prompt starts now or queues behind running work, a pending
-        change applies now or re-queues."""
+        change applies now or re-queues, an engine switch switches now or
+        re-queues. A change validated by an engine the session is no longer
+        heading for is refused rather than misapplied."""
         item = self._held_matches(index, ident)
         if item is None:
             return {"error": "that held item is gone"}
-        self.held.pop(index)
+        if _is_queued_engine(item):
+            fields = dict(item.get("fields") or {})
+            engine = str(fields.get("engine") or "")
+            from puppy import cli_upgrade
+            if cli_upgrade.is_running(engine):
+                return {"error": "{} is being updated - try again when it "
+                                 "finishes".format(engine or "that engine")}
+            self.held.pop(index)
+            result = self.request_engine_switch(
+                engine, fields.get("model") or "", effort=fields.get("effort") or "")
+            if "error" in result:
+                self.held.insert(index, item)   # nothing changed: keep it held
+            self._broadcast_queue()
+            return result if "error" in result else {"ok": True}
         if _is_queued_config(item):
-            fields = item.get("fields") or {}
-            if not self.queue_config(fields):
+            fields = dict(item.get("fields") or {})
+            self.held.pop(index)
+            result = self.queue_config(fields)
+            if result.get("error"):
+                self.held.insert(index, item)
+                self._broadcast_queue()
+                return {"error": result["error"]}
+            if not result.get("handled"):
                 self._apply_queued_config(fields)
             self._broadcast_queue()
             return {"ok": True}
+        self.held.pop(index)
         result = self.send_message(item)
         if "error" in result:
             self.held.insert(index, item)   # nothing was sent: keep it held
@@ -928,12 +1118,11 @@ class SessionHub:
             return None
 
         prompt_indexes = [index for index, item in enumerate(self.queue)
-                          if not _is_queued_config(item)]
+                          if not isinstance(item, dict)]
         if not prompt_indexes:
             applied = False
             while self.queue:
-                self._apply_queued_config(
-                    self._pop_queue(0).get("fields") or {})
+                self._apply_queued_item(self._pop_queue(0))
                 applied = True
             if applied:
                 self._broadcast_queue()
@@ -947,15 +1136,15 @@ class SessionHub:
             self.active_since = None
             return None
 
-        # Remove only configuration rows on the path to the selected prompt.
-        # Earlier paused prose remains where the user left it and will run
-        # later under whatever configuration its new execution position sees.
+        # Remove only configuration/engine rows on the path to the selected
+        # prompt. Earlier paused prose remains where the user left it and will
+        # run later under whatever configuration its new execution position
+        # sees.
         applied = False
         scan = 0
         while scan < next_prompt:
-            if _is_queued_config(self.queue[scan]):
-                self._apply_queued_config(
-                    self._pop_queue(scan).get("fields") or {})
+            if isinstance(self.queue[scan], dict):
+                self._apply_queued_item(self._pop_queue(scan))
                 next_prompt -= 1
                 applied = True
             else:
@@ -966,9 +1155,36 @@ class SessionHub:
         self._persist_queue()   # consumed: a crash must not run it twice
         return item
 
+    def _apply_queued_item(self, item) -> None:
+        """Apply one pending configuration or engine row. Never raises: this
+        runs in the turn-completion path, where one bad row must not stop the
+        queue behind it."""
+        try:
+            if _is_queued_engine(item):
+                self._apply_engine_switch(item.get("fields") or {})
+            else:
+                self._apply_queued_config(item.get("fields") or {})
+        except Exception:
+            log.exception("could not apply a queued change for session %s",
+                          self.id)
+
     def _apply_queued_config(self, fields: dict) -> None:
         clean = {k: v for k, v in fields.items() if k in ("model", "effort")}
         if not clean:
+            return
+        session = db.get_session(self.id)
+        if session is None:
+            return
+        tag = str(fields.get("engine") or "")
+        if tag and tag != str(session.get("engine") or ""):
+            # its engine switch was cancelled or reordered away: dropping the
+            # orphan beats applying model ids another engine validated
+            self._emit("info", {
+                "subtype": "config_skipped",
+                "text": "Skipped a queued model/effort change that belonged "
+                        "to {} - this session is on {}.".format(
+                            tag, session.get("engine") or "another engine"),
+            })
             return
         db.touch_session(self.id, **clean)
         self.broadcast({"type": "session_meta",
