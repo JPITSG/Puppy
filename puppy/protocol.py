@@ -42,8 +42,9 @@ BROWSER_FILE_WORKFLOWS_CAPABILITY = "browser-file-workflows"
 # is the engine-upgrade surface; this only decides when the node runs it, so a
 # node may support upgrading by hand without advertising the scheduler.
 ENGINE_AUTO_UPGRADE_CAPABILITY = "engine-auto-upgrade"
-# GET/PATCH of the node-owned custom and browser system-prompt text. Browser
-# guidance remains turn-scoped and is never sent when the browser is disabled.
+# GET/PATCH of node-owned custom, remote-workspace, and browser system-prompt
+# text. Conditional guidance remains turn-scoped: remote-workspace text needs a
+# cross-node mirror, and browser text needs browser tools enabled for the turn.
 SYSTEM_PROMPT_CAPABILITY = "system-prompt"
 # GET on an upload id returns the stored image, so a preview outlives the blob
 # URL a page held. Older nodes store the same files but expose no way to read

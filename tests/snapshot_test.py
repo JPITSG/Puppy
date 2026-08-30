@@ -142,6 +142,7 @@ async def main() -> None:
         config.set_value("browser.color_scheme", "light")
         config.set_system_prompts(
             "Keep answers concise.\nPreserve operator terminology.",
+            "Remember that this project is stored on another node.",
             "Use the shared browser before standalone automation.")
         config.set_value("engines.auto_upgrade",
                          {"enabled": True, "mode": "at", "at": "04:15"})
@@ -254,7 +255,9 @@ async def main() -> None:
         config.set_value("uploads.max_file_size_mb", 2)
         config.set_value("browser.enabled", False)
         config.set_value("browser.color_scheme", "dark")
-        config.set_system_prompts("mutated custom prompt", "mutated browser prompt")
+        config.set_system_prompts(
+            "mutated custom prompt", "mutated remote prompt",
+            "mutated browser prompt")
         config.set_value("engines.auto_upgrade",
                          {"enabled": False, "mode": "now", "at": "03:30"})
         config.set_value("notify.enabled", False)
@@ -281,16 +284,21 @@ async def main() -> None:
         assert config.get("browser.color_scheme") == "light"
         assert config.get("system_prompt.custom") == \
             "Keep answers concise.\nPreserve operator terminology."
+        assert config.get("system_prompt.remote_workspace") == \
+            "Remember that this project is stored on another node."
         assert config.get("system_prompt.browser") == \
             "Use the shared browser before standalone automation."
         missing_prompts = config.export_data()
         missing_prompts.pop("system_prompt", None)
+        previous_prompt_shape = config.export_data()
+        previous_prompt_shape["system_prompt"].pop("remote_workspace", None)
         missing_cwd = config.export_data()
         missing_cwd["sessions"].pop("default_cwd", None)
         unknown_selection = config.export_data()
         unknown_selection["engines"]["opencode"] = {
             "models": ["provider/model-a", "second/model-b"]}
-        for invalid in (missing_prompts, missing_cwd, unknown_selection):
+        for invalid in (missing_prompts, previous_prompt_shape,
+                        missing_cwd, unknown_selection):
             try:
                 config.normalize_import(invalid)
             except ValueError:
@@ -325,16 +333,19 @@ async def main() -> None:
             assert "color_scheme" in str(exc), str(exc)
         else:
             raise AssertionError("an invalid browser color scheme was accepted")
-        for invalid_prompt in (None, "x" * (config.MAX_SYSTEM_PROMPT_CHARS + 1), "bad\x00text"):
-            try:
-                config.normalize_import(dict(
-                    config.export_data(),
-                    system_prompt={"custom": invalid_prompt,
-                                   "browser": config.DEFAULT_BROWSER_SYSTEM_PROMPT}))
-            except ValueError:
-                pass
-            else:
-                raise AssertionError("an invalid system prompt was accepted")
+        for field in ("custom", "remote_workspace", "browser"):
+            for invalid_prompt in (
+                    None, "x" * (config.MAX_SYSTEM_PROMPT_CHARS + 1), "bad\x00text"):
+                prompts = dict(config.export_data()["system_prompt"])
+                prompts[field] = invalid_prompt
+                try:
+                    config.normalize_import(dict(
+                        config.export_data(), system_prompt=prompts))
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError(
+                        "an invalid {} system prompt was accepted".format(field))
         assert config.get("notify.enabled") is True
         assert config.get("notify.backend") == 1
         assert config.get("notify.command") == "printf done: %s {session}"

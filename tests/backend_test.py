@@ -567,15 +567,23 @@ async def exercise_node(url: str, token: str, expected_version: str,
             assert response.status == 200, prompt_payload
         prompt_defaults = prompt_payload["system_prompt"]
         assert prompt_defaults["custom"] == ""
+        assert "coding engine runs on this node" in \
+            prompt_defaults["remote_workspace"]
+        assert prompt_defaults["remote_workspace_default"] == \
+            prompt_defaults["remote_workspace"]
         assert "shared, user-visible Puppy browser" in prompt_defaults["browser"]
         assert prompt_defaults["browser_default"] == prompt_defaults["browser"]
         assert prompt_defaults["max_chars"] == 32768
         async with http.patch(url + "/api/system-prompt", headers=good, ssl=pinned,
                               json={"custom": "Use terse answers.",
+                                    "remote_workspace":
+                                        "Treat the working tree as a synchronized mirror.",
                                     "browser": "Use the visible browser first."}) as response:
             saved_prompt = await response.json()
             assert response.status == 200, saved_prompt
         assert saved_prompt["system_prompt"]["custom"] == "Use terse answers."
+        assert saved_prompt["system_prompt"]["remote_workspace"] == \
+            "Treat the working tree as a synchronized mirror."
         assert saved_prompt["system_prompt"]["browser"] == "Use the visible browser first."
         async with http.patch(url + "/api/system-prompt", headers=good, ssl=pinned,
                               json={"custom": "x" * 32769}) as response:
@@ -586,6 +594,8 @@ async def exercise_node(url: str, token: str, expected_version: str,
             assert response.status == 401
         async with http.patch(url + "/api/system-prompt", headers=good, ssl=pinned,
                               json={"custom": "",
+                                    "remote_workspace":
+                                        prompt_defaults["remote_workspace_default"],
                                     "browser": prompt_defaults["browser_default"]}) as response:
             assert response.status == 200, await response.text()
         assert "terminal" not in ping["capabilities"]
@@ -1241,6 +1251,8 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         async with http.patch(url + f"/api/b/{stored['id']}/system-prompt",
                               headers=headers,
                               json={"custom": "Controller-configured guidance.",
+                                    "remote_workspace": remote_prompt["system_prompt"][
+                                        "remote_workspace_default"],
                                     "browser": remote_prompt["system_prompt"]["browser_default"]
                                     }) as response:
             remote_prompt = await response.json()

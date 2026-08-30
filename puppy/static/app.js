@@ -10053,22 +10053,42 @@ class SettingsView {
     customSection.appendChild(custom);
     card.appendChild(customSection);
 
+    const remoteSection = el("section", "system-prompt-section system-prompt-remote-workspace");
+    const remoteHead = el("div", "system-prompt-section-head");
+    const remoteCopy = el("div", "system-prompt-section-copy");
+    remoteCopy.appendChild(el("h3", "", "Remote workspace guidance"));
+    remoteCopy.appendChild(el("p", "",
+      "Sent only when this node runs a model against a project stored on another node."));
+    const remoteReset = el("button", "btn btn-sm btn-ghost system-prompt-reset",
+      "Reset to default");
+    remoteReset.type = "button";
+    remoteHead.appendChild(remoteCopy);
+    remoteHead.appendChild(remoteReset);
+    const remoteText = document.createElement("textarea");
+    remoteText.className = "system-prompt-textarea config-textarea";
+    remoteText.rows = 3;
+    remoteText.setAttribute("aria-label", "Remote workspace system prompt");
+    remoteSection.appendChild(remoteHead);
+    remoteSection.appendChild(remoteText);
+    card.appendChild(remoteSection);
+
     const browserSection = el("section", "system-prompt-section system-prompt-browser");
     const browserHead = el("div", "system-prompt-section-head");
     const browserCopy = el("div", "system-prompt-section-copy");
-    browserCopy.appendChild(el("h3", "", "Puppy browser guidance"));
+    browserCopy.appendChild(el("h3", "", "Browser guidance"));
     const browserNote = el("p", "",
       "Sent to every model turn on nodes where Browser is enabled; it is not sent " +
       "on nodes where Browser is off.");
     browserCopy.appendChild(browserNote);
-    const reset = el("button", "btn btn-sm btn-ghost system-prompt-reset", "Reset to default");
-    reset.type = "button";
+    const browserReset = el("button", "btn btn-sm btn-ghost system-prompt-reset",
+      "Reset to default");
+    browserReset.type = "button";
     browserHead.appendChild(browserCopy);
-    browserHead.appendChild(reset);
+    browserHead.appendChild(browserReset);
     const browserText = document.createElement("textarea");
     browserText.className = "system-prompt-textarea config-textarea";
     browserText.rows = 3;
-    browserText.setAttribute("aria-label", "Puppy browser system prompt");
+    browserText.setAttribute("aria-label", "Browser system prompt");
     browserSection.appendChild(browserHead);
     browserSection.appendChild(browserText);
     card.appendChild(browserSection);
@@ -10094,16 +10114,24 @@ class SettingsView {
           typeof prompt.browser !== "string" ||
           typeof prompt.browser_default !== "string")
         throw new Error("node returned invalid system prompt settings");
+      const remoteWorkspaceSupported =
+        typeof prompt.remote_workspace === "string" &&
+        typeof prompt.remote_workspace_default === "string";
       const maxChars = Number(prompt.max_chars);
       if (!Number.isInteger(maxChars) || maxChars < 1)
         throw new Error("node returned an invalid system prompt limit");
       return {
         loaded: true,
         custom: prompt.custom,
+        remoteWorkspace: remoteWorkspaceSupported ? prompt.remote_workspace : "",
         browser: prompt.browser,
         customDraft: prompt.custom,
+        remoteWorkspaceDraft: remoteWorkspaceSupported ? prompt.remote_workspace : "",
         browserDraft: prompt.browser,
+        remoteWorkspaceDefault: remoteWorkspaceSupported ?
+          prompt.remote_workspace_default : "",
         browserDefault: prompt.browser_default,
+        remoteWorkspaceSupported,
         maxChars,
         saving: false,
         error: "",
@@ -10118,11 +10146,15 @@ class SettingsView {
 
     const supported = bid => backendSupportsSystemPrompt(bid);
     const dirty = record => !!record && record.loaded &&
-      (record.customDraft !== record.custom || record.browserDraft !== record.browser);
+      (record.customDraft !== record.custom || record.browserDraft !== record.browser ||
+       (record.remoteWorkspaceSupported &&
+        record.remoteWorkspaceDraft !== record.remoteWorkspace));
     const stash = () => {
       const record = records.get(activeBid);
       if (!record || !record.loaded || record.saving) return;
       record.customDraft = custom.value;
+      if (record.remoteWorkspaceSupported)
+        record.remoteWorkspaceDraft = remoteText.value;
       record.browserDraft = browserText.value;
       record.saved = false;
     };
@@ -10131,28 +10163,35 @@ class SettingsView {
       const canUse = supported(activeBid);
       const editable = canUse && !!record && record.loaded && !record.saving;
       custom.disabled = browserText.disabled = !editable;
-      reset.disabled = !editable;
+      remoteText.disabled = !editable || !record.remoteWorkspaceSupported;
+      remoteReset.disabled = !editable || !record.remoteWorkspaceSupported;
+      browserReset.disabled = !editable;
       save.disabled = !canUse || (!!record && record.saving);
       status.classList.remove("bad", "dirty");
       if (!canUse) {
-        custom.value = browserText.value = "";
+        custom.value = remoteText.value = browserText.value = "";
         custom.removeAttribute("maxlength");
+        remoteText.removeAttribute("maxlength");
         browserText.removeAttribute("maxlength");
         save.disabled = true;
         status.textContent = "Backend upgrade required for system prompt settings.";
       } else if (!record || record.loading) {
-        custom.value = browserText.value = "";
+        custom.value = remoteText.value = browserText.value = "";
         save.disabled = true;
         status.textContent = "Loading prompt…";
       } else if (!record.loaded) {
-        custom.value = browserText.value = "";
+        custom.value = remoteText.value = browserText.value = "";
         save.disabled = false;
         save.textContent = "Retry";
         status.textContent = record.error || "Prompt settings unavailable.";
         status.classList.add("bad");
       } else {
-        custom.maxLength = browserText.maxLength = record.maxChars;
+        custom.maxLength = remoteText.maxLength = browserText.maxLength = record.maxChars;
         if (document.activeElement !== custom) custom.value = record.customDraft;
+        if (document.activeElement !== remoteText)
+          remoteText.value = record.remoteWorkspaceDraft;
+        remoteText.placeholder = record.remoteWorkspaceSupported ? "" :
+          "Upgrade this backend to configure remote workspace guidance";
         if (document.activeElement !== browserText) browserText.value = record.browserDraft;
         save.textContent = record.saving ? "Saving…" : "Save prompt";
         if (record.error) {
@@ -10212,8 +10251,18 @@ class SettingsView {
       paint();
     };
     custom.oninput = edited;
+    remoteText.oninput = edited;
     browserText.oninput = edited;
-    reset.onclick = () => {
+    remoteReset.onclick = () => {
+      const record = records.get(activeBid);
+      if (!record || !record.loaded || record.saving ||
+          !record.remoteWorkspaceSupported) return;
+      remoteText.value = record.remoteWorkspaceDefault;
+      stash();
+      paint();
+      remoteText.focus();
+    };
+    browserReset.onclick = () => {
       const record = records.get(activeBid);
       if (!record || !record.loaded || record.saving) return;
       browserText.value = record.browserDefault;
@@ -10232,9 +10281,12 @@ class SettingsView {
       record.error = "";
       paint();
       try {
+        const body = { custom: record.customDraft, browser: record.browserDraft };
+        if (record.remoteWorkspaceSupported)
+          body.remote_workspace = record.remoteWorkspaceDraft;
         const result = await api(bid, "system-prompt", {
           method: "PATCH",
-          body: { custom: record.customDraft, browser: record.browserDraft },
+          body,
           timeoutMs: 12000,
         });
         if (generation !== this.renderGeneration || !card.isConnected) return;

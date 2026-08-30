@@ -46,6 +46,19 @@ DEFAULT_BROWSER_SYSTEM_PROMPT = (
     "clients remain appropriate for API-only and other non-rendered checks."
 )
 
+# This is model-visible only when the execution node is working in its private
+# mirror of a project owned by another node. Keep it generic rather than
+# embedding the authoritative absolute path: the latter is already rewritten
+# at the execution boundary, and project-relative paths are portable in chat.
+DEFAULT_REMOTE_WORKSPACE_SYSTEM_PROMPT = (
+    "This session uses a remote workspace. The coding engine runs on this node "
+    "against a Puppy-managed mirror, while the authoritative project is stored "
+    "on another node. Work normally in the current working directory; Puppy "
+    "synchronizes it between turns, so do not access or synchronize the storage "
+    "node yourself. Prefer project-relative paths when referring to files "
+    "because the mirror's absolute path is an implementation detail."
+)
+
 DEFAULTS = {
     "instance_name": socket.gethostname() or "puppy",
     "web": {"host": "0.0.0.0", "port": 10888},
@@ -72,11 +85,12 @@ DEFAULTS = {
     # probe (binary + version) to pass at toggle time. color_scheme is the
     # prefers-color-scheme its pages render with, synced from the WebUI theme.
     "browser": {"enabled": False, "color_scheme": "dark"},
-    # The custom text is added to every engine turn on this node. Browser text
-    # is an independently editable Puppy instruction and is added only while
-    # this node actually offers browser tools to that turn.
+    # The custom text is added to every engine turn on this node. Conditional
+    # fields are independently editable instructions added only while a turn
+    # uses a cross-node workspace or this node actually offers browser tools.
     "system_prompt": {
         "custom": "",
+        "remote_workspace": DEFAULT_REMOTE_WORKSPACE_SYSTEM_PROMPT,
         "browser": DEFAULT_BROWSER_SYSTEM_PROMPT,
     },
     "sessions": {"default_cwd": service_home(), "turn_timeout": 7200,
@@ -259,14 +273,20 @@ def normalize_system_prompt(value, path: str) -> str:
     return value.replace("\r\n", "\n").replace("\r", "\n")
 
 
-def set_system_prompts(custom: str, browser: str) -> None:
-    """Validate and persist the node's two prompt fields in one atomic write."""
+def set_system_prompts(custom: str, remote_workspace: str, browser: str) -> None:
+    """Validate and persist the node's prompt fields in one atomic write."""
     custom = normalize_system_prompt(custom, "custom system prompt")
+    remote_workspace = normalize_system_prompt(
+        remote_workspace, "remote workspace system prompt")
     browser = normalize_system_prompt(browser, "browser system prompt")
     cfg = load()
     with _lock:
         previous = cfg.get("system_prompt")
-        cfg["system_prompt"] = {"custom": custom, "browser": browser}
+        cfg["system_prompt"] = {
+            "custom": custom,
+            "remote_workspace": remote_workspace,
+            "browser": browser,
+        }
         try:
             _save_locked()
         except Exception:
@@ -299,6 +319,9 @@ def normalize_import(data: dict) -> dict:
     merged["system_prompt"]["custom"] = normalize_system_prompt(
         merged.get("system_prompt", {}).get("custom"),
         "config.system_prompt.custom")
+    merged["system_prompt"]["remote_workspace"] = normalize_system_prompt(
+        merged.get("system_prompt", {}).get("remote_workspace"),
+        "config.system_prompt.remote_workspace")
     merged["system_prompt"]["browser"] = normalize_system_prompt(
         merged.get("system_prompt", {}).get("browser"),
         "config.system_prompt.browser")

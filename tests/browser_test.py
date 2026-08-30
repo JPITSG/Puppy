@@ -40,7 +40,8 @@ STUB_LOG = TEST_ROOT / "stub-log"
 STUB_LOG.mkdir(mode=0o700)
 os.environ["PUPPY_BROWSER_STUB_LOG"] = str(STUB_LOG)
 
-from puppy import browser, browser_agent, config, db, runner as session_runner  # noqa: E402
+from puppy import (browser, browser_agent, config, db, runner as session_runner,
+                   system_prompts)  # noqa: E402
 from puppy.drivers.claude import ClaudeDriver  # noqa: E402
 from puppy.drivers.codex import CodexDriver  # noqa: E402
 from puppy.drivers.opencode import OpenCodeDriver  # noqa: E402
@@ -1856,15 +1857,21 @@ def check_system_prompt_settings(ui_source: str, css_source: str) -> None:
     assert 'const autoCard = el("div", "card")' not in ui_source
     assert 'api(0, "system-prompt")' in ui_source
     assert 'backend.capabilities.includes("system-prompt")' in ui_source
-    assert '"Puppy browser guidance"' in ui_source
+    assert '"Remote workspace guidance"' in ui_source
+    assert '"Browser guidance"' in ui_source
+    assert '"Puppy browser guidance"' not in ui_source
     assert '"Reset to default"' in ui_source
+    remote_copy = ("Sent only when this node runs a model against a project "
+                   "stored on another node.")
+    assert remote_copy in ui_source
     guidance_copy = ("Sent to every model turn on nodes where Browser is enabled; "
                      "it is not sent on nodes where Browser is off.")
     assert guidance_copy in ui_source.replace('" +\n      "', "")
     assert "browserNote.textContent = `Sent only for turns on ${node.name}" not in ui_source
-    assert 'body: { custom: record.customDraft, browser: record.browserDraft }' in ui_source
+    assert 'body.remote_workspace = record.remoteWorkspaceDraft' in ui_source
     runner_source = (BASE / "puppy" / "runner.py").read_text()
-    assert "system_prompt_text = system_prompts.custom_prompt()" in runner_source
+    assert "system_prompt_text = system_prompts.turn_prompt(" in runner_source
+    assert "remote_workspace=descriptor is not None" in runner_source
     assert ".engine-updates-section{" in css_source
     assert ".system-prompt-section+.system-prompt-section{" in css_source
     assert ".system-prompt-section-head{" in css_source
@@ -1873,11 +1880,13 @@ def check_system_prompt_settings(ui_source: str, css_source: str) -> None:
            "max-height:72px;resize:none}" in css_source
     assert "system-prompt-textarea::-webkit-resizer" not in css_source
     assert 'custom.className = "system-prompt-textarea config-textarea";' in ui_source
+    assert 'remoteText.className = "system-prompt-textarea config-textarea";' in ui_source
     assert 'browserText.className = "system-prompt-textarea config-textarea";' in ui_source
     assert 'class="config-textarea" id="be-pairing" rows="3"' in ui_source
     assert 'class="config-textarea" id="backend-edit-pairing" rows="3"' in ui_source
     assert ui_source.count('class="config-textarea"') == 2
-    assert "custom.rows = 3;" in ui_source and "browserText.rows = 3;" in ui_source
+    assert "custom.rows = 3;" in ui_source and "remoteText.rows = 3;" in ui_source and \
+        "browserText.rows = 3;" in ui_source
 
     start = ui_source.index("\n  systemPromptCard(") + 1
     brace = ui_source.index("{", start)
@@ -1916,16 +1925,22 @@ class MockNode {
 }
 const document={activeElement:null,createElement:tag=>new MockNode(tag)};
 const el=(tag,cls="",text="")=>new MockNode(tag,cls,text);
-const supported=new Set([0,1]);
+const supported=new Set([0,1,2]);
 const backendSupportsSystemPrompt=bid=>supported.has(bid);
 const backendConnectionAllowed=()=>true;
 const calls=[],toasts=[];
-const payload=(custom,browser)=>({custom,browser,browser_default:"DEFAULT",max_chars:100});
+const payload=(custom,remote,browser)=>({custom,remote_workspace:remote,browser,
+  remote_workspace_default:"REMOTE DEFAULT",browser_default:"DEFAULT",max_chars:100});
+const legacyPayload=(custom,browser)=>({custom,browser,browser_default:"DEFAULT",max_chars:100});
 async function api(bid,path,options={}) {
   calls.push({bid,path,method:options.method||"GET",body:options.body||null});
-  if(options.method==="PATCH")
-    return {system_prompt:payload(options.body.custom,options.body.browser)};
-  return {system_prompt:payload("REMOTE","REMOTE BROWSER")};
+  if(options.method==="PATCH") {
+    if(bid===2) return {system_prompt:legacyPayload(options.body.custom,options.body.browser)};
+    return {system_prompt:payload(options.body.custom,options.body.remote_workspace,
+      options.body.browser)};
+  }
+  if(bid===2) return {system_prompt:legacyPayload("LEGACY","LEGACY BROWSER")};
+  return {system_prompt:payload("REMOTE","REMOTE WORKSPACE","REMOTE BROWSER")};
 }
 const toast=(...args)=>toasts.push(args);
 class TestView {
@@ -1934,51 +1949,74 @@ __METHOD__
 }
 const view=new TestView();
 const card=view.systemPromptCard([
-  {bid:0,name:"Primary"},{bid:1,name:"Laptop"},{bid:2,name:"Old backend"}
-],payload("LOCAL","DEFAULT"),1);
+  {bid:0,name:"Primary"},{bid:1,name:"Laptop"},{bid:2,name:"Legacy prompts"},
+  {bid:3,name:"Old backend"}
+],payload("LOCAL","REMOTE DEFAULT","DEFAULT"),1);
 const nodeField=card.children[0],select=nodeField.children[1];
 const custom=card.children[1].children[1];
-const browserSection=card.children[2],browser=browserSection.children[1];
-const reset=browserSection.children[0].children[1];
-const actions=card.children[3],status=actions.children[0],save=actions.children[1];
-const before={custom:custom.value,browser:browser.value,status:status.textContent,
-  note:browserSection.children[0].children[0].children[1].textContent};
+const remoteSection=card.children[2],remoteWorkspace=remoteSection.children[1];
+const remoteReset=remoteSection.children[0].children[1];
+const browserSection=card.children[3],browser=browserSection.children[1];
+const browserReset=browserSection.children[0].children[1];
+const actions=card.children[4],status=actions.children[0],save=actions.children[1];
+const before={custom:custom.value,remoteWorkspace:remoteWorkspace.value,
+  browser:browser.value,status:status.textContent,
+  remoteNote:remoteSection.children[0].children[0].children[1].textContent,
+  browserNote:browserSection.children[0].children[0].children[1].textContent};
 custom.value="LOCAL EDIT";custom.oninput();
 const dirty=status.textContent;
-browser.value="OTHER";browser.oninput();reset.onclick();
-const resetState={browser:browser.value,status:status.textContent};
+remoteWorkspace.value="OTHER REMOTE";remoteWorkspace.oninput();remoteReset.onclick();
+browser.value="OTHER";browser.oninput();browserReset.onclick();
+const resetState={remoteWorkspace:remoteWorkspace.value,browser:browser.value,
+  status:status.textContent};
 await save.onclick();
 const saved={status:status.textContent,toast:toasts[0][0]};
 select.value="1";document.activeElement=select;select.onchange();
 await new Promise(resolve=>setTimeout(resolve,0));
-const remote={custom:custom.value,browser:browser.value,status:status.textContent,
-  note:browserSection.children[0].children[0].children[1].textContent};
+const remote={custom:custom.value,remoteWorkspace:remoteWorkspace.value,
+  browser:browser.value,status:status.textContent};
 select.value="2";document.activeElement=select;select.onchange();
-const unsupported={disabled:custom.disabled&&browser.disabled&&save.disabled,
+await new Promise(resolve=>setTimeout(resolve,0));
+const legacy={custom:custom.value,browser:browser.value,
+  remoteDisabled:remoteWorkspace.disabled,remotePlaceholder:remoteWorkspace.placeholder,
+  saveDisabled:save.disabled};
+custom.value="LEGACY EDIT";custom.oninput();await save.onclick();
+select.value="3";document.activeElement=select;select.onchange();
+const unsupported={disabled:custom.disabled&&remoteWorkspace.disabled&&browser.disabled&&save.disabled,
   status:status.textContent};
-console.log(JSON.stringify({before,dirty,resetState,saved,remote,unsupported,calls}));
+console.log(JSON.stringify({before,dirty,resetState,saved,remote,legacy,unsupported,calls}));
 """.replace("__METHOD__", method)
     proc = subprocess.run(["node", "--input-type=module", "-e", script],
                           capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:1000]
     result = json.loads(proc.stdout)
     assert result["before"] == {
-        "custom": "LOCAL", "browser": "DEFAULT",
+        "custom": "LOCAL", "remoteWorkspace": "REMOTE DEFAULT", "browser": "DEFAULT",
         "status": "Up to 100 characters per field.",
-        "note": guidance_copy,
+        "remoteNote": remote_copy, "browserNote": guidance_copy,
     }, result
     assert result["dirty"] == "Unsaved changes", result
     assert result["resetState"] == {
-        "browser": "DEFAULT", "status": "Unsaved changes"}, result
+        "remoteWorkspace": "REMOTE DEFAULT", "browser": "DEFAULT",
+        "status": "Unsaved changes"}, result
     assert result["saved"] == {
         "status": "Saved for new turns.", "toast": "Primary: System prompt saved"}, result
     assert result["remote"]["custom"] == "REMOTE" and \
+        result["remote"]["remoteWorkspace"] == "REMOTE WORKSPACE" and \
         result["remote"]["browser"] == "REMOTE BROWSER", result
-    assert result["remote"]["note"] == guidance_copy, result
+    assert result["legacy"] == {
+        "custom": "LEGACY", "browser": "LEGACY BROWSER",
+        "remoteDisabled": True,
+        "remotePlaceholder": "Upgrade this backend to configure remote workspace guidance",
+        "saveDisabled": False,
+    }, result
     assert result["unsupported"] == {
         "disabled": True,
         "status": "Backend upgrade required for system prompt settings."}, result
-    assert [call["method"] for call in result["calls"]] == ["PATCH", "GET"], result
+    assert [call["method"] for call in result["calls"]] == \
+        ["PATCH", "GET", "GET", "PATCH"], result
+    assert result["calls"][0]["body"]["remote_workspace"] == "REMOTE DEFAULT", result
+    assert "remote_workspace" not in result["calls"][3]["body"], result
 
 
 def check_opencode_chat_models(ui_source: str, css_source: str) -> None:
@@ -2473,14 +2511,28 @@ async def main() -> None:
             async with http.get(url + "/api/system-prompt", headers=headers) as r:
                 prompt_settings = await read_json(r)
                 assert r.status == 200, prompt_settings
+            default_remote_prompt = \
+                prompt_settings["system_prompt"]["remote_workspace_default"]
             default_browser_prompt = prompt_settings["system_prompt"]["browser_default"]
+            assert prompt_settings["system_prompt"]["remote_workspace"] == \
+                default_remote_prompt
+            assert system_prompts.turn_prompt(remote_workspace=False) == ""
+            assert system_prompts.turn_prompt(remote_workspace=True) == \
+                default_remote_prompt
             async with http.patch(url + "/api/system-prompt", headers=headers,
                                   json={"custom": "first\r\nsecond"}) as r:
                 prompt_settings = await read_json(r)
                 assert r.status == 200, prompt_settings
                 assert prompt_settings["system_prompt"]["custom"] == "first\nsecond"
+                assert prompt_settings["system_prompt"]["remote_workspace"] == \
+                    default_remote_prompt
+            assert system_prompts.turn_prompt(remote_workspace=False) == "first\nsecond"
+            assert system_prompts.turn_prompt(remote_workspace=True) == \
+                "first\nsecond\n\n" + default_remote_prompt
             async with http.patch(url + "/api/system-prompt", headers=headers,
-                                  json={"custom": "", "browser": default_browser_prompt}) as r:
+                                  json={"custom": "",
+                                        "remote_workspace": default_remote_prompt,
+                                        "browser": default_browser_prompt}) as r:
                 assert r.status == 200, await r.text()
 
             # a too-old binary is refused at enable time with the probed reason
@@ -2867,7 +2919,9 @@ async def main() -> None:
             custom_prompt = "Configured system guidance for every turn."
             policy = browser_agent.AGENT_SELECTION_POLICY + \
                 " Keep the shared browser visible while interacting."
-            config.set_system_prompts(custom_prompt, policy)
+            config.set_system_prompts(
+                custom_prompt, config.DEFAULT_REMOTE_WORKSPACE_SYSTEM_PROMPT,
+                policy)
             descriptor = browser_agent.turn_mcp(agent_sid, turn_id)
             assert descriptor and descriptor["name"] == "puppy_browser", descriptor
             assert descriptor["engine_guidance"] == policy

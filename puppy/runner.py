@@ -1297,17 +1297,8 @@ class SessionHub:
             self._active_turn_id = pinned
             self._browser_activity_announced = set()
             browser_mcp = browser_agent.turn_mcp(self.id, pinned)
-            system_prompt_text = system_prompts.custom_prompt()
-            if descriptor is not None:
-                note = ("This session's working directory is a Puppy-managed "
-                        "private mirror of the authoritative project at {}. "
-                        "Work normally with local paths; Puppy synchronizes "
-                        "your changes with the authoritative project between "
-                        "turns. Prefer project-relative paths when telling "
-                        "the user where things are.").format(
-                            descriptor.get("label") or descriptor.get("root") or "")
-                system_prompt_text = "{}\n\n{}".format(
-                    system_prompt_text, note).strip() if system_prompt_text else note
+            system_prompt_text = system_prompts.turn_prompt(
+                remote_workspace=descriptor is not None)
             argv = driver.build_cmd(
                 session, first_turn, prompt, pinned, browser_mcp=browser_mcp,
                 system_prompt=system_prompt_text)
