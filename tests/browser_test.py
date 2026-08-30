@@ -1699,27 +1699,53 @@ console.log(JSON.stringify({before,after,secondPaint,cleared}));
 
 
 def check_browser_handoff_ui(ui_source: str, css_source: str) -> None:
-    """The identified browser owns a compact, responsive chat-link strip."""
+    """The identified browser owns one session-link pill and its picker menu.
+
+    Linking, moving and unlinking all happen from the browser's own tab: the
+    pill names the linked session (dot + name) and opens a session picker, so
+    nothing depends on which chat happens to be selected elsewhere."""
     start = ui_source.index("class BrowserView {")
     end = ui_source.index("/* ================= SettingsView", start)
     view = ui_source[start:end]
     assert view.index('class="br-bar"') < view.index('class="br-meta"') < \
         view.index('class="br-stage"')
     assert 'aria-label="Copy Browser ID"' in view
-    assert 'aria-label="Unlink browser from session"' in view
     assert ' title=' not in view and ".title =" not in view and "data-tip" not in view
-    assert 'Use with current session' in view and 'Move to current session' in view
-    assert 'Linked to ${ownerName}' in view and 'Not linked to a session' in view
+    # one pill, four state pieces: glyph, session dot, text, picker chevron
+    assert 'aria-haspopup="menu"' in view
+    assert 'class="sess-dot br-owner-dot hidden"' in view
+    assert 'class="br-owner-glyph"' in view and 'class="br-owner-arrow hidden"' in view
+    assert '"Link to a session…"' in view
+    assert '"Session linking requires an updated backend"' in view
+    assert '"Browser closed"' in view and '"Checking session link…"' in view
+    # the picker lists this backend's sessions, opens the linked chat, and
+    # carries the unlink action; a pick moves the binding in one call
+    assert "showLinkMenu(this.ownerBtn)" in view
+    assert '"menuitemradio"' in view and "sessDot(s)" in view
+    # pick-one rows use the plain choice check, not the settings checkbox
+    assert 'choiceSvg("check")' in view and '"br-link-mark"' in view
+    assert '"Unlink browser"' in view and '"No sessions on this backend"' in view
+    assert "sessionsFor(bid).filter(s => !s.archived || s.id === ownerId)" in view
+    assert "positionAnchoredMenu(menu, anchor)" in view
     assert "this.applyBinding(d);" in view
     assert "method: \"POST\", body: { session_id: sessionId }" in view
     assert 'method: "DELETE", timeoutMs: 15000' in view
-    assert "currentBrowserSession(this.tab.bid)" in view
+    # the old selection-dependent handoff is gone everywhere
+    assert "Use with current session" not in ui_source
+    assert "currentBrowserSession" not in ui_source
     assert ".br-meta{" in css_source and ".br-ident{" in css_source
     assert ".br-copy-id{width:27px;height:27px;" in css_source
     assert ".br-owner-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}" \
         in css_source
-    assert ".br-handoff{display:flex;align-items:center;gap:6px;" in css_source
-    assert ".br-unlink{width:30px;height:28px;" in css_source
+    # pill twin of .br-ident; the strip stays one row on every viewport
+    assert "height:28px;min-width:0;max-width:440px;" in css_source
+    assert '.br-owner[aria-expanded="true"] .br-owner-arrow{transform:rotate(180deg)}' \
+        in css_source
+    assert ".br-link-menu{" in css_source and "max-height:min(340px," in css_source
+    assert "max-width:min(340px," in css_source and ".br-link-mark{" in css_source
+    assert ".br-handoff{" not in css_source and ".br-unlink{" not in css_source
+    assert ".br-use{" not in css_source
+    assert "@media(max-width:560px)" not in css_source
     # The live frame fills the stage, so its permanent outline and stronger
     # focus indication must be an overlay above both image and dead-state UI.
     assert ".br-stage::after{" in css_source
@@ -1734,9 +1760,6 @@ def check_browser_handoff_ui(ui_source: str, css_source: str) -> None:
     assert "--focus-stage-ring:#a9c7ef;" in css_source
     assert "--browser-frame:#cacdd4;" in css_source
     assert ".br-stage:focus-visible{box-shadow:" not in css_source
-    assert "@media(max-width:560px){" in css_source
-    assert ".br-meta{display:grid;grid-template-columns:auto minmax(0,1fr);" \
-        in css_source
 
 
 def check_desktop_side_drag(ui_source: str) -> None:
@@ -2508,10 +2531,13 @@ def check_shared_node_order(ui_source: str, css_source: str) -> None:
 
 
 def check_switch_engine_initial_selection(ui_source: str) -> None:
-    """The switch modal initially selects the session's current engine."""
-    expected = ('let pick = (engines.find(engine => engine.key === s.engine) || '
-                'engines[0] || {}).key || "";')
+    """The switch modal initially selects the engine already heading for the
+    session - a queued switch target when one is pending, else the current
+    engine - and marks both states on the cards."""
+    expected = ('let pick = (engines.find(engine => engine.key === '
+                '(pendingEngine || s.engine)) ||\n    engines[0] || {}).key || "";')
     assert expected in ui_source
+    assert '"Switch queued"' in ui_source and '"Current (reseed)"' in ui_source
 
 
 def check_engine_picker_alignment(css_source: str) -> None:

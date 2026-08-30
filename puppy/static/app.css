@@ -1413,21 +1413,41 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .br-id{font:600 11px/1 var(--mono);letter-spacing:.08em;color:var(--txt)}
 .br-copy-id{width:27px;height:27px;margin-left:3px;border:0;border-left:1px solid var(--line);
   border-radius:0 var(--r-md) var(--r-md) 0;flex:0 0 auto}
+/* The one linking control: a pill twin of .br-ident carrying the linked
+   session's own dot and name (or the invitation to link), with a chevron
+   promising the session picker. Sized like the ident pill so the strip reads
+   as one family and stays a single row on every viewport - phones spend no
+   extra row on it, which the stage gets back. */
 .br-owner{
-  display:flex;align-items:center;gap:6px;min-width:0;max-width:440px;padding:4px 2px;
-  border:0;background:transparent;color:var(--txt2);font:11px/1.2 var(--sans);
-  text-align:left;
+  display:flex;align-items:center;gap:7px;height:28px;min-width:0;max-width:440px;
+  padding:0 8px 0 9px;border:1px solid var(--line);border-radius:var(--r-md);
+  background:var(--panel2);color:var(--txt2);font:11px/1.2 var(--sans);text-align:left;
 }
 .br-owner:not(:disabled){cursor:pointer}
-.br-owner:not(:disabled):hover{color:var(--txt)}
-.br-owner svg{flex:0 0 auto;color:var(--txt3)}
+@media (hover:hover){.br-owner:not(:disabled):hover{color:var(--txt);border-color:var(--line2)}}
+.br-owner:disabled{color:var(--txt3)}
+.br-owner-glyph{flex:0 0 auto;color:var(--txt3)}
 .br-owner-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.br-handoff{display:flex;align-items:center;gap:6px;min-width:0;margin-left:auto}
-.br-use{height:28px;min-width:0;max-width:230px;overflow:hidden;text-overflow:ellipsis;
-  white-space:nowrap;font-size:11px}
-/* Match the 30px keyboard control above: their centres share one vertical axis,
-   and the matching 6px gaps align .br-use's right edge with .br-url's. */
-.br-unlink{width:30px;height:28px;flex:0 0 auto}
+.br-owner-arrow{
+  width:12px;height:12px;display:flex;align-items:center;justify-content:center;
+  flex:0 0 auto;color:var(--txt3);transition:transform .16s var(--ease);
+}
+.br-owner[aria-expanded="true"] .br-owner-arrow{transform:rotate(180deg)}
+/* Session rows wear the sidebar's own coloured dot (and running spinner), so
+   the picker scales past a screenful of chats without losing identity. */
+.br-link-menu{
+  max-width:min(340px,calc(100vw - 16px));
+  max-height:min(340px,calc(100dvh - 16px));overflow-y:auto;
+  overscroll-behavior:contain;
+}
+.br-link-menu .sess-dot{flex:0 0 auto}
+.menu button.br-link-sess{gap:10px}
+/* the plain pick-one check of the choice menus, not the settings checkbox:
+   only the linked row carries it, every row reserves the column */
+.br-link-mark{
+  width:14px;height:14px;display:flex;align-items:center;justify-content:center;
+  flex:0 0 auto;margin-left:auto;color:var(--acc2);
+}
 /* The stage owns every gesture: no native scroll, zoom, or context menus.
    Its content size drives the real remote viewport. The image keeps that
    intrinsic aspect, so pointer math never has to undo letterboxing. */
@@ -1472,13 +1492,6 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 }
 .br-ime::placeholder{color:var(--txt3)}
 .br-kbd.on{color:var(--acc);background:var(--acc-dim)}
-@media(max-width:560px){
-  .br-meta{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 7px}
-  .br-ident{grid-column:1;grid-row:1}
-  .br-handoff{grid-column:2;grid-row:1;justify-self:end;max-width:100%}
-  .br-owner{grid-column:1/-1;grid-row:2;max-width:none;padding-left:3px}
-  .br-use{max-width:190px}
-}
 
 /* ---------- settings view ---------- */
 .settings-scroll{flex:1;overflow-y:auto;padding:20px 18px}

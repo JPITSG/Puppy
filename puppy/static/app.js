@@ -3465,21 +3465,6 @@ function sidebarSessionKey(bid, sid) {
   return `${Number(bid) || 0}:${String(sid)}`;
 }
 
-/* Browser tabs do not replace the sidebar's chat selection. That gives a
-   browser opened beside a chat one stable, explicit meaning for "current
-   chat", including while the browser itself has focus in another pane. */
-function currentBrowserSession(bid) {
-  const key = state.selectedSession || focusedSessionKey();
-  if (!key) return null;
-  const separator = key.indexOf(":");
-  if (separator < 1) return null;
-  const selectedBid = Number(key.slice(0, separator)) || 0;
-  const sid = Number(key.slice(separator + 1)) || 0;
-  if (selectedBid !== (Number(bid) || 0) || !sid) return null;
-  const session = findSessionMeta(selectedBid, sid);
-  return session ? { bid: selectedBid, sid, session } : null;
-}
-
 function focusedSessionKey() {
   const tab = state.tabs.find(item => item.id === state.active);
   return tab && tab.type === "session" ? sidebarSessionKey(tab.bid, tab.sid) : null;
@@ -4421,8 +4406,8 @@ function openBrowserTab(bid, browserId = "", groupId = null, options = {}) {
 }
 
 /* Every open chat re-reads which of its browsers are still live, and visible
-   browsers re-read the current sidebar chat for their handoff action. Cheap:
-   both lists are tiny and each view updates only its own compact controls. */
+   browsers re-read their linked session's name and colour for the link pill.
+   Cheap: both lists are tiny and each view updates only its own controls. */
 function syncSessionBrowserChips() {
   for (const view of Object.values(state.views)) {
     if (view && typeof view.syncBrowserChips === "function") view.syncBrowserChips();
@@ -8696,28 +8681,19 @@ class BrowserView {
           <span class="br-id"></span>
           <button class="icon-btn br-copy-id" type="button" aria-label="Copy Browser ID"></button>
         </div>
-        <button class="br-owner" type="button" disabled>
-          <svg viewBox="0 0 16 16" width="14" height="14" fill="none"
-            stroke="currentColor" stroke-width="1.25" stroke-linecap="round"
+        <button class="br-owner" type="button" disabled aria-haspopup="menu"
+          aria-expanded="false">
+          <svg class="br-owner-glyph" viewBox="0 0 16 16" width="14" height="14" fill="none"
+            stroke="currentColor" stroke-width="1.35" stroke-linecap="round"
             stroke-linejoin="round" aria-hidden="true">
-            <path d="M2.3 3.2h11.4v7.6H7.1L4 13.4v-2.6H2.3z"/>
-            <path d="M5 6h6M5 8.2h4"/>
+            <path d="M6.2 10.8 5 12a2.5 2.5 0 0 1-3.5-3.5l2.2-2.2a2.5 2.5 0 0 1 3.5 0"/>
+            <path d="m9.8 5.2 1.2-1.2a2.5 2.5 0 0 1 3.5 3.5l-2.2 2.2a2.5 2.5 0 0 1-3.5 0"/>
+            <path d="m5.8 5.8 4.4 4.4"/>
           </svg>
+          <span class="sess-dot br-owner-dot hidden"></span>
           <span class="br-owner-text">Checking session link…</span>
+          <span class="br-owner-arrow hidden"></span>
         </button>
-        <div class="br-handoff">
-          <button class="btn btn-sm br-use" type="button">Use with current session</button>
-          <button class="icon-btn br-unlink hidden" type="button"
-            aria-label="Unlink browser from session">
-            <svg viewBox="0 0 16 16" width="14" height="14" fill="none"
-              stroke="currentColor" stroke-width="1.35" stroke-linecap="round"
-              stroke-linejoin="round" aria-hidden="true">
-              <path d="M6.2 10.8 5 12a2.5 2.5 0 0 1-3.5-3.5l2.2-2.2a2.5 2.5 0 0 1 3.5 0"/>
-              <path d="m9.8 5.2 1.2-1.2a2.5 2.5 0 0 1 3.5 3.5l-2.2 2.2a2.5 2.5 0 0 1-3.5 0"/>
-              <path d="m5.8 5.8 4.4 4.4M2.3 2.3l11.4 11.4"/>
-            </svg>
-          </button>
-        </div>
       </div>
       <div class="br-type hidden">
         <input class="br-ime" type="text" autocomplete="off" autocapitalize="none"
@@ -8747,8 +8723,11 @@ class BrowserView {
     this.copyIdBtn.appendChild(copyIcon());
     this.ownerBtn = this.root.querySelector(".br-owner");
     this.ownerText = this.root.querySelector(".br-owner-text");
-    this.useBtn = this.root.querySelector(".br-use");
-    this.unlinkBtn = this.root.querySelector(".br-unlink");
+    this.ownerGlyph = this.root.querySelector(".br-owner-glyph");
+    this.ownerDot = this.root.querySelector(".br-owner-dot");
+    this.ownerArrow = this.root.querySelector(".br-owner-arrow");
+    this.ownerArrow.appendChild(choiceSvg("arrow"));
+    this.linkBusy = "";
     this.typeRow = this.root.querySelector(".br-type");
     this.stage = this.root.querySelector(".br-stage");
     this.screen = this.root.querySelector(".br-screen");
@@ -8783,69 +8762,143 @@ class BrowserView {
     }
   }
 
+  /* One pill tells the whole linking story: who owns this browser, that the
+     pill opens the session picker (chevron), and why it is unavailable when
+     it is. Every state writes all four pieces - glyph, dot, text, chevron -
+     so states can never bleed into each other. */
   renderBinding() {
     const browserId = String(this.tab.browserId || "").toUpperCase();
     this.meta.classList.toggle("hidden", !browserId);
     if (!browserId) return;
     this.idText.textContent = browserId;
-    const supported = browserHandoffFor(this.tab.bid);
-    const ownerId = Number(this.binding.sessionId) || null;
-    const owner = ownerId ? findSessionMeta(this.tab.bid, ownerId) : null;
-    const ownerName = owner ? (owner.name || `Session ${ownerId}`) :
-      (this.binding.sessionName || (ownerId ? `Session ${ownerId}` : ""));
-    if (!supported) {
-      this.ownerText.textContent = "Session linking requires an updated backend";
-      this.ownerBtn.disabled = true;
-      this.useBtn.textContent = "Linking unavailable";
-      this.useBtn.disabled = true;
-      this.unlinkBtn.classList.add("hidden");
+    const set = (text, { disabled = false, dot = "", glyph = false,
+                         arrow = false, aria = "" } = {}) => {
+      this.ownerText.textContent = text;
+      this.ownerBtn.disabled = disabled;
+      this.ownerBtn.setAttribute("aria-label", aria || text);
+      this.ownerGlyph.classList.toggle("hidden", !glyph);
+      this.ownerDot.classList.toggle("hidden", !dot);
+      if (dot) this.ownerDot.style.color = dot;
+      this.ownerArrow.classList.toggle("hidden", !arrow);
+    };
+    if (!browserHandoffFor(this.tab.bid)) {
+      set("Session linking requires an updated backend", { disabled: true, glyph: true });
+      return;
+    }
+    if (this.tab.browserGone === true) {
+      set("Browser closed", { disabled: true, glyph: true });
+      return;
+    }
+    if (this.linkBusy) {
+      set(this.linkBusy === "unlink" ? "Unlinking…" : "Linking…",
+        { disabled: true, glyph: true });
       return;
     }
     if (!this.bindingKnown) {
-      this.ownerText.textContent = "Checking session link…";
-      this.ownerBtn.disabled = true;
-      this.useBtn.textContent = "Checking…";
-      this.useBtn.disabled = true;
-      this.unlinkBtn.classList.add("hidden");
+      set("Checking session link…", { disabled: true, glyph: true });
       return;
     }
-    this.ownerText.textContent = ownerId ? `Linked to ${ownerName}` : "Not linked to a session";
-    this.ownerBtn.disabled = !owner;
-    this.unlinkBtn.classList.toggle("hidden", !ownerId);
-    const selected = currentBrowserSession(this.tab.bid);
-    if (!selected) {
-      this.useBtn.textContent = "Select a session on this backend";
-      this.useBtn.disabled = true;
-    } else if (selected.sid === ownerId) {
-      this.useBtn.textContent = "Current session linked";
-      this.useBtn.disabled = true;
-    } else {
-      this.useBtn.textContent = ownerId ? "Move to current session" : "Use with current session";
-      this.useBtn.disabled = false;
+    const ownerId = Number(this.binding.sessionId) || null;
+    if (!ownerId) {
+      set("Link to a session…", { glyph: true, arrow: true,
+        aria: "Link this browser to a session" });
+      return;
     }
+    const owner = findSessionMeta(this.tab.bid, ownerId);
+    const ownerName = owner ? (owner.name || `Session ${ownerId}`) :
+      (this.binding.sessionName || `Session ${ownerId}`);
+    set(ownerName, { dot: (owner && owner.color) || "var(--txt3)", arrow: true,
+      aria: `Linked to ${ownerName} · open, move or unlink` });
   }
 
   async changeBinding(sessionId) {
     const browserId = String(this.tab.browserId || "").toUpperCase();
-    if (!browserId || !browserHandoffFor(this.tab.bid)) return;
-    this.useBtn.disabled = true;
-    this.useBtn.textContent = sessionId ? "Linking…" : "Unlinking…";
-    this.unlinkBtn.disabled = true;
+    if (!browserId || !browserHandoffFor(this.tab.bid) || this.linkBusy) return;
+    if ((Number(sessionId) || null) === (Number(this.binding.sessionId) || null))
+      return;   // picking the already-linked session changes nothing
+    this.linkBusy = sessionId ? "link" : "unlink";
+    this.renderBinding();
     try {
       const path = `browser/instances/${encodeURIComponent(browserId)}/binding`;
       const result = sessionId ? await api(this.tab.bid, path, {
         method: "POST", body: { session_id: sessionId }, timeoutMs: 15000,
       }) : await api(this.tab.bid, path, { method: "DELETE", timeoutMs: 15000 });
+      this.linkBusy = "";
       this.applyBinding(result);
       const name = sessionId && findSessionMeta(this.tab.bid, sessionId);
       toast(sessionId ? `Browser ${browserId} linked to ${name ? name.name : "session"}` :
         `Browser ${browserId} unlinked`, "ok");
     } catch (error) {
+      this.linkBusy = "";
       toast(`Browser ${browserId}: ${error.message}`, "error", 7000);
-      this.renderBinding();
     } finally {
-      this.unlinkBtn.disabled = false;
+      this.renderBinding();
     }
+  }
+
+  /* The whole linking flow lives here, on the browser's own tab: pick any
+     session on this backend to link or move the browser (the node swaps
+     bindings atomically), jump to the linked chat, or unlink - no dependency
+     on which chat happens to be selected elsewhere. */
+  showLinkMenu(anchor) {
+    if (closeAllMenus(anchor)) return;
+    const bid = this.tab.bid;
+    const ownerId = Number(this.binding.sessionId) || null;
+    const owner = ownerId ? findSessionMeta(bid, ownerId) : null;
+    const menu = el("div", "menu dyn br-link-menu");
+    menu._anchor = anchor;
+    menu._ownerView = this.root;
+    anchor.setAttribute("aria-expanded", "true");
+    const add = (label, fn) => {
+      const b = el("button", "", label);
+      b.type = "button";
+      b.onclick = (e) => { e.stopPropagation(); menu.remove(); fn(); };
+      menu.appendChild(b);
+      return b;
+    };
+    if (owner) {
+      add(`Open ${owner.name || `Session ${ownerId}`}`,
+        () => openSessionTab(bid, ownerId, owner));
+      menu.appendChild(el("div", "menu-sep"));
+    }
+    /* the user's own sidebar order; archived chats are offered only while one
+       still holds the link, so its checked row always exists */
+    const sessions = sessionsFor(bid).filter(s => !s.archived || s.id === ownerId);
+    if (!sessions.length) {
+      const none = el("button", "", "No sessions on this backend");
+      none.type = "button";
+      none.disabled = true;
+      menu.appendChild(none);
+    }
+    for (const s of sessions) {
+      const linked = s.id === ownerId;
+      /* pick-one rows wear the plain check of the choice menus, not the
+         drawn checkbox settings toggles use - only the linked row carries
+         a mark, every row reserves its column so labels align */
+      const row = el("button", "br-link-sess");
+      row.type = "button";
+      row.setAttribute("role", "menuitemradio");
+      row.setAttribute("aria-checked", linked ? "true" : "false");
+      row.appendChild(sessDot(s));
+      row.appendChild(el("span", "menu-check-label", s.name || `Session ${s.id}`));
+      const mark = el("span", "br-link-mark");
+      if (linked) mark.appendChild(choiceSvg("check"));
+      row.appendChild(mark);
+      row.onclick = (e) => {
+        e.stopPropagation();
+        menu.remove();
+        this.changeBinding(s.id);
+      };
+      menu.appendChild(row);
+    }
+    if (ownerId) {
+      menu.appendChild(el("div", "menu-sep"));
+      add("Unlink browser", () => this.changeBinding(null));
+    }
+    /* on <body> like every dynamic menu: the pane stacking context would
+       otherwise paint neighbours over it in a split */
+    document.body.appendChild(menu);
+    positionAnchoredMenu(menu, anchor);
   }
 
   send(payload) {
@@ -8933,16 +8986,10 @@ class BrowserView {
         if (this.copyIdBtn.isConnected) this.copyIdBtn.replaceChildren(copyIcon());
       }, 1400);
     };
-    this.ownerBtn.onclick = () => {
-      const sid = Number(this.binding.sessionId) || 0;
-      const meta = sid ? findSessionMeta(this.tab.bid, sid) : null;
-      if (meta) openSessionTab(this.tab.bid, sid, meta);
+    this.ownerBtn.onclick = (e) => {
+      e.stopPropagation();
+      this.showLinkMenu(this.ownerBtn);
     };
-    this.useBtn.onclick = () => {
-      const selected = currentBrowserSession(this.tab.bid);
-      if (selected) this.changeBinding(selected.sid);
-    };
-    this.unlinkBtn.onclick = () => this.changeBinding(null);
     const buttons = ["left", "middle", "right"];
     const mouse = (kind, e) => {
       const p = this.point(e.clientX, e.clientY);
@@ -9253,6 +9300,9 @@ class BrowserView {
     if (this.ws) { try { this.ws.close(); } catch (e) {} }
     this.ws = null;
     if (this.frameUrl) { URL.revokeObjectURL(this.frameUrl); this.frameUrl = null; }
+    /* the link menu sits on <body>, so closing this view does not take it */
+    for (const menu of document.querySelectorAll(".menu.dyn"))
+      if (menu._ownerView === this.root) menu.remove();
     this.root.remove();
   }
 }
