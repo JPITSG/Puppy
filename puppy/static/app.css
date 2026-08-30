@@ -15,7 +15,8 @@
   --err:#ff6b81; --err-dim:rgba(255,107,129,.12);
   /* State lines keep their hierarchy while following each theme's palette. */
   --focus-line:rgba(90,162,245,.55); --focus-ring:rgba(90,162,245,.12);
-  --focus-ring-soft:rgba(90,162,245,.10); --focus-stage-ring:rgba(90,162,245,.4);
+  --focus-ring-soft:rgba(90,162,245,.10); --focus-stage-ring:#284669;
+  --browser-frame:#2a2b2d;
   --acc-line-soft:rgba(90,162,245,.28); --acc-line:rgba(90,162,245,.58);
   --acc-line-hi:rgba(90,162,245,.62);
   --ok-line:rgba(34,229,164,.4);
@@ -1436,14 +1437,16 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 }
 /* The live <img> fills this box, so both the permanent frame and keyboard
    focus state must paint above it. A real border would change the measured
-   viewport and pointer mapping; this overlay is purely visual. Keep it above
-   the disconnected-state layer (z-index 20) as well. */
+   viewport and pointer mapping; this overlay is purely visual. Its opaque
+   inset stroke also stays one colour over light pages, dark pages and the
+   stage's black fallback instead of compositing into uneven edge tones. Keep
+   it above the disconnected-state layer (z-index 20) as well. */
 .br-stage::after{
   content:"";position:absolute;inset:0;z-index:21;pointer-events:none;
-  border:1px solid var(--line2);border-radius:inherit;
+  border-radius:inherit;box-shadow:inset 0 0 0 1px var(--browser-frame);
 }
 .br-stage:focus-visible::after{
-  border-color:var(--focus-stage-ring);border-width:2px;
+  box-shadow:inset 0 0 0 2px var(--focus-stage-ring);
 }
 .br-screen{
   display:none;max-width:100%;max-height:100%;width:auto;height:auto;
@@ -2157,7 +2160,8 @@ html.light{
   --warn:#b26205; --warn-dim:rgba(178,98,5,.10);
   --err:#d6455d; --err-dim:rgba(214,69,93,.10);
   --focus-line:rgba(59,130,224,.55); --focus-ring:rgba(59,130,224,.12);
-  --focus-ring-soft:rgba(59,130,224,.10); --focus-stage-ring:rgba(59,130,224,.4);
+  --focus-ring-soft:rgba(59,130,224,.10); --focus-stage-ring:#a9c7ef;
+  --browser-frame:#cacdd4;
   --acc-line-soft:rgba(59,130,224,.28); --acc-line:rgba(59,130,224,.58);
   --acc-line-hi:rgba(59,130,224,.62);
   --ok-line:rgba(11,158,113,.4);

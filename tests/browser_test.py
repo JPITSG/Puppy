@@ -1664,10 +1664,14 @@ def check_browser_handoff_ui(ui_source: str, css_source: str) -> None:
     assert ".br-stage::after{" in css_source
     assert 'content:"";position:absolute;inset:0;z-index:21;pointer-events:none;' \
         in css_source
-    assert "border:1px solid var(--line2);border-radius:inherit;" \
+    assert "border-radius:inherit;box-shadow:inset 0 0 0 1px var(--browser-frame);" \
         in css_source
     assert ".br-stage:focus-visible::after{" in css_source
-    assert "border-color:var(--focus-stage-ring);border-width:2px;" in css_source
+    assert "box-shadow:inset 0 0 0 2px var(--focus-stage-ring);" in css_source
+    assert "--focus-stage-ring:#284669;" in css_source
+    assert "--browser-frame:#2a2b2d;" in css_source
+    assert "--focus-stage-ring:#a9c7ef;" in css_source
+    assert "--browser-frame:#cacdd4;" in css_source
     assert ".br-stage:focus-visible{box-shadow:" not in css_source
     assert "@media(max-width:560px){" in css_source
     assert ".br-meta{display:grid;grid-template-columns:auto minmax(0,1fr);" \
