@@ -328,6 +328,10 @@ def clean_env(env: dict) -> dict:
     for k in list(out):
         if k.startswith("CLAUDE_") or k in (
                 "CLAUDECODE", "ANTHROPIC_MODEL", "CODEX_HOME_OVERRIDE",
+                # Puppy adds this back for exactly one case: a root-owned
+                # Claude turn whose selected mode explicitly bypasses all
+                # permission checks. Never inherit a broader service setting.
+                "IS_SANDBOX",
                 # A Puppy process may itself have been launched by OpenCode.
                 # Its turn-scoped inline config must never leak into a child
                 # engine; the OpenCode driver installs its own value explicitly.

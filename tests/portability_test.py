@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""No-quota tests for account defaults and source-tree launch portability."""
+"""No-quota tests for runtime environment and source-tree launch portability."""
 from __future__ import annotations
 
 import os
@@ -20,6 +20,7 @@ PRIVATE_TESTS.chmod(0o700)
 TEST_ROOT = Path(tempfile.mkdtemp(prefix="portability-", dir=str(PRIVATE_TESTS)))
 
 from puppy import user_paths  # noqa: E402
+from puppy.drivers.base import clean_env  # noqa: E402
 from puppy.drivers.claude import ClaudeDriver  # noqa: E402
 from puppy.drivers.codex import _codex_home  # noqa: E402
 
@@ -45,6 +46,31 @@ def test_service_home() -> None:
     with mock.patch.dict(os.environ, {"HOME": "relative/home"}), mock.patch(
             "puppy.user_paths.pwd.getpwuid", side_effect=KeyError("missing")):
         assert user_paths.service_home() == "/"
+
+
+def test_claude_root_bypass_environment() -> None:
+    driver = ClaudeDriver()
+
+    def turn_env(permission_mode: str, effective_uid: int) -> dict:
+        # Model the runner's per-turn environment construction, including an
+        # ambient value that Puppy must never leak into an ineligible turn.
+        env = clean_env({"PATH": "/usr/bin", "IS_SANDBOX": "ambient"})
+        with mock.patch("puppy.drivers.claude.os.geteuid",
+                        return_value=effective_uid):
+            env.update(driver.build_env(
+                {"permission_mode": permission_mode}, True, "prompt", "id"))
+        return env
+
+    assert turn_env("bypassPermissions", 0)["IS_SANDBOX"] == "1"
+    assert "IS_SANDBOX" not in turn_env("auto", 0)
+    assert "IS_SANDBOX" not in turn_env("dontAsk", 0)
+    assert "IS_SANDBOX" not in turn_env("bypassPermissions", 1000)
+
+    # A mode flip is observed on the next process environment in both
+    # directions; Claude is spawned anew for every Puppy turn.
+    switched = [turn_env(mode, 0).get("IS_SANDBOX") for mode in (
+        "bypassPermissions", "auto", "bypassPermissions")]
+    assert switched == ["1", None, "1"]
 
 
 def test_config_default_and_persistence() -> None:
@@ -98,11 +124,12 @@ def test_source_tree_launcher() -> None:
 def main() -> None:
     try:
         test_service_home()
+        test_claude_root_bypass_environment()
         test_config_default_and_persistence()
         test_source_tree_launcher()
     finally:
         shutil.rmtree(TEST_ROOT, ignore_errors=True)
-    print("portable account defaults and source-tree launcher passed")
+    print("runtime environment and source-tree launcher portability passed")
 
 
 if __name__ == "__main__":

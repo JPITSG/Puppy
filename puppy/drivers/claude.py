@@ -100,6 +100,18 @@ class ClaudeDriver(Driver):
             argv += ["--effort", effort]
         return argv
 
+    def build_env(self, session, first_turn, prompt, pinned_id, browser_mcp=None,
+                  system_prompt=""):
+        # Claude normally refuses bypassPermissions when its effective user is
+        # root. The vendor's sandbox marker is deliberately turn-scoped: the
+        # runner starts every turn with clean_env(), then calls this method for
+        # the freshly spawned process. Changing modes therefore removes or
+        # restores the marker on the very next turn without persistent state.
+        mode = session.get("permission_mode") or self.default_permission()
+        if mode == "bypassPermissions" and getattr(os, "geteuid", lambda: -1)() == 0:
+            return {"IS_SANDBOX": "1"}
+        return {}
+
     def initial_stdin(self, session, prompt):
         return [
             {"type": "control_request", "request_id": "init_1",
