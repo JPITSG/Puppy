@@ -1403,7 +1403,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .br-url::placeholder{color:var(--txt3)}
 .br-meta{
   display:flex;align-items:center;gap:8px;flex:0 0 auto;min-width:0;
-  padding:0 8px 4px;color:var(--txt2);font:11px/1.2 var(--sans);
+  padding:2px 8px 4px;color:var(--txt2);font:11px/1.2 var(--sans);
 }
 .br-ident{
   display:flex;align-items:center;height:28px;min-width:0;padding-left:9px;
