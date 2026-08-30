@@ -1124,49 +1124,15 @@ function guardNativeTouchDrag(target) {
   };
 }
 
-/* Live session/backend updates rebuild the sidebar. If one lands between the
-   two clicks, both clicks hit a different span and some browsers reset detail
-   to 1. Retain the first click by logical section key so the replacement node
-   can complete the same gesture. Browsers keep counting rapid clicks past two,
-   so every positive even detail completes another deliberate pair. */
-const DOUBLE_ACTIVATION_MS = 700;
-const DOUBLE_ACTIVATION_DISTANCE = 18;
-let pendingDoubleActivation = null;
-
-function wireDoubleClickOrTouch(target, activate, activationKey, ignoredSelector = "") {
-  const pointerForClick = activationPointer(target);
+/* Backend names are explicit one-click disclosure targets on every input
+   device. Ignore the later clicks in a desktop double-click sequence so a
+   hurried activation cannot immediately undo itself. */
+function wireDisclosureName(target, disclosure) {
   target.addEventListener("click", event => {
-    const pointerType = pointerForClick(event);
-    /* A disclosure surface may contain its ordinary single-click arrow. Let
-       that button act once and prevent its bubbling click (including the
-       synthetic click below) from being interpreted as a second activation. */
-    if (ignoredSelector && event.target && typeof event.target.closest === "function" &&
-        event.target.closest(ignoredSelector)) {
-      pendingDoubleActivation = null;
-      return;
-    }
-    if (pointerType === "touch") {
-      pendingDoubleActivation = null;
-    } else {
-      const previous = pendingDoubleActivation;
-      const elapsed = previous ? event.timeStamp - previous.time : Infinity;
-      const distance = previous ? Math.hypot(
-        event.clientX - previous.x, event.clientY - previous.y) : Infinity;
-      const replacedElementDouble = event.detail === 1 && previous &&
-        previous.key === activationKey && elapsed >= 0 && elapsed <= DOUBLE_ACTIVATION_MS &&
-        distance <= DOUBLE_ACTIVATION_DISTANCE;
-      const completedNativePair = event.detail > 0 && event.detail % 2 === 0;
-      if (!completedNativePair && !replacedElementDouble) {
-        pendingDoubleActivation = event.detail > 0 && event.detail % 2 === 1 ? {
-          key: activationKey, time: event.timeStamp, x: event.clientX, y: event.clientY,
-        } : null;
-        return;
-      }
-      pendingDoubleActivation = null;
-    }
     event.preventDefault();
     event.stopPropagation();
-    activate();
+    if (event.detail > 1) return;
+    disclosure.click();
   });
 }
 
@@ -3532,7 +3498,7 @@ function renderSidebar() {
       const key = g.bid ? `remote:${g.bid}` : "local";
       const disclosure = disclosureButton(`${g.name} sessions`, body,
         collapsedSessionBackends, "puppy.collapsed.session-backends", key);
-      wireDoubleClickOrTouch(name, () => disclosure.click(), `sessions:${key}`);
+      wireDisclosureName(name, disclosure);
       t.appendChild(dot);
       t.appendChild(name);
       if (g.browser) {
@@ -4262,8 +4228,7 @@ function renderFootEngines() {
         head.appendChild(version);
       }
       head.appendChild(disclosure);
-      wireDoubleClickOrTouch(head, () => disclosure.click(), `status:${key}`,
-        ".disclosure-toggle");
+      wireDisclosureName(name, disclosure);
       group.appendChild(head);
       group.dataset.nodeKey = key;
       wireNodeGroupDrag(group, head, key);
@@ -8672,7 +8637,7 @@ class BrowserView {
         <div class="br-handoff">
           <button class="btn btn-sm br-use" type="button">Use with current session</button>
           <button class="icon-btn br-unlink hidden" type="button"
-            aria-label="Unlink browser from session" title="Unlink browser from session">
+            aria-label="Unlink browser from session">
             <svg viewBox="0 0 16 16" width="14" height="14" fill="none"
               stroke="currentColor" stroke-width="1.35" stroke-linecap="round"
               stroke-linejoin="round" aria-hidden="true">
@@ -8775,21 +8740,16 @@ class BrowserView {
     }
     this.ownerText.textContent = ownerId ? `Linked to ${ownerName}` : "Not linked to a session";
     this.ownerBtn.disabled = !owner;
-    this.ownerBtn.title = owner ? `Open ${ownerName}` : "";
     this.unlinkBtn.classList.toggle("hidden", !ownerId);
     const selected = currentBrowserSession(this.tab.bid);
     if (!selected) {
       this.useBtn.textContent = "Select a session on this backend";
-      this.useBtn.title = "Select a session in the sidebar first";
       this.useBtn.disabled = true;
     } else if (selected.sid === ownerId) {
       this.useBtn.textContent = "Current session linked";
-      this.useBtn.title = `${selected.session.name || `Session ${selected.sid}`} uses this browser`;
       this.useBtn.disabled = true;
     } else {
       this.useBtn.textContent = ownerId ? "Move to current session" : "Use with current session";
-      this.useBtn.title = `Use Browser ${browserId} with ` +
-        `${selected.session.name || `Session ${selected.sid}`}`;
       this.useBtn.disabled = false;
     }
   }
@@ -9091,7 +9051,6 @@ class BrowserView {
         this.lastUrl = d.url || "";
         if (!this.urlFocused)
           this.urlInput.value = this.lastUrl === "about:blank" ? "" : this.lastUrl;
-        this.urlInput.title = d.title || "";
         this.backBtn.disabled = !d.can_back;
         this.clearDead();
       } else if (d.type === "frame_meta") {

@@ -1627,6 +1627,8 @@ def check_browser_handoff_ui(ui_source: str, css_source: str) -> None:
     assert view.index('class="br-bar"') < view.index('class="br-meta"') < \
         view.index('class="br-stage"')
     assert 'aria-label="Copy Browser ID"' in view
+    assert 'aria-label="Unlink browser from session"' in view
+    assert ' title=' not in view and ".title =" not in view and "data-tip" not in view
     assert 'Use with current session' in view and 'Move to current session' in view
     assert 'Linked to ${ownerName}' in view and 'Not linked to a session' in view
     assert "this.applyBinding(d);" in view
@@ -2375,15 +2377,12 @@ console.log(JSON.stringify({mouse:mouse.stats,vertical:vertical.stats,left:left.
 
 
 def check_status_header_activation(ui_source: str, css_source: str) -> None:
-    """The complete backend-status header toggles, while its arrow acts once."""
-    start = ui_source.index("function renderFootEngines()")
-    end = ui_source.index("\nfunction ", start + 1)
-    render = ui_source[start:end]
-    assert ('wireDoubleClickOrTouch(head, () => disclosure.click(), `status:${key}`,\n'
-            '        ".disclosure-toggle");') in render
-    assert "wireDoubleClickOrTouch(name, () => disclosure.click()" not in render
+    """Both backend-name labels are single-click disclosure targets."""
+    assert ui_source.count("wireDisclosureName(name, disclosure);") == 2
+    assert "wireDoubleClickOrTouch" not in ui_source
     assert (".foot-engine-head{display:flex;align-items:center;gap:6px;min-width:0;" +
-            "color:var(--txt3);cursor:pointer}") in css_source
+            "color:var(--txt3)}") in css_source
+    assert "user-select:none;cursor:pointer;" in css_source
 
 
 def check_shared_node_order(ui_source: str, css_source: str) -> None:
@@ -2424,8 +2423,8 @@ def check_browser_chip_order(ui_source: str) -> None:
     assert 'scroll.querySelector(".chip.be")' not in method
 
 
-def check_double_activation_survives_rerender(ui_source: str) -> None:
-    """A backend name rebuilt between clicks must still complete the gesture."""
+def check_backend_name_single_activation(ui_source: str) -> None:
+    """One click toggles a backend name; later double-click events do not undo it."""
     def extract_function(marker: str) -> str:
         start = ui_source.index(marker)
         brace = ui_source.index("{", start)
@@ -2439,84 +2438,31 @@ def check_double_activation_survives_rerender(ui_source: str) -> None:
                     return ui_source[start:index + 1]
         raise AssertionError("unbalanced " + marker)
 
-    activation_pointer = extract_function("function activationPointer(")
-    fallback_start = ui_source.index("const DOUBLE_ACTIVATION_MS = ")
-    wire_start = ui_source.index("function wireDoubleClickOrTouch(", fallback_start)
-    wire = extract_function("function wireDoubleClickOrTouch(")
-    fallback = ui_source[fallback_start:wire_start] + wire
+    wire = extract_function("function wireDisclosureName(")
     script = r"""
 class Target {
   constructor() { this.listeners={}; }
   addEventListener(kind,fn) { (this.listeners[kind] ||= []).push(fn); }
   emit(kind,values={}) {
-    const event=Object.assign({isPrimary:true,pointerType:"",detail:0,timeStamp:0,
-      clientX:0,clientY:0,prevented:false,stopped:false,target:this,
+    const event=Object.assign({detail:0,prevented:false,stopped:false,target:this,
       preventDefault(){this.prevented=true;},stopPropagation(){this.stopped=true;}},values);
     for(const fn of this.listeners[kind] || []) fn(event);
     return event;
   }
 }
 %s
-%s
-const activations=[];
-const make=(key,label)=>{const target=new Target();
-  wireDoubleClickOrTouch(target,()=>activations.push(label),key);return target;};
-const click=(target,detail,time,x=20,pointerType="mouse",eventTarget=target)=>{
-  target.emit("pointerdown",{pointerType,timeStamp:time-20,clientX:x,clientY:10,
-    target:eventTarget});
-  return target.emit("click",{pointerType,detail,timeStamp:time,clientX:x,clientY:10,
-    target:eventTarget});
-};
-
-const oldName=make("sessions:remote:7","old");
-const first=click(oldName,1,100,20);
-const replacementName=make("sessions:remote:7","replacement");
-const replacement=click(replacementName,1,330,23);
-
-pendingDoubleActivation=null;
-click(make("sessions:remote:7","wrong sessions"),1,500,20);
-click(make("status:remote:7","wrong status"),1,650,20);
-
-pendingDoubleActivation=null;
-click(make("sessions:remote:8","too late first"),1,1000,20);
-click(make("sessions:remote:8","too late second"),1,1801,20);
-
-pendingDoubleActivation=null;
-click(make("sessions:remote:9","too far first"),1,2000,10);
-click(make("sessions:remote:9","too far second"),1,2200,40);
-
-pendingDoubleActivation=null;
-const native=click(make("sessions:local","native"),2,2500,20);
-pendingDoubleActivation=null;
-const rapidTarget=make("sessions:remote:11","rapid");
-const rapid=[1,2,3,4,5,6].map((detail,index)=>
-  click(rapidTarget,detail,2600 + index * 70,20));
-const touch=click(make("sessions:remote:10","touch"),1,2800,20,"touch");
-pendingDoubleActivation=null;
-const wholeHead=new Target();
-wireDoubleClickOrTouch(wholeHead,()=>activations.push("whole status head"),
-  "status:local",".disclosure-toggle");
-const arrow={closest:selector=>selector===".disclosure-toggle"?arrow:null};
-const version={closest:()=>null};
-const nestedArrow=click(wholeHead,1,3000,20,"touch",arrow);
-const versionTap=click(wholeHead,1,3100,40,"touch",version);
-console.log(JSON.stringify({activations,first,replacement,native,rapid,touch,
-  nestedArrow,versionTap}));
-""" % (activation_pointer, fallback)
+const target=new Target();
+const disclosure={clicks:0,click(){this.clicks++;}};
+wireDisclosureName(target,disclosure);
+const events=[1,2,3,0].map(detail=>target.emit("click",{detail}));
+console.log(JSON.stringify({clicks:disclosure.clicks,events}));
+""" % wire
     proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:600]
     result = json.loads(proc.stdout.strip())
-    assert result["activations"] == [
-        "replacement", "native", "rapid", "rapid", "rapid", "touch",
-        "whole status head"], result
-    assert not result["first"]["prevented"] and not result["first"]["stopped"], result
-    for key in ("replacement", "native", "touch"):
-        assert result[key]["prevented"] and result[key]["stopped"], result
-    assert [event["prevented"] for event in result["rapid"]] == [
-        False, True, False, True, False, True], result
-    assert not result["nestedArrow"]["prevented"] and \
-        not result["nestedArrow"]["stopped"], result
-    assert result["versionTap"]["prevented"] and result["versionTap"]["stopped"], result
+    assert result["clicks"] == 2, result  # one physical click + programmatic activation
+    assert all(event["prevented"] and event["stopped"]
+               for event in result["events"]), result
 
 
 def check_browser_disable_closes_scoped_tabs(ui_source: str) -> None:
@@ -3691,7 +3637,7 @@ async def main() -> None:
             check_switch_engine_initial_selection(ui_source)
             check_engine_picker_alignment(css_source)
             check_browser_chip_order(ui_source)
-            check_double_activation_survives_rerender(ui_source)
+            check_backend_name_single_activation(ui_source)
             check_browser_disable_closes_scoped_tabs(ui_source)
             check_quota_math(ui_source)
             # one checkbox face app-wide: a native checkbox is painted by the
@@ -3757,12 +3703,11 @@ async def main() -> None:
             assert "position:absolute;z-index:1;top:6px;right:6px;width:27px;height:27px;" in css_source
             assert ".user-copy{opacity:.3}" in css_source
             assert ".code-copy:hover,.user-copy:hover{" in css_source
-            # Polls rebuild backend headings. The second click is keyed to the
-            # logical section so replacing its span cannot reset a double-click.
-            assert "previous.key === activationKey" in ui_source
-            assert "`sessions:${key}`" in ui_source
-            assert "`status:${key}`" in ui_source
-            assert ui_source.count("event.detail > 0 && event.detail % 2 === 0") == 2
+            # Both backend-name labels use one click; later clicks in the same
+            # desktop double-click sequence cannot undo the first activation.
+            assert ui_source.count("wireDisclosureName(name, disclosure);") == 2
+            assert "if (event.detail > 1) return;" in ui_source
+            assert ui_source.count("event.detail > 0 && event.detail % 2 === 0") == 1
             # A node disable already stops its processes. The settings response
             # and asynchronous state paths also retire only that node's tabs.
             assert ui_source.count("closeBrowserTabsForBackend(") == 4
