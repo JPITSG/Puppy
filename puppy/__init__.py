@@ -1,3 +1,3 @@
 """Puppy - persistent AI coding session manager for CLI coding agents."""
 
-__version__ = "1.0.311"
+__version__ = "1.0.312"

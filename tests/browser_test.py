@@ -1641,6 +1641,14 @@ def check_browser_handoff_ui(ui_source: str, css_source: str) -> None:
         in css_source
     assert ".br-handoff{display:flex;align-items:center;gap:6px;" in css_source
     assert ".br-unlink{width:30px;height:28px;" in css_source
+    # The live frame fills the stage, so its focus indication must be a
+    # positioned overlay above the image rather than a clipped outer shadow.
+    assert ".br-stage:focus-visible::after{" in css_source
+    assert 'content:"";position:absolute;inset:0;z-index:1;pointer-events:none;' \
+        in css_source
+    assert "border:2px solid var(--focus-stage-ring);border-radius:inherit;" \
+        in css_source
+    assert ".br-stage:focus-visible{box-shadow:" not in css_source
     assert "@media(max-width:560px){" in css_source
     assert ".br-meta{display:grid;grid-template-columns:auto minmax(0,1fr);" \
         in css_source
