@@ -2098,7 +2098,35 @@ function reconcileRemoteState() {
     const bid = key.slice(0, key.indexOf(":"));
     if (bid !== "0" && !live.has(bid)) sessionActivityAnchors.delete(key);
   }
+  let becameOnline = false;
+  for (const backend of state.backends) {
+    const health = controllerBackendHealth(backend);
+    if (!health) continue; // compatibility with controllers predating this field
+    const bid = Number(backend.id);
+    const previous = state.remoteOk[bid];
+    if (health.state === "online") {
+      const stopping = state.remoteStopping[bid];
+      if (stopping && !stopping.controllerOfflineSeen) {
+        state.remoteOk[bid] = false;
+        state.remoteErrors[bid] = stopping.message;
+        continue;
+      }
+      state.remoteOk[bid] = true;
+      delete state.remoteErrors[bid];
+      if (stopping) clearRemoteNodeStopping(bid);
+      if (previous !== true) becameOnline = true;
+    } else if (health.state === "offline") {
+      if (state.remoteStopping[bid])
+        state.remoteStopping[bid].controllerOfflineSeen = true;
+      state.remoteOk[bid] = false;
+      state.remoteErrors[bid] = health.reason || "Backend unavailable";
+    } else {
+      delete state.remoteOk[bid];
+      delete state.remoteErrors[bid];
+    }
+  }
   syncRemoteUpdateConnections();
+  return becameOnline;
 }
 
 /* A backend ID survives a connection edit, but everything learned through its
@@ -2119,6 +2147,29 @@ function resetRemoteBackendConnection(bid) {
   }
   for (const key of [...sessionActivityAnchors.keys()])
     if (key.startsWith(`${bid}:`)) sessionActivityAnchors.delete(key);
+}
+
+function controllerBackendHealth(backend) {
+  const health = backend && backend.availability;
+  if (!health || typeof health !== "object" ||
+      !["checking", "online", "offline"].includes(health.state)) return null;
+  return health;
+}
+
+/* New controllers own reachability discovery. Older controllers have no
+   availability field, so retain the prior browser-probe behavior for them. */
+function backendPoolable(backendOrBid) {
+  if (!backendOrBid) return true;
+  const backend = typeof backendOrBid === "object" ? backendOrBid :
+    state.backends.find(item => Number(item.id) === Number(backendOrBid));
+  if (!backend) return false;
+  const health = controllerBackendHealth(backend);
+  return !health || health.state === "online";
+}
+
+function backendConnectionAllowed(bid) {
+  if (!bid) return true;
+  return backendPoolable(bid) && state.remoteOk[bid] !== false;
 }
 
 function remoteAvailability(bid) {
@@ -2478,9 +2529,12 @@ function connectUpdates() {
         syncTabsWithSessions();
       } else if (d.type === "backends" && Array.isArray(d.backends)) {
         state.backends = d.backends;
-        reconcileRemoteState();
+        const becameOnline = reconcileRemoteState();
         renderSidebar();
         syncRemoteStateViews();
+        if (becameOnline)
+          pollRemotes({ forceEngines: true })
+            .catch(error => console.warn("backend recovery poll failed", error));
       } else if (d.type === "host_metrics") {
         renderHostCpu(d.cpu_percent);
       } else if (d.type === "notify") {
@@ -2565,7 +2619,11 @@ function handleRemoteNodeStopping(rawBid, notice = {}) {
   const restarting = notice.reason === "restart";
   const message = restarting ? "Backend restarting…" : "Backend shutting down…";
   remotePollSequence[bid] = Number(remotePollSequence[bid] || 0) + 1;
-  state.remoteStopping[bid] = { reason: restarting ? "restart" : "shutdown", message };
+  const health = controllerBackendHealth(backend);
+  state.remoteStopping[bid] = {
+    reason: restarting ? "restart" : "shutdown", message,
+    controllerOfflineSeen: !!health && health.state === "offline",
+  };
   state.remoteOk[bid] = false;
   state.remoteErrors[bid] = message;
   if (Array.isArray(state.remoteSessions[bid])) {
@@ -2609,7 +2667,8 @@ function closeRemoteUpdateConnection(rawBid) {
 
 function connectRemoteUpdates(backend) {
   const bid = Number(backend && backend.id) || 0;
-  if (!bid || !state.authed || !backendSupportsShutdownNotice(backend)) return;
+  if (!bid || !state.authed || !backendSupportsShutdownNotice(backend) ||
+      !backendConnectionAllowed(bid)) return;
   let entry = remoteUpdateConnections.get(bid);
   if (!entry) {
     entry = { ws: null, timer: null, retry: 800, sequence: 0, sawStopping: false };
@@ -2646,7 +2705,8 @@ function connectRemoteUpdates(backend) {
     if (!current()) return;
     entry.ws = null;
     const live = state.backends.find(item => item.id === bid);
-    if (!state.authed || !backendSupportsShutdownNotice(live)) return;
+    if (!state.authed || !backendSupportsShutdownNotice(live) ||
+        !backendConnectionAllowed(bid)) return;
     const delay = Math.round(entry.retry * (.85 + Math.random() * .3));
     entry.retry = Math.min(entry.retry * 1.7, 15000);
     entry.timer = setTimeout(() => {
@@ -2659,7 +2719,10 @@ function connectRemoteUpdates(backend) {
 
 function syncRemoteUpdateConnections() {
   const desired = new Map(state.backends
-    .filter(backendSupportsShutdownNotice).map(backend => [Number(backend.id), backend]));
+    .filter(backend => backendSupportsShutdownNotice(backend) &&
+      backendPoolable(backend) &&
+      state.remoteOk[Number(backend.id)] === true)
+    .map(backend => [Number(backend.id), backend]));
   for (const bid of [...remoteUpdateConnections.keys()])
     if (!desired.has(bid)) closeRemoteUpdateConnection(bid);
   if (!state.authed) return;
@@ -2706,34 +2769,36 @@ async function pollLocalEngines(forceEngines = false) {
 
 async function pollRemoteBackend(backend, forceEngines = false) {
   const bid = backend.id;
+  if (!backendConnectionAllowed(bid)) return;
   const sequence = (remotePollSequence[bid] || 0) + 1;
   remotePollSequence[bid] = sequence;
   const wasReachable = state.remoteOk[bid] === true;
   let payload = null;
   let failure = null;
 
-  /* A backend restart can invalidate one pooled connection while the new
-     listener is already healthy. Confirm one failure before publishing it. */
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      payload = await api(bid, "sessions", { timeoutMs: REMOTE_POLL_TIMEOUT });
-      if (!payload || !Array.isArray(payload.sessions))
-        throw new Error("backend returned an invalid sessions response");
-      failure = null;
-      break;
-    } catch (error) {
-      failure = error;
-      if (attempt === 0) {
-        await new Promise(resolve => setTimeout(resolve, 300));
-        if (!remotePollIsCurrent(bid, sequence)) return;
-      }
-    }
+  try {
+    payload = await api(bid, "sessions", { timeoutMs: REMOTE_POLL_TIMEOUT });
+    if (!payload || !Array.isArray(payload.sessions))
+      throw new Error("backend returned an invalid sessions response");
+  } catch (error) {
+    failure = error;
   }
   if (!remotePollIsCurrent(bid, sequence)) return;
   if (failure) {
-    state.remoteOk[bid] = false;
-    state.remoteErrors[bid] = remoteStoppingMessage(bid) ||
-      failure.message || "Backend unavailable";
+    const current = state.backends.find(item => Number(item.id) === Number(bid));
+    const reported = failure.data && failure.data.availability;
+    if (controllerBackendHealth(reported ? { availability: reported } : null) && current)
+      current.availability = reported;
+    if (controllerBackendHealth(current)) {
+      /* The controller verdict owns reachability. In particular, a browser's
+         own five-second abort must not strand this node locally when the
+         controller completed a healthy request just after that deadline. */
+      reconcileRemoteState();
+    } else {
+      state.remoteOk[bid] = false; // older controller compatibility
+      state.remoteErrors[bid] = remoteStoppingMessage(bid) ||
+        failure.message || "Backend unavailable";
+    }
     return;
   }
 
@@ -2817,12 +2882,19 @@ async function pollRemoteBackend(backend, forceEngines = false) {
 async function pollRemotes(options = {}) {
   const forceEngines = !!options.forceEngines;
   const backends = [...state.backends];
+  /* Publish each node as soon as its own request settles. One sleeping remote
+     must not hold healthy session lists (or local engine status) behind its
+     connect timeout during startup. The final Promise still keeps the normal
+     polling interval measured from the end of the whole pass. */
+  const publish = () => {
+    reconcileRemoteState();
+    syncRemoteStateViews();
+  };
   await Promise.all([
-    pollLocalEngines(forceEngines),
-    ...backends.map(backend => pollRemoteBackend(backend, forceEngines)),
+    pollLocalEngines(forceEngines).finally(publish),
+    ...backends.map(backend =>
+      pollRemoteBackend(backend, forceEngines).finally(publish)),
   ]);
-  reconcileRemoteState();
-  syncRemoteStateViews();
 }
 
 function startRemotePolling() {
@@ -6068,6 +6140,10 @@ class SessionView {
 
   connect() {
     if (this.closed) return;
+    if (this.tab.bid && !backendConnectionAllowed(this.tab.bid)) {
+      this.setReconnecting(true);
+      return;
+    }
     if (this.ws && (this.ws.readyState === 0 || this.ws.readyState === 1)) return;
     if (this.reconnectTimer !== null) {
       clearTimeout(this.reconnectTimer);
@@ -6114,6 +6190,7 @@ class SessionView {
       this.cancelQueueDrag(null, false);
       if (this.closed) return;
       this.setReconnecting(true);
+      if (this.tab.bid && !backendConnectionAllowed(this.tab.bid)) return;
       const delay = Math.round(this.retry * (.85 + Math.random() * .3));
       this.retry = Math.min(this.retry * 1.7, 15000);
       this.reconnectTimer = setTimeout(() => {
@@ -6200,8 +6277,23 @@ class SessionView {
   syncRemoteState() {
     this.syncUploadButton();
     const stopping = !!remoteStoppingMessage(this.tab.bid);
-    this.sendBtn.disabled = stopping;
-    this.queueBtn.disabled = stopping;
+    const unavailable = !!this.tab.bid && !backendConnectionAllowed(this.tab.bid);
+    if (unavailable) {
+      if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+      if (this.ws) {
+        const ws = this.ws;
+        this.ws = null;
+        this.connectionSequence++;
+        try { ws.close(); } catch (error) {}
+      }
+      this.draftReady = false;
+      this.setReconnecting(true);
+    } else if (this.tab.bid) {
+      this.resumeConnection();
+    }
+    this.sendBtn.disabled = stopping || unavailable;
+    this.queueBtn.disabled = stopping || unavailable;
     this.renderStatus();
   }
 
@@ -6222,7 +6314,7 @@ class SessionView {
   syncUploadButton() {
     if (!this.attachButton) return;
     const supported = backendSupportsFileUploads(this.tab.bid);
-    const unavailable = !!this.tab.bid && state.remoteOk[this.tab.bid] === false;
+    const unavailable = !!this.tab.bid && !backendConnectionAllowed(this.tab.bid);
     const policy = this.uploadPolicy || uploadSettingsFor(this.tab.bid);
     const disabledByPolicy = !!policy && !policy.enabled;
     this.attachButton.disabled = !supported || unavailable || disabledByPolicy;
@@ -8207,6 +8299,11 @@ class TermView {
     this.resizeObs.observe(this.host);
   }
   connect() {
+    if (this.tab.bid && !backendConnectionAllowed(this.tab.bid)) {
+      this.showDead(false);
+      return;
+    }
+    this.tab.ended = false;
     const sequence = ++this.connectionSequence;
     if (this.dataSub) { this.dataSub.dispose(); this.dataSub = null; }
     const params = new URLSearchParams({ cols: this.term.cols, rows: this.term.rows });
@@ -8266,8 +8363,8 @@ class TermView {
       toast("Clipboard paste was blocked · use Shift+right-click for the browser menu", "error", 7000);
     }
   }
-  showDead() {
-    if (this.tab.ended !== true) { this.tab.ended = true; saveTabs(); }
+  showDead(markEnded = true) {
+    if (markEnded && this.tab.ended !== true) { this.tab.ended = true; saveTabs(); }
     if (this.isDead()) { this.syncRemoteState(); return; }
     /* DECTCEM rather than a CSS override: the cursor is the terminal's to draw,
        and a hidden one stays hidden under a translucent overlay whichever
@@ -8280,6 +8377,7 @@ class TermView {
     const fresh = el("button", "btn btn-pri term-dead-new", "New shell");
     fresh.type = "button";
     fresh.onclick = () => {
+      if (this.tab.bid && !backendConnectionAllowed(this.tab.bid)) return;
       this.tab.ended = false;
       saveTabs();
       d.remove();
@@ -8306,11 +8404,18 @@ class TermView {
     this.syncRemoteState();
   }
   syncRemoteState() {
+    const unavailable = !!this.tab.bid && !backendConnectionAllowed(this.tab.bid);
+    if (unavailable && this.ws) {
+      const ws = this.ws;
+      this.ws = null;
+      this.connectionSequence++;
+      try { ws.close(); } catch (error) {}
+    }
+    if (unavailable && !this.isDead()) this.showDead(false);
     const dead = this.root.querySelector(".term-dead");
     if (!dead) return;
     const message = dead.querySelector(".term-dead-message");
     const button = dead.querySelector(".term-dead-new");
-    const unavailable = !!this.tab.bid && state.remoteOk[this.tab.bid] === false;
     message.textContent = remoteStoppingMessage(this.tab.bid) ||
       (unavailable ? "Backend unavailable" : "Terminal ended");
     button.textContent = unavailable ? "Waiting for backend…" : "New shell";
@@ -8340,6 +8445,7 @@ class BrowserView {
     this.closed = false;
     this.started = false;
     this.connectionSequence = 0;
+    this.waitingForBackend = false;
     this.frameW = 1280;
     this.frameH = 800;
     this.frameUrl = null;
@@ -8776,6 +8882,14 @@ class BrowserView {
   }
 
   connect() {
+    if (this.closed) return;
+    if (this.tab.bid && !backendConnectionAllowed(this.tab.bid)) {
+      this.waitingForBackend = true;
+      this.showDead(remoteStoppingMessage(this.tab.bid) || "Backend unavailable", false);
+      this.syncRemoteState();
+      return;
+    }
+    this.waitingForBackend = false;
     const sequence = ++this.connectionSequence;
     const path = this.tab.browserId ?
       `ws/browser/${encodeURIComponent(this.tab.browserId)}` : "ws/browser";
@@ -8900,12 +9014,28 @@ class BrowserView {
 
   syncRemoteState() {
     const stopping = remoteStoppingMessage(this.tab.bid);
-    if (!stopping) return;
-    this.showDead(stopping, true);
+    const unavailable = !!this.tab.bid && !backendConnectionAllowed(this.tab.bid);
+    if (unavailable) {
+      this.waitingForBackend = true;
+      if (this.ws) {
+        const ws = this.ws;
+        this.ws = null;
+        this.connectionSequence++;
+        try { ws.close(); } catch (error) {}
+      }
+      this.showDead(stopping || "Backend unavailable", !!stopping);
+    } else if (this.waitingForBackend) {
+      this.waitingForBackend = false;
+      this.clearDead();
+      this.connect();
+      return;
+    } else if (stopping) {
+      this.showDead(stopping, true);
+    }
     const reconnect = this.root.querySelector(".br-dead .btn-pri");
     if (reconnect) {
-      reconnect.textContent = "Waiting for backend…";
-      reconnect.disabled = true;
+      reconnect.textContent = unavailable ? "Waiting for backend…" : "Reconnect";
+      reconnect.disabled = unavailable;
     }
   }
 
@@ -9049,6 +9179,7 @@ class SettingsView {
         .filter(([, value]) => value === "running")
         .map(([id]) => Number(id.split(":")[0])))];
       await Promise.all(nodes.map(async bid => {
+        if (bid && !backendConnectionAllowed(bid)) return;
         try {
           applyEnginesPayload(bid, await api(bid, "engines", { timeoutMs: ENGINE_POLL_TIMEOUT }));
         } catch (error) {
@@ -9186,7 +9317,8 @@ class SettingsView {
   async refreshUpgradeReadiness(generation) {
     const candidates = [...this.upgradeButtons.entries()]
       .filter(([, record]) => this.isUpgradeCandidate(record) &&
-        !this.upgradesInProgress.has(record.backend.id));
+        !this.upgradesInProgress.has(record.backend.id) &&
+        backendConnectionAllowed(record.backend.id));
     const results = await Promise.all(candidates.map(async ([bid]) => {
       try {
         const descriptor = await api(bid, "node/upgrade", {
@@ -9761,6 +9893,11 @@ class SettingsView {
     };
     const load = async () => {
       if (!supported) return;
+      if (bid && !backendConnectionAllowed(bid)) {
+        loadError = "Backend unavailable";
+        update(null, remoteAvailability(bid), true);
+        return;
+      }
       try {
         const result = await api(bid, "uploads/settings", { timeoutMs: 8000 });
         if (!root.isConnected) return;
@@ -9841,6 +9978,12 @@ class SettingsView {
        known from /api/state and the node pings. Seed the switch from that, or
        it renders off and visibly flips on a moment later. */
     input.checked = browserEnabledFor(bid);
+    if (bid && !backendConnectionAllowed(bid)) {
+      input.disabled = true;
+      if (root) root.classList.add("disabled");
+      setNote("Backend unavailable", true);
+      return;
+    }
     let status;
     try {
       status = await api(bid, "browser/status", { timeoutMs: ENGINE_POLL_TIMEOUT });
@@ -10029,6 +10172,13 @@ class SettingsView {
     const load = async (force = false) => {
       const bid = activeBid;
       if (!supported(bid)) { paint(); return; }
+      if (bid && !backendConnectionAllowed(bid)) {
+        records.set(bid, {
+          loaded: false, loading: false, error: "Backend unavailable",
+        });
+        paint();
+        return;
+      }
       const existing = records.get(bid);
       if (!force && existing && existing.loaded) { paint(); return; }
       const serial = ++loadSerial;
@@ -11086,7 +11236,11 @@ function modalEditBackend(backend, onSaved) {
 async function modalNewSession(groupId = null) {
   const beOpts = [{ id: 0, name: backendName(0) }].concat(state.backends);
   const { m, close } = modal(`<h2>New session</h2>
-    <label>Backend<select id="ns-be">${beOpts.map(b => `<option value="${b.id}">${esc(b.name)}</option>`).join("")}</select></label>
+    <label>Backend<select id="ns-be">${beOpts.map(b => {
+      const offline = b.id && !backendConnectionAllowed(b.id);
+      return `<option value="${b.id}"${offline ? " disabled" : ""}>` +
+        `${esc(b.name)}${offline ? " (offline)" : ""}</option>`;
+    }).join("")}</select></label>
     <div class="engine-pick" id="ns-engines"></div>
     <div class="field-lbl">Workspace
       <div class="workspace-pick" id="ns-workspace">
@@ -11195,7 +11349,8 @@ async function modalNewSession(groupId = null) {
   function renderWsNodes() {
     const execBid = parseInt(beSel.value, 10);
     const nodes = [{ id: 0, name: backendName(0) }].concat(
-      state.backends.filter(b => backendSupportsWorkspaceProvider(b.id)));
+      state.backends.filter(b => backendSupportsWorkspaceProvider(b.id) &&
+        backendConnectionAllowed(b.id)));
     const previous = wsbeSel.value;
     wsbeSel.innerHTML = "";
     for (const node of nodes) {
@@ -11240,6 +11395,8 @@ async function modalNewSession(groupId = null) {
     const sequence = ++engineLoadSequence;
     let loaded = [];
     try {
+      if (bid && !backendConnectionAllowed(bid))
+        throw new Error("the controller reports this backend offline");
       if (bid === 0) {
         if (state.engines.some(engine => engine.dynamic_model_options &&
             engine.model_catalog_loaded !== true)) {

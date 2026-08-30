@@ -1301,6 +1301,7 @@ def build_app() -> web.Application:
     auth.register(app)
     backends.register(app)
     workspace_links.register(app)
+    app.on_startup.append(backends.start_health_worker)
     app.on_startup.append(backends.start_auto_upgrade_worker)
     app.on_startup.append(workspace_links.start_worker)
 
@@ -1329,6 +1330,7 @@ def build_app() -> web.Application:
     async def on_shutdown(app):
         await bind_verify.close_all(app)
         await backends.stop_auto_upgrade_worker(app)
+        await backends.stop_health_worker(app)
         await workspace_links.stop_worker(app)
         await runner.shutdown()
         await backends.close_client()

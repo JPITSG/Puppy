@@ -1108,6 +1108,9 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert stored["tls_fingerprint"] == backend_fingerprint
         assert stored["auto_upgrade"] is False
         assert stored["upgrade_in_progress"] is False
+        assert stored["availability"]["state"] == "online"
+        assert stored["availability"]["reason"] == ""
+        assert isinstance(stored["availability"]["checked_at"], (int, float))
         assert "token" not in stored
 
         async with http.get(
@@ -1330,6 +1333,10 @@ async def exercise_controller(url: str, token: str, backend_url: str,
                 break
         assert lifecycle_notice is not None, "remote restart sent no lifecycle notice"
         assert lifecycle_notice["reason"] == "restart", lifecycle_notice
+        async with http.get(url + "/api/backends", headers=headers) as response:
+            stopping_backend = (await response.json())["backends"][0]
+        assert stopping_backend["availability"]["state"] == "offline", stopping_backend
+        assert "restarting" in stopping_backend["availability"]["reason"].lower()
         await lifecycle_updates.close()
 
         deadline = asyncio.get_event_loop().time() + 120
@@ -1343,6 +1350,7 @@ async def exercise_controller(url: str, token: str, backend_url: str,
                 break
             await asyncio.sleep(0.25)
         assert refreshed is not None and refreshed["remote_version"] == __version__, refreshed
+        assert refreshed["availability"]["state"] == "online", refreshed
         assert refreshed["auto_upgrade"] is True
         assert "remote-upgrade" in refreshed["capabilities"]
 
@@ -1388,9 +1396,12 @@ async def exercise_redirect_rejection() -> None:
 
 async def exercise_proxy_recovery(controller_url: str, controller_token: str) -> None:
     """HTTP and WebSocket proxies follow a node between configured origins."""
+    from puppy import backends as controller_backends
+
     backend_token = "recovery-backend-token-0123456789abcdef"
     ports = [free_port(), free_port()]
     backend_urls = [f"http://127.0.0.1:{port}" for port in ports]
+    request_counts = {port: {"ping": 0, "sessions": 0, "updates": 0} for port in ports}
 
     async def start_backend(port: int) -> web.AppRunner:
         async def authorized(request):
@@ -1399,6 +1410,7 @@ async def exercise_proxy_recovery(controller_url: str, controller_token: str) ->
             return None
 
         async def ping(request):
+            request_counts[port]["ping"] += 1
             denied = await authorized(request)
             if denied is not None:
                 return denied
@@ -1410,6 +1422,7 @@ async def exercise_proxy_recovery(controller_url: str, controller_token: str) ->
             })
 
         async def sessions(request):
+            request_counts[port]["sessions"] += 1
             denied = await authorized(request)
             if denied is not None:
                 return denied
@@ -1422,6 +1435,7 @@ async def exercise_proxy_recovery(controller_url: str, controller_token: str) ->
             return web.json_response({"engines": []})
 
         async def updates(request):
+            request_counts[port]["updates"] += 1
             denied = await authorized(request)
             if denied is not None:
                 return denied
@@ -1496,25 +1510,52 @@ async def exercise_proxy_recovery(controller_url: str, controller_token: str) ->
                 aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.ERROR), closed
             await updates.close()
             async with http.get(proxy_url + "/sessions", headers=headers) as response:
-                assert response.status in (502, 504), await response.text()
+                unavailable = await response.json()
+                assert response.status == 503, unavailable
+                assert unavailable["availability"]["state"] == "offline", unavailable
             try:
                 await http.ws_connect(proxy_url + "/ws/updates", headers=headers)
                 raise AssertionError("dead backend completed the proxied WebSocket handshake")
             except aiohttp.WSServerHandshakeError as exc:
-                assert exc.status in (502, 504), exc.status
+                assert exc.status == 503, exc.status
 
             backend_runner = await start_backend(ports[0])
+            # Starting a listener does not let browser traffic rediscover it.
+            # Until the controller's authenticated health probe succeeds, the
+            # proxy gate responds locally and touches no backend API route.
+            sessions_before = request_counts[ports[0]]["sessions"]
+            updates_before = request_counts[ports[0]]["updates"]
+            started = time.monotonic()
+            for _attempt in range(3):
+                async with http.get(proxy_url + "/sessions", headers=headers) as response:
+                    assert response.status == 503, await response.text()
+            try:
+                await http.ws_connect(proxy_url + "/ws/updates", headers=headers)
+                raise AssertionError("offline gate completed a WebSocket handshake")
+            except aiohttp.WSServerHandshakeError as exc:
+                assert exc.status == 503, exc.status
+            assert time.monotonic() - started < 0.5
+            assert request_counts[ports[0]]["sessions"] == sessions_before
+            assert request_counts[ports[0]]["updates"] == updates_before
+
+            # Force the normally backoff-scheduled recovery probe due now and
+            # wait for its controller-owned availability broadcast/state.
+            controller_backends._health_retry_after[backend_id] = 0
+            controller_backends._wake_health()
             recovered = False
-            for _attempt in range(30):
-                try:
-                    async with http.get(proxy_url + "/sessions", headers=headers) as response:
-                        recovered = response.status == 200
-                except aiohttp.ClientError:
-                    recovered = False
+            for _attempt in range(50):
+                async with http.get(controller_url + "/api/backends",
+                                    headers=headers) as response:
+                    listed = (await response.json())["backends"]
+                current = next(item for item in listed if item["id"] == backend_id)
+                recovered = current["availability"]["state"] == "online"
                 if recovered:
                     break
                 await asyncio.sleep(0.1)
-            assert recovered, "HTTP proxy did not recover after backend restart"
+            assert recovered, "controller health probe did not recover the backend"
+            assert request_counts[ports[0]]["ping"] >= 1
+            async with http.get(proxy_url + "/sessions", headers=headers) as response:
+                assert response.status == 200, await response.text()
             async with http.get(controller_url + "/api/backends", headers=headers) as response:
                 returned = (await response.json())["backends"]
             active = next(item for item in returned if item["id"] == backend_id)

@@ -312,7 +312,18 @@ session state, and disable live controls instead of waiting for their next
 poll or TCP timeout. The write is best effort and bounded to one second, so a
 slow browser can never hold up machine shutdown. Abrupt power loss or a laptop
 whose network disappears before the OS runs service shutdown cannot emit the
-notice and remains covered by the existing reconnect/poll path.
+notice and is detected by the controller's health probe.
+
+## Controller-owned availability
+
+The full WebUI controller is the only component that discovers whether a
+paired backend is reachable. It publishes a transient `availability` object on
+each backend row and admits proxy traffic only while that state is `online`.
+The browser therefore does not send session, engine, browser, or WebSocket
+requests to a backend already known to be offline. A lightweight authenticated
+`/api/ping` probe is the sole recovery traffic; failures use exponential
+backoff, while an explicit **Test** can retry immediately. This state is not
+persisted and does not change the controller/backend protocol version.
 
 ## Unattended engine updates
 

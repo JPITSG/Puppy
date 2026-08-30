@@ -32,6 +32,11 @@ _auto_upgrade_wake = None
 _auto_upgrade_retry_after = {}
 _auto_upgrade_checked_at = {}
 _auto_upgrade_last_errors = {}
+_health_task = None
+_health_wake = None
+_health = {}
+_health_retry_after = {}
+_health_retry_delay = {}
 _active_urls = {}
 _url_cursors = {}
 
@@ -43,6 +48,11 @@ UPLOAD_PROXY_PATH = re.compile(r"^sessions/\d+/upload$")
 AUTO_UPGRADE_INTERVAL = 8.0
 AUTO_UPGRADE_FAILURE_RETRY = 30.0
 AUTO_UPGRADE_CURRENT_RECHECK = 5 * 60.0
+HEALTH_SCAN_INTERVAL = 2.0
+HEALTH_PROBE_TIMEOUT = 3.0
+HEALTH_ONLINE_RECHECK = 30.0
+HEALTH_OFFLINE_RETRY_MIN = 8.0
+HEALTH_OFFLINE_RETRY_MAX = 120.0
 
 HOP_HEADERS = {"host", "connection", "upgrade", "sec-websocket-key", "sec-websocket-version",
                "sec-websocket-extensions", "sec-websocket-protocol", "cookie", "x-puppy-token",
@@ -182,7 +192,10 @@ def _remember_active_url(bid: int, url: str, urls=None) -> bool:
 
 
 def _publish_active_url(backend: dict, url: str) -> None:
-    if _remember_active_url(int(backend["id"]), url, _backend_urls(backend)):
+    bid = int(backend["id"])
+    changed = _remember_active_url(bid, url, _backend_urls(backend))
+    changed = _mark_backend_online(bid) or changed
+    if changed:
         _broadcast_backends()
 
 
@@ -195,6 +208,75 @@ def _validate_url_security(urls: list, tls_fingerprint: str) -> None:
     if tls_fingerprint and any(urlsplit(url).scheme != "https" for url in urls):
         raise ValueError(
             "a TLS certificate fingerprint requires every backend URL to use https://")
+
+
+def _availability(bid: int) -> dict:
+    """Return the controller's transient reachability verdict for one backend."""
+    current = _health.get(int(bid))
+    if current is None:
+        return {
+            "state": "checking",
+            "reason": "The controller is checking this backend",
+            "checked_at": None,
+        }
+    return {
+        "state": current["state"],
+        "reason": current["reason"],
+        "checked_at": current["checked_at"],
+    }
+
+
+def backend_is_online(bid: int) -> bool:
+    return _availability(bid)["state"] == "online"
+
+
+def _set_health(bid: int, state: str, reason: str = "") -> bool:
+    """Store a verdict and report whether its user-visible meaning changed."""
+    bid = int(bid)
+    reason = str(reason or "")[:500]
+    previous = _health.get(bid)
+    _health[bid] = {
+        "state": state,
+        "reason": reason,
+        "checked_at": time.time(),
+    }
+    return previous is None or previous.get("state") != state or \
+        previous.get("reason") != reason
+
+
+def _mark_backend_online(bid: int) -> bool:
+    bid = int(bid)
+    _health_retry_after[bid] = time.monotonic() + HEALTH_ONLINE_RECHECK
+    _health_retry_delay.pop(bid, None)
+    return _set_health(bid, "online")
+
+
+def _mark_backend_offline(bid: int, reason: str) -> bool:
+    bid = int(bid)
+    now = time.monotonic()
+    current = _health.get(bid)
+    # Several HTTP/WebSocket requests can already be in flight when a node
+    # disappears. They all confirm the same outage, but must not multiply the
+    # recovery backoff as though several scheduled probes had failed.
+    if current is not None and current.get("state") == "offline" and \
+            _health_retry_after.get(bid, 0) > now:
+        return _set_health(bid, "offline", reason or "Backend unavailable")
+    delay = _health_retry_delay.get(bid, HEALTH_OFFLINE_RETRY_MIN)
+    _health_retry_after[bid] = now + delay
+    _health_retry_delay[bid] = min(delay * 2, HEALTH_OFFLINE_RETRY_MAX)
+    return _set_health(bid, "offline", reason or "Backend unavailable")
+
+
+def _clear_backend_health(bid: int) -> None:
+    bid = int(bid)
+    _health.pop(bid, None)
+    _health_retry_after.pop(bid, None)
+    _health_retry_delay.pop(bid, None)
+
+
+def _wake_health() -> None:
+    if _health_wake is not None:
+        _health_wake.set()
 
 
 def list_backends() -> list:
@@ -216,6 +298,7 @@ def list_backends() -> list:
         item["active_url"] = active if active in item["urls"] else ""
         item["auto_upgrade"] = bool(item.get("auto_upgrade"))
         item["upgrade_in_progress"] = item["id"] in _upgrades_in_progress
+        item["availability"] = _availability(int(item["id"]))
         out.append(item)
     return out
 
@@ -250,6 +333,8 @@ def node_channel(bid: int):
     backend = get_backend(bid)
     if backend is None:
         return None
+    if not backend_is_online(bid):
+        return None
     return {"bid": bid, "name": str(backend.get("name") or str(bid)),
             "urls": _ordered_backend_urls(backend),
             "token": backend["token"],
@@ -283,6 +368,10 @@ def reset_auto_upgrade_schedule() -> None:
     _auto_upgrade_last_errors.clear()
     _active_urls.clear()
     _url_cursors.clear()
+    _health.clear()
+    _health_retry_after.clear()
+    _health_retry_delay.clear()
+    _wake_health()
     _wake_auto_upgrade()
 
 
@@ -316,6 +405,8 @@ async def notify_exec(bid: int, command: str, info: dict) -> dict:
     be = get_backend(bid)
     if be is None:
         return {"ok": False, "error": "backend %s is not paired" % bid}
+    if not backend_is_online(bid):
+        return {"ok": False, "error": "%s is offline" % be["name"]}
     urls = _ordered_backend_urls(be)
     last_error = "backend is unavailable"
     for index, url in enumerate(urls):
@@ -346,6 +437,9 @@ async def notify_exec(bid: int, command: str, info: dict) -> dict:
                 continue
             break
     _advance_url_cursor(bid, len(urls))
+    if _mark_backend_offline(bid, last_error):
+        _broadcast_backends()
+        await close_proxy_websockets(bid, "Backend unavailable")
     return {"ok": False, "error": "%s: %s" % (be["name"], last_error)}
 
 
@@ -476,6 +570,120 @@ def _store_metadata(bid: int, remote: dict) -> bool:
     return changed
 
 
+def _same_backend_connection(first: dict, second: dict) -> bool:
+    return _backend_urls(first) == _backend_urls(second) and \
+        str(first.get("token") or "") == str(second.get("token") or "") and \
+        str(first.get("tls_fingerprint") or "") == \
+        str(second.get("tls_fingerprint") or "")
+
+
+async def _probe_backend_health(backend: dict) -> None:
+    """Probe and publish one node without waiting for slower peers."""
+    bid = int(backend["id"])
+    try:
+        result = await probe_configured_backend(
+            backend, timeout=HEALTH_PROBE_TIMEOUT)
+        current = get_backend(bid)
+        if current is None or not _same_backend_connection(backend, current):
+            return
+        if not result.get("ok"):
+            error = str(result.get("error") or "Backend unavailable")
+            if _mark_backend_offline(bid, error):
+                _broadcast_backends()
+                await close_proxy_websockets(bid, "Backend unavailable")
+                log.info("backend %s is offline: %s", backend["name"], error)
+            return
+
+        remote = result["remote"]
+        changed = bool(result.get("active_changed")) or \
+            _store_metadata(bid, remote)
+        became_online = _mark_backend_online(bid)
+        if changed or became_online:
+            _broadcast_backends()
+        if became_online:
+            _wake_auto_upgrade()
+            log.info("backend %s is online", backend["name"])
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        current = get_backend(bid)
+        if current is None or not _same_backend_connection(backend, current):
+            return
+        error = _connection_error(exc)
+        if _mark_backend_offline(bid, error):
+            _broadcast_backends()
+            await close_proxy_websockets(bid, "Backend unavailable")
+            log.info("backend %s is offline: %s", backend["name"], error)
+
+
+async def health_cycle(app: web.Application) -> None:
+    """Refresh controller-owned backend availability without involving browsers.
+
+    This is the sole recovery traffic for an offline node. Normal proxy and UI
+    traffic is admitted only after one of these authenticated probes succeeds.
+    Each result is published independently, so a timed-out peer cannot delay a
+    healthy node's session list.
+    """
+    if app.get("puppy_snapshot_busy"):
+        return
+    rows = [dict(row) for row in db.query("SELECT * FROM backends ORDER BY id")]
+    live_ids = {int(row["id"]) for row in rows}
+    for bucket in (_health, _health_retry_after, _health_retry_delay):
+        for bid in list(bucket):
+            if bid not in live_ids:
+                bucket.pop(bid, None)
+    now = time.monotonic()
+    due = [row for row in rows
+           if int(row["id"]) not in _upgrades_in_progress and
+           _health_retry_after.get(int(row["id"]), 0) <= now]
+    await asyncio.gather(*(_probe_backend_health(backend) for backend in due))
+
+
+async def _health_loop(app: web.Application) -> None:
+    while True:
+        if _health_wake is not None:
+            _health_wake.clear()
+        try:
+            await health_cycle(app)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("backend health scan failed")
+        try:
+            if _health_wake is None:
+                await asyncio.sleep(HEALTH_SCAN_INTERVAL)
+            else:
+                await asyncio.wait_for(
+                    _health_wake.wait(), timeout=HEALTH_SCAN_INTERVAL)
+        except asyncio.TimeoutError:
+            pass
+
+
+async def start_health_worker(app: web.Application) -> None:
+    global _health_task, _health_wake
+    if _health_task is not None and not _health_task.done():
+        return
+    _health.clear()
+    _health_retry_after.clear()
+    _health_retry_delay.clear()
+    _health_wake = asyncio.Event()
+    _health_task = asyncio.create_task(_health_loop(app))
+
+
+async def stop_health_worker(_app: web.Application = None) -> None:
+    global _health_task, _health_wake
+    task = _health_task
+    _health_task = None
+    _health_wake = None
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
 def _build_upgrade_payload() -> tuple:
     """Build and independently self-test the current backend in private data."""
     root = Path(__file__).resolve().parent.parent
@@ -572,6 +780,7 @@ async def h_add(request: web.Request):
         (name[:80], urls[0], _urls_json(urls), token, api_protocol, capabilities,
          remote_version, role, tls_fingerprint, int(auto_upgrade), time.time()))
     _remember_active_url(bid, result["active_url"], urls)
+    _mark_backend_online(bid)
     _broadcast_backends()
     if auto_upgrade:
         _wake_auto_upgrade()
@@ -681,6 +890,7 @@ async def h_patch(request: web.Request):
          tls_fingerprint, int(enabled), bid))
     if connection_changed:
         _remember_active_url(bid, active_url, urls)
+        _mark_backend_online(bid)
     if connection_changed or enabled != bool(backend.get("auto_upgrade")):
         _auto_upgrade_retry_after.pop(bid, None)
         _auto_upgrade_checked_at.pop(bid, None)
@@ -704,7 +914,9 @@ async def h_delete(request: web.Request):
     _auto_upgrade_retry_after.pop(bid, None)
     _auto_upgrade_checked_at.pop(bid, None)
     _auto_upgrade_last_errors.pop(bid, None)
+    _clear_backend_health(bid)
     _broadcast_backends()
+    _wake_health()
     return web.json_response({"ok": True})
 
 
@@ -714,8 +926,16 @@ async def h_test(request: web.Request):
     if be is None:
         return web.json_response({"error": "unknown backend"}, status=404)
     result = await probe_configured_backend(be)
+    changed = bool(result.get("active_changed"))
     if result["ok"]:
-        _store_metadata(bid, result["remote"])
+        changed = _store_metadata(bid, result["remote"]) or changed
+        changed = _mark_backend_online(bid) or changed
+        _wake_auto_upgrade()
+    else:
+        changed = _mark_backend_offline(
+            bid, result.get("error", "Backend unavailable")) or changed
+        await close_proxy_websockets(bid, "Backend unavailable")
+    if changed:
         _broadcast_backends()
     return web.json_response(result)
 
@@ -738,6 +958,8 @@ async def upgrade_backend(bid: int, remote_hint=None) -> dict:
     be = get_backend(bid)
     if be is None:
         raise BackendUpgradeError("unknown backend", 404)
+    if not backend_is_online(bid):
+        raise BackendUpgradeError("backend is offline; test its connection to retry now", 503)
     if bid in _upgrades_in_progress:
         raise BackendUpgradeError("an upgrade is already in progress for this backend", 409)
     _upgrades_in_progress.add(bid)
@@ -747,9 +969,13 @@ async def upgrade_backend(bid: int, remote_hint=None) -> dict:
         if remote is None:
             current = await probe_configured_backend(be)
             if not current["ok"]:
+                _mark_backend_offline(
+                    bid, current.get("error", "backend is unavailable"))
+                _broadcast_backends()
                 raise BackendUpgradeError(
-                    current.get("error", "backend is unavailable"), 502)
+                    current.get("error", "backend is unavailable"), 503)
             remote = current["remote"]
+            _mark_backend_online(bid)
             if current.get("active_changed"):
                 _broadcast_backends()
         _store_metadata(bid, remote)
@@ -811,7 +1037,7 @@ async def upgrade_backend(bid: int, remote_hint=None) -> dict:
                     continue
                 if isinstance(exc, asyncio.TimeoutError):
                     raise BackendUpgradeError(
-                        "backend timed out while staging the upgrade", 504) from exc
+                        "backend timed out while staging the upgrade", 503) from exc
                 raise BackendUpgradeError(
                     "backend upgrade request failed: {}".format(
                         _connection_error(exc)), 502) from exc
@@ -834,6 +1060,7 @@ async def upgrade_backend(bid: int, remote_hint=None) -> dict:
                     last.get("target_version") == manifest["version"] and \
                     last.get("sha256") == manifest["sha256"]:
                 _store_metadata(bid, upgraded)
+                _mark_backend_online(bid)
                 log.info("backend %s upgraded %s -> %s", be["name"],
                          remote.get("version"), upgraded.get("version"))
                 return {
@@ -849,7 +1076,8 @@ async def upgrade_backend(bid: int, remote_hint=None) -> dict:
                         last.get("error") or "candidate health check failed"), 502)
             last_error = "backend returned version {} instead of {}".format(
                 upgraded.get("version", "?"), manifest["version"])
-        raise BackendUpgradeError(last_error, 504)
+        _mark_backend_offline(bid, last_error)
+        raise BackendUpgradeError(last_error, 503)
     finally:
         _upgrades_in_progress.discard(bid)
         _broadcast_backends()
@@ -937,6 +1165,8 @@ async def auto_upgrade_cycle(app: web.Application) -> None:
     controller_version = upgrade_contract.version_key(__version__)
     for backend in rows:
         bid = int(backend["id"])
+        if not backend_is_online(bid):
+            continue
         if _auto_upgrade_retry_after.get(bid, 0) > now:
             continue
         try:
@@ -963,15 +1193,22 @@ async def auto_upgrade_cycle(app: web.Application) -> None:
         _auto_upgrade_checked_at[bid] = now
         if isinstance(current, Exception):
             message = _connection_error(current)
+            if _mark_backend_offline(bid, message):
+                _broadcast_backends()
+                await close_proxy_websockets(bid, "Backend unavailable")
             _auto_upgrade_retry_after[bid] = now + AUTO_UPGRADE_FAILURE_RETRY
             _auto_note_error(backend, message)
             continue
         if not current["ok"]:
             message = current.get("error", "backend is unavailable")
+            if _mark_backend_offline(bid, message):
+                _broadcast_backends()
+                await close_proxy_websockets(bid, "Backend unavailable")
             _auto_upgrade_retry_after[bid] = now + AUTO_UPGRADE_FAILURE_RETRY
             _auto_note_error(backend, message)
             continue
         remote = current["remote"]
+        _mark_backend_online(bid)
         stored_changed = _store_metadata(bid, remote)
         metadata_changed = bool(current.get("active_changed")) or \
             stored_changed or metadata_changed
@@ -1087,15 +1324,31 @@ def _is_ws(request: web.Request) -> bool:
     return request.headers.get("Upgrade", "").lower() == "websocket"
 
 
+def _unavailable_response(backend: dict):
+    availability = _availability(int(backend["id"]))
+    reason = availability.get("reason") or "The controller has not verified this backend"
+    return web.json_response({
+        "error": "backend '{}' is unavailable: {}".format(backend["name"], reason),
+        "availability": availability,
+    }, status=503, headers={"Retry-After": "8"})
+
+
 async def proxy(request: web.Request):
     bid = int(request.match_info["bid"])
     tail = request.match_info["tail"]
     be = get_backend(bid)
     if be is None:
         return web.json_response({"error": "unknown backend"}, status=404)
+    # Browsers never discover reachability by hammering a proxy route. The
+    # controller health worker is the sole path that can move this gate back
+    # to online after an outage (and the explicit Test button can force it).
+    if not backend_is_online(bid):
+        return _unavailable_response(be)
     urls = _ordered_backend_urls(be)
     if not urls:
-        return web.json_response({"error": "backend has no configured URL"}, status=502)
+        if _mark_backend_offline(bid, "backend has no configured URL"):
+            _broadcast_backends()
+        return _unavailable_response(be)
     headers = {"X-Puppy-Token": be["token"]}
     for k, v in request.headers.items():
         if k.lower() not in HOP_HEADERS:
@@ -1129,6 +1382,7 @@ async def proxy(request: web.Request):
                                         ssl=_ssl_pin(be["tls_fingerprint"])) as r:
                 payload = await r.read()
                 changed = _remember_active_url(bid, url, _backend_urls(be))
+                changed = _mark_backend_online(bid) or changed
                 if request.method == "GET" and tail in ("ping", "node") and r.status == 200:
                     try:
                         remote = _normalize_peer(json.loads(payload.decode("utf-8")))
@@ -1149,11 +1403,11 @@ async def proxy(request: web.Request):
                 continue
             break
     _advance_url_cursor(bid, len(urls))
-    if isinstance(last_error, asyncio.TimeoutError):
-        return web.json_response({"error": f"backend '{be['name']}' timeout"}, status=504)
     detail = _connection_error(last_error) if last_error else "no URL is available"
-    return web.json_response(
-        {"error": f"backend '{be['name']}' unreachable: {detail}"}, status=502)
+    if _mark_backend_offline(bid, detail):
+        _broadcast_backends()
+    await close_proxy_websockets(bid, "Backend unavailable")
+    return _unavailable_response(be)
 
 
 async def _proxy_ws(request: web.Request, backend: dict, urls: list,
@@ -1182,14 +1436,12 @@ async def _proxy_ws(request: web.Request, backend: dict, urls: list,
             last_error = exc
             log.warning("ws proxy to %s failed before handshake: %s",
                         ws_url, _connection_error(exc))
-    if ws_client is None and isinstance(last_error, asyncio.TimeoutError):
-        log.warning("all websocket URLs for backend %s timed out before handshake",
-                    backend["name"])
-        return web.json_response({"error": "backend websocket connection timed out"}, status=504)
     if ws_client is None:
         error = _connection_error(last_error) if last_error else "no URL is available"
-        return web.json_response(
-            {"error": "backend websocket unreachable: {}".format(error)}, status=502)
+        if _mark_backend_offline(bid, error):
+            _broadcast_backends()
+        await close_proxy_websockets(bid, "Backend unavailable")
+        return _unavailable_response(backend)
 
     # A connection edit can finish while this remote handshake is in flight,
     # before the viewer socket is registered for scoped revocation. Refuse to
@@ -1214,10 +1466,22 @@ async def _proxy_ws(request: web.Request, backend: dict, urls: list,
         socket_record = (bid, ws_server)
         _proxy_websockets.add(socket_record)
 
-        async def pump(src, dst):
+        async def pump(src, dst, from_backend=False):
             try:
                 async for msg in src:
                     if msg.type == WSMsgType.TEXT:
+                        if from_backend and tail == "ws/updates":
+                            try:
+                                notice = json.loads(msg.data)
+                            except Exception:
+                                notice = None
+                            if isinstance(notice, dict) and \
+                                    notice.get("type") == "node_stopping":
+                                action = "restarting" if notice.get("reason") == "restart" \
+                                    else "shutting down"
+                                if _mark_backend_offline(
+                                        bid, "Backend {}".format(action)):
+                                    _broadcast_backends()
                         await dst.send_str(msg.data)
                     elif msg.type == WSMsgType.BINARY:
                         await dst.send_bytes(msg.data)
@@ -1229,7 +1493,8 @@ async def _proxy_ws(request: web.Request, backend: dict, urls: list,
                 except Exception:
                     pass
 
-        await asyncio.gather(pump(ws_server, ws_client), pump(ws_client, ws_server),
+        await asyncio.gather(pump(ws_server, ws_client),
+                             pump(ws_client, ws_server, from_backend=True),
                              return_exceptions=True)
     except Exception as exc:
         log.warning("ws proxy to %s failed after handshake: %s", ws_url, _connection_error(exc))

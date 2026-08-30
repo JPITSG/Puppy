@@ -487,7 +487,8 @@ def check_backend_shutdown_notice(ui_source: str) -> None:
         raise AssertionError("unbalanced " + name)
 
     source = "\n".join(function(name) for name in (
-        "remoteStoppingMessage", "handleRemoteNodeStopping", "clearRemoteNodeStopping"))
+        "controllerBackendHealth", "remoteStoppingMessage",
+        "handleRemoteNodeStopping", "clearRemoteNodeStopping"))
     script = r"""
 const state = {
   backends: [{id: 7, name: "laptop"}, {id: 8, name: "other"}],
@@ -538,6 +539,107 @@ console.log(JSON.stringify({stoppedState, clearedState}));
     assert stopped["rendered"] == 1 and stopped["synced"] == 1, stopped
     assert stopped["stopped"] == 1 and stopped["otherStopped"] == 0, stopped
     assert result["clearedState"] == {"notice": None, "error": None, "cleared": 1}, result
+
+
+def check_controller_backend_pooling(ui_source: str) -> None:
+    """Controller availability prevents browser probes of offline nodes."""
+    def function(name):
+        markers = ("function " + name + "(", "async function " + name + "(")
+        starts = [ui_source.find(marker) for marker in markers]
+        starts = [start for start in starts if start >= 0]
+        assert starts, name
+        start = min(starts)
+        brace = ui_source.index(") {", start) + 2
+        depth = 0
+        for index in range(brace, len(ui_source)):
+            if ui_source[index] == "{":
+                depth += 1
+            elif ui_source[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    return ui_source[start:index + 1]
+        raise AssertionError("unbalanced " + name)
+
+    source = "\n".join(function(name) for name in (
+        "controllerBackendHealth", "backendPoolable", "backendConnectionAllowed",
+        "reconcileRemoteState", "remotePollIsCurrent", "pollRemoteBackend"))
+    script = r"""
+const state = {
+  backends: [
+    {id: 7, name: "offline", availability: {
+      state: "offline", reason: "connection timed out", checked_at: 10}},
+    {id: 8, name: "checking", availability: {
+      state: "checking", reason: "checking", checked_at: null}},
+    {id: 9, name: "online", availability: {
+      state: "online", reason: "", checked_at: 11}},
+  ],
+  remoteSessions: {}, remoteOk: {7: true}, remoteErrors: {}, remoteStopping: {},
+  engCache: {}, remoteEngineErrors: {}, remoteEngineCheckedAt: {},
+  remoteNodeCheckedAt: {}, remoteUsageRefresh: {}, remoteUploadSettings: {},
+};
+const remotePollSequence = {};
+const REMOTE_POLL_TIMEOUT = 5000;
+const sessionActivityAnchors = new Map();
+let connectionSyncs = 0, apiCalls = 0;
+const syncRemoteUpdateConnections = () => { connectionSyncs++; };
+let stoppingClears = 0;
+const clearRemoteNodeStopping = bid => {
+  stoppingClears++;
+  delete state.remoteStopping[bid];
+  delete state.remoteErrors[bid];
+};
+const api = async bid => {
+  apiCalls++;
+  if (bid !== 9) throw new Error("offline backend was pooled");
+  const error = new Error("controller reports unavailable");
+  error.data = {availability: {
+    state: "offline", reason: "recovery probe pending", checked_at: 12}};
+  throw error;
+};
+%s
+const becameOnline = reconcileRemoteState();
+const poolable = state.backends.map(backend => backendPoolable(backend));
+await pollRemoteBackend(state.backends[0], true);
+await pollRemoteBackend(state.backends[1], true);
+const skippedCalls = apiCalls;
+await pollRemoteBackend(state.backends[2], true);
+const failedOnline = {ok: state.remoteOk[9], error: state.remoteErrors[9]};
+state.backends[2].availability = {state: "online", reason: "", checked_at: 13};
+state.remoteStopping[9] = {
+  reason: "shutdown", message: "Backend shutting down…", controllerOfflineSeen: false};
+const prematureRecovery = reconcileRemoteState();
+const heldOffline = state.remoteOk[9] === false && !!state.remoteStopping[9];
+state.backends[2].availability = {
+  state: "offline", reason: "Backend shutting down", checked_at: 14};
+reconcileRemoteState();
+const offlineSeen = state.remoteStopping[9].controllerOfflineSeen;
+state.backends[2].availability = {state: "online", reason: "", checked_at: 15};
+const recoveredAfterController = reconcileRemoteState();
+console.log(JSON.stringify({
+  becameOnline, connectionSyncs, apiCalls, skippedCalls,
+  offline: {ok: state.remoteOk[7], error: state.remoteErrors[7]},
+  checkingKnown: Object.prototype.hasOwnProperty.call(state.remoteOk, 8),
+  failedOnline, poolable, prematureRecovery, heldOffline, offlineSeen,
+  recoveredAfterController, recoveredOnline: state.remoteOk[9], stoppingClears,
+}));
+""" % source
+    proc = subprocess.run(["node", "--input-type=module", "-e", script],
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:700]
+    result = json.loads(proc.stdout.strip())
+    assert result["becameOnline"] is True and result["connectionSyncs"] == 5, result
+    assert result["skippedCalls"] == 0 and result["apiCalls"] == 1, result
+    assert result["offline"] == {"ok": False, "error": "connection timed out"}, result
+    assert result["checkingKnown"] is False, result
+    assert result["failedOnline"] == {
+        "ok": False, "error": "recovery probe pending"}, result
+    assert result["poolable"] == [False, False, True], result
+    assert result["prematureRecovery"] is False and result["heldOffline"] is True, result
+    assert result["offlineSeen"] is True, result
+    assert result["recoveredAfterController"] is True and \
+        result["recoveredOnline"] is True and result["stoppingClears"] == 1, result
+    assert "if (this.tab.bid && !backendConnectionAllowed(this.tab.bid))" in ui_source
+    assert "backendConnectionAllowed(record.backend.id)" in ui_source
 
 
 def check_interrupted_completion(ui_source: str) -> None:
@@ -1799,6 +1901,7 @@ const document={activeElement:null,createElement:tag=>new MockNode(tag)};
 const el=(tag,cls="",text="")=>new MockNode(tag,cls,text);
 const supported=new Set([0,1]);
 const backendSupportsSystemPrompt=bid=>supported.has(bid);
+const backendConnectionAllowed=()=>true;
 const calls=[],toasts=[];
 const payload=(custom,browser)=>({custom,browser,browser_default:"DEFAULT",max_chars:100});
 async function api(bid,path,options={}) {
@@ -3271,6 +3374,7 @@ async def main() -> None:
             check_static_template_styles(ui_source)
             check_reconnect_status(ui_source)
             check_backend_shutdown_notice(ui_source)
+            check_controller_backend_pooling(ui_source)
             check_interrupted_completion(ui_source)
             check_thinking_icons(ui_source)
             check_backend_editor(ui_source, css_source)
