@@ -601,9 +601,9 @@ select.choice-native{display:none!important}
   content:"";position:absolute;left:0;right:0;bottom:0;height:1px;z-index:-1;pointer-events:none;
   background:var(--line);
 }
-/* Shown everywhere. On a wide layout it collapses the session list rather than
-   opening a drawer; only the narrow touch layout hides it, because there the
-   edge swipe is the gesture and the button would duplicate it. */
+/* Shown everywhere. On a wide layout it collapses the session list; on a
+   narrow layout it opens the drawer. Edge swipes are an additional touch
+   shortcut, never the only visible route into the session list. */
 .burger{display:inline-flex}
 /* Only the column layout collapses. Below 900px the sidebar is a drawer, and
    hiding it there would leave a persisted collapse with no way back in. */
@@ -2013,7 +2013,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 @media (max-width:900px){
   .side{
     position:fixed;left:0;top:0;bottom:0;transform:translateX(-105%);
-    transition:transform .25s var(--ease);box-shadow:20px 0 60px -20px rgba(0,0,0,.8);
+    transition:transform .25s var(--ease);
     background:var(--panel);width:min(300px,84vw);touch-action:pan-y pinch-zoom;
   }
   /* This is itself a scroll container, so touch-action resolution stops here
@@ -2021,6 +2021,12 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
      vertical scroll, but leave horizontal motion to the drawer drag. */
   .side-scroll{touch-action:pan-y pinch-zoom}
   .app.side-open .side{transform:none}
+  /* The closed drawer sits just beyond the viewport. Its broad shadow used to
+     reach back across the left edge even after the drawer had settled closed.
+     Show it only while the drawer itself is visible or under the pointer. */
+  .app.side-open .side,.app.drawer-dragging .side{
+    box-shadow:20px 0 60px -20px rgba(0,0,0,.8);
+  }
   .side-backdrop{
     display:block;position:fixed;inset:0;background:rgba(4,6,10,.6);z-index:25;
     opacity:0;pointer-events:none;transition:opacity .25s var(--ease);touch-action:pan-y pinch-zoom;
@@ -2123,11 +2129,9 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   .system-prompt-actions .btn{height:34px}
 }
 @media (max-width:900px) and (any-pointer:coarse){
-  /* a left-edge swipe opens the drawer on touch, so the button is redundant
-     here. It stays for narrow windows on a fine pointer, where the swipe
-     handler bails out (it only accepts pointerType "touch") and the button
-     would otherwise be the only way into the session list. */
-  .burger{display:none}
+  /* Coarse-pointer support enables the larger swipe target, but it cannot
+     identify a phone: touch-capable desktops report it too. Keep the visible
+     menu button and treat the gesture as an optional second route. */
   .drawer-edge{
     display:block;position:fixed;left:0;top:0;bottom:0;width:24px;z-index:19;
     touch-action:pan-y pinch-zoom;

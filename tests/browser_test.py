@@ -1206,6 +1206,24 @@ console.log(JSON.stringify({anchored,paused,partialClosed,majorityOpen,
     assert result["nextSideTap"] and result["gestureClickBlocked"], result
 
 
+def check_responsive_drawer_chrome(css_source: str) -> None:
+    """Narrow touch capability must not hide desktop navigation or cast a shadow."""
+    narrow_start = css_source.index("@media (max-width:900px){")
+    coarse_start = css_source.index(
+        "@media (max-width:900px) and (any-pointer:coarse){", narrow_start)
+    narrow = css_source[narrow_start:coarse_start]
+    coarse_end = css_source.index(
+        "@media (prefers-reduced-motion:reduce){", coarse_start)
+    coarse = css_source[coarse_start:coarse_end]
+
+    assert ".burger{display:none}" not in css_source
+    assert ".drawer-edge{" in coarse
+    assert "box-shadow:20px 0 60px -20px rgba(0,0,0,.8);" not in \
+        narrow[narrow.index(".side{"):narrow.index(".side-scroll{")]
+    assert ".app.side-open .side,.app.drawer-dragging .side{" in narrow
+    assert "box-shadow:20px 0 60px -20px rgba(0,0,0,.8);" in narrow
+
+
 def check_browser_viewport(ui_source: str) -> None:
     """Run the real BrowserView sizing methods without constructing its DOM."""
     start = ui_source.index("class BrowserView {")
@@ -3627,6 +3645,7 @@ async def main() -> None:
             check_thinking_icons(ui_source)
             check_backend_editor(ui_source, css_source)
             check_drawer_drag(ui_source)
+            check_responsive_drawer_chrome(css_source)
             check_browser_viewport(ui_source)
             check_session_draft_sync(ui_source)
             check_transcript_batching(ui_source)
