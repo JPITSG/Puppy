@@ -1739,9 +1739,12 @@ def check_browser_handoff_ui(ui_source: str, css_source: str) -> None:
     assert "Use with current session" not in ui_source
     assert "currentBrowserSession" not in ui_source
     assert ".br-meta{" in css_source and ".br-ident{" in css_source
-    # Four pixels below the toolbar plus two on this strip matches the strip's
-    # four-pixel bottom padding plus the stage's two-pixel top margin.
+    # Every inter-row gap is six pixels: four below the address bar plus two on
+    # the metadata strip, four below that strip plus two on the typing row, and
+    # four below the typing row plus the stage's two-pixel top margin.
     assert "padding:2px 8px 4px;color:var(--txt2)" in css_source
+    assert ".br-type{display:flex;align-items:center;gap:6px;flex:0 0 auto;" \
+        "padding:2px 8px 4px}" in css_source
     assert ".br-stage{\n  flex:1;min-height:0;margin:2px 8px 8px;" in css_source
     assert ".br-copy-id{width:27px;height:27px;" in css_source
     assert ".br-owner-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}" \

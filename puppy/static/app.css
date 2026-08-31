@@ -1368,10 +1368,14 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .btn-send:disabled,.btn-queue:disabled{opacity:.4;filter:none;box-shadow:none;pointer-events:none}
 
 /* ---------- terminal view ---------- */
-.term-meta{transition:filter .15s var(--ease)}
+.term-meta{padding-top:6px;transition:filter .15s var(--ease)}
 .term-meta.agent-active{filter:drop-shadow(0 0 5px rgba(80,160,255,.5))}
 .term-wrap{flex:1;min-height:0;padding:6px 8px 8px;display:flex}
 .term-host{flex:1;min-width:0;position:relative;border-radius:var(--r-md);overflow:hidden;background:#000;padding:6px}
+.term-host::after{
+  content:"";position:absolute;inset:0;z-index:21;pointer-events:none;
+  border-radius:inherit;box-shadow:inset 0 0 0 1px var(--browser-frame);
+}
 .term-host .xterm{height:100%}
 /* Centred on the terminal box itself: the overlay is a child of .term-host, so
    both axes centre on the black rectangle rather than on the padded view. */
@@ -1481,7 +1485,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 /* The typing relay is a real, visible field: an input hidden inside the stage
    never raises a soft keyboard (the stage is user-select:none, which iOS treats
    as uneditable), and on desktop an invisible one looks like a dead button. */
-.br-type{display:flex;align-items:center;gap:6px;flex:0 0 auto;padding:0 8px 2px}
+.br-type{display:flex;align-items:center;gap:6px;flex:0 0 auto;padding:2px 8px 4px}
 .br-type .btn-sm{flex:0 0 auto}
 /* Backspace carries the same border and ink as Enter beside it: as a bare
    dim icon its arrow-and-cross blurred into a smudge at this size. */

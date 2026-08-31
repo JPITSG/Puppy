@@ -94,7 +94,11 @@ def check_static_contract() -> None:
     assert 'handleTerminalActivity(0, d.session_id, d.turn_id, d.terminal_id)' in ui
     assert 'backend.capabilities.includes("terminal-instances")' in ui
     assert '`terminal/instances/${encodeURIComponent(terminalId)}/binding`' in ui
+    assert '.term-meta{padding-top:6px;' in css
     assert '.term-wrap{flex:1;min-height:0;padding:6px 8px 8px;display:flex}' in css
+    assert '.term-host::after{' in css
+    assert 'border-radius:inherit;box-shadow:inset 0 0 0 1px var(--browser-frame);' \
+        in css
     assert '.chip.browser,.chip.terminal{' in css
 
     start = ui.index("function terminalInstancesFor(")
