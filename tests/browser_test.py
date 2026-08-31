@@ -3412,36 +3412,47 @@ async def main() -> None:
             codex_first = CodexDriver().build_cmd(
                 agent_session, True, "hello", "native-2", browser_mcp=descriptor,
                 system_prompt=custom_prompt)
-            assert codex_first[-1].startswith(
+            assert codex_first[:3] == ["codex", "app-server", "--stdio"]
+            assert "hello" not in codex_first
+            codex_first_ctx = CodexDriver().turn_context(
+                agent_session, True, "hello", "native-2", browser_mcp=descriptor,
+                system_prompt=custom_prompt)
+            assert codex_first_ctx["prompt"].startswith(
                 "<puppy_system_prompt>\n" + custom_prompt +
                 "\n</puppy_system_prompt>\n\n<puppy_browser_policy>\n" + policy +
                 "\n</puppy_browser_policy>\n\n")
-            assert codex_first[-1].endswith("\n\nhello")
+            assert codex_first_ctx["prompt"].endswith("\n\nhello")
             codex_argv = CodexDriver().build_cmd(
                 resumed, False, "again", "unused", browser_mcp=descriptor,
                 system_prompt=custom_prompt)
-            resume_index = codex_argv.index("resume")
-            mcp_options = [value for value in codex_argv[:resume_index]
+            mcp_options = [value for value in codex_argv
                            if "mcp_servers.puppy_browser" in value]
             assert any(".command=" in value for value in mcp_options), codex_argv
             assert any("PUPPY_BROWSER_TURN_ID" in value for value in mcp_options), codex_argv
-            assert codex_argv[-1].startswith(
+            codex_ctx = CodexDriver().turn_context(
+                resumed, False, "again", "unused", browser_mcp=descriptor,
+                system_prompt=custom_prompt)
+            assert codex_ctx["native_session_id"] == "existing-native"
+            assert codex_ctx["prompt"].startswith(
                 "<puppy_system_prompt>\n" + custom_prompt + "\n</puppy_system_prompt>\n\n" +
                 "<puppy_browser_policy>\n" + policy)
-            assert codex_argv[-1].endswith("\n\nagain")
-            assert codex_argv[-1].count(policy) == 1
+            assert codex_ctx["prompt"].endswith("\n\nagain")
+            assert codex_ctx["prompt"].count(policy) == 1
             codex_without_browser = CodexDriver().build_cmd(
                 resumed, False, "plain", "unused", browser_mcp=None,
                 system_prompt=custom_prompt)
-            assert codex_without_browser[-1] == (
+            codex_plain_ctx = CodexDriver().turn_context(
+                resumed, False, "plain", "unused", browser_mcp=None,
+                system_prompt=custom_prompt)
+            assert codex_plain_ctx["prompt"] == (
                 "<puppy_system_prompt>\n" + custom_prompt +
                 "\n</puppy_system_prompt>\n\nplain")
             assert not any("mcp_servers.puppy_browser" in value
                            for value in codex_without_browser)
-            codex_without_guidance = CodexDriver().build_cmd(
+            codex_without_guidance = CodexDriver().turn_context(
                 resumed, False, "plain", "unused", browser_mcp=None,
                 system_prompt="")
-            assert codex_without_guidance[-1] == "plain"
+            assert codex_without_guidance["prompt"] == "plain"
 
             opencode = OpenCodeDriver()
             opencode_env = opencode.build_env(

@@ -1,17 +1,21 @@
-"""Codex CLI driver.
+"""Codex CLI app-server driver.
 
-Spawns the official `codex` binary per turn in non-interactive JSONL mode:
-  codex exec --json --skip-git-repo-check --color never -C <cwd> -s <sandbox> \
-       [-m model] (<prompt> | resume <thread_id> <prompt>)
+Each Puppy turn owns one official ``codex app-server --stdio`` process. The
+driver initializes that JSONL connection, starts or resumes the durable Codex
+thread, starts one turn, consumes its notifications, and closes stdin after
+``turn/completed``. Keeping the server turn-scoped preserves Puppy's process
+ownership while exposing Codex's bidirectional active-turn protocol.
 
-Event schema (verified against codex-cli 0.149.0):
-  thread.started {thread_id}  turn.started  item.started/updated/completed {item}
-  turn.completed {usage}      turn.failed {error}
-Item types: agent_message, reasoning, command_execution, file_change,
-mcp_tool_call, web_search, todo_list, error.
-exec mode has no interactive approvals - the sandbox policy is the control.
-New completed item types that look call-shaped are preserved as generic tool
-pairs so CLI additions do not silently disappear from the transcript.
+Contract verified against codex-cli 0.149.0 and 0.151.0:
+  initialize -> initialized -> thread/start|thread/resume -> turn/start
+  thread/started, turn/started, item/started|completed,
+  thread/tokenUsage/updated, turn/completed
+
+Puppy's Codex permission setting remains a sandbox choice. We explicitly use
+``approvalPolicy: never``, matching the old non-interactive ``codex exec``
+behavior: sandbox denials go back to the model rather than blocking on a UI
+approval. Defensive request handling remains in place for managed policies
+that can override the ordinary setting.
 """
 from __future__ import annotations
 
@@ -24,6 +28,7 @@ import re
 import shutil
 import time
 
+from puppy import __version__
 from puppy.drivers.base import Driver, clean_env
 from puppy.user_paths import service_home
 
@@ -37,6 +42,25 @@ _TERMINAL_POLICY_OPEN = "<puppy_terminal_policy>"
 _TERMINAL_POLICY_CLOSE = "</puppy_terminal_policy>"
 _SYSTEM_PROMPT_OPEN = "<puppy_system_prompt>"
 _SYSTEM_PROMPT_CLOSE = "</puppy_system_prompt>"
+
+_ID_INITIALIZE = "puppy-initialize"
+_ID_THREAD = "puppy-thread"
+_ID_TURN = "puppy-turn"
+_ID_INTERRUPT = "puppy-interrupt"
+
+
+def _rpc(request_id, method: str, params=None) -> dict:
+    value = {"id": request_id, "method": method}
+    if params is not None:
+        value["params"] = params
+    return value
+
+
+def _notification(method: str, params=None) -> dict:
+    value = {"method": method}
+    if params is not None:
+        value["params"] = params
+    return value
 
 
 def _with_runtime_guidance(prompt: str, system_prompt: str, browser_mcp,
@@ -373,7 +397,7 @@ def _web_search_result(item: dict) -> str:
 
 def _looks_like_tool_item(item: dict) -> bool:
     """Catch new CLI call types without turning lifecycle items into cards."""
-    item_type = str(item.get("type") or "").lower()
+    item_type = re.sub(r"[^a-z]", "", str(item.get("type") or "").lower())
     markers = ("tool", "call", "execution", "change", "search", "fetch",
                "browse", "view", "generation", "activity")
     if any(marker in item_type for marker in markers):
@@ -382,7 +406,8 @@ def _looks_like_tool_item(item: dict) -> bool:
 
 
 def _generic_tool(item: dict, item_id: str) -> list:
-    result_keys = ("result", "results", "aggregated_output", "output", "error", "message")
+    result_keys = ("result", "results", "aggregatedOutput", "aggregated_output",
+                   "output", "error", "message")
     omitted = {"type", "id", "name", "tool", "status", "arguments", "input", *result_keys}
     if "arguments" in item:
         tool_input = item.get("arguments")
@@ -401,11 +426,44 @@ def _generic_tool(item: dict, item_id: str) -> list:
     return _completed_tool(tool, tool_input, result, item_id, is_error)
 
 
+def _item_kind(item: dict) -> str:
+    """Compare app-server camelCase item names without version punctuation."""
+    return re.sub(r"[^a-z]", "", str(item.get("type") or "").lower())
+
+
+def _error_text(value, fallback="Codex request failed") -> str:
+    if isinstance(value, dict):
+        message = value.get("message") or value.get("additionalDetails")
+        if message:
+            return str(message)[:4000]
+        data = value.get("data")
+        if isinstance(data, dict) and data.get("message"):
+            return str(data["message"])[:4000]
+    elif value:
+        return str(value)[:4000]
+    return fallback
+
+
+def _usage_from_notification(value) -> dict:
+    """Normalize the current turn's app-server camelCase token breakdown."""
+    if not isinstance(value, dict):
+        return {}
+    source = value.get("last") if isinstance(value.get("last"), dict) else value
+    fields = {
+        "input_tokens": "inputTokens",
+        "output_tokens": "outputTokens",
+        "cached_input_tokens": "cachedInputTokens",
+        "reasoning_output_tokens": "reasoningOutputTokens",
+    }
+    return {target: source.get(origin) for target, origin in fields.items()
+            if source.get(origin) is not None}
+
+
 class CodexDriver(Driver):
     key = "codex"
     label = "Codex"
     binary = "codex"
-    uses_stdin_stream = False
+    uses_stdin_stream = True
     release_source = {"kind": "npm", "package": "@openai/codex"}
     upgrade_source = {"kind": "self", "args": ["update"]}
 
@@ -464,15 +522,7 @@ class CodexDriver(Driver):
 
     def build_cmd(self, session, first_turn, prompt, pinned_id, browser_mcp=None,
                   system_prompt="", terminal_mcp=None):
-        argv = [self.binary, "exec", "--json", "--skip-git-repo-check", "--color", "never",
-                "-C", session["cwd"],
-                "-s", session.get("permission_mode") or self.default_permission()]
-        model = (session.get("model") or "").strip()
-        if model:
-            argv += ["-m", model]
-        effort = (session.get("effort") or "").strip()
-        if effort:
-            argv += ["-c", f"model_reasoning_effort={effort}"]
+        argv = [self.binary, "app-server", "--stdio"]
         for mcp in (item for item in (browser_mcp, terminal_mcp) if item):
             prefix = "mcp_servers." + mcp["name"]
             argv += ["-c", prefix + ".command=" + json.dumps(mcp["command"]),
@@ -484,14 +534,347 @@ class CodexDriver(Driver):
             for key, value in sorted((mcp.get("env") or {}).items()):
                 argv += ["-c", "{}.env.{}={}".format(
                     prefix, key, json.dumps(str(value)))]
-        prompt = _with_runtime_guidance(
-            prompt, system_prompt, browser_mcp, terminal_mcp)
-        native = session.get("native_session_id") or ""
-        if first_turn or not native:
-            argv += [prompt]
-        else:
-            argv += ["resume", native, prompt]
         return argv
+
+    def turn_context(self, session, first_turn, prompt, pinned_id, browser_mcp=None,
+                     system_prompt="", terminal_mcp=None):
+        return {
+            "phase": "initialize",
+            "first_turn": bool(first_turn),
+            "native_session_id": str(session.get("native_session_id") or ""),
+            "thread_id": "",
+            "turn_id": "",
+            "client_message_id": str(pinned_id),
+            "cwd": str(session["cwd"]),
+            "model": str(session.get("model") or "").strip(),
+            "effort": str(session.get("effort") or "").strip(),
+            "sandbox": str(session.get("permission_mode") or
+                           self.default_permission()),
+            "prompt": _with_runtime_guidance(
+                prompt, system_prompt, browser_mcp, terminal_mcp),
+            "usage": {},
+            "items": {},
+            "item_seq": 0,
+            "last_error": "",
+            "completed": False,
+        }
+
+    def initial_stdin(self, session, prompt):
+        return [_rpc(_ID_INITIALIZE, "initialize", {
+            "clientInfo": {
+                "name": "puppy", "title": "Puppy", "version": __version__,
+            },
+            "capabilities": {"experimentalApi": True},
+        })]
+
+    @staticmethod
+    def _thread_request(ctx: dict) -> dict:
+        params = {
+            "cwd": ctx["cwd"],
+            # codex exec was deliberately non-interactive. Keep the same
+            # contract instead of silently adopting a user's TUI approval
+            # default merely because app-server can request approvals.
+            "approvalPolicy": "never",
+            "sandbox": ctx["sandbox"],
+        }
+        if ctx.get("model"):
+            params["model"] = ctx["model"]
+        if ctx.get("first_turn"):
+            method = "thread/start"
+        else:
+            method = "thread/resume"
+            params["threadId"] = ctx["native_session_id"]
+            # Puppy already owns the rendered transcript. Hydrating an entire
+            # native history into one JSONL response wastes memory and can
+            # exceed the subprocess stream limit on an old conversation.
+            params["excludeTurns"] = True
+        return _rpc(_ID_THREAD, method, params)
+
+    @staticmethod
+    def _turn_request(ctx: dict) -> dict:
+        params = {
+            "threadId": ctx["thread_id"],
+            "clientUserMessageId": ctx["client_message_id"],
+            "input": [{"type": "text", "text": ctx["prompt"]}],
+        }
+        if ctx.get("model"):
+            params["model"] = ctx["model"]
+        if ctx.get("effort"):
+            params["effort"] = ctx["effort"]
+        return _rpc(_ID_TURN, "turn/start", params)
+
+    @staticmethod
+    def _protocol_failure(message: str) -> list:
+        text = str(message or "Codex app-server protocol error")[:4000]
+        return [
+            {"a": "event", "kind": "error", "data": {"text": text}},
+            {"a": "result", "data": {"ok": False, "error": text,
+                                       "stop_reason": "error"}},
+        ]
+
+    @staticmethod
+    def _active_params(params: dict, ctx: dict, require_turn=False) -> bool:
+        thread_id = str(params.get("threadId") or "")
+        if thread_id and ctx.get("thread_id") and thread_id != ctx["thread_id"]:
+            return False
+        turn_id = str(params.get("turnId") or "")
+        if require_turn and ctx.get("turn_id") and turn_id and \
+                turn_id != ctx["turn_id"]:
+            return False
+        return True
+
+    def _response(self, ev: dict, ctx: dict) -> list:
+        request_id = ev.get("id")
+        if request_id not in (_ID_INITIALIZE, _ID_THREAD, _ID_TURN,
+                              _ID_INTERRUPT):
+            return []
+        if ev.get("error"):
+            # Completion can win the race with a user interrupt. In that case
+            # app-server may reject turn/interrupt because the turn is already
+            # terminal; the authoritative turn/completed notification still
+            # decides the outcome, and the runner's signal fallback remains
+            # armed if no completion follows.
+            if request_id == _ID_INTERRUPT:
+                return []
+            return self._protocol_failure(_error_text(
+                ev.get("error"), "Codex app-server request failed"))
+
+        result = ev.get("result")
+        if request_id == _ID_INITIALIZE:
+            if not isinstance(result, dict):
+                return self._protocol_failure(
+                    "Codex app-server returned an invalid initialize response")
+            ctx["phase"] = "thread"
+            return [
+                {"a": "stdin", "data": _notification("initialized")},
+                {"a": "stdin", "data": self._thread_request(ctx)},
+            ]
+
+        if request_id == _ID_THREAD:
+            result = result if isinstance(result, dict) else {}
+            thread = result.get("thread") if isinstance(result.get("thread"), dict) else {}
+            thread_id = str(thread.get("id") or "")
+            if not thread_id:
+                return self._protocol_failure(
+                    "Codex app-server did not return a thread id")
+            ctx["thread_id"] = thread_id
+            ctx["phase"] = "turn"
+            actions = [{"a": "native_id", "id": thread_id}]
+            model = str(result.get("model") or "")
+            if model:
+                actions.append({"a": "model", "model": model})
+            actions.append({"a": "stdin", "data": self._turn_request(ctx)})
+            return actions
+
+        if request_id == _ID_TURN:
+            result = result if isinstance(result, dict) else {}
+            turn = result.get("turn") if isinstance(result.get("turn"), dict) else {}
+            turn_id = str(turn.get("id") or "")
+            if not turn_id:
+                return self._protocol_failure(
+                    "Codex app-server did not return a turn id")
+            ctx["turn_id"] = turn_id
+            ctx["phase"] = "running"
+            return [{"a": "transient", "msg": {
+                "type": "status", "text": "Thinking..."}}]
+
+        # turn/interrupt acknowledgement; turn/completed is authoritative.
+        return []
+
+    @staticmethod
+    def _remember_item(item: dict, ctx: dict) -> dict:
+        item_id = str(item.get("id") or "")
+        if not item_id:
+            return item
+        previous = ctx.setdefault("items", {}).get(item_id)
+        merged = dict(previous) if isinstance(previous, dict) else {}
+        merged.update(item)
+        ctx["items"][item_id] = merged
+        return merged
+
+    def _item_started(self, item: dict, ctx: dict) -> list:
+        item = self._remember_item(item, ctx)
+        kind = _item_kind(item)
+        if kind == "commandexecution":
+            return [{"a": "transient", "msg": {"type": "status",
+                "text": "$ {}".format(_clean_cmd(item.get("command"))[:120])}}]
+        if kind == "agentmessage":
+            return [{"a": "transient", "msg": {
+                "type": "status", "text": "Writing..."}}]
+        if kind == "reasoning":
+            return [{"a": "transient", "msg": {
+                "type": "status", "text": "Thinking..."}}]
+        if kind == "filechange":
+            return [{"a": "transient", "msg": {
+                "type": "status", "text": "Applying changes..."}}]
+        if kind == "mcptoolcall":
+            tool = ".".join(str(value) for value in
+                            (item.get("server"), item.get("tool")) if value)
+            return [{"a": "transient", "msg": {"type": "status",
+                "text": "Using {}...".format(tool or "MCP tool")}}]
+        if kind == "websearch":
+            query = item.get("query") or ""
+            return [{"a": "transient", "msg": {"type": "status",
+                "text": "Web search{}".format(
+                    ": " + str(query)[:100] if query else "...")}}]
+        return []
+
+    def _item_completed(self, item: dict, ctx: dict) -> list:
+        item = self._remember_item(item, ctx)
+        kind = _item_kind(item)
+        iid = str(item.get("id") or "")
+        if not iid:
+            ctx["item_seq"] = int(ctx.get("item_seq", 0)) + 1
+            iid = "codex-item-{}".format(ctx["item_seq"])
+
+        if kind == "agentmessage":
+            return [{"a": "event", "kind": "assistant",
+                     "data": {"text": str(item.get("text") or "")}}]
+        if kind == "reasoning":
+            text = item.get("text")
+            if not text:
+                values = item.get("summary") or item.get("content") or []
+                if isinstance(values, list):
+                    text = "\n".join(str(value) for value in values if value)
+                else:
+                    text = str(values or "")
+            return ([{"a": "event", "kind": "thinking",
+                      "data": {"text": str(text)}}] if text else [])
+        if kind == "commandexecution":
+            output = item.get("aggregatedOutput")
+            if output is None:
+                output = item.get("aggregated_output") or item.get("output") or ""
+            code = item.get("exitCode")
+            if code is None:
+                code = item.get("exit_code")
+            failed = str(item.get("status") or "").lower() in \
+                ("failed", "declined", "error") or code not in (None, 0, "0")
+            return _completed_tool(
+                "shell", {"command": _clean_cmd(item.get("command"))},
+                output, iid, failed)
+        if kind == "filechange":
+            changes = item.get("changes") or []
+            if not isinstance(changes, list):
+                changes = [changes]
+            summary = "\n".join(
+                "{}: {}".format(change.get("kind", "edit"),
+                                change.get("path", "?"))
+                if isinstance(change, dict) else str(change)
+                for change in changes) or "(no changes)"
+            failed = str(item.get("status") or "").lower() in \
+                ("failed", "declined", "error")
+            return _completed_tool(
+                "file_change", {"changes": changes}, summary, iid, failed)
+        if kind == "mcptoolcall":
+            tool = ".".join(str(value) for value in
+                            (item.get("server"), item.get("tool")) if value) or "mcp"
+            result = item.get("result")
+            if result is None:
+                result = item.get("error") or item.get("status") or ""
+            failed = str(item.get("status") or "").lower() in \
+                ("failed", "error") or bool(item.get("error"))
+            return _completed_tool(
+                tool, item.get("arguments") or {}, result, iid, failed)
+        if kind == "websearch":
+            return _completed_tool(
+                "web_search", _web_search_input(item),
+                _web_search_result(item), iid, bool(item.get("error")))
+        if kind in ("plan", "todolist"):
+            text = str(item.get("text") or "")
+            if not text:
+                values = item.get("items") or []
+                text = "\n".join(
+                    ("[x] " if value.get("completed") else "[ ] ") +
+                    str(value.get("text") or "")
+                    for value in values if isinstance(value, dict))
+            return ([
+                {"a": "transient", "msg": {"type": "status",
+                                             "text": "Plan updated"}},
+                {"a": "event", "kind": "info",
+                 "data": {"subtype": "todo", "text": text}},
+            ] if text else [])
+        if kind == "error":
+            return [{"a": "event", "kind": "error", "data": {
+                "text": _error_text(item, "Codex error")}}]
+        if _looks_like_tool_item(item):
+            return _generic_tool(item, iid)
+        return []
+
+    @staticmethod
+    def _request_error(request_id, message: str) -> dict:
+        return {"id": request_id, "error": {
+            "code": -32601, "message": str(message)[:1000]}}
+
+    def _server_request(self, method: str, request_id, params: dict,
+                        ctx: dict) -> list:
+        params = params if isinstance(params, dict) else {}
+        thread_id = str(params.get("threadId") or
+                        params.get("conversationId") or "")
+        if thread_id and ctx.get("thread_id") and thread_id != ctx["thread_id"]:
+            return [{"a": "stdin", "data": self._request_error(
+                request_id, "Puppy cannot approve a child-thread request")}]
+
+        if method in ("item/commandExecution/requestApproval",
+                      "execCommandApproval"):
+            command = params.get("command")
+            if isinstance(command, list):
+                command = " ".join(str(value) for value in command)
+            suggestions = [{"type": "allowAlways",
+                            "label": "Allow for this Codex session"}]
+            return [{"a": "approval", "req": {
+                "request_id": str(request_id), "_rpc_id": request_id,
+                "_method": method, "_params": params,
+                "tool_name": "shell", "display_name": "Shell command",
+                "description": str(params.get("reason") or ""),
+                "input": {"command": str(command or ""),
+                          "cwd": str(params.get("cwd") or "")},
+                "tool_use_id": str(params.get("itemId") or
+                                   params.get("callId") or ""),
+                "suggestions": suggestions,
+            }}]
+
+        if method in ("item/fileChange/requestApproval", "applyPatchApproval"):
+            file_changes = params.get("fileChanges")
+            if not isinstance(file_changes, dict):
+                remembered = ctx.get("items", {}).get(str(params.get("itemId") or ""))
+                file_changes = ((remembered or {}).get("changes")
+                                if isinstance(remembered, dict) else None)
+            input_value = {"file_changes": file_changes or []}
+            if params.get("grantRoot"):
+                input_value["file_path"] = params["grantRoot"]
+            return [{"a": "approval", "req": {
+                "request_id": str(request_id), "_rpc_id": request_id,
+                "_method": method, "_params": params,
+                "tool_name": "file_change", "display_name": "File changes",
+                "description": str(params.get("reason") or ""),
+                "input": input_value,
+                "tool_use_id": str(params.get("itemId") or
+                                   params.get("callId") or ""),
+                "suggestions": [{"type": "allowAlways",
+                                 "label": "Allow for this Codex session"}],
+            }}]
+
+        if method == "item/permissions/requestApproval":
+            return [{"a": "approval", "req": {
+                "request_id": str(request_id), "_rpc_id": request_id,
+                "_method": method, "_params": params,
+                "tool_name": "permissions", "display_name": "Additional permissions",
+                "description": str(params.get("reason") or ""),
+                "input": params.get("permissions") or {},
+                "tool_use_id": str(params.get("itemId") or ""),
+                "suggestions": [{"type": "allowAlways",
+                                 "label": "Allow for this Codex session"}],
+            }}]
+
+        if method == "mcpServer/elicitation/request":
+            # Puppy's approval card cannot safely collect arbitrary typed MCP
+            # form values. Explicit cancellation is preferable to a request
+            # that silently blocks the whole turn forever.
+            return [{"a": "stdin", "data": {
+                "id": request_id, "result": {"action": "cancel"}}}]
+
+        return [{"a": "stdin", "data": self._request_error(
+            request_id, "Puppy does not support app-server request {}".format(method))}]
 
     def parse_line(self, line, ctx):
         try:
@@ -500,111 +883,166 @@ class CodexDriver(Driver):
             return []
         if not isinstance(ev, dict):
             return []
-        t = ev.get("type")
+        method = ev.get("method")
+        if not method:
+            return self._response(ev, ctx) if "id" in ev else []
 
-        if t == "thread.started":
-            return [{"a": "native_id", "id": ev.get("thread_id", "")}]
+        params = ev.get("params") if isinstance(ev.get("params"), dict) else {}
+        if "id" in ev:
+            return self._server_request(str(method), ev.get("id"), params, ctx)
 
-        if t == "turn.started":
-            return [{"a": "transient", "msg": {"type": "status", "text": "Thinking..."}}]
-
-        if t in ("item.started", "item.updated"):
-            item = ev.get("item") or {}
-            if not isinstance(item, dict):
+        if method == "thread/started":
+            thread = params.get("thread") if isinstance(params.get("thread"), dict) else {}
+            thread_id = str(thread.get("id") or "")
+            if not thread_id or (ctx.get("thread_id") and
+                                 thread_id != ctx["thread_id"]):
                 return []
-            it = item.get("type", "")
-            if it == "command_execution":
-                return [{"a": "transient", "msg": {"type": "status",
-                                                   "text": f"$ {_clean_cmd(item.get('command'))[:120]}"}}]
-            if it == "agent_message" and item.get("text"):
-                return [{"a": "transient", "msg": {"type": "status", "text": "Writing..."}}]
-            if it == "web_search":
-                search_input = _web_search_input(item)
-                query = search_input.get("query") or search_input.get("url") or ""
-                if not query and isinstance(search_input.get("queries"), list):
-                    query = next((value for value in search_input["queries"] if value), "")
-                text = "Web search" + (": " + str(query)[:100] if query else "...")
-                return [{"a": "transient", "msg": {"type": "status", "text": text}}]
-            return []
+            ctx["thread_id"] = thread_id
+            return [{"a": "native_id", "id": thread_id}]
 
-        if t == "item.completed":
-            item = ev.get("item") or {}
-            if not isinstance(item, dict):
+        if method == "turn/started":
+            if not self._active_params(params, ctx):
                 return []
-            it = item.get("type", "")
-            iid = str(item.get("id") or "")
-            if not iid:
-                ctx["item_seq"] = int(ctx.get("item_seq", 0)) + 1
-                iid = "codex-item-{}".format(ctx["item_seq"])
-            if it == "agent_message":
-                return [{"a": "event", "kind": "assistant", "data": {"text": item.get("text", "")}}]
-            if it == "reasoning":
-                return [{"a": "event", "kind": "thinking", "data": {"text": item.get("text", "")}}]
-            if it == "command_execution":
-                out = item.get("aggregated_output") or item.get("output") or ""
-                code = item.get("exit_code")
-                return _completed_tool(
-                    "shell", {"command": _clean_cmd(item.get("command"))}, out, iid,
-                    code not in (None, 0, "0"))
-            if it == "file_change":
-                changes = item.get("changes") or []
-                if not isinstance(changes, list):
-                    changes = [changes]
-                summary = "\n".join(
-                    "{}: {}".format(c.get("kind", "edit"), c.get("path", "?"))
-                    if isinstance(c, dict) else str(c) for c in changes) or "(no changes)"
-                return _completed_tool("file_change", {"changes": changes}, summary, iid)
-            if it == "mcp_tool_call":
-                tool = ".".join(str(x) for x in
-                                (item.get("server", ""), item.get("tool", "")) if x) or "mcp"
-                result = item.get("result") if item.get("result") is not None else item.get("status", "")
-                return _completed_tool(tool, item.get("arguments") or {}, result, iid,
-                                       item.get("status") == "failed")
-            if it == "web_search":
-                status = str(item.get("status") or "").lower()
-                return _completed_tool(
-                    "web_search", _web_search_input(item), _web_search_result(item), iid,
-                    status in ("failed", "error") or bool(item.get("error")))
-            if it == "todo_list":
-                items = item.get("items") or []
-                txt = "\n".join(("[x] " if x.get("completed") else "[ ] ") +
-                                str(x.get("text", ""))
-                                for x in items if isinstance(x, dict))
-                return [{"a": "transient", "msg": {"type": "status", "text": "Plan updated"}},
-                        {"a": "event", "kind": "info", "data": {"subtype": "todo", "text": txt}}] if txt else []
-            if it == "error":
-                return [{"a": "event", "kind": "error", "data": {"text": item.get("message", "codex error")}}]
-            if _looks_like_tool_item(item):
-                return _generic_tool(item, iid)
+            turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
+            turn_id = str(turn.get("id") or params.get("turnId") or "")
+            if turn_id:
+                ctx["turn_id"] = turn_id
+            ctx["phase"] = "running"
+            return [{"a": "transient", "msg": {
+                "type": "status", "text": "Thinking..."}}]
+
+        if method in ("item/started", "item/completed"):
+            if not self._active_params(params, ctx, require_turn=True):
+                return []
+            if not ctx.get("turn_id") and params.get("turnId"):
+                ctx["turn_id"] = str(params["turnId"])
+            item = params.get("item") if isinstance(params.get("item"), dict) else {}
+            return (self._item_started(item, ctx) if method == "item/started"
+                    else self._item_completed(item, ctx))
+
+        if method == "thread/tokenUsage/updated":
+            if not ctx.get("turn_id") or \
+                    str(params.get("turnId") or "") != ctx["turn_id"]:
+                return []
+            ctx["usage"] = _usage_from_notification(params.get("tokenUsage"))
             return []
 
-        if t == "token_count":
-            # not observed in exec --json yet, but codex records these in rollouts;
-            # capture live if the stream ever carries them
-            rl = ev.get("rate_limits") or (ev.get("info") or {}).get("rate_limits")
-            if rl:
-                _cache_live_quota(rl)
-                return [{"a": "rate_limit", "info": rl}]
+        if method == "account/rateLimits/updated":
+            limits = params.get("rateLimits")
+            if isinstance(limits, dict):
+                _cache_live_quota(limits)
+                return [{"a": "rate_limit", "info": limits}]
             return []
 
-        if t == "turn.completed":
-            usage = ev.get("usage") or {}
-            return [{"a": "result", "data": {
-                "ok": True,
-                "usage": {k: usage.get(k) for k in
-                          ("input_tokens", "output_tokens", "cached_input_tokens",
-                           "reasoning_output_tokens") if usage.get(k) is not None},
-            }}]
+        if method == "model/rerouted":
+            if not self._active_params(params, ctx, require_turn=True):
+                return []
+            model = str(params.get("toModel") or "")
+            return [{"a": "model", "model": model}] if model else []
 
-        if t == "turn.failed":
-            err = (ev.get("error") or {}).get("message", "turn failed")
-            return [{"a": "event", "kind": "error", "data": {"text": err}},
-                    {"a": "result", "data": {"ok": False, "error": err}}]
+        if method == "error":
+            if not self._active_params(params, ctx, require_turn=True):
+                return []
+            text = _error_text(params.get("error"), "Codex turn error")
+            if params.get("willRetry"):
+                return [{"a": "transient", "msg": {
+                    "type": "status", "text": "Retrying: {}".format(text[:160])}}]
+            ctx["last_error"] = text
+            return [{"a": "event", "kind": "error", "data": {"text": text}}]
 
-        if t == "error":
-            return [{"a": "event", "kind": "error", "data": {"text": ev.get("message", "codex error")}}]
+        if method == "turn/completed":
+            if not self._active_params(params, ctx, require_turn=True) or \
+                    ctx.get("completed"):
+                return []
+            turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
+            turn_id = str(turn.get("id") or params.get("turnId") or "")
+            if ctx.get("turn_id") and turn_id and turn_id != ctx["turn_id"]:
+                return []
+            ctx["completed"] = True
+            status = str(turn.get("status") or "").lower()
+            duration = turn.get("durationMs")
+            if status == "completed":
+                return [{"a": "result", "data": {
+                    "ok": True, "usage": dict(ctx.get("usage") or {}),
+                    "duration_ms": duration, "stop_reason": "completed",
+                }}]
+            error = _error_text(turn.get("error"),
+                                "Codex turn {}".format(status or "failed"))
+            result = {"a": "result", "data": {
+                "ok": False, "error": error,
+                "usage": dict(ctx.get("usage") or {}),
+                "duration_ms": duration,
+                "stop_reason": "cancelled" if status == "interrupted" else
+                               (status or "error"),
+            }}
+            if error == ctx.get("last_error") or status == "interrupted":
+                return [result]
+            return [{"a": "event", "kind": "error", "data": {"text": error}},
+                    result]
 
+        # Delta/progress/config notifications are intentionally not persisted;
+        # their completed item or final turn notification is authoritative.
         return []
+
+    @staticmethod
+    def _approval_decision(request: dict, behavior: str,
+                           updated_permissions=None, message="", cancel=False) -> dict:
+        request_id = request.get("_rpc_id", request.get("request_id"))
+        method = str(request.get("_method") or "")
+        always = any(isinstance(value, dict) and
+                     value.get("type") == "allowAlways"
+                     for value in updated_permissions or [])
+        allow = behavior == "allow" and not cancel
+
+        if method in ("item/commandExecution/requestApproval",
+                      "item/fileChange/requestApproval"):
+            decision = ("cancel" if cancel else
+                        ("acceptForSession" if allow and always else
+                         "accept" if allow else "decline"))
+            return {"id": request_id, "result": {"decision": decision}}
+
+        if method in ("execCommandApproval", "applyPatchApproval"):
+            if cancel:
+                decision = "abort"
+            elif allow:
+                decision = "approved_for_session" if always else "approved"
+            else:
+                decision = {"denied": {
+                    "rejection": str(message or "Denied by user")[:1000]}}
+            return {"id": request_id, "result": {"decision": decision}}
+
+        if method == "item/permissions/requestApproval" and allow:
+            params = request.get("_params") or {}
+            return {"id": request_id, "result": {
+                "permissions": params.get("permissions") or {},
+                "scope": "session" if always else "turn",
+            }}
+
+        return {"id": request_id, "error": {
+            "code": -32600,
+            "message": str(message or "Permission request denied by user")[:1000],
+        }}
+
+    def approval_payload(self, request_id, behavior, original_input, message="",
+                         updated_permissions=None, request=None):
+        return self._approval_decision(
+            request or {"request_id": request_id}, behavior,
+            updated_permissions=updated_permissions, message=message)
+
+    def cancel_approval_payload(self, request: dict):
+        return self._approval_decision(
+            request or {}, "deny", message="Turn interrupted", cancel=True)
+
+    def interrupt_payload(self, session=None, ctx=None):
+        ctx = ctx or {}
+        thread_id = str(ctx.get("thread_id") or
+                        (session or {}).get("native_session_id") or "")
+        turn_id = str(ctx.get("turn_id") or "")
+        if not thread_id or not turn_id or ctx.get("completed"):
+            return None
+        return _rpc(_ID_INTERRUPT, "turn/interrupt", {
+            "threadId": thread_id, "turnId": turn_id,
+        })
 
     def auth_touch_paths(self):
         return [os.path.join(_codex_home(), "auth.json")]

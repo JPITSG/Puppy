@@ -26,11 +26,70 @@ from puppy.drivers.codex import CodexDriver  # noqa: E402
 
 def exercise_driver_normalization() -> None:
     driver = CodexDriver()
-    context = {}
+    assert driver.uses_stdin_stream is True
+    session = {
+        "cwd": "/tmp", "native_session_id": "", "model": "gpt-test",
+        "effort": "high", "permission_mode": "workspace-write",
+    }
+    context = driver.turn_context(
+        session, True, "hello", "client-message-1",
+        system_prompt="Node policy.")
+    assert driver.build_cmd(session, True, "hello", "client-message-1")[:3] == \
+        ["codex", "app-server", "--stdio"]
+    initialize = driver.initial_stdin(session, "hello")
+    assert initialize == [{
+        "id": "puppy-initialize", "method": "initialize",
+        "params": {
+            "clientInfo": {"name": "puppy", "title": "Puppy",
+                           "version": __version__},
+            "capabilities": {"experimentalApi": True},
+        },
+    }]
+    setup = driver.parse_line(json.dumps({
+        "id": "puppy-initialize", "result": {
+            "userAgent": "codex", "codexHome": "/tmp/codex",
+            "platformFamily": "unix", "platformOs": "linux",
+        },
+    }), context)
+    assert setup[0] == {"a": "stdin", "data": {"method": "initialized"}}
+    thread_request = setup[1]["data"]
+    assert thread_request["method"] == "thread/start"
+    assert thread_request["params"] == {
+        "cwd": "/tmp", "approvalPolicy": "never",
+        "sandbox": "workspace-write", "model": "gpt-test",
+    }
+
+    thread_actions = driver.parse_line(json.dumps({
+        "id": "puppy-thread", "result": {
+            "thread": {"id": "thread-1"}, "model": "gpt-test",
+        },
+    }), context)
+    assert thread_actions[:2] == [
+        {"a": "native_id", "id": "thread-1"},
+        {"a": "model", "model": "gpt-test"},
+    ]
+    turn_request = thread_actions[2]["data"]
+    assert turn_request["method"] == "turn/start"
+    assert turn_request["params"]["threadId"] == "thread-1"
+    assert turn_request["params"]["clientUserMessageId"] == "client-message-1"
+    assert turn_request["params"]["input"][0]["text"].endswith("\n\nhello")
+    assert "<puppy_system_prompt>\nNode policy." in \
+        turn_request["params"]["input"][0]["text"]
+    assert turn_request["params"]["effort"] == "high"
+
+    started = driver.parse_line(json.dumps({
+        "id": "puppy-turn", "result": {
+            "turn": {"id": "turn-1", "status": "inProgress", "items": []},
+        },
+    }), context)
+    assert started[0]["msg"]["text"] == "Thinking..."
+    assert context["turn_id"] == "turn-1"
+
     search = driver.parse_line(json.dumps({
-        "type": "item.completed",
-        "item": {
-            "type": "web_search", "id": "search-1", "status": "completed",
+        "method": "item/completed", "params": {
+            "threadId": "thread-1", "turnId": "turn-1", "completedAtMs": 1,
+            "item": {
+            "type": "webSearch", "id": "search-1",
             "query": "python TLS support ...",
             "action": {"type": "search", "query": None,
                        "queries": ["python 3.9 TLS", "aiohttp certificate pin"]},
@@ -40,7 +99,7 @@ def exercise_driver_normalization() -> None:
                 {"title": "aiohttp documentation", "url": "https://docs.aiohttp.org/",
                  "snippet": "Fingerprint verification."},
             ],
-        },
+        }},
     }), context)
     assert [action.get("kind") for action in search] == ["tool_use", "tool_result"]
     assert search[0]["data"]["tool"] == "web_search"
@@ -50,34 +109,283 @@ def exercise_driver_normalization() -> None:
     assert search[1]["data"]["is_error"] is False
 
     structured_search = driver.parse_line(json.dumps({
-        "type": "item.completed",
-        "item": {"type": "web_search", "action": "open_page",
-                 "results": {"url": "https://example.test/", "status": 200}},
+        "method": "item/completed", "params": {
+            "threadId": "thread-1", "turnId": "turn-1", "completedAtMs": 2,
+            "item": {"type": "webSearch", "action": "open_page",
+                     "results": {"url": "https://example.test/", "status": 200}}},
     }), context)
     assert structured_search[0]["data"]["input"] == {"action": "open_page"}
     assert structured_search[0]["data"]["tool_use_id"] == "codex-item-1"
     assert '"status": 200' in structured_search[1]["data"]["content"]
 
     image = driver.parse_line(json.dumps({
-        "type": "item.completed",
-        "item": {"type": "image_view", "id": "image-1", "path": "/data/example.png"},
+        "method": "item/completed", "params": {
+            "threadId": "thread-1", "turnId": "turn-1", "completedAtMs": 3,
+            "item": {"type": "imageView", "id": "image-1",
+                     "path": "/data/example.png"}},
     }), context)
     assert [action.get("kind") for action in image] == ["tool_use", "tool_result"]
     assert image[0]["data"]["input"] == {"path": "/data/example.png"}
 
     future_call = driver.parse_line(json.dumps({
-        "type": "item.completed",
-        "item": {"type": "collab_agent_tool_call", "id": "call-1", "name": "delegate",
-                 "arguments": {"task": "inspect"}, "result": {"status": "done"}},
+        "method": "item/completed", "params": {
+            "threadId": "thread-1", "turnId": "turn-1", "completedAtMs": 4,
+            "item": {"type": "collabAgentToolCall", "id": "call-1",
+                     "name": "delegate", "arguments": {"task": "inspect"},
+                     "result": {"status": "done"}}},
     }), context)
     assert [action.get("kind") for action in future_call] == ["tool_use", "tool_result"]
     assert future_call[0]["data"]["tool"] == "delegate"
     assert '"status": "done"' in future_call[1]["data"]["content"]
 
     lifecycle = driver.parse_line(json.dumps({
-        "type": "item.completed", "item": {"type": "context_compaction", "id": "compact-1"},
+        "method": "item/completed", "params": {
+            "threadId": "thread-1", "turnId": "turn-1", "completedAtMs": 5,
+            "item": {"type": "contextCompaction", "id": "compact-1"}},
     }), context)
     assert lifecycle == []
+
+    # Restored usage from resume belongs to an older turn and must not leak
+    # into this result; the matching live turn breakdown is authoritative.
+    assert driver.parse_line(json.dumps({
+        "method": "thread/tokenUsage/updated", "params": {
+            "threadId": "thread-1", "turnId": "old-turn",
+            "tokenUsage": {"last": {"inputTokens": 99, "outputTokens": 99}},
+        },
+    }), context) == []
+    driver.parse_line(json.dumps({
+        "method": "thread/tokenUsage/updated", "params": {
+            "threadId": "thread-1", "turnId": "turn-1",
+            "tokenUsage": {"last": {
+                "inputTokens": 12, "outputTokens": 3,
+                "cachedInputTokens": 4, "reasoningOutputTokens": 2,
+                "totalTokens": 15,
+            }},
+        },
+    }), context)
+
+    approval = driver.parse_line(json.dumps({
+        "id": 77, "method": "item/commandExecution/requestApproval",
+        "params": {"threadId": "thread-1", "turnId": "turn-1",
+                   "itemId": "cmd-1", "startedAtMs": 1,
+                   "command": "make test", "cwd": "/tmp"},
+    }), context)[0]["req"]
+    assert approval["input"]["command"] == "make test"
+    assert driver.approval_payload(
+        approval["request_id"], "allow", approval["input"],
+        updated_permissions=[{"type": "allowAlways"}], request=approval) == \
+        {"id": 77, "result": {"decision": "acceptForSession"}}
+    assert driver.cancel_approval_payload(approval) == \
+        {"id": 77, "result": {"decision": "cancel"}}
+    assert driver.interrupt_payload(session, context) == {
+        "id": "puppy-interrupt", "method": "turn/interrupt",
+        "params": {"threadId": "thread-1", "turnId": "turn-1"},
+    }
+    assert driver.parse_line(json.dumps({
+        "id": "puppy-interrupt", "error": {
+            "code": -32600, "message": "turn already completed",
+        },
+    }), context) == []
+
+    completed = driver.parse_line(json.dumps({
+        "method": "turn/completed", "params": {
+            "threadId": "thread-1",
+            "turn": {"id": "turn-1", "status": "completed", "items": [],
+                     "durationMs": 1234},
+        },
+    }), context)
+    assert completed == [{"a": "result", "data": {
+        "ok": True, "usage": {
+            "input_tokens": 12, "output_tokens": 3,
+            "cached_input_tokens": 4, "reasoning_output_tokens": 2,
+        }, "duration_ms": 1234, "stop_reason": "completed",
+    }}]
+    assert driver.interrupt_payload(session, context) is None
+
+    resumed = dict(session, native_session_id="thread-existing")
+    resume_ctx = driver.turn_context(
+        resumed, False, "again", "client-message-2")
+    resume_setup = driver.parse_line(json.dumps({
+        "id": "puppy-initialize", "result": {
+            "userAgent": "codex", "codexHome": "/tmp/codex",
+            "platformFamily": "unix", "platformOs": "linux",
+        },
+    }), resume_ctx)
+    resume_request = resume_setup[1]["data"]
+    assert resume_request["method"] == "thread/resume"
+    assert resume_request["params"]["threadId"] == "thread-existing"
+    assert resume_request["params"]["excludeTurns"] is True
+
+
+async def exercise_codex_app_server_turn(root, runner, db) -> None:
+    """Drive the real runner against a no-model fake app-server process.
+
+    This pins process ownership, handshake ordering, native resume, normalized
+    transcript events, token usage, stdin EOF, and the fact that prompts are
+    carried in turn/start rather than process arguments.
+    """
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    fake = root / "codex"
+    log_path = root / "requests.jsonl"
+    fake.write_text(r'''#!/usr/bin/env python3
+import json
+import os
+import sys
+
+seen = []
+
+def read():
+    line = sys.stdin.readline()
+    if not line:
+        raise SystemExit("unexpected stdin EOF")
+    value = json.loads(line)
+    seen.append(value)
+    return value
+
+def send(value):
+    sys.stdout.write(json.dumps(value, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+if sys.argv[1:3] != ["app-server", "--stdio"]:
+    raise SystemExit("wrong argv: {!r}".format(sys.argv[1:]))
+
+initialize = read()
+send({"id": initialize["id"], "result": {
+    "userAgent": "fake-codex", "codexHome": "/tmp/fake-codex",
+    "platformFamily": "unix", "platformOs": "linux"}})
+if read().get("method") != "initialized":
+    raise SystemExit("missing initialized notification")
+thread_request = read()
+thread_id = thread_request.get("params", {}).get("threadId") or "fake-thread"
+send({"method": "thread/started", "params": {"thread": {"id": thread_id}}})
+send({"id": thread_request["id"], "result": {
+    "thread": {"id": thread_id}, "model": "gpt-fake"}})
+turn_request = read()
+turn_id = "fake-turn"
+# Notifications are allowed to race the immediate request response.
+send({"method": "turn/started", "params": {
+    "threadId": thread_id,
+    "turn": {"id": turn_id, "status": "inProgress", "items": []}}})
+send({"id": turn_request["id"], "result": {
+    "turn": {"id": turn_id, "status": "inProgress", "items": []}}})
+prompt_text = turn_request["params"]["input"][0]["text"]
+if prompt_text.endswith("interrupt fake turn"):
+    interrupt = read()
+    if interrupt.get("method") != "turn/interrupt" or \
+            interrupt.get("params") != {"threadId": thread_id, "turnId": turn_id}:
+        raise SystemExit("bad interrupt request: {!r}".format(interrupt))
+    send({"id": interrupt["id"], "result": {}})
+    send({"method": "turn/completed", "params": {
+        "threadId": thread_id,
+        "turn": {"id": turn_id, "status": "interrupted", "items": [],
+                 "durationMs": 5}}})
+else:
+    send({"method": "item/started", "params": {
+        "threadId": thread_id, "turnId": turn_id, "startedAtMs": 1,
+        "item": {"type": "agentMessage", "id": "answer-1", "text": ""}}})
+    send({"method": "item/completed", "params": {
+        "threadId": thread_id, "turnId": turn_id, "completedAtMs": 2,
+        "item": {"type": "agentMessage", "id": "answer-1",
+                 "text": "fake app-server response", "phase": "final_answer"}}})
+    send({"method": "thread/tokenUsage/updated", "params": {
+        "threadId": thread_id, "turnId": turn_id,
+        "tokenUsage": {"last": {
+            "inputTokens": 8, "outputTokens": 2, "cachedInputTokens": 3,
+            "reasoningOutputTokens": 1, "totalTokens": 10},
+            "total": {"inputTokens": 8, "outputTokens": 2,
+                      "cachedInputTokens": 3, "reasoningOutputTokens": 1,
+                      "totalTokens": 10}}}})
+    send({"method": "turn/completed", "params": {
+        "threadId": thread_id,
+        "turn": {"id": turn_id, "status": "completed", "items": [],
+                 "durationMs": 25}}})
+for line in sys.stdin:
+    if line.strip():
+        seen.append(json.loads(line))
+with open(os.environ["PUPPY_FAKE_CODEX_LOG"], "a", encoding="utf-8") as handle:
+    handle.write(json.dumps({"argv": sys.argv[1:], "seen": seen}) + "\n")
+''', encoding="utf-8")
+    fake.chmod(0o755)
+
+    from puppy.drivers import get_driver
+    driver = get_driver("codex")
+    original_binary = driver.binary
+    original_log = os.environ.get("PUPPY_FAKE_CODEX_LOG")
+    driver.binary = str(fake)
+    os.environ["PUPPY_FAKE_CODEX_LOG"] = str(log_path)
+    sid = db.create_session(
+        "codex app-server fake", "codex", str(root), "", "",
+        "#7aa2f7", "workspace-write")
+    hub = runner.hub(sid)
+    try:
+        for index, prompt in enumerate(("first fake turn", "resumed fake turn")):
+            assert hub.send_message(prompt) == {"queued": False}
+            deadline = time.monotonic() + 10
+            while hub.status != "idle":
+                if time.monotonic() >= deadline:
+                    raise AssertionError("fake Codex turn did not finish")
+                await asyncio.sleep(0.02)
+            if hub.turn_task is not None:
+                await hub.turn_task
+            assert db.get_session(sid)["native_session_id"] == "fake-thread"
+            events = db.get_events(sid)
+            assert sum(event["kind"] == "assistant" for event in events) == index + 1
+            result = [event for event in events if event["kind"] == "result"][-1]
+            assert result["data"]["ok"] is True
+            assert result["data"]["usage"] == {
+                "input_tokens": 8, "output_tokens": 2,
+                "cached_input_tokens": 3, "reasoning_output_tokens": 1,
+            }
+
+        # Stop immediately, before the subprocess has necessarily completed
+        # initialize. The runner must defer the native request until the
+        # app-server allocates its turn id, then close stdin on completion.
+        assert hub.send_message("interrupt fake turn") == {"queued": False}
+        await hub.interrupt()
+        deadline = time.monotonic() + 10
+        while hub.status != "idle":
+            if time.monotonic() >= deadline:
+                raise AssertionError("interrupted fake Codex turn did not finish")
+            await asyncio.sleep(0.02)
+        if hub.turn_task is not None:
+            await hub.turn_task
+        interrupted = [event for event in db.get_events(sid)
+                       if event["kind"] == "info" and
+                       event["data"].get("subtype") == "interrupted"]
+        assert interrupted, db.get_events(sid)[-5:]
+
+        invocations = [json.loads(line) for line in
+                       log_path.read_text(encoding="utf-8").splitlines()]
+        assert len(invocations) == 3, invocations
+        first_thread = next(value for value in invocations[0]["seen"]
+                            if value.get("id") == "puppy-thread")
+        resumed_thread = next(value for value in invocations[1]["seen"]
+                              if value.get("id") == "puppy-thread")
+        assert first_thread["method"] == "thread/start"
+        assert resumed_thread["method"] == "thread/resume"
+        assert resumed_thread["params"]["threadId"] == "fake-thread"
+        assert resumed_thread["params"]["excludeTurns"] is True
+        for invocation, prompt in zip(invocations,
+                                      ("first fake turn", "resumed fake turn")):
+            assert prompt not in invocation["argv"]
+            turn = next(value for value in invocation["seen"]
+                        if value.get("id") == "puppy-turn")
+            assert turn["params"]["input"][0]["text"].endswith(prompt)
+        interrupt = next(value for value in invocations[2]["seen"]
+                         if value.get("id") == "puppy-interrupt")
+        assert interrupt == {
+            "id": "puppy-interrupt", "method": "turn/interrupt",
+            "params": {"threadId": "fake-thread", "turnId": "fake-turn"},
+        }
+    finally:
+        driver.binary = original_binary
+        if original_log is None:
+            os.environ.pop("PUPPY_FAKE_CODEX_LOG", None)
+        else:
+            os.environ["PUPPY_FAKE_CODEX_LOG"] = original_log
+        runner.drop_hub(sid)
+        db.delete_session(sid)
 
 
 def exercise_opencode_driver() -> None:
@@ -2870,6 +3178,8 @@ async def main() -> None:
         config.set_value("auth.api_token", controller_token)
         config.set_value("engines.usage_refresh_minutes", 0)
         db.connect()
+        await exercise_codex_app_server_turn(
+            temp_root / "codex-app-server", runner, db)
         exercise_auth_hardening(auth)
         exercise_activity_blocks(runner.SessionHub)
         await exercise_shutdown_broadcast(runner)

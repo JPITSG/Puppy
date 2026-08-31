@@ -134,8 +134,8 @@ class Driver:
     # those files, so a driver may declare narrow, vendor-owned fallbacks while
     # ordinary PATH lookup remains authoritative.
     binary_fallbacks = ()
-    # True: prompt + control messages flow over stdin as JSONL (claude style).
-    # False: prompt is part of argv, stdin closed (codex style).
+    # True: prompt/setup/control messages flow over a writable JSONL stdin.
+    # False: the complete turn is supplied on argv and stdin stays closed.
     uses_stdin_stream = False
     # Some multi-provider CLIs deliberately leave authentication to whichever
     # provider/model a turn selects.  Their node health is binary availability,
@@ -254,8 +254,12 @@ class Driver:
         """Protocol response for a pending approval cancelled with its turn."""
         return None
 
-    def interrupt_payload(self, session=None):
-        """stdin JSON requesting a graceful interrupt, or None (-> signal only)."""
+    def interrupt_payload(self, session=None, ctx=None):
+        """stdin JSON requesting a graceful interrupt, or None (-> signal only).
+
+        ``ctx`` is the live object returned by turn_context(). Protocols whose
+        turn id is allocated during setup need it to target the exact turn.
+        """
         return None
 
     async def status(self) -> dict:

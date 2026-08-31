@@ -131,7 +131,7 @@ class ClaudeDriver(Driver):
         return {"type": "control_response",
                 "response": {"subtype": "success", "request_id": request_id, "response": resp}}
 
-    def interrupt_payload(self, session=None):
+    def interrupt_payload(self, session=None, ctx=None):
         return {"type": "control_request", "request_id": "int_1",
                 "request": {"subtype": "interrupt"}}
 

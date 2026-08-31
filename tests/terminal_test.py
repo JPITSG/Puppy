@@ -182,8 +182,11 @@ def check_driver_wiring(session_id: int) -> None:
         terminal_mcp=descriptor, system_prompt="Node policy.")
     assert any("mcp_servers.puppy_browser.command" in item for item in codex)
     assert any("mcp_servers.puppy_terminal.command" in item for item in codex)
-    assert "<puppy_terminal_policy>" in codex[-1]
-    assert codex[-1].endswith("\n\nhello")
+    codex_context = CodexDriver().turn_context(
+        session, True, "hello", "pin", browser_mcp=browser,
+        terminal_mcp=descriptor, system_prompt="Node policy.")
+    assert "<puppy_terminal_policy>" in codex_context["prompt"]
+    assert codex_context["prompt"].endswith("\n\nhello")
 
     opencode = OpenCodeDriver()
     context = opencode.turn_context(

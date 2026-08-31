@@ -363,6 +363,8 @@ class SessionHub:
         self.active_since = None
         self.proc = None
         self._proc_ready = False
+        self._driver_ctx = None
+        self._interrupt_protocol_sent = False
         self.turn_task = None
         self.pending_approval = None
         self.interrupted = False
@@ -1100,6 +1102,8 @@ class SessionHub:
         self.status = "running"
         self.interrupted = False
         self._proc_ready = False
+        self._driver_ctx = None
+        self._interrupt_protocol_sent = False
         self._active_prompt_text = text
         self.turn_task = asyncio.ensure_future(self._run_turn(text))
         # Publish the active block immediately, before process startup and the
@@ -1263,13 +1267,31 @@ class SessionHub:
                 self.pending_approval = None
                 self.broadcast({"type": "approval_resolved", "request_id": rid,
                                 "behavior": "cancelled"})
-            payload = driver.interrupt_payload(session)
-            if payload is not None and proc.stdin is not None and not proc.stdin.is_closing():
-                await self._write_stdin(payload)
+            await self._send_protocol_interrupt(driver, session)
         except Exception as e:
             log.warning("interrupt payload failed for session %s: %s", self.id, e)
         for delay, sig in ((3, signal.SIGINT), (8, signal.SIGKILL)):
             asyncio.get_event_loop().call_later(delay, self._signal_if_alive, proc, sig)
+
+    async def _send_protocol_interrupt(self, driver, session) -> bool:
+        """Send the engine-native interrupt once its allocated turn id exists.
+
+        A stop can race a JSONL engine's initialize/thread handshake. The first
+        attempt then has no addressable turn; the stdout pump retries after
+        each protocol message while the existing signal timers remain the
+        bounded fallback.
+        """
+        if self._interrupt_protocol_sent:
+            return True
+        proc = self.proc
+        if proc is None or proc.stdin is None or proc.stdin.is_closing():
+            return False
+        payload = driver.interrupt_payload(session, self._driver_ctx)
+        if payload is None:
+            return False
+        await self._write_stdin(payload)
+        self._interrupt_protocol_sent = True
+        return True
 
     def _signal_if_alive(self, proc, sig) -> None:
         # Engines are spawned in their own process group (start_new_session):
@@ -1597,6 +1619,7 @@ class SessionHub:
                 system_prompt=system_prompt_text)
             if not isinstance(ctx, dict):
                 ctx = {}
+            self._driver_ctx = ctx
 
             cwd = session["cwd"]
             if not os.path.isdir(cwd):
@@ -1700,6 +1723,14 @@ class SessionHub:
                     elif a == "result":
                         if self.interrupted and act["data"].get("stop_reason") in \
                                 ("cancelled", "canceled"):
+                            # A persistent JSONL service still needs EOF before
+                            # it exits. Preserve the existing interrupted
+                            # transcript path while releasing that service.
+                            if driver.uses_stdin_stream and self.proc.stdin is not None:
+                                try:
+                                    self.proc.stdin.close()
+                                except Exception:
+                                    pass
                             continue
                         got_result = True
                         # Every engine's turn reports how long it took: drivers
@@ -1720,6 +1751,13 @@ class SessionHub:
                                 self.proc.stdin.close()
                             except Exception:
                                 pass
+
+                if self.interrupted and not self._interrupt_protocol_sent:
+                    try:
+                        await self._send_protocol_interrupt(driver, session)
+                    except Exception as e:
+                        log.warning("deferred interrupt payload failed for session %s: %s",
+                                    self.id, e)
 
             try:
                 await asyncio.wait_for(self.proc.wait(), timeout=20)
@@ -1757,6 +1795,8 @@ class SessionHub:
                 self.broadcast({"type": "approval_resolved", "request_id": rid, "behavior": "cancelled"})
             self.proc = None
             self._proc_ready = False
+            self._driver_ctx = None
+            self._interrupt_protocol_sent = False
             self.stderr_tail = ""
             # A failed turn is fresh evidence about the engine (auth revoked,
             # binary broken): drop its cached probe so the next status poll

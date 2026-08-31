@@ -813,8 +813,9 @@ class OpenCodeDriver(Driver):
         return {"jsonrpc": "2.0", "id": request.get("_rpc_id", request.get("request_id")),
                 "result": {"outcome": {"outcome": "selected", "optionId": option}}}
 
-    def interrupt_payload(self, session=None):
-        native = str((session or {}).get("native_session_id") or "")
+    def interrupt_payload(self, session=None, ctx=None):
+        native = str((ctx or {}).get("session_id") or
+                     (session or {}).get("native_session_id") or "")
         if not native:
             return None
         return _notification("session/cancel", {"sessionId": native})
