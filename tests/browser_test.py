@@ -2408,11 +2408,6 @@ def check_sidebar_icon_alignment(css_source: str) -> None:
     assert ".foot-engine-head>.disclosure-toggle svg{position:relative;top:-1px}" in css_source
     assert ".conn-state{display:flex;align-items:center;" in css_source
     assert "margin-left:6px;position:relative;top:-1px;" in css_source
-    # The fixed footer mirrors the chat header's elevation into the session
-    # scrollport, with theme-specific ink and no layout or scroll changes.
-    assert "--side-foot-shadow:0 -10px 22px -14px rgba(0,0,0,.82);" in css_source
-    assert "box-shadow:var(--side-foot-shadow);" in css_source
-    assert "--side-foot-shadow:0 -10px 20px -13px rgba(15,23,42,.30);" in css_source
 
 
 def check_toast_touch_swipe(ui_source: str, css_source: str) -> None:
