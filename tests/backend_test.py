@@ -1000,6 +1000,25 @@ def exercise_activity_blocks(session_hub_cls) -> None:
     assert hub.status == "idle" and hub.active_since is None
 
 
+def exercise_health_retry_bound(backends_module) -> None:
+    """Offline recovery backs off, but never strands a revived node for a minute."""
+    bid = -9103
+    try:
+        backends_module._clear_backend_health(bid)
+        delays = []
+        for _ in range(4):
+            # Make each synthetic failure due; repeated in-flight failures are
+            # separately coalesced by _mark_backend_offline's future deadline.
+            backends_module._health_retry_after[bid] = 0
+            started = time.monotonic()
+            backends_module._mark_backend_offline(bid, "test node unavailable")
+            delays.append(backends_module._health_retry_after[bid] - started)
+        assert [round(delay) for delay in delays] == [2, 4, 8, 8], delays
+        assert max(delays) < 8.1, delays
+    finally:
+        backends_module._clear_backend_health(bid)
+
+
 async def exercise_shutdown_broadcast(runner_module) -> None:
     """Both node and open-session watchers receive the same bounded notice."""
     class Capture:
@@ -2013,6 +2032,12 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         proxied_scratch = proxied_created["session"]
         proxied_path = Path(proxied_scratch["cwd"])
         assert proxied_scratch["workspace_kind"] == "temporary" and proxied_path.is_dir()
+        async with http.get(url + f"/api/b/{stored['id']}/sessions",
+                            headers=headers) as response:
+            proxied_sessions = await response.json()
+            assert response.status == 200, proxied_sessions
+        assert any(session["id"] == proxied_scratch["id"]
+                   for session in proxied_sessions["sessions"])
         # Exceed both aiohttp applications' historical 8 MiB read ceiling. The
         # controller must stream the request to the node instead of buffering
         # it, while the receiving node remains the final limit authority.
@@ -2034,6 +2059,8 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert last_known["browser"] == {"enabled": False}
         assert last_known["system_prompt"]["custom"] == \
             "Controller-configured guidance."
+        assert any(session["id"] == proxied_scratch["id"]
+                   for session in last_known["sessions"])
         proxied_file = b"MZ" + (b"x" * (8 * 1024 * 1024)) + b"streamed-through-controller"
         controller_backends._active_urls.pop(stored["id"], None)
         async with http.post(
@@ -2054,11 +2081,6 @@ async def exercise_controller(url: str, token: str, backend_url: str,
                 url + f"/api/b/{stored['id']}/sessions/{proxied_scratch['id']}/upload/" +
                 proxied_upload["upload_id"], headers=headers) as response:
             assert response.status == 200, await response.text()
-        async with http.delete(
-                url + f"/api/b/{stored['id']}/sessions/{proxied_scratch['id']}",
-                headers=headers) as response:
-            assert response.status == 200, await response.text()
-        assert not proxied_path.exists()
 
         # New controllers allocate a node-owned, identified PTY before opening
         # its viewer socket. The process survives a viewer reconnect and keeps
@@ -2147,6 +2169,8 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert stopping_backend["last_known"]["usage_refresh"]["minutes"] == 0
         assert stopping_backend["last_known"]["system_prompt"]["custom"] == \
             "Controller-configured guidance."
+        assert any(session["id"] == proxied_scratch["id"]
+                   for session in stopping_backend["last_known"]["sessions"])
         await lifecycle_updates.close()
 
         deadline = asyncio.get_event_loop().time() + 120
@@ -2163,6 +2187,11 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert refreshed["availability"]["state"] == "online", refreshed
         assert refreshed["auto_upgrade"] is True
         assert "remote-upgrade" in refreshed["capabilities"]
+        async with http.delete(
+                url + f"/api/b/{stored['id']}/sessions/{proxied_scratch['id']}",
+                headers=headers) as response:
+            assert response.status == 200, await response.text()
+        assert not proxied_path.exists()
 
 
 async def exercise_redirect_rejection() -> None:
@@ -3561,7 +3590,8 @@ async def main() -> None:
         # instance's data directory. Fail loudly instead of writing there.
         assert "puppy.config" not in sys.modules, \
             "puppy.config was imported before the test data path was set"
-        from puppy import auth, config, db, host_metrics, runner, terminal, uploads
+        from puppy import (auth, backends as controller_backends, config, db,
+                           host_metrics, runner, terminal, uploads)
         from backend.puppy_backend import upgrade as backend_upgrade
         from puppy import web as puppy_web
         from puppy.web import build_app
@@ -3580,6 +3610,7 @@ async def main() -> None:
             temp_root / "codex-app-server", runner, db)
         exercise_auth_hardening(auth)
         exercise_activity_blocks(runner.SessionHub)
+        exercise_health_retry_bound(controller_backends)
         await exercise_shutdown_broadcast(runner)
         await exercise_queue_persistence(runner, db)
         await exercise_queue_pause(runner, db)

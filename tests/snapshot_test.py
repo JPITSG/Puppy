@@ -175,6 +175,11 @@ async def main() -> None:
             "uploads": {"enabled": True, "max_file_size_mb": 19,
                         "max_file_size_bytes": 19 * 1024 * 1024},
         })
+        db.meta_set("backend_last_sessions.{}".format(backend_id), {
+            "version": 1,
+            "sessions": [{"id": 91, "name": "cached remote session",
+                          "status": "idle", "active_since": None}],
+        })
 
         directory_id = db.create_session(
             "directory session", "codex", str(project), "", "", "#4dd0c4",
@@ -287,6 +292,8 @@ async def main() -> None:
         db.execute("DELETE FROM backends")
         db.execute("DELETE FROM meta WHERE key=?",
                    ("backend_last_known.{}".format(backend_id),))
+        db.execute("DELETE FROM meta WHERE key=?",
+                   ("backend_last_sessions.{}".format(backend_id),))
         shutil.rmtree(Path(config.DATA_DIR) / "uploads")
         tls_key.write_bytes(b"mutated-private-tls-material")
         project_file.write_text("changed after export", encoding="utf-8")
@@ -382,8 +389,14 @@ async def main() -> None:
         assert db.query_one("SELECT auto_upgrade FROM backends")["auto_upgrade"] == 1
         assert json.loads(db.query_one("SELECT urls FROM backends")["urls"]) == [
             "https://backend.test:10888", "https://backend-vpn.test:10888"]
-        assert db.meta_get("backend_last_known.{}".format(backend_id))["uploads"][
-            "max_file_size_mb"] == 19
+        restored_backend_cache = db.meta_get(
+            "backend_last_known.{}".format(backend_id))
+        assert restored_backend_cache["uploads"]["max_file_size_mb"] == 19
+        restored_session_cache = db.meta_get(
+            "backend_last_sessions.{}".format(backend_id))
+        assert restored_session_cache == {"version": 1, "sessions": [
+            {"id": 91, "name": "cached remote session",
+             "status": "idle", "active_since": None}]}
         assert db.query_one("SELECT username FROM users")["username"] == "snapshot-user"
         restored_scratch = db.get_session(scratch_id)
         assert restored_scratch["cwd"] != str(original_scratch)

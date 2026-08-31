@@ -2270,6 +2270,7 @@ function reconcileRemoteState() {
         state.remoteStopping[bid].controllerOfflineSeen = true;
       state.remoteOk[bid] = false;
       state.remoteErrors[bid] = health.reason || "Backend unavailable";
+      retireRemoteSessionActivity(bid);
     } else {
       delete state.remoteOk[bid];
       delete state.remoteErrors[bid];
@@ -2308,6 +2309,11 @@ function hydrateBackendLastKnown(backends) {
     const bid = Number(backend && backend.id) || 0;
     const known = backend && backend.last_known;
     if (!bid || !known || typeof known !== "object" || known.version !== 1) continue;
+    if (Array.isArray(known.sessions) &&
+        !Object.prototype.hasOwnProperty.call(state.remoteSessions, bid))
+      state.remoteSessions[bid] = known.sessions
+        .filter(session => session && typeof session === "object" && Number.isInteger(session.id))
+        .map(session => ({ ...session }));
     if (Array.isArray(known.engines)) state.engCache[bid] = known.engines;
     if (known.usage_refresh && typeof known.usage_refresh === "object")
       state.remoteUsageRefresh[bid] = known.usage_refresh;
@@ -2789,6 +2795,19 @@ function remoteStoppingMessage(bid) {
   return notice && notice.message ? notice.message : "";
 }
 
+function retireRemoteSessionActivity(rawBid) {
+  const bid = Number(rawBid) || 0;
+  if (!bid) return;
+  if (Array.isArray(state.remoteSessions[bid])) {
+    for (const session of state.remoteSessions[bid]) {
+      session.status = "idle";
+      session.active_since = null;
+    }
+  }
+  for (const key of [...sessionActivityAnchors.keys()])
+    if (key.startsWith(`${bid}:`)) sessionActivityAnchors.delete(key);
+}
+
 /* A graceful headless-node stop is different from discovering an outage on
    the next poll: it is authoritative now. Retire every cached running marker
    without firing a false "completed" notification, and let each open view
@@ -2807,14 +2826,7 @@ function handleRemoteNodeStopping(rawBid, notice = {}) {
   };
   state.remoteOk[bid] = false;
   state.remoteErrors[bid] = message;
-  if (Array.isArray(state.remoteSessions[bid])) {
-    for (const session of state.remoteSessions[bid]) {
-      session.status = "idle";
-      session.active_since = null;
-    }
-  }
-  for (const key of [...sessionActivityAnchors.keys()])
-    if (key.startsWith(`${bid}:`)) sessionActivityAnchors.delete(key);
+  retireRemoteSessionActivity(bid);
   for (const view of Object.values(state.views)) {
     if (!view || !view.tab || Number(view.tab.bid || 0) !== Number(bid)) continue;
     if (typeof view.handleNodeStopping === "function") view.handleNodeStopping(message);
@@ -3762,10 +3774,17 @@ function renderSidebar() {
       root.appendChild(el("div", "sess-empty", rows.length ?
         "Archived sessions hidden" : "No sessions yet"));
     for (const { bid, s } of list) {
-      const item = el("button", "sess-item" + (s.archived ? " archived" : ""));
+      const backendUnavailable = !!bid && state.remoteOk[bid] !== true;
+      const item = el("button", "sess-item" + (s.archived ? " archived" : "") +
+        (backendUnavailable ? " backend-unavailable" : ""));
       item.dataset.sessionId = String(s.id);
       item.dataset.bid = String(bid);
       item.dataset.sessionKey = sidebarSessionKey(bid, s.id);
+      if (backendUnavailable) {
+        item.dataset.backendAvailability = state.remoteOk[bid] === false ? "offline" : "checking";
+        item.setAttribute("aria-description",
+          `${backendName(bid)} is unavailable; this session can still be opened`);
+      }
       if (selectedSession === item.dataset.sessionKey) item.classList.add("active");
       const r1 = el("div", "si-row");
       r1.appendChild(sessDot(s));

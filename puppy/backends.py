@@ -52,8 +52,8 @@ AUTO_UPGRADE_CURRENT_RECHECK = 5 * 60.0
 HEALTH_SCAN_INTERVAL = 2.0
 HEALTH_PROBE_TIMEOUT = 3.0
 HEALTH_ONLINE_RECHECK = 30.0
-HEALTH_OFFLINE_RETRY_MIN = 8.0
-HEALTH_OFFLINE_RETRY_MAX = 120.0
+HEALTH_OFFLINE_RETRY_MIN = 2.0
+HEALTH_OFFLINE_RETRY_MAX = 8.0
 
 # Remote settings are node-owned, but an offline node cannot answer the Settings
 # page.  Keep the last authenticated values on the controller so every browser
@@ -70,6 +70,12 @@ LAST_KNOWN_LIMITS = {
     "browser": (dict, 8 * 1024),
     "system_prompt": (dict, 1024 * 1024),
 }
+# Session observations have their own exact shape so adding them does not widen
+# the established settings-cache format.  list_backends combines both only in
+# its transient response for the browser.
+LAST_SESSIONS_VERSION = 1
+LAST_SESSIONS_PREFIX = "backend_last_sessions."
+LAST_SESSIONS_MAX_BYTES = 4 * 1024 * 1024
 
 HOP_HEADERS = {"host", "connection", "upgrade", "sec-websocket-key", "sec-websocket-version",
                "sec-websocket-extensions", "sec-websocket-protocol", "cookie", "x-puppy-token",
@@ -300,6 +306,48 @@ def _last_known_key(bid: int) -> str:
     return LAST_KNOWN_PREFIX + str(int(bid))
 
 
+def _last_sessions_key(bid: int) -> str:
+    return LAST_SESSIONS_PREFIX + str(int(bid))
+
+
+def _validated_sessions(value):
+    if not isinstance(value, list):
+        return None
+    try:
+        encoded = json.dumps(
+            value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if len(encoded) > LAST_SESSIONS_MAX_BYTES:
+            return None
+        return json.loads(encoded.decode("utf-8"))
+    except (TypeError, ValueError, UnicodeError):
+        return None
+
+
+def _load_last_sessions(bid: int):
+    value = db.meta_get(_last_sessions_key(bid))
+    if not isinstance(value, dict) or set(value) != {"version", "sessions"} or \
+            value.get("version") != LAST_SESSIONS_VERSION:
+        return None
+    return _validated_sessions(value.get("sessions"))
+
+
+def _cache_remote_sessions(bid: int, sessions) -> bool:
+    normalized = _validated_sessions(sessions)
+    if normalized is None:
+        return False
+    key = _last_sessions_key(bid)
+    row = db.query_one("SELECT value FROM meta WHERE key=?", (key,))
+    current = _load_last_sessions(bid)
+    # A malformed or differently versioned value is rejected, never rewritten
+    # as an implicit persisted-format migration.
+    if row is not None and current is None:
+        return False
+    if current == normalized:
+        return False
+    db.meta_set(key, {"version": LAST_SESSIONS_VERSION, "sessions": normalized})
+    return True
+
+
 def _validated_last_known_value(name: str, value):
     spec = LAST_KNOWN_LIMITS.get(name)
     if spec is None or not isinstance(value, spec[0]):
@@ -338,6 +386,7 @@ def _load_last_known(bid: int):
 
 def _clear_last_known(bid: int) -> None:
     db.execute("DELETE FROM meta WHERE key=?", (_last_known_key(bid),))
+    db.execute("DELETE FROM meta WHERE key=?", (_last_sessions_key(bid),))
 
 
 def _merge_last_known(bid: int, updates: dict) -> bool:
@@ -372,7 +421,9 @@ def _cache_remote_payload(bid: int, tail: str, payload: dict) -> bool:
     if not isinstance(payload, dict):
         return False
     updates = {}
-    if tail in ("ping", "node"):
+    if tail == "sessions" and isinstance(payload.get("sessions"), list):
+        return _cache_remote_sessions(bid, payload["sessions"])
+    elif tail in ("ping", "node"):
         for name in ("uploads", "browser"):
             if name in payload:
                 updates[name] = payload[name]
@@ -394,7 +445,7 @@ def _cache_remote_payload(bid: int, tail: str, payload: dict) -> bool:
 
 def _cacheable_remote_tail(tail: str) -> bool:
     return tail in (
-        "ping", "node", "uploads/settings", "browser/status",
+        "sessions", "ping", "node", "uploads/settings", "browser/status",
         "browser/enabled", "system-prompt") or \
         tail == "engines" or tail.startswith("engines/")
 
@@ -419,7 +470,13 @@ def list_backends() -> list:
         item["auto_upgrade"] = bool(item.get("auto_upgrade"))
         item["upgrade_in_progress"] = item["id"] in _upgrades_in_progress
         item["availability"] = _availability(int(item["id"]))
-        item["last_known"] = _load_last_known(int(item["id"]))
+        bid = int(item["id"])
+        last_known = _load_last_known(bid)
+        last_sessions = _load_last_sessions(bid)
+        if last_sessions is not None:
+            last_known = dict(last_known or {"version": LAST_KNOWN_VERSION})
+            last_known["sessions"] = last_sessions
+        item["last_known"] = last_known
         out.append(item)
     return out
 
@@ -1611,16 +1668,20 @@ async def _proxy_ws(request: web.Request, backend: dict, urls: list,
                     if msg.type == WSMsgType.TEXT:
                         if from_backend and tail == "ws/updates":
                             try:
-                                notice = json.loads(msg.data)
+                                update = json.loads(msg.data)
                             except Exception:
-                                notice = None
-                            if isinstance(notice, dict) and \
-                                    notice.get("type") == "node_stopping":
-                                action = "restarting" if notice.get("reason") == "restart" \
+                                update = None
+                            if isinstance(update, dict) and \
+                                    update.get("type") == "node_stopping":
+                                action = "restarting" if update.get("reason") == "restart" \
                                     else "shutting down"
                                 if _mark_backend_offline(
                                         bid, "Backend {}".format(action)):
                                     _broadcast_backends()
+                            elif isinstance(update, dict) and \
+                                    update.get("type") == "sessions" and \
+                                    _cache_remote_payload(bid, "sessions", update):
+                                _broadcast_backends()
                         await dst.send_str(msg.data)
                     elif msg.type == WSMsgType.BINARY:
                         await dst.send_bytes(msg.data)

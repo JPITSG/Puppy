@@ -392,8 +392,12 @@ each backend row and admits proxy traffic only while that state is `online`.
 The browser therefore does not send session, engine, browser, or WebSocket
 requests to a backend already known to be offline. A lightweight authenticated
 `/api/ping` probe is the sole recovery traffic; failures use exponential
-backoff, while an explicit **Test** can retry immediately. This state is not
-persisted and does not change the controller/backend protocol version.
+backoff capped at eight seconds, while an explicit **Test** can retry
+immediately. This state is not persisted and does not change the
+controller/backend protocol version. The controller does retain the last
+authenticated session-list observation in a separate exact-version,
+rebuildable cache: an unavailable node's sessions remain visible and openable
+in the sidebar, visibly muted until the node is healthy again.
 
 ## Unattended engine updates
 

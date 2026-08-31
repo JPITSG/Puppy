@@ -521,7 +521,8 @@ def check_backend_shutdown_notice(ui_source: str) -> None:
 
     source = "\n".join(function(name) for name in (
         "controllerBackendHealth", "remoteStoppingMessage",
-        "handleRemoteNodeStopping", "clearRemoteNodeStopping"))
+        "retireRemoteSessionActivity", "handleRemoteNodeStopping",
+        "clearRemoteNodeStopping"))
     script = r"""
 const state = {
   backends: [{id: 7, name: "laptop"}, {id: 8, name: "other"}],
@@ -574,6 +575,70 @@ console.log(JSON.stringify({stoppedState, clearedState}));
     assert result["clearedState"] == {"notice": None, "error": None, "cleared": 1}, result
 
 
+def check_offline_sidebar_sessions(ui_source: str, css_source: str) -> None:
+    """Last-known remote sessions survive reload and remain openable while muted."""
+    def function(name):
+        start = ui_source.index("function " + name + "(")
+        brace = ui_source.index(") {", start) + 2
+        depth = 0
+        for index in range(brace, len(ui_source)):
+            if ui_source[index] == "{":
+                depth += 1
+            elif ui_source[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    return ui_source[start:index + 1]
+        raise AssertionError("unbalanced " + name)
+
+    source = "\n".join(function(name) for name in (
+        "hydrateBackendLastKnown", "controllerBackendHealth",
+        "retireRemoteSessionActivity", "reconcileRemoteState"))
+    script = r"""
+const cached = {id: 44, name: "cached", status: "running", active_since: 10};
+const state = {
+  backends: [{id: 7, availability: {state: "offline", reason: "powered off"},
+    last_known: {version: 1, sessions: [cached]}}],
+  remoteSessions: {}, remoteOk: {}, remoteErrors: {}, remoteStopping: {},
+  engCache: {}, remoteEngineErrors: {}, remoteEngineCheckedAt: {},
+  remoteNodeCheckedAt: {}, remoteUsageRefresh: {}, remoteAutoUpgrade: {},
+  remoteUploadSettings: {}, remoteSystemPrompts: {}, remoteBrowser: {}, nodeUsers: {},
+};
+const remotePollSequence = {};
+const sessionActivityAnchors = new Map([["7:44", 10]]);
+const normalizeUploadSettings = () => null;
+const syncRemoteUpdateConnections = () => {};
+const clearRemoteNodeStopping = () => {};
+%s
+hydrateBackendLastKnown(state.backends);
+const copied = state.remoteSessions[7][0] !== cached;
+const becameOnline = reconcileRemoteState();
+console.log(JSON.stringify({
+  copied, becameOnline, ok: state.remoteOk[7], error: state.remoteErrors[7],
+  session: state.remoteSessions[7][0], sourceStatus: cached.status,
+  anchorGone: !sessionActivityAnchors.has("7:44"),
+}));
+""" % source
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:700]
+    result = json.loads(proc.stdout.strip())
+    assert result["copied"] and result["becameOnline"] is False, result
+    assert result["ok"] is False and result["error"] == "powered off", result
+    assert result["session"]["status"] == "idle", result
+    assert result["session"]["active_since"] is None, result
+    assert result["sourceStatus"] == "running" and result["anchorGone"], result
+
+    sidebar = ui_source[
+        ui_source.index("function renderSidebar()"):
+        ui_source.index("\nfunction sessDot", ui_source.index("function renderSidebar()"))]
+    assert "const backendUnavailable = !!bid && state.remoteOk[bid] !== true;" in sidebar
+    assert '" backend-unavailable"' in sidebar
+    assert 'item.dataset.backendAvailability = state.remoteOk[bid] === false ?' in sidebar
+    assert "this session can still be opened" in sidebar
+    assert "item.disabled" not in sidebar
+    assert "openSessionTab(bid, s.id, s);" in sidebar
+    assert ".sess-item.backend-unavailable{opacity:.48;filter:grayscale(1)}" in css_source
+
+
 def check_controller_backend_pooling(ui_source: str) -> None:
     """Controller availability prevents browser probes of offline nodes."""
     def function(name):
@@ -595,7 +660,8 @@ def check_controller_backend_pooling(ui_source: str) -> None:
 
     source = "\n".join(function(name) for name in (
         "controllerBackendHealth", "backendPoolable", "backendConnectionAllowed",
-        "reconcileRemoteState", "remotePollIsCurrent", "pollRemoteBackend"))
+        "retireRemoteSessionActivity", "reconcileRemoteState",
+        "remotePollIsCurrent", "pollRemoteBackend"))
     script = r"""
 const state = {
   backends: [
@@ -4195,6 +4261,7 @@ async def main() -> None:
             check_static_template_styles(ui_source)
             check_reconnect_status(ui_source)
             check_backend_shutdown_notice(ui_source)
+            check_offline_sidebar_sessions(ui_source, css_source)
             check_controller_backend_pooling(ui_source)
             check_backend_last_known_settings(ui_source, css_source)
             check_interrupted_completion(ui_source)
