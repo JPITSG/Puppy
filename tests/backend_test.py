@@ -1149,25 +1149,33 @@ def stop_process(process: subprocess.Popen) -> None:
 
 async def stop_process_with_notice(process: subprocess.Popen, url: str, token: str,
                                    fingerprint: str = "") -> None:
-    """SIGTERM must announce the node lifecycle before its sockets disappear."""
+    """SIGTERM announces, closes live sockets, and exits without a 10s drain."""
     headers = {"X-Puppy-Token": token}
     async with aiohttp.ClientSession() as http:
         updates = await http.ws_connect(
             url + "/api/ws/updates", headers=headers, ssl=ssl_pin(fingerprint))
         first = await updates.receive_json(timeout=3)
         assert first["type"] == "sessions"
+        stop_started = time.monotonic()
         process.terminate()
         notice = await updates.receive_json(timeout=3)
         assert notice["type"] == "node_stopping", notice
         assert notice["reason"] == "shutdown", notice
         assert isinstance(notice["server_time"], (int, float)), notice
+        closing = await updates.receive(timeout=3)
+        assert closing.type in (aiohttp.WSMsgType.CLOSE,
+                                aiohttp.WSMsgType.CLOSING,
+                                aiohttp.WSMsgType.CLOSED), closing
+        assert closing.type != aiohttp.WSMsgType.CLOSE or closing.data == 1012, closing
         await updates.close()
     try:
-        process.wait(timeout=10)
+        process.wait(timeout=3)
     except subprocess.TimeoutExpired:
         process.kill()
         process.wait(timeout=5)
-        raise AssertionError("backend did not finish its graceful shutdown")
+        raise AssertionError("idle backend did not finish its prompt shutdown")
+    elapsed = time.monotonic() - stop_started
+    assert elapsed < 4, "idle backend shutdown took {:.2f}s".format(elapsed)
 
 
 def ssl_pin(fingerprint: str):

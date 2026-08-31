@@ -19,7 +19,8 @@ from urllib.parse import urlsplit
 import aiohttp
 from aiohttp import WSMsgType, web
 
-from puppy import __version__, config, db, protocol, runner, tls, upgrade_contract
+from puppy import (__version__, config, db, live_websockets, protocol, runner,
+                   tls, upgrade_contract)
 
 log = logging.getLogger("puppy.backends")
 
@@ -1600,6 +1601,7 @@ async def _proxy_ws(request: web.Request, backend: dict, urls: list,
     ws_server = web.WebSocketResponse(heartbeat=30, max_msg_size=1 << 22)
     try:
         await ws_server.prepare(request)
+        live_websockets.track(request, ws_server)
         socket_record = (bid, ws_server)
         _proxy_websockets.add(socket_record)
 

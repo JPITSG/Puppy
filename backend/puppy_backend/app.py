@@ -6,7 +6,7 @@ import logging
 
 from aiohttp import web
 
-from puppy import config, protocol, runner
+from puppy import config, live_websockets, protocol, runner
 from puppy.web import register_execution_api
 
 from . import upgrade
@@ -41,6 +41,7 @@ def build_app(include_terminal: bool = True, transport=None,
               upgrade_health=None) -> web.Application:
     app = web.Application(middlewares=[token_middleware],
                           client_max_size=8 * 1024 * 1024)
+    live_websockets.initialize(app)
     app["puppy_role"] = "backend"
     transport = dict(transport or {"encrypted": False})
     tls_enabled = bool(transport.get("encrypted"))
@@ -62,15 +63,20 @@ def build_app(include_terminal: bool = True, transport=None,
         # Set the runner's drain latch before the bounded socket write: a turn
         # finishing during that small window must not start its queued successor.
         runner.begin_shutdown()
+        reason = "restart" if _app.get("puppy_upgrade_draining") else "shutdown"
         if not _app["puppy_shutdown_notice_sent"]:
             _app["puppy_shutdown_notice_sent"] = True
-            reason = "restart" if _app.get("puppy_upgrade_draining") else "shutdown"
             try:
                 await runner.announce_node_stopping(reason)
             except Exception:
                 # A lifecycle hint must never obstruct the shutdown it reports.
                 log.warning("could not send graceful shutdown notice", exc_info=True)
-        await runner.shutdown()
+        try:
+            await runner.shutdown()
+        finally:
+            await live_websockets.close_all(
+                _app, "Puppy backend {}".format(
+                    "is restarting" if reason == "restart" else "is shutting down"))
 
     app.on_shutdown.append(on_shutdown)
     return app

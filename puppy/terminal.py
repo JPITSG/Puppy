@@ -26,7 +26,7 @@ import time
 
 from aiohttp import WSMsgType, web
 
-from puppy import config
+from puppy import config, live_websockets
 from puppy.drivers.base import clean_env
 from puppy.user_paths import service_home
 
@@ -868,6 +868,7 @@ async def _serve_viewer(request: web.Request, instance: TerminalInstance,
                         close_after: bool = False) -> web.WebSocketResponse:
     ws = web.WebSocketResponse(heartbeat=30, max_msg_size=1 << 20)
     await ws.prepare(request)
+    live_websockets.track(request, ws)
     if request.app.get("puppy_snapshot_busy"):
         await ws.close(code=1013, message=b"Puppy backup or restore in progress")
         return ws

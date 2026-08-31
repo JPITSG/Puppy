@@ -376,7 +376,11 @@ managed upgrade) before entering the ordinary turn grace window. Connected
 consoles can immediately mark that backend unavailable, retire cached running
 session state, and disable live controls instead of waiting for their next
 poll or TCP timeout. The write is best effort and bounded to one second, so a
-slow browser can never hold up machine shutdown. Abrupt power loss or a laptop
+slow browser can never hold up machine shutdown. Once the application-level
+turn drain is complete, the node explicitly closes every remaining Puppy
+WebSocket within a one-second bound; this keeps aiohttp's generic request drain
+from applying its shutdown timeout twice to long-lived channels. Abrupt power
+loss or a laptop
 whose network disappears before the OS runs service shutdown cannot emit the
 notice and is detected by the controller's health probe.
 

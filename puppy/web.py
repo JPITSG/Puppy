@@ -17,7 +17,8 @@ from aiohttp import WSMsgType, web
 from puppy import (__version__, auth, backends, bind_verify, browser,
                    cli_auto_upgrade, cli_releases,
                    cli_upgrade, config, db, host_metrics, listener_handoff, notify,
-                   protocol, runner, snapshots, system_prompts, terminal, uploads,
+                   live_websockets, protocol, runner, snapshots, system_prompts,
+                   terminal, uploads,
                    usage_refresh, workspace_links, workspace_sync, workspaces)
 from puppy.drivers import all_drivers, get_driver
 from puppy.drivers import base as driver_base
@@ -1043,6 +1044,7 @@ async def ws_session(request: web.Request):
     s = _session_or_404(request)
     ws = web.WebSocketResponse(heartbeat=30, max_msg_size=1 << 22)
     await ws.prepare(request)
+    live_websockets.track(request, ws)
     h = runner.hub(s["id"])
     try:
         # Draft changes are serialized with this first frame so a just-joined
@@ -1190,6 +1192,7 @@ async def ws_session(request: web.Request):
 async def ws_updates(request: web.Request):
     ws = web.WebSocketResponse(heartbeat=30)
     await ws.prepare(request)
+    live_websockets.track(request, ws)
     runner.updates_attach(ws)
     try:
         await ws.send_json(runner.sessions_payload())
@@ -1351,6 +1354,7 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
 def build_app() -> web.Application:
     app = web.Application(middlewares=[auth.middleware, state_change_guard],
                           client_max_size=8 * 1024 * 1024)
+    live_websockets.initialize(app)
     app["puppy_role"] = "full"
     host_metrics.register(app)
     app["puppy_snapshot_busy"] = None
@@ -1398,12 +1402,15 @@ def build_app() -> web.Application:
     register_execution_api(app, include_terminal=True)
 
     async def on_shutdown(app):
-        await bind_verify.close_all(app)
-        await backends.stop_auto_upgrade_worker(app)
-        await backends.stop_health_worker(app)
-        await workspace_links.stop_worker(app)
-        await runner.shutdown()
-        await backends.close_client()
+        try:
+            await bind_verify.close_all(app)
+            await backends.stop_auto_upgrade_worker(app)
+            await backends.stop_health_worker(app)
+            await workspace_links.stop_worker(app)
+            await runner.shutdown()
+        finally:
+            await live_websockets.close_all(app)
+            await backends.close_client()
 
     app.on_shutdown.append(on_shutdown)
     return app

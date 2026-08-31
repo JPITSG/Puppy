@@ -44,7 +44,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from aiohttp import WSMsgType, web
 
-from puppy import config
+from puppy import config, live_websockets
 
 log = logging.getLogger("puppy.browser")
 
@@ -3525,6 +3525,7 @@ async def h_binding_clear(request: web.Request):
 async def ws_browser(request: web.Request):
     ws = web.WebSocketResponse(heartbeat=30, max_msg_size=1 << 20)
     await ws.prepare(request)
+    live_websockets.track(request, ws)
     if request.app.get("puppy_snapshot_busy"):
         await ws.close(code=1013, message=b"Puppy backup or restore in progress")
         return ws
