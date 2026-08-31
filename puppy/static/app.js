@@ -3265,10 +3265,10 @@ function formatSessionActivity(startedAt, now = Date.now()) {
   const total = Number.isFinite(start) ?
     Math.max(0, Math.floor((now - start) / 1000)) : 0;
   const seconds = String(total % 60).padStart(2, "0");
-  const minutes = String(Math.floor(total / 60) % 60).padStart(2, "0");
+  const minutes = Math.floor(total / 60) % 60;
   if (total < 3600) return `${minutes}:${seconds}`;
-  const hours = String(Math.floor(total / 3600)).padStart(2, "0");
-  return `${hours}:${minutes}:${seconds}`;
+  const hours = Math.floor(total / 3600);
+  return `${hours}:${String(minutes).padStart(2, "0")}:${seconds}`;
 }
 
 function updateSessionActivityLabels() {
@@ -3614,6 +3614,9 @@ function renderSidebar() {
           ingestOneSessionActivity(g.bid, s, null, Date.now());
         activity.classList.add("active-time");
         activity.dataset.activityKey = key;
+        /* Match both halves of the running indicator to this session's colour:
+           the status ring at the left and the clock ring/text at the right. */
+        activity.style.color = s.color || "var(--txt3)";
         activity.textContent = formatSessionActivity(sessionActivityAnchors.get(key));
         activity.setAttribute("aria-label", `Agent active, ${activity.textContent}`);
       } else {

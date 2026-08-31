@@ -235,8 +235,15 @@ a{color:var(--acc2)}
 .si-row.sub{margin-top:2px}
 .si-be{font-size:9.5px;color:var(--txt3);flex-shrink:0}
 .si-be.active-time{
-  color:var(--txt2);font-family:var(--mono);font-variant-numeric:tabular-nums;
+  display:inline-flex;align-items:center;gap:4px;
+  font-family:var(--mono);font-variant-numeric:tabular-nums;
   position:relative;top:1px;
+}
+.si-be.active-time::before{
+  content:"";width:7px;height:7px;box-sizing:border-box;flex:0 0 7px;
+  border:2px solid var(--spin-track);
+  border-color:color-mix(in srgb,currentColor 30%,transparent);
+  border-top-color:currentColor;border-radius:50%;animation:spin .8s linear infinite;
 }
 .si-be.idle{letter-spacing:.08em}
 .sess-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0;color:var(--txt3);background:currentColor}

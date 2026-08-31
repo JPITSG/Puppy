@@ -2410,6 +2410,32 @@ def check_sidebar_icon_alignment(css_source: str) -> None:
     assert "margin-left:6px;position:relative;top:-1px;" in css_source
 
 
+def check_session_activity_clock(ui_source: str, css_source: str) -> None:
+    """Running clocks use a compact clock and repeat the session-colour spinner."""
+    start = ui_source.index("function formatSessionActivity(")
+    end = ui_source.index("\nfunction updateSessionActivityLabels", start)
+    formatter = ui_source[start:end]
+    script = formatter + r"""
+const start = 100000;
+console.log(JSON.stringify([0, 5, 61, 3599, 3600, 3661, 36000]
+  .map(seconds => formatSessionActivity(start, start + seconds * 1000))));
+"""
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:700]
+    assert json.loads(proc.stdout) == [
+        "0:00", "0:05", "1:01", "59:59", "1:00:00", "1:01:01", "10:00:00",
+    ]
+
+    sidebar = ui_source[
+        ui_source.index("function renderSidebar()"):
+        ui_source.index("\nfunction sessDot", ui_source.index("function renderSidebar()"))]
+    assert 'activity.style.color = s.color || "var(--txt3)";' in sidebar
+    assert ".si-be.active-time::before{" in css_source
+    assert "display:inline-flex;align-items:center;gap:4px;" in css_source
+    assert "border-top-color:currentColor;border-radius:50%;animation:spin .8s linear infinite;" \
+        in css_source
+
+
 def check_toast_touch_swipe(ui_source: str, css_source: str) -> None:
     """Only a deliberate rightward finger gesture dismisses an event toast."""
     start = ui_source.index("const TOAST_SWIPE_INTENT_PX = ")
@@ -3818,6 +3844,7 @@ async def main() -> None:
             check_opencode_chat_models(ui_source, css_source)
             check_session_provider_marks(css_source)
             check_sidebar_icon_alignment(css_source)
+            check_session_activity_clock(ui_source, css_source)
             check_toast_touch_swipe(ui_source, css_source)
             check_status_header_activation(ui_source, css_source)
             check_shared_node_order(ui_source, css_source)
