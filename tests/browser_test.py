@@ -2782,8 +2782,8 @@ console.log(JSON.stringify({mouse:mouse.stats,vertical:vertical.stats,left:left.
 
 
 def check_status_header_activation(ui_source: str, css_source: str) -> None:
-    """Session names and complete status lines are one-click targets."""
-    assert ui_source.count("wireDisclosureSurface(name, disclosure);") == 1
+    """Status-box node lines are one-click targets; the flat sidebar has none."""
+    assert "wireDisclosureSurface(name, disclosure);" not in ui_source
     assert ui_source.count("wireDisclosureSurface(head, disclosure);") == 1
     assert "wireDoubleClickOrTouch" not in ui_source
     assert ("display:flex;align-items:center;gap:6px;min-width:0;color:var(--txt3);" +
@@ -2792,18 +2792,77 @@ def check_status_header_activation(ui_source: str, css_source: str) -> None:
 
 
 def check_shared_node_order(ui_source: str, css_source: str) -> None:
-    """The sidebar and status panel edit the same browser-local node order."""
+    """The flat sidebar follows the node order the status panel edits."""
     sidebar = ui_source[
         ui_source.index("function renderSidebar()"):
         ui_source.index("\nfunction sessDot", ui_source.index("function renderSidebar()"))]
-    assert "sortNodeGroups(groups);" in sidebar
-    assert "wireNodeGroupDropZone(root);" in sidebar
-    assert 'wireNodeGroupDrag(group, t, key, ".sess-group");' in sidebar
+    assert "const nodes = sortNodeGroups([{ bid: 0 }]" in sidebar
+    assert "wireNodeGroupDrag(" not in sidebar
+    assert "disclosureButton(" not in sidebar
+    assert ui_source.count("wireNodeGroupDropZone(root);") == 1
     assert 'selector = ".foot-engine-group"' in ui_source
     assert 'restoreDragSlots(context, context.selector);' in ui_source
     assert 'lsSet(NODE_ORDER_KEY, JSON.stringify(keys));' in ui_source
-    assert ".sess-group.dragging{opacity:.28}" in css_source
-    assert "#sess-groups.reordering .sess-group{will-change:transform}" in css_source
+    assert ".foot-engine-group.dragging{opacity:.28}" in css_source
+    assert ".foot-engines.reordering .foot-engine-group{will-change:transform}" in css_source
+    assert ".sess-group.dragging" not in css_source
+    assert "#sess-groups.reordering .sess-item{will-change:transform}" in css_source
+
+
+def check_flat_session_list(ui_source: str, css_source: str) -> None:
+    """One cross-backend session list; rows name the backend owning the files."""
+    sidebar = ui_source[
+        ui_source.index("function renderSidebar()"):
+        ui_source.index("\nfunction sessDot", ui_source.index("function renderSidebar()"))]
+    assert 'el("section", "sess-group")' not in sidebar
+    assert "sess-group-title" not in sidebar
+    assert "item.dataset.bid = String(bid);" in sidebar
+    assert "sessionLocationLabel(s, bid));" in sidebar
+    assert "sessionLocationTitle(s, bid));" in sidebar
+    # the per-node openers moved to the status box beside its disclosures
+    foot = ui_source[
+        ui_source.index("function renderFootEngines()"):
+        ui_source.index("\nfunction findSessionMeta", ui_source.index("function renderFootEngines()"))]
+    assert "`Open browser on ${g.name}`" in foot
+    assert "`Open terminal on ${g.name}`" in foot
+    # reorder drags stay scoped to one backend inside the shared flat surface
+    assert 'const rowSelector = () => `.sess-item[data-bid="${dragSess.bid}"]`;' in ui_source
+    assert 'reorderChildren(root, `.sess-item[data-bid="${bid}"]`)' in ui_source
+    assert "container.insertBefore(dragged, siblings[siblings.length - 1].nextSibling);" \
+        in ui_source
+    assert ".sess-empty{padding:12px 6px 5px;" in css_source
+
+    start = ui_source.index("function sessionWorkspace(")
+    end = ui_source.index("\nfunction sessionDeleteMessage", start)
+    helpers = ui_source[start:end]
+    script = r"""
+const isScratchWorkspace=session=>!!session&&session.workspace_kind==="temporary";
+const backendName=bid=>bid===7?"NAS":"local";
+const tailPath=(path,n)=>path.length>n?"…"+path.slice(-n):path;
+%s
+const plain={cwd:"/etc/scripts/puppy"};
+const linked={cwd:"/private/mirror/never-show",workspace:{
+  root:"/volume1/projects/media-tools",node:"NAS"}};
+const scratch={cwd:"/tmp/puppy-scratch/x",workspace_kind:"temporary"};
+const expired={cwd:"/tmp/puppy-scratch/x",workspace_kind:"temporary",
+  workspace_missing:true};
+console.log(JSON.stringify([
+  sessionLocationLabel(plain,0),
+  sessionLocationLabel(linked,0),
+  sessionLocationTitle(linked,0),
+  sessionLocationLabel(scratch,7),
+  sessionLocationLabel(expired,7),
+]));
+""" % helpers
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:600]
+    assert json.loads(proc.stdout) == [
+        "local:/etc/scripts/puppy",
+        "NAS:…projects/media-tools",
+        "NAS:/volume1/projects/media-tools",
+        "Scratch workspace",
+        "Scratch workspace expired",
+    ]
 
 
 def check_switch_engine_initial_selection(ui_source: str) -> None:
@@ -4122,6 +4181,7 @@ async def main() -> None:
             check_toast_touch_swipe(ui_source, css_source)
             check_status_header_activation(ui_source, css_source)
             check_shared_node_order(ui_source, css_source)
+            check_flat_session_list(ui_source, css_source)
             check_switch_engine_initial_selection(ui_source)
             check_engine_picker_alignment(css_source)
             check_browser_chip_order(ui_source)
@@ -4136,16 +4196,15 @@ async def main() -> None:
             assert ".check input[type=checkbox],\n.menu-check-mark{" in css_source
             assert "-webkit-appearance:none;appearance:none" in css_source
             assert css_source.count("--check-tick:url(") == 1
-            # Session and engine-status disclosures share the sidebar's 240ms
-            # slide/fade helper. They are settled (and truly hidden) at rest,
-            # with transitions attached only for a user-triggered toggle so a
+            # Engine-status disclosures use the sidebar's 240ms slide/fade
+            # helper. They are settled (and truly hidden) at rest, with
+            # transitions attached only for a user-triggered toggle so a
             # restored collapse cannot animate during the first paint.
             assert "setDisclosureCollapsed(body, isCollapsed, animate);" in ui_source
             assert "sync(true);" in ui_source
             assert ui_source.count("SLIDE_MOTION_MS + 40") == 2
-            assert ".sess-group-body[hidden],.foot-engine-body[hidden]{display:none}" in css_source
-            assert (".sess-group-body.disclosure-animating," +
-                    ".foot-engine-body.disclosure-animating{") in css_source
+            assert ".foot-engine-body[hidden]{display:none}" in css_source
+            assert ".foot-engine-body.disclosure-animating{" in css_source
             assert "--slide-time:.24s;--slide-fade-time:.2s;" in css_source
             assert ("transition:height var(--slide-time) var(--ease)," +
                     "opacity var(--slide-fade-time) var(--ease),") in css_source
@@ -4192,9 +4251,9 @@ async def main() -> None:
             assert "position:absolute;z-index:1;top:6px;right:6px;width:27px;height:27px;" in css_source
             assert ".user-copy{opacity:.3}" in css_source
             assert ".code-copy:hover,.user-copy:hover{" in css_source
-            # Session labels and complete status lines use one click; later
-            # desktop double-click events cannot undo the first activation.
-            assert ui_source.count("wireDisclosureSurface(name, disclosure);") == 1
+            # Complete status lines use one click; later desktop double-click
+            # events cannot undo the first activation.
+            assert "wireDisclosureSurface(name, disclosure);" not in ui_source
             assert ui_source.count("wireDisclosureSurface(head, disclosure);") == 1
             assert "if (event.detail > 1) return;" in ui_source
             assert ui_source.count("event.detail > 0 && event.detail % 2 === 0") == 1

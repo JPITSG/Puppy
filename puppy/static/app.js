@@ -1036,7 +1036,6 @@ function fmtEndpoint(host, port) {
   return `${value.includes(":") ? `[${value}]` : value}:${port}`;
 }
 
-const collapsedSessionBackends = storedStringSet("puppy.collapsed.session-backends");
 const collapsedStatusBackends = storedStringSet("puppy.collapsed.status-backends");
 let disclosureSeq = 0;
 const disclosureMotionTimers = new WeakMap();
@@ -1583,6 +1582,22 @@ function workspaceLocationLabel(session, bid, maxChars = 38) {
 
 function workspaceLocationTitle(session, bid) {
   return `${workspaceLocationNode(session, bid)}:${workspaceLocationPath(session)}`;
+}
+
+/* Sidebar rows carry the same node-qualified location as the open session's
+   pill, because the flat list mixes every backend's sessions. Scratch rows
+   keep their plainer wording: a disposable path identifies nothing. The char
+   budgets stay inside the default column - measured 26, or 24 beside the ⇄
+   mark a linked row also carries - so the ellipsis lands on the left, where
+   tailPath puts it; a CSS overflow cut would eat the telling tail instead. */
+function sessionLocationLabel(session, bid) {
+  if (isScratchWorkspace(session)) return workspaceLabel(session);
+  return workspaceLocationLabel(session, bid, sessionWorkspace(session) ? 24 : 26);
+}
+
+function sessionLocationTitle(session, bid) {
+  if (isScratchWorkspace(session)) return workspaceTitle(session);
+  return workspaceLocationTitle(session, bid);
 }
 
 function sessionDeleteMessage(session) {
@@ -3669,152 +3684,88 @@ function renderSidebar() {
     dragSess.renderPending = true;
     return;
   }
-  if (dragNode && dragNode.item && dragNode.item.isConnected &&
-      dragNode.container === $("sess-groups")) {
-    dragNode.renderPending = true;
-    return;
-  }
   const root = $("sess-groups");
   root.innerHTML = "";
-  const groups = [{ bid: 0, name: backendName(0), ok: true, status: "ok",
-    browser: browserEnabledFor(0) }]
-    .concat(state.backends.map(b => {
-      const status = remoteAvailability(b.id);
-      return { bid: b.id, name: b.name, ok: status !== "bad", status,
-        terminal: backendHasCapability(b, "terminal"),
-        browser: browserEnabledFor(b.id) };
-    }));
-  sortNodeGroups(groups);
-  wireNodeGroupDropZone(root);
-  const availableSessions = new Set();
-  for (const group of groups)
-    for (const session of sessionsFor(group.bid))
-      availableSessions.add(sidebarSessionKey(group.bid, session.id));
+  wireSessionDropZone(root);
+  /* One flat list across every node - the per-backend blocks live in the
+     status box below. Rows follow that box's saved node order between
+     backends while keeping each backend's own sticky manual order within. */
+  const nodes = sortNodeGroups([{ bid: 0 }]
+    .concat(state.backends.map(b => ({ bid: b.id }))));
+  const rows = [];
+  for (const node of nodes)
+    for (const s of sessionsFor(node.bid)) rows.push({ bid: node.bid, s });
+  const availableSessions = new Set(
+    rows.map(row => sidebarSessionKey(row.bid, row.s.id)));
   if (state.selectedSession && !availableSessions.has(state.selectedSession))
     state.selectedSession = null;
   const selectedSession = state.selectedSession || focusedSessionKey();
-  const showGroups = groups.length > 1;
-  for (const g of groups) {
-    const group = el("section", "sess-group");
-    const body = el("div", "sess-group-body");
-    if (showGroups) {
-      const t = el("div", "sess-group-title");
-      const dot = el("span", "gdot " + g.status);
-      dot.setAttribute("role", "img");
-      dot.setAttribute("aria-label", g.bid ? remoteAvailabilityTitle(g.bid) : "available");
-      const name = el("span", "sess-group-name", g.name);
-      const key = g.bid ? `remote:${g.bid}` : "local";
-      const disclosure = disclosureButton(`${g.name} sessions`, body,
-        collapsedSessionBackends, "puppy.collapsed.session-backends", key);
-      wireDisclosureSurface(name, disclosure);
-      t.appendChild(dot);
-      t.appendChild(name);
-      if (g.browser) {
-        const browse = el("button", "sess-group-terminal sess-group-browser");
-        browse.type = "button";
-        browse.setAttribute("aria-label", `Open browser on ${g.name}`);
-        browse.appendChild(globeIcon(12));
-        browse.onclick = event => {
-          event.preventDefault();
-          event.stopPropagation();
-          openNewBrowser(g.bid, state.activeGroup);
-          closeDrawer();
-        };
-        t.appendChild(browse);
-      }
-      if (!g.bid || g.terminal) {
-        const terminal = el("button", "sess-group-terminal");
-        terminal.type = "button";
-        terminal.setAttribute("aria-label", `Open terminal on ${g.name}`);
-        terminal.appendChild(terminalIcon(12));
-        terminal.onclick = event => {
-          event.preventDefault();
-          event.stopPropagation();
-          openTermTab(g.bid, "");
-          closeDrawer();
-        };
-        t.appendChild(terminal);
-      }
-      t.appendChild(disclosure);
-      group.appendChild(t);
-      group.dataset.nodeKey = key;
-      wireNodeGroupDrag(group, t, key, ".sess-group");
+  const list = rows.filter(row => state.showArchived || !row.s.archived);
+  if (!list.length)
+    root.appendChild(el("div", "sess-empty", rows.length ?
+      "Archived sessions hidden" : "No sessions yet"));
+  for (const { bid, s } of list) {
+    const item = el("button", "sess-item" + (s.archived ? " archived" : ""));
+    item.dataset.sessionId = String(s.id);
+    item.dataset.bid = String(bid);
+    item.dataset.sessionKey = sidebarSessionKey(bid, s.id);
+    if (selectedSession === item.dataset.sessionKey) item.classList.add("active");
+    const r1 = el("div", "si-row");
+    r1.appendChild(sessDot(s));
+    r1.appendChild(el("div", "si-name", s.name || `Session ${s.id}`));
+    const activity = el("span", "si-be");
+    if (s.status === "running") {
+      const key = sessionActivityKey(bid, s.id);
+      if (!sessionActivityAnchors.has(key))
+        ingestOneSessionActivity(bid, s, null, Date.now());
+      activity.classList.add("active-time");
+      activity.dataset.activityKey = key;
+      /* The clock ring and text use the same blue as prompt status messages,
+         independent of the session colour used by the status ring at left. */
+      activity.textContent = formatSessionActivity(sessionActivityAnchors.get(key));
+      activity.setAttribute("aria-label", `Agent active, ${activity.textContent}`);
+    } else {
+      activity.classList.add("idle");
+      activity.textContent = "IDLE";
+      activity.setAttribute("aria-label", "Session idle");
     }
-    const allSessions = sessionsFor(g.bid);
-    const list = allSessions.filter(s => state.showArchived || !s.archived);
-    if (!list.length) {
-      let message = "No sessions yet";
-      if (!g.ok) message = remoteStoppingMessage(g.bid) || "Backend unavailable";
-      else if (!state.showArchived && allSessions.some(s => s.archived)) message = "Archived sessions hidden";
-      else if (showGroups) message = g.bid === 0 ? "No local sessions" : "No sessions attached";
-      body.appendChild(el("div", "sess-group-empty" + (showGroups ? "" : " standalone"), message));
+    r1.appendChild(activity);
+    const r2 = el("div", "si-row sub");
+    r2.appendChild(provIcon(s.engine));
+    const workspace = el("div", "si-sub" + (s.workspace_missing ? " warn" : ""),
+      sessionLocationLabel(s, bid));
+    workspace.setAttribute("aria-label", sessionLocationTitle(s, bid));
+    r2.appendChild(workspace);
+    if (sessionWorkspace(s)) {
+      const wsLink = linkForSession(bid, s.id);
+      const st = wsLink ? wsLink.state : (s.ws_dirty ? "pending" : "");
+      const mark = el("span", "si-ws" +
+        (st === "conflict" || st === "pending" ? " warn" :
+         st === "error" ? " err" :
+         st === "syncing" || st === "init" ? " busy" : ""), "⇄");
+      mark.setAttribute("aria-label",
+        "Linked workspace" + (st ? " · " + st : ""));
+      r2.appendChild(mark);
     }
-    for (const s of list) {
-      const item = el("button", "sess-item" + (s.archived ? " archived" : ""));
-      item.dataset.sessionId = String(s.id);
-      item.dataset.sessionKey = sidebarSessionKey(g.bid, s.id);
-      if (selectedSession === item.dataset.sessionKey) item.classList.add("active");
-      const r1 = el("div", "si-row");
-      r1.appendChild(sessDot(s));
-      r1.appendChild(el("div", "si-name", s.name || `Session ${s.id}`));
-      const activity = el("span", "si-be");
-      if (s.status === "running") {
-        const key = sessionActivityKey(g.bid, s.id);
-        if (!sessionActivityAnchors.has(key))
-          ingestOneSessionActivity(g.bid, s, null, Date.now());
-        activity.classList.add("active-time");
-        activity.dataset.activityKey = key;
-        /* The clock ring and text use the same blue as prompt status messages,
-           independent of the session colour used by the status ring at left. */
-        activity.textContent = formatSessionActivity(sessionActivityAnchors.get(key));
-        activity.setAttribute("aria-label", `Agent active, ${activity.textContent}`);
-      } else {
-        activity.classList.add("idle");
-        activity.textContent = "IDLE";
-        activity.setAttribute("aria-label", "Session idle");
+    item.appendChild(r1); item.appendChild(r2);
+    const pointerForClick = activationPointer(item);
+    item.onclick = event => {
+      const pointerType = pointerForClick(event);
+      selectSidebarSession(bid, s.id);
+      /* Keyboard activation has no click count, so it follows touch and opens
+         immediately. A mouse opens on each completed double-click pair. */
+      if (pointerType === "touch" || event.detail === 0 ||
+          (event.detail > 0 && event.detail % 2 === 0)) {
+        openSessionTab(bid, s.id, s);
+        closeDrawer();
       }
-      r1.appendChild(activity);
-      const r2 = el("div", "si-row sub");
-      r2.appendChild(provIcon(s.engine));
-      const workspace = el("div", "si-sub" + (s.workspace_missing ? " warn" : ""),
-        workspaceLabel(s));
-      workspace.setAttribute("aria-label", workspaceTitle(s));
-      r2.appendChild(workspace);
-      if (sessionWorkspace(s)) {
-        const wsLink = linkForSession(g.bid, s.id);
-        const st = wsLink ? wsLink.state : (s.ws_dirty ? "pending" : "");
-        const mark = el("span", "si-ws" +
-          (st === "conflict" || st === "pending" ? " warn" :
-           st === "error" ? " err" :
-           st === "syncing" || st === "init" ? " busy" : ""), "⇄");
-        mark.setAttribute("aria-label",
-          "Linked workspace" + (st ? " · " + st : ""));
-        r2.appendChild(mark);
-      }
-      item.appendChild(r1); item.appendChild(r2);
-      const pointerForClick = activationPointer(item);
-      item.onclick = event => {
-        const pointerType = pointerForClick(event);
-        selectSidebarSession(g.bid, s.id);
-        /* Keyboard activation has no click count, so it follows touch and opens
-           immediately. A mouse opens on each completed double-click pair. */
-        if (pointerType === "touch" || event.detail === 0 ||
-            (event.detail > 0 && event.detail % 2 === 0)) {
-          openSessionTab(g.bid, s.id, s);
-          closeDrawer();
-        }
-      };
-      suppressContextGestureActivation(item);
-      item.addEventListener("contextmenu", (e) => sessionContextMenu(e, g.bid, s));
-      wireSessionDrag(item, g.bid, s.id);
-      body.appendChild(item);
-    }
-    group.appendChild(body);
-    wireSessionDropZone(group, body, g.bid);
-    root.appendChild(group);
+    };
+    suppressContextGestureActivation(item);
+    item.addEventListener("contextmenu", (e) => sessionContextMenu(e, bid, s));
+    wireSessionDrag(item, bid, s.id);
+    root.appendChild(item);
   }
-  let archTotal = 0;
-  for (const g of groups) archTotal += sessionsFor(g.bid).filter(s => s.archived).length;
+  const archTotal = rows.filter(row => row.s.archived).length;
   const tog = $("toggle-archived");
   tog.textContent = (state.showArchived ? "Hide archived" : "Show archived") + ` (${archTotal})`;
   tog.classList.toggle("hidden", archTotal === 0);
@@ -4035,7 +3986,12 @@ function moveDragSlot(container, dragged, selector, coordinate, horizontal) {
   }
   if (current.indexOf(dragged) === slot) return false;
   animateChildReorder(container, selector, () => {
+    /* Past the last matched sibling means directly after it, not at the
+       container's end: a selector-scoped drag in a mixed container must not
+       jump the unmatched rows that follow its own run. */
     if (slot < siblings.length) container.insertBefore(dragged, siblings[slot]);
+    else if (siblings.length)
+      container.insertBefore(dragged, siblings[siblings.length - 1].nextSibling);
     else container.appendChild(dragged);
   });
   return true;
@@ -4101,32 +4057,37 @@ function wireSessionDrag(item, bid, sid) {
   item.addEventListener("dragend", () => cancelSessionDrag(item));
 }
 
-function wireSessionDropZone(surface, body, bid) {
-  /* The whole backend block is a drop surface, not only the row container.
-     That keeps the native cursor valid over the title and the small spaces
-     exposed while siblings animate. dragenter matters when live reflow puts
-     a different element beneath a stationary pointer before the next
-     dragover event arrives. */
-  surface.addEventListener("dragenter", (e) => {
-    if (!dragSess || dragSess.bid !== bid || dragSess.container !== body) return;
-    acceptReorderDrag(e);
+function wireSessionDropZone(root) {
+  /* The flat panel is one shared drop surface, wired once because the element
+     outlives its rows. Sticky manual ordering stays scoped to one backend:
+     the drag's own bid selects which rows it may slide between, so every
+     other backend's rows simply flow around the moving slot. dragenter
+     matters when live reflow puts a different element beneath a stationary
+     pointer before the next dragover event arrives. */
+  if (root.dataset.sessionReorderWired === "1") return;
+  root.dataset.sessionReorderWired = "1";
+  const mine = () => !!dragSess && dragSess.container === root;
+  const rowSelector = () => `.sess-item[data-bid="${dragSess.bid}"]`;
+  root.addEventListener("dragenter", (e) => {
+    if (mine()) acceptReorderDrag(e);
   });
-  surface.addEventListener("dragover", (e) => {
-    if (!dragSess || dragSess.bid !== bid || dragSess.container !== body) return;
+  root.addEventListener("dragover", (e) => {
+    if (!mine()) return;
     acceptReorderDrag(e);
-    moveDragSlot(body, dragSess.item, ".sess-item", e.clientY, false);
+    moveDragSlot(root, dragSess.item, rowSelector(), e.clientY, false);
   });
-  surface.addEventListener("drop", async (e) => {
-    if (!dragSess || dragSess.bid !== bid || dragSess.container !== body) return;
+  root.addEventListener("drop", async (e) => {
+    if (!mine()) return;
     acceptReorderDrag(e);
     const context = dragSess;
     dragSess = null;
     context.item.classList.remove("dragging");
-    body.classList.remove("reordering");
+    root.classList.remove("reordering");
 
+    const bid = context.bid;
     const all = sessionsFor(bid);
     const previousIds = all.map(session => session.id);
-    const visibleIds = reorderChildren(body, ".sess-item")
+    const visibleIds = reorderChildren(root, `.sess-item[data-bid="${bid}"]`)
       .map(node => Number(node.dataset.sessionId));
     const visibleSet = new Set(visibleIds);
     if (visibleIds.some(id => !Number.isInteger(id)) || visibleSet.size !== visibleIds.length ||
@@ -4408,9 +4369,10 @@ function renderFootEngines() {
   }
   root.innerHTML = "";
   const groups = [{ bid: 0, name: backendName(0), version: state.version || "",
-                    engines: state.engines }]
+                    terminal: true, engines: state.engines }]
     .concat(state.backends.map(b => ({
       bid: b.id, name: b.name, version: b.remote_version || "",
+      terminal: backendHasCapability(b, "terminal"),
       engines: Object.prototype.hasOwnProperty.call(state.engCache, b.id) ? state.engCache[b.id] : null,
     })));
   sortNodeGroups(groups);
@@ -4436,6 +4398,34 @@ function renderFootEngines() {
         const version = el("span", "foot-engine-version", `· v${g.version}`);
         version.setAttribute("aria-label", `version ${g.version}`);
         head.appendChild(version);
+      }
+      /* These per-node openers used to ride the sidebar's backend titles;
+         with the session list flat, this box is where a node is a row. */
+      if (browserEnabledFor(g.bid)) {
+        const browse = el("button", "foot-node-act");
+        browse.type = "button";
+        browse.setAttribute("aria-label", `Open browser on ${g.name}`);
+        browse.appendChild(globeIcon(12));
+        browse.onclick = event => {
+          event.preventDefault();
+          event.stopPropagation();
+          openNewBrowser(g.bid, state.activeGroup);
+          closeDrawer();
+        };
+        head.appendChild(browse);
+      }
+      if (g.terminal) {
+        const terminal = el("button", "foot-node-act");
+        terminal.type = "button";
+        terminal.setAttribute("aria-label", `Open terminal on ${g.name}`);
+        terminal.appendChild(terminalIcon(12));
+        terminal.onclick = event => {
+          event.preventDefault();
+          event.stopPropagation();
+          openTermTab(g.bid, "");
+          closeDrawer();
+        };
+        head.appendChild(terminal);
       }
       head.appendChild(disclosure);
       wireDisclosureSurface(head, disclosure);

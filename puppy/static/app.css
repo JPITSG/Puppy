@@ -165,38 +165,18 @@ a{color:var(--acc2)}
 /* bottom padding 0: the flexible spacer above supplies the gap, so the link
    sits as close to the divider as the rows below it */
 .side-scroll .linklike{margin-top:auto;align-self:flex-start;flex-shrink:0;padding:8px 6px 0}
+/* Backend group titles survive only in the Open session modal; the sidebar
+   itself is one flat list and the status box below owns the backend rows. */
 .sess-group-title{
   font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:var(--txt3);
   padding:5px 6px;display:flex;align-items:center;gap:6px;
 }
-/* A backend title sits as far below the row above it as its own first row sits
-   below it: 5px + row border + row padding, read either way. That needs the row
-   above to drop the 6px it keeps between rows. */
-.sess-group:not(:last-child)>.sess-group-body>.sess-item:last-child{margin-bottom:0}
-/* same rule for the flat Open session list, where titles are row siblings;
-   kept apart so a parser without :has() still applies the sidebar one */
+/* Titles are row siblings in that flat modal list: the row above a title
+   drops the 6px it keeps between plain rows. */
 .sess-item:has(+.sess-group-title){margin-bottom:0}
-/* The first group needs no top padding: the scroller's 2px plus the actions'
-   10px already give it the same 12px clearance the New session button has above. */
-#sess-groups>.sess-group:first-child>.sess-group-title{padding-top:0}
-.sess-group.dragging{opacity:.28}
-#sess-groups.reordering .sess-group{will-change:transform}
 .gdot{display:block;flex:0 0 6px;width:6px;height:6px;border-radius:50%;background:var(--txt3)}
 .gdot.ok{background:var(--ok)}
 .gdot.bad{background:var(--err)}
-.sess-group-name{
-  min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
-  cursor:pointer;user-select:none;
-}
-.sess-group-terminal{
-  width:18px;height:18px;margin:-4px 0;padding:0;display:inline-flex;align-items:center;
-  justify-content:center;flex:0 0 auto;border:0;border-radius:var(--btn-r);background:transparent;
-  color:var(--txt3);cursor:pointer;
-  transition:background .15s var(--ease),color .15s var(--ease),transform .12s var(--ease);
-}
-.sess-group-terminal svg{display:block}
-@media (hover:hover){.sess-group-terminal:hover{background:var(--hov);color:var(--txt)}}
-.sess-group-terminal:active{background:var(--hov);color:var(--txt);transform:scale(.9)}
 .disclosure-toggle{
   width:18px;height:18px;margin:-4px 0 -4px -3px;padding:0;display:inline-flex;align-items:center;
   justify-content:center;flex-shrink:0;border:0;border-radius:var(--btn-r);background:transparent;
@@ -207,10 +187,7 @@ a{color:var(--acc2)}
 .disclosure-toggle[aria-expanded=false] svg{transform:rotate(-90deg)}
 @media (hover:hover){.disclosure-toggle:hover{background:var(--hov);color:var(--txt)}}
 .disclosure-toggle:active{background:var(--hov);color:var(--txt);transform:scale(.9)}
-.sess-group-empty{
-  padding:2px 6px 10px 18px;color:var(--txt3);font-size:11px;line-height:1.35;
-}
-.sess-group-empty.standalone{padding:12px 6px 5px}
+.sess-empty{padding:12px 6px 5px;color:var(--txt3);font-size:11px;line-height:1.35}
 /* Surfaces whose press-and-hold or tap belongs to puppy: the session rows and
    tabs that open a menu, the backend names that toggle, and the remote
    browser screen. Android begins a text selection on the very same gesture, so
@@ -219,7 +196,7 @@ a{color:var(--acc2)}
    starts selecting before any event a handler could cancel. Safe here because
    the text on these rows is a label, not content - the terminal, which people
    genuinely select from, is deliberately absent. */
-.sess-item,.tab,.sess-group-name,.foot-engine-name,.foot-engine-head,.br-stage{
+.sess-item,.tab,.foot-engine-name,.foot-engine-head,.br-stage{
   -webkit-user-select:none;user-select:none;
   -webkit-touch-callout:none;
   -webkit-tap-highlight-color:transparent;
@@ -297,7 +274,7 @@ a{color:var(--acc2)}
 .sess-item.active{background:var(--acc-dim);border-color:var(--acc-line-soft)}
 .sess-item.archived{opacity:.5}
 .sess-item.dragging{opacity:.28}
-.sess-group-body.reordering .sess-item{will-change:transform}
+#sess-groups.reordering .sess-item{will-change:transform}
 .engine-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0;color:var(--txt3);background:currentColor}
 .engine-dot.claude{color:var(--claude)}
 .engine-dot.codex{color:var(--codex)}
@@ -334,14 +311,14 @@ a{color:var(--acc2)}
   --disclosure-gap:4px;display:flex;flex-direction:column;gap:4px;min-width:0;
   margin-top:var(--disclosure-gap);
 }
-.sess-group-body[hidden],.foot-engine-body[hidden]{display:none}
-.sess-group-body.disclosure-animating,.foot-engine-body.disclosure-animating{
+.foot-engine-body[hidden]{display:none}
+.foot-engine-body.disclosure-animating{
   overflow:hidden;
   transition:height var(--slide-time) var(--ease),opacity var(--slide-fade-time) var(--ease),
              margin-top var(--slide-time) var(--ease);
 }
 @media (prefers-reduced-motion:reduce){
-  .sess-group-body.disclosure-animating,.foot-engine-body.disclosure-animating{transition:none}
+  .foot-engine-body.disclosure-animating{transition:none}
 }
 .foot-engine-group+.foot-engine-group{border-top:1px solid var(--line);margin-top:3px;padding-top:7px}
 .foot-engine-head{display:flex;align-items:center;gap:6px;min-width:0;color:var(--txt3);cursor:pointer;}
@@ -359,6 +336,16 @@ a{color:var(--acc2)}
 .foot-engine-version{
   flex:0 0 auto;color:var(--txt3);font:9px var(--mono);white-space:nowrap;letter-spacing:0;
 }
+/* per-node browser/terminal openers, sized like the disclosure beside them */
+.foot-node-act{
+  width:18px;height:18px;margin:-4px 0;padding:0;display:inline-flex;align-items:center;
+  justify-content:center;flex:0 0 auto;border:0;border-radius:var(--btn-r);background:transparent;
+  color:var(--txt3);cursor:pointer;
+  transition:background .15s var(--ease),color .15s var(--ease),transform .12s var(--ease);
+}
+.foot-node-act svg{display:block}
+@media (hover:hover){.foot-node-act:hover{background:var(--hov);color:var(--txt)}}
+.foot-node-act:active{background:var(--hov);color:var(--txt);transform:scale(.9)}
 .foot-engine-empty{padding-left:22px;color:var(--txt3);font-size:10px}
 .foot-eng{display:flex;align-items:center;gap:6px;min-width:0;font-size:11px;color:var(--txt2)}
 /* -8px pulls the icon column left so the dots' visual inset matches the 14px right inset */
