@@ -237,7 +237,7 @@ a{color:var(--acc2)}
 .si-be.active-time{
   display:inline-flex;align-items:center;gap:4px;
   font-family:var(--mono);font-variant-numeric:tabular-nums;
-  position:relative;top:1px;
+  position:relative;top:1px;color:var(--acc2);
 }
 .si-be.active-time::before{
   content:"";width:7px;height:7px;box-sizing:border-box;flex:0 0 7px;

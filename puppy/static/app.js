@@ -3689,9 +3689,8 @@ function renderSidebar() {
           ingestOneSessionActivity(g.bid, s, null, Date.now());
         activity.classList.add("active-time");
         activity.dataset.activityKey = key;
-        /* Match both halves of the running indicator to this session's colour:
-           the status ring at the left and the clock ring/text at the right. */
-        activity.style.color = s.color || "var(--txt3)";
+        /* The clock ring and text use the same blue as prompt status messages,
+           independent of the session colour used by the status ring at left. */
         activity.textContent = formatSessionActivity(sessionActivityAnchors.get(key));
         activity.setAttribute("aria-label", `Agent active, ${activity.textContent}`);
       } else {

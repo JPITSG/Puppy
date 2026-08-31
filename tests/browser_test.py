@@ -2466,7 +2466,7 @@ def check_sidebar_icon_alignment(css_source: str) -> None:
 
 
 def check_session_activity_clock(ui_source: str, css_source: str) -> None:
-    """Running clocks use a compact clock and repeat the session-colour spinner."""
+    """Running clocks use a compact clock and the shared prompt-status blue."""
     start = ui_source.index("function formatSessionActivity(")
     end = ui_source.index("\nfunction updateSessionActivityLabels", start)
     formatter = ui_source[start:end]
@@ -2484,9 +2484,10 @@ console.log(JSON.stringify([0, 5, 61, 3599, 3600, 3661, 36000]
     sidebar = ui_source[
         ui_source.index("function renderSidebar()"):
         ui_source.index("\nfunction sessDot", ui_source.index("function renderSidebar()"))]
-    assert 'activity.style.color = s.color || "var(--txt3)";' in sidebar
+    assert "activity.style.color" not in sidebar
     assert ".si-be.active-time::before{" in css_source
     assert "display:inline-flex;align-items:center;gap:4px;" in css_source
+    assert "position:relative;top:1px;color:var(--acc2);" in css_source
     assert "border-top-color:currentColor;border-radius:50%;animation:spin .8s linear infinite;" \
         in css_source
 
