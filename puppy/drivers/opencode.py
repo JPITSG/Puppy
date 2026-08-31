@@ -36,6 +36,7 @@ _ID_SESSION = "puppy:session"
 _ID_LOAD = "puppy:load"
 _ID_CONFIG = "puppy:config"
 _ID_PROMPT = "puppy:prompt"
+_ID_STEER_PREFIX = "puppy:steer:"
 
 
 def _rpc(request_id, method: str, params: dict) -> dict:
@@ -276,6 +277,7 @@ class OpenCodeDriver(Driver):
     # source those files, so check the documented installation directly too.
     binary_fallbacks = ("~/.opencode/bin/opencode",)
     uses_stdin_stream = True
+    supports_steering = True
     availability_only = True
     dynamic_model_options = True
     allow_custom_model = False
@@ -483,6 +485,20 @@ class OpenCodeDriver(Driver):
                 "terminal": False,
             },
         })]
+
+    def steer_payload(self, session, ctx, text, request_id):
+        ctx = ctx if isinstance(ctx, dict) else {}
+        session_id = str(ctx.get("session_id") or "")
+        if ctx.get("phase") != "prompt" or not session_id:
+            return None
+        # ACP v1 has no separately named steer method. OpenCode's pinned ACP
+        # adapter persists a concurrent session/prompt message and its active
+        # run consumes that message at the next loop boundary. A distinct RPC
+        # id keeps its eventual response separate from the original prompt.
+        return _rpc(_ID_STEER_PREFIX + request_id, "session/prompt", {
+            "sessionId": session_id,
+            "prompt": [{"type": "text", "text": text}],
+        })
 
     @staticmethod
     def _flush_stream(ctx: dict) -> list:

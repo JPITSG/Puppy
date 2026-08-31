@@ -558,6 +558,35 @@ async def h_session_message(request: web.Request):
     return web.json_response(res, status=status)
 
 
+async def h_session_steer(request: web.Request):
+    s = _session_or_404(request)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid steering request"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "steering request must be an object"},
+                                 status=400)
+    text = body.get("text", "")
+    if not isinstance(text, str):
+        return web.json_response({"error": "steering text must be text"}, status=400)
+    text = text.strip()
+    if not text:
+        return web.json_response({"error": "empty steering message"}, status=400)
+    if len(text) > runner.MAX_STEER_CHARS:
+        return web.json_response({
+            "error": "steering message cannot exceed {} characters".format(
+                runner.MAX_STEER_CHARS)}, status=400)
+    request_id = body.get("request_id", "")
+    if request_id is None:
+        request_id = ""
+    if not isinstance(request_id, str) or \
+            len(request_id) > runner.MAX_STEER_REQUEST_ID_CHARS:
+        return web.json_response({"error": "invalid steering request id"}, status=400)
+    res = await runner.hub(s["id"]).steer(text, request_id)
+    return web.json_response(res, status=409 if "error" in res else 200)
+
+
 async def h_session_interrupt(request: web.Request):
     s = _session_or_404(request)
     await runner.hub(s["id"]).interrupt()
@@ -1295,6 +1324,7 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     r.add_delete("/api/sessions/{sid:\\d+}", h_session_delete)
     r.add_post("/api/sessions/{sid:\\d+}/workspace/reset", h_session_workspace_reset)
     r.add_post("/api/sessions/{sid:\\d+}/message", h_session_message)
+    r.add_post("/api/sessions/{sid:\\d+}/steer", h_session_steer)
     r.add_post("/api/sessions/{sid:\\d+}/interrupt", h_session_interrupt)
     r.add_post("/api/sessions/{sid:\\d+}/switch", h_session_switch)
     r.add_get("/api/sessions/{sid:\\d+}/events", h_session_events)

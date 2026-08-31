@@ -25,6 +25,7 @@ class ClaudeDriver(Driver):
     label = "Claude Code"
     binary = "claude"
     uses_stdin_stream = True
+    supports_steering = True
     release_source = {"kind": "npm", "package": "@anthropic-ai/claude-code"}
     upgrade_source = {"kind": "self", "args": ["update"]}
 
@@ -134,6 +135,13 @@ class ClaudeDriver(Driver):
     def interrupt_payload(self, session=None, ctx=None):
         return {"type": "control_request", "request_id": "int_1",
                 "request": {"subtype": "interrupt"}}
+
+    def steer_payload(self, session, ctx, text, request_id):
+        # stream-json input remains open for the whole invocation. Additional
+        # user messages are incorporated by the active query at its next safe
+        # processing boundary; no separate turn or session is created.
+        return {"type": "user", "message": {"role": "user",
+                "content": [{"type": "text", "text": text}]}}
 
     def parse_line(self, line, ctx):
         try:

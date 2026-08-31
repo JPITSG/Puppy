@@ -158,6 +158,18 @@ retire its activity timer without firing a configured completion command for a
 prompt the user stopped. Queued work that continues after a stop remains one
 activity block and can still notify when that later work actually finishes.
 
+## Active-turn steering transport
+
+`POST /api/sessions/{sid}/steer` sends an additional text instruction to the
+engine turn which is already running. It is intentionally separate from the
+ordinary message route: steering never joins the session queue or starts a new
+native turn. The shared runner maps it to each pinned CLI protocol (streamed
+user input, app-server `turn/steer`, or an active ACP prompt), persists the
+accepted text as a user event with `steering: true`, and refuses idle, starting,
+stopping, approval-waiting, or unsupported turns. The route is authenticated
+and is present in both the full runtime and the headless package; controllers
+must not expose it until the node advertises its steering capability.
+
 ## Account usage refresh
 
 The headless package stores the same per-node usage-refresh interval as the full

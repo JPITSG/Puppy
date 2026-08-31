@@ -137,6 +137,11 @@ class Driver:
     # True: prompt/setup/control messages flow over a writable JSONL stdin.
     # False: the complete turn is supplied on argv and stdin stays closed.
     uses_stdin_stream = False
+    # True only when the driver's pinned stdin protocol can add another user
+    # message to the currently active turn. This is deliberately independent
+    # of uses_stdin_stream: a writable protocol is necessary, but it does not
+    # by itself prove same-turn steering semantics.
+    supports_steering = False
     # Some multi-provider CLIs deliberately leave authentication to whichever
     # provider/model a turn selects.  Their node health is binary availability,
     # not a single global login verdict.
@@ -259,6 +264,16 @@ class Driver:
 
         ``ctx`` is the live object returned by turn_context(). Protocols whose
         turn id is allocated during setup need it to target the exact turn.
+        """
+        return None
+
+    def steer_payload(self, session: dict, ctx: dict, text: str,
+                      request_id: str):
+        """Return one active-turn user-input payload, or None until ready.
+
+        ``ctx`` is the live object returned by turn_context(). Drivers must
+        address the already-running native turn/session represented by that
+        object; steering must never create a new turn or native session.
         """
         return None
 

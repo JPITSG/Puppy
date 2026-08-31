@@ -24,6 +24,8 @@ _updates_watchers = set()  # websockets watching the session list
 
 STREAM_LIMIT = 16 * 1024 * 1024
 QUEUE_REORDER_HOLD_SECONDS = 30
+MAX_STEER_CHARS = 128 * 1024
+MAX_STEER_REQUEST_ID_CHARS = 128
 
 
 def hub(session_id: int) -> "SessionHub":
@@ -666,6 +668,61 @@ class SessionHub:
             return {"queued": True}
         self._start_turn(text)
         return {"queued": False}
+
+    async def steer(self, text: str, request_id: str = "") -> dict:
+        """Send additional user guidance to this hub's active native turn.
+
+        This path is intentionally separate from send_message(): it never
+        joins the ordinary queue and a driver must prove that its live stdin
+        protocol supports same-turn input before any transcript row is added.
+        """
+        if not isinstance(text, str):
+            return {"error": "steering text must be text"}
+        text = text.strip()
+        if not text:
+            return {"error": "empty steering message"}
+        if len(text) > MAX_STEER_CHARS:
+            return {"error": "steering message cannot exceed {} characters".format(
+                MAX_STEER_CHARS)}
+        if not isinstance(request_id, str) or \
+                len(request_id) > MAX_STEER_REQUEST_ID_CHARS:
+            return {"error": "invalid steering request id"}
+        request_id = request_id or str(uuid.uuid4())
+
+        session = db.get_session(self.id)
+        if session is None:
+            return {"error": "session gone"}
+        if self.status != "running":
+            return {"error": "there is no active turn to steer"}
+        if self.interrupted:
+            return {"error": "the active turn is stopping"}
+        if self.pending_approval is not None:
+            return {"error": "resolve the pending approval before steering"}
+        try:
+            driver = get_driver(session["engine"])
+        except KeyError:
+            return {"error": "the active engine is unavailable"}
+        if not driver.supports_steering:
+            return {"error": "{} does not support active-turn steering".format(
+                driver.label)}
+
+        proc = self.proc
+        ctx = self._driver_ctx
+        if not self._proc_ready or proc is None or proc.returncode is not None or \
+                proc.stdin is None or proc.stdin.is_closing():
+            return {"error": "the active turn is not ready for steering"}
+        payload = driver.steer_payload(session, ctx, text, request_id)
+        if not isinstance(payload, dict):
+            return {"error": "the active turn is not ready for steering"}
+        try:
+            await self._write_stdin(payload)
+        except (BrokenPipeError, ConnectionError, RuntimeError) as exc:
+            log.info("steering write failed for session %s: %s", self.id, exc)
+            return {"error": "the active turn stopped before steering was delivered"}
+
+        self._emit("user", {"text": text, "steering": True,
+                            "request_id": request_id})
+        return {"ok": True, "request_id": request_id}
 
     def pending_config(self) -> dict:
         """The {engine, model, effort} in force after everything queued: what

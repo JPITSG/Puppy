@@ -47,6 +47,7 @@ _ID_INITIALIZE = "puppy-initialize"
 _ID_THREAD = "puppy-thread"
 _ID_TURN = "puppy-turn"
 _ID_INTERRUPT = "puppy-interrupt"
+_ID_STEER_PREFIX = "puppy-steer:"
 
 
 def _rpc(request_id, method: str, params=None) -> dict:
@@ -464,6 +465,7 @@ class CodexDriver(Driver):
     label = "Codex"
     binary = "codex"
     uses_stdin_stream = True
+    supports_steering = True
     release_source = {"kind": "npm", "package": "@openai/codex"}
     upgrade_source = {"kind": "self", "args": ["update"]}
 
@@ -566,6 +568,20 @@ class CodexDriver(Driver):
             },
             "capabilities": {"experimentalApi": True},
         })]
+
+    def steer_payload(self, session, ctx, text, request_id):
+        ctx = ctx if isinstance(ctx, dict) else {}
+        thread_id = str(ctx.get("thread_id") or "")
+        turn_id = str(ctx.get("turn_id") or "")
+        if ctx.get("phase") != "running" or ctx.get("completed") or \
+                not thread_id or not turn_id:
+            return None
+        return _rpc(_ID_STEER_PREFIX + request_id, "turn/steer", {
+            "threadId": thread_id,
+            "clientUserMessageId": request_id,
+            "input": [{"type": "text", "text": text}],
+            "expectedTurnId": turn_id,
+        })
 
     @staticmethod
     def _thread_request(ctx: dict) -> dict:

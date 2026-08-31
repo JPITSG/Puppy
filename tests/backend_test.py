@@ -21,12 +21,20 @@ BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 
 from puppy import __version__, protocol, upgrade_contract  # noqa: E402
+from puppy.drivers.claude import ClaudeDriver  # noqa: E402
 from puppy.drivers.codex import CodexDriver  # noqa: E402
 
 
 def exercise_driver_normalization() -> None:
+    claude = ClaudeDriver()
+    assert claude.supports_steering is True
+    assert claude.steer_payload({}, {}, "change direction", "steer-1") == {
+        "type": "user", "message": {"role": "user", "content": [
+            {"type": "text", "text": "change direction"}]}}
+
     driver = CodexDriver()
     assert driver.uses_stdin_stream is True
+    assert driver.supports_steering is True
     session = {
         "cwd": "/tmp", "native_session_id": "", "model": "gpt-test",
         "effort": "high", "permission_mode": "workspace-write",
@@ -84,6 +92,16 @@ def exercise_driver_normalization() -> None:
     }), context)
     assert started[0]["msg"]["text"] == "Thinking..."
     assert context["turn_id"] == "turn-1"
+    assert driver.steer_payload(
+        session, context, "revised direction", "steer-2") == {
+            "id": "puppy-steer:steer-2", "method": "turn/steer",
+            "params": {
+                "threadId": "thread-1",
+                "clientUserMessageId": "steer-2",
+                "input": [{"type": "text", "text": "revised direction"}],
+                "expectedTurnId": "turn-1",
+            },
+        }
 
     search = driver.parse_line(json.dumps({
         "method": "item/completed", "params": {
@@ -200,6 +218,7 @@ def exercise_driver_normalization() -> None:
             "cached_input_tokens": 4, "reasoning_output_tokens": 2,
         }, "duration_ms": 1234, "stop_reason": "completed",
     }}]
+    assert driver.steer_payload(session, context, "too late", "steer-3") is None
     assert driver.interrupt_payload(session, context) is None
 
     resumed = dict(session, native_session_id="thread-existing")
@@ -281,13 +300,26 @@ if prompt_text.endswith("interrupt fake turn"):
         "turn": {"id": turn_id, "status": "interrupted", "items": [],
                  "durationMs": 5}}})
 else:
+    answer = "fake app-server response"
+    if prompt_text.endswith("steer fake turn"):
+        steer = read()
+        if steer.get("method") != "turn/steer" or \
+                steer.get("params") != {
+                    "threadId": thread_id,
+                    "clientUserMessageId": "runner-steer-1",
+                    "input": [{"type": "text", "text": "updated direction"}],
+                    "expectedTurnId": turn_id,
+                }:
+            raise SystemExit("bad steer request: {!r}".format(steer))
+        send({"id": steer["id"], "result": {"turnId": turn_id}})
+        answer = "steered: " + steer["params"]["input"][0]["text"]
     send({"method": "item/started", "params": {
         "threadId": thread_id, "turnId": turn_id, "startedAtMs": 1,
         "item": {"type": "agentMessage", "id": "answer-1", "text": ""}}})
     send({"method": "item/completed", "params": {
         "threadId": thread_id, "turnId": turn_id, "completedAtMs": 2,
         "item": {"type": "agentMessage", "id": "answer-1",
-                 "text": "fake app-server response", "phase": "final_answer"}}})
+                 "text": answer, "phase": "final_answer"}}})
     send({"method": "thread/tokenUsage/updated", "params": {
         "threadId": thread_id, "turnId": turn_id,
         "tokenUsage": {"last": {
@@ -338,6 +370,35 @@ with open(os.environ["PUPPY_FAKE_CODEX_LOG"], "a", encoding="utf-8") as handle:
                 "cached_input_tokens": 3, "reasoning_output_tokens": 1,
             }
 
+        assert (await hub.steer("not running", "idle-steer"))["error"] == \
+            "there is no active turn to steer"
+        assert hub.send_message("steer fake turn") == {"queued": False}
+        deadline = time.monotonic() + 10
+        while not (hub._proc_ready and isinstance(hub._driver_ctx, dict) and
+                   hub._driver_ctx.get("phase") == "running"):
+            if time.monotonic() >= deadline:
+                raise AssertionError("fake Codex turn never became steerable")
+            await asyncio.sleep(0.02)
+        steered = await hub.steer("updated direction", "runner-steer-1")
+        assert steered == {"ok": True, "request_id": "runner-steer-1"}
+        deadline = time.monotonic() + 10
+        while hub.status != "idle":
+            if time.monotonic() >= deadline:
+                raise AssertionError("steered fake Codex turn did not finish")
+            await asyncio.sleep(0.02)
+        if hub.turn_task is not None:
+            await hub.turn_task
+        events = db.get_events(sid)
+        steer_event = next(event for event in events
+                           if event["kind"] == "user" and
+                           event["data"].get("request_id") == "runner-steer-1")
+        assert steer_event["data"] == {
+            "text": "updated direction", "steering": True,
+            "request_id": "runner-steer-1"}
+        assert any(event["kind"] == "assistant" and
+                   event["data"].get("text") == "steered: updated direction"
+                   for event in events)
+
         # Stop immediately, before the subprocess has necessarily completed
         # initialize. The runner must defer the native request until the
         # app-server allocates its turn id, then close stdin on completion.
@@ -357,7 +418,7 @@ with open(os.environ["PUPPY_FAKE_CODEX_LOG"], "a", encoding="utf-8") as handle:
 
         invocations = [json.loads(line) for line in
                        log_path.read_text(encoding="utf-8").splitlines()]
-        assert len(invocations) == 3, invocations
+        assert len(invocations) == 4, invocations
         first_thread = next(value for value in invocations[0]["seen"]
                             if value.get("id") == "puppy-thread")
         resumed_thread = next(value for value in invocations[1]["seen"]
@@ -372,7 +433,10 @@ with open(os.environ["PUPPY_FAKE_CODEX_LOG"], "a", encoding="utf-8") as handle:
             turn = next(value for value in invocation["seen"]
                         if value.get("id") == "puppy-turn")
             assert turn["params"]["input"][0]["text"].endswith(prompt)
-        interrupt = next(value for value in invocations[2]["seen"]
+        steer = next(value for value in invocations[2]["seen"]
+                     if value.get("method") == "turn/steer")
+        assert steer["id"] == "puppy-steer:runner-steer-1"
+        interrupt = next(value for value in invocations[3]["seen"]
                          if value.get("id") == "puppy-interrupt")
         assert interrupt == {
             "id": "puppy-interrupt", "method": "turn/interrupt",
@@ -510,6 +574,15 @@ second/model-b
         "result": {"configOptions": model_options}}), ctx)
     assert actions[-1]["data"]["method"] == "session/prompt"
     assert actions[-1]["data"]["params"]["prompt"] == [{"type": "text", "text": "hello"}]
+    assert driver.supports_steering is True
+    assert driver.steer_payload(
+        session, ctx, "new constraint", "steer-oc-1") == {
+            "jsonrpc": "2.0", "id": "puppy:steer:steer-oc-1",
+            "method": "session/prompt", "params": {
+                "sessionId": "ses_test",
+                "prompt": [{"type": "text", "text": "new constraint"}],
+            },
+        }
 
     update = lambda value: json.dumps({
         "jsonrpc": "2.0", "method": "session/update",
@@ -564,6 +637,7 @@ second/model-b
     assert actions[0] == {"a": "event", "kind": "assistant", "data": {"text": "Done."}}
     assert actions[-1]["data"]["usage"] == {
         "input_tokens": 10, "output_tokens": 4, "total_tokens": 14}
+    assert driver.steer_payload(session, ctx, "too late", "steer-oc-2") is None
 
     resumed = dict(session, native_session_id="ses_existing", effort="")
     resume_ctx = driver.turn_context(resumed, False, "again", "pin")
@@ -1132,6 +1206,22 @@ async def exercise_node(url: str, token: str, expected_version: str,
                         headers=good, json=payload, ssl=pinned) as response:
                     rejected_message = await response.json()
                     assert response.status == 400, rejected_message
+            for payload in ([], {"text": ["not text"]}, {"text": "   "},
+                            {"text": "valid", "request_id": ["not text"]},
+                            {"text": "x" * (128 * 1024 + 1)}):
+                async with http.post(
+                        url + f"/api/sessions/{normal['id']}/steer",
+                        headers=good, json=payload, ssl=pinned) as response:
+                    rejected_steer = await response.json()
+                    assert response.status == 400, (payload if len(str(payload)) < 200
+                                                    else "oversize", rejected_steer)
+            async with http.post(
+                    url + f"/api/sessions/{normal['id']}/steer",
+                    headers=good, json={"text": "valid direction"},
+                    ssl=pinned) as response:
+                idle_steer = await response.json()
+                assert response.status == 409, idle_steer
+            assert idle_steer["error"] == "there is no active turn to steer"
             for query in ("limit=nope", "limit=-1", "limit=0", "limit=501",
                           "before_seq=nope", "before_seq=0"):
                 async with http.get(
