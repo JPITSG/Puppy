@@ -222,7 +222,12 @@ a{color:var(--acc2)}
   border-color:color-mix(in srgb,currentColor 30%,transparent);
   border-top-color:currentColor;border-radius:50%;animation:spin .8s linear infinite;
 }
-.si-be.idle{letter-spacing:.08em}
+/* idle rows name their executing backend here, dressed like the status box's
+   node labels; capped so a long name cannot crowd out the session's own */
+.si-be.node{
+  letter-spacing:.08em;text-transform:uppercase;
+  max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
 .sess-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0;color:var(--txt3);background:currentColor}
 /* dot (9px) and prov icon (11px) share a column: pad the dot so centres align.
    The name font's visible band sits 1px below its line-box centre at this size;

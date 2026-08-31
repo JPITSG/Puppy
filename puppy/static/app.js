@@ -3679,13 +3679,57 @@ function selectSidebarSession(bid, sid) {
   syncSessionBrowserChips();
 }
 
+/* Busy sessions surface at the very top, newest activity first, exactly
+   while they run; the settled rows keep the status box's node order and each
+   backend's sticky manual order beneath them. The float is render-only
+   state - it must never be written back into the durable order. */
+function orderSidebarRows(rows, anchorOf) {
+  const busy = [];
+  const settled = [];
+  for (const row of rows) (row.s.status === "running" ? busy : settled).push(row);
+  busy.sort((a, b) => anchorOf(b) - anchorOf(a));
+  return busy.concat(settled);
+}
+
+/* The flat list is rebuilt from scratch on every render, so its reorder
+   motion cannot use the node-identity FLIP in animateChildReorder. Surviving
+   rows are matched across the rebuild by session key instead, each sliding
+   from its previous slot: a session turning busy pushes up through the rows
+   above it and settles back down the same way. A row travelling further than
+   its own height rides above the others and arrives out of a light fade, so
+   the crossing reads as one moving card rather than colliding text. */
+function animateSessionRows(root, rebuild) {
+  const before = new Map();
+  for (const node of root.querySelectorAll(".sess-item[data-session-key]"))
+    before.set(node.dataset.sessionKey, node.getBoundingClientRect());
+  rebuild();
+  const reduced = window.matchMedia &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (!before.size || reduced) return;
+  for (const node of root.querySelectorAll(".sess-item[data-session-key]")) {
+    const first = before.get(node.dataset.sessionKey);
+    if (!first || typeof node.animate !== "function") continue;
+    const last = node.getBoundingClientRect();
+    const dy = first.top - last.top;
+    if (Math.abs(dy) < .5) continue;
+    const travelling = Math.abs(dy) > last.height;
+    if (travelling) node.style.zIndex = "1";
+    const animation = node.animate([
+      { transform: `translate(0,${dy}px)`, opacity: travelling ? .55 : 1 },
+      { transform: "translate(0,0)", opacity: 1 },
+    ], { duration: REORDER_MOTION_MS, easing: REORDER_EASING });
+    const clear = () => { if (travelling) node.style.zIndex = ""; };
+    animation.onfinish = clear;
+    animation.oncancel = clear;
+  }
+}
+
 function renderSidebar() {
   if (dragSess && dragSess.item && dragSess.item.isConnected) {
     dragSess.renderPending = true;
     return;
   }
   const root = $("sess-groups");
-  root.innerHTML = "";
   wireSessionDropZone(root);
   /* One flat list across every node - the per-backend blocks live in the
      status box below. Rows follow that box's saved node order between
@@ -3694,77 +3738,89 @@ function renderSidebar() {
     .concat(state.backends.map(b => ({ bid: b.id }))));
   const rows = [];
   for (const node of nodes)
-    for (const s of sessionsFor(node.bid)) rows.push({ bid: node.bid, s });
+    for (const s of sessionsFor(node.bid)) {
+      if (s.status === "running" &&
+          !sessionActivityAnchors.has(sessionActivityKey(node.bid, s.id)))
+        ingestOneSessionActivity(node.bid, s, null, Date.now());
+      rows.push({ bid: node.bid, s });
+    }
   const availableSessions = new Set(
     rows.map(row => sidebarSessionKey(row.bid, row.s.id)));
   if (state.selectedSession && !availableSessions.has(state.selectedSession))
     state.selectedSession = null;
   const selectedSession = state.selectedSession || focusedSessionKey();
-  const list = rows.filter(row => state.showArchived || !row.s.archived);
-  if (!list.length)
-    root.appendChild(el("div", "sess-empty", rows.length ?
-      "Archived sessions hidden" : "No sessions yet"));
-  for (const { bid, s } of list) {
-    const item = el("button", "sess-item" + (s.archived ? " archived" : ""));
-    item.dataset.sessionId = String(s.id);
-    item.dataset.bid = String(bid);
-    item.dataset.sessionKey = sidebarSessionKey(bid, s.id);
-    if (selectedSession === item.dataset.sessionKey) item.classList.add("active");
-    const r1 = el("div", "si-row");
-    r1.appendChild(sessDot(s));
-    r1.appendChild(el("div", "si-name", s.name || `Session ${s.id}`));
-    const activity = el("span", "si-be");
-    if (s.status === "running") {
-      const key = sessionActivityKey(bid, s.id);
-      if (!sessionActivityAnchors.has(key))
-        ingestOneSessionActivity(bid, s, null, Date.now());
-      activity.classList.add("active-time");
-      activity.dataset.activityKey = key;
-      /* The clock ring and text use the same blue as prompt status messages,
-         independent of the session colour used by the status ring at left. */
-      activity.textContent = formatSessionActivity(sessionActivityAnchors.get(key));
-      activity.setAttribute("aria-label", `Agent active, ${activity.textContent}`);
-    } else {
-      activity.classList.add("idle");
-      activity.textContent = "IDLE";
-      activity.setAttribute("aria-label", "Session idle");
-    }
-    r1.appendChild(activity);
-    const r2 = el("div", "si-row sub");
-    r2.appendChild(provIcon(s.engine));
-    const workspace = el("div", "si-sub" + (s.workspace_missing ? " warn" : ""),
-      sessionLocationLabel(s, bid));
-    workspace.setAttribute("aria-label", sessionLocationTitle(s, bid));
-    r2.appendChild(workspace);
-    if (sessionWorkspace(s)) {
-      const wsLink = linkForSession(bid, s.id);
-      const st = wsLink ? wsLink.state : (s.ws_dirty ? "pending" : "");
-      const mark = el("span", "si-ws" +
-        (st === "conflict" || st === "pending" ? " warn" :
-         st === "error" ? " err" :
-         st === "syncing" || st === "init" ? " busy" : ""), "⇄");
-      mark.setAttribute("aria-label",
-        "Linked workspace" + (st ? " · " + st : ""));
-      r2.appendChild(mark);
-    }
-    item.appendChild(r1); item.appendChild(r2);
-    const pointerForClick = activationPointer(item);
-    item.onclick = event => {
-      const pointerType = pointerForClick(event);
-      selectSidebarSession(bid, s.id);
-      /* Keyboard activation has no click count, so it follows touch and opens
-         immediately. A mouse opens on each completed double-click pair. */
-      if (pointerType === "touch" || event.detail === 0 ||
-          (event.detail > 0 && event.detail % 2 === 0)) {
-        openSessionTab(bid, s.id, s);
-        closeDrawer();
+  const list = orderSidebarRows(rows, row =>
+    sessionActivityAnchors.get(sessionActivityKey(row.bid, row.s.id)) || 0)
+    .filter(row => state.showArchived || !row.s.archived);
+  animateSessionRows(root, () => {
+    root.innerHTML = "";
+    if (!list.length)
+      root.appendChild(el("div", "sess-empty", rows.length ?
+        "Archived sessions hidden" : "No sessions yet"));
+    for (const { bid, s } of list) {
+      const item = el("button", "sess-item" + (s.archived ? " archived" : ""));
+      item.dataset.sessionId = String(s.id);
+      item.dataset.bid = String(bid);
+      item.dataset.sessionKey = sidebarSessionKey(bid, s.id);
+      if (selectedSession === item.dataset.sessionKey) item.classList.add("active");
+      const r1 = el("div", "si-row");
+      r1.appendChild(sessDot(s));
+      r1.appendChild(el("div", "si-name", s.name || `Session ${s.id}`));
+      const activity = el("span", "si-be");
+      if (s.status === "running") {
+        const key = sessionActivityKey(bid, s.id);
+        activity.classList.add("active-time");
+        activity.dataset.activityKey = key;
+        /* The clock ring and text use the same blue as prompt status messages,
+           independent of the session colour used by the status ring at left. */
+        activity.textContent = formatSessionActivity(sessionActivityAnchors.get(key));
+        activity.setAttribute("aria-label", `Agent active, ${activity.textContent}`);
+      } else {
+        /* The executing backend takes the slot the old IDLE word held: a
+           still dot already says idle, and the tiny uppercase echoes the
+           status box's node labels. The clock takes the slot back while
+           the session runs. */
+        activity.classList.add("node");
+        activity.textContent = backendName(bid);
+        activity.setAttribute("aria-label", `Session idle on ${backendName(bid)}`);
       }
-    };
-    suppressContextGestureActivation(item);
-    item.addEventListener("contextmenu", (e) => sessionContextMenu(e, bid, s));
-    wireSessionDrag(item, bid, s.id);
-    root.appendChild(item);
-  }
+      r1.appendChild(activity);
+      const r2 = el("div", "si-row sub");
+      r2.appendChild(provIcon(s.engine));
+      const workspace = el("div", "si-sub" + (s.workspace_missing ? " warn" : ""),
+        sessionLocationLabel(s, bid));
+      workspace.setAttribute("aria-label", sessionLocationTitle(s, bid));
+      r2.appendChild(workspace);
+      if (sessionWorkspace(s)) {
+        const wsLink = linkForSession(bid, s.id);
+        const st = wsLink ? wsLink.state : (s.ws_dirty ? "pending" : "");
+        const mark = el("span", "si-ws" +
+          (st === "conflict" || st === "pending" ? " warn" :
+           st === "error" ? " err" :
+           st === "syncing" || st === "init" ? " busy" : ""), "⇄");
+        mark.setAttribute("aria-label",
+          "Linked workspace" + (st ? " · " + st : ""));
+        r2.appendChild(mark);
+      }
+      item.appendChild(r1); item.appendChild(r2);
+      const pointerForClick = activationPointer(item);
+      item.onclick = event => {
+        const pointerType = pointerForClick(event);
+        selectSidebarSession(bid, s.id);
+        /* Keyboard activation has no click count, so it follows touch and opens
+           immediately. A mouse opens on each completed double-click pair. */
+        if (pointerType === "touch" || event.detail === 0 ||
+            (event.detail > 0 && event.detail % 2 === 0)) {
+          openSessionTab(bid, s.id, s);
+          closeDrawer();
+        }
+      };
+      suppressContextGestureActivation(item);
+      item.addEventListener("contextmenu", (e) => sessionContextMenu(e, bid, s));
+      wireSessionDrag(item, bid, s.id);
+      root.appendChild(item);
+    }
+  });
   const archTotal = rows.filter(row => row.s.archived).length;
   const tog = $("toggle-archived");
   tog.textContent = (state.showArchived ? "Hide archived" : "Show archived") + ` (${archTotal})`;
@@ -4086,9 +4142,14 @@ function wireSessionDropZone(root) {
 
     const bid = context.bid;
     const all = sessionsFor(bid);
+    /* A row floated to the top while busy sits outside the durable order, so
+       it keeps its saved slot exactly like a hidden archived row does - a
+       drop must never bake the transient float into the manual order. */
+    const floated = new Set(all.filter(s => s.status === "running").map(s => s.id));
     const previousIds = all.map(session => session.id);
     const visibleIds = reorderChildren(root, `.sess-item[data-bid="${bid}"]`)
-      .map(node => Number(node.dataset.sessionId));
+      .map(node => Number(node.dataset.sessionId))
+      .filter(id => !floated.has(id));
     const visibleSet = new Set(visibleIds);
     if (visibleIds.some(id => !Number.isInteger(id)) || visibleSet.size !== visibleIds.length ||
         visibleIds.some(id => !previousIds.includes(id))) {

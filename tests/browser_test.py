@@ -2865,6 +2865,44 @@ console.log(JSON.stringify([
     ]
 
 
+def check_busy_float(ui_source: str, css_source: str) -> None:
+    """A session turning busy slides to the very top of the flat list; idle
+    rows name their executing backend where the IDLE word used to sit."""
+    sidebar = ui_source[
+        ui_source.index("function renderSidebar()"):
+        ui_source.index("\nfunction sessDot", ui_source.index("function renderSidebar()"))]
+    assert "const list = orderSidebarRows(rows, row =>" in sidebar
+    assert "animateSessionRows(root, () => {" in sidebar
+    assert '"IDLE"' not in sidebar
+    assert "activity.textContent = backendName(bid);" in sidebar
+    assert "`Session idle on ${backendName(bid)}`" in sidebar
+    # a drop persists the durable order only; the float never rewrites it
+    assert ".filter(id => !floated.has(id));" in ui_source
+    # both FLIP helpers share one motion clock
+    assert ui_source.count("{ duration: REORDER_MOTION_MS, easing: REORDER_EASING });") == 2
+    assert ".si-be.node{" in css_source
+    assert ".si-be.idle" not in css_source
+
+    start = ui_source.index("function orderSidebarRows(")
+    end = ui_source.index("\n/* The flat list is rebuilt", start)
+    script = r"""
+%s
+const rows = [
+  { bid: 0, s: { id: 1, status: "idle" } },
+  { bid: 0, s: { id: 2, status: "running" } },
+  { bid: 2, s: { id: 7, status: "running" } },
+  { bid: 2, s: { id: 9, status: "idle" } },
+];
+const anchors = { "0:2": 100, "2:7": 300 };
+console.log(JSON.stringify(orderSidebarRows(rows,
+  row => anchors[`${row.bid}:${row.s.id}`] || 0)
+  .map(row => `${row.bid}:${row.s.id}`)));
+""" % ui_source[start:end]
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:600]
+    assert json.loads(proc.stdout) == ["2:7", "0:2", "0:1", "2:9"]
+
+
 def check_switch_engine_initial_selection(ui_source: str) -> None:
     """The switch modal initially selects the engine already heading for the
     session - a queued switch target when one is pending, else the current
@@ -4182,6 +4220,7 @@ async def main() -> None:
             check_status_header_activation(ui_source, css_source)
             check_shared_node_order(ui_source, css_source)
             check_flat_session_list(ui_source, css_source)
+            check_busy_float(ui_source, css_source)
             check_switch_engine_initial_selection(ui_source)
             check_engine_picker_alignment(css_source)
             check_browser_chip_order(ui_source)
