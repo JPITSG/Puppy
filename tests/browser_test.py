@@ -2436,6 +2436,20 @@ console.log(JSON.stringify([0, 5, 61, 3599, 3600, 3661, 36000]
         in css_source
 
 
+def check_sidebar_footer_buttons(ui_source: str, css_source: str) -> None:
+    """Footer actions share the tab-add box and use geometrically centred art."""
+    assert "function themeIcon(size, moon)" in ui_source
+    assert 'button.replaceChildren(themeIcon(14, t === "light"));' in ui_source
+    assert 'const add = el("button", "icon-btn");' in ui_source
+    assert "add.appendChild(plusIcon(14));" in ui_source
+    assert ".tab-add-wrap .icon-btn,.foot-row .icon-btn{" in css_source
+    assert "display:inline-grid;place-items:center;position:relative;" in css_source
+    assert "width:26px;height:26px;margin:0;padding:0;" in css_source
+    assert "background:var(--btn-face);box-shadow:" in css_source
+    assert ".tab-add-wrap .icon-btn>svg,.foot-row .icon-btn>svg{" in css_source
+    assert "transform:translateY(1px)" not in css_source
+
+
 def check_toast_touch_swipe(ui_source: str, css_source: str) -> None:
     """Only a deliberate rightward finger gesture dismisses an event toast."""
     start = ui_source.index("const TOAST_SWIPE_INTENT_PX = ")
@@ -3845,6 +3859,7 @@ async def main() -> None:
             check_session_provider_marks(css_source)
             check_sidebar_icon_alignment(css_source)
             check_session_activity_clock(ui_source, css_source)
+            check_sidebar_footer_buttons(ui_source, css_source)
             check_toast_touch_swipe(ui_source, css_source)
             check_status_header_activation(ui_source, css_source)
             check_shared_node_order(ui_source, css_source)

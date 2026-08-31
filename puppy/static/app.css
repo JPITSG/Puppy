@@ -373,8 +373,6 @@ a{color:var(--acc2)}
 .foot-eng .st-quota{color:var(--ok)}
 .foot-eng .st-quota.low{color:var(--err)}
 .foot-row{display:flex;align-items:center;gap:6px;border-top:1px solid var(--line);padding-top:7px}
-.foot-row .icon-btn{width:24px;height:24px;font-size:14px;border-radius:var(--btn-r);margin-left:-8px}
-#btn-bell svg{display:block;transform:translateY(1px)}
 #btn-bell.on{color:var(--acc2)}
 .conn-state{display:flex;align-items:center;min-width:0;margin-left:auto}
 .host-cpu{
@@ -789,7 +787,23 @@ select.choice-native{display:none!important}
 /* stretch over the bar's full height (incl. its 8px top padding) so the +
    sits at the true vertical center with an even hover halo */
 .tab-add-wrap{position:relative;display:flex;align-items:center;align-self:stretch;margin-top:-8px}
-.tab-add-wrap .icon-btn{width:26px;height:26px;font-size:14px;border-radius:var(--btn-r);position:relative}
+.tab-add-wrap .icon-btn,.foot-row .icon-btn{
+  display:inline-grid;place-items:center;position:relative;width:26px;height:26px;margin:0;padding:0;
+  font-size:14px;line-height:0;border:1px solid var(--line);border-radius:var(--btn-r);
+  background:var(--btn-face);box-shadow:inset 0 1px 0 var(--btn-top),var(--btn-lift);
+}
+.tab-add-wrap .icon-btn>svg,.foot-row .icon-btn>svg{
+  display:block;align-self:center;justify-self:center;margin:0;
+}
+@media (hover:hover){
+  .tab-add-wrap .icon-btn:hover,.foot-row .icon-btn:hover{
+    background:var(--btn-face-hi);border-color:var(--line3);color:var(--txt);
+    box-shadow:inset 0 1px 0 var(--btn-top),var(--btn-lift-hi);
+  }
+}
+.tab-add-wrap .icon-btn:active,.foot-row .icon-btn:active{
+  background:var(--hov);box-shadow:var(--btn-press);
+}
 .tab-drop-marker{
   width:2px;align-self:stretch;flex:0 0 2px;margin:2px -1px 4px;
   border-radius:2px;background:var(--acc);box-shadow:0 0 7px rgba(90,162,245,.7);

@@ -55,6 +55,41 @@ function bellIcon(size, off) {
   return svg;
 }
 
+/* The font sun/moon this replaces has an asymmetric em box. Keep both theme
+   states in the same centred 24-box as the footer's gear and bell instead. */
+function themeIcon(size, moon) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS(NS, "path");
+  path.setAttribute("fill", "none");
+  path.setAttribute("stroke", "currentColor");
+  path.setAttribute("stroke-width", "1.5");
+  path.setAttribute("stroke-linecap", "round");
+  path.setAttribute("stroke-linejoin", "round");
+  if (moon) {
+    path.setAttribute("d", "M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z");
+    svg.appendChild(path);
+    return svg;
+  }
+  const sun = document.createElementNS(NS, "circle");
+  sun.setAttribute("cx", "12");
+  sun.setAttribute("cy", "12");
+  sun.setAttribute("r", "4");
+  sun.setAttribute("fill", "none");
+  sun.setAttribute("stroke", "currentColor");
+  sun.setAttribute("stroke-width", "1.5");
+  path.setAttribute("d", "M12 2v2M12 20v2M4.93 4.93l1.42 1.42" +
+    "M17.65 17.65l1.42 1.42M2 12h2M20 12h2M4.93 19.07l1.42-1.42" +
+    "M17.65 6.35l1.42-1.42");
+  svg.appendChild(sun);
+  svg.appendChild(path);
+  return svg;
+}
+
 /* Same reason as the close cross above: a "+" character is placed on the font's
    math axis, which is not the middle of its line box, so the glyph lands about
    1.5px low in a flex-centred button however the box is aligned. Drawn ink is
@@ -5055,9 +5090,10 @@ function renderWorkspacePane(pane) {
   tabScroll.appendChild(tabsRoot);
   tabbar.appendChild(tabScroll);
   const addWrap = el("div", "tab-add-wrap");
-  const add = el("button", "icon-btn", "＋");
+  const add = el("button", "icon-btn");
   add.type = "button";
   add.setAttribute("aria-label", "New tab");
+  add.appendChild(plusIcon(14));
   add.onclick = event => showTabAddMenu(pane.id, add, event);
   addWrap.appendChild(add);
   tabbar.appendChild(addWrap);
@@ -5419,7 +5455,10 @@ function currentTheme() {
 }
 function applyTheme(t) {
   document.documentElement.classList.toggle("light", t === "light");
-  $("btn-theme").textContent = t === "light" ? "☾" : "☀";
+  const button = $("btn-theme");
+  button.replaceChildren(themeIcon(14, t === "light"));
+  button.setAttribute("aria-label", t === "light" ?
+    "Switch to dark mode" : "Switch to light mode");
   lsSet("puppy.theme", t);
   /* The theme is this browser's own state, so each node has to be told: its
      managed browsers render pages with the matching prefers-color-scheme. */
