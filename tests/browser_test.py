@@ -2173,7 +2173,8 @@ def check_active_turn_steering_ui(ui_source: str, css_source: str) -> None:
     assert "function queueActionIcon(size = 18)" in ui_source
     assert "function steerActionIcon(size = 18)" in ui_source
     assert "M2945 7323 c-299 -35" in ui_source
-    assert "M3377 6923 l-617 -1068" in ui_source
+    assert "M2029 6985 c-494 -60" in ui_source
+    assert "M3500 2000 l0 -1000" in ui_source
     assert ('this.steerBtn.querySelector(".composer-action-icon").' +
             'appendChild(steerActionIcon());') in ui_source
     assert ('this.queueBtn.querySelector(".composer-action-icon").' +
