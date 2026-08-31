@@ -111,6 +111,50 @@ function plusIcon(size) {
   return svg;
 }
 
+/* Narrow composers retain the labelled desktop actions as compact drawn
+   symbols. Their geometry comes from the user's references, but the same
+   currentColor/stroke system as Puppy's other icons keeps them crisp and
+   centred at every device scale. */
+function queueActionIcon(size = 16) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS(NS, "path");
+  path.setAttribute("d", "M5.25 3.25h7a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1Z" +
+    "M2.5 6v6.25c0 .7.55 1.25 1.25 1.25H10" +
+    "M8.75 6v3.5M7 7.75h3.5");
+  path.setAttribute("fill", "none");
+  path.setAttribute("stroke", "currentColor");
+  path.setAttribute("stroke-width", "1.4");
+  path.setAttribute("stroke-linecap", "round");
+  path.setAttribute("stroke-linejoin", "round");
+  svg.appendChild(path);
+  return svg;
+}
+
+function steerActionIcon(size = 17) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS(NS, "path");
+  path.setAttribute("d", "M8 13.5V2.75M5.9 4.85 8 2.75l2.1 2.1" +
+    "M8 10.7C7.65 7.8 5.65 5.45 2.7 4.25M2.7 4.25l.65 2.65M2.7 4.25l2.7-.45" +
+    "M8 10.7c.35-2.9 2.35-5.25 5.3-6.45M13.3 4.25l-.65 2.65M13.3 4.25l-2.7-.45");
+  path.setAttribute("fill", "none");
+  path.setAttribute("stroke", "currentColor");
+  path.setAttribute("stroke-width", "1.4");
+  path.setAttribute("stroke-linecap", "round");
+  path.setAttribute("stroke-linejoin", "round");
+  svg.appendChild(path);
+  return svg;
+}
+
 /* stroke is a parameter for the same reason bellIcon runs lighter: this 24-box
    art is drawn at 12px in a tab dot and 14px in the footer, where the tab's
    weight of 2 reads heavy beside the bell it sits next to. */
@@ -6164,8 +6208,14 @@ class SessionView {
                 ${composerChoice("effort", "Effort", "Reasoning effort")}
               </div>
             </div>
-            <button class="btn-steer hidden" type="button">Steer</button>
-            <button class="btn-queue hidden" type="button">Queue</button>
+            <button class="btn-steer hidden" type="button" aria-label="Steer the active turn">
+              <span class="composer-action-label">Steer</span>
+              <span class="composer-action-icon" aria-hidden="true"></span>
+            </button>
+            <button class="btn-queue hidden" type="button" aria-label="Queue for the next turn">
+              <span class="composer-action-label">Queue</span>
+              <span class="composer-action-icon" aria-hidden="true"></span>
+            </button>
             <button class="btn-send" type="button">Send</button>
           </div>
           <input class="hidden attach-input" type="file" multiple>
@@ -6193,6 +6243,8 @@ class SessionView {
     this.sendBtn = root.querySelector(".btn-send");
     this.steerBtn = root.querySelector(".btn-steer");
     this.queueBtn = root.querySelector(".btn-queue");
+    this.steerBtn.querySelector(".composer-action-icon").appendChild(steerActionIcon());
+    this.queueBtn.querySelector(".composer-action-icon").appendChild(queueActionIcon());
     this.composerRow = root.querySelector(".composer-row");
     this.composerMeta = root.querySelector(".composer-meta-scroll");
     this.composerMetaViewport = root.querySelector(".composer-meta-viewport");

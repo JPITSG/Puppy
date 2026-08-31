@@ -2120,14 +2120,19 @@ def check_queue_controls_ui(ui_source: str, css_source: str) -> None:
 
 
 def check_active_turn_steering_ui(ui_source: str, css_source: str) -> None:
-    """Wide composers expose distinct steer/queue actions and an icon stop."""
-    steer_markup = '<button class="btn-steer hidden" type="button">Steer</button>'
-    queue_markup = '<button class="btn-queue hidden" type="button">Queue</button>'
+    """Running composers expose responsive steer/queue/stop actions."""
+    steer_markup = ('<button class="btn-steer hidden" type="button" '
+                    'aria-label="Steer the active turn">')
+    queue_markup = ('<button class="btn-queue hidden" type="button" '
+                    'aria-label="Queue for the next turn">')
     send_markup = '<button class="btn-send" type="button">Send</button>'
     assert steer_markup in ui_source and queue_markup in ui_source and send_markup in ui_source
     assert ui_source.index(steer_markup) < ui_source.index(queue_markup) < \
         ui_source.index(send_markup)
     assert "this.steerBtn.onclick = () => this.steer();" in ui_source
+    assert "this.queueBtn.onclick = () => this.submit();" in ui_source
+    assert 'if (e.key === "Enter" && !e.shiftKey && !e.isComposing) ' \
+        '{ e.preventDefault(); this.submit(); return; }' in ui_source
     assert 'backend.capabilities.includes("active-turn-steering")' in ui_source
     assert 'case "steering_state":' in ui_source
     assert 'case "steer_status":' in ui_source
@@ -2151,14 +2156,32 @@ def check_active_turn_steering_ui(ui_source: str, css_source: str) -> None:
     assert (".btn-send.stop .stop-sq{display:block;width:10px;height:10px;" +
             "background:currentColor;flex:0 0 auto;margin:0}") in css_source
 
-    # Steer is the green member of the existing composer button family and is
-    # hidden at exactly the same narrow breakpoint as Queue.
+    # Steer is the green member of the existing composer button family. Wide
+    # layouts retain words; narrow layouts retain all three actions as equal
+    # square buttons, using the supplied stack-plus and branching-arrow ideas.
     assert ".btn-send,.btn-queue,.btn-steer{" in css_source
     assert ".btn-steer{" in css_source
     assert "background-color:var(--ok-lo);" in css_source
     assert ".btn-send:disabled,.btn-queue:disabled,.btn-steer:disabled{" in css_source
-    assert ".btn-queue,.btn-steer{display:none}" in css_source
     assert ".btn-send.stop{width:34px;min-width:34px}" in css_source
+    assert 'class="composer-action-label">Steer</span>' in ui_source
+    assert 'class="composer-action-label">Queue</span>' in ui_source
+    assert 'class="composer-action-icon" aria-hidden="true"' in ui_source
+    assert "function queueActionIcon(size = 16)" in ui_source
+    assert "function steerActionIcon(size = 17)" in ui_source
+    assert ('this.steerBtn.querySelector(".composer-action-icon").' +
+            'appendChild(steerActionIcon());') in ui_source
+    assert ('this.queueBtn.querySelector(".composer-action-icon").' +
+            'appendChild(queueActionIcon());') in ui_source
+    assert ".composer-action-icon{display:none;align-items:center;justify-content:center}" \
+        in css_source
+    assert ".composer-action-icon svg{display:block}" in css_source
+    assert ("display:inline-flex;width:34px;min-width:34px;height:34px;" +
+            "padding:0;gap:0;") in css_source
+    assert (".btn-queue .composer-action-label,.btn-steer " +
+            ".composer-action-label{display:none}") in css_source
+    assert (".btn-queue .composer-action-icon,.btn-steer " +
+            ".composer-action-icon{display:flex}") in css_source
 
     start = ui_source.index("\n  async steer()") + 1
     brace = ui_source.index("{", start)
