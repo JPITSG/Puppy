@@ -942,6 +942,16 @@ select.choice-native{display:none!important}
 .chat-status:empty{display:none}
 /* the text carries the truncation: a bare text node in a flex row cannot */
 .chat-status .status-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.prompt-status-label::after{
+  content:".";display:inline-block;width:3ch;text-align:left;letter-spacing:normal;
+  animation:prompt-status-dots 1.2s steps(1,end) infinite;
+}
+@keyframes prompt-status-dots{
+  0%,32%{content:"."}
+  33%,65%{content:".."}
+  66%,100%{content:"..."}
+}
+@media (prefers-reduced-motion:reduce){.prompt-status-label::after{content:"..."}}
 .chat-status .spinner{
   flex:0 0 auto;width:10px;height:10px;border:2px solid var(--acc-dim);
   border-top-color:var(--acc);border-radius:50%;animation:spin .8s linear infinite;

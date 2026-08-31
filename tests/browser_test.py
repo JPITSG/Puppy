@@ -427,6 +427,19 @@ def check_reconnect_status(ui_source: str) -> None:
     warning survived while fresh model output streamed underneath it. Exercise
     the real SessionView status methods in node to keep those states separate.
     """
+    def function(name):
+        start = ui_source.index("function " + name + "(")
+        brace = ui_source.index("{", start)
+        depth = 0
+        for index in range(brace, len(ui_source)):
+            if ui_source[index] == "{":
+                depth += 1
+            elif ui_source[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    return ui_source[start:index + 1]
+        raise AssertionError("unbalanced " + name)
+
     def method(name):
         start = ui_source.index("\n  " + name + "(") + 1
         brace = ui_source.index("{", start)
@@ -446,6 +459,7 @@ def check_reconnect_status(ui_source: str) -> None:
 const esc = value => String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;");
 let stopping = "";
 const remoteStoppingMessage = () => stopping;
+%s
 const proto = {
 %s
 };
@@ -473,7 +487,7 @@ stopping = "";
 view.setReconnecting(false);
 const recovered = take();
 console.log(JSON.stringify({before, lost, changedWhileLost, gracefulStop, recovered}));
-""" % ",\n".join(methods)
+""" % (function("promptStatusBase"), ",\n".join(methods))
     proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:400]
     result = json.loads(proc.stdout.strip())
@@ -802,10 +816,15 @@ def check_thinking_icons(ui_source: str) -> None:
 class Node {
   constructor(tag,cls="",text="") {
     this.tag=tag;this.className=cls;this.textContent=text;this.children=[];this.parent=null;
+    this.attributes={};
   }
+  setAttribute(name,value){this.attributes[name]=String(value);}
   appendChild(child){child.parent=this;this.children.push(child);return child;}
   replaceChildren(...children){this.children.forEach(child=>child.parent=null);this.children=[];
     children.forEach(child=>this.appendChild(child));}
+  replaceWith(child){if(!this.parent)return;const parent=this.parent;
+    const i=parent.children.indexOf(this);if(i>=0){parent.children[i]=child;child.parent=parent;}
+    this.parent=null;}
   remove(){if(!this.parent)return;const i=this.parent.children.indexOf(this);
     if(i>=0)this.parent.children.splice(i,1);this.parent=null;}
   querySelector(selector){const cls=selector.slice(1);
@@ -814,6 +833,8 @@ class Node {
   get lastChild(){return this.children[this.children.length-1]||null;}
 }
 const el=(tag,cls="",text="")=>new Node(tag,cls,text);
+%s
+%s
 %s
 %s
 const proto={
@@ -832,7 +853,8 @@ view.status="idle";view.syncLiveStatus();
 console.log(JSON.stringify({codex,tool,claude,idle:view.statusRow,
   classified:[isThinkingStatus("thinking"),isThinkingStatus("Thinking 9 tokens"),
     isThinkingStatus("rethinking"),isThinkingStatus("writing...")]}));
-""" % (function("thinkingIconNode"), function("isThinkingStatus"), method)
+""" % (function("promptStatusBase"), function("promptStatusLabel"),
+         function("thinkingIconNode"), function("isThinkingStatus"), method)
     proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:500]
     result = json.loads(proc.stdout.strip())
@@ -842,6 +864,36 @@ console.log(JSON.stringify({codex,tool,claude,idle:view.statusRow,
     assert result["idle"] is None, result
     assert result["classified"] == [True, True, False, False], result
     assert ui_source.count("sum.appendChild(thinkingIconNode())") == 2
+
+
+def check_prompt_status_animation(ui_source: str, css_source: str) -> None:
+    """Every live prompt status cycles one to three width-stable visual dots."""
+    start = ui_source.index("function promptStatusBase(")
+    end = ui_source.index("\nfunction promptStatusLabel", start)
+    source = ui_source[start:end]
+    script = source + r"""
+console.log(JSON.stringify([
+  promptStatusBase("Thinking..."),
+  promptStatusBase("Thinking… 42 tokens"),
+  promptStatusBase("Using shell"),
+  promptStatusBase("Starting next queued message…"),
+]));
+"""
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:500]
+    assert json.loads(proc.stdout) == [
+        "Thinking", "Thinking 42 tokens", "Using shell",
+        "Starting next queued message",
+    ]
+    assert 'class="status-text prompt-status-label"' in ui_source
+    assert ui_source.count('promptStatusLabel(text, "think-label")') == 2
+    assert "this.statusText || thinkingLabel(0), \"think-label\"" in ui_source
+    assert ".prompt-status-label::after{" in css_source
+    assert '0%,32%{content:"."}' in css_source
+    assert '33%,65%{content:".."}' in css_source
+    assert '66%,100%{content:"..."}' in css_source
+    assert "display:inline-block;width:3ch;text-align:left" in css_source
+    assert "prefers-reduced-motion:reduce){.prompt-status-label::after" in css_source
 
 
 def check_backend_editor(ui_source: str, css_source: str) -> None:
@@ -3843,6 +3895,7 @@ async def main() -> None:
             check_backend_last_known_settings(ui_source, css_source)
             check_interrupted_completion(ui_source)
             check_thinking_icons(ui_source)
+            check_prompt_status_animation(ui_source, css_source)
             check_backend_editor(ui_source, css_source)
             check_drawer_drag(ui_source)
             check_responsive_drawer_chrome(css_source)

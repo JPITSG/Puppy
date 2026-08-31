@@ -759,6 +759,21 @@ function thinkingLabel(tokens) {
 function thinkingIconNode() {
   return el("span", "think-brain", "🧠");
 }
+/* Every live prompt status ends with one shared, width-stable dot animation.
+   Engines use both `...` and `…`; remove that marker wherever it arrived so
+   token-bearing labels become "Thinking 42 tokens" followed by the same dots. */
+function promptStatusBase(text) {
+  return String(text == null ? "" : text)
+    .replace(/\s*(?:…|\.{3})\s*/, " ").trim();
+}
+function promptStatusLabel(text, className) {
+  const value = String(text == null ? "" : text);
+  const label = el("span", `${className} prompt-status-label`, promptStatusBase(value));
+  /* Generated dots are visual only. The stable source phrase prevents an
+     assistive technology from announcing every animation frame. */
+  label.setAttribute("aria-label", value);
+  return label;
+}
 /* Claude exposes a streaming thinking block, while Codex first announces the
    same phase as a plain status. Give either spelling the same visual marker. */
 function isThinkingStatus(text) {
@@ -7138,8 +7153,10 @@ class SessionView {
 
   renderStatus() {
     const text = this.visibleStatusText();
+    const label = promptStatusBase(text);
     this.statusEl.innerHTML = text ?
-      `<span class="spinner"></span><span class="status-text">${esc(text)}</span>` : "";
+      `<span class="spinner"></span><span class="status-text prompt-status-label" ` +
+      `aria-label="${esc(text)}">${esc(label)}</span>` : "";
     this.syncLiveStatus();
     this.syncHeadOverflow();
   }
@@ -7447,7 +7464,8 @@ class SessionView {
         this.liveEl.open = false;
         const sum = el("summary");
         sum.appendChild(thinkingIconNode());
-        sum.appendChild(el("span", "think-label", this.statusText || thinkingLabel(0)));
+        sum.appendChild(promptStatusLabel(
+          this.statusText || thinkingLabel(0), "think-label"));
         this.liveEl.appendChild(sum);
         this.liveEl.appendChild(el("div", "tbody"));
       } else {
@@ -7500,7 +7518,7 @@ class SessionView {
     const thinking = this.liveEl && this.liveKind === "thinking";
     if (thinking) {
       const lab = this.liveEl.querySelector(".think-label");
-      if (lab) lab.textContent = text;
+      if (lab) lab.replaceWith(promptStatusLabel(text, "think-label"));
     }
     if (this.status !== "running" || thinking) {
       if (this.statusRow) { this.statusRow.remove(); this.statusRow = null; }
@@ -7515,7 +7533,7 @@ class SessionView {
        transitions between those states without leaving the old icon behind. */
     this.statusRow.replaceChildren(
       isThinkingStatus(text) ? thinkingIconNode() : el("span", "spinner"),
-      el("span", "think-label", text));
+      promptStatusLabel(text, "think-label"));
     if (this.inner.lastChild !== this.statusRow) {
       const follow = this.atBottom();
       this.inner.appendChild(this.statusRow);   // stays the last thing in the transcript
