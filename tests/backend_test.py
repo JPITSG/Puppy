@@ -28,11 +28,30 @@ from puppy.drivers.codex import CodexDriver  # noqa: E402
 def exercise_driver_normalization() -> None:
     claude = ClaudeDriver()
     assert claude.supports_steering is True
-    assert claude.steering_acknowledged is False
-    assert claude.steer_ready({}, {}) is True
-    assert claude.steer_payload({}, {}, "change direction", "steer-1") == {
+    assert claude.steering_acknowledged is True
+    claude_ctx = claude.turn_context({}, True, "original direction", "pin")
+    assert claude.steer_ready({}, claude_ctx) is False
+    assert claude.steer_payload(
+        {}, claude_ctx, "change direction", "steer-1") is None
+    original_replay = claude.parse_line(json.dumps({
+        "type": "user", "message": {"role": "user", "content": [
+            {"type": "text", "text": "original direction"}]},
+    }), claude_ctx)
+    assert original_replay == []
+    assert claude.steer_ready({}, claude_ctx) is True
+    assert claude.steer_payload(
+        {}, claude_ctx, "change direction", "steer-1") == {
         "type": "user", "message": {"role": "user", "content": [
             {"type": "text", "text": "change direction"}]}}
+    assert claude.parse_line(json.dumps({
+        "type": "user", "message": {"role": "user", "content": [
+            {"type": "text", "text": "change direction"}]},
+    }), claude_ctx) == [{
+        "a": "steer_result", "request_id": "steer-1",
+        "ok": True, "error": "",
+    }]
+    assert "--replay-user-messages" in claude.build_cmd(
+        {}, True, "original direction", "pin")
 
     driver = CodexDriver()
     assert driver.uses_stdin_stream is True
@@ -326,7 +345,8 @@ if prompt_text.endswith("interrupt fake turn") or \
 else:
     answer = "fake app-server response"
     if prompt_text.endswith("steer fake turn") or \
-            prompt_text.endswith("reject steer turn"):
+            prompt_text.endswith("reject steer turn") or \
+            prompt_text.endswith("unacknowledged steer turn"):
         steer = read()
         params = steer.get("params") or {}
         if steer.get("method") != "turn/steer" or \
@@ -338,6 +358,10 @@ else:
         if prompt_text.endswith("reject steer turn"):
             send({"id": steer["id"], "error": {
                 "code": -32600, "message": "active turn no longer accepts input"}})
+        elif prompt_text.endswith("unacknowledged steer turn"):
+            # Deliberately reach turn/completed without a response to the
+            # turn/steer request. The runner must resolve its `sent` receipt.
+            pass
         else:
             if params != {
                     "threadId": thread_id,
@@ -522,6 +546,29 @@ with open(os.environ["PUPPY_FAKE_CODEX_LOG"], "a", encoding="utf-8") as handle:
         assert rejected_retry["status"] == "rejected" and \
             rejected_retry["duplicate"] is True
 
+        # A transport write is not native acceptance. If the engine completes
+        # without acknowledging it, the receipt and transcript resolve to a
+        # deterministic rejection instead of remaining `sent` forever.
+        assert hub.send_message("unacknowledged steer turn") == {"queued": False}
+        deadline = time.monotonic() + 10
+        while not hub.steering_state()["ready"]:
+            if time.monotonic() >= deadline:
+                raise AssertionError("unacknowledged fake turn never became steerable")
+            await asyncio.sleep(0.02)
+        unacknowledged_turn = hub.steering_state()["turn_id"]
+        unacknowledged = await hub.steer(
+            "maybe too late", "runner-steer-unacknowledged",
+            expected_turn_id=unacknowledged_turn)
+        assert unacknowledged["status"] == "sent"
+        while hub.status != "idle":
+            if time.monotonic() >= deadline:
+                raise AssertionError("unacknowledged fake turn did not finish")
+            await asyncio.sleep(0.02)
+        assert hub._steer_receipts["runner-steer-unacknowledged"]["status"] == \
+            "rejected"
+        assert "completed before" in \
+            hub._steer_receipts["runner-steer-unacknowledged"]["error"]
+
         # The result notification closes steering before process teardown.
         # This catches the window where status is still "running" but the
         # native turn has already become terminal.
@@ -617,7 +664,7 @@ with open(os.environ["PUPPY_FAKE_CODEX_LOG"], "a", encoding="utf-8") as handle:
 
         invocations = [json.loads(line) for line in
                        log_path.read_text(encoding="utf-8").splitlines()]
-        assert len(invocations) == 9, invocations
+        assert len(invocations) == 10, invocations
         first_thread = next(value for value in invocations[0]["seen"]
                             if value.get("id") == "puppy-thread")
         resumed_thread = next(value for value in invocations[1]["seen"]

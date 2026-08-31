@@ -142,8 +142,9 @@ class Driver:
     # of uses_stdin_stream: a writable protocol is necessary, but it does not
     # by itself prove same-turn steering semantics.
     supports_steering = False
-    # Protocols with a distinct response to the steering request set this;
-    # streamed-input protocols treat a successful stdin drain as acceptance.
+    # Protocols with a distinct native acknowledgement of the steering
+    # request set this. Other explicitly supported protocols use stdin drain
+    # as their strongest available acceptance signal.
     steering_acknowledged = False
     # Some multi-provider CLIs deliberately leave authentication to whichever
     # provider/model a turn selects.  Their node health is binary availability,

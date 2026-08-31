@@ -179,6 +179,10 @@ Writes are serialized with approvals and interrupts and revalidated under that
 lock. `steer_status` WebSocket frames distinguish `sent`, `accepted`, and
 `rejected`; protocol rejections also become durable transcript errors. Each
 turn has a bounded receipt ledger which is discarded before its successor.
+Claude runs with input replay enabled, so `accepted` means its stream protocol
+replayed that exact steering message rather than merely draining bytes into the
+CLI pipe. Any engine result which arrives before its acknowledgement resolves
+the outstanding receipt as `rejected`.
 Older nodes omit the capability, so controllers must not expose the route even
 if they happen to run the earlier transport preview.
 

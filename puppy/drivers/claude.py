@@ -2,7 +2,7 @@
 
 Spawns the official `claude` binary per turn in headless stream-json mode:
   claude -p --output-format stream-json --input-format stream-json \
-         --include-partial-messages --verbose \
+         --include-partial-messages --replay-user-messages --verbose \
          --permission-mode <mode> --permission-prompt-tool stdio \
          (--session-id <uuid> | --resume <uuid>) [--model <m>]
 
@@ -26,6 +26,7 @@ class ClaudeDriver(Driver):
     binary = "claude"
     uses_stdin_stream = True
     supports_steering = True
+    steering_acknowledged = True
     release_source = {"kind": "npm", "package": "@anthropic-ai/claude-code"}
     upgrade_source = {"kind": "self", "args": ["update"]}
 
@@ -69,6 +70,7 @@ class ClaudeDriver(Driver):
                 "--output-format", "stream-json",
                 "--input-format", "stream-json",
                 "--include-partial-messages",
+                "--replay-user-messages",
                 "--verbose",
                 "--permission-mode", session.get("permission_mode") or self.default_permission(),
                 "--permission-prompt-tool", "stdio"]
@@ -121,6 +123,19 @@ class ClaudeDriver(Driver):
              "content": [{"type": "text", "text": prompt}]}},
         ]
 
+    def turn_context(self, session, first_turn, prompt, pinned_id,
+                     browser_mcp=None, system_prompt="", terminal_mcp=None):
+        # --replay-user-messages gives a protocol-level acknowledgement for
+        # each text message accepted from stdin. Do not expose steering until
+        # the original prompt itself has been replayed, and retain the exact
+        # FIFO identities needed to correlate later replays without putting a
+        # Puppy request id into model-visible text.
+        return {
+            "initial_prompt": prompt,
+            "initial_user_replayed": False,
+            "pending_steers": [],
+        }
+
     def approval_payload(self, request_id, behavior, original_input, message="",
                          updated_permissions=None, request=None):
         if behavior == "allow":
@@ -140,13 +155,19 @@ class ClaudeDriver(Driver):
         # stream-json input remains open for the whole invocation. Additional
         # user messages are incorporated by the active query at its next safe
         # processing boundary; no separate turn or session is created.
+        if not self.steer_ready(session, ctx):
+            return None
+        ctx.setdefault("pending_steers", []).append({
+            "request_id": request_id, "text": text,
+        })
         return {"type": "user", "message": {"role": "user",
                 "content": [{"type": "text", "text": text}]}}
 
     def steer_ready(self, session, ctx):
-        # The runner calls this only after both initialize and the original
-        # user message have drained to the active stream-json invocation.
-        return True
+        # A pipe drain proves only that bytes reached the CLI process. Its
+        # replay of the original user message proves that the live query has
+        # actually accepted stream input and can receive additional guidance.
+        return bool(ctx.get("initial_user_replayed"))
 
     def parse_line(self, line, ctx):
         try:
@@ -219,6 +240,23 @@ class ClaudeDriver(Driver):
             msg = ev.get("message") or {}
             content = msg.get("content")
             if isinstance(content, list):
+                texts = [blk.get("text") for blk in content
+                         if isinstance(blk, dict) and
+                         blk.get("type") == "text" and
+                         isinstance(blk.get("text"), str)]
+                for text in texts:
+                    if not ctx.get("initial_user_replayed") and \
+                            text == ctx.get("initial_prompt"):
+                        ctx["initial_user_replayed"] = True
+                        continue
+                    pending = ctx.get("pending_steers") or []
+                    match = next((index for index, item in enumerate(pending)
+                                  if item.get("text") == text), None)
+                    if match is not None:
+                        item = pending.pop(match)
+                        acts.append({"a": "steer_result",
+                                     "request_id": item["request_id"],
+                                     "ok": True, "error": ""})
                 for blk in content:
                     if isinstance(blk, dict) and blk.get("type") == "tool_result":
                         acts.append({"a": "event", "kind": "tool_result",

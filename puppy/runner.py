@@ -764,6 +764,17 @@ class SessionHub:
                 "turn_id": receipt["turn_id"],
             })
 
+    def _reject_unacknowledged_steers(self, reason: str) -> None:
+        """Resolve every transport-delivered steer before its turn vanishes."""
+        for request_id, receipt in list(self._steer_receipts.items()):
+            if receipt.get("status") not in ("sending", "sent"):
+                continue
+            self._handle_steer_result({
+                "request_id": request_id,
+                "ok": False,
+                "error": reason,
+            })
+
     async def steer(self, text: str, request_id: str = "",
                     expected_turn_id: str = "") -> dict:
         """Send additional user guidance to this hub's active native turn.
@@ -1960,6 +1971,9 @@ class SessionHub:
                         db.meta_set(f"rate_limit.{session['engine']}", info)
                         self.broadcast({"type": "rate_limit", "engine": session["engine"], "info": info})
                     elif a == "result":
+                        self._reject_unacknowledged_steers(
+                            "the active turn completed before the engine "
+                            "acknowledged steering")
                         self._turn_result_seen = True
                         if self.interrupted and act["data"].get("stop_reason") in \
                                 ("cancelled", "canceled"):
@@ -2025,6 +2039,8 @@ class SessionHub:
             except Exception:
                 pass
         finally:
+            self._reject_unacknowledged_steers(
+                "the active turn stopped before the engine acknowledged steering")
             self._active_prompt_text = ""
             if not user_event_persisted:
                 self._discard_abandoned_uploads([text])
