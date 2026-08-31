@@ -2459,7 +2459,10 @@ def check_sidebar_icon_alignment(css_source: str) -> None:
     assert ".foot-engine-head>.foot-ico{position:relative;top:-1px}" in css_source
     assert ".foot-engine-head>.disclosure-toggle svg{position:relative;top:-1px}" in css_source
     assert ".conn-state{display:flex;align-items:center;" in css_source
-    assert "margin-left:6px;position:relative;top:-1px;" in css_source
+    conn_dot = css_source[css_source.index(".conn-dot{"):
+                          css_source.index(".conn-dot.ok", css_source.index(".conn-dot{"))]
+    assert "margin-left:6px;" in conn_dot
+    assert "position:" not in conn_dot and "top:" not in conn_dot
 
 
 def check_session_activity_clock(ui_source: str, css_source: str) -> None:
