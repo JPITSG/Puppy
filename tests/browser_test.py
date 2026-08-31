@@ -2810,7 +2810,7 @@ def check_shared_node_order(ui_source: str, css_source: str) -> None:
 
 
 def check_flat_session_list(ui_source: str, css_source: str) -> None:
-    """One cross-backend session list; rows name the backend owning the files."""
+    """One cross-backend list; only remote paths name their filesystem backend."""
     sidebar = ui_source[
         ui_source.index("function renderSidebar()"):
         ui_source.index("\nfunction sessDot", ui_source.index("function renderSidebar()"))]
@@ -2848,6 +2848,7 @@ const expired={cwd:"/tmp/puppy-scratch/x",workspace_kind:"temporary",
   workspace_missing:true};
 console.log(JSON.stringify([
   sessionLocationLabel(plain,0),
+  sessionLocationTitle(plain,0),
   sessionLocationLabel(linked,0),
   sessionLocationTitle(linked,0),
   sessionLocationLabel(scratch,7),
@@ -2857,7 +2858,8 @@ console.log(JSON.stringify([
     proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:600]
     assert json.loads(proc.stdout) == [
-        "local:/etc/scripts/puppy",
+        "/etc/scripts/puppy",
+        "/etc/scripts/puppy",
         "NAS:…projects/media-tools",
         "NAS:/volume1/projects/media-tools",
         "Scratch workspace",

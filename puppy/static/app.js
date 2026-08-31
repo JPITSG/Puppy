@@ -1584,20 +1584,24 @@ function workspaceLocationTitle(session, bid) {
   return `${workspaceLocationNode(session, bid)}:${workspaceLocationPath(session)}`;
 }
 
-/* Sidebar rows carry the same node-qualified location as the open session's
-   pill, because the flat list mixes every backend's sessions. Scratch rows
-   keep their plainer wording: a disposable path identifies nothing. The char
-   budgets stay inside the default column - measured 26, or 24 beside the ⇄
-   mark a linked row also carries - so the ellipsis lands on the left, where
-   tailPath puts it; a CSS overflow cut would eat the telling tail instead. */
+/* A sidebar row already names its execution backend in the activity slot. An
+   ordinary directory lives on that same backend, so its location is just the
+   path; only a linked workspace needs the filesystem backend prefix. Scratch
+   rows keep their plainer wording: a disposable path identifies nothing. The
+   char budgets stay inside the default column - measured 26, or 24 beside the
+   ⇄ mark a linked row also carries - so the ellipsis lands on the left,
+   where tailPath puts it; a CSS overflow cut would eat the telling tail
+   instead. */
 function sessionLocationLabel(session, bid) {
   if (isScratchWorkspace(session)) return workspaceLabel(session);
-  return workspaceLocationLabel(session, bid, sessionWorkspace(session) ? 24 : 26);
+  if (sessionWorkspace(session)) return workspaceLocationLabel(session, bid, 24);
+  return tailPath(workspaceLocationPath(session), 26);
 }
 
 function sessionLocationTitle(session, bid) {
   if (isScratchWorkspace(session)) return workspaceTitle(session);
-  return workspaceLocationTitle(session, bid);
+  if (sessionWorkspace(session)) return workspaceLocationTitle(session, bid);
+  return workspaceLocationPath(session);
 }
 
 function sessionDeleteMessage(session) {
