@@ -2690,6 +2690,55 @@ def check_browser_chip_order(ui_source: str) -> None:
     assert 'scroll.querySelector(".chip.be")' not in method
 
 
+def check_chat_status_bar_layout(ui_source: str, css_source: str) -> None:
+    """Identity is one pill; location names the backend that owns the files."""
+    start = ui_source.index("function workspaceLocationNode(")
+    end = ui_source.index("\nfunction sessionDeleteMessage", start)
+    helpers = ui_source[start:end]
+    script = r"""
+const sessionWorkspace=session=>session&&session.workspace&&session.workspace.root?
+  session.workspace:null;
+const backendName=bid=>bid===7?"Executor":"Primary";
+const tailPath=(path,n)=>path.length>n?"…"+path.slice(-n):path;
+%s
+const direct={cwd:"/etc/scripts/puppy"};
+const remote={cwd:"/private/mirror/never-show",workspace:{
+  root:"/volume/projects/puppy",node:"NAS"}};
+const missing={cwd:"/stale/scratch/path",workspace_missing:true};
+const long={workspace:{root:"/one/two/three/four/five",node:"NAS"}};
+console.log(JSON.stringify({
+  direct:[workspaceLocationLabel(direct,0),workspaceLocationTitle(direct,0)],
+  remote:[workspaceLocationLabel(remote,7),workspaceLocationTitle(remote,7)],
+  missing:workspaceLocationLabel(missing,0),
+  long:workspaceLocationLabel(long,7,20),
+}));
+""" % helpers
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:600]
+    result = json.loads(proc.stdout)
+    assert result == {
+        "direct": ["Primary:/etc/scripts/puppy", "Primary:/etc/scripts/puppy"],
+        "remote": ["NAS:/volume/projects/puppy", "NAS:/volume/projects/puppy"],
+        "missing": "Primary:Scratch workspace expired",
+        "long": "NAS:…/three/four/five",
+    }, result
+
+    build_start = ui_source.index("  buildDom() {")
+    build_end = ui_source.index("\n  connect()", build_start)
+    build = ui_source[build_start:build_end]
+    assert '<span class="chip be">' not in build
+    assert '<span class="chip eng">' in build and '<span class="chip cwd">' in build
+    head_start = ui_source.index("  updateHead() {")
+    head_end = ui_source.index("\n  updateRunState()", head_start)
+    head = ui_source[head_start:head_end]
+    assert "const identityText = `${backendName(this.tab.bid)} · ${engineText} · ${modelText}`;" \
+        in head
+    assert "cwd.textContent = workspaceLocationLabel(s, this.tab.bid);" in head
+    assert "workspaceLocationTitle(s, this.tab.bid)" in head
+    assert 'querySelector(".chip.be")' not in head
+    assert "backend/engine/model triplet is session identity" in css_source
+
+
 def check_backend_name_single_activation(ui_source: str) -> None:
     """One surface click toggles; its button and later double clicks do not."""
     def extract_function(marker: str) -> str:
@@ -3922,6 +3971,7 @@ async def main() -> None:
             check_switch_engine_initial_selection(ui_source)
             check_engine_picker_alignment(css_source)
             check_browser_chip_order(ui_source)
+            check_chat_status_bar_layout(ui_source, css_source)
             check_backend_name_single_activation(ui_source)
             check_browser_disable_closes_scoped_tabs(ui_source)
             check_quota_math(ui_source)

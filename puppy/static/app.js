@@ -1495,6 +1495,31 @@ function workspaceTitle(session) {
   return `Disposable scratch workspace · ${session.cwd}`;
 }
 
+/* The execution backend and the filesystem backend differ for a linked
+   workspace. Its authoritative path belongs to `ws.node`; the engine's cwd is
+   a private mirror and must never leak into the location pill. */
+function workspaceLocationNode(session, bid) {
+  const ws = sessionWorkspace(session);
+  return ws && ws.node ? ws.node : backendName(bid);
+}
+
+function workspaceLocationPath(session) {
+  const ws = sessionWorkspace(session);
+  if (ws) return ws.root;
+  if (session && session.workspace_missing) return "Scratch workspace expired";
+  return (session && session.cwd) || "";
+}
+
+function workspaceLocationLabel(session, bid, maxChars = 38) {
+  const node = workspaceLocationNode(session, bid);
+  const room = Math.max(10, maxChars - node.length - 1);
+  return `${node}:${tailPath(workspaceLocationPath(session), room)}`;
+}
+
+function workspaceLocationTitle(session, bid) {
+  return `${workspaceLocationNode(session, bid)}:${workspaceLocationPath(session)}`;
+}
+
 function sessionDeleteMessage(session) {
   const ws = sessionWorkspace(session);
   if (ws) {
@@ -6103,7 +6128,6 @@ class SessionView {
         <div class="chat-meta-viewport edge-scroll-viewport">
           <div class="chat-meta-scroll">
             <span class="chip eng"><span class="dot"></span><span class="eng-label">…</span></span>
-            <span class="chip be"></span>
             <span class="chip cwd"></span>
             <span class="chat-status"></span>
           </div>
@@ -7012,7 +7036,7 @@ class SessionView {
     this.browserChipKey = key;
     const scroll = this.root.querySelector(".chat-meta-scroll");
     for (const stale of scroll.querySelectorAll(".chip.browser")) stale.remove();
-    /* Browser controls finish the pill group: engine, backend and workspace
+    /* Browser controls finish the pill group: identity and filesystem location
        identify the session first, then its live browsers sit immediately before
        the transient activity text. */
     const anchor = scroll.querySelector(".chat-status");
@@ -7070,7 +7094,7 @@ class SessionView {
     if (!chip) {
       chip = el("button", cls);
       chip.type = "button";
-      /* immediately after the workspace path chip: engine, backend, path,
+      /* immediately after the filesystem-location chip: identity, location,
          then this link's live sync state */
       const cwdChip = scroll.querySelector(".chip.cwd");
       scroll.insertBefore(chip, cwdChip ? cwdChip.nextSibling :
@@ -7096,21 +7120,25 @@ class SessionView {
     const engLabel = key => (state.engMap[key] ? state.engMap[key].label : key);
     eng.className = "chip eng eng-" + s.engine + (eff.queuedEngine ? " pending" : "");
     eng.querySelector(".dot").style.background = s.color || "";
-    eng.querySelector(".eng-label").textContent = eff.queuedEngine
+    const engineText = eff.queuedEngine
       ? engLabel(s.engine) + " → " +
         (eff.engine === s.engine ? "reseed" : engLabel(eff.engine))
-      : engLabel(s.engine) +
-        (s.last_model ? " · " + s.last_model.replace(/^claude-/, "") : (s.model ? " · " + s.model : ""));
+      : engLabel(s.engine);
+    const modelText = String((eff.queuedEngine ? eff.model :
+      (s.last_model || s.model)) || "auto").replace(/^claude-/, "");
+    const identityText = `${backendName(this.tab.bid)} · ${engineText} · ${modelText}`;
+    eng.querySelector(".eng-label").textContent = identityText;
     if (eff.queuedEngine)
-      eng.setAttribute("aria-label", "Engine switch queued · applies after the queue");
+      eng.setAttribute("aria-label",
+        `${identityText} · engine switch queued, applies after the queue`);
     else eng.removeAttribute("aria-label");
     const cwd = this.root.querySelector(".chip.cwd");
-    cwd.textContent = workspaceLabel(s, 34);
+    cwd.textContent = workspaceLocationLabel(s, this.tab.bid);
     cwd.removeAttribute("title");
     cwd.removeAttribute("data-tip");
-    cwd.setAttribute("aria-label", workspaceTitle(s));
+    cwd.setAttribute("aria-label",
+      `Project location · ${workspaceLocationTitle(s, this.tab.bid)}`);
     cwd.classList.toggle("warn", !!s.workspace_missing);
-    this.root.querySelector(".chip.be").textContent = backendName(this.tab.bid);
     this.syncWorkspaceChip();
     this.syncBrowserChips();
     const setMini = (cls, label, value, pending = false) => {

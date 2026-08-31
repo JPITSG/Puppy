@@ -892,7 +892,7 @@ select.choice-native{display:none!important}
 }
 .chat-meta-scroll::-webkit-scrollbar{display:none}
 .chat-meta-scroll .chip,.chat-meta-scroll .chat-status{flex:0 0 auto}
-/* The engine/model pair is session identity, not incidental metadata. Let the
+/* The backend/engine/model triplet is session identity, not incidental metadata. Let the
    existing horizontal strip carry its full width on every viewport instead of
    clipping it at the generic chip cap (160px on phones). */
 .chat-meta-scroll .chip.eng{max-width:none}
