@@ -2167,7 +2167,7 @@ def check_active_turn_steering_ui(ui_source: str, css_source: str) -> None:
     assert 'class="composer-action-label">Steer</span>' in ui_source
     assert 'class="composer-action-label">Queue</span>' in ui_source
     assert 'class="composer-action-icon" aria-hidden="true"' in ui_source
-    assert "function filledReferenceIcon(size, paths)" in ui_source
+    assert "function filledReferenceIcon(size, paths, strokeWidth = 0)" in ui_source
     assert 'svg.setAttribute("viewBox", "0 0 800 800")' in ui_source
     assert 'group.setAttribute("fill", "currentColor")' in ui_source
     assert "function queueActionIcon(size = 18)" in ui_source
@@ -2175,6 +2175,12 @@ def check_active_turn_steering_ui(ui_source: str, css_source: str) -> None:
     assert "M2945 7323 c-299 -35" in ui_source
     assert "M2029 6985 c-494 -60" in ui_source
     assert "M3500 2000 l0 -1000" in ui_source
+    queue_icon_source = ui_source[ui_source.index("function queueActionIcon("):
+                                  ui_source.index("function steerActionIcon(")]
+    steer_icon_source = ui_source[ui_source.index("function steerActionIcon("):
+                                  ui_source.index("function folderIcon(")]
+    assert "], 140);" not in queue_icon_source
+    assert "], 140);" in steer_icon_source
     assert ('this.steerBtn.querySelector(".composer-action-icon").' +
             'appendChild(steerActionIcon());') in ui_source
     assert ('this.queueBtn.querySelector(".composer-action-icon").' +

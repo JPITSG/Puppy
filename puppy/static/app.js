@@ -115,7 +115,7 @@ function plusIcon(size) {
    in their original coordinate system. Keeping the source viewBox, padding,
    proportions and separate contours intact makes the compact controls the
    exact references rather than another interpretation of them. */
-function filledReferenceIcon(size, paths) {
+function filledReferenceIcon(size, paths, strokeWidth = 0) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
   svg.setAttribute("viewBox", "0 0 800 800");
@@ -125,7 +125,8 @@ function filledReferenceIcon(size, paths) {
   const group = document.createElementNS(NS, "g");
   group.setAttribute("transform", "translate(0 800) scale(.1 -.1)");
   group.setAttribute("fill", "currentColor");
-  group.setAttribute("stroke", "none");
+  group.setAttribute("stroke", strokeWidth ? "currentColor" : "none");
+  if (strokeWidth) group.setAttribute("stroke-width", strokeWidth);
   for (const data of paths) {
     const path = document.createElementNS(NS, "path");
     path.setAttribute("d", data);
@@ -172,7 +173,7 @@ function steerActionIcon(size = 18) {
 -10 507 -94 991 -973 1700 -1961 1580z`,
     `M3500 2000 l0 -1000 250 0 250 0 0 1000 0 1000 -250 0 -250 0 0
 -1000z`,
-  ]);
+  ], 140);
 }
 
 /* stroke is a parameter for the same reason bellIcon runs lighter: this 24-box
