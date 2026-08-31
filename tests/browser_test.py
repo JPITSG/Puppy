@@ -471,6 +471,7 @@ const view = Object.assign(Object.create(proto), {
   liveText: "",
   syncLiveStatus() { this.liveText = this.visibleStatusText(); },
   syncHeadOverflow() {},
+  updateSteerControl() {},
 });
 const take = () => ({header: view.statusEl.innerHTML, live: view.liveText,
                      activity: view.statusText, reconnecting: view.reconnecting});
@@ -1422,13 +1423,15 @@ function makeView(id="s:0:42") {
     attachments:[],histAttach:null,histIdx:null,histDraft:"",sentThumbs:new Map(),
     draftSupported:true,draftReady:true,draftRevision:0,
     draftMaxChars:100000,status:"idle",_forceScroll:false,
+    steering:{supported:true,ready:false,turn_id:""},steerPending:null,
     draftClientId:"device-a",draftClientSeq:0,draftLatestSeq:0,draftAckSeq:0,
     draftInFlightSeq:0,draftPendingText:null,
     draftDeferred:null,draftTouchedBeforeReady:false,draftJournal:null,
     queueEditSeq:0,queueEditPending:null,
     ws:{readyState:WebSocket.OPEN,send:value=>sent.push(JSON.parse(value))},
     renderAttachments(){},resizeComposer(){},releaseHistoryAttachments(){},
-    scrollBottom(){},updateRunState(){},setStatus(){},discardServerUpload(){},
+    scrollBottom(){},updateRunState(){},setSteeringState(){},setStatus(){},
+    discardServerUpload(){},updateSteerControl(){},
   });
   return {view,sent,queueClasses};
 }
@@ -2114,6 +2117,109 @@ def check_queue_controls_ui(ui_source: str, css_source: str) -> None:
     assert '.queue-strip .q-item.q-paused .q-t{opacity:.58}' in css_source
     assert '.queue-strip .q-item.q-sortable{cursor:grab;user-select:none}' in css_source
     assert '.queue-strip .q-live-list.reordering .q-live{will-change:transform}' in css_source
+
+
+def check_active_turn_steering_ui(ui_source: str, css_source: str) -> None:
+    """Wide composers expose distinct steer/queue actions and an icon stop."""
+    steer_markup = '<button class="btn-steer hidden" type="button">Steer</button>'
+    queue_markup = '<button class="btn-queue hidden" type="button">Queue</button>'
+    send_markup = '<button class="btn-send" type="button">Send</button>'
+    assert steer_markup in ui_source and queue_markup in ui_source and send_markup in ui_source
+    assert ui_source.index(steer_markup) < ui_source.index(queue_markup) < \
+        ui_source.index(send_markup)
+    assert "this.steerBtn.onclick = () => this.steer();" in ui_source
+    assert 'backend.capabilities.includes("active-turn-steering")' in ui_source
+    assert 'case "steering_state":' in ui_source
+    assert 'case "steer_status":' in ui_source
+    assert 'api(this.tab.bid, `sessions/${this.tab.sid}/steer`' in ui_source
+    assert "request_id: request.requestId" in ui_source
+    assert "expected_turn_id: request.turnId" in ui_source
+    assert "this.steerBtn.classList.toggle(\"hidden\", !(running && supported));" \
+        in ui_source
+    assert "hasAttachments" in ui_source and \
+        "Steering accepts text only; use Queue for attachments" in ui_source
+
+    # Stop keeps its accessible name while its visible face is only one drawn
+    # square. Width, height, padding, and the icon's zero margin make both
+    # centres geometric rather than font-dependent.
+    assert "'<span class=\"stop-sq\" aria-hidden=\"true\"></span>'" in ui_source
+    assert 'this.sendBtn.setAttribute("aria-label", running ? "Stop" : "Send")' \
+        in ui_source
+    assert '>Stop</button>' not in ui_source
+    assert ".btn-send.stop{" in css_source
+    assert "width:32px;min-width:32px;padding:0;gap:0;" in css_source
+    assert (".btn-send.stop .stop-sq{display:block;width:10px;height:10px;" +
+            "background:currentColor;flex:0 0 auto;margin:0}") in css_source
+
+    # Steer is the green member of the existing composer button family and is
+    # hidden at exactly the same narrow breakpoint as Queue.
+    assert ".btn-send,.btn-queue,.btn-steer{" in css_source
+    assert ".btn-steer{" in css_source
+    assert "background-color:var(--ok-lo);" in css_source
+    assert ".btn-send:disabled,.btn-queue:disabled,.btn-steer:disabled{" in css_source
+    assert ".btn-queue,.btn-steer{display:none}" in css_source
+    assert ".btn-send.stop{width:34px;min-width:34px}" in css_source
+
+    start = ui_source.index("\n  async steer()") + 1
+    brace = ui_source.index("{", start)
+    depth = 0
+    steer_method = None
+    for index in range(brace, len(ui_source)):
+        if ui_source[index] == "{":
+            depth += 1
+        elif ui_source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                steer_method = ui_source[start:index + 1]
+                break
+    assert steer_method is not None, "unbalanced SessionView.steer"
+    script = r"""
+let calls=[],toasts=[],draftSaves=0,controlSyncs=0;
+const newDraftClientId=()=>"request-1";
+const toast=(...args)=>toasts.push(args);
+const api=async (bid,path,options)=>{
+  calls.push({bid,path,options});
+  return {ok:true,status:"sent",request_id:options.body.request_id};
+};
+const proto={%s};
+const view=Object.assign(Object.create(proto),{
+  tab:{bid:7,sid:42},ta:{value:"  updated direction  "},attachments:[],
+  draftSupported:true,draftReady:true,steering:{supported:true,ready:true,turn_id:"turn-9"},
+  steerPending:null,_forceScroll:false,histIdx:3,histDraft:"old",
+  updateSteerControl(){controlSyncs++;},resizeComposer(){},
+  releaseHistoryAttachments(){},saveDraft(){draftSaves++;},scrollBottom(){},
+});
+await view.steer();
+const sent={calls,toasts,draftSaves,controlSyncs,text:view.ta.value,
+  pending:view.steerPending,forceScroll:view._forceScroll};
+view.ta.value="later";
+view.steering={supported:true,ready:false,turn_id:""};
+await view.steer();
+console.log(JSON.stringify({sent,afterNotReady:{calls:calls.length,toasts}}));
+""" % steer_method
+    proc = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:700]
+    result = json.loads(proc.stdout)
+    assert result["sent"]["calls"] == [{
+        "bid": 7,
+        "path": "sessions/42/steer",
+        "options": {
+            "method": "POST",
+            "body": {
+                "text": "updated direction",
+                "request_id": "steer-request-1",
+                "expected_turn_id": "turn-9",
+            },
+            "timeoutMs": 15000,
+        },
+    }], result
+    assert result["sent"]["text"] == "" and result["sent"]["pending"] is None
+    assert result["sent"]["draftSaves"] == 1 and result["sent"]["forceScroll"] is True
+    assert result["afterNotReady"]["calls"] == 1
+    assert result["afterNotReady"]["toasts"][-1][0] == \
+        "The active turn is not ready for steering"
 
 
 def check_system_prompt_settings(ui_source: str, css_source: str) -> None:
@@ -3970,6 +4076,7 @@ async def main() -> None:
             check_desktop_side_drag(ui_source)
             check_user_message_copy(ui_source)
             check_queue_controls_ui(ui_source, css_source)
+            check_active_turn_steering_ui(ui_source, css_source)
             check_system_prompt_settings(ui_source, css_source)
             check_remote_workspace_picker(ui_source, css_source)
             check_opencode_chat_models(ui_source, css_source)

@@ -3531,6 +3531,16 @@ function backendSupportsSessionDrafts(bid) {
     backend.capabilities.includes("session-drafts");
 }
 
+function backendSupportsActiveSteering(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(item => item.id === bid);
+  /* This route was added after the first steering transport preview. Require
+     the hardened capability so an older remote never gets a control whose
+     turn token and idempotency contract it cannot honor. */
+  return !!backend && Array.isArray(backend.capabilities) &&
+    backend.capabilities.includes("active-turn-steering");
+}
+
 function normalizeUploadSettings(value) {
   if (!value || typeof value !== "object") return null;
   const megabytes = Number(value.max_file_size_mb);
@@ -6050,6 +6060,8 @@ class SessionView {
     this.tab = tab;
     this.session = null;
     this.status = "idle";
+    this.steering = { supported: false, ready: false, turn_id: "" };
+    this.steerPending = null;
     this.ws = null;
     this.closed = false;
     this.retry = 800;
@@ -6152,8 +6164,9 @@ class SessionView {
                 ${composerChoice("effort", "Effort", "Reasoning effort")}
               </div>
             </div>
+            <button class="btn-steer hidden" type="button">Steer</button>
             <button class="btn-queue hidden" type="button">Queue</button>
-            <button class="btn-send">Send</button>
+            <button class="btn-send" type="button">Send</button>
           </div>
           <input class="hidden attach-input" type="file" multiple>
         </div>
@@ -6178,6 +6191,7 @@ class SessionView {
     this.ta = root.querySelector("textarea");
     this.composerBox = root.querySelector(".composer-box");
     this.sendBtn = root.querySelector(".btn-send");
+    this.steerBtn = root.querySelector(".btn-steer");
     this.queueBtn = root.querySelector(".btn-queue");
     this.composerRow = root.querySelector(".composer-row");
     this.composerMeta = root.querySelector(".composer-meta-scroll");
@@ -6245,6 +6259,7 @@ class SessionView {
       this.releaseHistoryAttachments();
       this.resizeComposer();
       this.saveDraft();
+      this.updateSteerControl();
     });
     this.ta.addEventListener("keydown", (e) => {
       if (e.isComposing) { this.ctrlCStreak = 0; return; }
@@ -6291,6 +6306,7 @@ class SessionView {
     this.ta.addEventListener("blur", () => { this.ctrlCStreak = 0; });
     this.ta.addEventListener("pointerdown", () => { this.ctrlCStreak = 0; });
     this.sendBtn.onclick = () => this.status === "running" ? this.interrupt() : this.submit();
+    this.steerBtn.onclick = () => this.steer();
     /* submit() already queues when a turn is in flight - the same path Enter
        takes. This just gives that a visible control while the primary button
        is busy being Stop. */
@@ -6477,12 +6493,16 @@ class SessionView {
     }
     this.sendBtn.disabled = stopping || unavailable;
     this.queueBtn.disabled = stopping || unavailable;
+    this.updateSteerControl();
     this.renderStatus();
   }
 
   handleNodeStopping() {
     this.shutdownSeen = true;
     this.status = "idle";
+    this.setSteeringState({
+      supported: this.steering.supported, ready: false, turn_id: "",
+    });
     this.clearLive();
     this.hideApproval();
     this.updateRunState();
@@ -6883,6 +6903,7 @@ class SessionView {
     switch (d.type) {
       case "snapshot":
         this.session = d.session;
+        this.setSteeringState(d.steering);
         if (Number.isInteger(d.draft_max_chars) && d.draft_max_chars > 0)
           this.draftMaxChars = d.draft_max_chars;
         if (d.uploads) {
@@ -6956,6 +6977,18 @@ class SessionView {
       case "approval_resolved":
         this.hideApproval();
         break;
+      case "steering_state":
+        this.setSteeringState(d.steering);
+        break;
+      case "steer_status":
+        if (this.steerPending && d.request_id === this.steerPending.requestId &&
+            (d.status === "accepted" || d.status === "rejected")) {
+          this.steerPending = null;
+          this.updateSteerControl();
+        }
+        if (d.status === "rejected")
+          toast(d.error || "Steering was not accepted", "error", 6000);
+        break;
       case "queued":
         this.renderQueue(d.queued || [], d.held || [], d.paused || [],
           d.queue_revision);
@@ -6987,6 +7020,9 @@ class SessionView {
         const continued = typeof d.continued === "boolean" ?
           d.continued : this.queued.length > 0;
         this.status = continued ? "running" : "idle";
+        this.setSteeringState({
+          supported: this.steering.supported, ready: false, turn_id: "",
+        });
         this.clearLive();
         this.updateRunState();
         this.setStatus(queueWaiting ? "Waiting for queue order…" :
@@ -7163,14 +7199,49 @@ class SessionView {
 
   updateRunState() {
     const running = this.status === "running";
-    if (running) this.sendBtn.innerHTML = '<span class="stop-sq"></span>Stop';
+    if (running) this.sendBtn.innerHTML =
+      '<span class="stop-sq" aria-hidden="true"></span>';
     else this.sendBtn.textContent = "Send";
+    this.sendBtn.setAttribute("aria-label", running ? "Stop" : "Send");
     this.sendBtn.classList.toggle("stop", running);
     /* only while a turn is running: idle, the primary button already says Send.
        CSS drops it below the desktop breakpoint, where the row has no room. */
     this.queueBtn.classList.toggle("hidden", !running);
+    this.updateSteerControl();
     if (!running) this.setStatus("");
     else this.syncLiveStatus();
+  }
+
+  setSteeringState(value) {
+    const stateValue = value && typeof value === "object" ? value : {};
+    const supported = backendSupportsActiveSteering(this.tab.bid) &&
+      stateValue.supported === true;
+    const turnId = typeof stateValue.turn_id === "string" ? stateValue.turn_id : "";
+    this.steering = {
+      supported,
+      ready: supported && stateValue.ready === true && !!turnId,
+      turn_id: turnId,
+    };
+    this.updateSteerControl();
+  }
+
+  updateSteerControl() {
+    if (!this.steerBtn) return;
+    const running = this.status === "running";
+    const supported = backendSupportsActiveSteering(this.tab.bid) &&
+      this.steering.supported;
+    this.steerBtn.classList.toggle("hidden", !(running && supported));
+    const stopping = !!remoteStoppingMessage(this.tab.bid);
+    const unavailable = !!this.tab.bid && !backendConnectionAllowed(this.tab.bid);
+    const hasAttachments = this.attachments.length > 0;
+    this.steerBtn.disabled = !running || !supported || !this.steering.ready ||
+      !!this.steerPending || this.reconnecting || stopping || unavailable ||
+      hasAttachments;
+    let label = "Steer the active turn";
+    if (hasAttachments) label = "Steering accepts text only; use Queue for attachments";
+    else if (this.steerPending) label = "Sending steering guidance";
+    else if (!this.steering.ready) label = "The active turn is not ready for steering";
+    this.steerBtn.setAttribute("aria-label", label);
   }
 
   visibleStatusText() {
@@ -7193,6 +7264,7 @@ class SessionView {
     if (this.reconnecting === reconnecting) return;
     this.reconnecting = reconnecting;
     this.renderStatus();
+    this.updateSteerControl();
   }
 
   setStatus(text) {
@@ -7771,10 +7843,72 @@ class SessionView {
     if (this.attachButton)
       this.attachButton.classList.toggle("uploading",
         this.attachments.some(attachment => attachment.uploading));
+    this.updateSteerControl();
     if (persist && !this.closed) this.saveDraft();
   }
 
+  async steer() {
+    const composerText = this.ta.value;
+    const text = composerText.trim();
+    if (!text) return;
+    if (this.attachments.length) {
+      toast("Steering accepts text only · use Queue for attachments", "error", 6000);
+      return;
+    }
+    if (this.draftSupported && !this.draftReady) {
+      toast("Draft is still syncing; wait for the session to reconnect", "error");
+      return;
+    }
+    if (!this.steering.ready || !this.steering.turn_id) {
+      toast("The active turn is not ready for steering", "error");
+      return;
+    }
+    if (this.steerPending) return;
+
+    const request = {
+      requestId: `steer-${newDraftClientId()}`,
+      turnId: this.steering.turn_id,
+    };
+    this.steerPending = request;
+    this.updateSteerControl();
+    this._forceScroll = true;
+    let result;
+    try {
+      result = await api(this.tab.bid, `sessions/${this.tab.sid}/steer`, {
+        method: "POST",
+        body: {
+          text,
+          request_id: request.requestId,
+          expected_turn_id: request.turnId,
+        },
+        timeoutMs: 15000,
+      });
+    } catch (error) {
+      if (this.steerPending === request) this.steerPending = null;
+      this._forceScroll = false;
+      this.updateSteerControl();
+      toast(error.message || "Steering could not be sent", "error", 6000);
+      return;
+    }
+    /* A native acknowledgement can arrive over the session socket before the
+       HTTP response. Clear only this request, never a newer one. `sent` is a
+       successful transport handoff, so another steer may follow while its
+       later accepted/rejected status remains visible through the socket. */
+    if (this.steerPending === request) this.steerPending = null;
+    if (this.ta.value === composerText) {
+      this.ta.value = "";
+      this.resizeComposer();
+      this.histIdx = null;
+      this.histDraft = "";
+      this.releaseHistoryAttachments();
+      this.saveDraft();
+    }
+    this.updateSteerControl();
+    this.scrollBottom(true);
+  }
+
   submit() {
+    const wasRunning = this.status === "running";
     const draft = this.draftValue();
     let text = this.ta.value.trim();
     if (!text && !this.attachments.length) return;
@@ -7831,6 +7965,9 @@ class SessionView {
     if (!this.draftSupported || !this.draftReady)
       lsDel("puppy.draft." + this.tab.id);
     this.status = "running";
+    if (!wasRunning) this.setSteeringState({
+      supported: this.steering.supported, ready: false, turn_id: "",
+    });
     noteSessionActivity(this.tab.bid, this.tab.sid, true);
     this.updateRunState();
     this.setStatus("Starting…");

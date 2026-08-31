@@ -1373,7 +1373,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .composer-row .mini:not(:disabled):active{transform:scale(.96);background:var(--hov)}
 .composer-row .mini .mini-value{color:var(--txt2)}
 @media (hover:hover){.composer-row .mini:hover .mini-value{color:var(--txt)}}
-.btn-send,.btn-queue{
+.btn-send,.btn-queue,.btn-steer{
   display:inline-flex;align-items:center;justify-content:center;gap:7px;flex-shrink:0;
   height:32px;min-width:86px;padding:0 16px var(--label-pb);border:none;border-radius:var(--btn-r);
   font-size:13px;font-weight:650;line-height:1;letter-spacing:.01em;cursor:pointer;user-select:none;
@@ -1382,21 +1382,27 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   box-shadow:inset 0 1px 0 rgba(255,255,255,.3),0 1px 2px rgba(0,0,0,.25),var(--glow-acc);
   transition:box-shadow .15s var(--ease),filter .15s var(--ease);
 }
-/* the pad lifts the whole content box, so give the square it back - it is
-   already centred and only the text needed the correction */
-.btn-send .stop-sq{width:9px;height:9px;background:currentColor;flex-shrink:0;margin-top:var(--label-pb)}
+.btn-steer{
+  color:var(--ok-ink);
+  background-color:var(--ok-lo);background-image:linear-gradient(180deg,var(--ok-hi),var(--ok-lo));
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.3),0 1px 2px rgba(0,0,0,.25),var(--glow-ok);
+}
 @media (hover:hover){
   .btn-send:hover,.btn-queue:hover{filter:brightness(1.07);box-shadow:inset 0 1px 0 rgba(255,255,255,.34),0 1px 2px rgba(0,0,0,.25),var(--glow-acc-hi)}
+  .btn-steer:hover{filter:brightness(1.07);box-shadow:inset 0 1px 0 rgba(255,255,255,.34),0 1px 2px rgba(0,0,0,.25),0 5px 15px -7px rgba(15,172,121,.85)}
 }
 .btn-send:active,.btn-queue:active{filter:brightness(.94);box-shadow:inset 0 2px 6px rgba(4,17,40,.4)}
+.btn-steer:active{filter:brightness(.94);box-shadow:inset 0 2px 6px rgba(2,40,28,.4)}
 .btn-send.stop{
+  width:32px;min-width:32px;padding:0;gap:0;
   background-color:var(--err-lo);background-image:linear-gradient(180deg,var(--err-hi),var(--err-lo));
   box-shadow:inset 0 1px 0 rgba(255,255,255,.3),0 1px 2px rgba(0,0,0,.25),var(--glow-err);
 }
+.btn-send.stop .stop-sq{display:block;width:10px;height:10px;background:currentColor;flex:0 0 auto;margin:0}
 @media (hover:hover){
   .btn-send.stop:hover{box-shadow:inset 0 1px 0 rgba(255,255,255,.34),0 1px 2px rgba(0,0,0,.25),0 6px 18px -6px rgba(217,66,89,1)}
 }
-.btn-send:disabled,.btn-queue:disabled{opacity:.4;filter:none;box-shadow:none;pointer-events:none}
+.btn-send:disabled,.btn-queue:disabled,.btn-steer:disabled{opacity:.4;filter:none;box-shadow:none;pointer-events:none}
 
 /* ---------- terminal view ---------- */
 .br-meta.term-meta{padding-top:6px;transition:filter .15s var(--ease)}
@@ -2116,8 +2122,9 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   .btn{height:36px;padding:0 16px var(--label-pb)}
   .btn-sm{height:30px;padding:0 12px var(--label-pb)}
   .btn-send{height:34px}
+  .btn-send.stop{width:34px;min-width:34px}
   /* the composer is tight enough on a phone; Enter already queues */
-  .btn-queue{display:none}
+  .btn-queue,.btn-steer{display:none}
   .composer-row .mini{height:26px}
   .icon-btn{width:34px;height:34px}
   .settings-form{grid-template-columns:1fr}
