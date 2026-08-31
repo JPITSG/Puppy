@@ -120,6 +120,13 @@ BASE_CAPABILITIES = (
     WORKSPACE_MIRROR_CAPABILITY,
 )
 TERMINAL_CAPABILITY = "terminal"
+# Identified node-owned PTYs, their create/list/delete routes, and the
+# ID-scoped viewer WebSocket. Older terminal-capable nodes keep the anonymous
+# create-on-connect socket and remain usable without agent collaboration.
+TERMINAL_INSTANCES_CAPABILITY = "terminal-instances"
+# Explicitly link one identified terminal to one chat. The linked engine turn
+# receives the private terminal MCP bridge and first-use activity events.
+TERMINAL_HANDOFF_CAPABILITY = "terminal-handoff"
 # POST /api/notify/exec runs a controller-supplied completion command. It is
 # part of the node's shell surface, so it exists exactly when terminal does.
 NOTIFY_EXEC_CAPABILITY = "notify-exec"
@@ -141,5 +148,7 @@ def execution_capabilities(include_terminal: bool = True) -> list:
     caps = list(BASE_CAPABILITIES)
     if include_terminal:
         caps.append(TERMINAL_CAPABILITY)
+        caps.append(TERMINAL_INSTANCES_CAPABILITY)
+        caps.append(TERMINAL_HANDOFF_CAPABILITY)
         caps.append(NOTIFY_EXEC_CAPABILITY)
     return caps

@@ -2073,6 +2073,7 @@ def check_system_prompt_settings(ui_source: str, css_source: str) -> None:
     assert 'backend.capabilities.includes("system-prompt")' in ui_source
     assert '"Remote workspace guidance"' in ui_source
     assert '"Browser guidance"' in ui_source
+    assert '"Terminal guidance"' in ui_source
     assert '"Puppy browser guidance"' not in ui_source
     assert '"Reset to default"' in ui_source
     remote_copy = ("Sent only when this backend runs a model against a project "
@@ -2081,8 +2082,12 @@ def check_system_prompt_settings(ui_source: str, css_source: str) -> None:
     guidance_copy = ("Sent to every model turn on backends where Browser is enabled; "
                      "it is not sent on backends where Browser is off.")
     assert guidance_copy in ui_source.replace('" +\n      "', "")
+    terminal_copy = ("Sent only when this backend offers shared Terminal tools; "
+                     "it is not sent when Terminal is unavailable.")
+    assert terminal_copy in ui_source.replace('" +\n      "', "")
     assert "browserNote.textContent = `Sent only for turns on ${node.name}" not in ui_source
     assert 'body.remote_workspace = record.remoteWorkspaceDraft' in ui_source
+    assert 'body.terminal = record.terminalDraft' in ui_source
     runner_source = (BASE / "puppy" / "runner.py").read_text()
     assert "system_prompt_text = system_prompts.turn_prompt(" in runner_source
     assert "remote_workspace=descriptor is not None" in runner_source
@@ -2096,11 +2101,12 @@ def check_system_prompt_settings(ui_source: str, css_source: str) -> None:
     assert 'custom.className = "system-prompt-textarea config-textarea";' in ui_source
     assert 'remoteText.className = "system-prompt-textarea config-textarea";' in ui_source
     assert 'browserText.className = "system-prompt-textarea config-textarea";' in ui_source
+    assert 'terminalText.className = "system-prompt-textarea config-textarea";' in ui_source
     assert 'class="config-textarea" id="be-pairing" rows="3"' in ui_source
     assert 'class="config-textarea" id="backend-edit-pairing" rows="3"' in ui_source
     assert ui_source.count('class="config-textarea"') == 2
     assert "custom.rows = 3;" in ui_source and "remoteText.rows = 3;" in ui_source and \
-        "browserText.rows = 3;" in ui_source
+        "browserText.rows = 3;" in ui_source and "terminalText.rows = 3;" in ui_source
 
     start = ui_source.index("\n  systemPromptCard(") + 1
     brace = ui_source.index("{", start)
@@ -2146,18 +2152,19 @@ const backendConnectionAllowed=bid=>!bid||backendAllowed;
 const remoteAvailability=bid=>!bid||backendAllowed?"ok":"bad";
 const state={remoteSystemPrompts:{}};
 const calls=[],toasts=[];
-const payload=(custom,remote,browser)=>({custom,remote_workspace:remote,browser,
-  remote_workspace_default:"REMOTE DEFAULT",browser_default:"DEFAULT",max_chars:100});
+const payload=(custom,remote,browser,terminal)=>({custom,remote_workspace:remote,browser,terminal,
+  remote_workspace_default:"REMOTE DEFAULT",browser_default:"DEFAULT",
+  terminal_default:"TERMINAL DEFAULT",max_chars:100});
 const legacyPayload=(custom,browser)=>({custom,browser,browser_default:"DEFAULT",max_chars:100});
 async function api(bid,path,options={}) {
   calls.push({bid,path,method:options.method||"GET",body:options.body||null});
   if(options.method==="PATCH") {
     if(bid===2) return {system_prompt:legacyPayload(options.body.custom,options.body.browser)};
     return {system_prompt:payload(options.body.custom,options.body.remote_workspace,
-      options.body.browser)};
+      options.body.browser,options.body.terminal)};
   }
   if(bid===2) return {system_prompt:legacyPayload("LEGACY","LEGACY BROWSER")};
-  return {system_prompt:payload("REMOTE","REMOTE WORKSPACE","REMOTE BROWSER")};
+  return {system_prompt:payload("REMOTE","REMOTE WORKSPACE","REMOTE BROWSER","REMOTE TERMINAL")};
 }
 const toast=(...args)=>toasts.push(args);
 class TestView {
@@ -2168,43 +2175,49 @@ const view=new TestView();
 const card=view.systemPromptCard([
   {bid:0,name:"Primary"},{bid:1,name:"Laptop"},{bid:2,name:"Legacy prompts"},
   {bid:3,name:"Old backend"}
-],payload("LOCAL","REMOTE DEFAULT","DEFAULT"),1);
+],payload("LOCAL","REMOTE DEFAULT","DEFAULT","TERMINAL DEFAULT"),1);
 const nodeField=card.children[0],select=nodeField.children[1];
 const custom=card.children[1].children[1];
 const remoteSection=card.children[2],remoteWorkspace=remoteSection.children[1];
 const remoteReset=remoteSection.children[0].children[1];
 const browserSection=card.children[3],browser=browserSection.children[1];
 const browserReset=browserSection.children[0].children[1];
-const actions=card.children[4],status=actions.children[0],save=actions.children[1];
+const terminalSection=card.children[4],terminal=terminalSection.children[1];
+const terminalReset=terminalSection.children[0].children[1];
+const actions=card.children[5],status=actions.children[0],save=actions.children[1];
 const before={custom:custom.value,remoteWorkspace:remoteWorkspace.value,
-  browser:browser.value,status:status.textContent,
+  browser:browser.value,terminal:terminal.value,status:status.textContent,
   remoteNote:remoteSection.children[0].children[0].children[1].textContent,
-  browserNote:browserSection.children[0].children[0].children[1].textContent};
+  browserNote:browserSection.children[0].children[0].children[1].textContent,
+  terminalNote:terminalSection.children[0].children[0].children[1].textContent};
 custom.value="LOCAL EDIT";custom.oninput();
 const dirty=status.textContent;
 remoteWorkspace.value="OTHER REMOTE";remoteWorkspace.oninput();remoteReset.onclick();
 browser.value="OTHER";browser.oninput();browserReset.onclick();
+terminal.value="OTHER TERMINAL";terminal.oninput();terminalReset.onclick();
 const resetState={remoteWorkspace:remoteWorkspace.value,browser:browser.value,
+  terminal:terminal.value,
   status:status.textContent};
 await save.onclick();
 const saved={status:status.textContent,toast:toasts[0][0]};
 select.value="1";document.activeElement=select;select.onchange();
 await new Promise(resolve=>setTimeout(resolve,0));
 const remote={custom:custom.value,remoteWorkspace:remoteWorkspace.value,
-  browser:browser.value,status:status.textContent};
+  browser:browser.value,terminal:terminal.value,status:status.textContent};
 backendAllowed=false;view.systemPromptSync();
 const offline={custom:custom.value,remoteWorkspace:remoteWorkspace.value,
-  browser:browser.value,status:status.textContent,
-  disabled:custom.disabled&&remoteWorkspace.disabled&&browser.disabled&&save.disabled};
+  browser:browser.value,terminal:terminal.value,status:status.textContent,
+  disabled:custom.disabled&&remoteWorkspace.disabled&&browser.disabled&&terminal.disabled&&save.disabled};
 backendAllowed=true;view.systemPromptSync();
 select.value="2";document.activeElement=select;select.onchange();
 await new Promise(resolve=>setTimeout(resolve,0));
 const legacy={custom:custom.value,browser:browser.value,
   remoteDisabled:remoteWorkspace.disabled,remotePlaceholder:remoteWorkspace.placeholder,
+  terminalDisabled:terminal.disabled,terminalPlaceholder:terminal.placeholder,
   saveDisabled:save.disabled};
 custom.value="LEGACY EDIT";custom.oninput();await save.onclick();
 select.value="3";document.activeElement=select;select.onchange();
-const unsupported={disabled:custom.disabled&&remoteWorkspace.disabled&&browser.disabled&&save.disabled,
+const unsupported={disabled:custom.disabled&&remoteWorkspace.disabled&&browser.disabled&&terminal.disabled&&save.disabled,
   status:status.textContent};
 console.log(JSON.stringify({before,dirty,resetState,saved,remote,offline,legacy,unsupported,calls}));
 """.replace("__METHOD__", method)
@@ -2214,21 +2227,25 @@ console.log(JSON.stringify({before,dirty,resetState,saved,remote,offline,legacy,
     result = json.loads(proc.stdout)
     assert result["before"] == {
         "custom": "LOCAL", "remoteWorkspace": "REMOTE DEFAULT", "browser": "DEFAULT",
+        "terminal": "TERMINAL DEFAULT",
         "status": "Up to 100 characters per field.",
         "remoteNote": remote_copy, "browserNote": guidance_copy,
+        "terminalNote": terminal_copy,
     }, result
     assert result["dirty"] == "Unsaved changes", result
     assert result["resetState"] == {
         "remoteWorkspace": "REMOTE DEFAULT", "browser": "DEFAULT",
+        "terminal": "TERMINAL DEFAULT",
         "status": "Unsaved changes"}, result
     assert result["saved"] == {
         "status": "Saved for new turns.", "toast": "Primary: System prompt saved"}, result
     assert result["remote"]["custom"] == "REMOTE" and \
         result["remote"]["remoteWorkspace"] == "REMOTE WORKSPACE" and \
-        result["remote"]["browser"] == "REMOTE BROWSER", result
+        result["remote"]["browser"] == "REMOTE BROWSER" and \
+        result["remote"]["terminal"] == "REMOTE TERMINAL", result
     assert result["offline"] == {
         "custom": "REMOTE", "remoteWorkspace": "REMOTE WORKSPACE",
-        "browser": "REMOTE BROWSER",
+        "browser": "REMOTE BROWSER", "terminal": "REMOTE TERMINAL",
         "status": "Backend unavailable · showing last known prompt settings.",
         "disabled": True,
     }, result
@@ -2236,6 +2253,8 @@ console.log(JSON.stringify({before,dirty,resetState,saved,remote,offline,legacy,
         "custom": "LEGACY", "browser": "LEGACY BROWSER",
         "remoteDisabled": True,
         "remotePlaceholder": "Upgrade this backend to configure remote workspace guidance",
+        "terminalDisabled": True,
+        "terminalPlaceholder": "Upgrade this backend to configure Terminal guidance",
         "saveDisabled": False,
     }, result
     assert result["unsupported"] == {
@@ -2244,7 +2263,9 @@ console.log(JSON.stringify({before,dirty,resetState,saved,remote,offline,legacy,
     assert [call["method"] for call in result["calls"]] == \
         ["PATCH", "GET", "GET", "PATCH"], result
     assert result["calls"][0]["body"]["remote_workspace"] == "REMOTE DEFAULT", result
+    assert result["calls"][0]["body"]["terminal"] == "TERMINAL DEFAULT", result
     assert "remote_workspace" not in result["calls"][3]["body"], result
+    assert "terminal" not in result["calls"][3]["body"], result
 
 
 def check_remote_workspace_picker(ui_source: str, css_source: str) -> None:
@@ -2778,6 +2799,8 @@ async def main() -> None:
                 assert "browser-instances" in ping["capabilities"], ping
                 assert "browser-handoff" in ping["capabilities"], ping
                 assert "browser-file-workflows" in ping["capabilities"], ping
+                assert "terminal-instances" in ping["capabilities"], ping
+                assert "terminal-handoff" in ping["capabilities"], ping
                 assert "system-prompt" in ping["capabilities"], ping
                 assert ping["browser"] == {"enabled": False}, ping
             async with http.get(url + "/api/system-prompt", headers=headers) as r:
@@ -2786,8 +2809,11 @@ async def main() -> None:
             default_remote_prompt = \
                 prompt_settings["system_prompt"]["remote_workspace_default"]
             default_browser_prompt = prompt_settings["system_prompt"]["browser_default"]
+            default_terminal_prompt = prompt_settings["system_prompt"]["terminal_default"]
             assert prompt_settings["system_prompt"]["remote_workspace"] == \
                 default_remote_prompt
+            assert prompt_settings["system_prompt"]["terminal"] == \
+                default_terminal_prompt
             assert system_prompts.turn_prompt(remote_workspace=False) == ""
             assert system_prompts.turn_prompt(remote_workspace=True) == \
                 default_remote_prompt
@@ -2804,7 +2830,8 @@ async def main() -> None:
             async with http.patch(url + "/api/system-prompt", headers=headers,
                                   json={"custom": "",
                                         "remote_workspace": default_remote_prompt,
-                                        "browser": default_browser_prompt}) as r:
+                                        "browser": default_browser_prompt,
+                                        "terminal": default_terminal_prompt}) as r:
                 assert r.status == 200, await r.text()
 
             # a too-old binary is refused at enable time with the probed reason
@@ -3193,7 +3220,7 @@ async def main() -> None:
                 " Keep the shared browser visible while interacting."
             config.set_system_prompts(
                 custom_prompt, config.DEFAULT_REMOTE_WORKSPACE_SYSTEM_PROMPT,
-                policy)
+                policy, config.DEFAULT_TERMINAL_SYSTEM_PROMPT)
             descriptor = browser_agent.turn_mcp(agent_sid, turn_id)
             assert descriptor and descriptor["name"] == "puppy_browser", descriptor
             assert descriptor["engine_guidance"] == policy

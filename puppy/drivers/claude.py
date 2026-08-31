@@ -63,7 +63,7 @@ class ClaudeDriver(Driver):
         ]
 
     def build_cmd(self, session, first_turn, prompt, pinned_id, browser_mcp=None,
-                  system_prompt=""):
+                  system_prompt="", terminal_mcp=None):
         argv = [self.binary, "-p",
                 "--output-format", "stream-json",
                 "--input-format", "stream-json",
@@ -71,17 +71,17 @@ class ClaudeDriver(Driver):
                 "--verbose",
                 "--permission-mode", session.get("permission_mode") or self.default_permission(),
                 "--permission-prompt-tool", "stdio"]
-        if browser_mcp:
-            mcp_config = {"mcpServers": {browser_mcp["name"]: {
-                "type": "stdio",
-                "command": browser_mcp["command"],
-                "args": list(browser_mcp.get("args") or []),
-                "env": dict(browser_mcp.get("env") or {}),
-            }}}
+        mcps = [item for item in (browser_mcp, terminal_mcp) if item]
+        if mcps:
+            mcp_config = {"mcpServers": {item["name"]: {
+                "type": "stdio", "command": item["command"],
+                "args": list(item.get("args") or []),
+                "env": dict(item.get("env") or {}),
+            } for item in mcps}}
             argv += ["--mcp-config", json.dumps(mcp_config, separators=(",", ":"))]
         guidance = [str(system_prompt or "").strip()]
-        if browser_mcp:
-            guidance.append(str(browser_mcp.get("engine_guidance") or "").strip())
+        guidance.extend(str(item.get("engine_guidance") or "").strip()
+                        for item in mcps)
         guidance = "\n\n".join(part for part in guidance if part)
         if guidance:
             # Additive: preserve any system prompt the user or CLI already
@@ -101,7 +101,7 @@ class ClaudeDriver(Driver):
         return argv
 
     def build_env(self, session, first_turn, prompt, pinned_id, browser_mcp=None,
-                  system_prompt=""):
+                  system_prompt="", terminal_mcp=None):
         # Claude normally refuses bypassPermissions when its effective user is
         # root. The vendor's sandbox marker is deliberately turn-scoped: the
         # runner starts every turn with clean_env(), then calls this method for

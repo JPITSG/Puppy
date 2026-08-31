@@ -508,6 +508,10 @@ async def h_session_delete(request: web.Request):
         await browser.manager().clear_session_binding(s["id"])
     except Exception as exc:
         log.warning("session %s browser binding cleanup failed: %s", s["id"], exc)
+    try:
+        await terminal.manager().clear_session_binding(s["id"])
+    except Exception as exc:
+        log.warning("session %s terminal binding cleanup failed: %s", s["id"], exc)
     db.delete_session(s["id"])
     runner.broadcast_sessions()
     log.info("session %s deleted workspace_removed=%s", s["id"], workspace_removed)
@@ -971,6 +975,13 @@ async def h_snapshot_import(request: web.Request):
         except Exception as exc:
             log.warning("restored state but could not reconcile the browser: %s", exc)
         try:
+            # Shared terminals are ephemeral and deliberately excluded from a
+            # snapshot. Drop ended transcripts and old session-ID bindings so
+            # restored chats cannot inherit pre-restore terminal state.
+            await terminal.manager().stop("Puppy state was restored")
+        except Exception as exc:
+            log.warning("restored state but could not clear shared terminals: %s", exc)
+        try:
             await backends.close_client()
         except Exception as exc:
             log.warning("restored state but could not close the old backend client: %s", exc)
@@ -1293,7 +1304,7 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     r.add_get("/api/ws/session/{sid:\\d+}", ws_session)
     r.add_get("/api/ws/updates", ws_updates)
     if include_terminal:
-        r.add_get("/api/ws/term", terminal.ws_terminal)
+        terminal.register(app)
         r.add_post("/api/notify/exec", h_notify_exec)
     browser.register(app)
     uploads.register(app)

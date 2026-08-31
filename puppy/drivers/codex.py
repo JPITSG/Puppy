@@ -33,11 +33,14 @@ log = logging.getLogger("puppy.drivers.codex")
 _SHELL_WRAP = re.compile(r"^\s*(?:\S*/)?(?:ba|z)?sh\s+-l?c\s+(.*)$", re.S)
 _BROWSER_POLICY_OPEN = "<puppy_browser_policy>"
 _BROWSER_POLICY_CLOSE = "</puppy_browser_policy>"
+_TERMINAL_POLICY_OPEN = "<puppy_terminal_policy>"
+_TERMINAL_POLICY_CLOSE = "</puppy_terminal_policy>"
 _SYSTEM_PROMPT_OPEN = "<puppy_system_prompt>"
 _SYSTEM_PROMPT_CLOSE = "</puppy_system_prompt>"
 
 
-def _with_runtime_guidance(prompt: str, system_prompt: str, browser_mcp) -> str:
+def _with_runtime_guidance(prompt: str, system_prompt: str, browser_mcp,
+                           terminal_mcp=None) -> str:
     """Add node and turn-scoped guidance without replacing native user config.
 
     Codex's developer_instructions config value is replacement-oriented. A
@@ -54,6 +57,10 @@ def _with_runtime_guidance(prompt: str, system_prompt: str, browser_mcp) -> str:
     if browser:
         blocks.append("{}\n{}\n{}".format(
             _BROWSER_POLICY_OPEN, browser, _BROWSER_POLICY_CLOSE))
+    terminal = str((terminal_mcp or {}).get("engine_guidance") or "").strip()
+    if terminal:
+        blocks.append("{}\n{}\n{}".format(
+            _TERMINAL_POLICY_OPEN, terminal, _TERMINAL_POLICY_CLOSE))
     if not blocks:
         return prompt
     return "{}\n\n{}".format("\n\n".join(blocks), prompt)
@@ -456,7 +463,7 @@ class CodexDriver(Driver):
         return True
 
     def build_cmd(self, session, first_turn, prompt, pinned_id, browser_mcp=None,
-                  system_prompt=""):
+                  system_prompt="", terminal_mcp=None):
         argv = [self.binary, "exec", "--json", "--skip-git-repo-check", "--color", "never",
                 "-C", session["cwd"],
                 "-s", session.get("permission_mode") or self.default_permission()]
@@ -466,18 +473,19 @@ class CodexDriver(Driver):
         effort = (session.get("effort") or "").strip()
         if effort:
             argv += ["-c", f"model_reasoning_effort={effort}"]
-        if browser_mcp:
-            prefix = "mcp_servers." + browser_mcp["name"]
-            argv += ["-c", prefix + ".command=" + json.dumps(browser_mcp["command"]),
+        for mcp in (item for item in (browser_mcp, terminal_mcp) if item):
+            prefix = "mcp_servers." + mcp["name"]
+            argv += ["-c", prefix + ".command=" + json.dumps(mcp["command"]),
                      "-c", prefix + ".args=" + json.dumps(
-                         list(browser_mcp.get("args") or []), separators=(",", ":")),
+                         list(mcp.get("args") or []), separators=(",", ":")),
                      "-c", prefix + ".enabled=true",
                      "-c", prefix + ".startup_timeout_sec=10",
                      "-c", prefix + ".tool_timeout_sec=70"]
-            for key, value in sorted((browser_mcp.get("env") or {}).items()):
+            for key, value in sorted((mcp.get("env") or {}).items()):
                 argv += ["-c", "{}.env.{}={}".format(
                     prefix, key, json.dumps(str(value)))]
-        prompt = _with_runtime_guidance(prompt, system_prompt, browser_mcp)
+        prompt = _with_runtime_guidance(
+            prompt, system_prompt, browser_mcp, terminal_mcp)
         native = session.get("native_session_id") or ""
         if first_turn or not native:
             argv += [prompt]

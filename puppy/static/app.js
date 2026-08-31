@@ -2370,7 +2370,8 @@ function saveTabs() {
       version: 2,
       tabs: state.tabs.map(t => ({
         id: t.id, type: t.type, bid: t.bid, sid: t.sid, title: t.title,
-        browserId: t.browserId, cmd: t.cmd, cwd: t.cwd, ended: t.ended === true,
+        browserId: t.browserId, terminalId: t.terminalId,
+        cmd: t.cmd, cwd: t.cwd, ended: t.ended === true,
       })),
       active: state.active,
       activeGroup: state.activeGroup,
@@ -2393,6 +2394,9 @@ function storedTabs(value) {
     if (item.type === "browser" && typeof item.browserId === "string" &&
         /^[A-Z0-9]{4}$/.test(item.browserId.toUpperCase()))
       tab.browserId = item.browserId.toUpperCase();
+    if (item.type === "term" && typeof item.terminalId === "string" &&
+        /^[A-Z0-9]{4}$/.test(item.terminalId.toUpperCase()))
+      tab.terminalId = item.terminalId.toUpperCase();
     if (typeof item.title === "string") tab.title = item.title.slice(0, 1000);
     if (typeof item.cmd === "string") tab.cmd = item.cmd.slice(0, 10000);
     if (typeof item.cwd === "string") tab.cwd = item.cwd.slice(0, 4096);
@@ -2562,6 +2566,8 @@ function connectUpdates() {
         renderSidebar();
       } else if (d.type === "browser_activity") {
         handleBrowserActivity(0, d.session_id, d.turn_id, d.browser_id);
+      } else if (d.type === "terminal_activity") {
+        handleTerminalActivity(0, d.session_id, d.turn_id, d.terminal_id);
       } else if (d.type === "workspace_links" && Array.isArray(d.links)) {
         state.workspaceLinks = d.links;
         renderSidebar();
@@ -3005,6 +3011,13 @@ function shellTabTitle(tab) {
   return `${state.nodeUsers[bid] || "shell"} @ ${backendName(bid)}`;
 }
 
+function terminalTabTitle(tabOrBid, terminalId = "") {
+  const tab = tabOrBid && typeof tabOrBid === "object" ? tabOrBid : null;
+  const bid = tab ? (tab.bid || 0) : (Number(tabOrBid) || 0);
+  const id = String(tab ? (tab.terminalId || "") : terminalId).toUpperCase();
+  return id ? `Terminal ${id} @ ${backendName(bid)}` : `Terminal @ ${backendName(bid)}`;
+}
+
 function browserTabTitle(tabOrBid, browserId = "") {
   const tab = tabOrBid && typeof tabOrBid === "object" ? tabOrBid : null;
   const bid = tab ? (tab.bid || 0) : (Number(tabOrBid) || 0);
@@ -3053,6 +3066,25 @@ function browserHandoffFor(bid) {
   const backend = state.backends.find(item => item.id === bid);
   return !!backend && Number(backend.protocol || 0) > 0 &&
     Array.isArray(backend.capabilities) && backend.capabilities.includes("browser-handoff");
+}
+
+function terminalInstancesFor(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(item => item.id === bid);
+  /* Unlike the long-established anonymous terminal socket, identified PTYs
+     are additive. A protocol-0 full node has no capability list, so treating
+     every feature as present would make an older node receive unknown POST and
+     ID-scoped WebSocket routes instead of the compatible legacy connection. */
+  return !!backend && Number(backend.protocol || 0) > 0 &&
+    Array.isArray(backend.capabilities) &&
+    backend.capabilities.includes("terminal-instances");
+}
+
+function terminalHandoffFor(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(item => item.id === bid);
+  return !!backend && Number(backend.protocol || 0) > 0 &&
+    Array.isArray(backend.capabilities) && backend.capabilities.includes("terminal-handoff");
 }
 
 async function openNewBrowser(bid, groupId = null) {
@@ -4314,6 +4346,7 @@ const tabScrollPositions = new Map();
 let tabScrollLayoutFrame = null;
 let pendingTabScrollFocus = null;
 const browserActivityTurns = new Map();
+const terminalActivityTurns = new Map();
 
 function findSessionMeta(bid, sid) {
   return sessionsFor(bid).find(s => s.id === sid);
@@ -4361,13 +4394,30 @@ function openSessionTab(bid, sid, meta, groupId = null) {
   activateTab(id);
 }
 
-function openTermTab(bid, cmd, groupId = null, cwd = "") {
+function openTermTab(bid, cmd, groupId = null, cwd = "", terminalId = "", options = {}) {
+  terminalId = String(terminalId || "").toUpperCase();
+  if (terminalId && !/^[A-Z0-9]{4}$/.test(terminalId)) return null;
+  let existing = terminalId && state.tabs.find(t => t.type === "term" &&
+    (t.bid || 0) === (bid || 0) && t.terminalId === terminalId);
+  if (existing) {
+    if (Number(options.sid) > 0) existing.sid = Number(options.sid);
+    if (options.activate === false) {
+      syncTabOrderFromLayout(); renderTabs(); syncSessionBrowserChips();
+    } else activateTab(existing.id);
+    return existing;
+  }
   const id = `t:${Date.now()}:${termSeq++}`;
-  state.tabs.push({ id, type: "term", bid: bid || 0, cmd: cmd || "",
-    cwd: cwd || "",
-    title: cmd ? cmd.slice(0, 24) : shellTabTitle({ bid: bid || 0 }) });
-  putTabInPane(id, groupId);
-  activateTab(id);
+  const tab = { id, type: "term", bid: bid || 0, cmd: cmd || "",
+    cwd: cwd || "", terminalId,
+    title: terminalTabTitle(bid, terminalId) };
+  if (Number(options.sid) > 0) tab.sid = Number(options.sid);
+  state.tabs.push(tab);
+  if (options.afterTabId) putTabAfter(id, options.afterTabId, groupId);
+  else putTabInPane(id, groupId);
+  if (options.activate === false) {
+    syncTabOrderFromLayout(); renderTabs(); syncSessionBrowserChips();
+  } else activateTab(id);
+  return tab;
 }
 
 /* Browser IDs are node-scoped. Reopening one ID reuses its screen while a new
@@ -4415,6 +4465,7 @@ function openBrowserTab(bid, browserId = "", groupId = null, options = {}) {
 function syncSessionBrowserChips() {
   for (const view of Object.values(state.views)) {
     if (view && typeof view.syncBrowserChips === "function") view.syncBrowserChips();
+    if (view && typeof view.syncTerminalChips === "function") view.syncTerminalChips();
     if (view && typeof view.renderBinding === "function") view.renderBinding();
   }
 }
@@ -4440,6 +4491,26 @@ function handleBrowserActivity(bid, sid, turnId, browserId = "") {
   const sessionTabId = `s:${bid}:${sid}`;
   const sessionPane = workspacePaneForTab(sessionTabId);
   openBrowserTab(bid, browserId, sessionPane ? sessionPane.id : null,
+    { activate: false, afterTabId: sessionTabId, sid });
+}
+
+/* A terminal first touched by the model follows the same background insertion
+   as Browser: beside its originating chat, visible to the user, without
+   stealing focus or disturbing the composer. */
+function handleTerminalActivity(bid, sid, turnId, terminalId = "") {
+  bid = Number(bid) || 0;
+  sid = Number(sid) || 0;
+  const token = String(turnId || "");
+  terminalId = String(terminalId || "").toUpperCase();
+  if (!sid || !token || !/^[A-Z0-9]{4}$/.test(terminalId)) return;
+  const key = `${bid}:${token}:${terminalId}`;
+  if (terminalActivityTurns.has(key)) return;
+  terminalActivityTurns.set(key, Date.now());
+  while (terminalActivityTurns.size > 128)
+    terminalActivityTurns.delete(terminalActivityTurns.keys().next().value);
+  const sessionTabId = `s:${bid}:${sid}`;
+  const sessionPane = workspacePaneForTab(sessionTabId);
+  openTermTab(bid, "", sessionPane ? sessionPane.id : null, "", terminalId,
     { activate: false, afterTabId: sessionTabId, sid });
 }
 
@@ -4475,6 +4546,16 @@ function closeTab(id) {
             "error", 7000);
       });
   }
+  if (closing.type === "term" && closing.terminalId &&
+      terminalInstancesFor(closing.bid || 0)) {
+    api(closing.bid || 0,
+      `terminal/instances/${encodeURIComponent(closing.terminalId)}`,
+      { method: "DELETE" }).catch(error => {
+        if (error.status !== 404)
+          toast(`Terminal ${closing.terminalId} may still be running: ${error.message}`,
+            "error", 7000);
+      });
+  }
   const pane = removeTabFromPane(id);
   state.tabs.splice(idx, 1);
   const v = state.views[id];
@@ -4484,7 +4565,7 @@ function closeTab(id) {
   normalizeWorkspace();
   renderTabs(state.active);
   renderSidebar();
-  if (closing.type === "browser") syncSessionBrowserChips();
+  if (closing.type === "browser" || closing.type === "term") syncSessionBrowserChips();
 }
 
 function isTabVisible(id) {
@@ -4657,7 +4738,7 @@ function renderTabNode(t, pane, tabsRoot) {
   else if (t.type === "browser") tdot.appendChild(globeIcon(12));
   tab.appendChild(tdot);
   tab.appendChild(el("span", "t-title",
-    (t.type === "term" && !t.cmd) ? shellTabTitle(t) :
+    (t.type === "term") ? terminalTabTitle(t) :
     (t.type === "browser") ? browserTabTitle(t) : (t.title || "tab")));
   if (t.type === "session") {
     suppressContextGestureActivation(tab);
@@ -5939,10 +6020,12 @@ class SessionView {
     this.fileDragDepth = 0;
     this.nativeComposerChoices = prefersNativeChoices();
     this.browserChipKey = null;   // set of linked-browser bubbles now rendered
+    this.terminalChipKey = null;  // set of linked-terminal bubbles now rendered
     this.pendingScroll = null;    // position owed back after a workspace rebuild
     this.lastScroll = null;       // last position seen while this view was visible
     this.buildDom();
     this.syncBrowserChips();      // a restored browser tab has a bubble at once
+    this.syncTerminalChips();
     this._onResize = () => { this.syncGutter(); this.syncComposerMeta(); this.syncHeadOverflow(); this.syncQueueFade(); };
     window.addEventListener("resize", this._onResize);
     this.connect();
@@ -6846,6 +6929,9 @@ class SessionView {
       case "browser_activity":
         handleBrowserActivity(this.tab.bid, this.tab.sid, d.turn_id, d.browser_id);
         break;
+      case "terminal_activity":
+        handleTerminalActivity(this.tab.bid, this.tab.sid, d.turn_id, d.terminal_id);
+        break;
     }
     const runningKinds = { user: 1, assistant: 1, thinking: 1, tool_use: 1, tool_result: 1 };
     if (!remoteStoppingMessage(this.tab.bid) &&
@@ -6879,6 +6965,27 @@ class SessionView {
       chip.appendChild(globeIcon(11));
       chip.appendChild(el("span", "chip-text", `Browser ${t.browserId}`));
       chip.setAttribute("aria-label", `Show Browser ${t.browserId}`);
+      chip.onclick = () => activateTab(t.id);
+      scroll.insertBefore(chip, anchor);
+    }
+  }
+
+  syncTerminalChips() {
+    const live = state.tabs.filter(t => t.type === "term" && t.terminalId &&
+      (t.bid || 0) === (this.tab.bid || 0) && t.sid === this.tab.sid &&
+      t.ended !== true && t.terminalGone !== true);
+    const key = live.map(t => t.id).join("\u0000");
+    if (key === this.terminalChipKey) return;
+    this.terminalChipKey = key;
+    const scroll = this.root.querySelector(".chat-meta-scroll");
+    for (const stale of scroll.querySelectorAll(".chip.terminal")) stale.remove();
+    const anchor = scroll.querySelector(".chat-status");
+    for (const t of live) {
+      const chip = el("button", "chip terminal");
+      chip.type = "button";
+      chip.appendChild(terminalIcon(11));
+      chip.appendChild(el("span", "chip-text", `Terminal ${t.terminalId}`));
+      chip.setAttribute("aria-label", `Show Terminal ${t.terminalId}`);
       chip.onclick = () => activateTab(t.id);
       scroll.insertBefore(chip, anchor);
     }
@@ -8437,17 +8544,186 @@ class TermView {
     this.tab = tab;
     this.closed = false;
     this.connectionSequence = 0;
+    this.bindingKnown = Number(tab.sid) > 0;
+    this.binding = { sessionId: Number(tab.sid) || null, sessionName: "" };
+    this.linkBusy = "";
+    this.nodeEnded = tab.ended === true;
     this.root = el("div", "view term");
-    this.root.innerHTML = `<div class="term-wrap"><div class="term-host"></div></div>`;
+    this.root.innerHTML = `<div class="br-meta term-meta hidden">
+        <div class="br-ident" aria-label="Terminal identity">
+          <span class="br-ident-label">Terminal</span>
+          <span class="br-id term-id"></span>
+          <button class="icon-btn br-copy-id term-copy-id" type="button"
+            aria-label="Copy Terminal ID"></button>
+        </div>
+        <button class="br-owner term-owner" type="button" disabled aria-haspopup="menu"
+          aria-expanded="false">
+          <svg class="br-owner-glyph" viewBox="0 0 16 16" width="14" height="14" fill="none"
+            stroke="currentColor" stroke-width="1.35" stroke-linecap="round"
+            stroke-linejoin="round" aria-hidden="true">
+            <path d="M6.2 10.8 5 12a2.5 2.5 0 0 1-3.5-3.5l2.2-2.2a2.5 2.5 0 0 1 3.5 0"/>
+            <path d="m9.8 5.2 1.2-1.2a2.5 2.5 0 0 1 3.5 3.5l-2.2 2.2a2.5 2.5 0 0 1-3.5 0"/>
+            <path d="m5.8 5.8 4.4 4.4"/>
+          </svg>
+          <span class="sess-dot br-owner-dot hidden"></span>
+          <span class="br-owner-text">Checking session link…</span>
+          <span class="br-owner-arrow hidden"></span>
+        </button>
+      </div>
+      <div class="term-wrap"><div class="term-host"></div></div>`;
     this.host = this.root.querySelector(".term-host");
+    this.meta = this.root.querySelector(".term-meta");
+    this.idText = this.root.querySelector(".term-id");
+    this.copyIdBtn = this.root.querySelector(".term-copy-id");
+    this.copyIdBtn.appendChild(copyIcon());
+    this.ownerBtn = this.root.querySelector(".term-owner");
+    this.ownerText = this.root.querySelector(".br-owner-text");
+    this.ownerGlyph = this.root.querySelector(".br-owner-glyph");
+    this.ownerDot = this.root.querySelector(".br-owner-dot");
+    this.ownerArrow = this.root.querySelector(".br-owner-arrow");
+    this.ownerArrow.appendChild(choiceSvg("arrow"));
     this.started = false;
+    this.renderBinding();
   }
   onShow(focus = true) {
+    this.renderBinding();
     if (!this.started) { this.started = true; this.start(); }
     else if (this.fit) setTimeout(() => this.fit.fit(), 30);
     if (focus && this.term && !this.isDead()) this.term.focus();
   }
   isDead() { return !!this.root.querySelector(".term-dead"); }
+
+  applyBinding(payload) {
+    const sessionId = Number(payload && payload.session_id) || null;
+    const previous = Number(this.tab.sid) || null;
+    this.bindingKnown = true;
+    this.binding = {
+      sessionId,
+      sessionName: String(payload && payload.session_name || ""),
+    };
+    if (sessionId) this.tab.sid = sessionId;
+    else delete this.tab.sid;
+    this.renderBinding();
+    if (previous !== sessionId) {
+      saveTabs();
+      syncSessionBrowserChips();
+    }
+  }
+
+  renderBinding() {
+    const terminalId = String(this.tab.terminalId || "").toUpperCase();
+    this.meta.classList.toggle("hidden", !terminalId || !terminalInstancesFor(this.tab.bid));
+    if (!terminalId) return;
+    this.idText.textContent = terminalId;
+    const set = (text, { disabled = false, dot = "", glyph = false,
+                         arrow = false, aria = "" } = {}) => {
+      this.ownerText.textContent = text;
+      this.ownerBtn.disabled = disabled;
+      this.ownerBtn.setAttribute("aria-label", aria || text);
+      this.ownerGlyph.classList.toggle("hidden", !glyph);
+      this.ownerDot.classList.toggle("hidden", !dot);
+      if (dot) this.ownerDot.style.color = dot;
+      this.ownerArrow.classList.toggle("hidden", !arrow);
+    };
+    if (!terminalHandoffFor(this.tab.bid)) {
+      set("Session linking requires an updated backend", { disabled: true, glyph: true });
+      return;
+    }
+    if (this.tab.terminalGone === true || this.tab.ended === true) {
+      set("Terminal ended", { disabled: true, glyph: true });
+      return;
+    }
+    if (this.linkBusy) {
+      set(this.linkBusy === "unlink" ? "Unlinking…" : "Linking…",
+        { disabled: true, glyph: true });
+      return;
+    }
+    if (!this.bindingKnown) {
+      set("Checking session link…", { disabled: true, glyph: true });
+      return;
+    }
+    const ownerId = Number(this.binding.sessionId) || null;
+    if (!ownerId) {
+      set("Link to a session…", { glyph: true, arrow: true,
+        aria: "Link this terminal to a session" });
+      return;
+    }
+    const owner = findSessionMeta(this.tab.bid, ownerId);
+    const ownerName = owner ? (owner.name || `Session ${ownerId}`) :
+      (this.binding.sessionName || `Session ${ownerId}`);
+    set(ownerName, { dot: (owner && owner.color) || "var(--txt3)", arrow: true,
+      aria: `Linked to ${ownerName} · move or unlink` });
+  }
+
+  async changeBinding(sessionId) {
+    const terminalId = String(this.tab.terminalId || "").toUpperCase();
+    if (!terminalId || !terminalHandoffFor(this.tab.bid) || this.linkBusy) return;
+    if ((Number(sessionId) || null) === (Number(this.binding.sessionId) || null)) return;
+    this.linkBusy = sessionId ? "link" : "unlink";
+    this.renderBinding();
+    try {
+      const path = `terminal/instances/${encodeURIComponent(terminalId)}/binding`;
+      const result = sessionId ? await api(this.tab.bid, path, {
+        method: "POST", body: { session_id: sessionId }, timeoutMs: 15000,
+      }) : await api(this.tab.bid, path, { method: "DELETE", timeoutMs: 15000 });
+      this.linkBusy = "";
+      this.applyBinding(result);
+      const name = sessionId && findSessionMeta(this.tab.bid, sessionId);
+      toast(sessionId ? `Terminal ${terminalId} linked to ${name ? name.name : "session"}` :
+        `Terminal ${terminalId} unlinked`, "ok");
+    } catch (error) {
+      this.linkBusy = "";
+      toast(`Terminal ${terminalId}: ${error.message}`, "error", 7000);
+    } finally {
+      this.renderBinding();
+    }
+  }
+
+  showLinkMenu(anchor) {
+    if (closeAllMenus(anchor)) return;
+    const bid = this.tab.bid;
+    const ownerId = Number(this.binding.sessionId) || null;
+    const menu = el("div", "menu dyn br-link-menu");
+    const scroll = el("div", "br-link-scroll");
+    menu.appendChild(scroll);
+    menu._anchor = anchor;
+    menu._ownerView = this.root;
+    anchor.setAttribute("aria-expanded", "true");
+    const add = (label, fn) => {
+      const b = el("button", "", label);
+      b.type = "button";
+      b.onclick = e => { e.stopPropagation(); menu.remove(); fn(); };
+      scroll.appendChild(b);
+    };
+    const sessions = sessionsFor(bid).filter(s => !s.archived || s.id === ownerId);
+    if (!sessions.length) {
+      const none = el("button", "", "No sessions on this backend");
+      none.type = "button"; none.disabled = true; scroll.appendChild(none);
+    }
+    for (const s of sessions) {
+      const linked = s.id === ownerId;
+      const row = el("button", "br-link-sess");
+      row.type = "button";
+      row.setAttribute("role", "menuitemradio");
+      row.setAttribute("aria-checked", linked ? "true" : "false");
+      row.appendChild(sessDot(s));
+      row.appendChild(el("span", "menu-check-label", s.name || `Session ${s.id}`));
+      const mark = el("span", "br-link-mark");
+      if (linked) mark.appendChild(choiceSvg("check"));
+      row.appendChild(mark);
+      row.onclick = e => {
+        e.stopPropagation(); menu.remove(); this.changeBinding(s.id);
+      };
+      scroll.appendChild(row);
+    }
+    if (ownerId) {
+      scroll.appendChild(el("div", "menu-sep"));
+      add("Unlink terminal", () => this.changeBinding(null));
+    }
+    document.body.appendChild(menu);
+    positionAnchoredMenu(menu, anchor);
+  }
+
   start() {
     this.term = new Terminal({
       cursorBlink: true, fontSize: 13, scrollback: 8000,
@@ -8457,6 +8733,19 @@ class TermView {
     this.fit = new FitAddon.FitAddon();
     this.term.loadAddon(this.fit);
     this.term.open(this.host);
+    this.copyIdBtn.onclick = async () => {
+      const terminalId = String(this.tab.terminalId || "").toUpperCase();
+      if (!terminalId || !await copyWithToast(
+          terminalId, `Terminal ${terminalId} ID copied`)) return;
+      clearTimeout(this.copyIdBtn._copyReset);
+      this.copyIdBtn.replaceChildren(copyIcon(true));
+      this.copyIdBtn._copyReset = setTimeout(() => {
+        if (this.copyIdBtn.isConnected) this.copyIdBtn.replaceChildren(copyIcon());
+      }, 1400);
+    };
+    this.ownerBtn.onclick = e => {
+      e.stopPropagation(); this.showLinkMenu(this.ownerBtn);
+    };
     /* Copy on select, the way a terminal emulator does. The write runs inside
        the mouseup that ended the gesture: browsers that want a user gesture
        accept it, and so does the execCommand fallback that plain-HTTP
@@ -8496,18 +8785,60 @@ class TermView {
     });
     this.resizeObs.observe(this.host);
   }
-  connect() {
+  async createInstance(sequence, ownerSession = null) {
+    const body = {
+      command: this.tab.cmd || "", cwd: this.tab.cwd || "",
+      cols: this.term.cols, rows: this.term.rows,
+    };
+    if (Number(ownerSession) > 0) body.session_id = Number(ownerSession);
+    const result = await api(this.tab.bid, "terminal/instances", {
+      method: "POST", body, timeoutMs: 30000,
+    });
+    const terminalId = String(result && result.terminal && result.terminal.id || "").toUpperCase();
+    if (!/^[A-Z0-9]{4}$/.test(terminalId))
+      throw new Error("backend returned an invalid Terminal ID");
+    if (this.closed || sequence !== this.connectionSequence) {
+      api(this.tab.bid, `terminal/instances/${encodeURIComponent(terminalId)}`,
+        { method: "DELETE" }).catch(() => {});
+      return false;
+    }
+    this.tab.terminalId = terminalId;
+    this.tab.terminalGone = false;
+    this.tab.ended = false;
+    this.nodeEnded = false;
+    this.bindingKnown = false;
+    if (result && Object.prototype.hasOwnProperty.call(result, "session_id"))
+      this.applyBinding(result);
+    this.tab.title = terminalTabTitle(this.tab);
+    saveTabs(); renderTabs(); this.renderBinding();
+    return true;
+  }
+
+  async connect() {
     if (this.tab.bid && !backendConnectionAllowed(this.tab.bid)) {
       this.showDead(false);
       return;
     }
-    this.tab.ended = false;
     const sequence = ++this.connectionSequence;
     if (this.dataSub) { this.dataSub.dispose(); this.dataSub = null; }
+    const identified = terminalInstancesFor(this.tab.bid);
+    if (identified && !this.tab.terminalId) {
+      try {
+        if (!await this.createInstance(sequence, this.tab.sid)) return;
+      } catch (error) {
+        if (sequence !== this.connectionSequence || this.closed) return;
+        this.deadReason = error.message || "Could not open terminal";
+        this.showDead(false);
+        return;
+      }
+    }
     const params = new URLSearchParams({ cols: this.term.cols, rows: this.term.rows });
     if (this.tab.cmd) params.set("cmd", this.tab.cmd);
     if (this.tab.cwd) params.set("cwd", this.tab.cwd);
-    const ws = new WebSocket(wsUrl(this.tab.bid, "ws/term?" + params.toString()));
+    const path = identified ?
+      `ws/terminal/${encodeURIComponent(this.tab.terminalId)}` :
+      "ws/term?" + params.toString();
+    const ws = new WebSocket(wsUrl(this.tab.bid, path));
     ws.binaryType = "arraybuffer";
     this.ws = ws;
     const enc = new TextEncoder();
@@ -8517,12 +8848,47 @@ class TermView {
         return;
       }
       noteRemoteSocketReachable(this.tab.bid);
+      this.deadReason = "";
+      this.sendResize();
       if (state.active === this.tab.id && isTabVisible(this.tab.id)) this.term.focus();
       this.dataSub = this.term.onData(d => { if (ws.readyState === 1) ws.send(enc.encode(d)); });
     };
     ws.onmessage = (ev) => {
       if (sequence !== this.connectionSequence || this.ws !== ws) return;
-      if (typeof ev.data === "string") return;
+      if (typeof ev.data === "string") {
+        let data;
+        try { data = JSON.parse(ev.data); } catch (error) { return; }
+        if (data.type === "binding") this.applyBinding(data);
+        else if (data.type === "status") {
+          const terminalId = String(data.terminal_id || "").toUpperCase();
+          if (/^[A-Z0-9]{4}$/.test(terminalId) && terminalId !== this.tab.terminalId) {
+            this.tab.terminalId = terminalId;
+            this.tab.title = terminalTabTitle(this.tab);
+            saveTabs(); renderTabs(); this.renderBinding();
+          }
+          if (data.replay_truncated && !this.replayWarned) {
+            this.replayWarned = true;
+            toast(`Terminal ${terminalId}: earlier output was omitted from reconnect replay`,
+              "error", 7000);
+          }
+          if (data.running === false) {
+            this.nodeEnded = true;
+            this.deadReason = data.reason || "Terminal ended";
+            this.showDead(true);
+          }
+        } else if (data.type === "agent_input") {
+          this.meta.classList.add("agent-active");
+          clearTimeout(this.agentActiveTimer);
+          this.agentActiveTimer = setTimeout(() =>
+            this.meta.classList.remove("agent-active"), 1200);
+        } else if (data.type === "error") {
+          this.nodeEnded = true;
+          this.tab.terminalGone = true;
+          this.deadReason = data.text || "Terminal unavailable";
+          this.showDead(true);
+        }
+        return;
+      }
       noteRemoteSocketReachable(this.tab.bid);
       this.term.write(new Uint8Array(ev.data));
     };
@@ -8530,7 +8896,7 @@ class TermView {
       if (sequence !== this.connectionSequence || this.ws !== ws) return;
       this.ws = null;
       if (this.dataSub) { this.dataSub.dispose(); this.dataSub = null; }
-      if (!this.closed) this.showDead();
+      if (!this.closed) this.showDead(this.nodeEnded || !identified);
     };
     ws.onerror = () => { try { ws.close(); } catch (e) {} };
   }
@@ -8561,8 +8927,41 @@ class TermView {
       toast("Clipboard paste was blocked · use Shift+right-click for the browser menu", "error", 7000);
     }
   }
+
+  async replaceTerminal(dead) {
+    if (this.tab.bid && !backendConnectionAllowed(this.tab.bid)) return;
+    if (!terminalInstancesFor(this.tab.bid)) {
+      this.tab.ended = false;
+      this.nodeEnded = false;
+      saveTabs(); dead.remove(); this.term.reset();
+      this.term.write("\x1b[?25h"); this.connect(); this.term.focus();
+      return;
+    }
+    const oldId = String(this.tab.terminalId || "").toUpperCase();
+    const owner = Number(this.binding.sessionId) || null;
+    const sequence = ++this.connectionSequence;
+    const button = dead.querySelector(".term-dead-new");
+    button.disabled = true; button.textContent = "Opening…";
+    try {
+      if (!await this.createInstance(sequence, owner)) return;
+      if (oldId) api(this.tab.bid,
+        `terminal/instances/${encodeURIComponent(oldId)}`,
+        { method: "DELETE" }).catch(() => {});
+      dead.remove(); this.term.reset(); this.term.write("\x1b[?25h");
+      this.connect(); this.term.focus(); syncSessionBrowserChips();
+    } catch (error) {
+      this.tab.terminalId = oldId;
+      this.tab.title = terminalTabTitle(this.tab);
+      saveTabs(); renderTabs(); this.renderBinding();
+      this.deadReason = error.message || "Could not open terminal";
+      button.disabled = false; this.syncRemoteState();
+    }
+  }
+
   showDead(markEnded = true) {
-    if (markEnded && this.tab.ended !== true) { this.tab.ended = true; saveTabs(); }
+    if (markEnded && this.tab.ended !== true) {
+      this.tab.ended = true; saveTabs(); syncSessionBrowserChips(); this.renderBinding();
+    }
     if (this.isDead()) { this.syncRemoteState(); return; }
     /* DECTCEM rather than a CSS override: the cursor is the terminal's to draw,
        and a hidden one stays hidden under a translucent overlay whichever
@@ -8576,13 +8975,11 @@ class TermView {
     fresh.type = "button";
     fresh.onclick = () => {
       if (this.tab.bid && !backendConnectionAllowed(this.tab.bid)) return;
-      this.tab.ended = false;
-      saveTabs();
-      d.remove();
-      this.term.reset();
-      this.term.write("\x1b[?25h");
-      this.connect();
-      this.term.focus();
+      if (this.tab.ended === true || this.nodeEnded) this.replaceTerminal(d);
+      else {
+        d.remove(); this.term.reset(); this.term.write("\x1b[?25h");
+        this.connect(); this.term.focus();
+      }
     };
     const close = el("button", "btn term-dead-close", "Close shell");
     close.type = "button";
@@ -8596,7 +8993,7 @@ class TermView {
     this.syncRemoteState();
   }
   handleNodeStopping() {
-    this.showDead();
+    this.showDead(false);
   }
   clearNodeStopping() {
     this.syncRemoteState();
@@ -8615,8 +9012,10 @@ class TermView {
     const message = dead.querySelector(".term-dead-message");
     const button = dead.querySelector(".term-dead-new");
     message.textContent = remoteStoppingMessage(this.tab.bid) ||
-      (unavailable ? "Backend unavailable" : "Terminal ended");
-    button.textContent = unavailable ? "Waiting for backend…" : "New shell";
+      (unavailable ? "Backend unavailable" : this.deadReason ||
+       (this.tab.ended || this.nodeEnded ? "Terminal ended" : "Terminal disconnected"));
+    button.textContent = unavailable ? "Waiting for backend…" :
+      (this.tab.ended || this.nodeEnded ? "New shell" : "Reconnect");
     button.disabled = unavailable;
   }
   destroy() {
@@ -8626,6 +9025,7 @@ class TermView {
     if (this.onSelectDown) this.host.removeEventListener("mousedown", this.onSelectDown);
     if (this.onSelectUp) document.removeEventListener("mouseup", this.onSelectUp);
     if (this.onContextMenu) this.host.removeEventListener("contextmenu", this.onContextMenu);
+    clearTimeout(this.agentActiveTimer);
     if (this.ws) try { this.ws.close(); } catch (e) {}
     if (this.dataSub) { this.dataSub.dispose(); this.dataSub = null; }
     if (this.term) this.term.dispose();
@@ -10405,6 +10805,27 @@ class SettingsView {
     browserSection.appendChild(browserText);
     card.appendChild(browserSection);
 
+    const terminalSection = el("section", "system-prompt-section system-prompt-terminal");
+    const terminalHead = el("div", "system-prompt-section-head");
+    const terminalCopy = el("div", "system-prompt-section-copy");
+    terminalCopy.appendChild(el("h3", "", "Terminal guidance"));
+    const terminalNote = el("p", "",
+      "Sent only when this backend offers shared Terminal tools; it is not sent " +
+      "when Terminal is unavailable.");
+    terminalCopy.appendChild(terminalNote);
+    const terminalReset = el("button", "btn btn-sm btn-ghost system-prompt-reset",
+      "Reset to default");
+    terminalReset.type = "button";
+    terminalHead.appendChild(terminalCopy);
+    terminalHead.appendChild(terminalReset);
+    const terminalText = document.createElement("textarea");
+    terminalText.className = "system-prompt-textarea config-textarea";
+    terminalText.rows = 3;
+    terminalText.setAttribute("aria-label", "Terminal system prompt");
+    terminalSection.appendChild(terminalHead);
+    terminalSection.appendChild(terminalText);
+    card.appendChild(terminalSection);
+
     const actions = el("div", "system-prompt-actions");
     const status = el("span", "system-prompt-status", "Ready");
     status.setAttribute("role", "status");
@@ -10429,6 +10850,9 @@ class SettingsView {
       const remoteWorkspaceSupported =
         typeof prompt.remote_workspace === "string" &&
         typeof prompt.remote_workspace_default === "string";
+      const terminalSupported =
+        typeof prompt.terminal === "string" &&
+        typeof prompt.terminal_default === "string";
       const maxChars = Number(prompt.max_chars);
       if (!Number.isInteger(maxChars) || maxChars < 1)
         throw new Error("backend returned an invalid system prompt limit");
@@ -10437,13 +10861,17 @@ class SettingsView {
         custom: prompt.custom,
         remoteWorkspace: remoteWorkspaceSupported ? prompt.remote_workspace : "",
         browser: prompt.browser,
+        terminal: terminalSupported ? prompt.terminal : "",
         customDraft: prompt.custom,
         remoteWorkspaceDraft: remoteWorkspaceSupported ? prompt.remote_workspace : "",
         browserDraft: prompt.browser,
+        terminalDraft: terminalSupported ? prompt.terminal : "",
         remoteWorkspaceDefault: remoteWorkspaceSupported ?
           prompt.remote_workspace_default : "",
         browserDefault: prompt.browser_default,
+        terminalDefault: terminalSupported ? prompt.terminal_default : "",
         remoteWorkspaceSupported,
+        terminalSupported,
         maxChars,
         saving: false,
         error: "",
@@ -10464,6 +10892,7 @@ class SettingsView {
     const supported = bid => backendSupportsSystemPrompt(bid);
     const dirty = record => !!record && record.loaded &&
       (record.customDraft !== record.custom || record.browserDraft !== record.browser ||
+       (record.terminalSupported && record.terminalDraft !== record.terminal) ||
        (record.remoteWorkspaceSupported &&
         record.remoteWorkspaceDraft !== record.remoteWorkspace));
     const stash = () => {
@@ -10473,6 +10902,8 @@ class SettingsView {
       if (record.remoteWorkspaceSupported)
         record.remoteWorkspaceDraft = remoteText.value;
       record.browserDraft = browserText.value;
+      if (record.terminalSupported)
+        record.terminalDraft = terminalText.value;
       record.saved = false;
     };
     const paint = () => {
@@ -10482,36 +10913,44 @@ class SettingsView {
       const unavailable = !!activeBid && !backendConnectionAllowed(activeBid);
       const editable = canUse && !unavailable && !!record && record.loaded && !record.saving;
       custom.disabled = browserText.disabled = !editable;
+      terminalText.disabled = !editable || !record.terminalSupported;
       remoteText.disabled = !editable || !record.remoteWorkspaceSupported;
       remoteReset.disabled = !editable || !record.remoteWorkspaceSupported;
       browserReset.disabled = !editable;
+      terminalReset.disabled = !editable || !record.terminalSupported;
       save.disabled = !canUse || unavailable || (!!record && record.saving);
       status.classList.remove("bad", "dirty");
       if (!canUse) {
-        custom.value = remoteText.value = browserText.value = "";
+        custom.value = remoteText.value = browserText.value = terminalText.value = "";
         custom.removeAttribute("maxlength");
         remoteText.removeAttribute("maxlength");
         browserText.removeAttribute("maxlength");
+        terminalText.removeAttribute("maxlength");
         save.disabled = true;
         status.textContent = "Backend upgrade required for system prompt settings.";
       } else if (!record || record.loading) {
-        custom.value = remoteText.value = browserText.value = "";
+        custom.value = remoteText.value = browserText.value = terminalText.value = "";
         save.disabled = true;
         status.textContent = "Loading prompt…";
       } else if (!record.loaded) {
-        custom.value = remoteText.value = browserText.value = "";
+        custom.value = remoteText.value = browserText.value = terminalText.value = "";
         save.disabled = false;
         save.textContent = "Retry";
         status.textContent = record.error || "Prompt settings unavailable.";
         status.classList.add("bad");
       } else {
-        custom.maxLength = remoteText.maxLength = browserText.maxLength = record.maxChars;
+        custom.maxLength = remoteText.maxLength = browserText.maxLength =
+          terminalText.maxLength = record.maxChars;
         if (document.activeElement !== custom) custom.value = record.customDraft;
         if (document.activeElement !== remoteText)
           remoteText.value = record.remoteWorkspaceDraft;
         remoteText.placeholder = record.remoteWorkspaceSupported ? "" :
           "Upgrade this backend to configure remote workspace guidance";
         if (document.activeElement !== browserText) browserText.value = record.browserDraft;
+        if (document.activeElement !== terminalText)
+          terminalText.value = record.terminalDraft;
+        terminalText.placeholder = record.terminalSupported ? "" :
+          "Upgrade this backend to configure Terminal guidance";
         save.textContent = record.saving ? "Saving…" : "Save prompt";
         if (unavailable) {
           status.textContent = backendStatus === "bad" ?
@@ -10586,6 +11025,7 @@ class SettingsView {
     custom.oninput = edited;
     remoteText.oninput = edited;
     browserText.oninput = edited;
+    terminalText.oninput = edited;
     remoteReset.onclick = () => {
       const record = records.get(activeBid);
       if (!record || !record.loaded || record.saving ||
@@ -10603,6 +11043,14 @@ class SettingsView {
       paint();
       browserText.focus();
     };
+    terminalReset.onclick = () => {
+      const record = records.get(activeBid);
+      if (!record || !record.loaded || record.saving || !record.terminalSupported) return;
+      terminalText.value = record.terminalDefault;
+      stash();
+      paint();
+      terminalText.focus();
+    };
     save.onclick = async () => {
       let record = records.get(activeBid);
       if (!record || !record.loaded) { await load(true); return; }
@@ -10617,6 +11065,8 @@ class SettingsView {
         const body = { custom: record.customDraft, browser: record.browserDraft };
         if (record.remoteWorkspaceSupported)
           body.remote_workspace = record.remoteWorkspaceDraft;
+        if (record.terminalSupported)
+          body.terminal = record.terminalDraft;
         const result = await api(bid, "system-prompt", {
           method: "PATCH",
           body,

@@ -12,7 +12,7 @@ import time
 import uuid
 
 from puppy import (browser_agent, config, db, handoff, notify, system_prompts,
-                   uploads, workspace_sync, workspaces)
+                   terminal_agent, uploads, workspace_sync, workspaces)
 from puppy.drivers import get_driver
 from puppy.drivers import base as driver_base
 from puppy.drivers.base import clean_env
@@ -379,6 +379,7 @@ class SessionHub:
         # turn. Each distinct browser it touches is announced once to the UI.
         self._active_turn_id = ""
         self._browser_activity_announced = set()
+        self._terminal_activity_announced = set()
         # The active prompt normally becomes a durable user event at the start
         # of _run_turn.  Keep it visible to attachment reference checks until
         # the turn closes so cancelling a duplicate queued marker cannot race
@@ -501,10 +502,14 @@ class SessionHub:
                 await _safe_send(recipient, payload, self.watchers)
             return payload
 
-    def browser_turn_active(self, turn_id: str) -> bool:
-        """Whether a per-turn browser bridge still belongs to this engine."""
+    def tool_turn_active(self, turn_id: str) -> bool:
+        """Whether a private per-turn agent bridge belongs to this engine."""
         return self.status == "running" and bool(turn_id) and \
             turn_id == self._active_turn_id
+
+    def browser_turn_active(self, turn_id: str) -> bool:
+        """Compatibility name retained for the browser bridge and its tests."""
+        return self.tool_turn_active(turn_id)
 
     def browser_activity(self, turn_id: str, browser_id: str) -> bool:
         """Authorize and announce one browser used by the current turn."""
@@ -515,6 +520,19 @@ class SessionHub:
         self._browser_activity_announced.add(browser_id)
         payload = {"type": "browser_activity", "turn_id": turn_id,
                    "browser_id": browser_id}
+        self.broadcast(payload)
+        broadcast_update({**payload, "session_id": self.id})
+        return True
+
+    def terminal_activity(self, turn_id: str, terminal_id: str) -> bool:
+        """Authorize and announce one shared terminal used by this turn."""
+        if not self.tool_turn_active(turn_id):
+            return False
+        if terminal_id in self._terminal_activity_announced:
+            return True
+        self._terminal_activity_announced.add(terminal_id)
+        payload = {"type": "terminal_activity", "turn_id": turn_id,
+                   "terminal_id": terminal_id}
         self.broadcast(payload)
         broadcast_update({**payload, "session_id": self.id})
         return True
@@ -1556,11 +1574,14 @@ class SessionHub:
             pinned = str(uuid.uuid4())
             self._active_turn_id = pinned
             self._browser_activity_announced = set()
+            self._terminal_activity_announced = set()
             browser_mcp = browser_agent.turn_mcp(self.id, pinned)
+            terminal_mcp = terminal_agent.turn_mcp(self.id, pinned)
             system_prompt_text = system_prompts.turn_prompt(
                 remote_workspace=descriptor is not None)
             argv = driver.build_cmd(
                 session, first_turn, prompt, pinned, browser_mcp=browser_mcp,
+                terminal_mcp=terminal_mcp,
                 system_prompt=system_prompt_text)
             env = clean_env(dict(os.environ))
             runtime_home = os.path.expanduser("~")
@@ -1568,9 +1589,11 @@ class SessionHub:
                 env.setdefault("HOME", runtime_home)
             env.update(driver.build_env(
                 session, first_turn, prompt, pinned, browser_mcp=browser_mcp,
+                terminal_mcp=terminal_mcp,
                 system_prompt=system_prompt_text))
             ctx = driver.turn_context(
                 session, first_turn, prompt, pinned, browser_mcp=browser_mcp,
+                terminal_mcp=terminal_mcp,
                 system_prompt=system_prompt_text)
             if not isinstance(ctx, dict):
                 ctx = {}
@@ -1727,6 +1750,7 @@ class SessionHub:
                 self._discard_abandoned_uploads([text])
             self._active_turn_id = ""
             self._browser_activity_announced = set()
+            self._terminal_activity_announced = set()
             if self.pending_approval is not None:
                 rid = self.pending_approval.get("request_id", "")
                 self.pending_approval = None

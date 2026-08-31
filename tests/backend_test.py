@@ -134,19 +134,31 @@ second/model-b
         "args": ["--session", "9"], "env": {"PUPPY_SOCKET": "/tmp/socket"},
         "engine_guidance": "Use the shared browser.",
     }
+    terminal_mcp = {
+        "name": "puppy_terminal", "command": "/tmp/terminal-agent",
+        "args": [], "env": {"PUPPY_TERMINAL_SOCKET": "/tmp/terminal-socket"},
+        "engine_guidance": "Use the shared terminal only when requested.",
+    }
     inline = json.loads(driver.build_env(
         session, True, "hello", "pin", browser_mcp=browser,
+        terminal_mcp=terminal_mcp,
         system_prompt="Be concise.")["OPENCODE_CONFIG_CONTENT"])
     agent = inline["agent"]["puppy_console"]
     assert inline["default_agent"] == "puppy_console"
     assert "Be concise." in agent["prompt"] and "Use the shared browser." in agent["prompt"]
+    assert "Use the shared terminal only when requested." in agent["prompt"]
     assert agent["permission"]["*"] == "ask" and agent["permission"]["read"] == "allow"
 
-    ctx = driver.turn_context(session, True, "hello", "pin", browser_mcp=browser)
+    ctx = driver.turn_context(session, True, "hello", "pin", browser_mcp=browser,
+                              terminal_mcp=terminal_mcp)
     assert ctx["mcp_servers"] == [{
         "name": "puppy_browser", "command": "/tmp/browser-agent",
         "args": ["--session", "9"],
         "env": [{"name": "PUPPY_SOCKET", "value": "/tmp/socket"}],
+    }, {
+        "name": "puppy_terminal", "command": "/tmp/terminal-agent",
+        "args": [],
+        "env": [{"name": "PUPPY_TERMINAL_SOCKET", "value": "/tmp/terminal-socket"}],
     }]
     initial = driver.initial_stdin(session, "hello")[0]
     assert initial["method"] == "initialize" and initial["params"]["protocolVersion"] == 1
@@ -575,18 +587,23 @@ async def exercise_node(url: str, token: str, expected_version: str,
             prompt_defaults["remote_workspace"]
         assert "shared, user-visible Puppy browser" in prompt_defaults["browser"]
         assert prompt_defaults["browser_default"] == prompt_defaults["browser"]
+        assert "explicitly asks" in prompt_defaults["terminal"]
+        assert prompt_defaults["terminal_default"] == prompt_defaults["terminal"]
         assert prompt_defaults["max_chars"] == 32768
         async with http.patch(url + "/api/system-prompt", headers=good, ssl=pinned,
                               json={"custom": "Use terse answers.",
                                     "remote_workspace":
                                         "Treat the working tree as a synchronized mirror.",
-                                    "browser": "Use the visible browser first."}) as response:
+                                    "browser": "Use the visible browser first.",
+                                    "terminal": "Use a shared terminal only on request."}) as response:
             saved_prompt = await response.json()
             assert response.status == 200, saved_prompt
         assert saved_prompt["system_prompt"]["custom"] == "Use terse answers."
         assert saved_prompt["system_prompt"]["remote_workspace"] == \
             "Treat the working tree as a synchronized mirror."
         assert saved_prompt["system_prompt"]["browser"] == "Use the visible browser first."
+        assert saved_prompt["system_prompt"]["terminal"] == \
+            "Use a shared terminal only on request."
         async with http.patch(url + "/api/system-prompt", headers=good, ssl=pinned,
                               json={"custom": "x" * 32769}) as response:
             rejected_prompt = await response.json()
@@ -598,9 +615,12 @@ async def exercise_node(url: str, token: str, expected_version: str,
                               json={"custom": "",
                                     "remote_workspace":
                                         prompt_defaults["remote_workspace_default"],
-                                    "browser": prompt_defaults["browser_default"]}) as response:
+                                    "browser": prompt_defaults["browser_default"],
+                                    "terminal": prompt_defaults["terminal_default"]}) as response:
             assert response.status == 200, await response.text()
         assert "terminal" not in ping["capabilities"]
+        assert "terminal-instances" not in ping["capabilities"]
+        assert "terminal-handoff" not in ping["capabilities"]
         # the completion-command endpoint is part of the shell surface: a node
         # deployed without a terminal must not run commands either
         assert "notify-exec" not in ping["capabilities"]
@@ -986,7 +1006,8 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert status["readiness"]["state"] == \
             ("ready" if upgrade_enabled else "unsupported")
         for path in ("/", "/static/app.js", "/api/settings", "/api/auth/status",
-                     "/api/ws/term"):
+                     "/api/ws/term", "/api/terminal/instances",
+                     "/api/ws/terminal/A1B2"):
             async with http.get(url + path, headers=good, ssl=pinned) as response:
                 assert response.status == 404, (path, response.status)
         async with http.post(url + "/api/snapshot/export", headers=good,
@@ -1048,6 +1069,8 @@ async def exercise_controller(url: str, token: str, backend_url: str,
             assert response.status == 200
         assert full_ping["role"] == "full" and full_ping["protocol"] == 1
         assert "terminal" in full_ping["capabilities"]
+        assert "terminal-instances" in full_ping["capabilities"]
+        assert "terminal-handoff" in full_ping["capabilities"]
         assert "queue-pause" in full_ping["capabilities"]
         assert "queue-edit" in full_ping["capabilities"]
         assert "queue-reorder" in full_ping["capabilities"]
@@ -1266,7 +1289,8 @@ async def exercise_controller(url: str, token: str, backend_url: str,
                               json={"custom": "Controller-configured guidance.",
                                     "remote_workspace": remote_prompt["system_prompt"][
                                         "remote_workspace_default"],
-                                    "browser": remote_prompt["system_prompt"]["browser_default"]
+                                    "browser": remote_prompt["system_prompt"]["browser_default"],
+                                    "terminal": remote_prompt["system_prompt"]["terminal_default"]
                                     }) as response:
             remote_prompt = await response.json()
             assert response.status == 200, remote_prompt
@@ -1333,6 +1357,48 @@ async def exercise_controller(url: str, token: str, backend_url: str,
             assert response.status == 200, await response.text()
         assert not proxied_path.exists()
 
+        # New controllers allocate a node-owned, identified PTY before opening
+        # its viewer socket. The process survives a viewer reconnect and keeps
+        # one four-character identity for both the user and terminal MCP tools.
+        async with http.post(url + "/api/terminal/instances", headers=headers,
+                             json={"command": "/bin/bash", "cols": 80,
+                                   "rows": 24}) as response:
+            created_terminal = await response.json()
+            assert response.status == 201, created_terminal
+        terminal_id = created_terminal["terminal"]["id"]
+        assert len(terminal_id) == 4 and terminal_id.isalnum() and \
+            terminal_id == terminal_id.upper(), terminal_id
+        async with http.get(url + "/api/terminal/instances",
+                            headers=headers) as response:
+            terminal_list = await response.json()
+            assert response.status == 200, terminal_list
+        assert any(item["id"] == terminal_id and item["running"]
+                   for item in terminal_list["instances"]), terminal_list
+        shared_terminal = await http.ws_connect(
+            url + "/api/ws/terminal/" + terminal_id, headers=headers)
+        terminal_status = await shared_terminal.receive_json(timeout=3)
+        terminal_binding = await shared_terminal.receive_json(timeout=3)
+        assert terminal_status["type"] == "status" and \
+            terminal_status["terminal_id"] == terminal_id
+        assert terminal_binding["type"] == "binding" and \
+            terminal_binding["session_id"] is None
+        await shared_terminal.send_bytes(b"echo PUPPY_SHARED_TERMINAL_OK\nexit\n")
+        shared_output = b""
+        deadline = asyncio.get_event_loop().time() + 5
+        while b"PUPPY_SHARED_TERMINAL_OK" not in shared_output and \
+                asyncio.get_event_loop().time() < deadline:
+            message = await shared_terminal.receive(timeout=2)
+            if message.type == aiohttp.WSMsgType.BINARY:
+                shared_output += message.data
+            elif message.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                break
+        assert b"PUPPY_SHARED_TERMINAL_OK" in shared_output, shared_output[-200:]
+        await shared_terminal.close()
+        async with http.delete(url + "/api/terminal/instances/" + terminal_id,
+                               headers=headers) as response:
+            assert response.status == 200, await response.text()
+
+        # Keep the anonymous create-on-connect socket for older controllers.
         terminal = await http.ws_connect(
             url + "/api/ws/term?cmd=/bin/bash&cols=80&rows=24", headers=headers)
         await terminal.send_bytes(b"echo PUPPY_BACKEND_ROUTE_OK\nexit\n")
@@ -2637,6 +2703,7 @@ async def main() -> None:
             names = archive.namelist()
         assert any(name.startswith("puppy/drivers/") for name in names)
         assert "puppy/browser_agent.py" in names
+        assert "puppy/terminal_agent.py" in names
         assert not any(name.startswith("puppy/static/") for name in names)
         mcp_env = dict(os.environ)
         mcp_env["PYTHONPATH"] = str(release_artifact)
@@ -2655,11 +2722,21 @@ async def main() -> None:
             mcp_result["result"]["instructions"]
         assert "repository's own browser test suite" in \
             mcp_result["result"]["instructions"]
+        terminal_mcp_output = subprocess.check_output(
+            [sys.executable, "-m", "puppy.terminal_agent"], input=mcp_init,
+            env=mcp_env, cwd=str(temp_root), text=True, timeout=5)
+        terminal_mcp_result = json.loads(terminal_mcp_output.strip())
+        assert terminal_mcp_result["result"]["serverInfo"]["name"] == \
+            "Puppy shared terminal"
+        assert "only when the user specifically asks" in \
+            terminal_mcp_result["result"]["instructions"]
         self_test = json.loads(subprocess.check_output([
             sys.executable, str(release_artifact), "self-test", "--data-dir",
             str(temp_root / "self-test-data"),
         ], text=True).splitlines()[-1])
         assert self_test["ok"] is True and self_test["version"] == __version__
+        assert "/api/terminal/instances" in self_test["routes"]
+        assert "/api/ws/terminal/{terminal_id}" in self_test["routes"]
 
         # Configuration alone is insufficient: a directly launched zipapp must
         # keep remote upgrades disabled because no external rollback exists.
@@ -2725,6 +2802,8 @@ async def main() -> None:
             "--max-upload-size-mb", "4",
         ], text=True))
         assert "terminal" in enabled_pairing["capabilities"]
+        assert "terminal-instances" in enabled_pairing["capabilities"]
+        assert "terminal-handoff" in enabled_pairing["capabilities"]
         assert "engine-model-selection" not in enabled_pairing["capabilities"]
         assert enabled_pairing["usage_refresh_minutes"] == 30
         assert enabled_pairing["max_upload_size_mb"] == 4

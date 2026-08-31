@@ -15,6 +15,11 @@ built-in web terminals.
 - **Frontend** (`puppy/static/`, vanilla JS SPA): left sidebar with sessions and
   backends, tabbed main area with concurrent chat sessions and xterm.js
   terminals. Responsive - works on mobile.
+- **Shared terminals**: every WebUI terminal has a four-character Terminal ID
+  and can be linked to one chat. When the user explicitly asks the model to
+  work in that terminal, Puppy exposes a turn-bound MCP bridge into the same
+  PTY, so user and model see and type in one session. Ordinary model shell and
+  file operations continue to use the engine's normal tools.
 - **Shared drafts**: each chat composer is written through to its session node
   and streamed to every open console. Unsent prose and staged attachment chips
   therefore follow the same chat across desktop/mobile browsers and survive a

@@ -231,7 +231,8 @@ The controller uses that list directly in new-session and chat model controls;
 there is no controller-owned provider list or node-owned model allow-list.
 Turns run through `opencode acp`, resume the native session ID, relay tool
 approvals/cancellation, and receive the same turn-scoped managed-browser MCP
-server when Browser is enabled on that node.
+server when Browser is enabled on that node, plus the shared-terminal MCP
+server when terminal support is enabled.
 
 Puppy resolves OpenCode from the service's `PATH` first. It also checks the
 official install script's per-user fallback at `$HOME/.opencode/bin/opencode`,
@@ -241,19 +242,42 @@ owns OpenCode's installation and provider credentials.
 
 ## System prompts
 
-Each node stores its own two-layer prompt setting. The custom layer is added to
-every new model turn the node starts. The Puppy browser layer is editable too,
-but is added only when that node's Browser option is enabled and the turn is
-given the managed-browser tools; disabling Browser therefore removes both the
-tools and their selection guidance. Active turns keep the prompt with which
-they started.
+Each node stores its own custom prompt plus conditional remote-workspace,
+Browser, and Terminal guidance. The custom layer is added to every new model
+turn the node starts. The Browser layer is added only when Browser is enabled
+and the turn receives managed-browser tools. The Terminal layer is added only
+when the node offers shared-terminal tools, and its shipped policy tells models
+to use those tools only after an explicit user request; ordinary shell work
+continues through the engine's normal tools. Active turns keep the prompt with
+which they started.
 
-An attached console reads and edits both fields through authenticated
+An attached console reads and edits these fields through authenticated
 `GET/PATCH /api/system-prompt`. Nodes advertise the additive `system-prompt`
 capability, so older backends remain visibly unavailable in the editor rather
 than accepting a controller-only setting they would never send. The API limits
-each field to 32,768 characters and returns Puppy's shipped browser text so the
-console can implement Reset to default without embedding a second copy.
+each field to 32,768 characters and returns Puppy's shipped conditional texts
+so the console can implement Reset to default without embedding second copies.
+
+## Shared terminals
+
+Terminal-enabled nodes advertise `terminal-instances` and `terminal-handoff`
+beside the legacy `terminal` capability. A controller creates a node-owned PTY
+through `POST /api/terminal/instances`, then attaches xterm.js to its
+ID-scoped WebSocket. Four-character Terminal IDs, process lifetime, transcript
+replay, and session links therefore survive viewer reconnects; the anonymous
+`/api/ws/term` create-on-connect route remains for older controllers.
+
+A terminal can be linked to exactly one chat and a chat to one current
+terminal. Every engine turn on a terminal-enabled node receives a private stdio
+MCP server backed by a mode-0600, same-uid Unix socket into that node-owned PTY.
+It offers bounded snapshots and high-level typing/key/wait operations, never a
+raw PTY file descriptor. Initialization alone creates nothing and changes no
+UI. The first real terminal tool call in a turn emits an identified activity
+event so the controller inserts that Terminal tab beside the chat without
+taking focus. The bridge rejects calls after the originating turn ends, and an
+unviewed terminal is stopped after its idle grace period. PTYs, replay buffers,
+and links are memory-only: a node restart or full state restore closes and
+forgets them rather than placing terminal contents in a backup.
 
 ## Durable message queues
 

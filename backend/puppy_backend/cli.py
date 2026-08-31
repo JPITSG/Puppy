@@ -214,13 +214,17 @@ def _self_test() -> dict:
     from .app import build_app
 
     initialize_runtime()
-    app = build_app(include_terminal=False, transport={"encrypted": False}, upgrade_health={
+    # Construct the terminal-enabled shape so candidate validation covers the
+    # complete packaged API. Merely registering these routes starts no PTY or
+    # listener; deployments may still opt out with --disable-terminal.
+    app = build_app(include_terminal=True, transport={"encrypted": False}, upgrade_health={
         "host": "127.0.0.1", "port": 1, "tls": False,
     })
     routes = sorted({route.resource.canonical for route in app.router.routes()})
     required = {"/api/ping", "/api/engines", "/api/engines/usage-refresh",
                 "/api/uploads/settings", "/api/sessions",
-                "/api/sessions/{sid}/upload", protocol.UPGRADE_API_PATH}
+                "/api/sessions/{sid}/upload", "/api/terminal/instances",
+                "/api/ws/terminal/{terminal_id}", protocol.UPGRADE_API_PATH}
     if not required.issubset(routes):
         raise RuntimeError("candidate API surface is incomplete")
     return {

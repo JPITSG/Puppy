@@ -27,7 +27,7 @@ TEST_ROOT = Path(tempfile.mkdtemp(prefix="snapshot-", dir=str(PRIVATE_TESTS)))
 os.environ["PUPPY_DATA"] = str(TEST_ROOT / "data")
 
 from puppy import (auth, config, db, listener_handoff, runner as session_runner,
-                   snapshots, uploads, workspaces)  # noqa: E402
+                   snapshots, terminal, uploads, workspaces)  # noqa: E402
 from puppy.web import build_app  # noqa: E402
 
 
@@ -107,11 +107,22 @@ async def exercise_http(archive_ui: dict, session_id: int, project: Path) -> Non
             app["puppy_bind_verifications"]["stale-before-restore"] = {
                 "timer": None, "server": None,
             }
+            # Ended PTYs do not block a restore, but their memory-only replay
+            # and old database session binding must not cross that boundary.
+            stale_terminal = await terminal.manager().create(
+                command="/bin/true", cwd=str(project), owner_session=session_id)
+            for _ in range(100):
+                if not stale_terminal.running:
+                    break
+                await asyncio.sleep(0.02)
+            assert not stale_terminal.running
+            assert terminal.manager().instance_payloads()
             async with http.post(url + "/api/snapshot/import", headers={
                     **headers, "Content-Type": "application/gzip"}, data=payload) as response:
                 restored = await response.json()
                 assert response.status == 200, restored
             assert app["puppy_bind_verifications"] == {}
+            assert terminal.manager().instance_payloads() == []
             assert restored["ui"] == archive_ui
             assert restored["sessions"] == 2
             assert config.get("instance_name") == "saved-instance"
@@ -143,7 +154,8 @@ async def main() -> None:
         config.set_system_prompts(
             "Keep answers concise.\nPreserve operator terminology.",
             "Remember that this project is stored on another node.",
-            "Use the shared browser before standalone automation.")
+            "Use the shared browser before standalone automation.",
+            "Use the shared terminal only when explicitly requested.")
         config.set_value("engines.auto_upgrade",
                          {"enabled": True, "mode": "at", "at": "04:15"})
         config.set_value("notify.enabled", True)
@@ -264,7 +276,7 @@ async def main() -> None:
         config.set_value("browser.color_scheme", "dark")
         config.set_system_prompts(
             "mutated custom prompt", "mutated remote prompt",
-            "mutated browser prompt")
+            "mutated browser prompt", "mutated terminal prompt")
         config.set_value("engines.auto_upgrade",
                          {"enabled": False, "mode": "now", "at": "03:30"})
         config.set_value("notify.enabled", False)
@@ -297,16 +309,21 @@ async def main() -> None:
             "Remember that this project is stored on another node."
         assert config.get("system_prompt.browser") == \
             "Use the shared browser before standalone automation."
+        assert config.get("system_prompt.terminal") == \
+            "Use the shared terminal only when explicitly requested."
         missing_prompts = config.export_data()
         missing_prompts.pop("system_prompt", None)
         previous_prompt_shape = config.export_data()
         previous_prompt_shape["system_prompt"].pop("remote_workspace", None)
+        previous_terminal_prompt_shape = config.export_data()
+        previous_terminal_prompt_shape["system_prompt"].pop("terminal", None)
         missing_cwd = config.export_data()
         missing_cwd["sessions"].pop("default_cwd", None)
         unknown_selection = config.export_data()
         unknown_selection["engines"]["opencode"] = {
             "models": ["provider/model-a", "second/model-b"]}
         for invalid in (missing_prompts, previous_prompt_shape,
+                        previous_terminal_prompt_shape,
                         missing_cwd, unknown_selection):
             try:
                 config.normalize_import(invalid)
@@ -342,7 +359,7 @@ async def main() -> None:
             assert "color_scheme" in str(exc), str(exc)
         else:
             raise AssertionError("an invalid browser color scheme was accepted")
-        for field in ("custom", "remote_workspace", "browser"):
+        for field in ("custom", "remote_workspace", "browser", "terminal"):
             for invalid_prompt in (
                     None, "x" * (config.MAX_SYSTEM_PROMPT_CHARS + 1), "bad\x00text"):
                 prompts = dict(config.export_data()["system_prompt"])
