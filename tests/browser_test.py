@@ -2167,8 +2167,13 @@ def check_active_turn_steering_ui(ui_source: str, css_source: str) -> None:
     assert 'class="composer-action-label">Steer</span>' in ui_source
     assert 'class="composer-action-label">Queue</span>' in ui_source
     assert 'class="composer-action-icon" aria-hidden="true"' in ui_source
-    assert "function queueActionIcon(size = 16)" in ui_source
-    assert "function steerActionIcon(size = 17)" in ui_source
+    assert "function filledReferenceIcon(size, paths)" in ui_source
+    assert 'svg.setAttribute("viewBox", "0 0 800 800")' in ui_source
+    assert 'group.setAttribute("fill", "currentColor")' in ui_source
+    assert "function queueActionIcon(size = 18)" in ui_source
+    assert "function steerActionIcon(size = 18)" in ui_source
+    assert "M2945 7323 c-299 -35" in ui_source
+    assert "M3377 6923 l-617 -1068" in ui_source
     assert ('this.steerBtn.querySelector(".composer-action-icon").' +
             'appendChild(steerActionIcon());') in ui_source
     assert ('this.queueBtn.querySelector(".composer-action-icon").' +

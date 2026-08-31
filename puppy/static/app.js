@@ -111,48 +111,74 @@ function plusIcon(size) {
   return svg;
 }
 
-/* Narrow composers retain the labelled desktop actions as compact drawn
-   symbols. Their geometry comes from the user's references, but the same
-   currentColor/stroke system as Puppy's other icons keeps them crisp and
-   centred at every device scale. */
-function queueActionIcon(size = 16) {
+/* These filled contours are traced from the supplied 800x800 alpha silhouettes
+   in their original coordinate system. Keeping the source viewBox, padding,
+   proportions and separate contours intact makes the compact controls the
+   exact references rather than another interpretation of them. */
+function filledReferenceIcon(size, paths) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
-  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("viewBox", "0 0 800 800");
   svg.setAttribute("width", size);
   svg.setAttribute("height", size);
   svg.setAttribute("aria-hidden", "true");
-  const path = document.createElementNS(NS, "path");
-  path.setAttribute("d", "M5.25 3.25h7a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1Z" +
-    "M2.5 6v6.25c0 .7.55 1.25 1.25 1.25H10" +
-    "M8.75 6v3.5M7 7.75h3.5");
-  path.setAttribute("fill", "none");
-  path.setAttribute("stroke", "currentColor");
-  path.setAttribute("stroke-width", "1.4");
-  path.setAttribute("stroke-linecap", "round");
-  path.setAttribute("stroke-linejoin", "round");
-  svg.appendChild(path);
+  const group = document.createElementNS(NS, "g");
+  group.setAttribute("transform", "translate(0 800) scale(.1 -.1)");
+  group.setAttribute("fill", "currentColor");
+  group.setAttribute("stroke", "none");
+  for (const data of paths) {
+    const path = document.createElementNS(NS, "path");
+    path.setAttribute("d", data);
+    group.appendChild(path);
+  }
+  svg.appendChild(group);
   return svg;
 }
 
-function steerActionIcon(size = 17) {
-  const NS = "http://www.w3.org/2000/svg";
-  const svg = document.createElementNS(NS, "svg");
-  svg.setAttribute("viewBox", "0 0 16 16");
-  svg.setAttribute("width", size);
-  svg.setAttribute("height", size);
-  svg.setAttribute("aria-hidden", "true");
-  const path = document.createElementNS(NS, "path");
-  path.setAttribute("d", "M8 13.5V2.75M5.9 4.85 8 2.75l2.1 2.1" +
-    "M8 10.7C7.65 7.8 5.65 5.45 2.7 4.25M2.7 4.25l.65 2.65M2.7 4.25l2.7-.45" +
-    "M8 10.7c.35-2.9 2.35-5.25 5.3-6.45M13.3 4.25l-.65 2.65M13.3 4.25l-2.7-.45");
-  path.setAttribute("fill", "none");
-  path.setAttribute("stroke", "currentColor");
-  path.setAttribute("stroke-width", "1.4");
-  path.setAttribute("stroke-linecap", "round");
-  path.setAttribute("stroke-linejoin", "round");
-  svg.appendChild(path);
-  return svg;
+function queueActionIcon(size = 18) {
+  return filledReferenceIcon(size, [
+    `M2945 7323 c-299 -35 -459 -102 -627 -262 -196 -186 -283 -380 -308
+-685 -14 -176 -14 -3247 0 -3422 23 -278 100 -466 262 -640 168 -179 382 -276
+673 -304 140 -13 3296 -13 3440 0 130 12 287 48 370 85 137 61 286 182 386
+315 50 66 120 211 143 297 45 168 46 184 46 1951 0 1125 -4 1704 -11 1769 -36
+325 -181 574 -429 736 -140 91 -278 137 -470 157 -88 9 -3400 12 -3475 3z
+m3338 -663 c171 -11 221 -27 285 -93 67 -69 82 -116 93 -290 11 -195 11 -2999
+0 -3213 -10 -178 -21 -220 -81 -287 -52 -60 -106 -86 -201 -98 -55 -6 -675 -9
+-1774 -7 -1425 3 -1695 5 -1725 17 -96 39 -168 116 -192 207 -19 73 -19 3478
+0 3544 27 92 111 178 195 201 23 6 92 15 152 19 165 11 3075 11 3248 0z`,
+    `M4587 5990 c-128 -33 -221 -134 -247 -269 -5 -30 -10 -203 -10 -387
+l0 -333 -372 -3 -373 -3 -57 -27 c-259 -121 -255 -483 7 -605 l60 -28 367 -3
+366 -3 4 -367 3 -367 28 -60 c59 -127 171 -199 308 -199 62 0 87 5 132 28
+71 34 133 97 166 166 l26 55 3 372 3 372 372 3 372 3 57 28 c72 36 134 98 167
+167 35 75 36 192 3 264 -37 82 -88 135 -161 170 l-66 31 -372 3 -372 3 -3 372
+c-3 362 -4 373 -26 421 -37 80 -88 135 -157 168 -69 32 -165 44 -228 28z`,
+    `M905 5317 c-96 -32 -162 -90 -204 -177 l-26 -55 0 -1930 c0 -1808 1
+-1934 18 -1995 61 -228 239 -406 467 -467 61 -17 187 -18 1995 -18 l1930 0 55
+26 c113 54 180 154 188 279 3 61 0 86 -19 135 -28 75 -101 154 -172 186 l-52
+24 -1867 5 c-1026 3 -1870 9 -1875 13 -4 5 -10 849 -13 1875 l-5 1867 -23 51
+c-29 64 -102 137 -167 165 -61 27 -173 35 -230 16z`,
+  ]);
+}
+
+function steerActionIcon(size = 18) {
+  return filledReferenceIcon(size, [
+    `M3377 6923 l-617 -1068 285 -3 285 -2 0 -905 0 -905 117 -137 c176
+-207 429 -557 529 -730 10 -18 21 -33 24 -33 3 1 35 49 72 108 136 220 333
+485 510 689 l88 101 0 906 0 906 285 2 285 3 -617 1068 c-340 587 -620 1067
+-623 1067 -3 0 -283 -480 -623 -1067z`,
+    `M1235 5144 c-638 -57 -1175 -103 -1193 -104 -22 0 -32 -4 -30 -13 4
+-16 1401 -2017 1408 -2017 3 0 47 91 99 203 52 111 97 205 101 210 11 12 194
+-147 360 -313 608 -608 1002 -1397 1152 -2309 l32 -194 23 184 c83 662 261
+1266 547 1855 l84 171 -100 164 c-350 575 -843 1132 -1367 1544 -63 50 -125
+99 -137 110 l-23 20 115 245 c64 135 126 269 139 298 l24 52 -37 -1 c-20 -1
+-559 -48 -1197 -105z`,
+    `M5559 5189 c15 -35 66 -143 111 -239 45 -96 95 -203 110 -237 l29
+-62 -137 -108 c-214 -170 -342 -284 -527 -468 -653 -653 -1110 -1382 -1390
+-2220 -140 -417 -223 -801 -270 -1243 -18 -175 -37 -584 -27 -593 4 -4 307 -10
+675 -13 l667 -7 0 113 c0 63 5 175 10 249 86 1105 493 2030 1210 2750 156 157
+350 324 361 312 4 -5 49 -99 100 -210 52 -112 96 -203 99 -203 7 0 1404 2000
+1408 2014 2 8 -345 42 -1170 114 -645 57 -1199 106 -1231 109 l-57 6 29 -64z`,
+  ]);
 }
 
 /* stroke is a parameter for the same reason bellIcon runs lighter: this 24-box
