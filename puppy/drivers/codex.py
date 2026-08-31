@@ -466,6 +466,7 @@ class CodexDriver(Driver):
     binary = "codex"
     uses_stdin_stream = True
     supports_steering = True
+    steering_acknowledged = True
     release_source = {"kind": "npm", "package": "@openai/codex"}
     upgrade_source = {"kind": "self", "args": ["update"]}
 
@@ -570,18 +571,22 @@ class CodexDriver(Driver):
         })]
 
     def steer_payload(self, session, ctx, text, request_id):
+        if not self.steer_ready(session, ctx):
+            return None
         ctx = ctx if isinstance(ctx, dict) else {}
         thread_id = str(ctx.get("thread_id") or "")
         turn_id = str(ctx.get("turn_id") or "")
-        if ctx.get("phase") != "running" or ctx.get("completed") or \
-                not thread_id or not turn_id:
-            return None
         return _rpc(_ID_STEER_PREFIX + request_id, "turn/steer", {
             "threadId": thread_id,
             "clientUserMessageId": request_id,
             "input": [{"type": "text", "text": text}],
             "expectedTurnId": turn_id,
         })
+
+    def steer_ready(self, session, ctx):
+        ctx = ctx if isinstance(ctx, dict) else {}
+        return ctx.get("phase") == "running" and not ctx.get("completed") and \
+            bool(ctx.get("thread_id")) and bool(ctx.get("turn_id"))
 
     @staticmethod
     def _thread_request(ctx: dict) -> dict:
@@ -641,6 +646,21 @@ class CodexDriver(Driver):
 
     def _response(self, ev: dict, ctx: dict) -> list:
         request_id = ev.get("id")
+        if isinstance(request_id, str) and request_id.startswith(_ID_STEER_PREFIX):
+            steer_id = request_id[len(_ID_STEER_PREFIX):]
+            if ev.get("error"):
+                return [{"a": "steer_result", "request_id": steer_id,
+                         "ok": False, "error": _error_text(
+                             ev.get("error"), "Codex rejected steering")}]
+            result = ev.get("result") if isinstance(ev.get("result"), dict) else {}
+            accepted_turn = str(result.get("turnId") or "")
+            expected_turn = str(ctx.get("turn_id") or "")
+            if not accepted_turn or accepted_turn != expected_turn:
+                return [{"a": "steer_result", "request_id": steer_id,
+                         "ok": False,
+                         "error": "Codex acknowledged steering for an unexpected turn"}]
+            return [{"a": "steer_result", "request_id": steer_id,
+                     "ok": True, "error": ""}]
         if request_id not in (_ID_INITIALIZE, _ID_THREAD, _ID_TURN,
                               _ID_INTERRUPT):
             return []

@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import signal
 import time
 import uuid
@@ -25,7 +26,9 @@ _updates_watchers = set()  # websockets watching the session list
 STREAM_LIMIT = 16 * 1024 * 1024
 QUEUE_REORDER_HOLD_SECONDS = 30
 MAX_STEER_CHARS = 128 * 1024
-MAX_STEER_REQUEST_ID_CHARS = 128
+MAX_STEER_TURN_ID_CHARS = 128
+MAX_STEERS_PER_TURN = 64
+STEER_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 
 def hub(session_id: int) -> "SessionHub":
@@ -149,6 +152,17 @@ def _starts_fresh_native_session(session: dict, workspace_reset: bool, driver) -
         (workspace_reset and driver.resume_requires_same_cwd)
 
 
+def valid_steer_request_id(value: str) -> bool:
+    return isinstance(value, str) and bool(STEER_REQUEST_ID_RE.fullmatch(value))
+
+
+def _driver_steering_supported(session: dict) -> bool:
+    try:
+        return bool(get_driver(str((session or {}).get("engine") or "")).supports_steering)
+    except KeyError:
+        return False
+
+
 def session_payload(session):
     if session is None:
         return None
@@ -195,6 +209,11 @@ def sessions_payload() -> dict:
             # list has to carry this too - reading it only from the single
             # session payload left that menu permanently showing "on"
             "show_meta": s["show_meta"] != 0,
+            "steering": (h.steering_state(s) if h else {
+                "supported": _driver_steering_supported(s),
+                "ready": False,
+                "turn_id": "",
+            }),
         })
     return {"type": "sessions", "server_time": now, "sessions": sessions}
 
@@ -367,6 +386,11 @@ class SessionHub:
         self._proc_ready = False
         self._driver_ctx = None
         self._interrupt_protocol_sent = False
+        self._turn_generation = 0
+        self._turn_result_seen = False
+        self._turn_stopping = False
+        self._steer_receipts = {}
+        self._last_steering_state = None
         self.turn_task = None
         self.pending_approval = None
         self.interrupted = False
@@ -541,6 +565,33 @@ class SessionHub:
         broadcast_update({**payload, "session_id": self.id})
         return True
 
+    def steering_state(self, session=None) -> dict:
+        """Current compare-before-send token and driver readiness."""
+        session = session or db.get_session(self.id) or {}
+        try:
+            driver = get_driver(str(session.get("engine") or ""))
+        except KeyError:
+            driver = None
+        supported = bool(driver and driver.supports_steering)
+        proc = self.proc
+        turn_id = self._active_turn_id if self.status == "running" else ""
+        ready = supported and bool(turn_id) and not self.interrupted and \
+            not self._turn_stopping and \
+            not self._turn_result_seen and self.pending_approval is None and \
+            self._proc_ready and proc is not None and proc.returncode is None and \
+            proc.stdin is not None and not proc.stdin.is_closing() and \
+            bool(driver.steer_ready(session, self._driver_ctx))
+        return {"supported": supported, "ready": bool(ready),
+                "turn_id": turn_id}
+
+    def _publish_steering_state(self, session=None) -> None:
+        state = self.steering_state(session)
+        if state == self._last_steering_state:
+            return
+        self._last_steering_state = dict(state)
+        self.broadcast({"type": "steering_state", "steering": state})
+        broadcast_sessions()
+
     def snapshot(self) -> dict:
         session = db.get_session(self.id)
         return {
@@ -557,6 +608,7 @@ class SessionHub:
             "paused": self._paused_wire(),
             "held": self._held_wire(),
             "pending_approval": self._scrub_value(self.pending_approval),
+            "steering": self.steering_state(session),
             "uploads": uploads.settings_payload(),
             "draft": db.get_session_draft(self.id),
             "draft_max_chars": db.MAX_DRAFT_CHARS,
@@ -669,7 +721,51 @@ class SessionHub:
         self._start_turn(text)
         return {"queued": False}
 
-    async def steer(self, text: str, request_id: str = "") -> dict:
+    @staticmethod
+    def _steer_response(receipt: dict, duplicate: bool = False) -> dict:
+        result = {
+            "request_id": receipt["request_id"],
+            "turn_id": receipt["turn_id"],
+            "status": receipt["status"],
+        }
+        if duplicate:
+            result["duplicate"] = True
+        if receipt["status"] == "rejected":
+            result["error"] = receipt.get("error") or "steering was rejected"
+        else:
+            result["ok"] = True
+        return result
+
+    def _publish_steer_status(self, receipt: dict) -> None:
+        payload = {
+            "type": "steer_status",
+            "request_id": receipt["request_id"],
+            "turn_id": receipt["turn_id"],
+            "status": receipt["status"],
+            "error": receipt.get("error") or "",
+        }
+        self.broadcast(payload)
+
+    def _handle_steer_result(self, action: dict) -> None:
+        request_id = str(action.get("request_id") or "")
+        receipt = self._steer_receipts.get(request_id)
+        if receipt is None or receipt.get("generation") != self._turn_generation:
+            return
+        receipt["status"] = "accepted" if action.get("ok") else "rejected"
+        receipt["error"] = "" if action.get("ok") else \
+            str(action.get("error") or "the engine rejected steering")[:2000]
+        self._publish_steer_status(receipt)
+        if receipt["status"] == "rejected" and not receipt.get("error_event"):
+            receipt["error_event"] = True
+            self._emit("error", {
+                "subtype": "steering_rejected",
+                "text": "Steering was not accepted: {}".format(receipt["error"]),
+                "request_id": request_id,
+                "turn_id": receipt["turn_id"],
+            })
+
+    async def steer(self, text: str, request_id: str = "",
+                    expected_turn_id: str = "") -> dict:
         """Send additional user guidance to this hub's active native turn.
 
         This path is intentionally separate from send_message(): it never
@@ -685,19 +781,16 @@ class SessionHub:
             return {"error": "steering message cannot exceed {} characters".format(
                 MAX_STEER_CHARS)}
         if not isinstance(request_id, str) or \
-                len(request_id) > MAX_STEER_REQUEST_ID_CHARS:
+                (request_id and not valid_steer_request_id(request_id)):
             return {"error": "invalid steering request id"}
         request_id = request_id or str(uuid.uuid4())
+        if not isinstance(expected_turn_id, str) or not expected_turn_id or \
+                len(expected_turn_id) > MAX_STEER_TURN_ID_CHARS:
+            return {"error": "a valid expected turn id is required"}
 
         session = db.get_session(self.id)
         if session is None:
             return {"error": "session gone"}
-        if self.status != "running":
-            return {"error": "there is no active turn to steer"}
-        if self.interrupted:
-            return {"error": "the active turn is stopping"}
-        if self.pending_approval is not None:
-            return {"error": "resolve the pending approval before steering"}
         try:
             driver = get_driver(session["engine"])
         except KeyError:
@@ -706,23 +799,93 @@ class SessionHub:
             return {"error": "{} does not support active-turn steering".format(
                 driver.label)}
 
-        proc = self.proc
-        ctx = self._driver_ctx
-        if not self._proc_ready or proc is None or proc.returncode is not None or \
-                proc.stdin is None or proc.stdin.is_closing():
-            return {"error": "the active turn is not ready for steering"}
-        payload = driver.steer_payload(session, ctx, text, request_id)
-        if not isinstance(payload, dict):
-            return {"error": "the active turn is not ready for steering"}
-        try:
-            await self._write_stdin(payload)
-        except (BrokenPipeError, ConnectionError, RuntimeError) as exc:
-            log.info("steering write failed for session %s: %s", self.id, exc)
-            return {"error": "the active turn stopped before steering was delivered"}
+        async with self._stdin_lock:
+            existing = self._steer_receipts.get(request_id)
+            if existing is not None:
+                if existing.get("turn_id") != expected_turn_id:
+                    return {"error": "steering request id belongs to another turn"}
+                if existing.get("text") != text:
+                    return {"error": "steering request id was already used for different text"}
+                return self._steer_response(existing, duplicate=True)
 
-        self._emit("user", {"text": text, "steering": True,
-                            "request_id": request_id})
-        return {"ok": True, "request_id": request_id}
+            state = self.steering_state(session)
+            if self.status != "running" or not state["turn_id"]:
+                return {"error": "there is no active turn to steer"}
+            if state["turn_id"] != expected_turn_id:
+                return {"error": "the active turn changed before steering was delivered"}
+            if self.interrupted or self._turn_stopping:
+                return {"error": "the active turn is stopping"}
+            if self._turn_result_seen:
+                return {"error": "the active turn has already completed"}
+            if self.pending_approval is not None:
+                return {"error": "resolve the pending approval before steering"}
+            if not state["ready"]:
+                return {"error": "the active turn is not ready for steering"}
+            if len(self._steer_receipts) >= MAX_STEERS_PER_TURN:
+                return {"error": "the active turn has reached its steering limit"}
+
+            proc = self.proc
+            generation = self._turn_generation
+            payload = driver.steer_payload(
+                session, self._driver_ctx, text, request_id)
+            if not isinstance(payload, dict) or proc is None or proc.stdin is None or \
+                    proc.stdin.is_closing():
+                return {"error": "the active turn is not ready for steering"}
+
+            # Write only to the process captured after compare-before-send.
+            # The user event and idempotency receipt are created before drain
+            # can yield to completion/queue transition, so a late retry cannot
+            # leak into the next native turn or reorder the transcript.
+            event = self._emit("user", {
+                "text": text, "steering": True,
+                "request_id": request_id, "turn_id": expected_turn_id,
+            })
+            receipt = {
+                "request_id": request_id,
+                "turn_id": expected_turn_id,
+                "text": text,
+                "generation": generation,
+                "event_seq": event["seq"],
+                "status": "sending",
+                "error": "",
+            }
+            self._steer_receipts[request_id] = receipt
+            try:
+                proc.stdin.write((json.dumps(payload) + "\n").encode())
+                await proc.stdin.drain()
+            except asyncio.CancelledError:
+                # The authenticated HTTP caller can disappear after the bytes
+                # were queued. Preserve idempotency for its retry rather than
+                # leaving an ambiguous internal "sending" receipt.
+                if receipt["status"] == "sending":
+                    receipt["status"] = (
+                        "sent" if driver.steering_acknowledged else "accepted")
+                    self._publish_steer_status(receipt)
+                raise
+            except (BrokenPipeError, ConnectionError, OSError, RuntimeError) as exc:
+                # A positive protocol acknowledgement, if one raced the drain,
+                # is stronger evidence than the transport exception.
+                if receipt["status"] != "accepted":
+                    receipt["status"] = "rejected"
+                    receipt["error"] = \
+                        "the active turn stopped before steering was delivered"
+                    log.info("steering write failed for session %s: %s", self.id, exc)
+                    self._publish_steer_status(receipt)
+                    self._emit("error", {
+                        "subtype": "steering_rejected",
+                        "text": "Steering was not accepted: {}".format(
+                            receipt["error"]),
+                        "request_id": request_id,
+                        "turn_id": expected_turn_id,
+                    })
+                    receipt["error_event"] = True
+                return self._steer_response(receipt)
+
+            if receipt["status"] == "sending":
+                receipt["status"] = (
+                    "sent" if driver.steering_acknowledged else "accepted")
+                self._publish_steer_status(receipt)
+            return self._steer_response(receipt)
 
     def pending_config(self) -> dict:
         """The {engine, model, effort} in force after everything queued: what
@@ -1161,11 +1324,17 @@ class SessionHub:
         self._proc_ready = False
         self._driver_ctx = None
         self._interrupt_protocol_sent = False
+        self._turn_generation += 1
+        self._turn_result_seen = False
+        self._turn_stopping = False
+        self._steer_receipts = {}
+        self._last_steering_state = None
+        self._active_turn_id = ""
         self._active_prompt_text = text
         self.turn_task = asyncio.ensure_future(self._run_turn(text))
         # Publish the active block immediately, before process startup and the
         # first persisted event have a chance to yield the event loop.
-        broadcast_sessions()
+        self._publish_steering_state()
 
     def _start_queue_if_ready(self) -> bool:
         """Start the front prompt when an idle queue mutation unblocks it."""
@@ -1300,6 +1469,8 @@ class SessionHub:
         self._interrupt_count += 1
         already_interrupted = self.interrupted
         self.interrupted = True
+        self._turn_stopping = True
+        self._publish_steering_state()
         if not already_interrupted:
             self.broadcast({"type": "status", "text": "Interrupting..."})
         proc = self.proc
@@ -1380,6 +1551,7 @@ class SessionHub:
             await self._write_stdin(payload)
         except Exception as e:
             log.error("approval write failed for session %s: %s", self.id, e)
+        self._publish_steering_state(session)
         # a setMode suggestion accepted -> persist as the session's mode for future turns
         for perm in updated_permissions or []:
             if isinstance(perm, dict) and perm.get("type") == "setMode" and perm.get("mode"):
@@ -1407,6 +1579,8 @@ class SessionHub:
         proc = self.proc
         if proc is None or proc.returncode is not None:
             return
+        self._turn_stopping = True
+        self._publish_steering_state()
         # SIGINT first: engines abort the turn cleanly (codex releases its
         # thread writer and records the interruption), then escalate.
         self._signal_if_alive(proc, signal.SIGINT)
@@ -1677,6 +1851,7 @@ class SessionHub:
             if not isinstance(ctx, dict):
                 ctx = {}
             self._driver_ctx = ctx
+            self._publish_steering_state(session)
 
             cwd = session["cwd"]
             if not os.path.isdir(cwd):
@@ -1703,12 +1878,15 @@ class SessionHub:
             self._proc_ready = True
             if self.interrupted:
                 await self._interrupt_proc(self.proc, driver)
+            self._publish_steering_state(session)
 
             timeout = float(config.get("sessions.turn_timeout", 7200))
             deadline = time.time() + timeout
             while True:
                 remaining = deadline - time.time()
                 if remaining <= 0:
+                    self._turn_stopping = True
+                    self._publish_steering_state(session)
                     self._emit("error", {"text": f"Turn timeout after {int(timeout)}s - killed"})
                     self._signal_if_alive(self.proc, signal.SIGKILL)
                     break
@@ -1717,6 +1895,8 @@ class SessionHub:
                 except asyncio.TimeoutError:
                     continue
                 if not line:
+                    self._turn_stopping = True
+                    self._publish_steering_state(session)
                     break
                 try:
                     actions = driver.parse_line(line.decode(errors="replace").strip(), ctx)
@@ -1770,6 +1950,8 @@ class SessionHub:
                         payload = act.get("data")
                         if isinstance(payload, dict):
                             await self._write_stdin(payload)
+                    elif a == "steer_result":
+                        self._handle_steer_result(act)
                     elif a == "rate_limit":
                         # stamped so consoles can say how fresh the figure is;
                         # additive beside the CLI's own camelCase keys
@@ -1778,6 +1960,7 @@ class SessionHub:
                         db.meta_set(f"rate_limit.{session['engine']}", info)
                         self.broadcast({"type": "rate_limit", "engine": session["engine"], "info": info})
                     elif a == "result":
+                        self._turn_result_seen = True
                         if self.interrupted and act["data"].get("stop_reason") in \
                                 ("cancelled", "canceled"):
                             # A persistent JSONL service still needs EOF before
@@ -1808,6 +1991,8 @@ class SessionHub:
                                 self.proc.stdin.close()
                             except Exception:
                                 pass
+
+                self._publish_steering_state(session)
 
                 if self.interrupted and not self._interrupt_protocol_sent:
                     try:
@@ -1854,7 +2039,10 @@ class SessionHub:
             self._proc_ready = False
             self._driver_ctx = None
             self._interrupt_protocol_sent = False
+            self._turn_result_seen = True
+            self._turn_stopping = True
             self.stderr_tail = ""
+            self._publish_steering_state(session)
             # A failed turn is fresh evidence about the engine (auth revoked,
             # binary broken): drop its cached probe so the next status poll
             # re-reads the truth instead of serving up to five stale minutes.

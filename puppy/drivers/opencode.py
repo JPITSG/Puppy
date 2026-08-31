@@ -278,6 +278,7 @@ class OpenCodeDriver(Driver):
     binary_fallbacks = ("~/.opencode/bin/opencode",)
     uses_stdin_stream = True
     supports_steering = True
+    steering_acknowledged = True
     availability_only = True
     dynamic_model_options = True
     allow_custom_model = False
@@ -487,10 +488,10 @@ class OpenCodeDriver(Driver):
         })]
 
     def steer_payload(self, session, ctx, text, request_id):
+        if not self.steer_ready(session, ctx):
+            return None
         ctx = ctx if isinstance(ctx, dict) else {}
         session_id = str(ctx.get("session_id") or "")
-        if ctx.get("phase") != "prompt" or not session_id:
-            return None
         # ACP v1 has no separately named steer method. OpenCode's pinned ACP
         # adapter persists a concurrent session/prompt message and its active
         # run consumes that message at the next loop boundary. A distinct RPC
@@ -499,6 +500,10 @@ class OpenCodeDriver(Driver):
             "sessionId": session_id,
             "prompt": [{"type": "text", "text": text}],
         })
+
+    def steer_ready(self, session, ctx):
+        ctx = ctx if isinstance(ctx, dict) else {}
+        return ctx.get("phase") == "prompt" and bool(ctx.get("session_id"))
 
     @staticmethod
     def _flush_stream(ctx: dict) -> list:
@@ -747,6 +752,13 @@ class OpenCodeDriver(Driver):
             }}]
 
         request_id = ev.get("id")
+        if isinstance(request_id, str) and request_id.startswith(_ID_STEER_PREFIX):
+            steer_id = request_id[len(_ID_STEER_PREFIX):]
+            if ev.get("error"):
+                return [{"a": "steer_result", "request_id": steer_id,
+                         "ok": False, "error": _json_error(ev.get("error"))}]
+            return [{"a": "steer_result", "request_id": steer_id,
+                     "ok": True, "error": ""}]
         if request_id == _ID_INITIALIZE:
             if ev.get("error"):
                 return self._protocol_failure(_json_error(ev.get("error")))

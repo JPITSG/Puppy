@@ -143,6 +143,11 @@ class ClaudeDriver(Driver):
         return {"type": "user", "message": {"role": "user",
                 "content": [{"type": "text", "text": text}]}}
 
+    def steer_ready(self, session, ctx):
+        # The runner calls this only after both initialize and the original
+        # user message have drained to the active stream-json invocation.
+        return True
+
     def parse_line(self, line, ctx):
         try:
             ev = json.loads(line)

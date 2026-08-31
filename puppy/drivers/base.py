@@ -142,6 +142,9 @@ class Driver:
     # of uses_stdin_stream: a writable protocol is necessary, but it does not
     # by itself prove same-turn steering semantics.
     supports_steering = False
+    # Protocols with a distinct response to the steering request set this;
+    # streamed-input protocols treat a successful stdin drain as acceptance.
+    steering_acknowledged = False
     # Some multi-provider CLIs deliberately leave authentication to whichever
     # provider/model a turn selects.  Their node health is binary availability,
     # not a single global login verdict.
@@ -276,6 +279,10 @@ class Driver:
         object; steering must never create a new turn or native session.
         """
         return None
+
+    def steer_ready(self, session: dict, ctx: dict) -> bool:
+        """Whether the live driver context can address its active turn."""
+        return False
 
     async def status(self) -> dict:
         """{installed, version, auth, detail, ...extras}; slow checks are cached."""

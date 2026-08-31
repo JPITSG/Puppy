@@ -167,8 +167,20 @@ native turn. The shared runner maps it to each pinned CLI protocol (streamed
 user input, app-server `turn/steer`, or an active ACP prompt), persists the
 accepted text as a user event with `steering: true`, and refuses idle, starting,
 stopping, approval-waiting, or unsupported turns. The route is authenticated
-and is present in both the full runtime and the headless package; controllers
-must not expose it until the node advertises its steering capability.
+and is present in both the full runtime and the headless package.
+
+Nodes advertise the hardened contract as `active-turn-steering`. Session lists,
+session reads, and WebSocket snapshots expose `{supported, ready, turn_id}`;
+the caller must echo that exact `turn_id` as `expected_turn_id`. This prevents a
+late request from reaching a queued successor. An optional restricted
+`request_id` is idempotent within the named turn: an exact retry replays its
+delivery state, while reuse with different text or another turn is refused.
+Writes are serialized with approvals and interrupts and revalidated under that
+lock. `steer_status` WebSocket frames distinguish `sent`, `accepted`, and
+`rejected`; protocol rejections also become durable transcript errors. Each
+turn has a bounded receipt ledger which is discarded before its successor.
+Older nodes omit the capability, so controllers must not expose the route even
+if they happen to run the earlier transport preview.
 
 ## Account usage refresh
 

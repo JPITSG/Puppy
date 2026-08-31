@@ -75,6 +75,11 @@ QUEUE_REORDER_CAPABILITY = "queue-reorder"
 # existing session socket accepts and broadcasts draft edits. Older remote
 # nodes keep the console's local-only compatibility path.
 SESSION_DRAFT_CAPABILITY = "session-drafts"
+# The node exposes an active-turn compare token in session payloads and accepts
+# authenticated POST /api/sessions/{sid}/steer with required expected_turn_id
+# plus turn-scoped idempotency. Older nodes may carry an unadvertised transport
+# preview; controllers must not offer steering without this hardened contract.
+ACTIVE_TURN_STEERING_CAPABILITY = "active-turn-steering"
 # Remote-workspace surfaces are two independent additive roles. A provider can
 # lease one local project directory to its controller and serve the streamed
 # manifest/fetch/apply protocol over it; a mirror host can run linked sessions
@@ -93,6 +98,7 @@ BASE_CAPABILITIES = (
     QUEUE_EDIT_CAPABILITY,
     QUEUE_REORDER_CAPABILITY,
     SESSION_DRAFT_CAPABILITY,
+    ACTIVE_TURN_STEERING_CAPABILITY,
     # model/effort changes made while work is pending hold their place in the
     # message queue ({kind:"config"} items) instead of applying immediately
     "queued-config",

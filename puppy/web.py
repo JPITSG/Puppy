@@ -405,6 +405,7 @@ async def h_session_get(request: web.Request):
     h = runner.hub(s["id"])
     return web.json_response({"session": runner.session_payload(s), "status": h.status,
                               "active_since": h.active_since if h.status == "running" else None,
+                              "steering": h.steering_state(s),
                               "server_time": time.time(),
                               "uploads": uploads.settings_payload(),
                               "events": db.get_events(s["id"], limit=200)})
@@ -581,9 +582,15 @@ async def h_session_steer(request: web.Request):
     if request_id is None:
         request_id = ""
     if not isinstance(request_id, str) or \
-            len(request_id) > runner.MAX_STEER_REQUEST_ID_CHARS:
+            (request_id and not runner.valid_steer_request_id(request_id)):
         return web.json_response({"error": "invalid steering request id"}, status=400)
-    res = await runner.hub(s["id"]).steer(text, request_id)
+    expected_turn_id = body.get("expected_turn_id", "")
+    if not isinstance(expected_turn_id, str) or not expected_turn_id or \
+            len(expected_turn_id) > runner.MAX_STEER_TURN_ID_CHARS:
+        return web.json_response({"error": "a valid expected turn id is required"},
+                                 status=400)
+    res = await runner.hub(s["id"]).steer(
+        text, request_id, expected_turn_id=expected_turn_id)
     return web.json_response(res, status=409 if "error" in res else 200)
 
 
