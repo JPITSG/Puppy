@@ -111,6 +111,27 @@ function plusIcon(size) {
   return svg;
 }
 
+/* A font's vertical-ellipsis ink is not guaranteed to share its em-box centre.
+   Draw the session-menu mark on a symmetric viewBox like every other compact
+   chrome button, so the hover square and the visible dots have one centre. */
+function moreIcon(size = 14) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 14 14");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  for (const cy of [3.5, 7, 10.5]) {
+    const dot = document.createElementNS(NS, "circle");
+    dot.setAttribute("cx", "7");
+    dot.setAttribute("cy", String(cy));
+    dot.setAttribute("r", "1");
+    dot.setAttribute("fill", "currentColor");
+    svg.appendChild(dot);
+  }
+  return svg;
+}
+
 /* These filled contours are traced from the supplied 800x800 alpha silhouettes
    in their original coordinate system. Keeping the source viewBox, padding,
    proportions and separate contours intact makes the compact controls the
@@ -477,13 +498,15 @@ function queuePauseIcon(paused, size = 10) {
   svg.setAttribute("aria-hidden", "true");
   if (paused) {
     const play = document.createElementNS(NS, "path");
-    play.setAttribute("d", "M4 2.7 9 6 4 9.3Z");
+    /* The triangle's visual mass, rather than its empty bounding-box corner,
+       is centred on x=6. */
+    play.setAttribute("d", "M4.35 2.7 9.3 6 4.35 9.3Z");
     play.setAttribute("fill", "currentColor");
     svg.appendChild(play);
   } else {
-    for (const x of [3.6, 7.2]) {
+    for (const x of [4, 8]) {
       const bar = document.createElementNS(NS, "path");
-      bar.setAttribute("d", `M${x} 2.8V9.2`);
+      bar.setAttribute("d", `M${x} 3V9`);
       bar.setAttribute("fill", "none");
       bar.setAttribute("stroke", "currentColor");
       bar.setAttribute("stroke-width", "1.55");
@@ -1071,7 +1094,8 @@ function choiceSvg(kind) {
   path.setAttribute("stroke-width", "1.4");
   path.setAttribute("stroke-linecap", "round");
   path.setAttribute("stroke-linejoin", "round");
-  path.setAttribute("d", kind === "check" ? "M2.2 6.2 4.8 8.7 9.8 3.4" : "M2.5 4.5 6 8 9.5 4.5");
+  path.setAttribute("d", kind === "check" ? "M2.2 6.2 4.8 8.7 9.8 3.4" :
+    "M2.5 4.25 6 7.75 9.5 4.25");
   svg.appendChild(path);
   return svg;
 }
@@ -3373,7 +3397,7 @@ function backendUrlEditor(root, initialUrls = [""]) {
       action.type = "button";
       if (index === 0) {
         action.setAttribute("aria-label", "Add another backend URL");
-        action.appendChild(plusIcon(13));
+        action.appendChild(plusIcon(14));
         action.disabled = stored.length >= 8;
         action.onclick = () => {
           if (stored.length >= 8) return;
@@ -3383,7 +3407,7 @@ function backendUrlEditor(root, initialUrls = [""]) {
         };
       } else {
         action.setAttribute("aria-label", `Remove backend URL ${index + 1}`);
-        action.appendChild(xIcon(13));
+        action.appendChild(xIcon(14));
         action.onclick = () => {
           stored = [...root.querySelectorAll("input")].map(field => field.value);
           stored.splice(index, 1);
@@ -6041,7 +6065,9 @@ function toolCardNode(data, completed = false) {
   const d = data || {};
   const n = el("div", "tool-card" + (d.is_error ? " err" : ""));
   const head = el("div", "tool-head");
-  head.appendChild(el("span", "t-caret", "❯"));
+  const caret = el("span", "t-caret");
+  caret.appendChild(choiceSvg("arrow"));
+  head.appendChild(caret);
   head.appendChild(el("span", "t-ico", toolIcon(d.tool)));
   head.appendChild(el("span", "t-name", toolLabel(d.tool)));
   head.appendChild(linkifyInto(el("span", "t-sum"), toolSummary(d.tool, d.input)));
@@ -6283,7 +6309,7 @@ class SessionView {
           </div>
         </div>
         <div class="chat-menu">
-          <button class="icon-btn menu-btn" aria-label="Session menu">⋮</button>
+          <button class="icon-btn menu-btn" aria-label="Session menu"></button>
         </div>
       </div>
       <div class="chat-scroll"><div class="chat-inner"></div></div>
@@ -6317,6 +6343,7 @@ class SessionView {
         </div>
       </div>`;
     this.root = root;
+    root.querySelector(".menu-btn").appendChild(moreIcon());
     /* Seeded from what the session list already knows, before this view is
        painted. The head is only authoritative once the socket snapshot lands,
        and rendering it visible until then made a session that hides it flash
@@ -8242,7 +8269,7 @@ class SessionView {
       const { row, ident, cfg } = this.queueRow(item, "!", true);
       const resend = el("button", "q-resend");
       resend.type = "button";
-      resend.appendChild(refreshIcon(11));
+      resend.appendChild(refreshIcon(12));
       resend.setAttribute("aria-label",
         cfg ? "Apply this held change" : "Send this held message again");
       resend.onclick = () => this.heldOp("requeue_held", i, ident);
@@ -8270,7 +8297,7 @@ class SessionView {
       if (!cfg && this.draftSupported && backendSupportsQueueEdit(this.tab.bid)) {
         const edit = el("button", "q-edit");
         edit.type = "button";
-        edit.appendChild(queueEditIcon(11));
+        edit.appendChild(queueEditIcon(12));
         edit.setAttribute("aria-label", "Edit this queued message");
         edit.onclick = () => this.editQueued(i, ident);
         row.appendChild(edit);
@@ -8278,7 +8305,7 @@ class SessionView {
       if (!cfg && backendSupportsQueuePause(this.tab.bid)) {
         const toggle = el("button", "q-pause");
         toggle.type = "button";
-        toggle.appendChild(queuePauseIcon(isPaused, 11));
+        toggle.appendChild(queuePauseIcon(isPaused, 12));
         toggle.setAttribute("aria-label",
           isPaused ? "Resume this queued message" : "Pause this queued message");
         toggle.setAttribute("aria-pressed", String(isPaused));
@@ -9489,7 +9516,7 @@ class BrowserView {
     this.bar = this.root.querySelector(".br-bar");
     this.backBtn = this.root.querySelector(".br-back");
     this.reloadBtn = this.root.querySelector(".br-reload");
-    this.reloadBtn.appendChild(refreshIcon(13));
+    this.reloadBtn.appendChild(refreshIcon(14));
     this.urlInput = this.root.querySelector(".br-url");
     this.kbdBtn = this.root.querySelector(".br-kbd");
     this.meta = this.root.querySelector(".br-meta");
@@ -10624,7 +10651,7 @@ class SettingsView {
       refresh.type = "button";
       refresh.setAttribute("aria-label",
         `Re-check installed and latest engine versions on ${name}`);
-      refresh.appendChild(refreshIcon(11));
+      refresh.appendChild(refreshIcon(12));
       refresh.onclick = () => refreshEngineVersions(bid, refresh, name);
       head.appendChild(refresh);
     }

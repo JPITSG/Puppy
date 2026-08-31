@@ -2149,7 +2149,7 @@ def check_queue_controls_ui(ui_source: str, css_source: str) -> None:
     assert "q-edit" not in render[held_start:queued_start]
     assert 'backendSupportsQueueEdit(this.tab.bid)' in render
     assert 'el("button", "q-edit")' in render
-    assert 'queueEditIcon(11)' in render
+    assert 'queueEditIcon(12)' in render
     assert '"Edit this queued message"' in render
     assert 'this.editQueued(i, ident)' in render
     assert 'if (!cfg && backendSupportsQueuePause(this.tab.bid))' in render
@@ -2157,7 +2157,7 @@ def check_queue_controls_ui(ui_source: str, css_source: str) -> None:
     pause_at = render.index('el("button", "q-pause")', queued_start)
     cancel_at = render.index('el("button", "q-x")', queued_start)
     assert edit_at < pause_at < cancel_at
-    assert 'queuePauseIcon(isPaused, 11)' in render
+    assert 'queuePauseIcon(isPaused, 12)' in render
     assert 'isPaused ? "Resume this queued message" : "Pause this queued message"' in render
     assert 'this.setQueuePaused(i, ident, !isPaused)' in render
     assert 'type: "set_queue_paused", index, text, paused' in ui_source
@@ -2178,6 +2178,9 @@ def check_queue_controls_ui(ui_source: str, css_source: str) -> None:
     assert '.queue-strip .q-edit{' in css_source
     assert '.queue-strip .q-edit::after{' in css_source
     assert '.queue-strip .q-pause{' in css_source
+    assert 'display:inline-grid;place-items:center;' in css_source[
+        css_source.index('.queue-strip .q-pause{'):
+        css_source.index('.queue-strip .q-pause::after')]
     assert 'width:16px;height:16px;' in css_source
     assert '.queue-strip.editing .q-live button:disabled{' in css_source
     assert '.queue-strip .q-item.q-paused .q-t{opacity:.58}' in css_source
@@ -2656,7 +2659,7 @@ def check_session_provider_marks(css_source: str) -> None:
 
 
 def check_sidebar_icon_alignment(css_source: str) -> None:
-    """Sidebar marks keep their measured optical offsets from adjacent text."""
+    """Text-adjacent marks may be optical; button ink stays box-centred."""
     assert ".sess-group-title{" in css_source
     assert ".si-row{display:flex;align-items:center;" in css_source
     assert ".si-row .sess-dot{margin:0 1px;position:relative;top:1px}" in css_source
@@ -2664,12 +2667,67 @@ def check_sidebar_icon_alignment(css_source: str) -> None:
     assert ".foot-engine-head{display:flex;align-items:center;" in css_source
     assert ".foot-eng{display:flex;align-items:center;" in css_source
     assert ".foot-engine-head>.foot-ico{position:relative;top:-1px}" in css_source
-    assert ".foot-engine-head>.disclosure-toggle svg{position:relative;top:-1px}" in css_source
+    assert ".foot-engine-head>.disclosure-toggle svg" not in css_source
+    disclosure = css_source[css_source.index(".disclosure-toggle{"):
+                            css_source.index(".sess-empty{", css_source.index(
+                                ".disclosure-toggle{"))]
+    assert "display:inline-grid;place-items:center;" in disclosure
+    assert "line-height:0" in disclosure and "top:" not in disclosure
     assert ".conn-state{display:flex;align-items:center;" in css_source
     conn_dot = css_source[css_source.index(".conn-dot{"):
                           css_source.index(".conn-dot.ok", css_source.index(".conn-dot{"))]
     assert "margin-left:6px;" in conn_dot
     assert "position:" not in conn_dot and "top:" not in conn_dot
+
+
+def check_compact_control_alignment(ui_source: str, css_source: str) -> None:
+    """Every icon-only hover box owns centred drawn geometry, not font ink."""
+    icon_button = css_source[css_source.index(".icon-btn{"):
+                             css_source.index("@media (hover:hover){.icon-btn:hover")]
+    assert "display:inline-grid;place-items:center;" in icon_button
+    assert "padding:0" in icon_button and "line-height:0" in icon_button
+    assert ".icon-btn>svg{display:block;margin:0}" in css_source
+    assert css_source.count(".burger{display:inline-grid}") == 2
+
+    for selector in (".disclosure-toggle{", ".foot-node-act{", ".tab .t-close{",
+                     ".code-copy,.user-copy{", ".queue-strip .q-x{",
+                     ".queue-strip .q-edit{", ".queue-strip .q-pause{",
+                     ".queue-strip .q-resend{", ".attach-chip .attach-x{",
+                     ".engine-node-refresh{"):
+        start = css_source.index(selector)
+        rule = css_source[start:css_source.index("}", start)]
+        assert "place-items:center" in rule, selector
+
+    pause_start = ui_source.index("function queuePauseIcon(")
+    pause_end = ui_source.index("\nfunction queueEditIcon", pause_start)
+    pause_icon = ui_source[pause_start:pause_end]
+    assert "for (const x of [4, 8])" in pause_icon
+    assert '`M${x} 3V9`' in pause_icon
+    assert '"M4.35 2.7 9.3 6 4.35 9.3Z"' in pause_icon
+
+    choice_start = ui_source.index("function choiceSvg(")
+    choice_end = ui_source.index("\n/* Backend sections", choice_start)
+    assert '"M2.5 4.25 6 7.75 9.5 4.25"' in ui_source[
+        choice_start:choice_end]
+    assert "--chevron:url(" in css_source
+    assert 'content:"❯"' not in css_source
+    assert 'el("span", "t-caret", "❯")' not in ui_source
+    assert 'caret.appendChild(choiceSvg("arrow"));' in ui_source
+
+    assert '<button class="icon-btn menu-btn" aria-label="Session menu"></button>' \
+        in ui_source
+    assert 'root.querySelector(".menu-btn").appendChild(moreIcon());' in ui_source
+    assert '>⋮</button>' not in ui_source
+    assert "function moreIcon(size = 14)" in ui_source
+
+    # Even SVG/button parity avoids half-pixel placement in the densest boxes.
+    for call in ('refreshIcon(12)', 'queueEditIcon(12)',
+                 'queuePauseIcon(isPaused, 12)', 'refreshIcon(14)',
+                 'plusIcon(14)', 'xIcon(14)'):
+        assert call in ui_source
+    backspace = css_source[css_source.index(".br-type-bksp{"):
+                           css_source.index(".br-type-bksp svg{")]
+    assert "padding-top:0!important;padding-bottom:0!important" in backspace
 
 
 def check_session_activity_clock(ui_source: str, css_source: str) -> None:
@@ -4283,6 +4341,7 @@ async def main() -> None:
             check_opencode_chat_models(ui_source, css_source)
             check_session_provider_marks(css_source)
             check_sidebar_icon_alignment(css_source)
+            check_compact_control_alignment(ui_source, css_source)
             check_session_activity_clock(ui_source, css_source)
             check_sidebar_footer_buttons(ui_source, css_source)
             check_toast_touch_swipe(ui_source, css_source)
