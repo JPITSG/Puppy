@@ -506,15 +506,28 @@ def add_event(session_id: int, kind: str, data: dict) -> dict:
     return {"seq": seq, "kind": kind, "ts": ts, "data": data}
 
 
-def get_events(session_id: int, before_seq=None, limit: int = 200) -> list:
-    if before_seq is not None:
+def get_events(session_id: int, before_seq=None, limit: int = 200,
+               after_seq=None) -> list:
+    """Return up to ``limit`` events in ascending seq order.
+
+    Without a cursor these are the newest events; ``before_seq`` pages back
+    from there, and ``after_seq`` pages forward, which lets a console load a
+    window of history around one event rather than paging back to it.
+    """
+    if after_seq is not None:
+        rows = query("SELECT seq,kind,payload,created_at FROM events WHERE session_id=? AND seq>? ORDER BY seq ASC LIMIT ?",
+                     (session_id, after_seq, limit))
+        ordered = rows
+    elif before_seq is not None:
         rows = query("SELECT seq,kind,payload,created_at FROM events WHERE session_id=? AND seq<? ORDER BY seq DESC LIMIT ?",
                      (session_id, before_seq, limit))
+        ordered = reversed(rows)
     else:
         rows = query("SELECT seq,kind,payload,created_at FROM events WHERE session_id=? ORDER BY seq DESC LIMIT ?",
                      (session_id, limit))
+        ordered = reversed(rows)
     out = []
-    for r in reversed(rows):
+    for r in ordered:
         try:
             data = json.loads(r["payload"])
         except Exception:

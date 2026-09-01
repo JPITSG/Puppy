@@ -464,7 +464,11 @@ order, and grouped-by-session or per-session paginated responses with
 control-character-delimited snippet highlights. A controller fans one query
 out to itself and its online capable nodes and merges results; offline or
 older nodes simply contribute nothing, so no transcript is mirrored for
-search.
+search. Opening a hit lands on that exact message: nodes advertising the
+additive `session-event-window` capability accept an `after_seq` cursor on
+`GET /api/sessions/{sid}/events` (oldest first), so the console loads a
+window of history around the target rather than paging back from the tail,
+and offers Load newer / Jump to latest to return.
 
 ## Graceful shutdown notice
 

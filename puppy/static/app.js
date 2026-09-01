@@ -906,6 +906,14 @@ const QUEUE_ROWS = 5;     // queued messages listed before collapsing to "+N mor
    before the top of the transcript that countdown begins. */
 const LOAD_OLDER_DELAY = 550;
 const LOAD_OLDER_MARGIN = 140;
+/* Jump-to-message reach: a target within this many Load-older pages is paged
+   to, keeping the transcript contiguous; anything further away swaps in a
+   window of history around it. Nodes without the forward cursor can only
+   page back, so they get a generous ceiling instead of a window. */
+const JUMP_PAGE_REACH = 2;
+const JUMP_LEGACY_PAGES = 60;
+const JUMP_CONTEXT_BEFORE = 60;
+const JUMP_WINDOW = 160;
 
 /* the header's thinking status; the live thinking block mirrors the header
    verbatim, so this is also what that block reads while a turn is thinking */
@@ -6589,6 +6597,10 @@ class SessionView {
     this.queueEditPending = null; // guarded queue -> shared-composer transaction
     this.queueOpen = false;   // whether the tail past QUEUE_ROWS is showing
     this.oldestSeq = null;
+    this.newestSeq = 0;       // highest seq rendered; 0 until the transcript lands
+    this.detached = false;    // showing a window of history rather than the live tail
+    this.skippedEvents = [];  // live events held while detached
+    this.newSinceDetach = 0;
     this.history = [];        // sent messages, oldest first (shell-style recall)
     this.histIdx = null;
     this.histDraft = "";
@@ -6709,6 +6721,14 @@ class SessionView {
         this.lastScroll = { top: this.scroll.scrollTop, bottom: this.atBottom() };
     }, { passive: true });
     this.inner = root.querySelector(".chat-inner");
+    /* Floats over the bottom of a detached history window and leads back to
+       the live tail; zero-height and sticky, so it displaces no message. */
+    this.tailPill = el("div", "tail-pill hidden");
+    this.tailButton = el("button", "btn btn-sm tail-pill-btn", "Jump to latest");
+    this.tailButton.type = "button";
+    this.tailButton.onclick = () => this.returnToTail();
+    this.tailPill.appendChild(this.tailButton);
+    this.scroll.appendChild(this.tailPill);
     this.ta = root.querySelector("textarea");
     this.composerBox = root.querySelector(".composer-box");
     this.mentionEl = root.querySelector(".mention-pop");
@@ -7964,20 +7984,16 @@ class SessionView {
         noteSessionActivity(this.tab.bid, this.tab.sid, d.status === "running",
           d.active_since, d.server_time, d.completion_status);
         this.retry = 800;
-        // the transcript is being rebuilt: retire the watcher on the old button
-        if (this._stopLoadOlder) this._stopLoadOlder();
-        this.clearLive();
-        this.inner.innerHTML = "";
-        this.toolCards = {};
-        this.switchLines = [];
-        this.oldestSeq = d.events.length ? d.events[0].seq : null;
-        if (d.events.length >= 200) this.addLoadOlder();
-        const transcript = document.createDocumentFragment();
-        d.events.forEach(ev => {
-          const node = this.buildEventNode(ev);
-          if (node) { node.dataset.seq = String(ev.seq); transcript.appendChild(node); }
-        });
-        this.inner.appendChild(transcript);
+        if (this.detached) {
+          /* A reconnect must not yank someone reading old history back to
+             the tail: keep the window; Load newer and the pill catch up
+             through the cursor when asked. */
+          this.syncTailPill();
+        } else {
+          this.rebuildTranscript(d.events, {
+            attached: true, mayHaveOlder: d.events.length >= 200 });
+          this.mergeSkipped();
+        }
         this.history = d.events.filter(ev => ev.kind === "user")
           .map(ev => (ev.data && ev.data.text) || "").filter(Boolean);
         this.histIdx = null;
@@ -7989,7 +8005,7 @@ class SessionView {
         this.syncLiveStatus();
         if (d.pending_approval) this.showApproval(d.pending_approval);
         else this.hideApproval();
-        this.scrollBottom(true);
+        if (!this.detached) this.scrollBottom(true);
         if (this._pendingJumpSeq != null) {
           const jump = this._pendingJumpSeq;
           this._pendingJumpSeq = null;
@@ -8000,6 +8016,19 @@ class SessionView {
         this.receiveDraft(d);
         break;
       case "event": {
+        if (this.detached) {
+          /* Held, not painted: the view shows history, and the pill counts
+             what the tail has produced since. Only the newest few matter
+             (everything older is refetched on the way back), so the hold is
+             bounded. */
+          this.skippedEvents.push(d.event);
+          if (this.skippedEvents.length > 2000) this.skippedEvents.shift();
+          this.newSinceDetach++;
+          if (d.event.kind === "user" && d.event.data && d.event.data.text)
+            this.history.push(d.event.data.text);
+          this.syncTailPill();
+          break;
+        }
         const follow = this.atBottom();   // before clearLive reshapes the tail
         this.clearLive();
         this.renderEvent(d.event, true, follow);
@@ -8420,26 +8449,31 @@ class SessionView {
     this.inner.appendChild(btn);
   }
 
-  /* Bring one persisted event on screen: page older history in until its seq
-     is loaded (bounded), then centre and flash the nearest rendered node -
-     a merged tool result lands on the tool card that carries it. */
+  /* Bring one persisted event on screen and flash it. Close above what is
+     loaded, the transcript pages back and stays contiguous; anything further
+     (or newer than a detached window) swaps in a slice of history around the
+     target, with Load older / Load newer at its edges and a pill back to the
+     live tail. A merged tool result lands on the card that carries it. */
   async jumpToSeq(seq) {
     seq = Number(seq);
     if (!Number.isFinite(seq) || seq < 1 || this._jumping) return;
     if (!this.session) { this._pendingJumpSeq = seq; return; }
     this._jumping = true;
+    const windowed = nodeSupportsEventWindow(this.tab.bid);
     try {
-      let guard = 0;
-      let previous = null;
-      while (this.oldestSeq !== null && this.oldestSeq > seq &&
-             typeof this._loadOlderFn === "function" &&
-             this.oldestSeq !== previous && guard++ < 12) {
-        previous = this.oldestSeq;
-        await this._loadOlderFn();
+      if (!this.inLoadedRange(seq)) {
+        const above = this.oldestSeq !== null && seq < this.oldestSeq;
+        if (above && this.oldestSeq - seq <= JUMP_PAGE_REACH * 200)
+          await this.pageBackTo(seq, JUMP_PAGE_REACH);
+        else if (above && !windowed)
+          await this.pageBackTo(seq, JUMP_LEGACY_PAGES);
+        if (!this.inLoadedRange(seq) && windowed)
+          await this.loadWindowAround(seq);
       }
       const target = this.findEventNode(seq);
       if (!target) {
-        toast("That match is deeper in this transcript than could be loaded", "info");
+        toast(windowed ? "That message is no longer in this transcript" :
+          "This backend needs a Puppy upgrade to jump that far back", "info", 6000);
         return;
       }
       target.scrollIntoView({ block: "center" });
@@ -8449,9 +8483,174 @@ class SessionView {
       setTimeout(() => {
         if (target.isConnected) target.classList.remove("search-flash");
       }, 2400);
+    } catch (error) {
+      toast(error.message, "error");
     } finally {
       this._jumping = false;
     }
+  }
+
+  inLoadedRange(seq) {
+    return this.oldestSeq !== null && seq >= this.oldestSeq && seq <= this.newestSeq;
+  }
+
+  /* Older history through the ordinary Load older path, a page at a time. */
+  async pageBackTo(seq, maxPages) {
+    let pages = 0;
+    let previous = null;
+    while (this.oldestSeq !== null && this.oldestSeq > seq &&
+           typeof this._loadOlderFn === "function" &&
+           this.oldestSeq !== previous && pages++ < maxPages) {
+      previous = this.oldestSeq;
+      await this._loadOlderFn();
+    }
+  }
+
+  /* Replace the transcript with a slice of history around seq. Detached from
+     the moment the fetch starts, so whatever the tail produces meanwhile is
+     held rather than painted into a view about to be replaced. */
+  async loadWindowAround(seq) {
+    const after = Math.max(0, seq - JUMP_CONTEXT_BEFORE);
+    this.detached = true;
+    let events;
+    try {
+      const d = await api(this.tab.bid,
+        `sessions/${this.tab.sid}/events?after_seq=${after}&limit=${JUMP_WINDOW}`);
+      events = d.events || [];
+    } catch (error) {
+      this.detached = false;
+      this.mergeSkipped();
+      this.syncTailPill();
+      throw error;
+    }
+    if (!events.length) {         // nothing there any more: settle on the tail
+      await this.returnToTail();
+      return;
+    }
+    const reachedTail = events.length < JUMP_WINDOW;   // nothing newer was persisted
+    this.rebuildTranscript(events, {
+      attached: reachedTail, mayHaveOlder: after > 0, mayHaveNewer: !reachedTail });
+    if (reachedTail) this.attachToTail();
+  }
+
+  /* One contiguous run of events replaces whatever was rendered. Attached, it
+     ends at the newest persisted event and live output appends to it;
+     detached, it is a window of history with the live tail held behind the
+     pill and Load newer at its foot. */
+  rebuildTranscript(events, { attached, mayHaveOlder = false, mayHaveNewer = false }) {
+    if (this._stopLoadOlder) this._stopLoadOlder();
+    if (this._stopLoadNewer) this._stopLoadNewer();
+    this.clearLive();
+    this.inner.innerHTML = "";
+    this.toolCards = {};
+    this.switchLines = [];
+    this.oldestSeq = events.length ? events[0].seq : null;
+    this.newestSeq = events.length ? events[events.length - 1].seq : 0;
+    this.detached = !attached;
+    if (mayHaveOlder) this.addLoadOlder();
+    const fragment = document.createDocumentFragment();
+    events.forEach(ev => {
+      const node = this.buildEventNode(ev);
+      if (node) { node.dataset.seq = String(ev.seq); fragment.appendChild(node); }
+    });
+    this.inner.appendChild(fragment);
+    if (!attached && mayHaveNewer) this.addLoadNewer();
+    this.syncTailPill();
+  }
+
+  /* Forward paging from the foot of a detached window; reaching the tail
+     re-attaches the live view. */
+  addLoadNewer() {
+    const btn = el("button", "btn btn-ghost btn-sm load-older load-newer", "Load newer…");
+    let loading = false;
+    let observer = null;
+    const stop = () => {
+      if (observer) observer.disconnect();
+      observer = null;
+      if (this._stopLoadNewer === stop) this._stopLoadNewer = null;
+    };
+    const load = async () => {
+      if (loading || !btn.isConnected) return;
+      loading = true;
+      btn.classList.add("busy");
+      btn.textContent = "Loading newer…";
+      try {
+        const d = await api(this.tab.bid,
+          `sessions/${this.tab.sid}/events?after_seq=${this.newestSeq}&limit=200`);
+        if (!btn.isConnected) return;   // the transcript was replaced meanwhile
+        const evs = d.events || [];
+        const frag = document.createDocumentFragment();
+        for (const ev of evs) {
+          const node = this.buildEventNode(ev);
+          if (node) { node.dataset.seq = String(ev.seq); frag.appendChild(node); }
+          if (ev.seq > this.newestSeq) this.newestSeq = ev.seq;
+        }
+        this.inner.insertBefore(frag, btn);
+        if (evs.length < 200) { stop(); btn.remove(); this.attachToTail(); }
+      } catch (e) {
+        toast(e.message, "error");
+      } finally {
+        loading = false;
+        if (btn.isConnected) {
+          btn.classList.remove("busy");
+          btn.textContent = "Load newer…";
+        }
+      }
+    };
+    observer = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) load();
+    }, { root: this.scroll, rootMargin: `0px 0px ${LOAD_OLDER_MARGIN}px 0px` });
+    observer.observe(btn);
+    btn.onclick = load;
+    this._stopLoadNewer = stop;
+    this.inner.appendChild(btn);
+  }
+
+  /* The window has caught up with the tail: resume the live view. */
+  attachToTail() {
+    this.detached = false;
+    this.mergeSkipped();
+    this.syncTailPill();
+    this.syncLiveStatus();
+  }
+
+  /* Events held while detached that are newer than what is rendered. */
+  mergeSkipped() {
+    const pending = this.skippedEvents
+      .filter(ev => Number(ev.seq) > this.newestSeq)
+      .sort((a, b) => a.seq - b.seq);
+    this.skippedEvents = [];
+    this.newSinceDetach = 0;
+    for (const ev of pending) this.renderEvent(ev, true, false);
+  }
+
+  /* Drop the window and show the newest history again, following the tail. */
+  async returnToTail() {
+    if (this._returning) return;
+    this._returning = true;
+    if (this.tailButton) this.tailButton.disabled = true;
+    try {
+      const d = await api(this.tab.bid, `sessions/${this.tab.sid}/events?limit=200`);
+      const events = d.events || [];
+      this.rebuildTranscript(events, {
+        attached: true, mayHaveOlder: events.length >= 200 });
+      this.mergeSkipped();
+      this.syncLiveStatus();
+      this.scrollBottom(true);
+    } catch (e) {
+      toast(e.message, "error");
+    } finally {
+      this._returning = false;
+      if (this.tailButton) this.tailButton.disabled = false;
+    }
+  }
+
+  syncTailPill() {
+    if (!this.tailPill) return;
+    this.tailPill.classList.toggle("hidden", !this.detached);
+    if (!this.detached) return;
+    const n = this.newSinceDetach;
+    this.tailButton.textContent = n ? `${n} new · Jump to latest` : "Jump to latest";
   }
 
   findEventNode(seq) {
@@ -8467,6 +8666,7 @@ class SessionView {
   }
 
   renderEvent(ev, live, follow = null) {
+    if (Number(ev.seq) > this.newestSeq) this.newestSeq = Number(ev.seq);
     const node = this.buildEventNode(ev);
     if (!node) return;
     node.dataset.seq = String(ev.seq);
@@ -8658,6 +8858,7 @@ class SessionView {
 
   /* live streaming bubble */
   appendLive(block, text) {
+    if (this.detached) return;   // the live tail is out of view; the pill leads back
     if (this.liveEl && this.liveKind !== block) this.clearLive();
     if (!this.liveEl) {
       this.liveKind = block;
@@ -8716,6 +8917,10 @@ class SessionView {
      time - tool calls, text streaming, the gaps between blocks - a standalone
      row does, so the two never disagree. */
   syncLiveStatus() {
+    if (this.detached) {
+      if (this.statusRow) { this.statusRow.remove(); this.statusRow = null; }
+      return;
+    }
     const text = this.visibleStatusText() || thinkingLabel(0);
     const thinking = this.liveEl && this.liveKind === "thinking";
     if (thinking) {
@@ -11209,6 +11414,14 @@ function nodeSupportsSearch(bid) {
   const backend = state.backends.find(b => b.id === bid);
   return !!backend && Array.isArray(backend.capabilities) &&
     backend.capabilities.includes("session-search");
+}
+
+/* The forward events cursor (after_seq) behind windowed jumps. */
+function nodeSupportsEventWindow(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(b => b.id === bid);
+  return !!backend && Array.isArray(backend.capabilities) &&
+    backend.capabilities.includes("session-event-window");
 }
 
 /* Server snippets delimit hits with control markers so highlighting needs no

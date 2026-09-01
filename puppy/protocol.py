@@ -111,6 +111,11 @@ SPAWN_LIMITS_CAPABILITY = "spawn-progress-limits"
 # query out to itself and to online nodes advertising this and merges results;
 # offline or older nodes simply contribute nothing.
 SEARCH_CAPABILITY = "session-search"
+# GET /api/sessions/{sid}/events accepts an after_seq cursor and answers with
+# the events that follow it, oldest first. A console uses it to load a window
+# of history around one event (a search hit) instead of paging back to it
+# from the newest; older nodes can only page backwards from the tail.
+SESSION_EVENT_WINDOW_CAPABILITY = "session-event-window"
 
 BASE_CAPABILITIES = (
     "sessions",
@@ -152,6 +157,7 @@ BASE_CAPABILITIES = (
     SPAWN_EXEC_CAPABILITY,
     SPAWN_LIMITS_CAPABILITY,
     SEARCH_CAPABILITY,
+    SESSION_EVENT_WINDOW_CAPABILITY,
 )
 TERMINAL_CAPABILITY = "terminal"
 # Identified node-owned PTYs, their create/list/delete routes, and the

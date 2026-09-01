@@ -645,18 +645,26 @@ async def h_session_switch(request: web.Request):
 async def h_session_events(request: web.Request):
     s = _session_or_404(request)
     before = request.query.get("before_seq")
+    after = request.query.get("after_seq")
     try:
         limit = int(request.query.get("limit", "200"))
         before_seq = int(before) if before is not None else None
+        after_seq = int(after) if after is not None else None
     except (TypeError, ValueError):
         return web.json_response({"error": "event cursor and limit must be integers"},
                                  status=400)
     if not 1 <= limit <= 500:
         return web.json_response({"error": "event limit must be between 1 and 500"},
                                  status=400)
+    if before_seq is not None and after_seq is not None:
+        return web.json_response(
+            {"error": "use either before_seq or after_seq, not both"}, status=400)
     if before_seq is not None and before_seq < 1:
         return web.json_response({"error": "event cursor must be positive"}, status=400)
-    events = db.get_events(s["id"], before_seq=before_seq, limit=limit)
+    if after_seq is not None and after_seq < 0:
+        return web.json_response({"error": "event cursor cannot be negative"}, status=400)
+    events = db.get_events(s["id"], before_seq=before_seq, limit=limit,
+                           after_seq=after_seq)
     return web.json_response({"events": events})
 
 

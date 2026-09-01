@@ -1013,6 +1013,18 @@ select.choice-native{display:none!important}
    without moving anything, so the reading position stays legible */
 .load-older.armed{animation:load-older-arm .55s var(--ease) both}
 .load-older.busy{opacity:.7;pointer-events:none}
+/* Load newer mirrors Load older at the foot of a detached history window. */
+.load-older.load-newer{margin-top:2px}
+/* The way back to the live tail floats over the bottom of the scroller:
+   sticky with no height of its own, so it never displaces a message. */
+.tail-pill{
+  position:sticky;bottom:12px;z-index:5;height:0;
+  display:flex;justify-content:center;pointer-events:none;
+}
+.tail-pill .btn{
+  pointer-events:auto;transform:translateY(-100%);
+  box-shadow:inset 0 1px 0 var(--btn-top),var(--btn-lift-hi);
+}
 @keyframes load-older-arm{from{opacity:.55}to{opacity:1}}
 @media (prefers-reduced-motion:reduce){.load-older.armed{animation:none}}
 

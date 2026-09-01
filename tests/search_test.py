@@ -91,6 +91,12 @@ def seed_sessions():
     db.add_event(sid2, "assistant", {"text": "Added the search tab."})
     db.add_event(sid2, "error", {"text": "Traceback: ValueError bad flag"})
     db.add_event(sid2, "info", {"subtype": "interrupted", "text": "Turn interrupted"})
+    # the forward cursor the console's jump-to-message window relies on
+    forward = db.get_events(sid1, after_seq=2, limit=2)
+    assert [event["seq"] for event in forward] == [3, 4], forward
+    assert db.get_events(sid1, after_seq=99) == []
+    backward = db.get_events(sid1, before_seq=3, limit=5)
+    assert [event["seq"] for event in backward] == [1, 2], backward
     return sid1, sid2
 
 

@@ -1254,6 +1254,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "spawn-exec" in ping["capabilities"]
         assert "spawn-progress-limits" in ping["capabilities"]
         assert "session-search" in ping["capabilities"]
+        assert "session-event-window" in ping["capabilities"]
         assert "shutdown-notice" in ping["capabilities"]
         assert ping["shutting_down"] is False
         # browser surface: capability is static, enablement is node config
@@ -1589,7 +1590,8 @@ async def exercise_node(url: str, token: str, expected_version: str,
                 assert response.status == 409, idle_steer
             assert idle_steer["error"] == "there is no active turn to steer"
             for query in ("limit=nope", "limit=-1", "limit=0", "limit=501",
-                          "before_seq=nope", "before_seq=0"):
+                          "before_seq=nope", "before_seq=0", "after_seq=nope",
+                          "after_seq=-1", "before_seq=3&after_seq=1"):
                 async with http.get(
                         url + f"/api/sessions/{normal['id']}/events?{query}",
                         headers=good, ssl=pinned) as response:
@@ -1599,6 +1601,12 @@ async def exercise_node(url: str, token: str, expected_version: str,
                     url + f"/api/sessions/{normal['id']}/events?limit=1",
                     headers=good, ssl=pinned) as response:
                 assert response.status == 200, await response.text()
+            async with http.get(
+                    url + f"/api/sessions/{normal['id']}/events?after_seq=0&limit=5",
+                    headers=good, ssl=pinned) as response:
+                forward = await response.json()
+                assert response.status == 200, forward
+                assert isinstance(forward["events"], list)
 
             session_ws = await http.ws_connect(
                 url + f"/api/ws/session/{normal['id']}", headers=good, ssl=pinned)
