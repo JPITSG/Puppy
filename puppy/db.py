@@ -55,6 +55,10 @@ CREATE TABLE meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+INSERT INTO meta(key,value) VALUES(
+    'web.transport',
+    '{"format":1,"scheme":"http","https_source":"auto"}'
+);
 CREATE TABLE users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT NOT NULL UNIQUE,

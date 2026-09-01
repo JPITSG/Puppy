@@ -27,7 +27,7 @@ from urllib.parse import urlsplit
 
 from aiohttp import web
 
-from puppy import config
+from puppy import config, web_tls
 
 
 HANDOFF_TTL = 40 * 60
@@ -50,14 +50,15 @@ def _authority(host: str, port: int) -> str:
     return "{}:{}".format(display, port)
 
 
-def _request_authority(value: str) -> Optional[Tuple[str, int]]:
+def _request_authority(value: str, scheme: str = "http") -> Optional[Tuple[str, int]]:
     try:
         parsed = urlsplit("http://" + str(value or ""))
         if not parsed.hostname or parsed.username is not None or \
                 parsed.password is not None or parsed.path not in ("", "/") or \
                 parsed.query or parsed.fragment:
             return None
-        return parsed.hostname.lower().rstrip("."), parsed.port or 80
+        return parsed.hostname.lower().rstrip("."), parsed.port or (
+            443 if scheme == "https" else 80)
     except ValueError:
         return None
 
@@ -115,7 +116,10 @@ def _load_locked() -> Optional[dict]:
         expires_at = float(record.get("expires_at"))
         token_hash = record.get("token_hash")
         browser_state = record.get("browser_state")
-        valid = isinstance(record, dict) and record.get("format") == 1 and \
+        scheme = record.get("scheme")
+        https_source = record.get("https_source")
+        certificate_sha256 = record.get("certificate_sha256")
+        valid = isinstance(record, dict) and record.get("format") == 2 and \
             isinstance(token_hash, str) and len(token_hash) == 64 and \
             all(character in "0123456789abcdef" for character in token_hash) and \
             isinstance(record.get("user"), str) and 0 < len(record["user"]) <= 256 and \
@@ -123,6 +127,11 @@ def _load_locked() -> Optional[dict]:
             isinstance(record.get("probe_host"), str) and \
             0 < len(record["probe_host"]) <= 255 and \
             isinstance(record.get("origin"), str) and 0 < len(record["origin"]) <= 512 and \
+            scheme in ("http", "https") and https_source in web_tls.SOURCES and \
+            isinstance(certificate_sha256, str) and \
+            ((scheme == "http" and certificate_sha256 == "") or
+             (scheme == "https" and len(certificate_sha256) == 64 and
+              all(character in "0123456789abcdef" for character in certificate_sha256))) and \
             isinstance(record.get("source_runtime"), str) and \
             0 < len(record["source_runtime"]) <= 128 and \
             isinstance(port, int) and not isinstance(port, bool) and 1 <= port <= 65535 and \
@@ -179,12 +188,15 @@ def _matching_locked(token: str) -> Optional[dict]:
 
 
 def _public_payload(token: str, record: dict) -> dict:
-    base = "http://" + _authority(record["probe_host"], int(record["port"]))
+    base = record["scheme"] + "://" + _authority(
+        record["probe_host"], int(record["port"]))
     route = HANDOFF_PREFIX + token
     return {
         "token": token,
         "host": record["host"],
         "port": int(record["port"]),
+        "scheme": record["scheme"],
+        "https_source": record["https_source"],
         "next_url": base + "/",
         "ready_url": base + route + "/ready",
         "claim_url": base + route,
@@ -193,20 +205,24 @@ def _public_payload(token: str, record: dict) -> dict:
 
 
 def create(app: web.Application, user: str, host: str, port: int,
-           probe_host: str, origin: str) -> dict:
+           probe_host: str, origin: str, scheme: str,
+           https_source: str, certificate_sha256: str) -> dict:
     """Replace any older pending handoff and return its browser capability."""
     if not user or user == "@token":
         raise ListenerHandoffError(
             "automatic listener activation requires a browser login", status=403)
     token = secrets.token_urlsafe(32)
     record = {
-        "format": 1,
+        "format": 2,
         "token_hash": hashlib.sha256(token.encode("utf-8")).hexdigest(),
         "user": user,
         "host": str(host),
         "port": int(port),
         "probe_host": str(probe_host),
         "origin": str(origin).rstrip("/"),
+        "scheme": str(scheme),
+        "https_source": str(https_source),
+        "certificate_sha256": str(certificate_sha256),
         "source_runtime": str(app.get("puppy_runtime_id") or ""),
         "created_at": time.time(),
         "expires_at": time.time() + HANDOFF_TTL,
@@ -319,14 +335,14 @@ def activate(app: web.Application, user: str, token: str, browser_state: dict,
         if record is None or record.get("user") != user:
             raise ListenerHandoffError(
                 "listener activation expired; verify the endpoint again", status=409)
-        if (str(config.get("web.host")) != record.get("host") or
-                int(config.get("web.port", 0)) != int(record.get("port", 0))):
+        configured = web_tls.configured_listener(
+            config.get("web.host"), config.get("web.port", 0))
+        if web_tls.listener_key(configured) != web_tls.listener_key(record):
             _unlink()
             raise ListenerHandoffError(
                 "the configured listener changed before activation", status=409)
         runtime = app.get("puppy_runtime_web") or {}
-        if (str(runtime.get("host")) == record.get("host") and
-                int(runtime.get("port", 0)) == int(record.get("port", 0))):
+        if web_tls.listener_key(runtime) == web_tls.listener_key(record):
             _unlink()
             raise ListenerHandoffError("the configured listener is already active", status=409)
         if record.get("status") == "queued":
@@ -373,27 +389,32 @@ def queued_by(app: web.Application) -> bool:
                         app.get("puppy_runtime_id") or ""))
 
 
-def target_matches(record: dict, host_header: str) -> bool:
-    return _request_authority(host_header) == (
+def target_matches(record: dict, host_header: str, scheme: str = "") -> bool:
+    return (not scheme or scheme == record.get("scheme")) and \
+        _request_authority(host_header, scheme or str(record.get("scheme") or "http")) == (
         str(record.get("probe_host", "")).lower().rstrip("."),
         int(record.get("port", 0)))
 
 
 def is_ready(app: web.Application, record: dict) -> bool:
     runtime = app.get("puppy_runtime_web") or {}
+    try:
+        configured = web_tls.configured_listener(
+            config.get("web.host"), config.get("web.port", 0))
+    except (ValueError, web_tls.WebTLSError):
+        return False
     return record.get("status") == "queued" and \
         str(app.get("puppy_runtime_id") or "") != record.get("source_runtime") and \
-        str(runtime.get("host")) == record.get("host") and \
-        int(runtime.get("port", 0)) == int(record.get("port", 0)) and \
-        str(config.get("web.host")) == record.get("host") and \
-        int(config.get("web.port", 0)) == int(record.get("port", 0))
+        web_tls.listener_key(runtime) == web_tls.listener_key(record) and \
+        web_tls.listener_key(configured) == web_tls.listener_key(record)
 
 
-def claim(app: web.Application, token: str, host_header: str) -> Optional[dict]:
+def claim(app: web.Application, token: str, host_header: str,
+          scheme: str = "") -> Optional[dict]:
     """Atomically consume a ready ticket at the newly active endpoint."""
     with _lock:
         record = _matching_locked(token)
-        if record is None or not target_matches(record, host_header) or \
+        if record is None or not target_matches(record, host_header, scheme) or \
                 not is_ready(app, record):
             return None
         _unlink()

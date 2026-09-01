@@ -27,7 +27,7 @@ TEST_ROOT = Path(tempfile.mkdtemp(prefix="snapshot-", dir=str(PRIVATE_TESTS)))
 os.environ["PUPPY_DATA"] = str(TEST_ROOT / "data")
 
 from puppy import (auth, config, db, listener_handoff, runner as session_runner,
-                   snapshots, terminal, uploads, workspaces)  # noqa: E402
+                   snapshots, terminal, uploads, web_tls, workspaces)  # noqa: E402
 from puppy.web import build_app  # noqa: E402
 
 
@@ -208,6 +208,12 @@ async def main() -> None:
         tls_key = tls_dir / "identity.key"
         tls_key.write_bytes(b"saved-private-tls-material")
         tls_key.chmod(0o600)
+        web_tls.commit_change(web_tls.prepare_change(
+            "https", "auto", "", "", ("snapshot.test", "127.0.0.1")))
+        saved_web_identity = web_tls.settings_payload()["identities"]["auto"]
+        assert saved_web_identity["available"] is True
+        web_tls.commit_change(web_tls.prepare_change(
+            "http", "auto", "", "", ("snapshot.test", "127.0.0.1")))
         db.add_event(directory_id, "user", {
             "text": "image at {}".format(upload),
         })
@@ -237,6 +243,17 @@ async def main() -> None:
             lambda: snapshots._validate_database(incomplete_draft_db),
             "schema is not current")
         incomplete_draft_db.unlink()
+        missing_transport_db = TEST_ROOT / "missing-web-transport.db"
+        db.backup_to(str(missing_transport_db))
+        missing_transport_connection = sqlite3.connect(str(missing_transport_db))
+        missing_transport_connection.execute(
+            "DELETE FROM meta WHERE key=?", (web_tls.STATE_KEY,))
+        missing_transport_connection.commit()
+        missing_transport_connection.close()
+        expect_snapshot_error(
+            lambda: snapshots._validate_database(missing_transport_db),
+            "transport state")
+        missing_transport_db.unlink()
         tab_id = "s:0:{}".format(scratch_id)
         pane_id = "pane:snapshot"
         ui = {
@@ -262,7 +279,8 @@ async def main() -> None:
 
         listener_handoff.create(
             {"puppy_runtime_id": "pre-snapshot-runtime"}, "snapshot-user",
-            "127.0.0.2", 10888, "127.0.0.2", "http://127.0.0.1:10888")
+            "127.0.0.2", 10888, "127.0.0.2", "http://127.0.0.1:10888",
+            "http", "auto", "")
         handoff_path = Path(config.DATA_DIR) / "runtime" / "listener-handoff.json"
         assert handoff_path.is_file()
 
@@ -298,6 +316,8 @@ async def main() -> None:
                    ("backend_last_known.{}".format(backend_id),))
         db.execute("DELETE FROM meta WHERE key=?",
                    ("backend_last_sessions.{}".format(backend_id),))
+        web_tls.commit_change(web_tls.prepare_change(
+            "http", "custom", "", "", ("snapshot.test", "127.0.0.1")))
         shutil.rmtree(Path(config.DATA_DIR) / "uploads")
         tls_key.write_bytes(b"mutated-private-tls-material")
         project_file.write_text("changed after export", encoding="utf-8")
@@ -315,6 +335,10 @@ async def main() -> None:
         assert config.get("browser.enabled") is True
         assert config.get("browser.color_scheme") == "light"
         assert config.get("browser.shared_storage") is True
+        assert web_tls.load_state() == {
+            "format": 1, "scheme": "http", "https_source": "auto"}
+        assert web_tls.settings_payload()["identities"]["auto"]["sha256"] == \
+            saved_web_identity["sha256"]
         assert config.get("system_prompt.custom") == \
             "Keep answers concise.\nPreserve operator terminology."
         assert config.get("system_prompt.remote_workspace") == \

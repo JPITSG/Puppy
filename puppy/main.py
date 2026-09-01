@@ -7,7 +7,7 @@ import sys
 
 from aiohttp import web as aioweb
 
-from puppy import __version__, config, db, localization, workspaces
+from puppy import __version__, config, db, localization, web_tls, workspaces
 
 
 def setup_logging() -> None:
@@ -49,11 +49,20 @@ def main() -> None:
     log = logging.getLogger("puppy")
     host = config.get("web.host", "0.0.0.0")
     port = int(config.get("web.port", 10888))
-    log.info("puppy %s starting on %s:%s (data: %s)", __version__, host, port, config.DATA_DIR)
+    try:
+        transport = web_tls.load_runtime()
+    except web_tls.WebTLSError as exc:
+        log.error("WebUI listener configuration is unusable: %s", exc)
+        raise SystemExit(2)
+    log.info("puppy %s starting on %s://%s:%s (data: %s)",
+             __version__, transport.scheme, host, port, config.DATA_DIR)
 
     from puppy.web import build_app
-    aioweb.run_app(build_app(), host=host, port=port, print=None,
-                   shutdown_timeout=5)
+    aioweb.run_app(
+        build_app(runtime_web=transport.listener(host, port),
+                  runtime_ssl_context=transport.context),
+        host=host, port=port, print=None, shutdown_timeout=5,
+        ssl_context=transport.context)
 
 
 if __name__ == "__main__":

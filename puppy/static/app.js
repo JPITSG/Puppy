@@ -1099,8 +1099,13 @@ function followListenerHandoff(handoff) {
   progress.setAttribute("aria-hidden", "true");
   for (let i = 0; i < 3; i++) progress.appendChild(el("span"));
   const help = el("p", "listener-handoff-help");
-  help.append("This page will reconnect automatically. If your browser blocks the check, ");
-  const direct = el("a", "", "open the verified listener");
+  const downgrade = location.protocol === "https:" && handoff.scheme === "http";
+  help.append(handoff.scheme === "https" && handoff.https_source === "auto"
+    ? "A self-signed certificate may require browser approval. If reconnection is blocked, "
+    : downgrade
+      ? "Browsers can block the automatic HTTPS-to-HTTP check. After Puppy restarts, "
+      : "This page will reconnect automatically. If your browser blocks the check, ");
+  const direct = el("a", "", "open the new listener");
   direct.href = handoff.claim_url;
   direct.rel = "noreferrer";
   help.appendChild(direct);
@@ -1176,6 +1181,19 @@ function fmtBytes(value) {
 function fmtEndpoint(host, port) {
   const value = String(host || "");
   return `${value.includes(":") ? `[${value}]` : value}:${port}`;
+}
+
+function fmtListenerEndpoint(value, host = null, port = null) {
+  const item = typeof value === "object" && value ? value : {
+    scheme: value, host, port,
+  };
+  return `${item.scheme === "https" ? "https" : "http"}://${fmtEndpoint(
+    item.host, item.port)}`;
+}
+
+function shortFingerprint(value) {
+  const text = String(value || "");
+  return text.length > 24 ? `${text.slice(0, 12)}…${text.slice(-8)}` : text;
 }
 
 const collapsedStatusBackends = storedStringSet("puppy.collapsed.status-backends");
@@ -3621,6 +3639,26 @@ function formatSessionActivity(startedAt, now = Date.now()) {
   return `${hours}:${String(minutes).padStart(2, "0")}:${seconds}`;
 }
 
+function formatUptime(value) {
+  const total = Math.max(0, Math.floor(Number(value) || 0));
+  const seconds = String(total % 60).padStart(2, "0");
+  const minutes = String(Math.floor(total / 60) % 60).padStart(2, "0");
+  const hours = String(Math.floor(total / 3600) % 24).padStart(2, "0");
+  const days = Math.floor(total / 86400);
+  return days ? `${days}d ${hours}:${minutes}:${seconds}` :
+    `${Math.floor(total / 3600)}:${minutes}:${seconds}`;
+}
+
+function updateUptimeLabels() {
+  const now = Date.now();
+  document.querySelectorAll("[data-uptime-seconds]").forEach(label => {
+    const base = Number(label.dataset.uptimeSeconds);
+    const sampledAt = Number(label.dataset.uptimeSampledAt);
+    if (!Number.isFinite(base) || !Number.isFinite(sampledAt)) return;
+    label.textContent = formatUptime(base + Math.max(0, (now - sampledAt) / 1000));
+  });
+}
+
 function updateSessionActivityLabels() {
   const now = Date.now();
   document.querySelectorAll(".si-be.active-time[data-activity-key]").forEach(label => {
@@ -3645,7 +3683,10 @@ function noteSessionActivity(bid, sid, running, activeSince, serverTime,
   renderTabs();
 }
 
-setInterval(updateSessionActivityLabels, 1000);
+setInterval(() => {
+  updateSessionActivityLabels();
+  updateUptimeLabels();
+}, 1000);
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") updateSessionActivityLabels();
 });
@@ -13388,6 +13429,19 @@ class SettingsView {
     /* instance */
     const c1 = el("div", "card");
     const activeWeb = settings.active_web || settings.web;
+    const configuredScheme = settings.web.scheme === "https" ? "https" : "http";
+    const configuredCertificateSource = settings.web.https_source === "custom"
+      ? "custom" : "auto";
+    const identities = settings.web.identities || {};
+    const autoIdentity = identities.auto || {};
+    const customIdentity = identities.custom || {};
+    const identitySummary = identity => {
+      if (!identity.available) return "Not installed";
+      if (identity.usable === false)
+        return `Needs replacement · ${identity.error || "certificate is not usable"}`;
+      return `Ready · SHA-256 ${shortFingerprint(identity.sha256)}`;
+    };
+    const uptimeSampledAt = Date.now();
     c1.innerHTML = `<h2>Instance</h2>
       <label>Instance name<input type="text" id="set-name" value="${esc(settings.instance_name)}"></label>
       <label>Default working directory<input type="text" id="set-cwd" value="${esc(settings.default_cwd || "")}"></label>
@@ -13416,14 +13470,75 @@ class SettingsView {
       </div>
       <p class="bind-help">Literal IPv4 or IPv6 address and TCP port for this WebUI instance.
         A changed endpoint is tested directly from this browser before it can be saved.</p>
-      <div class="kv"><span class="k">Active listener</span><span class="v">${esc(fmtEndpoint(activeWeb.host, activeWeb.port))}</span></div>
+      <section class="web-transport" aria-labelledby="web-transport-title">
+        <div class="web-transport-row">
+          <div class="web-transport-copy">
+            <span class="web-transport-title" id="web-transport-title">Protocol</span>
+            <small id="set-protocol-note"></small>
+          </div>
+          <div class="seg web-transport-seg" role="group" aria-label="WebUI protocol">
+            <button class="seg-btn" id="set-protocol-http" type="button"
+              aria-pressed="false">HTTP</button>
+            <button class="seg-btn" id="set-protocol-https" type="button"
+              aria-pressed="false">HTTPS</button>
+          </div>
+        </div>
+        <div class="https-options hidden" id="set-https-options">
+          <div class="web-transport-row web-certificate-row">
+            <div class="web-transport-copy">
+              <span class="web-transport-title">HTTPS certificate</span>
+              <small>Choose a Puppy-generated identity or import an existing PEM pair.</small>
+            </div>
+            <div class="seg web-certificate-seg" role="group"
+              aria-label="HTTPS certificate source">
+              <button class="seg-btn" id="set-cert-auto" type="button"
+                aria-pressed="false">Generate</button>
+              <button class="seg-btn" id="set-cert-custom" type="button"
+                aria-pressed="false">Custom</button>
+            </div>
+          </div>
+          <div class="web-certificate-panel" id="set-cert-auto-panel">
+            <div class="web-certificate-status">
+              <span>${esc(identitySummary(autoIdentity))}</span>
+              ${autoIdentity.available ? `<span class="web-certificate-fingerprint"
+                title="SHA-256 ${esc(autoIdentity.sha256)}">Anonymous subject · locally signed</span>` : ""}
+            </div>
+            <p>Puppy generates a private key and a self-signed certificate containing only
+              the endpoint names needed by this listener. Browsers will show a trust warning
+              until you explicitly trust it.</p>
+          </div>
+          <div class="web-certificate-panel hidden" id="set-cert-custom-panel">
+            <div class="tls-file-fields">
+              <label>Certificate chain path
+                <input type="text" id="set-tls-cert" autocomplete="off"
+                  autocapitalize="off" spellcheck="false" placeholder="/path/to/fullchain.pem">
+              </label>
+              <label>Private key path
+                <input type="text" id="set-tls-key" autocomplete="off"
+                  autocapitalize="off" spellcheck="false" placeholder="/path/to/privkey.pem">
+              </label>
+            </div>
+            <div class="web-certificate-status">
+              <span>${esc(identitySummary(customIdentity))}</span>
+              ${customIdentity.available ? `<span class="web-certificate-fingerprint"
+                title="SHA-256 ${esc(customIdentity.sha256)}">Imported private copy</span>` : ""}
+            </div>
+            <p>Puppy reads both server-side paths once, validates the pair, and copies it into
+              private backup-covered storage. Leave both blank to keep the installed pair.</p>
+          </div>
+        </div>
+      </section>
+      <div class="kv"><span class="k">Active listener</span><span class="v">${esc(fmtListenerEndpoint(activeWeb))}</span></div>
       ${settings.web_restart_required ? `<div class="bind-pending">
-        <span>Restart required to activate ${esc(fmtEndpoint(settings.web.host, settings.web.port))}.</span>
+        <span>Restart required to activate ${esc(fmtListenerEndpoint(settings.web))}.</span>
         <button class="btn btn-sm" id="set-activate" type="button">Verify &amp; restart</button>
       </div>` : ""}
       <div class="kv"><span class="k">Version</span><span class="v">${esc(settings.version)}</span></div>
       <div class="kv"><span class="k">API token</span><span class="v" id="set-token"
         role="button" tabindex="0" aria-label="Reveal API token" class="api-token-control">••••••••••••</span></div>
+      <div class="kv"><span class="k">Uptime</span><span class="v" id="set-uptime"
+        data-uptime-seconds="${esc(settings.uptime_seconds)}"
+        data-uptime-sampled-at="${uptimeSampledAt}">${esc(formatUptime(settings.uptime_seconds))}</span></div>
       <div class="settings-actions">
         <button class="btn btn-pri btn-sm" id="set-save">Save</button>
         <button class="btn btn-sm btn-ghost" id="set-logout">Log out</button>
@@ -13438,6 +13553,53 @@ class SettingsView {
         input: c1.querySelector("#set-browser-share"),
         root: c1.querySelector(".browser-share-toggle"),
       });
+    let selectedScheme = configuredScheme;
+    let selectedCertificateSource = configuredCertificateSource;
+    const protocolHttp = c1.querySelector("#set-protocol-http");
+    const protocolHttps = c1.querySelector("#set-protocol-https");
+    const certificateAuto = c1.querySelector("#set-cert-auto");
+    const certificateCustom = c1.querySelector("#set-cert-custom");
+    const httpsOptions = c1.querySelector("#set-https-options");
+    const autoPanel = c1.querySelector("#set-cert-auto-panel");
+    const customPanel = c1.querySelector("#set-cert-custom-panel");
+    const protocolNote = c1.querySelector("#set-protocol-note");
+    certificateAuto.disabled = !settings.web.openssl_available && !autoIdentity.available;
+    const paintTransport = () => {
+      const secure = selectedScheme === "https";
+      protocolHttp.classList.toggle("on", !secure);
+      protocolHttps.classList.toggle("on", secure);
+      protocolHttp.setAttribute("aria-pressed", String(!secure));
+      protocolHttps.setAttribute("aria-pressed", String(secure));
+      httpsOptions.classList.toggle("hidden", !secure);
+      protocolNote.textContent = secure
+        ? "Encrypted HTTPS only; HTTP connections will not be accepted."
+        : "Cleartext HTTP; sign-ins and API traffic are not encrypted in transit.";
+      protocolNote.classList.toggle("warn", !secure);
+      const automatic = selectedCertificateSource === "auto";
+      certificateAuto.classList.toggle("on", automatic);
+      certificateCustom.classList.toggle("on", !automatic);
+      certificateAuto.setAttribute("aria-pressed", String(automatic));
+      certificateCustom.setAttribute("aria-pressed", String(!automatic));
+      autoPanel.classList.toggle("hidden", !automatic);
+      customPanel.classList.toggle("hidden", automatic);
+    };
+    protocolHttp.onclick = () => { selectedScheme = "http"; paintTransport(); };
+    protocolHttps.onclick = () => {
+      selectedScheme = "https";
+      if (certificateAuto.disabled) selectedCertificateSource = "custom";
+      paintTransport();
+    };
+    certificateAuto.onclick = () => {
+      if (certificateAuto.disabled) return;
+      selectedCertificateSource = "auto";
+      paintTransport();
+    };
+    certificateCustom.onclick = () => {
+      selectedCertificateSource = "custom";
+      paintTransport();
+    };
+    paintTransport();
+    updateUptimeLabels();
     /* reveal -> copy -> hide, then round again, so the token never has to stay
        on screen once it has been taken. The label names what the NEXT activation
        does, which is what a screen reader announces before the press. */
@@ -13471,17 +13633,47 @@ class SettingsView {
         portInput.focus();
         return;
       }
+      const certificatePath = c1.querySelector("#set-tls-cert").value.trim();
+      const privateKeyPath = c1.querySelector("#set-tls-key").value.trim();
+      if (selectedCertificateSource === "custom" && selectedScheme === "https" &&
+          Boolean(certificatePath) !== Boolean(privateKeyPath)) {
+        toast("Certificate chain and private key paths are required together", "error");
+        c1.querySelector(certificatePath ? "#set-tls-key" : "#set-tls-cert").focus();
+        return;
+      }
+      if (selectedScheme === "https" && selectedCertificateSource === "custom" &&
+          !customIdentity.available && !certificatePath) {
+        toast("Choose the certificate chain and private key files on this server", "error");
+        c1.querySelector("#set-tls-cert").focus();
+        return;
+      }
+      if (selectedScheme === "https" && selectedCertificateSource === "auto" &&
+          !autoIdentity.available && !settings.web.openssl_available) {
+        toast("Self-signed HTTPS generation needs openssl on this server", "error");
+        return;
+      }
       const bindChanged = proposedBind !== String(settings.web.host || "") ||
         proposedPort !== Number(settings.web.port);
+      const transportChanged = selectedScheme !== configuredScheme ||
+        selectedCertificateSource !== configuredCertificateSource ||
+        (selectedScheme === "https" && selectedCertificateSource === "custom" &&
+         Boolean(certificatePath));
+      const listenerChanged = bindChanged || transportChanged;
       const configuredPending = !!settings.web_restart_required &&
         proposedBind === String(settings.web.host || "") &&
-        proposedPort === Number(settings.web.port);
-      const endpointProofNeeded = bindChanged || configuredPending || forceActivation;
+        proposedPort === Number(settings.web.port) &&
+        selectedScheme === configuredScheme &&
+        selectedCertificateSource === configuredCertificateSource;
+      const endpointProofNeeded = listenerChanged || configuredPending || forceActivation;
+      const proposedListener = {
+        host: proposedBind, port: proposedPort, scheme: selectedScheme,
+      };
       if (endpointProofNeeded && !(await modalConfirm(
-        bindChanged ? "Change and restart Puppy listener?" : "Restart Puppy listener?",
+        listenerChanged ? "Change and restart Puppy listener?" : "Restart Puppy listener?",
         `Puppy will first ask this browser to reach ${proposedBind
           ? fmtEndpoint(proposedBind, proposedPort) : "the proposed endpoint"} directly. ` +
-        `Only after that succeeds will it save the listener and queue a graceful restart. ` +
+        `Only after that succeeds will it save ${fmtListenerEndpoint(proposedListener)} ` +
+        `and queue a graceful restart. ` +
         "Active turns are allowed to finish, then this page reconnects automatically."))) return;
       saveButton.disabled = true;
       if (activateButton) activateButton.disabled = true;
@@ -13494,6 +13686,11 @@ class SettingsView {
           const prepared = await api(0, "settings/bind/prepare", {
             method: "POST", body: {
               host: proposedBind, port: proposedPort, origin: location.origin,
+              scheme: selectedScheme, https_source: selectedCertificateSource,
+              certificate_path: selectedScheme === "https" &&
+                selectedCertificateSource === "custom" ? certificatePath : "",
+              private_key_path: selectedScheme === "https" &&
+                selectedCertificateSource === "custom" ? privateKeyPath : "",
             },
           });
           const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
@@ -13549,7 +13746,7 @@ class SettingsView {
         if (bindCommit) {
           const activation = bindCommit.restart_required
             ? `Automatic restart was not queued. Return to Settings and use Verify & restart ` +
-              `to activate ${fmtEndpoint(bindCommit.host, bindCommit.port)}.`
+              `to activate ${fmtListenerEndpoint(bindCommit)}.`
             : "The active listener already matches this setting; no restart is required.";
           modalNotice("Listener was saved",
             `The browser check and save succeeded, but activation did not complete: ` +
@@ -13558,23 +13755,27 @@ class SettingsView {
           let current = null;
           try { current = await api(0, "settings", { timeoutMs: 3000 }); } catch (_) { /* uncertain */ }
           if (current && String(current.web.host) === String(verified.host) &&
-              Number(current.web.port) === Number(verified.port)) {
+              Number(current.web.port) === Number(verified.port) &&
+              String(current.web.scheme) === String(verified.scheme) &&
+              String(current.web.https_source) === String(verified.https_source)) {
             const activation = current.web_restart_required
-              ? `Restart Puppy to activate ${fmtEndpoint(current.web.host, current.web.port)}.`
+              ? `Restart Puppy to activate ${fmtListenerEndpoint(current.web)}.`
               : "The active listener already matches this setting; no restart is required.";
             modalNotice("Listener was saved",
               `The save completed even though its response was interrupted. ${activation}`);
           } else if (current && String(current.web.host) === String(settings.web.host) &&
-                     Number(current.web.port) === Number(settings.web.port)) {
+                     Number(current.web.port) === Number(settings.web.port) &&
+                     String(current.web.scheme) === configuredScheme &&
+                     String(current.web.https_source) === configuredCertificateSource) {
             modalNotice("Listener was not changed",
-              `${e.message}. Puppy remains configured on ${fmtEndpoint(settings.web.host, settings.web.port)}.`);
+              `${e.message}. Puppy remains configured on ${fmtListenerEndpoint(settings.web)}.`);
           } else {
             modalNotice("Listener save could not be confirmed",
               `${e.message}. The current listener remains active. Reload Settings and confirm the ` +
               "configured listener before restarting Puppy.");
           }
         } else if (endpointProofNeeded) modalNotice("Listener was not changed",
-          `${e.message}. Puppy remains configured on ${fmtEndpoint(settings.web.host, settings.web.port)}.`);
+          `${e.message}. Puppy remains configured on ${fmtListenerEndpoint(settings.web)}.`);
         else toast(e.message, "error");
       } finally {
         if (saveButton.isConnected) {

@@ -23,11 +23,11 @@ import time
 from typing import Dict, List
 
 from puppy import (__version__, config, db, listener_handoff, runner, terminal,
-                   upgrade_contract, uploads, workspaces)
+                   upgrade_contract, uploads, web_tls, workspaces)
 
 log = logging.getLogger("puppy.snapshots")
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 PRODUCT = "puppy-state"
 ARCHIVE_ROOT = "puppy-snapshot"
 MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
@@ -322,6 +322,11 @@ def create_archive(ui_state: dict) -> dict:
         tls_dir = Path(config.DATA_DIR).resolve() / "tls"
         if tls_dir.exists() or tls_dir.is_symlink():
             _copy_source_tree(tls_dir, stage / "tls", "tls", source_budget)
+        try:
+            web_tls.validate_snapshot(stage / "tls", web_tls.load_state())
+        except web_tls.WebTLSError as exc:
+            raise SnapshotError(
+                "WebUI TLS state cannot be backed up: {}".format(exc)) from exc
 
         scratch_saved = []
         scratch_missing = []
@@ -547,7 +552,7 @@ def _load_json(path: Path, label: str, max_bytes: int = MAX_UI_BYTES):
         raise SnapshotError("{} is invalid".format(label)) from exc
 
 
-def _validate_database(path: Path) -> int:
+def _validate_database(path: Path):
     connection = None
     try:
         connection = sqlite3.connect("file:{}?mode=ro".format(path), uri=True)
@@ -566,6 +571,16 @@ def _validate_database(path: Path) -> int:
             db.require_current_schema(connection)
         except db.SchemaMismatchError as exc:
             raise SnapshotError("snapshot database schema is not current") from exc
+        transport_row = connection.execute(
+            "SELECT value FROM meta WHERE key=?", (web_tls.STATE_KEY,)).fetchone()
+        if transport_row is None:
+            raise SnapshotError("snapshot database is missing WebUI transport state")
+        try:
+            transport = web_tls.normalize_state(json.loads(transport_row["value"]))
+        except (ValueError, TypeError, json.JSONDecodeError,
+                web_tls.WebTLSError) as exc:
+            raise SnapshotError(
+                "snapshot database contains invalid WebUI transport state") from exc
         for row in connection.execute("SELECT url,urls FROM backends"):
             try:
                 urls = json.loads(row["urls"])
@@ -596,7 +611,8 @@ def _validate_database(path: Path) -> int:
             "WHERE s.id IS NULL LIMIT 1").fetchone()
         if orphan:
             raise SnapshotError("snapshot database contains orphaned events")
-        return int(connection.execute("SELECT COUNT(*) FROM sessions").fetchone()[0])
+        return (int(connection.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]),
+                transport)
     except SnapshotError:
         raise
     except sqlite3.Error as exc:
@@ -722,9 +738,13 @@ def stage_import(archive_path: str) -> dict:
             raise SnapshotError("snapshot config is invalid: {}".format(exc)) from exc
         ui = validate_ui_state(_load_json(root / "ui.json", "browser state"))
         candidate_db = root / "puppy.db"
-        session_count = _validate_database(candidate_db)
+        session_count, transport = _validate_database(candidate_db)
         if session_count != manifest["sessions"]:
             raise SnapshotError("snapshot session count does not match its database")
+        try:
+            web_tls.validate_snapshot(root / "tls", transport)
+        except web_tls.WebTLSError as exc:
+            raise SnapshotError("snapshot WebUI TLS state is invalid: {}".format(exc)) from exc
         created_scratch = _prepare_scratch(candidate_db, root, manifest)
         return {
             "temporary": str(temporary), "root": str(root), "database": str(candidate_db),

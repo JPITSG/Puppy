@@ -19,6 +19,7 @@ from puppy import config, db
 log = logging.getLogger("puppy.auth")
 
 COOKIE_NAME = "puppy_session"
+SECURE_COOKIE_NAME = "__Host-puppy_session"
 SESSION_TTL = 30 * 24 * 3600
 PBKDF2_ITERS = 300_000
 _DUMMY_PWHASH = "pbkdf2_sha256${}$unknown-user-salt${}".format(
@@ -127,11 +128,29 @@ def token_ok(request: web.Request) -> bool:
     return bool(tok) and bool(want) and hmac.compare_digest(tok, want)
 
 
+def session_cookie_name(request: web.Request) -> str:
+    return SECURE_COOKIE_NAME if request.secure else COOKIE_NAME
+
+
+def set_session_cookie(request: web.Request, response: web.StreamResponse,
+                       token: str) -> None:
+    secure = request.secure
+    response.set_cookie(
+        session_cookie_name(request), token, max_age=SESSION_TTL,
+        httponly=True, secure=secure, samesite="Strict", path="/")
+
+
+def clear_session_cookie(request: web.Request, response: web.StreamResponse) -> None:
+    response.del_cookie(
+        session_cookie_name(request), path="/", secure=request.secure,
+        httponly=True, samesite="Strict")
+
+
 def request_user(request: web.Request):
     """Returns username, '@token' for api-token auth, or None."""
     if token_ok(request):
         return "@token"
-    return session_user(request.cookies.get(COOKIE_NAME, ""))
+    return session_user(request.cookies.get(session_cookie_name(request), ""))
 
 
 @web.middleware
@@ -186,7 +205,7 @@ async def h_setup(request: web.Request):
     log.info("initial admin user %r created", username)
     token = issue_session(username)
     resp = web.json_response({"ok": True, "username": username})
-    resp.set_cookie(COOKIE_NAME, token, max_age=SESSION_TTL, httponly=True, samesite="Strict", path="/")
+    set_session_cookie(request, resp, token)
     return resp
 
 
@@ -214,14 +233,14 @@ async def h_login(request: web.Request):
     _attempts.pop(peer, None)
     log.info("login %r from %s", username, peer)
     resp = web.json_response({"ok": True, "username": username})
-    resp.set_cookie(COOKIE_NAME, token, max_age=SESSION_TTL, httponly=True, samesite="Strict", path="/")
+    set_session_cookie(request, resp, token)
     return resp
 
 
 async def h_logout(request: web.Request):
-    drop_session(request.cookies.get(COOKIE_NAME, ""))
+    drop_session(request.cookies.get(session_cookie_name(request), ""))
     resp = web.json_response({"ok": True})
-    resp.del_cookie(COOKIE_NAME, path="/")
+    clear_session_cookie(request, resp)
     return resp
 
 
@@ -240,7 +259,7 @@ async def h_change_password(request: web.Request):
     db.execute("DELETE FROM web_sessions WHERE username=?", (user,))
     token = issue_session(user)
     resp = web.json_response({"ok": True})
-    resp.set_cookie(COOKIE_NAME, token, max_age=SESSION_TTL, httponly=True, samesite="Strict", path="/")
+    set_session_cookie(request, resp, token)
     return resp
 
 

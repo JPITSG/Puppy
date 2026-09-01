@@ -21,6 +21,7 @@ from puppy import (__version__, auth, backends, bind_verify, browser,
                    spawn_exec,
                    system_prompts, terminal, uploads,
                    usage_refresh, workspace_links, workspace_sync, workspaces)
+from puppy import web_tls
 from puppy.drivers import all_drivers, get_driver
 from puppy.drivers import base as driver_base
 
@@ -717,9 +718,16 @@ async def h_fs_mkdir(request: web.Request):
 # ---- settings ----
 
 async def h_settings_get(request: web.Request):
-    runtime_web = request.app.get("puppy_runtime_web") or {
-        "host": config.get("web.host"), "port": config.get("web.port")}
-    configured_web = {"host": config.get("web.host"), "port": config.get("web.port")}
+    transport = web_tls.settings_payload()
+    configured_listener = web_tls.configured_listener(
+        config.get("web.host"), config.get("web.port"))
+    configured_web = {
+        **configured_listener,
+        "openssl_available": transport["openssl_available"],
+        "identities": transport["identities"],
+    }
+    runtime_web = request.app.get("puppy_runtime_web") or configured_listener
+    started = float(request.app.get("puppy_started_monotonic", time.monotonic()))
     return web.json_response({
         "instance_name": config.get("instance_name"),
         "terminal_command": config.get("terminal.command"),
@@ -727,7 +735,9 @@ async def h_settings_get(request: web.Request):
         "api_token": config.get("auth.api_token"),
         "web": configured_web,
         "active_web": runtime_web,
-        "web_restart_required": configured_web != runtime_web,
+        "web_restart_required": web_tls.listener_key(configured_listener) !=
+                                web_tls.listener_key(runtime_web),
+        "uptime_seconds": max(0, int(time.monotonic() - started)),
         "usage_refresh": usage_refresh.payload(),
         "uploads": uploads.settings_payload(),
         "version": __version__,
@@ -762,7 +772,11 @@ async def h_bind_prepare(request: web.Request):
         proposed_port = body["port"] if "port" in body else config.get("web.port", 10888)
         return web.json_response(await bind_verify.prepare(
             request.app, str(request["user"]), body.get("host"), origin,
-            proposed_port, connected_host=connected_host))
+            proposed_port, connected_host=connected_host,
+            target_scheme=body.get("scheme"),
+            https_source=body.get("https_source"),
+            certificate_path=body.get("certificate_path"),
+            private_key_path=body.get("private_key_path")))
     except bind_verify.BindVerificationError as exc:
         return web.json_response({"error": str(exc)}, status=exc.status)
 
@@ -822,7 +836,7 @@ async def h_bind_handoff_ready(request: web.Request):
             headers={"Cache-Control": "no-store"})
     supplied_origin = request.headers.get("Origin", "").rstrip("/")
     if (supplied_origin and supplied_origin != record["origin"]) or \
-            not listener_handoff.target_matches(record, request.host):
+            not listener_handoff.target_matches(record, request.host, request.scheme):
         return web.json_response(
             {"error": "listener handoff target mismatch"}, status=403,
             headers={"Cache-Control": "no-store"})
@@ -833,8 +847,9 @@ async def h_bind_handoff_ready(request: web.Request):
         return _handoff_json({"error": "method not allowed"}, 405, headers)
     if record.get("status") != "queued":
         return _handoff_json({"error": "listener restart was not queued"}, 409, headers)
-    if str(config.get("web.host")) != record.get("host") or \
-            int(config.get("web.port", 0)) != int(record.get("port", 0)):
+    configured = web_tls.configured_listener(
+        config.get("web.host"), config.get("web.port", 0))
+    if web_tls.listener_key(configured) != web_tls.listener_key(record):
         return _handoff_json({"error": "configured listener changed"}, 409, headers)
     ready = listener_handoff.is_ready(request.app, record)
     return _handoff_json({"ok": True, "ready": ready}, 200 if ready else 202, headers)
@@ -857,7 +872,7 @@ localStorage.setItem(key, values[key]); }); } catch (_) {} location.replace("/")
 
 async def h_bind_handoff_claim(request: web.Request):
     record = listener_handoff.claim(
-        request.app, request.match_info["token"], request.host)
+        request.app, request.match_info["token"], request.host, request.scheme)
     if record is None:
         return web.Response(
             status=404, text="Listener handoff expired or is not ready.",
@@ -876,9 +891,7 @@ async def h_bind_handoff_claim(request: web.Request):
             "Referrer-Policy": "no-referrer",
             "X-Content-Type-Options": "nosniff",
         })
-    response.set_cookie(
-        auth.COOKIE_NAME, session_token, max_age=auth.SESSION_TTL,
-        httponly=True, samesite="Strict", path="/")
+    auth.set_session_cookie(request, response, session_token)
     return response
 
 
@@ -1370,7 +1383,8 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     search.register(app)
 
 
-def build_app() -> web.Application:
+def build_app(runtime_web: dict = None,
+              runtime_ssl_context=None) -> web.Application:
     app = web.Application(middlewares=[auth.middleware, state_change_guard],
                           client_max_size=8 * 1024 * 1024)
     live_websockets.initialize(app)
@@ -1378,10 +1392,10 @@ def build_app() -> web.Application:
     host_metrics.register(app)
     app["puppy_snapshot_busy"] = None
     app["puppy_mutations"] = 0
-    app["puppy_runtime_web"] = {
-        "host": config.get("web.host", "0.0.0.0"),
-        "port": int(config.get("web.port", 10888)),
-    }
+    app["puppy_started_monotonic"] = time.monotonic()
+    app["puppy_runtime_web"] = dict(runtime_web or web_tls.configured_listener(
+        config.get("web.host", "0.0.0.0"), int(config.get("web.port", 10888))))
+    app["puppy_runtime_ssl_context"] = runtime_ssl_context
     app["puppy_runtime_id"] = secrets.token_urlsafe(16)
     app["puppy_bind_verifications"] = {}
     listener_handoff.cleanup()

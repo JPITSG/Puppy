@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 
 from aiohttp import web
 
-from puppy import config, listener_handoff
+from puppy import config, listener_handoff, web_tls
 
 VERIFY_TTL = 60
 VERIFY_PREFIX = "/api/settings/bind/verify/"
@@ -127,14 +127,15 @@ def _wildcard_probe_host(target, origin_host: str,
             target.version, target.version))
 
 
-def _request_authority(value: str) -> Optional[Tuple[str, int]]:
+def _request_authority(value: str, scheme: str = "http") -> Optional[Tuple[str, int]]:
     try:
         parsed = urlsplit("http://" + str(value or ""))
         if not parsed.hostname or parsed.username is not None or \
                 parsed.password is not None or parsed.path not in ("", "/") or \
                 parsed.query or parsed.fragment:
             return None
-        return _canonical_hostname(parsed.hostname), parsed.port or 80
+        return _canonical_hostname(parsed.hostname), parsed.port or (
+            443 if scheme == "https" else 80)
     except ValueError:
         return None
 
@@ -210,7 +211,8 @@ def probe_response(app: web.Application, token: str, method: str,
     if entry is None or time.monotonic() >= entry["expires"]:
         _discard(app, token)
         return 404, {"Cache-Control": "no-store"}, b'{"error":"verification expired"}'
-    if _request_authority(host_header) != (entry["probe_host"], entry["port"]) or \
+    if _request_authority(host_header, entry["origin_key"][0]) != \
+            (entry["probe_host"], entry["port"]) or \
             not _origin_matches(entry, origin_header):
         return 403, {"Cache-Control": "no-store"}, b'{"error":"verification target mismatch"}'
     headers = _cors(entry)
@@ -275,7 +277,9 @@ async def _raw_probe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
 
 
 async def prepare(app: web.Application, user: str, bind_ip, origin: str,
-                  port, connected_host: Optional[str] = None) -> dict:
+                  port, connected_host: Optional[str] = None,
+                  target_scheme=None, https_source=None,
+                  certificate_path=None, private_key_path=None) -> dict:
     host = normalize_bind_ip(bind_ip)
     port = normalize_bind_port(port)
     scheme, origin_host, origin_port, canonical_origin = _origin(origin)
@@ -283,9 +287,11 @@ async def prepare(app: web.Application, user: str, bind_ip, origin: str,
         raise BindVerificationError(
             "a listener restart is already queued; wait for Puppy to reconnect",
             status=409)
-    if scheme != "http":
+    runtime = app.get("puppy_runtime_web") or {}
+    runtime_scheme = str(runtime.get("scheme") or "http")
+    if scheme != runtime_scheme:
         raise BindVerificationError(
-            "direct bind verification is unavailable from an HTTPS-proxied page; "
+            "direct bind verification is unavailable through a protocol-changing proxy; "
             "the bind endpoint was not changed")
     entries = _entries(app)
     for old_token, old_entry in list(entries.items()):
@@ -297,6 +303,16 @@ async def prepare(app: web.Application, user: str, bind_ip, origin: str,
     parsed_ip = ipaddress.ip_address(host)
     probe_host = _wildcard_probe_host(
         parsed_ip, origin_host, connected_host) if parsed_ip.is_unspecified else host
+    try:
+        current_transport = web_tls.load_state()
+        transport = web_tls.prepare_change(
+            target_scheme if target_scheme is not None else current_transport["scheme"],
+            https_source if https_source is not None else
+            current_transport["https_source"],
+            certificate_path, private_key_path,
+            (origin_host, probe_host, host))
+    except web_tls.WebTLSError as exc:
+        raise BindVerificationError(str(exc)) from exc
     token = secrets.token_urlsafe(24)
     expires = time.monotonic() + VERIFY_TTL
     entry = {
@@ -312,6 +328,7 @@ async def prepare(app: web.Application, user: str, bind_ip, origin: str,
         "verified": False,
         "server": None,
         "timer": None,
+        "transport": transport,
     }
     entries[token] = entry
 
@@ -319,8 +336,12 @@ async def prepare(app: web.Application, user: str, bind_ip, origin: str,
         await _raw_probe(reader, writer, app, token)
 
     try:
+        ssl_context = app.get("puppy_runtime_ssl_context") if scheme == "https" else None
+        if scheme == "https" and ssl_context is None:
+            raise BindVerificationError("the active HTTPS listener has no TLS context")
         entry["server"] = await asyncio.start_server(
-            connected, host=host, port=port, limit=16 * 1024)
+            connected, host=host, port=port, limit=16 * 1024,
+            ssl=ssl_context, ssl_handshake_timeout=5 if ssl_context else None)
     except OSError as exc:
         if exc.errno != errno.EADDRINUSE or not _runtime_can_conflict(
                 app, parsed_ip, port):
@@ -338,14 +359,17 @@ async def prepare(app: web.Application, user: str, bind_ip, origin: str,
 
     entry["timer"] = asyncio.get_running_loop().call_later(
         VERIFY_TTL, _expire, app, token)
-    base_url = "http://" + _authority(probe_host, port)
+    base_url = scheme + "://" + _authority(probe_host, port)
+    next_url = transport.scheme + "://" + _authority(probe_host, port)
     return {
         "ok": True,
         "token": token,
         "host": host,
         "port": port,
+        "scheme": transport.scheme,
+        "https_source": transport.https_source,
         "verify_url": base_url + VERIFY_PREFIX + token,
-        "next_url": base_url + "/",
+        "next_url": next_url + "/",
         "expires_in": VERIFY_TTL,
     }
 
@@ -375,29 +399,42 @@ async def commit(app: web.Application, user: str, token: str) -> dict:
         raise BindVerificationError(
             "the listener setting changed while it was being verified; try again",
             status=409)
+    previous_config = config.export_data()
     try:
         updated = config.export_data()
         updated["web"]["host"] = entry["host"]
         updated["web"]["port"] = entry["port"]
         config.replace_all(updated)
+        try:
+            web_tls.commit_change(entry["transport"])
+        except Exception:
+            config.replace_all(previous_config)
+            raise
+    except web_tls.WebTLSError as exc:
+        raise BindVerificationError(
+            "verification succeeded but the listener setting could not be saved: {}".
+            format(exc), status=500) from exc
     except (OSError, ValueError) as exc:
         raise BindVerificationError(
             "verification succeeded but the listener setting could not be saved", status=500) from exc
-    log.info("verified WebUI listener changed from %s to %s by %r",
-             _authority(old_host, old_port),
+    configured = web_tls.configured_listener(entry["host"], entry["port"])
+    old_transport = entry["transport"].expected_state
+    old_scheme = old_transport["scheme"]
+    log.info("verified WebUI listener changed from %s://%s to %s://%s by %r",
+             old_scheme, _authority(old_host, old_port), configured["scheme"],
              _authority(entry["host"], entry["port"]), user)
     runtime_web = app.get("puppy_runtime_web") or {
-        "host": old_host, "port": old_port}
-    restart_required = entry["host"] != str(runtime_web.get("host")) or \
-        entry["port"] != int(runtime_web.get("port", entry["port"]))
+        "host": old_host, "port": old_port, "scheme": old_scheme,
+        "https_source": old_transport["https_source"], "certificate_sha256": ""}
+    restart_required = web_tls.listener_key(configured) != web_tls.listener_key(runtime_web)
     result = {
         "ok": True,
-        "host": entry["host"],
-        "port": entry["port"],
+        **configured,
         "previous_host": old_host,
         "previous_port": old_port,
         "restart_required": restart_required,
-        "next_url": "http://" + _authority(entry["probe_host"], entry["port"]) + "/",
+        "next_url": configured["scheme"] + "://" +
+                    _authority(entry["probe_host"], entry["port"]) + "/",
     }
     # Any newer verified listener choice supersedes an older unclaimed
     # browser handoff. API-token callers retain the existing manual activation
@@ -406,7 +443,8 @@ async def commit(app: web.Application, user: str, token: str) -> dict:
         try:
             result["handoff"] = listener_handoff.create(
                 app, user, entry["host"], entry["port"], entry["probe_host"],
-                entry["origin"])
+                entry["origin"], configured["scheme"],
+                configured["https_source"], configured["certificate_sha256"])
         except (listener_handoff.ListenerHandoffError, OSError) as exc:
             # The listener setting is already durably committed. Return that
             # fact rather than turning a handoff-storage problem into an

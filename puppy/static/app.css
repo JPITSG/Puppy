@@ -1884,6 +1884,38 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .bind-fields{display:grid;grid-template-columns:minmax(0,1fr) 132px;gap:0 14px;min-width:0}
 .bind-fields>*{min-width:0}
 .bind-help{margin:-5px 0 7px;color:var(--txt3);font-size:10.5px;line-height:1.45}
+.web-transport{
+  margin:9px 0 8px;border:1px solid var(--line);border-radius:var(--r-md);
+  background:rgba(255,255,255,.012);overflow:hidden;
+}
+.web-transport-row{
+  display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;
+  gap:9px 14px;min-width:0;padding:11px 12px;
+}
+.web-transport-copy{display:flex;flex-direction:column;gap:3px;min-width:0}
+.web-transport-title{color:var(--txt2);font-size:12px;font-weight:570}
+.web-transport-copy small{
+  color:var(--txt3);font:9.5px/1.4 var(--mono);white-space:normal;
+}
+.web-transport-copy small.warn{color:var(--warn)}
+.web-transport-seg,.web-certificate-seg{--settings-control-h:30px}
+.https-options{border-top:1px solid var(--line)}
+.web-certificate-row{padding-bottom:9px}
+.web-certificate-panel{margin:0 12px 12px;padding:10px;border:1px solid var(--line);
+  border-radius:var(--r-sm);background:var(--panel2);min-width:0}
+.web-certificate-panel p{
+  margin:7px 0 0;color:var(--txt3);font-size:10.5px;line-height:1.5;
+}
+.web-certificate-status{
+  display:flex;align-items:center;justify-content:space-between;gap:6px 12px;
+  min-width:0;color:var(--txt2);font:10.5px/1.35 var(--mono);flex-wrap:wrap;
+}
+.web-certificate-fingerprint{color:var(--txt3);font-size:9.5px}
+.tls-file-fields{
+  display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:0 12px;min-width:0;
+}
+.tls-file-fields>*{min-width:0}
+.tls-file-fields input{font-family:var(--mono);font-size:11.5px}
 .bind-pending{
   display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;
   margin:5px 0 7px;padding:8px 8px 8px 10px;border:1px solid var(--warn-line-soft);
@@ -2420,6 +2452,12 @@ html.light .sh-more:hover{background:rgba(15,23,42,.035)}
   .backend-edit-grid .full{grid-column:1}
   .backend-edit-modal .m-btns{display:grid;grid-template-columns:1fr 1fr;gap:7px}
   .backend-edit-modal .m-btns .btn{width:100%;min-width:0}
+  .web-transport-row{grid-template-columns:minmax(0,1fr);padding:11px 10px}
+  .web-transport-seg,.web-certificate-seg{width:100%;height:34px}
+  .web-transport-seg .seg-btn,.web-certificate-seg .seg-btn{flex:1 1 0}
+  .web-certificate-panel{margin-left:10px;margin-right:10px;padding:9px}
+  .tls-file-fields{grid-template-columns:minmax(0,1fr)}
+  .tls-file-fields input{font-size:16px}
   .snapshot-actions{display:grid;grid-template-columns:1fr 1fr;gap:7px}
   .snapshot-actions .btn{width:100%;min-width:0;height:34px;padding-left:8px;padding-right:8px}
   /* the switch stays beside the name; the schedule takes the line below, the
