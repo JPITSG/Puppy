@@ -450,6 +450,64 @@ function globeIcon(size) {
   return svg;
 }
 
+function searchIcon(size) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const lens = document.createElementNS(NS, "circle");
+  lens.setAttribute("cx", "7.2");
+  lens.setAttribute("cy", "7.2");
+  lens.setAttribute("r", "4.4");
+  lens.setAttribute("fill", "none");
+  lens.setAttribute("stroke", "currentColor");
+  lens.setAttribute("stroke-width", "1.5");
+  const handle = document.createElementNS(NS, "path");
+  handle.setAttribute("d", "M10.5 10.5 L13.9 13.9");
+  handle.setAttribute("fill", "none");
+  handle.setAttribute("stroke", "currentColor");
+  handle.setAttribute("stroke-width", "1.5");
+  handle.setAttribute("stroke-linecap", "round");
+  svg.appendChild(lens);
+  svg.appendChild(handle);
+  return svg;
+}
+
+/* Three slider rails with staggered knobs: the conventional "advanced
+   filters" mark, drawn like the other stroked chrome icons so it and the
+   magnifier beside it read as one set. */
+function tuneIcon(size) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  /* each rail leaves a gap under its knob, so the mark needs no background
+     fill and stays crisp on any surface it lands on */
+  const rails = document.createElementNS(NS, "path");
+  rails.setAttribute("d", "M2.2 4.4h5.3M13 4.4h.8" +
+    "M2.2 8h.5M8.1 8h5.7M2.2 11.6h3.7M11.3 11.6h2.5");
+  rails.setAttribute("fill", "none");
+  rails.setAttribute("stroke", "currentColor");
+  rails.setAttribute("stroke-width", "1.4");
+  rails.setAttribute("stroke-linecap", "round");
+  svg.appendChild(rails);
+  for (const [x, y] of [[10.2, 4.4], [5.4, 8], [8.6, 11.6]]) {
+    const knob = document.createElementNS(NS, "circle");
+    knob.setAttribute("cx", String(x));
+    knob.setAttribute("cy", String(y));
+    knob.setAttribute("r", "1.9");
+    knob.setAttribute("fill", "none");
+    knob.setAttribute("stroke", "currentColor");
+    knob.setAttribute("stroke-width", "1.4");
+    svg.appendChild(knob);
+  }
+  return svg;
+}
+
 function checkIcon(size = 13) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
@@ -821,6 +879,16 @@ function userMessageCopyButton(text) {
 function fmtTime(ts) {
   const d = new Date(ts * 1000);
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+/* clock time today, "Mar 4" this year, "Mar 4, 2025" beyond - the shortest
+   stamp that still places a search hit in time */
+function fmtWhen(ts) {
+  const d = new Date(ts * 1000);
+  const now = new Date();
+  if (d.toDateString() === now.toDateString()) return fmtTime(ts);
+  const opts = { month: "short", day: "numeric" };
+  if (d.getFullYear() !== now.getFullYear()) opts.year = "numeric";
+  return d.toLocaleDateString([], opts);
 }
 function fmtTokens(n) {
   if (n == null) return "";
@@ -2188,6 +2256,7 @@ const state = {
   selectedSession: null,  // sidebar selection, independent until a session tab is focused
   layout: null,           // recursive pane/split tree
   showArchived: false,
+  sessionFilter: "",      // executed sidebar quick-search (title/location/node)
   views: {},              // tab id -> view object
 };
 
@@ -2615,7 +2684,7 @@ function storedTabs(value) {
   for (const item of value) {
     if (!item || typeof item !== "object" || typeof item.id !== "string" ||
         !item.id || item.id.length > 512 || seen.has(item.id) ||
-        !["session", "term", "browser", "settings"].includes(item.type)) continue;
+        !["session", "term", "browser", "settings", "search"].includes(item.type)) continue;
     const tab = { id: item.id, type: item.type };
     if (typeof item.bid === "number" && Number.isFinite(item.bid)) tab.bid = item.bid;
     if (typeof item.sid === "number" && Number.isFinite(item.sid)) tab.sid = item.sid;
@@ -3229,6 +3298,13 @@ function backendName(bid) {
   return b ? b.name : `backend ${bid}`;
 }
 
+/* What the sidebar quick-search can see: exactly the identity a row shows -
+   its title, its full location, and the node it executes on. */
+function sessionFilterHaystack(bid, s) {
+  return (`${s.name || `Session ${s.id}`}\n${sessionLocationTitle(s, bid)}\n` +
+    backendName(bid)).toLowerCase();
+}
+
 function terminalTabTitle(tabOrBid, terminalId = "") {
   const tab = tabOrBid && typeof tabOrBid === "object" ? tabOrBid : null;
   const bid = tab ? (tab.bid || 0) : (Number(tabOrBid) || 0);
@@ -3830,13 +3906,18 @@ function renderSidebar() {
   if (state.selectedSession && !availableSessions.has(state.selectedSession))
     state.selectedSession = null;
   const selectedSession = state.selectedSession || focusedSessionKey();
+  const filterTerms = state.sessionFilter.toLowerCase().split(/\s+/).filter(Boolean);
   const list = orderSidebarRows(rows, row =>
     sessionActivityPromotions.get(sessionActivityKey(row.bid, row.s.id)))
-    .filter(row => state.showArchived || !row.s.archived);
+    .filter(row => state.showArchived || !row.s.archived)
+    .filter(row => !filterTerms.length || (hay =>
+      filterTerms.every(term => hay.includes(term)))(
+      sessionFilterHaystack(row.bid, row.s)));
   animateSessionRows(root, () => {
     root.innerHTML = "";
     if (!list.length)
-      root.appendChild(el("div", "sess-empty", rows.length ?
+      root.appendChild(el("div", "sess-empty", filterTerms.length ?
+        `No sessions match “${state.sessionFilter}”` : rows.length ?
         "Archived sessions hidden" : "No sessions yet"));
     for (const { bid, s } of list) {
       const backendUnavailable = !!bid && state.remoteOk[bid] !== true;
@@ -4645,6 +4726,64 @@ function renderFootEngines() {
 
 $("toggle-archived").onclick = () => { state.showArchived = !state.showArchived; renderSidebar(); };
 
+/* ---- sidebar quick-search ----
+   Enter or the magnifier applies the typed terms to the visible session rows;
+   an applied filter turns that button into the clear cross. The sliders open
+   the full-history Search tab, carrying whatever was typed here. */
+function syncSideSearch() {
+  const input = $("side-search-input");
+  const go = $("side-search-go");
+  const active = !!state.sessionFilter &&
+    input.value.trim() === state.sessionFilter;
+  go.replaceChildren(active ? xIcon(12) : searchIcon(13));
+  go.setAttribute("aria-label", active ? "Clear search" : "Search");
+  $("side-search").classList.toggle("filtering", !!state.sessionFilter);
+}
+
+function applySideSearch() {
+  const input = $("side-search-input");
+  const value = input.value.trim();
+  if (!value || (state.sessionFilter && value === state.sessionFilter)) {
+    clearSideSearch();
+    return;
+  }
+  state.sessionFilter = value;
+  syncSideSearch();
+  renderSidebar();
+}
+
+function clearSideSearch(keepText = false) {
+  const input = $("side-search-input");
+  if (!keepText) input.value = "";
+  if (state.sessionFilter) {
+    state.sessionFilter = "";
+    renderSidebar();
+  }
+  syncSideSearch();
+}
+
+{
+  const input = $("side-search-input");
+  input.addEventListener("keydown", event => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      applySideSearch();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      if (input.value || state.sessionFilter) clearSideSearch();
+      else input.blur();
+    }
+  });
+  input.addEventListener("input", syncSideSearch);
+  $("side-search-go").onclick = applySideSearch;
+  $("side-search-adv").appendChild(tuneIcon(13));
+  $("side-search-adv").onclick = () => {
+    openSearchTab(state.activeGroup, input.value.trim());
+    closeDrawer();
+  };
+  syncSideSearch();
+}
+
 /* ================= tabs ================= */
 let termSeq = 1;
 let dragTab = null;
@@ -4834,6 +4973,18 @@ function openSettingsTab(groupId = null) {
   activateTab("settings");
 }
 
+/* One Search tab for the whole workspace, like Settings. A query passed in
+   (from the sidebar box) lands in the tab's own input and runs immediately. */
+function openSearchTab(groupId = null, presetQuery = "") {
+  if (!state.tabs.some(t => t.id === "search")) {
+    state.tabs.push({ id: "search", type: "search", title: "Search" });
+    putTabInPane("search", groupId);
+  }
+  activateTab("search");
+  const view = state.views.search;
+  if (view && presetQuery) view.presetQuery(presetQuery);
+}
+
 /* Disabling one node already stops every Chromium process on that node. Retire
    only that node's viewer tabs as the matching UI half of the lifecycle; each
    identified tab also closes its now-stopped catalog entry through closeTab. */
@@ -4920,6 +5071,7 @@ function ensureTabView(tab) {
     if (tab.type === "session") view = new SessionView(tab);
     else if (tab.type === "term") view = new TermView(tab);
     else if (tab.type === "browser") view = new BrowserView(tab);
+    else if (tab.type === "search") view = new SearchView(tab);
     else view = new SettingsView(tab);
     state.views[tab.id] = view;
     view.root.dataset.tabId = tab.id;
@@ -5043,9 +5195,11 @@ function renderTabNode(t, pane, tabsRoot) {
     if (meta) t.title = meta.name || `Session ${t.sid}`;
   } else if (t.type === "term") dotCls = "term";
   else if (t.type === "browser") dotCls = "browser";
+  else if (t.type === "search") dotCls = "search";
   const tdot = el("span", "t-dot " + dotCls);
   if (dotColor) tdot.style.color = dotColor;
   if (t.type === "settings") tdot.appendChild(gearIcon(12));
+  else if (t.type === "search") tdot.appendChild(searchIcon(12));
   else if (t.type === "term") tdot.appendChild(terminalIcon(12));
   else if (t.type === "browser") tdot.appendChild(globeIcon(12));
   tab.appendChild(tdot);
@@ -5549,6 +5703,7 @@ $("tab-add-menu").addEventListener("click", (e) => {
   else if (act === "open-session") modalOpenSession(groupId);
   else if (act === "new-terminal") modalNewTerminal(groupId);
   else if (act === "new-browser") openBrowserFromMenu(groupId);
+  else if (act === "search") openSearchTab(groupId);
 });
 $("btn-new-session").onclick = () => { modalNewSession(state.activeGroup); closeDrawer(); };
 /* the same drawn cog its own tab shows: the ⚙ glyph this replaced is a
@@ -7825,7 +7980,7 @@ class SessionView {
         const transcript = document.createDocumentFragment();
         d.events.forEach(ev => {
           const node = this.buildEventNode(ev);
-          if (node) transcript.appendChild(node);
+          if (node) { node.dataset.seq = String(ev.seq); transcript.appendChild(node); }
         });
         this.inner.appendChild(transcript);
         this.history = d.events.filter(ev => ev.kind === "user")
@@ -7840,6 +7995,11 @@ class SessionView {
         if (d.pending_approval) this.showApproval(d.pending_approval);
         else this.hideApproval();
         this.scrollBottom(true);
+        if (this._pendingJumpSeq != null) {
+          const jump = this._pendingJumpSeq;
+          this._pendingJumpSeq = null;
+          this.jumpToSeq(jump);
+        }
         break;
       case "draft":
         this.receiveDraft(d);
@@ -8193,6 +8353,7 @@ class SessionView {
       observer = null;
       this.scroll.removeEventListener("scroll", onScroll);
       if (this._stopLoadOlder === stop) this._stopLoadOlder = null;
+      if (this._loadOlderFn === load) this._loadOlderFn = null;
     };
     const disarm = () => {
       if (armTimer) clearTimeout(armTimer);
@@ -8215,7 +8376,7 @@ class SessionView {
         const anchor = btn.nextSibling;
         evs.forEach(ev => {
           const node = this.buildEventNode(ev);
-          if (node) frag.appendChild(node);
+          if (node) { node.dataset.seq = String(ev.seq); frag.appendChild(node); }
         });
         /* Anchor the reading position: everything inserted lands above what the
            user is looking at, so without giving that height back the transcript
@@ -8260,12 +8421,60 @@ class SessionView {
 
     btn.onclick = load;
     this._stopLoadOlder = stop;
+    this._loadOlderFn = load;   // jumpToSeq pages back through the same path
     this.inner.appendChild(btn);
+  }
+
+  /* Bring one persisted event on screen: page older history in until its seq
+     is loaded (bounded), then centre and flash the nearest rendered node -
+     a merged tool result lands on the tool card that carries it. */
+  async jumpToSeq(seq) {
+    seq = Number(seq);
+    if (!Number.isFinite(seq) || seq < 1 || this._jumping) return;
+    if (!this.session) { this._pendingJumpSeq = seq; return; }
+    this._jumping = true;
+    try {
+      let guard = 0;
+      let previous = null;
+      while (this.oldestSeq !== null && this.oldestSeq > seq &&
+             typeof this._loadOlderFn === "function" &&
+             this.oldestSeq !== previous && guard++ < 12) {
+        previous = this.oldestSeq;
+        await this._loadOlderFn();
+      }
+      const target = this.findEventNode(seq);
+      if (!target) {
+        toast("That match is deeper in this transcript than could be loaded", "info");
+        return;
+      }
+      target.scrollIntoView({ block: "center" });
+      target.classList.remove("search-flash");
+      void target.offsetWidth;   // restart the animation on repeated jumps
+      target.classList.add("search-flash");
+      setTimeout(() => {
+        if (target.isConnected) target.classList.remove("search-flash");
+      }, 2400);
+    } finally {
+      this._jumping = false;
+    }
+  }
+
+  findEventNode(seq) {
+    let best = null;
+    let bestSeq = -1;
+    for (const node of this.inner.querySelectorAll("[data-seq]")) {
+      const own = Number(node.dataset.seq);
+      if (!Number.isFinite(own) || own > seq) continue;
+      if (own === seq) return node;
+      if (own > bestSeq) { bestSeq = own; best = node; }
+    }
+    return best;
   }
 
   renderEvent(ev, live, follow = null) {
     const node = this.buildEventNode(ev);
     if (!node) return;
+    node.dataset.seq = String(ev.seq);
     this.inner.appendChild(node);
     /* A decision sampled before the append beats re-measuring after it, which
        the new node's own height would skew. */
@@ -10967,6 +11176,422 @@ class BrowserView {
 }
 
 /* ================= SettingsView ================= */
+/* ================= search view ================= */
+/* Full-history search. Each node indexes only its own transcripts, so the tab
+   fans one query out to this instance plus every online backend advertising
+   session-search and merges what returns; offline nodes are shown as skipped
+   rather than silently missing. */
+const SEARCH_KIND_CHIPS = [
+  { key: "user", label: "Prompts" },
+  { key: "assistant", label: "Replies" },
+  { key: "thinking", label: "Thinking" },
+  { key: "tool", label: "Tools" },
+  { key: "info", label: "System" },
+];
+const SEARCH_KIND_TAGS = {
+  user: "Prompt", assistant: "Reply", thinking: "Thinking",
+  tool: "Tool", info: "System", title: "Title",
+};
+const SEARCH_TIME_CHOICES = [
+  { key: "any", label: "Any time", seconds: 0 },
+  { key: "day", label: "24 h", seconds: 86400 },
+  { key: "week", label: "7 days", seconds: 7 * 86400 },
+  { key: "month", label: "30 days", seconds: 30 * 86400 },
+];
+const SEARCH_ORDER_CHOICES = [
+  { key: "relevance", label: "Relevance" },
+  { key: "recent", label: "Newest" },
+];
+const SEARCH_TIMEOUT = 20000;
+const SEARCH_PER_SESSION = 5;
+const SEARCH_MAX_SESSIONS = 40;
+const SEARCH_PAGE = 50;
+
+/* Deliberately stricter than backendHasCapability: a legacy node defaulting
+   to true would be offered a route it does not serve. */
+function nodeSupportsSearch(bid) {
+  if (!bid) return true;   // this console always carries its own index
+  const backend = state.backends.find(b => b.id === bid);
+  return !!backend && Array.isArray(backend.capabilities) &&
+    backend.capabilities.includes("session-search");
+}
+
+/* Server snippets delimit hits with control markers so highlighting needs no
+   HTML parsing: everything is text nodes plus <mark> elements. */
+function searchSnippetInto(host, text) {
+  const pieces = String(text || "").split("\u0001");
+  host.appendChild(document.createTextNode(pieces[0]));
+  for (let i = 1; i < pieces.length; i++) {
+    const closing = pieces[i].split("\u0002");
+    host.appendChild(el("mark", "", closing[0]));
+    host.appendChild(document.createTextNode(closing.slice(1).join("\u0002")));
+  }
+}
+
+class SearchView {
+  constructor(tab) {
+    this.tab = tab;
+    this.searchSequence = 0;
+    this.excludedNodes = new Set();
+    this.focusedOnce = false;
+    this.lastCore = null;      // the filters the visible results were run with
+    const prefs = this.loadPrefs();
+    this.kinds = new Set(prefs.kinds);
+    this.timeKey = prefs.time;
+    this.order = prefs.order;
+    this.root = el("div", "view search");
+    this.root.innerHTML = `
+      <div class="search-scroll"><div class="search-inner">
+        <div class="search-bar">
+          <input type="text" class="search-input" placeholder="Search all session history"
+            autocomplete="off" autocapitalize="off" spellcheck="false"
+            aria-label="Search all session history">
+          <button class="btn btn-pri search-go" type="button">Search</button>
+        </div>
+        <div class="search-filters">
+          <div class="search-filter-row">
+            <span class="search-filter-label">Nodes</span>
+            <span class="search-chips search-nodes"></span>
+          </div>
+          <div class="search-filter-row">
+            <span class="search-filter-label">In</span>
+            <span class="search-chips search-kinds"></span>
+          </div>
+          <div class="search-filter-row search-tail">
+            <span class="search-filter-label">When</span>
+            <span class="seg search-time"></span>
+            <span class="search-filter-label search-sort-label">Sort</span>
+            <span class="seg search-order"></span>
+          </div>
+        </div>
+        <div class="search-status"></div>
+        <div class="search-results"></div>
+      </div></div>`;
+    this.input = this.root.querySelector(".search-input");
+    this.goButton = this.root.querySelector(".search-go");
+    this.nodesBox = this.root.querySelector(".search-nodes");
+    this.kindsBox = this.root.querySelector(".search-kinds");
+    this.timeBox = this.root.querySelector(".search-time");
+    this.orderBox = this.root.querySelector(".search-order");
+    this.statusBox = this.root.querySelector(".search-status");
+    this.resultsBox = this.root.querySelector(".search-results");
+    this.goButton.onclick = () => this.runSearch();
+    this.input.addEventListener("keydown", event => {
+      if (event.key === "Enter") { event.preventDefault(); this.runSearch(); }
+    });
+    this.renderKindChips();
+    this.renderSegs();
+    this.renderNodeChips();
+    this.setStatus("Searches every transcript - including archived sessions - " +
+      "on this Puppy and its online backends.");
+  }
+
+  destroy() {
+    this.searchSequence++;
+    this.root.remove();
+  }
+
+  onShow(focus) {
+    this.renderNodeChips();   // reachability may have changed while hidden
+    if (focus && !this.focusedOnce) {
+      this.focusedOnce = true;
+      this.input.focus();
+    }
+  }
+
+  presetQuery(query) {
+    if (!query) return;
+    this.input.value = query;
+    this.runSearch();
+  }
+
+  loadPrefs() {
+    const fallback = { kinds: SEARCH_KIND_CHIPS.map(chip => chip.key),
+      time: "any", order: "relevance" };
+    try {
+      const d = JSON.parse(lsGet("puppy.search") || "null");
+      if (!d || d.v !== 1) return fallback;
+      const kinds = (Array.isArray(d.kinds) ? d.kinds : [])
+        .filter(kind => SEARCH_KIND_CHIPS.some(chip => chip.key === kind));
+      return {
+        kinds: kinds.length ? kinds : fallback.kinds,
+        time: SEARCH_TIME_CHOICES.some(t => t.key === d.time) ? d.time : "any",
+        order: d.order === "recent" ? "recent" : "relevance",
+      };
+    } catch (e) { return fallback; }
+  }
+
+  savePrefs() {
+    try {
+      lsSet("puppy.search", JSON.stringify({
+        v: 1, kinds: [...this.kinds], time: this.timeKey, order: this.order }));
+    } catch (e) {}
+  }
+
+  /* ---- filters ---- */
+
+  nodesCatalog() {
+    const rows = [{ bid: 0, name: backendName(0), enabled: true, reason: "" }];
+    for (const backend of state.backends) {
+      let reason = "";
+      if (!nodeSupportsSearch(backend.id)) reason = "needs a Puppy upgrade";
+      else if (state.remoteOk[backend.id] !== true) reason = "offline - not searched";
+      rows.push({ bid: backend.id, name: backend.name, enabled: !reason, reason });
+    }
+    return rows.map(row => ({
+      ...row, on: row.enabled && !this.excludedNodes.has(row.bid) }));
+  }
+
+  renderNodeChips() {
+    this.nodesBox.replaceChildren();
+    for (const node of this.nodesCatalog()) {
+      const chip = el("button", "search-chip" + (node.on ? " on" : ""));
+      chip.type = "button";
+      chip.appendChild(el("span",
+        "gdot" + (node.enabled ? (node.on ? " ok" : "") : " bad")));
+      chip.appendChild(el("span", "search-chip-label", node.name));
+      if (!node.enabled) {
+        chip.disabled = true;
+        chip.title = node.reason;
+      } else {
+        chip.setAttribute("aria-pressed", node.on ? "true" : "false");
+        chip.onclick = () => {
+          if (this.excludedNodes.has(node.bid)) this.excludedNodes.delete(node.bid);
+          else this.excludedNodes.add(node.bid);
+          this.renderNodeChips();
+        };
+      }
+      this.nodesBox.appendChild(chip);
+    }
+  }
+
+  renderKindChips() {
+    this.kindsBox.replaceChildren();
+    for (const spec of SEARCH_KIND_CHIPS) {
+      const on = this.kinds.has(spec.key);
+      const chip = el("button", "search-chip" + (on ? " on" : ""), spec.label);
+      chip.type = "button";
+      chip.setAttribute("aria-pressed", on ? "true" : "false");
+      chip.onclick = () => {
+        if (this.kinds.has(spec.key)) {
+          if (this.kinds.size === 1) return;   // something must stay searchable
+          this.kinds.delete(spec.key);
+        } else {
+          this.kinds.add(spec.key);
+        }
+        this.savePrefs();
+        this.renderKindChips();
+      };
+      this.kindsBox.appendChild(chip);
+    }
+  }
+
+  renderSegs() {
+    const build = (host, choices, current, apply) => {
+      host.replaceChildren();
+      for (const choice of choices) {
+        const btn = el("button",
+          "seg-btn" + (choice.key === current ? " on" : ""), choice.label);
+        btn.type = "button";
+        btn.onclick = () => { apply(choice.key); this.savePrefs(); this.renderSegs(); };
+        host.appendChild(btn);
+      }
+    };
+    build(this.timeBox, SEARCH_TIME_CHOICES, this.timeKey,
+      key => { this.timeKey = key; });
+    build(this.orderBox, SEARCH_ORDER_CHOICES, this.order,
+      key => { this.order = key; });
+  }
+
+  /* ---- execution ---- */
+
+  setStatus(...parts) {
+    this.statusBox.replaceChildren();
+    for (const part of parts) {
+      if (part == null) continue;
+      this.statusBox.appendChild(
+        typeof part === "string" ? el("span", "", part) : part);
+    }
+  }
+
+  coreParams(query) {
+    const core = { q: query, order: this.order };
+    if (this.kinds.size && this.kinds.size < SEARCH_KIND_CHIPS.length)
+      core.kinds = [...this.kinds, "title"].join(",");   // titles always count
+    const choice = SEARCH_TIME_CHOICES.find(t => t.key === this.timeKey);
+    if (choice && choice.seconds)
+      core.after = String(Date.now() / 1000 - choice.seconds);
+    return core;
+  }
+
+  async runSearch() {
+    const query = this.input.value.trim();
+    if (!query) {
+      this.setStatus("Type something to search for.");
+      this.input.focus();
+      return;
+    }
+    const sequence = ++this.searchSequence;
+    const catalog = this.nodesCatalog();
+    const targets = catalog.filter(node => node.on);
+    const skipped = catalog.filter(node => !node.enabled);
+    if (!targets.length) {
+      this.setStatus("No online nodes are selected to search.");
+      return;
+    }
+    const core = this.coreParams(query);
+    this.lastCore = core;
+    this.resultsBox.replaceChildren();
+    const spinner = el("span", "spinner");
+    this.setStatus(spinner, `Searching ${targets.length} node${
+      targets.length === 1 ? "" : "s"}…`);
+    const params = new URLSearchParams({ ...core,
+      per: String(SEARCH_PER_SESSION), sessions: String(SEARCH_MAX_SESSIONS) });
+    const settled = await Promise.allSettled(targets.map(node =>
+      api(node.bid, `search?${params}`, { timeoutMs: SEARCH_TIMEOUT })
+        .then(data => ({ node, data }))));
+    if (sequence !== this.searchSequence || !this.root.isConnected) return;
+    const groups = [];
+    const failures = [];
+    let total = 0;
+    let sessionCount = 0;
+    let truncated = false;
+    let partial = false;
+    settled.forEach((result, index) => {
+      if (result.status === "fulfilled") {
+        const { node, data } = result.value;
+        total += Number(data.total) || 0;
+        sessionCount += Number(data.session_total) || 0;
+        truncated = truncated || !!data.truncated;
+        partial = partial || !!data.partial;
+        for (const group of data.sessions || [])
+          if (group && group.session) groups.push({ bid: node.bid, group });
+      } else {
+        failures.push({ node: targets[index], error: result.reason });
+      }
+    });
+    const bestOf = entry => entry.group.matches.length ?
+      Math.min(...entry.group.matches.map(m => m.rank)) : 0;
+    const newestOf = entry => entry.group.matches.length ?
+      Math.max(...entry.group.matches.map(m => m.ts)) : 0;
+    groups.sort(this.order === "recent" ?
+      (a, b) => newestOf(b) - newestOf(a) : (a, b) => bestOf(a) - bestOf(b));
+
+    const statusParts = [];
+    statusParts.push(`${total} match${total === 1 ? "" : "es"} in ${
+      sessionCount} session${sessionCount === 1 ? "" : "s"} · searched ${
+      targets.length} node${targets.length === 1 ? "" : "s"}`);
+    if (skipped.length)
+      statusParts.push(el("span", "warn", ` · ${skipped.length} node${
+        skipped.length === 1 ? "" : "s"} skipped (${
+        [...new Set(skipped.map(node => node.reason.split(" - ")[0]))].join(", ")})`));
+    for (const failure of failures)
+      statusParts.push(el("span", "err", ` · ${failure.node.name}: ${
+        (failure.error && failure.error.message) || "failed"}`));
+    if (partial)
+      statusParts.push(el("span", "warn", " · an index is still building"));
+    if (truncated)
+      statusParts.push(el("span", "", " · long tail trimmed - refine the query"));
+    this.setStatus(...statusParts);
+
+    if (!groups.length) {
+      this.resultsBox.appendChild(el("div", "search-empty",
+        `No matches for “${query}”.`));
+      return;
+    }
+    for (const entry of groups)
+      this.resultsBox.appendChild(this.searchHitNode(entry.bid, entry.group));
+  }
+
+  /* ---- results ---- */
+
+  searchHitNode(bid, group) {
+    const session = group.session || {};
+    const hit = el("div", "search-hit");
+    const head = el("button", "sh-head");
+    head.type = "button";
+    head.appendChild(sessDot(session));
+    head.appendChild(el("span", "sh-name",
+      session.name || `Session ${session.id}`));
+    head.appendChild(provIcon(session.engine));
+    if (session.archived) head.appendChild(el("span", "pill", "archived"));
+    head.appendChild(el("span", "sh-node", backendName(bid)));
+    const location = el("span", "sh-loc", sessionLocationTitle(session, bid));
+    head.appendChild(location);
+    head.appendChild(el("span", "sh-count",
+      `${group.total} match${group.total === 1 ? "" : "es"}`));
+    head.title = `${backendName(bid)} · ${sessionLocationTitle(session, bid)}`;
+    head.setAttribute("aria-label",
+      `Open ${session.name || `session ${session.id}`} on ${backendName(bid)}`);
+    head.onclick = () => this.openMatch(bid, session, 0);
+    hit.appendChild(head);
+    const list = el("div", "sh-matches");
+    for (const match of group.matches)
+      list.appendChild(this.matchRow(bid, session, match));
+    hit.appendChild(list);
+    if (group.total > group.matches.length) {
+      const more = el("button", "sh-more",
+        `Show all ${group.total} matches`);
+      more.type = "button";
+      more.onclick = () => this.expandSession(bid, session, list, more, 0);
+      hit.appendChild(more);
+    }
+    return hit;
+  }
+
+  matchRow(bid, session, match) {
+    const row = el("button", "sh-match");
+    row.type = "button";
+    row.appendChild(el("span", "sh-kind",
+      SEARCH_KIND_TAGS[match.kind] || match.kind));
+    const snippet = el("span", "sh-snippet");
+    searchSnippetInto(snippet, match.snippet);
+    row.appendChild(snippet);
+    row.appendChild(el("span", "sh-when", fmtWhen(match.ts)));
+    row.onclick = () => this.openMatch(bid, session, match.seq);
+    return row;
+  }
+
+  async expandSession(bid, session, list, more, offset) {
+    if (!this.lastCore) return;
+    more.disabled = true;
+    more.textContent = "Loading…";
+    const params = new URLSearchParams({ ...this.lastCore,
+      sid: String(session.id), limit: String(SEARCH_PAGE),
+      offset: String(offset) });
+    try {
+      const data = await api(bid, `search?${params}`,
+        { timeoutMs: SEARCH_TIMEOUT });
+      if (!more.isConnected) return;
+      if (!offset) list.replaceChildren();
+      for (const match of data.matches || [])
+        list.appendChild(this.matchRow(bid, session, match));
+      const shown = list.children.length;
+      if (Number(data.total) > shown) {
+        more.disabled = false;
+        more.textContent = `Load more (${shown} of ${data.total})`;
+        more.onclick = () => this.expandSession(bid, session, list, more, shown);
+      } else {
+        more.remove();
+      }
+    } catch (error) {
+      toast(error.message, "error");
+      if (more.isConnected) {
+        more.disabled = false;
+        more.textContent = `Show all matches`;
+      }
+    }
+  }
+
+  openMatch(bid, session, seq) {
+    openSessionTab(bid, session.id, session);
+    if (seq > 0) {
+      const view = state.views[`s:${bid}:${session.id}`];
+      if (view && typeof view.jumpToSeq === "function") view.jumpToSeq(seq);
+    }
+  }
+}
+
 class SettingsView {
   constructor(tab) {
     this.tab = tab;

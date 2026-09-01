@@ -17,7 +17,7 @@ from aiohttp import WSMsgType, web
 from puppy import (__version__, auth, backends, bind_verify, browser,
                    cli_auto_upgrade, cli_releases,
                    cli_upgrade, config, db, host_metrics, listener_handoff, notify,
-                   live_websockets, protocol, runner, snapshots, spawn_exec,
+                   live_websockets, protocol, runner, search, snapshots, spawn_exec,
                    system_prompts, terminal, uploads,
                    usage_refresh, workspace_links, workspace_sync, workspaces)
 from puppy.drivers import all_drivers, get_driver
@@ -1011,6 +1011,9 @@ async def h_snapshot_import(request: web.Request):
         result = snapshots.commit_import(staged)
         usage_refresh.reset_due(clear_status=True)
         backends.reset_auto_upgrade_schedule()
+        # the restored database replaces every session this node knew, so the
+        # derived search index must be re-derived rather than trusted
+        search.request_full_reconcile()
         try:
             await browser.apply_config()
         except Exception as exc:
@@ -1354,6 +1357,7 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     uploads.register(app)
     workspace_sync.register(app)
     spawn_exec.register(app)
+    search.register(app)
 
 
 def build_app() -> web.Application:

@@ -88,7 +88,14 @@ esac
             time.sleep(0.01)
         assert record.read_text(encoding="utf-8").splitlines() == [
             "restart", str(os.getpid()), os.path.abspath(config.DATA_DIR)]
-        os.waitpid(child, 0)
+        try:
+            os.waitpid(child, 0)
+        except ChildProcessError:
+            # queue_restart drops its Popen, so whenever garbage collection
+            # frees that object after the hook exits, the interpreter has
+            # already reaped the child. The record above is the real proof;
+            # either reaper leaving no zombie is a pass.
+            pass
 
         os.environ.pop(listener_handoff.RESTART_HOOK_ENV, None)
         _expect_hook_error("requires a deployment restart hook")

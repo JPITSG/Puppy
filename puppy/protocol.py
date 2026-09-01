@@ -106,6 +106,11 @@ SPAWN_EXEC_CAPABILITY = "spawn-exec"
 # the owning turn replace either live deadline during a run. Older spawn nodes
 # retain their single fixed timeout and must not be offered limit updates.
 SPAWN_LIMITS_CAPABILITY = "spawn-progress-limits"
+# GET /api/search: full-history transcript search over this node's own
+# sessions, answered from a node-local rebuildable FTS index. A console fans a
+# query out to itself and to online nodes advertising this and merges results;
+# offline or older nodes simply contribute nothing.
+SEARCH_CAPABILITY = "session-search"
 
 BASE_CAPABILITIES = (
     "sessions",
@@ -146,6 +151,7 @@ BASE_CAPABILITIES = (
     WORKSPACE_MIRROR_CAPABILITY,
     SPAWN_EXEC_CAPABILITY,
     SPAWN_LIMITS_CAPABILITY,
+    SEARCH_CAPABILITY,
 )
 TERMINAL_CAPABILITY = "terminal"
 # Identified node-owned PTYs, their create/list/delete routes, and the

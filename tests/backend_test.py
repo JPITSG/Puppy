@@ -1253,6 +1253,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "system-prompt" in ping["capabilities"]
         assert "spawn-exec" in ping["capabilities"]
         assert "spawn-progress-limits" in ping["capabilities"]
+        assert "session-search" in ping["capabilities"]
         assert "shutdown-notice" in ping["capabilities"]
         assert ping["shutting_down"] is False
         # browser surface: capability is static, enablement is node config
@@ -1265,6 +1266,19 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert ping["browser"] == {"enabled": False}
         assert ping["uploads"]["enabled"] is \
             (ping["uploads"]["max_file_size_mb"] > 0)
+        # the packaged artifact serves the search surface: an empty index
+        # answers cleanly and a broken query is a 400, never a 500
+        async with http.get(url + "/api/search?q=zx-never-there", headers=good,
+                            ssl=pinned) as response:
+            found = await response.json()
+            assert response.status == 200, found
+            assert found["ok"] is True and found["total"] == 0, found
+            assert found["sessions"] == [], found
+        async with http.get(url + "/api/search?q=--", headers=good,
+                            ssl=pinned) as response:
+            assert response.status == 400
+        async with http.get(url + "/api/search?q=zx", ssl=pinned) as response:
+            assert response.status == 401
         async with http.get(url + "/api/system-prompt", headers=good,
                             ssl=pinned) as response:
             prompt_payload = await response.json()

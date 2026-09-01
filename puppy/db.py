@@ -15,6 +15,23 @@ log = logging.getLogger("puppy.db")
 
 _conn = None
 _lock = threading.RLock()
+_change_listeners = []
+
+
+def add_change_listener(listener) -> None:
+    """Register a callable receiving a session id after transcript-affecting
+    writes: event appends, session create, rename, and delete. Listeners run
+    outside the storage lock; a listener failure is logged, never raised."""
+    if listener not in _change_listeners:
+        _change_listeners.append(listener)
+
+
+def _notify_change(session_id) -> None:
+    for listener in _change_listeners:
+        try:
+            listener(int(session_id))
+        except Exception:
+            log.warning("session change listener failed", exc_info=True)
 
 # On Send, the same composer value travels once as the message and once as the
 # conditional draft-consume guard. A quarter-million Unicode code points keeps
@@ -339,13 +356,14 @@ def create_session(name: str, engine: str, cwd: str, model: str, effort: str,
                  workspace_kind, workspace, row["n"], now, now))
             session_id = int(cursor.lastrowid)
             conn.commit()
-            return session_id
         except Exception:
             conn.rollback()
             raise
         finally:
             if cursor is not None:
                 cursor.close()
+    _notify_change(session_id)
+    return session_id
 
 
 def session_row_to_dict(row) -> dict:
@@ -469,6 +487,8 @@ def touch_session(session_id: int, **fields) -> None:
     fields["updated_at"] = time.time()
     keys = ", ".join(f"{k}=?" for k in fields)
     execute(f"UPDATE sessions SET {keys} WHERE id=?", (*fields.values(), session_id))
+    if "name" in fields:
+        _notify_change(session_id)
 
 
 def add_event(session_id: int, kind: str, data: dict) -> dict:
@@ -482,6 +502,7 @@ def add_event(session_id: int, kind: str, data: dict) -> dict:
                      (session_id, seq, kind, json.dumps(data), ts))
         conn.execute("UPDATE sessions SET updated_at=? WHERE id=?", (ts, session_id))
         conn.commit()
+    _notify_change(session_id)
     return {"seq": seq, "kind": kind, "ts": ts, "data": data}
 
 
@@ -512,3 +533,4 @@ def delete_session(session_id: int) -> None:
         conn.execute("DELETE FROM meta WHERE key=?",
                      ("session_queue.{}".format(session_id),))
         conn.commit()
+    _notify_change(session_id)

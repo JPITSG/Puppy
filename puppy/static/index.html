@@ -41,6 +41,13 @@
       <div id="sess-groups"></div>
       <button class="linklike" id="toggle-archived">Show archived</button>
     </div>
+    <div class="side-search" id="side-search">
+      <input type="text" id="side-search-input" placeholder="Search sessions"
+        aria-label="Search sessions" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <button class="side-search-btn" id="side-search-adv" type="button"
+        aria-label="Advanced search" title="Advanced search"></button>
+      <button class="side-search-btn" id="side-search-go" type="button" aria-label="Search"></button>
+    </div>
     <div class="side-foot">
       <div class="foot-engines" id="foot-engines"></div>
       <div class="foot-row">
@@ -70,6 +77,7 @@
       <button data-act="new-session">New session</button>
       <button data-act="new-terminal">New terminal</button>
       <button data-act="new-browser">New browser</button>
+      <button data-act="search">Search</button>
     </div>
   </main>
 </div>

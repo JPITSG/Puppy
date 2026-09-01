@@ -449,6 +449,23 @@ of being eagerly deleted while another console may still have an update in
 flight. Older nodes omit the capability and keep their existing local-browser
 draft behavior.
 
+## Session search
+
+Every node advertises the additive `session-search` capability: `GET
+/api/search` answers full-history queries over this node's own transcripts
+(user prompts, replies, thinking, tool activity, system notes, plus one
+synthetic title document per session) from a node-local SQLite FTS5 index at
+`data/search/index.db`. The index is a derived, rebuildable cache fed by a
+background reconcile worker - it is never migrated (an unknown shape is
+deleted and rebuilt from the events table), never snapshotted, and a restored
+backup triggers a full re-derivation. Queries support implicit AND, quoted
+phrases, `-` exclusion, `OR`, kind/time/session filters, relevance or recency
+order, and grouped-by-session or per-session paginated responses with
+control-character-delimited snippet highlights. A controller fans one query
+out to itself and its online capable nodes and merges results; offline or
+older nodes simply contribute nothing, so no transcript is mirrored for
+search.
+
 ## Graceful shutdown notice
 
 Headless nodes advertise the additive `shutdown-notice` capability. While
