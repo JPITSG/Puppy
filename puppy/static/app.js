@@ -13211,7 +13211,7 @@ class SettingsView {
         Only import a backup you trust, and store it securely.</p>
       <div class="snapshot-actions">
         <button class="btn btn-pri btn-sm" id="snapshot-export">Export backup</button>
-        <button class="btn btn-sm" id="snapshot-import">Import backup…</button>
+        <button class="btn btn-sm" id="snapshot-import">Import backup</button>
         <input class="hidden" type="file" id="snapshot-file"
           accept=".tar.gz,application/gzip,application/x-gzip">
       </div>`;
@@ -13269,7 +13269,7 @@ class SettingsView {
         if (importButton.isConnected) {
           exportButton.disabled = false;
           importButton.disabled = false;
-          importButton.textContent = "Import backup…";
+          importButton.textContent = "Import backup";
           fileInput.value = "";
         }
       }
