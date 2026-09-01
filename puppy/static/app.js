@@ -4727,55 +4727,50 @@ function renderFootEngines() {
 $("toggle-archived").onclick = () => { state.showArchived = !state.showArchived; renderSidebar(); };
 
 /* ---- sidebar quick-search ----
-   Enter or the magnifier applies the typed terms to the visible session rows;
-   an applied filter turns that button into the clear cross. The sliders open
-   the full-history Search tab, carrying whatever was typed here. */
+   Typing filters the visible session rows immediately; while anything is
+   typed the magnifier becomes the clear cross. The sliders open the
+   full-history Search tab, carrying whatever was typed here. */
 function syncSideSearch() {
-  const input = $("side-search-input");
   const go = $("side-search-go");
-  const active = !!state.sessionFilter &&
-    input.value.trim() === state.sessionFilter;
+  const active = !!state.sessionFilter;
   go.replaceChildren(active ? xIcon(12) : searchIcon(13));
   go.setAttribute("aria-label", active ? "Clear search" : "Search");
-  $("side-search").classList.toggle("filtering", !!state.sessionFilter);
+  $("side-search").classList.toggle("filtering", active);
 }
 
 function applySideSearch() {
-  const input = $("side-search-input");
-  const value = input.value.trim();
-  if (!value || (state.sessionFilter && value === state.sessionFilter)) {
-    clearSideSearch();
-    return;
-  }
+  const value = $("side-search-input").value.trim();
+  if (value === state.sessionFilter) return;
   state.sessionFilter = value;
   syncSideSearch();
   renderSidebar();
 }
 
-function clearSideSearch(keepText = false) {
-  const input = $("side-search-input");
-  if (!keepText) input.value = "";
-  if (state.sessionFilter) {
-    state.sessionFilter = "";
-    renderSidebar();
-  }
-  syncSideSearch();
+function clearSideSearch() {
+  $("side-search-input").value = "";
+  applySideSearch();
 }
 
 {
   const input = $("side-search-input");
+  input.addEventListener("input", applySideSearch);
   input.addEventListener("keydown", event => {
     if (event.key === "Enter") {
+      /* already applied while typing: on a phone this just puts the
+         keyboard away so the filtered list is visible */
       event.preventDefault();
       applySideSearch();
+      input.blur();
     } else if (event.key === "Escape") {
       event.preventDefault();
       if (input.value || state.sessionFilter) clearSideSearch();
       else input.blur();
     }
   });
-  input.addEventListener("input", syncSideSearch);
-  $("side-search-go").onclick = applySideSearch;
+  $("side-search-go").onclick = () => {
+    if (state.sessionFilter) clearSideSearch();
+    input.focus();
+  };
   $("side-search-adv").appendChild(tuneIcon(13));
   $("side-search-adv").onclick = () => {
     openSearchTab(state.activeGroup, input.value.trim());
@@ -11248,7 +11243,9 @@ class SearchView {
             aria-label="Search all session history">
           <button class="btn btn-pri search-go" type="button">Search</button>
         </div>
-        <div class="search-filters">
+        <div class="card search-settings">
+          <h2>Search settings</h2>
+          <div class="search-filters">
           <div class="search-filter-row">
             <span class="search-filter-label">Nodes</span>
             <span class="search-chips search-nodes"></span>
@@ -11262,6 +11259,7 @@ class SearchView {
             <span class="seg search-time"></span>
             <span class="search-filter-label search-sort-label">Sort</span>
             <span class="seg search-order"></span>
+          </div>
           </div>
         </div>
         <div class="search-status"></div>

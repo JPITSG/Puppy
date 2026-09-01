@@ -2024,7 +2024,11 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .search-bar{display:flex;gap:8px}
 .search-bar input[type=text]{flex:1;min-width:0;height:38px;font-size:13.5px}
 .search-bar .btn{height:38px}
-.search-filters{display:flex;flex-direction:column;gap:7px}
+/* the filter rows live in one settings-style card between the query bar
+   and the results; the status line and hits stay outside it */
+.card.search-settings{padding:13px 16px 14px}
+.card.search-settings h2{margin-bottom:9px}
+.search-filters{display:flex;flex-direction:column;gap:8px}
 .search-filter-row{display:flex;align-items:center;gap:7px;flex-wrap:wrap;min-width:0}
 .search-filter-label{
   flex:0 0 44px;font-size:10px;text-transform:uppercase;letter-spacing:.09em;color:var(--txt3);
@@ -2427,6 +2431,7 @@ html.light .sh-more:hover{background:rgba(15,23,42,.035)}
   .system-prompt-actions .btn{height:34px}
   /* Search on a phone: labels take their own line, the location line wraps
      under the session identity, and the kind column narrows. */
+  .card.search-settings{padding:11px 12px 12px}
   .search-filter-label{flex-basis:100%}
   .search-sort-label{margin-left:0;margin-top:2px}
   .search-bar .btn{padding-left:14px;padding-right:14px}
