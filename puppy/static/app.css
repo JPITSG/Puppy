@@ -2039,7 +2039,6 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 /* the filter rows live in one settings-style card between the query bar
    and the results; the status line and hits stay outside it */
 .card.search-settings{padding:13px 16px 14px}
-.card.search-settings h2{margin-bottom:9px}
 .search-filters{display:flex;flex-direction:column;gap:8px}
 .search-filter-row{display:flex;align-items:center;gap:7px;flex-wrap:wrap;min-width:0}
 .search-filter-label{

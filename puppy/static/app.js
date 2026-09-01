@@ -11457,7 +11457,6 @@ class SearchView {
           <button class="btn btn-pri search-go" type="button">Search</button>
         </div>
         <div class="card search-settings">
-          <h2>Search settings</h2>
           <div class="search-filters">
           <div class="search-filter-row">
             <span class="search-filter-label">Nodes</span>
