@@ -1292,6 +1292,29 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
   color:var(--txt3);font-size:11px;
 }
+/* The "New spawn" wizard: a breadcrumb of chosen parts pins the context while
+   the list below it slides between parts. Informational rows (loading, empty)
+   render quiet - present but visibly not choices. */
+.mention-step-head{
+  display:flex;align-items:center;gap:10px;padding:5px 11px 8px;margin:0 0 5px;
+  border-bottom:1px solid var(--line);color:var(--txt3);font-size:11px;
+}
+.mention-step-trail{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mention-step-name{
+  margin-left:auto;flex-shrink:0;color:var(--txt2);font-size:10px;font-weight:600;
+  text-transform:uppercase;letter-spacing:.05em;
+}
+.mention-item.quiet{color:var(--txt3);cursor:default}
+.mention-chev svg{transition:none}
+.mention-chev.right svg{transform:rotate(-90deg)}
+.mention-chev.left svg{transform:rotate(90deg)}
+.mention-pop.slide-next{animation:mention-slide-next .16s var(--ease)}
+.mention-pop.slide-back{animation:mention-slide-back .16s var(--ease)}
+@keyframes mention-slide-next{from{transform:translateX(26px);opacity:.3}to{transform:none;opacity:1}}
+@keyframes mention-slide-back{from{transform:translateX(-26px);opacity:.3}to{transform:none;opacity:1}}
+@media (prefers-reduced-motion:reduce){
+  .mention-pop.slide-next,.mention-pop.slide-back{animation:none}
+}
 .attach-strip{display:flex;gap:6px;flex-wrap:wrap}
 /* The same strip inside a sent bubble. .msg-user is pre-wrap, so the strip is
    given its own block spacing rather than inheriting the prose's line box. */

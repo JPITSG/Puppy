@@ -1941,7 +1941,7 @@ function linkifyInto(node, text) {
    or terminal the message pointed the agent at. Surrounding prose keeps its
    ordinary linkification. */
 const MENTION_TOKEN_RE =
-  /(^|[\s([{'"])(@(?:Browser [A-Z0-9]{4}|Terminal [A-Z0-9]{4}|New browser|New terminal))(?=$|[\s.,;:!?)\]}'"])/g;
+  /(^|[\s([{'"])(@(?:Browser [A-Z0-9]{4}|Terminal [A-Z0-9]{4}|New browser|New terminal|Spawn an agent(?: on (?:"[^"\n]{1,80}"|\S+))? using \S+(?: \S+)?(?: at \S+ effort)? to))(?=$|[\s.,;:!?)\]}'"])/g;
 function decorateMentionsInto(node, text) {
   text = String(text == null ? "" : text);
   MENTION_TOKEN_RE.lastIndex = 0;
@@ -3295,6 +3295,17 @@ function terminalInstancesFor(bid) {
   return !!backend && Number(backend.protocol || 0) > 0 &&
     Array.isArray(backend.capabilities) &&
     backend.capabilities.includes("terminal-instances");
+}
+
+/* Spawned agents are additive too: a node without the capability has neither
+   the routes nor the turn-scoped spawn MCP bridge, so its composer must not
+   offer a mention its engine could never act on. */
+function spawnExecFor(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(item => item.id === bid);
+  return !!backend && Number(backend.protocol || 0) > 0 &&
+    Array.isArray(backend.capabilities) &&
+    backend.capabilities.includes("spawn-exec");
 }
 
 function terminalHandoffFor(bid) {
@@ -6082,6 +6093,36 @@ function filterMentionItems(items, query) {
   return items.filter(item => item.search.includes(q));
 }
 
+/* The spawn wizard's finished directive. It reads as prose, ends in "to" so
+   the task follows naturally, and stays exactly parseable: the spawn MCP
+   guidance defines this shape, omitted parts mean the engine defaults, and a
+   node name with spaces is quoted. sel.node is null for the session's own
+   node, whose name the spawn tool already assumes when no node is named. */
+function spawnMentionInsert(sel) {
+  const parts = ["@Spawn an agent"];
+  if (sel.node) {
+    const name = String(sel.node.name || "");
+    parts.push("on " + (/\s/.test(name) ? '"' + name + '"' : name));
+  }
+  parts.push("using " + String(sel.engine && sel.engine.key || ""));
+  if (sel.model && sel.model.value) parts.push(String(sel.model.value));
+  if (sel.effort && sel.effort.value)
+    parts.push("at " + String(sel.effort.value) + " effort");
+  parts.push("to");
+  return parts.join(" ");
+}
+
+/* Efforts for one chosen model: a dynamic catalog (OpenCode) attaches
+   model-specific effort_options to each model option; other engines share one
+   engine-level list. */
+function spawnEffortOptionsFor(engine, modelOption) {
+  const own = modelOption && Array.isArray(modelOption.effort_options)
+    ? modelOption.effort_options : null;
+  const options = own ||
+    (engine && Array.isArray(engine.effort_options) ? engine.effort_options : []);
+  return options.filter(option => option && typeof option.value === "string");
+}
+
 /* ================= SessionView ================= */
 const TOOL_ICONS = {
   Bash: "$", shell: "$", Read: "📄", Write: "✏️", Edit: "✏️", file_change: "✏️",
@@ -6345,6 +6386,8 @@ class SessionView {
     this.mention = null;          // open @-mention popup: {start, query, items, sel}
     this.mentionDismissedAt = -1; // Esc'd token start; stays hidden while it lives
     this.mentionData = { at: 0, browsers: null, terminals: null, promise: null };
+    this.mentionSpawn = null;     // "New spawn" wizard: {step, node, engine, model, …}
+    this.mentionRowEls = [];      // selectable rows, excluding the wizard header
     this.pendingScroll = null;    // position owed back after a workspace rebuild
     this.lastScroll = null;       // last position seen while this view was visible
     this.buildDom();
@@ -7147,8 +7190,17 @@ class SessionView {
       e.preventDefault();
       e.stopPropagation();
       this.ctrlCStreak = 0;
+      /* Inside the spawn wizard, Escape slides back one part; only the flat
+         list dismisses. Leaving the wizard's first part returns to the list. */
+      if (this.mentionSpawn) { this.spawnStepBack(); return true; }
       this.mentionDismissedAt = m.start;   // this token asked to be left alone
       this.hideMention();
+      return true;
+    }
+    if (this.mentionSpawn && e.key === "Backspace" && !m.query) {
+      e.preventDefault();
+      this.ctrlCStreak = 0;
+      this.spawnStepBack();
       return true;
     }
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
@@ -7162,7 +7214,8 @@ class SessionView {
       const item = m.items[m.sel];
       /* A mention already typed out in full has nothing left to complete;
          Enter keeps meaning send. Tab still completes the trailing space. */
-      if (e.key === "Enter" && item.search === m.query.toLowerCase()) {
+      if (!this.mentionSpawn && e.key === "Enter" &&
+          item.search === m.query.toLowerCase()) {
         this.hideMention();
         return false;
       }
@@ -7188,42 +7241,90 @@ class SessionView {
     if (this.histIdx !== null) { this.hideMention(); return; }
     if (this.mentionDismissedAt === ctx.start) { this.hideMention(); return; }
     this.mentionDismissedAt = -1;
-    const items = filterMentionItems(this.mentionCandidates(), ctx.query);
+    let items;
+    if (this.mentionSpawn) {
+      /* Wizard mode: the token's query filters the current step's choices,
+         and the Back row stays put so a fruitless filter cannot strand the
+         wizard with nowhere to go. */
+      const stepItems = this.spawnStepItems();
+      items = filterMentionItems(
+        stepItems.filter(item => item.kind !== "spawn-back"), ctx.query);
+      const back = stepItems.find(item => item.kind === "spawn-back");
+      if (back) items.push(back);
+    } else {
+      items = filterMentionItems(this.mentionCandidates(), ctx.query);
+    }
     if (!items.length) { this.hideMention(); return; }
     const previous = this.mention && this.mention.items[this.mention.sel];
-    const kept = previous ? items.findIndex(item => item.insert === previous.insert) : -1;
+    const kept = previous ? items.findIndex(item =>
+      item.kind === previous.kind && item.label === previous.label) : -1;
     this.mention = { start: ctx.start, query: ctx.query, items, sel: kept >= 0 ? kept : 0 };
     this.renderMention();
-    this.refreshMentionInstances();
+    if (!this.mentionSpawn) this.refreshMentionInstances();
   }
 
   hideMention() {
+    this.mentionSpawn = null;
     if (!this.mention) return;
     this.mention = null;
+    this.mentionRowEls = [];
     this.mentionEl.textContent = "";
     this.mentionEl.classList.add("hidden");
+    this.mentionEl.classList.remove("slide-next", "slide-back");
   }
 
   renderMention() {
     const m = this.mention;
+    const wizard = this.mentionSpawn;
     this.mentionEl.textContent = "";
+    this.mentionRowEls = [];
+    if (wizard) {
+      const head = el("div", "mention-step-head");
+      const trail = ["New spawn"];
+      if (wizard.node) trail.push(wizard.node.name);
+      else if (wizard.node === null) trail.push(backendName(this.tab.bid || 0));
+      if (wizard.engine) trail.push(wizard.engine.key);
+      if (wizard.step === "effort" && wizard.model)
+        trail.push(wizard.model.value || "default model");
+      head.appendChild(el("span", "mention-step-trail", trail.join(" · ")));
+      head.appendChild(el("span", "mention-step-name",
+        { node: "Node", engine: "Engine", model: "Model", effort: "Effort" }[wizard.step] || ""));
+      this.mentionEl.appendChild(head);
+    }
     m.items.forEach((item, index) => {
-      const row = el("button", "mention-item" + (index === m.sel ? " sel" : ""));
+      const row = el("button", "mention-item" + (index === m.sel ? " sel" : "") +
+        (item.kind === "spawn-wait" ? " quiet" : ""));
       row.type = "button";
       row.setAttribute("role", "option");
       row.setAttribute("aria-selected", index === m.sel ? "true" : "false");
       const ico = el("span", "mention-ico");
-      ico.appendChild(item.kind === "browser" ? globeIcon(12) :
-        item.kind === "terminal" ? terminalIcon(12) : plusIcon(11));
+      if (item.kind === "spawn-back" || item.kind === "spawn-step") {
+        ico.classList.add("mention-chev", item.kind === "spawn-back" ? "left" : "right");
+        ico.appendChild(choiceSvg("arrow"));
+      } else if (item.kind === "spawn-retry") {
+        ico.appendChild(refreshIcon(11));
+      } else if (item.kind !== "spawn-wait") {
+        ico.appendChild(item.kind === "browser" ? globeIcon(12) :
+          item.kind === "terminal" ? terminalIcon(12) : plusIcon(11));
+      }
       row.appendChild(ico);
       row.appendChild(el("span", "mention-label", item.label));
       if (item.hint) row.appendChild(el("span", "mention-hint", item.hint));
       row.onclick = () => this.applyMention(item);
       row.onmouseenter = () => { if (this.mention === m) this.selectMention(index); };
       this.mentionEl.appendChild(row);
+      this.mentionRowEls.push(row);
     });
     this.mentionEl.classList.remove("hidden");
-    const sel = this.mentionEl.children[m.sel];
+    this.mentionEl.classList.remove("slide-next", "slide-back");
+    if (wizard && wizard.slide) {
+      /* Re-adding the class after a reflow restarts the glide for every step,
+         so each part visibly slides in from its travel direction. */
+      void this.mentionEl.offsetWidth;
+      this.mentionEl.classList.add(wizard.slide < 0 ? "slide-back" : "slide-next");
+      wizard.slide = 0;
+    }
+    const sel = this.mentionRowEls[m.sel];
     if (sel && sel.scrollIntoView) sel.scrollIntoView({ block: "nearest" });
   }
 
@@ -7231,18 +7332,24 @@ class SessionView {
     const m = this.mention;
     if (!m || !m.items[index]) return;
     m.sel = index;
-    [...this.mentionEl.children].forEach((row, i) => {
+    this.mentionRowEls.forEach((row, i) => {
       row.classList.toggle("sel", i === index);
       row.setAttribute("aria-selected", i === index ? "true" : "false");
     });
-    const sel = this.mentionEl.children[index];
+    const sel = this.mentionRowEls[index];
     if (sel && sel.scrollIntoView) sel.scrollIntoView({ block: "nearest" });
   }
 
   /* Replace the token with the canonical mention and one trailing space. The
      synthetic input event runs the ordinary edit path (resize, draft save),
-     whose re-evaluation then retires the completed token as prose. */
+     whose re-evaluation then retires the completed token as prose. Wizard
+     rows never insert directly: they advance, retreat, or retry a part. */
   applyMention(item) {
+    if (item.kind === "new-spawn") { this.spawnMentionBegin(); return; }
+    if (item.kind === "spawn-back") { this.spawnStepBack(); return; }
+    if (item.kind === "spawn-step") { this.spawnStepChoose(item); return; }
+    if (item.kind === "spawn-retry") { this.spawnFetchEngines(true); return; }
+    if (item.kind === "spawn-wait") return;
     const m = this.mention;
     if (!m) return;
     const ta = this.ta;
@@ -7285,7 +7392,225 @@ class SessionView {
       push("terminal", `Terminal ${inst.id}`, hintFor(inst.session_id), `@Terminal ${inst.id}`);
     if (withBrowser) push("new-browser", "New browser", "another isolated browser", "@New browser");
     if (withTerminal) push("new-terminal", "New terminal", "another shared terminal", "@New terminal");
+    if (spawnExecFor(bid))
+      push("new-spawn", "New spawn", "delegate a one-shot agent", "");
     return items;
+  }
+
+  /* ---- the "New spawn" wizard ----
+     Selecting the row does not insert text; the popup slides through the
+     directive's parts - node, engine, model, effort - and only the finished
+     directive lands in the composer, so the exact wording never has to be
+     remembered. Single-choice parts are skipped, typing filters the current
+     part, and Escape/Backspace slide back. */
+
+  spawnMentionBegin() {
+    this.mentionSpawn = { step: "node", node: undefined, engine: null,
+                          model: null, effort: null, fetching: false,
+                          error: "", slide: 1 };
+    const nodes = this.spawnNodeChoices();
+    if (nodes.length <= 1) {
+      this.mentionSpawn.node = nodes.length ? nodes[0].node : null;
+      this.mentionSpawn.step = "engine";
+      this.spawnFetchEngines();
+    }
+    this.spawnResetQuery();
+  }
+
+  /* The session's own node always leads (node null: the spawn tool's default
+     target). Other nodes exist only for controller-hosted sessions, whose
+     node can relay; a backend-hosted engine can only spawn onto itself. */
+  spawnNodeChoices() {
+    const bid = this.tab.bid || 0;
+    const choices = [{ node: null, label: backendName(bid),
+                       hint: "this session's node" }];
+    if (!bid) {
+      for (const backend of state.backends) {
+        if (!spawnExecFor(backend.id) || !backendConnectionAllowed(backend.id))
+          continue;
+        choices.push({ node: { bid: backend.id, name: String(backend.name || "") },
+                       label: String(backend.name || `backend ${backend.id}`),
+                       hint: "backend node" });
+      }
+    }
+    return choices;
+  }
+
+  spawnTargetBid() {
+    const wizard = this.mentionSpawn;
+    return wizard && wizard.node ? wizard.node.bid : (this.tab.bid || 0);
+  }
+
+  spawnTargetEngines() {
+    const tid = this.spawnTargetBid();
+    const engines = tid ? state.engCache[tid] : state.engines;
+    return Array.isArray(engines) ? engines : null;
+  }
+
+  spawnFetchEngines(force) {
+    const wizard = this.mentionSpawn;
+    if (!wizard || wizard.fetching) return;
+    if (this.spawnTargetEngines() && !force) return;
+    const tid = this.spawnTargetBid();
+    wizard.fetching = true;
+    wizard.error = "";
+    if (force) this.updateMention();
+    api(tid, "engines", { timeoutMs: 15000 }).then(result => {
+      if (result && Array.isArray(result.engines))
+        rememberEnginePayload(tid, result);
+      if (this.mentionSpawn !== wizard) return;
+      wizard.fetching = false;
+      if (!this.spawnTargetEngines())
+        wizard.error = "node returned no engines";
+      this.updateMention();
+    }, error => {
+      if (this.mentionSpawn !== wizard) return;
+      wizard.fetching = false;
+      wizard.error = (error && error.message) || "engines unavailable";
+      this.updateMention();
+    });
+  }
+
+  spawnStepItems() {
+    const wizard = this.mentionSpawn;
+    const items = [];
+    const step = (label, hint, extra) => items.push({
+      kind: "spawn-step", label, hint: hint || "",
+      search: (label + " " + (extra.value || "")).toLowerCase(), ...extra });
+    if (wizard.step === "node") {
+      for (const choice of this.spawnNodeChoices())
+        step(choice.label, choice.hint, { node: choice.node, value: "" });
+    } else if (wizard.step === "engine") {
+      const engines = this.spawnTargetEngines();
+      if (wizard.fetching || (!engines && !wizard.error)) {
+        items.push({ kind: "spawn-wait", label: "Loading engines…", search: "" });
+        if (!wizard.fetching) this.spawnFetchEngines();
+      } else if (wizard.error) {
+        items.push({ kind: "spawn-retry", label: "Retry - " + wizard.error,
+                     search: "" });
+      } else {
+        for (const engine of engines) {
+          if (!engine || !engine.installed || !engine.key) continue;
+          step(engine.label || engine.key,
+            [engine.version, engine.auth === "ok" ? "" : engine.auth]
+              .filter(Boolean).join(" · "),
+            { engine, value: engine.key });
+        }
+        if (!items.length)
+          items.push({ kind: "spawn-wait", label: "No engines installed on this node",
+                       search: "" });
+      }
+    } else if (wizard.step === "model") {
+      for (const option of this.spawnModelOptions(wizard.engine))
+        step(option.label || option.value || "Default", option.hint,
+          { model: option, value: option.value });
+    } else if (wizard.step === "effort") {
+      for (const option of spawnEffortOptionsFor(wizard.engine, wizard.model))
+        step(option.label || option.value || "Default", option.hint,
+          { effort: option, value: option.value });
+    }
+    items.push({ kind: "spawn-back", label: "Back", hint: "", search: "back" });
+    return items;
+  }
+
+  spawnModelOptions(engine) {
+    const options = engine && Array.isArray(engine.model_options)
+      ? engine.model_options : [];
+    return options.filter(option => option && typeof option.value === "string");
+  }
+
+  spawnStepChoose(item) {
+    const wizard = this.mentionSpawn;
+    if (!wizard) return;
+    if (wizard.step === "node") {
+      wizard.node = item.node;
+      wizard.step = "engine";
+      wizard.slide = 1;
+      this.spawnFetchEngines();
+      this.spawnResetQuery();
+      return;
+    }
+    if (wizard.step === "engine") {
+      wizard.engine = item.engine;
+      if (this.spawnModelOptions(item.engine).length <= 1) {
+        wizard.model = this.spawnModelOptions(item.engine)[0] || { value: "" };
+        this.spawnAfterModel();
+        return;
+      }
+      wizard.step = "model";
+      wizard.slide = 1;
+      this.spawnResetQuery();
+      return;
+    }
+    if (wizard.step === "model") {
+      wizard.model = item.model;
+      this.spawnAfterModel();
+      return;
+    }
+    if (wizard.step === "effort") {
+      wizard.effort = item.effort;
+      this.spawnFinish();
+    }
+  }
+
+  spawnAfterModel() {
+    const wizard = this.mentionSpawn;
+    const efforts = spawnEffortOptionsFor(wizard.engine, wizard.model);
+    if (efforts.length <= 1) {
+      wizard.effort = efforts[0] || { value: "" };
+      this.spawnFinish();
+      return;
+    }
+    wizard.step = "effort";
+    wizard.slide = 1;
+    this.spawnResetQuery();
+  }
+
+  spawnStepBack() {
+    const wizard = this.mentionSpawn;
+    if (!wizard) return;
+    wizard.slide = -1;
+    if (wizard.step === "effort") {
+      wizard.effort = null;
+      wizard.model = null;
+      if (this.spawnModelOptions(wizard.engine).length > 1) {
+        wizard.step = "model";
+      } else {
+        wizard.engine = null;
+        wizard.step = "engine";
+      }
+    } else if (wizard.step === "model") {
+      wizard.model = null;
+      wizard.engine = null;
+      wizard.step = "engine";
+    } else if (wizard.step === "engine" && this.spawnNodeChoices().length > 1) {
+      wizard.engine = null;
+      wizard.node = undefined;
+      wizard.step = "node";
+    } else {
+      this.mentionSpawn = null;   // back out of the wizard, keep the "@" list
+    }
+    this.spawnResetQuery();
+  }
+
+  spawnFinish() {
+    const wizard = this.mentionSpawn;
+    this.mentionSpawn = null;
+    this.applyMention({ insert: spawnMentionInsert(wizard) });
+  }
+
+  /* Clear the token's typed filter (everything after the "@") so each part
+     starts with a clean query. The synthetic input re-runs updateMention,
+     which renders the new step through the ordinary path. */
+  spawnResetQuery() {
+    const m = this.mention;
+    if (!m) return;
+    const ta = this.ta;
+    const end = ta.selectionStart;
+    ta.value = ta.value.slice(0, m.start + 1) + ta.value.slice(end);
+    ta.setSelectionRange(m.start + 1, m.start + 1);
+    ta.focus();
+    ta.dispatchEvent(new Event("input", { bubbles: true }));
   }
 
   /* Live instances on this session's node: whatever the node last reported,

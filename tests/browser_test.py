@@ -41,7 +41,7 @@ STUB_LOG.mkdir(mode=0o700)
 os.environ["PUPPY_BROWSER_STUB_LOG"] = str(STUB_LOG)
 
 from puppy import (browser, browser_agent, config, db, runner as session_runner,
-                   system_prompts, terminal_agent)  # noqa: E402
+                   spawn_agent, system_prompts, terminal_agent)  # noqa: E402
 from puppy.drivers.claude import ClaudeDriver  # noqa: E402
 from puppy.drivers.codex import CodexDriver  # noqa: E402
 from puppy.drivers.opencode import OpenCodeDriver  # noqa: E402
@@ -3093,9 +3093,13 @@ const ctx = (text, caret, endSel) =>
   composerMentionContext(text, caret, endSel === undefined ? caret : endSel);
 const items = [
   {label: "Browser AB12"}, {label: "Terminal CD34"},
-  {label: "New browser"}, {label: "New terminal"},
+  {label: "New browser"}, {label: "New terminal"}, {label: "New spawn"},
 ].map(item => ({label: item.label, search: item.label.toLowerCase()}));
 const labels = (query) => filterMentionItems(items, query).map(item => item.label);
+const opencodeModel = {value: "anthropic/haiku", effort_options: [
+  {value: ""}, {value: "high"}]};
+const codex = {key: "codex", effort_options: [
+  {value: "", label: "Default"}, {value: "low"}, {value: "max"}]};
 console.log(JSON.stringify({
   bare: ctx("@", 1),
   word: ctx("hello @bro", 10),
@@ -3114,7 +3118,18 @@ console.log(JSON.stringify({
   fresh: labels("new"),
   kind: labels("browser"),
   kindId: labels("terminal c"),
+  spawnRow: labels("spawn"),
   none: labels("xyz"),
+  directiveFull: spawnMentionInsert({node: {bid: 2, name: "NAS.lan"},
+    engine: codex, model: {value: "gpt-5.6-sol"}, effort: {value: "max"}}),
+  directiveQuoted: spawnMentionInsert({node: {bid: 2, name: "My NAS"},
+    engine: codex, model: {value: ""}, effort: {value: "low"}}),
+  directiveLocal: spawnMentionInsert({node: null, engine: {key: "claude"},
+    model: {value: "haiku"}, effort: {value: ""}}),
+  effortsShared: spawnEffortOptionsFor(codex, {value: "gpt-5.6-sol"})
+    .map(option => option.value),
+  effortsOwn: spawnEffortOptionsFor(codex, opencodeModel)
+    .map(option => option.value),
 }));
 """ % helpers
     proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
@@ -3133,12 +3148,21 @@ console.log(JSON.stringify({
     assert result["long"] is None, result
     assert result["midCaret"] == {"start": 4, "query": "term"}, result
     assert result["all"] == ["Browser AB12", "Terminal CD34",
-                             "New browser", "New terminal"], result
+                             "New browser", "New terminal", "New spawn"], result
     assert result["id"] == ["Browser AB12"], result
-    assert result["fresh"] == ["New browser", "New terminal"], result
+    assert result["fresh"] == ["New browser", "New terminal", "New spawn"], result
     assert result["kind"] == ["Browser AB12", "New browser"], result
     assert result["kindId"] == ["Terminal CD34"], result
+    assert result["spawnRow"] == ["New spawn"], result
     assert result["none"] == [], result
+    assert result["directiveFull"] == \
+        "@Spawn an agent on NAS.lan using codex gpt-5.6-sol at max effort to", result
+    assert result["directiveQuoted"] == \
+        '@Spawn an agent on "My NAS" using codex at low effort to', result
+    assert result["directiveLocal"] == \
+        "@Spawn an agent using claude haiku to", result
+    assert result["effortsShared"] == ["", "low", "max"], result
+    assert result["effortsOwn"] == ["", "high"], result
 
     # The popup lives inside the composer box and consumes its keys before the
     # composer's own handlers - most importantly Escape, which must close the
@@ -3172,6 +3196,210 @@ console.log(JSON.stringify({
     assert "if (text) decorateMentionsInto(n, text);" in ui_source
     assert "Browser [A-Z0-9]{4}|Terminal [A-Z0-9]{4}|New browser|New terminal" \
         in ui_source
+    # the sent-message token regex recognises every spawn directive variant
+    re_start = ui_source.index("const MENTION_TOKEN_RE")
+    re_source = ui_source[re_start:ui_source.index("/g;", re_start) + 3]
+    token_script = r"""
+%s
+const token = text => {
+  MENTION_TOKEN_RE.lastIndex = 0;
+  const m = MENTION_TOKEN_RE.exec(text);
+  return m ? m[2] : null;
+};
+console.log(JSON.stringify({
+  full: token("please @Spawn an agent on NAS.lan using codex gpt-5.6-sol at max effort to review it"),
+  quoted: token('@Spawn an agent on "My NAS" using codex at low effort to check'),
+  bare: token("@Spawn an agent using claude to summarize"),
+  modelOnly: token("@Spawn an agent using claude haiku to summarize"),
+  browser: token("see @Browser AB12 now"),
+  prose: token("we will spawn an agent later"),
+  incomplete: token("@Spawn an agent using to nothing"),
+}));
+""" % re_source
+    proc = subprocess.run(["node", "-e", token_script],
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:500]
+    tokens = json.loads(proc.stdout.strip())
+    assert tokens["full"] == \
+        "@Spawn an agent on NAS.lan using codex gpt-5.6-sol at max effort to", tokens
+    assert tokens["quoted"] == \
+        '@Spawn an agent on "My NAS" using codex at low effort to', tokens
+    assert tokens["bare"] == "@Spawn an agent using claude to", tokens
+    assert tokens["modelOnly"] == "@Spawn an agent using claude haiku to", tokens
+    assert tokens["browser"] == "@Browser AB12", tokens
+    assert tokens["prose"] is None, tokens
+    assert tokens["incomplete"] is None, tokens
+
+    # The wizard flow itself, driven through the real methods: enter from the
+    # flat list, slide through parts, skip single-choice parts, fetch remote
+    # engines, go back, and insert only the finished directive.
+    methods_start = ui_source.index("  mentionKeydown(e) {")
+    methods = ui_source[methods_start:
+                        ui_source.index("\n  retireSentAttachment(", methods_start)]
+    helpers_again = helpers
+    flow_script = r"""
+%s
+class Classes {
+  constructor(){this.names=new Set();}
+  add(...n){n.forEach(x=>this.names.add(x));}
+  remove(...n){n.forEach(x=>this.names.delete(x));}
+  toggle(name,on){if(on===undefined)on=!this.names.has(name);on?this.add(name):this.remove(name);}
+  contains(name){return this.names.has(name);}
+}
+class MockNode {
+  constructor(tag,cls="",text=""){this.tag=tag;this.classList=new Classes();
+    (cls||"").split(/\s+/).filter(Boolean).forEach(n=>this.classList.add(n));
+    this.textContent=text;this.children=[];this.attributes={};}
+  appendChild(child){this.children.push(child);return child;}
+  setAttribute(k,v){this.attributes[k]=String(v);}
+}
+const el=(tag,cls,text)=>new MockNode(tag,cls,text);
+const svg=()=>new MockNode("svg");
+const globeIcon=svg,terminalIcon=svg,plusIcon=svg,refreshIcon=svg,choiceSvg=svg;
+const scrollCaretIntoView=()=>{};
+const state={instance:"pup",backends:[
+  {id:2,name:"NAS.lan",protocol:1,capabilities:["spawn-exec"]},
+  {id:3,name:"OLD",protocol:1,capabilities:[]},
+  {id:5,name:"LAPTOP",protocol:1,capabilities:["spawn-exec"]},
+],engines:[
+  {key:"claude",label:"Claude Code",installed:true,auth:"ok",version:"2.1.219",
+   model_options:[{value:"",label:"Default"},{value:"haiku",label:"Haiku"}],
+   effort_options:[{value:"",label:"Default"},{value:"max",label:"Max"}]},
+  {key:"broken",installed:false},
+],engCache:{5:[
+  {key:"solo",label:"Solo",installed:true,auth:"ok",
+   model_options:[{value:"",label:"Default"}],
+   effort_options:[{value:"",label:"Default"}]},
+]},tabs:[]};
+const backendName=bid=>bid?(state.backends.find(b=>b.id===bid)||{}).name||("backend "+bid):state.instance;
+const spawnExecFor=bid=>{if(!bid)return true;
+  const backend=state.backends.find(item=>item.id===bid);
+  return !!backend&&Number(backend.protocol||0)>0&&
+    Array.isArray(backend.capabilities)&&backend.capabilities.includes("spawn-exec");};
+const backendConnectionAllowed=()=>true;
+const backendHasCapability=()=>false;
+const browserEnabledFor=()=>false;
+const browserInstancesFor=()=>false;
+const terminalInstancesFor=()=>false;
+const findSessionMeta=()=>null;
+let apiCalls=[],apiResult=null;
+const api=(bid,path)=>{apiCalls.push({bid,path});
+  return Promise.resolve(apiResult);};
+const rememberEnginePayload=(bid,result)=>{
+  if(bid)state.engCache[bid]=result.engines;else state.engines=result.engines;};
+class MockTa {
+  constructor(view){this.view=view;this.value="";this.selectionStart=0;this.selectionEnd=0;}
+  setSelectionRange(a,b){this.selectionStart=a;this.selectionEnd=b;}
+  focus(){}
+  dispatchEvent(){this.view.updateMention();}
+}
+class View {
+  constructor(bid){this.tab={bid,sid:9};this.mention=null;this.mentionDismissedAt=-1;
+    this.mentionSpawn=null;this.mentionRowEls=[];this.histIdx=null;this.ctrlCStreak=0;
+    this.mentionData={at:Date.now(),browsers:null,terminals:null,promise:null};
+    this.mentionEl=new MockNode("div");
+    Object.defineProperty(this.mentionEl,"textContent",{
+      get(){return this._t||"";},set(v){this._t=v;this.children=[];}});
+    this.ta=new MockTa(this);}
+  type(text){this.ta.value=text;this.ta.setSelectionRange(text.length,text.length);
+    this.updateMention();}
+  labels(){return this.mention?this.mention.items.map(i=>i.label):null;}
+  pick(label){const item=this.mention.items.find(i=>i.label===label);
+    if(!item)throw new Error("no row "+label+" in "+JSON.stringify(this.labels()));
+    this.applyMention(item);}
+%s
+}
+const out={};
+const view=new View(0);
+view.type("@");
+out.flat=view.labels();
+view.pick("New spawn");
+out.nodeStep=[view.labels(),view.mentionSpawn.step];
+view.type("@na");
+out.nodeFiltered=view.labels();
+const remoteEngines=[{key:"codex",label:"Codex",installed:true,auth:"ok",version:"0.149.0",
+  model_options:[{value:"",label:"Default"},{value:"gpt-5.6-sol",label:"GPT-5.6 Sol"}],
+  effort_options:[{value:"",label:"Default"},{value:"max",label:"Max"}]}];
+apiResult={engines:remoteEngines,usage_refresh:{}};
+view.pick("NAS.lan");
+out.remoteLoading=[view.labels(),apiCalls.map(c=>c.bid+":"+c.path)];
+async function run(){
+  await Promise.resolve();await Promise.resolve();
+  out.engineStep=[view.labels(),view.mentionSpawn.step];
+  view.pick("Codex");
+  out.modelStep=[view.labels(),view.mentionSpawn.step];
+  view.pick("GPT-5.6 Sol");
+  out.effortStep=[view.labels(),view.mentionSpawn.step];
+  view.pick("Max");
+  out.inserted=[view.ta.value,view.mention,view.mentionSpawn];
+  // back-navigation and the wizard exit
+  view.type("@");
+  view.pick("New spawn");
+  view.pick("NAS.lan");
+  await Promise.resolve();await Promise.resolve();
+  view.mentionKeydown({key:"Escape",preventDefault(){},stopPropagation(){}});
+  out.backToNode=view.mentionSpawn.step;
+  view.mentionKeydown({key:"Backspace",preventDefault(){},stopPropagation(){}});
+  out.backOut=[view.mentionSpawn,view.labels()];
+  // single-model single-effort engines skip straight to insertion,
+  // and a backend-hosted session offers no node part at all
+  const remote=new View(5);
+  remote.type("@");
+  out.remoteFlat=remote.labels();
+  remote.pick("New spawn");
+  out.remoteEngine=[remote.labels(),remote.mentionSpawn.step];
+  remote.pick("Solo");
+  out.remoteInserted=[remote.ta.value,remote.mentionSpawn];
+  console.log(JSON.stringify(out));
+}
+run().catch(e=>{console.error(e&&e.stack||e);process.exit(1);});
+""" % (helpers_again, methods)
+    proc = subprocess.run(["node", "-e", flow_script],
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:1200]
+    flow = json.loads(proc.stdout.strip())
+    assert flow["flat"] == ["New terminal", "New spawn"], flow
+    assert flow["nodeStep"] == [["pup", "NAS.lan", "LAPTOP", "Back"], "node"], flow
+    assert flow["nodeFiltered"] == ["NAS.lan", "Back"], flow
+    assert flow["remoteLoading"] == [["Loading engines…", "Back"],
+                                     ["2:engines"]], flow
+    assert flow["engineStep"] == [["Codex", "Back"], "engine"], flow
+    assert flow["modelStep"] == [["Default", "GPT-5.6 Sol", "Back"], "model"], flow
+    assert flow["effortStep"] == [["Default", "Max", "Back"], "effort"], flow
+    assert flow["inserted"] == [
+        "@Spawn an agent on NAS.lan using codex gpt-5.6-sol at max effort to ",
+        None, None], flow
+    assert flow["backToNode"] == "node", flow
+    assert flow["backOut"] == [None, ["New terminal", "New spawn"]], flow
+    assert flow["remoteFlat"] == ["New spawn"], flow
+    assert flow["remoteEngine"] == [["Solo", "Back"], "engine"], flow
+    assert flow["remoteInserted"] == ["@Spawn an agent using solo to ", None], flow
+
+    # The "New spawn" wizard: capability-gated row, parts slide instead of
+    # inserting, Escape/Backspace go back, and only the finished directive
+    # lands in the composer through the ordinary insert path.
+    assert 'if (spawnExecFor(bid))\n      push("new-spawn", "New spawn"' in ui_source
+    assert 'backend.capabilities.includes("spawn-exec")' in ui_source
+    assert 'if (item.kind === "new-spawn") { this.spawnMentionBegin(); return; }' \
+        in ui_source
+    assert "if (this.mentionSpawn) { this.spawnStepBack(); return true; }" in ui_source
+    assert 'this.mentionSpawn && e.key === "Backspace" && !m.query' in ui_source
+    assert "this.applyMention({ insert: spawnMentionInsert(wizard) });" in ui_source
+    wizard_hide = ui_source.index("  hideMention() {")
+    assert ui_source.index("this.mentionSpawn = null;", wizard_hide) < \
+        ui_source.index("if (!this.mention) return;", wizard_hide)
+    assert '!this.mentionSpawn && e.key === "Enter"' in ui_source
+    assert "if (!this.mentionSpawn) this.refreshMentionInstances();" in ui_source
+    # a backend-hosted session can only spawn onto its own node
+    spawn_nodes = ui_source[ui_source.index("  spawnNodeChoices() {"):
+                            ui_source.index("\n  spawnTargetBid()")]
+    assert "if (!bid) {" in spawn_nodes
+    assert "!backendConnectionAllowed(backend.id)" in spawn_nodes
+    assert ".mention-step-head{" in css_source
+    assert ".mention-pop.slide-next{animation:mention-slide-next" in css_source
+    assert ".mention-pop.slide-back{animation:mention-slide-back" in css_source
+    assert ".mention-pop.slide-next,.mention-pop.slide-back{animation:none}" \
+        in css_source
     # styles: anchored above the composer, one .sel highlight, centred icon ink
     assert ".mention-pop{" in css_source
     assert "bottom:calc(100% + 9px)" in css_source
@@ -3193,6 +3421,12 @@ console.log(JSON.stringify({
     assert '"@Terminal A8AR" mention' in terminal_tools["type"][
         "inputSchema"]["properties"]["terminal_id"]["description"]
     assert '"@New terminal" mention' in terminal_tools["new_terminal"]["description"]
+    assert '"@Spawn an agent on NAS.lan using codex gpt-5.6-sol at max effort ' \
+        'to <task>"' in spawn_agent.TOOL_INSTRUCTIONS
+    assert "passing those values verbatim" in spawn_agent.TOOL_INSTRUCTIONS
+    spawn_tools = {tool["name"]: tool for tool in spawn_agent.TOOLS}
+    assert '"@Spawn an agent ... to ..." mention' in \
+        spawn_tools["spawn"]["description"]
 
 
 def check_chat_status_bar_layout(ui_source: str, css_source: str) -> None:

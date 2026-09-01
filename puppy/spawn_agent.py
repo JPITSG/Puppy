@@ -31,7 +31,16 @@ REQUEST_TIMEOUT = 55.0
 TOOL_INSTRUCTIONS = (
     "Spawned agents are one-shot engine runs Puppy starts on its own nodes: "
     "one prompt in, one final answer out, no conversation. Use them only for "
-    "an explicit delegation request from the user. Call targets to discover "
+    "an explicit delegation request from the user. The chat box inserts such "
+    "a request as a directive in the form \"@Spawn an agent on NAS.lan using "
+    "codex gpt-5.6-sol at max effort to <task>\" - the words after \"using\" "
+    "are the exact engine key, then optionally the exact model id, then "
+    "optionally \"at <effort> effort\"; \"on <node>\" may be quoted or absent "
+    "(absent means this session's node), and omitted parts mean the defaults. "
+    "Treat one such directive as one explicit request: make exactly one spawn "
+    "call passing those values verbatim, and build the spawned agent's prompt "
+    "from the task text plus whatever context it needs. Otherwise, call "
+    "targets to discover "
     "node names, engines, models, efforts, and permission modes; then call "
     "spawn with a complete self-contained prompt - the spawned agent does not "
     "see this chat and cannot ask questions. By default it works in this "
@@ -94,7 +103,9 @@ TOOLS = [
         "Start one non-interactive delegate agent: a single engine run that "
         "receives your prompt, works in a project directory on its node, and "
         "returns one final answer. Spends real quota; use only for an "
-        "explicit user delegation request. Returns the finished answer for "
+        "explicit user delegation request, such as an \"@Spawn an agent ... "
+        "to ...\" mention, whose named node/engine/model/effort must be "
+        "passed verbatim. Returns the finished answer for "
         "quick runs, otherwise a job id to pass to wait.",
         {
             "prompt": {

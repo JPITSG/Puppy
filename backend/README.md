@@ -295,7 +295,11 @@ explanation, and cross-node spawns exist only on the controller, which relays
 them over its already-authenticated channels - nodes still never contact each
 other, so a session hosted on a backend can spawn only onto its own node. A
 running spawned agent also blocks that engine's CLI upgrade, and spawn
-requests are refused while the engine's updater runs.
+requests are refused while the engine's updater runs. The console's composer
+offers the request as an "@" mention: a "New spawn" wizard slides through
+node, engine, model, and effort, then inserts the plain-text directive
+`@Spawn an agent on <node> using <engine> [<model>] [at <effort> effort] to
+<task>`, whose exact meaning the spawn MCP guidance defines for the engine.
 
 An attached console reads and edits these fields through authenticated
 `GET/PATCH /api/system-prompt`. Nodes advertise the additive `system-prompt`
