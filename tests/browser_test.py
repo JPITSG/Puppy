@@ -3452,9 +3452,8 @@ console.log(JSON.stringify([
     ]
 
 
-def check_busy_float(ui_source: str, css_source: str) -> None:
-    """A session turning busy slides to the very top of the flat list; idle
-    rows name their executing backend where the IDLE word used to sit."""
+def check_sticky_activity_promotions(ui_source: str, css_source: str) -> None:
+    """Each idle-to-busy event takes #1 and keeps that place after completion."""
     sidebar = ui_source[
         ui_source.index("function renderSidebar()"):
         ui_source.index("\nfunction sessDot", ui_source.index("function renderSidebar()"))]
@@ -3463,16 +3462,39 @@ def check_busy_float(ui_source: str, css_source: str) -> None:
     assert '"IDLE"' not in sidebar
     assert "activity.textContent = backendName(bid);" in sidebar
     assert "`Session idle on ${backendName(bid)}`" in sidebar
-    # a drop persists the durable order only; the float never rewrites it
+    # a drop persists the durable order only; other automatic promotions stay separate
     assert ".filter(id => !floated.has(id));" in ui_source
+    assert "sessionActivityPromotions.has(sessionActivityKey(bid, s.id))" in ui_source
+    assert "if (draggedPromotion) sessionActivityPromotions.delete(promotionKey);" \
+        in ui_source
+    assert "const visualChanged = visualOrder.length !== context.originalOrder.length" \
+        in ui_source
+    assert "if (!changed && !draggedPromotion)" in ui_source
     # both FLIP helpers share one motion clock
     assert ui_source.count("{ duration: REORDER_MOTION_MS, easing: REORDER_EASING });") == 2
     assert ".si-be.node{" in css_source
     assert ".si-be.idle" not in css_source
 
-    start = ui_source.index("function orderSidebarRows(")
-    end = ui_source.index("\n/* The flat list is rebuilt", start)
+    def function(name):
+        start = ui_source.index("function " + name + "(")
+        brace = ui_source.index(") {", start) + 2
+        depth = 0
+        for index in range(brace, len(ui_source)):
+            if ui_source[index] == "{":
+                depth += 1
+            elif ui_source[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    return ui_source[start:index + 1]
+        raise AssertionError("unbalanced " + name)
+
+    source = "\n".join(function(name) for name in (
+        "sessionActivityKey", "ingestOneSessionActivity", "orderSidebarRows"))
     script = r"""
+const sessionActivityAnchors = new Map();
+const sessionActivityPromotions = new Map();
+let sessionActivityPromotionSequence = 0;
+const reportRemoteCompletion = () => {};
 %s
 const rows = [
   { bid: 0, s: { id: 1, status: "idle" } },
@@ -3480,14 +3502,43 @@ const rows = [
   { bid: 2, s: { id: 7, status: "running" } },
   { bid: 2, s: { id: 9, status: "idle" } },
 ];
-const anchors = { "0:2": 100, "2:7": 300 };
-console.log(JSON.stringify(orderSidebarRows(rows,
-  row => anchors[`${row.bid}:${row.s.id}`] || 0)
-  .map(row => `${row.bid}:${row.s.id}`)));
-""" % ui_source[start:end]
+const order = () => orderSidebarRows(rows, row =>
+  sessionActivityPromotions.get(sessionActivityKey(row.bid, row.s.id)))
+  .map(row => `${row.bid}:${row.s.id}`);
+const snapshots = [order()];
+rows[1].s.active_since = 900;
+ingestOneSessionActivity(0, rows[1].s, 1000, 2000);
+snapshots.push(order());
+// A later observed activation takes #1 while the prior session is still busy,
+// even when its reported start time is older: promotion is event-ordered.
+rows[2].s.active_since = 100;
+ingestOneSessionActivity(2, rows[2].s, 1000, 2000);
+snapshots.push(order());
+rows[1].s.status = "idle";
+rows[1].s.completion_status = "interrupted";
+ingestOneSessionActivity(0, rows[1].s, null, 3000);
+snapshots.push(order());
+// A later idle -> busy transition promotes that same session again.
+rows[1].s.status = "running";
+ingestOneSessionActivity(0, rows[1].s, null, 4000);
+snapshots.push(order());
+// Ordinary running updates do not compete for #1 again.
+ingestOneSessionActivity(2, rows[2].s, 1100, 4100);
+snapshots.push(order());
+console.log(JSON.stringify({snapshots, promotions: sessionActivityPromotions.size}));
+""" % source
     proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:600]
-    assert json.loads(proc.stdout) == ["2:7", "0:2", "0:1", "2:9"]
+    result = json.loads(proc.stdout)
+    assert result["snapshots"] == [
+        ["0:1", "0:2", "2:7", "2:9"],
+        ["0:2", "0:1", "2:7", "2:9"],
+        ["2:7", "0:2", "0:1", "2:9"],
+        ["2:7", "0:2", "0:1", "2:9"],
+        ["0:2", "2:7", "0:1", "2:9"],
+        ["0:2", "2:7", "0:1", "2:9"],
+    ], result
+    assert result["promotions"] == 2, result
 
 
 def check_switch_engine_initial_selection(ui_source: str) -> None:
@@ -5371,7 +5422,7 @@ async def main() -> None:
             check_status_header_activation(ui_source, css_source)
             check_shared_node_order(ui_source, css_source)
             check_flat_session_list(ui_source, css_source)
-            check_busy_float(ui_source, css_source)
+            check_sticky_activity_promotions(ui_source, css_source)
             check_switch_engine_initial_selection(ui_source)
             check_engine_picker_alignment(css_source)
             check_browser_chip_order(ui_source)

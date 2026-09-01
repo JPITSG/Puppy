@@ -2202,6 +2202,11 @@ const remoteUpdateConnections = new Map();
    active_since and server_time so a controller can display a remote duration
    without assuming that the two machines' wall clocks agree. */
 const sessionActivityAnchors = new Map();
+/* Move-to-front history is deliberately separate from the live clock. An
+   idle -> running transition promotes a row once; ending that work block
+   retires only its timer, not the place it earned in the sidebar. */
+const sessionActivityPromotions = new Map();
+let sessionActivityPromotionSequence = 0;
 
 function sessionActivityKey(bid, sid) {
   return `${bid || 0}:${sid}`;
@@ -2219,6 +2224,7 @@ function ingestOneSessionActivity(bid, session, serverTime, receivedAt) {
     return;
   }
 
+  const wasRunning = sessionActivityAnchors.has(key);
   const activeSince = Number(session.active_since);
   const serverNow = Number(serverTime);
   let candidate = null;
@@ -2240,6 +2246,8 @@ function ingestOneSessionActivity(bid, session, serverTime, receivedAt) {
     const current = sessionActivityAnchors.get(key);
     if (current === undefined || Math.abs(current - candidate) > 2000)
       sessionActivityAnchors.set(key, candidate);
+    if (!wasRunning)
+      sessionActivityPromotions.set(key, ++sessionActivityPromotionSequence);
   }
 }
 
@@ -2254,6 +2262,9 @@ function ingestSessionActivity(bid, sessions, serverTime) {
   }
   for (const key of sessionActivityAnchors.keys()) {
     if (key.startsWith(prefix) && !seen.has(key)) sessionActivityAnchors.delete(key);
+  }
+  for (const key of sessionActivityPromotions.keys()) {
+    if (key.startsWith(prefix) && !seen.has(key)) sessionActivityPromotions.delete(key);
   }
 }
 
@@ -3726,25 +3737,31 @@ function selectSidebarSession(bid, sid) {
   syncSessionBrowserChips();
 }
 
-/* Busy sessions surface at the very top, newest activity first, exactly
-   while they run; the settled rows keep the status box's node order and each
-   backend's sticky manual order beneath them. The float is render-only
-   state - it must never be written back into the durable order. */
-function orderSidebarRows(rows, anchorOf) {
-  const busy = [];
+/* Every observed idle -> running transition moves that session to the front.
+   Its promotion survives completion, so this is a move-to-front history rather
+   than a live busy bucket: the next activated session takes #1 and pushes all
+   earlier promotions down one place, regardless of whether they still run. */
+function orderSidebarRows(rows, promotionOf) {
+  const promoted = [];
   const settled = [];
-  for (const row of rows) (row.s.status === "running" ? busy : settled).push(row);
-  busy.sort((a, b) => anchorOf(b) - anchorOf(a));
-  return busy.concat(settled);
+  for (let index = 0; index < rows.length; index++) {
+    const row = rows[index];
+    const promotion = Number(promotionOf(row));
+    if (promotion > 0) promoted.push({ row, promotion, index });
+    else settled.push(row);
+  }
+  promoted.sort((a, b) => b.promotion - a.promotion || a.index - b.index);
+  return promoted.map(item => item.row).concat(settled);
 }
 
 /* The flat list is rebuilt from scratch on every render, so its reorder
    motion cannot use the node-identity FLIP in animateChildReorder. Surviving
    rows are matched across the rebuild by session key instead, each sliding
-   from its previous slot: a session turning busy pushes up through the rows
-   above it and settles back down the same way. A row travelling further than
-   its own height rides above the others and arrives out of a light fade, so
-   the crossing reads as one moving card rather than colliding text. */
+   from its previous slot: a newly activated session pushes up through the rows
+   above it, while completion leaves the established order untouched. A row
+   travelling further than its own height rides above the others and arrives
+   out of a light fade, so the crossing reads as one moving card rather than
+   colliding text. */
 function animateSessionRows(root, rebuild) {
   const before = new Map();
   for (const node of root.querySelectorAll(".sess-item[data-session-key]"))
@@ -3793,11 +3810,13 @@ function renderSidebar() {
     }
   const availableSessions = new Set(
     rows.map(row => sidebarSessionKey(row.bid, row.s.id)));
+  for (const key of sessionActivityPromotions.keys())
+    if (!availableSessions.has(key)) sessionActivityPromotions.delete(key);
   if (state.selectedSession && !availableSessions.has(state.selectedSession))
     state.selectedSession = null;
   const selectedSession = state.selectedSession || focusedSessionKey();
   const list = orderSidebarRows(rows, row =>
-    sessionActivityAnchors.get(sessionActivityKey(row.bid, row.s.id)) || 0)
+    sessionActivityPromotions.get(sessionActivityKey(row.bid, row.s.id)))
     .filter(row => state.showArchived || !row.s.archived);
   animateSessionRows(root, () => {
     root.innerHTML = "";
@@ -4194,12 +4213,24 @@ function wireSessionDropZone(root) {
     context.item.classList.remove("dragging");
     root.classList.remove("reordering");
 
+    const visualOrder = reorderChildren(root, ".sess-item");
+    const visualChanged = visualOrder.length !== context.originalOrder.length ||
+      visualOrder.some((node, index) => node !== context.originalOrder[index]);
+    if (!visualChanged) {
+      renderSidebar();
+      return;
+    }
+
     const bid = context.bid;
     const all = sessionsFor(bid);
-    /* A row floated to the top while busy sits outside the durable order, so
-       it keeps its saved slot exactly like a hidden archived row does - a
-       drop must never bake the transient float into the manual order. */
-    const floated = new Set(all.filter(s => s.status === "running").map(s => s.id));
+    /* Automatic promotions sit outside the backend's durable order. Other
+       promoted rows keep those earned places while this drag is interpreted;
+       dragging a promoted row itself is an explicit manual override, so a
+       successful drop clears only that row's promotion. */
+    const promotionKey = sessionActivityKey(bid, context.sid);
+    const draggedPromotion = sessionActivityPromotions.get(promotionKey);
+    const floated = new Set(all.filter(s => s.id !== context.sid &&
+      sessionActivityPromotions.has(sessionActivityKey(bid, s.id))).map(s => s.id));
     const previousIds = all.map(session => session.id);
     const visibleIds = reorderChildren(root, `.sess-item[data-bid="${bid}"]`)
       .map(node => Number(node.dataset.sessionId))
@@ -4218,20 +4249,29 @@ function wireSessionDropZone(root) {
       return;
     }
     const changed = ids.some((id, index) => id !== previousIds[index]);
-    if (!changed) {
-      if (context.renderPending) renderSidebar();
+    if (!changed && !draggedPromotion) {
+      renderSidebar();
       return;
     }
 
-    sortSessionsByOrder(all, ids); // optimistic; the DOM is already in this order
+    if (changed)
+      sortSessionsByOrder(all, ids); // optimistic; the DOM is already in this order
+    if (draggedPromotion) sessionActivityPromotions.delete(promotionKey);
+    if (!changed) {
+      renderSidebar();
+      return;
+    }
     if (context.renderPending) renderSidebar();
     try {
       await api(bid, "sessions/reorder", { method: "POST", body: { order: ids } });
+      renderSidebar();
     } catch (err) {
       const current = sessionsFor(bid);
       if (current.length === previousIds.length &&
           current.every(session => previousIds.includes(session.id)))
         sortSessionsByOrder(current, previousIds);
+      if (draggedPromotion && !sessionActivityPromotions.has(promotionKey))
+        sessionActivityPromotions.set(promotionKey, draggedPromotion);
       renderSidebar();
       toast(err.message, "error");
     }
