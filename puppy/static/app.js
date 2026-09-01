@@ -1598,10 +1598,12 @@ function workspaceLocationPath(session) {
   return (session && session.cwd) || "";
 }
 
-function workspaceLocationLabel(session, bid, maxChars = 38) {
+function workspaceLocationLabel(session, bid, maxChars) {
   const node = workspaceLocationNode(session, bid);
+  const path = workspaceLocationPath(session);
+  if (!Number.isFinite(maxChars)) return `${node}:${path}`;
   const room = Math.max(10, maxChars - node.length - 1);
-  return `${node}:${tailPath(workspaceLocationPath(session), room)}`;
+  return `${node}:${tailPath(path, room)}`;
 }
 
 function workspaceLocationTitle(session, bid) {

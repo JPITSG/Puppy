@@ -3192,6 +3192,7 @@ console.log(JSON.stringify({
   direct:[workspaceLocationLabel(direct,0),workspaceLocationTitle(direct,0)],
   remote:[workspaceLocationLabel(remote,7),workspaceLocationTitle(remote,7)],
   missing:workspaceLocationLabel(missing,0),
+  longFull:workspaceLocationLabel(long,7),
   long:workspaceLocationLabel(long,7,20),
 }));
 """ % helpers
@@ -3202,6 +3203,7 @@ console.log(JSON.stringify({
         "direct": ["Primary:/etc/scripts/puppy", "Primary:/etc/scripts/puppy"],
         "remote": ["NAS:/volume/projects/puppy", "NAS:/volume/projects/puppy"],
         "missing": "Primary:Scratch workspace expired",
+        "longFull": "NAS:/one/two/three/four/five",
         "long": "NAS:…/three/four/five",
     }, result
 
@@ -3218,7 +3220,8 @@ console.log(JSON.stringify({
     assert "cwd.textContent = workspaceLocationLabel(s, this.tab.bid);" in head
     assert "workspaceLocationTitle(s, this.tab.bid)" in head
     assert 'querySelector(".chip.be")' not in head
-    assert "backend/engine/model triplet is session identity" in css_source
+    assert "Every pill is durable session metadata" in css_source
+    assert ".chat-meta-scroll .chip{max-width:none}" in css_source
 
 
 def check_backend_name_single_activation(ui_source: str) -> None:
@@ -4504,10 +4507,10 @@ async def main() -> None:
             assert ui_source.count("this.setReconnecting(false);") == 2
             assert "this.setReconnecting(true);" in ui_source
             assert 'this.setStatus("Connection lost' not in ui_source
-            # The metadata strip already scrolls horizontally. Its engine/model
-            # identity must use its full intrinsic width rather than inheriting
-            # the generic 160px phone cap and clipping the selected model ID.
-            assert ".chat-meta-scroll .chip.eng{max-width:none}" in css_source
+            # The metadata strip already scrolls horizontally. Every pill must
+            # keep its full intrinsic width rather than inheriting the generic
+            # 160px phone cap and clipping its value.
+            assert ".chat-meta-scroll .chip{max-width:none}" in css_source
             # Compatible headless nodes get one lightweight list watcher. Its
             # explicit lifecycle event, not an ordinary socket close, is what
             # retires cached running state immediately.
