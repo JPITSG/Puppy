@@ -23,6 +23,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import secrets
 import signal
 import time
@@ -41,6 +42,13 @@ DEFAULT_TIMEOUT_S = 900
 MIN_TIMEOUT_S = 30
 MAX_TIMEOUT_S = 7200
 WAIT_MAX_S = 30
+# One spawn call may fan out into parallel identical runs. The count cap keeps
+# a single directive from starting an unbounded process fleet; the running cap
+# is the node-wide backstop across calls, callers, and relayed remote work.
+MAX_SPAWN_COUNT = 12
+MAX_WAIT_JOBS = 16
+MAX_RUNNING_JOBS = 24
+_JOB_ID_RE = re.compile(r"[a-f0-9]{8}")
 # Finished jobs stay readable for a while, then disappear with their output.
 PURGE_AFTER_S = 1200
 SWEEP_INTERVAL_S = 10
@@ -71,6 +79,41 @@ def _clamp_wait(value, default: int = 25) -> float:
     except (TypeError, ValueError):
         wait = default
     return float(min(max(wait, 0), WAIT_MAX_S))
+
+
+def _validated_count(value) -> int:
+    if value is None:
+        return 1
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        raise SpawnError("count must be a whole number of agents")
+    if not 1 <= count <= MAX_SPAWN_COUNT:
+        raise SpawnError("count must be between 1 and {}".format(
+            MAX_SPAWN_COUNT))
+    return count
+
+
+def _validated_job_ids(params: dict) -> list:
+    values = params.get("jobs")
+    if values is None and params.get("job") is not None:
+        values = params.get("job")
+    if isinstance(values, str):
+        values = [values]
+    if not isinstance(values, list) or not values:
+        raise SpawnError("pass jobs: the spawned-agent job id(s) to act on")
+    ids = []
+    for value in values:
+        job_id = str(value or "").strip()
+        if not _JOB_ID_RE.fullmatch(job_id):
+            raise SpawnError("invalid spawned-agent job id '{}'".format(
+                str(value)[:32]))
+        if job_id not in ids:
+            ids.append(job_id)
+    if len(ids) > MAX_WAIT_JOBS:
+        raise SpawnError("act on at most {} jobs per call".format(
+            MAX_WAIT_JOBS))
+    return ids
 
 
 async def prepare_request(body: dict) -> dict:
@@ -417,6 +460,15 @@ class _Manager:
         if self._sweeper is None or self._sweeper.done():
             self._sweeper = asyncio.ensure_future(self._sweep_loop())
 
+    def running_count(self) -> int:
+        return sum(1 for job in self.jobs.values() if job.running)
+
+    def ensure_capacity(self, count: int) -> None:
+        if self.running_count() + count > MAX_RUNNING_JOBS:
+            raise SpawnError(
+                "this node is already running too many spawned agents - wait "
+                "for some to finish or cancel them", 429)
+
     def start_job(self, request: dict, owner) -> SpawnJob:
         job = SpawnJob(request, owner)
         self.jobs[job.id] = job
@@ -644,9 +696,11 @@ def job_text(job: dict, node_name: str) -> str:
     if status == "running":
         lines.append("Status: running for {}s (timeout {}s).".format(
             elapsed, job.get("timeout_s")))
-        lines.append("The result is not ready yet. Call wait with job "
-                     "\"{}\" until it completes; cancel discards it. The job "
-                     "dies with this turn, so collect the result before "
+        if job.get("wait_note"):
+            lines.append("Note: {}".format(job["wait_note"]))
+        lines.append("The result is not ready yet. Call wait with jobs "
+                     "[\"{}\"] until it completes; cancel discards it. The "
+                     "job dies with this turn, so collect the result before "
                      "finishing.".format(job.get("id")))
         return "\n".join(lines)
     detail = _format_usage(job)
@@ -667,8 +721,75 @@ def job_text(job: dict, node_name: str) -> str:
     return "\n".join(lines)
 
 
+def jobs_text(entries) -> str:
+    """Combined rendering for a parallel fleet: a completion summary and the
+    still-running ids first, then each finished agent's full result block.
+    ``entries`` is a list of (payload, node_name) pairs."""
+    if len(entries) == 1:
+        return job_text(entries[0][0], entries[0][1])
+    running = [entry for entry in entries
+               if str(entry[0].get("status")) == "running"]
+    finished = [entry for entry in entries
+                if str(entry[0].get("status")) != "running"]
+    lines = ["Spawned agents: {} of {} finished.".format(
+        len(finished), len(entries))]
+    if running:
+        lines.append(
+            "Still running: {} - keep calling wait with these job ids until "
+            "every agent finishes; they all die with this turn.".format(
+                ", ".join(str(entry[0].get("id")) for entry in running)))
+        for payload, node_name in running:
+            note = payload.get("wait_note")
+            if note:
+                lines.append("Agent {} on {}: {}".format(
+                    payload.get("id"), node_name, note))
+    for payload, node_name in finished:
+        lines.append("")
+        lines.append("=== agent {} ===".format(payload.get("id")))
+        lines.append(job_text(payload, node_name))
+    return "\n".join(lines)
+
+
+def _relayed_job(data: dict, node_name: str) -> dict:
+    job = data.get("job") if isinstance(data.get("job"), dict) else {}
+    if not job.get("id"):
+        raise SpawnError("node '{}' returned an invalid spawn response"
+                         .format(node_name), 502)
+    return job
+
+
+def _register_remote(session: dict, turn_id: str, target: dict,
+                     job: dict) -> None:
+    if str(job.get("status")) != "running":
+        return
+    manager().remote[str(job["id"])] = {
+        "bid": target["bid"], "node": target["name"],
+        "session_id": int(session["id"]), "turn_id": str(turn_id),
+    }
+    manager().ensure_sweeper()
+
+
+async def _refresh_remote(channel: dict, job: dict, wait_s: float) -> dict:
+    """One remote job's next observation. A transient relay failure keeps the
+    last known running state (with a note) so one hiccup cannot discard the
+    rest of a fleet's results."""
+    if str(job.get("status")) != "running":
+        return job
+    try:
+        data = await _node_request(
+            channel, "GET", "spawn/{}?wait_s={}".format(job["id"], int(wait_s)),
+            timeout_s=wait_s + 25.0)
+        fresh = data.get("job") if isinstance(data.get("job"), dict) else None
+        return fresh if fresh and fresh.get("id") else job
+    except SpawnError as exc:
+        stale = dict(job)
+        stale["wait_note"] = "status unavailable ({}) - wait again".format(exc)
+        return stale
+
+
 async def start_for_turn(session: dict, turn_id: str, params: dict) -> dict:
     target = resolve_target(params.get("node"))
+    count = _validated_count(params.get("count"))
     body = {
         "engine": str(params.get("engine") or "").strip() or
         str(session.get("engine") or ""),
@@ -683,25 +804,49 @@ async def start_for_turn(session: dict, turn_id: str, params: dict) -> dict:
     initial_wait = _clamp_wait(params.get("wait_s"), default=15)
     if target["bid"]:
         channel = _spawn_channel(target["bid"])
-        body["wait_s"] = initial_wait
-        data = await _node_request(channel, "POST", "spawn", body=body,
-                                   timeout_s=initial_wait + 35.0)
-        job = data.get("job") if isinstance(data.get("job"), dict) else {}
-        if not job.get("id"):
-            raise SpawnError("node '{}' returned an invalid spawn response"
-                             .format(target["name"]), 502)
-        if str(job.get("status")) == "running":
-            manager().remote[str(job["id"])] = {
-                "bid": target["bid"], "node": target["name"],
-                "session_id": int(session["id"]), "turn_id": str(turn_id),
-            }
-            manager().ensure_sweeper()
-        return {"text": job_text(job, target["name"])}
+        if count == 1:
+            data = await _node_request(
+                channel, "POST", "spawn", body=dict(body, wait_s=initial_wait),
+                timeout_s=initial_wait + 35.0)
+            jobs = [_relayed_job(data, target["name"])]
+        else:
+            # A fan-out is relayed as independent single starts, so any
+            # spawn-exec node can host a fleet without a wire change. All or
+            # nothing: if one start fails, the started remainder is cancelled
+            # rather than leaving a surprise partial fleet running.
+            outcomes = await asyncio.gather(
+                *(_node_request(channel, "POST", "spawn",
+                                body=dict(body, wait_s=0), timeout_s=45.0)
+                  for _ in range(count)), return_exceptions=True)
+            failure = next((item for item in outcomes
+                            if isinstance(item, BaseException)), None)
+            jobs = [_relayed_job(item, target["name"]) for item in outcomes
+                    if not isinstance(item, BaseException)]
+            if failure is not None:
+                for job in jobs:
+                    try:
+                        await _node_request(channel, "DELETE",
+                                            "spawn/" + str(job["id"]),
+                                            timeout_s=20.0)
+                    except SpawnError:
+                        pass
+                if isinstance(failure, SpawnError):
+                    raise failure
+                raise SpawnError("node '{}' failed while starting the fleet: "
+                                 "{}".format(target["name"], failure), 502)
+            jobs = list(await asyncio.gather(
+                *(_refresh_remote(channel, job, initial_wait)
+                  for job in jobs)))
+        for job in jobs:
+            _register_remote(session, turn_id, target, job)
+        return {"text": jobs_text([(job, target["name"]) for job in jobs])}
     request = await prepare_request(body)
-    job = manager().start_job(
-        request, ("turn", int(session["id"]), str(turn_id)))
-    await manager().wait(job, initial_wait)
-    return {"text": job_text(job.payload(), target["name"])}
+    manager().ensure_capacity(count)
+    owner = ("turn", int(session["id"]), str(turn_id))
+    jobs = [manager().start_job(request, owner) for _ in range(count)]
+    await asyncio.gather(*(manager().wait(job, initial_wait) for job in jobs))
+    return {"text": jobs_text([(job.payload(), target["name"])
+                               for job in jobs])}
 
 
 def _turn_job(session: dict, turn_id: str, job_id: str):
@@ -720,44 +865,69 @@ def _turn_remote(session: dict, turn_id: str, job_id: str):
     return None
 
 
+def _turn_entries(session: dict, turn_id: str, ids: list) -> list:
+    """Resolve every id to this turn's local job or remote handle up front, so
+    a stray id fails the call before anything is waited on or cancelled."""
+    entries = []
+    for job_id in ids:
+        job = _turn_job(session, turn_id, job_id)
+        if job is not None:
+            entries.append(("local", job_id, job))
+            continue
+        handle = _turn_remote(session, turn_id, job_id)
+        if handle is not None:
+            entries.append(("remote", job_id, handle))
+            continue
+        raise SpawnError("no spawned agent '{}' belongs to this turn"
+                         .format(job_id[:32]), 404)
+    return entries
+
+
 async def wait_for_turn(session: dict, turn_id: str, params: dict) -> dict:
-    job_id = str(params.get("job") or "")
+    entries = _turn_entries(session, turn_id,
+                            _validated_job_ids(params))
     wait_s = _clamp_wait(params.get("wait_s"))
-    job = _turn_job(session, turn_id, job_id)
-    if job is not None:
-        await manager().wait(job, wait_s)
-        return {"text": job_text(job.payload(), _local_node_name())}
-    handle = _turn_remote(session, turn_id, job_id)
-    if handle is not None:
-        channel = _spawn_channel(handle["bid"])
-        data = await _node_request(
-            channel, "GET", "spawn/{}?wait_s={}".format(job_id, int(wait_s)),
-            timeout_s=wait_s + 25.0)
-        job = data.get("job") if isinstance(data.get("job"), dict) else {}
+
+    async def settle(kind, job_id, ref):
+        if kind == "local":
+            await manager().wait(ref, wait_s)
+            return (ref.payload(), _local_node_name())
+        try:
+            channel = _spawn_channel(ref["bid"])
+        except SpawnError as exc:
+            if len(entries) == 1:
+                raise
+            return ({"id": job_id, "status": "running", "elapsed_s": 0,
+                     "wait_note": "status unavailable ({}) - wait again"
+                     .format(exc)}, ref["node"])
+        job = await _refresh_remote(
+            channel, {"id": job_id, "status": "running"}, wait_s)
         if str(job.get("status") or "running") != "running":
             manager().remote.pop(job_id, None)
-        return {"text": job_text(job, handle["node"])}
-    raise SpawnError("no spawned agent '{}' belongs to this turn"
-                     .format(job_id[:32]), 404)
+        return (job, ref["node"])
+
+    results = await asyncio.gather(
+        *(settle(kind, job_id, ref) for kind, job_id, ref in entries))
+    return {"text": jobs_text(list(results))}
 
 
 async def cancel_for_turn(session: dict, turn_id: str, params: dict) -> dict:
-    job_id = str(params.get("job") or "")
-    job = _turn_job(session, turn_id, job_id)
-    if job is not None:
-        await manager().cancel(job, "cancelled by the spawning turn")
-        manager().jobs.pop(job_id, None)
-        return {"text": "Cancelled spawned agent {}.".format(job_id)}
-    handle = _turn_remote(session, turn_id, job_id)
-    if handle is not None:
+    entries = _turn_entries(session, turn_id,
+                            _validated_job_ids(params))
+    lines = []
+    for kind, job_id, ref in entries:
+        if kind == "local":
+            await manager().cancel(ref, "cancelled by the spawning turn")
+            manager().jobs.pop(job_id, None)
+            lines.append("Cancelled spawned agent {}.".format(job_id))
+            continue
         manager().remote.pop(job_id, None)
-        channel = _spawn_channel(handle["bid"])
+        channel = _spawn_channel(ref["bid"])
         await _node_request(channel, "DELETE", "spawn/" + job_id,
                            timeout_s=25.0)
-        return {"text": "Cancelled spawned agent {} on {}.".format(
-            job_id, handle["node"])}
-    raise SpawnError("no spawned agent '{}' belongs to this turn"
-                     .format(job_id[:32]), 404)
+        lines.append("Cancelled spawned agent {} on {}.".format(
+            job_id, ref["node"]))
+    return {"text": "\n".join(lines)}
 
 
 def _engine_lines(engines: list) -> list:
@@ -850,6 +1020,7 @@ async def h_spawn_start(request):
                                  status=400)
     try:
         prepared = await prepare_request(body)
+        manager().ensure_capacity(1)
     except SpawnError as exc:
         return web.json_response({"error": str(exc)}, status=exc.status)
     job = manager().start_job(prepared, ("remote",))

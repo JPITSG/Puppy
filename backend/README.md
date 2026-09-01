@@ -295,10 +295,16 @@ explanation, and cross-node spawns exist only on the controller, which relays
 them over its already-authenticated channels - nodes still never contact each
 other, so a session hosted on a backend can spawn only onto its own node. A
 running spawned agent also blocks that engine's CLI upgrade, and spawn
-requests are refused while the engine's updater runs. The console's composer
+requests are refused while the engine's updater runs. A parallel fan-out
+(spawn `count`, up to 12) is expanded by the bridge into independent jobs -
+a remote fleet is simply that many relayed single starts, so any spawn-exec
+node can host one - and `wait`/`cancel` operate on job-id lists with one
+shared concurrent budget; each node also caps its total running spawned
+agents. The console's composer
 offers the request as an "@" mention: a "New spawn" wizard slides through
-node, engine, model, and effort, then inserts the plain-text directive
-`@Spawn an agent on <node> using <engine> [<model>] [at <effort> effort] to
+agent count, node, engine, model, and effort, then inserts the plain-text
+directive `@Spawn <an agent|N agents> on <node> using <engine> [<model>]
+[at <effort> effort] to
 <task>`, whose exact meaning the spawn MCP guidance defines for the engine.
 
 An attached console reads and edits these fields through authenticated

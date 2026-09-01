@@ -326,6 +326,72 @@ async def test_turn_dispatch(cwd):
     print("turn-bound dispatch, reaping, and bridge socket ok")
 
 
+async def test_parallel(cwd):
+    sid = db.create_session("fleet test", "fake", cwd, "", "", "blue",
+                            "standard")
+    hub = runner.hub(sid)
+    hub.status = "running"
+    hub._active_turn_id = "turn-f"
+    session = db.get_session(sid)
+
+    for bad, needle in ((0, "between 1 and"), (13, "between 1 and"),
+                        ("x", "whole number")):
+        try:
+            await spawn_exec.start_for_turn(session, "turn-f",
+                                            {"prompt": "hi", "count": bad})
+        except spawn_exec.SpawnError as exc:
+            assert needle in str(exc), (bad, str(exc))
+        else:
+            raise AssertionError("count accepted: {!r}".format(bad))
+
+    fleet = await spawn_exec.start_for_turn(
+        session, "turn-f", {"prompt": "count please", "model": "ok",
+                            "count": 3, "wait_s": 25})
+    assert "3 of 3 finished." in fleet["text"], fleet
+    assert fleet["text"].count("=== agent ") == 3, fleet
+    assert fleet["text"].count("FINAL ANSWER: 42") == 3, fleet
+
+    slow = await spawn_exec.start_for_turn(
+        session, "turn-f", {"prompt": "hang", "model": "hang", "count": 2,
+                            "wait_s": 0})
+    assert "0 of 2 finished." in slow["text"], slow
+    assert "Still running:" in slow["text"], slow
+    ids = [job.id for job in spawn_exec.manager().jobs.values()
+           if job.owner == ("turn", sid, "turn-f") and job.running]
+    assert len(ids) == 2, ids
+    waited = await spawn_exec.wait_for_turn(
+        session, "turn-f", {"jobs": ids, "wait_s": 1})
+    assert "0 of 2 finished." in waited["text"], waited
+    try:
+        await spawn_exec.wait_for_turn(session, "turn-f",
+                                       {"jobs": ids + ["zzzzzzzz"]})
+    except spawn_exec.SpawnError as exc:
+        assert "invalid spawned-agent job id" in str(exc)
+    else:
+        raise AssertionError("invalid job id accepted")
+    cancelled = await spawn_exec.cancel_for_turn(
+        session, "turn-f", {"jobs": ids})
+    assert cancelled["text"].count("Cancelled spawned agent") == 2, cancelled
+    for job_id in ids:
+        assert spawn_exec.manager().get(job_id) is None
+
+    previous_cap = spawn_exec.MAX_RUNNING_JOBS
+    spawn_exec.MAX_RUNNING_JOBS = 1
+    try:
+        await spawn_exec.start_for_turn(
+            session, "turn-f", {"prompt": "hang", "model": "hang",
+                                "count": 2, "wait_s": 0})
+    except spawn_exec.SpawnError as exc:
+        assert "too many spawned agents" in str(exc)
+    else:
+        raise AssertionError("capacity cap not enforced")
+    finally:
+        spawn_exec.MAX_RUNNING_JOBS = previous_cap
+    hub.status = "idle"
+    hub._active_turn_id = ""
+    print("parallel fleet start/wait/cancel and caps ok")
+
+
 async def test_http_routes(cwd):
     from aiohttp import web
     from aiohttp.test_utils import TestClient, TestServer
@@ -371,6 +437,7 @@ async def main():
         await test_one_shot_paths(cwd)
         await test_validation(cwd)
         await test_turn_dispatch(cwd)
+        await test_parallel(cwd)
         await test_http_routes(cwd)
     finally:
         await spawn_exec.manager().shutdown()

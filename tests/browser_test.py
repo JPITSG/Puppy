@@ -3126,6 +3126,8 @@ console.log(JSON.stringify({
     engine: codex, model: {value: ""}, effort: {value: "low"}}),
   directiveLocal: spawnMentionInsert({node: null, engine: {key: "claude"},
     model: {value: "haiku"}, effort: {value: ""}}),
+  directiveFleet: spawnMentionInsert({count: 10, node: {bid: 2, name: "NAS.lan"},
+    engine: codex, model: {value: ""}, effort: {value: ""}}),
   effortsShared: spawnEffortOptionsFor(codex, {value: "gpt-5.6-sol"})
     .map(option => option.value),
   effortsOwn: spawnEffortOptionsFor(codex, opencodeModel)
@@ -3161,6 +3163,8 @@ console.log(JSON.stringify({
         '@Spawn an agent on "My NAS" using codex at low effort to', result
     assert result["directiveLocal"] == \
         "@Spawn an agent using claude haiku to", result
+    assert result["directiveFleet"] == \
+        "@Spawn 10 agents on NAS.lan using codex to", result
     assert result["effortsShared"] == ["", "low", "max"], result
     assert result["effortsOwn"] == ["", "high"], result
 
@@ -3211,6 +3215,7 @@ console.log(JSON.stringify({
   quoted: token('@Spawn an agent on "My NAS" using codex at low effort to check'),
   bare: token("@Spawn an agent using claude to summarize"),
   modelOnly: token("@Spawn an agent using claude haiku to summarize"),
+  fleet: token("@Spawn 10 agents on NAS.lan using codex to hunt bugs"),
   browser: token("see @Browser AB12 now"),
   prose: token("we will spawn an agent later"),
   incomplete: token("@Spawn an agent using to nothing"),
@@ -3226,6 +3231,8 @@ console.log(JSON.stringify({
         '@Spawn an agent on "My NAS" using codex at low effort to', tokens
     assert tokens["bare"] == "@Spawn an agent using claude to", tokens
     assert tokens["modelOnly"] == "@Spawn an agent using claude haiku to", tokens
+    assert tokens["fleet"] == \
+        "@Spawn 10 agents on NAS.lan using codex to", tokens
     assert tokens["browser"] == "@Browser AB12", tokens
     assert tokens["prose"] is None, tokens
     assert tokens["incomplete"] is None, tokens
@@ -3314,6 +3321,11 @@ const view=new View(0);
 view.type("@");
 out.flat=view.labels();
 view.pick("New spawn");
+out.countStep=[view.labels().length,view.labels()[0],view.labels()[11],
+  view.labels()[12],view.mentionSpawn.step];
+view.type("@3 ag");
+out.countFiltered=view.labels();
+view.pick("3 agents");
 out.nodeStep=[view.labels(),view.mentionSpawn.step];
 view.type("@na");
 out.nodeFiltered=view.labels();
@@ -3332,13 +3344,16 @@ async function run(){
   out.effortStep=[view.labels(),view.mentionSpawn.step];
   view.pick("Max");
   out.inserted=[view.ta.value,view.mention,view.mentionSpawn];
-  // back-navigation and the wizard exit
+  // back-navigation slides engine -> node -> count -> back to the flat list
   view.type("@");
   view.pick("New spawn");
+  view.pick("1 agent");
   view.pick("NAS.lan");
   await Promise.resolve();await Promise.resolve();
   view.mentionKeydown({key:"Escape",preventDefault(){},stopPropagation(){}});
   out.backToNode=view.mentionSpawn.step;
+  view.mentionKeydown({key:"Escape",preventDefault(){},stopPropagation(){}});
+  out.backToCount=view.mentionSpawn.step;
   view.mentionKeydown({key:"Backspace",preventDefault(){},stopPropagation(){}});
   out.backOut=[view.mentionSpawn,view.labels()];
   // single-model single-effort engines skip straight to insertion,
@@ -3347,6 +3362,8 @@ async function run(){
   remote.type("@");
   out.remoteFlat=remote.labels();
   remote.pick("New spawn");
+  out.remoteCount=remote.mentionSpawn.step;
+  remote.pick("1 agent");
   out.remoteEngine=[remote.labels(),remote.mentionSpawn.step];
   remote.pick("Solo");
   out.remoteInserted=[remote.ta.value,remote.mentionSpawn];
@@ -3359,6 +3376,8 @@ run().catch(e=>{console.error(e&&e.stack||e);process.exit(1);});
     assert proc.returncode == 0, proc.stderr[:1200]
     flow = json.loads(proc.stdout.strip())
     assert flow["flat"] == ["New terminal", "New spawn"], flow
+    assert flow["countStep"] == [13, "1 agent", "12 agents", "Back", "count"], flow
+    assert flow["countFiltered"] == ["3 agents", "Back"], flow
     assert flow["nodeStep"] == [["pup", "NAS.lan", "LAPTOP", "Back"], "node"], flow
     assert flow["nodeFiltered"] == ["NAS.lan", "Back"], flow
     assert flow["remoteLoading"] == [["Loading engines…", "Back"],
@@ -3367,11 +3386,13 @@ run().catch(e=>{console.error(e&&e.stack||e);process.exit(1);});
     assert flow["modelStep"] == [["Default", "GPT-5.6 Sol", "Back"], "model"], flow
     assert flow["effortStep"] == [["Default", "Max", "Back"], "effort"], flow
     assert flow["inserted"] == [
-        "@Spawn an agent on NAS.lan using codex gpt-5.6-sol at max effort to ",
+        "@Spawn 3 agents on NAS.lan using codex gpt-5.6-sol at max effort to ",
         None, None], flow
     assert flow["backToNode"] == "node", flow
+    assert flow["backToCount"] == "count", flow
     assert flow["backOut"] == [None, ["New terminal", "New spawn"]], flow
     assert flow["remoteFlat"] == ["New spawn"], flow
+    assert flow["remoteCount"] == "count", flow
     assert flow["remoteEngine"] == [["Solo", "Back"], "engine"], flow
     assert flow["remoteInserted"] == ["@Spawn an agent using solo to ", None], flow
 
@@ -3424,9 +3445,17 @@ run().catch(e=>{console.error(e&&e.stack||e);process.exit(1);});
     assert '"@Spawn an agent on NAS.lan using codex gpt-5.6-sol at max effort ' \
         'to <task>"' in spawn_agent.TOOL_INSTRUCTIONS
     assert "passing those values verbatim" in spawn_agent.TOOL_INSTRUCTIONS
+    assert '"@Spawn 10 agents ..."' in spawn_agent.TOOL_INSTRUCTIONS
+    assert "Wait until every agent has finished" in spawn_agent.TOOL_INSTRUCTIONS
     spawn_tools = {tool["name"]: tool for tool in spawn_agent.TOOLS}
     assert '"@Spawn an agent ... to ..." mention' in \
         spawn_tools["spawn"]["description"]
+    count_schema = spawn_tools["spawn"]["inputSchema"]["properties"]["count"]
+    assert count_schema["minimum"] == 1 and count_schema["maximum"] == 12
+    wait_schema = spawn_tools["wait"]["inputSchema"]
+    assert wait_schema["properties"]["jobs"]["type"] == "array"
+    assert wait_schema["required"] == ["jobs"]
+    assert spawn_tools["cancel"]["inputSchema"]["required"] == ["jobs"]
 
 
 def check_chat_status_bar_layout(ui_source: str, css_source: str) -> None:

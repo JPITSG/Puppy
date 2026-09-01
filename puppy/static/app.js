@@ -1941,7 +1941,7 @@ function linkifyInto(node, text) {
    or terminal the message pointed the agent at. Surrounding prose keeps its
    ordinary linkification. */
 const MENTION_TOKEN_RE =
-  /(^|[\s([{'"])(@(?:Browser [A-Z0-9]{4}|Terminal [A-Z0-9]{4}|New browser|New terminal|Spawn an agent(?: on (?:"[^"\n]{1,80}"|\S+))? using \S+(?: \S+)?(?: at \S+ effort)? to))(?=$|[\s.,;:!?)\]}'"])/g;
+  /(^|[\s([{'"])(@(?:Browser [A-Z0-9]{4}|Terminal [A-Z0-9]{4}|New browser|New terminal|Spawn (?:an agent|[0-9]{1,2} agents)(?: on (?:"[^"\n]{1,80}"|\S+))? using \S+(?: \S+)?(?: at \S+ effort)? to))(?=$|[\s.,;:!?)\]}'"])/g;
 function decorateMentionsInto(node, text) {
   text = String(text == null ? "" : text);
   MENTION_TOKEN_RE.lastIndex = 0;
@@ -6095,11 +6095,13 @@ function filterMentionItems(items, query) {
 
 /* The spawn wizard's finished directive. It reads as prose, ends in "to" so
    the task follows naturally, and stays exactly parseable: the spawn MCP
-   guidance defines this shape, omitted parts mean the engine defaults, and a
-   node name with spaces is quoted. sel.node is null for the session's own
-   node, whose name the spawn tool already assumes when no node is named. */
+   guidance defines this shape, omitted parts mean the engine defaults, a
+   count above one becomes a parallel fan-out, and a node name with spaces is
+   quoted. sel.node is null for the session's own node, whose name the spawn
+   tool already assumes when no node is named. */
 function spawnMentionInsert(sel) {
-  const parts = ["@Spawn an agent"];
+  const count = Number(sel.count) || 1;
+  const parts = [count > 1 ? "@Spawn " + count + " agents" : "@Spawn an agent"];
   if (sel.node) {
     const name = String(sel.node.name || "");
     parts.push("on " + (/\s/.test(name) ? '"' + name + '"' : name));
@@ -7281,6 +7283,7 @@ class SessionView {
     if (wizard) {
       const head = el("div", "mention-step-head");
       const trail = ["New spawn"];
+      if (wizard.count > 1) trail.push(`${wizard.count} agents`);
       if (wizard.node) trail.push(wizard.node.name);
       else if (wizard.node === null) trail.push(backendName(this.tab.bid || 0));
       if (wizard.engine) trail.push(wizard.engine.key);
@@ -7288,7 +7291,8 @@ class SessionView {
         trail.push(wizard.model.value || "default model");
       head.appendChild(el("span", "mention-step-trail", trail.join(" · ")));
       head.appendChild(el("span", "mention-step-name",
-        { node: "Node", engine: "Engine", model: "Model", effort: "Effort" }[wizard.step] || ""));
+        { count: "Agents", node: "Node", engine: "Engine", model: "Model",
+          effort: "Effort" }[wizard.step] || ""));
       this.mentionEl.appendChild(head);
     }
     m.items.forEach((item, index) => {
@@ -7399,21 +7403,29 @@ class SessionView {
 
   /* ---- the "New spawn" wizard ----
      Selecting the row does not insert text; the popup slides through the
-     directive's parts - node, engine, model, effort - and only the finished
-     directive lands in the composer, so the exact wording never has to be
-     remembered. Single-choice parts are skipped, typing filters the current
-     part, and Escape/Backspace slide back. */
+     directive's parts - how many agents, node, engine, model, effort - and
+     only the finished directive lands in the composer, so the exact wording
+     never has to be remembered. Single-choice parts are skipped, typing
+     filters the current part, and Escape/Backspace slide back. */
 
   spawnMentionBegin() {
-    this.mentionSpawn = { step: "node", node: undefined, engine: null,
-                          model: null, effort: null, fetching: false,
-                          error: "", slide: 1 };
+    this.mentionSpawn = { step: "count", count: null, node: undefined,
+                          engine: null, model: null, effort: null,
+                          fetching: false, error: "", slide: 1 };
+    this.spawnResetQuery();
+  }
+
+  spawnEnterNodeStep() {
+    const wizard = this.mentionSpawn;
     const nodes = this.spawnNodeChoices();
     if (nodes.length <= 1) {
-      this.mentionSpawn.node = nodes.length ? nodes[0].node : null;
-      this.mentionSpawn.step = "engine";
+      wizard.node = nodes.length ? nodes[0].node : null;
+      wizard.step = "engine";
       this.spawnFetchEngines();
+    } else {
+      wizard.step = "node";
     }
+    wizard.slide = 1;
     this.spawnResetQuery();
   }
 
@@ -7477,7 +7489,12 @@ class SessionView {
     const step = (label, hint, extra) => items.push({
       kind: "spawn-step", label, hint: hint || "",
       search: (label + " " + (extra.value || "")).toLowerCase(), ...extra });
-    if (wizard.step === "node") {
+    if (wizard.step === "count") {
+      for (let n = 1; n <= 12; n++)
+        step(n === 1 ? "1 agent" : `${n} agents`,
+          n === 1 ? "a single one-shot run" : "parallel one-shot runs",
+          { count: n, value: String(n) });
+    } else if (wizard.step === "node") {
       for (const choice of this.spawnNodeChoices())
         step(choice.label, choice.hint, { node: choice.node, value: "" });
     } else if (wizard.step === "engine") {
@@ -7522,6 +7539,11 @@ class SessionView {
   spawnStepChoose(item) {
     const wizard = this.mentionSpawn;
     if (!wizard) return;
+    if (wizard.step === "count") {
+      wizard.count = item.count;
+      this.spawnEnterNodeStep();
+      return;
+    }
     if (wizard.step === "node") {
       wizard.node = item.node;
       wizard.step = "engine";
@@ -7587,6 +7609,11 @@ class SessionView {
       wizard.engine = null;
       wizard.node = undefined;
       wizard.step = "node";
+    } else if (wizard.step === "engine" || wizard.step === "node") {
+      wizard.engine = null;
+      wizard.node = undefined;
+      wizard.count = null;
+      wizard.step = "count";
     } else {
       this.mentionSpawn = null;   // back out of the wizard, keep the "@" list
     }
