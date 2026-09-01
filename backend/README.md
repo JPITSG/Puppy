@@ -291,6 +291,26 @@ Chromium. An individual CDP response that exceeds the pipe safety limit is
 discarded through its NUL boundary and fails only the matching pending request;
 it does not terminate the managed Browser or strand direct viewer input.
 
+Viewer navigation never blocks the input socket: address-bar, back/forward,
+and reload requests run as bounded background tasks, so mouse, key, and later
+navigation messages are processed while a slow site is still committing.
+Status broadcasts carry an additive `loading` boolean driven by main-frame
+lifecycle events (with an optimistic set when a viewer requests a navigation),
+and a refused or failed navigation is reported as a non-terminal `error`
+message on the same socket. Older consoles ignore both additions.
+
+`browser.shared_storage` is node-owned config behind the additive
+`browser-shared-storage` capability: `POST /api/browser/shared-storage`
+toggles it and `/api/browser/status` reports it. While on, every managed
+browser on the node three-way merges its cookie jar against one private store
+under `data/browser/shared/` (mode 0600; per-browser baselines; local changes
+win conflicts; deletions propagate live to running peers; partitioned cookies
+are never exported), and page localStorage is captured best-effort and seeded
+only into documents that do not already hold a key. The store persists across
+browser and node restarts, survives disabling the toggle, and - like the rest
+of `data/browser/` - is deliberately outside snapshot coverage, equivalent to
+the engines' native credential stores.
+
 ## System prompts
 
 Each node stores its own custom prompt plus conditional remote-workspace,

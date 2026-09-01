@@ -118,7 +118,9 @@ DEFAULTS = {
     # node-owned managed headless browser; enabling requires the availability
     # probe (binary + version) to pass at toggle time. color_scheme is the
     # prefers-color-scheme its pages render with, synced from the WebUI theme.
-    "browser": {"enabled": False, "color_scheme": "dark"},
+    # shared_storage merges every browser on this node into one persistent
+    # cookie/localStorage store so sign-ins outlive individual browsers.
+    "browser": {"enabled": False, "color_scheme": "dark", "shared_storage": False},
     # The custom text is added to every engine turn on this node. Conditional
     # fields are independently editable instructions added only while a turn
     # uses the corresponding cross-node workspace, browser, or terminal tools.

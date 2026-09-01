@@ -41,8 +41,9 @@ STUB_LOG = TEST_ROOT / "stub-log"
 STUB_LOG.mkdir(mode=0o700)
 os.environ["PUPPY_BROWSER_STUB_LOG"] = str(STUB_LOG)
 
-from puppy import (browser, browser_agent, config, db, runner as session_runner,
-                   spawn_agent, system_prompts, terminal_agent)  # noqa: E402
+from puppy import (browser, browser_agent, browser_store, config, db,
+                   runner as session_runner, spawn_agent, system_prompts,
+                   terminal_agent)  # noqa: E402
 from puppy.drivers.claude import ClaudeDriver  # noqa: E402
 from puppy.drivers.codex import CodexDriver  # noqa: E402
 from puppy.drivers.opencode import OpenCodeDriver  # noqa: E402
@@ -79,7 +80,19 @@ PAGE_TEXT = "Stub page Ready Continue Email Region Alerts"
 TYPED_VALUE = ""
 UPLOADED_FILES = []
 SCROLL_Y = 0
+STUB_COOKIES = []
+SEED_SERIAL = 0
 active_target = PAGE["targetId"]
+
+
+def put_cookie(cookie):
+    key = (cookie.get("name"), cookie.get("domain"), cookie.get("path", "/"))
+    for index, existing in enumerate(STUB_COOKIES):
+        if (existing.get("name"), existing.get("domain"),
+                existing.get("path", "/")) == key:
+            STUB_COOKIES[index] = cookie
+            return
+    STUB_COOKIES.append(cookie)
 
 
 def send(message):
@@ -237,6 +250,13 @@ while True:
                 value = {"target": "document", "x": 0, "y": SCROLL_Y,
                          "documentX": 0, "documentY": SCROLL_Y}
                 result = {"result": {"type": "object", "value": value}}
+            elif "puppySharedStorageCapture" in expression:
+                if current["url"].startswith("http://ls.example.test"):
+                    value = {"origin": "http://ls.example.test",
+                             "items": {"token": "local-secret"}}
+                else:
+                    value = None
+                result = {"result": {"type": "object", "value": value}}
             elif expression.startswith("JSON.stringify({url:location.href,title:document.title})"):
                 value = json.dumps({"url": current["url"], "title": current["title"]})
                 result = {"result": {"type": "string", "value": value}}
@@ -290,13 +310,25 @@ while True:
             casting = False
         elif method == "Page.navigate":
             url = params.get("url", "")
-            record("navigations.jsonl", {"url": url})
+            record("navigations.jsonl", {"url": url, "pid": os.getpid()})
             if url == "http://stub.invalid/die":
                 send({"id": msg.get("id"), "result": {}})
                 raise SystemExit(4)
+            if url == "http://stub.invalid/slow-nav":
+                # A hung commit: no answer, no lifecycle - only later input
+                # proves the node's socket loop was never blocked on this.
+                continue
             current = POPUP if active_target == POPUP["targetId"] else PAGE
             current["url"] = url
             current["title"] = "navigated"
+            if url == "http://cookie.example.test/login":
+                put_cookie({"name": "auth", "value": "cookie-secret",
+                            "domain": "cookie.example.test", "path": "/",
+                            "secure": False, "httpOnly": True, "session": False,
+                            "expires": 4102444800.0, "sameSite": "Lax",
+                            "size": 17, "sourceScheme": "NonSecure"})
+            elif url == "http://cookie.example.test/logout":
+                del STUB_COOKIES[:]
             send({"method": "Target.targetInfoChanged",
                   "params": {"targetInfo": dict(current)}})
             result = {"frameId": "f1"}
@@ -311,6 +343,29 @@ while True:
         elif method in ("Page.reload", "Page.navigateToHistoryEntry"):
             emit_lifecycle = True
             emit_frame = (viewport_width, viewport_height, FRAME)
+        elif method == "Storage.getCookies":
+            record("cookies-read.jsonl", {"pid": os.getpid(),
+                                          "count": len(STUB_COOKIES)})
+            result = {"cookies": [dict(cookie) for cookie in STUB_COOKIES]}
+        elif method == "Storage.setCookies":
+            incoming = params.get("cookies") or []
+            record("cookies-set.jsonl", {"pid": os.getpid(), "cookies": incoming})
+            for cookie in incoming:
+                put_cookie(dict(cookie, session="expires" not in cookie))
+        elif method == "Network.deleteCookies":
+            record("cookies-delete.jsonl", {"pid": os.getpid(), "params": params})
+            STUB_COOKIES[:] = [cookie for cookie in STUB_COOKIES if not (
+                cookie.get("name") == params.get("name") and
+                cookie.get("domain") == params.get("domain") and
+                cookie.get("path", "/") == params.get("path", "/"))]
+        elif method == "Page.addScriptToEvaluateOnNewDocument":
+            SEED_SERIAL += 1
+            record("seed-scripts.jsonl", {"pid": os.getpid(),
+                                          "source": params.get("source", "")})
+            result = {"identifier": "seed-{}".format(SEED_SERIAL)}
+        elif method == "Page.removeScriptToEvaluateOnNewDocument":
+            record("seed-removed.jsonl", {"pid": os.getpid(),
+                                          "identifier": params.get("identifier")})
         elif method.startswith("Input."):
             record("input.jsonl", {"method": method, "params": params})
             if method == "Input.insertText":
@@ -329,10 +384,14 @@ while True:
         if emit_lifecycle:
             session_id = "stub-sess-2" if active_target == POPUP["targetId"] \
                 else "stub-sess-1"
+            send({"method": "Page.frameStartedLoading", "sessionId": session_id,
+                  "params": {"frameId": "f1"}})
             send({"method": "Page.domContentEventFired", "sessionId": session_id,
                   "params": {"timestamp": 1}})
             send({"method": "Page.loadEventFired", "sessionId": session_id,
                   "params": {"timestamp": 2}})
+            send({"method": "Page.frameStoppedLoading", "sessionId": session_id,
+                  "params": {"frameId": "f1"}})
         if emit_frame is not None and casting:
             frame_session += 1
             width, height, data = emit_frame
@@ -4007,6 +4066,62 @@ console.log(JSON.stringify(out));
     assert rounded == [11, 32, 81, 60, None, 0], values
 
 
+def check_browser_loading_ui(ui_source: str, css_source: str) -> None:
+    """The bar acknowledges a navigation instantly, node statuses own the
+    loading flag, and a transient error is a toast, not the dead overlay."""
+    start = ui_source.index("class BrowserView {")
+    end = ui_source.index("/* ================= SettingsView", start)
+    view_source = ui_source[start:end]
+    assert "this.setLoading(d.loading === true);" in view_source
+    assert 'this.send({ type: "navigate", url: target });' in view_source
+    # optimistic acknowledgment precedes the send
+    assert view_source.index("this.setLoading(true);") < \
+        view_source.index('this.send({ type: "navigate", url: target });')
+    assert "if (d.terminal === true) {" in view_source
+    assert 'toast(d.text || "Browser error", "error", 5000);' in view_source
+    script = r"""
+const timers=new Map();let nextTimer=0;
+const setTimeout=(fn,delay)=>{const id=++nextTimer;timers.set(id,{fn,delay});return id;};
+const clearTimeout=id=>{timers.delete(id);};
+%s
+const classes=new Set();
+const view=Object.create(BrowserView.prototype);
+view.loadingTimer=null;
+view.root={classList:{
+  toggle(name,on){if(on)classes.add(name);else classes.delete(name);},
+  remove(name){classes.delete(name);}}};
+view.setLoading(true);
+const armed=classes.has("loading")&&timers.size===1;
+const delay=[...timers.values()][0].delay;
+view.setLoading(false);
+const clearedOnStatus=!classes.has("loading")&&timers.size===0;
+view.setLoading(true);
+[...timers.values()][0].fn();
+const selfExpired=!classes.has("loading")&&view.loadingTimer===null;
+console.log(JSON.stringify({armed,delay,clearedOnStatus,selfExpired}));
+""" % view_source
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:700]
+    result = json.loads(proc.stdout)
+    assert result == {"armed": True, "delay": 20000, "clearedOnStatus": True,
+                      "selfExpired": True}, result
+    assert ".view.browser.loading .br-bar::after" in css_source
+    assert "br-loading-sweep" in css_source
+
+
+def check_shared_storage_settings_ui(ui_source: str, css_source: str) -> None:
+    """The shared sign-in toggle rides the Browser switch's status fetch,
+    appears only for capable nodes, and downgrades with them offline."""
+    assert 'api(bid, "browser/shared-storage", {' in ui_source
+    assert 'id="set-browser-share"' in ui_source
+    assert 'backendHasCapability(b, "browser-shared-storage")' in ui_source
+    assert "st.shared_storage === true" in ui_source
+    assert 'typeof st.shared_storage === "boolean"' in ui_source
+    assert "record.shared.input.disabled = true;" in ui_source
+    assert "be-browser-share" in ui_source
+    assert ".browser-share-toggle" in css_source
+
+
 async def main() -> None:
     stub = TEST_ROOT / "stub-chromium"
     stub.write_text(STUB, encoding="utf-8")
@@ -5236,6 +5351,8 @@ async def main() -> None:
             check_chat_status_bar_layout(ui_source, css_source)
             check_backend_name_single_activation(ui_source)
             check_browser_disable_closes_scoped_tabs(ui_source)
+            check_browser_loading_ui(ui_source, css_source)
+            check_shared_storage_settings_ui(ui_source, css_source)
             check_quota_math(ui_source)
             # one checkbox face app-wide: a native checkbox is painted by the
             # browser, ignores the theme and differs per platform, so the form
@@ -5369,6 +5486,169 @@ async def main() -> None:
                 ui_source.index('status = await api(bid, "browser/status"')
             assert 'el("button", "chip browser")' in ui_source
             assert "t.browserGone !== true" in ui_source
+
+            # ---- the address bar never blocks the viewer input loop ----
+            async with http.post(url + "/api/browser/instances", headers=headers,
+                                 json={}) as r:
+                nav_id = (await read_json(r))["browser"]["id"]
+            nav_manager = browser.manager().get(nav_id)
+            nav_pid = nav_manager.pid
+            nav_texts, nav_frames = [], []
+            nav_ws = await http.ws_connect(
+                url + "/api/ws/browser/" + nav_id, headers=headers)
+            nav_reader = asyncio.ensure_future(collect_ws(nav_ws, nav_texts, nav_frames))
+            await wait_for(lambda: any(t.get("type") == "status" for t in nav_texts),
+                           message="nav-check status")
+            hang_started = time.monotonic()
+            await nav_ws.send_json({"type": "navigate",
+                                    "url": "http://stub.invalid/slow-nav"})
+            await nav_ws.send_json({"type": "insert_text", "text": "not-blocked"})
+            await wait_for(
+                lambda: any(line["method"] == "Input.insertText" and
+                            line["params"].get("text") == "not-blocked"
+                            for line in read_lines("input.jsonl")),
+                timeout=3.0, message="input processed during a hung navigation")
+            assert time.monotonic() - hang_started < 3.0
+            # the request is acknowledged immediately: optimistic URL + loading
+            await wait_for(
+                lambda: next((t for t in nav_texts if t.get("type") == "status" and
+                              t.get("loading") is True and
+                              t.get("url") == "http://stub.invalid/slow-nav"), None),
+                message="optimistic loading status")
+            # a real navigation settles the flag through main-frame lifecycle
+            await nav_ws.send_json({"type": "navigate",
+                                    "url": "http://ok.example.test/done"})
+            await wait_for(
+                lambda: next((t for t in nav_texts if t.get("type") == "status" and
+                              t.get("url") == "http://ok.example.test/done" and
+                              t.get("loading") is False), None),
+                message="loading cleared after commit")
+            # a refused scheme answers this viewer without killing the view
+            await nav_ws.send_json({"type": "navigate", "url": "file:///etc/passwd"})
+            refusal = await wait_for(
+                lambda: next((t for t in nav_texts if t.get("type") == "error"), None),
+                message="refused navigation notice")
+            assert refusal.get("terminal") is not True, refusal
+            assert "http(s)" in refusal.get("text", ""), refusal
+            assert all(line["url"] != "file:///etc/passwd"
+                       for line in read_lines("navigations.jsonl")
+                       if line.get("pid") == nav_pid)
+            await nav_ws.close()
+            nav_reader.cancel()
+            async with http.delete(url + "/api/browser/instances/" + nav_id,
+                                   headers=headers) as r:
+                assert r.status == 200, await read_json(r)
+
+            # ---- shared persistent sign-in storage across browsers ----
+            store_file = Path(browser_store.store_path())
+            assert not store_file.exists()
+            async with http.get(url + "/api/ping", headers=headers) as r:
+                ping_caps = await read_json(r)
+                assert "browser-shared-storage" in ping_caps["capabilities"], ping_caps
+            async with http.get(url + "/api/browser/status", headers=headers) as r:
+                shared_status = await read_json(r)
+                assert shared_status["shared_storage"] is False, shared_status
+            async with http.post(url + "/api/browser/shared-storage",
+                                 headers=headers, json={"enabled": "yes"}) as r:
+                assert r.status == 400
+            async with http.post(url + "/api/browser/shared-storage",
+                                 headers=headers, json={"enabled": True}) as r:
+                shared_status = await read_json(r)
+                assert r.status == 200 and shared_status["shared_storage"] is True
+            assert config.get("browser.shared_storage") is True
+
+            async with http.post(url + "/api/browser/instances", headers=headers,
+                                 json={}) as r:
+                share_a = (await read_json(r))["browser"]["id"]
+            share_a_manager = browser.manager().get(share_a)
+            share_a_pid = share_a_manager.pid
+            await wait_for(lambda: any(line["pid"] == share_a_pid for line in
+                                       read_lines("cookies-read.jsonl")),
+                           message="launch-time cookie import read")
+
+            def store_state():
+                if not store_file.exists():
+                    return None
+                return json.loads(store_file.read_text())
+
+            def store_cookie_names(data):
+                return {entry["cookie"]["name"] for entry in (data or {}).get(
+                    "cookies", [])}
+
+            # signing in on one browser lands the cookie in the shared store
+            await share_a_manager.handle_client(
+                {"type": "navigate", "url": "http://cookie.example.test/login"})
+            await wait_for(lambda: "auth" in store_cookie_names(store_state()),
+                           timeout=15.0, message="auth cookie reached the store")
+            assert (os.stat(store_file).st_mode & 0o777) == 0o600
+            assert (os.stat(store_file.parent).st_mode & 0o777) == 0o700
+            stored = store_state()
+            auth_entry = next(entry["cookie"] for entry in stored["cookies"]
+                              if entry["cookie"]["name"] == "auth")
+            assert auth_entry["value"] == "cookie-secret", auth_entry
+            assert auth_entry["httpOnly"] is True, auth_entry
+
+            # a second browser starts already signed in
+            async with http.post(url + "/api/browser/instances", headers=headers,
+                                 json={}) as r:
+                share_b = (await read_json(r))["browser"]["id"]
+            share_b_manager = browser.manager().get(share_b)
+            share_b_pid = share_b_manager.pid
+            assert share_b_pid != share_a_pid
+            await wait_for(lambda: any(
+                line["pid"] == share_b_pid and any(
+                    cookie.get("name") == "auth" for cookie in line["cookies"])
+                for line in read_lines("cookies-set.jsonl")),
+                timeout=15.0, message="second browser imported the shared cookie")
+
+            # localStorage flows capture -> store -> seed script on every peer
+            await share_a_manager.handle_client(
+                {"type": "navigate", "url": "http://ls.example.test/app"})
+            await wait_for(lambda: "http://ls.example.test" in
+                           (store_state() or {}).get("storage", {}),
+                           timeout=15.0, message="localStorage reached the store")
+
+            def seeded_pids():
+                return {line["pid"] for line in read_lines("seed-scripts.jsonl")
+                        if "local-secret" in line["source"]}
+
+            await wait_for(lambda: {share_a_pid, share_b_pid} <= seeded_pids(),
+                           timeout=15.0, message="seed script on both browsers")
+            seeded = next(line["source"] for line in read_lines("seed-scripts.jsonl")
+                          if "local-secret" in line["source"])
+            assert "localStorage.getItem(k)===null" in seeded, seeded
+
+            # signing out on one browser removes the cookie everywhere
+            await share_a_manager.handle_client(
+                {"type": "navigate", "url": "http://cookie.example.test/logout"})
+            await wait_for(lambda: store_state() is not None and
+                           "auth" not in store_cookie_names(store_state()),
+                           timeout=15.0, message="store dropped the auth cookie")
+            await wait_for(lambda: any(
+                line["pid"] == share_b_pid and line["params"].get("name") == "auth"
+                for line in read_lines("cookies-delete.jsonl")),
+                timeout=15.0, message="peer browser dropped the auth cookie")
+
+            # turning the toggle off stops syncing but keeps the store for later
+            async with http.post(url + "/api/browser/shared-storage",
+                                 headers=headers, json={"enabled": False}) as r:
+                shared_status = await read_json(r)
+                assert shared_status["shared_storage"] is False, shared_status
+            assert store_file.exists()
+            await asyncio.sleep(0.3)   # let poked timers observe the toggle
+            reads_when_off = len(read_lines("cookies-read.jsonl"))
+            await share_a_manager.handle_client(
+                {"type": "navigate", "url": "http://plain.example.test/after"})
+            await wait_for(lambda: any(
+                line["url"] == "http://plain.example.test/after"
+                for line in read_lines("navigations.jsonl")),
+                message="post-toggle navigation")
+            await asyncio.sleep(2.6)   # past STORE_SYNC_DELAY
+            assert len(read_lines("cookies-read.jsonl")) == reads_when_off
+            for share_id in (share_a, share_b):
+                async with http.delete(url + "/api/browser/instances/" + share_id,
+                                       headers=headers) as r:
+                    assert r.status == 200, await read_json(r)
 
             # A crash affects only the addressed instance; other browser IDs
             # remain available and the crashed logical browser can be restarted.

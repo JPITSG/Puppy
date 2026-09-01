@@ -44,7 +44,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from aiohttp import WSMsgType, web
 
-from puppy import config, live_websockets
+from puppy import browser_store, config, live_websockets
 
 log = logging.getLogger("puppy.browser")
 
@@ -56,6 +56,15 @@ PROBE_TTL_SECONDS = 300
 VERSION_TIMEOUT = 12.0
 START_TIMEOUT = 20.0
 CALL_TIMEOUT = 10.0
+# A viewer navigation runs as its own task, so a slow commit blocks nothing;
+# it may take real network time before Chromium answers with an errorText.
+NAVIGATE_TIMEOUT = 30.0
+# Lifecycle events own the loading flag; this backstop clears it if Chromium
+# never reports the navigation settling (e.g. it turned into a download).
+LOADING_GUARD_SECONDS = 45.0
+MAX_NAV_TASKS = 8
+STORE_SYNC_DELAY = 2.0         # after load/navigation events
+STORE_INPUT_SYNC_DELAY = 4.0   # after raw viewer/agent interaction
 IDLE_STOP_SECONDS = 900        # no viewers this long -> browser exits
 # Chromium needs a usable size before the first viewer arrives. Once one does,
 # its visible pane replaces this default with a bounded, same-aspect viewport.
@@ -251,6 +260,10 @@ def enabled() -> bool:
     return bool(config.get("browser.enabled", False))
 
 
+def shared_storage_enabled() -> bool:
+    return bool(config.get("browser.shared_storage", False))
+
+
 def normalize_color_scheme(value) -> str:
     """Anything unrecognised reads as dark: this is a rendering hint, and a
     stale or malformed one must never keep a browser from starting."""
@@ -334,6 +347,7 @@ async def status_payload() -> dict:
         "product": st["product"],
         "sandbox": sandbox_mode(),
         "color_scheme": color_scheme(),
+        "shared_storage": shared_storage_enabled(),
         "running": bool(m and m.running),
         "viewers": m.viewer_count() if m else 0,
         "instances": m.instance_payloads() if m else [],
@@ -353,6 +367,30 @@ async def set_enabled(value: bool) -> dict:
     config.set_value("browser.enabled", bool(value))
     if not value and _manager is not None:
         await _manager.stop("Browser disabled")
+    return await status_payload()
+
+
+def _poke_store_peers(source=None) -> None:
+    """Wake every other running browser so it pulls fresh trunk state soon."""
+    if _manager is None:
+        return
+    for instance in list(_manager.instances.values()):
+        if instance is not source and instance.running:
+            instance._arm_store_sync(0.5)
+
+
+async def set_shared_storage(value: bool) -> dict:
+    """Toggle the node's shared sign-in store; the store file itself is kept
+    on disable so switching back on restores the same logins."""
+    value = bool(value)
+    if value != shared_storage_enabled():
+        config.set_value("browser.shared_storage", value)
+        if _manager is not None:
+            for instance in list(_manager.instances.values()):
+                if value:
+                    instance._arm_store_sync(0.2)
+                else:
+                    instance._drop_store_seed()
     return await status_payload()
 
 
@@ -384,6 +422,11 @@ async def apply_config() -> None:
         await asyncio.gather(*(instance.apply_color_scheme(force=True)
                                for instance in list(_manager.instances.values())),
                              return_exceptions=True)
+        for instance in list(_manager.instances.values()):
+            if shared_storage_enabled():
+                instance._arm_store_sync(0.5)
+            else:
+                instance._drop_store_seed()
 
 
 async def shutdown() -> None:
@@ -803,7 +846,16 @@ class Manager:
         self.viewport = {"width": DEFAULT_VIEWPORT_W, "height": DEFAULT_VIEWPORT_H}
         self.frame_meta = dict(self.viewport)
         self.nav = {"url": "about:blank", "title": "", "can_back": False,
-                    "can_forward": False}
+                    "can_forward": False, "loading": False}
+        self.main_frame = ""
+        self.loading_guard_task = None
+        self.nav_action_tasks = set()
+        self.store_lock = asyncio.Lock()
+        self.store_timer = None
+        self.store_baseline_cookies = {}
+        self.store_baseline_storage = {}
+        self.store_seed_id = ""
+        self.store_seed_serial = -1
         self.agent_refs = {}
         self.agent_page_refs = {}
         self.agent_download_refs = {}
@@ -954,7 +1006,12 @@ class Manager:
             self.viewport = {"width": DEFAULT_VIEWPORT_W, "height": DEFAULT_VIEWPORT_H}
             self.frame_meta = dict(self.viewport)
             self.nav = {"url": "about:blank", "title": "", "can_back": False,
-                        "can_forward": False}
+                        "can_forward": False, "loading": False}
+            self.main_frame = ""
+            self.store_baseline_cookies = {}
+            self.store_baseline_storage = {}
+            self.store_seed_id = ""
+            self.store_seed_serial = -1
             self.agent_refs = {}
             self.agent_page_refs = {}
             self.agent_download_refs = {}
@@ -980,6 +1037,10 @@ class Manager:
                     pass   # best effort; downloads just land in the profile
                 await self._attach_page("")
                 await self._show_start_page()
+                if shared_storage_enabled():
+                    # Shared sign-ins must exist before the first navigation;
+                    # the sync itself never raises.
+                    await self._store_sync()
                 self.started_at = time.time()
                 log.info("managed Browser %s started pid=%s %s%s", self.browser_id, spawned,
                          version.get("product", ""),
@@ -1005,6 +1066,14 @@ class Manager:
                      self.browser_id, self.pid, reason)
             self.stopping = True
             pid = self.pid
+            if self.running and shared_storage_enabled():
+                # One bounded last export so a sign-in made moments before the
+                # stop still reaches the shared store.
+                try:
+                    await asyncio.wait_for(self._store_sync(), timeout=6.0)
+                except Exception:
+                    log.debug("Browser %s final shared-storage sync failed",
+                              self.browser_id)
             if self.running:
                 try:
                     await self.call("Browser.close", timeout=3.0)
@@ -1028,6 +1097,19 @@ class Manager:
         if self.nav_refresh_task is not None:
             self.nav_refresh_task.cancel()
             self.nav_refresh_task = None
+        if self.loading_guard_task is not None:
+            self.loading_guard_task.cancel()
+            self.loading_guard_task = None
+        if self.store_timer is not None:
+            self.store_timer.cancel()
+            self.store_timer = None
+        for task in list(self.nav_action_tasks):
+            task.cancel()
+        self.nav_action_tasks.clear()
+        self.nav["loading"] = False
+        self.main_frame = ""
+        self.store_seed_id = ""
+        self.store_seed_serial = -1
         for fut in list(self.pending.values()):
             if not fut.done():
                 fut.set_exception(BrowserError("Browser exited"))
@@ -1232,7 +1314,28 @@ class Manager:
             key = "domcontentloaded" if method == "Page.domContentEventFired" else "load"
             self.agent_lifecycle[key] += 1
             self.agent_file_chooser = None
+            if key == "load":
+                self._set_loading(False)
+            self._arm_store_sync(STORE_SYNC_DELAY)
             self._schedule_visual_refresh(0.25)
+            return
+        if method == "Page.frameStartedLoading" and event_session == self.page_session:
+            if not self.main_frame or params.get("frameId") == self.main_frame:
+                self._set_loading(True)
+            return
+        if method == "Page.frameStoppedLoading" and event_session == self.page_session:
+            if not self.main_frame or params.get("frameId") == self.main_frame:
+                self._set_loading(False)
+            return
+        if method == "Page.frameNavigated" and event_session == self.page_session:
+            frame = params.get("frame") or {}
+            if frame.get("id") and not frame.get("parentId"):
+                self.main_frame = str(frame["id"])
+            return
+        if method == "Page.navigatedWithinDocument" and \
+                event_session == self.page_session:
+            self._set_loading(False)
+            self._arm_store_sync(STORE_SYNC_DELAY)
             return
         if method == "Runtime.consoleAPICalled" and event_session == self.page_session:
             args = [self._diagnostic_arg(item) for item in params.get("args") or []]
@@ -1357,6 +1460,7 @@ class Manager:
                     self._schedule_nav_refresh()
                 if url_changed:
                     self._schedule_visual_refresh()
+                    self._arm_store_sync(STORE_SYNC_DELAY)
         elif method == "Target.targetDestroyed":
             tid = params.get("targetId")
             self.targets.pop(tid, None)
@@ -1443,6 +1547,22 @@ class Manager:
                 pass
             if previous_session and previous_session != session:
                 self._fire("Target.detachFromTarget", {"sessionId": previous_session})
+            self.main_frame = ""
+            try:
+                tree = await self.call("Page.getFrameTree", session=session)
+                self.main_frame = str(((tree.get("frameTree") or {})
+                                       .get("frame") or {}).get("id") or "")
+            except BrowserError:
+                pass   # loading events fall back to trusting any frame
+            self._set_loading(False)
+            self.store_seed_id = ""
+            self.store_seed_serial = -1
+            if shared_storage_enabled():
+                try:
+                    await self._store_apply_seed()
+                except Exception:
+                    log.debug("Browser %s seed registration failed",
+                              self.browser_id, exc_info=True)
             info = self.targets.get(target_id) or {}
             self.nav["url"] = info.get("url", "about:blank")
             self.nav["title"] = info.get("title", "")
@@ -1811,13 +1931,24 @@ class Manager:
             if text:
                 self._fire("Input.insertText", {"text": text}, session=self.page_session)
         elif kind == "navigate":
+            # Never await the commit here: a slow site would head-of-line
+            # block every later mouse/key/navigate message on this socket.
             url = _normalize_url(data.get("url"))
-            if url and self.page_session:
-                await self.call("Page.navigate", {"url": url}, session=self.page_session)
+            if not url:
+                viewer = self.viewers.get(viewer_ws) if viewer_ws is not None else None
+                if viewer is not None:
+                    viewer.send_json({
+                        "type": "error",
+                        "text": "Addresses must be http(s), about:blank, or data: URLs"})
+            elif self.page_session:
+                self._set_loading(True, url=url)
+                self._spawn_nav_action(self._viewer_navigate(url))
         elif kind in ("back", "forward"):
-            await self._history_step(1 if kind == "forward" else -1)
+            self._spawn_nav_action(
+                self._viewer_history(1 if kind == "forward" else -1))
         elif kind == "reload":
             if self.page_session:
+                self._set_loading(True)
                 self._fire("Page.reload", session=self.page_session)
         elif kind == "viewport":
             size = _normalize_viewport(data.get("width"), data.get("height"))
@@ -1836,6 +1967,12 @@ class Manager:
             visual_delay = VISUAL_REFRESH_DELAY
         if visual_delay is not None:
             self._schedule_visual_refresh(visual_delay)
+        if (kind == "insert_text" or
+                (kind == "mouse" and data.get("kind") == "up") or
+                (kind == "key" and data.get("kind") == "down")):
+            # An XHR login writes cookies without any navigation event;
+            # interaction is the only signal that state may have moved.
+            self._arm_store_sync(STORE_INPUT_SYNC_DELAY)
 
     def _point(self, data: dict) -> tuple:
         nx = min(1.0, max(0.0, float(data.get("nx") or 0.0)))
@@ -1935,6 +2072,236 @@ class Manager:
                 return True
         return False
 
+    def _spawn_nav_action(self, coro) -> None:
+        """Run one viewer navigation off the websocket read loop, bounded."""
+        if not self.running or len(self.nav_action_tasks) >= MAX_NAV_TASKS:
+            coro.close()
+            return
+        task = asyncio.ensure_future(coro)
+        self.nav_action_tasks.add(task)
+        task.add_done_callback(self.nav_action_tasks.discard)
+
+    async def _viewer_navigate(self, url: str) -> None:
+        session = self.page_session
+        try:
+            navigation = await self.call("Page.navigate", {"url": url},
+                                         session=session, timeout=NAVIGATE_TIMEOUT)
+        except BrowserError as exc:
+            # The commit may still land later; lifecycle events own the
+            # loading flag and its guard, so a late answer costs nothing.
+            log.debug("Browser %s navigation to %s gave no timely answer: %s",
+                      self.browser_id, _redact_diagnostic_url(url), exc)
+            return
+        error_text = str(navigation.get("errorText") or "")
+        # ERR_ABORTED is what a navigation that became a download reports.
+        if error_text and error_text != "net::ERR_ABORTED":
+            self._set_loading(False)
+            self._broadcast_json({"type": "error",
+                                  "text": "Navigation failed: " + error_text[:200]})
+
+    async def _viewer_history(self, direction: int) -> None:
+        try:
+            if await self._history_step(direction):
+                self._set_loading(True)
+        except BrowserError as exc:
+            log.debug("Browser %s history step failed: %s", self.browser_id, exc)
+
+    def _set_loading(self, value: bool, url: str = "") -> None:
+        """Track main-frame busyness and push it to viewers with the URL."""
+        value = bool(value)
+        changed = self.nav.get("loading") != value
+        if url and self.nav.get("url") != url:
+            # Optimistic echo: the bar reflects the request immediately and
+            # the commit's targetInfoChanged corrects it if needed.
+            self.nav["url"] = url
+            changed = True
+        if value:
+            self._arm_loading_guard()
+        elif self.loading_guard_task is not None:
+            self.loading_guard_task.cancel()
+            self.loading_guard_task = None
+        if not changed:
+            return
+        self.nav["loading"] = value
+        self._broadcast_json({"type": "status", "running": True, **self.nav})
+
+    def _arm_loading_guard(self) -> None:
+        if self.loading_guard_task is not None:
+            self.loading_guard_task.cancel()
+
+        async def later():
+            task = asyncio.current_task()
+            try:
+                await asyncio.sleep(LOADING_GUARD_SECONDS)
+            except asyncio.CancelledError:
+                return
+            finally:
+                if self.loading_guard_task is task:
+                    self.loading_guard_task = None
+            if self.running and self.nav.get("loading"):
+                self.nav["loading"] = False
+                self._broadcast_json({"type": "status", "running": True, **self.nav})
+
+        self.loading_guard_task = asyncio.ensure_future(later())
+
+    # ---- shared persistent sign-in storage ----
+
+    def _arm_store_sync(self, delay: float = STORE_SYNC_DELAY) -> None:
+        """First trigger wins: later events never postpone a pending sync, so
+        continuous activity still syncs about every ``delay`` seconds."""
+        if not self.running or self.closed or not shared_storage_enabled():
+            return
+        if self.store_timer is not None and not self.store_timer.done():
+            return
+
+        async def later():
+            try:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                return
+            self.store_timer = None
+            await self._store_sync()
+
+        self.store_timer = asyncio.ensure_future(later())
+
+    async def _store_sync(self) -> None:
+        """Full bidirectional sync with the shared store; never raises."""
+        if not shared_storage_enabled() or not self.running:
+            return
+        async with self.store_lock:
+            if not shared_storage_enabled() or not self.running:
+                return
+            try:
+                listed = await self.call("Storage.getCookies", timeout=5.0)
+            except BrowserError as exc:
+                log.debug("Browser %s cookie read failed: %s", self.browser_id, exc)
+                return
+            cookies_now = {}
+            for raw in listed.get("cookies") or []:
+                cookie = browser_store.cookie_from_cdp(raw)
+                if cookie is not None:
+                    cookies_now[browser_store.cookie_key(cookie)] = cookie
+            storage_now = {}
+            if self.page_session and \
+                    str(self.nav.get("url") or "").startswith(("http://", "https://")):
+                try:
+                    outcome = await self.call("Runtime.evaluate", {
+                        "expression": browser_store.capture_expression(),
+                        "returnByValue": True,
+                    }, session=self.page_session, timeout=5.0)
+                    value = (outcome.get("result") or {}).get("value")
+                    if isinstance(value, dict) and isinstance(value.get("origin"), str) \
+                            and value["origin"] and not value.get("over") \
+                            and isinstance(value.get("items"), dict):
+                        items = {key: item for key, item in value["items"].items()
+                                 if isinstance(key, str) and isinstance(item, str)}
+                        storage_now[value["origin"]] = items
+                except BrowserError:
+                    pass   # a page mid-navigation simply skips this capture
+            try:
+                merged = await browser_store.store().sync(
+                    cookies_now, self.store_baseline_cookies,
+                    storage_now, self.store_baseline_storage)
+            except Exception:
+                log.exception("Browser %s shared-storage merge failed",
+                              self.browser_id)
+                return
+            if not self.running:
+                return
+            agreed = merged["cookie_state"]
+            failed = await self._store_apply_cookies(merged["set_cookies"])
+            for key in failed:
+                # Still in the trunk, absent here: the next sync retries it.
+                agreed.pop(key, None)
+            for target in merged["delete_cookies"]:
+                key = "\x00".join((target["name"], target["domain"], target["path"]))
+                removed = False
+                if self.page_session:
+                    try:
+                        await self.call("Network.deleteCookies", dict(target),
+                                        session=self.page_session, timeout=5.0)
+                        removed = True
+                    except BrowserError as exc:
+                        log.debug("Browser %s cookie removal failed: %s",
+                                  self.browser_id, exc)
+                if not removed and key in cookies_now:
+                    # Keep the browser's copy in the baseline so the missing
+                    # trunk entry reads as a deletion again next sync.
+                    agreed[key] = cookies_now[key]
+            self.store_baseline_cookies = agreed
+            self.store_baseline_storage.update(merged["storage_state"])
+            if merged["serial"] != self.store_seed_serial:
+                try:
+                    await self._store_apply_seed()
+                except Exception:
+                    log.debug("Browser %s seed refresh failed",
+                              self.browser_id, exc_info=True)
+            if merged["changed"]:
+                _poke_store_peers(self)
+
+    async def _store_apply_cookies(self, cookies: list) -> set:
+        """Import trunk cookies; returns the keys that could not be applied."""
+        failed = set()
+        for start in range(0, len(cookies), 60):
+            chunk = cookies[start:start + 60]
+            try:
+                await self.call("Storage.setCookies", {"cookies": chunk},
+                                timeout=5.0)
+                continue
+            except BrowserError:
+                pass
+            for cookie in chunk:
+                try:
+                    await self.call("Storage.setCookies", {"cookies": [cookie]},
+                                    timeout=5.0)
+                except BrowserError as exc:
+                    log.debug("Browser %s rejected shared cookie %s: %s",
+                              self.browser_id, cookie.get("name"), exc)
+                    failed.add(browser_store.cookie_key(cookie))
+        return failed
+
+    async def _store_apply_seed(self) -> None:
+        """(Re)install the document-start localStorage seed on this page."""
+        if not self.running or not self.page_session:
+            return
+        serial, storage_map = await browser_store.store().seed_snapshot()
+        session = self.page_session
+        if serial == self.store_seed_serial:
+            return
+        previous = self.store_seed_id
+        if not storage_map:
+            if previous:
+                self._fire("Page.removeScriptToEvaluateOnNewDocument",
+                           {"identifier": previous}, session=session)
+            self.store_seed_id = ""
+            self.store_seed_serial = serial
+            return
+        try:
+            added = await self.call("Page.addScriptToEvaluateOnNewDocument", {
+                "source": browser_store.seed_script(storage_map),
+            }, session=session, timeout=5.0)
+        except BrowserError as exc:
+            log.debug("Browser %s seed install failed: %s", self.browser_id, exc)
+            return
+        # Add before remove: a moment with both scripts double-seeds
+        # idempotently, a moment with neither would drop a navigation.
+        self.store_seed_id = str(added.get("identifier") or "")
+        self.store_seed_serial = serial
+        if previous and previous != self.store_seed_id:
+            self._fire("Page.removeScriptToEvaluateOnNewDocument",
+                       {"identifier": previous}, session=session)
+
+    def _drop_store_seed(self) -> None:
+        """Shared storage was turned off: stop syncing and stop seeding."""
+        if self.store_timer is not None:
+            self.store_timer.cancel()
+            self.store_timer = None
+        previous, self.store_seed_id = self.store_seed_id, ""
+        self.store_seed_serial = -1
+        if previous and self.running and self.page_session:
+            self._fire("Page.removeScriptToEvaluateOnNewDocument",
+                       {"identifier": previous}, session=self.page_session)
+
     # ---- high-level input from the per-turn agent bridge ----
 
     async def agent_command(self, method: str, params: dict,
@@ -2016,6 +2383,7 @@ class Manager:
                 # the same 15-minute agent-only idle lifecycle as a closed tab.
                 if self.running and not self.viewers:
                     self._arm_idle()
+                self._arm_store_sync(STORE_INPUT_SYNC_DELAY)
 
     @staticmethod
     def _bounded_number(value, low: float, high: float, label: str) -> float:
@@ -3810,6 +4178,20 @@ async def h_enabled(request: web.Request):
     return web.json_response({"ok": True, **payload})
 
 
+async def h_shared_storage(request: web.Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid browser request"}, status=400)
+    if not isinstance(body, dict) or type(body.get("enabled")) is not bool:
+        return web.json_response(
+            {"error": "browser shared storage must be on or off"}, status=400)
+    payload = await set_shared_storage(body["enabled"])
+    log.info("managed browser shared sign-in storage %s on this node",
+             "enabled" if body["enabled"] else "disabled")
+    return web.json_response({"ok": True, **payload})
+
+
 async def h_create(request: web.Request):
     if request.app.get("puppy_snapshot_busy"):
         return web.json_response({"error": "Puppy backup or restore in progress"}, status=503)
@@ -3951,6 +4333,7 @@ async def ws_browser(request: web.Request):
 def register(app: web.Application) -> None:
     app.router.add_get("/api/browser/status", h_status)
     app.router.add_post("/api/browser/enabled", h_enabled)
+    app.router.add_post("/api/browser/shared-storage", h_shared_storage)
     app.router.add_post("/api/browser/instances", h_create)
     app.router.add_delete(
         "/api/browser/instances/{browser_id:[A-Z0-9]{4}}", h_close)

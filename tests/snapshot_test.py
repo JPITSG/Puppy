@@ -151,6 +151,7 @@ async def main() -> None:
         config.set_value("uploads.max_file_size_mb", 19)
         config.set_value("browser.enabled", True)
         config.set_value("browser.color_scheme", "light")
+        config.set_value("browser.shared_storage", True)
         config.set_system_prompts(
             "Keep answers concise.\nPreserve operator terminology.",
             "Remember that this project is stored on another node.",
@@ -280,6 +281,7 @@ async def main() -> None:
         config.set_value("uploads.max_file_size_mb", 2)
         config.set_value("browser.enabled", False)
         config.set_value("browser.color_scheme", "dark")
+        config.set_value("browser.shared_storage", False)
         config.set_system_prompts(
             "mutated custom prompt", "mutated remote prompt",
             "mutated browser prompt", "mutated terminal prompt",
@@ -312,6 +314,7 @@ async def main() -> None:
         assert config.get("uploads.max_file_size_mb") == 19
         assert config.get("browser.enabled") is True
         assert config.get("browser.color_scheme") == "light"
+        assert config.get("browser.shared_storage") is True
         assert config.get("system_prompt.custom") == \
             "Keep answers concise.\nPreserve operator terminology."
         assert config.get("system_prompt.remote_workspace") == \
@@ -368,11 +371,23 @@ async def main() -> None:
         # and a tampered archive cannot smuggle in an unknown rendering mode
         try:
             config.normalize_import(dict(config.export_data(),
-                                         browser={"enabled": True, "color_scheme": "neon"}))
+                                         browser={"enabled": True,
+                                                  "color_scheme": "neon",
+                                                  "shared_storage": False}))
         except ValueError as exc:
             assert "color_scheme" in str(exc), str(exc)
         else:
             raise AssertionError("an invalid browser color scheme was accepted")
+        # nor a non-boolean shared sign-in store setting
+        try:
+            config.normalize_import(dict(config.export_data(),
+                                         browser={"enabled": True,
+                                                  "color_scheme": "dark",
+                                                  "shared_storage": "yes"}))
+        except ValueError as exc:
+            assert "shared_storage" in str(exc), str(exc)
+        else:
+            raise AssertionError("an invalid shared storage setting was accepted")
         for field in ("custom", "remote_workspace", "browser", "terminal",
                       "spawn"):
             for invalid_prompt in (

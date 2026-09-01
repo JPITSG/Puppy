@@ -1493,9 +1493,27 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 /* base .view supplies the column flex once .on shows it; setting display here
    would out-specify the hidden state and paint over the other tabs */
 .br-bar{
+  position:relative;overflow:hidden;
   display:flex;align-items:center;gap:6px;flex:0 0 auto;
   padding:6px 8px 4px;min-width:0;
 }
+/* Address-bar loading sweep: a navigation is acknowledged the instant it is
+   requested, well before the first frame of the new page arrives. */
+.view.browser.loading .br-bar::after{
+  content:"";position:absolute;left:0;bottom:0;width:34%;height:2px;
+  border-radius:1px;background:var(--acc2);opacity:.85;pointer-events:none;
+  animation:br-loading-sweep 1.15s var(--ease) infinite;
+}
+@keyframes br-loading-sweep{
+  from{transform:translateX(-110%)}
+  to{transform:translateX(410%)}
+}
+@media (prefers-reduced-motion:reduce){
+  .view.browser.loading .br-bar::after{
+    width:100%;animation:br-loading-fade 1.6s ease-in-out infinite alternate;
+  }
+}
+@keyframes br-loading-fade{from{opacity:.2}to{opacity:.65}}
 .br-bar .icon-btn{width:30px;height:30px;flex:0 0 auto}
 .br-url{
   flex:1 1 60px;min-width:0;height:30px;padding:0 10px;
@@ -1759,6 +1777,8 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .be-toggles{display:flex;flex-direction:column;align-items:flex-start;gap:7px;min-width:0}
 .be-auto-copy small.warn{color:var(--warn)}
 .browser-toggle{display:inline-flex;margin:12px 0 2px}
+/* the shared-cookie switch reads as the Browser switch's sub-setting */
+.browser-share-toggle{margin-top:-6px}
 .be-auto-add{
   align-items:center;margin:0 0 14px;padding:0;
 }

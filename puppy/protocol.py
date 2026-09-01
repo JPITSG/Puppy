@@ -38,6 +38,10 @@ BROWSER_HANDOFF_CAPABILITY = "browser-handoff"
 # records into a file input, and inspect downloads belonging to its bound
 # browser. Neither operation accepts an arbitrary caller-supplied path.
 BROWSER_FILE_WORKFLOWS_CAPABILITY = "browser-file-workflows"
+# The node-owned shared sign-in store: POST /api/browser/shared-storage and the
+# additive shared_storage field on /api/browser/status. Older nodes keep their
+# per-browser throwaway profiles and the controller withholds the toggle.
+BROWSER_SHARED_STORAGE_CAPABILITY = "browser-shared-storage"
 # GET/PATCH of the node's unattended engine-update schedule. The upgrade itself
 # is the engine-upgrade surface; this only decides when the node runs it, so a
 # node may support upgrading by hand without advertising the scheduler.
@@ -128,6 +132,7 @@ BASE_CAPABILITIES = (
     BROWSER_INSTANCES_CAPABILITY,
     BROWSER_HANDOFF_CAPABILITY,
     BROWSER_FILE_WORKFLOWS_CAPABILITY,
+    BROWSER_SHARED_STORAGE_CAPABILITY,
     UPLOAD_PREVIEW_CAPABILITY,
     ENGINE_AUTO_UPGRADE_CAPABILITY,
     SYSTEM_PROMPT_CAPABILITY,

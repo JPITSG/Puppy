@@ -1260,6 +1260,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "browser-instances" in ping["capabilities"]
         assert "browser-handoff" in ping["capabilities"]
         assert "browser-file-workflows" in ping["capabilities"]
+        assert "browser-shared-storage" in ping["capabilities"]
         assert ping["browser"] == {"enabled": False}
         assert ping["uploads"]["enabled"] is \
             (ping["uploads"]["max_file_size_mb"] > 0)

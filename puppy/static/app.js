@@ -10080,6 +10080,7 @@ class BrowserView {
     this.frameUrl = null;
     this.urlFocused = false;
     this.lastUrl = "";
+    this.loadingTimer = null;
     this.moveQueued = null;
     this.wheelQueued = null;
     this.wheelFrame = null;
@@ -10599,7 +10600,13 @@ class BrowserView {
       e.stopPropagation();
       if (e.key === "Enter") {
         const target = this.urlInput.value.trim();
-        if (target) this.send({ type: "navigate", url: target });
+        if (target) {
+          /* Instant acknowledgment: echo the request and start the loading
+             sweep now; the node's status corrects both on commit. */
+          this.lastUrl = target;
+          this.setLoading(true);
+          this.send({ type: "navigate", url: target });
+        }
         this.urlInput.blur();
         this.stage.focus({ preventScroll: true });
       } else if (e.key === "Escape") {
@@ -10607,7 +10614,10 @@ class BrowserView {
       }
     });
     this.backBtn.onclick = () => this.send({ type: "back" });
-    this.reloadBtn.onclick = () => this.send({ type: "reload" });
+    this.reloadBtn.onclick = () => {
+      this.setLoading(true);
+      this.send({ type: "reload" });
+    };
     document.addEventListener("visibilitychange", this.visibilityHandler);
     this.connect();
   }
@@ -10675,6 +10685,7 @@ class BrowserView {
         if (!this.urlFocused)
           this.urlInput.value = this.lastUrl === "about:blank" ? "" : this.lastUrl;
         this.backBtn.disabled = !d.can_back;
+        this.setLoading(d.loading === true);
         this.clearDead();
       } else if (d.type === "frame_meta") {
         this.frameW = Number(d.width) || this.frameW;
@@ -10685,8 +10696,16 @@ class BrowserView {
         toast(`Page ${d.kind || "dialog"} ${d.action}: ${d.message || ""}`.trim(),
           "info", 6000);
       } else if (d.type === "error") {
-        this.terminalGone = d.terminal === true;
-        this.showDead(d.text || "Browser unavailable", true);
+        /* Only a terminal verdict ends this pane; a transient failure (a
+           refused navigation, a slow screencast call) is a toast, not a
+           dead overlay across a browser that is still running. */
+        if (d.terminal === true) {
+          this.terminalGone = true;
+          this.showDead(d.text || "Browser unavailable", true);
+        } else {
+          this.setLoading(false);
+          toast(d.text || "Browser error", "error", 5000);
+        }
       } else if (d.type === "gone") {
         this.terminalGone = true;
         this.showDead(d.reason || "Browser ended", true);
@@ -10717,6 +10736,22 @@ class BrowserView {
     this.clearDead();
   }
 
+  /* Node status broadcasts own this flag; the local timer only retires an
+     optimistic Enter that an older node never answers with a status. */
+  setLoading(on) {
+    if (this.loadingTimer !== null) {
+      clearTimeout(this.loadingTimer);
+      this.loadingTimer = null;
+    }
+    this.root.classList.toggle("loading", !!on);
+    if (on) {
+      this.loadingTimer = setTimeout(() => {
+        this.loadingTimer = null;
+        this.root.classList.remove("loading");
+      }, 20000);
+    }
+  }
+
   clearDead() {
     const dead = this.root.querySelector(".br-dead");
     if (dead) dead.remove();
@@ -10733,6 +10768,7 @@ class BrowserView {
 
   showDead(message, ended = false) {
     if (ended) this.markGone(true);
+    this.setLoading(false);
     let dead = this.root.querySelector(".br-dead");
     if (dead) {
       dead.querySelector(".term-dead-message").textContent = message;
@@ -11233,6 +11269,10 @@ class SettingsView {
         record.root.title = availability === "bad" ?
           "Backend unavailable · showing last known value" :
           "Checking backend · showing last known value";
+        if (record.shared) {
+          record.shared.input.disabled = true;
+          if (record.shared.root) record.shared.root.classList.add("disabled");
+        }
         record.wasOffline = true;
       } else if (record.wasOffline) {
         record.wasOffline = false;
@@ -11777,11 +11817,16 @@ class SettingsView {
 
   /* One wiring for the instance card and every backend row: probe the node's
      browser status, gate the toggle on availability, and surface the reason.
-     A row variant (no note element) carries the reason via title + tap toast. */
-  async wireBrowserToggle(bid, input, note, generation, root = null, existingRecord = null) {
+     A row variant (no note element) carries the reason via title + tap toast.
+     ``shared`` is the optional companion shared-cookie switch fed from the
+     same status fetch; it stays disabled until the node reports the field. */
+  async wireBrowserToggle(bid, input, note, generation, root = null,
+      existingRecord = null, shared = null) {
     const name = backendName(bid);
+    if (!shared && existingRecord && existingRecord.shared)
+      shared = existingRecord.shared;
     const browserRecord = existingRecord || (bid && root ? {
-      input, root, wasOffline: false,
+      input, root, shared, wasOffline: false,
     } : null);
     if (browserRecord) this.remoteBrowserToggles.set(bid, browserRecord);
     const setNote = (text, warn) => {
@@ -11790,6 +11835,11 @@ class SettingsView {
         note.classList.toggle("warn", !!warn);
       }
       if (root) root.title = text;
+    };
+    const setSharedUsable = usable => {
+      if (!shared) return;
+      shared.input.disabled = !usable;
+      if (shared.root) shared.root.classList.toggle("disabled", !usable);
     };
     const apply = st => {
       if (browserRecord) browserRecord.wasOffline = false;
@@ -11800,6 +11850,10 @@ class SettingsView {
         root.classList.toggle("disabled", input.disabled);
         root.onclick = input.disabled ?
           () => toast(`${name}: ${st.reason || "No usable browser"}`, "error", 6000) : null;
+      }
+      if (shared) {
+        shared.input.checked = st.shared_storage === true;
+        setSharedUsable(typeof st.shared_storage === "boolean");
       }
       if (st.available) {
         setNote((st.product || "Browser available") +
@@ -11815,6 +11869,7 @@ class SettingsView {
     if (bid && !backendConnectionAllowed(bid)) {
       input.disabled = true;
       if (root) root.classList.add("disabled");
+      setSharedUsable(false);
       if (browserRecord) browserRecord.wasOffline = true;
       setNote(remoteAvailability(bid) === "bad" ?
         "Backend unavailable · showing last known value" :
@@ -11828,6 +11883,7 @@ class SettingsView {
       if (generation !== this.renderGeneration || !input.isConnected) return;
       input.disabled = true;
       if (root) root.classList.add("disabled");
+      setSharedUsable(false);
       setNote(error.message || "Browser status unavailable", true);
       return;
     }
@@ -11850,6 +11906,21 @@ class SettingsView {
         input.checked = !desired;
         input.disabled = false;
         setNote(error.message, true);
+        toast(`${name}: ${error.message}`, "error", 6500);
+      }
+    };
+    if (shared) shared.input.onchange = async () => {
+      const desired = shared.input.checked;
+      shared.input.disabled = true;
+      try {
+        const result = await api(bid, "browser/shared-storage", {
+          method: "POST", body: { enabled: desired } });
+        apply(result);
+        toast(`${name}: Shared cookies & storage ${
+          result.shared_storage ? "enabled" : "disabled"}`, "ok");
+      } catch (error) {
+        shared.input.checked = !desired;
+        shared.input.disabled = false;
         toast(`${name}: ${error.message}`, "error", 6500);
       }
     };
@@ -12326,6 +12397,14 @@ class SettingsView {
         <span class="be-auto-copy"><span>Browser</span>
           <small id="set-browser-note">Checking availability…</small></span>
       </label>
+      <label class="be-auto be-auto-add browser-toggle browser-share-toggle">
+        <input type="checkbox" id="set-browser-share" disabled
+          aria-label="Share one persistent cookie and site-storage store across this instance's browsers">
+        <span class="be-auto-track" aria-hidden="true"><span></span></span>
+        <span class="be-auto-copy"><span>Shared cookies &amp; storage</span>
+          <small>All browsers on this instance use one persistent sign-in store,
+            so logins survive new browsers and restarts.</small></span>
+      </label>
       <div class="bind-fields">
         <label>Bind IP<input type="text" id="set-bind" value="${esc(settings.web.host)}"
           inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
@@ -12352,7 +12431,10 @@ class SettingsView {
     wireDirectoryPicker(c1.querySelector("#set-cwd"),
       c1.querySelector("#set-cwd-dirs"), () => 0);
     this.wireBrowserToggle(0, c1.querySelector("#set-browser"),
-      c1.querySelector("#set-browser-note"), generation);
+      c1.querySelector("#set-browser-note"), generation, null, null, {
+        input: c1.querySelector("#set-browser-share"),
+        root: c1.querySelector(".browser-share-toggle"),
+      });
     /* reveal -> copy -> hide, then round again, so the token never has to stay
        on screen once it has been taken. The label names what the NEXT activation
        does, which is what a screen reader announces before the press. */
@@ -12837,8 +12919,28 @@ class SettingsView {
           browserRoot.appendChild(browserInput);
           browserRoot.appendChild(browserTrack);
           browserRoot.appendChild(el("span", "be-auto-label", "Browser"));
-          this.wireBrowserToggle(b.id, browserInput, null, generation, browserRoot);
+          let shared = null;
+          if (backendHasCapability(b, "browser-shared-storage")) {
+            const sharedRoot = el("label", "be-auto be-auto-existing be-browser-share");
+            const sharedInput = document.createElement("input");
+            sharedInput.type = "checkbox";
+            sharedInput.disabled = true;
+            sharedInput.setAttribute("aria-label",
+              `Share one persistent cookie store across browsers on ${b.name}`);
+            const sharedTrack = el("span", "be-auto-track");
+            sharedTrack.setAttribute("aria-hidden", "true");
+            sharedTrack.appendChild(el("span"));
+            sharedRoot.appendChild(sharedInput);
+            sharedRoot.appendChild(sharedTrack);
+            sharedRoot.appendChild(el("span", "be-auto-label", "Shared cookies"));
+            sharedRoot.title =
+              "All browsers on this backend use one persistent sign-in store";
+            shared = { input: sharedInput, root: sharedRoot };
+          }
+          this.wireBrowserToggle(b.id, browserInput, null, generation,
+            browserRoot, null, shared);
           toggles.appendChild(browserRoot);
+          if (shared) toggles.appendChild(shared.root);
         }
         row.appendChild(toggles);
         const actions = el("div", "be-actions");
