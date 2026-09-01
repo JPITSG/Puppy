@@ -268,6 +268,29 @@ because non-interactive services normally do not source the shell file which
 the installer updates. Run the backend with the same `HOME` as the account that
 owns OpenCode's installation and provider credentials.
 
+## Managed browsers
+
+The headless artifact serves the same node-owned managed-browser execution
+surface as the full runtime. Browser viewer WebSockets accept the additive
+`viewer_active` boolean message: inactive sockets retain the page and binding
+but receive no frames, and Chromium's screencast pauses when no viewer is
+active. Reactivation starts the stream and sends an explicit fresh frame. Older
+consoles remain compatible because a newly attached viewer defaults to active;
+older nodes simply ignore the new message.
+
+Each entry in the Browser status `instances` array includes ephemeral
+`frame_flow` counters and rates for screencast frames received, screenshots
+captured, frames actually written to viewers, and drops caused by a stale
+surface, decode failure, inactivity, or viewer backpressure. These metrics are
+diagnostic process state, are never persisted or backed up, and exist so ACK
+pacing or image-quality changes can be based on measured behavior.
+
+Agent accessibility snapshots use bounded root/child traversal under one
+time/node budget, retaining a bounded full-tree fallback for compatible older
+Chromium. An individual CDP response that exceeds the pipe safety limit is
+discarded through its NUL boundary and fails only the matching pending request;
+it does not terminate the managed Browser or strand direct viewer input.
+
 ## System prompts
 
 Each node stores its own custom prompt plus conditional remote-workspace,

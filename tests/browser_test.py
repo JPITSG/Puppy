@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 import aiohttp
 from aiohttp import web
@@ -77,6 +78,7 @@ POPUP = {"targetId": "stub-popup-2", "type": "page", "title": "popup",
 PAGE_TEXT = "Stub page Ready Continue Email Region Alerts"
 TYPED_VALUE = ""
 UPLOADED_FILES = []
+SCROLL_Y = 0
 active_target = PAGE["targetId"]
 
 
@@ -94,6 +96,31 @@ casting = False
 viewport_width, viewport_height = 1280, 800
 frame_session = 10
 fail_next_viewport = False
+AX_NODES = [
+    {"nodeId": "root", "role": {"value": "RootWebArea"},
+     "name": {"value": "Stub page"},
+     "childIds": ["button", "input", "region", "file"]},
+    {"nodeId": "button", "role": {"value": "button"},
+     "name": {"value": "Continue"}, "backendDOMNodeId": 10,
+     "properties": [{"name": "focusable", "value": {"value": True}}]},
+    {"nodeId": "input", "role": {"value": "textbox"},
+     "name": {"value": "Email"}, "backendDOMNodeId": 11,
+     "properties": [{"name": "focusable", "value": {"value": True}}]},
+    {"nodeId": "region", "role": {"value": "region"},
+     "name": {"value": "Preferences"},
+     "childIds": ["select", "checkbox"]},
+    {"nodeId": "select", "role": {"value": "combobox"},
+     "name": {"value": "Region"}, "backendDOMNodeId": 12,
+     "properties": [{"name": "focusable", "value": {"value": True}}]},
+    {"nodeId": "checkbox", "role": {"value": "checkbox"},
+     "name": {"value": "Alerts"}, "backendDOMNodeId": 13,
+     "properties": [
+         {"name": "focusable", "value": {"value": True}},
+         {"name": "checked", "value": {"value": True}}]},
+    {"nodeId": "file", "role": {"value": "button"},
+     "name": {"value": "Upload file"}, "backendDOMNodeId": 14,
+     "properties": [{"name": "focusable", "value": {"value": True}}]},
+]
 while True:
     chunk = os.read(3, 65536)
     if not chunk:
@@ -124,32 +151,24 @@ while True:
         elif method == "Page.getLayoutMetrics":
             result = {"cssContentSize": {"x": 0, "y": 0,
                                          "width": 1200, "height": 1800}}
+        elif method == "Accessibility.getRootAXNode":
+            record("ax.jsonl", {"method": method, "params": params})
+            result = {"node": AX_NODES[0]}
+        elif method == "Accessibility.getPartialAXTree":
+            record("ax.jsonl", {"method": method, "params": params})
+            backend = params.get("backendNodeId")
+            result = {"nodes": [node for node in AX_NODES
+                                 if node.get("backendDOMNodeId") == backend]}
+        elif method == "Accessibility.getChildAXNodes":
+            record("ax.jsonl", {"method": method, "params": params})
+            parent = next((node for node in AX_NODES
+                           if node.get("nodeId") == params.get("id")), {})
+            wanted = set(parent.get("childIds") or [])
+            result = {"nodes": [node for node in AX_NODES
+                                 if node.get("nodeId") in wanted]}
         elif method == "Accessibility.getFullAXTree":
-            result = {"nodes": [
-                {"nodeId": "root", "role": {"value": "RootWebArea"},
-                 "name": {"value": "Stub page"},
-                 "childIds": ["button", "input", "region", "file"]},
-                {"nodeId": "button", "role": {"value": "button"},
-                 "name": {"value": "Continue"}, "backendDOMNodeId": 10,
-                 "properties": [{"name": "focusable", "value": {"value": True}}]},
-                {"nodeId": "input", "role": {"value": "textbox"},
-                 "name": {"value": "Email"}, "backendDOMNodeId": 11,
-                 "properties": [{"name": "focusable", "value": {"value": True}}]},
-                {"nodeId": "region", "role": {"value": "region"},
-                 "name": {"value": "Preferences"},
-                 "childIds": ["select", "checkbox"]},
-                {"nodeId": "select", "role": {"value": "combobox"},
-                 "name": {"value": "Region"}, "backendDOMNodeId": 12,
-                 "properties": [{"name": "focusable", "value": {"value": True}}]},
-                {"nodeId": "checkbox", "role": {"value": "checkbox"},
-                 "name": {"value": "Alerts"}, "backendDOMNodeId": 13,
-                 "properties": [
-                     {"name": "focusable", "value": {"value": True}},
-                     {"name": "checked", "value": {"value": True}}]},
-                {"nodeId": "file", "role": {"value": "button"},
-                 "name": {"value": "Upload file"}, "backendDOMNodeId": 14,
-                 "properties": [{"name": "focusable", "value": {"value": True}}]},
-            ]}
+            record("ax.jsonl", {"method": method, "params": params})
+            result = {"nodes": AX_NODES}
         elif method == "DOM.getBoxModel":
             result = {"model": {
                 "content": [100, 40, 300, 40, 300, 80, 100, 80],
@@ -212,8 +231,13 @@ while True:
             pass
         elif method == "Runtime.evaluate":
             expression = params.get("expression") or ""
+            record("evaluate.jsonl", {"expression": expression})
             current = POPUP if active_target == POPUP["targetId"] else PAGE
-            if expression.startswith("JSON.stringify({url:location.href,title:document.title})"):
+            if "puppyScrollState" in expression:
+                value = {"target": "document", "x": 0, "y": SCROLL_Y,
+                         "documentX": 0, "documentY": SCROLL_Y}
+                result = {"result": {"type": "object", "value": value}}
+            elif expression.startswith("JSON.stringify({url:location.href,title:document.title})"):
                 value = json.dumps({"url": current["url"], "title": current["title"]})
                 result = {"result": {"type": "string", "value": value}}
             elif "textPresent" in expression and "readyState" in expression:
@@ -252,6 +276,7 @@ while True:
                                       "html": params.get("html", "")})
             PAGE["title"] = "start page"
         elif method == "Page.getNavigationHistory":
+            record("history.jsonl", {})
             current = POPUP if active_target == POPUP["targetId"] else PAGE
             result = {"currentIndex": 1, "entries": [
                 {"id": 1, "url": "about:blank"}, {"id": 2, "url": current["url"]},
@@ -290,6 +315,9 @@ while True:
             record("input.jsonl", {"method": method, "params": params})
             if method == "Input.insertText":
                 TYPED_VALUE = str(params.get("text") or "")
+            elif method == "Input.dispatchMouseEvent" and \
+                    params.get("type") == "mouseWheel":
+                SCROLL_Y = max(0, SCROLL_Y + float(params.get("deltaY") or 0))
         elif method == "Browser.close":
             send({"id": msg.get("id"), "result": {}})
             raise SystemExit(0)
@@ -347,6 +375,153 @@ async def collect_ws(ws, texts, frames):
             frames.append(msg.data)
         else:
             break
+
+
+async def check_cdp_message_isolation() -> None:
+    """One excessive CDP reply must not kill or desynchronize the pipe."""
+    old_limit = browser.MAX_CDP_BUFFER
+
+    class Owner:
+        def __init__(self):
+            self.messages = []
+            self.oversized = []
+            self.lost = 0
+
+        def _on_message(self, message):
+            self.messages.append(message)
+
+        def _on_oversized_message(self, prefix, size):
+            self.oversized.append((prefix, size))
+
+        def _on_pipe_lost(self):
+            self.lost += 1
+
+    owner = Owner()
+    protocol = browser._ReadProtocol(owner)
+    try:
+        browser.MAX_CDP_BUFFER = 64
+        protocol.data_received(b'{"id":1,"result":{}}\0')
+        protocol.data_received(b'{"id":7,"result":{"blob":"' + b"x" * 45)
+        protocol.data_received(b"x" * 45 + b'"}}\0{"id":8,"result":{}}\0')
+    finally:
+        browser.MAX_CDP_BUFFER = old_limit
+    assert [message["id"] for message in owner.messages] == [1, 8], owner.messages
+    assert len(owner.oversized) == 1 and owner.oversized[0][0].startswith(b'{"id":7')
+    assert owner.oversized[0][1] > 64 and owner.lost == 0, owner.oversized
+
+    # A nested application id in an event is not a browser request id.
+    manager = object.__new__(browser.Manager)
+    manager.browser_id = "T1T1"
+    pending = asyncio.get_event_loop().create_future()
+    manager.pending = {91: pending}
+    manager._on_oversized_message(
+        b'{"method":"Runtime.bindingCalled","params":{"id":91,', 100)
+    assert not pending.done() and 91 in manager.pending
+    manager._on_oversized_message(b'{"id":91,"result":{"blob":"', 100)
+    assert pending.done() and isinstance(pending.exception(), browser.BrowserError)
+
+
+async def check_bounded_ax_source() -> None:
+    """The accessibility walker stops at its cap without a full-tree call."""
+    calls = []
+    mids = ["mid-{}".format(index) for index in range(100)]
+    root = {"nodeId": "root", "childIds": mids,
+            "role": {"value": "RootWebArea"}}
+
+    async def call(method, params=None, session="", timeout=0):
+        calls.append((method, params or {}))
+        if method == "Accessibility.getRootAXNode":
+            return {"node": root}
+        if method == "Accessibility.getChildAXNodes":
+            parent = (params or {}).get("id")
+            if parent == "root":
+                return {"nodes": [
+                    {"nodeId": mid,
+                     "childIds": ["{}-leaf-{}".format(mid, leaf)
+                                  for leaf in range(100)]}
+                    for mid in mids]}
+            return {"nodes": [
+                {"nodeId": "{}-leaf-{}".format(parent, leaf),
+                 "role": {"value": "StaticText"}}
+                for leaf in range(100)]}
+        raise AssertionError("unexpected AX call " + method)
+
+    manager = object.__new__(browser.Manager)
+    manager.browser_id = "A1X1"
+    manager.page_session = "ax-session"
+    manager.call = call
+    nodes, truncated = await manager._agent_ax_source()
+    methods = [method for method, _params in calls]
+    assert len(nodes) == browser.MAX_AX_SOURCE_NODES, len(nodes)
+    assert truncated is True
+    assert methods[0] == "Accessibility.getRootAXNode"
+    assert "Accessibility.getFullAXTree" not in methods
+    assert methods.count("Accessibility.getChildAXNodes") <= 65, len(methods)
+
+
+async def check_blocking_cleanup_offload() -> None:
+    """Filesystem/process reclamation must yield to the server event loop."""
+    registry = object.__new__(browser.BrowserRegistry)
+    registry.background_tasks = set()
+    started = time.monotonic()
+    registry._schedule_blocking("test cleanup", time.sleep, 0.25)
+    await asyncio.sleep(0.02)
+    elapsed = time.monotonic() - started
+    assert elapsed < 0.15, "cleanup blocked the event loop for {:.3f}s".format(elapsed)
+    if registry.background_tasks:
+        await asyncio.gather(*list(registry.background_tasks))
+
+
+def check_fragmented_bridge_response() -> None:
+    """A large fragmented bridge result is scanned once per received chunk."""
+    text_value = "z" * (512 * 1024)
+    encoded = json.dumps({"ok": True, "result": {"text": text_value}},
+                         separators=(",", ":")).encode() + b"\nignored"
+    chunks = [encoded[index:index + 128] for index in range(0, len(encoded), 128)]
+
+    class FakeSocket:
+        def __init__(self):
+            self.chunks = list(chunks)
+            self.request = b""
+
+        def settimeout(self, _value):
+            pass
+
+        def connect(self, _path):
+            pass
+
+        def sendall(self, value):
+            self.request = value
+
+        def recv(self, _size):
+            return self.chunks.pop(0) if self.chunks else b""
+
+        def close(self):
+            pass
+
+    fake = FakeSocket()
+    old_socket = browser_agent.socket.socket
+    old_env = {key: os.environ.get(key) for key in (
+        "PUPPY_BROWSER_SOCKET", "PUPPY_BROWSER_SESSION_ID", "PUPPY_BROWSER_TURN_ID")}
+    try:
+        browser_agent.socket.socket = lambda *_args, **_kwargs: fake
+        os.environ["PUPPY_BROWSER_SOCKET"] = "/tmp/browser-test.sock"
+        os.environ["PUPPY_BROWSER_SESSION_ID"] = "12"
+        os.environ["PUPPY_BROWSER_TURN_ID"] = "turn-fragments"
+        started = time.monotonic()
+        result = browser_agent._bridge_call("snapshot", {})
+        elapsed = time.monotonic() - started
+    finally:
+        browser_agent.socket.socket = old_socket
+        for key, value in old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    assert result == {"text": text_value}
+    assert json.loads(fake.request.decode())[
+        "method"] == "snapshot"
+    assert elapsed < 1.0, "fragmented bridge response took {:.3f}s".format(elapsed)
 
 
 class CaptureSocket:
@@ -1447,6 +1622,180 @@ console.log(JSON.stringify({sent,cleared,timers:timers.size,delay:queued.delay})
         ],
         "cleared": 1, "timers": 0, "delay": 80,
     }, result
+
+
+def check_browser_transport_controls(ui_source: str) -> None:
+    """Exercise wheel collapse, viewer activity, and reconnect backoff."""
+    start = ui_source.index("class BrowserView {")
+    end = ui_source.index("/* ================= SettingsView", start)
+    browser_view = ui_source[start:end]
+    script = r"""
+const sockets=[];
+function WebSocket(url){this.url=url;this.readyState=0;this.bufferedAmount=0;sockets.push(this);}
+WebSocket.OPEN=1;
+WebSocket.prototype.send=function(){};
+WebSocket.prototype.close=function(){};
+let visibility="visible";
+const document={get visibilityState(){return visibility;}};
+let nextRaf=0;
+const rafs=new Map();
+const requestAnimationFrame=fn=>{const id=++nextRaf;rafs.set(id,fn);return id;};
+const cancelAnimationFrame=id=>rafs.delete(id);
+const flushRaf=()=>{const item=[...rafs.entries()][0];rafs.delete(item[0]);item[1]();};
+let nextTimer=0;
+const timers=new Map();
+const setTimeout=(fn,delay)=>{const id=++nextTimer;timers.set(id,{fn,delay});return id;};
+const clearTimeout=id=>timers.delete(id);
+const backendConnectionAllowed=()=>true;
+const remoteStoppingMessage=()=>"";
+const wsUrl=(_bid,path)=>path;
+const noteRemoteSocketReachable=()=>{};
+%s
+
+const sent=[];
+const wheel=Object.assign(Object.create(BrowserView.prototype),{
+  viewerActive:true,closed:false,wheelQueued:null,wheelFrame:null,
+  ws:{readyState:WebSocket.OPEN,bufferedAmount:0,
+      send:value=>sent.push(JSON.parse(value))},
+});
+wheel.queueWheel({type:"wheel",nx:.1,ny:.2,dx:2,dy:3,modifiers:0});
+wheel.queueWheel({type:"wheel",nx:.4,ny:.5,dx:7,dy:-1,modifiers:8});
+const beforeFlush=sent.length;
+flushRaf();
+wheel.ws.bufferedAmount=300*1024;
+wheel.queueWheel({type:"wheel",nx:.6,ny:.7,dx:9,dy:9,modifiers:0});
+flushRaf();
+wheel.ws.bufferedAmount=0;
+wheel.viewerActive=false;
+wheel.queueWheel({type:"wheel",nx:.8,ny:.9,dx:10,dy:10,modifiers:0});
+flushRaf();
+
+const activitySent=[];
+let viewportQueues=0,reconnectRequests=0;
+const activity=Object.assign(Object.create(BrowserView.prototype),{
+  visible:true,viewerActive:null,closed:false,terminalGone:false,ws:null,
+  send:value=>activitySent.push(value),
+  queueViewport:()=>{viewportQueues++;},
+  scheduleReconnect:delay=>{reconnectRequests++;activity.reconnectRequested=delay;},
+});
+activity.syncViewerActivity();
+activity.syncViewerActivity();
+visibility="hidden";
+activity.syncViewerActivity();
+visibility="visible";
+activity.syncViewerActivity();
+
+let connects=0;
+const reconnect=Object.assign(Object.create(BrowserView.prototype),{
+  closed:false,terminalGone:false,visible:true,ws:null,tab:{bid:0},
+  reconnectTimer:null,reconnectDelay:1000,
+  connect(){connects++;this.ws={readyState:0};},
+});
+reconnect.scheduleReconnect();
+const firstTimer=[...timers.values()][0];
+const firstDelay=firstTimer.delay;
+timers.clear();reconnect.reconnectTimer=null;firstTimer.fn();
+reconnect.ws=null;reconnect.terminalGone=true;
+reconnect.scheduleReconnect();
+const terminalTimers=timers.size;
+reconnect.terminalGone=false;visibility="hidden";
+reconnect.scheduleReconnect();
+const hiddenTimers=timers.size;
+visibility="visible";reconnect.visible=false;
+reconnect.scheduleReconnect();
+const invisibleTimers=timers.size;
+
+const closeNotices=[];
+let closeRetries=0;
+const connection=Object.assign(Object.create(BrowserView.prototype),{
+  closed:false,terminalGone:false,visible:true,ws:null,tab:{bid:0,browserId:"A1B2"},
+  reconnectTimer:null,reconnectDelay:1000,connectionSequence:0,waitingForBackend:false,
+  showDead:(message,ended)=>closeNotices.push({message,ended}),
+  scheduleReconnect:()=>{closeRetries++;},syncViewerActivity:()=>{},
+  sendColorScheme:()=>{},sendViewport:()=>{},syncRemoteState:()=>{},
+});
+connection.connect();
+const transientSocket=sockets[0];
+transientSocket.readyState=WebSocket.OPEN;
+transientSocket.onopen();
+transientSocket.onclose();
+connection.connect();
+const terminalSocket=sockets[1];
+connection.terminalGone=true;
+terminalSocket.onclose();
+
+console.log(JSON.stringify({beforeFlush,sent,activitySent,viewportQueues,
+  reconnectRequests,reconnectRequested:activity.reconnectRequested,
+  firstDelay,nextDelay:reconnect.reconnectDelay,connects,
+  terminalTimers,hiddenTimers,invisibleTimers,closeNotices,closeRetries}));
+""" % browser_view
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:1000]
+    result = json.loads(proc.stdout)
+    assert result["beforeFlush"] == 0, result
+    assert result["sent"] == [{
+        "type": "wheel", "nx": 0.4, "ny": 0.5,
+        "dx": 9, "dy": 2, "modifiers": 8,
+    }], result
+    assert result["activitySent"] == [
+        {"type": "viewer_active", "active": True},
+        {"type": "viewer_active", "active": False},
+        {"type": "viewer_active", "active": True},
+    ], result
+    assert result["viewportQueues"] == 2 and result["reconnectRequests"] == 2, result
+    assert result["reconnectRequested"] == 0, result
+    assert result["firstDelay"] == 1000 and result["nextDelay"] == 2000, result
+    assert result["connects"] == 1, result
+    assert result["terminalTimers"] == 0 and result["hiddenTimers"] == 0 and \
+        result["invisibleTimers"] == 0, result
+    assert result["closeNotices"] == [{"message": "Connection closed",
+                                       "ended": False}], result
+    assert result["closeRetries"] == 1, result
+    reconnect_button = browser_view[browser_view.index("again.onclick = () => {"):
+                                    browser_view.index("const close =", browser_view.index(
+                                        "again.onclick = () => {"))]
+    assert "this.ws = null;" in reconnect_button and \
+        "this.connectionSequence++;" in reconnect_button
+
+
+def check_browser_theme_fanout(ui_source: str) -> None:
+    """A theme toggle sends once per node and prefers a connected view."""
+    start = ui_source.index("function applyTheme(")
+    brace = ui_source.index("{", start)
+    depth = 0
+    end = None
+    for index in range(brace, len(ui_source)):
+        if ui_source[index] == "{":
+            depth += 1
+        elif ui_source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                end = index + 1
+                break
+    assert end is not None
+    source = ui_source[start:end]
+    script = r"""
+const calls=[];
+const document={documentElement:{classList:{toggle(){}}}};
+const lsSet=()=>{};
+const themeButton={replaceChildren(){},setAttribute(){}};
+const $=()=>themeButton;
+const themeIcon=()=>({});
+const make=(name,bid,ready)=>({name,tab:{bid},ws:ready===null?null:{readyState:ready},
+  sendColorScheme(){calls.push(this.name);}});
+const state={views:{
+  disconnected:make("disconnected",7,null),
+  connected:make("connected",7,1),
+  duplicate:make("duplicate",7,1),
+  remote:make("remote",8,1),
+}};
+%s
+applyTheme("dark");
+console.log(JSON.stringify(calls));
+""" % source
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:800]
+    assert json.loads(proc.stdout) == ["connected", "remote"], proc.stdout
 
 
 def check_session_draft_sync(ui_source: str) -> None:
@@ -3702,6 +4051,10 @@ async def main() -> None:
     assert browser._normalize_url("data:text/plain,hello") == "data:text/plain,hello"
     assert browser._normalize_url("file:///etc/passwd") == ""
     assert browser._normalize_url("chrome://version") == ""
+    await check_cdp_message_isolation()
+    await check_bounded_ax_source()
+    await check_blocking_cleanup_offload()
+    check_fragmented_bridge_response()
     app = build_app()
     web_runner = web.AppRunner(app)
     await web_runner.setup()
@@ -3874,7 +4227,8 @@ async def main() -> None:
                 assert r.status == 201, third
             third_id = third["browser"]["id"]
             assert third_id not in created_ids
-            assert not (old_root / "retired-marker").exists()
+            await wait_for(lambda: not (old_root / "retired-marker").exists(),
+                           message="retired browser storage cleanup")
             if third_id == old_id:
                 assert registry.records[old_id]["closed_at"] is None
             else:
@@ -3989,16 +4343,54 @@ async def main() -> None:
 
             assert schemes() and set(schemes()) == {"dark"}, schemes()
             assert browser.color_scheme() == "dark"
+            media_count = len(read_lines("media.jsonl"))
             await ws.send_json({"type": "color_scheme", "value": "light"})
-            await wait_for(lambda: "light" in schemes(), message="light emulation")
+            await wait_for(lambda: len(read_lines("media.jsonl")) >= media_count + 2,
+                           message="light emulation on every live browser")
+            assert schemes()[-2:] == ["light", "light"], schemes()
             assert config.get("browser.color_scheme") == "light"
+            media_count = len(read_lines("media.jsonl"))
+            await ws.send_json({"type": "color_scheme", "value": "light"})
+            await asyncio.sleep(0.2)
+            assert len(read_lines("media.jsonl")) == media_count, schemes()
             # a stale or hostile value is a rendering hint, not a launch failure
             assert browser.normalize_color_scheme("neon") == "dark"
             assert browser.normalize_color_scheme(None) == "dark"
+            media_count = len(read_lines("media.jsonl"))
             await ws.send_json({"type": "color_scheme", "value": "sepia"})
-            await wait_for(lambda: schemes()[-1] == "dark", message="fallback emulation")
+            await wait_for(lambda: len(read_lines("media.jsonl")) >= media_count + 2,
+                           message="fallback emulation")
+            assert schemes()[-2:] == ["dark", "dark"], schemes()
+            media_count = len(read_lines("media.jsonl"))
             await ws.send_json({"type": "color_scheme", "value": "light"})
-            await wait_for(lambda: schemes()[-1] == "light", message="light again")
+            await wait_for(lambda: len(read_lines("media.jsonl")) >= media_count + 2,
+                           message="light again")
+            assert schemes()[-2:] == ["light", "light"], schemes()
+
+            # A hidden pane keeps its Browser process and socket but pauses the
+            # expensive screencast. Reactivation starts it and delivers a fresh
+            # frame without making the user reconnect manually.
+            instance = browser.manager().get(first_id)
+            stops = len(read_lines("screencast-stop.jsonl"))
+            await ws.send_json({"type": "viewer_active", "active": False})
+            await wait_for(
+                lambda: not instance.screencasting and
+                len(read_lines("screencast-stop.jsonl")) > stops,
+                message="inactive viewer screencast pause")
+            assert instance.running and instance.viewer_count() == 1
+            hidden_frames = len(frames)
+            hidden_shots = len(read_lines("screenshots.jsonl"))
+            await ws.send_json({"type": "reload"})
+            await asyncio.sleep(0.5)
+            assert len(frames) == hidden_frames
+            assert len(read_lines("screenshots.jsonl")) == hidden_shots
+            starts = len(read_lines("screencast.jsonl"))
+            await ws.send_json({"type": "viewer_active", "active": True})
+            await wait_for(lambda: instance.screencasting and
+                           len(read_lines("screencast.jsonl")) > starts,
+                           message="active viewer screencast resume")
+            await wait_for(lambda: len(frames) > hidden_frames,
+                           message="active viewer fresh frame")
 
             # bare hostnames gain a scheme; LAN-ish suffixes stay cleartext
             await ws.send_json({"type": "navigate", "url": "openhab.lan/start"})
@@ -4051,16 +4443,38 @@ async def main() -> None:
             assert browser.manager().get(first_id).screencasting is True
 
             # If a known visual change produces no damage frame at all, the
-            # bounded event-driven watchdog restarts the cast and captures one.
+            # watchdog captures one first. A healthy silent stream must not pay
+            # for a stop/start cycle merely because the page had no damage.
             silent_frames = len(frames)
             silent_casts = len(read_lines("screencast.jsonl"))
+            silent_shots = len(read_lines("screenshots.jsonl"))
             await ws.send_json({"type": "navigate",
                                 "url": "http://stub.invalid/no-frame"})
             await wait_for(
-                lambda: len(read_lines("screencast.jsonl")) > silent_casts,
+                lambda: len(read_lines("screenshots.jsonl")) > silent_shots,
                 timeout=3, message="silent screencast recovery")
             await wait_for(lambda: len(frames) > silent_frames,
                            message="watchdog recovery frame")
+            assert len(read_lines("screencast.jsonl")) == silent_casts
+
+            # Title churn updates the toolbar but does not imply visual damage.
+            # Several rapid target events collapse into one history read and
+            # never arm the screenshot watchdog used for actual URL changes.
+            instance = browser.manager().get(first_id)
+            history_reads = len(read_lines("history.jsonl"))
+            title_shots = len(read_lines("screenshots.jsonl"))
+            for index in range(6):
+                info = dict(instance.targets[instance.page_target])
+                info["title"] = "dynamic title {}".format(index)
+                instance._on_message({
+                    "method": "Target.targetInfoChanged",
+                    "params": {"targetInfo": info},
+                })
+            await wait_for(lambda: len(read_lines("history.jsonl")) > history_reads,
+                           message="coalesced title navigation refresh")
+            await asyncio.sleep(0.9)
+            assert len(read_lines("history.jsonl")) == history_reads + 1
+            assert len(read_lines("screenshots.jsonl")) == title_shots
 
             # A last-viewer detach schedules screencast shutdown. If a new
             # WebSocket attaches before that task runs, the stale shutdown
@@ -4089,6 +4503,15 @@ async def main() -> None:
                 assert running["running"] is True and running["viewers"] == 1, running
                 assert {item["id"] for item in running["instances"]} == \
                     {first_id, third_id}, running
+                flow = next(item["frame_flow"] for item in running["instances"]
+                            if item["id"] == first_id)
+                assert flow["received"] > 0 and flow["captured"] > 0 and \
+                    flow["forwarded"] > 0, flow
+                assert flow["dropped_surface"] >= 2, flow
+                assert flow["dropped"] == sum(
+                    flow[key] for key in ("dropped_surface", "dropped_decode",
+                                          "dropped_inactive", "dropped_backpressure")), flow
+                assert flow["receive_hz"] >= 0 and flow["forward_hz"] >= 0, flow
 
             # Disabling stops every process, preserves the logical IDs, and
             # informs all attached viewers.
@@ -4112,8 +4535,10 @@ async def main() -> None:
             ws2 = await http.ws_connect(
                 url + "/api/ws/browser/" + first_id, headers=headers)
             refused = await ws2.receive()
+            refused_payload = json.loads(refused.data)
             assert refused.type == aiohttp.WSMsgType.TEXT and \
-                "disabled" in json.loads(refused.data)["text"]
+                "disabled" in refused_payload["text"] and \
+                refused_payload["terminal"] is True
             await ws2.close()
 
             # Re-enabling does not eagerly launch any instance.
@@ -4348,6 +4773,11 @@ async def main() -> None:
                 assert "[b3] combobox" in fresh_text and \
                     "[b4] checkbox" in fresh_text and \
                     "[b5] button \"Upload file\"" in fresh_text, fresh_text
+                ax_methods = [item["method"] for item in read_lines("ax.jsonl")]
+                assert "Accessibility.getRootAXNode" in ax_methods, ax_methods
+                assert "Accessibility.getChildAXNodes" in ax_methods, ax_methods
+                assert "Accessibility.getPartialAXTree" in ax_methods, ax_methods
+                assert "Accessibility.getFullAXTree" not in ax_methods, ax_methods
                 chooser_intercepts = await wait_for(
                     lambda: read_lines("file-chooser-intercept.jsonl"),
                     message="file chooser interception")
@@ -4371,7 +4801,8 @@ async def main() -> None:
                 upload_text = uploaded_to_page["result"]["content"][0]["text"]
                 assert uploaded_to_page["result"]["isError"] is False, uploaded_to_page
                 assert "user-provided session upload" in upload_text and \
-                    "agent-document.txt" in upload_text, upload_text
+                    "agent-document.txt" in upload_text and \
+                    "no page-level outcome wait was needed" in upload_text, upload_text
                 file_inputs = read_lines("file-inputs.jsonl")
                 assert file_inputs and file_inputs[-1]["backendNodeId"] == 14, file_inputs
                 assert file_inputs[-1]["files"] == [uploaded["path"]], file_inputs[-1]
@@ -4530,6 +4961,25 @@ async def main() -> None:
                         "wait_for": {"text": "Ready", "timeout_ms": 100}}})
                 typed_text = typed["result"]["content"][0]["text"]
                 assert "Verified: b2 reports a value length of 10" in typed_text, typed_text
+                all_evaluations = [item["expression"] for item in
+                                   read_lines("evaluate.jsonl")]
+                assert any("innerText" in expression for expression in all_evaluations), \
+                    "text waits must inspect page text"
+                evaluation_start = len(all_evaluations)
+                fast_started = asyncio.get_event_loop().time()
+                typed_fast = await mcp_request(mcp, 135, "tools/call", {
+                    "name": "type", "arguments": {
+                        "ref": "b2", "text": "fast path", "clear": True}})
+                fast_elapsed = asyncio.get_event_loop().time() - fast_started
+                typed_fast_text = typed_fast["result"]["content"][0]["text"]
+                assert "no page-level outcome wait was needed" in typed_fast_text, \
+                    typed_fast_text
+                assert fast_elapsed < 0.55, fast_elapsed
+                fast_evaluations = [item["expression"] for item in
+                                    read_lines("evaluate.jsonl")[evaluation_start:]]
+                assert fast_evaluations and \
+                    all("innerText" not in expression for expression in fast_evaluations), \
+                    fast_evaluations
                 hovered = await mcp_request(mcp, 108, "tools/call", {
                     "name": "hover", "arguments": {
                         "ref": "b1", "wait_for": {"text": "Ready", "timeout_ms": 100}}})
@@ -4553,7 +5003,15 @@ async def main() -> None:
                 scrolled = await mcp_request(mcp, 112, "tools/call", {
                     "name": "scroll", "arguments": {
                         "delta_y": 320, "wait_for": {"text": "Ready", "timeout_ms": 100}}})
-                assert "Dispatched a scroll" in scrolled["result"]["content"][0]["text"]
+                assert "Dispatched a scroll" in scrolled["result"]["content"][0]["text"] and \
+                    "Verified: the document scroll position changed" in \
+                    scrolled["result"]["content"][0]["text"]
+                fast_scroll = await mcp_request(mcp, 136, "tools/call", {
+                    "name": "scroll", "arguments": {"delta_y": 40}})
+                assert "no page-level outcome wait was needed" in \
+                    fast_scroll["result"]["content"][0]["text"] and \
+                    "Verified: the document scroll position changed" in \
+                    fast_scroll["result"]["content"][0]["text"]
 
                 navigated = await mcp_request(mcp, 7, "tools/call", {
                     "name": "navigate", "arguments": {
@@ -4749,6 +5207,8 @@ async def main() -> None:
             check_drawer_drag(ui_source)
             check_responsive_drawer_chrome(css_source)
             check_browser_viewport(ui_source)
+            check_browser_transport_controls(ui_source)
+            check_browser_theme_fanout(ui_source)
             check_session_draft_sync(ui_source)
             check_transcript_batching(ui_source)
             check_browser_handoff_ui(ui_source, css_source)

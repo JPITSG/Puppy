@@ -66,14 +66,19 @@ SCREENCAST_QUALITY = 70
 SCREENCAST_CALL_TIMEOUT = 3.0
 VISUAL_REFRESH_DELAY = 0.75
 MAX_CDP_BUFFER = 32 * 1024 * 1024
+MAX_CDP_PREFIX = 4096
 MAX_TEXT_BACKLOG = 64          # queued small messages per viewer
 MAX_URL_LENGTH = 4096
 MAX_INSERT_TEXT = 8192
 MAX_AX_NODES = 400
 MAX_AX_SOURCE_NODES = 5000
 MAX_AX_TEXT = 48 * 1024
+AX_TREE_TIMEOUT = 30.0
+AX_CHILD_BATCH = 32
 MAX_WAIT_MS = 30000
 MAX_AGENT_WAIT_BUDGET_MS = 55000
+ACTION_NAV_OBSERVE_MS = 350
+FRAME_FLOW_LOG_SECONDS = 60.0
 MAX_DIAGNOSTIC_ENTRIES = 200
 MAX_DIAGNOSTIC_TEXT = 1200
 MAX_NETWORK_REQUESTS = 500
@@ -92,6 +97,7 @@ CATALOG_VERSION = 1
 
 _probe_cache = None            # (monotonic ts, dict)
 _manager = None
+_catalog_cleanup_ids = set()
 
 
 _AGENT_INSPECT_JS = r"""function puppyInspectElement() {
@@ -173,6 +179,27 @@ _AGENT_CHECK_JS = r"""function puppySetChecked(wanted) {
  }
  return {ok:true,checked:!!this.checked,type:type};
 }"""
+
+_AGENT_SCROLL_STATE_JS = r"""(async function puppyScrollState(x,y,settle) {
+ if (settle) await new Promise(resolve=>setTimeout(resolve,35));
+ const root=document.scrollingElement||document.documentElement||document.body;
+ const documentX=Number(root&&root.scrollLeft)||Number(scrollX)||0;
+ const documentY=Number(root&&root.scrollTop)||Number(scrollY)||0;
+ let element=document.elementFromPoint(Number(x)||0,Number(y)||0);
+ while (element&&element!==document.body&&element!==document.documentElement) {
+  const style=getComputedStyle(element);
+  const horizontal=element.scrollWidth>element.clientWidth&&
+   /^(auto|scroll|overlay)$/.test(style.overflowX);
+  const vertical=element.scrollHeight>element.clientHeight&&
+   /^(auto|scroll|overlay)$/.test(style.overflowY);
+  if (horizontal||vertical) return {target:'element',
+   x:Number(element.scrollLeft)||0,y:Number(element.scrollTop)||0,
+   documentX:documentX,documentY:documentY};
+  element=element.parentElement;
+ }
+ return {target:'document',x:documentX,y:documentY,
+  documentX:documentX,documentY:documentY};
+})(%s,%s,%s)"""
 
 
 class BrowserError(RuntimeError):
@@ -334,14 +361,13 @@ async def set_color_scheme(value) -> str:
     one they are using. Persisting it means the agent's own screenshots and any
     browser opened with nobody watching still match the user's UI."""
     scheme = normalize_color_scheme(value)
-    if scheme != color_scheme():
+    changed = scheme != color_scheme()
+    if changed:
         config.set_value("browser.color_scheme", scheme)
-    if _manager is not None:
-        for instance in list(_manager.instances.values()):
-            try:
-                await instance.apply_color_scheme()
-            except BrowserError:
-                pass   # a browser that is stopping simply picks it up next start
+    if changed and _manager is not None:
+        await asyncio.gather(*(instance.apply_color_scheme()
+                               for instance in list(_manager.instances.values())),
+                             return_exceptions=True)
     return scheme
 
 
@@ -352,8 +378,12 @@ async def apply_config() -> None:
     if not enabled() and _manager is not None:
         await _manager.stop("Browser disabled by restored configuration")
         return
-    # a restore can carry a different theme; browsers still running follow it
-    await set_color_scheme(color_scheme())
+    # A restore can replace the config beneath a live page. Force reapplication
+    # even when the restored value equals this process's newly loaded value.
+    if _manager is not None:
+        await asyncio.gather(*(instance.apply_color_scheme(force=True)
+                               for instance in list(_manager.instances.values())),
+                             return_exceptions=True)
 
 
 async def shutdown() -> None:
@@ -531,19 +561,45 @@ class _ReadProtocol(asyncio.Protocol):
     def __init__(self, owner):
         self.owner = owner
         self.buffer = bytearray()
+        self.scan_from = 0
+        self.discarding = False
+        self.discarded = 0
+        self.discard_prefix = b""
 
     def data_received(self, data):
-        self.buffer.extend(data)
-        if len(self.buffer) > MAX_CDP_BUFFER:
-            log.error("browser CDP stream exceeded %s bytes; dropping it", MAX_CDP_BUFFER)
-            self.owner._on_pipe_lost()
-            return
-        while True:
-            cut = self.buffer.find(b"\0")
+        if self.discarding:
+            cut = data.find(b"\0")
             if cut < 0:
+                self.discarded += len(data)
                 return
+            self.discarded += cut
+            self.owner._on_oversized_message(
+                self.discard_prefix, self.discarded)
+            self.discarding = False
+            self.discarded = 0
+            self.discard_prefix = b""
+            data = data[cut + 1:]
+        self.buffer.extend(data)
+        while True:
+            cut = self.buffer.find(b"\0", self.scan_from)
+            if cut < 0:
+                self.scan_from = len(self.buffer)
+                if len(self.buffer) > MAX_CDP_BUFFER:
+                    self.discarding = True
+                    self.discarded = len(self.buffer)
+                    self.discard_prefix = bytes(self.buffer[:MAX_CDP_PREFIX])
+                    self.buffer.clear()
+                    self.scan_from = 0
+                return
+            if cut > MAX_CDP_BUFFER:
+                prefix = bytes(self.buffer[:MAX_CDP_PREFIX])
+                del self.buffer[:cut + 1]
+                self.scan_from = 0
+                self.owner._on_oversized_message(prefix, cut)
+                continue
             raw = bytes(self.buffer[:cut])
             del self.buffer[:cut + 1]
+            self.scan_from = 0
             try:
                 message = json.loads(raw.decode("utf-8"))
             except Exception:
@@ -560,8 +616,10 @@ class _Viewer:
     serialized; frames collapse to the newest under backpressure while small
     JSON messages stay ordered and bounded."""
 
-    def __init__(self, ws):
+    def __init__(self, ws, frame_sent=None):
         self.ws = ws
+        self.frame_sent = frame_sent
+        self.active = True
         self.frame = None
         self.texts = collections.deque()
         self.wake = asyncio.Event()
@@ -573,9 +631,13 @@ class _Viewer:
             self.texts.append(json.dumps(payload))
         self.wake.set()
 
-    def send_frame(self, data: bytes) -> None:
+    def send_frame(self, data: bytes) -> bool:
+        if not self.active:
+            return False
+        replaced = self.frame is not None
         self.frame = data
         self.wake.set()
+        return replaced
 
     async def _run(self):
         try:
@@ -587,14 +649,19 @@ class _Viewer:
                 frame, self.frame = self.frame, None
                 if frame is not None:
                     await self.ws.send_bytes(frame)
+                    if self.frame_sent is not None:
+                        self.frame_sent()
         except asyncio.CancelledError:
             raise
         except Exception:
             pass
 
-    def close(self):
+    def close(self) -> bool:
+        dropped = self.frame is not None
+        self.frame = None
         self.closed = True
         self.task.cancel()
+        return dropped
 
 
 # key names that need a virtual key code because they carry no text
@@ -719,10 +786,19 @@ class Manager:
         self.targets = {}            # targetId -> targetInfo
         self.page_target = ""
         self.page_session = ""
+        self.applied_color_scheme = None
         self.screencasting = False
         self.viewport_repair_task = None
         self.visual_refresh_task = None
+        self.nav_refresh_task = None
         self.frame_sequence = 0
+        self.frame_flow_started = time.monotonic()
+        self.frame_flow_last_log = self.frame_flow_started
+        self.frame_flow_counts = {
+            "received": 0, "captured": 0, "forwarded": 0,
+            "dropped_surface": 0, "dropped_decode": 0,
+            "dropped_inactive": 0, "dropped_backpressure": 0,
+        }
         self.started_at = 0.0
         self.viewport = {"width": DEFAULT_VIEWPORT_W, "height": DEFAULT_VIEWPORT_H}
         self.frame_meta = dict(self.viewport)
@@ -742,6 +818,49 @@ class Manager:
 
     def viewer_count(self) -> int:
         return len(self.viewers)
+
+    def _active_viewers(self) -> list:
+        return [viewer for viewer in self.viewers.values() if viewer.active]
+
+    def _has_active_viewers(self) -> bool:
+        return any(viewer.active for viewer in self.viewers.values())
+
+    def _reset_frame_flow(self) -> None:
+        self.frame_flow_started = time.monotonic()
+        self.frame_flow_last_log = self.frame_flow_started
+        for key in self.frame_flow_counts:
+            self.frame_flow_counts[key] = 0
+
+    def frame_flow_payload(self) -> dict:
+        elapsed = max(0.001, time.monotonic() - self.frame_flow_started)
+        counts = dict(self.frame_flow_counts)
+        dropped = sum(value for key, value in counts.items()
+                      if key.startswith("dropped_"))
+        return {
+            **counts, "dropped": dropped,
+            "seconds": round(elapsed, 3),
+            "receive_hz": round(counts["received"] / elapsed, 3),
+            "forward_hz": round(counts["forwarded"] / elapsed, 3),
+        }
+
+    def _record_frame_flow(self, **changes) -> None:
+        for key, value in changes.items():
+            if key in self.frame_flow_counts:
+                self.frame_flow_counts[key] += max(0, int(value))
+        now = time.monotonic()
+        if now - self.frame_flow_last_log < FRAME_FLOW_LOG_SECONDS:
+            return
+        stats = self.frame_flow_payload()
+        log.debug(
+            "Browser %s frame flow: %.3f received/s, %.3f forwarded/s, "
+            "%s dropped (%s surface, %s decode, %s inactive, %s backpressure)",
+            self.browser_id, stats["receive_hz"], stats["forward_hz"],
+            stats["dropped"], stats["dropped_surface"], stats["dropped_decode"],
+            stats["dropped_inactive"], stats["dropped_backpressure"])
+        self.frame_flow_last_log = now
+
+    def _frame_forwarded(self) -> None:
+        self._record_frame_flow(forwarded=1)
 
     def _subdir(self, name: str) -> str:
         path = os.path.join(self.root, name)
@@ -774,7 +893,8 @@ class Manager:
             profile = self._subdir("profile")
             home = self._subdir("home")
             downloads = self._subdir("downloads")
-            _kill_stale_instance(profile, self.pidfile)
+            await asyncio.get_event_loop().run_in_executor(
+                None, _kill_stale_instance, profile, self.pidfile)
             argv = launch_argv(st["binary"], profile, os.geteuid() == 0)
             env = dict(os.environ)
             env["HOME"] = home
@@ -827,8 +947,10 @@ class Manager:
             self.targets = {}
             self.page_target = ""
             self.page_session = ""
+            self.applied_color_scheme = None
             self.screencasting = False
             self.frame_sequence = 0
+            self._reset_frame_flow()
             self.viewport = {"width": DEFAULT_VIEWPORT_W, "height": DEFAULT_VIEWPORT_H}
             self.frame_meta = dict(self.viewport)
             self.nav = {"url": "about:blank", "title": "", "can_back": False,
@@ -903,6 +1025,9 @@ class Manager:
         if self.visual_refresh_task is not None:
             self.visual_refresh_task.cancel()
             self.visual_refresh_task = None
+        if self.nav_refresh_task is not None:
+            self.nav_refresh_task.cancel()
+            self.nav_refresh_task = None
         for fut in list(self.pending.values()):
             if not fut.done():
                 fut.set_exception(BrowserError("Browser exited"))
@@ -917,6 +1042,7 @@ class Manager:
         self.read_transport = None
         self.page_target = ""
         self.page_session = ""
+        self.applied_color_scheme = None
         self.screencasting = False
         self.agent_refs = {}
         self.agent_page_refs = {}
@@ -1058,6 +1184,27 @@ class Manager:
                               if key != "status" else value)
         self.agent_network_failures.append(entry)
 
+    def _on_oversized_message(self, prefix: bytes, size: int) -> None:
+        """Discard one oversized CDP message without treating Chrome as dead.
+
+        Response ids are emitted near the beginning of Chromium's JSON object,
+        so the bounded prefix is enough to fail the affected call explicitly.
+        An oversized unsolicited event is simply dropped; either way the pipe
+        remains synchronized at the NUL delimiter for later control/input.
+        """
+        # Chromium serializes response ids as the first top-level member. Keep
+        # this anchored so an oversized event containing a nested application
+        # field named ``id`` cannot fail an unrelated pending browser call.
+        found = re.match(rb'\s*\{\s*"id"\s*:\s*([0-9]+)(?:\s*[,}])', prefix)
+        mid = int(found.group(1)) if found is not None else None
+        log.error("Browser %s discarded oversized CDP message (%s bytes, id=%s)",
+                  self.browser_id, size, mid if mid is not None else "event")
+        fut = self.pending.pop(mid, None) if mid is not None else None
+        if fut is not None and not fut.done():
+            fut.set_exception(BrowserError(
+                "browser response exceeded the {} MiB safety limit".format(
+                    MAX_CDP_BUFFER // (1024 * 1024))))
+
     def _on_message(self, message: dict) -> None:
         mid = message.get("id")
         if mid is not None:
@@ -1159,6 +1306,7 @@ class Manager:
             if width > 0 and height > 0 and \
                     (width != self.viewport["width"] or
                      height != self.viewport["height"]):
+                self._record_frame_flow(received=1, dropped_surface=1)
                 self._schedule_viewport_repair(width, height)
                 return
             if width > 0 and height > 0 and \
@@ -1168,12 +1316,18 @@ class Manager:
             try:
                 frame = base64.b64decode(params.get("data") or "")
             except Exception:
+                self._record_frame_flow(received=1, dropped_decode=1)
                 return
-            viewers = list(self.viewers.values())
-            if viewers:
-                self.frame_sequence += 1
+            viewers = self._active_viewers()
+            if not viewers:
+                self._record_frame_flow(received=1, dropped_inactive=1)
+                return
+            self.frame_sequence += 1
+            replaced = 0
             for viewer in viewers:
-                viewer.send_frame(frame)
+                replaced += int(viewer.send_frame(frame))
+            self._record_frame_flow(
+                received=1, dropped_backpressure=replaced)
         elif method == "Target.targetCreated":
             info = params.get("targetInfo") or {}
             tid = info.get("targetId")
@@ -1194,14 +1348,15 @@ class Manager:
                 return
             self.targets[tid] = info
             if tid == self.page_target:
-                changed = (self.nav["url"] != info.get("url", "") or
-                           self.nav["title"] != info.get("title", ""))
+                url_changed = self.nav["url"] != info.get("url", "")
+                title_changed = self.nav["title"] != info.get("title", "")
                 self.nav["url"] = info.get("url", self.nav["url"])
                 self.nav["title"] = info.get("title", self.nav["title"])
-                if changed:
+                if url_changed or title_changed:
                     self.agent_refs = {}
+                    self._schedule_nav_refresh()
+                if url_changed:
                     self._schedule_visual_refresh()
-                    asyncio.ensure_future(self._refresh_nav())
         elif method == "Target.targetDestroyed":
             tid = params.get("targetId")
             self.targets.pop(tid, None)
@@ -1258,6 +1413,7 @@ class Manager:
                 return
             self.page_target = target_id
             self.page_session = session
+            self.applied_color_scheme = None
             self.agent_domain_session = ""
             self.agent_refs = {}
             self.agent_page_refs = {}
@@ -1290,21 +1446,26 @@ class Manager:
             info = self.targets.get(target_id) or {}
             self.nav["url"] = info.get("url", "about:blank")
             self.nav["title"] = info.get("title", "")
-            if self.viewers:
+            if self._has_active_viewers():
                 await self._start_screencast()
                 await self._send_fresh_frame()
             await self._refresh_nav()
 
-    async def apply_color_scheme(self) -> None:
+    async def apply_color_scheme(self, force: bool = False) -> None:
         """Emulation is per attached page, so this is re-applied on every
         attach as well as when the viewer's theme changes. It emulates the
         standard media feature only - never Chromium's force-dark filter,
         which repaints sites that deliberately have no dark mode."""
         if not self.page_session or not self.running:
             return
+        marker = (self.page_session, color_scheme())
+        if not force and marker == self.applied_color_scheme:
+            return
         await self.call("Emulation.setEmulatedMedia", {
-            "features": [{"name": "prefers-color-scheme", "value": color_scheme()}],
+            "features": [{"name": "prefers-color-scheme", "value": marker[1]}],
         }, session=self.page_session)
+        if self.page_session == marker[0]:
+            self.applied_color_scheme = marker
 
     async def _apply_viewport(self, session: str, size: dict,
                               timeout: float = CALL_TIMEOUT) -> None:
@@ -1367,7 +1528,7 @@ class Manager:
                     if self.page_session != session or not self.running:
                         return
                     await self._stop_screencast()
-                    if self.viewers:
+                    if self._has_active_viewers():
                         try:
                             await self._start_screencast()
                         except BrowserError as exc:
@@ -1403,11 +1564,12 @@ class Manager:
             return
         self.nav["title"] = START_PAGE_TITLE.format(self.browser_id)
         await self._refresh_nav()
-        if self.viewers:
+        if self._has_active_viewers():
             await self._send_fresh_frame()
 
     async def _start_screencast_locked(self) -> None:
-        if self.screencasting or not self.page_session:
+        if self.screencasting or not self.page_session or \
+                not self._has_active_viewers():
             return
         session = self.page_session
         await self.call("Page.startScreencast", {
@@ -1445,14 +1607,16 @@ class Manager:
         old task cannot stop the replacement after its initial screenshot.
         """
         async with self.screencast_lock:
-            if self.viewers:
+            if self._has_active_viewers():
                 return
             await self._stop_screencast_locked()
 
     async def _send_fresh_frame(self, viewer=None) -> bool:
         """Screencast frames only arrive on damage; a still page would leave a
         newcomer staring at nothing, so push one explicit screenshot."""
-        if not self.page_session or not self.running:
+        targets = ([viewer] if viewer is not None and viewer.active else
+                   self._active_viewers() if viewer is None else [])
+        if not targets or not self.page_session or not self.running:
             return False
         try:
             shot = await self.call("Page.captureScreenshot",
@@ -1464,17 +1628,18 @@ class Manager:
             return False
         if not frame:
             return False
-        targets = [viewer] if viewer is not None else list(self.viewers.values())
-        if not targets:
-            return False
         self.frame_sequence += 1
+        replaced = 0
         for item in targets:
-            item.send_frame(frame)
+            replaced += int(item.send_frame(frame))
+        self._record_frame_flow(
+            captured=1, dropped_backpressure=replaced)
         return True
 
     def _schedule_visual_refresh(self, delay: float = VISUAL_REFRESH_DELAY) -> None:
         """Expect one delivered frame after a known page-changing event."""
-        if not self.running or not self.page_session or not self.viewers:
+        if not self.running or not self.page_session or \
+                not self._has_active_viewers():
             return
         if self.visual_refresh_task is not None and \
                 not self.visual_refresh_task.done():
@@ -1486,11 +1651,11 @@ class Manager:
 
     async def _recover_visual_stream(self, marker: int, session: str,
                                      delay: float) -> None:
-        """Restart a silent damage stream, then provide one authoritative frame."""
+        """Provide a fresh frame first; restart only a genuinely broken stream."""
         task = asyncio.current_task()
         try:
             await asyncio.sleep(max(0.05, float(delay)))
-            if not self.running or not self.viewers or \
+            if not self.running or not self._has_active_viewers() or \
                     self.page_session != session or self.frame_sequence != marker:
                 return
             repair = self.viewport_repair_task
@@ -1499,17 +1664,19 @@ class Manager:
                     await asyncio.shield(repair)
                 except Exception:
                     pass
-            if not self.running or not self.viewers or \
+            if not self.running or not self._has_active_viewers() or \
                     self.page_session != session or self.frame_sequence != marker:
+                return
+            if await self._send_fresh_frame():
                 return
             log.info("Browser %s recovering a silent screencast", self.browser_id)
             for attempt in range(3):
-                if not self.running or not self.viewers or \
+                if not self.running or not self._has_active_viewers() or \
                         self.page_session != session or self.frame_sequence != marker:
                     return
                 try:
                     await self._stop_screencast()
-                    if self.viewers and self.page_session == session:
+                    if self._has_active_viewers() and self.page_session == session:
                         await self._start_screencast()
                 except BrowserError as exc:
                     log.debug("Browser %s screencast recovery restart skipped: %s",
@@ -1526,8 +1693,29 @@ class Manager:
             if self.visual_refresh_task is task:
                 self.visual_refresh_task = None
 
+    def _schedule_nav_refresh(self, delay: float = 0.15) -> None:
+        if not self.running or not self.page_session or \
+                not self._has_active_viewers():
+            return
+        if self.nav_refresh_task is not None and not self.nav_refresh_task.done():
+            self.nav_refresh_task.cancel()
+
+        async def later():
+            task = asyncio.current_task()
+            try:
+                await asyncio.sleep(max(0.0, float(delay)))
+                await self._refresh_nav()
+            except asyncio.CancelledError:
+                raise
+            finally:
+                if self.nav_refresh_task is task:
+                    self.nav_refresh_task = None
+
+        self.nav_refresh_task = asyncio.ensure_future(later())
+
     async def _refresh_nav(self) -> None:
-        if not self.page_session or not self.running:
+        if not self.page_session or not self.running or \
+                not self._has_active_viewers():
             return
         try:
             history = await self.call("Page.getNavigationHistory", session=self.page_session)
@@ -1566,7 +1754,7 @@ class Manager:
     async def attach_viewer(self, ws) -> None:
         await self.ensure_started()
         self._cancel_idle()
-        viewer = _Viewer(ws)
+        viewer = _Viewer(ws, self._frame_forwarded)
         self.viewers[ws] = viewer
         viewer.send_json({"type": "status", "running": True, **self.nav})
         viewer.send_json(_binding_payload(self))
@@ -1577,19 +1765,42 @@ class Manager:
             pass
         await self._send_fresh_frame(viewer)
 
+    async def set_viewer_active(self, ws, active: bool) -> None:
+        viewer = self.viewers.get(ws)
+        if viewer is None or viewer.active == bool(active):
+            return
+        if not active and viewer.frame is not None:
+            viewer.frame = None
+            self._record_frame_flow(dropped_inactive=1)
+        viewer.active = bool(active)
+        if viewer.active:
+            try:
+                await self._start_screencast()
+            except BrowserError:
+                pass
+            await self._send_fresh_frame(viewer)
+            await self._refresh_nav()
+        elif not self._has_active_viewers():
+            await self._stop_screencast_if_idle()
+
     def detach_viewer(self, ws) -> None:
         viewer = self.viewers.pop(ws, None)
         if viewer is not None:
-            viewer.close()
-        if not self.viewers and self.running:
+            if viewer.close():
+                self._record_frame_flow(dropped_inactive=1)
+        if self.running and not self._has_active_viewers():
             asyncio.ensure_future(self._stop_screencast_if_idle())
+        if not self.viewers and self.running:
             self._arm_idle()
 
     # ---- input from viewers ----
 
-    async def handle_client(self, data: dict) -> None:
+    async def handle_client(self, data: dict, viewer_ws=None) -> None:
         kind = data.get("type")
-        if kind == "mouse":
+        if kind == "viewer_active":
+            if type(data.get("active")) is bool:
+                await self.set_viewer_active(viewer_ws, data["active"])
+        elif kind == "mouse":
             self._dispatch_mouse(data)
         elif kind == "wheel":
             self._dispatch_wheel(data)
@@ -1899,14 +2110,18 @@ class Manager:
         condition = condition or {}
         wanted = condition.get("text")
         absent = condition.get("text_absent")
-        expression = """(() => {
+        text_checks = wanted is not None or absent is not None
+        inspect_text = """
  const body=document.body ? String(document.body.innerText || '') : '';
+ textPresent=wanted===null?null:body.includes(wanted);
+ textAbsent=absent===null?null:!body.includes(absent);""" if text_checks else ""
+        expression = """(() => {
  const wanted=%s, absent=%s;
+ let textPresent=null, textAbsent=null;%s
  return {url:String(location.href),title:String(document.title),
   readyState:String(document.readyState),
-  textPresent:wanted===null?null:body.includes(wanted),
-  textAbsent:absent===null?null:!body.includes(absent)};
-})()""" % (json.dumps(wanted), json.dumps(absent))
+  textPresent:textPresent,textAbsent:textAbsent};
+})()""" % (json.dumps(wanted), json.dumps(absent), inspect_text)
         evaluated = await self.call("Runtime.evaluate", {
             "expression": expression, "returnByValue": True,
         }, session=self.page_session)
@@ -1926,6 +2141,32 @@ class Manager:
         self.nav["title"] = state["title"]
         if old_url and state["url"] != old_url:
             self.agent_refs = {}
+        return state
+
+    async def _agent_scroll_state(self, x: float, y: float,
+                                  settle: bool = False) -> dict:
+        expression = _AGENT_SCROLL_STATE_JS % (
+            json.dumps(float(x)), json.dumps(float(y)),
+            "true" if settle else "false")
+        evaluated = await self.call("Runtime.evaluate", {
+            "expression": expression, "returnByValue": True,
+            "awaitPromise": True,
+        }, session=self.page_session)
+        if evaluated.get("exceptionDetails"):
+            raise BrowserError("could not inspect the page's scroll position")
+        value = (evaluated.get("result") or {}).get("value")
+        if not isinstance(value, dict) or value.get("target") not in \
+                ("document", "element"):
+            raise BrowserError("the page returned an invalid scroll position")
+        state = {"target": value["target"]}
+        for key in ("x", "y", "documentX", "documentY"):
+            try:
+                number = float(value.get(key) or 0.0)
+            except (TypeError, ValueError):
+                raise BrowserError("the page returned an invalid scroll position")
+            if not math.isfinite(number):
+                raise BrowserError("the page returned an invalid scroll position")
+            state[key] = number
         return state
 
     def _agent_wait_spec(self, raw, default_load: bool = False) -> dict:
@@ -2045,12 +2286,14 @@ class Manager:
 
     async def _agent_finish_action(self, lead: str, params: dict, before: dict,
                                    lifecycle_before: dict, verification="",
-                                   observe_ms: int = 600) -> dict:
+                                   observe_ms: int = ACTION_NAV_OBSERVE_MS) -> dict:
         requested = params.get("wait_for")
         if requested is not None:
             _state, outcome = await self._agent_wait_condition(
                 requested, lifecycle_before=lifecycle_before,
                 previous_url=before.get("url", ""))
+        elif observe_ms <= 0:
+            outcome = "Input was dispatched; no page-level outcome wait was needed."
         else:
             outcome = await self._agent_observe_change(
                 before, lifecycle_before, timeout_ms=observe_ms)
@@ -2060,7 +2303,7 @@ class Manager:
             text += "\nVerified: " + verification
         payload = {"text": self._agent_page_text(text)}
         if params.get("include_snapshot") is True:
-            snapshot = await self._agent_snapshot({})
+            snapshot = await self._agent_snapshot({}, refresh_identity=False)
             payload["text"] += "\n\n" + snapshot.get("text", "")
             if snapshot.get("image"):
                 payload["image"] = snapshot["image"]
@@ -2108,14 +2351,104 @@ class Manager:
         payload = {"text": self._agent_page_text(
             "Reload requested.\nOutcome: " + outcome)}
         if params.get("include_snapshot") is True:
-            snapshot = await self._agent_snapshot({})
+            snapshot = await self._agent_snapshot({}, refresh_identity=False)
             payload["text"] += "\n\n" + snapshot.get("text", "")
             if snapshot.get("image"):
                 payload["image"] = snapshot["image"]
         return payload
 
-    async def _agent_snapshot(self, params: dict) -> dict:
-        await self._agent_refresh_identity()
+    async def _agent_ax_source(self, scope_backend=None) -> tuple:
+        """Fetch a bounded AX graph instead of one unbounded JSON response.
+
+        Modern Chromium exposes a root/children surface which lets Puppy stop
+        at its existing source-node cap. If an older compatible Chromium lacks
+        that surface, retain the full-tree fallback; the CDP reader's oversize
+        isolation turns an excessive fallback into one tool error, never a
+        Browser process loss.
+        """
+        deadline = time.monotonic() + AX_TREE_TIMEOUT
+
+        def remaining() -> float:
+            return max(0.05, deadline - time.monotonic())
+
+        try:
+            if scope_backend is None:
+                initial = await self.call(
+                    "Accessibility.getRootAXNode", session=self.page_session,
+                    timeout=remaining())
+                candidate = initial.get("node")
+                root = candidate if isinstance(candidate, dict) and \
+                    candidate.get("nodeId") is not None else None
+            else:
+                initial = await self.call("Accessibility.getPartialAXTree", {
+                    "backendNodeId": scope_backend, "fetchRelatives": False,
+                }, session=self.page_session, timeout=remaining())
+                candidates = initial.get("nodes") or []
+                root = next((item for item in candidates if isinstance(item, dict) and
+                             item.get("backendDOMNodeId") == scope_backend and
+                             item.get("nodeId") is not None), None)
+                if root is None:
+                    root = next((item for item in candidates
+                                 if isinstance(item, dict) and
+                                 item.get("nodeId") is not None), None)
+            if root is None:
+                raise BrowserError("bounded accessibility root was unavailable")
+        except BrowserError as exc:
+            log.debug("Browser %s bounded AX root unavailable, using full tree: %s",
+                      self.browser_id, exc)
+            if time.monotonic() >= deadline:
+                raise BrowserError("accessibility snapshot timed out")
+            result = await self.call("Accessibility.getFullAXTree",
+                                     session=self.page_session,
+                                     timeout=remaining())
+            return result.get("nodes") or [], False
+
+        nodes = []
+        by_id = {}
+        expand = collections.deque()
+
+        def add(node) -> bool:
+            if not isinstance(node, dict) or node.get("nodeId") is None:
+                return False
+            node_id = str(node["nodeId"])
+            if node_id in by_id or len(nodes) >= MAX_AX_SOURCE_NODES:
+                return False
+            by_id[node_id] = node
+            nodes.append(node)
+            if node.get("childIds"):
+                expand.append(node_id)
+            return True
+
+        add(root)
+        truncated = False
+        while expand and len(nodes) < MAX_AX_SOURCE_NODES:
+            if time.monotonic() >= deadline:
+                truncated = True
+                break
+            parents = [expand.popleft()
+                       for _ in range(min(AX_CHILD_BATCH, len(expand)))]
+            timeout = remaining()
+            replies = await asyncio.gather(*(self.call(
+                "Accessibility.getChildAXNodes", {"id": parent},
+                session=self.page_session, timeout=timeout)
+                for parent in parents), return_exceptions=True)
+            for reply in replies:
+                if isinstance(reply, Exception):
+                    truncated = True
+                    continue
+                children = reply.get("nodes") or []
+                for child in children:
+                    if len(nodes) >= MAX_AX_SOURCE_NODES:
+                        truncated = True
+                        break
+                    add(child)
+        if expand:
+            truncated = True
+        return nodes, truncated
+
+    async def _agent_snapshot(self, params: dict, refresh_identity: bool = True) -> dict:
+        if refresh_identity:
+            await self._agent_refresh_identity()
         query = self._agent_text_argument(params.get("query"), "query", 200).strip()
         max_nodes = int(self._bounded_number(params.get("max_nodes", MAX_AX_NODES),
                                              1, MAX_AX_NODES, "max_nodes"))
@@ -2127,8 +2460,7 @@ class Manager:
             if scope_backend is None:
                 raise BrowserError(
                     "unknown or stale scope_ref {}; take a fresh snapshot".format(scope_ref))
-        result = await self.call("Accessibility.getFullAXTree", session=self.page_session)
-        raw_nodes = result.get("nodes") or []
+        raw_nodes, source_truncated = await self._agent_ax_source(scope_backend)
         nodes = [node for node in raw_nodes[:MAX_AX_SOURCE_NODES]
                  if isinstance(node, dict) and node.get("nodeId") is not None]
         by_id = {str(node["nodeId"]): node for node in nodes}
@@ -2252,7 +2584,8 @@ class Manager:
 
         for root in roots:
             walk(root, 0)
-        if len(raw_nodes) > len(nodes) or shown >= max_nodes or text_size >= MAX_AX_TEXT:
+        if source_truncated or len(raw_nodes) > len(nodes) or shown >= max_nodes or \
+                text_size >= MAX_AX_TEXT:
             lines.append("… snapshot truncated; refine it with query or scope_ref")
         if shown == 0:
             lines.append("- No accessible nodes matched." if query else
@@ -2379,11 +2712,12 @@ class Manager:
         if wait_ms:
             await asyncio.sleep(wait_ms / 1000.0)
         await self._refresh_nav()
-        await self._agent_refresh_identity()
+        if wait_until == "none" and params.get("wait_for") is None:
+            await self._agent_refresh_identity()
         payload = {"text": self._agent_page_text(
             "Navigation requested for {}.\nOutcome: {}".format(url, outcome))}
         if params.get("include_snapshot") is True:
-            snapshot = await self._agent_snapshot({})
+            snapshot = await self._agent_snapshot({}, refresh_identity=False)
             payload["text"] += "\n\n" + snapshot.get("text", "")
             if snapshot.get("image"):
                 payload["image"] = snapshot["image"]
@@ -2474,7 +2808,7 @@ class Manager:
             "Dispatched {} character{} to {}{}.".format(
                 len(text), "" if len(text) == 1 else "s", ref,
                 " after clearing it" if params.get("clear") is True else ""),
-            params, before, lifecycle, verification)
+            params, before, lifecycle, verification, observe_ms=0)
 
     async def _agent_upload_file(self, params: dict) -> dict:
         """Put one already-validated session upload into a known file input.
@@ -2549,7 +2883,7 @@ class Manager:
             target_label, json.dumps(name, ensure_ascii=False), size)
         return await self._agent_finish_action(
             "Selected a user-provided session upload for {}.".format(target_label),
-            params, before, lifecycle, verification)
+            params, before, lifecycle, verification, observe_ms=0)
 
     async def _agent_press(self, params: dict) -> dict:
         before = await self._agent_page_state()
@@ -2581,7 +2915,8 @@ class Manager:
         ref = str(params.get("ref") or "").strip().lower()
         target = ref if ref else "({}, {})".format(x, y)
         return await self._agent_finish_action(
-            "Moved the pointer over {}.".format(target), params, before, lifecycle)
+            "Moved the pointer over {}.".format(target), params, before, lifecycle,
+            observe_ms=0)
 
     async def _agent_select(self, params: dict) -> dict:
         has_value = "value" in params
@@ -2605,7 +2940,7 @@ class Manager:
             json.dumps(str(selected.get("value") or ""), ensure_ascii=False))
         return await self._agent_finish_action(
             "Dispatched a select change to {}.".format(ref), params,
-            before, lifecycle, verification)
+            before, lifecycle, verification, observe_ms=0)
 
     async def _agent_check(self, params: dict) -> dict:
         if not isinstance(params.get("checked"), bool):
@@ -2623,22 +2958,36 @@ class Manager:
         return await self._agent_finish_action(
             "Dispatched a {} request to {}.".format(
                 "check" if params["checked"] else "uncheck", ref),
-            params, before, lifecycle, verification)
+            params, before, lifecycle, verification, observe_ms=0)
 
     async def _agent_scroll(self, params: dict) -> dict:
         before = await self._agent_page_state()
         lifecycle = dict(self.agent_lifecycle)
         dx = self._bounded_number(params.get("delta_x", 0), -2000, 2000, "delta_x")
         dy = self._bounded_number(params.get("delta_y"), -2000, 2000, "delta_y")
+        if dx == 0 and dy == 0:
+            raise BrowserError("scroll requires a non-zero delta_x or delta_y")
+        x = self.viewport["width"] / 2
+        y = self.viewport["height"] / 2
+        scroll_before = await self._agent_scroll_state(x, y)
         await self.call("Input.dispatchMouseEvent", {
             "type": "mouseWheel",
-            "x": self.viewport["width"] / 2,
-            "y": self.viewport["height"] / 2,
+            "x": x, "y": y,
             "deltaX": dx, "deltaY": dy, "modifiers": 0,
         }, session=self.page_session)
+        scroll_after = await self._agent_scroll_state(x, y, settle=True)
+        moved = any(abs(scroll_after[key] - scroll_before[key]) >= 0.5
+                    for key in ("x", "y", "documentX", "documentY"))
+        position = "({:.0f}, {:.0f})".format(scroll_after["x"], scroll_after["y"])
+        if moved:
+            verification = "the {} scroll position changed to {}".format(
+                scroll_after["target"], position)
+        else:
+            verification = ("the {} scroll position remained at {}; it may already be "
+                            "at its limit").format(scroll_after["target"], position)
         return await self._agent_finish_action(
             "Dispatched a scroll by ({}, {}).".format(dx, dy), params,
-            before, lifecycle)
+            before, lifecycle, verification, observe_ms=0)
 
     async def _agent_inspect_element(self, params: dict) -> dict:
         ref, backend_id = self._agent_backend_id(params.get("ref"))
@@ -3035,6 +3384,7 @@ def _rebind_catalog(records: dict, bindings: dict, browser_id: str,
 
 
 def _load_catalog() -> tuple:
+    global _catalog_cleanup_ids
     path = _catalog_path()
     try:
         with open(path, "r", encoding="utf-8") as handle:
@@ -3073,10 +3423,7 @@ def _load_catalog() -> tuple:
             raise BrowserError("managed browser catalog contains an invalid timestamp")
         if closed_at is not None and closed_at < cutoff:
             changed = True
-            try:
-                _safe_remove_instance_storage(browser_id)
-            except Exception as exc:
-                log.warning("could not prune Browser %s storage: %s", browser_id, exc)
+            _catalog_cleanup_ids.add(browser_id)
             continue
         origin = record["origin"]
         if origin not in ("agent", "user", "legacy"):
@@ -3140,13 +3487,30 @@ class BrowserRegistry:
 
     def __init__(self):
         self.lock = asyncio.Lock()
+        self.background_tasks = set()
         self.records, self.bindings = _load_catalog()
         self.instances = {}
         for browser_id, record in self.records.items():
             if record["closed_at"] is None:
                 self.instances[browser_id] = Manager(
                     browser_id, record["origin"], record["owner_session"])
+        for browser_id in list(_catalog_cleanup_ids):
+            self._schedule_blocking("prune Browser {}".format(browser_id),
+                                    _safe_remove_instance_storage, browser_id)
+        _catalog_cleanup_ids.clear()
         self._reclaim_unknown_stale_instances()
+
+    def _schedule_blocking(self, label: str, function, *args) -> None:
+        async def run():
+            try:
+                await asyncio.get_event_loop().run_in_executor(
+                    None, function, *args)
+            except Exception as exc:
+                log.warning("could not %s: %s", label, exc)
+
+        task = asyncio.ensure_future(run())
+        self.background_tasks.add(task)
+        task.add_done_callback(self.background_tasks.discard)
 
     @property
     def running(self) -> bool:
@@ -3167,6 +3531,7 @@ class BrowserRegistry:
                 "viewers": instance.viewer_count(),
                 "session_id": instance.owner_session,
                 "created_at": self.records[browser_id]["created_at"],
+                "frame_flow": instance.frame_flow_payload(),
             })
         return payloads
 
@@ -3186,8 +3551,10 @@ class BrowserRegistry:
             if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or \
                     info.st_uid != os.geteuid():
                 continue
-            _kill_stale_instance(os.path.join(root, "profile"),
-                                 os.path.join(root, "chrome.pid"))
+            self._schedule_blocking(
+                "reclaim stale Browser {}".format(name), _kill_stale_instance,
+                os.path.join(root, "profile"), os.path.join(root, "chrome.pid"))
+
     def _prune(self) -> None:
         cutoff = time.time() - ID_RETENTION_SECONDS
         removed = []
@@ -3200,10 +3567,8 @@ class BrowserRegistry:
         if not removed:
             return
         for browser_id in removed:
-            try:
-                _safe_remove_instance_storage(browser_id)
-            except Exception as exc:
-                log.warning("could not prune Browser %s storage: %s", browser_id, exc)
+            self._schedule_blocking("prune Browser {}".format(browser_id),
+                                    _safe_remove_instance_storage, browser_id)
         _write_catalog(new_records, self.bindings)
         self.records = new_records
 
@@ -3313,6 +3678,8 @@ class BrowserRegistry:
         if instances:
             await asyncio.gather(*(instance.stop(reason) for instance in instances),
                                  return_exceptions=True)
+        if self.background_tasks:
+            await asyncio.gather(*list(self.background_tasks), return_exceptions=True)
 
     async def clear_session_bindings(self) -> None:
         """Do not let restored database IDs inherit pre-restore browser state."""
@@ -3532,7 +3899,8 @@ async def ws_browser(request: web.Request):
     if not enabled():
         try:
             await ws.send_json({"type": "error",
-                                "text": "The browser is disabled on this backend"})
+                                "text": "The browser is disabled on this backend",
+                                "terminal": True})
         except Exception:
             pass
         await ws.close()
@@ -3544,7 +3912,8 @@ async def ws_browser(request: web.Request):
         await m.attach_viewer(ws)
     except BrowserError as exc:
         try:
-            await ws.send_json({"type": "error", "text": str(exc)})
+            await ws.send_json({"type": "error", "text": str(exc),
+                                "terminal": True})
         except Exception:
             pass
         await ws.close()
@@ -3564,7 +3933,7 @@ async def ws_browser(request: web.Request):
             if not isinstance(data, dict):
                 continue
             try:
-                await m.handle_client(data)
+                await m.handle_client(data, viewer_ws=ws)
             except BrowserError as exc:
                 try:
                     await ws.send_json({"type": "error", "text": str(exc)})

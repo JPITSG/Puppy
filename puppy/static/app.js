@@ -5440,6 +5440,8 @@ function renderTabs(focusTabId = null) {
   renderedTabPanes = current;
   renderedWorkspaceRevision = workspaceRevision;
   renderedWorkspaceSignature = signature;
+  for (const [id, view] of Object.entries(state.views))
+    if (view && typeof view.onVisibility === "function") view.onVisibility(current.has(id));
   const requests = [...show.entries()].sort((a, b) => Number(a[1]) - Number(b[1]));
   for (const [id, focus] of requests) {
     const view = state.views[id];
@@ -5681,8 +5683,16 @@ function applyTheme(t) {
   lsSet("puppy.theme", t);
   /* The theme is this browser's own state, so each node has to be told: its
      managed browsers render pages with the matching prefers-color-scheme. */
-  for (const view of Object.values(state.views))
-    if (view && typeof view.sendColorScheme === "function") view.sendColorScheme();
+  const browserNodes = new Map();
+  for (const view of Object.values(state.views)) {
+    if (!view || typeof view.sendColorScheme !== "function") continue;
+    const node = Number(view.tab && view.tab.bid) || 0;
+    const selected = browserNodes.get(node);
+    const connected = view.ws && view.ws.readyState === 1;
+    const selectedConnected = selected && selected.ws && selected.ws.readyState === 1;
+    if (!selected || (!selectedConnected && connected)) browserNodes.set(node, view);
+  }
+  for (const view of browserNodes.values()) view.sendColorScheme();
 }
 $("btn-theme").onclick = () =>
   applyTheme(document.documentElement.classList.contains("light") ? "dark" : "light");
@@ -10058,14 +10068,21 @@ class BrowserView {
     this.tab = tab;
     this.closed = false;
     this.started = false;
+    this.visible = false;
+    this.viewerActive = null;
     this.connectionSequence = 0;
     this.waitingForBackend = false;
+    this.terminalGone = false;
+    this.reconnectTimer = null;
+    this.reconnectDelay = 1000;
     this.frameW = 1280;
     this.frameH = 800;
     this.frameUrl = null;
     this.urlFocused = false;
     this.lastUrl = "";
     this.moveQueued = null;
+    this.wheelQueued = null;
+    this.wheelFrame = null;
     this.lastViewport = "";
     this.bindingKnown = Number(tab.sid) > 0;
     this.binding = {
@@ -10074,6 +10091,7 @@ class BrowserView {
     };
     this.viewportTimer = null;
     this.resizeObs = null;
+    this.visibilityHandler = () => this.syncViewerActivity();
     this.root = el("div", "view browser");
     this.root.innerHTML = `
       <div class="br-bar">
@@ -10156,12 +10174,30 @@ class BrowserView {
   }
 
   onShow(focus = true) {
+    this.onVisibility(true);
     this.renderBinding();
     if (!this.started) { this.started = true; this.start(); }
     else this.queueViewport();
     if (!focus || this.isDead()) return;
     if (this.typeRow.classList.contains("hidden")) this.stage.focus({ preventScroll: true });
     else this.ime.focus({ preventScroll: true });
+  }
+  onVisibility(visible) {
+    this.visible = !!visible;
+    if (this.started) this.syncViewerActivity();
+  }
+  syncViewerActivity() {
+    const active = this.visible && document.visibilityState !== "hidden";
+    if (this.viewerActive === active) return;
+    this.viewerActive = active;
+    this.send({ type: "viewer_active", active });
+    if (active) {
+      this.queueViewport();
+      if (!this.ws && !this.terminalGone) {
+        this.clearReconnect();
+        this.scheduleReconnect(0);
+      }
+    } else this.clearReconnect();
   }
   isDead() { return !!this.root.querySelector(".br-dead"); }
 
@@ -10323,6 +10359,29 @@ class BrowserView {
   send(payload) {
     if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify(payload));
   }
+  sendContinuous(payload) {
+    if (!this.viewerActive || !this.ws || this.ws.readyState !== WebSocket.OPEN ||
+        this.ws.bufferedAmount > 256 * 1024) return;
+    this.ws.send(JSON.stringify(payload));
+  }
+  queueWheel(payload) {
+    if (this.wheelQueued) {
+      this.wheelQueued.dx += payload.dx;
+      this.wheelQueued.dy += payload.dy;
+      this.wheelQueued.nx = payload.nx;
+      this.wheelQueued.ny = payload.ny;
+      this.wheelQueued.modifiers = payload.modifiers;
+    } else {
+      this.wheelQueued = payload;
+    }
+    if (this.wheelFrame !== null) return;
+    this.wheelFrame = requestAnimationFrame(() => {
+      this.wheelFrame = null;
+      const queued = this.wheelQueued;
+      this.wheelQueued = null;
+      if (queued && !this.closed) this.sendContinuous(queued);
+    });
+  }
   static modifiers(e) {
     return (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0);
   }
@@ -10435,7 +10494,7 @@ class BrowserView {
       if (idle) requestAnimationFrame(() => {
         const queued = this.moveQueued;
         this.moveQueued = null;
-        if (queued && !this.closed) this.send(queued);
+        if (queued && !this.closed) this.sendContinuous(queued);
       });
     });
     this.stage.addEventListener("contextmenu", e => e.preventDefault());
@@ -10445,7 +10504,7 @@ class BrowserView {
       const p = this.point(e.clientX, e.clientY);
       if (!p) return;
       const scale = e.deltaMode === 1 ? 16 : 1;
-      this.send({ type: "wheel", ...p, dx: e.deltaX * scale, dy: e.deltaY * scale,
+      this.queueWheel({ type: "wheel", ...p, dx: e.deltaX * scale, dy: e.deltaY * scale,
         modifiers: BrowserView.modifiers(e) });
     }, { passive: false });
 
@@ -10467,7 +10526,8 @@ class BrowserView {
       if (Math.abs(t.clientX - touch.sx) + Math.abs(t.clientY - touch.sy) > 9)
         touch.moved = true;
       const p = this.point(t.clientX, t.clientY);
-      if (p && touch.moved) this.send({ type: "wheel", ...p, dx: -dx, dy: -dy, modifiers: 0 });
+      if (p && touch.moved)
+        this.queueWheel({ type: "wheel", ...p, dx: -dx, dy: -dy, modifiers: 0 });
     }, { passive: false });
     this.stage.addEventListener("touchend", e => {
       const gesture = touch;
@@ -10548,11 +10608,33 @@ class BrowserView {
     });
     this.backBtn.onclick = () => this.send({ type: "back" });
     this.reloadBtn.onclick = () => this.send({ type: "reload" });
+    document.addEventListener("visibilitychange", this.visibilityHandler);
     this.connect();
   }
 
+  clearReconnect() {
+    if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+  }
+  scheduleReconnect(delay = null) {
+    if (this.closed || this.terminalGone || !this.visible ||
+        document.visibilityState === "hidden" || this.ws ||
+        (this.tab.bid && !backendConnectionAllowed(this.tab.bid))) return;
+    if (this.reconnectTimer !== null) return;
+    const wait = delay === null ? this.reconnectDelay : Math.max(0, delay);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.closed || this.terminalGone || !this.visible || this.ws ||
+          document.visibilityState === "hidden" ||
+          (this.tab.bid && !backendConnectionAllowed(this.tab.bid))) return;
+      this.connect();
+    }, wait);
+    if (delay === null) this.reconnectDelay = Math.min(15000, this.reconnectDelay * 2);
+  }
+
   connect() {
-    if (this.closed) return;
+    if (this.closed || this.ws) return;
+    this.clearReconnect();
     if (this.tab.bid && !backendConnectionAllowed(this.tab.bid)) {
       this.waitingForBackend = true;
       this.showDead(remoteStoppingMessage(this.tab.bid) || "Backend unavailable", false);
@@ -10572,6 +10654,9 @@ class BrowserView {
         return;
       }
       noteRemoteSocketReachable(this.tab.bid);
+      this.reconnectDelay = 1000;
+      this.viewerActive = null;
+      this.syncViewerActivity();
       this.sendColorScheme();
       this.lastViewport = "";
       this.sendViewport(true);
@@ -10585,6 +10670,7 @@ class BrowserView {
       let d = null;
       try { d = JSON.parse(ev.data); } catch (error) { return; }
       if (d.type === "status") {
+        this.terminalGone = false;
         this.lastUrl = d.url || "";
         if (!this.urlFocused)
           this.urlInput.value = this.lastUrl === "about:blank" ? "" : this.lastUrl;
@@ -10599,8 +10685,10 @@ class BrowserView {
         toast(`Page ${d.kind || "dialog"} ${d.action}: ${d.message || ""}`.trim(),
           "info", 6000);
       } else if (d.type === "error") {
+        this.terminalGone = d.terminal === true;
         this.showDead(d.text || "Browser unavailable", true);
       } else if (d.type === "gone") {
+        this.terminalGone = true;
         this.showDead(d.reason || "Browser ended", true);
       }
     };
@@ -10609,7 +10697,11 @@ class BrowserView {
       this.ws = null;
       if (!this.closed) {
         const stopping = remoteStoppingMessage(this.tab.bid);
-        this.showDead(stopping || "Connection closed", !!stopping);
+        if (stopping) this.showDead(stopping, true);
+        else if (!this.terminalGone) {
+          this.showDead("Connection closed", false);
+          this.scheduleReconnect();
+        }
       }
     };
     ws.onerror = () => { try { ws.close(); } catch (e) {} };
@@ -10621,6 +10713,7 @@ class BrowserView {
     this.screen.src = this.frameUrl;
     this.screen.classList.add("live");
     if (previous) URL.revokeObjectURL(previous);
+    this.terminalGone = false;
     this.clearDead();
   }
 
@@ -10651,8 +10744,16 @@ class BrowserView {
     const again = el("button", "btn btn-pri", "Reconnect");
     again.type = "button";
     again.onclick = () => {
+      this.terminalGone = false;
+      this.reconnectDelay = 1000;
+      this.clearReconnect();
       this.clearDead();
-      if (this.ws) { try { this.ws.close(); } catch (e) {} }
+      if (this.ws) {
+        const ws = this.ws;
+        this.ws = null;
+        this.connectionSequence++;
+        try { ws.close(); } catch (e) {}
+      }
       this.connect();
       this.stage.focus({ preventScroll: true });
     };
@@ -10695,6 +10796,7 @@ class BrowserView {
       this.showDead(stopping || "Backend unavailable", !!stopping);
     } else if (this.waitingForBackend) {
       this.waitingForBackend = false;
+      this.terminalGone = false;
       this.clearDead();
       this.connect();
       return;
@@ -10711,10 +10813,17 @@ class BrowserView {
   destroy() {
     this.closed = true;
     this.connectionSequence++;
+    this.clearReconnect();
+    document.removeEventListener("visibilitychange", this.visibilityHandler);
     if (this.resizeObs) { this.resizeObs.disconnect(); this.resizeObs = null; }
     if (this.viewportTimer !== null) {
       clearTimeout(this.viewportTimer);
       this.viewportTimer = null;
+    }
+    if (this.wheelFrame !== null) {
+      cancelAnimationFrame(this.wheelFrame);
+      this.wheelFrame = null;
+      this.wheelQueued = null;
     }
     if (this.ws) { try { this.ws.close(); } catch (e) {} }
     this.ws = null;

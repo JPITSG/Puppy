@@ -591,20 +591,26 @@ def _bridge_call(method: str, params: dict) -> dict:
     try:
         client.connect(path)
         client.sendall(request)
-        chunks = bytearray()
-        while b"\n" not in chunks:
+        chunks = []
+        total = 0
+        while True:
             chunk = client.recv(65536)
             if not chunk:
                 break
-            chunks.extend(chunk)
-            if len(chunks) > MAX_RESPONSE:
+            cut = chunk.find(b"\n")
+            piece = chunk if cut < 0 else chunk[:cut]
+            chunks.append(piece)
+            total += len(piece)
+            if total > MAX_RESPONSE:
                 raise BrowserAgentError("browser bridge response is too large")
+            if cut >= 0:
+                break
     except (OSError, socket.timeout) as exc:
         raise BrowserAgentError("could not reach Puppy's browser bridge: {}".format(exc))
     finally:
         client.close()
     try:
-        payload = json.loads(bytes(chunks).split(b"\n", 1)[0].decode("utf-8"))
+        payload = json.loads(b"".join(chunks).decode("utf-8"))
     except Exception:
         raise BrowserAgentError("Puppy's browser bridge returned an invalid response")
     if not isinstance(payload, dict) or payload.get("ok") is not True:
