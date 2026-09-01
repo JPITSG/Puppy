@@ -393,9 +393,9 @@ on every change, so they belong to the user rather than to the process. A
 console connected to a node advertising `queue-pause` may pause any ordinary
 queued prompt. The node publishes its indexes in the additive `paused` array;
 automatic dequeue skips those prompts while continuing with the next runnable
-one. Pending model/effort changes are not separately pausable; configuration
-rows encountered before the selected runnable prompt still apply in their
-visible order.
+one. Pending model/effort/permission changes are not separately pausable;
+configuration rows encountered before the selected runnable prompt still
+apply in their visible order.
 
 Nodes advertising `queue-reorder` also accept a duplicate-safe full
 permutation guarded by the queue's additive process-local revision. A console
@@ -413,8 +413,11 @@ the switch response carries the additive `queued` flag. Prompts sent before
 the row keep the engine they were written under; when its turn comes the row
 emits the ordinary `engine_switch` divider, resets the session to the target's
 defaults and starts a fresh native conversation, exactly like an immediate
-switch. Model/effort rows also carry the `engine` whose catalog validated
-them: a row orphaned by cancelling or reordering away its switch is skipped
+switch. Nodes advertising `queued-permission-config` include the target
+engine's permission default on that switch row and put later permission picks
+through the same ordered configuration path as model/effort. All configuration
+rows carry the `engine` whose catalog validated them: a row orphaned by
+cancelling or reordering away its switch is skipped
 with a transcript note rather than applied to another engine, and re-sending
 a held setting from a previous engine is refused. Engine-CLI upgrades count
 queued switch targets as busy sessions, and a switch aimed at an engine whose

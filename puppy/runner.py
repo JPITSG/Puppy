@@ -58,7 +58,7 @@ def drop_hub(session_id: int) -> None:
 # ---- session-list broadcasting ----
 
 def _is_queued_config(item) -> bool:
-    """Queue items are prompt strings, except pending model/effort changes
+    """Queue items are prompt strings, except pending configuration changes
     and pending engine switches."""
     return isinstance(item, dict) and item.get("kind") == "config"
 
@@ -75,7 +75,7 @@ def _queued_config_key(fields: dict) -> str:
 
 def _queued_engine_key(fields: dict) -> str:
     """The same cancel identity for a pending engine switch; the distinct
-    prefix can never collide with a model/effort change."""
+    prefix can never collide with a configuration change."""
     return "engine:" + json.dumps(fields, sort_keys=True)
 
 
@@ -98,26 +98,46 @@ def _queued_item_wire(item):
 
 def _valid_restored_item(item) -> bool:
     """Exactly the current queue-item shape; anything older is rejected rather
-    than converted (every config row must name the engine that validated it)."""
+    than converted (every config row must name the engine that validated it,
+    and every engine row carries all target defaults)."""
     if isinstance(item, str):
         return bool(item.strip())
     fields = item.get("fields") if isinstance(item, dict) else None
     if not isinstance(fields, dict) or not str(fields.get("engine") or ""):
         return False
+    if not all(isinstance(value, str) for value in fields.values()):
+        return False
     if _is_queued_engine(item):
-        return True
-    return _is_queued_config(item) and \
-        any(k in fields for k in ("model", "effort"))
+        if set(fields) != {"engine", "model", "effort", "permission_mode"}:
+            return False
+    elif _is_queued_config(item):
+        if not set(fields).issubset(
+                {"engine", "model", "effort", "permission_mode"}) or not \
+                any(k in fields for k in ("model", "effort", "permission_mode")):
+            return False
+    else:
+        return False
+    if "permission_mode" in fields:
+        try:
+            driver = get_driver(fields["engine"])
+        except KeyError:
+            return False
+        if fields["permission_mode"] not in [
+                str(option.get("value") or "") for option in
+                driver.permission_options()]:
+            return False
+    return True
 
 
 def _config_after(session: dict, items) -> dict:
-    """The {engine, model, effort} left in force after the given queue rows
-    apply in their visible order. Config rows whose validating engine no
-    longer matches the engine at their position are skipped, exactly as
-    application skips them."""
+    """The target configuration left in force after the given queue rows apply
+    in their visible order. Config rows whose validating engine no longer
+    matches the engine at their position are skipped, exactly as application
+    skips them."""
     cfg = {"engine": str(session.get("engine") or ""),
            "model": str(session.get("model") or ""),
-           "effort": str(session.get("effort") or "")}
+           "effort": str(session.get("effort") or ""),
+           "permission_mode": str(session.get("permission_mode") or "")}
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -126,8 +146,9 @@ def _config_after(session: dict, items) -> dict:
             cfg["engine"] = str(fields.get("engine") or "")
             cfg["model"] = str(fields.get("model") or "")
             cfg["effort"] = str(fields.get("effort") or "")
+            cfg["permission_mode"] = str(fields.get("permission_mode") or "")
         elif str(fields.get("engine") or "") == cfg["engine"]:
-            for k in ("model", "effort"):
+            for k in ("model", "effort", "permission_mode"):
                 if k in fields:
                     cfg[k] = str(fields.get(k) or "")
     return cfg
@@ -907,13 +928,13 @@ class SessionHub:
             return self._steer_response(receipt)
 
     def pending_config(self) -> dict:
-        """The {engine, model, effort} in force after everything queued: what
-        the next newly queued prompt or change would run under."""
+        """The configuration in force after everything queued: what the next
+        newly queued prompt or change would run under."""
         session = db.get_session(self.id) or {}
         return _config_after(session, self.queue)
 
     def queue_config(self, fields: dict) -> dict:
-        """Hold a model/effort change until everything already queued has run:
+        """Hold a configuration change until everything already queued has run:
         the user changed it after sending those prompts, so they belong to the
         configuration that was showing when they were written.
 
@@ -931,7 +952,8 @@ class SessionHub:
         and trims a pending entry that no longer changes anything.
 
         {"handled": False} means the caller applies these fields now."""
-        clean = {k: str(v) for k, v in fields.items() if k in ("model", "effort")}
+        clean = {k: str(v) for k, v in fields.items()
+                 if k in ("model", "effort", "permission_mode")}
         tag = str(fields.get("engine") or "")
 
         def moved(current):
@@ -970,7 +992,7 @@ class SessionHub:
         absorb = tail is not None and \
             str((tail.get("fields") or {}).get("engine") or "") == base["engine"]
         merged = {k: v for k, v in (tail.get("fields") or {}).items()
-                  if k in ("model", "effort")} if absorb else {}
+                  if k in ("model", "effort", "permission_mode")} if absorb else {}
         merged.update(clean)
         merged = {k: v for k, v in merged.items() if v != base.get(k, "")}
         if absorb and merged:
@@ -989,17 +1011,26 @@ class SessionHub:
         return {"handled": True}
 
     def request_engine_switch(self, engine: str, model: str,
-                              effort: str = "") -> dict:
+                              effort: str, permission_mode: str) -> dict:
         """Switch now when nothing is pending, otherwise hold the switch at
         the queue tail so prompts sent before it keep the engine they were
         written under. Consecutive requests collapse into the one pending
-        switch (last pick wins, its model/effort reset to the new target's
+        switch (last pick wins, its configuration resets to the new target's
         defaults), and a switch to the current engine stays meaningful:
         applying it reseeds a fresh native session from the transcript."""
         if db.get_session(self.id) is None:
             return {"error": "session gone"}
+        try:
+            driver = get_driver(str(engine or ""))
+        except KeyError:
+            return {"error": "unknown engine '{}'".format(engine)}
+        permission_mode = str(permission_mode or "")
+        if permission_mode not in [str(option.get("value") or "") for option in
+                                   driver.permission_options()]:
+            return {"error": "invalid permission mode for {}".format(driver.label)}
         fields = {"engine": str(engine or ""), "model": str(model or ""),
-                  "effort": str(effort or "")}
+                  "effort": str(effort or ""),
+                  "permission_mode": permission_mode}
         if self.status == "running" or self.queue:
             tail = self.queue[-1] if self.queue and \
                 _is_queued_engine(self.queue[-1]) else None
@@ -1031,6 +1062,13 @@ class SessionHub:
             self._emit("error", {
                 "text": "Cannot switch to unknown engine '{}'".format(engine)})
             return False
+        permission_mode = str(fields.get("permission_mode") or "")
+        if permission_mode not in [str(option.get("value") or "") for option in
+                                   driver.permission_options()]:
+            self._emit("error", {
+                "text": "Cannot switch to {} with an invalid permission mode".format(
+                    driver.label)})
+            return False
         old = session["engine"]
         # Snapshot what the outgoing engine actually ran, so the transcript
         # divider can name both configurations - a model picked but never sent
@@ -1050,7 +1088,7 @@ class SessionHub:
             self.id, engine=engine, native_session_id="",
             model=fields.get("model") or driver.default_model(),
             effort=fields.get("effort") or "", last_model="", used_config="",
-            permission_mode=driver.default_permission())
+            permission_mode=permission_mode)
         self.broadcast({"type": "session_meta",
                         "session": session_payload(db.get_session(self.id))})
         broadcast_sessions()
@@ -1290,7 +1328,8 @@ class SessionHub:
                                  "finishes".format(engine or "that engine")}
             self.held.pop(index)
             result = self.request_engine_switch(
-                engine, fields.get("model") or "", effort=fields.get("effort") or "")
+                engine, fields.get("model") or "", fields.get("effort") or "",
+                fields.get("permission_mode") or "")
             if "error" in result:
                 self.held.insert(index, item)   # nothing changed: keep it held
             self._broadcast_queue()
@@ -1369,7 +1408,7 @@ class SessionHub:
     def _take_next_turn(self):
         """Advance within an activity block, or close it when the queue is
         out of runnable prompts. Paused prompts stay visible but are skipped;
-        pending model/effort changes before the selected runnable prompt apply
+        pending configuration changes before the selected runnable prompt apply
         in their visible order."""
         # A shutdown grace window only has to outlast the RUNNING turn. Feeding
         # it the next queued prompt would consume that prompt and then kill it
@@ -1436,7 +1475,8 @@ class SessionHub:
                           self.id)
 
     def _apply_queued_config(self, fields: dict) -> None:
-        clean = {k: v for k, v in fields.items() if k in ("model", "effort")}
+        clean = {k: v for k, v in fields.items()
+                 if k in ("model", "effort", "permission_mode")}
         if not clean:
             return
         session = db.get_session(self.id)
@@ -1448,11 +1488,25 @@ class SessionHub:
             # orphan beats applying model ids another engine validated
             self._emit("info", {
                 "subtype": "config_skipped",
-                "text": "Skipped a queued model/effort change that belonged "
+                "text": "Skipped a queued configuration change that belonged "
                         "to {} - this session is on {}.".format(
                             tag, session.get("engine") or "another engine"),
             })
             return
+        if "permission_mode" in clean:
+            try:
+                driver = get_driver(str(session.get("engine") or ""))
+            except KeyError:
+                return
+            allowed = [str(option.get("value") or "") for option in
+                       driver.permission_options()]
+            if str(clean["permission_mode"]) not in allowed:
+                self._emit("info", {
+                    "subtype": "config_skipped",
+                    "text": "Skipped a queued permission mode that is not valid for {}.".format(
+                        driver.label),
+                })
+                return
         db.touch_session(self.id, **clean)
         self.broadcast({"type": "session_meta",
                         "session": session_payload(db.get_session(self.id))})

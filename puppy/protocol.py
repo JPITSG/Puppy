@@ -71,6 +71,11 @@ QUEUE_EDIT_CAPABILITY = "queue-edit"
 # of refusing it, and answers with the additive ``queued`` flag. Queue payloads
 # then contain {kind:"engine"} rows beside {kind:"config"} ones.
 QUEUED_ENGINE_SWITCH_CAPABILITY = "queued-engine-switch"
+# Permission choices use the same ordered configuration rows as model/effort,
+# and engine rows carry the target engine's permission default. Older nodes
+# validate permission against the still-live engine and cannot safely accept a
+# target-engine choice while a switch waits, so controllers gate that picker.
+QUEUED_PERMISSION_CAPABILITY = "queued-permission-config"
 # The session socket can hold automatic dequeue while a client rearranges the
 # live queue, then atomically accept a revision-guarded permutation. Older
 # nodes keep their ordinary queue and pause controls without draggable rows.
@@ -120,6 +125,7 @@ BASE_CAPABILITIES = (
     # the engine that validated them. Older nodes keep refusing mid-turn
     # switches with 409, and the console withholds the queued affordance.
     QUEUED_ENGINE_SWITCH_CAPABILITY,
+    QUEUED_PERMISSION_CAPABILITY,
     "uploads",
     FILE_UPLOAD_CAPABILITY,
     "filesystem",

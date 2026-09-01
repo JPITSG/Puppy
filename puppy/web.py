@@ -419,7 +419,7 @@ async def h_session_patch(request: web.Request):
     turn_config = {}
     pending = None
     driver = None
-    if "model" in body or "effort" in body:
+    if "model" in body or "effort" in body or "permission_mode" in body:
         # Validate against the engine these fields will actually reach: the
         # session's own engine plus every pending switch already queued. The
         # hub re-checks that engine when the change is queued, so a switch
@@ -431,7 +431,8 @@ async def h_session_patch(request: web.Request):
             return web.json_response(
                 {"error": "unknown engine '{}'".format(pending["engine"])},
                 status=400)
-        await driver.refresh_model_options()
+        if "model" in body or "effort" in body:
+            await driver.refresh_model_options()
     if "name" in body:
         fields["name"] = str(body["name"]).strip()[:80]
     if "model" in body:
@@ -454,18 +455,21 @@ async def h_session_patch(request: web.Request):
         if current_effort not in [o["value"] for o in
                                   driver.effort_options_for_model(turn_config["model"])]:
             turn_config["effort"] = ""
+    if "permission_mode" in body:
+        val = str(body["permission_mode"] or "").strip()
+        if val not in [str(option.get("value") or "") for option in
+                       driver.permission_options()]:
+            return web.json_response(
+                {"error": "That permission mode is not available for {}".format(
+                    driver.label)}, status=400)
+        turn_config["permission_mode"] = val
     if "color" in body and body["color"] in db.SESSION_COLORS:
         fields["color"] = body["color"]
     if "archived" in body:
         fields["archived"] = 1 if body["archived"] else 0
     if "show_meta" in body:
         fields["show_meta"] = 1 if body["show_meta"] else 0
-    if "permission_mode" in body:
-        driver = get_driver(s["engine"])
-        val = str(body["permission_mode"])
-        if val in [o["value"] for o in driver.permission_options()]:
-            fields["permission_mode"] = val
-    # While a turn runs or prompts wait, a model/effort change joins the queue
+    # While a turn runs or prompts wait, a configuration change joins the queue
     # and applies in order - prompts sent before it keep the configuration they
     # were written under. With nothing pending it applies like any other field.
     # "handled" means the hub took charge (queued, or already in force there).
@@ -478,7 +482,7 @@ async def h_session_patch(request: web.Request):
         queued_config = bool(result.get("handled"))
         if not queued_config:
             fields.update({k: v for k, v in turn_config.items()
-                           if k in ("model", "effort")})
+                           if k in ("model", "effort", "permission_mode")})
     if fields:
         db.touch_session(s["id"], **fields)
         runner.broadcast_sessions()
@@ -630,7 +634,7 @@ async def h_session_switch(request: web.Request):
             {"error": "{} is being updated - try again when it finishes".format(
                 driver.label)}, status=409)
     result = runner.hub(s["id"]).request_engine_switch(
-        engine, driver.default_model())
+        engine, driver.default_model(), "", driver.default_permission())
     if "error" in result:
         return web.json_response({"error": result["error"]}, status=409)
     return web.json_response(

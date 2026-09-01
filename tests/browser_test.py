@@ -3541,6 +3541,65 @@ console.log(JSON.stringify({snapshots, promotions: sessionActivityPromotions.siz
     assert result["promotions"] == 2, result
 
 
+def check_queued_permission_choices(ui_source: str) -> None:
+    """Permission options and value follow the queued engine/config tail."""
+    choice_start = ui_source.index("  composerChoiceSpec(kind, native = false) {")
+    choice_end = ui_source.index("\n  syncNativeComposerChoices()", choice_start)
+    choice = ui_source[choice_start:choice_end]
+    assert "options: [...((eng && eng.permission_options) || [])]" in choice
+    assert "selected: eff.permission_mode || \"\"" in choice
+    assert "backendSupportsQueuedPermission(this.tab.bid)" in choice
+    assert 'bind("perm", (value) => this.applyPermissionChoice(value));' in ui_source
+    assert 'setMini("perm", "Permission mode", eff.permission_mode || "auto",' \
+        in ui_source
+    assert 'backend.capabilities.includes("queued-permission-config")' in ui_source
+
+    start = ui_source.index("function effectiveQueuedConfig(")
+    end = ui_source.index("\n\nclass SessionView", start)
+    script = r"""
+%s
+const engines = {
+  claude: {default_permission:"auto"},
+  codex: {default_permission:"workspace-write"},
+};
+const engineOf = key => engines[key] || null;
+const session = {engine:"claude", model:"sonnet", effort:"high",
+  permission_mode:"auto"};
+const initial = effectiveQueuedConfig(session, [], engineOf);
+const legacySwitch = {kind:"engine", engine:"codex", model:"gpt-5.6-sol",
+  effort:"max"};
+const legacy = effectiveQueuedConfig(session, [legacySwitch], engineOf);
+const switched = effectiveQueuedConfig(session, [{...legacySwitch,
+  permission_mode:"workspace-write"}], engineOf);
+const picked = effectiveQueuedConfig(session, [{...legacySwitch,
+  permission_mode:"workspace-write"}, {kind:"config", engine:"codex",
+  permission_mode:"danger-full-access"}], engineOf);
+const stale = effectiveQueuedConfig(session, [{...legacySwitch,
+  permission_mode:"workspace-write"}, {kind:"config", engine:"codex",
+  permission_mode:"danger-full-access"}, {kind:"config", engine:"claude",
+  permission_mode:"plan"}], engineOf);
+const slim = value => ({engine:value.engine, permission:value.permission_mode,
+  queuedEngine:value.queuedEngine, queuedPermission:value.queuedPermission});
+console.log(JSON.stringify([initial, legacy, switched, picked, stale].map(slim)));
+""" % ui_source[start:end]
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:700]
+    assert json.loads(proc.stdout) == [
+        {"engine": "claude", "permission": "auto",
+         "queuedEngine": False, "queuedPermission": False},
+        # Compatibility display for an older remote row: target default.
+        {"engine": "codex", "permission": "workspace-write",
+         "queuedEngine": True, "queuedPermission": True},
+        {"engine": "codex", "permission": "workspace-write",
+         "queuedEngine": True, "queuedPermission": True},
+        {"engine": "codex", "permission": "danger-full-access",
+         "queuedEngine": True, "queuedPermission": True},
+        # A stale row validated for the old engine is ignored.
+        {"engine": "codex", "permission": "danger-full-access",
+         "queuedEngine": True, "queuedPermission": True},
+    ]
+
+
 def check_switch_engine_initial_selection(ui_source: str) -> None:
     """The switch modal initially selects the engine already heading for the
     session - a queued switch target when one is pending, else the current
@@ -5423,6 +5482,7 @@ async def main() -> None:
             check_shared_node_order(ui_source, css_source)
             check_flat_session_list(ui_source, css_source)
             check_sticky_activity_promotions(ui_source, css_source)
+            check_queued_permission_choices(ui_source)
             check_switch_engine_initial_selection(ui_source)
             check_engine_picker_alignment(css_source)
             check_browser_chip_order(ui_source)

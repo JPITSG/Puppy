@@ -915,7 +915,7 @@ select.choice-native{display:none!important}
 .chip.eng-claude .dot{background:var(--claude)}
 .chip.eng-codex .dot{background:var(--codex)}
 .chip.eng-opencode .dot{background:var(--opencode)}
-/* a queued engine switch: same voice as the pending model/effort minis */
+/* a queued engine switch: same voice as the pending configuration minis */
 .chip.eng.pending .eng-label{font-style:italic;color:var(--acc2)}
 .chip.cwd.warn{color:var(--warn);border-color:var(--warn-line);background:var(--warn-dim)}
 /* the one chip that is a control: a live browser this session launched */

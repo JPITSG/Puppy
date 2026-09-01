@@ -1707,6 +1707,14 @@ function effortShorthand(eng, value) {
   return (match && match.label) || raw;
 }
 
+function permissionShorthand(eng, value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const match = ((eng && eng.permission_options) || [])
+    .find(option => option && option.value === raw);
+  return (match && match.label) || raw;
+}
+
 /* "5.6-Sol Max", or "" when both sit on the engine's defaults. `blank` names
    the default model for lines where the engine is not there to carry it. */
 function engineConfigDetail(bid, engine, model, effort, blank) {
@@ -3658,6 +3666,13 @@ function backendSupportsQueuedEngineSwitch(bid) {
      original wording there and the 409 surfaces as the usual error toast. */
   return !!backend && Array.isArray(backend.capabilities) &&
     backend.capabilities.includes("queued-engine-switch");
+}
+
+function backendSupportsQueuedPermission(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(item => item.id === bid);
+  return !!backend && Array.isArray(backend.capabilities) &&
+    backend.capabilities.includes("queued-permission-config");
 }
 
 function backendSupportsSessionDrafts(bid) {
@@ -6350,6 +6365,47 @@ function filesFromDataTransfer(transfer) {
   return result;
 }
 
+/* Resolve the configuration at the queue tail in visible order. Engine rows
+   reset every engine-owned choice; the permission fallback keeps a new
+   console accurate against an older node whose switch row predates the
+   additive permission field, while capability gating keeps that fallback
+   read-only. */
+function effectiveQueuedConfig(session, queued, engineOf) {
+  const s = session || {};
+  const out = {
+    engine: s.engine || "", model: s.model || "", effort: s.effort || "",
+    permission_mode: s.permission_mode || "", queuedEngine: false,
+    queuedModel: false, queuedEffort: false, queuedPermission: false,
+  };
+  for (const item of queued || []) {
+    if (!item || typeof item !== "object") continue;
+    if (item.kind === "engine") {
+      out.engine = item.engine || "";
+      out.model = item.model || "";
+      out.effort = item.effort || "";
+      const target = engineOf(out.engine) || {};
+      out.permission_mode = Object.prototype.hasOwnProperty.call(item, "permission_mode")
+        ? item.permission_mode || "" : target.default_permission || "";
+      out.queuedEngine = true;
+      out.queuedModel = true;
+      out.queuedEffort = true;
+      out.queuedPermission = true;
+      continue;
+    }
+    /* A row whose validating engine no longer matches its position is an
+       orphan the node will skip - reading it here would promise the wrong
+       configuration. */
+    if (item.engine && item.engine !== out.engine) continue;
+    if ("model" in item) { out.model = item.model || ""; out.queuedModel = true; }
+    if ("effort" in item) { out.effort = item.effort || ""; out.queuedEffort = true; }
+    if ("permission_mode" in item) {
+      out.permission_mode = item.permission_mode || "";
+      out.queuedPermission = true;
+    }
+  }
+  return out;
+}
+
 class SessionView {
   constructor(tab) {
     this.tab = tab;
@@ -6653,7 +6709,7 @@ class SessionView {
           }
         };
       };
-      bind("perm", (value) => this.patchSession({ permission_mode: value }));
+      bind("perm", (value) => this.applyPermissionChoice(value));
       bind("model", (value) => this.applyModelChoice(value));
       bind("effort", (value) => this.patchSession({ effort: value }));
     } else {
@@ -8027,7 +8083,8 @@ class SessionView {
       const select = control.querySelector("select");
       (select || control).setAttribute("aria-label", title);
     };
-    setMini("perm", "Permission mode", s.permission_mode || "auto");
+    setMini("perm", "Permission mode", eff.permission_mode || "auto",
+      eff.queuedPermission);
     setMini("model", "Model", eff.model || "auto", eff.queuedModel);
     setMini("effort", "Reasoning effort", eff.effort || "auto", eff.queuedEffort);
     this.syncSwitchLines();   // the newest divider tracks the live selection
@@ -8866,8 +8923,8 @@ class SessionView {
     this.hideApproval();
   }
 
-  /* a queue entry is a prompt string, or a pending change: an engine switch
-     ({kind:"engine"}), or a model/effort change tagged with the engine whose
+  /* A queue entry is a prompt string, or a pending change: an engine switch
+     ({kind:"engine"}), or a configuration change tagged with the engine whose
      catalog validated it (older nodes omit the tag - fall back to the
      session's engine, which is all they can queue against) */
   describeQueuedConfig(item) {
@@ -8878,10 +8935,16 @@ class SessionView {
       parts.push("Engine → " + ((eng && eng.label) || item.engine || "?"));
       if (item.model) parts.push("Model → " + (modelShorthand(eng, item.model) || item.model));
       if (item.effort) parts.push("Effort → " + (effortShorthand(eng, item.effort) || item.effort));
+      const permission = Object.prototype.hasOwnProperty.call(item, "permission_mode")
+        ? item.permission_mode : (eng && eng.default_permission) || "";
+      if (permission)
+        parts.push("Permission → " + permissionShorthand(eng, permission));
       return parts.join(" · ");
     }
     if ("model" in item) parts.push("Model → " + (modelShorthand(eng, item.model) || "default"));
     if ("effort" in item) parts.push("Effort → " + (effortShorthand(eng, item.effort) || "default"));
+    if ("permission_mode" in item)
+      parts.push("Permission → " + permissionShorthand(eng, item.permission_mode));
     return parts.join(" · ") || "Setting change";
   }
 
@@ -9348,45 +9411,23 @@ class SessionView {
     positionAnchoredMenu(menu, anchor);
   }
 
-  /* what the NEXT prompt will run under: the session's engine/model/effort,
-     then any pending changes waiting in the queue, in order. The pickers and
-     mini pills speak about the next prompt, so they read this rather than the
-     session. */
+  /* What the NEXT prompt will run under: the session configuration followed
+     by every pending change in queue order. The pickers and mini pills speak
+     about that future configuration, not just the live session row. */
   effectiveConfig() {
-    const s = this.session || {};
-    const out = { engine: s.engine || "", model: s.model || "", effort: s.effort || "",
-                  queuedEngine: false, queuedModel: false, queuedEffort: false };
-    for (const item of this.queued || []) {
-      if (!item || typeof item !== "object") continue;
-      if (item.kind === "engine") {
-        out.engine = item.engine || ""; out.queuedEngine = true;
-        out.model = item.model || ""; out.queuedModel = true;
-        out.effort = item.effort || ""; out.queuedEffort = true;
-        continue;
-      }
-      /* a row whose validating engine no longer matches its position is an
-         orphan the node will skip - reading it here would promise the wrong
-         configuration */
-      if (item.engine && item.engine !== out.engine) continue;
-      if ("model" in item) { out.model = item.model || ""; out.queuedModel = true; }
-      if ("effort" in item) { out.effort = item.effort || ""; out.queuedEffort = true; }
-    }
-    return out;
+    return effectiveQueuedConfig(this.session, this.queued,
+      engine => engineInfo(this.tab.bid, engine));
   }
 
   composerChoiceSpec(kind, native = false) {
     const s = this.session || {};
     const eff = this.effectiveConfig();
-    /* model/effort choices follow the queue (a pending switch means the next
-       prompt runs on its target); permission stays with the session's own
-       engine because it applies immediately, and an applied switch resets it
-       to the target's default anyway */
     const eng = engineInfo(this.tab.bid, eff.engine || s.engine);
     if (kind === "perm") {
-      const cur = engineInfo(this.tab.bid, s.engine);
       return {
-        options: [...((cur && cur.permission_options) || [])],
-        selected: s.permission_mode || "",
+        options: [...((eng && eng.permission_options) || [])],
+        selected: eff.permission_mode || "",
+        disabled: eff.queuedEngine && !backendSupportsQueuedPermission(this.tab.bid),
       };
     }
     if (kind === "effort") return {
@@ -9435,16 +9476,29 @@ class SessionView {
         option.selected = String(item.value) === String(spec.selected);
         select.appendChild(option);
       }
-      select.disabled = !supplied;
-      select.parentElement.classList.toggle("disabled", !supplied);
+      select.disabled = !supplied || spec.disabled === true;
+      select.parentElement.classList.toggle("disabled", select.disabled);
     }
   }
 
   showPermMenu(anchor) {
     if (!this.session) return;
     const spec = this.composerChoiceSpec("perm");
+    if (spec.disabled) {
+      toast("Upgrade this backend to change permission before its queued engine switch", "error");
+      return;
+    }
     this.optionMenu(anchor, spec.options, spec.selected,
-      (value) => this.patchSession({ permission_mode: value }));
+      (value) => this.applyPermissionChoice(value));
+  }
+
+  async applyPermissionChoice(value) {
+    const eff = this.effectiveConfig();
+    if (eff.queuedEngine && !backendSupportsQueuedPermission(this.tab.bid)) {
+      toast("Upgrade this backend to change permission before its queued engine switch", "error");
+      return;
+    }
+    await this.patchSession({ permission_mode: value });
   }
 
   async patchSession(body) {

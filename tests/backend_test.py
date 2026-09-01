@@ -1247,6 +1247,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "queue-edit" in ping["capabilities"]
         assert "queue-reorder" in ping["capabilities"]
         assert "queued-engine-switch" in ping["capabilities"]
+        assert "queued-permission-config" in ping["capabilities"]
         assert "session-drafts" in ping["capabilities"]
         assert "active-turn-steering" in ping["capabilities"]
         assert "system-prompt" in ping["capabilities"]
@@ -2762,14 +2763,20 @@ async def exercise_queue_persistence(runner, db) -> None:
         assert h.discard_held(0, "third") == {"ok": True}
         assert db.meta_get("session_queue.{}".format(sid)) is None
 
-        # Restore accepts only the current item shape: engine rows and tagged
-        # config rows come back held with recomputed cancel identities, while
-        # an old untagged config row is rejected rather than converted.
-        eng_fields = {"engine": "codex", "model": "gpt-x", "effort": ""}
+        # Restore accepts only the current item shape: engine rows carry every
+        # target default and tagged config rows come back held with recomputed
+        # cancel identities. Old rows are rejected rather than converted.
+        from puppy.drivers import get_driver
+        eng_fields = {
+            "engine": "codex", "model": "gpt-x", "effort": "",
+            "permission_mode": get_driver("codex").default_permission(),
+        }
+        old_eng_fields = {"engine": "codex", "model": "gpt-x", "effort": ""}
         tagged_fields = {"model": "claude-x", "engine": "claude"}
         db.meta_set("session_queue.{}".format(sid), {
             "queue": [{"kind": "engine", "fields": dict(eng_fields), "key": "stale"}],
             "held": [{"kind": "config", "fields": dict(tagged_fields), "key": "stale"},
+                     {"kind": "engine", "fields": old_eng_fields, "key": "stale"},
                      {"kind": "config", "fields": {"model": "untagged"},
                       "key": "stale"}],
         })
@@ -3209,6 +3216,8 @@ async def exercise_engine_switch_queue(url: str, token: str, runner, db) -> None
     from puppy.drivers import get_driver
     codex_default = get_driver("codex").default_model()
     codex_permission = get_driver("codex").default_permission()
+    codex_custom_permission = "danger-full-access"
+    claude_permission = get_driver("claude").default_permission()
     sid = db.create_session("switch queue", "claude", "/tmp", "old-model", "high",
                             "blue", "auto")
     h = runner.hub(sid)
@@ -3235,33 +3244,54 @@ async def exercise_engine_switch_queue(url: str, token: str, runner, db) -> None
                     json={"engine": "codex"}) as response:
                 switched = await response.json()
                 assert response.status == 200, switched
+            # The permission picker now follows the queued target just like
+            # model/effort: valid target values fold into the switch row and a
+            # value belonging only to the live engine is rejected.
+            async with http.patch(
+                    url + "/api/sessions/{}".format(sid), headers=headers,
+                    json={"permission_mode": codex_custom_permission}) as response:
+                permission_changed = await response.json()
+                assert response.status == 200, permission_changed
+            async with http.patch(
+                    url + "/api/sessions/{}".format(sid), headers=headers,
+                    json={"permission_mode": "plan"}) as response:
+                assert response.status == 400, await response.text()
         assert switched["queued"] is True
+        assert permission_changed["queued_config"] is True
         assert switched["session"]["engine"] == "claude"
         assert h.queue[:2] == [claude_cfg, "paused prompt"]
         assert runner._is_queued_engine(h.queue[2])
         assert h.queue[2]["fields"] == {
-            "engine": "codex", "model": codex_default, "effort": ""}
+            "engine": "codex", "model": codex_default, "effort": "",
+            "permission_mode": codex_custom_permission}
         assert h._paused_wire() == [1] and h.held == ["held prompt"]
         # an engine upgrade must treat the queued switch target as busy work
         assert any(b["id"] == sid for b in runner.engine_blockers("codex"))
         assert any(b["id"] == sid for b in runner.engine_blockers("claude"))
 
         # A model picked while the switch waits belongs to its target and
-        # folds into the switch row; a stale validation tag is refused.
+        # folds into the same switch row; a stale validation tag is refused.
         assert h.queue_config({"model": "o-mini", "engine": "codex"}) == \
             {"handled": True}
         assert h.queue[2]["fields"]["model"] == "o-mini"
         assert "belongs to" in h.queue_config(
             {"model": "sonnet", "engine": "claude"})["error"]
         assert h.pending_config() == {
-            "engine": "codex", "model": "o-mini", "effort": ""}
+            "engine": "codex", "model": "o-mini", "effort": "",
+            "permission_mode": codex_custom_permission}
 
         # Re-picking collapses into the same pending row, resetting its
-        # model/effort to the newly chosen target's defaults.
-        assert h.request_engine_switch("claude", "") == {"queued": True}
+        # complete configuration to the newly chosen target's defaults.
+        assert h.request_engine_switch(
+            "claude", "", "", claude_permission) == {"queued": True}
         assert len(h.queue) == 3 and h.queue[2]["fields"] == {
-            "engine": "claude", "model": "", "effort": ""}
-        assert h.request_engine_switch("codex", codex_default) == {"queued": True}
+            "engine": "claude", "model": "", "effort": "",
+            "permission_mode": claude_permission}
+        assert h.request_engine_switch(
+            "codex", codex_default, "", codex_permission) == {"queued": True}
+        assert h.queue_config({
+            "permission_mode": codex_custom_permission, "engine": "codex",
+        }) == {"handled": True}
 
         # A new prompt into the idle, fully paused queue starts itself: the
         # claude model change applies while the session is still claude, the
@@ -3278,7 +3308,7 @@ async def exercise_engine_switch_queue(url: str, token: str, runner, db) -> None
         assert session["model"] == codex_default and session["effort"] == ""
         assert session["native_session_id"] == "" and session["last_model"] == ""
         assert session["used_config"] == ""
-        assert session["permission_mode"] == codex_permission
+        assert session["permission_mode"] == codex_custom_permission
         divider = [e for e in db.get_events(sid) if e["kind"] == "engine_switch"][-1]
         assert divider["data"] == {"from": "claude", "to": "codex",
                                    "from_model": "claude-only", "from_effort": "high"}
@@ -3291,12 +3321,19 @@ async def exercise_engine_switch_queue(url: str, token: str, runner, db) -> None
         skipped = db.get_events(sid)[-1]
         assert skipped["kind"] == "info" and \
             skipped["data"]["subtype"] == "config_skipped"
+        h._apply_queued_config({
+            "permission_mode": "read-only", "engine": "codex",
+        })
+        assert db.get_session(sid)["permission_mode"] == "read-only"
 
         # Held work survives switches for an explicit decision: a held switch
         # re-applies (or re-queues) on demand, and a held setting validated by
         # a different engine is refused rather than misapplied.
         assert h.unqueue(0, "paused prompt") == {"ok": True}
-        eng_fields = {"engine": "claude", "model": "", "effort": ""}
+        eng_fields = {
+            "engine": "claude", "model": "", "effort": "",
+            "permission_mode": claude_permission,
+        }
         eng_row = {"kind": "engine", "fields": dict(eng_fields),
                    "key": runner._queued_engine_key(eng_fields)}
         h.held = [eng_row]
