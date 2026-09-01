@@ -11459,7 +11459,7 @@ class SearchView {
         <div class="card search-settings">
           <div class="search-filters">
           <div class="search-filter-row">
-            <span class="search-filter-label">Nodes</span>
+            <span class="search-filter-label">Backends</span>
             <span class="search-chips search-nodes"></span>
           </div>
           <div class="search-filter-row">
