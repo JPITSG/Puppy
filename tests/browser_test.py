@@ -41,7 +41,7 @@ STUB_LOG.mkdir(mode=0o700)
 os.environ["PUPPY_BROWSER_STUB_LOG"] = str(STUB_LOG)
 
 from puppy import (browser, browser_agent, config, db, runner as session_runner,
-                   system_prompts)  # noqa: E402
+                   system_prompts, terminal_agent)  # noqa: E402
 from puppy.drivers.claude import ClaudeDriver  # noqa: E402
 from puppy.drivers.codex import CodexDriver  # noqa: E402
 from puppy.drivers.opencode import OpenCodeDriver  # noqa: E402
@@ -1646,7 +1646,9 @@ console.log(JSON.stringify({sent:first.sent,pendingJournal,journalCleared,follow
            attachments:editing.view.attachments.length,
            journal:storage.has("puppy.draft.s:0:50")}}));
 """ % (draft_helpers, attachment_helpers, session_view)
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    # The embedded SessionView class exceeds the kernel's single-argument cap
+    # (MAX_ARG_STRLEN, 128 KiB), so this script rides stdin rather than -e.
+    proc = subprocess.run(["node"], input=script, capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:1000]
     result = json.loads(proc.stdout)
     assert result["sent"] == [
@@ -3055,6 +3057,121 @@ def check_browser_chip_order(ui_source: str) -> None:
     assert 'scroll.querySelector(".chip.be")' not in method
 
 
+def check_composer_mentions(ui_source: str, css_source: str) -> None:
+    """The chat box's @ shortcut: token detection and filtering run for real,
+    the popup owns its keys ahead of the interrupt path, and both MCP agents
+    define the inserted mention forms for the engine."""
+    start = ui_source.index("\nconst MENTION_QUERY_MAX")
+    end = ui_source.index("\n/* ================= SessionView")
+    helpers = ui_source[start:end]
+    script = r"""
+%s
+const ctx = (text, caret, endSel) =>
+  composerMentionContext(text, caret, endSel === undefined ? caret : endSel);
+const items = [
+  {label: "Browser AB12"}, {label: "Terminal CD34"},
+  {label: "New browser"}, {label: "New terminal"},
+].map(item => ({label: item.label, search: item.label.toLowerCase()}));
+const labels = (query) => filterMentionItems(items, query).map(item => item.label);
+console.log(JSON.stringify({
+  bare: ctx("@", 1),
+  word: ctx("hello @bro", 10),
+  email: ctx("mail a@b.c", 10),
+  atSign: ctx("meet @ 5", 8),
+  prose: ctx("@john about x", 13),
+  spaced: ctx("@browser a", 10),
+  newline: ctx("line\n@te", 8),
+  crossed: ctx("@x\ny", 4),
+  paren: ctx("(@ab", 4),
+  range: ctx("@ab", 2, 3),
+  long: ctx("@" + "x".repeat(30), 31),
+  midCaret: ctx("see @term now", 9),
+  all: labels(""),
+  id: labels("ab"),
+  fresh: labels("new"),
+  kind: labels("browser"),
+  kindId: labels("terminal c"),
+  none: labels("xyz"),
+}));
+""" % helpers
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:500]
+    result = json.loads(proc.stdout.strip())
+    assert result["bare"] == {"start": 0, "query": ""}, result
+    assert result["word"] == {"start": 6, "query": "bro"}, result
+    assert result["email"] is None, result          # user@host stays prose
+    assert result["atSign"] is None, result         # "meet @ 5" stays prose
+    assert result["prose"] is None, result          # second space ends the token
+    assert result["spaced"] == {"start": 0, "query": "browser a"}, result
+    assert result["newline"] == {"start": 5, "query": "te"}, result
+    assert result["crossed"] is None, result        # tokens never cross lines
+    assert result["paren"] == {"start": 1, "query": "ab"}, result
+    assert result["range"] is None, result          # only a collapsed caret
+    assert result["long"] is None, result
+    assert result["midCaret"] == {"start": 4, "query": "term"}, result
+    assert result["all"] == ["Browser AB12", "Terminal CD34",
+                             "New browser", "New terminal"], result
+    assert result["id"] == ["Browser AB12"], result
+    assert result["fresh"] == ["New browser", "New terminal"], result
+    assert result["kind"] == ["Browser AB12", "New browser"], result
+    assert result["kindId"] == ["Terminal CD34"], result
+    assert result["none"] == [], result
+
+    # The popup lives inside the composer box and consumes its keys before the
+    # composer's own handlers - most importantly Escape, which must close the
+    # list rather than interrupt the running turn.
+    assert '<div class="mention-pop hidden" role="listbox"' in ui_source
+    keydown = ui_source.index('this.ta.addEventListener("keydown"')
+    assert ui_source.index("if (this.mentionKeydown(e)) return;", keydown) < \
+        ui_source.index('if (e.key === "Escape" || ctrlC)', keydown)
+    assert "this.mentionDismissedAt = m.start;" in ui_source
+    # the list follows the caret and leaves with composer focus
+    assert 'document.addEventListener("selectionchange", this._onSelectionChange);' \
+        in ui_source
+    assert 'document.removeEventListener("selectionchange", this._onSelectionChange);' \
+        in ui_source
+    assert "{ this.ctrlCStreak = 0; this.hideMention(); }" in ui_source
+    # completion inserts through the ordinary edit path and keeps focus on rows
+    apply_start = ui_source.index("  applyMention(item) {")
+    apply_method = ui_source[apply_start:
+                             ui_source.index("\n  mentionCandidates() {", apply_start)]
+    assert 'ta.dispatchEvent(new Event("input", { bubbles: true }));' in apply_method
+    assert 'this.mentionEl.addEventListener("pointerdown", (e) => e.preventDefault());' \
+        in ui_source
+    # offline nodes are never probed and instance snapshots are briefly cached
+    refresh = ui_source[ui_source.index("  refreshMentionInstances() {"):
+                        ui_source.index("\n  retireSentAttachment(")]
+    assert "if (bid && !backendConnectionAllowed(bid)) return;" in refresh
+    assert "browserEnabledFor(bid) && browserInstancesFor(bid)" in refresh
+    assert "terminalInstancesFor(bid)" in refresh
+    assert "Date.now() - data.at < 10000" in refresh
+    # sent bubbles render mention tokens; surrounding prose keeps linkification
+    assert "if (text) decorateMentionsInto(n, text);" in ui_source
+    assert "Browser [A-Z0-9]{4}|Terminal [A-Z0-9]{4}|New browser|New terminal" \
+        in ui_source
+    # styles: anchored above the composer, one .sel highlight, centred icon ink
+    assert ".mention-pop{" in css_source
+    assert "bottom:calc(100% + 9px)" in css_source
+    assert ".mention-item.sel{background:var(--float-menu-hover)}" in css_source
+    assert ".mention-ico svg{display:block}" in css_source
+    assert ".mention-token{" in css_source
+
+    # Both MCP agents define the inserted mention forms on every channel the
+    # WebUI relies on: the server instructions and the tool schemas themselves.
+    assert '"@Browser A8AR"' in browser_agent.TOOL_INSTRUCTIONS
+    assert '"@New browser"' in browser_agent.TOOL_INSTRUCTIONS
+    assert '"@Terminal A8AR"' in terminal_agent.TOOL_INSTRUCTIONS
+    assert '"@New terminal"' in terminal_agent.TOOL_INSTRUCTIONS
+    browser_tools = {tool["name"]: tool for tool in browser_agent.TOOLS}
+    assert '"@Browser A8AR" mention' in browser_tools["navigate"][
+        "inputSchema"]["properties"]["browser_id"]["description"]
+    assert '"@New browser" mention' in browser_tools["new_browser"]["description"]
+    terminal_tools = {tool["name"]: tool for tool in terminal_agent.TOOLS}
+    assert '"@Terminal A8AR" mention' in terminal_tools["type"][
+        "inputSchema"]["properties"]["terminal_id"]["description"]
+    assert '"@New terminal" mention' in terminal_tools["new_terminal"]["description"]
+
+
 def check_chat_status_bar_layout(ui_source: str, css_source: str) -> None:
     """Identity is one pill; location names the backend that owns the files."""
     start = ui_source.index("function workspaceLocationNode(")
@@ -4352,6 +4469,7 @@ async def main() -> None:
             check_switch_engine_initial_selection(ui_source)
             check_engine_picker_alignment(css_source)
             check_browser_chip_order(ui_source)
+            check_composer_mentions(ui_source, css_source)
             check_chat_status_bar_layout(ui_source, css_source)
             check_backend_name_single_activation(ui_source)
             check_browser_disable_closes_scoped_tabs(ui_source)

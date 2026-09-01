@@ -30,7 +30,10 @@ TOOL_INSTRUCTIONS = (
     "Terminal IDs are four uppercase A-Z/0-9 characters. Use these tools only "
     "when the user specifically asks you to interact with a Puppy terminal or "
     "names its ID; continue using your ordinary shell and file tools for normal "
-    "work. If the user names an ID, pass terminal_id. Otherwise omit it to use "
+    "work. If the user names an ID, pass terminal_id. The chat box inserts "
+    "mentions in the form \"@Terminal A8AR\" (use exactly that terminal) and "
+    "\"@New terminal\" (an explicit request for a fresh shared terminal). "
+    "Otherwise omit it to use "
     "this chat's linked terminal, creating a fresh shared terminal if none is "
     "live. Call new_terminal only when the user explicitly asks for another "
     "terminal. The user sees and can type in the same terminal. Inspect before "
@@ -55,8 +58,9 @@ def _tool(name, description, properties=None, required=None, read_only=False,
         properties["terminal_id"] = {
             "type": "string", "pattern": "^[A-Z0-9]{4}$",
             "description": (
-                "Existing Terminal ID named by the user. Omit to use this "
-                "session's linked terminal, creating one if needed."),
+                "Existing Terminal ID named by the user, e.g. via a "
+                "\"@Terminal A8AR\" mention. Omit to use this session's "
+                "linked terminal, creating one if needed."),
         }
     schema = {"type": "object", "properties": properties,
               "additionalProperties": False}
@@ -126,7 +130,8 @@ TOOLS = [
     _tool(
         "new_terminal",
         "Open an additional shared, user-visible Puppy terminal in the chat's "
-        "working directory. Use only when the user explicitly asks for another terminal.",
+        "working directory. Use only when the user explicitly asks for another "
+        "terminal, e.g. with a \"@New terminal\" mention.",
         terminal_target=False),
     _tool(
         "close_terminal",

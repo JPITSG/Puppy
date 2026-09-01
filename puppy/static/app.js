@@ -1934,6 +1934,26 @@ function linkifyInto(node, text) {
   return node;
 }
 
+/* A sent chat-box mention - inserted by the composer's @ shortcut, or typed by
+   hand in the same shape - renders as a token, confirming which Puppy browser
+   or terminal the message pointed the agent at. Surrounding prose keeps its
+   ordinary linkification. */
+const MENTION_TOKEN_RE =
+  /(^|[\s([{'"])(@(?:Browser [A-Z0-9]{4}|Terminal [A-Z0-9]{4}|New browser|New terminal))(?=$|[\s.,;:!?)\]}'"])/g;
+function decorateMentionsInto(node, text) {
+  text = String(text == null ? "" : text);
+  MENTION_TOKEN_RE.lastIndex = 0;
+  let last = 0, m;
+  while ((m = MENTION_TOKEN_RE.exec(text))) {
+    const start = m.index + m[1].length;
+    if (start > last) linkifyInto(node, text.slice(last, start));
+    node.appendChild(el("span", "mention-token", m[2]));
+    last = start + m[2].length;
+  }
+  if (last < text.length || !last) linkifyInto(node, text.slice(last));
+  return node;
+}
+
 /* ================= tooltips ================= */
 /* Custom title bubbles. A capture-phase pointerover moves an element's native
    `title` into `data-tip` the first time it is hovered (suppressing the
@@ -6019,6 +6039,47 @@ function closeMenusToggling(anchor) {
   return wasOpen;
 }
 
+/* ================= composer @-mentions ================= */
+/* Typing "@" in the chat box offers what the agent's Puppy MCP tools can be
+   pointed at: the live managed browsers and shared terminals on the session's
+   own node, plus explicit new-instance requests. Selecting a row inserts a
+   plain-text mention ("@Browser A8AR", "@New terminal") whose meaning the
+   engine-side MCP guidance defines, so the shortcut rides the ordinary prompt
+   string and survives engine switches and older nodes unchanged. */
+const MENTION_QUERY_MAX = 24;
+
+/* The mention token under a collapsed caret: an "@" opening a word, with the
+   query running from it to the caret. One internal space is allowed ("Browser
+   A8", "New ter…"); a second space, a newline, a leading space ("meet @ 5"),
+   or an over-long query reads as prose, which is how the list steps aside for
+   someone who is simply typing. */
+function composerMentionContext(value, selStart, selEnd) {
+  if (selStart !== selEnd) return null;
+  const text = String(value == null ? "" : value);
+  const caret = Math.max(0, Math.min(text.length, Number(selStart) || 0));
+  const from = Math.max(0, caret - MENTION_QUERY_MAX - 1);
+  for (let i = caret - 1; i >= from; i--) {
+    const ch = text[i];
+    if (ch === "\n") return null;
+    if (ch !== "@") continue;
+    const before = i > 0 ? text[i - 1] : "";
+    if (before && !/[\s([{'"]/.test(before)) return null;   // user@host, a@b.c
+    const query = text.slice(i + 1, caret);
+    if (query.startsWith(" ")) return null;
+    if (query.split(" ").length > 2) return null;
+    return { start: i, query };
+  }
+  return null;
+}
+
+/* Case-insensitive substring over the visible label, so "@ab" finds
+   "Browser AB12" and "@new" keeps only the new-instance rows. */
+function filterMentionItems(items, query) {
+  const q = String(query || "").toLowerCase();
+  if (!q) return items.slice();
+  return items.filter(item => item.search.includes(q));
+}
+
 /* ================= SessionView ================= */
 const TOOL_ICONS = {
   Bash: "$", shell: "$", Read: "📄", Write: "✏️", Edit: "✏️", file_change: "✏️",
@@ -6279,6 +6340,9 @@ class SessionView {
     this.nativeComposerChoices = prefersNativeChoices();
     this.browserChipKey = null;   // set of linked-browser bubbles now rendered
     this.terminalChipKey = null;  // set of linked-terminal bubbles now rendered
+    this.mention = null;          // open @-mention popup: {start, query, items, sel}
+    this.mentionDismissedAt = -1; // Esc'd token start; stays hidden while it lives
+    this.mentionData = { at: 0, browsers: null, terminals: null, promise: null };
     this.pendingScroll = null;    // position owed back after a workspace rebuild
     this.lastScroll = null;       // last position seen while this view was visible
     this.buildDom();
@@ -6286,6 +6350,12 @@ class SessionView {
     this.syncTerminalChips();
     this._onResize = () => { this.syncGutter(); this.syncComposerMeta(); this.syncHeadOverflow(); this.syncQueueFade(); };
     window.addEventListener("resize", this._onResize);
+    /* Arrow keys and clicks move the caret without an input event; the mention
+       list follows the caret, so it listens to the document-level selection. */
+    this._onSelectionChange = () => {
+      if (document.activeElement === this.ta) this.updateMention();
+    };
+    document.addEventListener("selectionchange", this._onSelectionChange);
     this.connect();
   }
 
@@ -6317,6 +6387,8 @@ class SessionView {
       <div class="approval hidden"></div>
       <div class="composer">
         <div class="composer-box">
+          <div class="mention-pop hidden" role="listbox"
+            aria-label="Mention a Puppy browser or terminal"></div>
           <textarea rows="1" placeholder="Message the agent…"></textarea>
           <div class="attach-strip hidden"></div>
           <div class="composer-row">
@@ -6362,6 +6434,11 @@ class SessionView {
     this.inner = root.querySelector(".chat-inner");
     this.ta = root.querySelector("textarea");
     this.composerBox = root.querySelector(".composer-box");
+    this.mentionEl = root.querySelector(".mention-pop");
+    /* Pointer presses anywhere on the list (rows, padding, scrollbar) keep the
+       composer focused; the row's click still lands and wheel/touch scrolling
+       is untouched. A blur would otherwise take the list down mid-pick. */
+    this.mentionEl.addEventListener("pointerdown", (e) => e.preventDefault());
     this.sendBtn = root.querySelector(".btn-send");
     this.steerBtn = root.querySelector(".btn-steer");
     this.queueBtn = root.querySelector(".btn-queue");
@@ -6434,9 +6511,13 @@ class SessionView {
       this.resizeComposer();
       this.saveDraft();
       this.updateSteerControl();
+      this.updateMention();
     });
     this.ta.addEventListener("keydown", (e) => {
       if (e.isComposing) { this.ctrlCStreak = 0; return; }
+      /* The open mention list owns its navigation keys - most importantly
+         Escape, which must close the list, never interrupt the turn. */
+      if (this.mentionKeydown(e)) return;
       const ctrlC = e.ctrlKey && !e.metaKey && !e.altKey && (e.key === "c" || e.key === "C");
       if (e.key === "Escape" || ctrlC) {
         e.preventDefault();
@@ -6477,7 +6558,9 @@ class SessionView {
         }
       }
     });
-    this.ta.addEventListener("blur", () => { this.ctrlCStreak = 0; });
+    /* Rows keep composer focus via pointerdown preventDefault, so any real
+       blur means the user left the composer and the list goes with them. */
+    this.ta.addEventListener("blur", () => { this.ctrlCStreak = 0; this.hideMention(); });
     this.ta.addEventListener("pointerdown", () => { this.ctrlCStreak = 0; });
     this.sendBtn.onclick = () => this.status === "running" ? this.interrupt() : this.submit();
     this.steerBtn.onclick = () => this.steer();
@@ -6589,6 +6672,7 @@ class SessionView {
     if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
     window.removeEventListener("resize", this._onResize);
+    document.removeEventListener("selectionchange", this._onSelectionChange);
     if (this.ws) try { this.ws.close(); } catch (e) {}
     this.clearLive();
     /* Closing a view is not deleting its shared draft. Abort only bytes still
@@ -7051,6 +7135,211 @@ class SessionView {
     this.histAttach = null;
     for (const attachment of parked)
       if (!this.attachments.includes(attachment)) this.removeAttachment(attachment, true);
+  }
+
+  /* ---- composer @-mentions ---- */
+  mentionKeydown(e) {
+    const m = this.mention;
+    if (!m) return false;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      this.ctrlCStreak = 0;
+      this.mentionDismissedAt = m.start;   // this token asked to be left alone
+      this.hideMention();
+      return true;
+    }
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      this.ctrlCStreak = 0;
+      this.selectMention((m.sel + (e.key === "ArrowDown" ? 1 : m.items.length - 1))
+        % m.items.length);
+      return true;
+    }
+    if (e.key === "Enter" || e.key === "Tab") {
+      const item = m.items[m.sel];
+      /* A mention already typed out in full has nothing left to complete;
+         Enter keeps meaning send. Tab still completes the trailing space. */
+      if (e.key === "Enter" && item.search === m.query.toLowerCase()) {
+        this.hideMention();
+        return false;
+      }
+      e.preventDefault();
+      this.ctrlCStreak = 0;
+      this.applyMention(item);
+      return true;
+    }
+    return false;
+  }
+
+  updateMention() {
+    const ctx = composerMentionContext(
+      this.ta.value, this.ta.selectionStart, this.ta.selectionEnd);
+    if (!ctx) {
+      this.mentionDismissedAt = -1;   // left the token; dismissal is spent
+      this.hideMention();
+      return;
+    }
+    /* History recall parks the caret at the end of restored text; a recalled
+       "@…" tail must not steal the arrow keys mid-walk. Typing exits history
+       mode first, so the list is back for every real keystroke. */
+    if (this.histIdx !== null) { this.hideMention(); return; }
+    if (this.mentionDismissedAt === ctx.start) { this.hideMention(); return; }
+    this.mentionDismissedAt = -1;
+    const items = filterMentionItems(this.mentionCandidates(), ctx.query);
+    if (!items.length) { this.hideMention(); return; }
+    const previous = this.mention && this.mention.items[this.mention.sel];
+    const kept = previous ? items.findIndex(item => item.insert === previous.insert) : -1;
+    this.mention = { start: ctx.start, query: ctx.query, items, sel: kept >= 0 ? kept : 0 };
+    this.renderMention();
+    this.refreshMentionInstances();
+  }
+
+  hideMention() {
+    if (!this.mention) return;
+    this.mention = null;
+    this.mentionEl.textContent = "";
+    this.mentionEl.classList.add("hidden");
+  }
+
+  renderMention() {
+    const m = this.mention;
+    this.mentionEl.textContent = "";
+    m.items.forEach((item, index) => {
+      const row = el("button", "mention-item" + (index === m.sel ? " sel" : ""));
+      row.type = "button";
+      row.setAttribute("role", "option");
+      row.setAttribute("aria-selected", index === m.sel ? "true" : "false");
+      const ico = el("span", "mention-ico");
+      ico.appendChild(item.kind === "browser" ? globeIcon(12) :
+        item.kind === "terminal" ? terminalIcon(12) : plusIcon(11));
+      row.appendChild(ico);
+      row.appendChild(el("span", "mention-label", item.label));
+      if (item.hint) row.appendChild(el("span", "mention-hint", item.hint));
+      row.onclick = () => this.applyMention(item);
+      row.onmouseenter = () => { if (this.mention === m) this.selectMention(index); };
+      this.mentionEl.appendChild(row);
+    });
+    this.mentionEl.classList.remove("hidden");
+    const sel = this.mentionEl.children[m.sel];
+    if (sel && sel.scrollIntoView) sel.scrollIntoView({ block: "nearest" });
+  }
+
+  selectMention(index) {
+    const m = this.mention;
+    if (!m || !m.items[index]) return;
+    m.sel = index;
+    [...this.mentionEl.children].forEach((row, i) => {
+      row.classList.toggle("sel", i === index);
+      row.setAttribute("aria-selected", i === index ? "true" : "false");
+    });
+    const sel = this.mentionEl.children[index];
+    if (sel && sel.scrollIntoView) sel.scrollIntoView({ block: "nearest" });
+  }
+
+  /* Replace the token with the canonical mention and one trailing space. The
+     synthetic input event runs the ordinary edit path (resize, draft save),
+     whose re-evaluation then retires the completed token as prose. */
+  applyMention(item) {
+    const m = this.mention;
+    if (!m) return;
+    const ta = this.ta;
+    const end = ta.selectionStart;
+    const rest = ta.value.slice(end);
+    const pad = rest.startsWith(" ") || rest.startsWith("\n") ? "" : " ";
+    ta.value = ta.value.slice(0, m.start) + item.insert + pad + rest;
+    const caret = m.start + item.insert.length + 1;
+    ta.setSelectionRange(caret, caret);
+    this.mentionDismissedAt = -1;
+    this.hideMention();
+    ta.focus();
+    ta.dispatchEvent(new Event("input", { bubbles: true }));
+    scrollCaretIntoView(ta);
+  }
+
+  /* What "@" can point the agent at on this session's node: live instances
+     first (its own before other sessions'), then the explicit new-instance
+     requests. Every row is gated on what the node actually offers the engine:
+     browser rows only where Browser is enabled, terminal rows only where the
+     node has terminals at all. */
+  mentionCandidates() {
+    const bid = this.tab.bid || 0;
+    const backend = bid ? state.backends.find(b => b.id === bid) : null;
+    const withBrowser = browserEnabledFor(bid);
+    const withTerminal = !bid || backendHasCapability(backend, "terminal");
+    const items = [];
+    const push = (kind, label, hint, insert) =>
+      items.push({ kind, label, hint, insert, search: label.toLowerCase() });
+    const hintFor = (owner) => {
+      const sid = Number(owner) || 0;
+      if (sid <= 0) return "";
+      if (sid === this.tab.sid) return "this session";
+      const meta = findSessionMeta(bid, sid);
+      return meta ? (meta.name || `Session ${sid}`) : "";
+    };
+    for (const inst of this.knownMentionInstances("browser", withBrowser))
+      push("browser", `Browser ${inst.id}`, hintFor(inst.session_id), `@Browser ${inst.id}`);
+    for (const inst of this.knownMentionInstances("terminal", withTerminal))
+      push("terminal", `Terminal ${inst.id}`, hintFor(inst.session_id), `@Terminal ${inst.id}`);
+    if (withBrowser) push("new-browser", "New browser", "another isolated browser", "@New browser");
+    if (withTerminal) push("new-terminal", "New terminal", "another shared terminal", "@New terminal");
+    return items;
+  }
+
+  /* Live instances on this session's node: whatever the node last reported,
+     joined with instances this workspace already has tabs for, so the list is
+     useful before (or without) a fetch. This session's own come first. */
+  knownMentionInstances(kind, allowed) {
+    if (!allowed) return [];
+    const bid = this.tab.bid || 0;
+    const known = new Map();
+    const fetched = kind === "browser" ? this.mentionData.browsers : this.mentionData.terminals;
+    for (const inst of fetched || []) {
+      const id = String(inst && inst.id || "").toUpperCase();
+      if (!/^[A-Z0-9]{4}$/.test(id) || inst.running === false) continue;
+      known.set(id, { id, session_id: Number(inst.session_id) || 0 });
+    }
+    for (const t of state.tabs) {
+      if ((t.bid || 0) !== bid) continue;
+      if (kind === "browser" && (t.type !== "browser" || t.browserGone === true)) continue;
+      if (kind === "terminal" &&
+          (t.type !== "term" || t.ended === true || t.terminalGone === true)) continue;
+      const id = String((kind === "browser" ? t.browserId : t.terminalId) || "").toUpperCase();
+      if (!/^[A-Z0-9]{4}$/.test(id) || known.has(id)) continue;
+      known.set(id, { id, session_id: Number(t.sid) > 0 ? Number(t.sid) : 0 });
+    }
+    const instances = [...known.values()];
+    return instances.filter(inst => inst.session_id === this.tab.sid)
+      .concat(instances.filter(inst => inst.session_id !== this.tab.sid));
+  }
+
+  /* One coalesced, briefly cached snapshot of the node's live instances: the
+     list opens instantly from local knowledge and refines itself when this
+     lands. An offline node is never probed - the controller's authenticated
+     ping owns outage recovery. */
+  refreshMentionInstances() {
+    const bid = this.tab.bid || 0;
+    const data = this.mentionData;
+    if (data.promise || Date.now() - data.at < 10000) return;
+    if (bid && !backendConnectionAllowed(bid)) return;
+    const wantBrowsers = browserEnabledFor(bid) && browserInstancesFor(bid);
+    const wantTerminals = terminalInstancesFor(bid);
+    data.at = Date.now();
+    if (!wantBrowsers && !wantTerminals) return;
+    const jobs = [];
+    if (wantBrowsers)
+      jobs.push(api(bid, "browser/status", { timeoutMs: 15000 }).then(r => {
+        if (r && Array.isArray(r.instances)) data.browsers = r.instances;
+      }, () => {}));
+    if (wantTerminals)
+      jobs.push(api(bid, "terminal/instances", { timeoutMs: 15000 }).then(r => {
+        if (r && Array.isArray(r.instances)) data.terminals = r.instances;
+      }, () => {}));
+    data.promise = Promise.all(jobs).then(() => {
+      data.promise = null;
+      data.at = Date.now();
+      if (this.mention && !this.closed) this.updateMention();
+    });
   }
 
   /* A sent image's object URL outlives its chip so recall can show the preview;
@@ -7612,7 +7901,7 @@ class SessionView {
            the person who sent it should have to read it back. Show what the
            composer showed; the message text keeps the markers untouched. */
         const { text, attachments } = splitAttachmentMarkers(d.text || "");
-        if (text) linkifyInto(n, text);
+        if (text) decorateMentionsInto(n, text);
         /* "leading" is set here rather than matched with :first-child, which
            counts elements only - prose is a bare text node, so the strip was
            its own first element child either way and the no-prose spacing
@@ -8129,6 +8418,7 @@ class SessionView {
     }
     this.ws.send(JSON.stringify(message));
     this.ta.value = "";
+    this.hideMention();
     this.resizeComposer();
     this.histIdx = null; this.histDraft = "";
     this.releaseHistoryAttachments();

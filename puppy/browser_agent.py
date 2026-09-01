@@ -39,7 +39,9 @@ AGENT_SELECTION_POLICY = config.DEFAULT_BROWSER_SYSTEM_PROMPT
 TOOL_INSTRUCTIONS = (
     "Independent Puppy-managed browsers are available on this session's backend. "
     "Browser IDs are four uppercase A-Z/0-9 characters. If the user names an "
-    "ID such as A8AR, pass it as browser_id. Otherwise omit browser_id: Puppy "
+    "ID such as A8AR, pass it as browser_id. The chat box inserts mentions in "
+    "the form \"@Browser A8AR\" (use exactly that browser) and \"@New browser\" "
+    "(an explicit request for a fresh instance). Otherwise omit browser_id: Puppy "
     "opens one fresh, isolated browser for this session and keeps using it "
     "across turns. Call new_browser only when the user explicitly asks for "
     "another browser. If the current browser was closed, the next unqualified "
@@ -75,8 +77,9 @@ def _tool(name, description, properties=None, required=None, read_only=False,
         properties["browser_id"] = {
             "type": "string", "pattern": "^[A-Z0-9]{4}$",
             "description": (
-                "Existing Browser ID named by the user. Omit to use this "
-                "session's current browser, creating a fresh one if needed."),
+                "Existing Browser ID named by the user, e.g. via a "
+                "\"@Browser A8AR\" mention. Omit to use this session's "
+                "current browser, creating a fresh one if needed."),
         }
     schema = {"type": "object", "properties": properties,
               "additionalProperties": False}
@@ -348,7 +351,7 @@ TOOLS = [
         "new_browser",
         "Open an additional isolated, user-visible Puppy browser and make it "
         "this session's current browser. Use only when the user explicitly asks "
-        "for another browser.",
+        "for another browser, e.g. with a \"@New browser\" mention.",
         browser_target=False),
 ]
 
