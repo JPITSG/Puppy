@@ -39,6 +39,15 @@ def terminal_prompt() -> str:
         return config.DEFAULT_TERMINAL_SYSTEM_PROMPT
 
 
+def spawn_prompt() -> str:
+    """Return the editable spawned-agent policy with a safe fallback."""
+    value = config.get("system_prompt.spawn", config.DEFAULT_SPAWN_SYSTEM_PROMPT)
+    try:
+        return config.normalize_system_prompt(value, "spawn system prompt")
+    except ValueError:
+        return config.DEFAULT_SPAWN_SYSTEM_PROMPT
+
+
 def remote_workspace_prompt() -> str:
     """Return remote-workspace guidance, falling back to Puppy's default."""
     value = config.get(
@@ -68,6 +77,8 @@ def payload() -> dict:
         "browser_default": config.DEFAULT_BROWSER_SYSTEM_PROMPT,
         "terminal": terminal_prompt(),
         "terminal_default": config.DEFAULT_TERMINAL_SYSTEM_PROMPT,
+        "spawn": spawn_prompt(),
+        "spawn_default": config.DEFAULT_SPAWN_SYSTEM_PROMPT,
         "max_chars": config.MAX_SYSTEM_PROMPT_CHARS,
     }
 
@@ -85,7 +96,8 @@ async def h_patch(request: web.Request):
         return web.json_response({"error": "invalid system prompt request"}, status=400)
     if not isinstance(body, dict):
         return web.json_response({"error": "system prompt request must be an object"}, status=400)
-    unknown = set(body) - {"custom", "remote_workspace", "browser", "terminal"}
+    unknown = set(body) - {"custom", "remote_workspace", "browser", "terminal",
+                           "spawn"}
     if unknown:
         return web.json_response(
             {"error": "unknown system prompt field: {}".format(sorted(unknown)[0])},
@@ -98,7 +110,9 @@ async def h_patch(request: web.Request):
             "remote_workspace", remote_workspace_prompt())
         browser = body.get("browser", browser_prompt())
         terminal = body.get("terminal", terminal_prompt())
-        config.set_system_prompts(custom, remote_workspace, browser, terminal)
+        spawn = body.get("spawn", spawn_prompt())
+        config.set_system_prompts(custom, remote_workspace, browser, terminal,
+                                  spawn)
     except ValueError as exc:
         return web.json_response({"error": str(exc)}, status=400)
     return web.json_response({"ok": True, "system_prompt": payload()})

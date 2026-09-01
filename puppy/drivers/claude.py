@@ -65,7 +65,7 @@ class ClaudeDriver(Driver):
         ]
 
     def build_cmd(self, session, first_turn, prompt, pinned_id, browser_mcp=None,
-                  system_prompt="", terminal_mcp=None):
+                  system_prompt="", terminal_mcp=None, spawn_mcp=None):
         argv = [self.binary, "-p",
                 "--output-format", "stream-json",
                 "--input-format", "stream-json",
@@ -74,7 +74,7 @@ class ClaudeDriver(Driver):
                 "--verbose",
                 "--permission-mode", session.get("permission_mode") or self.default_permission(),
                 "--permission-prompt-tool", "stdio"]
-        mcps = [item for item in (browser_mcp, terminal_mcp) if item]
+        mcps = [item for item in (browser_mcp, terminal_mcp, spawn_mcp) if item]
         if mcps:
             mcp_config = {"mcpServers": {item["name"]: {
                 "type": "stdio", "command": item["command"],
@@ -104,7 +104,7 @@ class ClaudeDriver(Driver):
         return argv
 
     def build_env(self, session, first_turn, prompt, pinned_id, browser_mcp=None,
-                  system_prompt="", terminal_mcp=None):
+                  system_prompt="", terminal_mcp=None, spawn_mcp=None):
         # Claude normally refuses bypassPermissions when its effective user is
         # root. The vendor's sandbox marker is deliberately turn-scoped: the
         # runner starts every turn with clean_env(), then calls this method for
@@ -124,7 +124,8 @@ class ClaudeDriver(Driver):
         ]
 
     def turn_context(self, session, first_turn, prompt, pinned_id,
-                     browser_mcp=None, system_prompt="", terminal_mcp=None):
+                     browser_mcp=None, system_prompt="", terminal_mcp=None,
+                     spawn_mcp=None):
         # --replay-user-messages gives a protocol-level acknowledgement for
         # each text message accepted from stdin. Do not expose steering until
         # the original prompt itself has been replayed, and retain the exact

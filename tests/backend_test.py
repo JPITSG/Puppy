@@ -1250,6 +1250,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "session-drafts" in ping["capabilities"]
         assert "active-turn-steering" in ping["capabilities"]
         assert "system-prompt" in ping["capabilities"]
+        assert "spawn-exec" in ping["capabilities"]
         assert "shutdown-notice" in ping["capabilities"]
         assert ping["shutting_down"] is False
         # browser surface: capability is static, enablement is node config
@@ -1275,13 +1276,16 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert prompt_defaults["browser_default"] == prompt_defaults["browser"]
         assert "explicitly asks" in prompt_defaults["terminal"]
         assert prompt_defaults["terminal_default"] == prompt_defaults["terminal"]
+        assert "one-shot" in prompt_defaults["spawn"]
+        assert prompt_defaults["spawn_default"] == prompt_defaults["spawn"]
         assert prompt_defaults["max_chars"] == 32768
         async with http.patch(url + "/api/system-prompt", headers=good, ssl=pinned,
                               json={"custom": "Use terse answers.",
                                     "remote_workspace":
                                         "Treat the working tree as a synchronized mirror.",
                                     "browser": "Use the visible browser first.",
-                                    "terminal": "Use a shared terminal only on request."}) as response:
+                                    "terminal": "Use a shared terminal only on request.",
+                                    "spawn": "Spawn delegate agents only on request."}) as response:
             saved_prompt = await response.json()
             assert response.status == 200, saved_prompt
         assert saved_prompt["system_prompt"]["custom"] == "Use terse answers."
@@ -1290,6 +1294,8 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert saved_prompt["system_prompt"]["browser"] == "Use the visible browser first."
         assert saved_prompt["system_prompt"]["terminal"] == \
             "Use a shared terminal only on request."
+        assert saved_prompt["system_prompt"]["spawn"] == \
+            "Spawn delegate agents only on request."
         async with http.patch(url + "/api/system-prompt", headers=good, ssl=pinned,
                               json={"custom": "x" * 32769}) as response:
             rejected_prompt = await response.json()
@@ -1302,8 +1308,24 @@ async def exercise_node(url: str, token: str, expected_version: str,
                                     "remote_workspace":
                                         prompt_defaults["remote_workspace_default"],
                                     "browser": prompt_defaults["browser_default"],
-                                    "terminal": prompt_defaults["terminal_default"]}) as response:
+                                    "terminal": prompt_defaults["terminal_default"],
+                                    "spawn": prompt_defaults["spawn_default"]}) as response:
             assert response.status == 200, await response.text()
+        # spawned-agent execution is part of the shared surface on every node;
+        # its start route validates before running anything.
+        async with http.post(url + "/api/spawn", headers=good, ssl=pinned,
+                             json={"engine": "no-such-engine",
+                                   "prompt": "hi", "cwd": "/"}) as response:
+            spawn_error = await response.json()
+            assert response.status == 400, spawn_error
+            assert "unknown engine" in spawn_error["error"]
+        async with http.get(url + "/api/spawn/0123abcd", headers=good,
+                            ssl=pinned) as response:
+            assert response.status == 404, await response.text()
+        async with http.post(url + "/api/spawn", ssl=pinned,
+                             json={"engine": "claude", "prompt": "hi",
+                                   "cwd": "/"}) as response:
+            assert response.status == 401
         assert "terminal" not in ping["capabilities"]
         assert "terminal-instances" not in ping["capabilities"]
         assert "terminal-handoff" not in ping["capabilities"]

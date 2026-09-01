@@ -223,25 +223,26 @@ class Driver:
 
     def build_cmd(self, session: dict, first_turn: bool, prompt: str, pinned_id: str,
                   browser_mcp=None, system_prompt: str = "",
-                  terminal_mcp=None) -> list:
+                  terminal_mcp=None, spawn_mcp=None) -> list:
         """argv for one turn. pinned_id: uuid the runner pre-generated for new sessions
         (engines that support pinning use it; others derive their own native id).
         browser_mcp is an optional per-turn stdio MCP server descriptor. It may
         also carry engine_guidance that applies only while those tools exist.
-        terminal_mcp is the equivalent descriptor for an explicitly requested
-        shared terminal; drivers may receive both in the same turn.
+        terminal_mcp and spawn_mcp are the equivalent descriptors for the
+        shared terminal and spawned-agent bridges; drivers may receive any
+        combination in the same turn.
         system_prompt is the node owner's additive guidance for every turn."""
         raise NotImplementedError
 
     def build_env(self, session: dict, first_turn: bool, prompt: str, pinned_id: str,
                   browser_mcp=None, system_prompt: str = "",
-                  terminal_mcp=None) -> dict:
+                  terminal_mcp=None, spawn_mcp=None) -> dict:
         """Per-turn environment additions. Credentials remain CLI-owned."""
         return {}
 
     def turn_context(self, session: dict, first_turn: bool, prompt: str, pinned_id: str,
                      browser_mcp=None, system_prompt: str = "",
-                     terminal_mcp=None) -> dict:
+                     terminal_mcp=None, spawn_mcp=None) -> dict:
         """Driver scratch state shared across streamed protocol messages."""
         return {}
 

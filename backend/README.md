@@ -271,13 +271,31 @@ owns OpenCode's installation and provider credentials.
 ## System prompts
 
 Each node stores its own custom prompt plus conditional remote-workspace,
-Browser, and Terminal guidance. The custom layer is added to every new model
-turn the node starts. The Browser layer is added only when Browser is enabled
-and the turn receives managed-browser tools. The Terminal layer is added only
-when the node offers shared-terminal tools, and its shipped policy tells models
-to use those tools only after an explicit user request; ordinary shell work
-continues through the engine's normal tools. Active turns keep the prompt with
-which they started.
+Browser, Terminal, and spawned-agent guidance. The custom layer is added to
+every new model turn the node starts. The Browser layer is added only when
+Browser is enabled and the turn receives managed-browser tools. The Terminal
+layer is added only when the node offers shared-terminal tools, and its
+shipped policy tells models to use those tools only after an explicit user
+request; ordinary shell work continues through the engine's normal tools. The
+spawned-agent layer accompanies the always-offered spawn MCP bridge and keeps
+delegation explicitly user-requested because spawned runs spend real
+subscription quota. Active turns keep the prompt with which they started.
+
+## Spawned agents
+
+Every node advertises the additive `spawn-exec` capability: `POST /api/spawn`
+starts one non-interactive engine run (engine, optional model/effort,
+permission mode, prompt, working directory, hard timeout) after validating the
+request against that node's installed engines, and `GET`/`DELETE
+/api/spawn/{job_id}` poll or cancel it. Jobs are in-memory, deadline-bounded,
+and never part of a snapshot. Engine turns receive a turn-scoped `puppy_spawn`
+stdio MCP bridge (targets/spawn/wait/cancel); jobs it starts die with their
+turn, approval requests inside a spawned run are auto-denied with an
+explanation, and cross-node spawns exist only on the controller, which relays
+them over its already-authenticated channels - nodes still never contact each
+other, so a session hosted on a backend can spawn only onto its own node. A
+running spawned agent also blocks that engine's CLI upgrade, and spawn
+requests are refused while the engine's updater runs.
 
 An attached console reads and edits these fields through authenticated
 `GET/PATCH /api/system-prompt`. Nodes advertise the additive `system-prompt`

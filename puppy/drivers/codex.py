@@ -40,6 +40,8 @@ _BROWSER_POLICY_OPEN = "<puppy_browser_policy>"
 _BROWSER_POLICY_CLOSE = "</puppy_browser_policy>"
 _TERMINAL_POLICY_OPEN = "<puppy_terminal_policy>"
 _TERMINAL_POLICY_CLOSE = "</puppy_terminal_policy>"
+_SPAWN_POLICY_OPEN = "<puppy_spawn_policy>"
+_SPAWN_POLICY_CLOSE = "</puppy_spawn_policy>"
 _SYSTEM_PROMPT_OPEN = "<puppy_system_prompt>"
 _SYSTEM_PROMPT_CLOSE = "</puppy_system_prompt>"
 
@@ -65,7 +67,7 @@ def _notification(method: str, params=None) -> dict:
 
 
 def _with_runtime_guidance(prompt: str, system_prompt: str, browser_mcp,
-                           terminal_mcp=None) -> str:
+                           terminal_mcp=None, spawn_mcp=None) -> str:
     """Add node and turn-scoped guidance without replacing native user config.
 
     Codex's developer_instructions config value is replacement-oriented. A
@@ -86,6 +88,10 @@ def _with_runtime_guidance(prompt: str, system_prompt: str, browser_mcp,
     if terminal:
         blocks.append("{}\n{}\n{}".format(
             _TERMINAL_POLICY_OPEN, terminal, _TERMINAL_POLICY_CLOSE))
+    spawn = str((spawn_mcp or {}).get("engine_guidance") or "").strip()
+    if spawn:
+        blocks.append("{}\n{}\n{}".format(
+            _SPAWN_POLICY_OPEN, spawn, _SPAWN_POLICY_CLOSE))
     if not blocks:
         return prompt
     return "{}\n\n{}".format("\n\n".join(blocks), prompt)
@@ -524,9 +530,10 @@ class CodexDriver(Driver):
         return True
 
     def build_cmd(self, session, first_turn, prompt, pinned_id, browser_mcp=None,
-                  system_prompt="", terminal_mcp=None):
+                  system_prompt="", terminal_mcp=None, spawn_mcp=None):
         argv = [self.binary, "app-server", "--stdio"]
-        for mcp in (item for item in (browser_mcp, terminal_mcp) if item):
+        for mcp in (item for item in (browser_mcp, terminal_mcp, spawn_mcp)
+                    if item):
             prefix = "mcp_servers." + mcp["name"]
             argv += ["-c", prefix + ".command=" + json.dumps(mcp["command"]),
                      "-c", prefix + ".args=" + json.dumps(
@@ -540,7 +547,7 @@ class CodexDriver(Driver):
         return argv
 
     def turn_context(self, session, first_turn, prompt, pinned_id, browser_mcp=None,
-                     system_prompt="", terminal_mcp=None):
+                     system_prompt="", terminal_mcp=None, spawn_mcp=None):
         return {
             "phase": "initialize",
             "first_turn": bool(first_turn),
@@ -554,7 +561,7 @@ class CodexDriver(Driver):
             "sandbox": str(session.get("permission_mode") or
                            self.default_permission()),
             "prompt": _with_runtime_guidance(
-                prompt, system_prompt, browser_mcp, terminal_mcp),
+                prompt, system_prompt, browser_mcp, terminal_mcp, spawn_mcp),
             "usage": {},
             "items": {},
             "item_seq": 0,

@@ -415,15 +415,16 @@ class OpenCodeDriver(Driver):
             item["value"].lower()))
 
     def build_cmd(self, session, first_turn, prompt, pinned_id, browser_mcp=None,
-                  system_prompt="", terminal_mcp=None):
+                  system_prompt="", terminal_mcp=None, spawn_mcp=None):
         return [self.resolved_binary() or self.binary,
                 "acp", "--cwd", session["cwd"]]
 
     def build_env(self, session, first_turn, prompt, pinned_id, browser_mcp=None,
-                  system_prompt="", terminal_mcp=None):
+                  system_prompt="", terminal_mcp=None, spawn_mcp=None):
         guidance = [str(system_prompt or "").strip()]
         guidance.extend(str(item.get("engine_guidance") or "").strip()
-                        for item in (browser_mcp, terminal_mcp) if item)
+                        for item in (browser_mcp, terminal_mcp, spawn_mcp)
+                        if item)
         agent = {
             "description": "Puppy managed interactive coding session",
             "mode": "primary",
@@ -440,9 +441,10 @@ class OpenCodeDriver(Driver):
             inline, ensure_ascii=False, separators=(",", ":"))}
 
     @staticmethod
-    def _mcp_servers(browser_mcp, terminal_mcp=None) -> list:
+    def _mcp_servers(browser_mcp, terminal_mcp=None, spawn_mcp=None) -> list:
         servers = []
-        for mcp in (item for item in (browser_mcp, terminal_mcp) if item):
+        for mcp in (item for item in (browser_mcp, terminal_mcp, spawn_mcp)
+                    if item):
             environment = []
             for name, value in (mcp.get("env") or {}).items():
                 environment.append({"name": str(name), "value": str(value)})
@@ -454,7 +456,7 @@ class OpenCodeDriver(Driver):
         return servers
 
     def turn_context(self, session, first_turn, prompt, pinned_id, browser_mcp=None,
-                     system_prompt="", terminal_mcp=None):
+                     system_prompt="", terminal_mcp=None, spawn_mcp=None):
         return {
             "phase": "initialize",
             "first_turn": bool(first_turn),
@@ -463,7 +465,8 @@ class OpenCodeDriver(Driver):
             "native_session_id": str(session.get("native_session_id") or ""),
             "model": str(session.get("model") or ""),
             "effort": str(session.get("effort") or ""),
-            "mcp_servers": self._mcp_servers(browser_mcp, terminal_mcp),
+            "mcp_servers": self._mcp_servers(browser_mcp, terminal_mcp,
+                                             spawn_mcp),
             "session_method": "",
             "session_id": "",
             "setup": [],

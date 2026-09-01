@@ -12,8 +12,9 @@ import signal
 import time
 import uuid
 
-from puppy import (browser_agent, config, db, handoff, notify, system_prompts,
-                   terminal_agent, uploads, workspace_sync, workspaces)
+from puppy import (browser_agent, config, db, handoff, notify, spawn_agent,
+                   system_prompts, terminal_agent, uploads, workspace_sync,
+                   workspaces)
 from puppy.drivers import get_driver
 from puppy.drivers import base as driver_base
 from puppy.drivers.base import clean_env
@@ -249,6 +250,13 @@ def engine_blockers(engine: str) -> list:
             continue
         out.append({"id": h.id, "name": session.get("name") or "",
                     "running": h.status == "running", "queued": len(h.queue)})
+    # A running spawned agent is a live process of this CLI too, even though
+    # no session owns it (a relayed cross-node job has no local session).
+    from puppy import spawn_exec
+    for job in spawn_exec.manager().jobs.values():
+        if job.running and job.engine == str(engine):
+            out.append({"id": 0, "name": "spawned agent {}".format(job.id),
+                        "running": True, "queued": 0})
     return out
 
 
@@ -1841,11 +1849,12 @@ class SessionHub:
             self._terminal_activity_announced = set()
             browser_mcp = browser_agent.turn_mcp(self.id, pinned)
             terminal_mcp = terminal_agent.turn_mcp(self.id, pinned)
+            spawn_mcp = spawn_agent.turn_mcp(self.id, pinned)
             system_prompt_text = system_prompts.turn_prompt(
                 remote_workspace=descriptor is not None)
             argv = driver.build_cmd(
                 session, first_turn, prompt, pinned, browser_mcp=browser_mcp,
-                terminal_mcp=terminal_mcp,
+                terminal_mcp=terminal_mcp, spawn_mcp=spawn_mcp,
                 system_prompt=system_prompt_text)
             env = clean_env(dict(os.environ))
             runtime_home = os.path.expanduser("~")
@@ -1853,11 +1862,11 @@ class SessionHub:
                 env.setdefault("HOME", runtime_home)
             env.update(driver.build_env(
                 session, first_turn, prompt, pinned, browser_mcp=browser_mcp,
-                terminal_mcp=terminal_mcp,
+                terminal_mcp=terminal_mcp, spawn_mcp=spawn_mcp,
                 system_prompt=system_prompt_text))
             ctx = driver.turn_context(
                 session, first_turn, prompt, pinned, browser_mcp=browser_mcp,
-                terminal_mcp=terminal_mcp,
+                terminal_mcp=terminal_mcp, spawn_mcp=spawn_mcp,
                 system_prompt=system_prompt_text)
             if not isinstance(ctx, dict):
                 ctx = {}

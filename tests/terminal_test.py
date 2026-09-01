@@ -345,7 +345,8 @@ async def main() -> None:
         config.set_system_prompts(
             "", config.DEFAULT_REMOTE_WORKSPACE_SYSTEM_PROMPT,
             config.DEFAULT_BROWSER_SYSTEM_PROMPT,
-            config.DEFAULT_TERMINAL_SYSTEM_PROMPT)
+            config.DEFAULT_TERMINAL_SYSTEM_PROMPT,
+            config.DEFAULT_SPAWN_SYSTEM_PROMPT)
         prompts = system_prompts.payload()
         assert prompts["terminal"] == config.DEFAULT_TERMINAL_SYSTEM_PROMPT
         assert prompts["terminal_default"] == config.DEFAULT_TERMINAL_SYSTEM_PROMPT

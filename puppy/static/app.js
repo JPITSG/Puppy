@@ -11516,6 +11516,27 @@ class SettingsView {
     terminalSection.appendChild(terminalText);
     card.appendChild(terminalSection);
 
+    const spawnSection = el("section", "system-prompt-section system-prompt-spawn");
+    const spawnHead = el("div", "system-prompt-section-head");
+    const spawnCopy = el("div", "system-prompt-section-copy");
+    spawnCopy.appendChild(el("h3", "", "Spawned agent guidance"));
+    const spawnNote = el("p", "",
+      "Sent with every model turn on this backend; it governs when the agent " +
+      "may delegate one-shot spawned agents to Puppy's nodes.");
+    spawnCopy.appendChild(spawnNote);
+    const spawnReset = el("button", "btn btn-sm btn-ghost system-prompt-reset",
+      "Reset to default");
+    spawnReset.type = "button";
+    spawnHead.appendChild(spawnCopy);
+    spawnHead.appendChild(spawnReset);
+    const spawnText = document.createElement("textarea");
+    spawnText.className = "system-prompt-textarea config-textarea";
+    spawnText.rows = 3;
+    spawnText.setAttribute("aria-label", "Spawned agent system prompt");
+    spawnSection.appendChild(spawnHead);
+    spawnSection.appendChild(spawnText);
+    card.appendChild(spawnSection);
+
     const actions = el("div", "system-prompt-actions");
     const status = el("span", "system-prompt-status", "Ready");
     status.setAttribute("role", "status");
@@ -11543,6 +11564,9 @@ class SettingsView {
       const terminalSupported =
         typeof prompt.terminal === "string" &&
         typeof prompt.terminal_default === "string";
+      const spawnSupported =
+        typeof prompt.spawn === "string" &&
+        typeof prompt.spawn_default === "string";
       const maxChars = Number(prompt.max_chars);
       if (!Number.isInteger(maxChars) || maxChars < 1)
         throw new Error("backend returned an invalid system prompt limit");
@@ -11552,16 +11576,20 @@ class SettingsView {
         remoteWorkspace: remoteWorkspaceSupported ? prompt.remote_workspace : "",
         browser: prompt.browser,
         terminal: terminalSupported ? prompt.terminal : "",
+        spawn: spawnSupported ? prompt.spawn : "",
         customDraft: prompt.custom,
         remoteWorkspaceDraft: remoteWorkspaceSupported ? prompt.remote_workspace : "",
         browserDraft: prompt.browser,
         terminalDraft: terminalSupported ? prompt.terminal : "",
+        spawnDraft: spawnSupported ? prompt.spawn : "",
         remoteWorkspaceDefault: remoteWorkspaceSupported ?
           prompt.remote_workspace_default : "",
         browserDefault: prompt.browser_default,
         terminalDefault: terminalSupported ? prompt.terminal_default : "",
+        spawnDefault: spawnSupported ? prompt.spawn_default : "",
         remoteWorkspaceSupported,
         terminalSupported,
+        spawnSupported,
         maxChars,
         saving: false,
         error: "",
@@ -11583,6 +11611,7 @@ class SettingsView {
     const dirty = record => !!record && record.loaded &&
       (record.customDraft !== record.custom || record.browserDraft !== record.browser ||
        (record.terminalSupported && record.terminalDraft !== record.terminal) ||
+       (record.spawnSupported && record.spawnDraft !== record.spawn) ||
        (record.remoteWorkspaceSupported &&
         record.remoteWorkspaceDraft !== record.remoteWorkspace));
     const stash = () => {
@@ -11594,6 +11623,8 @@ class SettingsView {
       record.browserDraft = browserText.value;
       if (record.terminalSupported)
         record.terminalDraft = terminalText.value;
+      if (record.spawnSupported)
+        record.spawnDraft = spawnText.value;
       record.saved = false;
     };
     const paint = () => {
@@ -11604,33 +11635,39 @@ class SettingsView {
       const editable = canUse && !unavailable && !!record && record.loaded && !record.saving;
       custom.disabled = browserText.disabled = !editable;
       terminalText.disabled = !editable || !record.terminalSupported;
+      spawnText.disabled = !editable || !record.spawnSupported;
       remoteText.disabled = !editable || !record.remoteWorkspaceSupported;
       remoteReset.disabled = !editable || !record.remoteWorkspaceSupported;
       browserReset.disabled = !editable;
       terminalReset.disabled = !editable || !record.terminalSupported;
+      spawnReset.disabled = !editable || !record.spawnSupported;
       save.disabled = !canUse || unavailable || (!!record && record.saving);
       status.classList.remove("bad", "dirty");
       if (!canUse) {
-        custom.value = remoteText.value = browserText.value = terminalText.value = "";
+        custom.value = remoteText.value = browserText.value =
+          terminalText.value = spawnText.value = "";
         custom.removeAttribute("maxlength");
         remoteText.removeAttribute("maxlength");
         browserText.removeAttribute("maxlength");
         terminalText.removeAttribute("maxlength");
+        spawnText.removeAttribute("maxlength");
         save.disabled = true;
         status.textContent = "Backend upgrade required for system prompt settings.";
       } else if (!record || record.loading) {
-        custom.value = remoteText.value = browserText.value = terminalText.value = "";
+        custom.value = remoteText.value = browserText.value =
+          terminalText.value = spawnText.value = "";
         save.disabled = true;
         status.textContent = "Loading prompt…";
       } else if (!record.loaded) {
-        custom.value = remoteText.value = browserText.value = terminalText.value = "";
+        custom.value = remoteText.value = browserText.value =
+          terminalText.value = spawnText.value = "";
         save.disabled = false;
         save.textContent = "Retry";
         status.textContent = record.error || "Prompt settings unavailable.";
         status.classList.add("bad");
       } else {
         custom.maxLength = remoteText.maxLength = browserText.maxLength =
-          terminalText.maxLength = record.maxChars;
+          terminalText.maxLength = spawnText.maxLength = record.maxChars;
         if (document.activeElement !== custom) custom.value = record.customDraft;
         if (document.activeElement !== remoteText)
           remoteText.value = record.remoteWorkspaceDraft;
@@ -11641,6 +11678,10 @@ class SettingsView {
           terminalText.value = record.terminalDraft;
         terminalText.placeholder = record.terminalSupported ? "" :
           "Upgrade this backend to configure Terminal guidance";
+        if (document.activeElement !== spawnText)
+          spawnText.value = record.spawnDraft;
+        spawnText.placeholder = record.spawnSupported ? "" :
+          "Upgrade this backend to configure spawned agent guidance";
         save.textContent = record.saving ? "Saving…" : "Save prompt";
         if (unavailable) {
           status.textContent = backendStatus === "bad" ?
@@ -11716,6 +11757,7 @@ class SettingsView {
     remoteText.oninput = edited;
     browserText.oninput = edited;
     terminalText.oninput = edited;
+    spawnText.oninput = edited;
     remoteReset.onclick = () => {
       const record = records.get(activeBid);
       if (!record || !record.loaded || record.saving ||
@@ -11741,6 +11783,14 @@ class SettingsView {
       paint();
       terminalText.focus();
     };
+    spawnReset.onclick = () => {
+      const record = records.get(activeBid);
+      if (!record || !record.loaded || record.saving || !record.spawnSupported) return;
+      spawnText.value = record.spawnDefault;
+      stash();
+      paint();
+      spawnText.focus();
+    };
     save.onclick = async () => {
       let record = records.get(activeBid);
       if (!record || !record.loaded) { await load(true); return; }
@@ -11757,6 +11807,8 @@ class SettingsView {
           body.remote_workspace = record.remoteWorkspaceDraft;
         if (record.terminalSupported)
           body.terminal = record.terminalDraft;
+        if (record.spawnSupported)
+          body.spawn = record.spawnDraft;
         const result = await api(bid, "system-prompt", {
           method: "PATCH",
           body,

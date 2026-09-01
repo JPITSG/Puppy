@@ -88,6 +88,11 @@ ACTIVE_TURN_STEERING_CAPABILITY = "active-turn-steering"
 # controller over the channels it already authenticates.
 WORKSPACE_PROVIDER_CAPABILITY = "workspace-provider"
 WORKSPACE_MIRROR_CAPABILITY = "workspace-mirror"
+# One-shot spawned-agent execution: POST /api/spawn starts a single
+# non-interactive engine run in a named directory on this node, and the
+# job routes poll/cancel it. The controller relays a session's cross-node
+# spawn requests here and never offers them to a node without this marker.
+SPAWN_EXEC_CAPABILITY = "spawn-exec"
 
 BASE_CAPABILITIES = (
     "sessions",
@@ -124,6 +129,7 @@ BASE_CAPABILITIES = (
     SYSTEM_PROMPT_CAPABILITY,
     WORKSPACE_PROVIDER_CAPABILITY,
     WORKSPACE_MIRROR_CAPABILITY,
+    SPAWN_EXEC_CAPABILITY,
 )
 TERMINAL_CAPABILITY = "terminal"
 # Identified node-owned PTYs, their create/list/delete routes, and the
