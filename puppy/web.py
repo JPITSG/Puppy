@@ -171,7 +171,7 @@ async def h_engines(request: web.Request):
         "engines": engines,
         "usage_refresh": usage_refresh.payload(),
         "auto_upgrade": cli_auto_upgrade.payload(),
-        # additive: lets the console label this node's shells "user @ node"
+        # Retained for older consoles that label anonymous shell tabs.
         "user": _node_user(),
     })
 

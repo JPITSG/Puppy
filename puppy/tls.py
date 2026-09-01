@@ -6,7 +6,6 @@ from pathlib import Path
 import re
 import ssl
 
-SHA256_HEX_LENGTH = 64
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _PEM_CERT_RE = re.compile(
     r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", re.DOTALL)

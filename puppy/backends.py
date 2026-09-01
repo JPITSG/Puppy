@@ -6,7 +6,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 from pathlib import Path
 import re
 import secrets
@@ -1736,7 +1735,6 @@ async def close_proxy_websockets(bid=None, reason: str = "Puppy state restored")
 
 
 async def close_client() -> None:
-    global _client
     if _client is not None and not _client.closed:
         await _client.close()
 

@@ -2164,7 +2164,6 @@ const state = {
   remoteErrors: {},       // bid -> latest reachability error
   remoteStopping: {},     // bid -> graceful node lifecycle notice
   engCache: {},           // bid -> engines[]
-  nodeUsers: {},          // bid -> account the node's puppy process runs as
   notify: { configured: false, enabled: false },   // completion-alert bell
   browser: { enabled: false },  // this instance's managed-browser toggle
   remoteBrowser: {},      // bid -> {enabled} from that node's ping metadata
@@ -2286,8 +2285,7 @@ function reconcileRemoteState() {
                         state.remoteEngineCheckedAt, state.remoteNodeCheckedAt,
                         state.remoteUsageRefresh, state.remoteAutoUpgrade,
                         state.remoteUploadSettings, state.remoteSystemPrompts,
-                        state.remoteBrowser, state.nodeUsers,
-                        remotePollSequence]) {
+                        state.remoteBrowser, remotePollSequence]) {
     for (const id of Object.keys(bucket)) if (!live.has(String(id))) delete bucket[id];
   }
   for (const key of sessionActivityAnchors.keys()) {
@@ -2340,7 +2338,7 @@ function resetRemoteBackendConnection(bid) {
                         state.remoteEngineCheckedAt, state.remoteNodeCheckedAt,
                         state.remoteUsageRefresh, state.remoteAutoUpgrade,
                         state.remoteUploadSettings, state.remoteSystemPrompts,
-                        state.remoteBrowser, state.nodeUsers]) {
+                        state.remoteBrowser]) {
     delete bucket[bid];
   }
   for (const key of [...sessionActivityAnchors.keys()])
@@ -2710,7 +2708,6 @@ async function refreshState() {
   const s = await api(0, "state");
   state.instance = s.instance_name;
   if (typeof s.version === "string") state.version = s.version;
-  if (typeof s.user === "string") state.nodeUsers[0] = s.user;
   if (s.notify) { state.notify = s.notify; syncBell(); }
   state.sessionColors = s.session_colors || [];
   state.engines = Array.isArray(s.engines) ? s.engines : [];
@@ -2997,7 +2994,6 @@ async function pollLocalEngines(forceEngines = false) {
     state.engines.forEach(engine => state.engMap[engine.key] = engine);
     state.usageRefresh = payload.usage_refresh || state.usageRefresh;
     state.localEngineCheckedAt = Date.now();
-    setNodeUser(0, payload.user);
   } catch (error) {
     /* A broken local request should not turn the 12-second session poll into
        a tight engine-status retry loop. The normal one-minute cadence retries. */
@@ -3108,7 +3104,6 @@ async function pollRemoteBackend(backend, forceEngines = false) {
     rememberEnginePayload(bid, engines);
     state.remoteEngineCheckedAt[bid] = Date.now();
     delete state.remoteEngineErrors[bid];
-    setNodeUser(bid, engines.user);
   } catch (error) {
     if (!remotePollIsCurrent(bid, sequence)) return;
     /* Sessions proved the node is reachable. Keep last-known engine data and
@@ -3213,19 +3208,6 @@ function backendName(bid) {
   if (!bid) return state.instance || "local";
   const b = state.backends.find(x => x.id === bid);
   return b ? b.name : `backend ${bid}`;
-}
-
-/* Shell tabs are titled by where the shell lands: the account the node's
-   puppy process runs as. Derived at render time, so it corrects itself when
-   the account arrives from a poll, and survives titles saved by older builds. */
-function setNodeUser(bid, user) {
-  if (typeof user !== "string" || state.nodeUsers[bid] === user) return;
-  state.nodeUsers[bid] = user;
-  renderTabs();
-}
-function shellTabTitle(tab) {
-  const bid = tab.bid || 0;
-  return `${state.nodeUsers[bid] || "shell"} @ ${backendName(bid)}`;
 }
 
 function terminalTabTitle(tabOrBid, terminalId = "") {
@@ -3345,14 +3327,6 @@ function activeBackendUrl(backend) {
   const urls = configuredBackendUrls(backend);
   const active = String(backend && backend.active_url || "");
   return active && urls.includes(active) ? active : (urls[0] || "");
-}
-
-function backendLocationVersion(backend) {
-  const urls = configuredBackendUrls(backend);
-  const location = state.remoteOk[backend.id] === true ? activeBackendUrl(backend) :
-    urls.join(" / ");
-  return [location, backend.remote_version ? `v${backend.remote_version}` : ""]
-    .filter(Boolean).join(" · ");
 }
 
 /* A disconnected node has no authoritative active address. Keep both layers

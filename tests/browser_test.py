@@ -601,7 +601,7 @@ const state = {
   remoteSessions: {}, remoteOk: {}, remoteErrors: {}, remoteStopping: {},
   engCache: {}, remoteEngineErrors: {}, remoteEngineCheckedAt: {},
   remoteNodeCheckedAt: {}, remoteUsageRefresh: {}, remoteAutoUpgrade: {},
-  remoteUploadSettings: {}, remoteSystemPrompts: {}, remoteBrowser: {}, nodeUsers: {},
+  remoteUploadSettings: {}, remoteSystemPrompts: {}, remoteBrowser: {},
 };
 const remotePollSequence = {};
 const sessionActivityAnchors = new Map([["7:44", 10]]);
@@ -675,7 +675,7 @@ const state = {
   remoteSessions: {}, remoteOk: {7: true}, remoteErrors: {}, remoteStopping: {},
   engCache: {}, remoteEngineErrors: {}, remoteEngineCheckedAt: {},
   remoteNodeCheckedAt: {}, remoteUsageRefresh: {}, remoteAutoUpgrade: {},
-  remoteUploadSettings: {}, remoteSystemPrompts: {}, remoteBrowser: {}, nodeUsers: {},
+  remoteUploadSettings: {}, remoteSystemPrompts: {}, remoteBrowser: {},
 };
 const remotePollSequence = {};
 const REMOTE_POLL_TIMEOUT = 5000;
