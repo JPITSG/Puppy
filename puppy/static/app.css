@@ -2019,8 +2019,8 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 @media (hover:hover){.seg-btn:not(.on):not(:disabled):hover{color:var(--txt2);background:var(--hov)}}
 .seg-btn:disabled{cursor:not-allowed;opacity:.45}
 .seg-btn:focus-visible{outline:1px solid var(--acc);outline-offset:1px}
-/* the base field rule matches input[type=time] by attribute, which out-weighs a
-   bare class - scope these so the control keeps its own width */
+/* Text instead of the browser-native time face: its visible 12/24-hour shape
+   must follow the primary server rather than the viewing device's locale. */
 .eau-when .eau-time{
   flex:0 0 auto;width:112px;height:var(--settings-control-h);margin:0;padding:0 8px;text-align:center;
   font-family:var(--mono);font-size:12px;

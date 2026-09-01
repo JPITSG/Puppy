@@ -876,9 +876,52 @@ function userMessageCopyButton(text) {
   return button;
 }
 
+/* The WebUI host publishes its LC_TIME hour cycle. Dates still use the
+   viewer's language and timezone, but every clock explicitly follows that
+   server-side 12/24-hour choice instead of the browser choosing its own. */
+function serverClockOptions(options = {}) {
+  return { ...options, hourCycle: state.clockFormat === "12h" ? "h12" : "h23" };
+}
 function fmtTime(ts) {
-  const d = new Date(ts * 1000);
-  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const d = new Date(Number(ts) * 1000);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleTimeString([], serverClockOptions({
+    hour: "2-digit", minute: "2-digit" }));
+}
+function fmtDateTime(ts, options = {}) {
+  const d = new Date(Number(ts) * 1000);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString([], serverClockOptions(options));
+}
+/* Unattended-update schedules are persisted as canonical 24-hour HH:MM
+   values because the node's scheduler consumes them. Only their WebUI face
+   follows the server's clock, with a parser that converts edits back. */
+function fmtClockSetting(value) {
+  const match = /^(\d{2}):(\d{2})$/.exec(String(value || ""));
+  if (!match) return String(value || "");
+  const hour = Number(match[1]), minute = Number(match[2]);
+  if (hour > 23 || minute > 59) return String(value || "");
+  if (state.clockFormat !== "12h") return `${match[1]}:${match[2]}`;
+  const period = hour < 12 ? "AM" : "PM";
+  return `${hour % 12 || 12}:${match[2]} ${period}`;
+}
+function parseClockSetting(value) {
+  const raw = String(value || "").trim();
+  if (state.clockFormat === "12h") {
+    const match = /^(\d{1,2}):([0-5]\d)\s*([ap])\.?m\.?$/i.exec(raw);
+    if (!match) return "";
+    let hour = Number(match[1]);
+    if (hour < 1 || hour > 12) return "";
+    if (match[3].toLowerCase() === "p") hour = hour % 12 + 12;
+    else hour %= 12;
+    return `${String(hour).padStart(2, "0")}:${match[2]}`;
+  }
+  const match = /^(\d{1,2}):([0-5]\d)$/.exec(raw);
+  if (!match || Number(match[1]) > 23) return "";
+  return `${String(Number(match[1])).padStart(2, "0")}:${match[2]}`;
+}
+function clockSettingExample() {
+  return state.clockFormat === "12h" ? "3:30 AM" : "03:30";
 }
 /* clock time today, "Mar 4" this year, "Mar 4, 2025" beyond - the shortest
    stamp that still places a search hit in time */
@@ -2234,6 +2277,7 @@ const state = {
   authed: false,
   instance: "",
   version: "",             // this instance's own puppy version
+  clockFormat: "24h",      // WebUI server's runtime LC_TIME hour cycle
   engines: [],            // local engines info
   engMap: {},             // key -> engine info (local)
   usageRefresh: null,     // local account-usage refresh metadata
@@ -2804,6 +2848,7 @@ async function refreshState() {
   const s = await api(0, "state");
   state.instance = s.instance_name;
   if (typeof s.version === "string") state.version = s.version;
+  state.clockFormat = s.clock_format === "12h" ? "12h" : "24h";
   if (s.notify) { state.notify = s.notify; syncBell(); }
   state.sessionColors = s.session_colors || [];
   state.engines = Array.isArray(s.engines) ? s.engines : [];
@@ -4421,10 +4466,9 @@ function quotaTitle(e) {
   const parts = [];
   const clock = (epoch) => {
     if (typeof epoch !== "number" || !isFinite(epoch)) return "";
-    try {
-      return new Date(epoch * 1000).toLocaleString([], {
-        weekday: "short", hour: "2-digit", minute: "2-digit" });
-    } catch (error) { return ""; }
+    try { return fmtDateTime(epoch, {
+      weekday: "short", hour: "2-digit", minute: "2-digit" }); }
+    catch (error) { return ""; }
   };
   const rl = e.rate_limit;
   const windows = rl && rl.unifiedWindows;
@@ -12435,8 +12479,10 @@ class SettingsView {
     seg.appendChild(nowBtn);
     seg.appendChild(atBtn);
     const time = document.createElement("input");
-    time.type = "time";
+    time.type = "text";
     time.className = "eau-time";
+    time.autocomplete = "off";
+    time.spellcheck = false;
     time.setAttribute("aria-label", `Time of day ${name} installs engine updates`);
     when.appendChild(seg);
     when.appendChild(time);
@@ -12476,8 +12522,8 @@ class SettingsView {
         const newest = keys.map(k => ({ key: k, ...attempts[k] }))
           .sort((a, b) => Number(b.at || 0) - Number(a.at || 0))[0];
         const engine = state.engMap[newest.key] ? state.engMap[newest.key].label : newest.key;
-        const when = new Date(Number(newest.at) * 1000);
-        const stamp = Number.isNaN(when.getTime()) ? "" : ` · ${when.toLocaleString()}`;
+        const formatted = fmtDateTime(newest.at);
+        const stamp = formatted ? ` · ${formatted}` : "";
         if (!newest.ok) {
           return `${engine} ${newest.to_version || ""} failed${stamp} — will not retry ` +
             `until a newer version appears`;
@@ -12486,7 +12532,8 @@ class SettingsView {
       }
       if (!current.enabled) return "Updates are installed by hand";
       if (current.mode === "at")
-        return `Installs in the ${current.window_minutes || 120} minutes after ${current.at}`;
+        return `Installs in the ${current.window_minutes || 120} minutes after ${
+          fmtClockSetting(current.at)}`;
       return "Installs as soon as an update is found";
     };
 
@@ -12505,7 +12552,12 @@ class SettingsView {
       nowBtn.disabled = atBtn.disabled = !usable;
       time.disabled = !usable || !at;
       time.classList.toggle("hidden", !at);
-      if (current && document.activeElement !== time) time.value = current.at || "03:30";
+      const example = clockSettingExample();
+      time.placeholder = example;
+      time.setAttribute("aria-description",
+        `Use ${state.clockFormat} time, for example ${example}`);
+      if (current && document.activeElement !== time)
+        time.value = fmtClockSetting(current.at || "03:30");
       note.textContent = describe();
       note.classList.toggle("warn", !!(current && current.last_attempts &&
         Object.values(current.last_attempts).some(a => a && a.ok === false)));
@@ -12533,8 +12585,25 @@ class SettingsView {
     nowBtn.onclick = () => { if (current && current.mode !== "now") commit({ mode: "now" }); };
     atBtn.onclick = () => { if (current && current.mode !== "at") commit({ mode: "at" }); };
     time.onchange = () => {
-      if (current && time.value && time.value !== current.at) commit({ at: time.value });
+      const parsed = parseClockSetting(time.value);
+      if (!parsed) {
+        toast(`${name}: Enter a time like ${clockSettingExample()}`, "error");
+        time.value = fmtClockSetting((current && current.at) || "03:30");
+        time.focus();
+        time.select();
+        return;
+      }
+      time.value = fmtClockSetting(parsed);
+      if (current && parsed !== current.at) commit({ at: parsed });
       else paint();
+    };
+    time.onkeydown = event => {
+      if (event.key === "Enter") { event.preventDefault(); time.blur(); }
+      else if (event.key === "Escape") {
+        event.preventDefault();
+        time.value = fmtClockSetting((current && current.at) || "03:30");
+        time.blur();
+      }
     };
 
     const update = (metadata, reachable = "ok", canConfigure = true) => {
@@ -12587,8 +12656,8 @@ class SettingsView {
       if (!metadata.enabled) return "Automatic refresh is off";
       if (metadata.last_error) return `Last refresh failed · ${metadata.last_error}`;
       if (metadata.last_success_at) {
-        const stamp = new Date(Number(metadata.last_success_at) * 1000);
-        if (!Number.isNaN(stamp.getTime())) return `Last refreshed ${stamp.toLocaleString()}`;
+        const stamp = fmtDateTime(metadata.last_success_at);
+        if (stamp) return `Last refreshed ${stamp}`;
       }
       return "Refreshes on the next engine-status check";
     };

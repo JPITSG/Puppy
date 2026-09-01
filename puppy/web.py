@@ -17,7 +17,8 @@ from aiohttp import WSMsgType, web
 from puppy import (__version__, auth, backends, bind_verify, browser,
                    cli_auto_upgrade, cli_releases,
                    cli_upgrade, config, db, host_metrics, listener_handoff, notify,
-                   live_websockets, protocol, runner, search, snapshots, spawn_exec,
+                   live_websockets, localization, protocol, runner, search, snapshots,
+                   spawn_exec,
                    system_prompts, terminal, uploads,
                    usage_refresh, workspace_links, workspace_sync, workspaces)
 from puppy.drivers import all_drivers, get_driver
@@ -149,6 +150,7 @@ async def h_state(request: web.Request):
     return web.json_response({
         "version": __version__,
         "instance_name": config.get("instance_name"),
+        "clock_format": localization.clock_format(),
         "user": _node_user(),
         "engines": engines,
         "usage_refresh": usage_refresh.payload(),

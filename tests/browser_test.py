@@ -42,6 +42,7 @@ STUB_LOG.mkdir(mode=0o700)
 os.environ["PUPPY_BROWSER_STUB_LOG"] = str(STUB_LOG)
 
 from puppy import (browser, browser_agent, browser_store, config, db,
+                   localization,
                    runner as session_runner, spawn_agent, system_prompts,
                    terminal_agent)  # noqa: E402
 from puppy.drivers.claude import ClaudeDriver  # noqa: E402
@@ -4260,6 +4261,69 @@ def check_shared_storage_settings_ui(ui_source: str, css_source: str) -> None:
     assert ".browser-share-toggle" in css_source
 
 
+def check_server_clock_format(ui_source: str) -> None:
+    """Every WebUI clock follows the primary process's LC_TIME hour cycle."""
+    assert localization.clock_format_from_pattern("%I:%M:%S %p") == "12h"
+    assert localization.clock_format_from_pattern("%OI:%M:%S %p") == "12h"
+    assert localization.clock_format_from_pattern("%H:%M:%S") == "24h"
+    assert localization.clock_format_from_pattern("%R") == "24h"
+    assert localization.clock_format_from_pattern("%%H %X") is None
+    assert localization.clock_format() in ("12h", "24h")
+
+    def extract(name: str) -> str:
+        start = ui_source.index("function " + name + "(")
+        brace = ui_source.index(") {", start) + 2
+        depth = 0
+        for index in range(brace, len(ui_source)):
+            if ui_source[index] == "{":
+                depth += 1
+            elif ui_source[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    return ui_source[start:index + 1]
+        raise AssertionError("unterminated {}".format(name))
+
+    helpers = "\n".join(extract(name) for name in (
+        "serverClockOptions", "fmtClockSetting", "parseClockSetting",
+        "clockSettingExample"))
+    script = r'''
+const state={clockFormat:"24h"};
+%s
+const result={};
+result.cycle24=serverClockOptions({weekday:"short"});
+result.show24=fmtClockSetting("15:05");
+result.parse24=parseClockSetting("3:05");
+result.reject24=parseClockSetting("24:00");
+result.example24=clockSettingExample();
+state.clockFormat="12h";
+result.cycle12=serverClockOptions({weekday:"short"});
+result.midnight=fmtClockSetting("00:05");
+result.morning=fmtClockSetting("03:30");
+result.afternoon=fmtClockSetting("15:30");
+result.am=parseClockSetting("12:05 AM");
+result.pm=parseClockSetting("12:05 PM");
+result.dotted=parseClockSetting("3:30 p.m.");
+result.reject12=parseClockSetting("15:30");
+result.example12=clockSettingExample();
+console.log(JSON.stringify(result));
+''' % helpers
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:700]
+    assert json.loads(proc.stdout) == {
+        "cycle24": {"weekday": "short", "hourCycle": "h23"},
+        "show24": "15:05", "parse24": "03:05", "reject24": "",
+        "example24": "03:30",
+        "cycle12": {"weekday": "short", "hourCycle": "h12"},
+        "midnight": "12:05 AM", "morning": "3:30 AM",
+        "afternoon": "3:30 PM", "am": "00:05", "pm": "12:05",
+        "dotted": "15:30", "reject12": "", "example12": "3:30 AM",
+    }
+    assert 'time.type = "time"' not in ui_source
+    assert 'time.type = "text"' in ui_source
+    assert ui_source.count(".toLocaleString([],") == 1
+    assert ui_source.count(".toLocaleTimeString(") == 1
+
+
 async def main() -> None:
     stub = TEST_ROOT / "stub-chromium"
     stub.write_text(STUB, encoding="utf-8")
@@ -4340,6 +4404,10 @@ async def main() -> None:
                 assert "terminal-handoff" in ping["capabilities"], ping
                 assert "system-prompt" in ping["capabilities"], ping
                 assert ping["browser"] == {"enabled": False}, ping
+            async with http.get(url + "/api/state", headers=headers) as r:
+                primary_state = await read_json(r)
+                assert r.status == 200, primary_state
+                assert primary_state["clock_format"] == localization.clock_format()
             async with http.get(url + "/api/system-prompt", headers=headers) as r:
                 prompt_settings = await read_json(r)
                 assert r.status == 200, prompt_settings
@@ -5448,6 +5516,7 @@ async def main() -> None:
             css_source = (BASE / "puppy" / "static" / "app.css").read_text()
             check_free_identifiers(ui_source)
             check_static_template_styles(ui_source)
+            check_server_clock_format(ui_source)
             check_reconnect_status(ui_source, css_source)
             check_backend_shutdown_notice(ui_source)
             check_offline_sidebar_sessions(ui_source, css_source)

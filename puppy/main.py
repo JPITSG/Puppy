@@ -7,7 +7,7 @@ import sys
 
 from aiohttp import web as aioweb
 
-from puppy import __version__, config, db, workspaces
+from puppy import __version__, config, db, localization, workspaces
 
 
 def setup_logging() -> None:
@@ -32,6 +32,7 @@ def initialize_runtime() -> None:
         print("puppy requires Python 3.9+", file=sys.stderr)
         sys.exit(1)
     os.umask(0o077)
+    localization.initialize()
     config.ensure_dirs()
     setup_logging()
     config.load()
