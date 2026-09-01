@@ -11280,8 +11280,6 @@ class SearchView {
     this.renderKindChips();
     this.renderSegs();
     this.renderNodeChips();
-    this.setStatus("Searches every transcript - including archived sessions - " +
-      "on this Puppy and its online backends.");
   }
 
   destroy() {
@@ -11425,7 +11423,6 @@ class SearchView {
   async runSearch() {
     const query = this.input.value.trim();
     if (!query) {
-      this.setStatus("Type something to search for.");
       this.input.focus();
       return;
     }
@@ -11475,21 +11472,28 @@ class SearchView {
     groups.sort(this.order === "recent" ?
       (a, b) => newestOf(b) - newestOf(a) : (a, b) => bestOf(a) - bestOf(b));
 
-    const statusParts = [];
-    statusParts.push(`${total} match${total === 1 ? "" : "es"} in ${
-      sessionCount} session${sessionCount === 1 ? "" : "s"} · searched ${
-      targets.length} node${targets.length === 1 ? "" : "s"}`);
+    /* The counts line only earns its place beside real hits; an empty result
+       says so once, below. Node warnings stay in either case. */
+    const fragments = [];
+    if (total > 0)
+      fragments.push([`${total} match${total === 1 ? "" : "es"} in ${
+        sessionCount} session${sessionCount === 1 ? "" : "s"} · searched ${
+        targets.length} node${targets.length === 1 ? "" : "s"}`, ""]);
     if (skipped.length)
-      statusParts.push(el("span", "warn", ` · ${skipped.length} node${
+      fragments.push([`${skipped.length} node${
         skipped.length === 1 ? "" : "s"} skipped (${
-        [...new Set(skipped.map(node => node.reason.split(" - ")[0]))].join(", ")})`));
+        [...new Set(skipped.map(node => node.reason.split(" - ")[0]))].join(", ")})`,
+        "warn"]);
     for (const failure of failures)
-      statusParts.push(el("span", "err", ` · ${failure.node.name}: ${
-        (failure.error && failure.error.message) || "failed"}`));
-    if (partial)
-      statusParts.push(el("span", "warn", " · an index is still building"));
-    if (truncated)
-      statusParts.push(el("span", "", " · long tail trimmed - refine the query"));
+      fragments.push([`${failure.node.name}: ${
+        (failure.error && failure.error.message) || "failed"}`, "err"]);
+    if (partial) fragments.push(["an index is still building", "warn"]);
+    if (truncated) fragments.push(["long tail trimmed - refine the query", ""]);
+    const statusParts = [];
+    fragments.forEach(([text, className], index) => {
+      if (index) statusParts.push(" · ");
+      statusParts.push(el("span", className, text));
+    });
     this.setStatus(...statusParts);
 
     if (!groups.length) {

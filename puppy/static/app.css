@@ -2050,6 +2050,9 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   min-height:16px;display:flex;align-items:center;gap:7px;flex-wrap:wrap;
   font-size:11.5px;color:var(--txt3);line-height:1.45;
 }
+/* nothing to say (a fresh tab, or an empty result with no node notes):
+   no blank line between the settings card and what follows */
+.search-status:empty{display:none}
 .search-status .spinner{
   flex:0 0 auto;width:10px;height:10px;border:2px solid var(--acc-dim);
   border-top-color:var(--acc);border-radius:50%;animation:spin .8s linear infinite;
