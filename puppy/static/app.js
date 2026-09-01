@@ -8064,6 +8064,7 @@ class SessionView {
     const reconnecting = !!value;
     if (this.reconnecting === reconnecting) return;
     this.reconnecting = reconnecting;
+    this.root.classList.toggle("transport-lost", reconnecting);
     this.renderStatus();
     this.updateSteerControl();
   }

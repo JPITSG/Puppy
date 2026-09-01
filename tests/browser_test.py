@@ -653,7 +653,7 @@ def check_static_template_styles(ui_source: str) -> None:
     assert 'style="' not in ui_source
 
 
-def check_reconnect_status(ui_source: str) -> None:
+def check_reconnect_status(ui_source: str, css_source: str) -> None:
     """A transport outage must overlay, not destroy, model activity text.
 
     The old close handler called setStatus("Connection lost ..."). A reconnect
@@ -697,18 +697,23 @@ const remoteStoppingMessage = () => stopping;
 const proto = {
 %s
 };
+const classes = new Set();
 const view = Object.assign(Object.create(proto), {
   tab: {bid: 7},
   reconnecting: false,
   statusText: "thinking 42 tokens",
   statusEl: {innerHTML: ""},
+  root: {classList: {toggle(name, on) {
+    if (on) classes.add(name); else classes.delete(name);
+  }}},
   liveText: "",
   syncLiveStatus() { this.liveText = this.visibleStatusText(); },
   syncHeadOverflow() {},
   updateSteerControl() {},
 });
 const take = () => ({header: view.statusEl.innerHTML, live: view.liveText,
-                     activity: view.statusText, reconnecting: view.reconnecting});
+                     activity: view.statusText, reconnecting: view.reconnecting,
+                     metadataHidden: classes.has("transport-lost")});
 view.renderStatus();
 const before = take();
 view.setReconnecting(true);
@@ -726,8 +731,10 @@ console.log(JSON.stringify({before, lost, changedWhileLost, gracefulStop, recove
     proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:400]
     result = json.loads(proc.stdout.strip())
+    assert result["before"]["metadataHidden"] is False, result
     assert "thinking 42 tokens" in result["before"]["header"], result
     assert "Connection lost" in result["lost"]["header"], result
+    assert result["lost"]["metadataHidden"] is True, result
     assert result["lost"]["activity"] == "thinking 42 tokens", result
     assert "Connection lost" in result["changedWhileLost"]["header"], result
     assert result["changedWhileLost"]["activity"] == "using shell", result
@@ -735,7 +742,9 @@ console.log(JSON.stringify({before, lost, changedWhileLost, gracefulStop, recove
     assert "Connection lost" not in result["gracefulStop"]["header"], result
     assert "using shell" in result["recovered"]["header"], result
     assert "Connection lost" not in result["recovered"]["header"], result
+    assert result["recovered"]["metadataHidden"] is False, result
     assert result["recovered"]["live"] == "using shell", result
+    assert ".chat.transport-lost .chat-meta-scroll>.chip{display:none}" in css_source
 
 
 def check_backend_shutdown_notice(ui_source: str) -> None:
@@ -3191,7 +3200,7 @@ console.log(JSON.stringify([0, 5, 61, 3599, 3600, 3661, 36000]
 
 
 def check_sidebar_footer_buttons(ui_source: str, css_source: str) -> None:
-    """Footer actions share the tab-add box and use geometrically centred art."""
+    """Footer actions stay boxed; the aligned tab add control stays quiet."""
     assert "function themeIcon(size, moon)" in ui_source
     assert 'button.replaceChildren(themeIcon(14, t === "light"));' in ui_source
     assert 'const add = el("button", "icon-btn");' in ui_source
@@ -3199,8 +3208,27 @@ def check_sidebar_footer_buttons(ui_source: str, css_source: str) -> None:
     assert ".tab-add-wrap .icon-btn,.foot-row .icon-btn{" in css_source
     assert "display:inline-grid;place-items:center;position:relative;" in css_source
     assert "width:26px;height:26px;margin:0;padding:0;" in css_source
-    assert "background:var(--btn-face);box-shadow:" in css_source
+    shared_start = css_source.index(".tab-add-wrap .icon-btn,.foot-row .icon-btn{")
+    shared_end = css_source.index("}", shared_start)
+    shared_rule = css_source[shared_start:shared_end]
+    assert "background:var(--btn-face)" not in shared_rule
+    footer_start = css_source.index(".foot-row .icon-btn{", shared_end)
+    footer_rule = css_source[footer_start:css_source.index("}", footer_start)]
+    assert "border-color:var(--line);" in footer_rule
+    assert "background:var(--btn-face);box-shadow:" in footer_rule
+    assert ".tab-add-wrap .icon-btn:hover,.foot-row .icon-btn:hover" not in css_source
     assert ".tab-add-wrap .icon-btn>svg,.foot-row .icon-btn>svg{" in css_source
+    menu_start = css_source.index(".chat-head .menu-btn{")
+    menu_rule = css_source[menu_start:css_source.index("}", menu_start)]
+    assert "width:26px;height:26px" in menu_rule and "margin-right:-4px" in menu_rule
+    # Desktop: 14px head padding minus the menu's 4px nudge equals the tabbar's
+    # 10px edge. Narrow: both use 10px directly after the nudge is cancelled.
+    assert ".tabbar{\n  display:flex;align-items:center;gap:4px;padding:8px 10px 0;" \
+        in css_source
+    assert ".chat-head{\n  display:flex;align-items:center;gap:9px;padding:9px 14px;" \
+        in css_source
+    assert ".chat-head{padding:8px 10px;gap:6px}" in css_source
+    assert ".chat-head .menu-btn{margin-right:0}" in css_source
     assert "transform:translateY(1px)" not in css_source
 
 
@@ -5310,7 +5338,7 @@ async def main() -> None:
             css_source = (BASE / "puppy" / "static" / "app.css").read_text()
             check_free_identifiers(ui_source)
             check_static_template_styles(ui_source)
-            check_reconnect_status(ui_source)
+            check_reconnect_status(ui_source, css_source)
             check_backend_shutdown_notice(ui_source)
             check_offline_sidebar_sessions(ui_source, css_source)
             check_controller_backend_pooling(ui_source)
