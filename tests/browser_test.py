@@ -3447,14 +3447,27 @@ run().catch(e=>{console.error(e&&e.stack||e);process.exit(1);});
     assert "passing those values verbatim" in spawn_agent.TOOL_INSTRUCTIONS
     assert '"@Spawn 10 agents ..."' in spawn_agent.TOOL_INSTRUCTIONS
     assert "Wait until every agent has finished" in spawn_agent.TOOL_INSTRUCTIONS
+    assert "silent for 600 seconds" in spawn_agent.TOOL_INSTRUCTIONS
+    assert "7200-second safety cap" in spawn_agent.TOOL_INSTRUCTIONS
+    assert "user sends steering" in spawn_agent.TOOL_INSTRUCTIONS
     spawn_tools = {tool["name"]: tool for tool in spawn_agent.TOOLS}
     assert '"@Spawn an agent ... to ..." mention' in \
         spawn_tools["spawn"]["description"]
     count_schema = spawn_tools["spawn"]["inputSchema"]["properties"]["count"]
     assert count_schema["minimum"] == 1 and count_schema["maximum"] == 12
+    spawn_limits = spawn_tools["spawn"]["inputSchema"]["properties"]
+    assert spawn_limits["idle_timeout_s"]["default"] == 600
+    assert spawn_limits["max_runtime_s"]["default"] == 7200
+    assert "timeout_s" not in spawn_limits
     wait_schema = spawn_tools["wait"]["inputSchema"]
     assert wait_schema["properties"]["jobs"]["type"] == "array"
     assert wait_schema["required"] == ["jobs"]
+    update_schema = spawn_tools["update_limits"]["inputSchema"]
+    assert update_schema["required"] == ["jobs"]
+    assert update_schema["anyOf"] == [
+        {"required": ["idle_timeout_s"]},
+        {"required": ["max_runtime_s"]},
+    ]
     assert spawn_tools["cancel"]["inputSchema"]["required"] == ["jobs"]
 
 

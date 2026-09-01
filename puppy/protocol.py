@@ -93,6 +93,10 @@ WORKSPACE_MIRROR_CAPABILITY = "workspace-mirror"
 # job routes poll/cancel it. The controller relays a session's cross-node
 # spawn requests here and never offers them to a node without this marker.
 SPAWN_EXEC_CAPABILITY = "spawn-exec"
+# Sliding recognized-progress leases plus PATCH /api/spawn/{job_id}, which lets
+# the owning turn replace either live deadline during a run. Older spawn nodes
+# retain their single fixed timeout and must not be offered limit updates.
+SPAWN_LIMITS_CAPABILITY = "spawn-progress-limits"
 
 BASE_CAPABILITIES = (
     "sessions",
@@ -130,6 +134,7 @@ BASE_CAPABILITIES = (
     WORKSPACE_PROVIDER_CAPABILITY,
     WORKSPACE_MIRROR_CAPABILITY,
     SPAWN_EXEC_CAPABILITY,
+    SPAWN_LIMITS_CAPABILITY,
 )
 TERMINAL_CAPABILITY = "terminal"
 # Identified node-owned PTYs, their create/list/delete routes, and the

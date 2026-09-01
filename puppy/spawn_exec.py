@@ -10,9 +10,10 @@ Jobs are node-owned and deliberately short-lived. A job started by a local
 engine turn belongs to that turn: the result must be collected before the
 turn ends, and the sweeper kills anything the turn abandoned. A job started
 over HTTP belongs to the caller (the controller relaying another session's
-request); the controller reaps its remote handles the same way and the node
-keeps a hard per-job deadline as the backstop, so no orphaned engine can
-burn subscription quota indefinitely. Nodes never talk to each other: a
+request); the controller reaps its remote handles the same way. Recognized
+engine progress renews a bounded inactivity lease, while an absolute runtime
+ceiling remains the backstop, so slow useful work can continue but no orphaned
+engine can burn subscription quota indefinitely. Nodes never talk to each other: a
 cross-node spawn is relayed by the controller over the channels it already
 authenticates, which also means a session hosted on a backend node can only
 spawn agents on its own node.
@@ -38,7 +39,12 @@ log = logging.getLogger("puppy.spawn")
 STREAM_LIMIT = 16 * 1024 * 1024
 MAX_PROMPT_CHARS = 120000
 ANSWER_LIMIT = 40000
-DEFAULT_TIMEOUT_S = 900
+# A silent engine gets ten minutes to produce recognized progress. Productive
+# runs may continue for at most two hours from job creation. ``timeout_s`` is
+# retained as a legacy API alias for the absolute runtime limit.
+DEFAULT_IDLE_TIMEOUT_S = 600
+DEFAULT_MAX_RUNTIME_S = 7200
+DEFAULT_TIMEOUT_S = DEFAULT_MAX_RUNTIME_S
 MIN_TIMEOUT_S = 30
 MAX_TIMEOUT_S = 7200
 WAIT_MAX_S = 30
@@ -116,6 +122,31 @@ def _validated_job_ids(params: dict) -> list:
     return ids
 
 
+def _validated_seconds(value, name: str) -> int:
+    if isinstance(value, bool) or \
+            (isinstance(value, float) and not value.is_integer()):
+        raise SpawnError("{} must be a whole number of seconds".format(name))
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError):
+        raise SpawnError("{} must be a whole number of seconds".format(name))
+    if not MIN_TIMEOUT_S <= seconds <= MAX_TIMEOUT_S:
+        raise SpawnError("{} must be between {} and {}".format(
+            name, MIN_TIMEOUT_S, MAX_TIMEOUT_S))
+    return seconds
+
+
+def _validated_limit_update(body: dict) -> dict:
+    values = {}
+    for name in ("idle_timeout_s", "max_runtime_s"):
+        if name in body:
+            values[name] = _validated_seconds(body.get(name), name)
+    if not values:
+        raise SpawnError(
+            "pass idle_timeout_s and/or max_runtime_s to change the job limits")
+    return values
+
+
 async def prepare_request(body: dict) -> dict:
     """Validate one spawn request against this node's installed engines.
 
@@ -184,18 +215,29 @@ async def prepare_request(body: dict) -> dict:
         raise SpawnError("working directory does not exist on this node: "
                          + cwd[:300])
 
-    timeout_raw = body.get("timeout_s", DEFAULT_TIMEOUT_S)
-    try:
-        timeout_s = int(timeout_raw)
-    except (TypeError, ValueError):
-        raise SpawnError("timeout_s must be a whole number of seconds")
-    if not MIN_TIMEOUT_S <= timeout_s <= MAX_TIMEOUT_S:
-        raise SpawnError("timeout_s must be between {} and {}".format(
-            MIN_TIMEOUT_S, MAX_TIMEOUT_S))
+    idle_timeout_s = _validated_seconds(
+        body.get("idle_timeout_s", DEFAULT_IDLE_TIMEOUT_S),
+        "idle_timeout_s")
+    if "max_runtime_s" in body:
+        max_runtime_s = _validated_seconds(
+            body.get("max_runtime_s"), "max_runtime_s")
+        if "timeout_s" in body:
+            legacy_timeout_s = _validated_seconds(
+                body.get("timeout_s"), "timeout_s")
+            if legacy_timeout_s != max_runtime_s:
+                raise SpawnError(
+                    "timeout_s and max_runtime_s must match when both are passed")
+    else:
+        max_runtime_s = _validated_seconds(
+            body.get("timeout_s", DEFAULT_MAX_RUNTIME_S),
+            "timeout_s" if "timeout_s" in body else "max_runtime_s")
 
     return {"engine": engine, "model": model, "effort": effort,
             "permission_mode": permission, "prompt": prompt, "cwd": cwd,
-            "timeout_s": timeout_s}
+            "idle_timeout_s": idle_timeout_s,
+            "max_runtime_s": max_runtime_s,
+            # Compatibility for callers/tests that still inspect the old field.
+            "timeout_s": max_runtime_s}
 
 
 class SpawnJob:
@@ -208,10 +250,22 @@ class SpawnJob:
         self.permission_mode = request["permission_mode"]
         self.prompt = request["prompt"]
         self.cwd = request["cwd"]
-        self.timeout_s = request["timeout_s"]
+        self.idle_timeout_s = int(request.get(
+            "idle_timeout_s", DEFAULT_IDLE_TIMEOUT_S))
+        self.max_runtime_s = int(request.get(
+            "max_runtime_s", request.get("timeout_s", DEFAULT_MAX_RUNTIME_S)))
+        # ``timeout_s`` remains a read-only alias in payloads for old
+        # controllers. New callers should use the two explicit limits.
+        self.timeout_s = self.max_runtime_s
         self.created_at = time.time()
-        self.deadline = self.created_at + self.timeout_s
+        self.created_clock = time.monotonic()
+        self.last_progress_at = self.created_at
+        self.last_progress_clock = self.created_clock
+        self.last_progress_kind = "job started"
+        self.progress_seq = 0
+        self._last_progress_values = {}
         self.finished_at = 0.0
+        self.finished_clock = 0.0
         self.status = "running"
         self.answer = ""
         self.error = ""
@@ -224,21 +278,148 @@ class SpawnJob:
         self.proc = None
         self.task = None
         self.done = asyncio.Event()
+        self.limits_changed = asyncio.Event()
 
     @property
     def running(self) -> bool:
         return self.status == "running"
 
+    @property
+    def idle_deadline(self) -> float:
+        return self.last_progress_clock + self.idle_timeout_s
+
+    @property
+    def hard_deadline(self) -> float:
+        return self.created_clock + self.max_runtime_s
+
+    @property
+    def deadline(self) -> float:
+        return min(self.idle_deadline, self.hard_deadline)
+
+    @staticmethod
+    def _stable_signature(value) -> str:
+        try:
+            return json.dumps(value, sort_keys=True, separators=(",", ":"),
+                              default=str)[:4000]
+        except Exception:
+            return str(value)[:4000]
+
+    def _note_progress(self, kind: str, signature=None,
+                       repeatable: bool = False) -> None:
+        """Renew the inactivity lease for positive, normalized engine output.
+
+        Repeated status/handshake notifications do not prove fresh work, so
+        they renew only when their value changes. Text/thinking deltas are
+        repeatable because every emitted chunk is new output even if two chunks
+        happen to contain the same text.
+        """
+        if not repeatable:
+            marker = self._stable_signature(signature)
+            if self._last_progress_values.get(str(kind)) == marker:
+                return
+            self._last_progress_values[str(kind)] = marker
+        self.last_progress_at = time.time()
+        self.last_progress_clock = time.monotonic()
+        self.last_progress_kind = str(kind or "engine output")[:80]
+        self.progress_seq += 1
+
+    def _note_action_progress(self, act: dict) -> None:
+        kind = str(act.get("a") or "")
+        if kind == "event":
+            event_kind = str(act.get("kind") or "")
+            data = act.get("data") if isinstance(act.get("data"), dict) else {}
+            if event_kind in ("assistant", "thinking") and data.get("text"):
+                self._note_progress(event_kind + " output", repeatable=True)
+            elif event_kind == "tool_use":
+                self._note_progress("tool started", data)
+            elif event_kind == "tool_result":
+                self._note_progress("tool finished", data)
+            elif event_kind == "info" and data:
+                self._note_progress("plan update", data)
+            elif event_kind == "error" and data.get("text"):
+                self._note_progress("engine error", data.get("text"))
+            return
+        if kind == "transient":
+            msg = act.get("msg") if isinstance(act.get("msg"), dict) else {}
+            msg_type = str(msg.get("type") or "")
+            if msg_type == "delta" and msg.get("text"):
+                label = "thinking output" if msg.get("block") == "thinking" \
+                    else "assistant output"
+                self._note_progress(label, repeatable=True)
+            elif msg_type == "thinking_tokens" and isinstance(
+                    msg.get("tokens"), (int, float)):
+                self._note_progress("token progress", msg.get("tokens"))
+            elif msg_type == "status" and msg.get("text"):
+                self._note_progress("status update", msg.get("text"))
+            elif msg_type == "turn_init":
+                self._note_progress("engine initialized", msg)
+            return
+        if kind == "native_id" and act.get("id"):
+            self._note_progress("engine initialized", act.get("id"))
+        elif kind == "model" and act.get("model"):
+            self._note_progress("model selected", act.get("model"))
+        elif kind == "approval":
+            self._note_progress("approval request", act.get("req") or {})
+        elif kind == "approval_cancel":
+            self._note_progress("approval cancelled", act.get("request_id"))
+        elif kind == "stdin":
+            self._note_progress("protocol exchange", act.get("data"))
+
+    def update_limits(self, values: dict) -> None:
+        """Atomically replace either live limit, preserving the two-hour cap."""
+        if not self.running:
+            raise SpawnError("spawned agent '{}' already finished".format(
+                self.id), 409)
+        now = time.monotonic()
+        idle_timeout_s = values.get("idle_timeout_s", self.idle_timeout_s)
+        max_runtime_s = values.get("max_runtime_s", self.max_runtime_s)
+        if self.last_progress_clock + idle_timeout_s <= now:
+            raise SpawnError(
+                "idle_timeout_s would already be expired; last recognized "
+                "progress was {}s ago".format(
+                    int(now - self.last_progress_clock)),
+                409)
+        if self.created_clock + max_runtime_s <= now:
+            raise SpawnError(
+                "max_runtime_s would already be expired; this job started {}s "
+                "ago".format(int(now - self.created_clock)), 409)
+        self.idle_timeout_s = idle_timeout_s
+        self.max_runtime_s = max_runtime_s
+        self.timeout_s = max_runtime_s
+        # Wake a reader currently sleeping against the previous deadline so a
+        # steering update takes effect immediately, including a shorter limit.
+        self.limits_changed.set()
+
+    def timeout_error(self, now=None) -> str:
+        now = time.monotonic() if now is None else now
+        if now >= self.hard_deadline:
+            return "the spawned agent hit its {}s hard runtime ceiling".format(
+                self.max_runtime_s)
+        return ("the spawned agent produced no recognized engine progress for "
+                "{}s".format(self.idle_timeout_s))
+
     def payload(self) -> dict:
+        now = self.finished_clock or time.monotonic()
         value = {
             "id": self.id, "engine": self.engine, "model": self.model,
             "model_used": self.model_used, "effort": self.effort,
             "permission_mode": self.permission_mode, "cwd": self.cwd,
-            "status": self.status, "timeout_s": self.timeout_s,
-            "elapsed_s": int((self.finished_at or time.time()) -
-                             self.created_at),
+            "status": self.status,
+            "idle_timeout_s": self.idle_timeout_s,
+            "max_runtime_s": self.max_runtime_s,
+            "timeout_s": self.max_runtime_s,
+            "elapsed_s": int(now - self.created_clock),
+            "last_progress_age_s": int(max(
+                0, now - self.last_progress_clock)),
+            "last_progress_kind": self.last_progress_kind,
+            "progress_seq": self.progress_seq,
             "denials": self.denials, "tool_calls": self.tool_calls,
         }
+        if self.running:
+            value["idle_remaining_s"] = max(
+                0, int(self.idle_deadline - now))
+            value["hard_remaining_s"] = max(
+                0, int(self.hard_deadline - now))
         if not self.running:
             value.update(answer=self.answer, error=self.error,
                          usage=dict(self.usage))
@@ -252,6 +433,7 @@ class SpawnJob:
         self.status = status
         self.error = str(error or "")[:4000]
         self.finished_at = time.time()
+        self.finished_clock = time.monotonic()
         self.done.set()
 
     # ---- the one-shot engine run ----
@@ -356,6 +538,8 @@ class SpawnJob:
 
         result = None
         stderr_task = None
+        read_task = None
+        limit_task = None
         try:
             driver = get_driver(self.engine)
             fake_session = {
@@ -390,27 +574,45 @@ class SpawnJob:
                 for obj in driver.initial_stdin(fake_session, self.prompt):
                     await self._write_line(obj)
             while result is None:
-                remaining = self.deadline - time.time()
+                remaining = self.deadline - time.monotonic()
                 if remaining <= 0:
-                    self._finish("timeout",
-                                 "the spawned agent hit its {}s timeout"
-                                 .format(self.timeout_s))
+                    self._finish("timeout", self.timeout_error())
                     break
-                try:
-                    line = await asyncio.wait_for(
-                        self.proc.stdout.readline(),
-                        timeout=min(remaining, 30.0))
-                except asyncio.TimeoutError:
+                if read_task is None:
+                    read_task = asyncio.ensure_future(
+                        self.proc.stdout.readline())
+                limit_task = asyncio.ensure_future(self.limits_changed.wait())
+                completed, _pending = await asyncio.wait(
+                    (read_task, limit_task), timeout=min(remaining, 30.0),
+                    return_when=asyncio.FIRST_COMPLETED)
+                if limit_task in completed:
+                    self.limits_changed.clear()
+                elif not limit_task.done():
+                    limit_task.cancel()
+                limit_task = None
+                if read_task not in completed:
                     continue
+                line = read_task.result()
+                read_task = None
                 if not line:
                     break
                 try:
+                    usage_before = self._stable_signature(
+                        ctx.get("usage") or {})
                     actions = driver.parse_line(
                         line.decode(errors="replace").strip(), ctx)
                 except Exception:
                     log.exception("spawn %s: parse_line failed", self.id)
                     continue
+                usage_after = self._stable_signature(ctx.get("usage") or {})
+                if usage_after != usage_before:
+                    # Codex currently records token notifications in its turn
+                    # context without returning a transient action. A changing
+                    # normalized usage counter is still strong positive evidence
+                    # of work and should renew the inactivity lease.
+                    self._note_progress("token progress", usage_after)
                 for act in actions:
+                    self._note_action_progress(act)
                     outcome = await self._apply_action(driver, act)
                     if outcome is not None:
                         result = outcome
@@ -421,6 +623,9 @@ class SpawnJob:
             log.exception("spawn %s failed", self.id)
             self._finish("failed", "spawned agent error: {}".format(exc))
         finally:
+            for pending in (read_task, limit_task):
+                if pending is not None and not pending.done():
+                    pending.cancel()
             if result is not None:
                 # Waiters get the verdict before process teardown so a clean
                 # engine exit never taxes the caller's latency.
@@ -508,19 +713,21 @@ class _Manager:
 
     async def _sweep_once(self) -> None:
         from puppy import runner
-        now = time.time()
+        now = time.monotonic()
+        wall_now = time.time()
         for job in list(self.jobs.values()):
             if job.running and job.owner[0] == "turn" and \
                     not runner.hub(job.owner[1]).tool_turn_active(job.owner[2]):
                 await self.cancel(
                     job, "the turn that spawned this agent ended")
             elif job.running and now > job.deadline + 30:
-                # run() enforces the deadline itself; this is the backstop for
-                # a wedged reader.
-                await self.cancel(job, "the spawned agent hit its timeout",
+                # run() enforces the live deadline itself; this is the backstop
+                # for a wedged reader and observes live limit changes through
+                # the deadline property.
+                await self.cancel(job, job.timeout_error(now),
                                   status="timeout")
             elif not job.running and job.finished_at and \
-                    now - job.finished_at > PURGE_AFTER_S:
+                    wall_now - job.finished_at > PURGE_AFTER_S:
                 self.jobs.pop(job.id, None)
         for job_id, handle in list(self.remote.items()):
             if not runner.hub(handle["session_id"]).tool_turn_active(
@@ -591,6 +798,16 @@ def _spawn_channel(bid: int) -> dict:
         raise SpawnError(
             "node '{}' does not support spawned agents yet - upgrade its "
             "Puppy backend".format(channel.get("name") or bid))
+    return channel
+
+
+def _limits_channel(bid: int) -> dict:
+    channel = _spawn_channel(bid)
+    if protocol.SPAWN_LIMITS_CAPABILITY not in \
+            (channel.get("capabilities") or []):
+        raise SpawnError(
+            "node '{}' cannot change live spawned-agent limits yet - upgrade "
+            "its Puppy backend".format(channel.get("name") or bid), 409)
     return channel
 
 
@@ -694,14 +911,30 @@ def job_text(job: dict, node_name: str) -> str:
     status = str(job.get("status") or "")
     elapsed = int(job.get("elapsed_s") or 0)
     if status == "running":
-        lines.append("Status: running for {}s (timeout {}s).".format(
-            elapsed, job.get("timeout_s")))
+        if job.get("idle_timeout_s") is not None and \
+                job.get("max_runtime_s") is not None:
+            lines.append(
+                "Status: running for {}s · last recognized progress {}s ago "
+                "({}) · inactivity limit {}s ({}s left) · hard runtime {}s "
+                "from start ({}s left).".format(
+                    elapsed, int(job.get("last_progress_age_s") or 0),
+                    job.get("last_progress_kind") or "engine output",
+                    job.get("idle_timeout_s"),
+                    int(job.get("idle_remaining_s") or 0),
+                    job.get("max_runtime_s"),
+                    int(job.get("hard_remaining_s") or 0)))
+        else:
+            # A controller may still be collecting a job from a pre-progress-
+            # lease backend during a rolling upgrade.
+            lines.append("Status: running for {}s (legacy timeout {}s).".format(
+                elapsed, job.get("timeout_s")))
         if job.get("wait_note"):
             lines.append("Note: {}".format(job["wait_note"]))
         lines.append("The result is not ready yet. Call wait with jobs "
-                     "[\"{}\"] until it completes; cancel discards it. The "
-                     "job dies with this turn, so collect the result before "
-                     "finishing.".format(job.get("id")))
+                     "[\"{}\"] until it completes; update_limits may change "
+                     "either live limit when the user requests it, and cancel "
+                     "discards it. The job dies with this turn, so collect the "
+                     "result before finishing.".format(job.get("id")))
         return "\n".join(lines)
     detail = _format_usage(job)
     if status == "done":
@@ -739,9 +972,21 @@ def jobs_text(entries) -> str:
             "every agent finishes; they all die with this turn.".format(
                 ", ".join(str(entry[0].get("id")) for entry in running)))
         for payload, node_name in running:
+            if payload.get("idle_timeout_s") is not None and \
+                    payload.get("max_runtime_s") is not None:
+                lines.append(
+                    "Agent {} on {}: progress {}s ago ({}) · inactivity {}s "
+                    "({}s left) · hard runtime {}s ({}s left).".format(
+                        payload.get("id"), node_name,
+                        int(payload.get("last_progress_age_s") or 0),
+                        payload.get("last_progress_kind") or "engine output",
+                        payload.get("idle_timeout_s"),
+                        int(payload.get("idle_remaining_s") or 0),
+                        payload.get("max_runtime_s"),
+                        int(payload.get("hard_remaining_s") or 0)))
             note = payload.get("wait_note")
             if note:
-                lines.append("Agent {} on {}: {}".format(
+                lines.append("Agent {} on {} status note: {}".format(
                     payload.get("id"), node_name, note))
     for payload, node_name in finished:
         lines.append("")
@@ -790,6 +1035,8 @@ async def _refresh_remote(channel: dict, job: dict, wait_s: float) -> dict:
 async def start_for_turn(session: dict, turn_id: str, params: dict) -> dict:
     target = resolve_target(params.get("node"))
     count = _validated_count(params.get("count"))
+    max_runtime_s = params.get(
+        "max_runtime_s", params.get("timeout_s", DEFAULT_MAX_RUNTIME_S))
     body = {
         "engine": str(params.get("engine") or "").strip() or
         str(session.get("engine") or ""),
@@ -799,7 +1046,12 @@ async def start_for_turn(session: dict, turn_id: str, params: dict) -> dict:
         "prompt": params.get("prompt"),
         "cwd": str(params.get("cwd") or "").strip() or
         _default_cwd(session, target),
-        "timeout_s": params.get("timeout_s", DEFAULT_TIMEOUT_S),
+        "idle_timeout_s": params.get(
+            "idle_timeout_s", DEFAULT_IDLE_TIMEOUT_S),
+        "max_runtime_s": max_runtime_s,
+        # Rolling-upgrade compatibility: an old node ignores the two new fields
+        # and still enforces this value as its fixed deadline.
+        "timeout_s": max_runtime_s,
     }
     initial_wait = _clamp_wait(params.get("wait_s"), default=15)
     if target["bid"]:
@@ -911,6 +1163,43 @@ async def wait_for_turn(session: dict, turn_id: str, params: dict) -> dict:
     return {"text": jobs_text(list(results))}
 
 
+async def update_limits_for_turn(session: dict, turn_id: str,
+                                 params: dict) -> dict:
+    """Replace either deadline on jobs owned by the active orchestrating turn."""
+    values = _validated_limit_update(params)
+    entries = _turn_entries(session, turn_id, _validated_job_ids(params))
+
+    # Resolve every remote capability before mutating anything we can validate
+    # locally. A network race can still make a multi-node update partial, but an
+    # already-known old/offline target cannot do so.
+    channels = {}
+    for kind, _job_id, ref in entries:
+        if kind == "remote" and ref["bid"] not in channels:
+            channels[ref["bid"]] = _limits_channel(ref["bid"])
+
+    async def apply(kind, job_id, ref):
+        if kind == "local":
+            ref.update_limits(values)
+            return (ref.payload(), _local_node_name())
+        data = await _node_request(
+            channels[ref["bid"]], "PATCH", "spawn/" + job_id,
+            body=values, timeout_s=25.0)
+        return (_relayed_job(data, ref["node"]), ref["node"])
+
+    updated = await asyncio.gather(
+        *(apply(kind, job_id, ref) for kind, job_id, ref in entries))
+    lines = []
+    for job, node_name in updated:
+        lines.append(
+            "Updated spawned agent {} on {}: inactivity limit {}s; hard "
+            "runtime {}s total from job creation.".format(
+                job.get("id"), node_name, job.get("idle_timeout_s"),
+                job.get("max_runtime_s")))
+    lines.append("Keep calling wait for every still-running job; changing a "
+                 "limit does not detach it from this turn.")
+    return {"text": "\n".join(lines)}
+
+
 async def cancel_for_turn(session: dict, turn_id: str, params: dict) -> dict:
     entries = _turn_entries(session, turn_id,
                             _validated_job_ids(params))
@@ -998,9 +1287,12 @@ async def targets_for_turn(session: dict, params: dict) -> dict:
         online = backends.backend_is_online(int(item["id"]))
         capable = protocol.SPAWN_EXEC_CAPABILITY in \
             (item.get("capabilities") or [])
+        live_limits = protocol.SPAWN_LIMITS_CAPABILITY in \
+            (item.get("capabilities") or [])
         lines.append("- {} ({}{})".format(
             name, "online" if online else "offline",
-            "" if capable else ", needs a Puppy upgrade for spawned agents"))
+            ("" if live_limits else ", legacy fixed timeout only")
+            if capable else ", needs a Puppy upgrade for spawned agents"))
     lines.append("Call targets with a node name for its engines, models, "
                  "efforts, and permission modes.")
     return {"text": "\n".join(lines)}
@@ -1038,6 +1330,26 @@ async def h_spawn_get(request):
     return web.json_response({"job": job.payload()})
 
 
+async def h_spawn_patch(request):
+    from aiohttp import web
+    job = manager().get(request.match_info["job_id"])
+    if job is None:
+        return web.json_response({"error": "unknown spawn job"}, status=404)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid spawn limit update"},
+                                 status=400)
+    if not isinstance(body, dict):
+        return web.json_response(
+            {"error": "spawn limit update must be an object"}, status=400)
+    try:
+        job.update_limits(_validated_limit_update(body))
+    except SpawnError as exc:
+        return web.json_response({"error": str(exc)}, status=exc.status)
+    return web.json_response({"ok": True, "job": job.payload()})
+
+
 async def h_spawn_delete(request):
     from aiohttp import web
     job = manager().get(request.match_info["job_id"])
@@ -1051,6 +1363,7 @@ async def h_spawn_delete(request):
 def register(app) -> None:
     app.router.add_post("/api/spawn", h_spawn_start)
     app.router.add_get("/api/spawn/{job_id:[a-f0-9]{8}}", h_spawn_get)
+    app.router.add_patch("/api/spawn/{job_id:[a-f0-9]{8}}", h_spawn_patch)
     app.router.add_delete("/api/spawn/{job_id:[a-f0-9]{8}}", h_spawn_delete)
 
     async def on_startup(_app):

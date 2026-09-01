@@ -285,11 +285,16 @@ subscription quota. Active turns keep the prompt with which they started.
 
 Every node advertises the additive `spawn-exec` capability: `POST /api/spawn`
 starts one non-interactive engine run (engine, optional model/effort,
-permission mode, prompt, working directory, hard timeout) after validating the
-request against that node's installed engines, and `GET`/`DELETE
-/api/spawn/{job_id}` poll or cancel it. Jobs are in-memory, deadline-bounded,
-and never part of a snapshot. Engine turns receive a turn-scoped `puppy_spawn`
-stdio MCP bridge (targets/spawn/wait/cancel); jobs it starts die with their
+permission mode, prompt, working directory, inactivity limit, absolute runtime)
+after validating the request against that node's installed engines, and
+`GET`/`PATCH`/`DELETE /api/spawn/{job_id}` poll, replace live limits, or cancel
+it. Jobs default to a 600-second sliding silence limit, renewed by positive
+normalized engine progress, and a hard 7200-second ceiling measured from job
+creation. Identical repeating status noise does not renew the lease. The PATCH
+route is advertised separately as `spawn-progress-limits`, so a controller
+never offers it to an older node with the legacy fixed timeout. Jobs are
+in-memory and never part of a snapshot. Engine turns receive a turn-scoped
+`puppy_spawn` stdio MCP bridge (targets/spawn/wait/update_limits/cancel); jobs it starts die with their
 turn, approval requests inside a spawned run are auto-denied with an
 explanation, and cross-node spawns exist only on the controller, which relays
 them over its already-authenticated channels - nodes still never contact each
@@ -298,9 +303,12 @@ running spawned agent also blocks that engine's CLI upgrade, and spawn
 requests are refused while the engine's updater runs. A parallel fan-out
 (spawn `count`, up to 12) is expanded by the bridge into independent jobs -
 a remote fleet is simply that many relayed single starts, so any spawn-exec
-node can host one - and `wait`/`cancel` operate on job-id lists with one
-shared concurrent budget; each node also caps its total running spawned
-agents. The console's composer
+node can host one - `wait` operates on job-id lists with one shared concurrent
+budget, while `update_limits` and `cancel` accept the same list shape. Each node
+also caps its total running spawned agents. Limit changes remain
+ownership-checked, stay within 30–7200
+seconds, and are offered to the orchestrating engine only for explicit user
+steering while jobs remain attached to that turn. The console's composer
 offers the request as an "@" mention: a "New spawn" wizard slides through
 agent count, node, engine, model, and effort, then inserts the plain-text
 directive `@Spawn <an agent|N agents> on <node> using <engine> [<model>]

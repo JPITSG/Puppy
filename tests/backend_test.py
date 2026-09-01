@@ -1251,6 +1251,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "active-turn-steering" in ping["capabilities"]
         assert "system-prompt" in ping["capabilities"]
         assert "spawn-exec" in ping["capabilities"]
+        assert "spawn-progress-limits" in ping["capabilities"]
         assert "shutdown-notice" in ping["capabilities"]
         assert ping["shutting_down"] is False
         # browser surface: capability is static, enablement is node config
@@ -1322,6 +1323,13 @@ async def exercise_node(url: str, token: str, expected_version: str,
         async with http.get(url + "/api/spawn/0123abcd", headers=good,
                             ssl=pinned) as response:
             assert response.status == 404, await response.text()
+        async with http.patch(url + "/api/spawn/0123abcd", headers=good,
+                              ssl=pinned,
+                              json={"idle_timeout_s": 1200}) as response:
+            assert response.status == 404, await response.text()
+        async with http.patch(url + "/api/spawn/0123abcd", ssl=pinned,
+                              json={"idle_timeout_s": 1200}) as response:
+            assert response.status == 401, await response.text()
         async with http.post(url + "/api/spawn", ssl=pinned,
                              json={"engine": "claude", "prompt": "hi",
                                    "cwd": "/"}) as response:
