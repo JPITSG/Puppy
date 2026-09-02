@@ -1892,15 +1892,21 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .agent-notes-modal{max-width:640px}
 .agent-notes-file{display:block;margin-bottom:12px}
 .agent-notes-head{
-  display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:5px;
-  text-transform:none;letter-spacing:0;
+  display:flex;align-items:center;gap:8px;min-width:0;margin-bottom:6px;
+  font-size:11px;color:var(--txt3);
 }
-.agent-notes-name{font:600 12px var(--mono);color:var(--txt)}
+.agent-notes-head .field-optional{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.agent-notes-name{flex:0 0 auto;font:600 12px var(--mono);color:var(--txt)}
 .agent-notes-text{
-  height:auto;min-height:120px;max-height:32dvh;resize:vertical;
+  height:24dvh;min-height:110px;max-height:24dvh;resize:none;margin:0;
   font-family:var(--mono);font-size:12px;line-height:1.45;white-space:pre;overflow:auto;tab-size:4;
 }
-.agent-notes-remove{margin-top:4px;font-size:11px}
+/* the header's remove control is the URL editor's square icon button */
+.agent-notes-remove{
+  flex:0 0 auto;margin-left:auto;width:24px;height:24px;
+  border-color:var(--line2);background:var(--panel2);color:var(--txt3);
+}
+@media (hover:hover){.agent-notes-remove:hover{color:var(--err);border-color:var(--err-line-soft)}}
 .backend-edit-error{
   margin:0;padding:8px 10px;border:1px solid var(--err-line-soft);border-radius:var(--r-sm);
   background:var(--err-dim);color:var(--err);font-size:11.5px;line-height:1.4;

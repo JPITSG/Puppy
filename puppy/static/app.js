@@ -4235,28 +4235,16 @@ function modalAgentNotes(bid, s) {
     areas.clear();
     for (const file of data.files || []) {
       loaded.set(file.name, file);
-      const block = el("label", "agent-notes-file");
-      const head = el("span", "agent-notes-head");
+      const block = el("div", "agent-notes-file");
+      const head = el("div", "agent-notes-head");
       head.appendChild(el("span", "agent-notes-name", file.name));
       head.appendChild(el("span", "field-optional", describeAgentNote(file)));
-      block.appendChild(head);
-      const area = el("textarea", "config-textarea agent-notes-text");
-      area.value = file.text || "";
-      area.spellcheck = false;
-      area.placeholder = file.exists ? "" :
-        `Standing instructions for ${AGENT_NOTE_READERS[file.name] || "the engines"}…`;
-      area.disabled = file.readable === false || !!file.truncated;
-      area.addEventListener("keydown", event => {
-        if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-          event.preventDefault();
-          form.requestSubmit();
-        }
-      });
-      block.appendChild(area);
-      areas.set(file.name, area);
       if (file.exists) {
-        const remove = el("button", "linklike agent-notes-remove", `Remove ${file.name}`);
+        /* the same square icon button the URL editor uses for its rows */
+        const remove = el("button", "icon-btn agent-notes-remove");
         remove.type = "button";
+        remove.setAttribute("aria-label", `Remove ${file.name}`);
+        remove.appendChild(xIcon(12));
         remove.onclick = async () => {
           if (!await modalConfirm(`Remove ${file.name}?`,
               `${file.name} is deleted from ${sessionLocationLabel(s, bid)}.`)) return;
@@ -4272,8 +4260,23 @@ function modalAgentNotes(bid, s) {
             setBusy(false);
           }
         };
-        block.appendChild(remove);
+        head.appendChild(remove);
       }
+      block.appendChild(head);
+      const area = el("textarea", "config-textarea agent-notes-text");
+      area.value = file.text || "";
+      area.spellcheck = false;
+      area.placeholder = file.exists ? "" :
+        `Standing instructions for ${AGENT_NOTE_READERS[file.name] || "the engines"}…`;
+      area.disabled = file.readable === false || !!file.truncated;
+      area.addEventListener("keydown", event => {
+        if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+          event.preventDefault();
+          form.requestSubmit();
+        }
+      });
+      block.appendChild(area);
+      areas.set(file.name, area);
       files.appendChild(block);
     }
     save.disabled = false;
