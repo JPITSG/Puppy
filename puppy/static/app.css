@@ -1457,10 +1457,10 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   transition:background .15s var(--ease),border-color .15s var(--ease),
              color .15s var(--ease),transform .12s var(--ease);
 }
-.composer-row .mini.attach-add{width:24px;padding:0}
+.composer-row .mini.attach-add,.composer-row .mini.tools-open{width:24px;padding:0}
 /* drawn plus, so the ink centres on the box rather than on the font's axis */
-.composer-row .mini.attach-add>span{display:flex}
-.composer-row .mini.attach-add svg{display:block}
+.composer-row .mini.attach-add>span,.composer-row .mini.tools-open>span{display:flex}
+.composer-row .mini.attach-add svg,.composer-row .mini.tools-open svg{display:block}
 .composer-row .mini.attach-add.uploading>span{animation:attach-pulse 1s ease-in-out infinite}
 .composer-row .mini:disabled{cursor:not-allowed;opacity:.38}
 /* the pill shows what the NEXT prompt will use; italics while that value is

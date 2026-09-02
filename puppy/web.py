@@ -125,6 +125,7 @@ async def _engines_payload(refresh_usage: bool = True, refresh_models: bool = Tr
             "default_permission": d.default_permission(),
             "model_options": d.model_options(),
             "effort_options": d.effort_options(),
+            "tool_options": d.tool_options(),
             "allow_custom_model": d.allow_custom_model,
             "dynamic_model_options": d.dynamic_model_options,
             "model_catalog_loaded": d.model_catalog_loaded(),
@@ -643,6 +644,28 @@ async def h_session_switch(request: web.Request):
     return web.json_response(
         {"ok": True, "queued": bool(result.get("queued")),
          "session": runner.session_payload(db.get_session(s["id"]))})
+
+
+async def h_session_tool(request: web.Request):
+    """Run one engine-native session tool (additive `session-tools`):
+    "compact" summarizes the native context, queued behind pending work;
+    "undo" drops the last prompt and its reply from the native conversation
+    and needs an idle session. The engine decides what it offers."""
+    s = _session_or_404(request)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid tool request"}, status=400)
+    if not isinstance(body, dict) or not isinstance(body.get("tool"), str):
+        return web.json_response({"error": "tool must be text"}, status=400)
+    tool = body["tool"].strip()
+    if tool not in runner.SESSION_TOOLS:
+        return web.json_response({"error": "unknown tool '{}'".format(tool[:32])},
+                                 status=400)
+    result = runner.hub(s["id"]).request_tool(tool)
+    if "error" in result:
+        return web.json_response({"error": result["error"]}, status=409)
+    return web.json_response(result)
 
 
 async def h_session_events(request: web.Request):
@@ -1367,6 +1390,7 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     r.add_post("/api/sessions/{sid:\\d+}/steer", h_session_steer)
     r.add_post("/api/sessions/{sid:\\d+}/interrupt", h_session_interrupt)
     r.add_post("/api/sessions/{sid:\\d+}/switch", h_session_switch)
+    r.add_post("/api/sessions/{sid:\\d+}/tool", h_session_tool)
     r.add_get("/api/sessions/{sid:\\d+}/events", h_session_events)
 
     r.add_get("/api/fs", h_fs)

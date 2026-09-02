@@ -17,7 +17,11 @@ Normalized transcript event kinds (persisted):
                  driver whose input already counts cached tokens must not
                  also emit those keys), output tokens and clock time for every
                  engine; a driver that leaves duration_ms unset is given the
-                 runner's wall-clock turn time.
+                 runner's wall-clock turn time. Drivers offering session
+                 tools also stamp each prompt turn's result with the native
+                 identities a later undo needs (native_session_id plus
+                 claude's native_prompt_id/native_tail_id or codex's
+                 native_turn_id); a tool turn's result carries tool=<name>.
     error        {text}
     engine_switch{from, to}
 
@@ -61,6 +65,46 @@ AUTH_FAILURE_RE = re.compile(
     r"|authentication[ _-]?(?:error|failed)"
     r"|please (?:log ?in|sign ?in|run /login)"
     r"|log ?out and sign ?in", re.I)
+
+
+class ToolUnavailable(RuntimeError):
+    """A session tool cannot run right now; the message is user-facing."""
+
+
+_UNDO_STATE_KEY = "session_undo.{}"
+
+
+def undo_state_get(session_id) -> dict:
+    """A pending conversation rollback the engine applies on the session's
+    next prompt (claude branches its transcript with that resume). Durable in
+    meta so a restart between the undo and the prompt keeps the promise."""
+    from puppy import db
+    if session_id is None:
+        return {}
+    try:
+        value = db.meta_get(_UNDO_STATE_KEY.format(int(session_id)))
+    except Exception:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def undo_state_set(session_id, state: dict) -> None:
+    from puppy import db
+    db.meta_set(_UNDO_STATE_KEY.format(int(session_id)), dict(state))
+
+
+def undo_state_clear(session_id) -> None:
+    from puppy import db
+    try:
+        db.meta_del(_UNDO_STATE_KEY.format(int(session_id)))
+    except Exception:
+        pass
+
+
+def tool_name(tool) -> str:
+    """The tool a build/context call is for, from the queue row fields the
+    runner passes as ``tool`` (empty for an ordinary prompt turn)."""
+    return str(tool.get("tool") or "") if isinstance(tool, dict) else ""
 
 
 def looks_like_auth_failure(text) -> bool:
@@ -169,6 +213,26 @@ class Driver:
     # cli_upgrade owns the bounded subprocess. Never build this from input.
     upgrade_source = None
 
+    def tool_options(self):
+        """Session tools this engine's headless protocol can run, as
+        [{value, label, hint}]: "compact" summarizes the native conversation
+        in place, "undo" drops the last prompt and its reply from the native
+        conversation (files are never touched). Empty when unsupported."""
+        return []
+
+    def tool_plan(self, tool: str, session: dict, turns: list) -> dict:
+        """Decide how one session tool runs now. ``turns`` lists the session's
+        most recent completed turns, newest first, as {"kind": "prompt"|"tool",
+        "tool": name, "text": prompt text, "result": persisted result data}.
+        Return {"run": True, "params": {...}} for a tool turn the runner
+        spawns (build_cmd/build_env/turn_context/initial_stdin then receive
+        ``tool`` = the queue row fields), or {"run": False, "state": {...},
+        "text": note} for a change the driver applies from durable
+        per-session state on the next prompt. Either form may add
+        "restore_text", a dropped prompt handed back to the composer. Raise
+        ToolUnavailable with a user-facing reason otherwise."""
+        raise ToolUnavailable("{} does not support {}".format(self.label, tool))
+
     def permission_options(self):
         """[{value, label, hint}] - engine-specific permission/sandbox levels."""
         return []
@@ -226,7 +290,7 @@ class Driver:
 
     def build_cmd(self, session: dict, first_turn: bool, prompt: str, pinned_id: str,
                   browser_mcp=None, system_prompt: str = "",
-                  terminal_mcp=None, spawn_mcp=None) -> list:
+                  terminal_mcp=None, spawn_mcp=None, tool=None) -> list:
         """argv for one turn. pinned_id: uuid the runner pre-generated for new sessions
         (engines that support pinning use it; others derive their own native id).
         browser_mcp is an optional per-turn stdio MCP server descriptor. It may
@@ -234,22 +298,24 @@ class Driver:
         terminal_mcp and spawn_mcp are the equivalent descriptors for the
         shared terminal and spawned-agent bridges; drivers may receive any
         combination in the same turn.
-        system_prompt is the node owner's additive guidance for every turn."""
+        system_prompt is the node owner's additive guidance for every turn.
+        tool is the queue row fields ({engine, tool, ...params}) of a session
+        tool turn; the runner passes it only to drivers with tool_options."""
         raise NotImplementedError
 
     def build_env(self, session: dict, first_turn: bool, prompt: str, pinned_id: str,
                   browser_mcp=None, system_prompt: str = "",
-                  terminal_mcp=None, spawn_mcp=None) -> dict:
+                  terminal_mcp=None, spawn_mcp=None, tool=None) -> dict:
         """Per-turn environment additions. Credentials remain CLI-owned."""
         return {}
 
     def turn_context(self, session: dict, first_turn: bool, prompt: str, pinned_id: str,
                      browser_mcp=None, system_prompt: str = "",
-                     terminal_mcp=None, spawn_mcp=None) -> dict:
+                     terminal_mcp=None, spawn_mcp=None, tool=None) -> dict:
         """Driver scratch state shared across streamed protocol messages."""
         return {}
 
-    def initial_stdin(self, session: dict, prompt: str) -> list:
+    def initial_stdin(self, session: dict, prompt: str, tool=None) -> list:
         """JSON objects to write to stdin right after spawn (stdin-stream engines)."""
         return []
 

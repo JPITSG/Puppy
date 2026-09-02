@@ -16,7 +16,8 @@ from __future__ import annotations
 import json
 import os
 
-from puppy.drivers.base import Driver, stringify_content
+from puppy.drivers import base as driver_base
+from puppy.drivers.base import Driver, ToolUnavailable, stringify_content
 from puppy.user_paths import service_home
 
 
@@ -64,8 +65,66 @@ class ClaudeDriver(Driver):
             {"value": "max", "label": "Max", "hint": "Maximum reasoning"},
         ]
 
+    def tool_options(self):
+        return [
+            {"value": "compact", "label": "Compact context",
+             "hint": "Summarize the conversation so far into a shorter context"},
+            {"value": "undo", "label": "Undo last turn",
+             "hint": "Drop your last prompt and its reply from the conversation; "
+                     "files are not changed"},
+        ]
+
+    def tool_plan(self, tool, session, turns):
+        """Verified against claude 2.1.258. Compaction is the ordinary
+        stream-json turn whose user message is the local command "/compact".
+        Undo cannot run on its own in print mode: the NEXT prompt resumes with
+        --resume-session-at <last message of the turn before the dropped one>
+        --resume-drops-turn <dropped prompt uuid>, which appends that prompt
+        under the earlier message and leaves the dropped turn orphaned in the
+        transcript for every later plain resume. Headless file rewinding is
+        not enabled, so files stay as they are."""
+        if tool == "compact":
+            return {"run": True, "params": {}}
+        if tool != "undo":
+            raise ToolUnavailable("{} does not support {}".format(self.label, tool))
+        if driver_base.undo_state_get(session.get("id")):
+            raise ToolUnavailable(
+                "The last undo is still pending - send a prompt before undoing again")
+        last = turns[0] if turns else None
+        if last is None:
+            raise ToolUnavailable("Nothing to undo yet - this session has not run a turn")
+        if last.get("kind") != "prompt":
+            raise ToolUnavailable(
+                "The last thing that ran was a {}, which cannot be undone".format(
+                    "compaction" if last.get("tool") == "compact" else "session tool"))
+        result = last.get("result") or {}
+        native = str(session.get("native_session_id") or "")
+        if not result:
+            raise ToolUnavailable("The last turn did not finish, so it cannot be undone")
+        if not result.get("native_prompt_id") or \
+                str(result.get("native_session_id") or "") != native:
+            raise ToolUnavailable(
+                "The last turn predates undo support here and cannot be undone")
+        previous = (turns[1].get("result") or {}) if len(turns) > 1 else {}
+        resume_at = str(previous.get("native_tail_id") or "")
+        if not resume_at or str(previous.get("native_session_id") or "") != native:
+            raise ToolUnavailable("Only turns after the first can be undone")
+        return {
+            "run": False,
+            "state": {"engine": self.key, "resume_at": resume_at,
+                      "drops": str(result["native_prompt_id"])},
+            "text": "Undid the last turn: the next prompt continues from before it "
+                    "(files are unchanged)",
+            "restore_text": str(last.get("text") or ""),
+        }
+
+    @staticmethod
+    def _turn_text(prompt, tool):
+        return "/compact" if driver_base.tool_name(tool) == "compact" else prompt
+
     def build_cmd(self, session, first_turn, prompt, pinned_id, browser_mcp=None,
-                  system_prompt="", terminal_mcp=None, spawn_mcp=None):
+                  system_prompt="", terminal_mcp=None, spawn_mcp=None, tool=None):
+        tool_kind = driver_base.tool_name(tool)
         argv = [self.binary, "-p",
                 "--output-format", "stream-json",
                 "--input-format", "stream-json",
@@ -74,7 +133,10 @@ class ClaudeDriver(Driver):
                 "--verbose",
                 "--permission-mode", session.get("permission_mode") or self.default_permission(),
                 "--permission-prompt-tool", "stdio"]
-        mcps = [item for item in (browser_mcp, terminal_mcp, spawn_mcp) if item]
+        # a tool turn only ever addresses the existing native conversation:
+        # no agent bridges, no guidance, and never a fresh session
+        mcps = [] if tool_kind else \
+            [item for item in (browser_mcp, terminal_mcp, spawn_mcp) if item]
         if mcps:
             mcp_config = {"mcpServers": {item["name"]: {
                 "type": "stdio", "command": item["command"],
@@ -82,7 +144,7 @@ class ClaudeDriver(Driver):
                 "env": dict(item.get("env") or {}),
             } for item in mcps}}
             argv += ["--mcp-config", json.dumps(mcp_config, separators=(",", ":"))]
-        guidance = [str(system_prompt or "").strip()]
+        guidance = [] if tool_kind else [str(system_prompt or "").strip()]
         guidance.extend(str(item.get("engine_guidance") or "").strip()
                         for item in mcps)
         guidance = "\n\n".join(part for part in guidance if part)
@@ -91,10 +153,18 @@ class ClaudeDriver(Driver):
             # supplies while making both configured layers model-visible.
             argv += ["--append-system-prompt", guidance]
         native = session.get("native_session_id") or ""
-        if first_turn or not native:
+        if tool_kind:
+            argv += ["--resume", native]
+        elif first_turn or not native:
             argv += ["--session-id", pinned_id]
         else:
             argv += ["--resume", native]
+            pending = driver_base.undo_state_get(session.get("id"))
+            if pending.get("engine") == self.key and \
+                    pending.get("native_session_id") == native and \
+                    pending.get("resume_at") and pending.get("drops"):
+                argv += ["--resume-session-at", str(pending["resume_at"]),
+                         "--resume-drops-turn", str(pending["drops"])]
         model = (session.get("model") or "").strip()
         if model:
             argv += ["--model", model]
@@ -104,7 +174,7 @@ class ClaudeDriver(Driver):
         return argv
 
     def build_env(self, session, first_turn, prompt, pinned_id, browser_mcp=None,
-                  system_prompt="", terminal_mcp=None, spawn_mcp=None):
+                  system_prompt="", terminal_mcp=None, spawn_mcp=None, tool=None):
         # Claude normally refuses bypassPermissions when its effective user is
         # root. The vendor's sandbox marker is deliberately turn-scoped: the
         # runner starts every turn with clean_env(), then calls this method for
@@ -115,26 +185,34 @@ class ClaudeDriver(Driver):
             return {"IS_SANDBOX": "1"}
         return {}
 
-    def initial_stdin(self, session, prompt):
+    def initial_stdin(self, session, prompt, tool=None):
         return [
             {"type": "control_request", "request_id": "init_1",
              "request": {"subtype": "initialize", "hooks": None}},
             {"type": "user", "message": {"role": "user",
-             "content": [{"type": "text", "text": prompt}]}},
+             "content": [{"type": "text", "text": self._turn_text(prompt, tool)}]}},
         ]
 
     def turn_context(self, session, first_turn, prompt, pinned_id,
                      browser_mcp=None, system_prompt="", terminal_mcp=None,
-                     spawn_mcp=None):
+                     spawn_mcp=None, tool=None):
         # --replay-user-messages gives a protocol-level acknowledgement for
         # each text message accepted from stdin. Do not expose steering until
         # the original prompt itself has been replayed, and retain the exact
         # FIFO identities needed to correlate later replays without putting a
         # Puppy request id into model-visible text.
         return {
-            "initial_prompt": prompt,
+            "initial_prompt": self._turn_text(prompt, tool),
             "initial_user_replayed": False,
             "pending_steers": [],
+            "tool": driver_base.tool_name(tool),
+            # transcript identities a later undo needs: this turn's prompt and
+            # its last chain entry (user/assistant/compaction messages carry
+            # the uuid the CLI persists; results do not)
+            "native_session_id": "",
+            "prompt_uuid": "",
+            "tail_uuid": "",
+            "compacted": False,
         }
 
     def approval_payload(self, request_id, behavior, original_input, message="",
@@ -168,7 +246,7 @@ class ClaudeDriver(Driver):
         # A pipe drain proves only that bytes reached the CLI process. Its
         # replay of the original user message proves that the live query has
         # actually accepted stream input and can receive additional guidance.
-        return bool(ctx.get("initial_user_replayed"))
+        return bool(ctx.get("initial_user_replayed")) and not ctx.get("tool")
 
     def parse_line(self, line, ctx):
         try:
@@ -200,6 +278,7 @@ class ClaudeDriver(Driver):
         if t == "system":
             sub = ev.get("subtype")
             if sub == "init":
+                ctx["native_session_id"] = str(ev.get("session_id") or "")
                 acts = [{"a": "native_id", "id": ev.get("session_id", "")},
                         {"a": "transient", "msg": {"type": "turn_init",
                                                    "model": ev.get("model", ""),
@@ -213,10 +292,24 @@ class ClaudeDriver(Driver):
             if sub == "thinking_tokens":
                 return [{"a": "transient", "msg": {"type": "thinking_tokens",
                                                    "tokens": ev.get("estimated_tokens", 0)}}]
+            if sub == "compact_boundary":
+                ctx["compacted"] = True
+                if ev.get("uuid"):
+                    ctx["tail_uuid"] = str(ev["uuid"])
+                meta = ev.get("compact_metadata") if isinstance(
+                    ev.get("compact_metadata"), dict) else {}
+                pre = meta.get("pre_tokens")
+                text = "Context compacted"
+                if isinstance(pre, (int, float)) and not isinstance(pre, bool) and pre > 0:
+                    text += " · {:,} tokens before".format(int(pre))
+                return [{"a": "event", "kind": "info",
+                         "data": {"subtype": "compact", "text": text}}]
             return []
 
         if t == "assistant":
             acts = []
+            if ev.get("uuid"):
+                ctx["tail_uuid"] = str(ev["uuid"])
             msg = ev.get("message") or {}
             # per-response model id - catches mid-turn fallback (e.g. fable -> opus)
             mdl = msg.get("model") or ""
@@ -238,6 +331,8 @@ class ClaudeDriver(Driver):
 
         if t == "user":
             acts = []
+            if ev.get("uuid"):
+                ctx["tail_uuid"] = str(ev["uuid"])
             msg = ev.get("message") or {}
             content = msg.get("content")
             if isinstance(content, list):
@@ -249,6 +344,7 @@ class ClaudeDriver(Driver):
                     if not ctx.get("initial_user_replayed") and \
                             text == ctx.get("initial_prompt"):
                         ctx["initial_user_replayed"] = True
+                        ctx["prompt_uuid"] = str(ev.get("uuid") or "")
                         continue
                     pending = ctx.get("pending_steers") or []
                     match = next((index for index, item in enumerate(pending)
@@ -288,7 +384,16 @@ class ClaudeDriver(Driver):
 
         if t == "result":
             usage = ev.get("usage") or {}
+            identity = {
+                "native_session_id": ctx.get("native_session_id") or
+                                     str(ev.get("session_id") or ""),
+                "native_prompt_id": ctx.get("prompt_uuid") or "",
+                "native_tail_id": ctx.get("tail_uuid") or "",
+            }
+            if ctx.get("tool") == "compact":
+                identity["compacted"] = bool(ctx.get("compacted"))
             return [{"a": "result", "data": {
+                **identity,
                 "ok": not ev.get("is_error", False),
                 "duration_ms": ev.get("duration_api_ms"),
                 "cost_usd": ev.get("total_cost_usd"),

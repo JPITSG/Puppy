@@ -53,6 +53,7 @@ def drop_hub(session_id: int) -> None:
         h.held.clear()
         h.paused_queue.clear()
         asyncio.ensure_future(h.kill())
+    driver_base.undo_state_clear(session_id)
 
 
 # ---- session-list broadcasting ----
@@ -61,6 +62,20 @@ def _is_queued_config(item) -> bool:
     """Queue items are prompt strings, except pending configuration changes
     and pending engine switches."""
     return isinstance(item, dict) and item.get("kind") == "config"
+
+
+def _is_queued_tool(item) -> bool:
+    """A session tool waiting its turn: runnable like a prompt, ordered like a
+    change, and tagged with the engine that accepted it."""
+    return isinstance(item, dict) and item.get("kind") == "tool"
+
+
+# the session tools a console may request; drivers say which they offer
+SESSION_TOOLS = {"compact": "Compact context", "undo": "Undo last turn"}
+
+
+def _queued_tool_key(fields: dict) -> str:
+    return "tool:{}:{}".format(fields.get("engine") or "", fields.get("tool") or "")
 
 
 def _is_queued_engine(item) -> bool:
@@ -80,8 +95,12 @@ def _queued_engine_key(fields: dict) -> str:
 
 
 def _queued_item_key(item: dict) -> str:
-    return (_queued_engine_key if _is_queued_engine(item) else
-            _queued_config_key)(item.get("fields") or {})
+    fields = item.get("fields") or {}
+    if _is_queued_engine(item):
+        return _queued_engine_key(fields)
+    if _is_queued_tool(item):
+        return _queued_tool_key(fields)
+    return _queued_config_key(fields)
 
 
 def _queued_item_wire(item):
@@ -110,6 +129,15 @@ def _valid_restored_item(item) -> bool:
     if _is_queued_engine(item):
         if set(fields) != {"engine", "model", "effort", "permission_mode"}:
             return False
+    elif _is_queued_tool(item):
+        if set(fields) != {"engine", "tool"}:
+            return False
+        try:
+            driver = get_driver(fields["engine"])
+        except KeyError:
+            return False
+        return fields["tool"] in [str(option.get("value") or "")
+                                  for option in driver.tool_options()]
     elif _is_queued_config(item):
         if not set(fields).issubset(
                 {"engine", "model", "effort", "permission_mode"}) or not \
@@ -927,6 +955,104 @@ class SessionHub:
                 self._publish_steer_status(receipt)
             return self._steer_response(receipt)
 
+    def _recent_turns(self, limit: int = 3) -> list:
+        """The most recent turns, newest first, read back from the persisted
+        transcript: a result closes a turn and the user event before it names
+        what ran; a prompt with no result did not finish. Nothing before an
+        engine switch belongs to the current native conversation."""
+        turns = []
+        current = None
+        for ev in reversed(db.get_events(self.id, limit=600)):
+            kind = ev.get("kind")
+            data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
+            if kind == "result":
+                if current is not None:
+                    turns.append(current)
+                if data.get("tool"):
+                    turns.append({"kind": "tool", "tool": str(data.get("tool")),
+                                  "text": "", "result": data})
+                    current = None
+                else:
+                    current = {"kind": "prompt", "tool": "", "text": "", "result": data}
+            elif kind == "user":
+                if current is None:
+                    current = {"kind": "prompt", "tool": "", "text": "", "result": {}}
+                current["text"] = str(data.get("text") or "")
+                turns.append(current)
+                current = None
+            elif kind == "engine_switch":
+                break
+            if len(turns) >= limit:
+                break
+        return turns[:limit]
+
+    def request_tool(self, tool: str) -> dict:
+        """Run one session tool. Compaction joins the queue behind pending
+        work (as a runnable tool row tagged with the engine in force there) or
+        starts now; undo needs an idle session with an empty queue and either
+        starts its own tool turn or records the rollback the next prompt
+        applies. Errors are user-facing."""
+        tool = str(tool or "").strip()
+        session = db.get_session(self.id)
+        if session is None:
+            return {"error": "session gone"}
+        label = SESSION_TOOLS.get(tool, tool)
+        engine = self.pending_config()["engine"]
+        try:
+            driver = get_driver(engine)
+        except KeyError:
+            return {"error": "unknown engine '{}'".format(engine)}
+        if tool not in [str(option.get("value") or "")
+                        for option in driver.tool_options()]:
+            return {"error": "{} does not offer {}".format(driver.label, label)}
+        from puppy import cli_upgrade
+        if cli_upgrade.is_running(engine):
+            return {"error": "{} is being updated - try again when it finishes".format(
+                driver.label)}
+        busy = self.status == "running" or bool(self.queue)
+        if tool == "undo":
+            if busy:
+                return {"error": "Wait for the running turn and the queue to finish "
+                                 "before undoing"}
+            if not session.get("native_session_id"):
+                return {"error": "Nothing to undo yet - this session has not run a turn"}
+            try:
+                plan = driver.tool_plan(tool, session, self._recent_turns())
+            except driver_base.ToolUnavailable as exc:
+                return {"error": str(exc)}
+            restore = str(plan.get("restore_text") or "")
+            if not plan.get("run"):
+                state = dict(plan.get("state") or {})
+                state["native_session_id"] = str(session.get("native_session_id") or "")
+                driver_base.undo_state_set(self.id, state)
+                self._emit("info", {"subtype": "tool", "tool": tool, "phase": "done",
+                                    "text": str(plan.get("text") or "Undid the last turn")})
+                return {"ok": True, "queued": False, "restore_text": restore}
+            fields = {"engine": engine, "tool": tool}
+            fields.update({str(k): str(v) for k, v in (plan.get("params") or {}).items()})
+            self._start_turn({"kind": "tool", "fields": fields,
+                              "key": _queued_tool_key(fields)})
+            return {"ok": True, "queued": False, "restore_text": restore}
+        if not busy and not session.get("native_session_id"):
+            return {"error": "Nothing to compact yet - this session has not run a turn"}
+        try:
+            driver.tool_plan(tool, session, [])
+        except driver_base.ToolUnavailable as exc:
+            return {"error": str(exc)}
+        fields = {"engine": engine, "tool": tool}
+        row = {"kind": "tool", "fields": fields, "key": _queued_tool_key(fields)}
+        if busy:
+            if any(_is_queued_tool(item) and item.get("key") == row["key"]
+                   for item in self.queue):
+                return {"ok": True, "queued": True, "duplicate": True}
+            self.queue.append(row)
+            self._broadcast_queue()
+            if self.status != "running":
+                self._start_queue_if_ready()
+            return {"ok": True, "queued": True}
+        self._start_turn(row)
+        return {"ok": True, "queued": False}
+
     def pending_config(self) -> dict:
         """The configuration in force after everything queued: what the next
         newly queued prompt or change would run under."""
@@ -1092,6 +1218,7 @@ class SessionHub:
         self.broadcast({"type": "session_meta",
                         "session": session_payload(db.get_session(self.id))})
         broadcast_sessions()
+        driver_base.undo_state_clear(self.id)
         log.info("session %s switched %s -> %s", self.id, old, engine)
         return True
 
@@ -1334,6 +1461,14 @@ class SessionHub:
                 self.held.insert(index, item)   # nothing changed: keep it held
             self._broadcast_queue()
             return result if "error" in result else {"ok": True}
+        if _is_queued_tool(item):
+            fields = dict(item.get("fields") or {})
+            self.held.pop(index)
+            result = self.request_tool(str(fields.get("tool") or ""))
+            if "error" in result:
+                self.held.insert(index, item)   # nothing ran: keep it held
+            self._broadcast_queue()
+            return result if "error" in result else {"ok": True}
         if _is_queued_config(item):
             fields = dict(item.get("fields") or {})
             self.held.pop(index)
@@ -1373,7 +1508,8 @@ class SessionHub:
             self._discard_abandoned_uploads(removed)
         return count
 
-    def _start_turn(self, text: str) -> None:
+    def _start_turn(self, item) -> None:
+        """Run one queue item now: a prompt string or a runnable tool row."""
         if self.active_since is None:
             self.active_since = time.time()
             self.last_completion_status = ""
@@ -1388,8 +1524,8 @@ class SessionHub:
         self._steer_receipts = {}
         self._last_steering_state = None
         self._active_turn_id = ""
-        self._active_prompt_text = text
-        self.turn_task = asyncio.ensure_future(self._run_turn(text))
+        self._active_prompt_text = item if isinstance(item, str) else ""
+        self.turn_task = asyncio.ensure_future(self._run_turn(item))
         # Publish the active block immediately, before process startup and the
         # first persisted event have a chance to yield the event loop.
         self._publish_steering_state()
@@ -1424,7 +1560,7 @@ class SessionHub:
             return None
 
         prompt_indexes = [index for index, item in enumerate(self.queue)
-                          if not isinstance(item, dict)]
+                          if not isinstance(item, dict) or _is_queued_tool(item)]
         if not prompt_indexes:
             applied = False
             while self.queue:
@@ -1449,7 +1585,8 @@ class SessionHub:
         applied = False
         scan = 0
         while scan < next_prompt:
-            if isinstance(self.queue[scan], dict):
+            if isinstance(self.queue[scan], dict) and \
+                    not _is_queued_tool(self.queue[scan]):
                 self._apply_queued_item(self._pop_queue(scan))
                 next_prompt -= 1
                 applied = True
@@ -1829,9 +1966,12 @@ class SessionHub:
         self.broadcast({"type": "session_meta",
                         "session": session_payload(db.get_session(self.id))})
 
-    async def _run_turn(self, text: str) -> None:
+    async def _run_turn(self, item) -> None:
+        tool_fields = dict(item.get("fields") or {}) if _is_queued_tool(item) else None
+        tool = str(tool_fields.get("tool") or "") if tool_fields else ""
+        text = "" if tool else item
         got_result = False
-        user_event_persisted = False
+        user_event_persisted = bool(tool)   # a tool turn owns no prompt text
         engine_ran = False
         descriptor = None
         self._block_status = "error"   # until a result says otherwise
@@ -1857,14 +1997,43 @@ class SessionHub:
             db.touch_session(self.id, status="running")
             broadcast_sessions()
 
+            if tool:
+                tag = str(tool_fields.get("engine") or "")
+                if tag and tag != str(session.get("engine") or ""):
+                    # its engine switch was cancelled or reordered away
+                    self._block_status = "ok"
+                    self._emit("info", {
+                        "subtype": "config_skipped",
+                        "text": "Skipped a queued {} that belonged to {} - this "
+                                "session is on {}.".format(
+                                    SESSION_TOOLS.get(tool, tool), tag,
+                                    session.get("engine") or "another engine")})
+                    return
+                if workspace_reset or not session.get("native_session_id"):
+                    self._emit("error", {
+                        "text": "Nothing to {} yet - this session has not run a "
+                                "turn.".format("compact" if tool == "compact" else "undo")})
+                    return
+
             fresh_native_session = _starts_fresh_native_session(
                 session, workspace_reset, driver)
+            if fresh_native_session:
+                # a rollback promised against the previous native conversation
+                # cannot apply to a new one
+                driver_base.undo_state_clear(self.id)
             do_handoff = fresh_native_session and \
                 (workspace_reset or handoff.needs_handoff(session))
-            # ahead of the prompt: the divider introduces the turns below it
-            self._note_turn_config(session)
-            user_ev = self._emit("user", {"text": text})
-            user_event_persisted = True
+            user_ev = None
+            if tool:
+                self._emit("info", {
+                    "subtype": "tool", "tool": tool, "phase": "start",
+                    "text": "Compacting context" if tool == "compact"
+                            else "Undoing the last turn"})
+            else:
+                # ahead of the prompt: the divider introduces the turns below it
+                self._note_turn_config(session)
+                user_ev = self._emit("user", {"text": text})
+                user_event_persisted = True
 
             if descriptor is not None:
                 grant = await self._workspace_barrier("pre")
@@ -1893,7 +2062,7 @@ class SessionHub:
 
             prompt = text
             first_turn = fresh_native_session
-            if do_handoff:
+            if do_handoff and user_ev is not None:
                 prompt = handoff.build(session, exclude_seq=user_ev["seq"]) + text
                 self.broadcast({"type": "status", "text": "Seeding new engine with handoff..."})
 
@@ -1901,27 +2070,26 @@ class SessionHub:
             self._active_turn_id = pinned
             self._browser_activity_announced = set()
             self._terminal_activity_announced = set()
-            browser_mcp = browser_agent.turn_mcp(self.id, pinned)
-            terminal_mcp = terminal_agent.turn_mcp(self.id, pinned)
-            spawn_mcp = spawn_agent.turn_mcp(self.id, pinned)
-            system_prompt_text = system_prompts.turn_prompt(
+            # a tool turn addresses the native conversation alone: no agent
+            # bridges and no guidance, so nothing can steer or extend it
+            browser_mcp = None if tool else browser_agent.turn_mcp(self.id, pinned)
+            terminal_mcp = None if tool else terminal_agent.turn_mcp(self.id, pinned)
+            spawn_mcp = None if tool else spawn_agent.turn_mcp(self.id, pinned)
+            system_prompt_text = "" if tool else system_prompts.turn_prompt(
                 remote_workspace=descriptor is not None)
-            argv = driver.build_cmd(
-                session, first_turn, prompt, pinned, browser_mcp=browser_mcp,
-                terminal_mcp=terminal_mcp, spawn_mcp=spawn_mcp,
-                system_prompt=system_prompt_text)
+            driver_kwargs = {"browser_mcp": browser_mcp, "terminal_mcp": terminal_mcp,
+                             "spawn_mcp": spawn_mcp, "system_prompt": system_prompt_text}
+            if tool:
+                driver_kwargs["tool"] = tool_fields
+            argv = driver.build_cmd(session, first_turn, prompt, pinned, **driver_kwargs)
             env = clean_env(dict(os.environ))
             runtime_home = os.path.expanduser("~")
             if runtime_home and runtime_home != "~":
                 env.setdefault("HOME", runtime_home)
-            env.update(driver.build_env(
-                session, first_turn, prompt, pinned, browser_mcp=browser_mcp,
-                terminal_mcp=terminal_mcp, spawn_mcp=spawn_mcp,
-                system_prompt=system_prompt_text))
-            ctx = driver.turn_context(
-                session, first_turn, prompt, pinned, browser_mcp=browser_mcp,
-                terminal_mcp=terminal_mcp, spawn_mcp=spawn_mcp,
-                system_prompt=system_prompt_text)
+            env.update(driver.build_env(session, first_turn, prompt, pinned,
+                                        **driver_kwargs))
+            ctx = driver.turn_context(session, first_turn, prompt, pinned,
+                                      **driver_kwargs)
             if not isinstance(ctx, dict):
                 ctx = {}
             self._driver_ctx = ctx
@@ -1946,7 +2114,9 @@ class SessionHub:
             stderr_task = asyncio.ensure_future(self._pump_stderr(self.proc))
 
             if driver.uses_stdin_stream:
-                for obj in driver.initial_stdin(session, prompt):
+                stdin_objects = driver.initial_stdin(session, prompt, tool=tool_fields) \
+                    if tool else driver.initial_stdin(session, prompt)
+                for obj in stdin_objects:
                     await self._write_stdin(obj)
 
             self._proc_ready = True
@@ -2061,6 +2231,8 @@ class SessionHub:
                         elif driver_base.looks_like_auth_failure(act["data"].get("error")):
                             driver_base.note_auth_failure(
                                 session["engine"], str(act["data"].get("error") or ""))
+                        if tool:
+                            act["data"]["tool"] = tool
                         self._emit("result", act["data"])
                         # claude: close stdin so the process exits cleanly
                         if driver.uses_stdin_stream and self.proc.stdin is not None:
@@ -2105,6 +2277,10 @@ class SessionHub:
             self._reject_unacknowledged_steers(
                 "the active turn stopped before the engine acknowledged steering")
             self._active_prompt_text = ""
+            if engine_ran and not tool:
+                # the pending rollback rode along on this prompt's resume (or
+                # the engine refused it); either way it is spent
+                driver_base.undo_state_clear(self.id)
             if not user_event_persisted:
                 self._discard_abandoned_uploads([text])
             self._active_turn_id = ""

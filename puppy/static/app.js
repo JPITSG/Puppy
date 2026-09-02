@@ -111,6 +111,26 @@ function plusIcon(size) {
   return svg;
 }
 
+/* the composer's session-tools trigger: a wrench on the same 24-grid the
+   settings gear uses, so both read as chrome rather than as content */
+function toolsIcon(size) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const p = document.createElementNS(NS, "path");
+  p.setAttribute("d", "M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z");
+  p.setAttribute("fill", "none");
+  p.setAttribute("stroke", "currentColor");
+  p.setAttribute("stroke-width", "2.2");
+  p.setAttribute("stroke-linecap", "round");
+  p.setAttribute("stroke-linejoin", "round");
+  svg.appendChild(p);
+  return svg;
+}
+
 /* A font's vertical-ellipsis ink is not guaranteed to share its em-box centre.
    Draw the session-menu mark on a symmetric viewBox like every other compact
    chrome button, so the hover square and the visible dots have one centre. */
@@ -3799,6 +3819,29 @@ function backendSupportsSystemPrompt(bid) {
     backend.capabilities.includes("system-prompt");
 }
 
+/* Engine-native maintenance actions the composer's tools menu offers. The
+   node advertises the route; each engine's tool_options say which it can
+   run, and the menu keeps the rest visible but disabled so the answer to
+   "why is undo missing?" is on the row itself. */
+const SESSION_TOOLS = [
+  { value: "compact", label: "Compact context",
+    hint: "Summarize the conversation so far into a shorter context" },
+  { value: "undo", label: "Undo last turn",
+    hint: "Drop your last prompt and its reply from the conversation; files are not changed" },
+];
+
+function sessionToolLabel(value) {
+  const tool = SESSION_TOOLS.find(item => item.value === value);
+  return tool ? tool.label : "Session tool";
+}
+
+function backendSupportsSessionTools(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(item => item.id === bid);
+  return !!backend && Array.isArray(backend.capabilities) &&
+    backend.capabilities.includes("session-tools");
+}
+
 function backendSupportsFileUploads(bid) {
   if (!bid) return true;
   const backend = state.backends.find(item => item.id === bid);
@@ -6771,6 +6814,8 @@ class SessionView {
               <div class="composer-meta-scroll">
                 <button type="button" class="mini attach-add" aria-label="Attach files">
                   <span aria-hidden="true"></span></button>
+                <button type="button" class="mini tools-open hidden" aria-label="Session tools">
+                  <span aria-hidden="true"></span></button>
                 ${composerChoice("perm", "Permissions", "Permission mode")}
                 ${composerChoice("model", "Model", "Model")}
                 ${composerChoice("effort", "Effort", "Reasoning effort")}
@@ -6843,6 +6888,10 @@ class SessionView {
     this.attachStrip = root.querySelector(".attach-strip");
     this.attachButton = root.querySelector(".attach-add");
     this.attachButton.firstElementChild.appendChild(plusIcon(12));
+    this.toolsButton = root.querySelector(".tools-open");
+    this.toolsButton.firstElementChild.appendChild(toolsIcon(12));
+    this.toolsButton.onclick = (e) => { e.stopPropagation(); this.showToolsMenu(e.currentTarget); };
+    this.syncToolsButton();
     this.fileInput = root.querySelector(".attach-input");
     this.headMeta.addEventListener("scroll", () => this.syncHeadOverflow(), { passive: true });
     this.composerMeta.addEventListener("scroll", () => this.syncComposerOverflow(), { passive: true });
@@ -8359,6 +8408,7 @@ class SessionView {
     setMini("effort", "Reasoning effort", eff.effort || "auto", eff.queuedEffort);
     this.syncSwitchLines();   // the newest divider tracks the live selection
     this.syncNativeComposerChoices();
+    this.syncToolsButton();
     this.syncComposerMeta();
     this.syncHeadOverflow();
     this.tab.title = s.name || `Session ${s.id}`;
@@ -8938,10 +8988,13 @@ class SessionView {
         else bits.push("✔");
         if (d.duration_ms) bits.push((d.duration_ms / 1000).toFixed(1) + "s");
         const u = d.usage || {};
-        if (u.input_tokens != null)
+        /* a tool turn (compaction, undo) reports no usage of its own on some
+           engines; "0 in · 0 out" would misreport work that was not counted */
+        const counted = !d.tool || !!(u.input_tokens || u.output_tokens);
+        if (counted && u.input_tokens != null)
           bits.push(fmtTokens(u.input_tokens + (u.cache_read_input_tokens || 0) +
             (u.cache_creation_input_tokens || 0)) + " in");
-        if (u.output_tokens != null) bits.push(fmtTokens(u.output_tokens) + " out");
+        if (counted && u.output_tokens != null) bits.push(fmtTokens(u.output_tokens) + " out");
         bits.push(fmtTime(ev.ts));
         n.innerHTML = bits.join(" · ");
         return n;
@@ -9434,6 +9487,7 @@ class SessionView {
     const s = this.session || {};
     const eng = engineInfo(this.tab.bid, item.engine || s.engine);
     const parts = [];
+    if (item.kind === "tool") return sessionToolLabel(item.tool);
     if (item.kind === "engine") {
       parts.push("Engine → " + ((eng && eng.label) || item.engine || "?"));
       if (item.model) parts.push("Model → " + (modelShorthand(eng, item.model) || item.model));
@@ -9984,6 +10038,48 @@ class SessionView {
     }
   }
 
+  /* the trigger exists wherever the node can run tools; which rows are live
+     follows the engine the NEXT prompt will use */
+  syncToolsButton() {
+    if (!this.toolsButton) return;
+    this.toolsButton.classList.toggle("hidden", !backendSupportsSessionTools(this.tab.bid));
+  }
+
+  showToolsMenu(anchor) {
+    if (!this.session) return;
+    const eff = this.effectiveConfig();
+    const eng = engineInfo(this.tab.bid, eff.engine || this.session.engine);
+    const offered = new Map(((eng && eng.tool_options) || []).map(o => [o.value, o]));
+    const engineLabel = (eng && eng.label) || "this engine";
+    const options = SESSION_TOOLS.map(tool => {
+      const o = offered.get(tool.value);
+      return {
+        value: tool.value, label: tool.label, disabled: !o,
+        hint: o ? (o.hint || tool.hint) : `Not available for ${engineLabel}`,
+      };
+    });
+    this.optionMenu(anchor, options, "", (value) => this.runSessionTool(value));
+  }
+
+  async runSessionTool(tool) {
+    if (tool === "undo") {
+      const ok = await modalConfirm("Undo last turn",
+        "Removes your last prompt and its reply from the conversation, so the " +
+        "next prompt continues from before them. Files changed by that turn " +
+        "are not reverted.");
+      if (!ok) return;
+    }
+    try {
+      const r = await api(this.tab.bid, `sessions/${this.tab.sid}/tool`,
+        { method: "POST", body: { tool } });
+      if (r.queued) toast(r.duplicate ? "Compaction is already queued" :
+        "Compaction queued behind the pending work", "ok");
+      /* the undone prompt comes back to the composer for editing, never on
+         top of something already being written */
+      if (r.restore_text && !this.ta.value.trim()) this.setComposer(r.restore_text);
+    } catch (e) { toast(e.message, "error"); }
+  }
+
   showPermMenu(anchor) {
     if (!this.session) return;
     const spec = this.composerChoiceSpec("perm");
@@ -10040,11 +10136,13 @@ class SessionView {
       const selected = current === o.value;
       const row = choiceOptionNode(o.label, selected);
       if (o.hint) row.title = o.hint;
+      row.disabled = !!o.disabled;
       row.tabIndex = selected ? 0 : -1;
       row.onmouseenter = () => highlight(index);
       row.onfocus = row.onmouseenter;
       row.onclick = (event) => {
         event.stopPropagation();
+        if (o.disabled) return;
         dismiss(true);
         onPick(o.value);
       };

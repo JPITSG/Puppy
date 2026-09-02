@@ -432,6 +432,32 @@ session websocket accepts `requeue_held` / `discard_held` with the same
 stale-index guard as `unqueue`. A prompt is consumed durably the moment its
 turn starts, so a crash never runs one twice.
 
+## Session tools
+
+Nodes advertising `session-tools` accept `POST /api/sessions/{sid}/tool` with
+`{"tool": "compact"}` or `{"tool": "undo"}`, and every entry of `/api/engines`
+carries the additive `tool_options` list naming what that engine can run
+(OpenCode's ACP surface offers neither, so its list is empty). Both actions
+are engine-native: Claude compacts by running its `/compact` local command
+inside an ordinary stream-json turn and undoes by resuming the next prompt
+with `--resume-session-at`/`--resume-drops-turn`, which branches its
+transcript so the dropped turn stays orphaned for every later resume; Codex
+compacts with `thread/compact/start` (a turn of its own) and undoes with
+`thread/revert`. Undo is conversation-only on both engines: files changed by
+the dropped turn are left alone.
+
+Compaction while a turn runs or prompts wait joins the message queue as a
+runnable, additive `{kind:"tool"}` row tagged with the engine in force at the
+tail; it runs in visible order, can be cancelled like any row, and is parked
+as held work by a restart. Undo needs an idle session with an empty queue and
+a completed last turn whose result recorded the engine's native identities
+(`native_session_id` plus `native_prompt_id`/`native_tail_id` for Claude or
+`native_turn_id` for Codex); an older, interrupted, or first turn answers 409
+with the reason. The response's `queued` flag says whether compaction waited,
+and `restore_text` hands an undone prompt back to the composer. Tool turns
+persist an `info` event (`subtype: "tool"`) and a `result` stamped with
+`tool`; they receive no agent bridges, guidance, or steering.
+
 ## Shared composer drafts
 
 Nodes advertising the additive `session-drafts` capability persist one

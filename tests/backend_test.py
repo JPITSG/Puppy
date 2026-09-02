@@ -251,6 +251,8 @@ def exercise_driver_normalization() -> None:
         },
     }), context)
     assert completed == [{"a": "result", "data": {
+        # the identities a later undo reverts to ride on every prompt result
+        "native_session_id": "thread-1", "native_turn_id": "turn-1",
         "ok": True, "usage": {
             "input_tokens": 12, "output_tokens": 3,
             "cached_input_tokens": 4, "reasoning_output_tokens": 2,
@@ -1255,6 +1257,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "spawn-progress-limits" in ping["capabilities"]
         assert "session-search" in ping["capabilities"]
         assert "session-event-window" in ping["capabilities"]
+        assert "session-tools" in ping["capabilities"]
         assert "shutdown-notice" in ping["capabilities"]
         assert ping["shutting_down"] is False
         # browser surface: capability is static, enablement is node config
@@ -1589,6 +1592,22 @@ async def exercise_node(url: str, token: str, expected_version: str,
                 idle_steer = await response.json()
                 assert response.status == 409, idle_steer
             assert idle_steer["error"] == "there is no active turn to steer"
+            # session tools: malformed requests are 400, a session that has
+            # never run a turn has nothing to compact or undo (409), and no
+            # engine is ever spawned by either answer
+            for payload in ([], {"tool": 5}, {"tool": "explode"}):
+                async with http.post(
+                        url + f"/api/sessions/{normal['id']}/tool",
+                        headers=good, json=payload, ssl=pinned) as response:
+                    rejected_tool = await response.json()
+                    assert response.status == 400, (payload, rejected_tool)
+            for tool in ("compact", "undo"):
+                async with http.post(
+                        url + f"/api/sessions/{normal['id']}/tool",
+                        headers=good, json={"tool": tool}, ssl=pinned) as response:
+                    idle_tool = await response.json()
+                    assert response.status == 409, (tool, idle_tool)
+                    assert "has not run a turn" in idle_tool["error"], idle_tool
             for query in ("limit=nope", "limit=-1", "limit=0", "limit=501",
                           "before_seq=nope", "before_seq=0", "after_seq=nope",
                           "after_seq=-1", "before_seq=3&after_seq=1"):

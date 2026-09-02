@@ -29,7 +29,7 @@ import shutil
 import time
 
 from puppy import __version__
-from puppy.drivers.base import Driver, clean_env
+from puppy.drivers.base import Driver, ToolUnavailable, clean_env, tool_name
 from puppy.user_paths import service_home
 
 log = logging.getLogger("puppy.drivers.codex")
@@ -50,6 +50,7 @@ _ID_THREAD = "puppy-thread"
 _ID_TURN = "puppy-turn"
 _ID_INTERRUPT = "puppy-interrupt"
 _ID_STEER_PREFIX = "puppy-steer:"
+_ID_TOOL = "puppy-tool"
 
 
 def _rpc(request_id, method: str, params=None) -> dict:
@@ -529,11 +530,51 @@ class CodexDriver(Driver):
             account_as_of=now)
         return True
 
+    def tool_options(self):
+        return [
+            {"value": "compact", "label": "Compact context",
+             "hint": "Summarize the conversation so far into a shorter context"},
+            {"value": "undo", "label": "Undo last turn",
+             "hint": "Drop your last prompt and its reply from the conversation; "
+                     "files are not changed"},
+        ]
+
+    def tool_plan(self, tool, session, turns):
+        """Verified against codex-cli 0.152.1: thread/compact/start runs the
+        compaction as its own turn (a contextCompaction item, then
+        turn/completed); thread/revert {threadId, beforeTurnId} drops that
+        turn and everything after it from the thread and answers with the
+        thread, then notifies thread/reverted. thread/rollback is deprecated
+        and refused for paginated threads. Neither touches files."""
+        if tool == "compact":
+            return {"run": True, "params": {}}
+        if tool != "undo":
+            raise ToolUnavailable("{} does not support {}".format(self.label, tool))
+        last = turns[0] if turns else None
+        if last is None:
+            raise ToolUnavailable("Nothing to undo yet - this session has not run a turn")
+        if last.get("kind") != "prompt":
+            raise ToolUnavailable(
+                "The last thing that ran was a {}, which cannot be undone".format(
+                    "compaction" if last.get("tool") == "compact" else "session tool"))
+        result = last.get("result") or {}
+        if not result:
+            raise ToolUnavailable("The last turn did not finish, so it cannot be undone")
+        if not result.get("native_turn_id") or \
+                str(result.get("native_session_id") or "") != \
+                str(session.get("native_session_id") or ""):
+            raise ToolUnavailable(
+                "The last turn predates undo support here and cannot be undone")
+        return {"run": True,
+                "params": {"before_turn_id": str(result["native_turn_id"])},
+                "restore_text": str(last.get("text") or "")}
+
     def build_cmd(self, session, first_turn, prompt, pinned_id, browser_mcp=None,
-                  system_prompt="", terminal_mcp=None, spawn_mcp=None):
+                  system_prompt="", terminal_mcp=None, spawn_mcp=None, tool=None):
         argv = [self.binary, "app-server", "--stdio"]
-        for mcp in (item for item in (browser_mcp, terminal_mcp, spawn_mcp)
-                    if item):
+        # a tool turn only addresses the existing thread: no agent bridges
+        bridges = () if tool_name(tool) else (browser_mcp, terminal_mcp, spawn_mcp)
+        for mcp in (item for item in bridges if item):
             prefix = "mcp_servers." + mcp["name"]
             argv += ["-c", prefix + ".command=" + json.dumps(mcp["command"]),
                      "-c", prefix + ".args=" + json.dumps(
@@ -547,8 +588,10 @@ class CodexDriver(Driver):
         return argv
 
     def turn_context(self, session, first_turn, prompt, pinned_id, browser_mcp=None,
-                     system_prompt="", terminal_mcp=None, spawn_mcp=None):
+                     system_prompt="", terminal_mcp=None, spawn_mcp=None, tool=None):
         return {
+            "tool": tool_name(tool),
+            "tool_params": dict(tool) if isinstance(tool, dict) else {},
             "phase": "initialize",
             "first_turn": bool(first_turn),
             "native_session_id": str(session.get("native_session_id") or ""),
@@ -569,7 +612,7 @@ class CodexDriver(Driver):
             "completed": False,
         }
 
-    def initial_stdin(self, session, prompt):
+    def initial_stdin(self, session, prompt, tool=None):
         return [_rpc(_ID_INITIALIZE, "initialize", {
             "clientInfo": {
                 "name": "puppy", "title": "Puppy", "version": __version__,
@@ -593,6 +636,7 @@ class CodexDriver(Driver):
     def steer_ready(self, session, ctx):
         ctx = ctx if isinstance(ctx, dict) else {}
         return ctx.get("phase") == "running" and not ctx.get("completed") and \
+            not ctx.get("tool") and \
             bool(ctx.get("thread_id")) and bool(ctx.get("turn_id"))
 
     @staticmethod
@@ -669,7 +713,7 @@ class CodexDriver(Driver):
             return [{"a": "steer_result", "request_id": steer_id,
                      "ok": True, "error": ""}]
         if request_id not in (_ID_INITIALIZE, _ID_THREAD, _ID_TURN,
-                              _ID_INTERRUPT):
+                              _ID_INTERRUPT, _ID_TOOL):
             return []
         if ev.get("error"):
             # Completion can win the race with a user interrupt. In that case
@@ -706,8 +750,32 @@ class CodexDriver(Driver):
             model = str(result.get("model") or "")
             if model:
                 actions.append({"a": "model", "model": model})
-            actions.append({"a": "stdin", "data": self._turn_request(ctx)})
+            if ctx.get("tool") == "compact":
+                actions.append({"a": "stdin", "data": _rpc(
+                    _ID_TOOL, "thread/compact/start", {"threadId": thread_id})})
+                actions.append({"a": "transient", "msg": {
+                    "type": "status", "text": "Compacting context..."}})
+            elif ctx.get("tool") == "undo":
+                actions.append({"a": "stdin", "data": _rpc(_ID_TOOL, "thread/revert", {
+                    "threadId": thread_id,
+                    "beforeTurnId": str((ctx.get("tool_params") or {}).get(
+                        "before_turn_id") or ""),
+                })})
+            else:
+                actions.append({"a": "stdin", "data": self._turn_request(ctx)})
             return actions
+
+        if request_id == _ID_TOOL:
+            if ctx.get("tool") == "undo":
+                # the thread answered already rewritten; thread/reverted and
+                # the status churn that follow are not this turn's business
+                ctx["completed"] = True
+                return [{"a": "result", "data": {
+                    "ok": True, "stop_reason": "reverted", "usage": {}}}]
+            # compaction runs as its own turn: turn/started names it and
+            # turn/completed decides the outcome, like any other turn
+            ctx["phase"] = "running"
+            return []
 
         if request_id == _ID_TURN:
             result = result if isinstance(result, dict) else {}
@@ -750,6 +818,9 @@ class CodexDriver(Driver):
         if kind == "filechange":
             return [{"a": "transient", "msg": {
                 "type": "status", "text": "Applying changes..."}}]
+        if kind == "contextcompaction":
+            return [{"a": "transient", "msg": {
+                "type": "status", "text": "Compacting context..."}}]
         if kind == "mcptoolcall":
             tool = ".".join(str(value) for value in
                             (item.get("server"), item.get("tool")) if value)
@@ -1004,14 +1075,22 @@ class CodexDriver(Driver):
             ctx["completed"] = True
             status = str(turn.get("status") or "").lower()
             duration = turn.get("durationMs")
+            # what a later undo reverts to: this turn's id on the thread it
+            # ran in (a tool turn records nothing - it is not undoable)
+            identity = {
+                "native_session_id": str(ctx.get("thread_id") or ""),
+                "native_turn_id": "" if ctx.get("tool") else turn_id,
+            }
             if status == "completed":
                 return [{"a": "result", "data": {
+                    **identity,
                     "ok": True, "usage": dict(ctx.get("usage") or {}),
                     "duration_ms": duration, "stop_reason": "completed",
                 }}]
             error = _error_text(turn.get("error"),
                                 "Codex turn {}".format(status or "failed"))
             result = {"a": "result", "data": {
+                **identity,
                 "ok": False, "error": error,
                 "usage": dict(ctx.get("usage") or {}),
                 "duration_ms": duration,

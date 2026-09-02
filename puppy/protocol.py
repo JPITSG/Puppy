@@ -116,6 +116,13 @@ SEARCH_CAPABILITY = "session-search"
 # of history around one event (a search hit) instead of paging back to it
 # from the newest; older nodes can only page backwards from the tail.
 SESSION_EVENT_WINDOW_CAPABILITY = "session-event-window"
+# POST /api/sessions/{sid}/tool runs one engine-native maintenance action:
+# "compact" summarizes the native context in place (queued behind pending work
+# as an additive runnable {kind:"tool"} row) and "undo" drops the last prompt
+# and its reply from the native conversation (idle sessions only; files are
+# never touched). Each engine lists what it offers in the engines payload's
+# additive tool_options; a console shows the composer's tools menu only here.
+SESSION_TOOLS_CAPABILITY = "session-tools"
 
 BASE_CAPABILITIES = (
     "sessions",
@@ -158,6 +165,7 @@ BASE_CAPABILITIES = (
     SPAWN_LIMITS_CAPABILITY,
     SEARCH_CAPABILITY,
     SESSION_EVENT_WINDOW_CAPABILITY,
+    SESSION_TOOLS_CAPABILITY,
 )
 TERMINAL_CAPABILITY = "terminal"
 # Identified node-owned PTYs, their create/list/delete routes, and the
