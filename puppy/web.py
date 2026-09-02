@@ -774,7 +774,13 @@ async def h_settings_get(request: web.Request):
 async def h_settings_patch(request: web.Request):
     body = await request.json()
     if "instance_name" in body:
-        config.set_value("instance_name", str(body["instance_name"]).strip()[:60] or "puppy")
+        instance_name = str(body["instance_name"]).strip()[:60] or "puppy"
+        # the spawn bridge resolves this name to the local node, so it must
+        # not shadow a paired backend or a reserved alias
+        conflict = backends.instance_name_conflict(instance_name)
+        if conflict:
+            return web.json_response({"error": conflict}, status=409)
+        config.set_value("instance_name", instance_name)
     if "terminal_command" in body:
         config.set_value("terminal.command", str(body["terminal_command"]).strip() or "/bin/bash -l")
     if "default_cwd" in body:

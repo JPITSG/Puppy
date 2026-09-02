@@ -44,7 +44,8 @@ TOOL_INSTRUCTIONS = (
     "codex gpt-5.6-sol at max effort to <task>\" - the words after \"using\" "
     "are the exact engine key, then optionally the exact model id, then "
     "optionally \"at <effort> effort\"; \"on <node>\" may be quoted or absent "
-    "(absent means this session's node), and omitted parts mean the defaults. "
+    "(absent means this session's node; a node is its display name or the "
+    "#id targets shows), and omitted parts mean the defaults. "
     "\"@Spawn 10 agents ...\" is the same directive as a parallel fan-out: "
     "pass that number as count. "
     "Treat one such directive as one explicit request: make exactly one spawn "
@@ -121,8 +122,9 @@ TOOLS = [
         "with unfamiliar names.",
         {
             "node": {"type": "string", "maxLength": 80,
-                     "description": "Node name for engine/model detail. Omit "
-                                    "to list the reachable nodes."},
+                     "description": "Node name or #id for engine/model "
+                                    "detail. Omit to list the reachable "
+                                    "nodes."},
         }, read_only=True),
     _tool(
         "spawn",
@@ -141,7 +143,8 @@ TOOLS = [
                                "relevant paths, constraints, and the exact "
                                "form of answer you need."},
             "node": {"type": "string", "maxLength": 80,
-                     "description": "Target node name from targets. Omit to "
+                     "description": "Target node name or #id from targets. "
+                                    "Omit to "
                                     "run on this session's node."},
             "engine": {"type": "string", "maxLength": 32,
                        "description": "Engine key on the target node (e.g. "

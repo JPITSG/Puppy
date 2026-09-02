@@ -2698,6 +2698,49 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert stored["last_known"]["uploads"]["max_file_size_mb"] >= 0
         assert "token" not in stored
 
+        # Node names must resolve unambiguously for spawned agents: a backend
+        # may not reuse another backend's name (in any case), this
+        # controller's instance name, a reserved local alias, or the #id
+        # form - and the instance name may not shadow a backend either.
+        for taken, needle in (("BACKEND-TEST-NODE", "already the name of backend"),
+                              ("local", "reserved"), ("This Node", "reserved"),
+                              ("#7", "cannot start with '#'")):
+            async with http.post(url + "/api/backends", headers=headers, json={
+                    "name": taken, "urls": [backend_url], "token": backend_token,
+                    "tls_fingerprint": backend_fingerprint}) as response:
+                refused = await response.json()
+                assert response.status == 409, (taken, refused)
+            assert needle in refused["error"], (taken, refused)
+        async with http.get(url + "/api/settings", headers=headers) as response:
+            instance_name = (await response.json())["instance_name"]
+        async with http.post(url + "/api/backends", headers=headers, json={
+                "name": instance_name.upper(), "urls": [backend_url],
+                "token": backend_token,
+                "tls_fingerprint": backend_fingerprint}) as response:
+            refused = await response.json()
+            assert response.status == 409, refused
+        assert "own instance name" in refused["error"], refused
+        # a second node reporting the same instance name gets no silent twin
+        async with http.post(url + "/api/backends", headers=headers, json={
+                "name": "", "urls": [backend_url], "token": backend_token,
+                "tls_fingerprint": backend_fingerprint}) as response:
+            refused = await response.json()
+            assert response.status == 409, refused
+        assert "pass a different name" in refused["error"], refused
+        async with http.patch(url + "/api/backends/{}".format(stored["id"]),
+                              headers=headers, json={"name": "Local"}) as response:
+            refused = await response.json()
+            assert response.status == 409 and "reserved" in refused["error"], refused
+        async with http.patch(url + "/api/settings", headers=headers,
+                              json={"instance_name": "Backend-Test-Node"}) as response:
+            refused = await response.json()
+            assert response.status == 409, refused
+        assert "already the name of backend" in refused["error"], refused
+        async with http.get(url + "/api/settings", headers=headers) as response:
+            assert (await response.json())["instance_name"] == instance_name
+        async with http.get(url + "/api/backends", headers=headers) as response:
+            assert len((await response.json())["backends"]) == 1
+
         async with http.get(
                 url + f"/api/b/{stored['id']}/browser/instances/A1B2/binding",
                 headers=headers) as response:

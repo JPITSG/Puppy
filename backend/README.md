@@ -401,7 +401,11 @@ budget, while `update_limits` and `cancel` accept the same list shape (`cancel`
 runs concurrently and reports each job's outcome; a relayed verdict stays
 readable for the rest of the turn, and a combined result too large for one
 bridge response is shortened per answer with a hint to re-read that agent
-alone rather than replaced by an error). Each node
+alone rather than replaced by an error). A node is addressed by its display
+name or the `#id` that `targets` lists; a name fitting more than one node is
+refused rather than resolved to the first match, and the controller keeps
+backend names unique, distinct from its own instance name, and free of the
+reserved local aliases when backends are paired or renamed. Each node
 also caps its total running spawned agents. Limit changes remain
 ownership-checked, stay within 30–7200
 seconds, and are offered to the orchestrating engine only for explicit user

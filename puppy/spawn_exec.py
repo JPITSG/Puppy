@@ -1011,24 +1011,52 @@ def _local_node_name() -> str:
     return str(config.get("instance_name") or "this node")
 
 
-def resolve_target(node_name):
-    """Map a caller-supplied node name to {"bid", "name"}; bid 0 is local.
+def _node_ref(node: dict) -> str:
+    return "{} (#{})".format(node["name"], node["bid"])
 
-    Names live in the controller's backends table, so a headless backend can
-    only ever resolve itself - which is exactly the reach it has."""
-    wanted = str(node_name or "").strip()
-    if not wanted or wanted.lower() in ("local", "this node") or \
-            wanted.lower() == _local_node_name().lower():
-        return {"bid": 0, "name": _local_node_name()}
+
+def resolve_target(node_name):
+    """Map a caller-supplied node reference to {"bid", "name"}; bid 0 is local.
+
+    A reference is a display name (matched case- and whitespace-
+    insensitively) or the "#<id>" targets shows beside it. Names live in the
+    controller's backends table, so a headless backend can only ever resolve
+    itself - which is exactly the reach it has. A name that fits more than
+    one node (this node and a backend, or two backends - the controller
+    refuses new collisions, but older rows may carry them) is an error that
+    names every candidate's #id, never a silent pick of the first."""
     from puppy import backends
-    known = []
-    for item in backends.list_backends():
-        name = str(item.get("name") or "")
-        known.append(name)
-        if name.lower() == wanted.lower():
-            return {"bid": int(item["id"]), "name": name}
+    wanted = str(node_name or "").strip()
+    local = {"bid": 0, "name": _local_node_name()}
+    known = [{"bid": int(item["id"]), "name": str(item.get("name") or "")}
+             for item in backends.list_backends()]
+    listing = ", ".join(_node_ref(node) for node in [local] + known)
+    if not wanted:
+        return local
+    if wanted.startswith("#"):
+        try:
+            bid = int(wanted[1:].strip())
+        except ValueError:
+            bid = -1
+        for node in [local] + known:
+            if node["bid"] == bid:
+                return node
+        raise SpawnError("unknown node id '{}' (nodes: {})".format(
+            wanted[:80], listing))
+    key = backends.node_key(wanted)
+    matches = [local] if key in backends.RESERVED_NODE_NAMES or \
+        key == backends.node_key(local["name"]) else []
+    matches.extend(node for node in known
+                   if backends.node_key(node["name"]) == key)
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        raise SpawnError(
+            "node name '{}' is ambiguous - it fits {}; pass the #id instead, "
+            "or rename the backend under Settings".format(
+                wanted[:80], " and ".join(_node_ref(node) for node in matches)))
     raise SpawnError("unknown node '{}' (nodes: {})".format(
-        wanted[:80], ", ".join([_local_node_name()] + known) or "none"))
+        wanted[:80], listing))
 
 
 def _spawn_channel(bid: int) -> dict:
@@ -1678,7 +1706,7 @@ async def targets_for_turn(session: dict, params: dict) -> dict:
         lines.extend(_engine_lines(engines))
         return {"text": "\n".join(lines)}
     lines = ["Nodes reachable for spawned agents:",
-             "- {} (this session's node)".format(_local_node_name())]
+             "- {} (#0, this session's node)".format(_local_node_name())]
     for item in backends.list_backends():
         name = str(item.get("name") or "?")
         online = backends.backend_is_online(int(item["id"]))
@@ -1686,12 +1714,12 @@ async def targets_for_turn(session: dict, params: dict) -> dict:
             (item.get("capabilities") or [])
         live_limits = protocol.SPAWN_LIMITS_CAPABILITY in \
             (item.get("capabilities") or [])
-        lines.append("- {} ({}{})".format(
-            name, "online" if online else "offline",
+        lines.append("- {} (#{}, {}{})".format(
+            name, item["id"], "online" if online else "offline",
             ("" if live_limits else ", legacy fixed timeout only")
             if capable else ", needs a Puppy upgrade for spawned agents"))
-    lines.append("Call targets with a node name for its engines, models, "
-                 "efforts, and permission modes.")
+    lines.append("Call targets with a node name (or its #id) for its engines, "
+                 "models, efforts, and permission modes.")
     return {"text": "\n".join(lines)}
 
 

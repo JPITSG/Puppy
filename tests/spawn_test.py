@@ -339,9 +339,69 @@ async def test_validation(cwd):
     try:
         spawn_exec.resolve_target("missing-node")
     except spawn_exec.SpawnError as exc:
-        assert "NAS.LAN" in str(exc)
+        assert "NAS.LAN (#{})".format(remote_bid) in str(exc)
     else:
         raise AssertionError("unknown node accepted")
+
+    # a reference is a display name (any case or spacing) or the #id targets
+    # shows; a name that fits more than one node is refused naming every
+    # candidate, never resolved to the first match
+    instance = str(config.get("instance_name"))
+    assert spawn_exec.resolve_target("#0")["bid"] == 0
+    assert spawn_exec.resolve_target("# {}".format(remote_bid))["name"] == \
+        "NAS.LAN"
+    assert spawn_exec.resolve_target(" nas.LAN ")["bid"] == remote_bid
+    assert spawn_exec.resolve_target("Local")["bid"] == 0
+    assert spawn_exec.resolve_target("This  Node")["bid"] == 0
+    assert spawn_exec.resolve_target(instance.upper())["bid"] == 0
+    for bad in ("#999", "#x", "#"):
+        try:
+            spawn_exec.resolve_target(bad)
+        except spawn_exec.SpawnError as exc:
+            assert "unknown node id" in str(exc) and \
+                "NAS.LAN (#{})".format(remote_bid) in str(exc), str(exc)
+        else:
+            raise AssertionError("bad node id accepted: " + bad)
+
+    def insert_backend(name):
+        return db.execute(
+            "INSERT INTO backends(name,url,urls,token,protocol,capabilities,"
+            "created_at) VALUES(?,?,?,?,?,?,?)",
+            (name, "http://192.0.2.10:1", '["http://192.0.2.10:1"]',
+             "token", 1, '["spawn-exec"]', time.time()))
+    twin = insert_backend("nas.lan")
+    shadow = insert_backend(instance)
+    alias = insert_backend("Local")
+    try:
+        for name, ids in (("NAS.lan", (remote_bid, twin)),
+                          (instance, (0, shadow)), ("local", (0, alias))):
+            try:
+                spawn_exec.resolve_target(name)
+            except spawn_exec.SpawnError as exc:
+                assert "ambiguous" in str(exc) and all(
+                    "(#{})".format(bid) in str(exc) for bid in ids), str(exc)
+            else:
+                raise AssertionError("ambiguous node name resolved: " + name)
+        assert spawn_exec.resolve_target("#{}".format(twin))["bid"] == twin
+        assert spawn_exec.resolve_target("#{}".format(shadow))["bid"] == shadow
+        # the controller refuses to create such collisions in the first place
+        assert "already the name of backend #{}".format(remote_bid) in \
+            backends.node_name_conflict("Nas.Lan", exclude_bid=twin)
+        assert "reserved" in backends.node_name_conflict("This Node")
+        assert "own instance name" in backends.node_name_conflict(
+            instance.upper())
+        assert "cannot start with '#'" in backends.node_name_conflict("#1")
+        assert "required" in backends.node_name_conflict("  ")
+        assert "already the name of backend" in \
+            backends.instance_name_conflict("nas.lan")
+        assert "reserved" in backends.instance_name_conflict("local")
+        assert backends.instance_name_conflict("something-new") == ""
+    finally:
+        db.execute("DELETE FROM backends WHERE id IN (?,?,?)",
+                   (twin, shadow, alias))
+    assert backends.node_name_conflict("nas.lan", exclude_bid=remote_bid) == ""
+    assert backends.node_name_conflict("fresh-name") == ""
+    assert spawn_exec.resolve_target("nas.lan")["bid"] == remote_bid
     print("validation and node resolution ok")
 
 
@@ -444,8 +504,10 @@ async def test_turn_dispatch(cwd):
         relayed["text"]
 
     targets = await spawn_exec.targets_for_turn(session, {})
-    assert config.get("instance_name") in targets["text"]
-    assert "NAS.LAN" in targets["text"]
+    assert "{} (#0, this session's node)".format(
+        config.get("instance_name")) in targets["text"]
+    assert "NAS.LAN (#{}, online)".format(remote_bid) in targets["text"]
+    assert "or its #id" in targets["text"]
     # scope the engine listing to the stub so no real CLI probe runs here
     saved_drivers = dict(drivers._DRIVERS)
     drivers._DRIVERS.clear()

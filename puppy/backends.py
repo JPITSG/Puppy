@@ -959,6 +959,54 @@ def _build_upgrade_payload() -> tuple:
     }
     return payload, manifest
 
+# Aliases the spawn bridge resolves to this controller's own node, so no
+# backend may carry them; "#<id>" is reserved for id references.
+RESERVED_NODE_NAMES = ("local", "this node", "this backend")
+
+
+def node_key(name) -> str:
+    """Case- and whitespace-insensitive form of a node display name: spawn
+    directives are typed by people (and models) who do not reproduce case
+    reliably, so names differing only that way are the same name."""
+    return " ".join(str(name or "").strip().lower().split())
+
+
+def node_name_conflict(name: str, exclude_bid=None) -> str:
+    """Why this display name cannot identify a backend unambiguously ("" if
+    it can): empty, an id reference, a reserved alias, this controller's own
+    instance name, or already another backend's name."""
+    name = str(name or "").strip()
+    if not name:
+        return "backend name is required"
+    if name.startswith("#"):
+        return "backend names cannot start with '#' (that form refers to a node id)"
+    key = node_key(name)
+    if key in RESERVED_NODE_NAMES:
+        return "'{}' is reserved for this controller's own node".format(name)
+    if key == node_key(config.get("instance_name")):
+        return "'{}' is this controller's own instance name".format(name)
+    for item in list_backends():
+        if exclude_bid is not None and int(item["id"]) == int(exclude_bid):
+            continue
+        if node_key(item.get("name")) == key:
+            return "'{}' is already the name of backend #{}".format(
+                name, item["id"])
+    return ""
+
+
+def instance_name_conflict(name: str) -> str:
+    """Why this controller cannot take this instance name ("" if it can): it
+    would shadow a backend or a reserved alias in node resolution."""
+    name = str(name or "").strip()
+    if name.startswith("#") or node_key(name) in RESERVED_NODE_NAMES:
+        return "'{}' is reserved and cannot be the instance name".format(name)
+    for item in list_backends():
+        if node_key(item.get("name")) == node_key(name):
+            return "'{}' is already the name of backend #{}".format(
+                name, item["id"])
+    return ""
+
+
 async def h_list(request: web.Request):
     return web.json_response({"backends": list_backends()})
 
@@ -970,11 +1018,14 @@ async def h_add(request: web.Request):
         return web.json_response({"error": "invalid backend request"}, status=400)
     if not isinstance(body, dict):
         return web.json_response({"error": "invalid backend request"}, status=400)
-    name = (body.get("name") or "").strip()
+    name = (body.get("name") or "").strip()[:80]
     token = (body.get("token") or "").strip()
     auto_upgrade = body.get("auto_upgrade", False)
     if type(auto_upgrade) is not bool:
         return web.json_response({"error": "auto-upgrade must be on or off"}, status=400)
+    conflict = node_name_conflict(name) if name else ""
+    if conflict:
+        return web.json_response({"error": conflict}, status=409)
     try:
         urls = _request_urls(body)
         tls_fingerprint = tls.normalize_fingerprint(
@@ -990,7 +1041,13 @@ async def h_add(request: web.Request):
                                   "status": result.get("status"),
                                   "attempts": result.get("attempts", [])}, status=400)
     remote = result["remote"]
-    name = name or str(remote.get("name") or "").strip() or "backend"
+    name = name or str(remote.get("name") or "").strip()[:80] or "backend"
+    conflict = node_name_conflict(name)
+    if conflict:
+        # the node's own instance name is only a default; a second node
+        # reporting the same one must be told apart by the person pairing it
+        return web.json_response(
+            {"error": conflict + "; pass a different name"}, status=409)
     if auto_upgrade and (remote.get("role") != "backend" or
                          protocol.UPGRADE_CAPABILITY not in (remote.get("capabilities") or [])):
         return web.json_response({
@@ -1034,6 +1091,9 @@ async def h_patch(request: web.Request):
         if not isinstance(body["name"], str) or not body["name"].strip():
             return web.json_response({"error": "backend name is required"}, status=400)
         name = body["name"].strip()[:80]
+        conflict = node_name_conflict(name, exclude_bid=bid)
+        if conflict:
+            return web.json_response({"error": conflict}, status=409)
 
     try:
         urls = _request_urls(body, backend)
