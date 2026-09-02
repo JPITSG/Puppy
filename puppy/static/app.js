@@ -6769,7 +6769,6 @@ class SessionView {
     this.history = [];        // sent messages, oldest first (shell-style recall)
     this.histIdx = null;
     this.histDraft = "";
-    this.ctrlCStreak = 0;     // composer-only: second consecutive Ctrl-C clears the queue
     this.attachments = [];    // staged server files represented by draft marker lines
     this.histAttach = null;   // staged attachments parked while history recall is active
     this.sentThumbs = new Map();  // path -> object URL, so recall can re-show previews
@@ -6973,7 +6972,6 @@ class SessionView {
       this.resizeComposer();
     }
     this.ta.addEventListener("input", () => {
-      this.ctrlCStreak = 0;
       this.histIdx = null;   // manual edits exit history mode
       this.releaseHistoryAttachments();
       this.resizeComposer();
@@ -6982,21 +6980,19 @@ class SessionView {
       this.updateMention();
     });
     this.ta.addEventListener("keydown", (e) => {
-      if (e.isComposing) { this.ctrlCStreak = 0; return; }
+      if (e.isComposing) return;
       /* The open mention list owns its navigation keys - most importantly
          Escape, which must close the list, never interrupt the turn. */
       if (this.mentionKeydown(e)) return;
-      const ctrlC = e.ctrlKey && !e.metaKey && !e.altKey && (e.key === "c" || e.key === "C");
-      if (e.key === "Escape" || ctrlC) {
+      if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
-        if (e.repeat) return; // holding C must not accidentally erase the queue
-        this.ctrlCStreak = ctrlC ? this.ctrlCStreak + 1 : 0;
-        this.interrupt(this.ctrlCStreak > 1);
+        if (e.repeat) return;
+        this.interrupt();
         return;
       }
-      // Modifier keydowns between two presses do not break the sequence; typing does.
-      if (!(["Control", "Shift", "Alt", "Meta"].includes(e.key))) this.ctrlCStreak = 0;
+      /* Ctrl/Cmd+C has no shortcut here: it falls through to the modifier
+         guard below so textarea selection and native clipboard copy work. */
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); this.submit(); return; }
       if (e.shiftKey || e.ctrlKey || e.altKey || e.metaKey || e.isComposing) return;
       const atStart = this.ta.selectionStart === 0 && this.ta.selectionEnd === 0;
@@ -7028,8 +7024,7 @@ class SessionView {
     });
     /* Rows keep composer focus via pointerdown preventDefault, so any real
        blur means the user left the composer and the list goes with them. */
-    this.ta.addEventListener("blur", () => { this.ctrlCStreak = 0; this.hideMention(); });
-    this.ta.addEventListener("pointerdown", () => { this.ctrlCStreak = 0; });
+    this.ta.addEventListener("blur", () => this.hideMention());
     this.sendBtn.onclick = () => this.status === "running" ? this.interrupt() : this.submit();
     this.steerBtn.onclick = () => this.steer();
     /* submit() already queues when a turn is in flight - the same path Enter
@@ -7612,7 +7607,6 @@ class SessionView {
     if (e.key === "Escape") {
       e.preventDefault();
       e.stopPropagation();
-      this.ctrlCStreak = 0;
       /* Inside the spawn wizard, Escape slides back one part; only the flat
          list dismisses. Leaving the wizard's first part returns to the list. */
       if (this.mentionSpawn) { this.spawnStepBack(); return true; }
@@ -7622,13 +7616,11 @@ class SessionView {
     }
     if (this.mentionSpawn && e.key === "Backspace" && !m.query) {
       e.preventDefault();
-      this.ctrlCStreak = 0;
       this.spawnStepBack();
       return true;
     }
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
-      this.ctrlCStreak = 0;
       this.selectMention((m.sel + (e.key === "ArrowDown" ? 1 : m.items.length - 1))
         % m.items.length);
       return true;
@@ -7643,7 +7635,6 @@ class SessionView {
         return false;
       }
       e.preventDefault();
-      this.ctrlCStreak = 0;
       this.applyMention(item);
       return true;
     }
@@ -9486,9 +9477,9 @@ class SessionView {
     this.updateRunState();
     this.setStatus("Starting…");
   }
-  interrupt(clearQueue = false) {
+  interrupt() {
     if (this.ws && this.ws.readyState === 1)
-      this.ws.send(JSON.stringify({ type: "interrupt", clear_queue: clearQueue }));
+      this.ws.send(JSON.stringify({ type: "interrupt", clear_queue: false }));
   }
 
   /* ---- approvals ---- */

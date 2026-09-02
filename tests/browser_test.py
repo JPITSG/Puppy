@@ -2632,6 +2632,20 @@ def check_active_turn_steering_ui(ui_source: str, css_source: str) -> None:
     assert 'if (e.key === "Enter" && !e.shiftKey && !e.isComposing) ' \
         '{ e.preventDefault(); this.submit(); return; }' in ui_source
     assert 'backend.capabilities.includes("active-turn-steering")' in ui_source
+
+    # Copy shortcuts inside the textarea stay entirely browser-native. Escape
+    # and the visible Stop button are the explicit ways to interrupt a turn.
+    keydown_start = ui_source.index('this.ta.addEventListener("keydown"')
+    keydown_end = ui_source.index('this.ta.addEventListener("blur"', keydown_start)
+    keydown = ui_source[keydown_start:keydown_end]
+    assert 'if (e.key === "Escape") {' in keydown
+    assert "this.interrupt();" in keydown
+    assert 'e.key === "c"' not in keydown and 'e.key === "C"' not in keydown
+    assert "ctrlCStreak" not in ui_source
+    assert ('this.sendBtn.onclick = () => this.status === "running" ? '
+            'this.interrupt() : this.submit();') in ui_source
+    assert 'interrupt() {' in ui_source
+    assert 'type: "interrupt", clear_queue: false' in ui_source
     assert 'case "steering_state":' in ui_source
     assert 'case "steer_status":' in ui_source
     assert 'api(this.tab.bid, `sessions/${this.tab.sid}/steer`' in ui_source
@@ -3639,7 +3653,7 @@ def check_browser_chip_order(ui_source: str) -> None:
 
 def check_composer_mentions(ui_source: str, css_source: str) -> None:
     """The chat box's @ shortcut: token detection and filtering run for real,
-    the popup owns its keys ahead of the interrupt path, and both MCP agents
+    the popup owns Escape ahead of the interrupt path, and both MCP agents
     define the inserted mention forms for the engine."""
     start = ui_source.index("\nconst MENTION_QUERY_MAX")
     end = ui_source.index("\n/* ================= SessionView")
@@ -3731,14 +3745,14 @@ console.log(JSON.stringify({
     assert '<div class="mention-pop hidden" role="listbox"' in ui_source
     keydown = ui_source.index('this.ta.addEventListener("keydown"')
     assert ui_source.index("if (this.mentionKeydown(e)) return;", keydown) < \
-        ui_source.index('if (e.key === "Escape" || ctrlC)', keydown)
+        ui_source.index('if (e.key === "Escape")', keydown)
     assert "this.mentionDismissedAt = m.start;" in ui_source
     # the list follows the caret and leaves with composer focus
     assert 'document.addEventListener("selectionchange", this._onSelectionChange);' \
         in ui_source
     assert 'document.removeEventListener("selectionchange", this._onSelectionChange);' \
         in ui_source
-    assert "{ this.ctrlCStreak = 0; this.hideMention(); }" in ui_source
+    assert 'this.ta.addEventListener("blur", () => this.hideMention());' in ui_source
     # completion inserts through the ordinary edit path and keeps focus on rows
     apply_start = ui_source.index("  applyMention(item) {")
     apply_method = ui_source[apply_start:
@@ -3859,7 +3873,7 @@ class MockTa {
 }
 class View {
   constructor(bid){this.tab={bid,sid:9};this.mention=null;this.mentionDismissedAt=-1;
-    this.mentionSpawn=null;this.mentionRowEls=[];this.histIdx=null;this.ctrlCStreak=0;
+    this.mentionSpawn=null;this.mentionRowEls=[];this.histIdx=null;
     this.mentionData={at:Date.now(),browsers:null,terminals:null,promise:null};
     this.mentionEl=new MockNode("div");
     Object.defineProperty(this.mentionEl,"textContent",{
