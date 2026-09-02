@@ -13477,8 +13477,7 @@ class SettingsView {
         </div>
       </div>
       <p class="bind-help">Literal IPv4 or IPv6 address and TCP port for this WebUI instance.
-        A changed endpoint is tested directly from this browser before it can be saved.
-        <span id="set-protocol-note"></span></p>
+        A changed endpoint is tested directly from this browser before it can be saved.</p>
       <div class="hidden" id="set-https-options">
         <div class="field-lbl">SSL certificate
           <div class="seg" role="group" aria-label="SSL certificate source">
@@ -13489,9 +13488,7 @@ class SettingsView {
           </div>
         </div>
         <div id="set-cert-auto-panel">
-          <p class="bind-help">Puppy generates a private key and a self-signed certificate containing
-            only the endpoint names needed by this listener. Browsers will show a trust warning
-            until you explicitly trust it.</p>
+          <p class="bind-help">Puppy generates a self-signed certificate for this listener.</p>
           <div class="kv"><span class="k">SSL certificate</span><span class="v"
             title="${autoIdentity.available ? `SHA-256 ${esc(autoIdentity.sha256)}` : ""}"
             >${esc(identitySummary(autoIdentity))}</span></div>
@@ -13543,7 +13540,6 @@ class SettingsView {
     const httpsOptions = c1.querySelector("#set-https-options");
     const autoPanel = c1.querySelector("#set-cert-auto-panel");
     const customPanel = c1.querySelector("#set-cert-custom-panel");
-    const protocolNote = c1.querySelector("#set-protocol-note");
     certificateAuto.disabled = !settings.web.openssl_available && !autoIdentity.available;
     const paintTransport = () => {
       const secure = selectedScheme === "https";
@@ -13552,10 +13548,6 @@ class SettingsView {
       protocolHttp.setAttribute("aria-pressed", String(!secure));
       protocolHttps.setAttribute("aria-pressed", String(secure));
       httpsOptions.classList.toggle("hidden", !secure);
-      protocolNote.textContent = secure
-        ? "Encrypted HTTPS only; HTTP connections will not be accepted."
-        : "Cleartext HTTP; sign-ins and API traffic are not encrypted in transit.";
-      protocolNote.classList.toggle("warn", !secure);
       const automatic = selectedCertificateSource === "auto";
       certificateAuto.classList.toggle("on", automatic);
       certificateCustom.classList.toggle("on", !automatic);
