@@ -1884,7 +1884,8 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .settings-form .full{grid-column:1/-1}
 .bind-fields{display:grid;grid-template-columns:minmax(0,1fr) 132px auto;gap:0 14px;min-width:0}
 .bind-fields>*{min-width:0}
-.bind-help{margin:-5px 0 7px;color:var(--txt3);font-size:10.5px;line-height:1.45}
+/* the same 10px a wrapped input leaves before the next caption */
+.bind-help{margin:-5px 0 10px;color:var(--txt3);font-size:10.5px;line-height:1.45}
 .bind-pending{
   display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;
   margin:5px 0 7px;padding:8px 8px 8px 10px;border:1px solid var(--warn-line-soft);
