@@ -6,8 +6,10 @@ cancel kills), request validation, node resolution, the turn-bound bridge
 dispatch with its identity checks, live local/remote limit updates, sweeper
 reaping, the runner's synchronous turn-end reaping and shutdown cancels,
 controller-chosen relay ids (unconfirmed starts, lost jobs, retained handles,
-concurrent fleet compensation), one real Unix-socket round trip, and the HTTP
-job routes including idempotent client ids.
+concurrent fleet compensation), concurrent per-job cancels, settled relay
+verdicts, the updater launch gate and teardown blocker, bridge frame sizing
+with shortened combined results, one real Unix-socket round trip, and the
+HTTP job routes including idempotent client ids.
 No real engine is invoked, no network is reached, and no quota is spent.
 """
 import asyncio
@@ -496,6 +498,19 @@ async def test_turn_dispatch(cwd):
     over_socket = await loop.run_in_executor(
         None, spawn_agent._bridge_call, "targets", {})
     assert "Nodes reachable" in over_socket["text"]
+    # the largest schema-valid prompt crosses the bridge whole, whatever its
+    # script: UTF-8 frames, and the cap sized for six-byte escapes
+    for prompt in ("\u6f22\u5b57" * 60000, "\x01" * spawn_exec.MAX_PROMPT_CHARS,
+                   "\U0001f436" * spawn_exec.MAX_PROMPT_CHARS):
+        assert len(prompt) == spawn_exec.MAX_PROMPT_CHARS
+        try:
+            await loop.run_in_executor(
+                None, spawn_agent._bridge_call, "spawn",
+                {"prompt": prompt, "node": "nowhere", "cwd": cwd})
+        except spawn_agent.SpawnAgentError as exc:
+            assert "unknown node" in str(exc), str(exc)[:200]
+        else:
+            raise AssertionError("unknown node accepted over the socket")
     await spawn_agent.stop(None)
     hub.status = "idle"
     hub._active_turn_id = ""
@@ -587,10 +602,24 @@ def fake_requests(behaviour: dict, calls: list):
         if handler is None:
             raise AssertionError("unexpected {} {}".format(method, path))
         outcome = handler(path, body)
+        if asyncio.iscoroutine(outcome):
+            outcome = await outcome
         if isinstance(outcome, BaseException):
             raise outcome
         return outcome
     return fake
+
+
+def finished_job(job_id, answer, **extra):
+    job = {"id": job_id, "status": "done", "elapsed_s": 5, "answer": answer,
+           "error": "", "usage": {"output_tokens": 3}}
+    job.update(extra)
+    return {"ok": True, "job": job}
+
+
+async def slow(seconds, outcome):
+    await asyncio.sleep(seconds)
+    return outcome
 
 
 def running_job(job_id, **extra):
@@ -813,7 +842,15 @@ async def test_relay_start(cwd):
             session, "turn-r", {"jobs": [pending_id], "wait_s": 1})
         assert "Status: lost" in lost["text"] and "no spawned agent" in \
             lost["text"], lost
-        assert pending_id not in mgr.remote
+        # the verdict settles on the handle: readable again, no longer
+        # outstanding, and dropped at the turn's end without a round trip
+        assert mgr.remote[pending_id]["final"]["status"] == "lost"
+        assert pending_id not in spawn_exec.turn_job_ids(sid, "turn-r")
+        calls.clear()
+        again = await spawn_exec.wait_for_turn(
+            session, "turn-r", {"jobs": [pending_id], "wait_s": 1})
+        assert "Status: lost" in again["text"] and calls == []
+        mgr.remote.pop(pending_id)
         # whereas an unreachable node keeps the last known state and the handle
         behaviour["GET"] = lambda path, body: unreached()
         still = await spawn_exec.wait_for_turn(
@@ -849,6 +886,50 @@ async def test_relay_start(cwd):
             session, "turn-r", {"jobs": [confirmed_id]})
         assert "Cancelled spawned agent" in cancelled["text"]
         assert confirmed_id not in mgr.remote
+
+        # cancels run concurrently and report per job: a node that cannot be
+        # reached keeps that handle (retried at the turn's end) while the
+        # others are released, and one slow node never holds the rest
+        for job_id in ("cc000001", "cc000002", "cc000003"):
+            spawn_exec._register_remote(session, "turn-r",
+                                        {"bid": remote_bid, "name": "NAS.LAN"},
+                                        job_id)
+        behaviour["DELETE"] = lambda path, body: (
+            unreached() if path.endswith("cc000002")
+            else slow(0.4, {"ok": True}))
+        started_at = time.monotonic()
+        mixed = await spawn_exec.cancel_for_turn(
+            session, "turn-r", {"jobs": ["cc000001", "cc000002", "cc000003"]})
+        assert time.monotonic() - started_at < 0.75
+        assert "Cancelled spawned agent cc000001 on NAS.LAN." in mixed["text"]
+        assert "Could not cancel spawned agent cc000002" in mixed["text"]
+        assert "Cancelled spawned agent cc000003 on NAS.LAN." in mixed["text"]
+        assert "cc000002" in mgr.remote and "cc000001" not in mgr.remote \
+            and "cc000003" not in mgr.remote
+        mgr.remote.pop("cc000002")
+
+        # a relayed verdict stays readable for the rest of the turn without
+        # another round trip, so a shortened combined result can be re-read
+        # one agent at a time
+        spawn_exec._register_remote(session, "turn-r",
+                                    {"bid": remote_bid, "name": "NAS.LAN"},
+                                    "dd000001")
+        behaviour["GET"] = lambda path, body: finished_job(
+            "dd000001", "the remote verdict")
+        calls.clear()
+        first_read = await spawn_exec.wait_for_turn(
+            session, "turn-r", {"jobs": ["dd000001"], "wait_s": 1})
+        assert "the remote verdict" in first_read["text"]
+        assert len(calls) == 1 and "dd000001" in mgr.remote
+        assert mgr.remote["dd000001"]["final"]["status"] == "done"
+        second_read = await spawn_exec.wait_for_turn(
+            session, "turn-r", {"jobs": ["dd000001"], "wait_s": 1})
+        assert "the remote verdict" in second_read["text"]
+        assert len(calls) == 1
+        assert spawn_exec.turn_job_ids(sid, "turn-r").count("dd000001") == 0
+        calls.clear()
+        await spawn_exec.end_turn(sid, "turn-r")
+        assert "dd000001" not in mgr.remote and calls == []
 
         # a fleet with one failed start cancels the rest concurrently
         counter = {"n": 0}
@@ -902,6 +983,101 @@ async def test_relay_start(cwd):
         hub.status = "idle"
         hub._active_turn_id = ""
     print("relayed start tracking, lost jobs, and fleet compensation ok")
+
+
+async def test_upgrade_gate(cwd):
+    """An engine updater and a spawn launch can no longer interleave, and a
+    job still tearing down keeps blocking that engine's updater."""
+    from puppy import cli_upgrade
+    mgr = spawn_exec.manager()
+    sid = db.create_session("gate test", "fake", cwd, "", "", "blue",
+                            "standard")
+    hub = runner.hub(sid)
+    hub.status = "running"
+    hub._active_turn_id = "turn-g"
+    session = db.get_session(sid)
+    driver = drivers._DRIVERS["fake"]
+
+    async def claim_during_refresh():
+        # the updater wins the slot while prepare_request awaits the catalog
+        cli_upgrade._runs["fake"] = {"state": "running"}
+    driver.dynamic_model_options = True
+    driver.refresh_model_options = claim_during_refresh
+    before = mgr.running_count()
+    try:
+        try:
+            await spawn_exec.start_for_turn(
+                session, "turn-g", {"prompt": "race", "model": "hang",
+                                    "wait_s": 0})
+        except spawn_exec.SpawnError as exc:
+            assert "being upgraded" in str(exc) and exc.status == 409
+        else:
+            raise AssertionError("spawn launched under a running updater")
+        assert mgr.running_count() == before
+    finally:
+        cli_upgrade._runs.pop("fake", None)
+        del driver.refresh_model_options
+        driver.dynamic_model_options = False
+        hub.status = "idle"
+        hub._active_turn_id = ""
+
+    settled = spawn_exec.SpawnJob(request_for("ok", cwd), ("remote",))
+    settled._finish("done")
+    settled.task = asyncio.get_event_loop().create_future()
+    mgr.jobs[settled.id] = settled
+    try:
+        assert not settled.running
+        assert any(item["name"] == "spawned agent " + settled.id
+                   for item in runner.engine_blockers("fake"))
+        assert not runner.engine_blockers("other")
+        settled.task.set_result(None)
+        assert not any(item["name"] == "spawned agent " + settled.id
+                       for item in runner.engine_blockers("fake"))
+    finally:
+        mgr.jobs.pop(settled.id, None)
+    print("upgrade launch gate and teardown blocker ok")
+
+
+def test_bridge_sizing():
+    """Schema-valid payloads fit the bridge whole; an oversized combined
+    result is shortened per agent, never replaced by an id-less error."""
+    biggest = {"session_id": "1", "turn_id": "t", "method": "spawn",
+               "params": {"prompt": "\x01" * spawn_exec.MAX_PROMPT_CHARS,
+                          "cwd": "/" + "d" * 4000, "node": "n" * 80,
+                          "count": 12}}
+    assert len(spawn_agent._encode(biggest)) <= spawn_agent.MAX_REQUEST
+    small = {"ok": True, "result": {"text": "fine", "entries": [("x", "y")]}}
+    wire = json.loads(spawn_agent._wire_response(small))
+    assert wire == {"ok": True, "result": {"text": "fine"}}
+
+    answer = ("\u6f22\u5b57" * 20000)[:spawn_exec.ANSWER_LIMIT]
+    entries = []
+    for index in range(spawn_exec.MAX_WAIT_JOBS):
+        payload = finished_job("ee{:06x}".format(index), answer)["job"]
+        payload.update(engine="fake", cwd="/tmp", tool_calls=2)
+        entries.append((payload, "NAS.LAN"))
+    full = spawn_exec.jobs_text(entries)
+    assert len(full.encode("utf-8")) > spawn_agent.MAX_RESPONSE
+    wire = spawn_agent._wire_response(
+        {"ok": True, "result": spawn_exec._rendered(entries)})
+    assert len(wire) <= spawn_agent.MAX_RESPONSE
+    decoded = json.loads(wire)
+    assert decoded["ok"] is True and set(decoded["result"]) == {"text"}
+    text = decoded["result"]["text"]
+    assert "Answers were shortened" in text
+    for payload, _node in entries:
+        assert payload["id"] in text
+        assert "call wait with jobs [\"{}\"] alone".format(payload["id"]) \
+            in text
+    assert text.count("more characters omitted") == spawn_exec.MAX_WAIT_JOBS
+    # the first shortening step that fits is the one used, so as much of
+    # every answer as possible survives
+    assert "\u6f22\u5b57" * 4000 in text
+    # a lone answer can never be too large, so it is never shortened
+    single = spawn_agent._wire_response(
+        {"ok": True, "result": spawn_exec._rendered(entries[:1])})
+    assert "shortened" not in json.loads(single)["result"]["text"]
+    print("bridge sizing and shortened results ok")
 
 
 async def test_http_routes(cwd):
@@ -1041,6 +1217,8 @@ async def main():
         await test_parallel(cwd)
         await test_turn_end_reaping(cwd)
         await test_relay_start(cwd)
+        await test_upgrade_gate(cwd)
+        test_bridge_sizing()
         await test_http_routes(cwd)
     finally:
         await spawn_exec.manager().shutdown()

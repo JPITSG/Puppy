@@ -25,8 +25,15 @@ log = logging.getLogger("puppy.spawn.agent")
 
 SERVER_NAME = "puppy_spawn"
 SOCKET_NAME = "agent.sock"
-MAX_REQUEST = 512 * 1024
+# Bridge frames are UTF-8 JSON (no ASCII escaping), so a schema-valid
+# request always fits: the largest prompt (120,000 characters) costs at most
+# six bytes per character after JSON escaping, well under this cap.
+MAX_REQUEST = 1024 * 1024
 MAX_RESPONSE = 1024 * 1024
+# A combined result too large for one response is re-rendered with every
+# answer capped at these lengths in turn; the ids and the way back to each
+# full answer (wait with that id alone) always survive.
+ANSWER_SHORTENING_STEPS = (20000, 8000, 3000, 1000, 300, 0)
 REQUEST_TIMEOUT = 55.0
 
 TOOL_INSTRUCTIONS = (
@@ -48,7 +55,9 @@ TOOL_INSTRUCTIONS = (
     "finished - keep calling wait with the still-running job ids - and only "
     "then act on the collected answers as the user's task directs (judge, "
     "filter, deduplicate, aggregate). For large fan-outs, tell the agents to "
-    "answer concisely so the combined results stay readable. Otherwise, call "
+    "answer concisely so the combined results stay readable; if a combined "
+    "result had to be shortened it says so, and wait with one job id alone "
+    "returns that agent's full answer. Otherwise, call "
     "targets to discover "
     "node names, engines, models, efforts, and permission modes; then call "
     "spawn with a complete self-contained prompt - the spawned agent does not "
@@ -373,6 +382,37 @@ def _timeout_message(request) -> str:
             "with its job id")
 
 
+def _encode(payload: dict) -> bytes:
+    return json.dumps(payload, separators=(",", ":"),
+                      ensure_ascii=False).encode("utf-8") + b"\n"
+
+
+def _wire_response(response: dict) -> bytes:
+    """Serialize a bridge answer so that it always fits. A combined
+    spawned-agent result too large for one response is re-rendered with each
+    answer shortened - the ids and a recovery hint survive - instead of
+    being replaced by a generic error that hides every finished answer."""
+    result = response.get("result") if response.get("ok") else None
+    if isinstance(result, dict):
+        # the entries a result was rendered from never travel
+        response = dict(response, result={"text": str(result.get("text") or "")})
+    encoded = _encode(response)
+    if len(encoded) <= MAX_RESPONSE:
+        return encoded
+    entries = result.get("entries") if isinstance(result, dict) else None
+    if entries:
+        from puppy import spawn_exec
+        for limit in ANSWER_SHORTENING_STEPS:
+            encoded = _encode({"ok": True, "result": {
+                "text": spawn_exec.jobs_text(entries, answer_limit=limit)}})
+            if len(encoded) <= MAX_RESPONSE:
+                return encoded
+    text = str((result.get("text") if isinstance(result, dict)
+                else response.get("error")) or "")
+    return _encode({"ok": False, "error": "spawn response was too large; "
+                    "it began: " + text[:4000]})
+
+
 async def _handle_connection(reader, writer) -> None:
     request = None
     try:
@@ -396,10 +436,7 @@ async def _handle_connection(reader, writer) -> None:
         log.exception("spawn agent request failed")
         response = {"ok": False, "error": "spawn operation failed internally"}
     try:
-        encoded = json.dumps(response, separators=(",", ":")).encode("utf-8") + b"\n"
-        if len(encoded) > MAX_RESPONSE:
-            encoded = b'{"ok":false,"error":"spawn response was too large"}\n'
-        writer.write(encoded)
+        writer.write(_wire_response(response))
         await writer.drain()
     except Exception:
         pass
@@ -419,10 +456,10 @@ def _bridge_call(method: str, params: dict) -> dict:
     turn_id = os.environ.get("PUPPY_SPAWN_TURN_ID", "")
     if not path or not session_id or not turn_id:
         raise SpawnAgentError("Puppy spawn bridge environment is incomplete")
-    request = json.dumps({
+    request = _encode({
         "session_id": session_id, "turn_id": turn_id,
         "method": method, "params": params,
-    }, separators=(",", ":")).encode("utf-8") + b"\n"
+    })
     if len(request) > MAX_REQUEST:
         raise SpawnAgentError("spawn tool request is too large")
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

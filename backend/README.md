@@ -397,7 +397,11 @@ requests are refused while the engine's updater runs. A parallel fan-out
 (spawn `count`, up to 12) is expanded by the bridge into independent jobs -
 a remote fleet is simply that many relayed single starts, so any spawn-exec
 node can host one - `wait` operates on job-id lists with one shared concurrent
-budget, while `update_limits` and `cancel` accept the same list shape. Each node
+budget, while `update_limits` and `cancel` accept the same list shape (`cancel`
+runs concurrently and reports each job's outcome; a relayed verdict stays
+readable for the rest of the turn, and a combined result too large for one
+bridge response is shortened per answer with a hint to re-read that agent
+alone rather than replaced by an error). Each node
 also caps its total running spawned agents. Limit changes remain
 ownership-checked, stay within 30–7200
 seconds, and are offered to the orchestrating engine only for explicit user

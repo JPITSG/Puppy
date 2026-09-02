@@ -799,6 +799,18 @@ class _Manager:
                 "for some to finish or cancel them", 429)
 
     def start_job(self, request: dict, owner, job_id=None) -> SpawnJob:
+        # The last word before the CLI is launched. prepare_request's own
+        # check precedes awaits (a model-catalog refresh) during which an
+        # updater may claim this engine's slot; nothing awaits between this
+        # check and the job counting as that engine's blocker, and the
+        # updater claims its slot synchronously after its own blocker check,
+        # so the two can no longer interleave.
+        from puppy import cli_upgrade
+        engine = str(request.get("engine") or "")
+        if cli_upgrade.is_running(engine):
+            raise SpawnError(
+                "{} is being upgraded on this node right now - retry "
+                "shortly".format(get_driver(engine).label), 409)
         job = SpawnJob(request, owner, job_id=job_id)
         self.jobs[job.id] = job
         job.task = asyncio.ensure_future(job.run())
@@ -873,9 +885,12 @@ class _Manager:
         owner = ("turn", int(session_id), str(turn_id))
         local = [job for job in self.jobs.values()
                  if job.owner == owner and job.running]
-        remote = [(job_id, handle) for job_id, handle
-                  in self.turn_handles(session_id, turn_id)
-                  if not handle.get("abandoning")]
+        remote = []
+        for job_id, handle in self.turn_handles(session_id, turn_id):
+            if handle.get("final") is not None:
+                self.remote.pop(job_id, None)   # nothing left to cancel
+            elif not handle.get("abandoning"):
+                remote.append((job_id, handle))
         tasks = [asyncio.ensure_future(self.cancel(
                     job, "the turn that spawned this agent ended"))
                  for job in local]
@@ -892,21 +907,32 @@ class _Manager:
         from puppy import runner
         now = time.monotonic()
         wall_now = time.time()
+        reap = []
         for job in list(self.jobs.values()):
             if job.running and job.owner[0] == "turn" and \
                     not runner.hub(job.owner[1]).tool_turn_active(job.owner[2]):
-                await self.cancel(
-                    job, "the turn that spawned this agent ended")
+                reap.append(self.cancel(
+                    job, "the turn that spawned this agent ended"))
             elif job.running and now > job.deadline + 30:
                 # run() enforces the live deadline itself; this is the backstop
                 # for a wedged reader and observes live limit changes through
                 # the deadline property.
-                await self.cancel(job, job.timeout_error(now),
-                                  status="timeout")
+                reap.append(self.cancel(job, job.timeout_error(now),
+                                        status="timeout"))
             elif not job.running and job.finished_at and \
                     wall_now - job.finished_at > PURGE_AFTER_S:
                 self.jobs.pop(job.id, None)
+        if reap:
+            # one wedged process must not hold the others' cleanup
+            await asyncio.gather(*reap, return_exceptions=True)
         for job_id, handle in list(self.remote.items()):
+            if handle.get("final") is not None:
+                # a settled verdict stays readable for a while, like a
+                # finished local job, then goes the same way
+                if wall_now - float(handle.get("finished_at") or wall_now) > \
+                        PURGE_AFTER_S:
+                    self.remote.pop(job_id, None)
+                continue
             if runner.hub(handle["session_id"]).tool_turn_active(
                     handle["turn_id"]):
                 continue
@@ -941,7 +967,8 @@ class _Manager:
                  for job in list(self.jobs.values()) if job.running]
         tasks.extend(asyncio.ensure_future(self._abandon_handle(job_id, handle))
                      for job_id, handle in list(self.remote.items())
-                     if not handle.get("abandoning"))
+                     if not handle.get("abandoning") and
+                     handle.get("final") is None)
         await self._reap(tasks, SHUTDOWN_GRACE_S, "shutdown")
         self.jobs.clear()
         self.remote.clear()
@@ -972,9 +999,9 @@ def turn_job_ids(session_id: int, turn_id: str) -> list:
     owner = ("turn", int(session_id), str(turn_id))
     ids = [job.id for job in _manager.jobs.values()
            if job.owner == owner and job.running]
-    ids.extend(job_id for job_id, _handle
+    ids.extend(job_id for job_id, handle
                in _manager.turn_handles(session_id, turn_id)
-               if job_id not in ids)
+               if job_id not in ids and handle.get("final") is None)
     return ids
 
 
@@ -1128,8 +1155,21 @@ def _format_usage(job: dict) -> str:
     return " · ".join(parts)
 
 
-def job_text(job: dict, node_name: str) -> str:
-    """One shared rendering for local payloads and relayed remote payloads."""
+def _shortened(text, answer_limit, job_id) -> str:
+    text = str(text or "")
+    if answer_limit is None or len(text) <= answer_limit:
+        return text
+    return (text[:answer_limit] +
+            "\n[... {} more characters omitted so the combined result fits "
+            "in one response; call wait with jobs [\"{}\"] alone to read "
+            "this agent's full answer]".format(len(text) - answer_limit,
+                                              job_id))
+
+
+def job_text(job: dict, node_name: str, answer_limit=None) -> str:
+    """One shared rendering for local payloads and relayed remote payloads.
+    ``answer_limit`` caps the answer text when a combined result has to be
+    shortened to fit one bridge response; the cut names the way back."""
     head = "Spawned agent {} on {} · {}".format(
         job.get("id"), node_name,
         " · ".join(value for value in (
@@ -1172,8 +1212,8 @@ def job_text(job: dict, node_name: str) -> str:
         lines.append("Status: completed in {}s{}".format(
             elapsed, " · " + detail if detail else ""))
         lines.append(UNTRUSTED_MARK)
-        lines.append(str(job.get("answer") or
-                         "(the spawned agent returned no text)"))
+        lines.append(_shortened(job.get("answer"), answer_limit, job.get("id"))
+                     or "(the spawned agent returned no text)")
     else:
         lines.append("Status: {} after {}s{}".format(
             status, elapsed, " · " + detail if detail else ""))
@@ -1181,22 +1221,29 @@ def job_text(job: dict, node_name: str) -> str:
         if job.get("answer"):
             lines.append(UNTRUSTED_MARK)
             lines.append("Partial output before the failure:")
-            lines.append(str(job["answer"]))
+            lines.append(_shortened(job["answer"], answer_limit,
+                                    job.get("id")))
     return "\n".join(lines)
 
 
-def jobs_text(entries) -> str:
+def jobs_text(entries, answer_limit=None) -> str:
     """Combined rendering for a parallel fleet: a completion summary and the
     still-running ids first, then each finished agent's full result block.
-    ``entries`` is a list of (payload, node_name) pairs."""
+    ``entries`` is a list of (payload, node_name) pairs. With
+    ``answer_limit`` every answer is capped (the bridge re-renders an
+    oversized result this way) and the summary says so."""
     if len(entries) == 1:
-        return job_text(entries[0][0], entries[0][1])
+        return job_text(entries[0][0], entries[0][1], answer_limit)
     running = [entry for entry in entries
                if str(entry[0].get("status")) == "running"]
     finished = [entry for entry in entries
                 if str(entry[0].get("status")) != "running"]
     lines = ["Spawned agents: {} of {} finished.".format(
         len(finished), len(entries))]
+    if answer_limit is not None and finished:
+        lines.append(
+            "Answers were shortened to fit this response; call wait with a "
+            "single job id to read that agent's full answer.")
     if running:
         lines.append(
             "Still running: {} - keep calling wait with these job ids until "
@@ -1222,8 +1269,15 @@ def jobs_text(entries) -> str:
     for payload, node_name in finished:
         lines.append("")
         lines.append("=== agent {} ===".format(payload.get("id")))
-        lines.append(job_text(payload, node_name))
+        lines.append(job_text(payload, node_name, answer_limit))
     return "\n".join(lines)
+
+
+def _rendered(entries: list) -> dict:
+    """A bridge result: the text plus the entries it was rendered from, so
+    the bridge can re-render with shorter answers if the text is too large
+    for one response (the entries themselves never travel)."""
+    return {"text": jobs_text(entries), "entries": entries}
 
 
 def _relayed_job(data: dict, node_name: str) -> dict:
@@ -1241,10 +1295,24 @@ def _register_remote(session: dict, turn_id: str, target: dict,
         "session_id": int(session["id"]), "turn_id": str(turn_id),
         "registered_clock": time.monotonic(), "retry_at": 0.0,
         "abandoning": False,
+        # the verdict once the node reported one: readable for the rest of
+        # the turn without another round trip (a combined result that had to
+        # be shortened is re-read one agent at a time)
+        "final": None, "finished_at": 0.0,
     }
     manager().remote[str(job_id)] = handle
     manager().ensure_sweeper()
     return handle
+
+
+def _note_remote_outcome(job: dict) -> None:
+    """Record a relayed job's terminal payload on its handle."""
+    if str(job.get("status") or "running") == "running":
+        return
+    handle = manager().remote.get(str(job.get("id") or ""))
+    if handle is not None and handle.get("final") is None:
+        handle["final"] = dict(job)
+        handle["finished_at"] = time.time()
 
 
 def _discard_remote(job_id: str, handle: dict) -> None:
@@ -1324,10 +1392,8 @@ async def _start_remote(session: dict, turn_id: str, target: dict,
         raise
     if str(job["id"]) != job_id:
         _discard_remote(job_id, handle)
-        if str(job.get("status")) == "running":
-            _register_remote(session, turn_id, target, str(job["id"]))
-    elif str(job.get("status")) != "running":
-        _discard_remote(job_id, handle)
+        _register_remote(session, turn_id, target, str(job["id"]))
+    _note_remote_outcome(job)
     return job
 
 
@@ -1375,10 +1441,13 @@ async def _start_remote_fleet(session: dict, turn_id: str, target: dict,
         raise SpawnError("node '{}' failed while starting the fleet: "
                          "{}".format(target["name"], failure), 502)
     refresh_wait = min(wait_s, REMOTE_FLEET_REFRESH_S)
-    return list(await asyncio.gather(
+    jobs = list(await asyncio.gather(
         *(_refresh_remote(channel, job, refresh_wait,
                           timeout_s=refresh_wait + 15.0)
           for job in jobs)))
+    for job in jobs:
+        _note_remote_outcome(job)
+    return jobs
 
 
 async def start_for_turn(session: dict, turn_id: str, params: dict) -> dict:
@@ -1407,14 +1476,13 @@ async def start_for_turn(session: dict, turn_id: str, params: dict) -> dict:
         channel = _spawn_channel(target["bid"])
         jobs = await _start_remote_fleet(session, turn_id, target, channel,
                                          body, count, initial_wait)
-        return {"text": jobs_text([(job, target["name"]) for job in jobs])}
+        return _rendered([(job, target["name"]) for job in jobs])
     request = await prepare_request(body)
     manager().ensure_capacity(count)
     owner = ("turn", int(session["id"]), str(turn_id))
     jobs = [manager().start_job(request, owner) for _ in range(count)]
     await asyncio.gather(*(manager().wait(job, initial_wait) for job in jobs))
-    return {"text": jobs_text([(job.payload(), target["name"])
-                               for job in jobs])}
+    return _rendered([(job.payload(), target["name"]) for job in jobs])
 
 
 def _turn_job(session: dict, turn_id: str, job_id: str):
@@ -1460,6 +1528,8 @@ async def wait_for_turn(session: dict, turn_id: str, params: dict) -> dict:
         if kind == "local":
             await manager().wait(ref, wait_s)
             return (ref.payload(), _local_node_name())
+        if ref.get("final") is not None:
+            return (ref["final"], ref["node"])
         try:
             channel = _spawn_channel(ref["bid"])
         except SpawnError as exc:
@@ -1470,13 +1540,12 @@ async def wait_for_turn(session: dict, turn_id: str, params: dict) -> dict:
                      .format(exc)}, ref["node"])
         job = await _refresh_remote(
             channel, {"id": job_id, "status": "running"}, wait_s)
-        if str(job.get("status") or "running") != "running":
-            manager().remote.pop(job_id, None)
+        _note_remote_outcome(job)
         return (job, ref["node"])
 
     results = await asyncio.gather(
         *(settle(kind, job_id, ref) for kind, job_id, ref in entries))
-    return {"text": jobs_text(list(results))}
+    return _rendered(list(results))
 
 
 async def update_limits_for_turn(session: dict, turn_id: str,
@@ -1517,21 +1586,34 @@ async def update_limits_for_turn(session: dict, turn_id: str,
 
 
 async def cancel_for_turn(session: dict, turn_id: str, params: dict) -> dict:
+    """Cancel this turn's jobs concurrently - every id was resolved up front,
+    and one slow process or unreachable node must not hold the others past
+    the bridge's deadline - and report each outcome by job."""
     entries = _turn_entries(session, turn_id,
                             _validated_job_ids(params))
-    lines = []
-    for kind, job_id, ref in entries:
+
+    async def cancel_one(kind, job_id, ref):
         if kind == "local":
             await manager().cancel(ref, "cancelled by the spawning turn")
             manager().jobs.pop(job_id, None)
-            lines.append("Cancelled spawned agent {}.".format(job_id))
-            continue
-        # the handle goes only once the node acknowledged; otherwise the
-        # turn's end and the sweeper keep retrying the cancel
-        await _cancel_remote(_spawn_channel(ref["bid"]), job_id)
-        lines.append("Cancelled spawned agent {} on {}.".format(
+            return (True, "Cancelled spawned agent {}.".format(job_id))
+        try:
+            # the handle goes only once the node acknowledged; otherwise the
+            # turn's end and the sweeper keep retrying the cancel
+            await _cancel_remote(_spawn_channel(ref["bid"]), job_id)
+        except SpawnError as exc:
+            return (False, "Could not cancel spawned agent {} on {}: {}. It "
+                           "stays tracked and the cancel is retried when "
+                           "this turn ends.".format(job_id, ref["node"], exc))
+        return (True, "Cancelled spawned agent {} on {}.".format(
             job_id, ref["node"]))
-    return {"text": "\n".join(lines)}
+
+    outcomes = await asyncio.gather(
+        *(cancel_one(kind, job_id, ref) for kind, job_id, ref in entries))
+    text = "\n".join(line for _ok, line in outcomes)
+    if not any(ok for ok, _line in outcomes):
+        raise SpawnError(text, 502)
+    return {"text": text}
 
 
 def _engine_lines(engines: list) -> list:
@@ -1646,10 +1728,10 @@ async def h_spawn_start(request):
             try:
                 prepared = await prepare_request(body)
                 mgr.ensure_capacity(1)
+                job = mgr.start_job(prepared, ("remote",), job_id=job_id)
             except SpawnError as exc:
                 return web.json_response({"error": str(exc)},
                                          status=exc.status)
-            job = mgr.start_job(prepared, ("remote",), job_id=job_id)
     finally:
         if lock is not None:
             mgr.release_start_lock(job_id, lock)

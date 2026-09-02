@@ -326,11 +326,13 @@ def engine_blockers(engine: str) -> list:
             continue
         out.append({"id": h.id, "name": session.get("name") or "",
                     "running": h.status == "running", "queued": len(h.queue)})
-    # A running spawned agent is a live process of this CLI too, even though
-    # no session owns it (a relayed cross-node job has no local session).
+    # A spawned agent is a live process of this CLI too, even though no
+    # session owns it (a relayed cross-node job has no local session) - and
+    # so is one still tearing down after its verdict, whose process the
+    # updater would otherwise rewrite from under.
     from puppy import spawn_exec
-    for job in spawn_exec.manager().jobs.values():
-        if job.running and job.engine == str(engine):
+    for job in spawn_exec.manager().live_jobs():
+        if job.engine == str(engine):
             out.append({"id": 0, "name": "spawned agent {}".format(job.id),
                         "running": True, "queued": 0})
     return out
