@@ -701,8 +701,15 @@ class OpenCodeDriver(Driver):
                 ])
             return actions
         if kind == "usage_update":
+            # OpenCode's own context arithmetic for the latest assistant
+            # message against the model's catalog limit
             used = update.get("used")
+            size = update.get("size")
             if isinstance(used, (int, float)) and not isinstance(used, bool):
+                ctx["context_used"] = int(used)
+                if isinstance(size, (int, float)) and not isinstance(size, bool) \
+                        and size > 0:
+                    ctx["context_window"] = int(size)
                 return [{"a": "transient", "msg": {
                     "type": "thinking_tokens", "tokens": used}}]
         if kind in ("config_option_update", "current_model_update"):
@@ -803,11 +810,15 @@ class OpenCodeDriver(Driver):
             result = ev.get("result") if isinstance(ev.get("result"), dict) else {}
             stop = str(result.get("stopReason") or "end_turn")
             ok = stop not in ("refusal", "cancelled", "canceled", "error")
-            actions.append({"a": "result", "data": {
+            data = {
                 "ok": ok, "stop_reason": stop,
                 "usage": self._usage(result.get("usage")),
                 "error": "" if ok else "OpenCode stopped: {}".format(stop),
-            }})
+            }
+            if ctx.get("context_used") is not None and ctx.get("context_window"):
+                data["context_used"] = int(ctx["context_used"])
+                data["context_window"] = int(ctx["context_window"])
+            actions.append({"a": "result", "data": data})
             ctx["phase"] = "done"
             return actions
         return []

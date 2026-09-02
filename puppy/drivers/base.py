@@ -22,6 +22,10 @@ Normalized transcript event kinds (persisted):
                  identities a later undo needs (native_session_id plus
                  claude's native_prompt_id/native_tail_id or codex's
                  native_turn_id); a tool turn's result carries tool=<name>.
+                 context_used/context_window (tokens) describe the native
+                 context at the END of the turn - the last model request's
+                 input plus output against the model's window - and the
+                 transcript line shows their ratio when both are known.
     error        {text}
     engine_switch{from, to}
 

@@ -452,19 +452,55 @@ def _error_text(value, fallback="Codex request failed") -> str:
     return fallback
 
 
-def _usage_from_notification(value) -> dict:
-    """Normalize the current turn's app-server camelCase token breakdown."""
-    if not isinstance(value, dict):
+_USAGE_FIELDS = {
+    "input_tokens": "inputTokens",
+    "output_tokens": "outputTokens",
+    "cached_input_tokens": "cachedInputTokens",
+    "reasoning_output_tokens": "reasoningOutputTokens",
+}
+
+
+def _usage_breakdown(block) -> dict:
+    """Normalize one camelCase token breakdown to Puppy's usage vocabulary."""
+    if not isinstance(block, dict):
         return {}
-    source = value.get("last") if isinstance(value.get("last"), dict) else value
-    fields = {
-        "input_tokens": "inputTokens",
-        "output_tokens": "outputTokens",
-        "cached_input_tokens": "cachedInputTokens",
-        "reasoning_output_tokens": "reasoningOutputTokens",
-    }
-    return {target: source.get(origin) for target, origin in fields.items()
-            if source.get(origin) is not None}
+    out = {}
+    for target, origin in _USAGE_FIELDS.items():
+        value = block.get(origin)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            out[target] = int(value)
+    return out
+
+
+def _accumulate_usage(value, ctx: dict) -> None:
+    """Verified against codex-cli 0.152.1: thread/tokenUsage/updated fires once
+    per model response, ``last`` being that response and ``total`` the
+    thread's running sum. The turn's usage is the sum of ``total`` deltas
+    since the turn's first notification (which contributes its own ``last``),
+    so a repeated notification adds nothing and a resumed thread's history is
+    never counted; the latest response's input plus output is the context in
+    use against ``modelContextWindow``."""
+    if not isinstance(value, dict):
+        return
+    last = _usage_breakdown(value.get("last"))
+    total = _usage_breakdown(value.get("total"))
+    previous = ctx.get("usage_total_prev")
+    if previous is None or not total:
+        delta = last
+    else:
+        delta = {key: total[key] - int(previous.get(key, 0)) for key in total}
+    usage = dict(ctx.get("usage") or {})
+    for key, amount in delta.items():
+        usage[key] = int(usage.get(key, 0)) + amount
+    ctx["usage"] = usage
+    if total:
+        ctx["usage_total_prev"] = total
+    if last:
+        ctx["context_used"] = int(last.get("input_tokens", 0)) + \
+            int(last.get("output_tokens", 0))
+    window = value.get("modelContextWindow")
+    if isinstance(window, (int, float)) and not isinstance(window, bool) and window > 0:
+        ctx["context_window"] = int(window)
 
 
 class CodexDriver(Driver):
@@ -1038,7 +1074,7 @@ class CodexDriver(Driver):
             if not ctx.get("turn_id") or \
                     str(params.get("turnId") or "") != ctx["turn_id"]:
                 return []
-            ctx["usage"] = _usage_from_notification(params.get("tokenUsage"))
+            _accumulate_usage(params.get("tokenUsage"), ctx)
             return []
 
         if method == "account/rateLimits/updated":
@@ -1081,6 +1117,10 @@ class CodexDriver(Driver):
                 "native_session_id": str(ctx.get("thread_id") or ""),
                 "native_turn_id": "" if ctx.get("tool") else turn_id,
             }
+            if ctx.get("context_used") is not None:
+                identity["context_used"] = int(ctx["context_used"])
+                if ctx.get("context_window"):
+                    identity["context_window"] = int(ctx["context_window"])
             if status == "completed":
                 return [{"a": "result", "data": {
                     **identity,

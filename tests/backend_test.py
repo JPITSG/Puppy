@@ -253,6 +253,8 @@ def exercise_driver_normalization() -> None:
     assert completed == [{"a": "result", "data": {
         # the identities a later undo reverts to ride on every prompt result
         "native_session_id": "thread-1", "native_turn_id": "turn-1",
+        # the last response's input+output is the context the model held
+        "context_used": 15,
         "ok": True, "usage": {
             "input_tokens": 12, "output_tokens": 3,
             "cached_input_tokens": 4, "reasoning_output_tokens": 2,

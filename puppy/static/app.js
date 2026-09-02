@@ -8995,6 +8995,9 @@ class SessionView {
           bits.push(fmtTokens(u.input_tokens + (u.cache_read_input_tokens || 0) +
             (u.cache_creation_input_tokens || 0)) + " in");
         if (counted && u.output_tokens != null) bits.push(fmtTokens(u.output_tokens) + " out");
+        /* the native context at the end of the turn against the model's window */
+        if (d.context_window > 0 && d.context_used != null)
+          bits.push(Math.round(100 * d.context_used / d.context_window) + "% ctx");
         bits.push(fmtTime(ev.ts));
         n.innerHTML = bits.join(" · ");
         return n;

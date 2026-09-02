@@ -21,6 +21,23 @@ from puppy.drivers.base import Driver, ToolUnavailable, stringify_content
 from puppy.user_paths import service_home
 
 
+def _context_window(model_usage, model) -> int:
+    """The window of the model this turn ran on, from the result's per-model
+    usage map (contextWindow per model id); the only or largest entry when
+    the id seen mid-turn is not among them."""
+    if not isinstance(model_usage, dict):
+        return 0
+    windows = {}
+    for key, value in model_usage.items():
+        if isinstance(value, dict):
+            window = value.get("contextWindow")
+            if isinstance(window, (int, float)) and not isinstance(window, bool) and window > 0:
+                windows[str(key)] = int(window)
+    if not windows:
+        return 0
+    return windows.get(str(model or ""), max(windows.values()))
+
+
 class ClaudeDriver(Driver):
     key = "claude"
     label = "Claude Code"
@@ -213,6 +230,8 @@ class ClaudeDriver(Driver):
             "prompt_uuid": "",
             "tail_uuid": "",
             "compacted": False,
+            # the last API request's prompt size: what the model actually held
+            "context_used": None,
         }
 
     def approval_payload(self, request_id, behavior, original_input, message="",
@@ -311,6 +330,12 @@ class ClaudeDriver(Driver):
             if ev.get("uuid"):
                 ctx["tail_uuid"] = str(ev["uuid"])
             msg = ev.get("message") or {}
+            usage = msg.get("usage") if isinstance(msg.get("usage"), dict) else None
+            if usage:
+                ctx["context_used"] = sum(
+                    int(usage.get(k) or 0) for k in
+                    ("input_tokens", "cache_read_input_tokens",
+                     "cache_creation_input_tokens"))
             # per-response model id - catches mid-turn fallback (e.g. fable -> opus)
             mdl = msg.get("model") or ""
             if mdl and mdl != ctx.get("model_seen"):
@@ -392,6 +417,10 @@ class ClaudeDriver(Driver):
             }
             if ctx.get("tool") == "compact":
                 identity["compacted"] = bool(ctx.get("compacted"))
+            window = _context_window(ev.get("modelUsage"), ctx.get("model_seen"))
+            if ctx.get("context_used") is not None and window:
+                identity["context_used"] = int(ctx["context_used"])
+                identity["context_window"] = window
             return [{"a": "result", "data": {
                 **identity,
                 "ok": not ev.get("is_error", False),
