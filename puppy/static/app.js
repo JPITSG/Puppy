@@ -935,6 +935,7 @@ function fmtWhen(ts) {
 }
 function fmtTokens(n) {
   if (n == null) return "";
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
   return n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n);
 }
 function cmpVersion(a, b) {
@@ -8922,9 +8923,14 @@ class SessionView {
       case "error": {
         return el("div", "err-card", d.text || "Error");
       }
-      /* one shape for every engine: outcome · how long · tokens out · when.
-         Cost is deliberately absent - engines price differently (and some not
-         at all), so the line would stop meaning the same thing everywhere. */
+      /* one shape for every engine: outcome · how long · tokens in · tokens
+         out · when. "In" is every token the model read during the turn, cached
+         context included, summed over its requests: Claude and OpenCode report
+         cache reads/writes beside a small uncached input_tokens, while Codex
+         folds its cached_input_tokens into input_tokens, so adding the cache
+         keys that exist gives the same figure for all three. Cost is
+         deliberately absent - engines price differently (and some not at
+         all), so the line would stop meaning the same thing everywhere. */
       case "result": {
         const n = el("div", "result-line");
         const bits = [];
@@ -8932,6 +8938,9 @@ class SessionView {
         else bits.push("✔");
         if (d.duration_ms) bits.push((d.duration_ms / 1000).toFixed(1) + "s");
         const u = d.usage || {};
+        if (u.input_tokens != null)
+          bits.push(fmtTokens(u.input_tokens + (u.cache_read_input_tokens || 0) +
+            (u.cache_creation_input_tokens || 0)) + " in");
         if (u.output_tokens != null) bits.push(fmtTokens(u.output_tokens) + " out");
         bits.push(fmtTime(ev.ts));
         n.innerHTML = bits.join(" · ");

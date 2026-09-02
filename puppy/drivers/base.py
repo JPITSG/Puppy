@@ -12,9 +12,12 @@ Normalized transcript event kinds (persisted):
     tool_result  {tool_use_id, content, is_error}
     info         {subtype, text, ...}
     result       {ok, usage?, cost_usd?, duration_ms?, stop_reason?, error?}
-                 The transcript line reads outcome, duration, output tokens and
-                 clock time for every engine; a driver that leaves duration_ms
-                 unset is given the runner's wall-clock turn time.
+                 The transcript line reads outcome, duration, input tokens
+                 (input_tokens plus any cache_read/cache_creation keys, so a
+                 driver whose input already counts cached tokens must not
+                 also emit those keys), output tokens and clock time for every
+                 engine; a driver that leaves duration_ms unset is given the
+                 runner's wall-clock turn time.
     error        {text}
     engine_switch{from, to}
 
