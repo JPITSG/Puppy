@@ -10058,7 +10058,8 @@ class SessionView {
         hint: o ? (o.hint || tool.hint) : `Not available for ${engineLabel}`,
       };
     });
-    this.optionMenu(anchor, options, "", (value) => this.runSessionTool(value));
+    this.optionMenu(anchor, options, "", (value) => this.runSessionTool(value),
+      { actions: true });
   }
 
   async runSessionTool(tool) {
@@ -10107,15 +10108,18 @@ class SessionView {
     } catch (e) { toast(e.message, "error"); }
   }
 
-  optionMenu(anchor, opts, current, onPick) {
+  /* A choice menu opens on its current value: highlighted, focused, checked.
+     An action menu ({actions: true}) has no current value, so nothing is
+     highlighted until the pointer or the arrow keys reach a row. */
+  optionMenu(anchor, opts, current, onPick, { actions = false } = {}) {
     if (closeAllMenus(anchor)) return null;
     const menu = el("div", "choice-menu composer-choice-menu dyn");
     menu._anchor = anchor;
-    menu.setAttribute("role", "listbox");
+    menu.setAttribute("role", actions ? "menu" : "listbox");
     menu.setAttribute("aria-label",
       anchor.getAttribute("aria-label") || tips.text(anchor) || "Choices");
     menu.style.visibility = "hidden";
-    anchor.setAttribute("aria-haspopup", "listbox");
+    anchor.setAttribute("aria-haspopup", actions ? "menu" : "listbox");
     anchor.setAttribute("aria-expanded", "true");
     const rows = [];
     const dismiss = (returnFocus = false) => {
@@ -10129,12 +10133,17 @@ class SessionView {
     const resting = () => {
       const focused = rows.indexOf(document.activeElement);
       if (focused >= 0) return focused;
+      if (actions) return -1;
       const selectedAt = rows.findIndex(row => row.classList.contains("selected"));
       return selectedAt >= 0 ? selectedAt : 0;
     };
     opts.forEach((o, index) => {
-      const selected = current === o.value;
+      const selected = !actions && current === o.value;
       const row = choiceOptionNode(o.label, selected);
+      if (actions) {
+        row.setAttribute("role", "menuitem");
+        row.removeAttribute("aria-selected");
+      }
       if (o.hint) row.title = o.hint;
       row.disabled = !!o.disabled;
       row.tabIndex = selected ? 0 : -1;
@@ -10160,10 +10169,11 @@ class SessionView {
         return;
       }
       if (!rows.length) return;
-      const at = Math.max(0, rows.indexOf(document.activeElement));
+      const at = rows.indexOf(document.activeElement);   // -1: focus is on the menu itself
       let next = null;
-      if (event.key === "ArrowDown") next = (at + 1) % rows.length;
-      else if (event.key === "ArrowUp") next = (at - 1 + rows.length) % rows.length;
+      if (event.key === "ArrowDown") next = at < 0 ? 0 : (at + 1) % rows.length;
+      else if (event.key === "ArrowUp")
+        next = at < 0 ? rows.length - 1 : (at - 1 + rows.length) % rows.length;
       else if (event.key === "Home") next = 0;
       else if (event.key === "End") next = rows.length - 1;
       if (next !== null) {
@@ -10178,13 +10188,13 @@ class SessionView {
     document.body.appendChild(menu);
     const openAt = resting();
     highlight(openAt);
+    if (actions || !rows.length) menu.tabIndex = -1;   // the keys land on the menu
     requestAnimationFrame(() => {
       if (!menu.isConnected) return;
       positionChoiceMenu({ menu, button: anchor });
       (rows[openAt] || menu).focus({ preventScroll: true });
     });
     if (!rows.length) {
-      menu.tabIndex = -1;
       menu.appendChild(el("span", "choice-empty", "No choices available"));
     }
     return menu;
