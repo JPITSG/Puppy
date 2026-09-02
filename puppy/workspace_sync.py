@@ -161,6 +161,23 @@ def plan_reconcile(base: dict, workspace: dict, mirror: dict) -> dict:
             "base": next_base}
 
 
+def plan_authoritative_pull(workspace: dict, mirror: dict) -> dict:
+    """Make a rebuilt mirror exactly match its authoritative workspace.
+
+    Restore markers deliberately bypass three-way history. Even if an
+    unexpected process touched the empty mirror before its first barrier,
+    those bytes must never be pushed into or conflict with the authority.
+    """
+    pull = []
+    for path in sorted(set(workspace) | set(mirror)):
+        current, desired = mirror.get(path), workspace.get(path)
+        if entry_signature(current) != entry_signature(desired):
+            pull.extend(ops_for(path, current, desired))
+    order_ops(pull)
+    return {"pull": pull, "push": [], "conflicts": [],
+            "base": dict(workspace)}
+
+
 def ops_for(path: str, current, desired) -> list:
     """Ops that move the receiver from ``current`` to ``desired``.
 
@@ -818,10 +835,13 @@ def validate_lease_root(root) -> str:
     return resolved
 
 
-def create_lease(root) -> dict:
+def create_lease(root, reuse: bool = False) -> dict:
     resolved = validate_lease_root(root)
     for existing in list_leases():
         other = str(existing.get("root") or "")
+        if reuse and other == resolved:
+            touch_lease(str(existing["id"]))
+            return get_lease(str(existing["id"]))
         if other == resolved or other.startswith(resolved + os.sep) or \
                 resolved.startswith(other + os.sep):
             raise SyncError(
@@ -922,6 +942,12 @@ def mirror_base(uid) -> str:
     return os.path.join(config.DATA_DIR, "mirrors", uid)
 
 
+def mirror_leaf(name: str) -> str:
+    """The deterministic, single-component project name under a mirror id."""
+    safe = "".join(ch for ch in (name or "") if ch.isalnum() or ch in "._-")
+    return (safe.strip(".") or "project")[:80]
+
+
 def allocate_mirror(uid: str, name: str) -> str:
     """Create the stable mirror tree for one linked session; return its cwd.
 
@@ -930,9 +956,7 @@ def allocate_mirror(uid: str, name: str) -> str:
     resume can be pinned to the cwd.
     """
     base = mirror_base(uid)
-    safe = "".join(ch for ch in (name or "") if ch.isalnum() or ch in "._-")
-    safe = (safe.strip(".") or "project")[:80]
-    tree = os.path.join(base, safe)
+    tree = os.path.join(base, mirror_leaf(name))
     os.makedirs(tree, mode=0o700, exist_ok=True)
     os.chmod(base, 0o700)
     return tree
@@ -952,18 +976,44 @@ def remove_mirror(uid) -> bool:
     return True
 
 
+def _session_value(session, key: str, default=""):
+    if session is None:
+        return default
+    if isinstance(session, dict):
+        return session.get(key, default)
+    try:
+        return session[key]
+    except (KeyError, IndexError, TypeError):
+        return default
+
+
 def session_workspace(session):
     """Parse a session row's workspace descriptor, or None when unlinked."""
-    raw = session.get("workspace") if isinstance(session, dict) else None
+    raw = _session_value(session, "workspace")
     if not raw:
         return None
     try:
-        data = json.loads(raw) if isinstance(raw, str) else None
+        data = json.loads(raw) if isinstance(raw, str) else \
+            dict(raw) if isinstance(raw, dict) else None
     except Exception:
         return None
     if not isinstance(data, dict) or not data.get("uid"):
         return None
     return data
+
+
+def public_cwd(session: dict) -> str:
+    """The user-facing location for a session.
+
+    Linked sessions execute inside a private mirror, but every API, search
+    result, notification and transcript surface must identify the authoritative
+    project instead. Internal engine/store callers continue reading the raw
+    persisted ``cwd`` directly.
+    """
+    descriptor = session_workspace(session)
+    root = descriptor.get("root") if isinstance(descriptor, dict) else None
+    return str(root) if isinstance(root, str) and root else \
+        str(_session_value(session, "cwd") or "")
 
 
 def mirror_store_for(session: dict) -> Store:
@@ -978,18 +1028,76 @@ def mirror_store_for(session: dict) -> Store:
     return get_store(cwd, os.path.join(base, ".sync"))
 
 
+MIRROR_RESET_VERSION = 1
+MIRROR_RESET_FILE = "restore-reset.json"
+MIRROR_RESET_HEADER = "X-Puppy-Workspace-Reset"
+
+
+def mark_mirror_reset(base: str, reset_id: str) -> None:
+    """Mark a newly reconstructed mirror as authoritative-source-only."""
+    if not isinstance(reset_id, str) or not 16 <= len(reset_id) <= 128:
+        raise SyncError("invalid mirror reset id")
+    meta = os.path.join(base, ".sync")
+    os.makedirs(meta, mode=0o700, exist_ok=True)
+    path = os.path.join(meta, MIRROR_RESET_FILE)
+    temp = path + ".tmp"
+    with open(temp, "w", encoding="utf-8") as handle:
+        json.dump({"version": MIRROR_RESET_VERSION, "reset_id": reset_id},
+                  handle, separators=(",", ":"))
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temp, 0o600)
+    os.replace(temp, path)
+
+
+def mirror_reset(store: Store):
+    path = os.path.join(store.meta, MIRROR_RESET_FILE)
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            value = json.load(handle)
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        raise SyncError("mirror reset marker is unreadable", 500) from exc
+    if not isinstance(value, dict) or set(value) != {"version", "reset_id"} or \
+            value.get("version") != MIRROR_RESET_VERSION or \
+            not isinstance(value.get("reset_id"), str) or \
+            not 16 <= len(value["reset_id"]) <= 128:
+        raise SyncError("mirror reset marker has an unsupported shape", 500)
+    return value["reset_id"]
+
+
+def acknowledge_mirror_reset(store: Store, reset_id: str) -> bool:
+    current = mirror_reset(store)
+    if current is None:
+        return False
+    if current != reset_id:
+        raise SyncError("mirror reset marker changed", 409)
+    os.unlink(os.path.join(store.meta, MIRROR_RESET_FILE))
+    return True
+
+
 # ---- shared HTTP surface (both runtimes) ----
 
 async def _stream_manifest(request: web.Request, store: Store,
                            kind: str) -> web.StreamResponse:
     loop = asyncio.get_running_loop()
+    reset_id = None
+    if kind == "mirror":
+        reset_id = await loop.run_in_executor(None, mirror_reset, store)
+        if reset_id and request.headers.get(MIRROR_RESET_HEADER) != "1":
+            raise SyncError(
+                "this workspace mirror was rebuilt from a backup; upgrade its "
+                "controller before synchronizing it", 409)
     async with store_lock(store):
         scanned = await loop.run_in_executor(None, store.scan)
     response = web.StreamResponse(status=200, headers={
         "Content-Type": CONTENT_TYPE, "Cache-Control": "no-store"})
     await response.prepare(request)
-    await response.write(encode_frame(
-        {"kind": kind, "count": len(scanned["entries"])}))
+    header = {"kind": kind, "count": len(scanned["entries"])}
+    if reset_id:
+        header["reset_id"] = reset_id
+    await response.write(encode_frame(header))
     buffered = bytearray()
     for path, entry in scanned["entries"].items():
         buffered += encode_frame({"p": path, **entry})
@@ -1168,7 +1276,8 @@ async def h_lease_create(request: web.Request):
     loop = asyncio.get_running_loop()
     try:
         record = await loop.run_in_executor(
-            None, create_lease, str(body.get("root") or ""))
+            None, create_lease, str(body.get("root") or ""),
+            body.get("reuse") is True)
     except SyncError as exc:
         return _sync_error_response(exc)
     log.info("workspace lease %s created for %s", record["id"], record["root"])
@@ -1259,6 +1368,28 @@ async def h_mirror_apply(request: web.Request):
         return _sync_error_response(exc)
 
 
+async def h_mirror_reset_ack(request: web.Request):
+    """Clear a restore marker only after the capable controller says its
+    authoritative-source reconcile completed cleanly."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid mirror reset acknowledgement"},
+                                 status=400)
+    if not isinstance(body, dict) or set(body) != {"reset_id"} or \
+            not isinstance(body.get("reset_id"), str):
+        return web.json_response({"error": "invalid mirror reset acknowledgement"},
+                                 status=400)
+    try:
+        store = await _mirror_store(request)
+        loop = asyncio.get_running_loop()
+        cleared = await loop.run_in_executor(
+            None, acknowledge_mirror_reset, store, body["reset_id"])
+        return web.json_response({"ok": True, "cleared": cleared})
+    except SyncError as exc:
+        return _sync_error_response(exc)
+
+
 async def h_mirror_grant(request: web.Request):
     """The controller reports barrier progress or completion for one session."""
     from puppy import runner
@@ -1286,5 +1417,7 @@ def register(app: web.Application) -> None:
     r.add_get("/api/sessions/{sid:\\d+}/workspace/manifest", h_mirror_manifest)
     r.add_post("/api/sessions/{sid:\\d+}/workspace/fetch", h_mirror_fetch)
     r.add_post("/api/sessions/{sid:\\d+}/workspace/apply", h_mirror_apply)
+    r.add_post("/api/sessions/{sid:\\d+}/workspace/reset-ack",
+               h_mirror_reset_ack)
     r.add_post("/api/sessions/{sid:\\d+}/workspace/grant", h_mirror_grant)
     expire_leases()

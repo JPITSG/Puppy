@@ -1067,9 +1067,11 @@ def check_interrupted_completion(ui_source: str) -> None:
     source = "\n".join(function(name) for name in (
         "sessionActivityKey", "ingestOneSessionActivity", "reportRemoteCompletion"))
     script = r"""
-const state = {notify: {configured: true, enabled: true}};
+const state = {notify: {configured: true, enabled: true}, backends: [
+  {id: 8, capabilities: ["completion-events"]},
+]};
 const sessionActivityAnchors = new Map([
-  ["7:1", 1000], ["7:2", 1000], ["7:3", 1000],
+  ["7:1", 1000], ["7:2", 1000], ["7:3", 1000], ["8:4", 1000],
 ]);
 const posts = [];
 const api = (bid, route, options) => {
@@ -1083,6 +1085,9 @@ ingestOneSessionActivity(7,
   {id: 2, status: "idle", completion_status: "ok"}, 20, 5000);
 // An older backend has no additive outcome and retains the prior behavior.
 ingestOneSessionActivity(7, {id: 3, status: "idle"}, 20, 5000);
+// A current backend is consumed by the controller and must never double-fire.
+ingestOneSessionActivity(8,
+  {id: 4, status: "idle", completion_status: "ok"}, 20, 5000);
 console.log(JSON.stringify({posts, remaining: sessionActivityAnchors.size}));
 """ % source
     proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
@@ -2154,13 +2159,12 @@ def check_transcript_batching(ui_source: str) -> None:
     snapshot = ui_source[
         ui_source.index('      case "snapshot":'):
         ui_source.index('      case "draft":')]
-    assert "const transcript = document.createDocumentFragment();" in snapshot
-    assert "this.inner.appendChild(transcript);" in snapshot
+    assert "this.rebuildTranscript(d.events" in snapshot
     assert "this.renderEvent(ev, false)" not in snapshot
 
     def method(name):
         start = ui_source.index("\n  " + name + "(") + 1
-        brace = ui_source.index("{", start)
+        brace = ui_source.index(") {", start) + 2
         depth = 0
         for index in range(brace, len(ui_source)):
             if ui_source[index] == "{":
@@ -2170,6 +2174,11 @@ def check_transcript_batching(ui_source: str) -> None:
                 if depth == 0:
                     return ui_source[start:index + 1]
         raise AssertionError("unbalanced SessionView." + name)
+
+    rebuilt = method("rebuildTranscript")
+    assert "const fragment = document.createDocumentFragment();" in rebuilt
+    assert "this.inner.appendChild(fragment);" in rebuilt
+    assert "this.buildEventNode(ev)" in rebuilt
 
     script = r"""
 let nextFrame=1;
@@ -2779,7 +2788,8 @@ def check_system_prompt_settings(ui_source: str, css_source: str) -> None:
     assert 'body.terminal = record.terminalDraft' in ui_source
     assert 'body.spawn = record.spawnDraft' in ui_source
     runner_source = (BASE / "puppy" / "runner.py").read_text()
-    assert "system_prompt_text = system_prompts.turn_prompt(" in runner_source
+    assert 'system_prompt_text = "" if tool else system_prompts.turn_prompt(' \
+        in runner_source
     assert "remote_workspace=descriptor is not None" in runner_source
     assert ".engine-updates-section{" in css_source
     assert ".system-prompt-section+.system-prompt-section{" in css_source

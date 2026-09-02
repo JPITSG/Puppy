@@ -334,6 +334,27 @@ def meta_set(key: str, value) -> None:
             (key, json.dumps(value)))
 
 
+def meta_apply(upserts=None, delete_keys=(), delete_globs=()) -> None:
+    """Atomically apply a small related set of durable meta changes."""
+    with _lock:
+        conn = connect()
+        try:
+            for key, value in (upserts or {}).items():
+                conn.execute(
+                    "INSERT INTO meta(key,value) VALUES(?,?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (str(key), json.dumps(value)))
+            for key in delete_keys:
+                conn.execute("DELETE FROM meta WHERE key=?", (str(key),))
+            for pattern in delete_globs:
+                conn.execute("DELETE FROM meta WHERE key GLOB ?",
+                             (str(pattern),))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+
 def meta_del(key: str) -> None:
     execute("DELETE FROM meta WHERE key=?", (key,))
 
@@ -549,5 +570,7 @@ def delete_session(session_id: int) -> None:
         # the durable queue/held record rides under this session's meta key
         conn.execute("DELETE FROM meta WHERE key=?",
                      ("session_queue.{}".format(session_id),))
+        conn.execute("DELETE FROM meta WHERE key=?",
+                     ("session_completion.{}".format(session_id),))
         conn.commit()
     _notify_change(session_id)

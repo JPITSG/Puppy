@@ -946,6 +946,8 @@ async def h_snapshot_export(request: web.Request):
     if conflict:
         return web.json_response({"error": conflict}, status=409)
     request.app["puppy_snapshot_busy"] = "export"
+    workspace_links.pause_for_snapshot()
+    notify.pause_for_snapshot()
     result = None
     try:
         loop = asyncio.get_running_loop()
@@ -975,6 +977,8 @@ async def h_snapshot_export(request: web.Request):
         return web.json_response({"error": "backup failed: {}".format(exc)}, status=500)
     finally:
         request.app["puppy_snapshot_busy"] = None
+        workspace_links.resume_after_snapshot()
+        notify.resume_after_snapshot()
 
 
 async def h_snapshot_download(request: web.Request):
@@ -1022,6 +1026,7 @@ async def h_snapshot_import(request: web.Request):
     size = 0
     staged = None
     owns_busy = False
+    restored_state = False
     try:
         with os.fdopen(descriptor, "wb") as output:
             async for chunk in request.content.iter_chunked(1024 * 1024):
@@ -1041,6 +1046,8 @@ async def h_snapshot_import(request: web.Request):
 
         request.app["puppy_snapshot_busy"] = "restore"
         owns_busy = True
+        workspace_links.pause_for_snapshot()
+        notify.pause_for_snapshot()
         # Recheck states that could have changed immediately before the marker
         # was installed. New mutations are rejected from this point onward.
         blocked = snapshots.blockers()
@@ -1055,6 +1062,8 @@ async def h_snapshot_import(request: web.Request):
         if blocked:
             return web.json_response({"error": "; ".join(blocked)}, status=409)
         result = snapshots.commit_import(staged)
+        restored_state = True
+        notify.reset_after_restore()
         usage_refresh.reset_due(clear_status=True)
         backends.reset_auto_upgrade_schedule()
         # the restored database replaces every session this node knew, so the
@@ -1084,6 +1093,8 @@ async def h_snapshot_import(request: web.Request):
     finally:
         if owns_busy:
             request.app["puppy_snapshot_busy"] = None
+            workspace_links.resume_after_snapshot(restored=restored_state)
+            notify.resume_after_snapshot()
         snapshots.discard_staged(staged)
         try:
             os.unlink(upload_name)
@@ -1275,6 +1286,27 @@ async def h_notify_exec(request: web.Request):
     return web.json_response(result)
 
 
+async def h_completions(request: web.Request):
+    """Shared, authenticated authoritative completion cursor."""
+    if request.app.get("puppy_snapshot_busy"):
+        return web.json_response(
+            {"error": "completion history is paused for backup or restore"},
+            status=503)
+    raw = request.query.get("after", "0")
+    try:
+        after = int(raw)
+    except (TypeError, ValueError):
+        return web.json_response({"error": "after must be a non-negative integer"},
+                                 status=400)
+    if after < 0 or str(after) != str(raw):
+        return web.json_response({"error": "after must be a non-negative integer"},
+                                 status=400)
+    try:
+        return web.json_response(notify.completion_events(after))
+    except RuntimeError as exc:
+        return web.json_response({"error": str(exc)}, status=500)
+
+
 def _notify_broadcast() -> None:
     runner.broadcast_update({"type": "notify", **notify.public_state()})
 
@@ -1299,6 +1331,7 @@ async def h_notify_set(request: web.Request):
     # The switch/bell owns enabled independently. An enabled alert with no
     # command remains inert, and saving a command never undoes a user's choice.
     _notify_broadcast()
+    notify.wake_worker()
     log.info("notify command %s (backend %s)", "configured" if command else "cleared", bid)
     return web.json_response({"ok": True, "settings": notify.settings()})
 
@@ -1307,6 +1340,7 @@ async def h_notify_toggle(request: web.Request):
     body = await request.json()
     config.set_value("notify.enabled", bool(body.get("enabled")))
     _notify_broadcast()
+    notify.wake_worker()
     return web.json_response({"ok": True, "settings": notify.settings()})
 
 
@@ -1350,7 +1384,9 @@ async def h_notify_fire(request: web.Request):
     if not notify.active():
         return web.json_response({"ok": True, "fired": False})
     be = backends.get_backend(bid)
-    if be is None or not notify.accept_remote_fire(bid, sid):
+    if be is None or backends.backend_supports(
+            bid, protocol.COMPLETION_EVENTS_CAPABILITY) or \
+            not notify.accept_remote_fire(bid, sid):
         return web.json_response({"ok": True, "fired": False})
     info["backend"] = be["name"]
     info["id"] = str(sid)
@@ -1380,6 +1416,7 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     r.add_post("/api/engines/{key:[A-Za-z0-9_-]{1,32}}/upgrade", h_engine_upgrade)
 
     r.add_get("/api/sessions", h_sessions_list)
+    r.add_get("/api/completions", h_completions)
     r.add_post("/api/sessions", h_session_create)
     r.add_post("/api/sessions/reorder", h_sessions_reorder)
     r.add_get("/api/sessions/{sid:\\d+}", h_session_get)
@@ -1435,6 +1472,7 @@ def build_app(runtime_web: dict = None,
     app.on_startup.append(backends.start_health_worker)
     app.on_startup.append(backends.start_auto_upgrade_worker)
     app.on_startup.append(workspace_links.start_worker)
+    app.on_startup.append(notify.start_worker)
 
     r.add_get("/api/state", h_state)
     r.add_get("/api/notify", h_notify_get)
@@ -1464,6 +1502,7 @@ def build_app(runtime_web: dict = None,
             await backends.stop_auto_upgrade_worker(app)
             await backends.stop_health_worker(app)
             await workspace_links.stop_worker(app)
+            await notify.stop_worker(app)
             await runner.shutdown()
         finally:
             await live_websockets.close_all(app)

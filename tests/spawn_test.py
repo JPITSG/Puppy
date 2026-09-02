@@ -54,6 +54,11 @@ elif mode == "active":
         out({"t": "progress", "tokens": n})
     out({"t": "a", "text": "active run finished"})
     out({"t": "result", "ok": True})
+elif mode == "nofinal":
+    out({"t": "result", "ok": True})
+elif mode == "limit":
+    out({"t": "a", "text": "partial answer cut off"})
+    out({"t": "result", "ok": True, "stop_reason": "max_tokens"})
 elif mode == "activehang":
     n = 0
     while True:
@@ -127,7 +132,8 @@ class FakeDriver(Driver):
         if kind == "result":
             return [{"a": "result", "data": {
                 "ok": ev["ok"], "usage": ev.get("usage"),
-                "cost_usd": ev.get("cost"), "error": ev.get("error", "")}}]
+                "cost_usd": ev.get("cost"), "error": ev.get("error", ""),
+                "stop_reason": ev.get("stop_reason", "")}}]
         return []
 
     def approval_payload(self, request_id, behavior, original_input,
@@ -156,7 +162,7 @@ async def test_one_shot_paths(cwd):
     await wait_done(job)
     assert job.status == "done", (job.status, job.error)
     assert "FINAL ANSWER: 42 (denied=ap1)" in job.answer
-    assert "Working on it." in job.answer
+    assert "Working on it." not in job.answer
     assert job.denials == 1
     assert job.model_used == "stub-1"
     assert job.usage == {"output_tokens": 7}
@@ -165,6 +171,19 @@ async def test_one_shot_paths(cwd):
     assert "UNTRUSTED SPAWNED-AGENT OUTPUT" in text
     assert "1 approval(s) auto-denied" in text
     assert "7 output tokens" in text
+
+    job = spawn_exec.manager().start_job(
+        request_for("nofinal", cwd), ("remote",))
+    await wait_done(job)
+    assert job.status == "incomplete"
+    assert "without a final answer" in job.error and not job.answer
+
+    job = spawn_exec.manager().start_job(
+        request_for("limit", cwd), ("remote",))
+    await wait_done(job)
+    assert job.status == "incomplete" and job.stop_reason == "max_tokens"
+    assert job.answer == "partial answer cut off"
+    assert job.payload()["stop_reason"] == "max_tokens"
 
     job = spawn_exec.manager().start_job(request_for("fail", cwd), ("remote",))
     await wait_done(job)

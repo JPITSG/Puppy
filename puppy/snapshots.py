@@ -1,8 +1,9 @@
 """Versioned, validated backups of Puppy-owned settings and session state.
 
-Snapshots deliberately exclude ordinary project directories and external engine
-credential/session stores. They include the SQLite database, complete config,
-uploads, browser UI state, and Puppy-managed scratch workspace contents.
+Snapshots deliberately exclude ordinary project directories, rebuildable
+workspace mirrors/leases, and external engine credential/session stores. They
+include the SQLite database, complete config, uploads, browser UI state,
+Puppy-managed scratch contents, and preserved conflict losers.
 """
 from __future__ import annotations
 
@@ -23,11 +24,12 @@ import time
 from typing import Dict, List
 
 from puppy import (__version__, config, db, listener_handoff, runner, terminal,
-                   upgrade_contract, uploads, web_tls, workspaces)
+                   upgrade_contract, uploads, web_tls, workspace_sync,
+                   workspaces)
 
 log = logging.getLogger("puppy.snapshots")
 
-FORMAT_VERSION = 2
+FORMAT_VERSION = 3
 PRODUCT = "puppy-state"
 ARCHIVE_ROOT = "puppy-snapshot"
 MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
@@ -114,6 +116,10 @@ def blockers() -> List[str]:
     # so backup/restore must not race its artifact replacement and restart.
     from puppy import backends
     reasons.extend(backends.upgrade_blockers())
+    from puppy import workspace_links
+    reasons.extend(workspace_links.snapshot_blockers())
+    from puppy import notify
+    reasons.extend(notify.snapshot_blockers())
     return reasons
 
 
@@ -170,7 +176,7 @@ def _safe_link_target(relative: PurePosixPath, target: str) -> None:
         if len(relative.parts) < 3:
             raise SnapshotError("scratch workspace root cannot be a symbolic link")
         boundary = relative.parts[:2]
-    elif relative.parts[0] in ("uploads", "tls"):
+    elif relative.parts[0] in ("uploads", "tls", "keeps"):
         boundary = relative.parts[:1]
     else:
         raise SnapshotError("symbolic links are not allowed in snapshot metadata")
@@ -304,9 +310,11 @@ def create_archive(ui_state: dict) -> dict:
         stage.mkdir(mode=0o700)
         (stage / "uploads").mkdir(mode=0o700)
         (stage / "scratch").mkdir(mode=0o700)
+        (stage / "keeps").mkdir(mode=0o700)
         source_budget = {"members": 0, "bytes": 0}
 
         db.backup_to(str(stage / "puppy.db"))
+        _validate_database(stage / "puppy.db")
         cfg = config.export_data()
         (stage / "config.json").write_text(
             json.dumps(cfg, indent=2, sort_keys=True), encoding="utf-8")
@@ -327,6 +335,11 @@ def create_archive(ui_state: dict) -> dict:
         except web_tls.WebTLSError as exc:
             raise SnapshotError(
                 "WebUI TLS state cannot be backed up: {}".format(exc)) from exc
+        keeps_dir = Path(config.DATA_DIR).resolve() / "workspace" / "keeps"
+        if keeps_dir.exists() or keeps_dir.is_symlink():
+            (stage / "keeps").rmdir()
+            _copy_source_tree(keeps_dir, stage / "keeps", "keeps",
+                              source_budget)
 
         scratch_saved = []
         scratch_missing = []
@@ -555,7 +568,8 @@ def _load_json(path: Path, label: str, max_bytes: int = MAX_UI_BYTES):
 def _validate_database(path: Path):
     connection = None
     try:
-        connection = sqlite3.connect("file:{}?mode=ro".format(path), uri=True)
+        connection = sqlite3.connect(
+            "file:{}?mode=ro&immutable=1".format(path), uri=True)
         connection.row_factory = sqlite3.Row
         check = connection.execute("PRAGMA quick_check").fetchone()[0]
         if check != "ok":
@@ -606,6 +620,12 @@ def _validate_database(path: Path):
             "LIMIT 1").fetchone()
         if invalid_workspace:
             raise SnapshotError("snapshot database contains an invalid workspace type")
+        from puppy import notify
+        try:
+            notify.validate_database_state(connection)
+        except ValueError as exc:
+            raise SnapshotError(
+                "snapshot database contains invalid completion state") from exc
         orphan = connection.execute(
             "SELECT 1 FROM events e LEFT JOIN sessions s ON s.id=e.session_id "
             "WHERE s.id IS NULL LIMIT 1").fetchone()
@@ -657,13 +677,13 @@ def _verify_manifest(root: Path, manifest: dict) -> None:
                 for value in values) or len(set(values)) != len(values):
             raise SnapshotError("snapshot manifest has invalid scratch-workspace metadata")
     allowed = {"manifest.json", "config.json", "puppy.db", "ui.json",
-               "uploads", "scratch", "tls"}
+               "uploads", "scratch", "tls", "keeps"}
     if any(path.name not in allowed for path in root.iterdir()):
         raise SnapshotError("snapshot contains an unknown top-level entry")
     for name in ("config.json", "puppy.db", "ui.json"):
         if not (root / name).is_file() or (root / name).is_symlink():
             raise SnapshotError("snapshot is missing {}".format(name))
-    for name in ("uploads", "scratch"):
+    for name in ("uploads", "scratch", "keeps"):
         if not (root / name).is_dir() or (root / name).is_symlink():
             raise SnapshotError("snapshot is missing its {} directory".format(name))
 
@@ -720,6 +740,100 @@ def _prepare_scratch(candidate_db: Path, root: Path, manifest: dict) -> List[str
         connection.close()
 
 
+def _linked_descriptor(raw) -> dict:
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else None
+    except (TypeError, ValueError):
+        value = None
+    if not isinstance(value, dict) or set(value) != {"uid", "root", "node", "label"}:
+        raise SnapshotError(
+            "snapshot database contains an invalid linked-workspace descriptor")
+    uid, root, node, label = (value.get("uid"), value.get("root"),
+                              value.get("node"), value.get("label"))
+    try:
+        workspace_sync.mirror_base(uid)
+    except workspace_sync.SyncError as exc:
+        raise SnapshotError(
+            "snapshot database contains an invalid linked-workspace id") from exc
+    if not isinstance(root, str) or not root.startswith("/") or \
+            os.path.normpath(root) != root or not 1 < len(root) <= 4096 or \
+            "\x00" in root or not isinstance(node, str) or len(node) > 80 or \
+            not isinstance(label, str) or len(label) > 512:
+        raise SnapshotError(
+            "snapshot database contains an invalid linked-workspace descriptor")
+    return value
+
+
+def _prepare_mirrors(candidate_db: Path, temporary: Path,
+                     manifest: dict) -> dict:
+    """Create empty, reset-marked mirror trees at their stable live paths.
+
+    Mirrors and three-way bases are caches, so archive bytes never seed them.
+    The reset marker makes the first capable controller pull from the
+    authoritative workspace and makes an older controller fail closed.
+    """
+    prepared_mirrors = temporary / "prepared-mirrors"
+    prepared_base = temporary / "prepared-workspace-base"
+    prepared_mirrors.mkdir(mode=0o700)
+    prepared_base.mkdir(mode=0o700)
+    source_data = os.path.normpath(str(manifest["source_data_dir"]))
+    live_data = os.path.normpath(str(Path(config.DATA_DIR).resolve()))
+    connection = sqlite3.connect(str(candidate_db))
+    connection.row_factory = sqlite3.Row
+    seen = set()
+    try:
+        rows = connection.execute(
+            "SELECT id,cwd,workspace,workspace_kind,ws_dirty,native_session_id "
+            "FROM sessions").fetchall()
+        for row in rows:
+            raw = str(row["workspace"] or "")
+            if not raw:
+                continue
+            if row["workspace_kind"] != "directory" or int(row["ws_dirty"]) != 0:
+                raise SnapshotError(
+                    "snapshot contains a linked workspace with unsynchronized changes")
+            descriptor = _linked_descriptor(raw)
+            uid = descriptor["uid"]
+            if uid in seen:
+                raise SnapshotError(
+                    "snapshot database reuses a private workspace mirror")
+            seen.add(uid)
+            leaf = workspace_sync.mirror_leaf(
+                os.path.basename(descriptor["root"].rstrip("/")) or "project")
+            expected_old = os.path.join(source_data, "mirrors", uid, leaf)
+            if os.path.normpath(str(row["cwd"] or "")) != expected_old:
+                raise SnapshotError(
+                    "snapshot database contains an invalid workspace mirror path")
+            base = prepared_mirrors / uid
+            tree = base / leaf
+            tree.mkdir(mode=0o700, parents=True)
+            base.chmod(0o700)
+            workspace_sync.mark_mirror_reset(
+                str(base), secrets.token_hex(16))
+            live_cwd = os.path.join(live_data, "mirrors", uid, leaf)
+            clear_native = live_cwd != expected_old
+            connection.execute(
+                "UPDATE sessions SET cwd=?,native_session_id=? WHERE id=?",
+                (live_cwd, "" if clear_native else row["native_session_id"],
+                 row["id"]))
+            if clear_native:
+                connection.execute("DELETE FROM meta WHERE key=?",
+                                   ("session_undo.{}".format(row["id"]),))
+        # A restored controller must rediscover both sides and rebuild each
+        # excluded three-way base before reporting a link as synchronized.
+        connection.execute(
+            "UPDATE workspace_links SET state='init',conflicts='[]',"
+            "resolutions='{}',last_error=''")
+        connection.commit()
+        return {"mirrors": str(prepared_mirrors),
+                "base": str(prepared_base)}
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
 def stage_import(archive_path: str) -> dict:
     """Extract, validate, and prepare a restore without touching live state."""
     archive = Path(archive_path)
@@ -746,10 +860,13 @@ def stage_import(archive_path: str) -> dict:
         except web_tls.WebTLSError as exc:
             raise SnapshotError("snapshot WebUI TLS state is invalid: {}".format(exc)) from exc
         created_scratch = _prepare_scratch(candidate_db, root, manifest)
+        prepared_workspace = _prepare_mirrors(candidate_db, temporary, manifest)
         return {
             "temporary": str(temporary), "root": str(root), "database": str(candidate_db),
             "config": cfg, "ui": ui, "manifest": manifest,
             "created_scratch": created_scratch,
+            "prepared_mirrors": prepared_workspace["mirrors"],
+            "prepared_workspace_base": prepared_workspace["base"],
         }
     except Exception:
         for path in created_scratch:
@@ -787,9 +904,20 @@ def commit_import(staged: dict) -> dict:
     swapped = []
     database_changed = False
     try:
-        for name in ("uploads", "tls"):
-            current = Path(config.DATA_DIR).resolve() / name
-            incoming = root / name
+        trees = (
+            ("uploads", Path(config.DATA_DIR).resolve() / "uploads",
+             root / "uploads"),
+            ("tls", Path(config.DATA_DIR).resolve() / "tls", root / "tls"),
+            ("keeps", Path(config.DATA_DIR).resolve() / "workspace" / "keeps",
+             root / "keeps"),
+            ("workspace-base",
+             Path(config.DATA_DIR).resolve() / "workspace" / "base",
+             Path(staged["prepared_workspace_base"])),
+            ("mirrors", Path(config.DATA_DIR).resolve() / "mirrors",
+             Path(staged["prepared_mirrors"])),
+        )
+        for name, current, incoming in trees:
+            current.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             previous = rollback / name
             if current.exists() or current.is_symlink():
                 os.replace(str(current), str(previous))
@@ -818,7 +946,7 @@ def commit_import(staged: dict) -> dict:
                 if previous.exists() or previous.is_symlink():
                     os.replace(str(previous), str(current))
             except Exception as rollback_exc:
-                rollback_errors.append("{}: {}".format(current.name, rollback_exc))
+                rollback_errors.append("{}: {}".format(current, rollback_exc))
         if rollback_errors:
             detail = "; rollback errors: {}; recovery files retained in {}".format(
                 ", ".join(rollback_errors), rollback)

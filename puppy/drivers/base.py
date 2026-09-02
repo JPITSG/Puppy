@@ -15,9 +15,12 @@ Normalized transcript event kinds (persisted):
                  The transcript line reads outcome, duration, input tokens
                  (input_tokens plus any cache_read/cache_creation keys, so a
                  driver whose input already counts cached tokens must not
-                 also emit those keys), output tokens and clock time for every
+                 also emit those keys), total output tokens (including any
+                 reasoning_output_tokens subset) and clock time for every
                  engine; a driver that leaves duration_ms unset is given the
-                 runner's wall-clock turn time. Drivers offering session
+                 runner's wall-clock turn time. usage_scope="last_request"
+                 explicitly labels an engine fallback that cannot recover a
+                 whole-turn total. Drivers offering session
                  tools also stamp each prompt turn's result with the native
                  identities a later undo needs (native_session_id plus
                  claude's native_prompt_id/native_tail_id or codex's

@@ -2436,13 +2436,15 @@ function ingestSessionActivity(bid, sessions, serverTime) {
   }
 }
 
-/* Completions on remote backends are seen here, by whichever consoles are
-   watching (session tab streams and the 12-second polls both funnel through
-   the activity ingest). Report them; the controller deduplicates, so several
-   open browsers ring once. Local sessions fire on the server itself and are
-   deliberately not reported. */
+/* Older remote nodes need the console-report fallback. Current nodes publish
+   an authoritative durable completion cursor that the controller consumes
+   itself, so browser visibility and browser-computed timing play no role. */
 function reportRemoteCompletion(bid, session, startedAt, now) {
   if (!bid || !state.notify.configured || !state.notify.enabled) return;
+  const backend = (state.backends || []).find(
+    item => Number(item.id) === Number(bid));
+  if (backend && Array.isArray(backend.capabilities) &&
+      backend.capabilities.includes("completion-events")) return;
   api(0, "notify/fire", { method: "POST", body: {
     bid, sid: session.id,
     info: {
@@ -8187,6 +8189,9 @@ class SessionView {
       case "thinking_tokens":
         this.setStatus(thinkingLabel(d.tokens));
         break;
+      case "context_tokens":
+        this.setStatus(`${fmtTokens(Number(d.tokens) || 0)} context used`);
+        break;
       case "approval_request":
         this.showApproval(d.req);
         break;
@@ -8991,10 +8996,12 @@ class SessionView {
         /* a tool turn (compaction, undo) reports no usage of its own on some
            engines; "0 in · 0 out" would misreport work that was not counted */
         const counted = !d.tool || !!(u.input_tokens || u.output_tokens);
+        const usageSuffix = d.usage_scope === "last_request" ? " (last request)" : "";
         if (counted && u.input_tokens != null)
           bits.push(fmtTokens(u.input_tokens + (u.cache_read_input_tokens || 0) +
-            (u.cache_creation_input_tokens || 0)) + " in");
-        if (counted && u.output_tokens != null) bits.push(fmtTokens(u.output_tokens) + " out");
+            (u.cache_creation_input_tokens || 0)) + " in" + usageSuffix);
+        if (counted && u.output_tokens != null)
+          bits.push(fmtTokens(u.output_tokens) + " out" + usageSuffix);
         /* the native context at the end of the turn against the model's window */
         if (d.context_window > 0 && d.context_used != null)
           bits.push(Math.round(100 * d.context_used / d.context_window) + "% ctx");
@@ -9933,8 +9940,10 @@ class SessionView {
     menu.appendChild(menuCheckRow("Show status bar", sessionShowsMeta(this.session),
       () => this.patchSession({ show_meta: !sessionShowsMeta(this.session) })));
     menu.appendChild(el("div", "menu-sep"));
-    add(isScratchWorkspace(this.session) ? "Copy workspace path" : "Copy cwd",
-      () => copyWithToast(this.session.cwd));
+    const sessionWs = sessionWorkspace(this.session);
+    add(isScratchWorkspace(this.session) ? "Copy workspace path" :
+      sessionWs ? "Copy project path" : "Copy cwd",
+      () => copyWithToast(sessionWs ? sessionWs.root : this.session.cwd));
     if (this.session && this.session.native_session_id)
       add("Copy native session id", () => copyWithToast(this.session.native_session_id));
     if (isScratchWorkspace(this.session))

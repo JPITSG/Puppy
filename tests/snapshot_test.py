@@ -26,8 +26,10 @@ PRIVATE_TESTS.chmod(0o700)
 TEST_ROOT = Path(tempfile.mkdtemp(prefix="snapshot-", dir=str(PRIVATE_TESTS)))
 os.environ["PUPPY_DATA"] = str(TEST_ROOT / "data")
 
-from puppy import (auth, config, db, listener_handoff, runner as session_runner,
-                   snapshots, terminal, uploads, web_tls, workspaces)  # noqa: E402
+from puppy import (auth, config, db, listener_handoff, notify,
+                   runner as session_runner, snapshots, terminal, uploads,
+                   web_tls, workspace_sync,
+                   workspaces)  # noqa: E402
 from puppy.web import build_app  # noqa: E402
 
 
@@ -80,11 +82,16 @@ async def exercise_http(archive_ui: dict, session_id: int, project: Path) -> Non
             finally:
                 uploads._active_uploads = 0
 
+            archived_stream = notify.completion_events(0)["stream_id"]
+            cursor_bid = int(db.query_one("SELECT id FROM backends")["id"])
+            cursor_key = "notify_completion_cursor.{}".format(cursor_bid)
+            db.meta_set(cursor_key, {
+                "version": 1, "stream_id": "f" * 32, "cursor": 4})
             async with http.post(url + "/api/snapshot/export", headers=headers,
                                  json={"ui": archive_ui}) as response:
                 prepared = await response.json()
                 assert response.status == 200, prepared
-                assert prepared["sessions"] == 2
+                assert prepared["sessions"] == 3
             async with http.get(url + prepared["download"], headers=headers) as response:
                 payload = await response.read()
                 assert response.status == 200
@@ -124,12 +131,14 @@ async def exercise_http(archive_ui: dict, session_id: int, project: Path) -> Non
             assert app["puppy_bind_verifications"] == {}
             assert terminal.manager().instance_payloads() == []
             assert restored["ui"] == archive_ui
-            assert restored["sessions"] == 2
+            assert restored["sessions"] == 3
             assert config.get("instance_name") == "saved-instance"
             assert config.get("sessions.default_cwd") == str(project)
             assert config.get("engines.usage_refresh_minutes") == 30
             assert config.get("engines.opencode") is None
             assert config.get("uploads.max_file_size_mb") == 19
+            assert notify.completion_events(0)["stream_id"] != archived_stream
+            assert db.meta_get(cursor_key) is None
     finally:
         await runner.cleanup()
 
@@ -199,6 +208,35 @@ async def main() -> None:
         (nested / "file.txt").write_text("scratch contents", encoding="utf-8")
         os.symlink("nested/file.txt", str(original_scratch / "safe-link"))
 
+        mirror_uid = workspace_sync.new_mirror_uid()
+        mirror_cwd = workspace_sync.allocate_mirror(mirror_uid, project.name)
+        linked_id = db.create_session(
+            "linked session", "codex", mirror_cwd, "", "", "#7aa2f7",
+            "workspace-write", workspace_kind="directory",
+            workspace=json.dumps({
+                "uid": mirror_uid, "root": str(project), "node": "saved-backend",
+                "label": "saved-backend:" + str(project),
+            }, separators=(",", ":")))
+        db.touch_session(linked_id, native_session_id="native-linked", ws_dirty=0)
+        saved_completion = notify._record_completion(
+            db.get_session(linked_id), "ok", 7)
+        db.execute(
+            "INSERT INTO workspace_links(uid,exec_backend,session_id,ws_backend,"
+            "root,lease,state,generation,conflicts,resolutions,last_error,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (mirror_uid, 0, linked_id, backend_id, str(project), "old-lease",
+             "ok", 4, "[]", "{}", "", time.time()))
+        (Path(mirror_cwd) / "clean-cache.txt").write_text(
+            "excluded mirror bytes", encoding="utf-8")
+        keep_file = (Path(config.DATA_DIR) / "workspace" / "keeps" /
+                     mirror_uid / "4" / "conflict.txt")
+        keep_file.parent.mkdir(parents=True, mode=0o700)
+        keep_file.write_text("preserved loser", encoding="utf-8")
+        base_file = (Path(config.DATA_DIR) / "workspace" / "base" /
+                     (mirror_uid + ".json.gz"))
+        base_file.parent.mkdir(parents=True, mode=0o700)
+        base_file.write_bytes(b"excluded base cache")
+
         upload = (Path(config.DATA_DIR) / "uploads" / str(directory_id) /
                   "1700000000000-abcdef0123" / "image.png")
         upload.parent.mkdir(parents=True)
@@ -243,6 +281,18 @@ async def main() -> None:
             lambda: snapshots._validate_database(incomplete_draft_db),
             "schema is not current")
         incomplete_draft_db.unlink()
+        invalid_completion_db = TEST_ROOT / "invalid-completion.db"
+        db.backup_to(str(invalid_completion_db))
+        invalid_completion_connection = sqlite3.connect(
+            str(invalid_completion_db))
+        invalid_completion_connection.execute(
+            "UPDATE meta SET value='{}' WHERE key='completion_log'")
+        invalid_completion_connection.commit()
+        invalid_completion_connection.close()
+        expect_snapshot_error(
+            lambda: snapshots._validate_database(invalid_completion_db),
+            "completion state")
+        invalid_completion_db.unlink()
         missing_transport_db = TEST_ROOT / "missing-web-transport.db"
         db.backup_to(str(missing_transport_db))
         missing_transport_connection = sqlite3.connect(str(missing_transport_db))
@@ -290,6 +340,10 @@ async def main() -> None:
         with tarfile.open(str(archive_path), "r:gz") as archive:
             names = archive.getnames()
         assert snapshots.ARCHIVE_ROOT + "/manifest.json" in names
+        assert any(name.endswith("/keeps/{}/4/conflict.txt".format(mirror_uid))
+                   for name in names)
+        assert not any("/mirrors/" in name or "/workspace/base/" in name
+                       for name in names)
         assert not any("puppy.log" in name or "/snapshots/" in name or "/runtime/" in name
                        for name in names)
 
@@ -316,6 +370,12 @@ async def main() -> None:
                    ("backend_last_known.{}".format(backend_id),))
         db.execute("DELETE FROM meta WHERE key=?",
                    ("backend_last_sessions.{}".format(backend_id),))
+        db.execute("DELETE FROM meta WHERE key IN (?,?)", (
+            "completion_log", "session_completion.{}".format(linked_id)))
+        (Path(mirror_cwd) / "newer-cache.txt").write_text(
+            "must not survive restore", encoding="utf-8")
+        keep_file.write_text("mutated loser", encoding="utf-8")
+        base_file.write_bytes(b"mutated base cache")
         web_tls.commit_change(web_tls.prepare_change(
             "http", "custom", "", "", ("snapshot.test", "127.0.0.1")))
         shutil.rmtree(Path(config.DATA_DIR) / "uploads")
@@ -429,7 +489,7 @@ async def main() -> None:
         assert config.get("notify.enabled") is True
         assert config.get("notify.backend") == 1
         assert config.get("notify.command") == "printf done: %s {session}"
-        assert len(db.list_sessions(include_archived=True)) == 2
+        assert len(db.list_sessions(include_archived=True)) == 3
         assert session_runner.parse_used_config(
             db.get_session(directory_id)["used_config"]) == {"model": "gpt-5.6-sol", "effort": "max"}
         assert db.query_one("SELECT token FROM backends")["token"] == "private-backend-token"
@@ -465,6 +525,27 @@ async def main() -> None:
         assert restored_directory_draft["text"] == directory_draft
         assert str(restored_upload) in restored_directory_draft["text"]
         assert project_file.read_text(encoding="utf-8") == "changed after export"
+        restored_linked = db.get_session(linked_id)
+        assert restored_linked["cwd"] == mirror_cwd
+        assert session_runner.session_payload(restored_linked)["cwd"] == str(project)
+        restored_completion = notify.completion_record(linked_id)
+        assert restored_completion["completion_id"] == \
+            saved_completion["completion_id"]
+        assert restored_completion["cwd"] == str(project)
+        restored_mirror = Path(restored_linked["cwd"])
+        assert restored_mirror.is_dir()
+        assert not (restored_mirror / "clean-cache.txt").exists()
+        assert not (restored_mirror / "newer-cache.txt").exists()
+        reset_store = workspace_sync.mirror_store_for(restored_linked)
+        assert workspace_sync.mirror_reset(reset_store)
+        assert keep_file.read_text(encoding="utf-8") == "preserved loser"
+        assert not base_file.exists()
+        restored_link = db.query_one(
+            "SELECT state,conflicts,resolutions,last_error FROM workspace_links "
+            "WHERE session_id=?", (linked_id,))
+        assert dict(restored_link) == {
+            "state": "init", "conflicts": "[]", "resolutions": "{}",
+            "last_error": ""}
 
         unsupported = Path(restored_scratch["cwd"]) / "named-pipe"
         os.mkfifo(str(unsupported))
@@ -481,6 +562,11 @@ async def main() -> None:
         current_upload = Path(config.DATA_DIR) / "uploads" / "current.txt"
         current_upload.write_text("keep me", encoding="utf-8")
         tls_key.write_bytes(b"keep current tls material")
+        current_mirror_sentinel = restored_mirror / "rollback-current.txt"
+        current_mirror_sentinel.write_text("keep current mirror", encoding="utf-8")
+        keep_file.write_text("keep current loser", encoding="utf-8")
+        base_file.parent.mkdir(parents=True, exist_ok=True)
+        base_file.write_bytes(b"keep current base")
         staged = snapshots.stage_import(str(archive_path))
         original_replace = db.replace_from
         calls = {"count": 0}
@@ -503,7 +589,11 @@ async def main() -> None:
         assert config.get("uploads.max_file_size_mb") == 23
         assert current_upload.read_text(encoding="utf-8") == "keep me"
         assert tls_key.read_bytes() == b"keep current tls material"
-        assert len(db.list_sessions(include_archived=True)) == 2
+        assert len(db.list_sessions(include_archived=True)) == 3
+        assert current_mirror_sentinel.read_text(encoding="utf-8") == \
+            "keep current mirror"
+        assert keep_file.read_text(encoding="utf-8") == "keep current loser"
+        assert base_file.read_bytes() == b"keep current base"
         assert not list(snapshots.work_root().glob("rollback-*"))
 
         traversal = TEST_ROOT / "traversal.tar.gz"

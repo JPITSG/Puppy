@@ -42,7 +42,9 @@ _locks = {}          # link id -> asyncio.Lock (one reconcile at a time)
 _watch_tasks = {}    # exec backend id -> watcher Task
 _sweep_task = None
 _service_inflight = set()   # (exec bid, sid, phase)
+_active_reconciles = set()  # link ids currently inside their reconcile lock
 _retry_after = {}    # link id -> monotonic timestamp of the next allowed try
+_snapshot_paused = False
 
 
 class NodeError(RuntimeError):
@@ -205,12 +207,16 @@ async def _request_json(channel: dict, method: str, path: str,
 
 
 async def _open_stream(channel: dict, method: str, path: str, *,
-                       json_body=None, data=None, content_type=None):
+                       json_body=None, data=None, content_type=None,
+                       extra_headers=None):
     """A streaming request against the node's preferred URL (no failover)."""
     urls = channel.get("urls") or []
     if not urls:
         raise NodeError("{} has no configured URL".format(channel["name"]), 502)
     headers = _headers(channel)
+    if isinstance(extra_headers, dict):
+        headers.update({str(key): str(value)
+                        for key, value in extra_headers.items()})
     if content_type:
         headers["Content-Type"] = content_type
     try:
@@ -234,14 +240,24 @@ async def _open_stream(channel: dict, method: str, path: str, *,
     return response
 
 
-async def _fetch_manifest(channel: dict, prefix: str) -> dict:
-    response = await _open_stream(channel, "GET", prefix + "/manifest")
+async def _fetch_manifest(channel: dict, prefix: str, *,
+                          accept_reset: bool = False) -> dict:
+    response = await _open_stream(
+        channel, "GET", prefix + "/manifest",
+        extra_headers=({workspace_sync.MIRROR_RESET_HEADER: "1"}
+                       if accept_reset else None))
     entries = {}
     skipped = {}
+    reset_id = None
     try:
         header = await workspace_sync.read_frame(response.content)
         if not isinstance(header, dict):
             raise NodeError("invalid manifest stream", 502)
+        if header.get("reset_id") is not None:
+            reset_id = header.get("reset_id")
+            if not accept_reset or not isinstance(reset_id, str) or \
+                    not 16 <= len(reset_id) <= 128:
+                raise NodeError("invalid mirror reset marker", 502)
         while True:
             frame = await workspace_sync.read_frame(response.content)
             if frame is None:
@@ -257,7 +273,24 @@ async def _fetch_manifest(channel: dict, prefix: str) -> dict:
                 raise NodeError("manifest exceeds the entry limit", 507)
     finally:
         response.release()
-    return {"entries": entries, "skipped": skipped}
+    return {"entries": entries, "skipped": skipped,
+            "reset_id": reset_id}
+
+
+async def _recover_lease(link: dict, ws_channel: dict) -> str:
+    """Reacquire an expired/restored provider lease for the same root."""
+    reply = await _request_json(
+        ws_channel, "POST", "workspace/leases",
+        {"root": link["root"], "reuse": True})
+    lease = reply.get("lease") if isinstance(reply, dict) else None
+    lease_id = lease.get("id") if isinstance(lease, dict) else None
+    lease_root = str(lease.get("root") or "") if isinstance(lease, dict) else ""
+    if not isinstance(lease_id, str) or not lease_id or \
+            lease_root != str(link["root"]):
+        raise NodeError("{} returned an invalid replacement lease".format(
+            ws_channel["name"]), 502)
+    _update_link(int(link["id"]), lease=lease_id)
+    return lease_id
 
 
 async def _transfer(src: dict, src_prefix: str, dst: dict, dst_prefix: str,
@@ -498,12 +531,25 @@ async def run_reconcile(link_id: int) -> dict:
         ws_prefix = "workspace/leases/{}".format(link["lease"])
         keepalive = asyncio.ensure_future(
             _keepalive(exec_channel, int(link["session_id"])))
+        _active_reconciles.add(int(link_id))
         try:
-            workspace_manifest = await _fetch_manifest(ws_channel, ws_prefix)
-            mirror_manifest = await _fetch_manifest(exec_channel, mirror_prefix)
-            base = _load_base(link["uid"])
-            plan = workspace_sync.plan_reconcile(
-                base, workspace_manifest["entries"], mirror_manifest["entries"])
+            try:
+                workspace_manifest = await _fetch_manifest(ws_channel, ws_prefix)
+            except NodeError as exc:
+                if exc.status != 404:
+                    raise
+                lease_id = await _recover_lease(link, ws_channel)
+                ws_prefix = "workspace/leases/{}".format(lease_id)
+                workspace_manifest = await _fetch_manifest(ws_channel, ws_prefix)
+            mirror_manifest = await _fetch_manifest(
+                exec_channel, mirror_prefix, accept_reset=True)
+            reset_id = mirror_manifest.get("reset_id")
+            base = {} if reset_id else _load_base(link["uid"])
+            plan = (workspace_sync.plan_authoritative_pull(
+                workspace_manifest["entries"], mirror_manifest["entries"])
+                if reset_id else workspace_sync.plan_reconcile(
+                    base, workspace_manifest["entries"],
+                    mirror_manifest["entries"]))
 
             resolutions = link["resolutions"]
             unresolved = []
@@ -563,6 +609,10 @@ async def run_reconcile(link_id: int) -> dict:
             failed_conflicts = [attempted[path] for path in sorted(used & failed)]
             visible_conflicts = unresolved + failed_conflicts
             clean = not visible_conflicts and not failed
+            if reset_id and clean:
+                await _request_json(
+                    exec_channel, "POST", mirror_prefix + "/reset-ack",
+                    {"reset_id": reset_id})
             completed_resolutions = used - failed
             remaining = {path: value for path, value in resolutions.items()
                          if path not in completed_resolutions}
@@ -620,6 +670,7 @@ async def run_reconcile(link_id: int) -> dict:
             return {"ok": False, "error": str(exc)}
         finally:
             keepalive.cancel()
+            _active_reconciles.discard(int(link_id))
             _broadcast_links()
 
 
@@ -664,6 +715,8 @@ async def service_session(exec_bid: int, session_id: int, phase: str) -> dict:
 
 
 def _schedule_service(exec_bid: int, session_id: int, phase: str) -> None:
+    if _snapshot_paused:
+        return
     key = (exec_bid, session_id, phase)
     if key in _service_inflight:
         return
@@ -771,6 +824,8 @@ async def _poll_backend_sessions(bid: int) -> None:
 
 async def _sweep_once() -> None:
     """Retry errored links, finish parked dirty mirrors, reap orphans."""
+    if _snapshot_paused:
+        return
     links = list_links()
     if not links:
         return
@@ -826,6 +881,27 @@ async def _sweep_loop() -> None:
 
 
 # ---- lifecycle orchestration ----
+
+def snapshot_blockers() -> list:
+    return (["workspace reconciliation in progress"]
+            if _active_reconciles or _service_inflight else [])
+
+
+def pause_for_snapshot() -> None:
+    global _snapshot_paused
+    _snapshot_paused = True
+
+
+def resume_after_snapshot(restored: bool = False) -> None:
+    """Resume background servicing, discarding cache state after a restore."""
+    global _snapshot_paused
+    if restored:
+        _locks.clear()
+        _retry_after.clear()
+    _snapshot_paused = False
+    ensure_watchers()
+    if restored:
+        asyncio.ensure_future(_startup_sweep())
 
 async def create_linked_session(body: dict) -> dict:
     exec_bid = int(body.get("backend") or 0)

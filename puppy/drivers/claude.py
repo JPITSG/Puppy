@@ -335,7 +335,7 @@ class ClaudeDriver(Driver):
                 ctx["context_used"] = sum(
                     int(usage.get(k) or 0) for k in
                     ("input_tokens", "cache_read_input_tokens",
-                     "cache_creation_input_tokens"))
+                     "cache_creation_input_tokens", "output_tokens"))
             # per-response model id - catches mid-turn fallback (e.g. fable -> opus)
             mdl = msg.get("model") or ""
             if mdl and mdl != ctx.get("model_seen"):

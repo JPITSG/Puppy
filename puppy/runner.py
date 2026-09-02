@@ -220,8 +220,11 @@ def session_payload(session):
     out["workspace_missing"] = workspaces.is_temporary(out) and not workspaces.is_available(out)
     out["used_config"] = parse_used_config(out["used_config"])
     out["show_meta"] = out["show_meta"] != 0
-    # raw descriptor JSON becomes a structured object (or None) on the wire
-    out["workspace"] = workspace_sync.session_workspace(out)
+    # Raw descriptor JSON becomes a structured object on the wire, while the
+    # private mirror cwd never leaves the node.
+    descriptor = workspace_sync.session_workspace(out)
+    out["cwd"] = workspace_sync.public_cwd(out)
+    out["workspace"] = descriptor
     out["ws_dirty"] = bool(out.get("ws_dirty"))
     return out
 
@@ -239,18 +242,22 @@ def sessions_payload() -> dict:
     sessions = []
     for s in db.list_sessions(include_archived=True):
         h = _hubs.get(s["id"])
+        descriptor = workspace_sync.session_workspace(s)
+        completion = notify.completion_record(s["id"])
         sessions.append({
-            "id": s["id"], "name": s["name"], "engine": s["engine"], "cwd": s["cwd"],
+            "id": s["id"], "name": s["name"], "engine": s["engine"],
+            "cwd": workspace_sync.public_cwd(s),
             "status": (h.status if h else "idle"), "archived": s["archived"],
             "active_since": (h.active_since if h and h.status == "running" else None),
-            "completion_status": (h.last_completion_status
-                                  if h and h.status == "idle" else ""),
+            "completion_status": (
+                h.last_completion_status if h and h.status == "idle" else
+                str((completion or {}).get("status") or "") if not h else ""),
             "updated_at": s["updated_at"], "model": s["model"], "last_model": s["last_model"],
             "effort": s["effort"], "color": s["color"], "permission_mode": s["permission_mode"],
             "has_native": bool(s["native_session_id"]),
             "workspace_kind": s["workspace_kind"],
             "workspace_missing": workspaces.is_temporary(s) and not workspaces.is_available(s),
-            "workspace": workspace_sync.session_workspace(s),
+            "workspace": descriptor,
             "ws_dirty": bool(s["ws_dirty"]),
             # non-empty while a turn holds at a sync barrier; the controller's
             # watcher reads this to know a linked session needs service
@@ -454,7 +461,9 @@ class SessionHub:
         # The outcome which ended the most recent activity block. It is
         # transient protocol state, used by controllers to distinguish a user
         # stop from work that completed while their session socket was hidden.
-        self.last_completion_status = ""
+        completion = notify.completion_record(session_id)
+        self.last_completion_status = str(
+            (completion or {}).get("status") or "")
         self.stderr_tail = ""
         self._stdin_lock = asyncio.Lock()
         # whether this turn's divider already announced a model move, so the

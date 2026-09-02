@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -52,6 +53,19 @@ def exercise_driver_normalization() -> None:
     }]
     assert "--replay-user-messages" in claude.build_cmd(
         {}, True, "original direction", "pin")
+    usage_ctx = claude.turn_context({}, True, "usage", "usage-pin")
+    claude.parse_line(json.dumps({
+        "type": "assistant", "message": {
+            "model": "claude-test", "content": [], "usage": {
+                "input_tokens": 10, "cache_read_input_tokens": 20,
+                "cache_creation_input_tokens": 3, "output_tokens": 4,
+            }}}), usage_ctx)
+    usage_result = claude.parse_line(json.dumps({
+        "type": "result", "session_id": "claude-session", "usage": {},
+        "modelUsage": {"claude-test": {"contextWindow": 200000}},
+    }), usage_ctx)[0]["data"]
+    assert usage_result["context_used"] == 37
+    assert usage_result["context_window"] == 200000
 
     driver = CodexDriver()
     assert driver.uses_stdin_stream is True
@@ -718,6 +732,7 @@ with open(os.environ["PUPPY_FAKE_CODEX_LOG"], "a", encoding="utf-8") as handle:
 def exercise_opencode_driver() -> None:
     """Pin catalog parsing and the full no-model ACP handshake/state machine."""
     from puppy import runner
+    import puppy.drivers.opencode as opencode_module
     from puppy.drivers.opencode import OpenCodeDriver, _display_provider, parse_model_catalog
     catalog = parse_model_catalog("""provider/model-a
 {
@@ -760,6 +775,40 @@ second/model-b
         {"native_session_id": "ses_existing"}, True, driver) is True
     assert runner._starts_fresh_native_session(
         {"native_session_id": "ses_existing"}, True, CodexDriver()) is False
+    usage_root = Path(tempfile.mkdtemp(prefix="opencode-usage-"))
+    previous_xdg = os.environ.get("XDG_DATA_HOME")
+    try:
+        usage_dir = usage_root / "opencode"
+        usage_dir.mkdir()
+        connection = sqlite3.connect(str(usage_dir / "opencode.db"))
+        connection.execute(
+            "CREATE TABLE session(id TEXT PRIMARY KEY,tokens_input INTEGER,"
+            "tokens_output INTEGER,tokens_reasoning INTEGER,"
+            "tokens_cache_read INTEGER,tokens_cache_write INTEGER)")
+        connection.execute(
+            "INSERT INTO session VALUES(?,?,?,?,?,?)",
+            ("ses-counted", 11, 12, 13, 14, 15))
+        connection.commit()
+        connection.close()
+        os.environ["XDG_DATA_HOME"] = str(usage_root)
+        assert opencode_module._session_totals("ses-counted") == {
+            "input_tokens": 11, "output_tokens": 25,
+            "reasoning_output_tokens": 13,
+            "cache_read_input_tokens": 14,
+            "cache_creation_input_tokens": 15,
+        }
+        assert opencode_module._covers_request(
+            {"input_tokens": 20, "output_tokens": 9},
+            {"input_tokens": 7, "output_tokens": 9})
+        assert not opencode_module._covers_request(
+            {"input_tokens": 0, "output_tokens": 0},
+            {"input_tokens": 7, "output_tokens": 9})
+    finally:
+        if previous_xdg is None:
+            os.environ.pop("XDG_DATA_HOME", None)
+        else:
+            os.environ["XDG_DATA_HOME"] = previous_xdg
+        shutil.rmtree(usage_root, ignore_errors=True)
     session = {
         "cwd": "/tmp", "native_session_id": "", "model": "provider/model-a",
         "effort": "high", "permission_mode": "manual",
@@ -906,18 +955,56 @@ second/model-b
     assert reply == {"jsonrpc": "2.0", "id": 7,
                      "result": {"outcome": {"outcome": "selected", "optionId": "always"}}}
 
+    usage_action = driver.parse_line(update({
+        "sessionUpdate": "usage_update", "used": 1000, "size": 2000}), ctx)
+    assert usage_action == [{"a": "transient", "msg": {
+        "type": "context_tokens", "tokens": 1000}}]
+
     driver.parse_line(update({
         "sessionUpdate": "agent_message_chunk",
         "content": {"type": "text", "text": "Done."}}), ctx)
-    actions = driver.parse_line(json.dumps({
-        "jsonrpc": "2.0", "id": "puppy:prompt", "result": {
-            "stopReason": "end_turn", "usage": {
-                "inputTokens": 10, "outputTokens": 4, "totalTokens": 14}}}), ctx)
+    ctx["usage_baseline"] = {
+        "input_tokens": 100, "output_tokens": 12,
+        "reasoning_output_tokens": 2, "cache_read_input_tokens": 500,
+        "cache_creation_input_tokens": 5,
+    }
+    original_totals = opencode_module._session_totals
+    opencode_module._session_totals = lambda _sid: {
+        "input_tokens": 130, "output_tokens": 23,
+        "reasoning_output_tokens": 5, "cache_read_input_tokens": 590,
+        "cache_creation_input_tokens": 7,
+    }
+    try:
+        actions = driver.parse_line(json.dumps({
+            "jsonrpc": "2.0", "id": "puppy:prompt", "result": {
+                "stopReason": "end_turn", "usage": {
+                    "inputTokens": 10, "outputTokens": 4,
+                    "totalTokens": 14}}}), ctx)
+    finally:
+        opencode_module._session_totals = original_totals
     assert actions[0] == {"a": "event", "kind": "assistant", "data": {"text": "Done."}}
     assert actions[-1]["data"]["usage"] == {
-        "input_tokens": 10, "output_tokens": 4, "total_tokens": 14}
+        "input_tokens": 30, "output_tokens": 11,
+        "reasoning_output_tokens": 3, "cache_read_input_tokens": 90,
+        "cache_creation_input_tokens": 2}
+    assert actions[-1]["data"]["usage_scope"] == "turn"
+    assert actions[-1]["data"]["context_used"] == 1004
+    assert actions[-1]["data"]["context_window"] == 2000
     assert driver.steer_ready(session, ctx) is False
     assert driver.steer_payload(session, ctx, "too late", "steer-oc-2") is None
+
+    fallback_ctx = driver.turn_context(session, True, "limited", "pin-fallback")
+    fallback_ctx.update(phase="prompt", session_id="definitely-not-a-session")
+    limited = driver.parse_line(json.dumps({
+        "jsonrpc": "2.0", "id": "puppy:prompt", "result": {
+            "stopReason": "max_tokens", "usage": {
+                "inputTokens": 7, "outputTokens": 9,
+                "thoughtTokens": 3, "totalTokens": 19}}}), fallback_ctx)[-1]["data"]
+    assert limited["ok"] is False and limited["stop_reason"] == "max_tokens"
+    assert limited["usage_scope"] == "last_request"
+    assert limited["usage"] == {
+        "input_tokens": 7, "output_tokens": 12, "total_tokens": 19,
+        "reasoning_output_tokens": 3}
 
     resumed = dict(session, native_session_id="ses_existing", effort="")
     resume_ctx = driver.turn_context(resumed, False, "again", "pin")
@@ -1260,6 +1347,8 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "session-search" in ping["capabilities"]
         assert "session-event-window" in ping["capabilities"]
         assert "session-tools" in ping["capabilities"]
+        assert "completion-events" in ping["capabilities"]
+        assert "workspace-mirror-reset" in ping["capabilities"]
         assert "shutdown-notice" in ping["capabilities"]
         assert ping["shutting_down"] is False
         # browser surface: capability is static, enablement is node config
@@ -1365,6 +1454,18 @@ async def exercise_node(url: str, token: str, expected_version: str,
         async with http.post(url + "/api/notify/exec", headers=good, ssl=pinned,
                              json={"command": "true"}) as response:
             assert response.status == 404
+        async with http.get(url + "/api/completions?after=0",
+                            headers=good, ssl=pinned) as response:
+            completions = await response.json()
+            assert response.status == 200, completions
+            assert completions["ok"] is True and completions["cursor"] >= 0
+            assert len(completions["stream_id"]) == 32
+        async with http.get(url + "/api/completions?after=-1",
+                            headers=good, ssl=pinned) as response:
+            assert response.status == 400
+        async with http.get(url + "/api/completions?after=0",
+                            ssl=pinned) as response:
+            assert response.status == 401
         # The authenticated named-browser handoff routes are packaged in the
         # headless runtime even while Browser is off; an unknown logical ID is
         # a domain error, not an absent route.
@@ -1873,6 +1974,8 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert "active-turn-steering" in full_ping["capabilities"]
         assert "browser-handoff" in full_ping["capabilities"]
         assert "browser-file-workflows" in full_ping["capabilities"]
+        assert "completion-events" in full_ping["capabilities"]
+        assert "workspace-mirror-reset" in full_ping["capabilities"]
         assert "shutdown-notice" not in full_ping["capabilities"]
 
         updates = await http.ws_connect(url + "/api/ws/updates", headers=headers)
@@ -2538,7 +2641,7 @@ async def check_notify_placeholders() -> None:
     Imported here, not at module scope: notify pulls in puppy.config, which
     binds its data path at import time and must not load before PUPPY_DATA.
     """
-    from puppy import notify
+    from puppy import backends, db, notify
     # the leading unit is never zero-padded, so the shape follows the span
     for seconds, expected in [
             (0, "0:00"), (7, "0:07"), (59, "0:59"), (60, "1:00"),
@@ -2574,13 +2677,72 @@ async def check_notify_placeholders() -> None:
         notify.active = lambda: True
         notify._fire = capture_fire
         session = {"id": 9, "name": "stopped", "engine": "codex",
-                   "model": "test", "cwd": "/tmp"}
+                   "model": "configured", "last_model": "actual-model",
+                   "cwd": "/private/mirror/project",
+                   "workspace": json.dumps({
+                       "uid": "abcd1234", "root": "/authoritative/project",
+                       "node": "remote", "label": "remote project"})}
         notify.session_finished(session, "interrupted", 12)
         await asyncio.sleep(0)
         assert fired == [], fired
         notify.session_finished(session, "ok", 13)
         await asyncio.sleep(0)
         assert len(fired) == 1 and fired[0]["status"] == "ok", fired
+        assert fired[0]["model"] == "actual-model"
+        assert fired[0]["cwd"] == "/authoritative/project"
+        history = notify.completion_events(0)
+        assert len(history["stream_id"]) == 32 and history["cursor"] >= 2
+        assert history["completions"][-1]["cwd"] == "/authoritative/project"
+
+        # The controller establishes a baseline once, then consumes durable
+        # remote records itself. It advances only after attempting delivery;
+        # interrupted work and a replaced/restored stream never ring.
+        bid = 987
+        notify.forget_backend(bid)
+        stream = "a" * 32
+
+        def record(seq, status="ok"):
+            return {
+                "seq": seq, "completion_id": "{:032x}".format(seq),
+                "session_id": 44, "session": "remote session",
+                "engine": "codex", "model": "actual", "status": status,
+                "duration": 5, "cwd": "/remote/project",
+                "started_at": 10.0, "finished_at": 15.0,
+            }
+
+        replies = [
+            {"ok": True, "stream_id": stream, "cursor": 1,
+             "truncated": False, "completions": [record(1)]},
+            {"ok": True, "stream_id": stream, "cursor": 2,
+             "truncated": False, "completions": [record(2)]},
+            {"ok": True, "stream_id": stream, "cursor": 3,
+             "truncated": False,
+             "completions": [record(3, "interrupted")]},
+            {"ok": True, "stream_id": "b" * 32, "cursor": 1,
+             "truncated": False, "completions": [record(1)]},
+            # A same-stream gap is rejected; the cursor must not advance past
+            # an event the node failed to return.
+            {"ok": True, "stream_id": "b" * 32, "cursor": 3,
+             "truncated": False, "completions": [record(3)]},
+        ]
+        requested = []
+        original_fetch = backends.fetch_completion_events
+
+        async def fetch(_bid, after):
+            requested.append(after)
+            return replies.pop(0)
+
+        backends.fetch_completion_events = fetch
+        fired.clear()
+        try:
+            backend = {"id": bid, "name": "remote"}
+            for _ in range(5):
+                await notify._poll_backend(backend)
+        finally:
+            backends.fetch_completion_events = original_fetch
+            notify.forget_backend(bid)
+        assert requested == [0, 1, 2, 3, 1], requested
+        assert [item["seq"] for item in fired] == [2], fired
     finally:
         notify.active, notify._fire = original_active, original_fire
 
@@ -2751,6 +2913,20 @@ def exercise_session_show_meta(runner, db) -> None:
         hub.status = "running"
         assert listed()["completion_status"] == ""
         assert hub.snapshot()["completion_status"] == ""
+        private_cwd = "/private/data/mirrors/abcd1234/project"
+        public_cwd = "/srv/authoritative/project"
+        db.touch_session(sid, cwd=private_cwd, workspace=json.dumps({
+            "uid": "abcd1234", "root": public_cwd,
+            "node": "files", "label": "files:" + public_cwd,
+        }, separators=(",", ":")))
+        assert runner.session_payload(db.get_session(sid))["cwd"] == public_cwd
+        assert listed()["cwd"] == public_cwd
+        assert hub.snapshot()["session"]["cwd"] == public_cwd
+        from puppy import search
+        title = search._title_body(db.query_one(
+            "SELECT id,name,cwd,workspace,created_at FROM sessions WHERE id=?",
+            (sid,)))
+        assert public_cwd in title and private_cwd not in title
     finally:
         runner.drop_hub(sid)
         db.delete_session(sid)

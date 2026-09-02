@@ -243,7 +243,10 @@ async def exercise(harness: Harness) -> None:
     descriptor = session["workspace"]
     assert descriptor and descriptor["root"] == str(project)
     uid = descriptor["uid"]
-    mirror = Path(session["cwd"])
+    # The private execution mirror never appears on the user-facing session
+    # payload; only internal storage retains it.
+    assert session["cwd"] == str(project)
+    mirror = Path(db.get_session(sid)["cwd"])
     assert mirror.is_dir()
     assert mirror.parent == Path(config.DATA_DIR) / "mirrors" / uid
     assert mirror.name == project.name
@@ -275,6 +278,40 @@ async def exercise(harness: Harness) -> None:
     summary = await workspace_links.run_reconcile(link_id)
     assert summary == {"ok": True, "clean": True, "conflicts": 0,
                        "pulled": 0, "pushed": 0, "retry": 0}
+
+    # A snapshot rebuilds no mirror bytes. Its durable marker makes an older
+    # controller fail closed, while the capable broker ignores the stale
+    # three-way base, pulls from authority, and acknowledges only once clean.
+    shutil.rmtree(str(mirror))
+    mirror.mkdir(mode=0o700)
+    (mirror / "unexpected-local.txt").write_text(
+        "must never push during a restore reset", encoding="utf-8")
+    reset_id = "r" * 32
+    workspace_sync.mark_mirror_reset(str(mirror.parent), reset_id)
+    status, reset_blocked = await harness.api(
+        "GET", "sessions/{}/workspace/manifest".format(sid))
+    assert status == 409 and "rebuilt" in reset_blocked["error"], reset_blocked
+    summary = await workspace_links.run_reconcile(link_id)
+    assert summary["ok"] and summary["clean"] and summary["pushed"] == 0, summary
+    assert_trees_equal(project, mirror)
+    assert workspace_sync.mirror_reset(
+        workspace_sync.mirror_store_for(db.get_session(sid))) is None
+
+    # Provider leases are rebuildable too. Losing one must reacquire the same
+    # authoritative root and update the durable link instead of marooning it.
+    old_lease = lease["id"]
+    status, released = await harness.api(
+        "DELETE", "workspace/leases/{}".format(old_lease))
+    assert status == 200 and released["removed"] is True
+    summary = await workspace_links.run_reconcile(link_id)
+    assert summary["ok"] and summary["clean"], summary
+    replacement = workspace_links.get_link(link_id)["lease"]
+    assert replacement != old_lease
+    lease["id"] = replacement
+    status, reused = await harness.api(
+        "POST", "workspace/leases",
+        json={"root": str(project), "reuse": True})
+    assert status == 200 and reused["lease"]["id"] == replacement, reused
 
     # -- engine-side changes push; workspace-side changes pull; deletes flow --
     write_tree(mirror, {"src/new_module.py": "print('new')\n",

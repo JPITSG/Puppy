@@ -97,6 +97,11 @@ ACTIVE_TURN_STEERING_CAPABILITY = "active-turn-steering"
 # controller over the channels it already authenticates.
 WORKSPACE_PROVIDER_CAPABILITY = "workspace-provider"
 WORKSPACE_MIRROR_CAPABILITY = "workspace-mirror"
+# A rebuilt mirror advertises a one-use reset marker in its manifest. A
+# capable controller treats the authoritative workspace as the seed and
+# acknowledges the marker only after a clean pull; older controllers are
+# refused before they can mistake an empty rebuilt mirror for deletions.
+WORKSPACE_MIRROR_RESET_CAPABILITY = "workspace-mirror-reset"
 # One-shot spawned-agent execution: POST /api/spawn starts a single
 # non-interactive engine run in a named directory on this node, and the
 # job routes poll/cancel it. The controller relays a session's cross-node
@@ -123,6 +128,10 @@ SESSION_EVENT_WINDOW_CAPABILITY = "session-event-window"
 # never touched). Each engine lists what it offers in the engines payload's
 # additive tool_options; a console shows the composer's tools menu only here.
 SESSION_TOOLS_CAPABILITY = "session-tools"
+# A node keeps a bounded, durable sequence of authoritative activity-block
+# completions and serves GET /api/completions?after=<seq>. Controllers use it
+# for remote completion commands without relying on an open browser.
+COMPLETION_EVENTS_CAPABILITY = "completion-events"
 
 BASE_CAPABILITIES = (
     "sessions",
@@ -161,11 +170,13 @@ BASE_CAPABILITIES = (
     SYSTEM_PROMPT_CAPABILITY,
     WORKSPACE_PROVIDER_CAPABILITY,
     WORKSPACE_MIRROR_CAPABILITY,
+    WORKSPACE_MIRROR_RESET_CAPABILITY,
     SPAWN_EXEC_CAPABILITY,
     SPAWN_LIMITS_CAPABILITY,
     SEARCH_CAPABILITY,
     SESSION_EVENT_WINDOW_CAPABILITY,
     SESSION_TOOLS_CAPABILITY,
+    COMPLETION_EVENTS_CAPABILITY,
 )
 TERMINAL_CAPABILITY = "terminal"
 # Identified node-owned PTYs, their create/list/delete routes, and the

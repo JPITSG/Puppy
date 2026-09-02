@@ -18,10 +18,13 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import time
+from urllib.parse import quote
 
 from puppy import __version__
 from puppy.drivers.base import Driver, clean_env
+from puppy.user_paths import service_home
 
 log = logging.getLogger("puppy.drivers.opencode")
 
@@ -37,6 +40,70 @@ _ID_LOAD = "puppy:load"
 _ID_CONFIG = "puppy:config"
 _ID_PROMPT = "puppy:prompt"
 _ID_STEER_PREFIX = "puppy:steer:"
+
+_SESSION_USAGE_COLUMNS = (
+    "tokens_input", "tokens_output", "tokens_reasoning",
+    "tokens_cache_read", "tokens_cache_write",
+)
+
+
+def _usage_database_path() -> str:
+    base = str(os.environ.get("XDG_DATA_HOME") or "")
+    if not os.path.isabs(base):
+        base = os.path.join(service_home(), ".local", "share")
+    return os.path.join(base, "opencode", "opencode.db")
+
+
+def _session_totals(session_id: str):
+    """Read OpenCode's committed, whole-session counters without writing.
+
+    OpenCode 1.18.25 maintains these as the exact sum of every assistant
+    message. A missing database or changed schema returns None so the ACP's
+    per-request usage can remain an explicitly labelled fallback.
+    """
+    if not isinstance(session_id, str) or not session_id:
+        return None
+    path = _usage_database_path()
+    uri = "file:{}?mode=ro".format(quote(path, safe="/"))
+    connection = None
+    try:
+        connection = sqlite3.connect(uri, uri=True, timeout=0.25)
+        row = connection.execute(
+            "SELECT {} FROM session WHERE id=?".format(
+                ",".join(_SESSION_USAGE_COLUMNS)), (session_id,)).fetchone()
+        if row is None or len(row) != len(_SESSION_USAGE_COLUMNS) or any(
+                not isinstance(value, int) or isinstance(value, bool) or value < 0
+                for value in row):
+            return None
+        return {
+            "input_tokens": row[0], "output_tokens": row[1] + row[2],
+            "reasoning_output_tokens": row[2],
+            "cache_read_input_tokens": row[3],
+            "cache_creation_input_tokens": row[4],
+        }
+    except sqlite3.Error:
+        return None
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def _usage_delta(before, after):
+    if not isinstance(before, dict) or not isinstance(after, dict) or \
+            set(before) != set(after):
+        return None
+    delta = {key: int(after[key]) - int(before[key]) for key in after}
+    return delta if all(value >= 0 for value in delta.values()) else None
+
+
+def _covers_request(whole_turn, request_usage) -> bool:
+    """A committed session delta cannot be smaller than its final request."""
+    if not isinstance(whole_turn, dict):
+        return False
+    return all(int(whole_turn.get(key) or 0) >= int(value or 0)
+               for key, value in (request_usage or {}).items()
+               if key != "total_tokens" and isinstance(value, (int, float)) and
+               not isinstance(value, bool))
 
 
 def _rpc(request_id, method: str, params: dict) -> dict:
@@ -478,6 +545,7 @@ class OpenCodeDriver(Driver):
             "tools": {},
             "last_plan": "",
             "model_seen": "",
+            "usage_baseline": None,
         }
 
     def initial_stdin(self, session, prompt):
@@ -590,13 +658,21 @@ class OpenCodeDriver(Driver):
             return {}
         mapping = {
             "inputTokens": "input_tokens", "outputTokens": "output_tokens",
-            "totalTokens": "total_tokens", "thoughtTokens": "thought_tokens",
+            "totalTokens": "total_tokens",
+            "thoughtTokens": "reasoning_output_tokens",
             "cachedReadTokens": "cache_read_input_tokens",
             "cachedWriteTokens": "cache_creation_input_tokens",
         }
-        return {target: value[source] for source, target in mapping.items()
-                if isinstance(value.get(source), (int, float)) and
-                not isinstance(value.get(source), bool)}
+        out = {target: int(value[source]) for source, target in mapping.items()
+               if isinstance(value.get(source), (int, float)) and
+               not isinstance(value.get(source), bool)}
+        # ACP and OpenCode's database report visible output and reasoning as
+        # disjoint counters. Puppy's normalized output_tokens is the complete
+        # generated output; reasoning_output_tokens remains its useful subset.
+        reasoning = int(out.get("reasoning_output_tokens") or 0)
+        if "output_tokens" in out and reasoning:
+            out["output_tokens"] += reasoning
+        return out
 
     @staticmethod
     def _current_model(options: list) -> str:
@@ -663,6 +739,7 @@ class OpenCodeDriver(Driver):
         if not session_id:
             return self._protocol_failure("OpenCode did not return a session ID")
         ctx["session_id"] = session_id
+        ctx["usage_baseline"] = _session_totals(session_id)
         ctx["config_options"] = _config_options(result)
         ctx["setup"] = ["mode", "model", "effort"]
         return [{"a": "native_id", "id": session_id}] + self._advance_setup(ctx)
@@ -711,7 +788,7 @@ class OpenCodeDriver(Driver):
                         and size > 0:
                     ctx["context_window"] = int(size)
                 return [{"a": "transient", "msg": {
-                    "type": "thinking_tokens", "tokens": used}}]
+                    "type": "context_tokens", "tokens": used}}]
         if kind in ("config_option_update", "current_model_update"):
             options = update.get("configOptions")
             if isinstance(options, list):
@@ -809,14 +886,29 @@ class OpenCodeDriver(Driver):
                 return actions
             result = ev.get("result") if isinstance(ev.get("result"), dict) else {}
             stop = str(result.get("stopReason") or "end_turn")
-            ok = stop not in ("refusal", "cancelled", "canceled", "error")
+            ok = stop not in (
+                "refusal", "cancelled", "canceled", "error", "max_tokens",
+                "max_turn_requests")
+            request_usage = self._usage(result.get("usage"))
+            usage = _usage_delta(
+                ctx.get("usage_baseline"),
+                _session_totals(str(ctx.get("session_id") or "")))
+            if not _covers_request(usage, request_usage):
+                usage = None
+            usage_scope = "turn"
+            if usage is None:
+                usage = request_usage
+                usage_scope = "last_request"
             data = {
                 "ok": ok, "stop_reason": stop,
-                "usage": self._usage(result.get("usage")),
-                "error": "" if ok else "OpenCode stopped: {}".format(stop),
+                "usage": usage, "usage_scope": usage_scope,
+                "error": "" if ok else
+                         "OpenCode stopped before completing: {}".format(stop),
             }
-            if ctx.get("context_used") is not None and ctx.get("context_window"):
-                data["context_used"] = int(ctx["context_used"])
+            if ctx.get("context_used") is not None and ctx.get("context_window") and \
+                    "output_tokens" in request_usage:
+                final_output = int(request_usage.get("output_tokens") or 0)
+                data["context_used"] = int(ctx["context_used"]) + final_output
                 data["context_window"] = int(ctx["context_window"])
             actions.append({"a": "result", "data": data})
             ctx["phase"] = "done"

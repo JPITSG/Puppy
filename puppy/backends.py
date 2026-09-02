@@ -529,6 +529,11 @@ def _backend_capabilities(backend: dict) -> list:
     return value if isinstance(value, list) else []
 
 
+def backend_supports(bid: int, capability: str) -> bool:
+    backend = get_backend(int(bid))
+    return bool(backend and capability in _backend_capabilities(backend))
+
+
 def _broadcast_backends() -> None:
     runner.broadcast_update({"type": "backends", "backends": list_backends()})
 
@@ -618,6 +623,47 @@ async def notify_exec(bid: int, command: str, info: dict) -> dict:
         _broadcast_backends()
         await close_proxy_websockets(bid, "Backend unavailable")
     return {"ok": False, "error": "%s: %s" % (be["name"], last_error)}
+
+
+async def fetch_completion_events(bid: int, after: int):
+    """Read one node's authoritative completion sequence directly.
+
+    This deliberately bypasses the browser proxy: controller health is the
+    reachability authority, and token/TLS/redirect rules match every other
+    controller-owned backend request.
+    """
+    be = get_backend(bid)
+    if be is None or not backend_is_online(bid):
+        return None
+    urls = _ordered_backend_urls(be)
+    last_error = "backend is unavailable"
+    for index, url in enumerate(urls):
+        try:
+            async with client().get(
+                    url + "/api/completions", params={"after": str(int(after))},
+                    headers={"X-Puppy-Token": be["token"]},
+                    timeout=aiohttp.ClientTimeout(
+                        total=10, connect=FAILOVER_CONNECT_TIMEOUT,
+                        sock_connect=FAILOVER_CONNECT_TIMEOUT),
+                    allow_redirects=False,
+                    ssl=_ssl_pin(be.get("tls_fingerprint") or "")) as response:
+                _publish_active_url(be, url)
+                if response.status == 404:
+                    return None
+                if response.status != 200:
+                    return None
+                data = await response.json()
+                return data if isinstance(data, dict) else None
+        except Exception as exc:
+            last_error = _connection_error(exc)
+            if index + 1 < len(urls) and _failed_before_request(exc):
+                continue
+            break
+    _advance_url_cursor(bid, len(urls))
+    if _mark_backend_offline(bid, last_error):
+        _broadcast_backends()
+        await close_proxy_websockets(bid, "Backend unavailable")
+    return None
 
 
 async def probe_backend(url: str, token: str, tls_fingerprint: str = "",
@@ -1074,6 +1120,8 @@ async def h_patch(request: web.Request):
             previous_last_known.get("node_uuid") == remote.get("node_uuid"))
         if not same_node:
             _clear_last_known(bid)
+            from puppy import notify
+            notify.forget_backend(bid)
         _cache_remote_payload(bid, "ping", remote)
         _remember_active_url(bid, active_url, urls)
         _mark_backend_online(bid)
@@ -1095,6 +1143,8 @@ async def h_patch(request: web.Request):
 async def h_delete(request: web.Request):
     bid = int(request.match_info["bid"])
     db.execute("DELETE FROM backends WHERE id=?", (bid,))
+    from puppy import notify
+    notify.forget_backend(bid)
     _clear_last_known(bid)
     _active_urls.pop(bid, None)
     _url_cursors.pop(bid, None)

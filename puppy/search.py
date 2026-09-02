@@ -27,7 +27,7 @@ import time
 
 from aiohttp import web
 
-from puppy import config, db, runner
+from puppy import config, db, runner, workspace_sync
 
 log = logging.getLogger("puppy.search")
 
@@ -260,7 +260,7 @@ def _event_doc(kind, data):
 
 
 def _title_body(session) -> str:
-    parts = [str(session["name"] or ""), str(session["cwd"] or "")]
+    parts = [str(session["name"] or ""), workspace_sync.public_cwd(session)]
     workspace = str(session["workspace"] or "")
     if workspace:
         try:
