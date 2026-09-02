@@ -53,6 +53,10 @@ if [ "$1" = "update" ]; then
     noop)   echo "already on the latest version"; exit 0;;
     fail)   echo "npm ERR! EACCES: permission denied" 1>&2; exit 7;;
     hang)   sleep 30; exit 0;;
+    stall)  echo "resolving latest release..."; sleep 30; exit 0;;
+    chatty) i=0
+            while [ "$i" -lt 8 ]; do echo "step $i"; sleep 0.4; i=$((i + 1)); done
+            echo "2.0.0" > "{version}"; echo "updated to 2.0.0"; exit 0;;
     hold)   : > "{started}"
             i=0
             while [ ! -f "{release}" ] && [ "$i" -lt 300 ]; do
@@ -325,6 +329,53 @@ async def exercise_http() -> None:
         await runner.cleanup()
 
 
+async def check_idle() -> None:
+    """An updater that goes quiet and still is stopped long before the hard
+    cap, keeping what it said; one that keeps talking is left alone."""
+    driver = drivers.get_driver("stub")
+    original = (cli_upgrade.IDLE_SECONDS, cli_upgrade.SAMPLE_INTERVAL,
+                cli_upgrade.TIMEOUT_SECONDS)
+    cli_upgrade.IDLE_SECONDS = 1.5
+    cli_upgrade.SAMPLE_INTERVAL = 0.25
+    cli_upgrade.TIMEOUT_SECONDS = 60
+    try:
+        BEHAVIOUR_FILE.write_text("stall", encoding="utf-8")
+        started = asyncio.get_event_loop().time()
+        await cli_upgrade.start(driver)
+        for _ in range(400):
+            if cli_upgrade.state(driver)["upgrade_state"] == "idle":
+                break
+            await asyncio.sleep(0.05)
+        elapsed = asyncio.get_event_loop().time() - started
+        state = cli_upgrade.state(driver)
+        assert state["upgrade_state"] == "idle", state
+        result = state["upgrade_result"]
+        assert result["ok"] is False and "no sign of progress" in result["error"], result
+        assert "resolving latest release" in result["output"], result
+        assert elapsed < 10, elapsed
+        assert cli_upgrade.running_keys() == []
+
+        BEHAVIOUR_FILE.write_text("chatty", encoding="utf-8")
+        VERSION_FILE.write_text("1.0.0\n", encoding="utf-8")
+        from puppy.drivers.base import invalidate_status
+        invalidate_status("stub")
+        await cli_upgrade.start(driver)
+        for _ in range(400):
+            if cli_upgrade.state(driver)["upgrade_state"] == "idle":
+                break
+            await asyncio.sleep(0.05)
+        result = cli_upgrade.state(driver)["upgrade_result"]
+        assert result["ok"] is True and result["changed"] is True, result
+        assert result["output"].count("step ") == 8, result
+    finally:
+        (cli_upgrade.IDLE_SECONDS, cli_upgrade.SAMPLE_INTERVAL,
+         cli_upgrade.TIMEOUT_SECONDS) = original
+        BEHAVIOUR_FILE.write_text("ok", encoding="utf-8")
+        VERSION_FILE.write_text("1.0.0\n", encoding="utf-8")
+        from puppy.drivers.base import invalidate_status
+        invalidate_status("stub")
+
+
 async def check_timeout() -> None:
     """A wedged updater is killed and reported, never left holding the lock."""
     BEHAVIOUR_FILE.write_text("hang", encoding="utf-8")
@@ -502,6 +553,7 @@ async def main() -> None:
         cli_upgrade.reset_for_tests()
         await exercise_http()
         await check_timeout()
+        await check_idle()
         await check_schedule()
         await check_attempt_once()
         await check_concurrent_automatic_updates()

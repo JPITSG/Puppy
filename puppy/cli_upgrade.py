@@ -31,6 +31,20 @@ log = logging.getLogger("puppy.cli_upgrade")
 
 TIMEOUT_SECONDS = 15 * 60
 MAX_OUTPUT_CHARS = 8000
+# A wedged updater is not waited on for the whole cap. Its output is streamed
+# and its entire process group is sampled: progress is output, CPU beyond a
+# sliver, I/O beyond a trickle, or a change in the tree (a child starting or
+# ending). A group holding sockets is presumed to be waiting on the network
+# and gets the longer allowance; one holding none that stays silent and
+# still is dead - a package manager downloads, unpacks, or compiles, all of
+# which show. Sampling reads /proc; where that is unavailable only the cap
+# applies.
+IDLE_SECONDS = 90
+IDLE_NETWORK_SECONDS = 240
+SAMPLE_INTERVAL = 5.0
+EXIT_AFTER_EOF_SECONDS = 30
+_CPU_BUSY_FRACTION = 0.02
+_IO_TRICKLE_BYTES = 4096
 _ARG_RE = re.compile(r"^-{0,2}[A-Za-z0-9][A-Za-z0-9._=-]*$")
 
 _runs: Dict[str, dict] = {}
@@ -104,8 +118,109 @@ def _last_line(text: str) -> str:
     return ""
 
 
+class _GroupActivity:
+    """Aggregate activity of an updater's process group, read from /proc."""
+
+    def __init__(self, pgid: int):
+        self.pgid = int(pgid)
+        self.available = os.path.isdir("/proc/self")
+        try:
+            self.clock_ticks = float(os.sysconf("SC_CLK_TCK")) or 100.0
+        except (AttributeError, ValueError, OSError):
+            self.clock_ticks = 100.0
+
+    def sample(self) -> Optional[dict]:
+        if not self.available:
+            return None
+        members, cpu, io, sockets = [], 0, 0, 0
+        try:
+            names = os.listdir("/proc")
+        except OSError:
+            self.available = False
+            return None
+        for name in names:
+            if not name.isdigit():
+                continue
+            pid = int(name)
+            try:
+                with open("/proc/{}/stat".format(pid), "rb") as handle:
+                    raw = handle.read().decode("latin-1")
+            except OSError:
+                continue
+            # the command name may contain spaces or parentheses: split after
+            # the last closing one
+            fields = raw[raw.rfind(")") + 2:].split()
+            if len(fields) < 13:
+                continue
+            try:
+                if int(fields[2]) != self.pgid:
+                    continue
+                cpu += int(fields[11]) + int(fields[12])
+            except ValueError:
+                continue
+            members.append(pid)
+            try:
+                with open("/proc/{}/io".format(pid)) as handle:
+                    for line in handle:
+                        if line.startswith(("rchar:", "wchar:")):
+                            io += int(line.split()[1])
+            except (OSError, ValueError, IndexError):
+                pass
+            try:
+                for fd in os.listdir("/proc/{}/fd".format(pid)):
+                    try:
+                        if os.readlink("/proc/{}/fd/{}".format(pid, fd)).startswith(
+                                "socket:"):
+                            sockets += 1
+                    except OSError:
+                        pass
+            except OSError:
+                pass
+        return {"members": tuple(sorted(members)), "cpu": cpu, "io": io,
+                "sockets": sockets}
+
+    def progressed(self, before: Optional[dict], after: Optional[dict],
+                   elapsed: float) -> bool:
+        """Whether the group did real work between two samples."""
+        if before is None or after is None:
+            return False
+        if after["members"] != before["members"]:
+            return True
+        cpu_seconds = (after["cpu"] - before["cpu"]) / self.clock_ticks
+        if elapsed > 0 and cpu_seconds / elapsed > _CPU_BUSY_FRACTION:
+            return True
+        return after["io"] - before["io"] > _IO_TRICKLE_BYTES
+
+
+class UpdaterFailure(RuntimeError):
+    """A run puppy ended itself, with whatever the updater said until then."""
+
+    def __init__(self, error: str, output: str):
+        super().__init__(error)
+        self.output = output
+
+
+async def _end_group(proc) -> None:
+    for sig in (signal.SIGINT, signal.SIGKILL):
+        try:
+            os.killpg(proc.pid, sig)
+        except Exception:
+            break
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+            break
+        except asyncio.TimeoutError:
+            continue
+
+
 async def _spawn(argv: List[str]) -> tuple:
-    """Run the updater to completion and return (exit_code, combined output)."""
+    """Run the updater and return (exit_code, combined output).
+
+    Output is streamed so a run puppy has to end still reports what the
+    updater said; the group's activity is sampled every SAMPLE_INTERVAL and a
+    run that shows none for its idle allowance is ended long before the hard
+    cap, which remains the backstop for one that keeps busy without ever
+    finishing."""
     # Imported here on purpose: drivers import this module, and config binds its
     # data path at import time, so pulling either in at module scope would fix
     # that path before an embedding process (or a test) has chosen it.
@@ -123,22 +238,75 @@ async def _spawn(argv: List[str]) -> tuple:
         # Its own process group: a package manager rewriting a global prefix
         # must not be torn down halfway by puppy's own shutdown signalling.
         start_new_session=True)
+    activity = _GroupActivity(proc.pid)
+    chunks: List[bytes] = []
+    kept = 0
+    started = time.monotonic()
+    last_progress = started
+    last_sample = activity.sample()
+    sampled_at = started
+    sockets = last_sample["sockets"] if last_sample else 0
+    read_task = None
+    failure = ""
+    eof = False
     try:
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=TIMEOUT_SECONDS)
-    except asyncio.TimeoutError:
-        for sig in (signal.SIGINT, signal.SIGKILL):
-            try:
-                os.killpg(proc.pid, sig)
-            except Exception:
+        while True:
+            now = time.monotonic()
+            if now - started >= TIMEOUT_SECONDS:
+                failure = "updater timed out after {} minutes".format(
+                    TIMEOUT_SECONDS // 60)
                 break
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=5)
-                break
-            except asyncio.TimeoutError:
+            if read_task is None:
+                read_task = asyncio.ensure_future(proc.stdout.read(4096))
+            done, _pending = await asyncio.wait(
+                {read_task},
+                timeout=max(0.05, min(SAMPLE_INTERVAL,
+                                      TIMEOUT_SECONDS - (now - started))))
+            now = time.monotonic()
+            if read_task in done:
+                chunk = read_task.result()
+                read_task = None
+                if not chunk:
+                    eof = True
+                    break
+                chunks.append(chunk)
+                kept += len(chunk)
+                while kept > MAX_OUTPUT_CHARS * 4 and len(chunks) > 1:
+                    kept -= len(chunks.pop(0))
+                last_progress = now
                 continue
-        raise RuntimeError(
-            "updater timed out after {} minutes".format(TIMEOUT_SECONDS // 60))
-    return proc.returncode, out.decode(errors="replace") if out else ""
+            if now - sampled_at >= SAMPLE_INTERVAL:
+                sample = activity.sample()
+                if activity.progressed(last_sample, sample, now - sampled_at):
+                    last_progress = now
+                if sample is not None:
+                    sockets = sample["sockets"]
+                last_sample, sampled_at = sample, now
+            allowance = IDLE_NETWORK_SECONDS if sockets else IDLE_SECONDS
+            if activity.available and now - last_progress >= allowance:
+                failure = (
+                    "updater showed no sign of progress for {}s (no output, "
+                    "CPU, I/O, or process changes{}) and was stopped".format(
+                        int(now - last_progress),
+                        " while holding {} open socket(s)".format(sockets)
+                        if sockets else ""))
+                break
+    finally:
+        if read_task is not None and not read_task.done():
+            read_task.cancel()
+    if eof:
+        # every holder of its output is gone or has let go; the exit should
+        # follow at once, and one that never comes is a failure of its own
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=EXIT_AFTER_EOF_SECONDS)
+        except asyncio.TimeoutError:
+            failure = ("updater closed its output but did not exit within "
+                       "{}s and was stopped".format(EXIT_AFTER_EOF_SECONDS))
+    output = b"".join(chunks).decode(errors="replace")
+    if failure:
+        await _end_group(proc)
+        raise UpdaterFailure(failure, output)
+    return proc.returncode, output
 
 
 async def _run(driver, argv: List[str], from_version: str, token) -> None:
@@ -153,6 +321,9 @@ async def _run(driver, argv: List[str], from_version: str, token) -> None:
             error = _last_line(output) or "updater exited with status {}".format(exit_code)
     except asyncio.CancelledError:
         raise
+    except UpdaterFailure as exc:
+        error = str(exc)[:300]
+        output = exc.output
     except Exception as exc:
         error = str(exc)[:300] or exc.__class__.__name__
 

@@ -273,9 +273,14 @@ The run is refused with 409 while any session on that engine is running or has
 queued work, because the updater rewrites the installed package in place. Other
 engines' sessions are unaffected and do not block it. New turns on the engine
 are refused until its update finishes. Each engine has one upgrade slot, so
-different vendor CLIs can update concurrently; every run is bounded by a
-fifteen-minute timeout, and its output is captured and truncated rather than
-streamed.
+different vendor CLIs can update concurrently. Every run is bounded twice: its
+output is streamed into a capped transcript and its whole process group is
+sampled through `/proc`, so an updater that shows no output, CPU, I/O, or
+process-tree change for 90 seconds (240 while it holds open sockets, since it
+may be waiting on the network) is stopped and reported as making no progress
+with whatever it said until then, and a fifteen-minute hard cap remains the
+backstop for one that stays busy without finishing. The detection is
+engine-, host-, and install-method-agnostic.
 
 It starts in the background and the POST returns immediately, so `upgrade_state`
 in the engine payload is the progress signal and `upgrade_result` the outcome -
