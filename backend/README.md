@@ -158,6 +158,29 @@ retire its activity timer without firing a configured completion command for a
 prompt the user stopped. Queued work that continues after a stop remains one
 activity block and can still notify when that later work actually finishes.
 
+## Engine background work
+
+Claude's `run_in_background` commands, Monitor waits and backgrounded agents
+are tasks of the CLI process itself. When the model answers while such tasks
+are still running, the node keeps that process alive instead of ending the
+turn: the CLI wakes the model on its own when a task ends and the answer
+continues within the same turn, whereas closing its stdin would kill the
+tasks. The session stays `running` for the whole wait (bounded by
+`sessions.turn_timeout`). A persisted `info` event with subtype
+`background_wait` (`tasks: [{id, type, description}]`) marks the pause, an
+`info` event with subtype `task` (`status`, `task_id`) records each task that
+ends, and `background_wait_stopped` records a wait the node ended itself. One
+`result` closes the turn, with `usage` and `num_turns` summed over every
+wake-up and an additive `wakeups` count. Stopping the turn during the wait
+closes the engine's stdin so it ends its tasks gracefully; the answer given
+so far becomes the result and the completion status is `interrupted`.
+
+Session sockets receive an additive `background_tasks` message
+(`{tasks, waiting, text}`) whenever the live set changes or a wait starts or
+ends, and snapshots carry the same object as `background_tasks`; while
+`waiting` is true, `text` is the status line to show. Older controllers can
+ignore both and still see the plain `status` text and the transcript rows.
+
 ## Active-turn steering transport
 
 `POST /api/sessions/{sid}/steer` sends an additional text instruction to the

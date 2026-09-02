@@ -8,6 +8,17 @@ Spawns the official `claude` binary per turn in headless stream-json mode:
 
 Interactive permission prompts arrive as control_request/can_use_tool on stdout
 and are answered with control_response on stdin (verified against claude 2.1.219).
+
+Background work (Bash run_in_background, Monitor, backgrounded agents) is the
+CLI's own, verified against claude 2.1.258: it reports the live set as
+system/background_tasks_changed (REPLACE semantics, ambient housekeeping
+flagged), the edges as task_started/task_updated/task_notification, and while
+stdin stays open it wakes the model itself when a task ends - a fresh
+system/init, a continuation, and another result in the same process. Closing
+stdin ends every task (~5 s, reported as stopped) and exits; a later resume
+first reports such a task as stale and runs an empty wake-up whose result
+precedes the prompt's own. total_cost_usd and duration_api_ms accumulate over
+the process while usage and num_turns are per result.
 Compliance note: we only drive the unmodified official binary; auth stays inside
 the CLI's own login (subscription OAuth), which is the vendor-sanctioned path.
 """
@@ -19,6 +30,34 @@ import os
 from puppy.drivers import base as driver_base
 from puppy.drivers.base import Driver, ToolUnavailable, stringify_content
 from puppy.user_paths import service_home
+
+
+USAGE_KEYS = ("input_tokens", "output_tokens", "cache_read_input_tokens",
+              "cache_creation_input_tokens")
+_TASK_ENDED = ("completed", "failed", "killed", "stopped")
+
+
+def _task_row(item) -> dict:
+    """One live background task as the runner and consoles see it; empty for
+    ambient housekeeping the CLI hides from user-visible activity."""
+    if not isinstance(item, dict) or item.get("ambient") or item.get("skip_transcript"):
+        return {}
+    task_id = str(item.get("task_id") or "")
+    if not task_id:
+        return {}
+    return {"id": task_id, "type": str(item.get("task_type") or ""),
+            "description": str(item.get("description") or "")[:200]}
+
+
+def _task_notice(ev) -> str:
+    status = str(ev.get("status") or "")
+    summary = str(ev.get("summary") or "").strip()
+    if status == "completed" and summary:
+        return summary
+    label = "failed" if status == "failed" else \
+        "completed" if status == "completed" else "stopped"
+    return "Background task {}: {}".format(
+        label, summary or ev.get("task_id") or "unknown task")
 
 
 def _context_window(model_usage, model) -> int:
@@ -232,7 +271,37 @@ class ClaudeDriver(Driver):
             "compacted": False,
             # the last API request's prompt size: what the model actually held
             "context_used": None,
+            # a local command (compaction) acknowledges the request through its
+            # replayed output rather than a replay of the "/compact" text
+            "local_command_seen": False,
+            # background work the CLI still owns: REPLACE semantics from
+            # background_tasks_changed, task edges as the fallback
+            "background_tasks": [],
+            # wake-up queries for tasks of a PREVIOUS process run ahead of our
+            # own request; their results are folded, never taken as ours
+            "stale_wakeups": 0,
+            # every result of this process adds to the prompt's totals
+            "folded_usage": {},
+            "folded_turns": None,
+            "wakeups": 0,
         }
+
+    @staticmethod
+    def _request_acknowledged(ctx) -> bool:
+        return bool(ctx.get("initial_user_replayed") or ctx.get("compacted") or
+                    ctx.get("local_command_seen"))
+
+    @staticmethod
+    def _set_tasks(ctx, tasks) -> list:
+        if tasks == list(ctx.get("background_tasks") or []):
+            return []
+        ctx["background_tasks"] = tasks
+        return [{"a": "background_tasks", "tasks": [dict(row) for row in tasks]}]
+
+    def _drop_task(self, ctx, task_id) -> list:
+        task_id = str(task_id or "")
+        return self._set_tasks(ctx, [row for row in (ctx.get("background_tasks") or [])
+                                     if row.get("id") != task_id])
 
     def approval_payload(self, request_id, behavior, original_input, message="",
                          updated_permissions=None, request=None):
@@ -323,6 +392,36 @@ class ClaudeDriver(Driver):
                     text += " · {:,} tokens before".format(int(pre))
                 return [{"a": "event", "kind": "info",
                          "data": {"subtype": "compact", "text": text}}]
+            if sub == "background_tasks_changed":
+                rows = [_task_row(item) for item in (ev.get("tasks") or [])]
+                return self._set_tasks(ctx, [row for row in rows if row])
+            if sub == "task_started":
+                row = _task_row(ev)
+                if row and ev.get("is_backgrounded") and all(
+                        item.get("id") != row["id"]
+                        for item in ctx.get("background_tasks") or []):
+                    return self._set_tasks(
+                        ctx, list(ctx.get("background_tasks") or []) + [row])
+                return []
+            if sub == "task_updated":
+                patch = ev.get("patch") if isinstance(ev.get("patch"), dict) else {}
+                if patch.get("status") in _TASK_ENDED:
+                    return self._drop_task(ctx, ev.get("task_id"))
+                return []
+            if sub == "task_notification":
+                acts = self._drop_task(ctx, ev.get("task_id"))
+                if not self._request_acknowledged(ctx):
+                    # a task of the previous process, reported before our own
+                    # request: the CLI wakes the model for it ahead of the prompt
+                    ctx["stale_wakeups"] = int(ctx.get("stale_wakeups") or 0) + 1
+                    return acts
+                if ev.get("skip_transcript") or ev.get("ambient"):
+                    return acts
+                acts.append({"a": "event", "kind": "info", "data": {
+                    "subtype": "task", "status": str(ev.get("status") or ""),
+                    "task_id": str(ev.get("task_id") or ""),
+                    "text": _task_notice(ev)}})
+                return acts
             return []
 
         if t == "assistant":
@@ -360,12 +459,16 @@ class ClaudeDriver(Driver):
                 ctx["tail_uuid"] = str(ev["uuid"])
             msg = ev.get("message") or {}
             content = msg.get("content")
+            if isinstance(content, str) and "<local-command-stdout>" in content:
+                ctx["local_command_seen"] = True
             if isinstance(content, list):
                 texts = [blk.get("text") for blk in content
                          if isinstance(blk, dict) and
                          blk.get("type") == "text" and
                          isinstance(blk.get("text"), str)]
                 for text in texts:
+                    if "<local-command-stdout>" in text:
+                        ctx["local_command_seen"] = True
                     if not ctx.get("initial_user_replayed") and \
                             text == ctx.get("initial_prompt"):
                         ctx["initial_user_replayed"] = True
@@ -408,7 +511,23 @@ class ClaudeDriver(Driver):
             return [{"a": "rate_limit", "info": ev.get("rate_limit_info") or {}}]
 
         if t == "result":
-            usage = ev.get("usage") or {}
+            usage = ev.get("usage") if isinstance(ev.get("usage"), dict) else {}
+            folded = ctx.setdefault("folded_usage", {})
+            for key in USAGE_KEYS:
+                value = usage.get(key)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    folded[key] = int(folded.get(key) or 0) + int(value)
+            turns = ev.get("num_turns")
+            if isinstance(turns, (int, float)) and not isinstance(turns, bool):
+                ctx["folded_turns"] = int(ctx.get("folded_turns") or 0) + int(turns)
+            if not self._request_acknowledged(ctx) and \
+                    int(ctx.get("stale_wakeups") or 0) > 0:
+                # the wake-up for a previous process's task ran ahead of our
+                # request: its result is not the prompt's
+                ctx["stale_wakeups"] = int(ctx["stale_wakeups"]) - 1
+                return [{"a": "transient", "msg": {
+                    "type": "status",
+                    "text": "Catching up on an earlier background task..."}}]
             identity = {
                 "native_session_id": ctx.get("native_session_id") or
                                      str(ev.get("session_id") or ""),
@@ -421,19 +540,28 @@ class ClaudeDriver(Driver):
             if ctx.get("context_used") is not None and window:
                 identity["context_used"] = int(ctx["context_used"])
                 identity["context_window"] = window
-            return [{"a": "result", "data": {
+            data = {
                 **identity,
                 "ok": not ev.get("is_error", False),
+                # duration_api_ms and total_cost_usd accumulate over the
+                # process, so the last result already covers every wake-up
                 "duration_ms": ev.get("duration_api_ms"),
                 "cost_usd": ev.get("total_cost_usd"),
                 "stop_reason": ev.get("stop_reason", ""),
-                "num_turns": ev.get("num_turns"),
-                "usage": {k: usage.get(k) for k in
-                          ("input_tokens", "output_tokens",
-                           "cache_read_input_tokens", "cache_creation_input_tokens")
-                          if usage.get(k) is not None},
+                "num_turns": ctx.get("folded_turns"),
+                "usage": dict(folded),
                 "error": (ev.get("result") or "")[:2000] if ev.get("is_error") else "",
-            }}]
+            }
+            if ctx.get("wakeups"):
+                data["wakeups"] = int(ctx["wakeups"])
+            if data["ok"] and ctx.get("background_tasks") and not ctx.get("tool"):
+                # the model has answered, but its background work is still
+                # running and the CLI will wake it when that ends: keep the
+                # process alive and treat this result as provisional
+                ctx["wakeups"] = int(ctx.get("wakeups") or 0) + 1
+                return [{"a": "turn_pause", "data": data,
+                         "tasks": [dict(row) for row in ctx["background_tasks"]]}]
+            return [{"a": "result", "data": data}]
 
         return []
 

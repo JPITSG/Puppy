@@ -11,6 +11,12 @@ Normalized transcript event kinds (persisted):
     tool_use     {tool, input, tool_use_id}
     tool_result  {tool_use_id, content, is_error}
     info         {subtype, text, ...}
+                 Engine background work uses three subtypes: background_wait
+                 {tasks} when the model has answered but the engine still
+                 owns background tasks whose end will wake it within this
+                 same turn, task {status, task_id} when one of them ends, and
+                 background_wait_stopped when the node ended such a wait
+                 itself (turn timeout, or an engine that never continued).
     result       {ok, usage?, cost_usd?, duration_ms?, stop_reason?, error?}
                  The transcript line reads outcome, duration, input tokens
                  (input_tokens plus any cache_read/cache_creation keys, so a
@@ -42,6 +48,17 @@ Actions returned by parse_line() (consumed by the runner):
     {"a": "stdin", "data": {...}}                    continue a JSONL handshake
     {"a": "rate_limit", "info": {...}}
     {"a": "result", "data": {...}}                   turn finished (also persisted)
+    {"a": "background_tasks", "tasks": [...]}        live engine background tasks as
+                                                     {id, type, description}; REPLACE
+                                                     semantics, ambient work excluded
+    {"a": "turn_pause", "data": {...}, "tasks": [...]}
+                                                     the model answered but the engine
+                                                     keeps running background tasks that
+                                                     will wake it in this same process:
+                                                     the runner keeps stdin open, and data
+                                                     (the result so far) becomes the turn's
+                                                     result only if the engine leaves before
+                                                     a final "result"
 """
 from __future__ import annotations
 

@@ -404,6 +404,31 @@ async def _safe_send(ws, payload, pool=None) -> None:
             pool.discard(ws)
 
 
+# How long every background task may be gone without the engine waking the
+# model before the wait is ended anyway (the CLI normally continues at once).
+BACKGROUND_WAKE_GRACE = 60.0
+
+
+def _background_wait_text(tasks) -> str:
+    """The transcript row for a model that answered while its engine still
+    owns background work."""
+    names = [str(row.get("description") or row.get("id") or "task")[:80]
+             for row in tasks if isinstance(row, dict)]
+    if not names:
+        return "Waiting for background tasks to finish"
+    shown = ", ".join(names[:2])
+    if len(names) > 2:
+        shown += " and {} more".format(len(names) - 2)
+    return "Waiting for {} background task{}: {}".format(
+        len(names), "" if len(names) == 1 else "s", shown)
+
+
+def _background_wait_status(tasks) -> str:
+    if not tasks:
+        return "Background tasks finished; waiting for the model to continue..."
+    return _background_wait_text(tasks) + " · Stop ends the wait"
+
+
 class SessionHub:
     def __init__(self, session_id: int):
         self.id = session_id
@@ -493,6 +518,13 @@ class SessionHub:
         self._ws_progress_at = 0.0
         self._ws_map = None
         self._interrupt_count = 0
+        # Background work the engine still owns after answering (claude's
+        # run_in_background commands, Monitor waits, backgrounded agents).
+        # The process stays alive while the model waits on it so the CLI can
+        # wake the model itself when a task ends; _bg_wait_since marks that
+        # idle-but-attached phase for the stop path and for consoles.
+        self._bg_tasks = []
+        self._bg_wait_since = None
 
     # ---- watchers ----
 
@@ -675,6 +707,7 @@ class SessionHub:
             "held": self._held_wire(),
             "pending_approval": self._scrub_value(self.pending_approval),
             "steering": self.steering_state(session),
+            "background_tasks": self._background_payload(),
             "uploads": uploads.settings_payload(),
             "draft": db.get_session_draft(self.id),
             "draft_max_chars": db.MAX_DRAFT_CHARS,
@@ -1534,6 +1567,8 @@ class SessionHub:
         self._last_steering_state = None
         self._active_turn_id = ""
         self._active_prompt_text = item if isinstance(item, str) else ""
+        self._bg_tasks = []
+        self._bg_wait_since = None
         self.turn_task = asyncio.ensure_future(self._run_turn(item))
         # Publish the active block immediately, before process startup and the
         # first persisted event have a chance to yield the event loop.
@@ -1691,7 +1726,10 @@ class SessionHub:
         self._turn_stopping = True
         self._publish_steering_state()
         if not already_interrupted:
-            self.broadcast({"type": "status", "text": "Interrupting..."})
+            self.broadcast({"type": "status", "text":
+                            "Ending the wait for background tasks..."
+                            if self._bg_wait_since is not None else
+                            "Interrupting..."})
         proc = self.proc
         # A stop can arrive while create_subprocess_exec or the driver's initial
         # stdin handshake is in flight. _run_turn observes the flag as soon as
@@ -1701,6 +1739,14 @@ class SessionHub:
         await self._interrupt_proc(proc)
 
     async def _interrupt_proc(self, proc, driver=None) -> None:
+        if self._bg_wait_since is not None:
+            # The model has already answered; only its background tasks keep
+            # the process alive. EOF is the CLI's own cue to end them and
+            # exit, reporting each one as stopped on the way out.
+            self._close_stdin()
+            for delay, sig in ((8, signal.SIGINT), (15, signal.SIGKILL)):
+                asyncio.get_event_loop().call_later(delay, self._signal_if_alive, proc, sig)
+            return
         try:
             session = db.get_session(self.id) or {}
             if driver is None:
@@ -1800,6 +1846,9 @@ class SessionHub:
             return
         self._turn_stopping = True
         self._publish_steering_state()
+        if self._bg_wait_since is not None:
+            # idle on background work: EOF is the CLI's own cue to end it
+            self._close_stdin()
         # SIGINT first: engines abort the turn cleanly (codex releases its
         # thread writer and records the interruption), then escalate.
         self._signal_if_alive(proc, signal.SIGINT)
@@ -1928,6 +1977,36 @@ class SessionHub:
         return value
 
     # ---- turn internals ----
+
+    def _background_payload(self) -> dict:
+        """Live engine background tasks for consoles, with the status line to
+        show while the model waits on them."""
+        tasks = self._scrub_value([dict(row) for row in self._bg_tasks])
+        waiting = self._bg_wait_since is not None and self.status == "running"
+        return {"tasks": tasks, "waiting": waiting,
+                "text": _background_wait_status(tasks) if waiting else ""}
+
+    def _publish_background(self) -> None:
+        payload = self._background_payload()
+        self.broadcast({"type": "background_tasks", **payload})
+        if payload["waiting"]:
+            self.broadcast({"type": "status", "text": payload["text"]})
+
+    def _set_background_tasks(self, tasks) -> None:
+        tasks = [dict(row) for row in tasks if isinstance(row, dict)]
+        if tasks == self._bg_tasks:
+            return
+        self._bg_tasks = tasks
+        self._publish_background()
+
+    def _close_stdin(self) -> None:
+        proc = self.proc
+        if proc is None or proc.stdin is None or proc.stdin.is_closing():
+            return
+        try:
+            proc.stdin.close()
+        except Exception:
+            pass
 
     async def _write_stdin(self, obj: dict) -> None:
         proc = self.proc
@@ -2135,9 +2214,59 @@ class SessionHub:
 
             timeout = float(config.get("sessions.turn_timeout", 7200))
             deadline = time.time() + timeout
+            # The model's answer once it paused on background work. It becomes
+            # the turn's result if the engine leaves before waking the model.
+            pending_result = None
+            wait_closed = ""       # why a wait was ended early, if it was
+            bg_idle_since = None   # when every task ended without a wake-up
+
+            def settle_result(data) -> None:
+                nonlocal got_result
+                got_result = True
+                # Every engine's turn reports how long it took: drivers
+                # whose CLI times its own work keep that figure, the
+                # rest (codex) get the wall clock from spawn to result.
+                if data.get("duration_ms") is None:
+                    data["duration_ms"] = int((time.time() - turn_started) * 1000)
+                self._block_status = "ok" if data.get("ok") else "error"
+                if data.get("ok"):
+                    driver_base.clear_auth_failure(session["engine"])
+                elif driver_base.looks_like_auth_failure(data.get("error")):
+                    driver_base.note_auth_failure(
+                        session["engine"], str(data.get("error") or ""))
+                if tool:
+                    data["tool"] = tool
+                self._emit("result", data)
+                # claude: close stdin so the process exits cleanly
+                if driver.uses_stdin_stream:
+                    self._close_stdin()
+
+            def end_wait(reason, text) -> None:
+                nonlocal wait_closed, deadline
+                wait_closed = reason
+                self._emit("info", {"subtype": "background_wait_stopped",
+                                    "text": text})
+                self._close_stdin()
+                # the CLI ends its tasks and exits on EOF within seconds
+                deadline = time.time() + 30
+
             while True:
+                if pending_result is not None and not wait_closed and \
+                        bg_idle_since is not None and \
+                        time.time() - bg_idle_since > BACKGROUND_WAKE_GRACE:
+                    # every task ended, yet the engine never woke the model
+                    end_wait("engine did not continue",
+                             "Background tasks finished but the engine did not "
+                             "continue; ending the turn")
                 remaining = deadline - time.time()
                 if remaining <= 0:
+                    if pending_result is not None and not wait_closed:
+                        # only background work kept the engine alive
+                        end_wait("timeout",
+                                 "Stopped waiting for background tasks after "
+                                 "{}s (turn timeout); the engine is ending "
+                                 "them".format(int(timeout)))
+                        continue
                     self._turn_stopping = True
                     self._publish_steering_state(session)
                     self._emit("error", {"text": f"Turn timeout after {int(timeout)}s - killed"})
@@ -2161,7 +2290,42 @@ class SessionHub:
                     if a == "event":
                         self._emit(act["kind"], act["data"])
                     elif a == "transient":
-                        self.broadcast(self._scrub_value(act["msg"]))
+                        msg = act["msg"]
+                        if self._bg_wait_since is not None and \
+                                isinstance(msg, dict) and msg.get("type") == "turn_init":
+                            # the engine woke the model for a finished task:
+                            # its answer continues within this same turn
+                            self._bg_wait_since = None
+                            bg_idle_since = None
+                            self._turn_result_seen = False
+                            self._publish_background()
+                        self.broadcast(self._scrub_value(msg))
+                    elif a == "background_tasks":
+                        self._set_background_tasks(act.get("tasks") or [])
+                        if self._bg_wait_since is not None:
+                            bg_idle_since = None if self._bg_tasks else time.time()
+                    elif a == "turn_pause":
+                        self._reject_unacknowledged_steers(
+                            "the model finished its answer before the engine "
+                            "acknowledged steering")
+                        self._turn_result_seen = True
+                        data = dict(act["data"])
+                        if self.interrupted:
+                            # a stop is not a wait: the answer stands as it is
+                            settle_result(data)
+                            continue
+                        pending_result = data
+                        tasks = [dict(row) for row in (act.get("tasks") or [])
+                                 if isinstance(row, dict)] or list(self._bg_tasks)
+                        self._bg_wait_since = time.time()
+                        bg_idle_since = None if tasks else time.time()
+                        self._bg_tasks = tasks
+                        self._emit("info", {
+                            "subtype": "background_wait",
+                            "text": _background_wait_text(tasks),
+                            "tasks": [dict(row) for row in tasks]})
+                        self._publish_background()
+                        self._publish_steering_state(session)
                     elif a == "native_id":
                         nid = act.get("id") or ""
                         if nid and nid != session.get("native_session_id"):
@@ -2222,33 +2386,12 @@ class SessionHub:
                             # A persistent JSONL service still needs EOF before
                             # it exits. Preserve the existing interrupted
                             # transcript path while releasing that service.
-                            if driver.uses_stdin_stream and self.proc.stdin is not None:
-                                try:
-                                    self.proc.stdin.close()
-                                except Exception:
-                                    pass
+                            if driver.uses_stdin_stream:
+                                self._close_stdin()
                             continue
-                        got_result = True
-                        # Every engine's turn reports how long it took: drivers
-                        # whose CLI times its own work keep that figure, the
-                        # rest (codex) get the wall clock from spawn to result.
-                        if act["data"].get("duration_ms") is None:
-                            act["data"]["duration_ms"] = int((time.time() - turn_started) * 1000)
-                        self._block_status = "ok" if act["data"].get("ok") else "error"
-                        if act["data"].get("ok"):
-                            driver_base.clear_auth_failure(session["engine"])
-                        elif driver_base.looks_like_auth_failure(act["data"].get("error")):
-                            driver_base.note_auth_failure(
-                                session["engine"], str(act["data"].get("error") or ""))
-                        if tool:
-                            act["data"]["tool"] = tool
-                        self._emit("result", act["data"])
-                        # claude: close stdin so the process exits cleanly
-                        if driver.uses_stdin_stream and self.proc.stdin is not None:
-                            try:
-                                self.proc.stdin.close()
-                            except Exception:
-                                pass
+                        self._bg_wait_since = None
+                        pending_result = None
+                        settle_result(act["data"])
 
                 self._publish_steering_state(session)
 
@@ -2266,6 +2409,24 @@ class SessionHub:
                 await self.proc.wait()
             stderr_task.cancel()
 
+            if not got_result and pending_result is not None:
+                # The model had answered; only its background tasks kept the
+                # engine alive, and the engine has now left. That answer is
+                # the turn's result.
+                if self.interrupted:
+                    self._emit("info", {
+                        "subtype": "interrupted",
+                        "text": "Stopped waiting for background tasks; the "
+                                "engine ended them"
+                                if self._bg_wait_since is not None else
+                                "Turn interrupted by user"})
+                elif not wait_closed:
+                    tail = self.stderr_tail.strip()[-1500:]
+                    self._emit("error", {
+                        "text": "Engine exited while waiting for background tasks"
+                                + (f" (exit {self.proc.returncode})" if self.proc.returncode else "")
+                                + (f"\n{tail}" if tail else "")})
+                settle_result(pending_result)
             if not got_result:
                 if self.interrupted:
                     self._emit("info", {"subtype": "interrupted", "text": "Turn interrupted by user"})
@@ -2305,6 +2466,8 @@ class SessionHub:
             self._interrupt_protocol_sent = False
             self._turn_result_seen = True
             self._turn_stopping = True
+            self._bg_wait_since = None
+            self._bg_tasks = []
             self.stderr_tail = ""
             self._publish_steering_state(session)
             # A failed turn is fresh evidence about the engine (auth revoked,

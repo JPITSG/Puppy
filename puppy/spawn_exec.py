@@ -332,6 +332,12 @@ class SpawnJob:
 
     def _note_action_progress(self, act: dict) -> None:
         kind = str(act.get("a") or "")
+        if kind == "turn_pause":
+            self._note_progress("waiting for background tasks", act.get("tasks"))
+            return
+        if kind == "background_tasks":
+            self._note_progress("background tasks changed", act.get("tasks"))
+            return
         if kind == "event":
             event_kind = str(act.get("kind") or "")
             data = act.get("data") if isinstance(act.get("data"), dict) else {}
@@ -604,6 +610,10 @@ class SpawnJob:
             if driver.uses_stdin_stream:
                 for obj in driver.initial_stdin(fake_session, self.prompt):
                     await self._write_line(obj)
+            # The answer given before the engine paused on its own background
+            # tasks. The process stays alive for the CLI's wake-up (bounded by
+            # this job's limits); if it leaves first, that answer stands.
+            pending_result = None
             while result is None:
                 remaining = self.deadline - time.monotonic()
                 if remaining <= 0:
@@ -626,6 +636,7 @@ class SpawnJob:
                 line = read_task.result()
                 read_task = None
                 if not line:
+                    result = pending_result
                     break
                 try:
                     usage_before = self._stable_signature(
@@ -644,6 +655,9 @@ class SpawnJob:
                     self._note_progress("token progress", usage_after)
                 for act in actions:
                     self._note_action_progress(act)
+                    if act.get("a") == "turn_pause":
+                        pending_result = act.get("data") or {}
+                        continue
                     outcome = await self._apply_action(driver, act)
                     if outcome is not None:
                         result = outcome

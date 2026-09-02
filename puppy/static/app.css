@@ -1149,6 +1149,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 }
 .todo-row.done .todo-txt{color:var(--txt3);text-decoration:line-through}
 .info-line.warn{color:var(--warn)}
+.info-line.bg-wait{color:var(--txt2)}
 .switch-line{
   align-self:stretch;display:flex;align-items:center;justify-content:center;color:var(--txt3);
   font-size:11px;text-transform:uppercase;letter-spacing:.09em;margin:6px 0;

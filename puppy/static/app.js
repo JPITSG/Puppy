@@ -8140,6 +8140,8 @@ class SessionView {
         this.updateHead();
         this.updateRunState();
         this.syncLiveStatus();
+        if (d.background_tasks && d.background_tasks.waiting && d.background_tasks.text)
+          this.setStatus(d.background_tasks.text);
         if (d.pending_approval) this.showApproval(d.pending_approval);
         else this.hideApproval();
         if (!this.detached) this.scrollBottom(true);
@@ -8185,6 +8187,11 @@ class SessionView {
       case "turn_init":
         this.setStatus(`Model ${d.model}`);
         if (this.session) { this.session.last_model = d.model; this.updateHead(); }
+        break;
+      case "background_tasks":
+        /* the model answered but its engine still owns background work; the
+           node's text names it (older nodes send the plain status instead) */
+        if (d.waiting && d.text) this.setStatus(d.text);
         break;
       case "thinking_tokens":
         this.setStatus(thinkingLabel(d.tokens));
@@ -8969,8 +8976,10 @@ class SessionView {
         }
         if (d.subtype === "config_change") return this.switchLineNode(ev, d, false);
         const warned = d.subtype === "interrupted" || d.subtype === "model_switch" ||
-          d.subtype === "workspace_reset";
-        const n = el("div", "info-line" + (warned ? " warn" : ""));
+          d.subtype === "workspace_reset" || d.subtype === "background_wait_stopped" ||
+          (d.subtype === "task" && !!d.status && d.status !== "completed");
+        const n = el("div", "info-line" + (warned ? " warn" : "") +
+          (d.subtype === "background_wait" ? " bg-wait" : ""));
         n.textContent = d.text || d.subtype || "";
         return n;
       }

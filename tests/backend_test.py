@@ -67,6 +67,129 @@ def exercise_driver_normalization() -> None:
     assert usage_result["context_used"] == 37
     assert usage_result["context_window"] == 200000
 
+    # Background work (claude 2.1.258): a successful result with live tasks is
+    # a pause the CLI will wake the model from in the same process, and the
+    # final result folds every result of that process.
+    bg_ctx = claude.turn_context({}, True, "start a watcher", "bg-pin")
+    assert claude.parse_line(json.dumps({
+        "type": "user", "uuid": "prompt-1", "message": {"role": "user", "content": [
+            {"type": "text", "text": "start a watcher"}]},
+    }), bg_ctx) == []
+    assert claude.parse_line(json.dumps({
+        "type": "system", "subtype": "background_tasks_changed", "tasks": [
+            {"task_id": "b1", "task_type": "local_bash", "description": "watch"},
+            {"task_id": "b2", "task_type": "monitor_ws", "description": "sweep",
+             "ambient": True}]}), bg_ctx) == [{
+        "a": "background_tasks",
+        "tasks": [{"id": "b1", "type": "local_bash", "description": "watch"}]}]
+    # the edge for a task already in the set is not a change
+    assert claude.parse_line(json.dumps({
+        "type": "system", "subtype": "task_started", "task_id": "b1",
+        "is_backgrounded": True, "description": "watch",
+        "task_type": "local_bash"}), bg_ctx) == []
+    paused = claude.parse_line(json.dumps({
+        "type": "result", "session_id": "s", "num_turns": 2, "duration_api_ms": 400,
+        "total_cost_usd": 0.01, "stop_reason": "end_turn", "is_error": False,
+        "usage": {"input_tokens": 10, "output_tokens": 4,
+                  "cache_read_input_tokens": 100}, "modelUsage": {}}), bg_ctx)
+    assert len(paused) == 1 and paused[0]["a"] == "turn_pause"
+    assert paused[0]["tasks"] == [
+        {"id": "b1", "type": "local_bash", "description": "watch"}]
+    assert paused[0]["data"]["usage"] == {
+        "input_tokens": 10, "output_tokens": 4, "cache_read_input_tokens": 100}
+    assert paused[0]["data"]["native_prompt_id"] == "prompt-1"
+    assert paused[0]["data"]["num_turns"] == 2
+    assert "wakeups" not in paused[0]["data"]
+    assert claude.parse_line(json.dumps({
+        "type": "system", "subtype": "background_tasks_changed", "tasks": []}),
+        bg_ctx) == [{"a": "background_tasks", "tasks": []}]
+    assert claude.parse_line(json.dumps({
+        "type": "system", "subtype": "task_notification", "task_id": "b1",
+        "status": "completed", "output_file": "/tmp/x",
+        "summary": 'Background command "watch" completed (exit code 0)'}),
+        bg_ctx) == [{"a": "event", "kind": "info", "data": {
+            "subtype": "task", "status": "completed", "task_id": "b1",
+            "text": 'Background command "watch" completed (exit code 0)'}}]
+    assert claude.parse_line(json.dumps({
+        "type": "result", "session_id": "s", "num_turns": 1, "duration_api_ms": 900,
+        "total_cost_usd": 0.03, "stop_reason": "end_turn", "is_error": False,
+        "usage": {"input_tokens": 5, "output_tokens": 6,
+                  "cache_read_input_tokens": 50}, "modelUsage": {}}), bg_ctx) == [{
+        "a": "result", "data": {
+            "native_session_id": "s", "native_prompt_id": "prompt-1",
+            "native_tail_id": "prompt-1", "ok": True, "duration_ms": 900,
+            "cost_usd": 0.03, "stop_reason": "end_turn", "num_turns": 3,
+            "usage": {"input_tokens": 15, "output_tokens": 10,
+                      "cache_read_input_tokens": 150},
+            "error": "", "wakeups": 1}}]
+
+    # A task the previous process left running is reported before the prompt
+    # is replayed; the empty wake-up result that follows is not the prompt's.
+    stale_ctx = claude.turn_context({}, False, "and now?", "stale-pin")
+    assert claude.parse_line(json.dumps({
+        "type": "system", "subtype": "task_notification", "task_id": "old",
+        "status": "stopped", "output_file": "",
+        "summary": "No completion record was found"}), stale_ctx) == []
+    assert claude.parse_line(json.dumps({
+        "type": "result", "session_id": "s", "num_turns": 0, "duration_api_ms": 0,
+        "total_cost_usd": 0, "stop_reason": None, "is_error": False,
+        "usage": {"input_tokens": 0, "output_tokens": 0}}), stale_ctx) == [{
+        "a": "transient", "msg": {
+            "type": "status",
+            "text": "Catching up on an earlier background task..."}}]
+    assert claude.parse_line(json.dumps({
+        "type": "user", "uuid": "p2", "message": {"role": "user", "content": [
+            {"type": "text", "text": "and now?"}]}}), stale_ctx) == []
+    real = claude.parse_line(json.dumps({
+        "type": "result", "session_id": "s", "num_turns": 1, "duration_api_ms": 300,
+        "total_cost_usd": 0.02, "stop_reason": "end_turn", "is_error": False,
+        "usage": {"input_tokens": 7, "output_tokens": 3}}), stale_ctx)
+    assert real[0]["a"] == "result"
+    assert real[0]["data"]["native_prompt_id"] == "p2"
+    assert real[0]["data"]["usage"] == {"input_tokens": 7, "output_tokens": 3}
+    assert real[0]["data"]["num_turns"] == 1
+    # without a stale report, an early result is still the turn's result
+    early_ctx = claude.turn_context({}, True, "x", "early-pin")
+    early = claude.parse_line(json.dumps({
+        "type": "result", "session_id": "s", "is_error": True,
+        "result": "Not logged in", "usage": {}}), early_ctx)
+    assert early[0]["a"] == "result" and early[0]["data"]["ok"] is False
+    # an error never waits on background work
+    error_ctx = claude.turn_context({}, True, "x", "error-pin")
+    claude.parse_line(json.dumps({
+        "type": "user", "message": {"role": "user", "content": [
+            {"type": "text", "text": "x"}]}}), error_ctx)
+    claude.parse_line(json.dumps({
+        "type": "system", "subtype": "background_tasks_changed", "tasks": [
+            {"task_id": "b1", "task_type": "local_bash", "description": "watch"}]}),
+        error_ctx)
+    failed = claude.parse_line(json.dumps({
+        "type": "result", "session_id": "s", "is_error": True,
+        "result": "boom", "usage": {}}), error_ctx)
+    assert failed[0]["a"] == "result" and failed[0]["data"]["ok"] is False
+    # "/compact" is never replayed: the compaction acknowledges the request
+    # through its replayed local-command output, after any stale wake-up
+    compact_ctx = claude.turn_context(
+        {}, False, "ignored", "compact-pin", tool={"tool": "compact"})
+    assert compact_ctx["initial_prompt"] == "/compact"
+    claude.parse_line(json.dumps({
+        "type": "system", "subtype": "task_notification", "task_id": "old",
+        "status": "stopped", "output_file": "", "summary": "stale"}), compact_ctx)
+    assert claude.parse_line(json.dumps({
+        "type": "result", "session_id": "s", "num_turns": 0, "is_error": False,
+        "usage": {}}), compact_ctx)[0]["a"] == "transient"
+    assert claude.parse_line(json.dumps({
+        "type": "user", "uuid": "lc-1", "message": {
+            "role": "user",
+            "content": "<local-command-stdout>Compacted </local-command-stdout>"}}),
+        compact_ctx) == []
+    compacted = claude.parse_line(json.dumps({
+        "type": "result", "session_id": "s", "num_turns": 0, "is_error": False,
+        "usage": {}}), compact_ctx)
+    assert compacted[0]["a"] == "result"
+    assert compacted[0]["data"]["compacted"] is False
+    assert compacted[0]["data"]["native_tail_id"] == "lc-1"
+
     driver = CodexDriver()
     assert driver.uses_stdin_stream is True
     assert driver.supports_steering is True
@@ -725,6 +848,345 @@ with open(os.environ["PUPPY_FAKE_CODEX_LOG"], "a", encoding="utf-8") as handle:
             os.environ.pop("PUPPY_FAKE_CODEX_LOG", None)
         else:
             os.environ["PUPPY_FAKE_CODEX_LOG"] = original_log
+        runner.drop_hub(sid)
+        db.delete_session(sid)
+
+
+async def exercise_claude_background_turn(root, runner, db, config) -> None:
+    """Drive the real runner against a no-model fake claude whose background
+    tasks follow the pinned stream-json contract.
+
+    This pins the wait: stdin stays open across the model's answer while a
+    task runs, the CLI's own wake-up continues the same turn, one folded result
+    closes it, a stop or the turn timeout ends the wait through stdin EOF, a
+    stale task reported by a resumed process never closes the prompt's turn
+    early, and an error result never waits.
+    """
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    fake = root / "claude"
+    log_path = root / "invocations.jsonl"
+    fake.write_text(r'''#!/usr/bin/env python3
+import json
+import os
+import select
+import sys
+import time
+
+seen = []
+flags = {}
+
+
+def read():
+    line = sys.stdin.readline()
+    if not line:
+        raise SystemExit("unexpected stdin EOF")
+    value = json.loads(line)
+    seen.append(value)
+    return value
+
+
+def send(value):
+    sys.stdout.write(json.dumps(value, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+
+def stdin_eof(timeout):
+    """True when the runner closes stdin within timeout seconds."""
+    end = time.monotonic() + timeout
+    while True:
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            return False
+        ready, _, _ = select.select([sys.stdin], [], [], remaining)
+        if not ready:
+            return False
+        line = sys.stdin.readline()
+        if not line:
+            return True
+        if line.strip():
+            seen.append(json.loads(line))
+
+
+def finish(code=0):
+    with open(os.environ["PUPPY_FAKE_CLAUDE_LOG"], "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"argv": sys.argv[1:], "seen": seen,
+                                 "flags": flags}) + "\n")
+    raise SystemExit(code)
+
+
+argv = sys.argv[1:]
+if argv[:1] != ["-p"] or "--input-format" not in argv:
+    raise SystemExit("wrong argv: {!r}".format(argv))
+if "--session-id" in argv:
+    sid = argv[argv.index("--session-id") + 1]
+else:
+    sid = argv[argv.index("--resume") + 1]
+
+
+def usage(inp, out):
+    return {"input_tokens": inp, "output_tokens": out,
+            "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+
+
+def result(num_turns, api_ms, cost, inp, out, text, is_error=False):
+    send({"type": "result",
+          "subtype": "error_during_execution" if is_error else "success",
+          "is_error": is_error, "num_turns": num_turns, "duration_ms": 5,
+          "duration_api_ms": api_ms, "total_cost_usd": cost,
+          "stop_reason": "end_turn", "session_id": sid, "usage": usage(inp, out),
+          "modelUsage": {"claude-fake": {"contextWindow": 200000}},
+          "result": text})
+
+
+def system(subtype, **fields):
+    value = {"type": "system", "subtype": subtype, "session_id": sid}
+    value.update(fields)
+    send(value)
+
+
+TASK = {"task_id": "btask1", "task_type": "local_bash",
+        "description": "fake background command"}
+
+init = read()
+if init.get("type") != "control_request" or \
+        init.get("request", {}).get("subtype") != "initialize":
+    raise SystemExit("missing initialize: {!r}".format(init))
+send({"type": "control_response", "response": {
+    "subtype": "success", "request_id": init["request_id"], "response": {}}})
+user = read()
+prompt = user["message"]["content"][0]["text"]
+if prompt.endswith("stale wakeup fake turn"):
+    # a task the previous process left running is reported first, and its
+    # wake-up query ends before the prompt is even replayed
+    system("task_notification", task_id="bold1", status="stopped", output_file="",
+           summary="No completion record was found for this background shell "
+                   "command from the previous session.")
+    system("init", model="claude-fake", tools=[])
+    result(0, 0, 0.0, 0, 0, "")
+    flags["early_close"] = stdin_eof(0.3)
+system("init", model="claude-fake", tools=[])
+send({"type": "user", "uuid": "u-1", "session_id": sid,
+      "message": {"role": "user", "content": [{"type": "text", "text": prompt}]}})
+send({"type": "assistant", "uuid": "a-1", "session_id": sid, "message": {
+    "model": "claude-fake", "content": [{"type": "text", "text": "first answer"}],
+    "usage": usage(10, 2)}})
+if prompt.endswith("error with tasks fake turn"):
+    system("background_tasks_changed", tasks=[TASK])
+    result(1, 100, 0.01, 10, 2, "boom", is_error=True)
+    flags["closed_after_error"] = stdin_eof(3)
+    finish()
+if prompt.endswith("plain fake turn") or prompt.endswith("stale wakeup fake turn"):
+    result(1, 100, 0.01, 10, 2, "first answer")
+else:
+    system("background_tasks_changed", tasks=[TASK])
+    system("task_started", task_id="btask1", tool_use_id="toolu_1",
+           is_backgrounded=True, description=TASK["description"],
+           task_type="local_bash")
+    result(1, 100, 0.01, 10, 2, "first answer")
+    if prompt.endswith("background fake turn"):
+        if stdin_eof(0.5):
+            # the runner gave up on the task: a real CLI would kill it now
+            flags["early_close"] = True
+            system("background_tasks_changed", tasks=[])
+            system("task_notification", task_id="btask1", status="stopped",
+                   output_file="", summary=TASK["description"])
+            finish()
+        system("background_tasks_changed", tasks=[])
+        system("task_updated", task_id="btask1", patch={"status": "completed"})
+        system("task_notification", task_id="btask1", tool_use_id="toolu_1",
+               status="completed", output_file="/tmp/fake.output",
+               summary='Background command "fake background command" '
+                       'completed (exit code 0)')
+        system("init", model="claude-fake", tools=[])
+        send({"type": "assistant", "uuid": "a-2", "session_id": sid, "message": {
+            "model": "claude-fake",
+            "content": [{"type": "text", "text": "continued after task"}],
+            "usage": usage(5, 3)}})
+        result(1, 250, 0.02, 5, 3, "continued after task")
+    else:
+        # "stop while waiting" and "timeout while waiting": the task never ends
+        flags["eof_while_waiting"] = stdin_eof(15)
+        system("background_tasks_changed", tasks=[])
+        system("task_notification", task_id="btask1", tool_use_id="toolu_1",
+               status="stopped", output_file="", summary=TASK["description"])
+        finish()
+for line in sys.stdin:
+    if line.strip():
+        seen.append(json.loads(line))
+finish()
+''', encoding="utf-8")
+    fake.chmod(0o755)
+
+    from puppy.drivers import get_driver
+    driver = get_driver("claude")
+    original_binary = driver.binary
+    original_log = os.environ.get("PUPPY_FAKE_CLAUDE_LOG")
+    original_timeout = config.get("sessions.turn_timeout")
+    driver.binary = str(fake)
+    os.environ["PUPPY_FAKE_CLAUDE_LOG"] = str(log_path)
+    sid = db.create_session(
+        "claude background fake", "claude", str(root), "", "", "#7aa2f7", "auto")
+    hub = runner.hub(sid)
+
+    class Capture:
+        def __init__(self):
+            self.messages = []
+
+        async def send_json(self, value):
+            self.messages.append(value)
+
+    capture = Capture()
+    hub.attach(capture)
+
+    async def finish_turn(label):
+        deadline = time.monotonic() + 20
+        while hub.status != "idle":
+            if time.monotonic() >= deadline:
+                raise AssertionError(label + " did not finish")
+            await asyncio.sleep(0.02)
+        if hub.turn_task is not None:
+            await hub.turn_task
+
+    def turn_events(prompt):
+        events = db.get_events(sid)
+        start = max(index for index, event in enumerate(events)
+                    if event["kind"] == "user" and
+                    event["data"].get("text") == prompt)
+        return events[start:]
+
+    def shape(events):
+        return [(event["kind"], event["data"].get("subtype", ""))
+                for event in events]
+
+    def last_invocation():
+        return json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
+
+    try:
+        # an ordinary turn establishes the native session
+        assert hub.send_message("plain fake turn") == {"queued": False}
+        await finish_turn("plain fake turn")
+        assert shape(turn_events("plain fake turn")) == [
+            ("user", ""), ("assistant", ""), ("result", "")]
+        assert db.get_session(sid)["native_session_id"]
+
+        # the CLI wakes the model for a finished task in the same process
+        assert hub.send_message("background fake turn") == {"queued": False}
+        await finish_turn("background fake turn")
+        events = turn_events("background fake turn")
+        assert shape(events) == [
+            ("user", ""), ("assistant", ""), ("info", "background_wait"),
+            ("info", "task"), ("assistant", ""), ("result", "")], shape(events)
+        assert events[2]["data"]["text"] == \
+            "Waiting for 1 background task: fake background command"
+        assert events[2]["data"]["tasks"] == [{
+            "id": "btask1", "type": "local_bash",
+            "description": "fake background command"}]
+        assert events[3]["data"]["status"] == "completed"
+        assert events[3]["data"]["text"] == \
+            'Background command "fake background command" completed (exit code 0)'
+        assert events[4]["data"]["text"] == "continued after task"
+        result = events[5]["data"]
+        assert result["ok"] is True and result["wakeups"] == 1
+        assert result["usage"] == {
+            "input_tokens": 15, "output_tokens": 5,
+            "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+        assert result["num_turns"] == 2 and result["duration_ms"] == 250
+        assert result["cost_usd"] == 0.02
+        assert result["native_prompt_id"] == "u-1"
+        assert result["native_tail_id"] == "a-2"
+        assert hub.last_completion_status == "ok"
+        waiting = [message for message in capture.messages
+                   if message.get("type") == "background_tasks" and
+                   message.get("waiting")]
+        assert waiting and waiting[0]["tasks"][0]["id"] == "btask1"
+        assert waiting[0]["text"] == \
+            "Waiting for 1 background task: fake background command · Stop ends the wait"
+        assert any(message.get("type") == "status" and
+                   message.get("text") == waiting[0]["text"]
+                   for message in capture.messages)
+        assert any(message.get("type") == "background_tasks" and
+                   not message.get("waiting") for message in capture.messages)
+        assert last_invocation()["flags"].get("early_close") is not True
+
+        # a stop during the wait ends the tasks through EOF; the answer stands
+        capture.messages.clear()
+        assert hub.send_message("stop while waiting fake turn") == {"queued": False}
+        deadline = time.monotonic() + 20
+        while hub._bg_wait_since is None:
+            if time.monotonic() >= deadline:
+                raise AssertionError("fake turn never paused on its task")
+            await asyncio.sleep(0.02)
+        snapshot = hub.snapshot()["background_tasks"]
+        assert snapshot["waiting"] is True
+        assert snapshot["tasks"][0]["id"] == "btask1"
+        assert snapshot["text"].endswith("Stop ends the wait")
+        assert hub.steering_state()["ready"] is False
+        await hub.interrupt()
+        await finish_turn("stop while waiting fake turn")
+        events = turn_events("stop while waiting fake turn")
+        assert shape(events) == [
+            ("user", ""), ("assistant", ""), ("info", "background_wait"),
+            ("info", "task"), ("info", "interrupted"), ("result", "")], shape(events)
+        assert events[3]["data"]["status"] == "stopped"
+        assert events[4]["data"]["text"] == \
+            "Stopped waiting for background tasks; the engine ended them"
+        assert events[5]["data"]["ok"] is True
+        assert events[5]["data"]["usage"]["input_tokens"] == 10
+        assert hub.last_completion_status == "interrupted"
+        assert last_invocation()["flags"]["eof_while_waiting"] is True
+        assert any(message.get("type") == "status" and
+                   message.get("text") == "Ending the wait for background tasks..."
+                   for message in capture.messages)
+
+        # the turn timeout ends a wait gracefully instead of killing the engine
+        config.set_value("sessions.turn_timeout", 2)
+        try:
+            assert hub.send_message("timeout while waiting fake turn") == \
+                {"queued": False}
+            await finish_turn("timeout while waiting fake turn")
+        finally:
+            config.set_value("sessions.turn_timeout", original_timeout)
+        events = turn_events("timeout while waiting fake turn")
+        assert shape(events) == [
+            ("user", ""), ("assistant", ""), ("info", "background_wait"),
+            ("info", "background_wait_stopped"), ("info", "task"),
+            ("result", "")], shape(events)
+        assert "turn timeout" in events[3]["data"]["text"]
+        assert events[5]["data"]["ok"] is True
+        assert hub.last_completion_status == "ok"
+        assert last_invocation()["flags"]["eof_while_waiting"] is True
+
+        # a stale task from the previous process never closes the prompt's turn
+        assert hub.send_message("stale wakeup fake turn") == {"queued": False}
+        await finish_turn("stale wakeup fake turn")
+        events = turn_events("stale wakeup fake turn")
+        assert shape(events) == [
+            ("user", ""), ("assistant", ""), ("result", "")], shape(events)
+        assert events[2]["data"]["native_prompt_id"] == "u-1"
+        assert events[2]["data"]["num_turns"] == 1
+        assert events[2]["data"]["usage"]["input_tokens"] == 10
+        invocation = last_invocation()
+        assert invocation["flags"]["early_close"] is False
+        assert "--resume" in invocation["argv"]
+
+        # an error result never waits on background work
+        assert hub.send_message("error with tasks fake turn") == {"queued": False}
+        await finish_turn("error with tasks fake turn")
+        events = turn_events("error with tasks fake turn")
+        assert shape(events) == [
+            ("user", ""), ("assistant", ""), ("result", "")], shape(events)
+        assert events[2]["data"]["ok"] is False
+        assert last_invocation()["flags"]["closed_after_error"] is True
+        assert hub.last_completion_status == "error"
+    finally:
+        hub.detach(capture)
+        driver.binary = original_binary
+        if original_log is None:
+            os.environ.pop("PUPPY_FAKE_CLAUDE_LOG", None)
+        else:
+            os.environ["PUPPY_FAKE_CLAUDE_LOG"] = original_log
+        config.set_value("sessions.turn_timeout", original_timeout)
         runner.drop_hub(sid)
         db.delete_session(sid)
 
@@ -3895,6 +4357,8 @@ async def main() -> None:
         db.connect()
         await exercise_codex_app_server_turn(
             temp_root / "codex-app-server", runner, db)
+        await exercise_claude_background_turn(
+            temp_root / "claude-background", runner, db, config)
         exercise_auth_hardening(auth)
         exercise_activity_blocks(runner.SessionHub)
         exercise_health_retry_bound(controller_backends)
