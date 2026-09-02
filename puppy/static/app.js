@@ -13467,21 +13467,21 @@ class SettingsView {
           inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
         <label>Bind port<input type="number" id="set-port" value="${esc(settings.web.port)}"
           min="1" max="65535" step="1" inputmode="numeric" autocomplete="off"></label>
-      </div>
-      <p class="bind-help">Literal IPv4 or IPv6 address and TCP port for this WebUI instance.
-        A changed endpoint is tested directly from this browser before it can be saved.</p>
-      <div class="field-lbl">Protocol
-        <div class="seg" role="group" aria-label="WebUI protocol">
-          <button class="seg-btn" id="set-protocol-http" type="button"
-            aria-pressed="false">HTTP</button>
-          <button class="seg-btn" id="set-protocol-https" type="button"
-            aria-pressed="false">HTTPS</button>
+        <div class="field-lbl">Protocol
+          <div class="seg" role="group" aria-label="WebUI protocol">
+            <button class="seg-btn" id="set-protocol-http" type="button"
+              aria-pressed="false">HTTP</button>
+            <button class="seg-btn" id="set-protocol-https" type="button"
+              aria-pressed="false">HTTPS</button>
+          </div>
         </div>
       </div>
-      <p class="bind-help" id="set-protocol-note"></p>
+      <p class="bind-help">Literal IPv4 or IPv6 address and TCP port for this WebUI instance.
+        A changed endpoint is tested directly from this browser before it can be saved.
+        <span id="set-protocol-note"></span></p>
       <div class="hidden" id="set-https-options">
-        <div class="field-lbl">Certificate
-          <div class="seg" role="group" aria-label="HTTPS certificate source">
+        <div class="field-lbl">SSL certificate
+          <div class="seg" role="group" aria-label="SSL certificate source">
             <button class="seg-btn" id="set-cert-auto" type="button"
               aria-pressed="false">Generate</button>
             <button class="seg-btn" id="set-cert-custom" type="button"
@@ -13492,7 +13492,7 @@ class SettingsView {
           <p class="bind-help">Puppy generates a private key and a self-signed certificate containing
             only the endpoint names needed by this listener. Browsers will show a trust warning
             until you explicitly trust it.</p>
-          <div class="kv"><span class="k">Generated pair</span><span class="v"
+          <div class="kv"><span class="k">SSL certificate</span><span class="v"
             title="${autoIdentity.available ? `SHA-256 ${esc(autoIdentity.sha256)}` : ""}"
             >${esc(identitySummary(autoIdentity))}</span></div>
         </div>
@@ -13501,9 +13501,10 @@ class SettingsView {
             autocapitalize="off" spellcheck="false" placeholder="/path/to/fullchain.pem"></label>
           <label>Private key path<input type="text" id="set-tls-key" autocomplete="off"
             autocapitalize="off" spellcheck="false" placeholder="/path/to/privkey.pem"></label>
-          <p class="bind-help">Puppy reads both server-side paths once, validates the pair, and copies
-            it into private backup-covered storage. Leave both blank to keep the installed pair.</p>
-          <div class="kv"><span class="k">Imported pair</span><span class="v"
+          <p class="bind-help">Puppy reads both server-side paths once, validates the certificate and
+            key, and copies them into private backup-covered storage. Leave both blank to keep the
+            installed certificate.</p>
+          <div class="kv"><span class="k">SSL certificate</span><span class="v"
             title="${customIdentity.available ? `SHA-256 ${esc(customIdentity.sha256)}` : ""}"
             >${esc(identitySummary(customIdentity))}</span></div>
         </div>
