@@ -571,8 +571,8 @@ class CodexDriver(Driver):
             {"value": "compact", "label": "Compact context",
              "hint": "Summarize the conversation so far into a shorter context"},
             {"value": "undo", "label": "Undo last turn",
-             "hint": "Drop your last prompt and its reply from the conversation; "
-                     "files are not changed"},
+             "hint": "Revert the engine's context to before your last prompt; "
+                     "Puppy's transcript and files stay unchanged"},
         ]
 
     def tool_plan(self, tool, session, turns):
@@ -1125,7 +1125,7 @@ class CodexDriver(Driver):
                 return [{"a": "result", "data": {
                     **identity,
                     "ok": True, "usage": dict(ctx.get("usage") or {}),
-                    "duration_ms": duration, "stop_reason": "completed",
+                    "engine_duration_ms": duration, "stop_reason": "completed",
                 }}]
             error = _error_text(turn.get("error"),
                                 "Codex turn {}".format(status or "failed"))
@@ -1133,7 +1133,7 @@ class CodexDriver(Driver):
                 **identity,
                 "ok": False, "error": error,
                 "usage": dict(ctx.get("usage") or {}),
-                "duration_ms": duration,
+                "engine_duration_ms": duration,
                 "stop_reason": "cancelled" if status == "interrupted" else
                                (status or "error"),
             }}

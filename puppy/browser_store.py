@@ -151,13 +151,11 @@ def _load_blocking(path: str) -> "dict | None":
     except FileNotFoundError:
         return None
     except Exception as exc:
-        log.warning("shared browser store is unreadable, starting empty: %s", exc)
-        return None
+        raise RuntimeError("shared browser store is unreadable: {}".format(exc))
     if not isinstance(raw, dict) or raw.get("v") != STORE_VERSION:
         # No-migration rule: an unsupported persisted shape is rejected, and
         # for this rebuildable login cache rejection means a fresh store.
-        log.warning("shared browser store has an unsupported shape, starting empty")
-        return None
+        raise RuntimeError("shared browser store has an unsupported shape")
     cookies = {}
     for entry in raw.get("cookies") or []:
         if not isinstance(entry, dict):
@@ -191,7 +189,12 @@ def _load_blocking(path: str) -> "dict | None":
     serial = raw.get("serial")
     if not isinstance(serial, int) or isinstance(serial, bool) or serial < 0:
         serial = 0
-    return {"cookies": cookies, "storage": storage, "serial": serial}
+    try:
+        saved_at = float(os.path.getmtime(path))
+    except OSError:
+        saved_at = None
+    return {"cookies": cookies, "storage": storage, "serial": serial,
+            "saved_at": saved_at}
 
 
 def _save_blocking(path: str, payload: dict) -> None:
@@ -226,23 +229,39 @@ class SharedStore:
         self._cookies = {}    # key -> {"cookie": {...}, "seen": ts}
         self._storage = {}    # origin -> {"items": {...}, "ts": ts}
         self._serial = 0
+        self._dirty = False
+        self._persistence_error = ""
+        self._persistence_error_at = None
+        self._last_saved_at = None
 
     async def _ensure_loaded(self) -> None:
         if self._loaded:
             return
-        loaded = await asyncio.get_event_loop().run_in_executor(
-            None, _load_blocking, store_path())
+        try:
+            loaded = await asyncio.get_event_loop().run_in_executor(
+                None, _load_blocking, store_path())
+        except Exception as exc:
+            # The shared store is a rebuildable node-local cache, so an
+            # unreadable/current-shape failure starts from empty as before,
+            # but it is no longer silent. Mark it dirty so the first browser
+            # sync attempts a current-shape durable replacement.
+            self._persistence_error = str(exc)[:400]
+            self._persistence_error_at = time.time()
+            self._dirty = True
+            log.warning("%s; starting empty", exc)
+            loaded = None
         if loaded is not None:
             self._cookies = loaded["cookies"]
             self._storage = loaded["storage"]
             self._serial = loaded["serial"]
+            self._last_saved_at = loaded["saved_at"]
         self._loaded = True
 
-    async def _save(self) -> None:
-        self._serial += 1
+    async def _save(self) -> bool:
+        next_serial = self._serial + 1
         payload = {
             "v": STORE_VERSION,
-            "serial": self._serial,
+            "serial": next_serial,
             "cookies": [dict(entry) for entry in self._cookies.values()],
             "storage": {origin: dict(entry)
                         for origin, entry in self._storage.items()},
@@ -251,7 +270,17 @@ class SharedStore:
             await asyncio.get_event_loop().run_in_executor(
                 None, _save_blocking, store_path(), payload)
         except Exception as exc:
+            self._dirty = True
+            self._persistence_error = str(exc)[:400]
+            self._persistence_error_at = time.time()
             log.warning("shared browser store save failed: %s", exc)
+            return False
+        self._serial = next_serial
+        self._dirty = False
+        self._persistence_error = ""
+        self._persistence_error_at = None
+        self._last_saved_at = time.time()
+        return True
 
     def _prune_cookies(self, now: float) -> bool:
         changed = False
@@ -355,7 +384,7 @@ class SharedStore:
                     entry["ts"] = now
             changed = self._prune_storage() or changed
 
-            if changed:
+            if changed or self._dirty:
                 await self._save()
             return {
                 "set_cookies": set_into,
@@ -367,6 +396,18 @@ class SharedStore:
                                   if origin in self._storage},
                 "serial": self._serial,
                 "changed": changed,
+            }
+
+    async def persistence_health(self) -> dict:
+        """Authenticated status metadata; never includes stored site data."""
+        async with self._lock:
+            await self._ensure_loaded()
+            return {
+                "ok": not self._persistence_error and not self._dirty,
+                "dirty": bool(self._dirty),
+                "last_saved_at": self._last_saved_at,
+                "error_at": self._persistence_error_at,
+                "error": self._persistence_error,
             }
 
     async def seed_snapshot(self) -> tuple:

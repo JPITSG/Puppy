@@ -2316,6 +2316,7 @@ const state = {
   authed: false,
   instance: "",
   version: "",             // this instance's own puppy version
+  runtimeId: "",           // changes whenever this listener's process restarts
   clockFormat: "24h",      // WebUI server's runtime LC_TIME hour cycle
   engines: [],            // local engines info
   engMap: {},             // key -> engine info (local)
@@ -2862,6 +2863,7 @@ let updatesWs = null;
 let updatesRetry = 800;
 let updatesReconnectTimer = null;
 let updatesConnectionSequence = 0;
+let updatesHasOpened = false;
 
 async function enterApp() {
   state.authed = true;
@@ -2889,6 +2891,7 @@ async function refreshState() {
   const s = await api(0, "state");
   state.instance = s.instance_name;
   if (typeof s.version === "string") state.version = s.version;
+  state.runtimeId = typeof s.runtime_id === "string" ? s.runtime_id : "";
   state.clockFormat = s.clock_format === "12h" ? "12h" : "24h";
   if (s.notify) { state.notify = s.notify; syncBell(); }
   state.sessionColors = s.session_colors || [];
@@ -2907,6 +2910,28 @@ async function refreshState() {
   reconcileRemoteState();
   state.defaultCwd = s.default_cwd || "/";
   renderSidebar();
+  return s;
+}
+
+async function refreshAfterUpdatesReconnect(sequence, ws) {
+  const previousRuntime = state.runtimeId;
+  try {
+    await refreshState();
+  } catch (error) {
+    console.warn("state refresh after reconnect failed", error);
+    return;
+  }
+  if (sequence !== updatesConnectionSequence || updatesWs !== ws) return;
+  /* A new process can serve the same listener and accept the WebSocket while
+     this page still holds its old JS, version, uptime and rendered clocks.
+     Reloading is both a state refresh and the cache-busted frontend upgrade. */
+  if (previousRuntime && state.runtimeId && previousRuntime !== state.runtimeId) {
+    location.reload();
+    return;
+  }
+  renderTabs();
+  renderSidebar();
+  renderFootEngines();
 }
 
 function connectUpdates() {
@@ -2924,8 +2949,11 @@ function connectUpdates() {
       try { ws.close(); } catch (error) {}
       return;
     }
+    const reconnect = updatesHasOpened;
+    updatesHasOpened = true;
     updatesRetry = 800;
     setLocalConnection(true);
+    if (reconnect) refreshAfterUpdatesReconnect(sequence, ws);
   };
   ws.onmessage = (ev) => {
     if (sequence !== updatesConnectionSequence || updatesWs !== ws) return;
@@ -3829,7 +3857,7 @@ const SESSION_TOOLS = [
   { value: "compact", label: "Compact context",
     hint: "Summarize the conversation so far into a shorter context" },
   { value: "undo", label: "Undo last turn",
-    hint: "Drop your last prompt and its reply from the conversation; files are not changed" },
+    hint: "Revert the engine's context; Puppy's transcript and files stay unchanged" },
 ];
 
 function sessionToolLabel(value) {
@@ -4559,7 +4587,18 @@ function quotaTitle(e) {
   };
   const rl = e.rate_limit;
   const windows = rl && rl.unifiedWindows;
-  if (windows && typeof windows === "object") {
+  /* weeklyUsedPercent prefers the account/rollout quota snapshot whenever it
+     exists, so provenance must come from that same object. Mixing its fresh
+     percentage with an older turn-level rate_limit timestamp made a correct
+     number look stale (and described different source windows). */
+  const quotaSelected = e.quota &&
+    typeof e.quota.weekly_used_percent === "number";
+  if (quotaSelected) {
+    let piece = `week ${Math.round(e.quota.weekly_used_percent)}% used`;
+    const reset = clock(e.quota.resets_at);
+    if (reset) piece += ` (resets ${reset})`;
+    parts.push(piece);
+  } else if (windows && typeof windows === "object") {
     const label = { five_hour: "5h", seven_day: "week",
                     seven_day_overage_included: "week incl. overage" };
     for (const name of ["five_hour", "seven_day", "seven_day_overage_included"]) {
@@ -4571,14 +4610,9 @@ function quotaTitle(e) {
         parts.push(piece);
       }
     }
-  } else if (e.quota && typeof e.quota.weekly_used_percent === "number") {
-    let piece = `week ${Math.round(e.quota.weekly_used_percent)}% used`;
-    const reset = clock(e.quota.resets_at);
-    if (reset) piece += ` (resets ${reset})`;
-    parts.push(piece);
   }
   if (!parts.length) return "";
-  const asOf = clock((rl && rl.captured_at) || (e.quota && e.quota.as_of));
+  const asOf = clock(quotaSelected ? e.quota.as_of : (rl && rl.captured_at));
   if (asOf) parts.push(`reported ${asOf}`);
   return parts.join(" · ");
 }
@@ -8826,14 +8860,15 @@ class SessionView {
   }
 
   /* Dividers mark where the configuration changed, and name it on both sides.
-     A model/effort divider carries both sides itself: the engine writes it as a
-     turn starts, so what it names is what actually ran. An engine switch cannot
+     used_config records what the last turn requested; last_model is the
+     separate engine-confirmed effective model. An engine switch cannot
      - it resets the incoming engine to its defaults, and the model is picked
      afterwards - so that side is resolved from what came later: the "from" side
      of the next divider, or, for the newest one (the segment still running),
-     the configuration the session's last turn used. Never the live picker: a
-     model chosen but not yet sent anything has not run. Redone whenever either
-     input changes, which is cheap at a handful of dividers. */
+     the confirmed model plus the requested effort of the session's last turn.
+     Never the live picker: a model chosen but not yet sent anything has not
+     run. Redone whenever either input changes, which is cheap at a handful of
+     dividers. */
   syncSwitchLines() {
     const s = this.session || {};
     const lines = this.switchLines
@@ -8842,11 +8877,13 @@ class SessionView {
     this.switchLines = lines;
     lines.forEach((node, i) => {
       const { data: d, engines } = node._switch;
-      if (!engines) return this.fillSwitchLine(node, d, d.to_model, d.to_effort);
       const next = lines[i + 1] && lines[i + 1]._switch.data;
-      const used = (!next && s.engine === d.to && s.used_config) || {};
-      this.fillSwitchLine(node, d, next ? next.from_model : used.model,
-        next ? next.from_effort : used.effort);
+      const targetEngine = engines ? d.to : (d.engine || s.engine);
+      const used = (!next && s.engine === targetEngine && s.used_config) || {};
+      const effectiveModel = (!next && s.engine === targetEngine && s.last_model) ||
+        used.model || d.to_model;
+      this.fillSwitchLine(node, d, next ? next.from_model : effectiveModel,
+        next ? next.from_effort : (used.effort || d.to_effort));
     });
   }
 
@@ -8988,8 +9025,8 @@ class SessionView {
       case "error": {
         return el("div", "err-card", d.text || "Error");
       }
-      /* one shape for every engine: outcome · how long · tokens in · tokens
-         out · when. "In" is every token the model read during the turn, cached
+      /* one shape for every engine: outcome · elapsed wall time · tokens in ·
+         tokens out · when. "In" is every token the model read during the turn, cached
          context included, summed over its requests: Claude and OpenCode report
          cache reads/writes beside a small uncached input_tokens, while Codex
          folds its cached_input_tokens into input_tokens, so adding the cache
@@ -9001,7 +9038,8 @@ class SessionView {
         const bits = [];
         if (!d.ok) bits.push(`<span class="bad">✗ ${esc((d.error || "Failed").slice(0, 80))}</span>`);
         else bits.push("✔");
-        if (d.duration_ms) bits.push((d.duration_ms / 1000).toFixed(1) + "s");
+        if (d.duration_ms != null)
+          bits.push((Math.max(0, Number(d.duration_ms) || 0) / 1000).toFixed(1) + "s");
         const u = d.usage || {};
         /* a tool turn (compaction, undo) reports no usage of its own on some
            engines; "0 in · 0 out" would misreport work that was not counted */
@@ -10087,9 +10125,9 @@ class SessionView {
   async runSessionTool(tool) {
     if (tool === "undo") {
       const ok = await modalConfirm("Undo last turn",
-        "Removes your last prompt and its reply from the conversation, so the " +
-        "next prompt continues from before them. Files changed by that turn " +
-        "are not reverted.");
+        "Reverts only the native engine context, so the next prompt continues " +
+        "from before your last turn. That prompt and reply stay visible in " +
+        "Puppy's transcript, and files changed by the turn are not reverted.");
       if (!ok) return;
     }
     try {
@@ -11606,6 +11644,7 @@ class BrowserView {
    session-search and merges what returns; offline nodes are shown as skipped
    rather than silently missing. */
 const SEARCH_KIND_CHIPS = [
+  { key: "title", label: "Titles" },
   { key: "user", label: "Prompts" },
   { key: "assistant", label: "Replies" },
   { key: "thinking", label: "Thinking" },
@@ -11630,6 +11669,21 @@ const SEARCH_TIMEOUT = 20000;
 const SEARCH_PER_SESSION = 5;
 const SEARCH_MAX_SESSIONS = 40;
 const SEARCH_PAGE = 50;
+
+/* SQLite BM25 magnitudes belong to one node's own FTS corpus and cannot be
+   compared with another node's. Each response is already ordered by its own
+   relevance, so federated relevance uses that per-node ordinal and interleaves
+   equal positions by freshness. This is rank normalization, not raw-score
+   arithmetic across unrelated corpora. */
+function searchGroupNewest(entry) {
+  const matches = (entry.group && entry.group.matches) || [];
+  return matches.length ? Math.max(...matches.map(match => Number(match.ts) || 0)) : 0;
+}
+
+function searchRelevanceCompare(a, b) {
+  return (Number(a.nodeRank) || 0) - (Number(b.nodeRank) || 0) ||
+    searchGroupNewest(b) - searchGroupNewest(a);
+}
 
 /* Deliberately stricter than backendHasCapability: a legacy node defaulting
    to true would be offered a route it does not serve. */
@@ -11742,7 +11796,7 @@ class SearchView {
       time: "any", order: "relevance" };
     try {
       const d = JSON.parse(lsGet("puppy.search") || "null");
-      if (!d || d.v !== 1) return fallback;
+      if (!d || d.v !== 2) return fallback;
       const kinds = (Array.isArray(d.kinds) ? d.kinds : [])
         .filter(kind => SEARCH_KIND_CHIPS.some(chip => chip.key === kind));
       return {
@@ -11756,7 +11810,7 @@ class SearchView {
   savePrefs() {
     try {
       lsSet("puppy.search", JSON.stringify({
-        v: 1, kinds: [...this.kinds], time: this.timeKey, order: this.order }));
+        v: 2, kinds: [...this.kinds], time: this.timeKey, order: this.order }));
     } catch (e) {}
   }
 
@@ -11849,7 +11903,7 @@ class SearchView {
   coreParams(query) {
     const core = { q: query, order: this.order };
     if (this.kinds.size && this.kinds.size < SEARCH_KIND_CHIPS.length)
-      core.kinds = [...this.kinds, "title"].join(",");   // titles always count
+      core.kinds = [...this.kinds].join(",");
     const choice = SEARCH_TIME_CHOICES.find(t => t.key === this.timeKey);
     if (choice && choice.seconds)
       core.after = String(Date.now() / 1000 - choice.seconds);
@@ -11895,18 +11949,16 @@ class SearchView {
         sessionCount += Number(data.session_total) || 0;
         truncated = truncated || !!data.truncated;
         partial = partial || !!data.partial;
-        for (const group of data.sessions || [])
-          if (group && group.session) groups.push({ bid: node.bid, group });
+        (data.sessions || []).forEach((group, nodeRank) => {
+          if (group && group.session) groups.push({ bid: node.bid, group, nodeRank });
+        });
       } else {
         failures.push({ node: targets[index], error: result.reason });
       }
     });
-    const bestOf = entry => entry.group.matches.length ?
-      Math.min(...entry.group.matches.map(m => m.rank)) : 0;
-    const newestOf = entry => entry.group.matches.length ?
-      Math.max(...entry.group.matches.map(m => m.ts)) : 0;
     groups.sort(this.order === "recent" ?
-      (a, b) => newestOf(b) - newestOf(a) : (a, b) => bestOf(a) - bestOf(b));
+      (a, b) => searchGroupNewest(b) - searchGroupNewest(a) :
+      searchRelevanceCompare);
 
     /* The counts line only earns its place beside real hits; an empty result
        says so once, below. Node warnings stay in either case. */
@@ -13024,6 +13076,22 @@ class SettingsView {
       shared.input.disabled = !usable;
       if (shared.root) shared.root.classList.toggle("disabled", !usable);
     };
+    const setSharedStatus = st => {
+      if (!shared) return;
+      const health = st.shared_storage_health;
+      const failed = st.shared_storage === true && health && health.ok === false;
+      const copy = failed ?
+        `Persistence error: ${health.error || "the shared store could not be saved"}` :
+        "Shares non-partitioned cookies and best-effort localStorage captured from visited " +
+        "pages across browsers and restarts. It does not copy partitioned cookies, " +
+        "IndexedDB, sessionStorage, or service workers. This node-local store is excluded " +
+        "from backups.";
+      if (shared.note) {
+        shared.note.textContent = copy;
+        shared.note.classList.toggle("warn", !!failed);
+      }
+      if (shared.root) shared.root.title = copy;
+    };
     const apply = st => {
       if (browserRecord) browserRecord.wasOffline = false;
       input.checked = !!st.enabled;
@@ -13037,6 +13105,7 @@ class SettingsView {
       if (shared) {
         shared.input.checked = st.shared_storage === true;
         setSharedUsable(typeof st.shared_storage === "boolean");
+        setSharedStatus(st);
       }
       if (st.available) {
         setNote((st.product || "Browser available") +
@@ -13099,8 +13168,11 @@ class SettingsView {
         const result = await api(bid, "browser/shared-storage", {
           method: "POST", body: { enabled: desired } });
         apply(result);
+        const failed = result.shared_storage && result.shared_storage_health &&
+          result.shared_storage_health.ok === false;
         toast(`${name}: Shared cookies & storage ${
-          result.shared_storage ? "enabled" : "disabled"}`, "ok");
+          result.shared_storage ? "enabled" : "disabled"}${failed ?
+          " · persistence failed" : ""}`, failed ? "error" : "ok");
       } catch (error) {
         shared.input.checked = !desired;
         shared.input.disabled = false;
@@ -13595,11 +13667,13 @@ class SettingsView {
       </label>
       <label class="be-auto be-auto-add browser-toggle browser-share-toggle">
         <input type="checkbox" id="set-browser-share" disabled
-          aria-label="Share one persistent cookie and site-storage store across this instance's browsers">
+          aria-label="Share supported cookies and page localStorage across this instance's browsers">
         <span class="be-auto-track" aria-hidden="true"><span></span></span>
         <span class="be-auto-copy"><span>Shared cookies &amp; storage</span>
-          <small>All browsers on this instance use one persistent sign-in store,
-            so logins survive new browsers and restarts.</small></span>
+          <small id="set-browser-share-note">Shares non-partitioned cookies and best-effort
+            localStorage captured from visited pages across browsers and restarts. It does not
+            copy partitioned cookies, IndexedDB, sessionStorage, or service workers. This
+            node-local store is excluded from backups.</small></span>
       </label>
       <div class="bind-fields">
         <label>Bind IP<input type="text" id="set-bind" value="${esc(settings.web.host)}"
@@ -13669,6 +13743,7 @@ class SettingsView {
       c1.querySelector("#set-browser-note"), generation, null, null, {
         input: c1.querySelector("#set-browser-share"),
         root: c1.querySelector(".browser-share-toggle"),
+        note: c1.querySelector("#set-browser-share-note"),
       });
     let selectedScheme = configuredScheme;
     let selectedCertificateSource = configuredCertificateSource;
@@ -13956,9 +14031,10 @@ class SettingsView {
     /* account usage refresh */
     const usageCard = el("div", "card usage-refresh-card");
     usageCard.innerHTML = `<h2>Usage refresh</h2>
-      <p class="usage-refresh-copy">Choose how often each backend asks its installed engines
-        for current account-limit data. This read-only check does not start a turn or consume
-        model tokens. Use 0 to disable it.</p>`;
+      <p class="usage-refresh-copy">Choose how often each backend asks its installed Codex CLI
+        for current account-limit data. Other engines do not provide an account-refresh API
+        here. This read-only check does not start a turn or consume model tokens. Use 0 to
+        disable it.</p>`;
     const usageList = el("div", "usage-refresh-list");
     const localUsage = this.usageRefreshRow(settings.instance_name, 0);
     localUsage.update(state.usageRefresh, "ok", true);
@@ -14242,7 +14318,7 @@ class SettingsView {
             sharedInput.type = "checkbox";
             sharedInput.disabled = true;
             sharedInput.setAttribute("aria-label",
-              `Share one persistent cookie store across browsers on ${b.name}`);
+              `Share supported cookies and page localStorage across browsers on ${b.name}`);
             const sharedTrack = el("span", "be-auto-track");
             sharedTrack.setAttribute("aria-hidden", "true");
             sharedTrack.appendChild(el("span"));
@@ -14250,7 +14326,10 @@ class SettingsView {
             sharedRoot.appendChild(sharedTrack);
             sharedRoot.appendChild(el("span", "be-auto-label", "Shared cookies"));
             sharedRoot.title =
-              "All browsers on this backend use one persistent sign-in store";
+              "Shares non-partitioned cookies and best-effort localStorage captured from " +
+              "visited pages across browsers and restarts. It does not copy partitioned " +
+              "cookies, IndexedDB, sessionStorage, or service workers. This node-local " +
+              "store is excluded from backups.";
             shared = { input: sharedInput, root: sharedRoot };
           }
           this.wireBrowserToggle(b.id, browserInput, null, generation,

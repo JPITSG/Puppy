@@ -198,8 +198,13 @@ def _config_after(session: dict, items) -> dict:
 
 
 def parse_used_config(raw):
-    """{model, effort} of the last turn that actually ran, or None if the
-    session has not run one since it was created or moved to this engine."""
+    """Requested {model, effort} of the last turn sent to this engine.
+
+    ``last_model`` is the separate engine-confirmed effective model.  Keeping
+    the two sources distinct matters when a provider reroutes a request: the
+    requested pair still decides whether the picker introduced a new segment,
+    while transcript provenance must prefer the model the engine reported.
+    """
     if not raw:
         return None
     try:
@@ -1253,19 +1258,18 @@ class SessionHub:
                     driver.label)})
             return False
         old = session["engine"]
-        # Snapshot what the outgoing engine actually ran, so the transcript
-        # divider can name both configurations - a model picked but never sent
-        # anything never ran, and must not be recorded as if it had. A session
-        # with no completed turn has no such record and falls back to its
-        # selection. The incoming engine is reset to its defaults just below
-        # and its model is chosen later, so the WebUI resolves that side from
-        # what runs next rather than from here.
-        used = parse_used_config(session["used_config"]) or \
+        # Snapshot the outgoing request separately from the effective model
+        # the engine reported. A provider fallback/reroute updates last_model,
+        # and that confirmed value is what the transcript divider must name.
+        # A session with no engine report falls back to the request/selection.
+        # The incoming model is resolved later from its first turn.
+        requested = parse_used_config(session["used_config"]) or \
             {"model": session["model"] or session["last_model"],
              "effort": session["effort"]}
         self._emit("engine_switch", {
             "from": old, "to": engine,
-            "from_model": used["model"], "from_effort": used["effort"],
+            "from_model": session.get("last_model") or requested["model"],
+            "from_effort": requested["effort"],
         })
         db.touch_session(
             self.id, engine=engine, native_session_id="",
@@ -2038,14 +2042,19 @@ class SessionHub:
         return ev
 
     def _note_turn_config(self, session) -> None:
-        """Record the model/effort this turn is actually run with, and mark the
-        transcript when it differs from the previous turn's.
+        """Record this turn's requested model/effort and mark request changes.
 
         Deliberately driven by turns, not by the picker: choosing a model in the
         UI changes nothing until a prompt is sent under it, so a selection that
         never reached an engine must not claim the session moved. The first turn
         of a session - or the first after an engine switch - only establishes
-        the baseline; there is no earlier configuration to have moved from."""
+        the baseline; there is no earlier configuration to have moved from.
+
+        The request is deliberately not called effective: an engine ``model``
+        action later records that independently in ``last_model``.  When a
+        divider closes the previous segment, it uses that confirmed model so a
+        reroute is not rewritten as the picker value.
+        """
         previous = parse_used_config(session.get("used_config"))
         current = {"model": session.get("model") or "", "effort": session.get("effort") or ""}
         self._model_move_announced = False
@@ -2060,13 +2069,21 @@ class SessionHub:
                 # the engine these names belong to: a later switch must not make
                 # the WebUI read this line against a different engine's catalog
                 "engine": session.get("engine") or "",
-                "from_model": previous["model"], "from_effort": previous["effort"],
+                "from_model": session.get("last_model") or previous["model"],
+                "from_effort": previous["effort"],
                 "to_model": current["model"], "to_effort": current["effort"],
             })
             self._model_move_announced = current["model"] != previous["model"]
         raw = json.dumps(current)
         session["used_config"] = raw
-        db.touch_session(self.id, used_config=raw)
+        update = {"used_config": raw}
+        if previous is not None and current["model"] != previous["model"]:
+            # The previous effective model belongs to the segment the divider
+            # just closed. Until this turn's engine reports its model there is
+            # no confirmed effective value for the new request.
+            session["last_model"] = ""
+            update["last_model"] = ""
+        db.touch_session(self.id, **update)
         self.broadcast({"type": "session_meta",
                         "session": session_payload(db.get_session(self.id))})
 
@@ -2246,7 +2263,7 @@ class SessionHub:
                 return
 
             log.info("session %s turn: %s", self.id, " ".join(argv[:8]) + " ...")
-            turn_started = time.time()
+            turn_started = time.monotonic()
             self.proc = await asyncio.create_subprocess_exec(
                 *argv, cwd=cwd, env=env,
                 stdin=asyncio.subprocess.PIPE if driver.uses_stdin_stream else asyncio.subprocess.DEVNULL,
@@ -2300,11 +2317,17 @@ class SessionHub:
                     if driver.uses_stdin_stream:
                         self._close_stdin()
                     return
-                # Every engine's turn reports how long it took: drivers
-                # whose CLI times its own work keep that figure, the
-                # rest (codex) get the wall clock from spawn to result.
-                if data.get("duration_ms") is None:
-                    data["duration_ms"] = int((time.time() - turn_started) * 1000)
+                # One comparable duration on every result: elapsed wall time
+                # from engine spawn through its final result, including tool
+                # work and background-task wake-ups. Older/custom drivers may
+                # still use duration_ms for a native measurement; retain it
+                # under an explicit name before replacing the shared field.
+                native_duration = data.get("duration_ms")
+                if native_duration is not None and \
+                        data.get("engine_duration_ms") is None:
+                    data["engine_duration_ms"] = native_duration
+                data["duration_ms"] = max(
+                    0, int((time.monotonic() - turn_started) * 1000))
                 self._block_status = "ok" if data.get("ok") else "error"
                 if data.get("ok"):
                     driver_base.clear_auth_failure(session["engine"])
@@ -2411,24 +2434,25 @@ class SessionHub:
                     elif a == "model":
                         new_model = act["model"]
                         old_model = session.get("last_model") or ""
-                        if new_model != old_model:
-                            requested = (session.get("model") or "").strip()
-                            mismatch = requested and requested.lower() not in new_model.lower()
+                        requested = (session.get("model") or "").strip()
+                        mismatch = requested and requested.lower() not in new_model.lower()
+                        if new_model != old_model or mismatch:
                             # this turn's own divider already announced the move,
                             # so only an unasked-for one is worth a warning line
                             announced = self._model_move_announced and not mismatch
                             self._model_move_announced = False
                             if not announced:
-                                if old_model:
-                                    self._emit("info", {"subtype": "model_switch",
-                                                        "text": f"engine model changed: {old_model} → {new_model}"})
-                                elif mismatch:
+                                if mismatch:
                                     self._emit("info", {"subtype": "model_switch",
                                                         "text": f"requested model '{requested}' but engine is serving {new_model}"})
-                            session["last_model"] = new_model
-                            db.touch_session(self.id, last_model=new_model)
-                            self.broadcast({"type": "session_meta",
-                                            "session": session_payload(db.get_session(self.id))})
+                                elif old_model:
+                                    self._emit("info", {"subtype": "model_switch",
+                                                        "text": f"engine model changed: {old_model} → {new_model}"})
+                            if new_model != old_model:
+                                session["last_model"] = new_model
+                                db.touch_session(self.id, last_model=new_model)
+                                self.broadcast({"type": "session_meta",
+                                                "session": session_payload(db.get_session(self.id))})
                     elif a == "approval":
                         # stored raw: the reply must echo the engine's own
                         # paths, so only the broadcast copy is rewritten

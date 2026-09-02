@@ -126,8 +126,8 @@ class ClaudeDriver(Driver):
             {"value": "compact", "label": "Compact context",
              "hint": "Summarize the conversation so far into a shorter context"},
             {"value": "undo", "label": "Undo last turn",
-             "hint": "Drop your last prompt and its reply from the conversation; "
-                     "files are not changed"},
+             "hint": "Revert the engine's context to before your last prompt; "
+                     "Puppy's transcript and files stay unchanged"},
         ]
 
     def tool_plan(self, tool, session, turns):
@@ -169,8 +169,8 @@ class ClaudeDriver(Driver):
             "run": False,
             "state": {"engine": self.key, "resume_at": resume_at,
                       "drops": str(result["native_prompt_id"])},
-            "text": "Undid the last turn: the next prompt continues from before it "
-                    "(files are unchanged)",
+            "text": "Engine context reverted: the next prompt continues from before "
+                    "the last turn (Puppy's transcript and files are unchanged)",
             "restore_text": str(last.get("text") or ""),
         }
 
@@ -560,8 +560,9 @@ class ClaudeDriver(Driver):
                 **identity,
                 "ok": not ev.get("is_error", False),
                 # duration_api_ms and total_cost_usd accumulate over the
-                # process, so the last result already covers every wake-up
-                "duration_ms": ev.get("duration_api_ms"),
+                # process, so the last result already covers every wake-up.
+                # API time is not wall time: the runner supplies the latter.
+                "api_duration_ms": ev.get("duration_api_ms"),
                 "cost_usd": ev.get("total_cost_usd"),
                 "stop_reason": ev.get("stop_reason", ""),
                 "num_turns": ctx.get("folded_turns"),

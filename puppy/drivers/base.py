@@ -21,14 +21,17 @@ Normalized transcript event kinds (persisted):
                  same turn, task {status, task_id} when one of them ends, and
                  background_wait_stopped when the node ended such a wait
                  itself (turn timeout, or an engine that never continued).
-    result       {ok, usage?, cost_usd?, duration_ms?, stop_reason?, error?}
+    result       {ok, usage?, cost_usd?, engine_duration_ms?,
+                  api_duration_ms?, stop_reason?, error?}
+                 The runner adds duration_ms as comparable elapsed wall time.
                  The transcript line reads outcome, duration, input tokens
                  (input_tokens plus any cache_read/cache_creation keys, so a
                  driver whose input already counts cached tokens must not
                  also emit those keys), total output tokens (including any
                  reasoning_output_tokens subset) and clock time for every
-                 engine; a driver that leaves duration_ms unset is given the
-                 runner's wall-clock turn time. usage_scope="last_request"
+                 engine. Engine-native or API-only measurements stay in their
+                 explicitly scoped fields and are not displayed as wall time.
+                 usage_scope="last_request"
                  explicitly labels an engine fallback that cannot recover a
                  whole-turn total. Drivers offering session
                  tools also stamp each prompt turn's result with the native
@@ -49,7 +52,7 @@ Actions returned by parse_line() (consumed by the runner):
     {"a": "event", "kind": ..., "data": {...}}      persist + broadcast
     {"a": "transient", "msg": {...}}                 broadcast only (deltas, status)
     {"a": "native_id", "id": "..."}                  store engine-native session id
-    {"a": "model", "model": "..."}                   engine reported its model
+    {"a": "model", "model": "..."}                   engine-confirmed effective model
     {"a": "approval", "req": {...}}                  interactive permission request
     {"a": "approval_cancel", "request_id": "..."}
     {"a": "stdin", "data": {...}}                    continue a JSONL handshake

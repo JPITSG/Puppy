@@ -338,6 +338,7 @@ async def probe(force: bool = False) -> dict:
 async def status_payload() -> dict:
     st = await probe()
     m = manager()
+    shared_health = await browser_store.store().persistence_health()
     return {
         "supported": True,
         "enabled": enabled(),
@@ -348,6 +349,7 @@ async def status_payload() -> dict:
         "sandbox": sandbox_mode(),
         "color_scheme": color_scheme(),
         "shared_storage": shared_storage_enabled(),
+        "shared_storage_health": shared_health,
         "running": bool(m and m.running),
         "viewers": m.viewer_count() if m else 0,
         "instances": m.instance_payloads() if m else [],

@@ -151,6 +151,10 @@ async def h_state(request: web.Request):
     session_state = runner.sessions_payload()
     return web.json_response({
         "version": __version__,
+        # Process identity lets an already-open console distinguish a brief
+        # socket interruption from a same-listener restart. The latter needs a
+        # full asset/state reload (version, uptime, and LC_TIME clock format).
+        "runtime_id": str(request.app.get("puppy_runtime_id") or ""),
         "instance_name": config.get("instance_name"),
         "clock_format": localization.clock_format(),
         "user": _node_user(),

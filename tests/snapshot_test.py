@@ -195,7 +195,8 @@ async def main() -> None:
         directory_id = db.create_session(
             "directory session", "codex", str(project), "", "", "#4dd0c4",
             "workspace-write", workspace_kind="directory")
-        # what the last turn ran with: transcript dividers are read against it
+        # what the last turn requested; last_model separately carries any
+        # provider reroute for transcript provenance
         db.touch_session(directory_id,
                          used_config='{"model": "gpt-5.6-sol", "effort": "max"}')
         scratch_path = workspaces.create_temporary()

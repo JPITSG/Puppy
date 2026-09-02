@@ -1,4 +1,8 @@
-"""Rate-limited, token-free refresh of engine account-usage metadata."""
+"""Rate-limited, token-free Codex account-usage refresh.
+
+The generic driver hook keeps the runner engine-agnostic, but Codex is the only
+current driver whose CLI exposes this read-only account query.
+"""
 from __future__ import annotations
 
 import asyncio

@@ -4191,11 +4191,13 @@ def check_quota_math(ui_source: str) -> None:
                     return ui_source[i:j + 1]
         raise AssertionError("unbalanced " + start)
     script = (extract("\nfunction weeklyUsedPercent(") +
-              extract("\nfunction weeklyQuotaLeft(") + """
+              extract("\nfunction weeklyQuotaLeft(") +
+              extract("\nfunction quotaTitle(") + """
+const fmtDateTime = epoch => String(epoch);
 const claude = {rateLimitType: "seven_day_overage_included", utilization: 0.89,
   unifiedWindows: {five_hour: {utilization: 0.29}, seven_day: {utilization: 0.68},
                    seven_day_overage_included: {utilization: 0.89}}};
-const out = [
+const values = [
   weeklyQuotaLeft({rate_limit: claude}),                                  // 11
   weeklyQuotaLeft({rate_limit: {rateLimitType: "five_hour", utilization: 0.3,
     unifiedWindows: {seven_day: {utilization: 0.68}}}}),                  // 32
@@ -4206,13 +4208,22 @@ const out = [
   weeklyQuotaLeft({rate_limit: {rateLimitType: "seven_day",
                                 utilization: 1.15}}),                     // 0
 ];
-console.log(JSON.stringify(out));
+const provenance = quotaTitle({
+  quota: {weekly_used_percent: 19, resets_at: 333, as_of: 222},
+  rate_limit: {captured_at: 111, unifiedWindows: {
+    five_hour: {utilization: 0.9}, seven_day: {utilization: 0.8}}},
+});
+console.log(JSON.stringify({values, provenance}));
 """)
     proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:400]
-    values = json.loads(proc.stdout.strip())
-    rounded = [None if v is None else round(v) for v in values]
-    assert rounded == [11, 32, 81, 60, None, 0], values
+    result = json.loads(proc.stdout.strip())
+    rounded = [None if v is None else round(v) for v in result["values"]]
+    assert rounded == [11, 32, 81, 60, None, 0], result
+    assert "week 19% used" in result["provenance"], result
+    assert "reported 222" in result["provenance"], result
+    assert "111" not in result["provenance"] and \
+        "5h" not in result["provenance"], result
 
 
 def check_browser_loading_ui(ui_source: str, css_source: str) -> None:
@@ -4266,9 +4277,107 @@ def check_shared_storage_settings_ui(ui_source: str, css_source: str) -> None:
     assert 'backendHasCapability(b, "browser-shared-storage")' in ui_source
     assert "st.shared_storage === true" in ui_source
     assert 'typeof st.shared_storage === "boolean"' in ui_source
+    assert "st.shared_storage_health" in ui_source
+    assert "persistence failed" in ui_source
+    assert "non-partitioned cookies" in ui_source
+    assert "IndexedDB, sessionStorage, or service workers" in ui_source
+    assert "node-local store is excluded from backups" in ui_source
     assert "record.shared.input.disabled = true;" in ui_source
     assert "be-browser-share" in ui_source
     assert ".browser-share-toggle" in css_source
+
+
+def check_audit_truthfulness_ui(ui_source: str) -> None:
+    """History, search, reconnect, undo and usage copy retain exact provenance."""
+    # Divider endpoints prefer the engine-confirmed model, including the
+    # newest config-change line (not only engine-switch lines).
+    switch_start = ui_source.index("  syncSwitchLines() {")
+    switch_end = ui_source.index("\n  switchLineNode(", switch_start)
+    switch_source = ui_source[switch_start:switch_end]
+    assert "s.last_model" in switch_source
+    assert "if (!engines) return" not in switch_source
+
+    # Titles are a real selectable kind, and selected kinds are sent exactly.
+    assert '{ key: "title", label: "Titles" }' in ui_source
+    assert '[...this.kinds, "title"]' not in ui_source
+    assert 'v: 2, kinds: [...this.kinds]' in ui_source
+
+    def extract(start):
+        i = ui_source.index(start)
+        b = ui_source.index("{", i)
+        depth = 0
+        for j in range(b, len(ui_source)):
+            if ui_source[j] == "{":
+                depth += 1
+            elif ui_source[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    return ui_source[i:j + 1]
+        raise AssertionError("unbalanced " + start)
+
+    # Raw BM25 deliberately disagrees with node rank here. Federated ordering
+    # must interleave the per-node ordinal, using freshness only as its tie.
+    script = (extract("\nfunction searchGroupNewest(") +
+              extract("\nfunction searchRelevanceCompare(") + r'''
+const rows = [
+  {id:"raw-winner",nodeRank:1,group:{matches:[{rank:-999,ts:300}]}},
+  {id:"rank-first-old",nodeRank:0,group:{matches:[{rank:-1,ts:100}]}},
+  {id:"rank-first-new",nodeRank:0,group:{matches:[{rank:-2,ts:200}]}},
+];
+rows.sort(searchRelevanceCompare);
+console.log(JSON.stringify(rows.map(row => row.id)));
+''')
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:500]
+    assert json.loads(proc.stdout) == [
+        "rank-first-new", "rank-first-old", "raw-winner"]
+
+    # A reconnect always refreshes state, while a new process identity reloads
+    # cache-busted assets and therefore uptime/version/clock rendering too.
+    assert "refreshAfterUpdatesReconnect(sequence, ws)" in ui_source
+    assert "await refreshState();" in ui_source
+    assert "previousRuntime !== state.runtimeId" in ui_source
+    assert "location.reload();" in ui_source
+
+    assert "That prompt and reply stay visible in " in ui_source
+    assert "Removes your last prompt and its reply" not in ui_source
+    assert "installed Codex CLI" in ui_source
+    assert "Other engines do not provide an account-refresh API" in ui_source
+
+
+async def check_shared_store_persistence_health() -> None:
+    """A failed durable write is visible and retried without another change."""
+    path = TEST_ROOT / "store-health" / "state.json"
+    original_path = browser_store.store_path
+    original_save = browser_store._save_blocking
+    shared = browser_store.SharedStore()
+    cookie = {
+        "name": "auth", "value": "secret", "domain": "health.test",
+        "path": "/", "secure": True, "httpOnly": True,
+    }
+
+    def fail_save(_path, _payload):
+        raise OSError("simulated durable write failure")
+
+    try:
+        browser_store.store_path = lambda: str(path)
+        browser_store._save_blocking = fail_save
+        first = await shared.sync(
+            {browser_store.cookie_key(cookie): cookie}, {}, {}, {})
+        failed = await shared.persistence_health()
+        assert failed["ok"] is False and failed["dirty"] is True, failed
+        assert "simulated durable write failure" in failed["error"], failed
+        assert not path.exists()
+
+        browser_store._save_blocking = original_save
+        # No new browser mutation: dirty state alone must retry persistence.
+        await shared.sync(first["cookie_state"], first["cookie_state"], {}, {})
+        recovered = await shared.persistence_health()
+        assert recovered["ok"] is True and recovered["dirty"] is False, recovered
+        assert recovered["last_saved_at"] is not None and path.is_file(), recovered
+    finally:
+        browser_store.store_path = original_path
+        browser_store._save_blocking = original_save
 
 
 def check_server_clock_format(ui_source: str) -> None:
@@ -4381,6 +4490,7 @@ async def main() -> None:
     await check_cdp_message_isolation()
     await check_bounded_ax_source()
     await check_blocking_cleanup_offload()
+    await check_shared_store_persistence_health()
     check_fragmented_bridge_response()
     app = build_app()
     web_runner = web.AppRunner(app)
@@ -4399,6 +4509,7 @@ async def main() -> None:
                 assert r.status == 200, status
                 assert status["supported"] is True and status["available"] is True, status
                 assert status["enabled"] is False and status["running"] is False, status
+                assert status["shared_storage_health"]["ok"] is True, status
                 assert "StubChrome" in status["product"], status
                 expected_sandbox = "no-sandbox" if os.geteuid() == 0 else "sandboxed"
                 assert status["sandbox"] == expected_sandbox, status
@@ -4418,6 +4529,8 @@ async def main() -> None:
                 primary_state = await read_json(r)
                 assert r.status == 200, primary_state
                 assert primary_state["clock_format"] == localization.clock_format()
+                assert isinstance(primary_state["runtime_id"], str) and \
+                    primary_state["runtime_id"], primary_state
             async with http.get(url + "/api/system-prompt", headers=headers) as r:
                 prompt_settings = await read_json(r)
                 assert r.status == 200, prompt_settings
@@ -5571,6 +5684,7 @@ async def main() -> None:
             check_browser_disable_closes_scoped_tabs(ui_source)
             check_browser_loading_ui(ui_source, css_source)
             check_shared_storage_settings_ui(ui_source, css_source)
+            check_audit_truthfulness_ui(ui_source)
             check_quota_math(ui_source)
             # one checkbox face app-wide: a native checkbox is painted by the
             # browser, ignores the theme and differs per platform, so the form

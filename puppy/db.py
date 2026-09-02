@@ -97,7 +97,8 @@ CREATE TABLE sessions (
     permission_mode TEXT NOT NULL DEFAULT '',
     native_session_id TEXT NOT NULL DEFAULT '',
     last_model TEXT NOT NULL DEFAULT '',
-    -- model/effort the last turn actually ran with, JSON; '' until one has
+    -- requested model/effort of the last turn, JSON; last_model separately
+    -- holds the engine-confirmed effective model; '' until a turn was sent
     used_config TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'idle',
     archived INTEGER NOT NULL DEFAULT 0,

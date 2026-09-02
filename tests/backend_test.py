@@ -117,7 +117,7 @@ def exercise_driver_normalization() -> None:
                   "cache_read_input_tokens": 50}, "modelUsage": {}}), bg_ctx) == [{
         "a": "result", "data": {
             "native_session_id": "s", "native_prompt_id": "prompt-1",
-            "native_tail_id": "prompt-1", "ok": True, "duration_ms": 900,
+            "native_tail_id": "prompt-1", "ok": True, "api_duration_ms": 900,
             "cost_usd": 0.03, "stop_reason": "end_turn", "num_turns": 3,
             "usage": {"input_tokens": 15, "output_tokens": 10,
                       "cache_read_input_tokens": 150},
@@ -429,7 +429,7 @@ def exercise_driver_normalization() -> None:
         "ok": True, "usage": {
             "input_tokens": 12, "output_tokens": 3,
             "cached_input_tokens": 4, "reasoning_output_tokens": 2,
-        }, "duration_ms": 1234, "stop_reason": "completed",
+        }, "engine_duration_ms": 1234, "stop_reason": "completed",
     }}]
     assert driver.steer_ready(session, context) is False
     assert driver.steer_payload(session, context, "too late", "steer-3") is None
@@ -1174,7 +1174,10 @@ finish()
         assert result["usage"] == {
             "input_tokens": 15, "output_tokens": 5,
             "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
-        assert result["num_turns"] == 2 and result["duration_ms"] == 250
+        assert result["num_turns"] == 2 and result["api_duration_ms"] == 250
+        # The unified duration includes the 0.5s background wait; Claude's
+        # API-only 250ms remains separately available and is never mislabeled.
+        assert result["duration_ms"] >= 450, result["duration_ms"]
         assert result["cost_usd"] == 0.02
         assert result["native_prompt_id"] == "u-1"
         assert result["native_tail_id"] == "a-2"
@@ -4203,6 +4206,45 @@ async def exercise_engine_switch_queue(url: str, token: str, runner, db) -> None
         db.delete_session(sid)
 
 
+def exercise_effective_model_provenance(runner, db) -> None:
+    """Requested picker history stays separate from engine-confirmed routing."""
+    from puppy.drivers import get_driver
+
+    sid = db.create_session("model provenance", "claude", "/tmp",
+                            "requested-a", "high", "blue", "auto")
+    hub = runner.hub(sid)
+    try:
+        db.touch_session(
+            sid, used_config=json.dumps({"model": "requested-a", "effort": "high"}),
+            last_model="served-effective-a", model="requested-b", effort="max")
+        session = db.get_session(sid)
+        hub._note_turn_config(session)
+        divider = db.get_events(sid)[-1]
+        assert divider["kind"] == "info" and \
+            divider["data"]["subtype"] == "config_change", divider
+        assert divider["data"]["from_model"] == "served-effective-a", divider
+        assert divider["data"]["to_model"] == "requested-b", divider
+        assert runner.parse_used_config(db.get_session(sid)["used_config"]) == {
+            "model": "requested-b", "effort": "max"}
+        assert db.get_session(sid)["last_model"] == ""
+
+        # The provider reroutes the new request. An outgoing engine divider
+        # names that confirmed model, never requested-b.
+        db.touch_session(sid, last_model="served-fallback-b")
+        target = get_driver("codex")
+        assert hub._apply_engine_switch({
+            "engine": "codex", "model": target.default_model(), "effort": "",
+            "permission_mode": target.default_permission(),
+        }) is True
+        moved = [event for event in db.get_events(sid)
+                 if event["kind"] == "engine_switch"][-1]
+        assert moved["data"]["from_model"] == "served-fallback-b", moved
+        assert moved["data"]["from_effort"] == "max", moved
+    finally:
+        runner.drop_hub(sid)
+        db.delete_session(sid)
+
+
 async def exercise_queue_pause_websocket(url: str, token: str, runner, db) -> None:
     """The authenticated socket carries pause and revision-guarded reorder."""
     sid = db.create_session("queue pause socket", "claude", "/tmp", "", "",
@@ -4518,6 +4560,7 @@ async def main() -> None:
         await exercise_session_drafts(runner, db, uploads, config)
         exercise_abandoned_upload_cleanup(runner, db, uploads, config)
         exercise_session_show_meta(runner, db)
+        exercise_effective_model_provenance(runner, db)
         await exercise_auth_probes(temp_root / "auth-probes")
         exercise_auth_evidence(temp_root / "auth-evidence", db)
         exercise_host_cpu_math(host_metrics)
