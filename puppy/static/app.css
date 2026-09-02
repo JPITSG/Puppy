@@ -1123,6 +1123,10 @@ details.think summary::before{
 }
 details.think[open] summary::before{transform:rotate(0)}
 details.think summary:hover{color:var(--txt2)}
+/* nothing to show yet: the caret stays as a marker, but the row is inert */
+details.think.empty summary{cursor:default}
+details.think.empty summary:hover{color:var(--txt3)}
+details.think.empty summary::before{opacity:.35}
 details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 
 .tool-card{

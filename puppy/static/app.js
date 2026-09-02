@@ -987,6 +987,31 @@ function thinkingLabel(tokens) {
 function thinkingIconNode() {
   return el("span", "think-brain", "🧠");
 }
+
+/* A thinking block whose body holds no text yet (the model is still thinking,
+   or an engine reported the phase without the words) keeps its caret but is
+   not openable: there is nothing behind it. The class drives the styling, the
+   guards below stop the native details toggle by mouse and by keyboard. */
+function syncThinkingOpenable(details) {
+  if (!details) return;
+  const body = details.querySelector(".tbody");
+  const has = !!body && body.textContent.trim().length > 0;
+  details.classList.toggle("empty", !has);
+  if (!has) details.open = false;
+}
+
+document.addEventListener("click", event => {
+  const summary = event.target instanceof Element &&
+    event.target.closest("details.think.empty > summary");
+  if (summary) event.preventDefault();
+}, true);
+document.addEventListener("keydown", event => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  const summary = event.target instanceof Element &&
+    event.target.closest("details.think.empty > summary");
+  if (summary) event.preventDefault();
+}, true);
+
 /* Every live prompt status ends with one shared, width-stable dot animation.
    Engines use both `...` and `…`; remove that marker wherever it arrived so
    token-bearing labels become "Thinking 42 tokens" followed by the same dots. */
@@ -9122,6 +9147,7 @@ class SessionView {
         sum.appendChild(el("span", "think-label", "thinking"));
         const body = el("div", "tbody", d.text || "");
         n.appendChild(sum); n.appendChild(body);
+        syncThinkingOpenable(n);
         return n;
       }
       case "tool_use": {
@@ -9241,6 +9267,7 @@ class SessionView {
         this.liveEl.querySelector(".tbody") : this.liveEl.querySelector(".md");
       this.liveTextNode = document.createTextNode("");
       target.appendChild(this.liveTextNode);
+      if (block === "thinking") syncThinkingOpenable(this.liveEl);
       this.syncLiveStatus();
     }
     this.livePendingText += text;
@@ -9261,6 +9288,7 @@ class SessionView {
     const text = this.livePendingText;
     this.livePendingText = "";
     this.liveTextNode.appendData(text);
+    if (this.liveKind === "thinking") syncThinkingOpenable(this.liveEl);
     if (follow) this.scrollBottom(true);
   }
   clearLive() {
