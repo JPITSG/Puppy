@@ -5358,6 +5358,33 @@ function syncHorizontalOverflow(scroller, viewport = scroller && scroller.parent
   viewport.classList.toggle("more-right", overflowed && position < maximum - 1);
 }
 
+/* The horizontal strips (the tab bar, the chat head's chips, the composer's
+   chips) are swiped sideways on a touch screen. A mouse has no swipe, so a
+   vertical wheel turn over one of them moves it sideways instead of scrolling
+   the page - the cursor stays as it is and nothing has to be grabbed. It takes
+   only what the strip can actually move, so at either end the wheel falls
+   through to whatever scrolls behind it, and a trackpad's own sideways delta
+   is left to the browser. Every strip that gets the touch-swipe treatment
+   (overflow-x:auto with touch-action:pan-x) must be listed here too. */
+const WHEEL_SWIPE_STRIPS = [".tabs", ".chat-meta-scroll", ".composer-meta-scroll"];
+
+document.addEventListener("wheel", event => {
+  if (event.ctrlKey || event.defaultPrevented) return;
+  const origin = event.target instanceof Element ? event.target : null;
+  const strip = origin && origin.closest(WHEEL_SWIPE_STRIPS.join(","));
+  if (!strip || Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
+  let delta = event.deltaY;
+  if (event.deltaMode === 1) delta *= 16;
+  else if (event.deltaMode === 2) delta *= strip.clientWidth;
+  if (!delta) return;
+  const maximum = strip.scrollWidth - strip.clientWidth;
+  if (maximum <= 1) return;
+  const next = Math.max(0, Math.min(maximum, strip.scrollLeft + delta));
+  if (Math.abs(next - strip.scrollLeft) < 0.5) return;
+  strip.scrollLeft = next;
+  event.preventDefault();
+}, { passive: false });
+
 function syncAllTabOverflow() {
   document.querySelectorAll(".tab-scroll > .tabs").forEach(scroller =>
     syncHorizontalOverflow(scroller));
