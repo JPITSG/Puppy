@@ -1576,6 +1576,14 @@ class SessionHub:
         if self.active_since is None:
             self.active_since = time.time()
             self.last_completion_status = ""
+            # Idle -> running moves the session to the front of the durable
+            # order every console shares; queued continuations within the
+            # same activity block leave it where it is, and so does finishing.
+            try:
+                db.bump_session_to_top(self.id)
+            except Exception:
+                log.warning("could not move session %s to the front", self.id,
+                            exc_info=True)
         self.status = "running"
         self.interrupted = False
         self._proc_ready = False

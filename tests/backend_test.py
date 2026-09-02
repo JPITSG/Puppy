@@ -3800,6 +3800,69 @@ async def exercise_queue_pause(runner, db) -> None:
         db.delete_session(sid)
 
 
+async def exercise_session_order(runner, db) -> None:
+    """The sidebar order is the node's: every idle -> running transition moves
+    that session to the front, continuations within one activity block and
+    completions leave it, and drag-and-drop edits the same durable order."""
+    ids = [db.create_session("order {}".format(name), "claude", "/tmp", "", "",
+                             "blue", "auto") for name in ("a", "b", "c")]
+    a, b, c = ids
+
+    def order():
+        return [s["id"] for s in db.list_sessions() if s["id"] in ids]
+
+    def numbering():
+        return [s["sort_order"] for s in db.list_sessions() if s["id"] in ids]
+
+    hubs = {}
+    tasks = []
+    try:
+        assert order() == [a, b, c]
+        for sid in ids:
+            hub = runner.SessionHub(sid)
+            runner._hubs[sid] = hub
+
+            async def no_turn(_item):
+                return None
+            hub._run_turn = no_turn   # the transition is what is under test
+            hubs[sid] = hub
+        hubs[c]._start_turn("first prompt")
+        tasks.append(hubs[c].turn_task)
+        assert order() == [c, a, b], order()
+        # a queued continuation within the same activity block stays put
+        hubs[c]._start_turn("queued prompt")
+        tasks.append(hubs[c].turn_task)
+        assert order() == [c, a, b], order()
+        hubs[b]._start_turn("later prompt")
+        tasks.append(hubs[b].turn_task)
+        assert order() == [b, c, a], order()
+        # finishing changes nothing; the next activation does
+        hubs[b].status = "idle"
+        hubs[b].active_since = None
+        assert order() == [b, c, a], order()
+        hubs[a]._start_turn("newest prompt")
+        tasks.append(hubs[a].turn_task)
+        assert order() == [a, b, c], order()
+        assert numbering() == sorted(numbering()) and \
+            len(set(numbering())) == 3, numbering()
+        # a manual drag edits the same order the activations produced
+        db.reorder_sessions([c, a, b])
+        assert order() == [c, a, b], order()
+        hubs[a].status = "idle"
+        hubs[a].active_since = None
+        hubs[a]._start_turn("again")
+        tasks.append(hubs[a].turn_task)
+        assert order() == [a, c, b], order()
+        payload = runner.sessions_payload()["sessions"]
+        listed = [s["id"] for s in payload if s["id"] in ids]
+        assert listed == [a, c, b], listed
+        await asyncio.gather(*tasks, return_exceptions=True)
+    finally:
+        for sid in ids:
+            runner._hubs.pop(sid, None)
+            db.delete_session(sid)
+
+
 async def exercise_queue_reorder(runner, db) -> None:
     """A revision-guarded drag holds dequeue, remaps pause indexes, and resumes
     from the user's chosen order when the hold is released."""
@@ -4631,6 +4694,7 @@ async def main() -> None:
         await exercise_queue_persistence(runner, db)
         await exercise_queue_pause(runner, db)
         await exercise_queue_reorder(runner, db)
+        await exercise_session_order(runner, db)
         await exercise_session_drafts(runner, db, uploads, config)
         exercise_abandoned_upload_cleanup(runner, db, uploads, config)
         exercise_session_show_meta(runner, db)

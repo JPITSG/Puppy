@@ -417,6 +417,35 @@ def reorder_sessions(ids: list) -> None:
         conn.commit()
 
 
+def bump_session_to_top(session_id: int) -> None:
+    """Move one session to the front of the durable order, pushing the rows
+    above it down one place; everything else keeps its relative order.
+
+    The runner calls this on every idle -> running transition, so the
+    order is a move-to-front history of activity that the user's manual
+    drag-and-drop then edits - one order, held by the node, seen by every
+    console."""
+    with _lock:
+        conn = connect()
+        row = conn.execute("SELECT sort_order FROM sessions WHERE id=?",
+                           (int(session_id),)).fetchone()
+        if row is None:
+            return
+        conn.execute(
+            "UPDATE sessions SET sort_order=sort_order+1 "
+            "WHERE sort_order<=? AND id<>?", (row["sort_order"], int(session_id)))
+        conn.execute(
+            "UPDATE sessions SET sort_order=(SELECT COALESCE(MIN(sort_order),1) "
+            "FROM sessions WHERE id<>?) - 1 WHERE id=?",
+            (int(session_id), int(session_id)))
+        # keep the numbering dense so a long history never drifts
+        rows = conn.execute("SELECT id FROM sessions ORDER BY sort_order, id").fetchall()
+        for index, item in enumerate(rows):
+            conn.execute("UPDATE sessions SET sort_order=? WHERE id=?",
+                         (index + 1, int(item["id"])))
+        conn.commit()
+
+
 def get_session_draft(session_id: int) -> dict:
     """Return the authoritative composer draft and its monotonic version."""
     row = query_one(

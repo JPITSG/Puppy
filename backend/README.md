@@ -158,6 +158,14 @@ retire its activity timer without firing a configured completion command for a
 prompt the user stopped. Queued work that continues after a stop remains one
 activity block and can still notify when that later work actually finishes.
 
+The order of `GET /api/sessions` (and of every `sessions` broadcast) is the
+node's durable `sort_order`, and it is the order a console renders within
+that node's group. The node moves a session to the front every time it goes
+from idle to running - the start of an activity block, not a queued
+continuation or a completion - and `POST /api/sessions/reorder` (drag-and-drop
+in the console) edits that same order. Nothing about the order lives in the
+browser, so every console and every reload sees the same list.
+
 ## Transient engine failures
 
 When an engine's own result says the failure is transient (claude's OAuth
