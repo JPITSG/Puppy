@@ -17,7 +17,8 @@ import zipfile
 
 from aiohttp import web
 
-from puppy import (__version__, config, protocol, runner, terminal, upgrade_contract,
+from puppy import (__version__, config, protocol, runner, spawn_exec, terminal,
+                   upgrade_contract,
                    uploads)
 
 from . import build_info
@@ -111,7 +112,8 @@ def _last_status(path: Path) -> dict:
 
 
 def _readiness_payload(state: str, reason: str = "", sessions=None,
-                       active_terminals: int = 0, active_uploads: int = 0) -> dict:
+                       active_terminals: int = 0, active_uploads: int = 0,
+                       active_spawns: int = 0) -> dict:
     return {
         "ready": state == "ready",
         "state": state,
@@ -119,11 +121,13 @@ def _readiness_payload(state: str, reason: str = "", sessions=None,
         "sessions": list(sessions or []),
         "active_terminals": int(active_terminals),
         "active_uploads": int(active_uploads),
+        "active_spawns": int(active_spawns),
         "checked_at": time.time(),
     }
 
 
-def _busy_reason(blockers: list, terminals: int, upload_count: int) -> str:
+def _busy_reason(blockers: list, terminals: int, upload_count: int,
+                 spawn_count: int = 0) -> str:
     running = sum(1 for item in blockers if item.get("running"))
     queued = sum(max(0, int(item.get("queued") or 0)) for item in blockers)
     parts = []
@@ -137,6 +141,9 @@ def _busy_reason(blockers: list, terminals: int, upload_count: int) -> str:
     if upload_count:
         parts.append("{} active file upload{}".format(
             upload_count, "" if upload_count == 1 else "s"))
+    if spawn_count:
+        parts.append("{} running spawned agent{}".format(
+            spawn_count, "" if spawn_count == 1 else "s"))
     return "backend is busy: " + ", ".join(parts or ["session activity"])
 
 
@@ -144,10 +151,15 @@ def _workload_readiness() -> dict:
     blockers = runner.upgrade_blockers()
     terminals = terminal.active_count()
     upload_count = uploads.active_count()
-    if blockers or terminals or upload_count:
+    # A spawned agent is a live engine process this node owns even when no
+    # local session does (a relayed cross-node job), and one still tearing
+    # down after its verdict may yet be writing files: a restart under either
+    # loses the delegate's result and can leave its edits half-applied.
+    spawn_count = spawn_exec.manager().live_count()
+    if blockers or terminals or upload_count or spawn_count:
         return _readiness_payload(
-            "busy", _busy_reason(blockers, terminals, upload_count),
-            blockers, terminals, upload_count)
+            "busy", _busy_reason(blockers, terminals, upload_count, spawn_count),
+            blockers, terminals, upload_count, spawn_count)
     return _readiness_payload("ready", "backend is idle and ready to upgrade")
 
 

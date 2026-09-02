@@ -373,14 +373,26 @@ it. Jobs default to a 600-second sliding silence limit, renewed by positive
 normalized engine progress, and a hard 7200-second ceiling measured from job
 creation. Identical repeating status noise does not renew the lease. The PATCH
 route is advertised separately as `spawn-progress-limits`, so a controller
-never offers it to an older node with the legacy fixed timeout. Jobs are
+never offers it to an older node with the legacy fixed timeout. `POST
+/api/spawn` also honors a controller-chosen `job_id`, advertised as
+`spawn-client-job-ids`: the start is idempotent for that id (the same id
+answered again returns the job it already started) and the poll/cancel routes
+wait behind an in-flight start of it, so a controller registers its relay
+handle before transmitting and a start whose answer is lost still names a job
+that can be waited for, cancelled, and reaped; a later 404 from the node ends
+that job as `lost`, while an unreachable node keeps the handle for retry.
+Jobs are
 in-memory and never part of a snapshot. Engine turns receive a turn-scoped
 `puppy_spawn` stdio MCP bridge (targets/spawn/wait/update_limits/cancel); jobs it starts die with their
-turn, approval requests inside a spawned run are auto-denied with an
+turn - the runner reaps them synchronously before the post-turn workspace
+sync and the next queued prompt, and a node's shutdown kills its local jobs
+and cancels the ones it relayed while its channels are still open - approval
+requests inside a spawned run are auto-denied with an
 explanation, and cross-node spawns exist only on the controller, which relays
 them over its already-authenticated channels - nodes still never contact each
 other, so a session hosted on a backend can spawn only onto its own node. A
-running spawned agent also blocks that engine's CLI upgrade, and spawn
+running spawned agent also blocks that engine's CLI upgrade and (including
+one still tearing down) the backend's own signed self-upgrade, and spawn
 requests are refused while the engine's updater runs. A parallel fan-out
 (spawn `count`, up to 12) is expanded by the bridge into independent jobs -
 a remote fleet is simply that many relayed single starts, so any spawn-exec

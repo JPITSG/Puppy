@@ -4,7 +4,10 @@ Covers the one-shot driver loop (final answer, auto-denied approvals, usage,
 failure and no-result paths, sliding inactivity and hard-runtime limits, and
 cancel kills), request validation, node resolution, the turn-bound bridge
 dispatch with its identity checks, live local/remote limit updates, sweeper
-reaping, one real Unix-socket round trip, and the HTTP job routes.
+reaping, the runner's synchronous turn-end reaping and shutdown cancels,
+controller-chosen relay ids (unconfirmed starts, lost jobs, retained handles,
+concurrent fleet compensation), one real Unix-socket round trip, and the HTTP
+job routes including idempotent client ids.
 No real engine is invoked, no network is reached, and no quota is spent.
 """
 import asyncio
@@ -574,6 +577,333 @@ async def test_parallel(cwd):
     print("parallel fleet start/wait/cancel and caps ok")
 
 
+def fake_requests(behaviour: dict, calls: list):
+    """A stand-in for spawn_exec._node_request driven by ``behaviour``:
+    per-method callables that return a payload or raise a SpawnError."""
+    async def fake(channel, method, path, body=None, timeout_s=60.0):
+        calls.append({"method": method, "path": path, "body": body,
+                      "timeout_s": timeout_s, "bid": channel["bid"]})
+        handler = behaviour.get(method)
+        if handler is None:
+            raise AssertionError("unexpected {} {}".format(method, path))
+        outcome = handler(path, body)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+    return fake
+
+
+def running_job(job_id, **extra):
+    job = {"id": job_id, "status": "running", "elapsed_s": 1,
+           "idle_timeout_s": 600, "max_runtime_s": 7200,
+           "idle_remaining_s": 599, "hard_remaining_s": 7199,
+           "last_progress_age_s": 0, "last_progress_kind": "job started"}
+    job.update(extra)
+    return {"ok": True, "job": job}
+
+
+def unreached():
+    return spawn_exec.SpawnError("NAS.LAN: node is unreachable", 502,
+                                 unreached=True)
+
+
+def set_remote_capabilities(bid, capabilities):
+    db.execute("UPDATE backends SET capabilities=? WHERE id=?",
+               (json.dumps(capabilities), bid))
+
+
+async def test_turn_end_reaping(cwd):
+    """A turn's end reaps its delegates synchronously, before the runner
+    moves on to the next queued prompt, and shutdown tells relayed jobs to
+    stop instead of forgetting them."""
+    mgr = spawn_exec.manager()
+    remote_bid = spawn_exec.resolve_target("nas.lan")["bid"]
+    backends._mark_backend_online(remote_bid)
+    # keep the sweeper out of this: only the runner's own hook may reap
+    previous_interval = spawn_exec.SWEEP_INTERVAL_S
+    spawn_exec.SWEEP_INTERVAL_S = 3600
+    if mgr._sweeper is not None:
+        mgr._sweeper.cancel()
+        mgr._sweeper = None
+    mgr.ensure_sweeper()
+    original_node_request = spawn_exec._node_request
+
+    sid = db.create_session("reap test", "fake", cwd, "active", "", "blue",
+                            "standard")
+    hub = runner.hub(sid)
+    session = db.get_session(sid)
+    deletes = []
+    behaviour = {"DELETE": lambda path, body: deletes.append(
+        {"path": path, "turn_id": hub._active_turn_id,
+         "status": hub.status}) or {"ok": True}}
+    calls = []
+    spawn_exec._node_request = fake_requests(behaviour, calls)
+    try:
+        hub.queue.append("second prompt")
+        hub._start_turn("first prompt")
+        first_task = hub.turn_task
+        for _ in range(100):
+            if hub._active_turn_id and hub.proc is not None:
+                break
+            await asyncio.sleep(0.05)
+        assert hub._active_turn_id and hub.proc is not None, "turn never started"
+        turn_id = hub._active_turn_id
+        orphan = mgr.start_job(request_for("hang", cwd), ("turn", sid, turn_id))
+        handle = spawn_exec._register_remote(session, turn_id,
+                                             {"bid": remote_bid, "name": "NAS.LAN"},
+                                             "ab12cd34")
+        assert spawn_exec.turn_job_ids(sid, turn_id) == [orphan.id, "ab12cd34"]
+        await asyncio.wait_for(first_task, timeout=40)
+        # by the time the first turn's task is over, the delegate is dead and
+        # the relayed one was told to stop - not merely scheduled for a sweep
+        assert orphan.status == "cancelled", orphan.status
+        assert orphan.task.done()
+        assert "turn that spawned this agent ended" in orphan.error
+        assert deletes == [{"path": "spawn/ab12cd34", "turn_id": "",
+                            "status": "running"}], deletes
+        assert "ab12cd34" not in mgr.remote
+        assert spawn_exec.turn_job_ids(sid, turn_id) == []
+        for _ in range(400):
+            if hub.status == "idle" and not hub.queue:
+                break
+            await asyncio.sleep(0.05)
+        assert hub.status == "idle" and not hub.queue, (hub.status, hub.queue)
+
+        # an unreachable node keeps the handle: the turn's end tried once, the
+        # sweeper retries at its own pace and lets go once acknowledged
+        calls.clear()
+        behaviour["DELETE"] = lambda path, body: unreached()
+        handle = spawn_exec._register_remote(
+            session, "turn-e", {"bid": remote_bid, "name": "NAS.LAN"},
+            "ab12cd35")
+        await spawn_exec.end_turn(sid, "turn-e")
+        assert mgr.remote.get("ab12cd35") is handle
+        assert handle["retry_at"] > time.monotonic() and \
+            not handle["abandoning"]
+        assert len(calls) == 1 and calls[0]["method"] == "DELETE"
+        await mgr._sweep_once()          # too early to retry
+        assert len(calls) == 1
+        handle["retry_at"] = 0.0
+        behaviour["DELETE"] = lambda path, body: spawn_exec.SpawnError(
+            "unknown spawn job", 404)   # the node answered: gone for good
+        await mgr._sweep_once()
+        for _ in range(20):
+            if "ab12cd35" not in mgr.remote:
+                break
+            await asyncio.sleep(0.05)
+        assert "ab12cd35" not in mgr.remote and len(calls) == 2
+        # a handle nobody could cancel is dropped only once the job cannot
+        # possibly be alive any more on the node's own limits
+        stale = spawn_exec._register_remote(
+            session, "turn-e", {"bid": remote_bid, "name": "NAS.LAN"},
+            "ab12cd36")
+        stale["registered_clock"] = time.monotonic() - \
+            spawn_exec.ABANDON_GIVE_UP_S - 1
+        calls.clear()
+        await mgr._sweep_once()
+        assert "ab12cd36" not in mgr.remote and calls == []
+
+        # shutdown: local jobs killed and relayed ones cancelled (concurrently,
+        # bounded) before the handles are forgotten
+        behaviour["DELETE"] = lambda path, body: {"ok": True}
+        calls.clear()
+        local = mgr.start_job(request_for("hang", cwd), ("turn", sid, "turn-s"))
+        spawn_exec._register_remote(session, "turn-s",
+                                    {"bid": remote_bid, "name": "NAS.LAN"},
+                                    "ab12cd37")
+        spawn_exec._register_remote(session, "turn-s",
+                                    {"bid": remote_bid, "name": "NAS.LAN"},
+                                    "ab12cd38")
+        started = time.monotonic()
+        await mgr.shutdown()
+        assert time.monotonic() - started < spawn_exec.SHUTDOWN_GRACE_S
+        assert local.status == "cancelled" and local.task.done()
+        assert sorted(call["path"] for call in calls) == \
+            ["spawn/ab12cd37", "spawn/ab12cd38"], calls
+        assert mgr.remote == {} and mgr.jobs == {}
+
+        # a caller cancelled while it waits for a job's end is itself
+        # cancelled, not silently satisfied by the job's own cancellation
+        victim = spawn_exec.SpawnJob(request_for("hang", cwd),
+                                     ("turn", sid, "turn-c"))
+
+        async def stubborn():
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                await asyncio.sleep(1.0)   # a slow teardown
+                raise
+        victim.task = asyncio.ensure_future(stubborn())
+        mgr.jobs[victim.id] = victim
+        canceller = asyncio.ensure_future(mgr.cancel(victim, "stop"))
+        await asyncio.sleep(0.1)
+        assert victim.task.cancelled() is False and not victim.task.done()
+        canceller.cancel()
+        try:
+            await canceller
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("caller cancellation was swallowed")
+        await asyncio.wait({victim.task})
+        assert victim.task.cancelled()
+        victim._finish("cancelled", "test over")
+        mgr.jobs.pop(victim.id, None)
+    finally:
+        spawn_exec._node_request = original_node_request
+        spawn_exec.SWEEP_INTERVAL_S = previous_interval
+        hub.status = "idle"
+        hub._active_turn_id = ""
+    print("turn-end reaping, retry, and shutdown ok")
+
+
+async def test_relay_start(cwd):
+    """Relayed starts are tracked before they are transmitted."""
+    mgr = spawn_exec.manager()
+    remote_bid = spawn_exec.resolve_target("nas.lan")["bid"]
+    backends._mark_backend_online(remote_bid)
+    capable = [protocol.SPAWN_EXEC_CAPABILITY, protocol.SPAWN_LIMITS_CAPABILITY,
+               protocol.SPAWN_CLIENT_IDS_CAPABILITY]
+    legacy = [protocol.SPAWN_EXEC_CAPABILITY, protocol.SPAWN_LIMITS_CAPABILITY]
+    set_remote_capabilities(remote_bid, capable)
+    sid = db.create_session("relay test", "fake", cwd, "", "", "blue",
+                            "standard")
+    hub = runner.hub(sid)
+    hub.status = "running"
+    hub._active_turn_id = "turn-r"
+    session = db.get_session(sid)
+    calls = []
+    behaviour = {}
+    original_node_request = spawn_exec._node_request
+    spawn_exec._node_request = fake_requests(behaviour, calls)
+    params = {"prompt": "remote work", "node": "nas.lan", "cwd": cwd,
+              "wait_s": 30}
+    try:
+        # the node honors the controller's id and the handle keeps it
+        behaviour["POST"] = lambda path, body: running_job(body["job_id"])
+        started = await spawn_exec.start_for_turn(session, "turn-r", params)
+        post = calls[-1]
+        assert post["method"] == "POST" and post["body"]["job_id"]
+        assert post["body"]["wait_s"] == spawn_exec.REMOTE_START_WAIT_S
+        assert post["timeout_s"] <= 45, post["timeout_s"]
+        confirmed_id = post["body"]["job_id"]
+        assert confirmed_id in started["text"] and "not ready yet" in \
+            started["text"]
+        assert confirmed_id in mgr.remote and \
+            mgr.remote[confirmed_id]["turn_id"] == "turn-r"
+
+        # the answer never arrives: the start is reported unconfirmed, still
+        # under an id the turn can wait for
+        behaviour["POST"] = lambda path, body: unreached()
+        unconfirmed = await spawn_exec.start_for_turn(session, "turn-r", params)
+        pending_id = calls[-1]["body"]["job_id"]
+        assert pending_id in unconfirmed["text"], unconfirmed
+        assert "not confirmed" in unconfirmed["text"], unconfirmed
+        assert pending_id in mgr.remote
+        assert spawn_agent._timeout_message(
+            {"session_id": sid, "turn_id": "turn-r"}).count(pending_id) == 1
+        assert confirmed_id in spawn_agent._timeout_message(
+            {"session_id": sid, "turn_id": "turn-r"})
+        assert "if an agent was started" in spawn_agent._timeout_message(
+            {"session_id": sid, "turn_id": "turn-none"})
+        # ... and a node that answers "no such job" ends it for good
+        behaviour["GET"] = lambda path, body: spawn_exec.SpawnError(
+            "unknown spawn job", 404)
+        lost = await spawn_exec.wait_for_turn(
+            session, "turn-r", {"jobs": [pending_id], "wait_s": 1})
+        assert "Status: lost" in lost["text"] and "no spawned agent" in \
+            lost["text"], lost
+        assert pending_id not in mgr.remote
+        # whereas an unreachable node keeps the last known state and the handle
+        behaviour["GET"] = lambda path, body: unreached()
+        still = await spawn_exec.wait_for_turn(
+            session, "turn-r", {"jobs": [confirmed_id], "wait_s": 1})
+        assert "status unavailable" in still["text"] and confirmed_id in \
+            mgr.remote
+
+        # a refusal the node itself answered leaves nothing to track
+        behaviour["POST"] = lambda path, body: spawn_exec.SpawnError(
+            "this node is already running too many spawned agents", 429)
+        before = set(mgr.remote)
+        try:
+            await spawn_exec.start_for_turn(session, "turn-r", params)
+        except spawn_exec.SpawnError as exc:
+            assert "too many" in str(exc)
+        else:
+            raise AssertionError("refused start reported as success")
+        assert set(mgr.remote) == before
+
+        # a cancel the node did not acknowledge keeps the handle for retry
+        behaviour["DELETE"] = lambda path, body: unreached()
+        try:
+            await spawn_exec.cancel_for_turn(session, "turn-r",
+                                             {"jobs": [confirmed_id]})
+        except spawn_exec.SpawnError:
+            pass
+        else:
+            raise AssertionError("failed cancel reported as success")
+        assert confirmed_id in mgr.remote
+        behaviour["DELETE"] = lambda path, body: spawn_exec.SpawnError(
+            "unknown spawn job", 404)
+        cancelled = await spawn_exec.cancel_for_turn(
+            session, "turn-r", {"jobs": [confirmed_id]})
+        assert "Cancelled spawned agent" in cancelled["text"]
+        assert confirmed_id not in mgr.remote
+
+        # a fleet with one failed start cancels the rest concurrently
+        counter = {"n": 0}
+
+        def fleet_post(path, body):
+            counter["n"] += 1
+            if counter["n"] == 2:
+                return spawn_exec.SpawnError("capacity", 429)
+            return running_job(body["job_id"])
+        behaviour["POST"] = fleet_post
+        behaviour["DELETE"] = lambda path, body: {"ok": True}
+        calls.clear()
+        try:
+            await spawn_exec.start_for_turn(
+                session, "turn-r", dict(params, count=3))
+        except spawn_exec.SpawnError as exc:
+            assert "capacity" in str(exc)
+        else:
+            raise AssertionError("partial fleet reported as success")
+        posted = [call["body"]["job_id"] for call in calls
+                  if call["method"] == "POST"]
+        deleted = sorted(call["path"] for call in calls
+                         if call["method"] == "DELETE")
+        assert len(posted) == 3 and len(deleted) == 2, calls
+        assert all(job_id not in mgr.remote for job_id in posted)
+
+        # a node too old for client ids answers with its own id: the handle
+        # follows that id, and an unanswered start there is an error
+        set_remote_capabilities(remote_bid, legacy)
+        behaviour["POST"] = lambda path, body: running_job("0ld0ld01")
+        started = await spawn_exec.start_for_turn(session, "turn-r", params)
+        assert "0ld0ld01" in started["text"]
+        assert "0ld0ld01" in mgr.remote and \
+            calls[-1]["body"]["job_id"] not in mgr.remote
+        mgr.remote.pop("0ld0ld01")
+        behaviour["POST"] = lambda path, body: unreached()
+        before = set(mgr.remote)
+        try:
+            await spawn_exec.start_for_turn(session, "turn-r", params)
+        except spawn_exec.SpawnError as exc:
+            assert exc.unreached
+        else:
+            raise AssertionError("legacy unanswered start reported tracked")
+        assert set(mgr.remote) == before
+    finally:
+        spawn_exec._node_request = original_node_request
+        set_remote_capabilities(remote_bid, capable)
+        for job_id in list(mgr.remote):
+            if mgr.remote[job_id]["session_id"] == sid:
+                mgr.remote.pop(job_id)
+        hub.status = "idle"
+        hub._active_turn_id = ""
+    print("relayed start tracking, lost jobs, and fleet compensation ok")
+
+
 async def test_http_routes(cwd):
     from aiohttp import web
     from aiohttp.test_utils import TestClient, TestServer
@@ -626,6 +956,71 @@ async def test_http_routes(cwd):
         assert response.status == 200
         response = await client.get("/api/spawn/00000000")
         assert response.status == 404
+
+        # a controller-chosen id is honored, idempotent, and never collides
+        # with a job somebody else owns
+        response = await client.post("/api/spawn", json={
+            "engine": "fake", "model": "hang", "prompt": "hi", "cwd": cwd,
+            "wait_s": 0, "job_id": "XYZ"})
+        assert response.status == 400
+        response = await client.post("/api/spawn", json={
+            "engine": "fake", "model": "hang", "prompt": "hi", "cwd": cwd,
+            "wait_s": 0, "job_id": "c0ffee01"})
+        body = await response.json()
+        assert response.status == 200 and body["job"]["id"] == "c0ffee01", body
+        first = spawn_exec.manager().get("c0ffee01")
+        response = await client.post("/api/spawn", json={
+            "engine": "fake", "model": "hang", "prompt": "hi", "cwd": cwd,
+            "wait_s": 0, "job_id": "c0ffee01"})
+        body = await response.json()
+        assert response.status == 200 and body["job"]["id"] == "c0ffee01"
+        assert spawn_exec.manager().get("c0ffee01") is first
+        assert spawn_exec.manager().running_count() == 1
+        response = await client.delete("/api/spawn/c0ffee01")
+        assert response.status == 200
+        mine = spawn_exec.manager().start_job(
+            request_for("hang", cwd), ("turn", 1, "t"), job_id="c0ffee02")
+        response = await client.post("/api/spawn", json={
+            "engine": "fake", "model": "hang", "prompt": "hi", "cwd": cwd,
+            "wait_s": 0, "job_id": "c0ffee02"})
+        assert response.status == 409
+        await spawn_exec.manager().cancel(mine, "test over")
+        spawn_exec.manager().jobs.pop("c0ffee02", None)
+
+        # a poll or cancel for an id whose start is still validating waits
+        # for that start instead of answering "unknown" (and orphaning it)
+        original_prepare = spawn_exec.prepare_request
+
+        async def slow_prepare(body):
+            await asyncio.sleep(0.8)
+            return await original_prepare(body)
+
+        async def post(job_id):
+            return await client.post("/api/spawn", json={
+                "engine": "fake", "model": "hang", "prompt": "hi",
+                "cwd": cwd, "wait_s": 0, "job_id": job_id})
+        spawn_exec.prepare_request = slow_prepare
+        try:
+            starting = asyncio.ensure_future(post("c0ffee03"))
+            await asyncio.sleep(0.2)
+            response = await client.get("/api/spawn/c0ffee03")
+            body = await response.json()
+            assert response.status == 200 and body["job"]["status"] == \
+                "running", body
+            assert (await starting).status == 200
+            response = await client.delete("/api/spawn/c0ffee03")
+            assert response.status == 200
+
+            starting = asyncio.ensure_future(post("c0ffee04"))
+            await asyncio.sleep(0.2)
+            response = await client.delete("/api/spawn/c0ffee04")
+            assert response.status == 200
+            assert (await response.json())["job"]["status"] == "cancelled"
+            assert (await starting).status == 200
+            assert spawn_exec.manager().get("c0ffee04") is None
+        finally:
+            spawn_exec.prepare_request = original_prepare
+        assert spawn_exec.manager()._start_locks == {}
     finally:
         await client.close()
     print("spawn HTTP routes ok")
@@ -644,6 +1039,8 @@ async def main():
         await test_validation(cwd)
         await test_turn_dispatch(cwd)
         await test_parallel(cwd)
+        await test_turn_end_reaping(cwd)
+        await test_relay_start(cwd)
         await test_http_routes(cwd)
     finally:
         await spawn_exec.manager().shutdown()

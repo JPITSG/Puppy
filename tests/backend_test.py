@@ -1818,6 +1818,35 @@ async def exercise_upgrade_readiness(upgrade_module, runner_module,
         assert uploading["active_uploads"] == 1
         assert "active file upload" in uploading["reason"]
         upgrade_module.uploads._active_uploads = 0
+
+        # A spawned agent is a live engine process of this node even without
+        # a local session (a relayed job), and its verdict alone does not free
+        # the node: the process may still be tearing down and writing files.
+        from puppy import spawn_exec
+        spawned = spawn_exec.SpawnJob({
+            "engine": "codex", "model": "", "effort": "",
+            "permission_mode": "", "prompt": "relayed work",
+            "cwd": str(temporary)}, ("remote",))
+        spawned.task = asyncio.get_event_loop().create_future()
+        spawn_exec.manager().jobs[spawned.id] = spawned
+        try:
+            spawning = upgrade_module._readiness(runtime, app)
+            assert spawning["ready"] is False and spawning["state"] == "busy"
+            assert spawning["active_spawns"] == 1 and spawning["sessions"] == []
+            assert "1 running spawned agent" in spawning["reason"]
+            rejected = await upgrade_module.h_upgrade(
+                type("Request", (), {"app": app})())
+            assert rejected.status == 409
+            assert json.loads(rejected.text)["readiness"]["active_spawns"] == 1
+            spawned._finish("done")
+            tearing_down = upgrade_module._workload_readiness()
+            assert tearing_down["ready"] is False
+            assert tearing_down["active_spawns"] == 1
+            spawned.task.set_result(None)
+            settled = upgrade_module._workload_readiness()
+            assert settled["ready"] is True and settled["active_spawns"] == 0
+        finally:
+            spawn_exec.manager().jobs.pop(spawned.id, None)
         marker.touch()
         blocked = upgrade_module._readiness(runtime, app)
         assert blocked["ready"] is False and blocked["state"] == "blocked"
@@ -1958,6 +1987,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "system-prompt" in ping["capabilities"]
         assert "spawn-exec" in ping["capabilities"]
         assert "spawn-progress-limits" in ping["capabilities"]
+        assert "spawn-client-job-ids" in ping["capabilities"]
         assert "session-search" in ping["capabilities"]
         assert "session-event-window" in ping["capabilities"]
         assert "session-tools" in ping["capabilities"]

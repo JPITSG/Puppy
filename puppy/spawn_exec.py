@@ -58,6 +58,22 @@ _JOB_ID_RE = re.compile(r"[a-f0-9]{8}")
 # Finished jobs stay readable for a while, then disappear with their output.
 PURGE_AFTER_S = 1200
 SWEEP_INTERVAL_S = 10
+# A turn's end reaps what it spawned before the session moves on; this bounds
+# how long that transition may wait on a wedged process or an unreachable
+# node (the sweeper keeps retrying afterwards).
+END_TURN_GRACE_S = 20.0
+SHUTDOWN_GRACE_S = 10.0
+# A relay handle whose turn ended but whose node did not acknowledge the
+# cancel is retried at this pace; it is dropped once the job cannot possibly
+# be alive any more on the node's own limits.
+ABANDON_RETRY_S = 30.0
+ABANDON_GIVE_UP_S = MAX_TIMEOUT_S + PURGE_AFTER_S
+# The relay keeps every remote start well inside the bridge's 55 s call
+# deadline: a node that answers late produces an "unconfirmed" start that
+# still carries its id instead of a cancelled relay that names nothing.
+REMOTE_START_WAIT_S = 20
+REMOTE_START_SLACK_S = 20.0
+REMOTE_FLEET_REFRESH_S = 10
 
 DENIAL_MESSAGE = (
     "This spawned agent runs non-interactively; nobody can approve this "
@@ -73,9 +89,23 @@ INCOMPLETE_STOP_REASONS = {
 
 
 class SpawnError(RuntimeError):
-    def __init__(self, message: str, status: int = 400):
+    def __init__(self, message: str, status: int = 400,
+                 unreached: bool = False):
         super().__init__(message)
         self.status = status
+        # True when the node never answered (connection, TLS, timeout), so
+        # whether it acted on the request is unknown. A status the node itself
+        # returned is a definitive answer.
+        self.unreached = unreached
+
+
+def _job_id_or_none(value):
+    if value is None:
+        return None
+    job_id = str(value or "").strip()
+    if not _JOB_ID_RE.fullmatch(job_id):
+        raise SpawnError("job_id must be 8 lowercase hex characters")
+    return job_id
 
 
 def _option_values(options) -> list:
@@ -245,8 +275,8 @@ async def prepare_request(body: dict) -> dict:
 
 
 class SpawnJob:
-    def __init__(self, request: dict, owner):
-        self.id = secrets.token_hex(4)
+    def __init__(self, request: dict, owner, job_id=None):
+        self.id = str(job_id or "") or secrets.token_hex(4)
         self.owner = owner  # ("turn", session_id, turn_id) or ("remote",)
         self.engine = request["engine"]
         self.model = request["model"]
@@ -721,6 +751,9 @@ class _Manager:
         self.jobs = {}
         self.remote = {}   # job_id -> controller-side relay handle
         self._sweeper = None
+        # job_id -> lock held while a controller-chosen id is being started,
+        # so a poll or cancel for that id waits for the start to settle
+        self._start_locks = {}
 
     def ensure_sweeper(self) -> None:
         if self._sweeper is None or self._sweeper.done():
@@ -729,14 +762,44 @@ class _Manager:
     def running_count(self) -> int:
         return sum(1 for job in self.jobs.values() if job.running)
 
+    def live_jobs(self) -> list:
+        """Jobs whose engine process may still exist: running ones and those
+        still tearing down after their verdict. Restart gates count these."""
+        return [job for job in self.jobs.values()
+                if job.running or
+                (job.task is not None and not job.task.done())]
+
+    def live_count(self) -> int:
+        return len(self.live_jobs())
+
+    def start_lock(self, job_id: str) -> asyncio.Lock:
+        lock = self._start_locks.get(job_id)
+        if lock is None:
+            lock = self._start_locks[job_id] = asyncio.Lock()
+        return lock
+
+    def release_start_lock(self, job_id: str, lock: asyncio.Lock) -> None:
+        lock.release()
+        if self._start_locks.get(job_id) is lock and not lock.locked():
+            self._start_locks.pop(job_id, None)
+
+    async def settle_start(self, job_id: str) -> None:
+        """Wait out an in-flight start of this id (a controller-chosen id whose
+        POST is still validating) so a poll or cancel sees its outcome."""
+        lock = self._start_locks.get(str(job_id or ""))
+        if lock is None:
+            return
+        async with lock:
+            pass
+
     def ensure_capacity(self, count: int) -> None:
         if self.running_count() + count > MAX_RUNNING_JOBS:
             raise SpawnError(
                 "this node is already running too many spawned agents - wait "
                 "for some to finish or cancel them", 429)
 
-    def start_job(self, request: dict, owner) -> SpawnJob:
-        job = SpawnJob(request, owner)
+    def start_job(self, request: dict, owner, job_id=None) -> SpawnJob:
+        job = SpawnJob(request, owner, job_id=job_id)
         self.jobs[job.id] = job
         job.task = asyncio.ensure_future(job.run())
         self.ensure_sweeper()
@@ -763,14 +826,67 @@ class _Manager:
             job.cancel_status = status
             job.error = reason
             job.task.cancel()
-            try:
-                await job.task
-            except (asyncio.CancelledError, Exception):
-                pass
+            # wait() reports the child's end without re-raising its own
+            # CancelledError, so a cancellation of THIS caller still propagates
+            # instead of being mistaken for the child's.
+            await asyncio.wait({job.task})
         # A task cancelled before its coroutine ever ran skips run()'s own
         # finalization; settle the record here so it can never stay "running".
         job._finish(status, reason)
         job.done.set()
+
+    def turn_handles(self, session_id: int, turn_id: str) -> list:
+        return [(job_id, handle) for job_id, handle in self.remote.items()
+                if handle["session_id"] == int(session_id) and
+                handle["turn_id"] == str(turn_id)]
+
+    async def _abandon_handle(self, job_id: str, handle: dict) -> None:
+        """Cancel one relay handle whose turn ended. The handle goes only once
+        the node acknowledged (or no longer knows) the job; an unreachable
+        node keeps it for the sweeper's retry."""
+        handle["abandoning"] = True
+        try:
+            if await _remote_abandon(handle, job_id):
+                if self.remote.get(job_id) is handle:
+                    self.remote.pop(job_id, None)
+        finally:
+            handle["abandoning"] = False
+            handle["retry_at"] = time.monotonic() + ABANDON_RETRY_S
+
+    async def _reap(self, tasks: list, grace: float, what: str) -> None:
+        if not tasks:
+            return
+        _done, pending = await asyncio.wait(tasks, timeout=grace)
+        if pending:
+            # They keep running on their own; the sweeper covers the rest.
+            log.warning("%s: %d spawned-agent cleanup(s) still pending after "
+                        "%.0fs", what, len(pending), grace)
+
+    async def end_turn(self, session_id: int, turn_id: str) -> None:
+        """Reap everything the ended turn owns before the runner moves on.
+
+        The runner awaits this ahead of the post-turn workspace sync and the
+        next queued prompt, so a delegate can never keep editing the working
+        directory under either. Local jobs are cancelled and remote handles
+        abandoned concurrently under one bound; whatever misses it stays
+        tracked and the sweeper finishes the job."""
+        owner = ("turn", int(session_id), str(turn_id))
+        local = [job for job in self.jobs.values()
+                 if job.owner == owner and job.running]
+        remote = [(job_id, handle) for job_id, handle
+                  in self.turn_handles(session_id, turn_id)
+                  if not handle.get("abandoning")]
+        tasks = [asyncio.ensure_future(self.cancel(
+                    job, "the turn that spawned this agent ended"))
+                 for job in local]
+        tasks.extend(asyncio.ensure_future(self._abandon_handle(job_id, handle))
+                     for job_id, handle in remote)
+        if tasks:
+            log.info("spawn: turn %s of session %s ended with %d local and %d "
+                     "remote job(s) alive; reaping", turn_id, session_id,
+                     len(local), len(remote))
+        await self._reap(tasks, END_TURN_GRACE_S,
+                         "turn end in session {}".format(session_id))
 
     async def _sweep_once(self) -> None:
         from puppy import runner
@@ -791,10 +907,18 @@ class _Manager:
                     wall_now - job.finished_at > PURGE_AFTER_S:
                 self.jobs.pop(job.id, None)
         for job_id, handle in list(self.remote.items()):
-            if not runner.hub(handle["session_id"]).tool_turn_active(
+            if runner.hub(handle["session_id"]).tool_turn_active(
                     handle["turn_id"]):
+                continue
+            if handle.get("abandoning") or \
+                    now < float(handle.get("retry_at") or 0.0):
+                continue
+            if now - float(handle.get("registered_clock") or now) > \
+                    ABANDON_GIVE_UP_S:
+                # the node's own limits ended this job long ago
                 self.remote.pop(job_id, None)
-                asyncio.ensure_future(_remote_abandon(handle, job_id))
+                continue
+            asyncio.ensure_future(self._abandon_handle(job_id, handle))
 
     async def _sweep_loop(self) -> None:
         while True:
@@ -805,11 +929,20 @@ class _Manager:
                 log.exception("spawn sweep failed")
 
     async def shutdown(self) -> None:
+        """Kill local jobs and cancel relayed ones before the node goes away.
+
+        The runner calls this after its turns are down but while the
+        controller's backend channels are still open, so a relayed job is
+        told to stop instead of merely being forgotten."""
         if self._sweeper is not None:
             self._sweeper.cancel()
             self._sweeper = None
-        for job in list(self.jobs.values()):
-            await self.cancel(job, "Puppy is shutting down")
+        tasks = [asyncio.ensure_future(self.cancel(job, "Puppy is shutting down"))
+                 for job in list(self.jobs.values()) if job.running]
+        tasks.extend(asyncio.ensure_future(self._abandon_handle(job_id, handle))
+                     for job_id, handle in list(self.remote.items())
+                     if not handle.get("abandoning"))
+        await self._reap(tasks, SHUTDOWN_GRACE_S, "shutdown")
         self.jobs.clear()
         self.remote.clear()
 
@@ -822,6 +955,27 @@ def manager() -> _Manager:
     if _manager is None:
         _manager = _Manager()
     return _manager
+
+
+async def end_turn(session_id: int, turn_id: str) -> None:
+    """Runner hook: reap a finished turn's delegates before it moves on."""
+    if _manager is None:
+        return
+    await _manager.end_turn(session_id, turn_id)
+
+
+def turn_job_ids(session_id: int, turn_id: str) -> list:
+    """Ids a turn can still wait for or cancel (for a relay that ran out of
+    time before it could name them)."""
+    if _manager is None:
+        return []
+    owner = ("turn", int(session_id), str(turn_id))
+    ids = [job.id for job in _manager.jobs.values()
+           if job.owner == owner and job.running]
+    ids.extend(job_id for job_id, _handle
+               in _manager.turn_handles(session_id, turn_id)
+               if job_id not in ids)
+    return ids
 
 
 # ---- controller-side relay to other nodes ----
@@ -903,18 +1057,34 @@ async def _node_request(channel: dict, method: str, path: str, body=None,
             if index + 1 < len(urls) and backends._failed_before_request(exc):
                 continue
             break
-    raise SpawnError("{}: {}".format(channel["name"], last_error), 502)
+    raise SpawnError("{}: {}".format(channel["name"], last_error), 502,
+                     unreached=True)
 
 
-async def _remote_abandon(handle: dict, job_id: str) -> None:
-    """Best-effort cancel for a relay handle whose turn already ended."""
+def _node_forgot(exc: SpawnError) -> bool:
+    """The node answered and has no such job: the definitive end of it."""
+    return exc.status == 404 and not exc.unreached
+
+
+async def _remote_abandon(handle: dict, job_id: str) -> bool:
+    """Cancel a relay handle whose turn already ended. True once the node has
+    acknowledged the cancel or no longer knows the job; False when it could
+    not be reached, so the caller keeps the handle and retries."""
     try:
         channel = _spawn_channel(handle["bid"])
         await _node_request(channel, "DELETE", "spawn/" + job_id,
                            timeout_s=20.0)
+    except SpawnError as exc:
+        if _node_forgot(exc):
+            return True
+        log.warning("could not cancel abandoned spawn %s on node %s: %s",
+                    job_id, handle.get("node") or handle.get("bid"), exc)
+        return False
     except Exception as exc:
         log.warning("could not cancel abandoned spawn %s on node %s: %s",
                     job_id, handle.get("node") or handle.get("bid"), exc)
+        return False
+    return True
 
 
 # ---- bridge-facing operations (called by spawn_agent._dispatch) ----
@@ -1065,32 +1235,150 @@ def _relayed_job(data: dict, node_name: str) -> dict:
 
 
 def _register_remote(session: dict, turn_id: str, target: dict,
-                     job: dict) -> None:
-    if str(job.get("status")) != "running":
-        return
-    manager().remote[str(job["id"])] = {
+                     job_id: str) -> dict:
+    handle = {
         "bid": target["bid"], "node": target["name"],
         "session_id": int(session["id"]), "turn_id": str(turn_id),
+        "registered_clock": time.monotonic(), "retry_at": 0.0,
+        "abandoning": False,
     }
+    manager().remote[str(job_id)] = handle
     manager().ensure_sweeper()
+    return handle
 
 
-async def _refresh_remote(channel: dict, job: dict, wait_s: float) -> dict:
-    """One remote job's next observation. A transient relay failure keeps the
-    last known running state (with a note) so one hiccup cannot discard the
-    rest of a fleet's results."""
+def _discard_remote(job_id: str, handle: dict) -> None:
+    if manager().remote.get(str(job_id)) is handle:
+        manager().remote.pop(str(job_id), None)
+
+
+def _lost_job(job: dict, node_name: str) -> dict:
+    lost = dict(job)
+    lost.pop("wait_note", None)
+    lost.update(
+        status="lost",
+        error="node '{}' has no spawned agent '{}': the start never reached "
+              "it, was refused after the answer to it was lost, or the node "
+              "restarted. Spawn again if the work still matters.".format(
+                  node_name, job.get("id")))
+    return lost
+
+
+async def _refresh_remote(channel: dict, job: dict, wait_s: float,
+                          timeout_s=None) -> dict:
+    """One remote job's next observation. A node that could not be reached
+    keeps the last known running state (with a note) so one hiccup cannot
+    discard the rest of a fleet's results; a node that answers that it has no
+    such job ends the job for good."""
     if str(job.get("status")) != "running":
         return job
     try:
         data = await _node_request(
             channel, "GET", "spawn/{}?wait_s={}".format(job["id"], int(wait_s)),
-            timeout_s=wait_s + 25.0)
+            timeout_s=wait_s + 25.0 if timeout_s is None else timeout_s)
         fresh = data.get("job") if isinstance(data.get("job"), dict) else None
         return fresh if fresh and fresh.get("id") else job
     except SpawnError as exc:
+        if _node_forgot(exc):
+            return _lost_job(job, channel.get("name") or "?")
         stale = dict(job)
         stale["wait_note"] = "status unavailable ({}) - wait again".format(exc)
         return stale
+
+
+def _unconfirmed_job(job_id: str, body: dict, exc: SpawnError) -> dict:
+    return {
+        "id": job_id, "status": "running", "elapsed_s": 0,
+        "idle_timeout_s": body.get("idle_timeout_s"),
+        "max_runtime_s": body.get("max_runtime_s"),
+        "idle_remaining_s": body.get("idle_timeout_s"),
+        "hard_remaining_s": body.get("max_runtime_s"),
+        "last_progress_age_s": 0,
+        "last_progress_kind": "start not yet confirmed",
+        "wait_note": "the node has not confirmed this start ({}); wait "
+                     "reports whether it is running or was never started"
+                     .format(exc),
+    }
+
+
+async def _start_remote(session: dict, turn_id: str, target: dict,
+                        channel: dict, body: dict, wait_s: float,
+                        client_ids: bool) -> dict:
+    """One relayed start. The handle is registered under a controller-chosen
+    id BEFORE transmission, so an answer lost in flight still leaves a job
+    the turn can wait for, cancel, and reap. A node too old to honor client
+    ids answers with its own id and the handle is re-keyed to it; an answer
+    that never arrives from such a node cannot be tracked and is an error."""
+    job_id = secrets.token_hex(4)
+    handle = _register_remote(session, turn_id, target, job_id)
+    try:
+        data = await _node_request(
+            channel, "POST", "spawn",
+            body=dict(body, wait_s=int(wait_s), job_id=job_id),
+            timeout_s=wait_s + REMOTE_START_SLACK_S)
+        job = _relayed_job(data, target["name"])
+    except SpawnError as exc:
+        if exc.unreached and client_ids:
+            return _unconfirmed_job(job_id, body, exc)
+        _discard_remote(job_id, handle)
+        raise
+    if str(job["id"]) != job_id:
+        _discard_remote(job_id, handle)
+        if str(job.get("status")) == "running":
+            _register_remote(session, turn_id, target, str(job["id"]))
+    elif str(job.get("status")) != "running":
+        _discard_remote(job_id, handle)
+    return job
+
+
+async def _cancel_remote(channel: dict, job_id: str) -> None:
+    """Cancel one relayed job and drop its handle once the node acknowledged
+    (or never had it); an unreachable node keeps the handle for the turn's
+    end and the sweeper."""
+    try:
+        await _node_request(channel, "DELETE", "spawn/" + str(job_id),
+                            timeout_s=20.0)
+    except SpawnError as exc:
+        if not _node_forgot(exc):
+            raise
+    manager().remote.pop(str(job_id), None)
+
+
+async def _start_remote_fleet(session: dict, turn_id: str, target: dict,
+                              channel: dict, body: dict, count: int,
+                              wait_s: float) -> list:
+    client_ids = protocol.SPAWN_CLIENT_IDS_CAPABILITY in \
+        (channel.get("capabilities") or [])
+    if count == 1:
+        return [await _start_remote(session, turn_id, target, channel, body,
+                                    min(wait_s, REMOTE_START_WAIT_S),
+                                    client_ids)]
+    # A fan-out is relayed as independent single starts, so any spawn-exec
+    # node can host a fleet without a wire change. All or nothing: if one
+    # start fails, the started remainder is cancelled (concurrently, so the
+    # compensation itself fits the relay's deadline) rather than leaving a
+    # surprise partial fleet running. A cancel the node did not acknowledge
+    # keeps its handle, and the turn's end reaps it.
+    outcomes = await asyncio.gather(
+        *(_start_remote(session, turn_id, target, channel, body, 0,
+                        client_ids) for _ in range(count)),
+        return_exceptions=True)
+    failure = next((item for item in outcomes
+                    if isinstance(item, BaseException)), None)
+    jobs = [item for item in outcomes if not isinstance(item, BaseException)]
+    if failure is not None:
+        await asyncio.gather(
+            *(_cancel_remote(channel, job["id"]) for job in jobs),
+            return_exceptions=True)
+        if isinstance(failure, SpawnError):
+            raise failure
+        raise SpawnError("node '{}' failed while starting the fleet: "
+                         "{}".format(target["name"], failure), 502)
+    refresh_wait = min(wait_s, REMOTE_FLEET_REFRESH_S)
+    return list(await asyncio.gather(
+        *(_refresh_remote(channel, job, refresh_wait,
+                          timeout_s=refresh_wait + 15.0)
+          for job in jobs)))
 
 
 async def start_for_turn(session: dict, turn_id: str, params: dict) -> dict:
@@ -1117,41 +1405,8 @@ async def start_for_turn(session: dict, turn_id: str, params: dict) -> dict:
     initial_wait = _clamp_wait(params.get("wait_s"), default=15)
     if target["bid"]:
         channel = _spawn_channel(target["bid"])
-        if count == 1:
-            data = await _node_request(
-                channel, "POST", "spawn", body=dict(body, wait_s=initial_wait),
-                timeout_s=initial_wait + 35.0)
-            jobs = [_relayed_job(data, target["name"])]
-        else:
-            # A fan-out is relayed as independent single starts, so any
-            # spawn-exec node can host a fleet without a wire change. All or
-            # nothing: if one start fails, the started remainder is cancelled
-            # rather than leaving a surprise partial fleet running.
-            outcomes = await asyncio.gather(
-                *(_node_request(channel, "POST", "spawn",
-                                body=dict(body, wait_s=0), timeout_s=45.0)
-                  for _ in range(count)), return_exceptions=True)
-            failure = next((item for item in outcomes
-                            if isinstance(item, BaseException)), None)
-            jobs = [_relayed_job(item, target["name"]) for item in outcomes
-                    if not isinstance(item, BaseException)]
-            if failure is not None:
-                for job in jobs:
-                    try:
-                        await _node_request(channel, "DELETE",
-                                            "spawn/" + str(job["id"]),
-                                            timeout_s=20.0)
-                    except SpawnError:
-                        pass
-                if isinstance(failure, SpawnError):
-                    raise failure
-                raise SpawnError("node '{}' failed while starting the fleet: "
-                                 "{}".format(target["name"], failure), 502)
-            jobs = list(await asyncio.gather(
-                *(_refresh_remote(channel, job, initial_wait)
-                  for job in jobs)))
-        for job in jobs:
-            _register_remote(session, turn_id, target, job)
+        jobs = await _start_remote_fleet(session, turn_id, target, channel,
+                                         body, count, initial_wait)
         return {"text": jobs_text([(job, target["name"]) for job in jobs])}
     request = await prepare_request(body)
     manager().ensure_capacity(count)
@@ -1271,10 +1526,9 @@ async def cancel_for_turn(session: dict, turn_id: str, params: dict) -> dict:
             manager().jobs.pop(job_id, None)
             lines.append("Cancelled spawned agent {}.".format(job_id))
             continue
-        manager().remote.pop(job_id, None)
-        channel = _spawn_channel(ref["bid"])
-        await _node_request(channel, "DELETE", "spawn/" + job_id,
-                           timeout_s=25.0)
+        # the handle goes only once the node acknowledged; otherwise the
+        # turn's end and the sweeper keep retrying the cancel
+        await _cancel_remote(_spawn_channel(ref["bid"]), job_id)
         lines.append("Cancelled spawned agent {} on {}.".format(
             job_id, ref["node"]))
     return {"text": "\n".join(lines)}
@@ -1371,18 +1625,41 @@ async def h_spawn_start(request):
     if not isinstance(body, dict):
         return web.json_response({"error": "spawn request must be an object"},
                                  status=400)
+    mgr = manager()
     try:
-        prepared = await prepare_request(body)
-        manager().ensure_capacity(1)
+        job_id = _job_id_or_none(body.get("job_id"))
     except SpawnError as exc:
         return web.json_response({"error": str(exc)}, status=exc.status)
-    job = manager().start_job(prepared, ("remote",))
-    await manager().wait(job, _clamp_wait(body.get("wait_s"), default=0))
+    # A controller-chosen id makes the start idempotent: the same id answered
+    # again returns the job it already started, and a poll or cancel for it
+    # waits behind this lock until the start has settled either way.
+    lock = mgr.start_lock(job_id) if job_id else None
+    if lock is not None:
+        await lock.acquire()
+    try:
+        job = mgr.get(job_id) if job_id else None
+        if job is not None and job.owner != ("remote",):
+            return web.json_response(
+                {"error": "spawn job id is already in use on this node"},
+                status=409)
+        if job is None:
+            try:
+                prepared = await prepare_request(body)
+                mgr.ensure_capacity(1)
+            except SpawnError as exc:
+                return web.json_response({"error": str(exc)},
+                                         status=exc.status)
+            job = mgr.start_job(prepared, ("remote",), job_id=job_id)
+    finally:
+        if lock is not None:
+            mgr.release_start_lock(job_id, lock)
+    await mgr.wait(job, _clamp_wait(body.get("wait_s"), default=0))
     return web.json_response({"ok": True, "job": job.payload()})
 
 
 async def h_spawn_get(request):
     from aiohttp import web
+    await manager().settle_start(request.match_info["job_id"])
     job = manager().get(request.match_info["job_id"])
     if job is None:
         return web.json_response({"error": "unknown spawn job"}, status=404)
@@ -1393,6 +1670,7 @@ async def h_spawn_get(request):
 
 async def h_spawn_patch(request):
     from aiohttp import web
+    await manager().settle_start(request.match_info["job_id"])
     job = manager().get(request.match_info["job_id"])
     if job is None:
         return web.json_response({"error": "unknown spawn job"}, status=404)
@@ -1413,6 +1691,7 @@ async def h_spawn_patch(request):
 
 async def h_spawn_delete(request):
     from aiohttp import web
+    await manager().settle_start(request.match_info["job_id"])
     job = manager().get(request.match_info["job_id"])
     if job is None:
         return web.json_response({"error": "unknown spawn job"}, status=404)
@@ -1435,6 +1714,8 @@ def register(app) -> None:
     async def on_cleanup(_app):
         from puppy import spawn_agent
         await spawn_agent.stop(_app)
+        # runner.shutdown() already ran this while the controller's backend
+        # channels were open; here it is the idempotent backstop.
         await manager().shutdown()
 
     app.on_startup.append(on_startup)

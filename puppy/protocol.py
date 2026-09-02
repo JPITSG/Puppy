@@ -111,6 +111,13 @@ SPAWN_EXEC_CAPABILITY = "spawn-exec"
 # the owning turn replace either live deadline during a run. Older spawn nodes
 # retain their single fixed timeout and must not be offered limit updates.
 SPAWN_LIMITS_CAPABILITY = "spawn-progress-limits"
+# POST /api/spawn honors a controller-chosen job_id and is idempotent for it
+# (the same id answered again returns the job it already started, and a poll
+# or cancel for that id waits behind an in-flight start). A controller
+# registers the relay handle before it transmits, so a start whose answer
+# is lost can still be waited for, cancelled, and reaped; older nodes
+# assign their own ids and an unanswered start there is reported as an error.
+SPAWN_CLIENT_IDS_CAPABILITY = "spawn-client-job-ids"
 # GET /api/search: full-history transcript search over this node's own
 # sessions, answered from a node-local rebuildable FTS index. A console fans a
 # query out to itself and to online nodes advertising this and merges results;
@@ -173,6 +180,7 @@ BASE_CAPABILITIES = (
     WORKSPACE_MIRROR_RESET_CAPABILITY,
     SPAWN_EXEC_CAPABILITY,
     SPAWN_LIMITS_CAPABILITY,
+    SPAWN_CLIENT_IDS_CAPABILITY,
     SEARCH_CAPABILITY,
     SESSION_EVENT_WINDOW_CAPABILITY,
     SESSION_TOOLS_CAPABILITY,

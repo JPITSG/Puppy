@@ -2554,6 +2554,7 @@ class SessionHub:
                 driver_base.undo_state_clear(self.id)
             if not user_event_persisted:
                 self._discard_abandoned_uploads([text])
+            ended_turn_id = self._active_turn_id
             self._active_turn_id = ""
             self._browser_activity_announced = set()
             self._terminal_activity_announced = set()
@@ -2579,6 +2580,16 @@ class SessionHub:
                     driver_base.invalidate_status(session["engine"])
                 except Exception:
                     pass
+            if ended_turn_id:
+                # Everything this turn spawned dies with it - here, before the
+                # post-turn sync or the next queued prompt can touch the same
+                # working directory, not on the sweeper's next pass.
+                try:
+                    from puppy import spawn_exec
+                    await spawn_exec.end_turn(self.id, ended_turn_id)
+                except Exception:
+                    log.exception("spawned-agent cleanup failed for session %s",
+                                  self.id)
             if descriptor is not None and engine_ran:
                 # the turn is not over until the authoritative project holds
                 # this turn's files; an unserviced barrier leaves the durable
@@ -2684,3 +2695,11 @@ async def shutdown() -> None:
         await asyncio.sleep(0.5)
     for h in list(_hubs.values()):
         await h.kill()
+    # Spawned delegates go with their turns: local ones are killed and relayed
+    # ones told to stop while the controller's backend channels are still open
+    # (both runtimes close those only after this returns).
+    try:
+        from puppy import spawn_exec
+        await spawn_exec.manager().shutdown()
+    except Exception:
+        log.exception("spawned-agent shutdown failed")

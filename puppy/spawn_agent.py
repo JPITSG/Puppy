@@ -354,7 +354,27 @@ async def _dispatch(request: dict) -> dict:
     raise SpawnAgentError("unknown spawn tool: " + method[:80])
 
 
+def _timeout_message(request) -> str:
+    """A relay that ran out of time may still have started agents; name the
+    ids this turn can wait for so they are never left unobserved."""
+    ids = []
+    if isinstance(request, dict):
+        try:
+            from puppy import spawn_exec
+            ids = spawn_exec.turn_job_ids(int(request.get("session_id")),
+                                          str(request.get("turn_id") or ""))
+        except Exception:
+            ids = []
+    if ids:
+        return ("spawn operation timed out; this turn's spawned agents are "
+                "still tracked: {} - call wait with those job ids".format(
+                    ", ".join(ids)))
+    return ("spawn operation timed out; if an agent was started, call wait "
+            "with its job id")
+
+
 async def _handle_connection(reader, writer) -> None:
+    request = None
     try:
         if not _peer_is_owner(writer):
             raise SpawnAgentError(
@@ -371,9 +391,7 @@ async def _handle_connection(reader, writer) -> None:
     except SpawnAgentError as exc:
         response = {"ok": False, "error": str(exc)}
     except asyncio.TimeoutError:
-        response = {"ok": False,
-                    "error": "spawn operation timed out; if an agent was "
-                             "started, call wait with its job id"}
+        response = {"ok": False, "error": _timeout_message(request)}
     except Exception:
         log.exception("spawn agent request failed")
         response = {"ok": False, "error": "spawn operation failed internally"}
