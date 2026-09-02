@@ -8977,6 +8977,7 @@ class SessionView {
         if (d.subtype === "config_change") return this.switchLineNode(ev, d, false);
         const warned = d.subtype === "interrupted" || d.subtype === "model_switch" ||
           d.subtype === "workspace_reset" || d.subtype === "background_wait_stopped" ||
+          d.subtype === "engine_retry" ||
           (d.subtype === "task" && !!d.status && d.status !== "completed");
         const n = el("div", "info-line" + (warned ? " warn" : "") +
           (d.subtype === "background_wait" ? " bg-wait" : ""));

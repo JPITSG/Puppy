@@ -429,6 +429,22 @@ class ClaudeDriver(Driver):
             if ev.get("uuid"):
                 ctx["tail_uuid"] = str(ev["uuid"])
             msg = ev.get("message") or {}
+            if msg.get("model") == "<synthetic>":
+                # The CLI speaks in the model's place: an API error (the
+                # wrapper carries is_api_error_message/error) or a local
+                # notice. Neither is a model move nor a request the model
+                # held, and an error is reported as one.
+                if ev.get("is_api_error_message") or ev.get("error"):
+                    text = "\n".join(
+                        blk.get("text") for blk in msg.get("content") or []
+                        if isinstance(blk, dict) and blk.get("type") == "text"
+                        and blk.get("text")).strip()
+                    if text:
+                        acts.append({"a": "event", "kind": "error", "data": {
+                            "subtype": "engine_api_error",
+                            "code": str(ev.get("error") or ""),
+                            "text": text}})
+                return acts
             usage = msg.get("usage") if isinstance(msg.get("usage"), dict) else None
             if usage:
                 ctx["context_used"] = sum(

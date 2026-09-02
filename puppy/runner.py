@@ -70,6 +70,21 @@ def _is_queued_tool(item) -> bool:
     return isinstance(item, dict) and item.get("kind") == "tool"
 
 
+def _is_queued_retry(item) -> bool:
+    """The same prompt again after an engine's transient failure. Started
+    directly by the turn that failed, ahead of the queue; never queued,
+    persisted, or shown as a queue row."""
+    return isinstance(item, dict) and item.get("kind") == "retry"
+
+
+# Back-off before each further attempt at a prompt whose engine reported a
+# transient failure (claude's OAuth refresh lock timeout says "retry in a
+# minute"; a lock left by a dead process stays in the way for about that
+# long). Three attempts in all.
+ENGINE_RETRY_DELAYS = (30.0, 60.0)
+ENGINE_MAX_ATTEMPTS = len(ENGINE_RETRY_DELAYS) + 1
+
+
 # the session tools a console may request; drivers say which they offer
 SESSION_TOOLS = {"compact": "Compact context", "undo": "Undo last turn"}
 
@@ -1566,7 +1581,8 @@ class SessionHub:
         self._steer_receipts = {}
         self._last_steering_state = None
         self._active_turn_id = ""
-        self._active_prompt_text = item if isinstance(item, str) else ""
+        self._active_prompt_text = item if isinstance(item, str) else \
+            str(item["fields"].get("text") or "") if _is_queued_retry(item) else ""
         self._bg_tasks = []
         self._bg_wait_since = None
         self.turn_task = asyncio.ensure_future(self._run_turn(item))
@@ -2054,12 +2070,48 @@ class SessionHub:
         self.broadcast({"type": "session_meta",
                         "session": session_payload(db.get_session(self.id))})
 
+    async def _retry_pause(self, fields: dict, attempt: int) -> bool:
+        """Hold a retried prompt for its back-off. False when the wait was cut
+        short: a stop drops the prompt like any interrupted turn, a shutdown
+        parks it as held, and a deleted session simply ends."""
+        delay = max(0.0, float(fields.get("delay") or 0))
+        self.broadcast({"type": "status", "text":
+                        "Retrying in {}s after the engine's transient failure "
+                        "(attempt {} of {})...".format(
+                            int(round(delay)), attempt, ENGINE_MAX_ATTEMPTS)})
+        until = time.monotonic() + delay
+        while True:
+            if _hubs.get(self.id) is not self:
+                return False
+            if _draining:
+                self.held.append(str(fields.get("text") or ""))
+                self._persist_queue()
+                self._broadcast_queue()
+                self._emit("info", {"subtype": "interrupted",
+                                    "text": "Retry parked by the restart; re-send "
+                                            "the held prompt to continue"})
+                return False
+            if self.interrupted:
+                self._emit("info", {"subtype": "interrupted",
+                                    "text": "Retry cancelled by user"})
+                return False
+            remaining = until - time.monotonic()
+            if remaining <= 0:
+                return True
+            await asyncio.sleep(min(0.5, remaining))
+
     async def _run_turn(self, item) -> None:
         tool_fields = dict(item.get("fields") or {}) if _is_queued_tool(item) else None
         tool = str(tool_fields.get("tool") or "") if tool_fields else ""
-        text = "" if tool else item
+        retry_fields = dict(item.get("fields") or {}) if _is_queued_retry(item) else None
+        attempt = max(1, int(retry_fields.get("attempt") or 1)) if retry_fields else 1
+        text = "" if tool else \
+            str(retry_fields.get("text") or "") if retry_fields else item
         got_result = False
-        user_event_persisted = bool(tool)   # a tool turn owns no prompt text
+        # a tool turn owns no prompt text; a retry's prompt is already there
+        user_event_persisted = bool(tool) or retry_fields is not None
+        user_seq = int(retry_fields.get("user_seq") or 0) if retry_fields else 0
+        retry_delay = None   # set when this attempt ended in a transient failure
         engine_ran = False
         descriptor = None
         self._block_status = "error"   # until a result says otherwise
@@ -2103,6 +2155,10 @@ class SessionHub:
                                 "turn.".format("compact" if tool == "compact" else "undo")})
                     return
 
+            if retry_fields is not None and \
+                    not await self._retry_pause(retry_fields, attempt):
+                return
+
             fresh_native_session = _starts_fresh_native_session(
                 session, workspace_reset, driver)
             if fresh_native_session:
@@ -2117,10 +2173,11 @@ class SessionHub:
                     "subtype": "tool", "tool": tool, "phase": "start",
                     "text": "Compacting context" if tool == "compact"
                             else "Undoing the last turn"})
-            else:
+            elif retry_fields is None:
                 # ahead of the prompt: the divider introduces the turns below it
                 self._note_turn_config(session)
                 user_ev = self._emit("user", {"text": text})
+                user_seq = int(user_ev.get("seq") or 0)
                 user_event_persisted = True
 
             if descriptor is not None:
@@ -2150,8 +2207,8 @@ class SessionHub:
 
             prompt = text
             first_turn = fresh_native_session
-            if do_handoff and user_ev is not None:
-                prompt = handoff.build(session, exclude_seq=user_ev["seq"]) + text
+            if do_handoff and user_seq:
+                prompt = handoff.build(session, exclude_seq=user_seq) + text
                 self.broadcast({"type": "status", "text": "Seeding new engine with handoff..."})
 
             pinned = str(uuid.uuid4())
@@ -2221,8 +2278,28 @@ class SessionHub:
             bg_idle_since = None   # when every task ended without a wake-up
 
             def settle_result(data) -> None:
-                nonlocal got_result
+                nonlocal got_result, retry_delay
                 got_result = True
+                if not data.get("ok") and not tool and \
+                        driver_base.looks_transient_auth(data.get("error")) and \
+                        attempt < ENGINE_MAX_ATTEMPTS and \
+                        not self.interrupted and not _draining:
+                    # The vendor itself says "retry in a minute": the prompt
+                    # runs again after a back-off, and only the final attempt's
+                    # outcome becomes this prompt's result.
+                    retry_delay = ENGINE_RETRY_DELAYS[
+                        min(attempt, len(ENGINE_RETRY_DELAYS)) - 1]
+                    self._block_status = "error"
+                    self._emit("info", {
+                        "subtype": "engine_retry",
+                        "text": "The engine reported a transient failure; "
+                                "retrying in {}s (attempt {} of {})".format(
+                                    int(round(retry_delay)), attempt + 1,
+                                    ENGINE_MAX_ATTEMPTS),
+                        "attempt": attempt + 1, "delay": int(round(retry_delay))})
+                    if driver.uses_stdin_stream:
+                        self._close_stdin()
+                    return
                 # Every engine's turn reports how long it took: drivers
                 # whose CLI times its own work keep that figure, the
                 # rest (codex) get the wall clock from spawn to result.
@@ -2507,7 +2584,18 @@ class SessionHub:
                                   "session %s", self.id)
             block_started = self.active_since
             queue_waiting = self._queue_reorder is not None and bool(self.queue)
-            if queue_waiting:
+            retry_item = None
+            if retry_delay is not None and not self.interrupted and not _draining:
+                retry_item = {"kind": "retry", "fields": {
+                    "text": text, "attempt": attempt + 1,
+                    "delay": retry_delay, "user_seq": user_seq}}
+            if retry_item is not None:
+                # the same prompt again after its back-off, ahead of the queue
+                nxt = retry_item
+                continued = True
+                completion_status = ""
+                queue_waiting = False
+            elif queue_waiting:
                 # The acknowledged drag owns the transition. Mark the engine
                 # idle without ending the activity block; its drop/cancel path
                 # either starts the chosen next prompt or commits completion.

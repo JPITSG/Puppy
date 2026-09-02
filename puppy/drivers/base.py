@@ -11,6 +11,10 @@ Normalized transcript event kinds (persisted):
     tool_use     {tool, input, tool_use_id}
     tool_result  {tool_use_id, content, is_error}
     info         {subtype, text, ...}
+                 engine_retry {attempt, delay} records that the prompt runs
+                 again after a back-off because the engine reported a
+                 transient failure (looks_transient_auth); only the final
+                 attempt's outcome becomes the turn's result.
                  Engine background work uses three subtypes: background_wait
                  {tasks} when the model has answered but the engine still
                  owns background tasks whose end will wake it within this
@@ -36,6 +40,9 @@ Normalized transcript event kinds (persisted):
                  input plus output against the model's window - and the
                  transcript line shows their ratio when both are known.
     error        {text}
+                 subtype="engine_api_error" (with the vendor's error code)
+                 is a synthetic API error message the CLI emitted in the
+                 model's place; it is never assistant text.
     engine_switch{from, to}
 
 Actions returned by parse_line() (consumed by the runner):
@@ -131,8 +138,22 @@ def tool_name(tool) -> str:
     return str(tool.get("tool") or "") if isinstance(tool, dict) else ""
 
 
+# A vendor's own "try again" wording: claude's OAuth refresh lock timeout
+# ("another Claude Code process is refreshing it or exited mid-refresh. This is
+# usually transient; retry in a minute"). The login is intact; only this
+# process could not refresh the token in time.
+TRANSIENT_AUTH_RE = re.compile(
+    r"another [a-z ]*process is (?:refreshing|holding)"
+    r"|exited mid-refresh|refresh lock|usually transient", re.I)
+
+
+def looks_transient_auth(text) -> bool:
+    return bool(TRANSIENT_AUTH_RE.search(str(text or "")))
+
+
 def looks_like_auth_failure(text) -> bool:
-    return bool(AUTH_FAILURE_RE.search(str(text or "")))
+    text = str(text or "")
+    return bool(AUTH_FAILURE_RE.search(text)) and not looks_transient_auth(text)
 
 
 def _evidence_key(key: str) -> str:

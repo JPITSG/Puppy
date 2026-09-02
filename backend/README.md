@@ -158,6 +158,21 @@ retire its activity timer without firing a configured completion command for a
 prompt the user stopped. Queued work that continues after a stop remains one
 activity block and can still notify when that later work actually finishes.
 
+## Transient engine failures
+
+When an engine's own result says the failure is transient (claude's OAuth
+refresh lock timeout: "another Claude Code process is refreshing it or exited
+mid-refresh ... retry in a minute"), the node does not record it as lost
+login and does not end the prompt. It emits an `info` event with subtype
+`engine_retry` (`attempt`, `delay`), waits out the back-off (30 s, then 60 s;
+three attempts in all) with the session still `running`, and runs the same
+prompt again without a second `user` event. Only the final attempt's outcome
+becomes the `result`. Stopping during the back-off cancels the retry like any
+interrupted turn; a restart parks the prompt as held. Synthetic API error
+messages the CLI emits in the model's place arrive as `error` events with
+subtype `engine_api_error` and the vendor's `code`, never as assistant text,
+and never count as a model change.
+
 ## Engine background work
 
 Claude's `run_in_background` commands, Monitor waits and backgrounded agents

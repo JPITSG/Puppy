@@ -190,6 +190,40 @@ def exercise_driver_normalization() -> None:
     assert compacted[0]["data"]["compacted"] is False
     assert compacted[0]["data"]["native_tail_id"] == "lc-1"
 
+    # The CLI's OAuth refresh lock timeout is its own "retry in a minute":
+    # never evidence of a lost login, and the synthetic message it emits in
+    # the model's place is an error, not assistant text or a model move.
+    from puppy.drivers import base as driver_base_module
+    lock_text = ("Failed to refresh OAuth token: another Claude Code process is "
+                 "refreshing it or exited mid-refresh. This is usually transient; "
+                 "retry in a minute, and if it persists close other Claude Code "
+                 "processes or sign in again")
+    assert driver_base_module.looks_transient_auth(lock_text) is True
+    assert driver_base_module.looks_like_auth_failure(lock_text) is False
+    assert driver_base_module.looks_like_auth_failure(
+        "OAuth token expired; please run /login") is True
+    synthetic_ctx = claude.turn_context({}, True, "hello", "syn-pin")
+    claude.parse_line(json.dumps({
+        "type": "system", "subtype": "init", "session_id": "s",
+        "model": "claude-fable-5-1", "tools": []}), synthetic_ctx)
+    assert claude.parse_line(json.dumps({
+        "type": "assistant", "uuid": "syn-1", "error": "server_error",
+        "is_api_error_message": True, "message": {
+            "model": "<synthetic>", "stop_reason": "stop_sequence",
+            "content": [{"type": "text", "text": lock_text}],
+            "usage": {"input_tokens": 0, "output_tokens": 0}}}), synthetic_ctx) == [{
+        "a": "event", "kind": "error", "data": {
+            "subtype": "engine_api_error", "code": "server_error",
+            "text": lock_text}}]
+    assert synthetic_ctx["model_seen"] == "claude-fable-5-1"
+    assert synthetic_ctx.get("context_used") is None
+    assert synthetic_ctx["tail_uuid"] == "syn-1"
+    assert claude.parse_line(json.dumps({
+        "type": "assistant", "message": {
+            "model": "<synthetic>",
+            "content": [{"type": "text", "text": "No response requested."}]}}),
+        synthetic_ctx) == []
+
     driver = CodexDriver()
     assert driver.uses_stdin_stream is True
     assert driver.supports_steering is True
@@ -908,11 +942,35 @@ def stdin_eof(timeout):
             seen.append(json.loads(line))
 
 
+state = {"prompt": ""}
+
+
 def finish(code=0):
     with open(os.environ["PUPPY_FAKE_CLAUDE_LOG"], "a", encoding="utf-8") as handle:
         handle.write(json.dumps({"argv": sys.argv[1:], "seen": seen,
-                                 "flags": flags}) + "\n")
+                                 "flags": flags, "prompt": state["prompt"]}) + "\n")
     raise SystemExit(code)
+
+
+def prior_invocations(prompt):
+    path = os.environ["PUPPY_FAKE_CLAUDE_LOG"]
+    if not os.path.exists(path):
+        return 0
+    count = 0
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                if json.loads(line).get("prompt") == prompt:
+                    count += 1
+            except ValueError:
+                pass
+    return count
+
+
+TRANSIENT = ("Failed to refresh OAuth token: another Claude Code process is "
+             "refreshing it or exited mid-refresh. This is usually transient; retry "
+             "in a minute, and if it persists close other Claude Code processes or "
+             "sign in again")
 
 
 argv = sys.argv[1:]
@@ -956,6 +1014,29 @@ send({"type": "control_response", "response": {
     "subtype": "success", "request_id": init["request_id"], "response": {}}})
 user = read()
 prompt = user["message"]["content"][0]["text"]
+state["prompt"] = prompt
+if prompt.endswith("always transient fake turn") or \
+        prompt.endswith("cancelled retry fake turn") or \
+        (prompt.endswith("transient auth fake turn") and
+         prior_invocations(prompt) == 0):
+    # the CLI's OAuth refresh lock timeout: a synthetic error message in
+    # the model's place, then an error result carrying the same text
+    system("init", model="claude-fake", tools=[])
+    send({"type": "user", "uuid": "u-t", "session_id": sid,
+          "message": {"role": "user", "content": [{"type": "text", "text": prompt}]}})
+    send({"type": "assistant", "uuid": "a-t", "session_id": sid,
+          "error": "server_error", "is_api_error_message": True, "message": {
+              "model": "<synthetic>", "stop_reason": "stop_sequence",
+              "content": [{"type": "text", "text": TRANSIENT}],
+              "usage": usage(0, 0)}})
+    send({"type": "result", "subtype": "success", "is_error": True,
+          "num_turns": 1, "duration_ms": 5, "duration_api_ms": 0,
+          "total_cost_usd": 0, "stop_reason": "stop_sequence", "session_id": sid,
+          "usage": usage(0, 0), "modelUsage": {}, "result": TRANSIENT})
+    for line in sys.stdin:
+        if line.strip():
+            seen.append(json.loads(line))
+    finish()
 if prompt.endswith("stale wakeup fake turn"):
     # a task the previous process left running is reported first, and its
     # wake-up query ends before the prompt is even replayed
@@ -976,7 +1057,8 @@ if prompt.endswith("error with tasks fake turn"):
     result(1, 100, 0.01, 10, 2, "boom", is_error=True)
     flags["closed_after_error"] = stdin_eof(3)
     finish()
-if prompt.endswith("plain fake turn") or prompt.endswith("stale wakeup fake turn"):
+if prompt.endswith("plain fake turn") or prompt.endswith("stale wakeup fake turn") \
+        or prompt.endswith("transient auth fake turn"):
     result(1, 100, 0.01, 10, 2, "first answer")
 else:
     system("background_tasks_changed", tasks=[TASK])
@@ -1023,6 +1105,7 @@ finish()
     original_binary = driver.binary
     original_log = os.environ.get("PUPPY_FAKE_CLAUDE_LOG")
     original_timeout = config.get("sessions.turn_timeout")
+    original_retry = (runner.ENGINE_RETRY_DELAYS, runner.ENGINE_MAX_ATTEMPTS)
     driver.binary = str(fake)
     os.environ["PUPPY_FAKE_CLAUDE_LOG"] = str(log_path)
     sid = db.create_session(
@@ -1179,9 +1262,75 @@ finish()
         assert events[2]["data"]["ok"] is False
         assert last_invocation()["flags"]["closed_after_error"] is True
         assert hub.last_completion_status == "error"
+
+        def invocations_for(prompt):
+            rows = [json.loads(line) for line in
+                    log_path.read_text(encoding="utf-8").splitlines()]
+            return [row for row in rows if row.get("prompt") == prompt]
+
+        # a transient engine failure retries on its own: no second user row,
+        # no lost-login evidence, no model-move noise, one result at the end
+        runner.ENGINE_RETRY_DELAYS = (0.3, 0.3)
+        runner.ENGINE_MAX_ATTEMPTS = 3
+        capture.messages.clear()
+        assert hub.send_message("transient auth fake turn") == {"queued": False}
+        await finish_turn("transient auth fake turn")
+        events = turn_events("transient auth fake turn")
+        assert shape(events) == [
+            ("user", ""), ("error", "engine_api_error"), ("info", "engine_retry"),
+            ("assistant", ""), ("result", "")], shape(events)
+        assert events[1]["data"]["code"] == "server_error"
+        assert "refresh OAuth token" in events[1]["data"]["text"]
+        assert events[2]["data"]["attempt"] == 2
+        assert events[4]["data"]["ok"] is True
+        assert db.meta_get("auth_evidence.claude") is None
+        assert hub.last_completion_status == "ok"
+        assert any(message.get("type") == "status" and
+                   str(message.get("text") or "").startswith("Retrying in")
+                   for message in capture.messages)
+        retried = invocations_for("transient auth fake turn")
+        assert len(retried) == 2, retried
+        assert "--resume" in retried[1]["argv"]
+
+        # every attempt failing ends with the honest error, still not as lost login
+        assert hub.send_message("always transient fake turn") == {"queued": False}
+        await finish_turn("always transient fake turn")
+        events = turn_events("always transient fake turn")
+        assert shape(events) == [
+            ("user", ""), ("error", "engine_api_error"), ("info", "engine_retry"),
+            ("error", "engine_api_error"), ("info", "engine_retry"),
+            ("error", "engine_api_error"), ("result", "")], shape(events)
+        assert events[4]["data"]["attempt"] == 3
+        assert events[6]["data"]["ok"] is False
+        assert "refresh OAuth token" in events[6]["data"]["error"]
+        assert db.meta_get("auth_evidence.claude") is None
+        assert hub.last_completion_status == "error"
+        assert len(invocations_for("always transient fake turn")) == 3
+
+        # a stop during the back-off cancels the retry like any interrupted turn
+        runner.ENGINE_RETRY_DELAYS = (5.0, 5.0)
+        capture.messages.clear()
+        assert hub.send_message("cancelled retry fake turn") == {"queued": False}
+        deadline = time.monotonic() + 20
+        while not any(message.get("type") == "status" and
+                      str(message.get("text") or "").startswith("Retrying in")
+                      for message in capture.messages):
+            if time.monotonic() >= deadline:
+                raise AssertionError("the retry back-off never started")
+            await asyncio.sleep(0.02)
+        await hub.interrupt()
+        await finish_turn("cancelled retry fake turn")
+        events = turn_events("cancelled retry fake turn")
+        assert shape(events) == [
+            ("user", ""), ("error", "engine_api_error"), ("info", "engine_retry"),
+            ("info", "interrupted")], shape(events)
+        assert events[3]["data"]["text"] == "Retry cancelled by user"
+        assert hub.last_completion_status == "interrupted"
+        assert len(invocations_for("cancelled retry fake turn")) == 1
     finally:
         hub.detach(capture)
         driver.binary = original_binary
+        runner.ENGINE_RETRY_DELAYS, runner.ENGINE_MAX_ATTEMPTS = original_retry
         if original_log is None:
             os.environ.pop("PUPPY_FAKE_CLAUDE_LOG", None)
         else:
