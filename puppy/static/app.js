@@ -13470,64 +13470,44 @@ class SettingsView {
       </div>
       <p class="bind-help">Literal IPv4 or IPv6 address and TCP port for this WebUI instance.
         A changed endpoint is tested directly from this browser before it can be saved.</p>
-      <section class="web-transport" aria-labelledby="web-transport-title">
-        <div class="web-transport-row">
-          <div class="web-transport-copy">
-            <span class="web-transport-title" id="web-transport-title">Protocol</span>
-            <small id="set-protocol-note"></small>
-          </div>
-          <div class="seg web-transport-seg" role="group" aria-label="WebUI protocol">
-            <button class="seg-btn" id="set-protocol-http" type="button"
-              aria-pressed="false">HTTP</button>
-            <button class="seg-btn" id="set-protocol-https" type="button"
-              aria-pressed="false">HTTPS</button>
+      <div class="field-lbl">Protocol
+        <div class="seg" role="group" aria-label="WebUI protocol">
+          <button class="seg-btn" id="set-protocol-http" type="button"
+            aria-pressed="false">HTTP</button>
+          <button class="seg-btn" id="set-protocol-https" type="button"
+            aria-pressed="false">HTTPS</button>
+        </div>
+      </div>
+      <p class="bind-help" id="set-protocol-note"></p>
+      <div class="hidden" id="set-https-options">
+        <div class="field-lbl">Certificate
+          <div class="seg" role="group" aria-label="HTTPS certificate source">
+            <button class="seg-btn" id="set-cert-auto" type="button"
+              aria-pressed="false">Generate</button>
+            <button class="seg-btn" id="set-cert-custom" type="button"
+              aria-pressed="false">Custom</button>
           </div>
         </div>
-        <div class="https-options hidden" id="set-https-options">
-          <div class="web-transport-row web-certificate-row">
-            <div class="web-transport-copy">
-              <span class="web-transport-title">HTTPS certificate</span>
-              <small>Choose a Puppy-generated identity or import an existing PEM pair.</small>
-            </div>
-            <div class="seg web-certificate-seg" role="group"
-              aria-label="HTTPS certificate source">
-              <button class="seg-btn" id="set-cert-auto" type="button"
-                aria-pressed="false">Generate</button>
-              <button class="seg-btn" id="set-cert-custom" type="button"
-                aria-pressed="false">Custom</button>
-            </div>
-          </div>
-          <div class="web-certificate-panel" id="set-cert-auto-panel">
-            <div class="web-certificate-status">
-              <span>${esc(identitySummary(autoIdentity))}</span>
-              ${autoIdentity.available ? `<span class="web-certificate-fingerprint"
-                title="SHA-256 ${esc(autoIdentity.sha256)}">Anonymous subject · locally signed</span>` : ""}
-            </div>
-            <p>Puppy generates a private key and a self-signed certificate containing only
-              the endpoint names needed by this listener. Browsers will show a trust warning
-              until you explicitly trust it.</p>
-          </div>
-          <div class="web-certificate-panel hidden" id="set-cert-custom-panel">
-            <div class="tls-file-fields">
-              <label>Certificate chain path
-                <input type="text" id="set-tls-cert" autocomplete="off"
-                  autocapitalize="off" spellcheck="false" placeholder="/path/to/fullchain.pem">
-              </label>
-              <label>Private key path
-                <input type="text" id="set-tls-key" autocomplete="off"
-                  autocapitalize="off" spellcheck="false" placeholder="/path/to/privkey.pem">
-              </label>
-            </div>
-            <div class="web-certificate-status">
-              <span>${esc(identitySummary(customIdentity))}</span>
-              ${customIdentity.available ? `<span class="web-certificate-fingerprint"
-                title="SHA-256 ${esc(customIdentity.sha256)}">Imported private copy</span>` : ""}
-            </div>
-            <p>Puppy reads both server-side paths once, validates the pair, and copies it into
-              private backup-covered storage. Leave both blank to keep the installed pair.</p>
-          </div>
+        <div id="set-cert-auto-panel">
+          <p class="bind-help">Puppy generates a private key and a self-signed certificate containing
+            only the endpoint names needed by this listener. Browsers will show a trust warning
+            until you explicitly trust it.</p>
+          <div class="kv"><span class="k">Generated pair</span><span class="v"
+            title="${autoIdentity.available ? `SHA-256 ${esc(autoIdentity.sha256)}` : ""}"
+            >${esc(identitySummary(autoIdentity))}</span></div>
         </div>
-      </section>
+        <div class="hidden" id="set-cert-custom-panel">
+          <label>Certificate chain path<input type="text" id="set-tls-cert" autocomplete="off"
+            autocapitalize="off" spellcheck="false" placeholder="/path/to/fullchain.pem"></label>
+          <label>Private key path<input type="text" id="set-tls-key" autocomplete="off"
+            autocapitalize="off" spellcheck="false" placeholder="/path/to/privkey.pem"></label>
+          <p class="bind-help">Puppy reads both server-side paths once, validates the pair, and copies
+            it into private backup-covered storage. Leave both blank to keep the installed pair.</p>
+          <div class="kv"><span class="k">Imported pair</span><span class="v"
+            title="${customIdentity.available ? `SHA-256 ${esc(customIdentity.sha256)}` : ""}"
+            >${esc(identitySummary(customIdentity))}</span></div>
+        </div>
+      </div>
       <div class="kv"><span class="k">Active listener</span><span class="v">${esc(fmtListenerEndpoint(activeWeb))}</span></div>
       ${settings.web_restart_required ? `<div class="bind-pending">
         <span>Restart required to activate ${esc(fmtListenerEndpoint(settings.web))}.</span>
