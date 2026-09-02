@@ -1988,6 +1988,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "spawn-exec" in ping["capabilities"]
         assert "spawn-progress-limits" in ping["capabilities"]
         assert "spawn-client-job-ids" in ping["capabilities"]
+        assert "spawn-owner-lease" in ping["capabilities"]
         assert "session-search" in ping["capabilities"]
         assert "session-event-window" in ping["capabilities"]
         assert "session-tools" in ping["capabilities"]

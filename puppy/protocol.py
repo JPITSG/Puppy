@@ -118,6 +118,13 @@ SPAWN_LIMITS_CAPABILITY = "spawn-progress-limits"
 # is lost can still be waited for, cancelled, and reaped; older nodes
 # assign their own ids and an unanswered start there is reported as an error.
 SPAWN_CLIENT_IDS_CAPABILITY = "spawn-client-job-ids"
+# Ownership leases for relayed jobs: POST /api/spawn accepts lease_s, any
+# poll or limit change renews it, and POST /api/spawn/renew renews a batch
+# of ids (reporting unknown ones). A job whose controller stops renewing -
+# a crash, a partition - is stopped by the node once the lease lapses
+# instead of running unobserved to its own limits. Nodes without this keep
+# today's behaviour; controllers without it never send lease_s.
+SPAWN_OWNER_LEASE_CAPABILITY = "spawn-owner-lease"
 # GET /api/search: full-history transcript search over this node's own
 # sessions, answered from a node-local rebuildable FTS index. A console fans a
 # query out to itself and to online nodes advertising this and merges results;
@@ -181,6 +188,7 @@ BASE_CAPABILITIES = (
     SPAWN_EXEC_CAPABILITY,
     SPAWN_LIMITS_CAPABILITY,
     SPAWN_CLIENT_IDS_CAPABILITY,
+    SPAWN_OWNER_LEASE_CAPABILITY,
     SEARCH_CAPABILITY,
     SESSION_EVENT_WINDOW_CAPABILITY,
     SESSION_TOOLS_CAPABILITY,

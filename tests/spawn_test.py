@@ -8,8 +8,10 @@ reaping, the runner's synchronous turn-end reaping and shutdown cancels,
 controller-chosen relay ids (unconfirmed starts, lost jobs, retained handles,
 concurrent fleet compensation), concurrent per-job cancels, settled relay
 verdicts, the updater launch gate and teardown blocker, bridge frame sizing
-with shortened combined results, one real Unix-socket round trip, and the
-HTTP job routes including idempotent client ids.
+with shortened combined results, ownership leases (lapse, renewal by
+contact and by the controller's bulk round, precedence of the job's own
+limits), one real Unix-socket round trip, and the HTTP job routes including
+idempotent client ids.
 No real engine is invoked, no network is reached, and no quota is spent.
 """
 import asyncio
@@ -1018,6 +1020,70 @@ async def test_relay_start(cwd):
         assert len(posted) == 3 and len(deleted) == 2, calls
         assert all(job_id not in mgr.remote for job_id in posted)
 
+        # the controller asks a lease-capable node for a lease, renews every
+        # live handle of an active turn in one bulk request per node, leaves
+        # ended turns and settled verdicts alone, and settles ids the node
+        # answered it never had
+        leased_caps = capable + [protocol.SPAWN_OWNER_LEASE_CAPABILITY]
+        set_remote_capabilities(remote_bid, leased_caps)
+        behaviour["POST"] = lambda path, body: running_job(body["job_id"])
+        calls.clear()
+        await spawn_exec.start_for_turn(session, "turn-r", params)
+        leased_id = calls[-1]["body"]["job_id"]
+        assert calls[-1]["body"]["lease_s"] == spawn_exec.REMOTE_LEASE_S
+        assert mgr.remote[leased_id]["lease"] is True
+        ended = spawn_exec._register_remote(
+            session, "turn-gone", {"bid": remote_bid, "name": "NAS.LAN"},
+            "1ea5e0aa", lease=True)
+        old_lost = spawn_exec._register_remote(
+            session, "turn-r", {"bid": remote_bid, "name": "NAS.LAN"},
+            "1ea5e0bb", lease=True)
+        old_lost["registered_clock"] -= 120
+        fresh_unknown = spawn_exec._register_remote(
+            session, "turn-r", {"bid": remote_bid, "name": "NAS.LAN"},
+            "1ea5e0cc", lease=True)
+        renewals = []
+
+        def renew(path, body):
+            assert path == "spawn/renew"
+            renewals.append(sorted(body["jobs"]))
+            return {"ok": True, "renewed": [leased_id], "finished": [],
+                    "starting": [], "unknown": ["1ea5e0bb", "1ea5e0cc"]}
+        behaviour["POST"] = renew
+        # the ended turn's handle is the sweeper's to cancel (here on a node
+        # it cannot reach), never the renewal round's to keep alive
+        behaviour["DELETE"] = lambda path, body: unreached()
+        mgr._next_renew = 0.0
+        await mgr._sweep_once()
+        await asyncio.wait_for(mgr._renew_task, timeout=5)
+        assert renewals == [sorted([leased_id, "1ea5e0bb", "1ea5e0cc"])], \
+            renewals
+        assert old_lost["final"]["status"] == "lost"
+        assert fresh_unknown["final"] is None     # its start may be in flight
+        for _ in range(20):
+            if not ended["abandoning"]:
+                break
+            await asyncio.sleep(0.05)
+        assert ended["final"] is None and "1ea5e0aa" in mgr.remote
+        assert ended["retry_at"] > time.monotonic()
+        assert mgr._next_renew > time.monotonic()
+        await mgr._sweep_once()                   # not due again yet
+        assert len(renewals) == 1
+        # an unreachable node is left for its own lease to time out
+        behaviour["POST"] = lambda path, body: unreached()
+        mgr._next_renew = 0.0
+        await mgr._sweep_once()
+        await asyncio.wait_for(mgr._renew_task, timeout=5)
+        assert mgr.remote[leased_id]["final"] is None
+        for job_id in (leased_id, "1ea5e0aa", "1ea5e0bb", "1ea5e0cc"):
+            mgr.remote.pop(job_id, None)
+        set_remote_capabilities(remote_bid, capable)
+        behaviour["POST"] = lambda path, body: running_job(body["job_id"])
+        await spawn_exec.start_for_turn(session, "turn-r", params)
+        assert "lease_s" not in calls[-1]["body"]
+        assert mgr.remote[calls[-1]["body"]["job_id"]]["lease"] is False
+        mgr.remote.pop(calls[-1]["body"]["job_id"])
+
         # a node too old for client ids answers with its own id: the handle
         # follows that id, and an unanswered start there is an error
         set_remote_capabilities(remote_bid, legacy)
@@ -1259,6 +1325,74 @@ async def test_http_routes(cwd):
         finally:
             spawn_exec.prepare_request = original_prepare
         assert spawn_exec.manager()._start_locks == {}
+
+        # ownership leases: a relayed job whose controller stops renewing is
+        # stopped once the lease lapses, while contact of any kind keeps it
+        response = await client.post("/api/spawn", json={
+            "engine": "fake", "model": "hang", "prompt": "hi", "cwd": cwd,
+            "wait_s": 0, "lease_s": 2})
+        assert response.status == 400   # below the floor: refused, not clamped
+        response = await client.post("/api/spawn", json={
+            "engine": "fake", "model": "hang", "prompt": "hi", "cwd": cwd,
+            "wait_s": 0, "lease_s": spawn_exec.MIN_LEASE_S,
+            "job_id": "1ea5e001"})
+        body = await response.json()
+        assert response.status == 200, body
+        assert body["job"]["lease_s"] == spawn_exec.MIN_LEASE_S
+        assert 0 < body["job"]["lease_remaining_s"] <= spawn_exec.MIN_LEASE_S
+        renewed_until = time.monotonic() + spawn_exec.MIN_LEASE_S + 2.5
+        while time.monotonic() < renewed_until:
+            response = await client.post("/api/spawn/renew",
+                                         json={"jobs": ["1ea5e001", "00000000"]})
+            renewal = await response.json()
+            assert response.status == 200, renewal
+            assert renewal["renewed"] == ["1ea5e001"], renewal
+            assert renewal["unknown"] == ["00000000"], renewal
+            await asyncio.sleep(1.0)
+        response = await client.get("/api/spawn/1ea5e001")
+        body = await response.json()
+        assert body["job"]["status"] == "running", body   # renewals held it
+        leased = spawn_exec.manager().get("1ea5e001")
+        await asyncio.sleep(spawn_exec.MIN_LEASE_S + 1.5)
+        await wait_done(leased, 10.0)
+        assert leased.status == "abandoned", leased.status
+        assert "stopped renewing its ownership lease" in leased.error
+        response = await client.post("/api/spawn/renew",
+                                     json={"jobs": ["1ea5e001"]})
+        assert (await response.json())["finished"] == ["1ea5e001"]
+        response = await client.delete("/api/spawn/1ea5e001")
+        assert response.status == 200
+        # a poll is contact too; a job's own limits outrank a lapsed lease
+        response = await client.post("/api/spawn", json={
+            "engine": "fake", "model": "hang", "prompt": "hi", "cwd": cwd,
+            "wait_s": 0, "lease_s": spawn_exec.MIN_LEASE_S,
+            "job_id": "1ea5e002"})
+        assert response.status == 200
+        polled = spawn_exec.manager().get("1ea5e002")
+        await asyncio.sleep(spawn_exec.MIN_LEASE_S - 1.5)
+        response = await client.get("/api/spawn/1ea5e002?wait_s=0")
+        assert (await response.json())["job"]["status"] == "running"
+        assert polled.lease_deadline > time.monotonic() + \
+            spawn_exec.MIN_LEASE_S - 1.0
+        polled.lease_clock -= spawn_exec.MIN_LEASE_S     # lease lapsed
+        assert polled.expiry()[0] == "abandoned"
+        polled.idle_timeout_s = 1                          # own limit too
+        assert polled.expiry()[0] == "timeout"
+        await spawn_exec.manager().cancel(polled, "test over")
+        spawn_exec.manager().jobs.pop("1ea5e002", None)
+        # an unleased job never expires this way
+        response = await client.post("/api/spawn", json={
+            "engine": "fake", "model": "hang", "prompt": "hi", "cwd": cwd,
+            "wait_s": 0, "job_id": "1ea5e003"})
+        body = await response.json()
+        assert response.status == 200 and "lease_s" not in body["job"]
+        assert spawn_exec.manager().get("1ea5e003").lease_deadline is None
+        response = await client.delete("/api/spawn/1ea5e003")
+        assert response.status == 200
+        response = await client.post("/api/spawn/renew", json={"jobs": []})
+        assert response.status == 400
+        response = await client.post("/api/spawn/renew", json=[1])
+        assert response.status == 400
     finally:
         await client.close()
     print("spawn HTTP routes ok")

@@ -381,7 +381,12 @@ wait behind an in-flight start of it, so a controller registers its relay
 handle before transmitting and a start whose answer is lost still names a job
 that can be waited for, cancelled, and reaped; a later 404 from the node ends
 that job as `lost`, while an unreachable node keeps the handle for retry.
-Jobs are
+Nodes advertising `spawn-owner-lease` accept `lease_s` on that start: the
+controller renews the lease in the background (`POST /api/spawn/renew` with
+a batch of ids; a poll or limit change renews too), and a job whose
+controller stops renewing - a crash or a partition, never a brief blip - is
+stopped by the node as `abandoned` once the lease lapses instead of running
+unobserved to its own limits. Jobs are
 in-memory and never part of a snapshot. Engine turns receive a turn-scoped
 `puppy_spawn` stdio MCP bridge (targets/spawn/wait/update_limits/cancel); jobs it starts die with their
 turn - the runner reaps them synchronously before the post-turn workspace

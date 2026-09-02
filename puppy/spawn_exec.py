@@ -74,6 +74,17 @@ ABANDON_GIVE_UP_S = MAX_TIMEOUT_S + PURGE_AFTER_S
 REMOTE_START_WAIT_S = 20
 REMOTE_START_SLACK_S = 20.0
 REMOTE_FLEET_REFRESH_S = 10
+# Ownership leases. A relayed job is started with lease_s and its controller
+# renews the lease in the background (one bulk request per node); a poll or
+# limit change renews it too. If the controller vanishes - a crash, a power
+# loss, a partition - the node stops the job once the lease lapses instead
+# of letting it run to its own limits unobserved. The lease outlasts the
+# controller's offline-ping backoff by a wide margin, so a brief blip never
+# costs a job, and a controller that ends a turn simply stops renewing.
+MIN_LEASE_S = 5
+MAX_LEASE_S = 3600
+REMOTE_LEASE_S = 300
+LEASE_RENEW_INTERVAL_S = 30.0
 
 DENIAL_MESSAGE = (
     "This spawned agent runs non-interactively; nobody can approve this "
@@ -156,7 +167,8 @@ def _validated_job_ids(params: dict) -> list:
     return ids
 
 
-def _validated_seconds(value, name: str) -> int:
+def _validated_seconds(value, name: str, low: int = MIN_TIMEOUT_S,
+                       high: int = MAX_TIMEOUT_S) -> int:
     if isinstance(value, bool) or \
             (isinstance(value, float) and not value.is_integer()):
         raise SpawnError("{} must be a whole number of seconds".format(name))
@@ -164,9 +176,9 @@ def _validated_seconds(value, name: str) -> int:
         seconds = int(value)
     except (TypeError, ValueError):
         raise SpawnError("{} must be a whole number of seconds".format(name))
-    if not MIN_TIMEOUT_S <= seconds <= MAX_TIMEOUT_S:
+    if not low <= seconds <= high:
         raise SpawnError("{} must be between {} and {}".format(
-            name, MIN_TIMEOUT_S, MAX_TIMEOUT_S))
+            name, low, high))
     return seconds
 
 
@@ -266,10 +278,16 @@ async def prepare_request(body: dict) -> dict:
             body.get("timeout_s", DEFAULT_MAX_RUNTIME_S),
             "timeout_s" if "timeout_s" in body else "max_runtime_s")
 
+    lease_s = 0
+    if body.get("lease_s") is not None:
+        lease_s = _validated_seconds(body.get("lease_s"), "lease_s",
+                                     MIN_LEASE_S, MAX_LEASE_S)
+
     return {"engine": engine, "model": model, "effort": effort,
             "permission_mode": permission, "prompt": prompt, "cwd": cwd,
             "idle_timeout_s": idle_timeout_s,
             "max_runtime_s": max_runtime_s,
+            "lease_s": lease_s,
             # Compatibility for callers/tests that still inspect the old field.
             "timeout_s": max_runtime_s}
 
@@ -293,6 +311,9 @@ class SpawnJob:
         self.timeout_s = self.max_runtime_s
         self.created_at = time.time()
         self.created_clock = time.monotonic()
+        # 0 means unleased (a turn-owned job dies with its turn instead)
+        self.lease_s = int(request.get("lease_s") or 0)
+        self.lease_clock = self.created_clock
         self.last_progress_at = self.created_at
         self.last_progress_clock = self.created_clock
         self.last_progress_kind = "job started"
@@ -330,8 +351,43 @@ class SpawnJob:
         return self.created_clock + self.max_runtime_s
 
     @property
+    def lease_deadline(self):
+        return self.lease_clock + self.lease_s if self.lease_s else None
+
+    @property
     def deadline(self) -> float:
-        return min(self.idle_deadline, self.hard_deadline)
+        deadline = min(self.idle_deadline, self.hard_deadline)
+        if self.lease_s:
+            deadline = min(deadline, self.lease_deadline)
+        return deadline
+
+    def renew_lease(self) -> None:
+        """Any contact from the owning controller renews its lease."""
+        if self.lease_s and self.running:
+            self.lease_clock = time.monotonic()
+
+    def expiry(self, now=None) -> tuple:
+        """(status, error) for a job whose deadline has passed. The job's own
+        limits take precedence over a lapsed lease so a stalled agent is
+        reported as such even when its controller is also gone."""
+        now = time.monotonic() if now is None else now
+        if now >= self.hard_deadline:
+            return ("timeout",
+                    "the spawned agent hit its {}s hard runtime ceiling".format(
+                        self.max_runtime_s))
+        if now >= self.idle_deadline:
+            return ("timeout",
+                    "the spawned agent produced no recognized engine progress "
+                    "for {}s".format(self.idle_timeout_s))
+        if self.lease_s and now >= self.lease_deadline:
+            return ("abandoned",
+                    "the controlling node stopped renewing its ownership "
+                    "lease on this agent (it may have crashed or lost "
+                    "connectivity), so the agent was stopped after {}s "
+                    "without contact".format(self.lease_s))
+        return ("timeout",
+                "the spawned agent produced no recognized engine progress "
+                "for {}s".format(self.idle_timeout_s))
 
     @staticmethod
     def _stable_signature(value) -> str:
@@ -434,12 +490,7 @@ class SpawnJob:
         self.limits_changed.set()
 
     def timeout_error(self, now=None) -> str:
-        now = time.monotonic() if now is None else now
-        if now >= self.hard_deadline:
-            return "the spawned agent hit its {}s hard runtime ceiling".format(
-                self.max_runtime_s)
-        return ("the spawned agent produced no recognized engine progress for "
-                "{}s".format(self.idle_timeout_s))
+        return self.expiry(now)[1]
 
     def payload(self) -> dict:
         now = self.finished_clock or time.monotonic()
@@ -463,6 +514,10 @@ class SpawnJob:
                 0, int(self.idle_deadline - now))
             value["hard_remaining_s"] = max(
                 0, int(self.hard_deadline - now))
+            if self.lease_s:
+                value["lease_s"] = self.lease_s
+                value["lease_remaining_s"] = max(
+                    0, int(self.lease_deadline - now))
         if not self.running:
             value.update(answer=self.answer, error=self.error,
                          usage=dict(self.usage))
@@ -647,7 +702,7 @@ class SpawnJob:
             while result is None:
                 remaining = self.deadline - time.monotonic()
                 if remaining <= 0:
-                    self._finish("timeout", self.timeout_error())
+                    self._finish(*self.expiry())
                     break
                 if read_task is None:
                     read_task = asyncio.ensure_future(
@@ -754,6 +809,9 @@ class _Manager:
         # job_id -> lock held while a controller-chosen id is being started,
         # so a poll or cancel for that id waits for the start to settle
         self._start_locks = {}
+        # controller side: the next lease renewal round and the one in flight
+        self._next_renew = 0.0
+        self._renew_task = None
 
     def ensure_sweeper(self) -> None:
         if self._sweeper is None or self._sweeper.done():
@@ -915,10 +973,10 @@ class _Manager:
                     job, "the turn that spawned this agent ended"))
             elif job.running and now > job.deadline + 30:
                 # run() enforces the live deadline itself; this is the backstop
-                # for a wedged reader and observes live limit changes through
-                # the deadline property.
-                reap.append(self.cancel(job, job.timeout_error(now),
-                                        status="timeout"))
+                # for a wedged reader and observes live limit changes (and a
+                # lapsed lease) through the deadline property.
+                status, error = job.expiry(now)
+                reap.append(self.cancel(job, error, status=status))
             elif not job.running and job.finished_at and \
                     wall_now - job.finished_at > PURGE_AFTER_S:
                 self.jobs.pop(job.id, None)
@@ -945,6 +1003,68 @@ class _Manager:
                 self.remote.pop(job_id, None)
                 continue
             asyncio.ensure_future(self._abandon_handle(job_id, handle))
+        if now >= self._next_renew and \
+                (self._renew_task is None or self._renew_task.done()):
+            self._next_renew = now + LEASE_RENEW_INTERVAL_S
+            self._renew_task = asyncio.ensure_future(self._renew_leases())
+
+    def _leased_handles(self) -> dict:
+        """Live relayed jobs whose turn still wants them, by node. A handle
+        whose turn ended is deliberately left out: the cancel is retried
+        separately, and letting the lease lapse ends the job even on a node
+        the cancel cannot reach."""
+        from puppy import runner
+        by_node = {}
+        for job_id, handle in self.remote.items():
+            if not handle.get("lease") or handle.get("final") is not None or \
+                    handle.get("abandoning"):
+                continue
+            if not runner.hub(handle["session_id"]).tool_turn_active(
+                    handle["turn_id"]):
+                continue
+            by_node.setdefault(int(handle["bid"]), []).append(job_id)
+        return by_node
+
+    async def _renew_leases(self) -> None:
+        by_node = self._leased_handles()
+        if by_node:
+            await asyncio.gather(
+                *(self._renew_node(bid, ids) for bid, ids in by_node.items()),
+                return_exceptions=True)
+
+    async def _renew_node(self, bid: int, ids: list) -> None:
+        try:
+            channel = _spawn_channel(bid)
+        except SpawnError:
+            # marked offline by the controller's own ping: no traffic until
+            # that verdict changes; the lease outlasts the ping backoff
+            return
+        now = time.monotonic()
+        for start in range(0, len(ids), MAX_WAIT_JOBS):
+            chunk = ids[start:start + MAX_WAIT_JOBS]
+            try:
+                data = await _node_request(channel, "POST", "spawn/renew",
+                                           body={"jobs": chunk},
+                                           timeout_s=15.0)
+            except SpawnError as exc:
+                if exc.status == 404 and not exc.unreached:
+                    log.warning("node %s no longer offers spawn lease renewal",
+                                channel.get("name") or bid)
+                return
+            for job_id in data.get("unknown") or []:
+                handle = self.remote.get(str(job_id))
+                if handle is None or handle.get("final") is not None or \
+                        handle.get("abandoning"):
+                    continue
+                if now - float(handle.get("registered_clock") or now) <= \
+                        REMOTE_START_WAIT_S + REMOTE_START_SLACK_S:
+                    # its start may still be on the wire
+                    continue
+                # the node answered and has no such job: settled as lost
+                # here rather than on the next wait
+                _note_remote_outcome(_lost_job(
+                    {"id": str(job_id), "status": "running", "elapsed_s": 0},
+                    channel.get("name") or "?"))
 
     async def _sweep_loop(self) -> None:
         while True:
@@ -963,6 +1083,8 @@ class _Manager:
         if self._sweeper is not None:
             self._sweeper.cancel()
             self._sweeper = None
+        if self._renew_task is not None and not self._renew_task.done():
+            self._renew_task.cancel()
         tasks = [asyncio.ensure_future(self.cancel(job, "Puppy is shutting down"))
                  for job in list(self.jobs.values()) if job.running]
         tasks.extend(asyncio.ensure_future(self._abandon_handle(job_id, handle))
@@ -1317,12 +1439,14 @@ def _relayed_job(data: dict, node_name: str) -> dict:
 
 
 def _register_remote(session: dict, turn_id: str, target: dict,
-                     job_id: str) -> dict:
+                     job_id: str, lease: bool = False) -> dict:
     handle = {
         "bid": target["bid"], "node": target["name"],
         "session_id": int(session["id"]), "turn_id": str(turn_id),
         "registered_clock": time.monotonic(), "retry_at": 0.0,
         "abandoning": False,
+        # started with an ownership lease this controller must keep renewing
+        "lease": bool(lease),
         # the verdict once the node reported one: readable for the rest of
         # the turn without another round trip (a combined result that had to
         # be shortened is re-read one agent at a time)
@@ -1399,18 +1523,22 @@ def _unconfirmed_job(job_id: str, body: dict, exc: SpawnError) -> dict:
 
 async def _start_remote(session: dict, turn_id: str, target: dict,
                         channel: dict, body: dict, wait_s: float,
-                        client_ids: bool) -> dict:
+                        client_ids: bool, lease: bool) -> dict:
     """One relayed start. The handle is registered under a controller-chosen
     id BEFORE transmission, so an answer lost in flight still leaves a job
     the turn can wait for, cancel, and reap. A node too old to honor client
     ids answers with its own id and the handle is re-keyed to it; an answer
-    that never arrives from such a node cannot be tracked and is an error."""
+    that never arrives from such a node cannot be tracked and is an error.
+    A node that supports ownership leases is asked for one, which this
+    controller then renews for as long as the turn wants the job."""
     job_id = secrets.token_hex(4)
-    handle = _register_remote(session, turn_id, target, job_id)
+    handle = _register_remote(session, turn_id, target, job_id, lease=lease)
+    request = dict(body, wait_s=int(wait_s), job_id=job_id)
+    if lease:
+        request["lease_s"] = REMOTE_LEASE_S
     try:
         data = await _node_request(
-            channel, "POST", "spawn",
-            body=dict(body, wait_s=int(wait_s), job_id=job_id),
+            channel, "POST", "spawn", body=request,
             timeout_s=wait_s + REMOTE_START_SLACK_S)
         job = _relayed_job(data, target["name"])
     except SpawnError as exc:
@@ -1420,7 +1548,7 @@ async def _start_remote(session: dict, turn_id: str, target: dict,
         raise
     if str(job["id"]) != job_id:
         _discard_remote(job_id, handle)
-        _register_remote(session, turn_id, target, str(job["id"]))
+        _register_remote(session, turn_id, target, str(job["id"]), lease=lease)
     _note_remote_outcome(job)
     return job
 
@@ -1441,12 +1569,13 @@ async def _cancel_remote(channel: dict, job_id: str) -> None:
 async def _start_remote_fleet(session: dict, turn_id: str, target: dict,
                               channel: dict, body: dict, count: int,
                               wait_s: float) -> list:
-    client_ids = protocol.SPAWN_CLIENT_IDS_CAPABILITY in \
-        (channel.get("capabilities") or [])
+    capabilities = channel.get("capabilities") or []
+    client_ids = protocol.SPAWN_CLIENT_IDS_CAPABILITY in capabilities
+    lease = protocol.SPAWN_OWNER_LEASE_CAPABILITY in capabilities
     if count == 1:
         return [await _start_remote(session, turn_id, target, channel, body,
                                     min(wait_s, REMOTE_START_WAIT_S),
-                                    client_ids)]
+                                    client_ids, lease)]
     # A fan-out is relayed as independent single starts, so any spawn-exec
     # node can host a fleet without a wire change. All or nothing: if one
     # start fails, the started remainder is cancelled (concurrently, so the
@@ -1455,7 +1584,7 @@ async def _start_remote_fleet(session: dict, turn_id: str, target: dict,
     # keeps its handle, and the turn's end reaps it.
     outcomes = await asyncio.gather(
         *(_start_remote(session, turn_id, target, channel, body, 0,
-                        client_ids) for _ in range(count)),
+                        client_ids, lease) for _ in range(count)),
         return_exceptions=True)
     failure = next((item for item in outcomes
                     if isinstance(item, BaseException)), None)
@@ -1773,6 +1902,7 @@ async def h_spawn_get(request):
     job = manager().get(request.match_info["job_id"])
     if job is None:
         return web.json_response({"error": "unknown spawn job"}, status=404)
+    job.renew_lease()
     await manager().wait(job, _clamp_wait(request.query.get("wait_s"),
                                           default=0))
     return web.json_response({"job": job.payload()})
@@ -1796,7 +1926,39 @@ async def h_spawn_patch(request):
         job.update_limits(_validated_limit_update(body))
     except SpawnError as exc:
         return web.json_response({"error": str(exc)}, status=exc.status)
+    job.renew_lease()
     return web.json_response({"ok": True, "job": job.payload()})
+
+
+async def h_spawn_renew(request):
+    """Bulk lease renewal from the controller that relayed these jobs. Ids
+    the node does not know are reported back so the controller can settle
+    them as lost; an id whose start is still validating is 'starting'."""
+    from aiohttp import web
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    if not isinstance(body, dict):
+        return web.json_response({"error": "invalid spawn renewal"},
+                                 status=400)
+    try:
+        ids = _validated_job_ids(body)
+    except SpawnError as exc:
+        return web.json_response({"error": str(exc)}, status=exc.status)
+    mgr = manager()
+    outcome = {"renewed": [], "finished": [], "starting": [], "unknown": []}
+    for job_id in ids:
+        job = mgr.get(job_id)
+        if job is None or job.owner != ("remote",):
+            outcome["starting" if job_id in mgr._start_locks
+                    else "unknown"].append(job_id)
+        elif not job.running:
+            outcome["finished"].append(job_id)
+        else:
+            job.renew_lease()
+            outcome["renewed"].append(job_id)
+    return web.json_response(dict(outcome, ok=True))
 
 
 async def h_spawn_delete(request):
@@ -1812,6 +1974,7 @@ async def h_spawn_delete(request):
 
 def register(app) -> None:
     app.router.add_post("/api/spawn", h_spawn_start)
+    app.router.add_post("/api/spawn/renew", h_spawn_renew)
     app.router.add_get("/api/spawn/{job_id:[a-f0-9]{8}}", h_spawn_get)
     app.router.add_patch("/api/spawn/{job_id:[a-f0-9]{8}}", h_spawn_patch)
     app.router.add_delete("/api/spawn/{job_id:[a-f0-9]{8}}", h_spawn_delete)
