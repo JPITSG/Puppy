@@ -115,6 +115,9 @@ body::after{
 ::-webkit-scrollbar{width:10px;height:10px}
 ::-webkit-scrollbar-thumb{background:#242b3a;border-radius:8px;border:2px solid var(--bg)}
 ::-webkit-scrollbar-track{background:transparent}
+/* where a vertical and a horizontal bar meet: the browser's default there is
+   an opaque square that ignores the theme */
+::-webkit-scrollbar-corner{background:transparent}
 a{color:var(--acc2)}
 
 /* ---------- layout ---------- */
@@ -1899,7 +1902,9 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .agent-notes-name{flex:0 0 auto;font:600 12px var(--mono);color:var(--txt)}
 .agent-notes-text{
   height:24dvh;min-height:110px;max-height:24dvh;resize:none;margin:0;
-  font-family:var(--mono);font-size:12px;line-height:1.45;white-space:pre;overflow:auto;tab-size:4;
+  font-family:var(--mono);font-size:12px;line-height:1.45;tab-size:4;
+  /* notes are prose: long lines wrap, so only a vertical bar ever appears */
+  white-space:pre-wrap;overflow-wrap:anywhere;overflow-x:hidden;overflow-y:auto;
 }
 /* the header's remove control is the URL editor's square icon button */
 .agent-notes-remove{
