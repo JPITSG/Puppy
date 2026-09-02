@@ -142,6 +142,12 @@ SESSION_EVENT_WINDOW_CAPABILITY = "session-event-window"
 # never touched). Each engine lists what it offers in the engines payload's
 # additive tool_options; a console shows the composer's tools menu only here.
 SESSION_TOOLS_CAPABILITY = "session-tools"
+# GET/PUT /api/sessions/{sid}/agent-notes read and replace the AGENTS.md and
+# CLAUDE.md files in a session's working directory (exactly those two names,
+# bounded in size), and every session payload carries the additive
+# agent_notes list naming which of them exist. A console shows the sidebar's
+# notes button and its editor only for nodes that advertise this.
+SESSION_AGENT_NOTES_CAPABILITY = "session-agent-notes"
 # A node keeps a bounded, durable sequence of authoritative activity-block
 # completions and serves GET /api/completions?after=<seq>. Controllers use it
 # for remote completion commands without relying on an open browser.
@@ -192,6 +198,7 @@ BASE_CAPABILITIES = (
     SEARCH_CAPABILITY,
     SESSION_EVENT_WINDOW_CAPABILITY,
     SESSION_TOOLS_CAPABILITY,
+    SESSION_AGENT_NOTES_CAPABILITY,
     COMPLETION_EVENTS_CAPABILITY,
 )
 TERMINAL_CAPABILITY = "terminal"

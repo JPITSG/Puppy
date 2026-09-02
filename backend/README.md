@@ -508,6 +508,21 @@ session websocket accepts `requeue_held` / `discard_held` with the same
 stale-index guard as `unqueue`. A prompt is consumed durably the moment its
 turn starts, so a crash never runs one twice.
 
+## Agent notes
+
+Nodes advertising `session-agent-notes` serve the AGENTS.md and CLAUDE.md
+files in a session's working directory: `GET /api/sessions/{sid}/agent-notes`
+returns both (existence, text up to 256 KiB, symlink target) and
+`PUT /api/sessions/{sid}/agent-notes` with `{"name", "text"}` replaces one
+atomically - through a symlink to its target, so a `CLAUDE.md -> AGENTS.md`
+layout survives - or removes it with `{"name", "delete": true}`. Only those
+two names are accepted. Every session payload carries the additive
+`agent_notes` list naming which of them exist; the console shows it as the
+mark at the bottom right of each sidebar row, which opens the editor. A note
+edited inside a linked workspace's mirror marks the session dirty so the
+controller carries the change to the authoritative project at its next
+reconcile.
+
 ## Session tools
 
 Nodes advertising `session-tools` accept `POST /api/sessions/{sid}/tool` with

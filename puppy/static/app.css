@@ -297,6 +297,19 @@ a{color:var(--acc2)}
 .sess-item .si-ws.warn{color:var(--warn)}
 .sess-item .si-ws.err{color:var(--err)}
 .sess-item .si-ws.busy{color:var(--acc2)}
+/* agent notes mark (bottom-right of a row): faint when the working directory
+   holds neither AGENTS.md nor CLAUDE.md, full strength when it holds one */
+.sess-item .si-notes{
+  flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;
+  width:24px;height:22px;margin:-4px -6px -4px 0;border-radius:var(--r-sm);
+  color:var(--txt3);opacity:.38;cursor:pointer;
+  transition:opacity .15s var(--ease),background .15s var(--ease),color .15s var(--ease);
+}
+.sess-item .si-notes svg{width:12px;height:12px}
+.sess-item .si-notes.has{opacity:1;color:var(--acc2)}
+@media (hover:hover){.sess-item .si-notes:hover{opacity:1;background:var(--hov);color:var(--txt)}}
+.sess-item .si-notes:focus-visible{opacity:1;outline:1px solid var(--acc-line);outline-offset:1px}
+.sess-item .si-notes:active{background:var(--hov)}
 .linklike{
   display:inline-flex;align-items:center;background:none;border:none;color:var(--txt3);
   font:inherit;font-size:11px;line-height:1;cursor:pointer;padding:8px 6px;border-radius:var(--btn-r);
@@ -1876,6 +1889,18 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .backend-edit-grid .full{grid-column:1/-1}
 .config-textarea{display:block;height:72px;min-height:72px;max-height:72px;resize:none}
 .backend-edit-help{margin:-5px 0 9px;color:var(--txt3);font-size:10.5px;line-height:1.45}
+.agent-notes-modal{max-width:640px}
+.agent-notes-file{display:block;margin-bottom:12px}
+.agent-notes-head{
+  display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:5px;
+  text-transform:none;letter-spacing:0;
+}
+.agent-notes-name{font:600 12px var(--mono);color:var(--txt)}
+.agent-notes-text{
+  height:auto;min-height:120px;max-height:32dvh;resize:vertical;
+  font-family:var(--mono);font-size:12px;line-height:1.45;white-space:pre;overflow:auto;tab-size:4;
+}
+.agent-notes-remove{margin-top:4px;font-size:11px}
 .backend-edit-error{
   margin:0;padding:8px 10px;border:1px solid var(--err-line-soft);border-radius:var(--r-sm);
   background:var(--err-dim);color:var(--err);font-size:11.5px;line-height:1.4;

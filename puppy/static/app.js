@@ -4115,6 +4115,7 @@ function renderSidebar() {
           "Linked workspace" + (st ? " · " + st : ""));
         r2.appendChild(mark);
       }
+      if (backendSupportsAgentNotes(bid)) r2.appendChild(agentNotesMark(bid, s));
       item.appendChild(r1); item.appendChild(r2);
       const pointerForClick = activationPointer(item);
       item.onclick = event => {
@@ -4139,6 +4140,180 @@ function renderSidebar() {
   tog.textContent = (state.showArchived ? "Hide archived" : "Show archived") + ` (${archTotal})`;
   tog.classList.toggle("hidden", archTotal === 0);
   renderFootEngines();
+}
+
+const AGENT_NOTE_FILES = ["AGENTS.md", "CLAUDE.md"];
+const AGENT_NOTE_READERS = { "AGENTS.md": "Codex and OpenCode", "CLAUDE.md": "Claude Code" };
+
+function backendSupportsAgentNotes(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(b => b.id === bid);
+  return !!backend && Array.isArray(backend.capabilities) &&
+    backend.capabilities.includes("session-agent-notes");
+}
+
+/* Bottom-right of every row: whether the working directory holds AGENTS.md or
+   CLAUDE.md, the standing instructions the engines read there. Present reads
+   at full strength, absent as a faint outline; either opens the editor. It is
+   a role=button span rather than a nested button, because the row is one. */
+function agentNotesMark(bid, s) {
+  const names = Array.isArray(s.agent_notes) ? s.agent_notes : [];
+  const mark = el("span", "si-notes" + (names.length ? " has" : ""));
+  mark.setAttribute("role", "button");
+  mark.tabIndex = 0;
+  mark.setAttribute("aria-label", names.length ?
+    `Agent notes: ${names.join(", ")} · open editor` :
+    "No agent notes · create AGENTS.md or CLAUDE.md");
+  mark.appendChild(attachmentFileIcon(12));
+  const open = event => {
+    event.preventDefault();
+    event.stopPropagation();
+    modalAgentNotes(bid, s);
+  };
+  mark.addEventListener("click", open);
+  mark.addEventListener("keydown", event => {
+    if (event.key === "Enter" || event.key === " ") open(event);
+  });
+  /* a press on the mark is never the start of a row drag or a row activation */
+  mark.addEventListener("pointerdown", event => event.stopPropagation());
+  mark.addEventListener("contextmenu", event => event.stopPropagation());
+  return mark;
+}
+
+function describeAgentNote(file) {
+  const readers = `read by ${AGENT_NOTE_READERS[file.name] || "the engines"}`;
+  if (!file.exists) return file.readable === false ? "not a regular file" : `not present · ${readers}`;
+  const parts = [readers];
+  if (file.symlink) parts.push(`link → ${file.symlink}`);
+  if (file.truncated) parts.push("too large to edit here");
+  return parts.join(" · ");
+}
+
+/* The editor for both note files at once: two labelled text areas, each saved
+   only when its text changed, on the same modal, form, error and button
+   vocabulary as the backend editor. The node that runs the session serves
+   and stores the files, so a remote session edits its own working directory. */
+function modalAgentNotes(bid, s) {
+  const { m, close } = modal(`<h2>Agent notes</h2>
+    <p class="backend-edit-intro agent-notes-intro"></p>
+    <form id="agent-notes-form">
+      <div class="agent-notes-files"><p class="modal-copy">Loading…</p></div>
+      <p class="backend-edit-error hidden" role="alert"></p>
+      <div class="m-btns"><button type="button" class="btn" id="agent-notes-cancel">Cancel</button>
+        <button type="submit" class="btn btn-pri" id="agent-notes-save" disabled>Save</button></div>
+    </form>`, "agent-notes-modal");
+  const form = m.querySelector("#agent-notes-form");
+  const intro = m.querySelector(".agent-notes-intro");
+  const files = m.querySelector(".agent-notes-files");
+  const error = m.querySelector(".backend-edit-error");
+  const cancel = m.querySelector("#agent-notes-cancel");
+  const save = m.querySelector("#agent-notes-save");
+  intro.textContent = `${s.name || `Session ${s.id}`} · ${sessionLocationLabel(s, bid)}`;
+  const path = `sessions/${s.id}/agent-notes`;
+  let loaded = new Map();     // name -> file record as served
+  const areas = new Map();    // name -> textarea
+
+  const setError = text => {
+    error.textContent = text || "";
+    error.classList.toggle("hidden", !text);
+  };
+  const setBusy = busy => {
+    form.setAttribute("aria-busy", busy ? "true" : "false");
+    form.querySelectorAll("textarea,button").forEach(control => control.disabled = busy);
+    save.textContent = busy ? "Saving…" : "Save";
+  };
+  const applyPresence = data => {
+    if (!Array.isArray(data.present)) return;
+    const live = sessionsFor(bid).find(item => item.id === s.id);
+    if (live) live.agent_notes = data.present.slice();
+    s.agent_notes = data.present.slice();
+    renderSidebar();
+  };
+  const render = data => {
+    files.innerHTML = "";
+    loaded = new Map();
+    areas.clear();
+    for (const file of data.files || []) {
+      loaded.set(file.name, file);
+      const block = el("label", "agent-notes-file");
+      const head = el("span", "agent-notes-head");
+      head.appendChild(el("span", "agent-notes-name", file.name));
+      head.appendChild(el("span", "field-optional", describeAgentNote(file)));
+      block.appendChild(head);
+      const area = el("textarea", "config-textarea agent-notes-text");
+      area.value = file.text || "";
+      area.spellcheck = false;
+      area.placeholder = file.exists ? "" :
+        `Standing instructions for ${AGENT_NOTE_READERS[file.name] || "the engines"}…`;
+      area.disabled = file.readable === false || !!file.truncated;
+      area.addEventListener("keydown", event => {
+        if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+          event.preventDefault();
+          form.requestSubmit();
+        }
+      });
+      block.appendChild(area);
+      areas.set(file.name, area);
+      if (file.exists) {
+        const remove = el("button", "linklike agent-notes-remove", `Remove ${file.name}`);
+        remove.type = "button";
+        remove.onclick = async () => {
+          if (!await modalConfirm(`Remove ${file.name}?`,
+              `${file.name} is deleted from ${sessionLocationLabel(s, bid)}.`)) return;
+          setError("");
+          setBusy(true);
+          try {
+            const result = await api(bid, path, { method: "PUT", body: { name: file.name, delete: true } });
+            applyPresence(result);
+            render(result);
+          } catch (err) {
+            setError(err.message || "the file could not be removed");
+          } finally {
+            setBusy(false);
+          }
+        };
+        block.appendChild(remove);
+      }
+      files.appendChild(block);
+    }
+    save.disabled = false;
+  };
+
+  cancel.onclick = close;
+  form.onsubmit = async event => {
+    event.preventDefault();
+    setError("");
+    const changes = [];
+    for (const [name, area] of areas) {
+      const file = loaded.get(name) || {};
+      if (area.disabled) continue;
+      const text = area.value;
+      if (file.exists ? text !== (file.text || "") : text.trim() !== "")
+        changes.push({ name, text });
+    }
+    if (!changes.length) { close(); return; }
+    setBusy(true);
+    try {
+      let result = null;
+      for (const change of changes)
+        result = await api(bid, path, { method: "PUT", body: change });
+      if (result) applyPresence(result);
+      close();
+      toast("Agent notes saved", "ok");
+    } catch (err) {
+      setBusy(false);
+      setError(err.message || "the notes could not be saved");
+    }
+  };
+  api(bid, path).then(data => {
+    if (!m.isConnected) return;
+    applyPresence(data);
+    render(data);
+  }).catch(err => {
+    if (!m.isConnected) return;
+    files.innerHTML = "";
+    setError(err.message || "the notes could not be loaded");
+  });
 }
 
 function sessDot(s) {

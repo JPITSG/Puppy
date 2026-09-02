@@ -1692,6 +1692,76 @@ else:
             os.environ["PATH"] = saved_path
 
 
+async def exercise_agent_notes(http, url, headers, pinned, session, cwd: Path) -> None:
+    """AGENTS.md / CLAUDE.md in the session's working directory: listed on
+    every session payload, read and replaced only by those two names, written
+    through a symlink to its target, bounded, and removable."""
+    sid = session["id"]
+    notes_url = url + f"/api/sessions/{sid}/agent-notes"
+
+    async def listed():
+        async with http.get(url + "/api/sessions", headers=headers, ssl=pinned) as response:
+            rows = (await response.json())["sessions"]
+        return next(row["agent_notes"] for row in rows if row["id"] == sid)
+
+    async with http.get(notes_url, headers=headers, ssl=pinned) as response:
+        data = await response.json()
+        assert response.status == 200, data
+    assert [f["name"] for f in data["files"]] == ["AGENTS.md", "CLAUDE.md"]
+    assert all(f["exists"] is False for f in data["files"]) and data["present"] == []
+    assert await listed() == []
+    assert session["agent_notes"] == []
+
+    text = "# Project notes\n\nKeep answers brief.\n"
+    async with http.put(notes_url, headers=headers, ssl=pinned,
+                        json={"name": "AGENTS.md", "text": text}) as response:
+        written = await response.json()
+        assert response.status == 200, written
+    assert written["present"] == ["AGENTS.md"]
+    assert (cwd / "AGENTS.md").read_text(encoding="utf-8") == text
+    assert await listed() == ["AGENTS.md"]
+    async with http.get(url + f"/api/sessions/{sid}", headers=headers, ssl=pinned) as response:
+        assert (await response.json())["session"]["agent_notes"] == ["AGENTS.md"]
+
+    # a CLAUDE.md that links to AGENTS.md is a common layout: it reads through
+    # and writes through, and the link itself survives the write
+    (cwd / "CLAUDE.md").symlink_to("AGENTS.md")
+    async with http.get(notes_url, headers=headers, ssl=pinned) as response:
+        data = await response.json()
+    linked = data["files"][1]
+    assert linked["exists"] is True and linked["symlink"] == "AGENTS.md"
+    assert linked["text"] == text and data["present"] == ["AGENTS.md", "CLAUDE.md"]
+    async with http.put(notes_url, headers=headers, ssl=pinned,
+                        json={"name": "CLAUDE.md", "text": "via the link\n"}) as response:
+        assert response.status == 200, await response.text()
+    assert (cwd / "CLAUDE.md").is_symlink()
+    assert (cwd / "AGENTS.md").read_text(encoding="utf-8") == "via the link\n"
+
+    for body, status in (({"name": "README.md", "text": "x"}, 400),
+                         ({"name": "../AGENTS.md", "text": "x"}, 400),
+                         ({"name": "AGENTS.md", "text": "x" * (256 * 1024 + 1)}, 413),
+                         ({"name": "AGENTS.md", "text": 7}, 400),
+                         ([1], 400)):
+        async with http.put(notes_url, headers=headers, ssl=pinned, json=body) as response:
+            assert response.status == status, (body if not isinstance(body, dict) else body.get("name"),
+                                               response.status, await response.text())
+    assert (cwd / "AGENTS.md").read_text(encoding="utf-8") == "via the link\n"
+
+    async with http.put(notes_url, headers=headers, ssl=pinned,
+                        json={"name": "CLAUDE.md", "delete": True}) as response:
+        removed = await response.json()
+        assert response.status == 200, removed
+    assert not (cwd / "CLAUDE.md").exists() and (cwd / "AGENTS.md").exists()
+    assert removed["present"] == ["AGENTS.md"]
+    async with http.put(notes_url, headers=headers, ssl=pinned,
+                        json={"name": "AGENTS.md", "delete": True}) as response:
+        assert (await response.json())["present"] == []
+    assert await listed() == []
+    async with http.get(url + "/api/sessions/999999/agent-notes",
+                        headers=headers, ssl=pinned) as response:
+        assert response.status == 404
+
+
 def exercise_activity_blocks(session_hub_cls) -> None:
     """Queued turns retain one start time and become idle only after the tail."""
     hub = session_hub_cls(-1)
@@ -1992,6 +2062,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "session-search" in ping["capabilities"]
         assert "session-event-window" in ping["capabilities"]
         assert "session-tools" in ping["capabilities"]
+        assert "session-agent-notes" in ping["capabilities"]
         assert "completion-events" in ping["capabilities"]
         assert "workspace-mirror-reset" in ping["capabilities"]
         assert "shutdown-notice" in ping["capabilities"]
@@ -2303,6 +2374,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
                 normal_created = await response.json()
                 assert response.status == 200, normal_created
             normal = normal_created["session"]
+            await exercise_agent_notes(http, url, good, pinned, normal, normal_path)
             assert normal["workspace_kind"] == "directory"
 
             # Malformed direct clients get bounded 4xx responses and cannot

@@ -14,7 +14,7 @@ import time
 
 from aiohttp import WSMsgType, web
 
-from puppy import (__version__, auth, backends, bind_verify, browser,
+from puppy import (__version__, agent_notes, auth, backends, bind_verify, browser,
                    cli_auto_upgrade, cli_releases,
                    cli_upgrade, config, db, host_metrics, listener_handoff, notify,
                    live_websockets, localization, protocol, runner, search, snapshots,
@@ -1452,6 +1452,7 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     workspace_sync.register(app)
     spawn_exec.register(app)
     search.register(app)
+    agent_notes.register(app)
 
 
 def build_app(runtime_web: dict = None,

@@ -12,7 +12,7 @@ import signal
 import time
 import uuid
 
-from puppy import (browser_agent, config, db, handoff, notify, spawn_agent,
+from puppy import (agent_notes, browser_agent, config, db, handoff, notify, spawn_agent,
                    system_prompts, terminal_agent, uploads, workspace_sync,
                    workspaces)
 from puppy.drivers import get_driver
@@ -237,6 +237,7 @@ def session_payload(session):
     if session is None:
         return None
     out = dict(session)
+    out["agent_notes"] = agent_notes.present(session.get("cwd"))
     out["workspace_missing"] = workspaces.is_temporary(out) and not workspaces.is_available(out)
     out["used_config"] = parse_used_config(out["used_config"])
     out["show_meta"] = out["show_meta"] != 0
@@ -276,6 +277,8 @@ def sessions_payload() -> dict:
             "effort": s["effort"], "color": s["color"], "permission_mode": s["permission_mode"],
             "has_native": bool(s["native_session_id"]),
             "workspace_kind": s["workspace_kind"],
+            # which of AGENTS.md / CLAUDE.md the working directory holds
+            "agent_notes": agent_notes.present(s["cwd"]),
             "workspace_missing": workspaces.is_temporary(s) and not workspaces.is_available(s),
             "workspace": descriptor,
             "ws_dirty": bool(s["ws_dirty"]),
