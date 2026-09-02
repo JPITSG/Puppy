@@ -306,18 +306,112 @@ async def exercise(harness: Harness) -> None:
     assert summary["ok"] and summary["conflicts"] == 1
     assert (mirror / "docs/second.md").exists()
 
-    # -- resolution: keep the workspace version, preserve the loser --
-    status, resolved = await harness.api(
-        "POST", "workspaces/{}/resolve".format(link_id),
-        json={"choices": {"src/main.py": "workspace"}})
+    # -- resolution is fail-closed until the losing bytes are preserved --
+    # Store the user's choice through the real route, but suppress its normal
+    # background launch so the fetch race below is deterministic.
+    real_schedule = workspace_links._schedule_service
+    workspace_links._schedule_service = lambda *_args: None
+    try:
+        status, resolved = await harness.api(
+            "POST", "workspaces/{}/resolve".format(link_id),
+            json={"choices": {"src/main.py": "workspace"}})
+    finally:
+        workspace_links._schedule_service = real_schedule
     assert status == 200, resolved
-    await wait_for(lambda: workspace_links.get_link(link_id)["state"] == "ok",
-                   message="conflict resolution to converge")
+    assert workspace_links.get_link(link_id)["resolutions"] == {
+        "src/main.py": "workspace"}
+
+    # If the loser changes after the manifests were scanned, its fetch no
+    # longer matches the version Puppy promised to retain. Nothing is applied,
+    # the choice remains retryable, and both live versions survive.
+    real_open_stream = workspace_links._open_stream
+    raced = False
+
+    async def race_loser_fetch(channel, method, path, **kwargs):
+        nonlocal raced
+        if not raced and method == "POST" and \
+                path == "sessions/{}/workspace/fetch".format(sid) and \
+                kwargs.get("json_body") == {"paths": ["src/main.py"]}:
+            write_tree(mirror, {
+                "src/main.py": "print('engine raced preservation')\n"})
+            raced = True
+        return await real_open_stream(channel, method, path, **kwargs)
+
+    workspace_links._open_stream = race_loser_fetch
+    try:
+        summary = await workspace_links.run_reconcile(link_id)
+    finally:
+        workspace_links._open_stream = real_open_stream
+    assert not summary["ok"] and "could not preserve" in summary["error"]
+    assert (project / "src/main.py").read_text() == "print('user version')\n"
+    assert (mirror / "src/main.py").read_text() == \
+        "print('engine raced preservation')\n"
+    link = workspace_links.get_link(link_id)
+    assert link["state"] == "error" and "not resolved" in link["last_error"]
+    assert link["resolutions"] == {"src/main.py": "workspace"}
+
+    # A stable retry first atomically preserves and verifies the current loser,
+    # then applies the winner.
+    summary = await workspace_links.run_reconcile(link_id)
+    assert summary["ok"] and summary["clean"], summary
     assert (mirror / "src/main.py").read_text() == "print('user version')\n"
     assert_trees_equal(project, mirror)
     keeps = list((Path(config.DATA_DIR) / "workspace" / "keeps" / uid)
                  .rglob("src/main.py"))
-    assert keeps and keeps[0].read_text() == "print('engine version')\n"
+    assert keeps and keeps[0].read_text() == \
+        "print('engine raced preservation')\n"
+    assert not list((Path(config.DATA_DIR) / "workspace" / "keeps" / uid)
+                    .rglob(".puppy-keep-tmp-*"))
+
+    # -- an individual apply failure is a sync failure, never "Synced" --
+    write_tree(project, {"docs/failing.txt": "must reach the mirror\n"})
+    before_failure = workspace_links.get_link(link_id)
+    previous_sync = before_failure["last_sync_at"]
+    previous_generation = before_failure["generation"]
+    real_transfer = workspace_links._transfer
+
+    async def fail_one_transfer(src, src_prefix, dst, dst_prefix, ops):
+        if any(op.get("p") == "docs/failing.txt" for op in ops):
+            return [{"p": op["p"], "ok": False,
+                     "reason": "injected apply failure"} for op in ops]
+        return await real_transfer(src, src_prefix, dst, dst_prefix, ops)
+
+    workspace_links._transfer = fail_one_transfer
+    try:
+        summary = await workspace_links.run_reconcile(link_id)
+        assert not summary["ok"] and not summary["clean"], summary
+        assert summary["retry"] == 1
+        link = workspace_links.get_link(link_id)
+        assert link["state"] == "error"
+        assert "pull docs/failing.txt: injected apply failure" in \
+            link["last_error"]
+        assert link["last_sync_at"] == previous_sync
+        assert link["generation"] == previous_generation
+        assert not (mirror / "docs/failing.txt").exists()
+
+        # Manual sync reports an HTTP failure instead of a success toast.
+        status, failed_sync = await harness.api(
+            "POST", "workspaces/{}/sync".format(link_id))
+        assert status == 502 and "injected apply failure" in \
+            failed_sync["error"], failed_sync
+
+        # The same per-file failure denies a pre-turn grant, so the engine
+        # cannot run against the stale mirror.
+        hub = runner.hub(sid)
+        barrier = asyncio.ensure_future(hub._workspace_barrier("pre"))
+        await wait_for(lambda: hub.workspace_barrier_active(), message="barrier")
+        await workspace_links.service_session(1, sid, "pre")
+        outcome = await asyncio.wait_for(barrier, timeout=5)
+        assert not outcome["ok"]
+        assert "injected apply failure" in outcome["error"]
+    finally:
+        workspace_links._transfer = real_transfer
+
+    summary = await workspace_links.run_reconcile(link_id)
+    assert summary["ok"] and summary["clean"], summary
+    assert (mirror / "docs/failing.txt").read_text() == \
+        "must reach the mirror\n"
+    assert workspace_links.get_link(link_id)["state"] == "ok"
 
     # -- barrier mechanics over the real grant route --
     hub = runner.hub(sid)

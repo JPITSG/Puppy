@@ -15120,7 +15120,11 @@ function modalWorkspaceLink(bid, session) {
         state.workspaceLinks = state.workspaceLinks.map(
           l => l.id === r.link.id ? r.link : l);
       }
-      toast("Workspace synced");
+      if (r && r.clean) toast("Workspace synced");
+      else if (r && r.conflicts) toast(
+        `${r.conflicts} workspace conflict${r.conflicts === 1 ? "" : "s"} need a decision`,
+        "error");
+      else toast("Workspace sync is still pending", "error");
     } catch (e) { toast(e.message, "error"); }
     syncBtn.disabled = false;
     render();

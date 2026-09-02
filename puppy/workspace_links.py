@@ -17,9 +17,11 @@ nothing about links - they just serve the shared workspace-sync surface.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
+import secrets
 import time
 
 import aiohttp
@@ -29,7 +31,6 @@ from puppy import backends, config, db, protocol, runner, workspace_sync
 
 log = logging.getLogger("puppy.wslinks")
 
-KEEP_MAX_BYTES = 64 * 1024 * 1024
 KEEPALIVE_SECONDS = 45.0
 SWEEP_SECONDS = 120.0
 RETRY_SECONDS = 300.0
@@ -318,38 +319,138 @@ async def _transfer(src: dict, src_prefix: str, dst: dict, dst_prefix: str,
     results = result.get("results") if isinstance(result, dict) else None
     if not isinstance(results, list):
         raise NodeError("invalid apply reply from {}".format(dst["name"]), 502)
-    return results + local_results
+    combined = results + local_results
+    expected = sorted(str(op.get("p") or "") for op in ops)
+    actual = []
+    for item in combined:
+        if not isinstance(item, dict) or not isinstance(item.get("p"), str) or \
+                type(item.get("ok")) is not bool:
+            raise NodeError("invalid apply result from {}".format(
+                dst["name"]), 502)
+        actual.append(item["p"])
+    if sorted(actual) != expected:
+        raise NodeError("incomplete apply result from {}".format(
+            dst["name"]), 502)
+    return combined
+
+
+def _open_keep_parent(link: dict, path: str) -> tuple:
+    """Open the private keep directory for ``path`` without following links.
+
+    Every newly created directory is fsync'd through its parent before the
+    next component is opened. The caller owns the returned descriptor.
+    """
+    workspace_sync.validate_relpath(path)
+    uid = str(link.get("uid") or "")
+    # Reuse the mirror namespace validator: link ids and mirror ids deliberately
+    # share the same private, lowercase-alphanumeric shape.
+    workspace_sync.mirror_base(uid)
+    generation = str(int(link["generation"]) + 1)
+    parts = ["workspace", "keeps", uid, generation] + path.split("/")[:-1]
+    fd = os.open(os.path.realpath(config.DATA_DIR),
+                 os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in parts:
+            try:
+                os.mkdir(part, mode=0o700, dir_fd=fd)
+                os.fsync(fd)
+            except FileExistsError:
+                pass
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY |
+                            os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        return fd, path.rsplit("/", 1)[-1]
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _write_fd(fd: int, block: bytes) -> None:
+    view = memoryview(block)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            raise OSError("short write while preserving conflict data")
+        view = view[written:]
 
 
 async def _keep_loser(link: dict, entry, path: str, channel: dict,
                       prefix: str) -> None:
-    """Preserve the losing side of a resolved conflict under private data."""
-    if not isinstance(entry, dict) or entry.get("t") != "f" or \
-            int(entry.get("s") or 0) > KEEP_MAX_BYTES:
+    """Durably preserve a losing regular file before resolution can proceed.
+
+    Missing entries and non-files contain no losing file bytes to retain. A
+    regular file is streamed into a private adjacent temp, checked against the
+    manifest entry and fetch trailer, fsync'd, and atomically promoted. Any
+    failure aborts the whole reconcile before its winning operation is sent.
+    """
+    if not isinstance(entry, dict) or entry.get("t") != "f":
         return
+    workspace_sync.validate_relpath(path)
+    expected_size = entry.get("s")
+    expected_hash = entry.get("h")
+    if not isinstance(expected_size, int) or isinstance(expected_size, bool) or \
+            expected_size < 0 or not isinstance(expected_hash, str):
+        raise NodeError(
+            "could not preserve losing file {}: invalid manifest entry; "
+            "the conflict was not resolved".format(path), 502)
     try:
         response = await _open_stream(channel, "POST", prefix + "/fetch",
                                       json_body={"paths": [path]})
     except NodeError as exc:
-        log.warning("conflict loser for %s not preserved: %s", path, exc)
-        return
-    dest = os.path.join(config.DATA_DIR, "workspace", "keeps", link["uid"],
-                        str(int(link["generation"]) + 1), path)
+        raise NodeError(
+            "could not preserve losing file {}: {}; the conflict was not "
+            "resolved".format(path, exc), exc.status) from exc
+    parent_fd = None
+    temp_fd = None
+    temp_name = ".puppy-keep-tmp-{}".format(secrets.token_hex(8))
     try:
         item = await workspace_sync.read_frame(response.content)
-        if not isinstance(item, dict) or item.get("missing"):
-            return
-        os.makedirs(os.path.dirname(dest), mode=0o700, exist_ok=True)
-        size = int(item.get("s") or 0)
-        with open(dest, "wb") as fh:
-            if size:
-                async for block in workspace_sync.read_exact(
-                        response.content, size):
-                    fh.write(block)
-        os.chmod(dest, 0o600)
+        if not isinstance(item, dict) or item.get("p") != path or \
+                item.get("missing") or item.get("s") != expected_size or \
+                item.get("h") != expected_hash:
+            raise workspace_sync.SyncError(
+                "the losing file changed after it was scanned")
+        parent_fd, leaf = _open_keep_parent(link, path)
+        temp_fd = os.open(temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                          os.O_NOFOLLOW, 0o600, dir_fd=parent_fd)
+        digest = hashlib.sha256()
+        async for block in workspace_sync.read_exact(
+                response.content, expected_size):
+            digest.update(block)
+            _write_fd(temp_fd, block)
+        trailer = await workspace_sync.read_frame(response.content)
+        end = await workspace_sync.read_frame(response.content)
+        if not isinstance(trailer, dict) or trailer.get("p") != path or \
+                trailer.get("ok") is not True or not isinstance(end, dict) or \
+                end.get("end") is not True or digest.hexdigest() != expected_hash:
+            raise workspace_sync.SyncError(
+                "the losing file could not be verified")
+        os.fsync(temp_fd)
+        os.close(temp_fd)
+        temp_fd = None
+        os.replace(temp_name, leaf, src_dir_fd=parent_fd,
+                   dst_dir_fd=parent_fd)
+        os.fsync(parent_fd)
     except Exception as exc:
-        log.warning("conflict loser for %s not preserved: %s", path, exc)
+        if temp_fd is not None:
+            try:
+                os.close(temp_fd)
+            except OSError:
+                pass
+        if parent_fd is not None:
+            try:
+                os.unlink(temp_name, dir_fd=parent_fd)
+            except OSError:
+                pass
+        status = exc.status if isinstance(exc, NodeError) else \
+            507 if isinstance(exc, OSError) else 409
+        raise NodeError(
+            "could not preserve losing file {}: {}; the conflict was not "
+            "resolved".format(path, exc), status) from exc
     finally:
+        if parent_fd is not None:
+            os.close(parent_fd)
         response.release()
 
 
@@ -407,12 +508,14 @@ async def run_reconcile(link_id: int) -> dict:
             resolutions = link["resolutions"]
             unresolved = []
             used = set()
+            attempted = {}
             for conflict in plan["conflicts"]:
                 path = conflict["path"]
                 choice = resolutions.get(path)
                 if choice == "workspace":
                     await _keep_loser(link, conflict.get("mirror"), path,
                                       exec_channel, mirror_prefix)
+                    attempted[path] = conflict
                     plan["pull"].extend(workspace_sync.ops_for(
                         path, conflict.get("mirror"), conflict.get("workspace")))
                     if conflict.get("workspace") is not None:
@@ -423,6 +526,7 @@ async def run_reconcile(link_id: int) -> dict:
                 elif choice == "session":
                     await _keep_loser(link, conflict.get("workspace"), path,
                                       ws_channel, ws_prefix)
+                    attempted[path] = conflict
                     plan["push"].extend(workspace_sync.ops_for(
                         path, conflict.get("workspace"), conflict.get("mirror")))
                     if conflict.get("mirror") is not None:
@@ -456,27 +560,54 @@ async def run_reconcile(link_id: int) -> dict:
                     next_base.pop(path, None)
             _save_base(link["uid"], next_base)
 
-            push_failed = sum(1 for item in push_results if not item.get("ok"))
-            clean = not unresolved and not push_failed
+            failed_conflicts = [attempted[path] for path in sorted(used & failed)]
+            visible_conflicts = unresolved + failed_conflicts
+            clean = not visible_conflicts and not failed
+            completed_resolutions = used - failed
             remaining = {path: value for path, value in resolutions.items()
-                         if path not in used}
-            _update_link(
-                link_id,
-                state="conflict" if unresolved else "ok",
-                generation=int(link["generation"]) + 1,
-                conflicts=json.dumps([_public_conflict(c) for c in unresolved],
+                         if path not in completed_resolutions}
+            failure_parts = []
+            for direction, results in (("pull", pull_results),
+                                       ("push", push_results)):
+                for item in results:
+                    if item.get("ok"):
+                        continue
+                    reason = item.get("reason")
+                    detail = str(reason).strip() if reason is not None else ""
+                    failure_parts.append("{} {}: {}".format(
+                        direction, item["p"], detail or "not applied"))
+            failure_error = "workspace transfer incomplete: {}".format(
+                "; ".join(failure_parts))[:500] if failure_parts else ""
+            fields = {
+                "state": "error" if failed else
+                         "conflict" if visible_conflicts else "ok",
+                # Generation and last_sync_at describe the same completed
+                # pass in the UI; a partial/failed pass advances neither.
+                "generation": int(link["generation"]) + (0 if failed else 1),
+                "conflicts": json.dumps(
+                    [_public_conflict(c) for c in visible_conflicts],
                                      separators=(",", ":")),
-                resolutions=json.dumps(remaining, separators=(",", ":")),
-                last_error="", last_sync_at=time.time())
-            _retry_after.pop(link_id, None)
+                "resolutions": json.dumps(remaining, separators=(",", ":")),
+                "last_error": failure_error,
+            }
+            if not failed:
+                fields["last_sync_at"] = time.time()
+            _update_link(link_id, **fields)
+            if failed:
+                _retry_after[link_id] = time.monotonic() + RETRY_SECONDS
+            else:
+                _retry_after.pop(link_id, None)
             pulled = sum(1 for item in pull_results if item.get("ok"))
             pushed = sum(1 for item in push_results if item.get("ok"))
-            if pulled or pushed or unresolved or failed:
+            if pulled or pushed or visible_conflicts or failed:
                 log.info("link %s reconciled: %d pulled, %d pushed, "
                          "%d conflict(s), %d retry", link_id, pulled, pushed,
-                         len(unresolved), len(failed))
-            return {"ok": True, "clean": clean, "conflicts": len(unresolved),
-                    "pulled": pulled, "pushed": pushed, "retry": len(failed)}
+                         len(visible_conflicts), len(failed))
+            return {"ok": not failed, "clean": clean,
+                    "conflicts": len(visible_conflicts),
+                    "pulled": pulled, "pushed": pushed,
+                    "retry": len(failed), **(
+                        {"error": failure_error} if failed else {})}
         except (NodeError, workspace_sync.SyncError) as exc:
             message = str(exc)
             _update_link(link_id, state="error", last_error=message[:500])
@@ -511,15 +642,17 @@ async def _send_grant(exec_bid: int, session_id: int, payload: dict) -> None:
         log.warning("grant delivery to session %s failed: %s", session_id, exc)
 
 
-async def service_session(exec_bid: int, session_id: int, phase: str) -> None:
+async def service_session(exec_bid: int, session_id: int, phase: str) -> dict:
     """Reconcile the link behind one session and answer its barrier."""
     link = get_link_by_session(exec_bid, session_id)
     if link is None:
+        summary = {"ok": False,
+                   "error": "no workspace link exists on this controller"}
         if phase in ("pre", "post"):
             await _send_grant(exec_bid, session_id, {
                 "phase": phase, "ok": False,
-                "error": "no workspace link exists on this controller"})
-        return
+                "error": summary["error"]})
+        return summary
     summary = await run_reconcile(link["id"])
     await _send_grant(exec_bid, session_id, {
         "phase": phase,
@@ -527,6 +660,7 @@ async def service_session(exec_bid: int, session_id: int, phase: str) -> None:
         "clean": bool(summary.get("clean")),
         "conflicts": int(summary.get("conflicts") or 0),
         "error": str(summary.get("error") or "")})
+    return summary
 
 
 def _schedule_service(exec_bid: int, session_id: int, phase: str) -> None:
@@ -829,16 +963,18 @@ async def h_sync(request: web.Request):
     link = get_link(int(request.match_info["lid"]))
     if link is None:
         return web.json_response({"error": "unknown workspace link"}, status=404)
-    await service_session(int(link["exec_backend"]),
-                          int(link["session_id"]), "idle")
+    summary = await service_session(int(link["exec_backend"]),
+                                    int(link["session_id"]), "idle")
     fresh = get_link(int(link["id"]))
-    if fresh is not None and fresh["state"] == "error":
+    if not summary.get("ok"):
         return web.json_response(
-            {"error": fresh["last_error"] or "sync failed",
+            {"error": summary.get("error") or
+                      (fresh and fresh["last_error"]) or "sync failed",
              "link": next((item for item in public_links()
                            if item["id"] == link["id"]), None)}, status=502)
     return web.json_response({
-        "ok": True,
+        "ok": True, "clean": bool(summary.get("clean")),
+        "conflicts": int(summary.get("conflicts") or 0),
         "link": next((item for item in public_links()
                       if item["id"] == link["id"]), None)})
 
