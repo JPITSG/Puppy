@@ -1452,7 +1452,8 @@ second/model-b
         ["", "high", "max"]
 
     driver = OpenCodeDriver()
-    driver._catalog = catalog
+    driver._model_catalog_state().ingest(
+        driver._catalog_options(catalog), source="engine")
     exposed = driver.model_options()
     assert [model["value"] for model in exposed] == \
         ["", "provider/model-a", "second/model-b"]
@@ -1726,7 +1727,7 @@ import sys
 
 if sys.argv[1:] == ["--version"]:
     print("1.2.3")
-elif sys.argv[1:] == ["models", "--verbose"]:
+elif sys.argv[1:] == ["models", "--verbose", "--refresh"]:
     print("fallback/model-a")
     print(json.dumps({{
         "id": "model-a", "providerID": "fallback", "name": "Model A",
@@ -2308,7 +2309,6 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert opencode["availability_only"] is True
         assert opencode["dynamic_model_options"] is True
         assert opencode["allow_custom_model"] is False
-        assert isinstance(opencode["model_catalog_error"], str)
         assert opencode["model_options"][0]["value"] == ""
         assert opencode["model_options"][0]["label"] == "Default"
         assert len({model["value"] for model in opencode["model_options"]}) == \
@@ -2317,6 +2317,16 @@ async def exercise_node(url: str, token: str, expected_version: str,
             assert opencode["auth"] == "ok"
             assert opencode["detail"] == "binary available"
         for engine in engine_payload["engines"]:
+            assert isinstance(engine["dynamic_model_options"], bool)
+            assert isinstance(engine["model_catalog_loaded"], bool)
+            assert isinstance(engine["model_catalog_error"], str)
+            assert isinstance(engine["model_catalog_note"], str)
+            assert engine["model_catalog_source"] in \
+                ("engine", "turn", "cache-file", "static", "none")
+            assert engine["model_catalog_checked_at"] is None or \
+                isinstance(engine["model_catalog_checked_at"], (int, float))
+            assert engine["model_catalog_updated_at"] is None or \
+                isinstance(engine["model_catalog_updated_at"], (int, float))
             assert isinstance(engine["latest_version"], str)
             assert engine["update_available"] in (True, False, None)
             assert engine["latest_checked_at"] is None or \
@@ -2327,8 +2337,8 @@ async def exercise_node(url: str, token: str, expected_version: str,
             assert engine["upgrade_result"] is None or \
                 isinstance(engine["upgrade_result"], dict)
             assert isinstance(engine["version_checked_at"], (int, float))
-        # OpenCode's discovered choices feed model_options directly; there is
-        # no separate node-owned allow-list API.
+        # Discovered choices feed model_options directly; there is no separate
+        # controller-owned or node-owned allow-list API.
         async with http.patch(url + "/api/engines/opencode/models", headers=good,
                               ssl=pinned, json={"models": []}) as response:
             assert response.status == 404, await response.text()
@@ -2340,6 +2350,8 @@ async def exercise_node(url: str, token: str, expected_version: str,
             assert response.status == 200, rechecked
         assert isinstance(rechecked["engines"], list)
         assert "usage_refresh" in rechecked
+        assert all("model_catalog_checked_at" in engine
+                   for engine in rechecked["engines"])
         async with http.post(url + "/api/engines/not-an-engine/upgrade",
                              headers=good, ssl=pinned) as response:
             assert response.status == 404, await response.text()

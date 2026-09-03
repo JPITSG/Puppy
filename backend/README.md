@@ -259,17 +259,20 @@ local rollout record remains the fallback if the account read is unavailable.
 ## Engine versions and upgrades
 
 Every engine payload reports the installed CLI version, the latest published
-version, and whether an update exists. Both sides refresh on their own timers:
-installed `--version`/auth probes are cached for five minutes, and the latest
+version, whether an update exists, and the engine's model catalog. Installed
+`--version`/auth probes and model lists are cached for five minutes; the latest
 published version is re-checked every six hours (fifteen minutes after a failed
-check). A registry outage only makes the latest value unavailable; it never
+check). Catalog requests are single-flight and run concurrently across engines.
+A failed discovery keeps the last good choices visible, reports its error and
+backs off from 30 seconds up to five minutes. A registry or catalog outage never
 makes an installed engine unavailable.
 
 Two authenticated routes complete that picture, and nodes advertise both with
 the additive `engine-upgrade` capability:
 
-- `POST /api/engines/refresh` forces one immediate installed-version re-probe
-  and one latest-release check on this node.
+- `POST /api/engines/refresh` concurrently forces an immediate installed-version,
+  sign-in, latest-release, and model-catalog check on this node. This is the
+  Settings → Engines refresh button; it does not start a model turn.
 - `POST /api/engines/{key}/upgrade` runs that engine's own updater
   (`claude update`, `codex update`, `opencode upgrade`).
 
@@ -295,21 +298,36 @@ engine-, host-, and install-method-agnostic.
 It starts in the background and the POST returns immediately, so `upgrade_state`
 in the engine payload is the progress signal and `upgrade_result` the outcome -
 a reconnecting controller rejoins a run already in flight. Engines are spawned
-per turn, so nothing restarts afterwards; the node re-probes the version itself
-when the updater exits, because a zero exit status alone does not prove the
-version moved.
+per turn, so nothing restarts afterwards; the node re-probes the version and
+model catalog itself when the updater exits, because a zero exit status alone
+does not prove the version moved or the available choices stayed the same.
 
-## OpenCode models
+## Engine model catalogs
+
+Claude discovers its current aliases and each alias's supported effort levels
+from a no-turn stream-json `initialize` exchange. Codex uses its app-server
+`model/list` method, follows pagination, excludes hidden entries, and carries
+each model's own reasoning-effort choices. Its validated on-disk model cache is
+only a cold-start fallback. OpenCode reads `opencode models --verbose`; an
+explicit Settings refresh adds the CLI's `--refresh` flag so provider metadata
+is fetched now, while ordinary five-minute checks remain read-only. Older
+OpenCode versions that do not support that flag fall back to re-reading their
+current list and report that qualification in the Engines card.
+
+The same payload drives new-session cards and active-session selectors. A live
+catalog update preserves a still-valid selection, does not rebuild a native
+mobile picker while it is open, and never offers an effort level that the
+selected catalog model did not report.
 
 OpenCode is registered in the headless artifact just like it is in the full
 runtime. Its status is binary availability only: provider authentication is
 model-specific, so a found binary reports `Ready` and an absent one reports
 `No binary` rather than attempting one global auth verdict.
 
-An installed node discovers its catalog from `opencode models --verbose` and
-serves every reported choice through the ordinary engine `model_options` list.
-The controller uses that list directly in new-session and chat model controls;
-there is no controller-owned provider list or node-owned model allow-list.
+An installed node serves every reported OpenCode choice through the ordinary
+engine `model_options` list. The controller uses that list directly in
+new-session and chat model controls; there is no controller-owned provider list
+or node-owned model allow-list.
 Turns run through `opencode acp`, resume the native session ID, relay tool
 approvals/cancellation, and receive the same turn-scoped managed-browser MCP
 server when Browser is enabled on that node, plus the shared-terminal MCP

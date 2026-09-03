@@ -113,11 +113,20 @@ async def h_ping(request: web.Request):
 async def _engines_payload(refresh_usage: bool = True, refresh_models: bool = True):
     if refresh_usage:
         await usage_refresh.maybe_refresh()
+    drivers = all_drivers()
+    statuses = await asyncio.gather(*(driver.status() for driver in drivers))
+    if refresh_models:
+        due = [driver for driver, status in zip(drivers, statuses)
+               if driver.dynamic_model_options and status.get("installed")]
+        results = await asyncio.gather(
+            *(driver.refresh_model_options() for driver in due),
+            return_exceptions=True)
+        for driver, result in zip(due, results):
+            if isinstance(result, BaseException):
+                log.warning("%s model catalog refresh escaped its driver: %s",
+                            driver.key, result)
     engines = []
-    for d in all_drivers():
-        st = await d.status()
-        if refresh_models and d.dynamic_model_options and st.get("installed"):
-            await d.refresh_model_options()
+    for d, st in zip(drivers, statuses):
         engines.append({
             "key": d.key, "label": d.label, **st,
             "availability_only": d.availability_only,
@@ -130,6 +139,10 @@ async def _engines_payload(refresh_usage: bool = True, refresh_models: bool = Tr
             "dynamic_model_options": d.dynamic_model_options,
             "model_catalog_loaded": d.model_catalog_loaded(),
             "model_catalog_error": d.model_catalog_error(),
+            "model_catalog_note": d.model_catalog_note(),
+            "model_catalog_source": d.model_catalog_source(),
+            "model_catalog_checked_at": d.model_catalog_checked_at(),
+            "model_catalog_updated_at": d.model_catalog_updated_at(),
             "rate_limit": db.meta_get(f"rate_limit.{d.key}"),
         })
     return engines
@@ -191,25 +204,33 @@ async def h_usage_refresh_get(request: web.Request):
 async def h_usage_refresh_post(request: web.Request):
     await usage_refresh.maybe_refresh(force=True)
     return web.json_response({
-        "engines": await _engines_payload(refresh_usage=False),
+        "engines": await _engines_payload(
+            refresh_usage=False, refresh_models=False),
         "usage_refresh": usage_refresh.payload(),
         "auto_upgrade": cli_auto_upgrade.payload(),
     })
 
 
 async def h_engines_refresh(request: web.Request):
-    """Force one installed-version re-probe and one latest-release check.
+    """Force installed-version, sign-in, release, and model-catalog checks.
 
-    Both values otherwise refresh on their own timers (installed on the status
-    cache, latest on the periodic release worker). This is the manual override
-    behind the Settings refresh control; it never starts a turn."""
+    All otherwise refresh on their own timers. This is the manual override
+    behind the Settings refresh control; model discovery never starts a turn."""
     drivers = all_drivers()
     driver_base.invalidate_status()
-    await cli_releases.refresh_if_due(drivers, force=True)
-    await asyncio.gather(*(driver.refresh_model_options(force=True)
-                           for driver in drivers if driver.dynamic_model_options))
+    dynamic = [driver for driver in drivers
+               if driver.dynamic_model_options and driver.resolved_binary()]
+    results = await asyncio.gather(
+        cli_releases.refresh_if_due(drivers, force=True),
+        *(driver.status() for driver in drivers),
+        *(driver.refresh_model_options(force=True) for driver in dynamic),
+        return_exceptions=True)
+    for result in results:
+        if isinstance(result, BaseException):
+            log.warning("manual engine refresh component failed: %s", result)
     return web.json_response({
-        "engines": await _engines_payload(refresh_usage=False),
+        "engines": await _engines_payload(
+            refresh_usage=False, refresh_models=False),
         "usage_refresh": usage_refresh.payload(),
         "auto_upgrade": cli_auto_upgrade.payload(),
     })
@@ -262,7 +283,8 @@ async def h_engine_upgrade(request: web.Request):
         return web.json_response({"error": str(exc)}, status=409)
     return web.json_response({
         "ok": True,
-        "engines": await _engines_payload(refresh_usage=False),
+        "engines": await _engines_payload(
+            refresh_usage=False, refresh_models=False),
         "usage_refresh": usage_refresh.payload(),
         "auto_upgrade": cli_auto_upgrade.payload(),
     })
@@ -282,7 +304,8 @@ async def h_usage_refresh_patch(request: web.Request):
     if interval > 0:
         await usage_refresh.maybe_refresh(force=True)
     return web.json_response({
-        "engines": await _engines_payload(refresh_usage=False),
+        "engines": await _engines_payload(
+            refresh_usage=False, refresh_models=False),
         "usage_refresh": usage_refresh.payload(),
         "auto_upgrade": cli_auto_upgrade.payload(),
     })

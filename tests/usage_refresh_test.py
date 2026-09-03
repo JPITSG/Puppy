@@ -19,6 +19,7 @@ from tests.scratch import private_root  # noqa: E402
 
 TEST_ROOT = private_root("usage-refresh-")
 os.environ["PUPPY_DATA"] = str(TEST_ROOT / "data")
+os.environ["CODEX_HOME"] = str(TEST_ROOT / "codex-home")
 COUNTER = TEST_ROOT / "account-reads.txt"
 os.environ["PUPPY_USAGE_TEST_COUNTER"] = str(COUNTER)
 
@@ -45,19 +46,18 @@ if args == ["login", "status"]:
 if args != ["app-server", "--stdio"]:
     raise SystemExit(2)
 
-counter = Path(os.environ["PUPPY_USAGE_TEST_COUNTER"])
-try:
-    count = int(counter.read_text(encoding="utf-8"))
-except (FileNotFoundError, ValueError):
-    count = 0
-counter.write_text(str(count + 1), encoding="utf-8")
-
 for raw in sys.stdin:
     request = json.loads(raw)
     method = request.get("method")
     if method == "initialize":
         response = {"id": request["id"], "result": {}}
     elif method == "account/rateLimits/read":
+        counter = Path(os.environ["PUPPY_USAGE_TEST_COUNTER"])
+        try:
+            count = int(counter.read_text(encoding="utf-8"))
+        except (FileNotFoundError, ValueError):
+            count = 0
+        counter.write_text(str(count + 1), encoding="utf-8")
         if os.environ.get("PUPPY_USAGE_TEST_FAIL"):
             response = {"id": request["id"],
                         "error": {"code": -32000, "message": "simulated account failure"}}
@@ -77,6 +77,13 @@ for raw in sys.stdin:
                                   "resetsAt": 2000001000}
                 }}
             }}
+    elif method == "model/list":
+        response = {"id": request["id"], "result": {"data": [{
+            "model": "account-test", "displayName": "Account Test",
+            "isDefault": True, "supportedReasoningEfforts": [
+                {"reasoningEffort": "high", "description": "High"}
+            ]
+        }], "nextCursor": None}}
     else:
         continue
     sys.stdout.write(json.dumps(response, separators=(",", ":")) + "\n")
@@ -139,8 +146,9 @@ async def main() -> None:
             assert read_count() == 1
             for payload in (first, concurrent):
                 status = next(item for item in payload["engines"] if item["key"] == "codex")
-                assert status["quota"]["weekly_used_percent"] == 42.0
-                assert status["quota"]["source"] == "account"
+                assert status["quota"] and \
+                    status["quota"]["weekly_used_percent"] == 42.0, status
+                assert status["quota"]["source"] == "account", status
                 assert payload["usage_refresh"]["minutes"] == 15
                 assert payload["usage_refresh"]["last_success_at"] is not None
 

@@ -3232,6 +3232,44 @@ def check_opencode_chat_models(ui_source: str, css_source: str) -> None:
         "className": "prov-opencode", "text": "OC", "label": "OpenCode"}
 
 
+def check_dynamic_model_catalog_ui(ui_source: str) -> None:
+    """Every engine payload reaches live pickers without inventing efforts."""
+    assert "const enginePayloadListeners = new Set();" in ui_source
+    assert "auto_upgrade: s.auto_upgrade || state.autoUpgrade" in ui_source
+    assert "rememberEnginePayload(0, payload);" in ui_source
+    assert "enginePayloadListeners.add(enginePayloadListener);" in ui_source
+    assert "onClose(() => enginePayloadListeners.delete(enginePayloadListener));" \
+        in ui_source
+    assert "renderEngines(loaded);\n    try {" in ui_source
+    assert "renderEngines(loaded, true);" in ui_source
+    assert "select.dataset.engineChoicesDirty = \"true\";" in ui_source
+    assert "select.dataset.engineChoiceBusy = \"true\";" in ui_source
+    assert "this.syncNativeComposerChoices();\n    this.syncComposerMeta();" in ui_source
+    assert "Re-check engine versions, sign-in and model lists" in ui_source
+    assert "Model-list refresh warning" in ui_source
+
+    start = ui_source.index("function effortOptionsForModel(")
+    end = ui_source.index("\n\nconst headWord", start)
+    script = ui_source[start:end] + r'''
+const exact={allow_custom_model:false,model_options:[
+  {value:"known",effort_options:[{value:"",label:"Default"},
+                                 {value:"high",label:"High"}]}],
+  effort_options:[{value:"",label:"Default"},{value:"max",label:"Max"}]};
+const custom={allow_custom_model:true,model_options:[],
+  effort_options:[{value:"",label:"Default"},{value:"max",label:"Max"}]};
+console.log(JSON.stringify({
+  known:effortOptionsForModel(exact,"known").map(item=>item.value),
+  retired:effortOptionsForModel(exact,"retired").map(item=>item.value),
+  custom:effortOptionsForModel(custom,"custom-id").map(item=>item.value),
+}));
+'''
+    proc = subprocess.run(["node", "--input-type=module", "-e", script],
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:700]
+    assert json.loads(proc.stdout) == {
+        "known": ["", "high"], "retired": [""], "custom": ["", "max"]}
+
+
 def check_session_provider_marks(css_source: str) -> None:
     """Detailed compact marks grow without changing the session-row layout slot."""
     assert '.si-row.sub .prov-anthropic,.si-row.sub .prov-openai{' in css_source
@@ -3617,7 +3655,7 @@ def check_node_owned_session_order(ui_source: str, css_source: str) -> None:
 def check_queued_permission_choices(ui_source: str) -> None:
     """Permission options and value follow the queued engine/config tail."""
     choice_start = ui_source.index("  composerChoiceSpec(kind, native = false) {")
-    choice_end = ui_source.index("\n  syncNativeComposerChoices()", choice_start)
+    choice_end = ui_source.index("\n  syncNativeComposerChoices(", choice_start)
     choice = ui_source[choice_start:choice_end]
     assert "options: [...((eng && eng.permission_options) || [])]" in choice
     assert "selected: eff.permission_mode || \"\"" in choice
@@ -5759,6 +5797,7 @@ async def main() -> None:
             check_system_prompt_settings(ui_source, css_source)
             check_remote_workspace_picker(ui_source, css_source)
             check_opencode_chat_models(ui_source, css_source)
+            check_dynamic_model_catalog_ui(ui_source)
             check_session_provider_marks(css_source)
             check_sidebar_icon_alignment(css_source)
             check_compact_control_alignment(ui_source, css_source)

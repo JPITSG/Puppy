@@ -362,6 +362,16 @@ async def _run(driver, argv: List[str], from_version: str, token) -> None:
         "message": _last_line(output),
         "output": _tail(output),
     }
+    # The replacement CLI may ship a different catalog protocol or newly
+    # available aliases. Mark the updater idle first so the catalog guard no
+    # longer treats this as an attempt against a binary being rewritten.
+    try:
+        driver.invalidate_model_options()
+        await driver.refresh_model_options(force=True)
+    except Exception as exc:
+        # Catalog discovery retains its previous good list and normally owns
+        # its own error state; this guard also protects third-party test drivers.
+        log.warning("%s model refresh after upgrade failed: %s", key, exc)
     log.info("%s upgrade finished: %s -> %s (%s)", key, from_version or "?",
              to_version or "?", error or "ok")
 

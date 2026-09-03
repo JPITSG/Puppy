@@ -50,6 +50,140 @@ _TASK_ENDED = ("completed", "failed", "killed", "stopped")
 # Our request ids travel on the wire, so they are namespaced rather than
 # trusted to be distinct from the CLI's own.
 _ID_SQ_PREFIX = "puppy-sq:"
+_MODEL_REQUEST_ID = "puppy-models"
+_MODEL_OUTPUT_LIMIT = 8 * 1024 * 1024
+_MODEL_MESSAGE_LIMIT = 128
+_EFFORT_ORDER = ("low", "medium", "high", "xhigh", "max", "ultra")
+_EFFORT_HINTS = {
+    "low": "Fastest, minimal reasoning",
+    "medium": "Balanced",
+    "high": "More reasoning",
+    "xhigh": "Extensive reasoning",
+    "max": "Maximum reasoning",
+    "ultra": "Maximum reasoning with delegation",
+}
+
+
+def _effort_option(value: str) -> dict:
+    label = "X-High" if value == "xhigh" else value.replace("_", " ").title()
+    return {"value": value, "label": label,
+            "hint": _EFFORT_HINTS.get(value, "Claude model effort")}
+
+
+def _claude_efforts(values=None) -> list:
+    options = [{"value": "", "label": "Default", "hint": "Claude model default"}]
+    seen = set()
+    normalized = []
+    for raw in _EFFORT_ORDER[:-1] if values is None else values:
+        value = str(raw or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        normalized.append(value)
+    order = {value: index for index, value in enumerate(_EFFORT_ORDER)}
+    normalized.sort(key=lambda value: (order.get(value, len(order)), value))
+    for value in normalized:
+        options.append(_effort_option(value))
+    return options
+
+
+def parse_model_catalog(models) -> list:
+    """Normalize the initialize reply's model picker without guessing IDs."""
+    if not isinstance(models, list):
+        raise RuntimeError("Claude initialize response did not include models")
+    options = []
+    seen = set()
+    for raw in models[:512]:
+        if not isinstance(raw, dict) or not isinstance(raw.get("value"), str):
+            continue
+        native_value = raw["value"].strip()
+        if not native_value:
+            continue
+        value = "" if native_value == "default" else native_value
+        if value in seen:
+            continue
+        seen.add(value)
+        label = str(raw.get("displayName") or native_value).strip()[:120]
+        if not value and label.lower().startswith("default"):
+            label = "Default"
+        description = str(raw.get("description") or "").strip()
+        resolved = str(raw.get("resolvedModel") or "").strip()
+        hint = description
+        if resolved and resolved not in hint:
+            hint = "{}{}{}".format(hint, " · " if hint else "", resolved)
+        option = {"value": value, "label": label or ("Default" if not value else value),
+                  "hint": hint[:240]}
+        levels = raw.get("supportedEffortLevels")
+        if raw.get("supportsEffort") is False:
+            option["effort_options"] = _claude_efforts([])
+        elif isinstance(levels, list):
+            option["effort_options"] = _claude_efforts(levels)
+        options.append(option)
+    if "" not in seen:
+        options.insert(0, {
+            "value": "", "label": "Default", "hint": "Claude CLI default model",
+            "effort_options": _claude_efforts(),
+        })
+    return options
+
+
+def _static_model_options() -> list:
+    efforts = _claude_efforts()
+    return [
+        {"value": "", "label": "Default", "hint": "Claude CLI default model",
+         "effort_options": efforts},
+        {"value": "fable", "label": "Fable", "hint": "Latest Fable - most capable",
+         "effort_options": efforts},
+        {"value": "opus", "label": "Opus", "hint": "Latest Opus",
+         "effort_options": efforts},
+        {"value": "sonnet", "label": "Sonnet", "hint": "Latest Sonnet",
+         "effort_options": efforts},
+        {"value": "haiku", "label": "Haiku", "hint": "Latest Haiku - fast and cheap",
+         "effort_options": efforts},
+    ]
+
+
+async def _read_model_catalog(binary: str) -> list:
+    argv = [
+        binary, "-p", "--output-format", "stream-json",
+        "--input-format", "stream-json", "--verbose",
+        "--no-session-persistence", "--strict-mcp-config",
+        "--mcp-config", '{"mcpServers":{}}',
+    ]
+    process = await driver_base.start_probe(argv, writable_stdin=True)
+    total = 0
+    try:
+        body = json.dumps({
+            "type": "control_request", "request_id": _MODEL_REQUEST_ID,
+            "request": {"subtype": "initialize", "hooks": None},
+        }, separators=(",", ":")).encode("utf-8") + b"\n"
+        process.stdin.write(body)
+        await process.stdin.drain()
+        for _ in range(_MODEL_MESSAGE_LIMIT):
+            line = await process.stdout.readline()
+            if not line:
+                raise RuntimeError("Claude exited before reporting its models")
+            total += len(line)
+            if total > _MODEL_OUTPUT_LIMIT:
+                raise RuntimeError("Claude model response is too large")
+            try:
+                event = json.loads(line)
+            except (UnicodeError, ValueError):
+                continue
+            response = event.get("response") if isinstance(event, dict) and \
+                event.get("type") == "control_response" else None
+            if not isinstance(response, dict) or \
+                    response.get("request_id") != _MODEL_REQUEST_ID:
+                continue
+            if response.get("subtype") != "success":
+                raise RuntimeError(str(response.get("error") or
+                                       "Claude refused model discovery")[:400])
+            payload = response.get("response")
+            payload = payload if isinstance(payload, dict) else {}
+            return parse_model_catalog(payload.get("models"))
+        raise RuntimeError("Claude returned too many unrelated model messages")
+    finally:
+        await driver_base.end_probe(process)
 
 
 def _task_row(item) -> dict:
@@ -100,6 +234,7 @@ class ClaudeDriver(Driver):
     supports_steering = True
     steering_acknowledged = True
     supports_side_questions = True
+    dynamic_model_options = True
     release_source = {"kind": "npm", "package": "@anthropic-ai/claude-code"}
     upgrade_source = {"kind": "self", "args": ["update"]}
 
@@ -116,26 +251,29 @@ class ClaudeDriver(Driver):
     def default_permission(self) -> str:
         return "auto"
 
-    def model_options(self):
-        # aliases resolved by the CLI to the latest model of each tier (claude 2.1.219)
-        return [
-            {"value": "", "label": "Default", "hint": "CLI default model"},
-            {"value": "fable", "label": "Fable", "hint": "Latest Fable - most capable"},
-            {"value": "opus", "label": "Opus", "hint": "Latest Opus"},
-            {"value": "sonnet", "label": "Sonnet", "hint": "Latest Sonnet"},
-            {"value": "haiku", "label": "Haiku", "hint": "Latest Haiku - fast and cheap"},
-        ]
+    def _fallback_model_options(self):
+        # Stable family aliases remain useful on older CLIs which predate the
+        # initialize catalog. A successful discovery replaces this whole list.
+        return _static_model_options()
+
+    async def _discover_model_options(self, force: bool):
+        binary = self.resolved_binary()
+        if not binary:
+            raise RuntimeError("Claude binary not found")
+        return driver_base.ModelCatalogResult(
+            await _read_model_catalog(binary), source="engine")
 
     def effort_options(self):
-        # claude --effort <low|medium|high|xhigh|max> (claude 2.1.219)
-        return [
-            {"value": "", "label": "Default", "hint": "CLI default effort"},
-            {"value": "low", "label": "Low", "hint": "Fastest, minimal reasoning"},
-            {"value": "medium", "label": "Medium", "hint": "Balanced"},
-            {"value": "high", "label": "High", "hint": "More reasoning"},
-            {"value": "xhigh", "label": "X-High", "hint": "Extensive reasoning"},
-            {"value": "max", "label": "Max", "hint": "Maximum reasoning"},
-        ]
+        seen = {}
+        for model in self.model_options():
+            for option in model.get("effort_options") or []:
+                if isinstance(option, dict) and isinstance(option.get("value"), str):
+                    seen.setdefault(option["value"], dict(option))
+        if len(seen) <= 1:
+            return _claude_efforts()
+        order = {value: index for index, value in enumerate(("",) + _EFFORT_ORDER)}
+        return sorted(seen.values(), key=lambda item: (
+            order.get(item["value"], len(order)), item["value"]))
 
     def tool_options(self):
         return [
@@ -580,6 +718,14 @@ class ClaudeDriver(Driver):
             if rid == "init_1":
                 # the control channel answered: side questions can ride it
                 ctx["control_ready"] = resp.get("subtype") == "success"
+                if ctx["control_ready"] and isinstance(resp.get("response"), dict):
+                    try:
+                        options = parse_model_catalog(resp["response"].get("models"))
+                        self._model_catalog_state().ingest(options, source="turn")
+                    except Exception:
+                        # Picker metadata is optional and cannot affect the
+                        # control channel's readiness for this real turn.
+                        pass
                 return []
             if not rid.startswith(_ID_SQ_PREFIX):
                 return []

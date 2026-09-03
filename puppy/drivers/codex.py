@@ -29,7 +29,8 @@ import shutil
 import time
 
 from puppy import __version__
-from puppy.drivers.base import Driver, ToolUnavailable, clean_env, tool_name
+from puppy.drivers import base as driver_base
+from puppy.drivers.base import Driver, ToolUnavailable, tool_name
 from puppy.user_paths import service_home
 
 log = logging.getLogger("puppy.drivers.codex")
@@ -51,6 +52,18 @@ _ID_TURN = "puppy-turn"
 _ID_INTERRUPT = "puppy-interrupt"
 _ID_STEER_PREFIX = "puppy-steer:"
 _ID_TOOL = "puppy-tool"
+_MODEL_PAGE_LIMIT = 100
+_MODEL_MAX_PAGES = 10
+_MODEL_MAX_ITEMS = 1000
+_APP_SERVER_OUTPUT_LIMIT = 8 * 1024 * 1024
+_APP_SERVER_MESSAGE_LIMIT = 256
+_EFFORT_FALLBACKS = {
+    "low": "Fastest, minimal reasoning",
+    "medium": "Balanced",
+    "high": "More reasoning",
+    "xhigh": "Extensive reasoning",
+    "max": "Maximum reasoning",
+}
 
 
 def _rpc(request_id, method: str, params=None) -> dict:
@@ -102,36 +115,116 @@ def _codex_home() -> str:
     return os.environ.get("CODEX_HOME") or os.path.join(service_home(), ".codex")
 
 
-_models_cache = {"ts": 0.0, "models": None}
+def _effort_label(value: str) -> str:
+    return "X-High" if value == "xhigh" else value.replace("_", " ").title()
 
 
-def _cached_models() -> list:
-    """Models the CLI itself knows about (models_cache.json), 5-min cached."""
-    now = time.time()
-    if _models_cache["models"] is not None and now - _models_cache["ts"] < 300:
-        return _models_cache["models"]
-    models = []
+def _reasoning_options(levels, value_key: str, description_key: str) -> list:
+    options = [{"value": "", "label": "Default",
+                "hint": "Codex model default effort"}]
+    seen = set()
+    for raw in levels or []:
+        if not isinstance(raw, dict):
+            continue
+        value = str(raw.get(value_key) or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        options.append({
+            "value": value, "label": _effort_label(value),
+            "hint": str(raw.get(description_key) or
+                        _EFFORT_FALLBACKS.get(value, "Codex reasoning effort"))[:180],
+        })
+    return options
+
+
+def _default_model_option(options: list) -> dict:
+    preferred = None
+    for item in options:
+        if item.pop("_default", False) and preferred is None:
+            preferred = item
+    efforts = preferred.get("effort_options") if preferred else None
+    if not isinstance(efforts, list):
+        seen = {}
+        for model in options:
+            for effort in model.get("effort_options") or []:
+                if isinstance(effort, dict) and isinstance(effort.get("value"), str):
+                    seen.setdefault(effort["value"], dict(effort))
+        efforts = list(seen.values())
+    default = {"value": "", "label": "Default",
+               "hint": "Codex config.toml default model"}
+    if efforts:
+        default["effort_options"] = [dict(item) for item in efforts]
+    return default
+
+
+def parse_model_catalog(models) -> list:
+    """Normalize app-server ``model/list`` rows, preserving vendor order."""
+    if not isinstance(models, list):
+        raise RuntimeError("Codex model/list returned invalid data")
+    options = []
+    seen = set()
+    for raw in models[:_MODEL_MAX_ITEMS]:
+        if not isinstance(raw, dict) or raw.get("hidden") is True:
+            continue
+        value = str(raw.get("model") or raw.get("id") or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        options.append({
+            "value": value,
+            "label": str(raw.get("displayName") or value).strip()[:120],
+            "hint": str(raw.get("description") or "")[:240],
+            "effort_options": _reasoning_options(
+                raw.get("supportedReasoningEfforts"),
+                "reasoningEffort", "description"),
+            "_default": raw.get("isDefault") is True,
+        })
+    default = _default_model_option(options)
+    return [default] + options
+
+
+def _cache_file_model_options() -> list:
+    """Validated cold-start fallback from the CLI-owned on-disk cache."""
+    options = []
     try:
         with open(os.path.join(_codex_home(), "models_cache.json"), encoding="utf-8") as f:
             data = json.load(f)
         for m in data.get("models") or []:
             if not isinstance(m, dict) or m.get("visibility") != "list" or not m.get("slug"):
                 continue
-            models.append({
-                "slug": m["slug"],
+            options.append({
+                "value": str(m["slug"]),
                 "label": m.get("display_name") or m["slug"],
-                "hint": (m.get("description") or "")[:90],
-                "efforts": [(lv.get("effort"), (lv.get("description") or "")[:90])
-                            for lv in m.get("supported_reasoning_levels") or []
-                            if isinstance(lv, dict) and lv.get("effort")],
-                "priority": m.get("priority") if isinstance(m.get("priority"), int) else 999,
+                "hint": str(m.get("description") or "")[:240],
+                "effort_options": _reasoning_options(
+                    m.get("supported_reasoning_levels"), "effort", "description"),
+                "_priority": m.get("priority")
+                if isinstance(m.get("priority"), int) else 999,
             })
-        models.sort(key=lambda m: m["priority"])
+        options.sort(key=lambda item: item.pop("_priority"))
     except Exception as e:
         log.warning("models_cache.json unreadable: %s", e)
-        models = []
-    _models_cache.update(ts=now, models=models)
-    return models
+        return []
+    if not options:
+        return []
+    return [_default_model_option(options)] + options
+
+
+def _static_model_options() -> list:
+    levels = [{"effort": key, "description": value}
+              for key, value in _EFFORT_FALLBACKS.items()]
+    efforts = _reasoning_options(levels, "effort", "description")
+    return [
+        {"value": "", "label": "Default", "hint": "Codex config.toml default model",
+         "effort_options": efforts},
+        {"value": "gpt-5.6-sol", "label": "GPT-5.6 Sol",
+         "hint": "Flagship coding model", "effort_options": efforts},
+        {"value": "gpt-5.5", "label": "GPT-5.5", "hint": "",
+         "effort_options": efforts},
+        {"value": "gpt-5.4-mini", "label": "GPT-5.4 Mini", "hint": "Fast and cheap",
+         "effort_options": efforts},
+    ]
 
 
 _quota_cache = {"ts": 0.0, "quota": None, "account_as_of": 0.0}
@@ -222,14 +315,21 @@ def _weekly_from_rl(rl):
     return None
 
 
-async def _app_server_response(process, request_id: int, deadline: float) -> dict:
-    for _ in range(64):
+async def _app_server_response(process, request_id, deadline: float,
+                               purpose: str = "app-server request",
+                               budget=None) -> dict:
+    budget = budget if isinstance(budget, dict) else {"bytes": 0, "messages": 0}
+    while budget["messages"] < _APP_SERVER_MESSAGE_LIMIT:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise RuntimeError("account usage request timed out")
+            raise RuntimeError("{} timed out".format(purpose))
         line = await asyncio.wait_for(process.stdout.readline(), timeout=remaining)
         if not line:
-            raise RuntimeError("account usage service exited before responding")
+            raise RuntimeError("Codex exited before {} completed".format(purpose))
+        budget["messages"] += 1
+        budget["bytes"] += len(line)
+        if budget["bytes"] > _APP_SERVER_OUTPUT_LIMIT:
+            raise RuntimeError("Codex app-server response is too large")
         try:
             value = json.loads(line)
         except (UnicodeError, ValueError):
@@ -239,47 +339,25 @@ async def _app_server_response(process, request_id: int, deadline: float) -> dic
         if value.get("error"):
             error = value["error"]
             message = error.get("message") if isinstance(error, dict) else str(error)
-            raise RuntimeError(message or "account usage request failed")
+            raise RuntimeError(message or "{} failed".format(purpose))
         result = value.get("result")
         if not isinstance(result, dict):
-            raise RuntimeError("account usage service returned an invalid response")
+            raise RuntimeError("{} returned an invalid response".format(purpose))
         return result
-    raise RuntimeError("account usage service returned too many unrelated messages")
+    raise RuntimeError("Codex returned too many unrelated app-server messages")
 
 
 async def _stop_app_server(process) -> None:
-    if process.stdin is not None:
-        try:
-            process.stdin.close()
-        except (BrokenPipeError, ConnectionError):
-            pass
-    if process.returncode is None:
-        try:
-            await asyncio.wait_for(process.wait(), timeout=0.5)
-        except asyncio.TimeoutError:
-            try:
-                process.terminate()
-            except ProcessLookupError:
-                pass
-    if process.returncode is None:
-        try:
-            await asyncio.wait_for(process.wait(), timeout=2)
-        except asyncio.TimeoutError:
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
-            await process.wait()
+    await driver_base.end_probe(process)
 
 
 async def _read_account_rate_limits(binary: str, timeout: float = 12.0) -> dict:
     """Read the CLI account snapshot through its local JSONL app server."""
-    process = await asyncio.create_subprocess_exec(
-        binary, "app-server", "--stdio",
-        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL, limit=256 * 1024,
-        env=clean_env(dict(os.environ)))
+    process = await driver_base.start_probe(
+        [binary, "app-server", "--stdio"], writable_stdin=True,
+        line_limit=256 * 1024)
     deadline = time.monotonic() + timeout
+    budget = {"bytes": 0, "messages": 0}
 
     async def send(value: dict) -> None:
         body = json.dumps(value, separators=(",", ":")).encode("utf-8") + b"\n"
@@ -295,10 +373,12 @@ async def _read_account_rate_limits(binary: str, timeout: float = 12.0) -> dict:
                 "capabilities": {"experimentalApi": True},
             },
         })
-        await _app_server_response(process, 1, deadline)
+        await _app_server_response(
+            process, 1, deadline, "account usage initialization", budget)
         await send({"method": "initialized"})
         await send({"id": 2, "method": "account/rateLimits/read", "params": None})
-        result = await _app_server_response(process, 2, deadline)
+        result = await _app_server_response(
+            process, 2, deadline, "account usage request", budget)
         # Newer app-server responses can carry several named limits. Prefer the
         # explicit Codex bucket; rateLimits is the backward-compatible shape in
         # the installed 0.149 contract.
@@ -315,6 +395,60 @@ async def _read_account_rate_limits(binary: str, timeout: float = 12.0) -> dict:
         if not isinstance(snapshot, dict):
             raise RuntimeError("account usage service did not return rate limits")
         return snapshot
+    finally:
+        await _stop_app_server(process)
+
+
+async def _read_model_catalog(binary: str, timeout: float = 14.0) -> list:
+    """Read every visible model through the supported app-server protocol."""
+    process = await driver_base.start_probe(
+        [binary, "app-server", "--stdio"], writable_stdin=True)
+    deadline = time.monotonic() + timeout
+    budget = {"bytes": 0, "messages": 0}
+
+    async def send(value: dict) -> None:
+        body = json.dumps(value, separators=(",", ":")).encode("utf-8") + b"\n"
+        process.stdin.write(body)
+        await process.stdin.drain()
+
+    try:
+        await send({
+            "id": "puppy-model-init", "method": "initialize",
+            "params": {
+                "clientInfo": {"name": "puppy", "version": __version__},
+                "capabilities": {"experimentalApi": True},
+            },
+        })
+        await _app_server_response(
+            process, "puppy-model-init", deadline,
+            "model catalog initialization", budget)
+        await send({"method": "initialized"})
+        cursor = None
+        rows = []
+        seen_cursors = set()
+        for page in range(_MODEL_MAX_PAGES):
+            request_id = "puppy-model-page-{}".format(page)
+            params = {"limit": _MODEL_PAGE_LIMIT, "includeHidden": False}
+            if cursor is not None:
+                params["cursor"] = cursor
+            await send({"id": request_id, "method": "model/list", "params": params})
+            result = await _app_server_response(
+                process, request_id, deadline, "model catalog request", budget)
+            data = result.get("data")
+            if not isinstance(data, list):
+                raise RuntimeError("Codex model/list returned invalid data")
+            rows.extend(data)
+            if len(rows) > _MODEL_MAX_ITEMS:
+                raise RuntimeError("Codex model catalog exceeds {} entries".format(
+                    _MODEL_MAX_ITEMS))
+            cursor = result.get("nextCursor")
+            if cursor is None:
+                return parse_model_catalog(rows)
+            if not isinstance(cursor, str) or not cursor or cursor in seen_cursors:
+                raise RuntimeError("Codex model/list returned an invalid cursor")
+            seen_cursors.add(cursor)
+        raise RuntimeError("Codex model catalog exceeded {} pages".format(
+            _MODEL_MAX_PAGES))
     finally:
         await _stop_app_server(process)
 
@@ -510,8 +644,12 @@ class CodexDriver(Driver):
     uses_stdin_stream = True
     supports_steering = True
     steering_acknowledged = True
+    dynamic_model_options = True
     release_source = {"kind": "npm", "package": "@openai/codex"}
     upgrade_source = {"kind": "self", "args": ["update"]}
+
+    def __init__(self):
+        self._cache_file_options = None
 
     def permission_options(self):
         return [
@@ -523,34 +661,36 @@ class CodexDriver(Driver):
     def default_permission(self) -> str:
         return "workspace-write"
 
-    def model_options(self):
-        # derived from the CLI's own models_cache.json; static fallback if unreadable
-        opts = [{"value": "", "label": "Default", "hint": "config.toml default model"}]
-        models = _cached_models()
-        if models:
-            opts += [{"value": m["slug"], "label": m["label"], "hint": m["hint"]} for m in models]
-        else:
-            opts += [{"value": "gpt-5.6-sol", "label": "GPT-5.6 Sol", "hint": "Flagship coding model"},
-                     {"value": "gpt-5.5", "label": "GPT-5.5", "hint": ""},
-                     {"value": "gpt-5.4-mini", "label": "GPT-5.4 Mini", "hint": "Fast and cheap"}]
-        return opts
+    def _fallback_model_options(self):
+        if self._cache_file_options is None:
+            self._cache_file_options = _cache_file_model_options()
+        return self._cache_file_options or _static_model_options()
+
+    def _fallback_model_source(self) -> str:
+        self._fallback_model_options()
+        return "cache-file" if self._cache_file_options else "static"
+
+    async def _discover_model_options(self, force: bool):
+        binary = self.resolved_binary()
+        if not binary:
+            raise RuntimeError("Codex binary not found")
+        return driver_base.ModelCatalogResult(
+            await _read_model_catalog(binary), source="engine")
 
     def effort_options(self):
-        # union of supported_reasoning_levels across cached models (canonical order)
-        opts = [{"value": "", "label": "Default", "hint": "config.toml default effort"}]
-        seen = {}
-        for m in _cached_models():
-            for effort, desc in m["efforts"]:
-                if effort and effort not in seen:
-                    seen[effort] = desc
-        if not seen:
-            seen = {"low": "Fastest, minimal reasoning", "medium": "Balanced", "high": "More reasoning",
-                    "xhigh": "Extensive reasoning", "max": "Maximum reasoning"}
-        order = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
-        for lv in sorted(seen, key=lambda x: order.index(x) if x in order else 99):
-            opts.append({"value": lv, "label": lv.capitalize() if lv != "xhigh" else "X-High",
-                         "hint": seen[lv]})
-        return opts
+        seen = {"": {"value": "", "label": "Default",
+                     "hint": "Codex config.toml default effort"}}
+        for model in self.model_options():
+            for option in model.get("effort_options") or []:
+                if isinstance(option, dict) and isinstance(option.get("value"), str):
+                    seen.setdefault(option["value"], dict(option))
+        if len(seen) == 1:
+            for value, hint in _EFFORT_FALLBACKS.items():
+                seen[value] = {"value": value, "label": _effort_label(value), "hint": hint}
+        order = ["", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+        return sorted(seen.values(), key=lambda item: (
+            order.index(item["value"]) if item["value"] in order else len(order),
+            item["value"]))
 
     def _extra_status(self):
         return {"quota": _weekly_quota()}

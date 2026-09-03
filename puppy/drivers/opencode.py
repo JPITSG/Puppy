@@ -13,25 +13,21 @@ per-session model control used by the other engines.
 """
 from __future__ import annotations
 
-import asyncio
 import json
-import logging
 import os
 import re
 import sqlite3
-import time
 from urllib.parse import quote
 
 from puppy import __version__
+from puppy.drivers import base as driver_base
 from puppy.drivers.base import Driver, clean_env
 from puppy.user_paths import service_home
 
-log = logging.getLogger("puppy.drivers.opencode")
-
 ACP_PROTOCOL = 1
 PUPPY_AGENT = "puppy_console"
-CATALOG_TTL_SECONDS = 300
 CATALOG_TIMEOUT_SECONDS = 12
+CATALOG_FORCE_TIMEOUT_SECONDS = 20
 CATALOG_OUTPUT_LIMIT = 16 * 1024 * 1024
 
 _ID_INITIALIZE = "puppy:initialize"
@@ -265,11 +261,6 @@ async def _read_catalog_process(process) -> bytes:
             break
         total += len(chunk)
         if total > CATALOG_OUTPUT_LIMIT:
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
-            await process.wait()
             raise RuntimeError("model catalog exceeds {} MiB".format(
                 CATALOG_OUTPUT_LIMIT // (1024 * 1024)))
         chunks.append(chunk)
@@ -353,12 +344,6 @@ class OpenCodeDriver(Driver):
     release_source = {"kind": "npm", "package": "opencode-ai"}
     upgrade_source = {"kind": "self", "args": ["upgrade"]}
 
-    def __init__(self):
-        self._catalog = []
-        self._catalog_error = ""
-        self._catalog_ts = 0.0
-        self._catalog_lock = None
-
     def permission_options(self):
         return [
             {"value": "auto", "label": "Standard",
@@ -376,98 +361,76 @@ class OpenCodeDriver(Driver):
     def default_permission(self) -> str:
         return "auto"
 
-    async def refresh_model_options(self, force: bool = False) -> None:
-        now = time.time()
-        if not force and self._catalog_ts and now - self._catalog_ts < CATALOG_TTL_SECONDS:
-            return
-        binary = self.resolved_binary()
-        if not binary:
-            self._catalog = []
-            self._catalog_error = "OpenCode binary not found"
-            self._catalog_ts = now
-            return
-        if self._catalog_lock is None:
-            self._catalog_lock = asyncio.Lock()
-        async with self._catalog_lock:
-            now = time.time()
-            if not force and self._catalog_ts and now - self._catalog_ts < CATALOG_TTL_SECONDS:
-                return
-            try:
-                env = clean_env(dict(os.environ))
-                runtime_home = os.path.expanduser("~")
-                if runtime_home and runtime_home != "~":
-                    env.setdefault("HOME", runtime_home)
-                process = await asyncio.create_subprocess_exec(
-                    binary, "models", "--verbose", cwd="/", env=env,
-                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
-                try:
-                    output = await asyncio.wait_for(
-                        _read_catalog_process(process), timeout=CATALOG_TIMEOUT_SECONDS)
-                except asyncio.TimeoutError:
-                    if process.returncode is None:
-                        try:
-                            process.kill()
-                        except ProcessLookupError:
-                            pass
-                        await process.wait()
-                    raise RuntimeError("model discovery timed out")
-                except asyncio.CancelledError:
-                    if process.returncode is None:
-                        try:
-                            process.kill()
-                        except ProcessLookupError:
-                            pass
-                        await process.wait()
-                    raise
-                text = output.decode(errors="replace")
-                if process.returncode:
-                    detail = text.strip().splitlines()[-1] if text.strip() else \
-                        "model discovery exited {}".format(process.returncode)
-                    raise RuntimeError(detail[:400])
-                catalog = parse_model_catalog(text)
-                if not catalog:
-                    raise RuntimeError("OpenCode reported no models")
-                self._catalog = catalog
-                self._catalog_error = ""
-            except Exception as exc:
-                # Keep a previously good catalog through a transient provider
-                # or network failure so an established session control does not
-                # suddenly lose every model choice.
-                self._catalog_error = str(exc)[:400]
-                log.warning("OpenCode model discovery failed: %s", exc)
-            self._catalog_ts = time.time()
-
-    def model_catalog_error(self) -> str:
-        return self._catalog_error
-
-    def model_catalog_loaded(self) -> bool:
-        return bool(self._catalog_ts)
-
-    def model_options(self):
+    @staticmethod
+    def _catalog_options(catalog: list) -> list:
         options = [{
             "value": "", "label": "Default", "hint": "OpenCode default model",
             "effort_options": [{"value": "", "label": "Default",
                                 "hint": "OpenCode model default"}],
         }]
-        for item in self._catalog:
+        for item in catalog:
             option = dict(item)
-            provider = str(option.get("provider_label") or option.get("provider") or "").strip()
+            provider = str(option.get("provider_label") or
+                           option.get("provider") or "").strip()
             label = str(option.get("label") or option.get("value") or "").strip()
             if provider:
                 option["label"] = "{} · {}".format(provider, label)
             options.append(option)
         return options
 
+    def _fallback_model_options(self):
+        return self._catalog_options([])
+
+    def _fallback_model_source(self) -> str:
+        return "none"
+
+    def model_catalog_timeout(self, force: bool) -> float:
+        return CATALOG_FORCE_TIMEOUT_SECONDS if force else CATALOG_TIMEOUT_SECONDS
+
+    @staticmethod
+    def _refresh_flag_unsupported(text: str) -> bool:
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", str(text or "")).lower()
+        return "refresh" in plain and any(phrase in plain for phrase in (
+            "unknown argument", "unknown option", "unrecognized option",
+            "unexpected argument"))
+
+    async def _run_catalog_command(self, binary: str, refresh: bool) -> tuple:
+        env = clean_env(dict(os.environ))
+        runtime_home = os.path.expanduser("~")
+        if runtime_home and runtime_home != "~":
+            env.setdefault("HOME", runtime_home)
+        argv = [binary, "models", "--verbose"]
+        if refresh:
+            argv.append("--refresh")
+        process = await driver_base.start_probe(argv, env=env)
+        try:
+            output = await _read_catalog_process(process)
+            return process.returncode, output.decode(errors="replace")
+        finally:
+            await driver_base.end_probe(process)
+
+    async def _discover_model_options(self, force: bool):
+        binary = self.resolved_binary()
+        if not binary:
+            raise RuntimeError("OpenCode binary not found")
+        code, text = await self._run_catalog_command(binary, force)
+        note = ""
+        if code and force and self._refresh_flag_unsupported(text):
+            code, text = await self._run_catalog_command(binary, False)
+            note = ("This OpenCode version cannot force its provider cache; "
+                    "Puppy re-read the CLI's current model list instead")
+        if code:
+            detail = text.strip().splitlines()[-1] if text.strip() else \
+                "model discovery exited {}".format(code)
+            raise RuntimeError(detail[:400])
+        catalog = parse_model_catalog(text)
+        if not catalog:
+            raise RuntimeError("OpenCode reported no models")
+        return driver_base.ModelCatalogResult(
+            self._catalog_options(catalog), source="engine", note=note)
+
     def default_model(self) -> str:
         return ""
-
-    def effort_options_for_model(self, model: str):
-        for item in self.model_options():
-            if item.get("value") == model:
-                options = item.get("effort_options")
-                if isinstance(options, list):
-                    return options
-        return [{"value": "", "label": "Default", "hint": "OpenCode model default"}]
 
     def effort_options(self):
         seen = {"": {"value": "", "label": "Default", "hint": "OpenCode model default"}}

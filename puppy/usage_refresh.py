@@ -85,7 +85,12 @@ async def maybe_refresh(force: bool = False) -> dict:
     if interval <= 0 and not force:
         return payload()
     requested_at = time.monotonic()
-    if not force and not _due(requested_at, interval):
+    # A second caller arriving after the first marked its attempt but before it
+    # completed must wait on the lock and observe that result. Treating the
+    # fresh attempt timestamp as a completed TTL hit lets it return stale quota.
+    in_flight = float(_state["last_attempt_mono"] or 0.0) > \
+        float(_state["last_completed_mono"] or 0.0)
+    if not force and not in_flight and not _due(requested_at, interval):
         return payload()
 
     async with _get_lock():

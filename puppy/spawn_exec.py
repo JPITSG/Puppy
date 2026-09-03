@@ -1789,10 +1789,23 @@ def _engine_lines(engines: list) -> list:
         lines.append("  models: (default){}".format(
             (", " + ", ".join(models[:24]) +
              (", ..." if len(models) > 24 else "")) if models else ""))
-        efforts = [value for value in
-                   _option_values(item.get("effort_options") or []) if value]
-        if efforts:
-            lines.append("  efforts: (default), " + ", ".join(efforts))
+        specific = []
+        for model in item.get("model_options") or []:
+            if not isinstance(model, dict) or not model.get("value") or \
+                    not isinstance(model.get("effort_options"), list):
+                continue
+            values = [value for value in
+                      _option_values(model["effort_options"]) if value]
+            specific.append("{}={}".format(
+                model["value"], "/".join(values) if values else "default only"))
+        if specific:
+            lines.append("  model efforts: {}{}".format(
+                "; ".join(specific[:12]), "; ..." if len(specific) > 12 else ""))
+        else:
+            efforts = [value for value in
+                       _option_values(item.get("effort_options") or []) if value]
+            if efforts:
+                lines.append("  efforts: (default), " + ", ".join(efforts))
         modes = _option_values(item.get("permission_options") or [])
         if modes:
             lines.append("  permission modes: {} (default {})".format(
@@ -1802,11 +1815,15 @@ def _engine_lines(engines: list) -> list:
 
 async def _local_engines() -> list:
     from puppy.drivers import all_drivers
+    drivers = all_drivers()
+    statuses = await asyncio.gather(*(driver.status() for driver in drivers))
+    dynamic = [driver for driver, status in zip(drivers, statuses)
+               if driver.dynamic_model_options and status.get("installed")]
+    await asyncio.gather(
+        *(driver.refresh_model_options() for driver in dynamic),
+        return_exceptions=True)
     engines = []
-    for driver in all_drivers():
-        st = await driver.status()
-        if driver.dynamic_model_options and st.get("installed"):
-            await driver.refresh_model_options()
+    for driver, st in zip(drivers, statuses):
         engines.append({
             "key": driver.key, "installed": st.get("installed"),
             "version": st.get("version"), "auth": st.get("auth"),

@@ -76,6 +76,7 @@ import asyncio
 import logging
 import os
 import re
+import signal
 import shutil
 import time
 
@@ -85,6 +86,164 @@ log = logging.getLogger("puppy.drivers")
 
 STATUS_TTL_SECONDS = 300
 _status_cache = {}  # key -> (ts, dict)
+
+MODEL_CATALOG_TTL_SECONDS = 300
+MODEL_CATALOG_RETRY_SECONDS = (30, 60, 120, 300)
+MODEL_CATALOG_FORCE_MIN_INTERVAL_SECONDS = 5
+MODEL_PROBE_LINE_LIMIT = 4 * 1024 * 1024
+
+
+class ModelCatalogResult:
+    """One successful vendor discovery, before it replaces last-known-good.
+
+    ``source`` describes where the choices came from (normally ``engine``;
+    Claude can also learn them from a real turn). ``note`` is a successful but
+    important qualification, such as an older CLI that could only re-read its
+    local cache when a person explicitly requested a network refresh.
+    """
+
+    def __init__(self, options: list, source: str = "engine", note: str = ""):
+        self.options = options
+        self.source = str(source or "engine")[:40]
+        self.note = str(note or "")[:400]
+
+
+class ModelCatalog:
+    """Loop-safe, in-memory last-known-good state for a dynamic model list."""
+
+    def __init__(self):
+        self.options = []
+        self.source = ""
+        self.error = ""
+        self.note = ""
+        self.checked_at = None
+        self.updated_at = None
+        self.next_due_mono = 0.0
+        self.completed_mono = 0.0
+        self.attempt_forced = False
+        self.force_started_mono = 0.0
+        self.failures = 0
+        self._lock = None
+        self._lock_loop = None
+
+    def lock(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        if self._lock is None or self._lock_loop is not loop:
+            self._lock = asyncio.Lock()
+            self._lock_loop = loop
+        return self._lock
+
+    def due(self, now: float) -> bool:
+        return not self.next_due_mono or now >= self.next_due_mono
+
+    @staticmethod
+    def _validated(options) -> list:
+        if not isinstance(options, list):
+            raise RuntimeError("model discovery returned an invalid catalog")
+        kept = []
+        seen = set()
+        for raw in options:
+            if not isinstance(raw, dict) or not isinstance(raw.get("value"), str):
+                continue
+            value = raw["value"]
+            if value in seen:
+                continue
+            seen.add(value)
+            kept.append(dict(raw))
+        # A Default-only result is not a model catalog. Publishing it over a
+        # previous good list would make every named choice disappear.
+        if not any(item["value"] for item in kept):
+            raise RuntimeError("engine reported no models")
+        return kept
+
+    def succeeded(self, result: ModelCatalogResult, forced: bool) -> None:
+        now_mono = time.monotonic()
+        now_wall = time.time()
+        self.options = self._validated(result.options)
+        self.source = result.source
+        self.error = ""
+        self.note = result.note
+        self.checked_at = now_wall
+        self.updated_at = now_wall
+        self.completed_mono = now_mono
+        self.attempt_forced = bool(forced)
+        self.failures = 0
+        self.next_due_mono = now_mono + MODEL_CATALOG_TTL_SECONDS
+
+    def failed(self, exc: Exception, forced: bool) -> None:
+        now_mono = time.monotonic()
+        self.failures += 1
+        delay = MODEL_CATALOG_RETRY_SECONDS[
+            min(self.failures - 1, len(MODEL_CATALOG_RETRY_SECONDS) - 1)]
+        self.error = (str(exc) or exc.__class__.__name__)[:400]
+        self.note = ""
+        self.checked_at = time.time()
+        self.completed_mono = now_mono
+        self.attempt_forced = bool(forced)
+        self.next_due_mono = now_mono + delay
+
+    def ingest(self, options: list, source: str = "turn") -> None:
+        """Accept a catalog carried by an already-running native protocol."""
+        self.succeeded(ModelCatalogResult(options, source=source), forced=False)
+
+
+async def start_probe(argv: list, *, writable_stdin: bool = False,
+                      cwd: str = "/", env=None,
+                      line_limit: int = MODEL_PROBE_LINE_LIMIT):
+    """Start a no-turn CLI probe in its own bounded process group."""
+    return await asyncio.create_subprocess_exec(
+        *argv,
+        stdin=asyncio.subprocess.PIPE if writable_stdin else asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        cwd=cwd,
+        env=clean_env(dict(os.environ)) if env is None else env,
+        limit=line_limit,
+        start_new_session=True)
+
+
+async def end_probe(process) -> None:
+    """Close a probe and, if needed, stop every child it brought with it."""
+    if process is None:
+        return
+    if process.stdin is not None:
+        try:
+            process.stdin.close()
+        except (BrokenPipeError, ConnectionError):
+            pass
+
+    def group_alive() -> bool:
+        try:
+            os.killpg(process.pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+
+    if process.returncode is not None and not group_alive():
+        return
+    for sig, timeout in ((signal.SIGINT, 0.75), (signal.SIGKILL, 2.0)):
+        try:
+            os.killpg(process.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            try:
+                process.send_signal(sig)
+            except ProcessLookupError:
+                if not group_alive():
+                    return
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            await asyncio.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+            # The leader can exit on INT while a grandchild ignores it. The
+            # group, rather than only process.returncode, is the cleanup proof.
+            if not group_alive():
+                if process.returncode is None:
+                    try:
+                        await asyncio.wait_for(process.wait(), timeout=0.2)
+                    except asyncio.TimeoutError:
+                        pass
+                return
 
 
 # What an authentication failure looks like when a vendor's own surface says
@@ -255,6 +414,7 @@ class Driver:
     # served to the ordinary session controls.
     dynamic_model_options = False
     allow_custom_model = True
+    model_catalog_timeout_seconds = 15.0
     # Loading a native session in a replacement temporary workspace is unsafe
     # for engines which bind permissions and tool routing to the creation cwd.
     resume_requires_same_cwd = False
@@ -317,17 +477,109 @@ class Driver:
     def model_options(self):
         """[{value, label, hint}] - engine-specific model choices ('' = engine default).
         ``allow_custom_model`` decides whether the picker also offers free text."""
+        state = self._model_catalog_state()
+        options = state.options or self._fallback_model_options()
+        seen = set()
+        result = []
+        for raw in options:
+            if not isinstance(raw, dict) or not isinstance(raw.get("value"), str) or \
+                    raw["value"] in seen:
+                continue
+            seen.add(raw["value"])
+            result.append(dict(raw))
+        return result
+
+    def _model_catalog_state(self) -> ModelCatalog:
+        state = getattr(self, "_model_catalog", None)
+        if state is None:
+            state = ModelCatalog()
+            self._model_catalog = state
+        return state
+
+    def _fallback_model_options(self) -> list:
         return []
 
+    def _fallback_model_source(self) -> str:
+        return "static" if self._fallback_model_options() else "none"
+
+    async def _discover_model_options(self, force: bool) -> ModelCatalogResult:
+        raise RuntimeError("model discovery is not implemented")
+
+    def model_catalog_timeout(self, force: bool) -> float:
+        return float(self.model_catalog_timeout_seconds)
+
     async def refresh_model_options(self, force: bool = False) -> None:
-        """Refresh a driver-owned dynamic catalog. Static drivers do nothing."""
+        """Refresh a dynamic catalog without ever discarding last-known-good.
+
+        Concurrent callers share an attempt. A force which arrived during an
+        ordinary attempt still gets one forced attempt afterwards, because an
+        engine such as OpenCode gives the forced form stronger cache semantics.
+        """
+        if not self.dynamic_model_options:
+            return None
+        state = self._model_catalog_state()
+        requested_at = time.monotonic()
+        if not force and not state.due(requested_at):
+            return None
+        async with state.lock():
+            now = time.monotonic()
+            if state.completed_mono >= requested_at and \
+                    (not force or state.attempt_forced):
+                return None
+            if not force and not state.due(now):
+                return None
+            if force and state.force_started_mono and \
+                    now - state.force_started_mono < \
+                    MODEL_CATALOG_FORCE_MIN_INTERVAL_SECONDS:
+                return None
+            # Never execute a package while its vendor updater is replacing it.
+            if cli_upgrade.is_running(self.key):
+                return None
+            if force:
+                state.force_started_mono = now
+            try:
+                result = await asyncio.wait_for(
+                    self._discover_model_options(force),
+                    timeout=self.model_catalog_timeout(force))
+                if isinstance(result, list):
+                    result = ModelCatalogResult(result)
+                if not isinstance(result, ModelCatalogResult):
+                    raise RuntimeError("model discovery returned an invalid result")
+                state.succeeded(result, force)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if isinstance(exc, asyncio.TimeoutError):
+                    exc = RuntimeError("model discovery timed out after {}s".format(
+                        int(self.model_catalog_timeout(force))))
+                state.failed(exc, force)
+                log.warning("%s model discovery failed: %s", self.key, exc)
         return None
 
     def model_catalog_error(self) -> str:
-        return ""
+        return self._model_catalog_state().error
+
+    def model_catalog_note(self) -> str:
+        return self._model_catalog_state().note
+
+    def model_catalog_source(self) -> str:
+        return self._model_catalog_state().source or self._fallback_model_source()
+
+    def model_catalog_checked_at(self):
+        return self._model_catalog_state().checked_at
+
+    def model_catalog_updated_at(self):
+        return self._model_catalog_state().updated_at
+
+    def invalidate_model_options(self) -> None:
+        """Make the next discovery due while retaining visible last-known-good."""
+        state = self._model_catalog_state()
+        state.next_due_mono = 0.0
+        state.force_started_mono = 0.0
 
     def model_catalog_loaded(self) -> bool:
-        return True
+        return not self.dynamic_model_options or \
+            self._model_catalog_state().checked_at is not None
 
     def default_model(self) -> str:
         """Model used when a new/reseeded session does not name one."""
@@ -338,8 +590,14 @@ class Driver:
         return []
 
     def effort_options_for_model(self, model: str):
-        """A dynamic driver may expose variants specific to one model."""
-        return self.effort_options()
+        """Prefer capabilities attached to the selected catalog entry."""
+        for item in self.model_options():
+            if item.get("value") == model and isinstance(item.get("effort_options"), list):
+                return [dict(option) for option in item["effort_options"]
+                        if isinstance(option, dict)]
+        if self.allow_custom_model:
+            return self.effort_options()
+        return [{"value": "", "label": "Default", "hint": "Engine model default"}]
 
     def build_cmd(self, session: dict, first_turn: bool, prompt: str, pinned_id: str,
                   browser_mcp=None, system_prompt: str = "",
@@ -477,24 +735,28 @@ class Driver:
         the command could not run at all. Auth verbs speak through their exit
         code as much as their wording, and warnings can precede the line that
         matters, so unlike _run_quick nothing is thrown away."""
+        p = None
         try:
-            p = await asyncio.create_subprocess_exec(
-                *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            p = await start_probe(list(argv))
             out, _ = await asyncio.wait_for(p.communicate(), timeout=timeout)
             return p.returncode, out.decode(errors="replace").strip()[:4000]
         except Exception as e:
             log.warning("%s probe %s failed: %s", self.key, argv[1:], e)
             return None, ""
+        finally:
+            await end_probe(p)
 
     async def _run_quick(self, argv, timeout: float = 12.0) -> str:
+        p = None
         try:
-            p = await asyncio.create_subprocess_exec(
-                *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            p = await start_probe(list(argv))
             out, _ = await asyncio.wait_for(p.communicate(), timeout=timeout)
             return out.decode(errors="replace").strip().splitlines()[0] if out else ""
         except Exception as e:
             log.warning("%s quick cmd failed: %s", self.key, e)
             return ""
+        finally:
+            await end_probe(p)
 
 
 def clean_env(env: dict) -> dict:

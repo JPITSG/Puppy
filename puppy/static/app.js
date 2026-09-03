@@ -1865,8 +1865,8 @@ function sessionDeleteMessage(session) {
 
 /* ---- engine configuration shorthand ----
    Names an engine + model + effort compactly ("codex 5.6 Sol Max"). Model and
-   effort vocabularies are driver-supplied and change on their own (codex reads
-   its CLI's model cache), so nothing here may know a model by name: display
+   effort vocabularies are driver-supplied and refresh from their engine
+   catalogs, so nothing here may know a model by name: display
    text comes from the live option lists, and the only compaction is peeling off
    a leading family word that most of that engine's models carry - "GPT-5.6-Sol"
    loses its "GPT" because "GPT-5.5" and the rest repeat it, while claude's
@@ -1895,6 +1895,11 @@ function effortOptionsForModel(engine, model) {
   const match = ((engine && engine.model_options) || [])
     .find(option => option && option.value === model);
   if (match && Array.isArray(match.effort_options)) return match.effort_options;
+  /* A catalog-only engine rejects retired/unknown model IDs server-side. Do
+     not offer its global effort union for such a model: those combinations
+     are not evidence-backed and the PATCH would be ignored. */
+  if (engine && engine.allow_custom_model === false)
+    return [{ value: "", label: "Default", hint: "Engine model default" }];
   return [...((engine && engine.effort_options) || [])];
 }
 
@@ -2429,6 +2434,7 @@ const remotePollSequence = {};
 let remotePollTimer = null;
 let remotePollingGeneration = 0;
 const remoteUpdateConnections = new Map();
+const enginePayloadListeners = new Set();
 
 /* Browser-clock anchors for uninterrupted work blocks. The server sends both
    active_since and server_time so a controller can display a remote duration
@@ -2966,12 +2972,13 @@ async function refreshState() {
   state.clockFormat = s.clock_format === "12h" ? "12h" : "24h";
   if (s.notify) { state.notify = s.notify; syncBell(); }
   state.sessionColors = s.session_colors || [];
-  state.engines = Array.isArray(s.engines) ? s.engines : [];
-  state.usageRefresh = s.usage_refresh || state.usageRefresh;
+  rememberEnginePayload(0, {
+    engines: Array.isArray(s.engines) ? s.engines : [],
+    usage_refresh: s.usage_refresh || state.usageRefresh,
+    auto_upgrade: s.auto_upgrade || state.autoUpgrade,
+  });
   rememberUploadSettings(0, s.uploads);
   state.localEngineCheckedAt = 0;
-  state.engMap = {};
-  state.engines.forEach(e => state.engMap[e.key] = e);
   state.backends = Array.isArray(s.backends) ? s.backends : [];
   hydrateBackendLastKnown(state.backends);
   state.workspaceLinks = Array.isArray(s.workspace_links) ? s.workspace_links : [];
@@ -3270,10 +3277,7 @@ async function pollLocalEngines(forceEngines = false) {
     const payload = await api(0, "engines", { timeoutMs: ENGINE_POLL_TIMEOUT });
     if (!payload || !Array.isArray(payload.engines))
       throw new Error("instance returned an invalid engines response");
-    state.engines = payload.engines;
-    state.engMap = {};
-    state.engines.forEach(engine => state.engMap[engine.key] = engine);
-    state.usageRefresh = payload.usage_refresh || state.usageRefresh;
+    rememberEnginePayload(0, payload);
     state.localEngineCheckedAt = Date.now();
   } catch (error) {
     /* A broken local request should not turn the 12-second session poll into
@@ -4841,9 +4845,6 @@ function quotaTitle(e) {
   return parts.join(" · ");
 }
 
-/* Every engine-bearing response (poll, usage refresh, version refresh, engine
-   upgrade) carries the same {engines, usage_refresh} pair. One applier keeps
-   local and remote caches, the footer and Settings in step whatever asked. */
 /* Every node's engine payload is remembered here and nowhere else. Several
    callers do their own partial bookkeeping around it - a poll, a lazy load, the
    settings render - and a field wired into only some of them is precisely how
@@ -4859,6 +4860,10 @@ function rememberEnginePayload(bid, result) {
     state.engines.forEach(engine => state.engMap[engine.key] = engine);
     if (result.usage_refresh) state.usageRefresh = result.usage_refresh;
     if (result.auto_upgrade) state.autoUpgrade = result.auto_upgrade;
+  }
+  for (const listener of [...enginePayloadListeners]) {
+    try { listener(Number(bid) || 0, result.engines); }
+    catch (error) { console.warn("engine payload listener failed", error); }
   }
 }
 
@@ -4881,8 +4886,8 @@ function applyUsageRefreshPayload(bid, result) {
   applyEnginesPayload(bid, result);
 }
 
-/* Installed and latest versions both refresh on their own timers on the node.
-   This is the impatient path: re-probe the CLIs and re-ask the registry now. */
+/* Engine status, published versions and model catalogs refresh on their own
+   timers. This is the impatient path that forces all three checks now. */
 async function refreshEngineVersions(bid, button, nodeName) {
   if (button.disabled) return;
   button.disabled = true;
@@ -4892,8 +4897,20 @@ async function refreshEngineVersions(bid, button, nodeName) {
      "Checking backend…" for this request, then resolves from the result. */
   syncRemoteStateViews();
   try {
-    applyEnginesPayload(bid, await api(bid, "engines/refresh",
-      { method: "POST", timeoutMs: ENGINE_REFRESH_TIMEOUT }));
+    const result = await api(bid, "engines/refresh",
+      { method: "POST", timeoutMs: ENGINE_REFRESH_TIMEOUT });
+    applyEnginesPayload(bid, result);
+    const issues = result.engines.filter(engine => engine && engine.installed &&
+      engine.dynamic_model_options &&
+      (engine.model_catalog_error || engine.model_catalog_note));
+    if (issues.length) {
+      const detail = issues.map(engine =>
+        `${engine.label}: ${engine.model_catalog_error || engine.model_catalog_note}`).join(" · ");
+      toast(`${nodeName}: refreshed; some model lists need attention · ${detail}`,
+        "error", 8000);
+    } else {
+      toast(`${nodeName}: engine status and model lists refreshed`, "ok", 4500);
+    }
   } catch (error) {
     toast(`${nodeName}: ${error.message}`, "error", 7000);
   } finally {
@@ -7347,12 +7364,19 @@ class SessionView {
         const select = this.composerNativeSelects[kind];
         select.onchange = async () => {
           const value = select.value;
+          select.dataset.engineChoiceBusy = "true";
           select.disabled = true;
           try { await apply(value); }
           finally {
-            this.syncNativeComposerChoices();
+            delete select.dataset.engineChoiceBusy;
+            this.syncNativeComposerChoices(kind);
             this.syncComposerMeta();
           }
+        };
+        select.onblur = () => {
+          if (select.dataset.engineChoiceBusy !== "true" &&
+              select.dataset.engineChoicesDirty === "true")
+            this.syncNativeComposerChoices();
         };
       };
       bind("perm", (value) => this.applyPermissionChoice(value));
@@ -7505,6 +7529,8 @@ class SessionView {
   }
 
   syncRemoteState() {
+    this.syncNativeComposerChoices();
+    this.syncComposerMeta();
     this.syncUploadButton();
     const stopping = !!remoteStoppingMessage(this.tab.bid);
     const unavailable = !!this.tab.bid && !backendConnectionAllowed(this.tab.bid);
@@ -10525,10 +10551,15 @@ class SessionView {
     return { options, selected: custom ? "__current_custom__" : current };
   }
 
-  syncNativeComposerChoices() {
+  syncNativeComposerChoices(forceKind = "") {
     if (!this.nativeComposerChoices || !this.composerNativeSelects || !this.session) return;
     for (const kind of ["perm", "model", "effort"]) {
       const select = this.composerNativeSelects[kind];
+      if (forceKind !== kind && select === document.activeElement) {
+        select.dataset.engineChoicesDirty = "true";
+        continue;
+      }
+      delete select.dataset.engineChoicesDirty;
       const spec = this.composerChoiceSpec(kind, true);
       const supplied = spec.options.length > 0;
       const options = [...spec.options];
@@ -13090,7 +13121,7 @@ class SettingsView {
       refresh = el("button", "engine-node-refresh");
       refresh.type = "button";
       refresh.setAttribute("aria-label",
-        `Re-check installed and latest engine versions on ${name}`);
+        `Re-check engine versions, sign-in and model lists on ${name}`);
       refresh.appendChild(refreshIcon(12));
       refresh.onclick = () => refreshEngineVersions(bid, refresh, name);
       head.appendChild(refresh);
@@ -13146,6 +13177,12 @@ class SettingsView {
         if (stale)
           body.appendChild(el("div", "engine-node-message engine-node-stale",
             `Latest-version check unavailable · ${stale.latest_check_error}`));
+        const catalogIssues = engines.filter(e2 => e2.installed &&
+          e2.dynamic_model_options && (e2.model_catalog_error || e2.model_catalog_note));
+        if (catalogIssues.length)
+          body.appendChild(el("div", "engine-node-message engine-node-stale",
+            "Model-list refresh warning · " + catalogIssues.map(e2 =>
+              `${e2.label}: ${e2.model_catalog_error || e2.model_catalog_note}`).join(" · ")));
       }
     };
     return { root, update, setMeta };
@@ -15052,19 +15089,28 @@ function modal(html, className = "") {
   $("modal-root").appendChild(back);
   m.querySelectorAll("select").forEach(select => enhanceChoiceSelect(select));
   let closed = false;
+  const closeListeners = new Set();
   const close = () => {
     if (closed) return;
     closed = true;
     closeChoiceMenu();
     back.remove();
     document.removeEventListener("keydown", escH);
+    for (const listener of closeListeners) {
+      try { listener(); } catch (error) { console.warn("modal close listener failed", error); }
+    }
+    closeListeners.clear();
+  };
+  const onClose = listener => {
+    if (closed) listener();
+    else closeListeners.add(listener);
   };
   back.addEventListener("mousedown", (e) => { if (e.target === back) close(); });
   function escH(e) {
     if (e.key === "Escape" && !e.defaultPrevented && !openChoiceControl) close();
   }
   document.addEventListener("keydown", escH);
-  return { m, close };
+  return { m, close, onClose };
 }
 
 function modalConfirm(title, text) {
@@ -15251,7 +15297,7 @@ function renderWorkspaceBackendOptions(select, execBid) {
 /* new session */
 async function modalNewSession(groupId = null) {
   const beOpts = [{ id: 0, name: backendName(0) }].concat(state.backends);
-  const { m, close } = modal(`<h2>New session</h2>
+  const { m, close, onClose } = modal(`<h2>New session</h2>
     <label>Backend<select id="ns-be">${beOpts.map(b => {
       const offline = b.id && !backendConnectionAllowed(b.id);
       return `<option value="${b.id}"${offline ? " disabled" : ""}>` +
@@ -15333,6 +15379,7 @@ async function modalNewSession(groupId = null) {
     layoutSwatchRow(colorBox);
   };
   window.addEventListener("resize", relayoutColors);
+  onClose(() => window.removeEventListener("resize", relayoutColors));
   const cwdInp = m.querySelector("#ns-cwd");
   const dirBox = m.querySelector("#ns-dirs");
   /* Every new session starts from the configured default, never from wherever
@@ -15397,7 +15444,11 @@ async function modalNewSession(groupId = null) {
   async function loadEngines() {
     const bid = parseInt(beSel.value, 10);
     const sequence = ++engineLoadSequence;
-    let loaded = [];
+    let loaded = bid === 0 ? state.engines : (state.engCache[bid] || []);
+    /* Paint the last observation immediately. A first catalog fetch can take
+       a few seconds, but that should not leave a remote node's usable cached
+       choices as an empty modal in the meantime. */
+    renderEngines(loaded);
     try {
       if (bid && !backendConnectionAllowed(bid))
         throw new Error("the controller reports this backend offline");
@@ -15435,7 +15486,18 @@ async function modalNewSession(groupId = null) {
       }
     }
     if (sequence !== engineLoadSequence || parseInt(beSel.value, 10) !== bid) return;
-    engines = loaded;
+    renderEngines(loaded, true);
+  }
+
+  function renderEngines(loaded, preserve = false) {
+    const previous = preserve ? {
+      engine,
+      permission: permSel.value,
+      model: modelSel.value,
+      effort: effortSel.value,
+      custom: customInp.value,
+    } : null;
+    engines = Array.isArray(loaded) ? loaded : [];
     engBox.innerHTML = "";
     for (const e2 of engines) {
       const card = el("div", "ep");
@@ -15447,9 +15509,12 @@ async function modalNewSession(groupId = null) {
       card.onclick = () => pick(e2.key);
       engBox.appendChild(card);
     }
-    pick(engines.length ? engines[0].key : null);
+    const key = previous && engines.some(item => item.key === previous.engine)
+      ? previous.engine : (engines.length ? engines[0].key : null);
+    pick(key, previous && previous.engine === key ? previous : null);
   }
-  function pick(key) {
+
+  function pick(key, previous = null) {
     engine = key;
     engBox.querySelectorAll(".ep").forEach(c => c.classList.toggle("sel", c.dataset.key === key));
     const e2 = engines.find(x => x.key === key);
@@ -15464,24 +15529,41 @@ async function modalNewSession(groupId = null) {
       }
       refreshChoiceSelect(sel);
     };
-    fill(permSel, e2 ? e2.permission_options : [], e2 ? e2.default_permission : "");
+    const permissions = e2 ? e2.permission_options : [];
+    const permission = previous && permissions.some(o => o.value === previous.permission)
+      ? previous.permission : (e2 ? e2.default_permission : "");
+    fill(permSel, permissions, permission);
     const modelOptions = [...((e2 && e2.model_options) || [])];
     if (!e2 || e2.allow_custom_model !== false)
       modelOptions.push({ value: "__custom__", label: "Custom…" });
     if (!modelOptions.length)
       modelOptions.push({ value: "", label: "No models reported", disabled: true });
-    fill(modelSel, modelOptions, modelOptions[0].value);
+    const model = previous && modelOptions.some(o => o.value === previous.model)
+      ? previous.model : modelOptions[0].value;
+    fill(modelSel, modelOptions, model);
+    if (previous && model === "__custom__") customInp.value = previous.custom;
     modelSel.disabled = !e2 || (e2.allow_custom_model === false &&
       !(e2.model_options || []).length);
     refreshChoiceSelect(modelSel);
+    let preserveEffort = !!previous;
     const syncEffort = () => {
       const model = modelSel.value === "__custom__" ? "" : modelSel.value;
-      fill(effortSel, effortOptionsForModel(e2, model), "");
+      const effortOptions = effortOptionsForModel(e2, model);
+      const effort = preserveEffort && effortOptions.some(o => o.value === previous.effort)
+        ? previous.effort : "";
+      preserveEffort = false;
+      fill(effortSel, effortOptions, effort);
       customWrap.classList.toggle("hidden", modelSel.value !== "__custom__");
     };
     modelSel.onchange = syncEffort;
     syncEffort();
   }
+  const enginePayloadListener = (bid, loaded) => {
+    if (!m.isConnected || bid !== (parseInt(beSel.value, 10) || 0)) return;
+    renderEngines(loaded, true);
+  };
+  enginePayloadListeners.add(enginePayloadListener);
+  onClose(() => enginePayloadListeners.delete(enginePayloadListener));
   beSel.onchange = () => { syncWorkspaceSupport(); loadEngines(); };
   syncWorkspaceSupport();
   await loadEngines();
