@@ -67,7 +67,7 @@ DEFAULT_TERMINAL_SYSTEM_PROMPT = (
 DEFAULT_SPAWN_SYSTEM_PROMPT = (
     "When the Puppy spawn tools are available, use them only when the user "
     "explicitly asks you to spawn, delegate to, or consult a separate agent "
-    "(for example \"spawn an agent on NAS using codex to review X\"). A "
+    "(for example \"spawn an agent on build-node using codex to review X\"). A "
     "spawned agent is a one-shot, non-conversational engine run: it receives "
     "a single prompt, works in the project directory on its node, and returns "
     "one final answer for you to act on. It does not see this conversation and "
@@ -95,7 +95,7 @@ DEFAULT_REMOTE_WORKSPACE_SYSTEM_PROMPT = (
 
 DEFAULTS = {
     "instance_name": socket.gethostname() or "puppy",
-    "web": {"host": "0.0.0.0", "port": 10888},
+    "web": {"host": "127.0.0.1", "port": 10888},
     "auth": {"api_token": ""},  # generated on first run; used by remote puppy instances
     "backend": {
         "host": "127.0.0.1",

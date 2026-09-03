@@ -1356,7 +1356,7 @@ async def h_notify_toggle(request: web.Request):
 
 async def h_notify_test(request: web.Request):
     """Run once, now, with the values from the panel (unsaved), so the command
-    can be proven before trusting it from across the house."""
+    can be proven before trusting it from another device."""
     body = await request.json()
     override = {"command": str(body.get("command") or "").strip()[:notify.MAX_COMMAND]}
     if "backend" in body:
@@ -1466,7 +1466,7 @@ def build_app(runtime_web: dict = None,
     app["puppy_mutations"] = 0
     app["puppy_started_monotonic"] = time.monotonic()
     app["puppy_runtime_web"] = dict(runtime_web or web_tls.configured_listener(
-        config.get("web.host", "0.0.0.0"), int(config.get("web.port", 10888))))
+        config.get("web.host", "127.0.0.1"), int(config.get("web.port", 10888))))
     app["puppy_runtime_ssl_context"] = runtime_ssl_context
     app["puppy_runtime_id"] = secrets.token_urlsafe(16)
     app["puppy_bind_verifications"] = {}

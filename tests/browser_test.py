@@ -230,8 +230,8 @@ while True:
                 value = {"ok": backend == 14, "tag": "input", "type": "file",
                          "count": len(files), "files": files, "disabled": False}
             elif "puppySelectOption" in declaration:
-                requested = arguments[0] if arguments[0] is not None else "pl"
-                label = arguments[1] if arguments[1] is not None else "Poland"
+                requested = arguments[0] if arguments[0] is not None else "test-value"
+                label = arguments[1] if arguments[1] is not None else "Testland"
                 value = {"ok": True, "value": requested, "label": label, "index": 1}
             elif "puppySetChecked" in declaration:
                 value = {"ok": True, "checked": bool(arguments[0]), "type": "checkbox"}
@@ -769,7 +769,7 @@ def check_backend_shutdown_notice(ui_source: str) -> None:
         "clearRemoteNodeStopping"))
     script = r"""
 const state = {
-  backends: [{id: 7, name: "laptop"}, {id: 8, name: "other"}],
+  backends: [{id: 7, name: "worker"}, {id: 8, name: "other"}],
   remoteStopping: {}, remoteOk: {7: true, 8: true}, remoteErrors: {},
   remoteSessions: {
     7: [{id: 11, status: "running", active_since: 100},
@@ -1481,7 +1481,7 @@ const makeButton=()=>({disabled:false,isConnected:true,classList:new Classes(),a
   removeAttribute(name){delete this.attributes[name];}});
 __REFRESH__
 const failedButton=makeButton();
-const failedTask=refreshEngineVersions(7,failedButton,"Laptop");
+const failedTask=refreshEngineVersions(7,failedButton,"Worker node");
 const failedDuring={disabled:failedButton.disabled,
   refreshing:failedButton.classList.contains("refreshing"),
   busy:failedButton.attributes["aria-busy"],synced};
@@ -1491,7 +1491,7 @@ const failedAfter={disabled:failedButton.disabled,
   busy:failedButton.attributes["aria-busy"]||null,synced,applied,errors:errors.length};
 shouldFail=false;
 const goodButton=makeButton();
-const goodTask=refreshEngineVersions(7,goodButton,"Laptop");
+const goodTask=refreshEngineVersions(7,goodButton,"Worker node");
 const goodDuring={disabled:goodButton.disabled,
   refreshing:goodButton.classList.contains("refreshing"),synced};
 await goodTask;
@@ -2891,7 +2891,7 @@ __METHOD__
 }
 const view=new TestView();
 const card=view.systemPromptCard([
-  {bid:0,name:"Primary"},{bid:1,name:"Laptop"},{bid:2,name:"Legacy prompts"},
+  {bid:0,name:"Primary"},{bid:1,name:"Worker node"},{bid:2,name:"Legacy prompts"},
   {bid:3,name:"Old backend"}
 ],payload("LOCAL","REMOTE DEFAULT","DEFAULT","TERMINAL DEFAULT","SPAWN DEFAULT"),1);
 const nodeField=card.children[0],select=nodeField.children[1];
@@ -3447,12 +3447,12 @@ def check_flat_session_list(ui_source: str, css_source: str) -> None:
     helpers = ui_source[start:end]
     script = r"""
 const isScratchWorkspace=session=>!!session&&session.workspace_kind==="temporary";
-const backendName=bid=>bid===7?"NAS":"local";
+const backendName=bid=>bid===7?"Builder":"local";
 const tailPath=(path,n)=>path.length>n?"…"+path.slice(-n):path;
 %s
-const plain={cwd:"/etc/scripts/puppy"};
+const plain={cwd:"/srv/apps/puppy"};
 const linked={cwd:"/private/mirror/never-show",workspace:{
-  root:"/volume1/projects/media-tools",node:"NAS"}};
+  root:"/srv/projects/sample-media",node:"Builder"}};
 const scratch={cwd:"/tmp/puppy-scratch/x",workspace_kind:"temporary"};
 const expired={cwd:"/tmp/puppy-scratch/x",workspace_kind:"temporary",
   workspace_missing:true};
@@ -3468,102 +3468,36 @@ console.log(JSON.stringify([
     proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:600]
     assert json.loads(proc.stdout) == [
-        "/etc/scripts/puppy",
-        "/etc/scripts/puppy",
-        "NAS:…projects/media-tools",
-        "NAS:/volume1/projects/media-tools",
+        "/srv/apps/puppy",
+        "/srv/apps/puppy",
+        "Builder:…cts/sample-media",
+        "Builder:/srv/projects/sample-media",
         "Scratch workspace",
         "Scratch workspace expired",
     ]
 
 
-def check_sticky_activity_promotions(ui_source: str, css_source: str) -> None:
-    """Each idle-to-busy event takes #1 and keeps that place after completion."""
+def check_node_owned_session_order(ui_source: str, css_source: str) -> None:
+    """The sidebar consumes the node's durable order without a local overlay."""
     sidebar = ui_source[
         ui_source.index("function renderSidebar()"):
         ui_source.index("\nfunction sessDot", ui_source.index("function renderSidebar()"))]
-    assert "const list = orderSidebarRows(rows, row =>" in sidebar
+    assert "const list = rows" in sidebar
     assert "animateSessionRows(root, () => {" in sidebar
     assert '"IDLE"' not in sidebar
     assert "activity.textContent = backendName(bid);" in sidebar
     assert "`Session idle on ${backendName(bid)}`" in sidebar
-    # a drop persists the durable order only; other automatic promotions stay separate
-    assert ".filter(id => !floated.has(id));" in ui_source
-    assert "sessionActivityPromotions.has(sessionActivityKey(bid, s.id))" in ui_source
-    assert "if (draggedPromotion) sessionActivityPromotions.delete(promotionKey);" \
-        in ui_source
+    # The node owns one durable ordering; the browser has no promotion overlay.
+    assert "orderSidebarRows" not in ui_source
+    assert "sessionActivityPromotions" not in ui_source
+    assert ".filter(id => !floated.has(id));" not in ui_source
     assert "const visualChanged = visualOrder.length !== context.originalOrder.length" \
         in ui_source
-    assert "if (!changed && !draggedPromotion)" in ui_source
+    assert "if (!changed) {" in ui_source
     # both FLIP helpers share one motion clock
     assert ui_source.count("{ duration: REORDER_MOTION_MS, easing: REORDER_EASING });") == 2
     assert ".si-be.node{" in css_source
     assert ".si-be.idle" not in css_source
-
-    def function(name):
-        start = ui_source.index("function " + name + "(")
-        brace = ui_source.index(") {", start) + 2
-        depth = 0
-        for index in range(brace, len(ui_source)):
-            if ui_source[index] == "{":
-                depth += 1
-            elif ui_source[index] == "}":
-                depth -= 1
-                if depth == 0:
-                    return ui_source[start:index + 1]
-        raise AssertionError("unbalanced " + name)
-
-    source = "\n".join(function(name) for name in (
-        "sessionActivityKey", "ingestOneSessionActivity", "orderSidebarRows"))
-    script = r"""
-const sessionActivityAnchors = new Map();
-const sessionActivityPromotions = new Map();
-let sessionActivityPromotionSequence = 0;
-const reportRemoteCompletion = () => {};
-%s
-const rows = [
-  { bid: 0, s: { id: 1, status: "idle" } },
-  { bid: 0, s: { id: 2, status: "running" } },
-  { bid: 2, s: { id: 7, status: "running" } },
-  { bid: 2, s: { id: 9, status: "idle" } },
-];
-const order = () => orderSidebarRows(rows, row =>
-  sessionActivityPromotions.get(sessionActivityKey(row.bid, row.s.id)))
-  .map(row => `${row.bid}:${row.s.id}`);
-const snapshots = [order()];
-rows[1].s.active_since = 900;
-ingestOneSessionActivity(0, rows[1].s, 1000, 2000);
-snapshots.push(order());
-// A later observed activation takes #1 while the prior session is still busy,
-// even when its reported start time is older: promotion is event-ordered.
-rows[2].s.active_since = 100;
-ingestOneSessionActivity(2, rows[2].s, 1000, 2000);
-snapshots.push(order());
-rows[1].s.status = "idle";
-rows[1].s.completion_status = "interrupted";
-ingestOneSessionActivity(0, rows[1].s, null, 3000);
-snapshots.push(order());
-// A later idle -> busy transition promotes that same session again.
-rows[1].s.status = "running";
-ingestOneSessionActivity(0, rows[1].s, null, 4000);
-snapshots.push(order());
-// Ordinary running updates do not compete for #1 again.
-ingestOneSessionActivity(2, rows[2].s, 1100, 4100);
-snapshots.push(order());
-console.log(JSON.stringify({snapshots, promotions: sessionActivityPromotions.size}));
-""" % source
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
-    assert proc.returncode == 0, proc.stderr[:600]
-    result = json.loads(proc.stdout)
-    assert result["snapshots"] == [
-        ["0:1", "0:2", "2:7", "2:9"],
-        ["0:2", "0:1", "2:7", "2:9"],
-        ["2:7", "0:2", "0:1", "2:9"],
-        ["2:7", "0:2", "0:1", "2:9"],
-        ["0:2", "2:7", "0:1", "2:9"],
-        ["0:2", "2:7", "0:1", "2:9"],
-    ], result
-    assert result["promotions"] == 2, result
 
 
 def check_queued_permission_choices(ui_source: str) -> None:
@@ -3691,13 +3625,13 @@ console.log(JSON.stringify({
   kindId: labels("terminal c"),
   spawnRow: labels("spawn"),
   none: labels("xyz"),
-  directiveFull: spawnMentionInsert({node: {bid: 2, name: "NAS.lan"},
+  directiveFull: spawnMentionInsert({node: {bid: 2, name: "build-node.lan"},
     engine: codex, model: {value: "gpt-5.6-sol"}, effort: {value: "max"}}),
-  directiveQuoted: spawnMentionInsert({node: {bid: 2, name: "My NAS"},
+  directiveQuoted: spawnMentionInsert({node: {bid: 2, name: "Build node west"},
     engine: codex, model: {value: ""}, effort: {value: "low"}}),
   directiveLocal: spawnMentionInsert({node: null, engine: {key: "claude"},
     model: {value: "haiku"}, effort: {value: ""}}),
-  directiveFleet: spawnMentionInsert({count: 10, node: {bid: 2, name: "NAS.lan"},
+  directiveFleet: spawnMentionInsert({count: 10, node: {bid: 2, name: "build-node.lan"},
     engine: codex, model: {value: ""}, effort: {value: ""}}),
   effortsShared: spawnEffortOptionsFor(codex, {value: "gpt-5.6-sol"})
     .map(option => option.value),
@@ -3729,13 +3663,13 @@ console.log(JSON.stringify({
     assert result["spawnRow"] == ["New spawn"], result
     assert result["none"] == [], result
     assert result["directiveFull"] == \
-        "@Spawn an agent on NAS.lan using codex gpt-5.6-sol at max effort to", result
+        "@Spawn an agent on build-node.lan using codex gpt-5.6-sol at max effort to", result
     assert result["directiveQuoted"] == \
-        '@Spawn an agent on "My NAS" using codex at low effort to', result
+        '@Spawn an agent on "Build node west" using codex at low effort to', result
     assert result["directiveLocal"] == \
         "@Spawn an agent using claude haiku to", result
     assert result["directiveFleet"] == \
-        "@Spawn 10 agents on NAS.lan using codex to", result
+        "@Spawn 10 agents on build-node.lan using codex to", result
     assert result["effortsShared"] == ["", "low", "max"], result
     assert result["effortsOwn"] == ["", "high"], result
 
@@ -3782,11 +3716,11 @@ const token = text => {
   return m ? m[2] : null;
 };
 console.log(JSON.stringify({
-  full: token("please @Spawn an agent on NAS.lan using codex gpt-5.6-sol at max effort to review it"),
-  quoted: token('@Spawn an agent on "My NAS" using codex at low effort to check'),
+  full: token("please @Spawn an agent on build-node.lan using codex gpt-5.6-sol at max effort to review it"),
+  quoted: token('@Spawn an agent on "Build node west" using codex at low effort to check'),
   bare: token("@Spawn an agent using claude to summarize"),
   modelOnly: token("@Spawn an agent using claude haiku to summarize"),
-  fleet: token("@Spawn 10 agents on NAS.lan using codex to hunt bugs"),
+  fleet: token("@Spawn 10 agents on build-node.lan using codex to hunt bugs"),
   browser: token("see @Browser AB12 now"),
   prose: token("we will spawn an agent later"),
   incomplete: token("@Spawn an agent using to nothing"),
@@ -3797,13 +3731,13 @@ console.log(JSON.stringify({
     assert proc.returncode == 0, proc.stderr[:500]
     tokens = json.loads(proc.stdout.strip())
     assert tokens["full"] == \
-        "@Spawn an agent on NAS.lan using codex gpt-5.6-sol at max effort to", tokens
+        "@Spawn an agent on build-node.lan using codex gpt-5.6-sol at max effort to", tokens
     assert tokens["quoted"] == \
-        '@Spawn an agent on "My NAS" using codex at low effort to', tokens
+        '@Spawn an agent on "Build node west" using codex at low effort to', tokens
     assert tokens["bare"] == "@Spawn an agent using claude to", tokens
     assert tokens["modelOnly"] == "@Spawn an agent using claude haiku to", tokens
     assert tokens["fleet"] == \
-        "@Spawn 10 agents on NAS.lan using codex to", tokens
+        "@Spawn 10 agents on build-node.lan using codex to", tokens
     assert tokens["browser"] == "@Browser AB12", tokens
     assert tokens["prose"] is None, tokens
     assert tokens["incomplete"] is None, tokens
@@ -3835,10 +3769,10 @@ const el=(tag,cls,text)=>new MockNode(tag,cls,text);
 const svg=()=>new MockNode("svg");
 const globeIcon=svg,terminalIcon=svg,plusIcon=svg,refreshIcon=svg,choiceSvg=svg;
 const scrollCaretIntoView=()=>{};
-const state={instance:"pup",backends:[
-  {id:2,name:"NAS.lan",protocol:1,capabilities:["spawn-exec"]},
+const state={instance:"controller",backends:[
+  {id:2,name:"build-node.lan",protocol:1,capabilities:["spawn-exec"]},
   {id:3,name:"OLD",protocol:1,capabilities:[]},
-  {id:5,name:"LAPTOP",protocol:1,capabilities:["spawn-exec"]},
+  {id:5,name:"worker-two",protocol:1,capabilities:["spawn-exec"]},
 ],engines:[
   {key:"claude",label:"Claude Code",installed:true,auth:"ok",version:"2.1.219",
    model_options:[{value:"",label:"Default"},{value:"haiku",label:"Haiku"}],
@@ -3898,13 +3832,13 @@ view.type("@3 ag");
 out.countFiltered=view.labels();
 view.pick("3 agents");
 out.nodeStep=[view.labels(),view.mentionSpawn.step];
-view.type("@na");
+view.type("@build");
 out.nodeFiltered=view.labels();
 const remoteEngines=[{key:"codex",label:"Codex",installed:true,auth:"ok",version:"0.149.0",
   model_options:[{value:"",label:"Default"},{value:"gpt-5.6-sol",label:"GPT-5.6 Sol"}],
   effort_options:[{value:"",label:"Default"},{value:"max",label:"Max"}]}];
 apiResult={engines:remoteEngines,usage_refresh:{}};
-view.pick("NAS.lan");
+view.pick("build-node.lan");
 out.remoteLoading=[view.labels(),apiCalls.map(c=>c.bid+":"+c.path)];
 async function run(){
   await Promise.resolve();await Promise.resolve();
@@ -3919,7 +3853,7 @@ async function run(){
   view.type("@");
   view.pick("New spawn");
   view.pick("1 agent");
-  view.pick("NAS.lan");
+  view.pick("build-node.lan");
   await Promise.resolve();await Promise.resolve();
   view.mentionKeydown({key:"Escape",preventDefault(){},stopPropagation(){}});
   out.backToNode=view.mentionSpawn.step;
@@ -3949,15 +3883,16 @@ run().catch(e=>{console.error(e&&e.stack||e);process.exit(1);});
     assert flow["flat"] == ["New terminal", "New spawn"], flow
     assert flow["countStep"] == [13, "1 agent", "12 agents", "Back", "count"], flow
     assert flow["countFiltered"] == ["3 agents", "Back"], flow
-    assert flow["nodeStep"] == [["pup", "NAS.lan", "LAPTOP", "Back"], "node"], flow
-    assert flow["nodeFiltered"] == ["NAS.lan", "Back"], flow
+    assert flow["nodeStep"] == [
+        ["controller", "build-node.lan", "worker-two", "Back"], "node"], flow
+    assert flow["nodeFiltered"] == ["build-node.lan", "Back"], flow
     assert flow["remoteLoading"] == [["Loading engines…", "Back"],
                                      ["2:engines"]], flow
     assert flow["engineStep"] == [["Codex", "Back"], "engine"], flow
     assert flow["modelStep"] == [["Default", "GPT-5.6 Sol", "Back"], "model"], flow
     assert flow["effortStep"] == [["Default", "Max", "Back"], "effort"], flow
     assert flow["inserted"] == [
-        "@Spawn 3 agents on NAS.lan using codex gpt-5.6-sol at max effort to ",
+        "@Spawn 3 agents on build-node.lan using codex gpt-5.6-sol at max effort to ",
         None, None], flow
     assert flow["backToNode"] == "node", flow
     assert flow["backToCount"] == "count", flow
@@ -4013,7 +3948,7 @@ run().catch(e=>{console.error(e&&e.stack||e);process.exit(1);});
     assert '"@Terminal A8AR" mention' in terminal_tools["type"][
         "inputSchema"]["properties"]["terminal_id"]["description"]
     assert '"@New terminal" mention' in terminal_tools["new_terminal"]["description"]
-    assert '"@Spawn an agent on NAS.lan using codex gpt-5.6-sol at max effort ' \
+    assert '"@Spawn an agent on build-node.lan using codex at max effort ' \
         'to <task>"' in spawn_agent.TOOL_INSTRUCTIONS
     assert "passing those values verbatim" in spawn_agent.TOOL_INSTRUCTIONS
     assert '"@Spawn 10 agents ..."' in spawn_agent.TOOL_INSTRUCTIONS
@@ -4053,11 +3988,11 @@ const sessionWorkspace=session=>session&&session.workspace&&session.workspace.ro
 const backendName=bid=>bid===7?"Executor":"Primary";
 const tailPath=(path,n)=>path.length>n?"…"+path.slice(-n):path;
 %s
-const direct={cwd:"/etc/scripts/puppy"};
+const direct={cwd:"/srv/apps/puppy"};
 const remote={cwd:"/private/mirror/never-show",workspace:{
-  root:"/volume/projects/puppy",node:"NAS"}};
+  root:"/srv/projects/sample-app",node:"Builder"}};
 const missing={cwd:"/stale/scratch/path",workspace_missing:true};
-const long={workspace:{root:"/one/two/three/four/five",node:"NAS"}};
+const long={workspace:{root:"/one/two/three/four/five",node:"Builder"}};
 console.log(JSON.stringify({
   direct:[workspaceLocationLabel(direct,0),workspaceLocationTitle(direct,0)],
   remote:[workspaceLocationLabel(remote,7),workspaceLocationTitle(remote,7)],
@@ -4070,11 +4005,11 @@ console.log(JSON.stringify({
     assert proc.returncode == 0, proc.stderr[:600]
     result = json.loads(proc.stdout)
     assert result == {
-        "direct": ["Primary:/etc/scripts/puppy", "Primary:/etc/scripts/puppy"],
-        "remote": ["NAS:/volume/projects/puppy", "NAS:/volume/projects/puppy"],
+        "direct": ["Primary:/srv/apps/puppy", "Primary:/srv/apps/puppy"],
+        "remote": ["Builder:/srv/projects/sample-app", "Builder:/srv/projects/sample-app"],
         "missing": "Primary:Scratch workspace expired",
-        "longFull": "NAS:/one/two/three/four/five",
-        "long": "NAS:…/three/four/five",
+        "longFull": "Builder:/one/two/three/four/five",
+        "long": "Builder:…ee/four/five",
     }, result
 
     build_start = ui_source.index("  buildDom() {")
@@ -4851,10 +4786,10 @@ async def main() -> None:
                            message="active viewer fresh frame")
 
             # bare hostnames gain a scheme; LAN-ish suffixes stay cleartext
-            await ws.send_json({"type": "navigate", "url": "openhab.lan/start"})
+            await ws.send_json({"type": "navigate", "url": "device.lan/start"})
             navs = await wait_for(lambda: read_lines("navigations.jsonl"),
                                   message="navigation")
-            assert navs[0]["url"] == "http://openhab.lan/start", navs
+            assert navs[0]["url"] == "http://device.lan/start", navs
 
             # Chromium sometimes keeps the requested DOM viewport but resets
             # its screencast surface on the first navigation. A mismatched
@@ -5390,7 +5325,7 @@ async def main() -> None:
                 assert conflicting_shot["result"]["isError"] is True, conflicting_shot
                 invalid_select = await mcp_request(mcp, 124, "tools/call", {
                     "name": "select", "arguments": {
-                        "ref": "b3", "value": "pl", "label": "Poland"}})
+                        "ref": "b3", "value": "test-value", "label": "Testland"}})
                 assert invalid_select["result"]["isError"] is True, invalid_select
                 invalid_check = await mcp_request(mcp, 125, "tools/call", {
                     "name": "check", "arguments": {
@@ -5444,9 +5379,9 @@ async def main() -> None:
                 assert "Moved the pointer over b1" in hovered["result"]["content"][0]["text"]
                 selected_option = await mcp_request(mcp, 109, "tools/call", {
                     "name": "select", "arguments": {
-                        "ref": "b3", "label": "Poland",
+                        "ref": "b3", "label": "Testland",
                         "wait_for": {"text": "Ready", "timeout_ms": 100}}})
-                assert "selected \"Poland\"" in \
+                assert "selected \"Testland\"" in \
                     selected_option["result"]["content"][0]["text"]
                 checked = await mcp_request(mcp, 110, "tools/call", {
                     "name": "check", "arguments": {
@@ -5473,11 +5408,11 @@ async def main() -> None:
 
                 navigated = await mcp_request(mcp, 7, "tools/call", {
                     "name": "navigate", "arguments": {
-                        "url": "router.lan/status", "wait_ms": 0,
-                        "wait_for": {"url_contains": "router.lan", "timeout_ms": 1000}}})
+                        "url": "gateway.lan/status", "wait_ms": 0,
+                        "wait_for": {"url_contains": "gateway.lan", "timeout_ms": 1000}}})
                 navigated_text = navigated["result"]["content"][0]["text"]
                 assert "Observed document domcontentloaded" in navigated_text and \
-                    "Observed URL containing 'router.lan'" in navigated_text, navigated_text
+                    "Observed URL containing 'gateway.lan'" in navigated_text, navigated_text
                 assert len([item for item in session_capture.messages
                             if item.get("type") == "browser_activity"]) == 1
                 assert len([item for item in updates_capture.messages
@@ -5495,9 +5430,9 @@ async def main() -> None:
                            item["params"].get("backendNodeId") == 11
                            for item in read_lines("dom.jsonl"))
                 assert read_lines("navigations.jsonl")[-1]["url"] == \
-                    "http://router.lan/status"
+                    "http://gateway.lan/status"
                 functions = read_lines("agent-functions.jsonl")
-                assert any(item["backend"] == 12 and item["arguments"] == [None, "Poland"]
+                assert any(item["backend"] == 12 and item["arguments"] == [None, "Testland"]
                            for item in functions), functions
                 assert any(item["backend"] == 13 and item["arguments"] == [False]
                            for item in functions), functions
@@ -5651,6 +5586,10 @@ async def main() -> None:
 
             ui_source = (BASE / "puppy" / "static" / "app.js").read_text()
             css_source = (BASE / "puppy" / "static" / "app.css").read_text()
+            index_source = (BASE / "puppy" / "static" / "index.html").read_text()
+            assert 'id="auth-setup-code-wrap" class="hidden"' in index_source
+            assert 'showAuth("setup", !!st.setup_code_required)' in ui_source
+            assert 'setup_code: $("auth-setup-code").value' in ui_source
             check_free_identifiers(ui_source)
             check_static_template_styles(ui_source)
             check_server_clock_format(ui_source)
@@ -5687,7 +5626,7 @@ async def main() -> None:
             check_status_header_activation(ui_source, css_source)
             check_shared_node_order(ui_source, css_source)
             check_flat_session_list(ui_source, css_source)
-            check_sticky_activity_promotions(ui_source, css_source)
+            check_node_owned_session_order(ui_source, css_source)
             check_queued_permission_choices(ui_source)
             check_switch_engine_initial_selection(ui_source)
             check_engine_picker_alignment(css_source)

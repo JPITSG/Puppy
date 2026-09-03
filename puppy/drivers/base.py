@@ -485,7 +485,11 @@ def clean_env(env: dict) -> dict:
                 # A Puppy process may itself have been launched by OpenCode.
                 # Its turn-scoped inline config must never leak into a child
                 # engine; the OpenCode driver installs its own value explicitly.
-                "OPENCODE_CONFIG_CONTENT"):
+                "OPENCODE_CONFIG_CONTENT",
+                # A first-run bootstrap credential belongs only to the WebUI
+                # process and must never reach an engine, terminal, updater,
+                # or spawned-agent subprocess.
+                "PUPPY_SETUP_CODE"):
             out.pop(k, None)
     return out
 

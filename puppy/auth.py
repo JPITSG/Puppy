@@ -1,14 +1,15 @@
-"""Self-hosted auth: PBKDF2 password users, cookie sessions, aiohttp middleware.
+"""Self-hosted auth: PBKDF2 users, cookie sessions, and first-run protection.
 
-Modeled on the facestreamer house pattern (first-run setup, hashed session tokens,
-login rate limiting, origin guard). Remote puppy instances authenticate with the
-X-Puppy-Token header (api_token from data/config.json).
+Remote Puppy instances authenticate with the X-Puppy-Token header (api_token
+from data/config.json).
 """
 from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
 import logging
+import os
 import secrets
 import time
 
@@ -26,6 +27,9 @@ _DUMMY_PWHASH = "pbkdf2_sha256${}$unknown-user-salt${}".format(
     PBKDF2_ITERS, "00" * 32)
 RATE_LIMIT_MAX_KEYS = 4096
 RATE_LIMIT_PRUNE_SECONDS = 60
+SETUP_CODE_ENV = "PUPPY_SETUP_CODE"
+SETUP_CODE_MIN_CHARS = 16
+SETUP_CODE_MAX_CHARS = 128
 
 PUBLIC_PREFIXES = ("/static/", "/api/settings/bind/verify/",
                    "/api/settings/bind/handoff/")
@@ -33,6 +37,55 @@ PUBLIC_PATHS = {"/", "/favicon.ico", "/api/auth/status", "/api/auth/login", "/ap
 
 _attempts = {}  # key -> [timestamps]
 _attempts_last_prune = 0.0
+_setup_code_configured = os.environ.pop(SETUP_CODE_ENV, None)
+_setup_code = None
+
+
+def setup_code_required_for_host(host: str) -> bool:
+    """Return whether an initial-admin listener is reachable beyond loopback."""
+    value = str(host or "").strip().strip("[]").rstrip(".")
+    if value.lower() == "localhost":
+        return False
+    try:
+        return not ipaddress.ip_address(value.split("%", 1)[0]).is_loopback
+    except ValueError:
+        # A wildcard, non-local DNS name, or malformed manual value must never
+        # weaken first-run protection.
+        return True
+
+
+def _setup_code_value() -> str:
+    global _setup_code
+    if _setup_code is not None:
+        return _setup_code
+    configured = _setup_code_configured
+    if configured is None:
+        _setup_code = secrets.token_urlsafe(18)
+        return _setup_code
+    configured = configured.strip()
+    if not SETUP_CODE_MIN_CHARS <= len(configured) <= SETUP_CODE_MAX_CHARS or \
+            any(ord(char) < 33 or ord(char) > 126 for char in configured):
+        raise RuntimeError(
+            "{} must contain {}-{} non-whitespace ASCII characters".format(
+                SETUP_CODE_ENV, SETUP_CODE_MIN_CHARS, SETUP_CODE_MAX_CHARS))
+    _setup_code = configured
+    return _setup_code
+
+
+def setup_code_required(request: web.Request) -> bool:
+    runtime = request.app.get("puppy_runtime_web") or {}
+    host = runtime.get("host", config.get("web.host", "127.0.0.1"))
+    return setup_code_required_for_host(host)
+
+
+def announce_initial_setup(host: str) -> None:
+    """Log the private bootstrap code only when an exposed listener needs it."""
+    if has_users() or not setup_code_required_for_host(host):
+        return
+    log.warning("First-run administrator setup requires bootstrap code: %s",
+                _setup_code_value())
+    log.warning("Keep the bootstrap code private; setup stops accepting it once "
+                "an administrator exists")
 
 
 def hash_password(password: str) -> str:
@@ -185,8 +238,10 @@ async def middleware(request: web.Request, handler):
 
 async def h_status(request: web.Request):
     user = request_user(request)
+    needs_setup = not has_users()
     return web.json_response({
-        "setup_required": not has_users(),
+        "setup_required": needs_setup,
+        "setup_code_required": needs_setup and setup_code_required(request),
         "authed": user is not None,
         "username": None if user is None else user,
         "instance_name": config.get("instance_name"),
@@ -196,10 +251,32 @@ async def h_status(request: web.Request):
 async def h_setup(request: web.Request):
     if has_users():
         return web.json_response({"error": "already set up"}, status=400)
-    body = await request.json()
-    username = (body.get("username") or "").strip()
-    password = body.get("password") or ""
-    if not username or len(password) < 6:
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid setup request"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "invalid setup request"}, status=400)
+    if setup_code_required(request):
+        peer = str(request.remote or "?")[:128]
+        ledger_key = "setup:" + peer
+        if _rate_limited(ledger_key):
+            return web.json_response(
+                {"error": "too many attempts, wait a few minutes"}, status=429)
+        supplied = body.get("setup_code")
+        if not isinstance(supplied, str) or not hmac.compare_digest(
+                supplied, _setup_code_value()):
+            log.warning("invalid first-run setup code from %s", peer)
+            return web.json_response({"error": "invalid bootstrap code"}, status=403)
+        _attempts.pop(ledger_key, None)
+    # Two requests can both reach their first database check while their JSON
+    # bodies are being read. Recheck synchronously immediately before creation.
+    if has_users():
+        return web.json_response({"error": "already set up"}, status=400)
+    username_value = body.get("username")
+    password = body.get("password")
+    username = username_value.strip() if isinstance(username_value, str) else ""
+    if not isinstance(password, str) or not username or len(password) < 6:
         return web.json_response({"error": "username required, password min 6 chars"}, status=400)
     create_user(username, password)
     log.info("initial admin user %r created", username)

@@ -11,11 +11,12 @@ python3 backend/build.py
 backend/dist/puppy-backend.pyz --version
 ```
 
-The build emits `puppy-backend.pyz` plus the stdlib-only
-`puppy-backend-launcher.py`. The zipapp contains all Puppy Python code required
-at runtime; the stable launcher owns restart health checks and rollback. The
-target still needs Python 3.9+, `aiohttp`, and whichever official engine CLIs
-it will run. No frontend assets are included.
+The build emits `puppy-backend.pyz`, the stdlib-only
+`puppy-backend-launcher.py`, and a copy of `LICENSE`. The zipapp also carries the
+license and all Puppy Python code required at runtime; the stable launcher owns
+restart health checks and rollback. The target still needs Python 3.9+,
+`aiohttp`, and whichever official engine CLIs it will run. No frontend assets
+are included.
 
 Run from the source tree without building:
 
@@ -25,9 +26,10 @@ python3 -m backend.puppy_backend serve --data-dir backend/data
 
 ## Deploy
 
-Copy both generated files to the remote machine, install `aiohttp` (or use
-`requirements.txt`), and run the engine login commands as the same unprivileged
-Unix user that will run the service. Initialize the private configuration once.
+Copy the generated zipapp, launcher, and `LICENSE` to the remote machine, install
+`aiohttp` (or use `requirements.txt`), and run the engine login commands as the
+same unprivileged Unix user that will run the service. Initialize the private
+configuration once.
 The address below is reserved for documentation; replace it with an address
 actually assigned to the backend host.
 

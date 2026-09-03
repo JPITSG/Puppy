@@ -7,7 +7,7 @@ import sys
 
 from aiohttp import web as aioweb
 
-from puppy import __version__, config, db, localization, web_tls, workspaces
+from puppy import __version__, auth, config, db, localization, web_tls, workspaces
 
 
 def setup_logging() -> None:
@@ -47,7 +47,7 @@ def main() -> None:
     initialize_runtime()
 
     log = logging.getLogger("puppy")
-    host = config.get("web.host", "0.0.0.0")
+    host = config.get("web.host", "127.0.0.1")
     port = int(config.get("web.port", 10888))
     try:
         transport = web_tls.load_runtime()
@@ -56,6 +56,10 @@ def main() -> None:
         raise SystemExit(2)
     log.info("puppy %s starting on %s://%s:%s (data: %s)",
              __version__, transport.scheme, host, port, config.DATA_DIR)
+    if transport.scheme == "http" and auth.setup_code_required_for_host(host):
+        log.warning("WebUI is exposed over plaintext HTTP; use HTTPS or a "
+                    "trusted private tunnel")
+    auth.announce_initial_setup(host)
 
     from puppy.web import build_app
     aioweb.run_app(

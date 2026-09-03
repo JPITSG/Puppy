@@ -2834,8 +2834,13 @@ function loadTabs() {
 
 /* ================= auth ================= */
 let authMode = "login";
-function showAuth(mode) {
+let authSetupCodeRequired = false;
+function showAuth(mode, setupCodeRequired) {
   if (mode) authMode = mode;
+  if (authMode !== "setup") authSetupCodeRequired = false;
+  else if (typeof setupCodeRequired === "boolean") {
+    authSetupCodeRequired = setupCodeRequired;
+  }
   state.authed = false;
   stopRemotePolling();
   if (updatesWs) try { updatesWs.close(); } catch (error) {}
@@ -2844,15 +2849,21 @@ function showAuth(mode) {
   $("auth-shell").classList.remove("hidden");
   const setup = authMode === "setup";
   $("auth-title").textContent = setup ? "Create admin account" : "Sign in";
-  $("auth-sub").textContent = setup ? "First run - choose the credentials for this puppy instance" : "AI coding session manager";
+  $("auth-sub").textContent = setup ? (authSetupCodeRequired ?
+    "Enter the bootstrap code from Puppy's startup log, then choose your credentials" :
+    "First run - choose the credentials for this Puppy instance") :
+    "AI coding session manager";
+  $("auth-setup-code-wrap").classList.toggle("hidden", !setup || !authSetupCodeRequired);
+  $("auth-setup-code").required = setup && authSetupCodeRequired;
   $("auth-pass2-wrap").classList.toggle("hidden", !setup);
+  $("auth-pass").autocomplete = setup ? "new-password" : "current-password";
   $("auth-submit").textContent = setup ? "Create & enter" : "Sign in";
   $("auth-err").classList.add("hidden");
 }
 async function initAuth() {
   const st = await api(0, "auth/status");
   state.instance = st.instance_name || "puppy";
-  if (st.setup_required) { showAuth("setup"); return; }
+  if (st.setup_required) { showAuth("setup", !!st.setup_code_required); return; }
   if (!st.authed) { showAuth("login"); return; }
   await enterApp();
 }
@@ -2865,11 +2876,14 @@ $("auth-form").addEventListener("submit", async (ev) => {
   try {
     if (authMode === "setup") {
       if (pass !== $("auth-pass2").value) throw new Error("passwords do not match");
-      await api(0, "auth/setup", { method: "POST", body: { username: user, password: pass } });
+      await api(0, "auth/setup", { method: "POST", body: {
+        username: user, password: pass, setup_code: $("auth-setup-code").value,
+      } });
     } else {
       await api(0, "auth/login", { method: "POST", body: { username: user, password: pass } });
     }
     $("auth-pass").value = ""; $("auth-pass2").value = "";
+    $("auth-setup-code").value = "";
     await enterApp();
   } catch (e) {
     errBox.textContent = e.message;

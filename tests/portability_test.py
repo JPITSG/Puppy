@@ -54,7 +54,8 @@ def test_claude_root_bypass_environment() -> None:
     def turn_env(permission_mode: str, effective_uid: int) -> dict:
         # Model the runner's per-turn environment construction, including an
         # ambient value that Puppy must never leak into an ineligible turn.
-        env = clean_env({"PATH": "/usr/bin", "IS_SANDBOX": "ambient"})
+        env = clean_env({"PATH": "/usr/bin", "IS_SANDBOX": "ambient",
+                         "PUPPY_SETUP_CODE": "private-bootstrap-code"})
         with mock.patch("puppy.drivers.claude.os.geteuid",
                         return_value=effective_uid):
             env.update(driver.build_env(
@@ -65,6 +66,8 @@ def test_claude_root_bypass_environment() -> None:
     assert "IS_SANDBOX" not in turn_env("auto", 0)
     assert "IS_SANDBOX" not in turn_env("dontAsk", 0)
     assert "IS_SANDBOX" not in turn_env("bypassPermissions", 1000)
+    assert all("PUPPY_SETUP_CODE" not in turn_env(mode, 0) for mode in (
+        "bypassPermissions", "auto", "dontAsk"))
 
     # A mode flip is observed on the next process environment in both
     # directions; Claude is spawned anew for every Puppy turn.
@@ -85,6 +88,8 @@ def test_config_default_and_persistence() -> None:
     environment["HOME"] = str(first_home)
     read_default = "from puppy import config; print(config.get('sessions.default_cwd'))"
     assert _python_output(read_default, environment) == str(first_home)
+    read_host = "from puppy import config; print(config.get('web.host'))"
+    assert _python_output(read_host, environment) == "127.0.0.1"
 
     explicit = "/srv/projects-explicit"
     persist = (
@@ -92,8 +97,14 @@ def test_config_default_and_persistence() -> None:
         "config.set_value('sessions.default_cwd', {!r}); "
         "print(config.get('sessions.default_cwd'))".format(explicit))
     assert _python_output(persist, environment) == explicit
+    persist_external_host = (
+        "from puppy import config; "
+        "config.set_value('web.host', '0.0.0.0'); "
+        "print(config.get('web.host'))")
+    assert _python_output(persist_external_host, environment) == "0.0.0.0"
     environment["HOME"] = str(second_home)
     assert _python_output(read_default, environment) == explicit
+    assert _python_output(read_host, environment) == "0.0.0.0"
 
 
 def test_source_tree_launcher() -> None:

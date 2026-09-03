@@ -40,6 +40,7 @@ def main() -> None:
     output = Path(args.output).resolve()
     launcher_output = (Path(args.launcher_output).resolve() if args.launcher_output else
                        output.with_name("puppy-backend-launcher.py"))
+    license_output = output.with_name("LICENSE")
     output.parent.mkdir(parents=True, exist_ok=True)
     commit = _commit()
 
@@ -49,6 +50,7 @@ def main() -> None:
                         ignore=shutil.ignore_patterns("static", "__pycache__", "*.pyc"))
         shutil.copytree(BACKEND_DIR / "puppy_backend", stage / "puppy_backend",
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        shutil.copy2(ROOT / "LICENSE", stage / "LICENSE")
         (stage / "puppy_backend" / "build_info.py").write_text(
             '"""Generated backend artifact metadata."""\n\n'
             f'ARTIFACT_KIND = "zipapp"\nBUILD_COMMIT = {commit!r}\n',
@@ -70,10 +72,15 @@ def main() -> None:
     shutil.copy2(BACKEND_DIR / "launcher.py", launcher_temporary)
     os.chmod(launcher_temporary, 0o755)
     os.replace(launcher_temporary, launcher_output)
+    license_temporary = license_output.with_name("." + license_output.name + ".tmp")
+    shutil.copy2(ROOT / "LICENSE", license_temporary)
+    os.chmod(license_temporary, 0o644)
+    os.replace(license_temporary, license_output)
 
     size_kib = output.stat().st_size / 1024
     print(f"built {output} ({size_kib:.1f} KiB), puppy {__version__}, commit {commit or 'unknown'}")
     print(f"copied upgrade launcher to {launcher_output}")
+    print(f"copied MIT license to {license_output}")
 
 
 if __name__ == "__main__":

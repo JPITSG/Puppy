@@ -111,6 +111,8 @@ async def main():
             async with http.get(URL + "/api/auth/status") as r:
                 st = await r.json()
             check("first run needs setup", st.get("setup_required") is True)
+            check("loopback setup needs no bootstrap code",
+                  st.get("setup_code_required") is False)
             async with http.post(URL + "/api/auth/setup",
                                  json={"username": "tester", "password": "secret123"}) as r:
                 check("admin setup", r.status == 200, str(r.status))

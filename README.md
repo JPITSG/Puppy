@@ -91,7 +91,7 @@ built-in web terminals.
 ## Run
 
 ```
-./run.sh                      # listens on 0.0.0.0:10888 by default
+./run.sh                      # listens on 127.0.0.1:10888 by default
 ```
 
 `run.sh` locates its own checkout and uses `python3` from `PATH`. Set
@@ -108,7 +108,18 @@ executable, non-symlink file owned by root or the Puppy service user and must no
 be group- or world-writable. Without a hook, the verified listener setting is
 saved and remains pending until the operator restarts Puppy manually.
 
-First visit prompts for the creation of the admin account.
+Fresh installs are loopback-only. Open `http://127.0.0.1:10888` on the host and
+create the administrator account before exposing Puppy to another device. Use
+Settings to verify and activate a different listener, and prefer HTTPS whenever
+the connection leaves the host.
+
+If an operator deliberately configures a non-loopback listener before creating
+the first account, Puppy prints a high-entropy bootstrap code to its startup
+output and private `data/puppy.log`; the setup form requires that code. Set
+`PUPPY_SETUP_CODE` to 16-128 non-whitespace ASCII characters when an externally
+managed bootstrap credential is preferable. Setup stops accepting either form
+once an administrator exists; an automatically generated code also rotates on
+every restart.
 
 Headless remote backend artifact:
 
@@ -130,10 +141,11 @@ usage-refresh interval, and upload-size limit),
 `puppy.db` (sessions, transcripts, shared drafts, users), backend TLS identities,
 and `puppy.log`. Scratch-session files are the
 intentional exception: they live in a mode-0700, instance-specific namespace
-under the OS temporary directory and are disposable. The repo itself is clean
-code, safe to publish. Export archives contain password hashes, API/backend
-tokens, and TLS material; treat them as private credentials and only import
-archives from a trusted source.
+under the OS temporary directory and are disposable. Public source releases
+must include tracked files only: never package the working directory or its
+ignored `data/` and `backend/dist/data/` trees. Export archives contain password
+hashes, API/backend tokens, and TLS material; treat them as private credentials
+and only import archives from a trusted source.
 
 ## Compliance
 
@@ -141,3 +153,8 @@ Puppy drives installed CLI interfaces and leaves login/provider setup with those
 CLIs (`claude login`, `codex login`, or OpenCode's provider auth). No credentials
 are extracted or proxied to provider APIs. Intended for personal, single-user
 use with your own accounts.
+
+## License
+
+Puppy is released under the [MIT License](LICENSE). Vendored dependencies retain
+their own license notices and terms.

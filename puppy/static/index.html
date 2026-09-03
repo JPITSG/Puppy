@@ -20,6 +20,9 @@
     <h1 id="auth-title">Sign in</h1>
     <p class="auth-sub" id="auth-sub">AI coding session manager</p>
     <form id="auth-form" autocomplete="on">
+      <label id="auth-setup-code-wrap" class="hidden">Bootstrap code
+        <input type="password" id="auth-setup-code" autocomplete="one-time-code" spellcheck="false">
+      </label>
       <label>Username<input type="text" id="auth-user" autocomplete="username" required></label>
       <label>Password<input type="password" id="auth-pass" autocomplete="current-password" required></label>
       <label id="auth-pass2-wrap" class="hidden">Repeat password<input type="password" id="auth-pass2"></label>

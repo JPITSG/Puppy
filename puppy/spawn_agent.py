@@ -40,8 +40,8 @@ TOOL_INSTRUCTIONS = (
     "Spawned agents are one-shot engine runs Puppy starts on its own nodes: "
     "one prompt in, one final answer out, no conversation. Use them only for "
     "an explicit delegation request from the user. The chat box inserts such "
-    "a request as a directive in the form \"@Spawn an agent on NAS.lan using "
-    "codex gpt-5.6-sol at max effort to <task>\" - the words after \"using\" "
+    "a request as a directive in the form \"@Spawn an agent on build-node.lan "
+    "using codex at max effort to <task>\" - the words after \"using\" "
     "are the exact engine key, then optionally the exact model id, then "
     "optionally \"at <effort> effort\"; \"on <node>\" may be quoted or absent "
     "(absent means this session's node; a node is its display name or the "
@@ -151,9 +151,8 @@ TOOLS = [
                                       "claude, codex, opencode). Omit to use "
                                       "this session's engine."},
             "model": {"type": "string", "maxLength": 256,
-                      "description": "Model for the spawned agent, e.g. "
-                                     "gpt-5.6-sol or haiku. Omit for the "
-                                     "engine's default."},
+                      "description": "Exact model id advertised by the target "
+                                     "engine. Omit for the engine's default."},
             "effort": {"type": "string", "maxLength": 32,
                        "description": "Reasoning effort, e.g. low or max. "
                                       "Omit for the engine's default."},

@@ -323,9 +323,9 @@ async def test_validation(cwd):
         config.get("instance_name"))["bid"] == 0
     db.execute("INSERT INTO backends(name,url,urls,token,protocol,"
                "capabilities,created_at) VALUES(?,?,?,?,?,?,?)",
-               ("NAS.LAN", "http://192.0.2.9:1", '["http://192.0.2.9:1"]',
+               ("BUILD-NODE.LAN", "http://192.0.2.9:1", '["http://192.0.2.9:1"]',
                 "token", 1, '["spawn-exec"]', time.time()))
-    remote_bid = spawn_exec.resolve_target("nas.lan")["bid"]
+    remote_bid = spawn_exec.resolve_target("build-node.lan")["bid"]
     assert remote_bid >= 1
     backends._mark_backend_online(remote_bid)
     try:
@@ -341,7 +341,7 @@ async def test_validation(cwd):
     try:
         spawn_exec.resolve_target("missing-node")
     except spawn_exec.SpawnError as exc:
-        assert "NAS.LAN (#{})".format(remote_bid) in str(exc)
+        assert "BUILD-NODE.LAN (#{})".format(remote_bid) in str(exc)
     else:
         raise AssertionError("unknown node accepted")
 
@@ -351,8 +351,8 @@ async def test_validation(cwd):
     instance = str(config.get("instance_name"))
     assert spawn_exec.resolve_target("#0")["bid"] == 0
     assert spawn_exec.resolve_target("# {}".format(remote_bid))["name"] == \
-        "NAS.LAN"
-    assert spawn_exec.resolve_target(" nas.LAN ")["bid"] == remote_bid
+        "BUILD-NODE.LAN"
+    assert spawn_exec.resolve_target(" build-NODE.lan ")["bid"] == remote_bid
     assert spawn_exec.resolve_target("Local")["bid"] == 0
     assert spawn_exec.resolve_target("This  Node")["bid"] == 0
     assert spawn_exec.resolve_target(instance.upper())["bid"] == 0
@@ -361,7 +361,7 @@ async def test_validation(cwd):
             spawn_exec.resolve_target(bad)
         except spawn_exec.SpawnError as exc:
             assert "unknown node id" in str(exc) and \
-                "NAS.LAN (#{})".format(remote_bid) in str(exc), str(exc)
+                "BUILD-NODE.LAN (#{})".format(remote_bid) in str(exc), str(exc)
         else:
             raise AssertionError("bad node id accepted: " + bad)
 
@@ -371,11 +371,11 @@ async def test_validation(cwd):
             "created_at) VALUES(?,?,?,?,?,?,?)",
             (name, "http://192.0.2.10:1", '["http://192.0.2.10:1"]',
              "token", 1, '["spawn-exec"]', time.time()))
-    twin = insert_backend("nas.lan")
+    twin = insert_backend("build-node.lan")
     shadow = insert_backend(instance)
     alias = insert_backend("Local")
     try:
-        for name, ids in (("NAS.lan", (remote_bid, twin)),
+        for name, ids in (("Build-Node.lan", (remote_bid, twin)),
                           (instance, (0, shadow)), ("local", (0, alias))):
             try:
                 spawn_exec.resolve_target(name)
@@ -388,22 +388,22 @@ async def test_validation(cwd):
         assert spawn_exec.resolve_target("#{}".format(shadow))["bid"] == shadow
         # the controller refuses to create such collisions in the first place
         assert "already the name of backend #{}".format(remote_bid) in \
-            backends.node_name_conflict("Nas.Lan", exclude_bid=twin)
+            backends.node_name_conflict("Build-Node.Lan", exclude_bid=twin)
         assert "reserved" in backends.node_name_conflict("This Node")
         assert "own instance name" in backends.node_name_conflict(
             instance.upper())
         assert "cannot start with '#'" in backends.node_name_conflict("#1")
         assert "required" in backends.node_name_conflict("  ")
         assert "already the name of backend" in \
-            backends.instance_name_conflict("nas.lan")
+            backends.instance_name_conflict("build-node.lan")
         assert "reserved" in backends.instance_name_conflict("local")
         assert backends.instance_name_conflict("something-new") == ""
     finally:
         db.execute("DELETE FROM backends WHERE id IN (?,?,?)",
                    (twin, shadow, alias))
-    assert backends.node_name_conflict("nas.lan", exclude_bid=remote_bid) == ""
+    assert backends.node_name_conflict("build-node.lan", exclude_bid=remote_bid) == ""
     assert backends.node_name_conflict("fresh-name") == ""
-    assert spawn_exec.resolve_target("nas.lan")["bid"] == remote_bid
+    assert spawn_exec.resolve_target("build-node.lan")["bid"] == remote_bid
     print("validation and node resolution ok")
 
 
@@ -474,10 +474,10 @@ async def test_turn_dispatch(cwd):
 
     # A cross-node update is relayed through the additive PATCH capability and
     # retains the originating turn's ownership check.
-    remote_bid = spawn_exec.resolve_target("nas.lan")["bid"]
+    remote_bid = spawn_exec.resolve_target("build-node.lan")["bid"]
     remote_id = "abcdef12"
     spawn_exec.manager().remote[remote_id] = {
-        "bid": remote_bid, "node": "NAS.LAN", "session_id": sid,
+        "bid": remote_bid, "node": "BUILD-NODE.LAN", "session_id": sid,
         "turn_id": "turn-1",
     }
     original_node_request = spawn_exec._node_request
@@ -502,13 +502,13 @@ async def test_turn_dispatch(cwd):
     finally:
         spawn_exec._node_request = original_node_request
         spawn_exec.manager().remote.pop(remote_id, None)
-    assert "NAS.LAN" in relayed["text"] and "hard runtime 6000s" in \
+    assert "BUILD-NODE.LAN" in relayed["text"] and "hard runtime 6000s" in \
         relayed["text"]
 
     targets = await spawn_exec.targets_for_turn(session, {})
     assert "{} (#0, this session's node)".format(
         config.get("instance_name")) in targets["text"]
-    assert "NAS.LAN (#{}, online)".format(remote_bid) in targets["text"]
+    assert "BUILD-NODE.LAN (#{}, online)".format(remote_bid) in targets["text"]
     assert "or its #id" in targets["text"]
     # scope the engine listing to the stub so no real CLI probe runs here
     saved_drivers = dict(drivers._DRIVERS)
@@ -696,7 +696,7 @@ def running_job(job_id, **extra):
 
 
 def unreached():
-    return spawn_exec.SpawnError("NAS.LAN: node is unreachable", 502,
+    return spawn_exec.SpawnError("BUILD-NODE.LAN: node is unreachable", 502,
                                  unreached=True)
 
 
@@ -710,7 +710,7 @@ async def test_turn_end_reaping(cwd):
     moves on to the next queued prompt, and shutdown tells relayed jobs to
     stop instead of forgetting them."""
     mgr = spawn_exec.manager()
-    remote_bid = spawn_exec.resolve_target("nas.lan")["bid"]
+    remote_bid = spawn_exec.resolve_target("build-node.lan")["bid"]
     backends._mark_backend_online(remote_bid)
     # keep the sweeper out of this: only the runner's own hook may reap
     previous_interval = spawn_exec.SWEEP_INTERVAL_S
@@ -743,7 +743,7 @@ async def test_turn_end_reaping(cwd):
         turn_id = hub._active_turn_id
         orphan = mgr.start_job(request_for("hang", cwd), ("turn", sid, turn_id))
         handle = spawn_exec._register_remote(session, turn_id,
-                                             {"bid": remote_bid, "name": "NAS.LAN"},
+                                             {"bid": remote_bid, "name": "BUILD-NODE.LAN"},
                                              "ab12cd34")
         assert spawn_exec.turn_job_ids(sid, turn_id) == [orphan.id, "ab12cd34"]
         await asyncio.wait_for(first_task, timeout=40)
@@ -767,7 +767,7 @@ async def test_turn_end_reaping(cwd):
         calls.clear()
         behaviour["DELETE"] = lambda path, body: unreached()
         handle = spawn_exec._register_remote(
-            session, "turn-e", {"bid": remote_bid, "name": "NAS.LAN"},
+            session, "turn-e", {"bid": remote_bid, "name": "BUILD-NODE.LAN"},
             "ab12cd35")
         await spawn_exec.end_turn(sid, "turn-e")
         assert mgr.remote.get("ab12cd35") is handle
@@ -788,7 +788,7 @@ async def test_turn_end_reaping(cwd):
         # a handle nobody could cancel is dropped only once the job cannot
         # possibly be alive any more on the node's own limits
         stale = spawn_exec._register_remote(
-            session, "turn-e", {"bid": remote_bid, "name": "NAS.LAN"},
+            session, "turn-e", {"bid": remote_bid, "name": "BUILD-NODE.LAN"},
             "ab12cd36")
         stale["registered_clock"] = time.monotonic() - \
             spawn_exec.ABANDON_GIVE_UP_S - 1
@@ -802,10 +802,10 @@ async def test_turn_end_reaping(cwd):
         calls.clear()
         local = mgr.start_job(request_for("hang", cwd), ("turn", sid, "turn-s"))
         spawn_exec._register_remote(session, "turn-s",
-                                    {"bid": remote_bid, "name": "NAS.LAN"},
+                                    {"bid": remote_bid, "name": "BUILD-NODE.LAN"},
                                     "ab12cd37")
         spawn_exec._register_remote(session, "turn-s",
-                                    {"bid": remote_bid, "name": "NAS.LAN"},
+                                    {"bid": remote_bid, "name": "BUILD-NODE.LAN"},
                                     "ab12cd38")
         started = time.monotonic()
         await mgr.shutdown()
@@ -853,7 +853,7 @@ async def test_turn_end_reaping(cwd):
 async def test_relay_start(cwd):
     """Relayed starts are tracked before they are transmitted."""
     mgr = spawn_exec.manager()
-    remote_bid = spawn_exec.resolve_target("nas.lan")["bid"]
+    remote_bid = spawn_exec.resolve_target("build-node.lan")["bid"]
     backends._mark_backend_online(remote_bid)
     capable = [protocol.SPAWN_EXEC_CAPABILITY, protocol.SPAWN_LIMITS_CAPABILITY,
                protocol.SPAWN_CLIENT_IDS_CAPABILITY]
@@ -869,7 +869,7 @@ async def test_relay_start(cwd):
     behaviour = {}
     original_node_request = spawn_exec._node_request
     spawn_exec._node_request = fake_requests(behaviour, calls)
-    params = {"prompt": "remote work", "node": "nas.lan", "cwd": cwd,
+    params = {"prompt": "remote work", "node": "build-node.lan", "cwd": cwd,
               "wait_s": 30}
     try:
         # the node honors the controller's id and the handle keeps it
@@ -956,7 +956,7 @@ async def test_relay_start(cwd):
         # others are released, and one slow node never holds the rest
         for job_id in ("cc000001", "cc000002", "cc000003"):
             spawn_exec._register_remote(session, "turn-r",
-                                        {"bid": remote_bid, "name": "NAS.LAN"},
+                                        {"bid": remote_bid, "name": "BUILD-NODE.LAN"},
                                         job_id)
         behaviour["DELETE"] = lambda path, body: (
             unreached() if path.endswith("cc000002")
@@ -965,9 +965,9 @@ async def test_relay_start(cwd):
         mixed = await spawn_exec.cancel_for_turn(
             session, "turn-r", {"jobs": ["cc000001", "cc000002", "cc000003"]})
         assert time.monotonic() - started_at < 0.75
-        assert "Cancelled spawned agent cc000001 on NAS.LAN." in mixed["text"]
+        assert "Cancelled spawned agent cc000001 on BUILD-NODE.LAN." in mixed["text"]
         assert "Could not cancel spawned agent cc000002" in mixed["text"]
-        assert "Cancelled spawned agent cc000003 on NAS.LAN." in mixed["text"]
+        assert "Cancelled spawned agent cc000003 on BUILD-NODE.LAN." in mixed["text"]
         assert "cc000002" in mgr.remote and "cc000001" not in mgr.remote \
             and "cc000003" not in mgr.remote
         mgr.remote.pop("cc000002")
@@ -976,7 +976,7 @@ async def test_relay_start(cwd):
         # another round trip, so a shortened combined result can be re-read
         # one agent at a time
         spawn_exec._register_remote(session, "turn-r",
-                                    {"bid": remote_bid, "name": "NAS.LAN"},
+                                    {"bid": remote_bid, "name": "BUILD-NODE.LAN"},
                                     "dd000001")
         behaviour["GET"] = lambda path, body: finished_job(
             "dd000001", "the remote verdict")
@@ -1033,14 +1033,14 @@ async def test_relay_start(cwd):
         assert calls[-1]["body"]["lease_s"] == spawn_exec.REMOTE_LEASE_S
         assert mgr.remote[leased_id]["lease"] is True
         ended = spawn_exec._register_remote(
-            session, "turn-gone", {"bid": remote_bid, "name": "NAS.LAN"},
+            session, "turn-gone", {"bid": remote_bid, "name": "BUILD-NODE.LAN"},
             "1ea5e0aa", lease=True)
         old_lost = spawn_exec._register_remote(
-            session, "turn-r", {"bid": remote_bid, "name": "NAS.LAN"},
+            session, "turn-r", {"bid": remote_bid, "name": "BUILD-NODE.LAN"},
             "1ea5e0bb", lease=True)
         old_lost["registered_clock"] -= 120
         fresh_unknown = spawn_exec._register_remote(
-            session, "turn-r", {"bid": remote_bid, "name": "NAS.LAN"},
+            session, "turn-r", {"bid": remote_bid, "name": "BUILD-NODE.LAN"},
             "1ea5e0cc", lease=True)
         renewals = []
 
@@ -1183,7 +1183,7 @@ def test_bridge_sizing():
     for index in range(spawn_exec.MAX_WAIT_JOBS):
         payload = finished_job("ee{:06x}".format(index), answer)["job"]
         payload.update(engine="fake", cwd="/tmp", tool_calls=2)
-        entries.append((payload, "NAS.LAN"))
+        entries.append((payload, "BUILD-NODE.LAN"))
     full = spawn_exec.jobs_text(entries)
     assert len(full.encode("utf-8")) > spawn_agent.MAX_RESPONSE
     wire = spawn_agent._wire_response(

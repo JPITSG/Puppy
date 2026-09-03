@@ -22,9 +22,12 @@ PRIVATE_TESTS.mkdir(parents=True, exist_ok=True, mode=0o700)
 PRIVATE_TESTS.chmod(0o700)
 TEST_ROOT = Path(tempfile.mkdtemp(prefix="web-tls-", dir=str(PRIVATE_TESTS)))
 os.environ["PUPPY_DATA"] = str(TEST_ROOT / "data")
+os.environ["PUPPY_SETUP_CODE"] = "web-tls-bootstrap-code"
 
 from puppy import auth, config, db, web_tls  # noqa: E402
 from puppy.web import build_app  # noqa: E402
+
+assert "PUPPY_SETUP_CODE" not in os.environ
 
 
 def expect_tls_error(call, contains: str) -> None:
@@ -34,6 +37,55 @@ def expect_tls_error(call, contains: str) -> None:
         assert contains.lower() in str(exc).lower(), str(exc)
     else:
         raise AssertionError("invalid WebUI TLS input was accepted")
+
+
+async def exercise_exposed_setup_gate() -> None:
+    assert auth.setup_code_required_for_host("0.0.0.0") is True
+    assert auth.setup_code_required_for_host("console.example.test") is True
+    assert auth.setup_code_required_for_host("127.0.0.1") is False
+    assert auth.setup_code_required_for_host("::1") is False
+    assert auth.setup_code_required_for_host("localhost") is False
+
+    listener = web_tls.configured_listener("0.0.0.0", 0)
+    app = build_app(runtime_web=listener)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    url = "http://127.0.0.1:{}".format(port)
+    account = {"username": "bootstrap-admin", "password": "secret123"}
+    try:
+        async with aiohttp.ClientSession() as http:
+            async with http.get(url + "/api/auth/status") as response:
+                status = await response.json()
+                assert status["setup_required"] is True
+                assert status["setup_code_required"] is True
+                assert "web-tls-bootstrap-code" not in str(status)
+            async with http.post(url + "/api/auth/setup", json=account) as response:
+                assert response.status == 403, await response.text()
+            async with http.post(url + "/api/auth/setup", json=dict(
+                    account, setup_code="wrong-bootstrap-code")) as response:
+                assert response.status == 403, await response.text()
+            async def valid_setup(username):
+                body = dict(account, username=username,
+                            setup_code="web-tls-bootstrap-code")
+                async with http.post(url + "/api/auth/setup", json=body) as response:
+                    return response.status, await response.text()
+
+            raced = await asyncio.gather(
+                valid_setup("bootstrap-admin-a"),
+                valid_setup("bootstrap-admin-b"))
+            assert sorted(status for status, _text in raced) == [200, 400], raced
+            assert db.query_one("SELECT count(*) AS n FROM users")["n"] == 1
+            async with http.get(url + "/api/auth/status") as response:
+                status = await response.json()
+                assert status["setup_required"] is False
+                assert status["setup_code_required"] is False
+    finally:
+        await runner.cleanup()
+        db.execute("DELETE FROM web_sessions")
+        db.execute("DELETE FROM users")
 
 
 async def exercise_https(runtime: web_tls.Runtime) -> None:
@@ -49,6 +101,9 @@ async def exercise_https(runtime: web_tls.Runtime) -> None:
     jar = aiohttp.CookieJar(unsafe=True)
     try:
         async with aiohttp.ClientSession(cookie_jar=jar) as http:
+            async with http.get(url + "/api/auth/status", ssl=False) as response:
+                status = await response.json()
+                assert status["setup_code_required"] is False
             async with http.post(
                     url + "/api/auth/setup", ssl=False,
                     json={"username": "tls-admin", "password": "secret123"}) as response:
@@ -112,6 +167,8 @@ async def main() -> None:
         db.connect()
         assert web_tls.load_state() == web_tls.DEFAULT_STATE
         assert web_tls.settings_payload()["identities"]["auto"]["available"] is False
+        assert config.get("web.host") == "127.0.0.1"
+        await exercise_exposed_setup_gate()
 
         openssl = shutil.which("openssl")
         assert openssl, "this test host needs openssl for the generation path"

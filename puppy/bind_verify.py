@@ -319,7 +319,7 @@ async def prepare(app: web.Application, user: str, bind_ip, origin: str,
         "user": user,
         "host": host,
         "port": port,
-        "expected_host": str(config.get("web.host", "0.0.0.0")),
+        "expected_host": str(config.get("web.host", "127.0.0.1")),
         "expected_port": int(config.get("web.port", port)),
         "probe_host": probe_host,
         "origin": canonical_origin,
@@ -389,7 +389,7 @@ async def commit(app: web.Application, user: str, token: str) -> dict:
             await server.wait_closed()
         except OSError:
             pass
-    old_host = str(config.get("web.host", "0.0.0.0"))
+    old_host = str(config.get("web.host", "127.0.0.1"))
     old_port = int(config.get("web.port", entry["port"]))
     if listener_handoff.queued_by(app):
         raise BindVerificationError(

@@ -3603,7 +3603,7 @@ async def exercise_auth_probes(root) -> None:
     codex = CodexDriver()
     for script, expected in [
         ('echo "Logged in using ChatGPT"; exit 0', "ok"),
-        ('echo "Not logged in"; exit 1', "missing"),               # the NAS.lan case
+        ('echo "Not logged in"; exit 1', "missing"),               # the build-node.lan case
         ('echo "WARNING: preamble"; echo "Not logged in"; exit 1', "missing"),
         ('echo "You are signed out"; exit 1', "missing"),          # future rewording
         ('echo "Session active"; exit 0', "ok"),                   # rc stays the contract
@@ -4581,12 +4581,15 @@ async def main() -> None:
         subprocess.run([sys.executable, str(BASE / "backend" / "build.py"),
                         "--output", str(release_artifact)], cwd=str(BASE), check=True)
         generated_launcher = release_artifact.with_name("puppy-backend-launcher.py")
+        generated_license = release_artifact.with_name("LICENSE")
         assert generated_launcher.is_file() and os.access(generated_launcher, os.X_OK)
+        assert generated_license.read_bytes() == (BASE / "LICENSE").read_bytes()
         with zipfile.ZipFile(release_artifact) as archive:
             names = archive.namelist()
         assert any(name.startswith("puppy/drivers/") for name in names)
         assert "puppy/browser_agent.py" in names
         assert "puppy/terminal_agent.py" in names
+        assert "LICENSE" in names
         assert not any(name.startswith("puppy/static/") for name in names)
         mcp_env = dict(os.environ)
         mcp_env["PYTHONPATH"] = str(release_artifact)

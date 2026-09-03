@@ -72,12 +72,12 @@ def seed_sessions():
                              "", "", "#e0784f", "ask")
     sid2 = db.create_session("", "codex", "/home/user/labs",
                              "", "", "#4dd0c4", "ask")
-    db.add_event(sid1, "user", {"text": "please deploy the backend to NAS"})
+    db.add_event(sid1, "user", {"text": "please deploy the backend to the build node"})
     db.add_event(sid1, "assistant",
-                 {"text": "Deployment complete; supervisor restarted the program."})
+                 {"text": "Deployment complete; the service manager restarted the program."})
     db.add_event(sid1, "tool_use", {
         "tool": "shell",
-        "input": {"command": "supervisorctl restart puppy-backend"},
+        "input": {"command": "service-manager restart example-backend"},
         "tool_use_id": "t1"})
     db.add_event(sid1, "tool_result", {
         "tool_use_id": "t1", "is_error": False,
