@@ -9,6 +9,18 @@ Spawns the official `claude` binary per turn in headless stream-json mode:
 Interactive permission prompts arrive as control_request/can_use_tool on stdout
 and are answered with control_response on stdin (verified against claude 2.1.219).
 
+Side questions ("/btw") are a client-originated control_request, verified
+against claude 2.1.258: request {subtype:"side_question", question, history?}
+answered by exactly one control_response {response, synthetic, refusal_fallback?}
+with system/control_request_progress rows (started, api_retry) in between, and
+withdrawn with control_cancel_request. The CLI forks the live conversation for
+a single tool-less answer that never enters its transcript, so the running turn
+is untouched. history is ours to keep - the CLI ignores its own for SDK callers.
+An unknown subtype is refused with an error control_response, never a crash.
+Probed facts the runner depends on: it answers while an approval is pending and
+during a background-task wait, and it can answer AFTER the turn's own result,
+so stdin must stay open until it resolves.
+
 Background work (Bash run_in_background, Monitor, backgrounded agents) is the
 CLI's own, verified against claude 2.1.258: it reports the live set as
 system/background_tasks_changed (REPLACE semantics, ambient housekeeping
@@ -35,6 +47,9 @@ from puppy.user_paths import service_home
 USAGE_KEYS = ("input_tokens", "output_tokens", "cache_read_input_tokens",
               "cache_creation_input_tokens")
 _TASK_ENDED = ("completed", "failed", "killed", "stopped")
+# Our request ids travel on the wire, so they are namespaced rather than
+# trusted to be distinct from the CLI's own.
+_ID_SQ_PREFIX = "puppy-sq:"
 
 
 def _task_row(item) -> dict:
@@ -84,6 +99,7 @@ class ClaudeDriver(Driver):
     uses_stdin_stream = True
     supports_steering = True
     steering_acknowledged = True
+    supports_side_questions = True
     release_source = {"kind": "npm", "package": "@anthropic-ai/claude-code"}
     upgrade_source = {"kind": "self", "args": ["update"]}
 
@@ -274,6 +290,10 @@ class ClaudeDriver(Driver):
             # a local command (compaction) acknowledges the request through its
             # replayed output rather than a replay of the "/compact" text
             "local_command_seen": False,
+            # the initialize control_response: proof that the control channel
+            # itself is live, which is what a side question rides on. The
+            # user-message replay proves only that the query accepts prompts.
+            "control_ready": False,
             # background work the CLI still owns: REPLACE semantics from
             # background_tasks_changed, task edges as the fallback
             "background_tasks": [],
@@ -336,6 +356,39 @@ class ClaudeDriver(Driver):
         # actually accepted stream input and can receive additional guidance.
         return bool(ctx.get("initial_user_replayed")) and not ctx.get("tool")
 
+    def side_question_payload(self, session, ctx, question, history, request_id):
+        # A control_request, not a user message: the CLI answers it from a
+        # one-shot tool-less fork of the same context and never shows it to
+        # the running turn. Only answered exchanges are replayed, so a thread
+        # never carries a placeholder forward as if the model had said it.
+        if not self.side_question_ready(session, ctx):
+            return None
+        request = {"subtype": "side_question", "question": question}
+        rows = []
+        for item in history or []:
+            row = {"question": str(item.get("question") or ""),
+                   "response": str(item.get("response") or "")}
+            if not row["question"] or not row["response"]:
+                continue
+            notice = str(item.get("fallback_notice") or "")
+            if notice:
+                row["fallback_notice"] = notice
+            rows.append(row)
+        if rows:
+            request["history"] = rows
+        return {"type": "control_request",
+                "request_id": _ID_SQ_PREFIX + request_id, "request": request}
+
+    def side_question_cancel_payload(self, session, ctx, request_id):
+        return {"type": "control_cancel_request",
+                "request_id": _ID_SQ_PREFIX + request_id}
+
+    def side_question_ready(self, session, ctx):
+        # The initialize reply is the control channel's own acknowledgement.
+        # A tool turn addresses the native conversation with no live query to
+        # fork, so it is never offered one.
+        return bool(ctx.get("control_ready")) and not ctx.get("tool")
+
     def parse_line(self, line, ctx):
         try:
             ev = json.loads(line)
@@ -365,6 +418,18 @@ class ClaudeDriver(Driver):
 
         if t == "system":
             sub = ev.get("subtype")
+            if sub == "control_request_progress":
+                # the only long-running client request we make; other ids are
+                # not ours to interpret
+                rid = str(ev.get("request_id") or "")
+                if not rid.startswith(_ID_SQ_PREFIX):
+                    return []
+                return [{"a": "side_question_progress",
+                         "request_id": rid[len(_ID_SQ_PREFIX):],
+                         "status": str(ev.get("status") or ""),
+                         "attempt": ev.get("attempt"),
+                         "max_retries": ev.get("max_retries"),
+                         "retry_delay_ms": ev.get("retry_delay_ms")}]
             if sub == "init":
                 ctx["native_session_id"] = str(ev.get("session_id") or "")
                 acts = [{"a": "native_id", "id": ev.get("session_id", "")},
@@ -508,6 +573,34 @@ class ClaudeDriver(Driver):
                                               "content": stringify_content(blk.get("content"))[:20000],
                                               "is_error": bool(blk.get("is_error"))}})
             return acts
+
+        if t == "control_response":
+            resp = ev.get("response") or {}
+            rid = str(resp.get("request_id") or "")
+            if rid == "init_1":
+                # the control channel answered: side questions can ride it
+                ctx["control_ready"] = resp.get("subtype") == "success"
+                return []
+            if not rid.startswith(_ID_SQ_PREFIX):
+                return []
+            request_id = rid[len(_ID_SQ_PREFIX):]
+            if resp.get("subtype") != "success":
+                # an older CLI refuses the subtype outright; the wording is the
+                # engine's own and is shown as the reason
+                return [{"a": "side_question_result", "request_id": request_id,
+                         "ok": False, "error": str(
+                             resp.get("error") or "the engine refused the question")}]
+            body = resp.get("response")
+            body = body if isinstance(body, dict) else {}
+            fallback = body.get("refusal_fallback")
+            fallback = fallback if isinstance(fallback, dict) else {}
+            return [{"a": "side_question_result", "request_id": request_id,
+                     "ok": True, "text": str(body.get("response") or ""),
+                     # the CLI's own placeholder for an API error or a model
+                     # that tried to call a tool: shown, never threaded
+                     "synthetic": bool(body.get("synthetic")),
+                     "fallback_model": str(fallback.get("fallback_model") or ""),
+                     "fallback_notice": str(fallback.get("content") or "")}]
 
         if t == "control_request":
             req = ev.get("request") or {}

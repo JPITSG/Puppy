@@ -251,6 +251,15 @@ def _event_doc(kind, data):
     elif kind in ("info", "error"):
         text = data.get("text")
         kind = "info"
+    elif kind == "side_question":
+        # asked beside a turn rather than inside it, but the person did write
+        # it and will look for it again; folded into the existing kinds so the
+        # query language keeps exactly the vocabulary it already publishes
+        text = data.get("question")
+        kind = "user"
+    elif kind == "side_question_result":
+        text = data.get("text")
+        kind = "assistant"
     else:
         return None   # result/engine_switch lines carry no searchable prose
     text = _scrub(text).strip()

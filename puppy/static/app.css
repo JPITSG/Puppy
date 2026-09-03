@@ -1191,6 +1191,31 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   border-radius:var(--r-md);padding:9px 13px;font-size:12.5px;color:var(--err);white-space:pre-wrap;
   font-family:var(--mono);
 }
+/* A side question runs BESIDE the turn: the model answers it from a
+   tool-less fork of the same context and the turn never sees it. The rail
+   and the flat, unbubbled surface say "this is a note about the work", not
+   "someone said this in the conversation". */
+.aside-card{
+  align-self:stretch;border:1px solid var(--line2);border-left:3px solid var(--acc-line);
+  border-radius:var(--r-md);padding:8px 12px 9px;background:var(--panel2);
+}
+.aside-head{
+  display:flex;align-items:center;gap:6px;min-width:0;
+  font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--txt3);font-family:var(--mono);
+}
+.aside-head svg{flex:none;opacity:.8}
+.aside-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.aside-state{flex:none;color:var(--txt3)}
+.aside-card.pending .aside-state{color:var(--acc2)}
+.aside-card.bad{border-left-color:var(--err-line)}
+.aside-card.bad .aside-state{color:var(--err)}
+.aside-card.synthetic .aside-state{color:var(--warn)}
+.aside-q{margin-top:5px;font-size:13px;color:var(--txt2);white-space:pre-wrap}
+.aside-a{margin-top:8px;padding-top:8px;border-top:1px solid var(--line)}
+.aside-a .md{font-size:13.5px}
+.aside-err{font-size:12.5px;color:var(--err);font-family:var(--mono);white-space:pre-wrap}
+.aside-note{margin-top:6px;font-size:11.5px;color:var(--warn);font-family:var(--mono)}
 .result-line{align-self:flex-end;font-size:10.5px;color:var(--txt3);font-family:var(--mono);padding:0 4px}
 .result-line .bad{color:var(--err)}
 
@@ -1504,7 +1529,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .composer-row .mini:not(:disabled):active{transform:scale(.96);background:var(--hov)}
 .composer-row .mini .mini-value{color:var(--txt2)}
 @media (hover:hover){.composer-row .mini:hover .mini-value{color:var(--txt)}}
-.btn-send,.btn-queue,.btn-steer{
+.btn-send,.btn-queue,.btn-steer,.btn-ask{
   display:inline-flex;align-items:center;justify-content:center;gap:7px;flex-shrink:0;
   height:32px;min-width:86px;padding:0 16px var(--label-pb);border:none;border-radius:var(--btn-r);
   font-size:13px;font-weight:650;line-height:1;letter-spacing:.01em;cursor:pointer;user-select:none;
@@ -1518,13 +1543,21 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   background-color:var(--ok-lo);background-image:linear-gradient(180deg,var(--ok-hi),var(--ok-lo));
   box-shadow:inset 0 1px 0 rgba(255,255,255,.3),0 1px 2px rgba(0,0,0,.25),var(--glow-ok);
 }
+.btn-ask{
+  color:var(--txt);
+  background-color:var(--panel3);background-image:var(--btn-face);
+  border:1px solid var(--line2);
+  box-shadow:inset 0 1px 0 var(--btn-top),var(--btn-lift);
+}
 .composer-action-icon{display:none;align-items:center;justify-content:center}
 .composer-action-icon svg{display:block}
 @media (hover:hover){
   .btn-send:hover,.btn-queue:hover{filter:brightness(1.07);box-shadow:inset 0 1px 0 rgba(255,255,255,.34),0 1px 2px rgba(0,0,0,.25),var(--glow-acc-hi)}
   .btn-steer:hover{filter:brightness(1.07);box-shadow:inset 0 1px 0 rgba(255,255,255,.34),0 1px 2px rgba(0,0,0,.25),0 5px 15px -7px rgba(15,172,121,.85)}
+  .btn-ask:hover{color:var(--txt);border-color:var(--line3);background-color:var(--hov)}
 }
 .btn-send:active,.btn-queue:active{filter:brightness(.94);box-shadow:inset 0 2px 6px rgba(4,17,40,.4)}
+.btn-ask:active{filter:brightness(.94);box-shadow:inset 0 2px 6px rgba(4,17,40,.4)}
 .btn-steer:active{filter:brightness(.94);box-shadow:inset 0 2px 6px rgba(2,40,28,.4)}
 .btn-send.stop{
   width:32px;min-width:32px;padding:0;gap:0;
@@ -1535,7 +1568,8 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 @media (hover:hover){
   .btn-send.stop:hover{box-shadow:inset 0 1px 0 rgba(255,255,255,.34),0 1px 2px rgba(0,0,0,.25),0 6px 18px -6px rgba(217,66,89,1)}
 }
-.btn-send:disabled,.btn-queue:disabled,.btn-steer:disabled{opacity:.4;filter:none;box-shadow:none;pointer-events:none}
+.btn-send:disabled,.btn-queue:disabled,.btn-steer:disabled,
+.btn-ask:disabled{opacity:.4;filter:none;box-shadow:none;pointer-events:none}
 
 /* ---------- terminal view ---------- */
 .br-meta.term-meta{padding-top:6px;transition:filter .15s var(--ease)}
@@ -2408,11 +2442,13 @@ html.light .sh-more:hover{background:rgba(15,23,42,.035)}
   /* Enter keeps its established Queue behavior. The three explicit running
      actions remain available as equally sized symbols without squeezing the
      horizontally scrollable metadata lane. */
-  .btn-queue,.btn-steer{
+  .btn-queue,.btn-steer,.btn-ask{
     display:inline-flex;width:34px;min-width:34px;height:34px;padding:0;gap:0;
   }
-  .btn-queue .composer-action-label,.btn-steer .composer-action-label{display:none}
-  .btn-queue .composer-action-icon,.btn-steer .composer-action-icon{display:flex}
+  .btn-queue .composer-action-label,.btn-steer .composer-action-label,
+  .btn-ask .composer-action-label{display:none}
+  .btn-queue .composer-action-icon,.btn-steer .composer-action-icon,
+  .btn-ask .composer-action-icon{display:flex}
   .composer-row .mini{height:26px}
   .icon-btn{width:34px;height:34px}
   .settings-form{grid-template-columns:1fr}

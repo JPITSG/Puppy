@@ -152,6 +152,13 @@ SESSION_AGENT_NOTES_CAPABILITY = "session-agent-notes"
 # completions and serves GET /api/completions?after=<seq>. Controllers use it
 # for remote completion commands without relying on an open browser.
 COMPLETION_EVENTS_CAPABILITY = "completion-events"
+# POST /api/sessions/{sid}/ask puts one question to the engine's own model
+# alongside a running turn, without interrupting it or entering its
+# conversation. Session payloads carry the additive side_question readiness
+# object beside steering, and the answer arrives as its own transcript rows.
+# Only engines whose pinned protocol has a native side-question request offer
+# it; older nodes advertise nothing and consoles withhold the control.
+SIDE_QUESTION_CAPABILITY = "active-turn-side-question"
 
 BASE_CAPABILITIES = (
     "sessions",
@@ -163,6 +170,7 @@ BASE_CAPABILITIES = (
     QUEUE_REORDER_CAPABILITY,
     SESSION_DRAFT_CAPABILITY,
     ACTIVE_TURN_STEERING_CAPABILITY,
+    SIDE_QUESTION_CAPABILITY,
     # model/effort changes made while work is pending hold their place in the
     # message queue ({kind:"config"} items) instead of applying immediately
     "queued-config",

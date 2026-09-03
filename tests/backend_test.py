@@ -454,6 +454,81 @@ def exercise_driver_normalization() -> None:
     assert resume_request["params"]["excludeTurns"] is True
 
 
+def exercise_side_question_contract() -> None:
+    """The pinned claude 2.1.258 side-question control protocol.
+
+    Probed against the real binary: the request rides the control channel
+    (not a user message), the initialize reply is what makes it available, an
+    unknown subtype is refused with an error control_response rather than a
+    crash, and only answered non-synthetic exchanges may be replayed as
+    history.
+    """
+    claude = ClaudeDriver()
+    assert claude.supports_side_questions is True
+    ctx = claude.turn_context({}, True, "do the work", "pin")
+
+    # not until the control channel itself has answered
+    assert claude.side_question_ready({}, ctx) is False
+    assert claude.side_question_payload({}, ctx, "why?", [], "q1") is None
+    assert claude.parse_line(json.dumps({
+        "type": "control_response", "response": {
+            "subtype": "success", "request_id": "init_1", "response": {}},
+    }), ctx) == []
+    assert claude.side_question_ready({}, ctx) is True
+
+    # a tool turn addresses the native conversation with no live query to fork
+    tool_ctx = claude.turn_context({}, False, "/compact", "pin",
+                                   tool={"tool": "compact"})
+    tool_ctx["control_ready"] = True
+    assert claude.side_question_ready({}, tool_ctx) is False
+
+    assert claude.side_question_payload({}, ctx, "why that file?", [], "q1") == {
+        "type": "control_request", "request_id": "puppy-sq:q1",
+        "request": {"subtype": "side_question", "question": "why that file?"}}
+    # history is ours to keep: the CLI ignores its own for SDK callers, and a
+    # half-formed pair is never replayed as if the model had said it
+    assert claude.side_question_payload({}, ctx, "and then?", [
+        {"question": "why that file?", "response": "It holds the parser."},
+        {"question": "dropped", "response": ""},
+    ], "q2")["request"]["history"] == [
+        {"question": "why that file?", "response": "It holds the parser."}]
+    assert claude.side_question_cancel_payload({}, ctx, "q2") == {
+        "type": "control_cancel_request", "request_id": "puppy-sq:q2"}
+
+    # progress and the single final answer, correlated by our namespaced id
+    assert claude.parse_line(json.dumps({
+        "type": "system", "subtype": "control_request_progress",
+        "request_id": "puppy-sq:q1", "status": "started",
+    }), ctx) == [{"a": "side_question_progress", "request_id": "q1",
+                  "status": "started", "attempt": None, "max_retries": None,
+                  "retry_delay_ms": None}]
+    # an id that is not ours is never interpreted as an answer
+    assert claude.parse_line(json.dumps({
+        "type": "system", "subtype": "control_request_progress",
+        "request_id": "someone-else", "status": "started",
+    }), ctx) == []
+    assert claude.parse_line(json.dumps({
+        "type": "control_response", "response": {
+            "subtype": "success", "request_id": "puppy-sq:q1",
+            "response": {"response": "It holds the parser.", "synthetic": False}},
+    }), ctx) == [{"a": "side_question_result", "request_id": "q1", "ok": True,
+                  "text": "It holds the parser.", "synthetic": False,
+                  "fallback_model": "", "fallback_notice": ""}]
+    # an older CLI refuses the subtype outright; its wording becomes the reason
+    assert claude.parse_line(json.dumps({
+        "type": "control_response", "response": {
+            "subtype": "error", "request_id": "puppy-sq:q3",
+            "error": "Unsupported control request subtype: side_question"},
+    }), ctx) == [{"a": "side_question_result", "request_id": "q3", "ok": False,
+                  "error": "Unsupported control request subtype: side_question"}]
+
+    # engines without a native side-question channel offer nothing
+    from puppy.drivers.opencode import OpenCodeDriver
+    assert CodexDriver().supports_side_questions is False
+    assert OpenCodeDriver().supports_side_questions is False
+    assert protocol.SIDE_QUESTION_CAPABILITY in protocol.BASE_CAPABILITIES
+
+
 async def exercise_codex_app_server_turn(root, runner, db) -> None:
     """Drive the real runner against a no-model fake app-server process.
 
@@ -4581,6 +4656,7 @@ async def main() -> None:
     controller_runner = None
     try:
         exercise_driver_normalization()
+        exercise_side_question_contract()
         release_artifact = temp_root / "release" / "puppy-backend.pyz"
         subprocess.run([sys.executable, str(BASE / "backend" / "build.py"),
                         "--output", str(release_artifact)], cwd=str(BASE), check=True)

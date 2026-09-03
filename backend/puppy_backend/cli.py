@@ -224,6 +224,7 @@ def _self_test() -> dict:
     required = {"/api/ping", "/api/engines", "/api/engines/usage-refresh",
                 "/api/uploads/settings", "/api/sessions",
                 "/api/sessions/{sid}/steer",
+                "/api/sessions/{sid}/ask",
                 "/api/sessions/{sid}/upload", "/api/terminal/instances",
                 "/api/ws/terminal/{terminal_id}", protocol.UPGRADE_API_PATH}
     if not required.issubset(routes):

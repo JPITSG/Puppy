@@ -29,6 +29,13 @@ QUEUE_REORDER_HOLD_SECONDS = 30
 MAX_STEER_CHARS = 128 * 1024
 MAX_STEER_TURN_ID_CHARS = 128
 MAX_STEERS_PER_TURN = 64
+MAX_SIDE_QUESTION_CHARS = 16 * 1024
+MAX_SIDE_QUESTIONS_PER_TURN = 32
+# Probed on claude 2.1.258: a side question can resolve seconds AFTER the
+# turn's own result, and closing stdin ends it outright. A turn therefore
+# holds its process open for a bounded grace rather than throwing away an
+# answer the user already paid for.
+SIDE_QUESTION_GRACE = 90.0
 STEER_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 
@@ -233,6 +240,14 @@ def _driver_steering_supported(session: dict) -> bool:
         return False
 
 
+def _driver_side_questions_supported(session: dict) -> bool:
+    try:
+        return bool(get_driver(
+            str((session or {}).get("engine") or "")).supports_side_questions)
+    except KeyError:
+        return False
+
+
 def session_payload(session):
     if session is None:
         return None
@@ -291,6 +306,11 @@ def sessions_payload() -> dict:
             "show_meta": s["show_meta"] != 0,
             "steering": (h.steering_state(s) if h else {
                 "supported": _driver_steering_supported(s),
+                "ready": False,
+                "turn_id": "",
+            }),
+            "side_question": (h.side_question_state(s) if h else {
+                "supported": _driver_side_questions_supported(s),
                 "ready": False,
                 "turn_id": "",
             }),
@@ -505,6 +525,11 @@ class SessionHub:
         self._turn_stopping = False
         self._steer_receipts = {}
         self._last_steering_state = None
+        # Side questions asked during the active turn, in the order they were
+        # asked. One turn is one thread: answered pairs are replayed so a
+        # follow-up reads as a conversation.
+        self._side_questions = {}
+        self._last_side_question_state = None
         self.turn_task = None
         self.pending_approval = None
         self.interrupted = False
@@ -708,12 +733,23 @@ class SessionHub:
                 "turn_id": turn_id}
 
     def _publish_steering_state(self, session=None) -> None:
+        """Both live turn-input affordances change on exactly the same events
+        (process up, approval, stop, result), so they share one publisher
+        rather than a second set of call sites that could drift apart."""
+        session = session or db.get_session(self.id) or {}
+        changed = False
         state = self.steering_state(session)
-        if state == self._last_steering_state:
-            return
-        self._last_steering_state = dict(state)
-        self.broadcast({"type": "steering_state", "steering": state})
-        broadcast_sessions()
+        if state != self._last_steering_state:
+            self._last_steering_state = dict(state)
+            self.broadcast({"type": "steering_state", "steering": state})
+            changed = True
+        ask = self.side_question_state(session)
+        if ask != self._last_side_question_state:
+            self._last_side_question_state = dict(ask)
+            self.broadcast({"type": "side_question_state", "side_question": ask})
+            changed = True
+        if changed:
+            broadcast_sessions()
 
     def snapshot(self) -> dict:
         session = db.get_session(self.id)
@@ -732,6 +768,7 @@ class SessionHub:
             "held": self._held_wire(),
             "pending_approval": self._scrub_value(self.pending_approval),
             "steering": self.steering_state(session),
+            "side_question": self.side_question_state(session),
             "background_tasks": self._background_payload(),
             "uploads": uploads.settings_payload(),
             "draft": db.get_session_draft(self.id),
@@ -898,6 +935,239 @@ class SessionHub:
                 "ok": False,
                 "error": reason,
             })
+
+    def side_question_state(self, session=None) -> dict:
+        """Whether this turn can carry a question asked beside its work."""
+        session = session or db.get_session(self.id) or {}
+        try:
+            driver = get_driver(str(session.get("engine") or ""))
+        except KeyError:
+            driver = None
+        supported = bool(driver and driver.supports_side_questions)
+        proc = self.proc
+        turn_id = self._active_turn_id if self.status == "running" else ""
+        # Deliberately looser than steering: a question changes nothing the
+        # turn does, so a held approval and a background-task wait both keep
+        # it available - both were probe-verified to answer, and a held
+        # approval is exactly when "why do you want to run that?" is asked.
+        # Only a turn on its way out, or one whose stdin has gone, cannot.
+        ready = supported and bool(turn_id) and not self.interrupted and \
+            not self._turn_stopping and not self._side_questions_pending() and \
+            self._proc_ready and proc is not None and proc.returncode is None and \
+            proc.stdin is not None and not proc.stdin.is_closing() and \
+            bool(driver.side_question_ready(session, self._driver_ctx))
+        return {"supported": supported, "ready": bool(ready),
+                "turn_id": turn_id}
+
+    def _side_question_history(self) -> list:
+        """This turn's answered exchanges, oldest first.
+
+        A placeholder answer - an API error, or the model reaching for a tool
+        it does not have - is left out, exactly as the engine leaves it out of
+        its own thread. Replaying one would put words in the model's mouth.
+        """
+        rows = []
+        for record in sorted(self._side_questions.values(),
+                             key=lambda r: r.get("asked_at") or 0):
+            if record.get("status") != "answered" or record.get("synthetic"):
+                continue
+            if not record.get("answer"):
+                continue
+            rows.append({"question": record["question"],
+                         "response": record["answer"],
+                         "fallback_notice": record.get("fallback_notice") or ""})
+        return rows
+
+    def _side_questions_pending(self) -> bool:
+        return any(record.get("status") == "pending" and
+                   record.get("generation") == self._turn_generation
+                   for record in self._side_questions.values())
+
+    @staticmethod
+    def _ask_response(record: dict, duplicate: bool = False) -> dict:
+        result = {"request_id": record["request_id"],
+                  "turn_id": record["turn_id"],
+                  "status": record["status"]}
+        if duplicate:
+            result["duplicate"] = True
+        if record["status"] == "failed":
+            result["error"] = record.get("error") or "the question was not answered"
+        else:
+            result["ok"] = True
+        return result
+
+    def _settle_side_question(self, record: dict, ok: bool, text: str = "",
+                              synthetic: bool = False, fallback_model: str = "",
+                              fallback_notice: str = "", error: str = "") -> None:
+        """Resolve one question exactly once and persist its answer.
+
+        The answer is its own transcript row rather than an edit of the
+        question's: the event log stays append-only and a reload folds the
+        pair back into one card, the same way a tool result folds into its
+        tool call.
+        """
+        if record.get("status") != "pending":
+            return
+        if ok and not str(text or "").strip():
+            ok, error = False, "the engine answered with nothing"
+        record["status"] = "answered" if ok else "failed"
+        record["answer"] = str(text or "") if ok else ""
+        record["synthetic"] = bool(synthetic) if ok else False
+        record["fallback_notice"] = str(fallback_notice or "") if ok else ""
+        record["error"] = "" if ok else \
+            str(error or "the question was not answered")[:2000]
+        self._emit("side_question_result", {
+            "request_id": record["request_id"],
+            "turn_id": record["turn_id"],
+            "ok": bool(ok),
+            "text": record["answer"],
+            "synthetic": record["synthetic"],
+            "fallback_model": str(fallback_model or "") if ok else "",
+            "fallback_notice": record["fallback_notice"],
+            "error": record["error"],
+        })
+        self._publish_steering_state()
+
+    def _handle_side_question_result(self, action: dict) -> None:
+        record = self._side_questions.get(str(action.get("request_id") or ""))
+        if record is None or record.get("generation") != self._turn_generation:
+            return
+        self._settle_side_question(
+            record, ok=bool(action.get("ok")),
+            text=str(action.get("text") or ""),
+            synthetic=bool(action.get("synthetic")),
+            fallback_model=str(action.get("fallback_model") or ""),
+            fallback_notice=str(action.get("fallback_notice") or ""),
+            error=str(action.get("error") or ""))
+
+    def _handle_side_question_progress(self, action: dict) -> None:
+        """Transient: the engine accepted the question, or is retrying it."""
+        record = self._side_questions.get(str(action.get("request_id") or ""))
+        if record is None or record.get("status") != "pending":
+            return
+        self.broadcast({
+            "type": "side_question_progress",
+            "request_id": record["request_id"],
+            "turn_id": record["turn_id"],
+            "status": str(action.get("status") or ""),
+            "attempt": action.get("attempt"),
+            "max_retries": action.get("max_retries"),
+            "retry_delay_ms": action.get("retry_delay_ms"),
+        })
+
+    def _fail_side_questions(self, reason: str) -> None:
+        """Resolve every unanswered question before its engine can vanish."""
+        for record in list(self._side_questions.values()):
+            if record.get("status") == "pending":
+                self._settle_side_question(record, ok=False, error=reason)
+
+    async def ask(self, question: str, request_id: str = "",
+                  expected_turn_id: str = "") -> dict:
+        """Put one question to the model beside this hub's running turn.
+
+        The opposite of steer(): this must not change what the turn does. The
+        driver addresses its engine's own side-question channel, which answers
+        from a tool-less one-shot fork of the same context and never enters
+        the engine's transcript. Puppy owns the thread, so a follow-up carries
+        this turn's earlier answered pairs; the answer arrives asynchronously
+        as its own transcript rows, not in this call's reply.
+        """
+        if not isinstance(question, str):
+            return {"error": "the question must be text"}
+        question = question.strip()
+        if not question:
+            return {"error": "empty question"}
+        if len(question) > MAX_SIDE_QUESTION_CHARS:
+            return {"error": "a question cannot exceed {} characters".format(
+                MAX_SIDE_QUESTION_CHARS)}
+        if not isinstance(request_id, str) or \
+                (request_id and not valid_steer_request_id(request_id)):
+            return {"error": "invalid question id"}
+        request_id = request_id or str(uuid.uuid4())
+        if not isinstance(expected_turn_id, str) or not expected_turn_id or \
+                len(expected_turn_id) > MAX_STEER_TURN_ID_CHARS:
+            return {"error": "a valid expected turn id is required"}
+
+        session = db.get_session(self.id)
+        if session is None:
+            return {"error": "session gone"}
+        try:
+            driver = get_driver(session["engine"])
+        except KeyError:
+            return {"error": "the active engine is unavailable"}
+        if not driver.supports_side_questions:
+            return {"error": "{} cannot answer a question beside its running "
+                             "turn".format(driver.label)}
+
+        async with self._stdin_lock:
+            existing = self._side_questions.get(request_id)
+            if existing is not None:
+                if existing.get("turn_id") != expected_turn_id:
+                    return {"error": "that question id belongs to another turn"}
+                if existing.get("question") != question:
+                    return {"error": "that question id was already used for a "
+                                     "different question"}
+                return self._ask_response(existing, duplicate=True)
+
+            state = self.side_question_state(session)
+            if self.status != "running" or not state["turn_id"]:
+                return {"error": "there is no active turn to ask"}
+            if state["turn_id"] != expected_turn_id:
+                return {"error": "the active turn changed before the question "
+                                 "was sent"}
+            if self.interrupted or self._turn_stopping:
+                return {"error": "the active turn is stopping"}
+            if not state["ready"]:
+                return {"error": "the active turn cannot take a question yet"}
+            if self._side_questions_pending():
+                return {"error": "wait for the previous answer before asking again"}
+            if len(self._side_questions) >= MAX_SIDE_QUESTIONS_PER_TURN:
+                return {"error": "this turn has reached its question limit"}
+
+            proc = self.proc
+            generation = self._turn_generation
+            payload = driver.side_question_payload(
+                session, self._driver_ctx, question,
+                self._side_question_history(), request_id)
+            if not isinstance(payload, dict) or proc is None or \
+                    proc.stdin is None or proc.stdin.is_closing():
+                return {"error": "the active turn cannot take a question yet"}
+
+            event = self._emit("side_question", {
+                "request_id": request_id, "turn_id": expected_turn_id,
+                "question": question,
+                # position in this turn's thread, so a follow-up says so
+                "index": len(self._side_questions)})
+            record = {
+                "request_id": request_id,
+                "turn_id": expected_turn_id,
+                "question": question,
+                "generation": generation,
+                "event_seq": event["seq"],
+                "status": "pending",
+                "answer": "",
+                "synthetic": False,
+                "fallback_notice": "",
+                "error": "",
+                "asked_at": time.time(),
+            }
+            self._side_questions[request_id] = record
+            try:
+                proc.stdin.write((json.dumps(payload) + "\n").encode())
+                await proc.stdin.drain()
+            except asyncio.CancelledError:
+                # The bytes are already queued and the answer lands in the
+                # transcript regardless of who is still holding the HTTP call.
+                raise
+            except (BrokenPipeError, ConnectionError, OSError, RuntimeError) as exc:
+                log.info("side question write failed for session %s: %s",
+                         self.id, exc)
+                self._settle_side_question(
+                    record, ok=False,
+                    error="the active turn stopped before the question was sent")
+                return self._ask_response(record)
+            self._publish_steering_state(session)
+            return self._ask_response(record)
 
     async def steer(self, text: str, request_id: str = "",
                     expected_turn_id: str = "") -> dict:
@@ -1597,6 +1867,8 @@ class SessionHub:
         self._turn_stopping = False
         self._steer_receipts = {}
         self._last_steering_state = None
+        self._side_questions = {}
+        self._last_side_question_state = None
         self._active_turn_id = ""
         self._active_prompt_text = item if isinstance(item, str) else \
             str(item["fields"].get("text") or "") if _is_queued_retry(item) else ""
@@ -2033,6 +2305,10 @@ class SessionHub:
         self._publish_background()
 
     def _close_stdin(self) -> None:
+        # Probed on claude 2.1.258: closing stdin ends an unanswered side
+        # question outright, so nothing may be left waiting on an answer that
+        # can no longer arrive. This is the single choke point for that.
+        self._fail_side_questions("the turn ended before the engine answered")
         proc = self.proc
         if proc is None or proc.stdin is None or proc.stdin.is_closing():
             return
@@ -2306,9 +2582,12 @@ class SessionHub:
             pending_result = None
             wait_closed = ""       # why a wait was ended early, if it was
             bg_idle_since = None   # when every task ended without a wake-up
+            # deadline for holding the process open after the result purely so
+            # an in-flight side question can still land
+            sq_grace_until = None
 
             def settle_result(data) -> None:
-                nonlocal got_result, retry_delay
+                nonlocal got_result, retry_delay, sq_grace_until
                 got_result = True
                 if not data.get("ok") and not tool and \
                         driver_base.looks_transient_auth(data.get("error")) and \
@@ -2350,9 +2629,17 @@ class SessionHub:
                 if tool:
                     data["tool"] = tool
                 self._emit("result", data)
-                # claude: close stdin so the process exits cleanly
+                # claude: close stdin so the process exits cleanly. A side
+                # question asked near the end of the turn can still be in
+                # flight, and closing stdin would end it - probed on claude
+                # 2.1.258, its answer arrives seconds AFTER the result. The
+                # process is held open for a bounded grace rather than
+                # discarding an answer the user already paid for.
                 if driver.uses_stdin_stream:
-                    self._close_stdin()
+                    if self._side_questions_pending():
+                        sq_grace_until = time.time() + SIDE_QUESTION_GRACE
+                    else:
+                        self._close_stdin()
 
             def end_wait(reason, text) -> None:
                 nonlocal wait_closed, deadline
@@ -2364,6 +2651,13 @@ class SessionHub:
                 deadline = time.time() + 30
 
             while True:
+                if sq_grace_until is not None and (
+                        not self._side_questions_pending() or
+                        time.time() >= sq_grace_until):
+                    # answered, or out of grace: _close_stdin resolves
+                    # whatever is still outstanding
+                    sq_grace_until = None
+                    self._close_stdin()
                 if pending_result is not None and not wait_closed and \
                         bg_idle_since is not None and \
                         time.time() - bg_idle_since > BACKGROUND_WAKE_GRACE:
@@ -2385,8 +2679,12 @@ class SessionHub:
                     self._emit("error", {"text": f"Turn timeout after {int(timeout)}s - killed"})
                     self._signal_if_alive(self.proc, signal.SIGKILL)
                     break
+                read_cap = min(remaining, 60)
+                if sq_grace_until is not None:
+                    read_cap = min(read_cap,
+                                   max(0.5, sq_grace_until - time.time()))
                 try:
-                    line = await asyncio.wait_for(self.proc.stdout.readline(), timeout=min(remaining, 60))
+                    line = await asyncio.wait_for(self.proc.stdout.readline(), timeout=read_cap)
                 except asyncio.TimeoutError:
                     continue
                 if not line:
@@ -2483,6 +2781,10 @@ class SessionHub:
                             await self._write_stdin(payload)
                     elif a == "steer_result":
                         self._handle_steer_result(act)
+                    elif a == "side_question_result":
+                        self._handle_side_question_result(act)
+                    elif a == "side_question_progress":
+                        self._handle_side_question_progress(act)
                     elif a == "rate_limit":
                         # stamped so consoles can say how fresh the figure is;
                         # additive beside the CLI's own camelCase keys
@@ -2581,6 +2883,7 @@ class SessionHub:
             self._interrupt_protocol_sent = False
             self._turn_result_seen = True
             self._turn_stopping = True
+            self._fail_side_questions("the turn ended before the engine answered")
             self._bg_wait_since = None
             self._bg_tasks = []
             self.stderr_tail = ""

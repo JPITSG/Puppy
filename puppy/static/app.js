@@ -202,6 +202,29 @@ c-29 64 -102 137 -167 165 -61 27 -173 35 -230 16z`,
   ]);
 }
 
+/* The composer's side-question mark. Drawn rather than typeset for the same
+   reason the other composer actions are: a glyph from the UI font would not
+   share their optical box, so the three buttons would not line up when the
+   narrow layout drops their labels. */
+function askActionIcon(size = 18) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 800 800");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS(NS, "path");
+  path.setAttribute("fill", "currentColor");
+  path.setAttribute("d",
+    "M400 0C250 0 190 31 165 76c-23 43-25 105-25 171h132c0-57 3-92 20-112" +
+    "c20-23 58-30 108-30s88 7 108 30c18 20 25 60 25 112c0 53-15 83-55 103" +
+    "l-80 30c-60 23-80 50-90 90c-8 35-10 50-10 75h132c0-25 3-45 13-60" +
+    "c13-20 45-35 85-53c70-32 130-77 130-185c0-66-2-128-25-171C550 31 490 0 400 0Z" +
+    "M297 653h138v147H297Z");
+  svg.appendChild(path);
+  return svg;
+}
+
 function steerActionIcon(size = 18) {
   return filledReferenceIcon(size, [
     `M2029 6985 c-494 -60 -958 -347 -1236 -765 -301 -452 -373 -993 -203
@@ -3898,6 +3921,16 @@ function sessionToolLabel(value) {
   return tool ? tool.label : "Session tool";
 }
 
+/* The node answers POST /api/sessions/{sid}/ask and publishes side-question
+   readiness beside steering. Without the marker the control stays hidden -
+   an older node would 404 the route. */
+function backendSupportsSideQuestions(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(item => item.id === bid);
+  return !!backend && Array.isArray(backend.capabilities) &&
+    backend.capabilities.includes("active-turn-side-question");
+}
+
 function backendSupportsSessionTools(bid) {
   if (!bid) return true;
   const backend = state.backends.find(item => item.id === bid);
@@ -6732,6 +6765,49 @@ function toolSummary(tool, input) {
   ).join(", "), 120);
   return displayValue(input, 120).replace(/\s+/g, " ");
 }
+/* A side question is put to the model while its turn keeps running: the
+   engine answers from a tool-less fork of the same context and never shows
+   the exchange to the turn. Deliberately not a message bubble - nobody said
+   this in the conversation, so it reads as a note beside it. */
+function asideCardNode(d) {
+  const n = el("div", "aside-card pending");
+  const head = el("div", "aside-head");
+  head.appendChild(askActionIcon(11));
+  head.appendChild(el("span", "aside-title",
+    Number(d.index) > 0 ? "Side question · follow-up" : "Side question"));
+  head.appendChild(el("span", "aside-state", "asking…"));
+  n.appendChild(head);
+  n.appendChild(el("div", "aside-q", d.question || ""));
+  return n;
+}
+
+function fillAsideAnswer(card, d) {
+  card.classList.remove("pending");
+  const state = card.querySelector(".aside-state");
+  const body = el("div", "aside-a");
+  if (d.ok) {
+    /* The engine's own placeholder for an API error, or for a model that
+       reached for a tool it was not given. Shown, but marked: it is not an
+       answer, and the node never threads it into a follow-up. */
+    card.classList.toggle("synthetic", !!d.synthetic);
+    if (state) state.textContent = d.synthetic ? "no answer" : "answered";
+    const box = el("div", "md");
+    box.innerHTML = md(d.text || "");
+    decorateMarkdownLinks(box);
+    decorateMarkdownImages(box);
+    decorateCodeBlocks(box);
+    body.appendChild(box);
+    if (d.fallback_notice)
+      body.appendChild(el("div", "aside-note", d.fallback_notice));
+  } else {
+    card.classList.add("bad");
+    if (state) state.textContent = "unanswered";
+    body.appendChild(el("div", "aside-err",
+      d.error || "The question was not answered"));
+  }
+  card.appendChild(body);
+}
+
 function toolCardNode(data, completed = false) {
   const d = data || {};
   const n = el("div", "tool-card" + (d.is_error ? " err" : ""));
@@ -6939,6 +7015,12 @@ class SessionView {
     this.status = "idle";
     this.steering = { supported: false, ready: false, turn_id: "" };
     this.steerPending = null;
+    this.sideQuestion = { supported: false, ready: false, turn_id: "" };
+    this.askPending = null;
+    /* Question cards awaiting their answer, by request id - the answer is its
+       own event and folds into the card it belongs to, exactly as a tool
+       result folds into its tool call. */
+    this.asideCards = {};
     this.ws = null;
     this.closed = false;
     this.retry = 800;
@@ -7059,6 +7141,10 @@ class SessionView {
                 ${composerChoice("effort", "Effort", "Reasoning effort")}
               </div>
             </div>
+            <button class="btn-ask hidden" type="button" aria-label="Ask a side question">
+              <span class="composer-action-label">Ask</span>
+              <span class="composer-action-icon" aria-hidden="true"></span>
+            </button>
             <button class="btn-steer hidden" type="button" aria-label="Steer the active turn">
               <span class="composer-action-label">Steer</span>
               <span class="composer-action-icon" aria-hidden="true"></span>
@@ -7107,7 +7193,9 @@ class SessionView {
     this.mentionEl.addEventListener("pointerdown", (e) => e.preventDefault());
     this.sendBtn = root.querySelector(".btn-send");
     this.steerBtn = root.querySelector(".btn-steer");
+    this.askBtn = root.querySelector(".btn-ask");
     this.queueBtn = root.querySelector(".btn-queue");
+    this.askBtn.querySelector(".composer-action-icon").appendChild(askActionIcon());
     this.steerBtn.querySelector(".composer-action-icon").appendChild(steerActionIcon());
     this.queueBtn.querySelector(".composer-action-icon").appendChild(queueActionIcon());
     this.composerRow = root.querySelector(".composer-row");
@@ -7230,6 +7318,7 @@ class SessionView {
     this.ta.addEventListener("blur", () => this.hideMention());
     this.sendBtn.onclick = () => this.status === "running" ? this.interrupt() : this.submit();
     this.steerBtn.onclick = () => this.steer();
+    this.askBtn.onclick = () => this.ask();
     /* submit() already queues when a turn is in flight - the same path Enter
        takes. This just gives that a visible control while the primary button
        is busy being Stop. */
@@ -7426,6 +7515,9 @@ class SessionView {
     this.status = "idle";
     this.setSteeringState({
       supported: this.steering.supported, ready: false, turn_id: "",
+    });
+    this.setSideQuestionState({
+      supported: this.sideQuestion.supported, ready: false, turn_id: "",
     });
     this.clearLive();
     this.hideApproval();
@@ -8336,6 +8428,7 @@ class SessionView {
       case "snapshot":
         this.session = d.session;
         this.setSteeringState(d.steering);
+        this.setSideQuestionState(d.side_question);
         if (Number.isInteger(d.draft_max_chars) && d.draft_max_chars > 0)
           this.draftMaxChars = d.draft_max_chars;
         if (d.uploads) {
@@ -8436,6 +8529,12 @@ class SessionView {
       case "steering_state":
         this.setSteeringState(d.steering);
         break;
+      case "side_question_state":
+        this.setSideQuestionState(d.side_question);
+        break;
+      case "side_question_progress":
+        this.noteAskProgress(d);
+        break;
       case "steer_status":
         if (this.steerPending && d.request_id === this.steerPending.requestId &&
             (d.status === "accepted" || d.status === "rejected")) {
@@ -8478,6 +8577,9 @@ class SessionView {
         this.status = continued ? "running" : "idle";
         this.setSteeringState({
           supported: this.steering.supported, ready: false, turn_id: "",
+        });
+        this.setSideQuestionState({
+          supported: this.sideQuestion.supported, ready: false, turn_id: "",
         });
         this.clearLive();
         this.updateRunState();
@@ -8683,6 +8785,112 @@ class SessionView {
     this.updateSteerControl();
   }
 
+  /* Transient: the engine accepted the question, or is retrying its request.
+     The turn's own status line is deliberately untouched - the whole point is
+     that this runs beside the work rather than instead of it. */
+  noteAskProgress(d) {
+    const card = d && d.request_id && this.asideCards[d.request_id];
+    if (!card) return;
+    const state = card.querySelector(".aside-state");
+    if (!state) return;
+    if (d.status === "api_retry") {
+      const attempt = Number(d.attempt) || 0;
+      const max = Number(d.max_retries) || 0;
+      state.textContent = attempt && max ?
+        `retrying ${attempt}/${max}…` : "retrying…";
+    } else if (d.status === "started") {
+      state.textContent = "answering…";
+    }
+  }
+
+  setSideQuestionState(value) {
+    const stateValue = value && typeof value === "object" ? value : {};
+    const supported = backendSupportsSideQuestions(this.tab.bid) &&
+      stateValue.supported === true;
+    const turnId = typeof stateValue.turn_id === "string" ? stateValue.turn_id : "";
+    this.sideQuestion = {
+      supported,
+      ready: supported && stateValue.ready === true && !!turnId,
+      turn_id: turnId,
+    };
+    this.updateAskControl();
+  }
+
+  updateAskControl() {
+    if (!this.askBtn) return;
+    const running = this.status === "running";
+    const supported = backendSupportsSideQuestions(this.tab.bid) &&
+      this.sideQuestion.supported;
+    this.askBtn.classList.toggle("hidden", !(running && supported));
+    const stopping = !!remoteStoppingMessage(this.tab.bid);
+    const unavailable = !!this.tab.bid && !backendConnectionAllowed(this.tab.bid);
+    const hasAttachments = this.attachments.length > 0;
+    this.askBtn.disabled = !running || !supported || !this.sideQuestion.ready ||
+      !!this.askPending || this.reconnecting || stopping || unavailable ||
+      hasAttachments;
+    let label = "Ask a side question - answered beside the turn, without changing it";
+    if (hasAttachments) label = "A side question is text only";
+    else if (this.askPending) label = "Waiting for the answer to the last question";
+    else if (!this.sideQuestion.ready) label = "The active turn cannot take a question";
+    this.askBtn.setAttribute("aria-label", label);
+  }
+
+  /* Put the composer's text to the model alongside the running turn. The
+     engine answers it from a tool-less fork of the same context: the turn is
+     not paused, not steered, and never sees the exchange. Follow-ups need no
+     separate control - the node threads this turn's answered pairs. */
+  async ask() {
+    const composerText = this.ta.value;
+    const question = composerText.trim();
+    if (!question) return;
+    if (this.attachments.length) {
+      toast("A side question is text only · use Queue for attachments", "error", 6000);
+      return;
+    }
+    if (!this.sideQuestion.ready || !this.sideQuestion.turn_id) {
+      toast("The active turn cannot take a question", "error");
+      return;
+    }
+    if (this.askPending) return;
+
+    const request = {
+      requestId: `ask-${newDraftClientId()}`,
+      turnId: this.sideQuestion.turn_id,
+    };
+    this.askPending = request;
+    this.updateAskControl();
+    this._forceScroll = true;
+    try {
+      await api(this.tab.bid, `sessions/${this.tab.sid}/ask`, {
+        method: "POST",
+        body: {
+          question,
+          request_id: request.requestId,
+          expected_turn_id: request.turnId,
+        },
+        timeoutMs: 15000,
+      });
+    } catch (error) {
+      if (this.askPending === request) this.askPending = null;
+      this._forceScroll = false;
+      this.updateAskControl();
+      toast(error.message || "The question could not be sent", "error", 6000);
+      return;
+    }
+    /* The reply only acknowledges the handoff; the answer arrives over the
+       session socket as its own rows, which is what releases the control. */
+    if (this.ta.value === composerText) {
+      this.ta.value = "";
+      this.resizeComposer();
+      this.histIdx = null;
+      this.histDraft = "";
+      this.releaseHistoryAttachments();
+      this.saveDraft();
+    }
+    this.updateAskControl();
+    this.scrollBottom(true);
+  }
+
   updateSteerControl() {
     if (!this.steerBtn) return;
     const running = this.status === "running";
@@ -8700,6 +8908,9 @@ class SessionView {
     else if (this.steerPending) label = "Sending steering guidance";
     else if (!this.steering.ready) label = "The active turn is not ready for steering";
     this.steerBtn.setAttribute("aria-label", label);
+    /* Both live turn-input controls answer to the same conditions, so they
+       share one sync point rather than a second set of call sites. */
+    this.updateAskControl();
   }
 
   visibleStatusText() {
@@ -8919,6 +9130,7 @@ class SessionView {
     this.clearLive();
     this.inner.innerHTML = "";
     this.toolCards = {};
+    this.asideCards = {};
     this.switchLines = [];
     this.oldestSeq = events.length ? events[0].seq : null;
     this.newestSeq = events.length ? events[events.length - 1].seq : 0;
@@ -9187,6 +9399,29 @@ class SessionView {
         body.appendChild(el("div", "tb-label", d.is_error ? "error" : "result"));
         body.appendChild(linkifyInto(el("pre"), displayValue(d.content) || "(Empty)"));
         return n;
+      }
+      case "side_question": {
+        const n = asideCardNode(d);
+        if (d.request_id) this.asideCards[d.request_id] = n;
+        return n;
+      }
+      case "side_question_result": {
+        if (this.askPending && this.askPending.requestId === d.request_id) {
+          this.askPending = null;
+          this.updateAskControl();
+        }
+        const card = d.request_id && this.asideCards[d.request_id];
+        if (card) {
+          fillAsideAnswer(card, d);
+          delete this.asideCards[d.request_id];
+          return null;
+        }
+        /* Its question is outside this window (a jump into history): the
+           answer still stands on its own rather than disappearing. */
+        const orphan = asideCardNode({});
+        orphan.querySelector(".aside-q").remove();
+        fillAsideAnswer(orphan, d);
+        return orphan;
       }
       case "info": {
         if (d.subtype === "todo") {
@@ -9678,6 +9913,9 @@ class SessionView {
     this.status = "running";
     if (!wasRunning) this.setSteeringState({
       supported: this.steering.supported, ready: false, turn_id: "",
+    });
+    if (!wasRunning) this.setSideQuestionState({
+      supported: this.sideQuestion.supported, ready: false, turn_id: "",
     });
     noteSessionActivity(this.tab.bid, this.tab.sid, true);
     this.updateRunState();

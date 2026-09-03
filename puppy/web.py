@@ -415,6 +415,7 @@ async def h_session_get(request: web.Request):
     return web.json_response({"session": runner.session_payload(s), "status": h.status,
                               "active_since": h.active_since if h.status == "running" else None,
                               "steering": h.steering_state(s),
+                              "side_question": h.side_question_state(s),
                               "server_time": time.time(),
                               "uploads": uploads.settings_payload(),
                               "events": db.get_events(s["id"], limit=200)})
@@ -604,6 +605,42 @@ async def h_session_steer(request: web.Request):
                                  status=400)
     res = await runner.hub(s["id"]).steer(
         text, request_id, expected_turn_id=expected_turn_id)
+    return web.json_response(res, status=409 if "error" in res else 200)
+
+
+async def h_session_ask(request: web.Request):
+    """Ask the model a question beside its running turn (never in it)."""
+    s = _session_or_404(request)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid question request"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "question request must be an object"},
+                                 status=400)
+    question = body.get("question", "")
+    if not isinstance(question, str):
+        return web.json_response({"error": "the question must be text"}, status=400)
+    question = question.strip()
+    if not question:
+        return web.json_response({"error": "empty question"}, status=400)
+    if len(question) > runner.MAX_SIDE_QUESTION_CHARS:
+        return web.json_response({
+            "error": "a question cannot exceed {} characters".format(
+                runner.MAX_SIDE_QUESTION_CHARS)}, status=400)
+    request_id = body.get("request_id", "")
+    if request_id is None:
+        request_id = ""
+    if not isinstance(request_id, str) or \
+            (request_id and not runner.valid_steer_request_id(request_id)):
+        return web.json_response({"error": "invalid question id"}, status=400)
+    expected_turn_id = body.get("expected_turn_id", "")
+    if not isinstance(expected_turn_id, str) or not expected_turn_id or \
+            len(expected_turn_id) > runner.MAX_STEER_TURN_ID_CHARS:
+        return web.json_response({"error": "a valid expected turn id is required"},
+                                 status=400)
+    res = await runner.hub(s["id"]).ask(
+        question, request_id, expected_turn_id=expected_turn_id)
     return web.json_response(res, status=409 if "error" in res else 200)
 
 
@@ -1435,6 +1472,7 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     r.add_post("/api/sessions/{sid:\\d+}/workspace/reset", h_session_workspace_reset)
     r.add_post("/api/sessions/{sid:\\d+}/message", h_session_message)
     r.add_post("/api/sessions/{sid:\\d+}/steer", h_session_steer)
+    r.add_post("/api/sessions/{sid:\\d+}/ask", h_session_ask)
     r.add_post("/api/sessions/{sid:\\d+}/interrupt", h_session_interrupt)
     r.add_post("/api/sessions/{sid:\\d+}/switch", h_session_switch)
     r.add_post("/api/sessions/{sid:\\d+}/tool", h_session_tool)

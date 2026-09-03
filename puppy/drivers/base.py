@@ -241,6 +241,11 @@ class Driver:
     # request set this. Other explicitly supported protocols use stdin drain
     # as their strongest available acceptance signal.
     steering_acknowledged = False
+    # True only when the pinned protocol can put a question to the model
+    # ALONGSIDE the running turn: answered from the same conversation context,
+    # tool-less, one response, and never added to the engine's own transcript.
+    # This is the opposite of steering - it must not change what the turn does.
+    supports_side_questions = False
     # Some multi-provider CLIs deliberately leave authentication to whichever
     # provider/model a turn selects.  Their node health is binary availability,
     # not a single global login verdict.
@@ -401,6 +406,26 @@ class Driver:
 
     def steer_ready(self, session: dict, ctx: dict) -> bool:
         """Whether the live driver context can address its active turn."""
+        return False
+
+    def side_question_payload(self, session: dict, ctx: dict, question: str,
+                              history: list, request_id: str):
+        """Return one stdin side-question payload, or None until ready.
+
+        ``history`` is this turn's earlier question/answer pairs, oldest
+        first, which the driver replays so a follow-up reads as a thread.
+        The payload must never create a turn, a native session, or a
+        transcript entry the running turn can see.
+        """
+        return None
+
+    def side_question_cancel_payload(self, session: dict, ctx: dict,
+                                     request_id: str):
+        """Return one stdin payload withdrawing an unanswered side question."""
+        return None
+
+    def side_question_ready(self, session: dict, ctx: dict) -> bool:
+        """Whether the live driver context can carry a side question."""
         return False
 
     async def status(self) -> dict:
