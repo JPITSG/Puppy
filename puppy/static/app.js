@@ -2430,6 +2430,7 @@ const UPGRADE_READINESS_TIMEOUT = 4000;
    in tens of seconds. Poll gently and only while one is actually running. */
 const ENGINE_UPGRADE_POLL_INTERVAL = 3000;
 const ENGINE_REFRESH_TIMEOUT = 30000;
+const ENGINE_REFRESH_RESULT_MS = 3200;
 const remotePollSequence = {};
 let remotePollTimer = null;
 let remotePollingGeneration = 0;
@@ -4886,38 +4887,104 @@ function applyUsageRefreshPayload(bid, result) {
   applyEnginesPayload(bid, result);
 }
 
+/* Turn the refresh response into one compact, truthful sentence. A missing
+   login is a successful sign-in CHECK (the row now says what to fix); only an
+   indeterminate probe means that action itself failed. Likewise, one stale
+   catalog makes the model-list action a failure even though its last-known-good
+   choices remain usable. Older backends do not need a new response shape: the
+   engine payload already carries every diagnostic this summary needs. */
+function engineRefreshFeedback(nodeName, result, requestError = "") {
+  const allActions = [
+    "version checks", "sign-in checks", "latest-release checks", "model-list refresh",
+  ];
+  if (requestError) {
+    return {
+      ok: false,
+      text: `${nodeName}: refresh failed · Failed: ${allActions.join(", ")} · ${requestError}`,
+    };
+  }
+
+  const engines = result && Array.isArray(result.engines) ? result.engines : [];
+  const succeeded = [];
+  const failed = [];
+  const describe = (engine, fallback) =>
+    `${engine.label || engine.key || "Engine"}: ${fallback}`;
+  const record = (action, issues) => {
+    if (issues.length) failed.push(`${action} (${issues.join("; ")})`);
+    else succeeded.push(action);
+  };
+
+  record("version checks", engines.filter(engine => engine && engine.installed &&
+    !String(engine.version || "").trim()).map(engine =>
+      describe(engine, "version command returned no version")));
+  record("sign-in checks", engines.filter(engine => engine && engine.installed &&
+    !engine.availability_only && engine.auth === "unknown").map(engine =>
+      describe(engine, engine.detail || "sign-in status was indeterminate")));
+  record("latest-release checks", engines.filter(engine => engine && engine.installed &&
+    engine.latest_check_error).map(engine =>
+      describe(engine, engine.latest_check_error)));
+  record("model-list refresh", engines.filter(engine => engine && engine.installed &&
+    engine.dynamic_model_options && (engine.model_catalog_error ||
+      engine.model_catalog_note || engine.model_catalog_loaded === false)).map(engine =>
+      describe(engine, engine.model_catalog_error || engine.model_catalog_note ||
+        "model list was not checked")));
+
+  const ok = failed.length === 0;
+  const parts = [`${nodeName}: refresh ${ok ? "succeeded" : "completed with errors"}`];
+  if (succeeded.length) parts.push(`Succeeded: ${succeeded.join(", ")}`);
+  if (failed.length) parts.push(`Failed: ${failed.join(" · ")}`);
+  return { ok, text: parts.join(" · ") };
+}
+
+function resetEngineRefreshButton(button, nodeName) {
+  clearTimeout(button._engineRefreshResultTimer);
+  button._engineRefreshResultTimer = null;
+  button.classList.remove("refresh-success", "refresh-failure");
+  button.replaceChildren(refreshIcon(12));
+  button.setAttribute("aria-label",
+    `Re-check engine versions, sign-in and model lists on ${nodeName}`);
+}
+
+function showEngineRefreshResult(button, nodeName, ok) {
+  clearTimeout(button._engineRefreshResultTimer);
+  button.classList.remove("refresh-success", "refresh-failure");
+  button.classList.add(ok ? "refresh-success" : "refresh-failure");
+  button.replaceChildren(ok ? checkIcon(14) : xIcon(13));
+  button.setAttribute("aria-label", `Engine refresh ${ok ? "succeeded" : "failed"} on ${nodeName}`);
+  button._engineRefreshResultTimer = setTimeout(() => {
+    button._engineRefreshResultTimer = null;
+    if (!button.isConnected || button.classList.contains("refreshing")) return;
+    resetEngineRefreshButton(button, nodeName);
+  }, ENGINE_REFRESH_RESULT_MS);
+}
+
 /* Engine status, published versions and model catalogs refresh on their own
    timers. This is the impatient path that forces all three checks now. */
 async function refreshEngineVersions(bid, button, nodeName) {
-  if (button.disabled) return;
+  if (button.disabled || button.classList.contains("refreshing")) return;
+  resetEngineRefreshButton(button, nodeName);
   button.disabled = true;
   button.classList.add("refreshing");
   button.setAttribute("aria-busy", "true");
   /* Settings groups read the live button state: an unavailable node becomes
      "Checking backend…" for this request, then resolves from the result. */
   syncRemoteStateViews();
+  let feedback = null;
   try {
     const result = await api(bid, "engines/refresh",
       { method: "POST", timeoutMs: ENGINE_REFRESH_TIMEOUT });
     applyEnginesPayload(bid, result);
-    const issues = result.engines.filter(engine => engine && engine.installed &&
-      engine.dynamic_model_options &&
-      (engine.model_catalog_error || engine.model_catalog_note));
-    if (issues.length) {
-      const detail = issues.map(engine =>
-        `${engine.label}: ${engine.model_catalog_error || engine.model_catalog_note}`).join(" · ");
-      toast(`${nodeName}: refreshed; some model lists need attention · ${detail}`,
-        "error", 8000);
-    } else {
-      toast(`${nodeName}: engine status and model lists refreshed`, "ok", 4500);
-    }
+    feedback = engineRefreshFeedback(nodeName, result);
+    toast(feedback.text, feedback.ok ? "ok" : "error", feedback.ok ? 5500 : 9000);
   } catch (error) {
-    toast(`${nodeName}: ${error.message}`, "error", 7000);
+    feedback = engineRefreshFeedback(nodeName, null, error.message || "request failed");
+    toast(feedback.text, "error", 9000);
   } finally {
     if (button.isConnected) {
       button.disabled = false;
       button.classList.remove("refreshing");
       button.removeAttribute("aria-busy");
+      showEngineRefreshResult(button, nodeName, !!(feedback && feedback.ok));
     }
     syncRemoteStateViews();
   }
@@ -13133,7 +13200,8 @@ class SettingsView {
       dot.className = "gdot " + status;
       root.classList.toggle("engine-node-offline-values",
         status !== "ok" && Array.isArray(engines));
-      if (refresh) refresh.disabled = !!bid && status !== "ok";
+      if (refresh) refresh.disabled = refresh.classList.contains("refreshing") ||
+        (!!bid && status !== "ok");
       const statusLabel = status === "ok" ? "available" : status === "bad" ? "unavailable" : "checking";
       dot.setAttribute("aria-label", detail ? `${statusLabel}: ${detail}` : statusLabel);
       body.innerHTML = "";

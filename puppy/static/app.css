@@ -1802,6 +1802,9 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .engine-node-refresh:focus-visible{outline:1px solid var(--acc);outline-offset:2px}
 .engine-node-refresh:disabled{cursor:wait;opacity:.5}
 .engine-node-refresh.refreshing svg{animation:spin .75s linear infinite}
+.engine-node-refresh.refresh-success{color:var(--ok);background:var(--ok-dim);opacity:1}
+.engine-node-refresh.refresh-failure{color:var(--err);background:var(--err-dim);opacity:1}
+.engine-node-refresh.refresh-failure:disabled{cursor:not-allowed}
 .engine-row{
   display:grid;grid-template-columns:minmax(110px,1fr) auto;align-items:center;gap:8px 14px;
   min-width:0;padding:8px 0 8px 13px;

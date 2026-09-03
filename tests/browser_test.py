@@ -1458,26 +1458,49 @@ console.log(JSON.stringify({before,after,connected}));
         in css_source
     assert ('if (status === "bad" && refresh && ' +
             'refresh.classList.contains("refreshing")) {') not in ui_source
-    assert 'if (refresh) refresh.disabled = !!bid && status !== "ok";' in ui_source
+    assert ('if (refresh) refresh.disabled = refresh.classList.contains("refreshing") ||' +
+            '\n        (!!bid && status !== "ok");') in ui_source
+    assert (".engine-node-refresh.refresh-success{color:var(--ok);" +
+            "background:var(--ok-dim);opacity:1}") in css_source
+    assert (".engine-node-refresh.refresh-failure{color:var(--err);" +
+            "background:var(--err-dim);opacity:1}") in css_source
 
     # A manual retry announces both edges of the attempt, remains gated while
-    # in flight, and always restores the button even when the backend is still
-    # unreachable. Settings keeps the last values painted and gates the retry
-    # again when its post-request availability sync still says offline.
+    # in flight, and then paints a centred check/X before returning to its
+    # refresh glyph. Toasts name successful and failed components, including a
+    # partial response rather than flattening it into a generic verdict.
+    feedback_source = extract("engineRefreshFeedback")
+    reset_source = extract("resetEngineRefreshButton")
+    result_source = extract("showEngineRefreshResult")
     refresh_source = "async " + extract("refreshEngineVersions")
     refresh_script = r"""
 const ENGINE_REFRESH_TIMEOUT=1234;
-let shouldFail=true,synced=0,applied=0;const calls=[],errors=[];
+const ENGINE_REFRESH_RESULT_MS=3200;
+let shouldFail=true,synced=0,applied=0;const calls=[],toasts=[];
 const syncRemoteStateViews=()=>{synced++;};
 const api=async(bid,path,options)=>{calls.push({bid,path,options});
-  if(shouldFail)throw new Error("still unavailable");return {engines:[],usage_refresh:{}};};
+  if(shouldFail)throw new Error("still unavailable");return {engines:[
+    {label:"First",installed:true,version:"1.2.3",auth:"ok",latest_check_error:"",
+      dynamic_model_options:true,model_catalog_loaded:true,model_catalog_error:"",
+      model_catalog_note:""}],usage_refresh:{}};};
 const applyEnginesPayload=()=>{applied++;};
-const toast=(text,kind)=>{errors.push({text,kind});};
+const toast=(text,kind,ms)=>{toasts.push({text,kind,ms});};
+const refreshIcon=size=>({kind:"refresh",size});
+const checkIcon=size=>({kind:"check",size});
+const xIcon=size=>({kind:"x",size});
+let nextTimer=0;const timers=new Map();
+const setTimeout=(fn,ms)=>{const id=++nextTimer;timers.set(id,{fn,ms});return id;};
+const clearTimeout=id=>{if(id)timers.delete(id);};
 class Classes{constructor(){this.names=new Set();}add(name){this.names.add(name);}
-  remove(name){this.names.delete(name);}contains(name){return this.names.has(name);}}
-const makeButton=()=>({disabled:false,isConnected:true,classList:new Classes(),attributes:{},
+  remove(...names){names.forEach(name=>this.names.delete(name));}
+  contains(name){return this.names.has(name);}}
+const makeButton=()=>({disabled:false,isConnected:true,classList:new Classes(),attributes:{},icon:null,
   setAttribute(name,value){this.attributes[name]=String(value);},
-  removeAttribute(name){delete this.attributes[name];}});
+  removeAttribute(name){delete this.attributes[name];},
+  replaceChildren(icon){this.icon=icon;}});
+__FEEDBACK__
+__RESET__
+__RESULT__
 __REFRESH__
 const failedButton=makeButton();
 const failedTask=refreshEngineVersions(7,failedButton,"Worker node");
@@ -1487,7 +1510,13 @@ const failedDuring={disabled:failedButton.disabled,
 await failedTask;
 const failedAfter={disabled:failedButton.disabled,
   refreshing:failedButton.classList.contains("refreshing"),
-  busy:failedButton.attributes["aria-busy"]||null,synced,applied,errors:errors.length};
+  failed:failedButton.classList.contains("refresh-failure"),icon:failedButton.icon.kind,
+  label:failedButton.attributes["aria-label"],busy:failedButton.attributes["aria-busy"]||null,
+  synced,applied,toasts:toasts.length};
+const failedReset=timers.get(failedButton._engineRefreshResultTimer);
+failedReset.fn();
+const failedRestored={failed:failedButton.classList.contains("refresh-failure"),
+  icon:failedButton.icon.kind,label:failedButton.attributes["aria-label"]};
 shouldFail=false;
 const goodButton=makeButton();
 const goodTask=refreshEngineVersions(7,goodButton,"Worker node");
@@ -1495,9 +1524,18 @@ const goodDuring={disabled:goodButton.disabled,
   refreshing:goodButton.classList.contains("refreshing"),synced};
 await goodTask;
 const goodAfter={disabled:goodButton.disabled,
-  refreshing:goodButton.classList.contains("refreshing"),synced,applied};
-console.log(JSON.stringify({failedDuring,failedAfter,goodDuring,goodAfter,calls}));
-""".replace("__REFRESH__", refresh_source)
+  refreshing:goodButton.classList.contains("refreshing"),
+  succeeded:goodButton.classList.contains("refresh-success"),icon:goodButton.icon.kind,
+  label:goodButton.attributes["aria-label"],synced,applied,toasts:toasts.length};
+const partial=engineRefreshFeedback("Worker node",{engines:[
+  {label:"First",installed:true,version:"1.2.3",auth:"ok",
+    latest_check_error:"registry timed out",dynamic_model_options:true,
+    model_catalog_loaded:true,model_catalog_error:"catalog timed out",model_catalog_note:""}
+]});
+console.log(JSON.stringify({failedDuring,failedAfter,failedRestored,goodDuring,goodAfter,
+  calls,toasts,partial,failedDelay:failedReset.ms}));
+""".replace("__FEEDBACK__", feedback_source).replace("__RESET__", reset_source).replace(
+        "__RESULT__", result_source).replace("__REFRESH__", refresh_source)
     refresh_proc = subprocess.run(
         ["node", "--input-type=module", "-e", refresh_script],
         capture_output=True, text=True)
@@ -1508,13 +1546,22 @@ console.log(JSON.stringify({failedDuring,failedAfter,goodDuring,goodAfter,calls}
     }, refreshed
     assert refreshed["failedAfter"] == {
         "disabled": False, "refreshing": False, "busy": None,
-        "synced": 2, "applied": 0, "errors": 1,
+        "failed": True, "icon": "x",
+        "label": "Engine refresh failed on Worker node",
+        "synced": 2, "applied": 0, "toasts": 1,
     }, refreshed
+    assert refreshed["failedRestored"] == {
+        "failed": False, "icon": "refresh",
+        "label": "Re-check engine versions, sign-in and model lists on Worker node",
+    }, refreshed
+    assert refreshed["failedDelay"] == 3200, refreshed
     assert refreshed["goodDuring"] == {
         "disabled": True, "refreshing": True, "synced": 3,
     }, refreshed
     assert refreshed["goodAfter"] == {
-        "disabled": False, "refreshing": False, "synced": 4, "applied": 1,
+        "disabled": False, "refreshing": False, "succeeded": True, "icon": "check",
+        "label": "Engine refresh succeeded on Worker node",
+        "synced": 4, "applied": 1, "toasts": 2,
     }, refreshed
     assert refreshed["calls"] == [
         {"bid": 7, "path": "engines/refresh",
@@ -1522,6 +1569,19 @@ console.log(JSON.stringify({failedDuring,failedAfter,goodDuring,goodAfter,calls}
         {"bid": 7, "path": "engines/refresh",
          "options": {"method": "POST", "timeoutMs": 1234}},
     ], refreshed
+    assert refreshed["toasts"][0]["kind"] == "error", refreshed
+    assert "Failed: version checks, sign-in checks, latest-release checks, model-list refresh" \
+        in refreshed["toasts"][0]["text"], refreshed
+    assert refreshed["toasts"][1]["kind"] == "ok", refreshed
+    assert ("Succeeded: version checks, sign-in checks, latest-release checks, " +
+            "model-list refresh") in refreshed["toasts"][1]["text"], refreshed
+    assert refreshed["partial"]["ok"] is False, refreshed
+    assert "Succeeded: version checks, sign-in checks" in refreshed["partial"]["text"], \
+        refreshed
+    assert "Failed: latest-release checks (First: registry timed out)" in \
+        refreshed["partial"]["text"], refreshed
+    assert "model-list refresh (First: catalog timed out)" in \
+        refreshed["partial"]["text"], refreshed
 
 
 def check_drawer_drag(ui_source: str) -> None:
