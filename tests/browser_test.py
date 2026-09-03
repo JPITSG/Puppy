@@ -2816,6 +2816,19 @@ def check_side_question_ui(ui_source: str, css_source: str) -> None:
     assert "delete this.asideCards[d.request_id];" in ui_source
     assert ".aside-card{" in css_source and ".aside-a{" in css_source
 
+    # The answer goes through the same md() as an assistant message, so the
+    # markdown rules belong to the container rather than to whichever surface
+    # holds it. Scoped to .msg-assistant they left the aside card with
+    # unindented lists whose markers hung outside its left edge, and no code,
+    # table, quote or paragraph rhythm at all.
+    for rule in (".md>*+*{", ".md pre{", ".md code{", ".md ul,.md ol{",
+                 ".md blockquote{", ".md table{", ".md h1,.md h2,.md h3{"):
+        assert rule in css_source, rule
+    assert "html.light .md code{" in css_source
+    assert ".msg-assistant ul" not in css_source
+    assert ".msg-assistant code{" not in css_source
+    assert ".msg-assistant pre{" not in css_source
+
 
 def check_modal_surface(ui_source: str, css_source: str) -> None:
     """Every modal wears the New session modal's surface and title.

@@ -1057,13 +1057,18 @@ select.choice-native{display:none!important}
   background:rgba(90,162,245,.18);border:1px solid rgba(90,162,245,.3);
 }
 .msg-assistant{align-self:stretch;padding:2px 2px}
-.msg-assistant .md>*+*{margin-top:.6em}
-.msg-assistant pre{
+/* Rendered markdown is styled by its own container, not by whichever surface
+   happens to hold it: the assistant bubble and the side-question answer card
+   render the same thing through md(), so both must read the same. Scoping
+   these to .msg-assistant left the aside card with unindented lists whose
+   markers hung outside the card, and no code, table or paragraph rhythm. */
+.md>*+*{margin-top:.6em}
+.md pre{
   background:var(--panel);border:1px solid var(--line);border-radius:var(--r-sm);
   padding:10px 12px;overflow-x:auto;font-family:var(--mono);font-size:12.5px;line-height:1.45;
 }
-.msg-assistant .code-block{position:relative}
-.msg-assistant .code-block>pre{padding-right:46px}
+.md .code-block{position:relative}
+.md .code-block>pre{padding-right:46px}
 .code-copy,.user-copy{
   position:absolute;z-index:1;top:6px;right:6px;width:27px;height:27px;
   display:inline-grid;place-items:center;cursor:pointer;line-height:0;
@@ -1081,13 +1086,13 @@ select.choice-native{display:none!important}
 .user-copy:focus-visible{color:var(--txt);background:var(--panel3);opacity:1}
 .code-copy:active,.user-copy:active{transform:scale(.92)}
 .code-copy.done,.user-copy.done{color:var(--ok);opacity:1}
-.msg-assistant code{font-family:var(--mono);font-size:.92em;background:rgba(255,255,255,.07);padding:1px 5px;border-radius:5px}
-.msg-assistant pre code{background:none;padding:0}
-.msg-assistant table{border-collapse:collapse;font-size:13px;display:block;overflow-x:auto}
-.msg-assistant th,.msg-assistant td{border:1px solid var(--line2);padding:5px 9px;text-align:left}
-.msg-assistant h1,.msg-assistant h2,.msg-assistant h3{font-size:1.1em;margin-top:.8em}
-.msg-assistant ul,.msg-assistant ol{padding-left:1.4em}
-.msg-assistant blockquote{border-left:3px solid var(--line2);padding-left:10px;color:var(--txt2)}
+.md code{font-family:var(--mono);font-size:.92em;background:rgba(255,255,255,.07);padding:1px 5px;border-radius:5px}
+.md pre code{background:none;padding:0}
+.md table{border-collapse:collapse;font-size:13px;display:block;overflow-x:auto}
+.md th,.md td{border:1px solid var(--line2);padding:5px 9px;text-align:left}
+.md h1,.md h2,.md h3{font-size:1.1em;margin-top:.8em}
+.md ul,.md ol{padding-left:1.4em}
+.md blockquote{border-left:3px solid var(--line2);padding-left:10px;color:var(--txt2)}
 .msg-live{opacity:.85}
 .msg-live .cursor{display:inline-block;width:7px;height:14px;background:var(--acc);vertical-align:-2px;animation:blink 1s steps(1) infinite;margin-left:2px;border-radius:2px}
 @keyframes blink{50%{opacity:0}}
@@ -2641,8 +2646,8 @@ html.light ::-webkit-scrollbar-thumb{background:#c0c9d8;border-color:var(--bg)}
 html.light .sess-item:active{background:rgba(15,23,42,.07)}
 html.light .tab .t-close:active{background:rgba(15,23,42,.09)}
 html.light .swatch.sel,html.light .menu button.swatch.sel{background:rgba(15,23,42,.05)}
-html.light .msg-assistant code{background:rgba(15,23,42,.075)}
-html.light .msg-assistant pre code{background:none}
+html.light .md code{background:rgba(15,23,42,.075)}
+html.light .md pre code{background:none}
 html.light .msg-user{
   background:linear-gradient(180deg,rgba(59,130,224,.13),rgba(59,130,224,.06));
   border-color:rgba(59,130,224,.30);
