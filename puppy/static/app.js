@@ -5864,23 +5864,94 @@ function syncHorizontalOverflow(scroller, viewport = scroller && scroller.parent
    is left to the browser. Every strip that gets the touch-swipe treatment
    (overflow-x:auto with touch-action:pan-x) must be listed here too. */
 const WHEEL_SWIPE_STRIPS = [".tabs", ".chat-meta-scroll", ".composer-meta-scroll"];
+const wheelSwipeAnimations = new WeakMap();
+
+function stopWheelSwipe(strip) {
+  const state = wheelSwipeAnimations.get(strip);
+  if (!state) return;
+  if (state.frame !== null) cancelAnimationFrame(state.frame);
+  wheelSwipeAnimations.delete(strip);
+}
+
+/* Wheel notches can be much larger than touch/trackpad deltas, so applying
+   each one directly makes a short strip appear to teleport. Accumulate them
+   into one destination and approach it on animation frames. The exponential
+   step is time-based (not refresh-rate-based), coalesces a burst naturally,
+   and clamps delayed frames so returning to a backgrounded tab cannot jump.
+   Reduced-motion users keep the same navigation without the interpolation. */
+function smoothWheelSwipe(strip, delta, maximum) {
+  const reduced = window.matchMedia &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (reduced) {
+    const next = Math.max(0, Math.min(maximum, strip.scrollLeft + delta));
+    if (Math.abs(next - strip.scrollLeft) < 0.5) return false;
+    stopWheelSwipe(strip);
+    strip.scrollLeft = next;
+    return true;
+  }
+
+  let state = wheelSwipeAnimations.get(strip);
+  if (!state) {
+    state = { target: strip.scrollLeft, frame: null, lastAt: null };
+    wheelSwipeAnimations.set(strip, state);
+  }
+  state.target = Math.max(0, Math.min(maximum, state.target + delta));
+  const moving = Math.abs(state.target - strip.scrollLeft) >= 0.5;
+  if (!moving) {
+    stopWheelSwipe(strip);
+    return false;
+  }
+  if (state.frame !== null) return true;
+
+  const step = at => {
+    state.frame = null;
+    if (!strip.isConnected) {
+      wheelSwipeAnimations.delete(strip);
+      return;
+    }
+    const limit = Math.max(0, strip.scrollWidth - strip.clientWidth);
+    state.target = Math.max(0, Math.min(limit, state.target));
+    const distance = state.target - strip.scrollLeft;
+    if (Math.abs(distance) < 0.5) {
+      strip.scrollLeft = state.target;
+      wheelSwipeAnimations.delete(strip);
+      return;
+    }
+    const elapsed = state.lastAt === null ? 16 :
+      Math.max(0, Math.min(32, at - state.lastAt));
+    state.lastAt = at;
+    strip.scrollLeft += distance * (1 - Math.exp(-elapsed / 75));
+    state.frame = requestAnimationFrame(step);
+  };
+  state.frame = requestAnimationFrame(step);
+  return true;
+}
 
 document.addEventListener("wheel", event => {
   if (event.ctrlKey || event.defaultPrevented) return;
   const origin = event.target instanceof Element ? event.target : null;
   const strip = origin && origin.closest(WHEEL_SWIPE_STRIPS.join(","));
-  if (!strip || Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
+  if (!strip) return;
+  if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
+    stopWheelSwipe(strip);   // give a native sideways gesture full ownership
+    return;
+  }
   let delta = event.deltaY;
   if (event.deltaMode === 1) delta *= 16;
   else if (event.deltaMode === 2) delta *= strip.clientWidth;
   if (!delta) return;
   const maximum = strip.scrollWidth - strip.clientWidth;
   if (maximum <= 1) return;
-  const next = Math.max(0, Math.min(maximum, strip.scrollLeft + delta));
-  if (Math.abs(next - strip.scrollLeft) < 0.5) return;
-  strip.scrollLeft = next;
-  event.preventDefault();
+  if (smoothWheelSwipe(strip, delta, maximum)) event.preventDefault();
 }, { passive: false });
+
+/* A direct manipulation must win immediately over momentum left by an earlier
+   wheel turn. Pointer events cover mouse drags and touch swipes alike. */
+document.addEventListener("pointerdown", event => {
+  const origin = event.target instanceof Element ? event.target : null;
+  const strip = origin && origin.closest(WHEEL_SWIPE_STRIPS.join(","));
+  if (strip) stopWheelSwipe(strip);
+}, { passive: true });
 
 function syncAllTabOverflow() {
   document.querySelectorAll(".tab-scroll > .tabs").forEach(scroller =>

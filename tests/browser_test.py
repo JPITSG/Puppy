@@ -4375,6 +4375,123 @@ run().catch(e=>{console.error(e&&e.stack||e);process.exit(1);});
     assert spawn_tools["cancel"]["inputSchema"]["required"] == ["jobs"]
 
 
+def check_smooth_wheel_swipe(ui_source: str) -> None:
+    """Every touch-swipe strip shares one smooth, boundary-aware wheel path."""
+    start = ui_source.index("const WHEEL_SWIPE_STRIPS")
+    end = ui_source.index("\nfunction syncAllTabOverflow", start)
+    source = ui_source[start:end]
+    script = r"""
+let reduced = false;
+const listeners = {};
+class Element {
+  constructor() {
+    this.scrollLeft = 0; this.scrollWidth = 500; this.clientWidth = 100;
+    this.isConnected = true;
+  }
+  closest(selector) { return selector.includes(".tabs") ? this : null; }
+}
+const document = {addEventListener(kind, fn, options) {
+  listeners[kind] = {fn, options};
+}};
+const window = {matchMedia:() => ({matches:reduced})};
+let frameSeq = 0, clock = 0;
+const frames = new Map();
+const requestAnimationFrame = fn => { const id = ++frameSeq; frames.set(id, fn); return id; };
+const cancelAnimationFrame = id => frames.delete(id);
+%s
+const strip = new Element();
+function wheel(values={}) {
+  const event = Object.assign({target:strip, ctrlKey:false, defaultPrevented:false,
+    deltaX:0, deltaY:0, deltaMode:0, prevented:false,
+    preventDefault() { this.prevented = true; }}, values);
+  listeners.wheel.fn(event);
+  return event;
+}
+function runFrame() {
+  const row = frames.entries().next().value;
+  if (!row) return false;
+  frames.delete(row[0]); clock += 16; row[1](clock); return true;
+}
+function settle() {
+  let count = 0;
+  while (runFrame() && ++count < 200) {}
+  if (frames.size) throw new Error("wheel animation did not settle");
+  return count;
+}
+
+const first = wheel({deltaY:120});
+const queued = {left:strip.scrollLeft, frames:frames.size};
+runFrame();
+const eased = strip.scrollLeft;
+const second = wheel({deltaY:80});
+const frameCount = settle();
+const accumulated = strip.scrollLeft;
+
+strip.scrollLeft = 200;
+const pending = wheel({deltaY:80});
+const horizontal = wheel({deltaX:90, deltaY:4});
+const horizontalResult = {pending:pending.prevented, native:horizontal.prevented,
+  frames:frames.size, left:strip.scrollLeft};
+
+strip.scrollLeft = 400;
+const atRight = wheel({deltaY:100});
+strip.scrollLeft = 0;
+const atLeft = wheel({deltaY:-100});
+
+const line = wheel({deltaY:2, deltaMode:1}); settle();
+const lineLeft = strip.scrollLeft;
+strip.scrollLeft = 0;
+const page = wheel({deltaY:1, deltaMode:2}); settle();
+const pageLeft = strip.scrollLeft;
+
+strip.scrollLeft = 0;
+const pointerStart = wheel({deltaY:100});
+listeners.pointerdown.fn({target:strip});
+const pointerResult = {prevented:pointerStart.prevented, frames:frames.size,
+  left:strip.scrollLeft};
+
+strip.scrollLeft = 0; strip.isConnected = false;
+const detached = wheel({deltaY:100}); runFrame();
+const detachedResult = {prevented:detached.prevented, frames:frames.size,
+  left:strip.scrollLeft};
+strip.isConnected = true;
+
+reduced = true; strip.scrollLeft = 0;
+const reducedEvent = wheel({deltaY:100});
+const reducedResult = {prevented:reducedEvent.prevented, frames:frames.size,
+  left:strip.scrollLeft};
+
+console.log(JSON.stringify({selectors:WHEEL_SWIPE_STRIPS, passive:listeners.wheel.options.passive,
+  pointerPassive:listeners.pointerdown.options.passive,
+  first:first.prevented, second:second.prevented, queued, eased, frameCount, accumulated,
+  horizontalResult, atRight:atRight.prevented, atLeft:atLeft.prevented,
+  line:line.prevented, lineLeft, page:page.prevented, pageLeft,
+  pointerResult, detachedResult, reducedResult}));
+""" % source
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:1000]
+    result = json.loads(proc.stdout.strip())
+    assert result["selectors"] == [
+        ".tabs", ".chat-meta-scroll", ".composer-meta-scroll"], result
+    assert result["passive"] is False and result["pointerPassive"] is True, result
+    assert result["first"] and result["second"], result
+    assert result["queued"] == {"left": 0, "frames": 1}, result
+    assert 0 < result["eased"] < 120, result
+    assert 1 < result["frameCount"] < 200, result
+    assert result["accumulated"] == 200, result
+    assert result["horizontalResult"] == {
+        "pending": True, "native": False, "frames": 0, "left": 200}, result
+    assert not result["atRight"] and not result["atLeft"], result
+    assert result["line"] and result["lineLeft"] == 32, result
+    assert result["page"] and result["pageLeft"] == 100, result
+    assert result["pointerResult"] == {
+        "prevented": True, "frames": 0, "left": 0}, result
+    assert result["detachedResult"] == {
+        "prevented": True, "frames": 0, "left": 0}, result
+    assert result["reducedResult"] == {
+        "prevented": True, "frames": 0, "left": 100}, result
+
+
 def check_chat_status_bar_layout(ui_source: str, css_source: str) -> None:
     """Identity is one pill; location names the backend that owns the files."""
     start = ui_source.index("function workspaceLocationNode(")
@@ -6060,6 +6177,7 @@ async def main() -> None:
             check_engine_picker_alignment(css_source)
             check_browser_chip_order(ui_source)
             check_composer_mentions(ui_source, css_source)
+            check_smooth_wheel_swipe(ui_source)
             check_chat_status_bar_layout(ui_source, css_source)
             check_backend_name_single_activation(ui_source)
             check_browser_disable_closes_scoped_tabs(ui_source)
