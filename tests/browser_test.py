@@ -3343,6 +3343,11 @@ def check_timer_settings_ui(ui_source: str, css_source: str) -> None:
     assert 'api(bid, "timers", { timeoutMs: 10000 })' in ui_source
     assert '"Apply to other online backends?"' in ui_source
     assert '{ confirmLabel: "Apply to all", destructive: false }' in ui_source
+    assert '"Reset all to defaults"' in ui_source
+    assert '"Reset timers everywhere?"' in ui_source
+    assert '{ confirmLabel: "Reset all", destructive: false }' in ui_source
+    assert "body: { ...current.defaults }" in ui_source
+    assert "if (localUpdated) startRemotePolling();" in ui_source
     assert "Promise.allSettled(targets.map" in ui_source
     assert 'failed: ${failed.join("; ")}' in ui_source
     assert 'Math.min(timerMilliseconds("remote_session_seconds"),' in ui_source
@@ -3352,6 +3357,7 @@ def check_timer_settings_ui(ui_source: str, css_source: str) -> None:
     assert ".timer-row{" in css_source
     assert ".timer-section{" in css_source
     assert ".timer-node{" in css_source
+    assert ".timer-actions{" in css_source
 
     constants_start = ui_source.index("const TIMER_DEFAULT_VALUES")
     constants_end = ui_source.index("/* Browser-clock anchors", constants_start)
@@ -3378,7 +3384,7 @@ console.log(JSON.stringify({before,after:remotePollingTickMilliseconds(),valid:!
     assert proc.returncode == 0, proc.stderr[:700]
     assert json.loads(proc.stdout) == {"before": 12000, "after": 7000, "valid": True}
 
-    targets_start = ui_source.index("function onlineTimerPropagationTargets(")
+    targets_start = ui_source.index("function onlineTimerTargets(")
     targets_end = ui_source.index("\n\nfunction backendSupportsSystemPrompt", targets_start)
     script = r'''const statuses={1:"ok",2:"ok",3:"bad",4:"ok",5:"ok"};
 const supported=new Set([0,1,2,3,5]);
@@ -3392,6 +3398,7 @@ const nodes=[
   {bid:3,name:"Offline"},{bid:4,name:"Legacy"},{bid:5,name:"Blocked"},
 ];
 console.log(JSON.stringify({
+  all:onlineTimerTargets(nodes).map(node=>node.name),
   remote:onlineTimerPropagationTargets(nodes,1).map(node=>node.name),
   local:onlineTimerPropagationTargets(nodes,0).map(node=>node.name),
 }));
@@ -3400,6 +3407,7 @@ console.log(JSON.stringify({
                           capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:700]
     assert json.loads(proc.stdout) == {
+        "all": ["Local", "Source", "Online"],
         "remote": ["Local", "Online"], "local": ["Source", "Online"]}
 
     propagate_start = ui_source.index("async function propagateTimerSetting(")
@@ -3430,6 +3438,44 @@ console.log(JSON.stringify({result,calls}));
     assert all(call["path"] == "timers" and
                call["options"]["body"] == {"model_catalog_minutes": 9}
                for call in result["calls"])
+
+    reset_start = ui_source.index("async function resetTimerSettings(")
+    reset_end = ui_source.index("\n\nfunction backendSupportsSystemPrompt", reset_start)
+    script = r'''const calls=[];
+async function api(bid,path,options={}){
+  calls.push({bid,path,options});
+  if(!options.method){
+    if(bid===4)return {timers:null};
+    return {timers:{defaults:{node_default:bid}}};
+  }
+  if(bid===3)throw new Error("offline during reset");
+  return {timers:{reset_bid:bid}};
+}
+function normalizeTimerSettings(payload){return payload&&payload.defaults?payload:null;}
+function rememberTimerSettings(bid,payload){return payload&&payload.reset_bid===bid;}
+''' + ui_source[reset_start:reset_end] + r'''
+const result=await resetTimerSettings([
+  {bid:0,name:"Local"},{bid:2,name:"Different"},
+  {bid:3,name:"Gone"},{bid:4,name:"Malformed"},
+]);
+console.log(JSON.stringify({result,calls}));
+'''
+    proc = subprocess.run(["node", "--input-type=module", "-e", script],
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:700]
+    result = json.loads(proc.stdout)
+    assert result["result"] == {
+        "updated": ["Local", "Different"],
+        "failed": ["Gone: offline during reset",
+                   "Malformed: backend returned invalid timer settings"],
+        "localUpdated": True,
+    }
+    patch_calls = [call for call in result["calls"]
+                   if call["options"].get("method") == "PATCH"]
+    assert [(call["bid"], call["options"]["body"])
+            for call in patch_calls] == [
+                (0, {"node_default": 0}), (2, {"node_default": 2}),
+                (3, {"node_default": 3})]
 
     # Dismissing either promise-backed dialog via Escape/backdrop must settle it;
     # otherwise the caller can remain disabled forever after a close without a button.

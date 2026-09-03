@@ -2093,6 +2093,10 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   width:74px;height:var(--settings-control-h);margin:0;padding:0 7px;text-align:center;
   font-family:var(--mono);font-size:12px;
 }
+.timer-actions{
+  display:flex;align-items:center;gap:8px;margin-top:8px;padding-top:12px;
+  border-top:1px solid var(--line);
+}
 .timer-row-controls input:disabled{opacity:.5;cursor:not-allowed}
 .timer-row-controls .btn{height:var(--settings-control-h)}
 .timer-row-controls input[type=number]::-webkit-inner-spin-button,
@@ -2604,6 +2608,7 @@ html.light .sh-more:hover{background:rgba(15,23,42,.035)}
   .timer-row-controls{--settings-control-h:34px;justify-content:flex-start}
   .timer-row-controls input{width:min(120px,40vw)}
   .timer-row-controls .btn{margin-left:auto}
+  .timer-actions .btn{height:34px}
   .system-prompt-section-head{display:grid;grid-template-columns:minmax(0,1fr)}
   .system-prompt-reset{justify-self:start;height:32px}
   .system-prompt-textarea{font-size:16px;line-height:1.45}

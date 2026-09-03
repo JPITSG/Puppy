@@ -3963,16 +3963,20 @@ function backendSupportsTimerSettings(bid) {
     backend.capabilities.includes("timer-settings");
 }
 
-/* Propagation is deliberately limited to peers whose most recent live probe
-   succeeded. A stale cached timer payload is useful for editing while a node
-   is down, but it is not proof that a PATCH can reach that node now. */
-function onlineTimerPropagationTargets(nodes, sourceBid) {
-  const source = Number(sourceBid) || 0;
+/* Fleet timer actions are deliberately limited to peers whose most recent
+   live probe succeeded. A stale cached timer payload is useful for editing
+   while a node is down, but it is not proof that a PATCH can reach it now. */
+function onlineTimerTargets(nodes, excludedBid = null) {
+  const excluded = excludedBid === null ? null : (Number(excludedBid) || 0);
   return (Array.isArray(nodes) ? nodes : []).filter(node => {
     const bid = Number(node && node.bid) || 0;
-    if (bid === source || !backendSupportsTimerSettings(bid)) return false;
+    if (bid === excluded || !backendSupportsTimerSettings(bid)) return false;
     return !bid || (remoteAvailability(bid) === "ok" && backendConnectionAllowed(bid));
   });
+}
+
+function onlineTimerPropagationTargets(nodes, sourceBid) {
+  return onlineTimerTargets(nodes, Number(sourceBid) || 0);
 }
 
 async function propagateTimerSetting(targets, key, value) {
@@ -3992,6 +3996,36 @@ async function propagateTimerSetting(targets, key, value) {
       outcome.reason.message : "update failed"}`);
   });
   return { updated, failed };
+}
+
+async function resetTimerSettings(targets) {
+  const outcomes = await Promise.allSettled(targets.map(async target => {
+    /* Re-read immediately before the reset. Defaults belong to the node's
+       installed version; a controller constant or stale cache could reset a
+       newer backend to the wrong values. */
+    const currentResult = await api(target.bid, "timers", { timeoutMs: 10000 });
+    const current = normalizeTimerSettings(currentResult && currentResult.timers);
+    if (!current) throw new Error("backend returned invalid timer settings");
+    const resetResult = await api(target.bid, "timers", {
+      method: "PATCH", body: { ...current.defaults }, timeoutMs: 12000,
+    });
+    if (!rememberTimerSettings(target.bid, resetResult && resetResult.timers))
+      throw new Error("backend returned invalid timer settings after reset");
+    return target;
+  }));
+  const updated = [];
+  const failed = [];
+  let localUpdated = false;
+  outcomes.forEach((outcome, index) => {
+    if (outcome.status === "fulfilled") {
+      updated.push(targets[index].name);
+      if (!(Number(targets[index].bid) || 0)) localUpdated = true;
+    } else {
+      failed.push(`${targets[index].name}: ${outcome.reason && outcome.reason.message ?
+        outcome.reason.message : "reset failed"}`);
+    }
+  });
+  return { updated, failed, localUpdated };
 }
 
 function backendSupportsSystemPrompt(bid) {
@@ -13909,6 +13943,7 @@ class SettingsView {
     if (nodes.some(node => node.bid === preferred)) activeBid = preferred;
     const loading = new Set();
     const rows = [];
+    let resetting = false;
 
     const engineSection = el("section", "timer-section");
     const engineHead = el("div", "timer-section-head");
@@ -14042,6 +14077,48 @@ class SettingsView {
     };
     specs.forEach(addRow);
 
+    const timerActions = el("div", "timer-actions");
+    const resetButton = el("button", "btn btn-sm btn-ghost", "Reset all to defaults");
+    resetButton.type = "button";
+    timerActions.appendChild(resetButton);
+    card.appendChild(timerActions);
+
+    resetButton.onclick = async () => {
+      const targets = onlineTimerTargets(nodes);
+      const peers = targets.filter(target => Number(target.bid) || 0);
+      const scope = peers.length ?
+        `the primary instance and ${peers.length} currently online ` +
+          `backend${peers.length === 1 ? "" : "s"}` : "the primary instance";
+      const confirmed = await modalConfirm(
+        "Reset timers everywhere?",
+        `This will reset all six timer values on ${scope}: ` +
+          `${targets.map(target => target.name).join(", ")}. Each node will use the ` +
+          "defaults advertised by its installed Puppy version. Offline or incompatible " +
+          "backends will not be changed.",
+        { confirmLabel: "Reset all", destructive: false });
+      if (!confirmed || generation !== this.renderGeneration || !card.isConnected) return;
+      resetting = true;
+      paint();
+      try {
+        const { updated, failed, localUpdated } = await resetTimerSettings(targets);
+        if (localUpdated) startRemotePolling();
+        if (generation !== this.renderGeneration || !card.isConnected) return;
+        if (!failed.length) {
+          toast(`Timer defaults restored on ${updated.join(", ")}`, "ok", 7000);
+        } else {
+          const prefix = updated.length ?
+            `Timer defaults restored on ${updated.join(", ")} · ` : "Timer reset ";
+          toast(`${prefix}failed: ${failed.join("; ")}`, "error", 10000);
+        }
+      } catch (error) {
+        if (generation === this.renderGeneration && card.isConnected)
+          toast(`Timer reset failed: ${error.message}`, "error", 8000);
+      } finally {
+        resetting = false;
+        if (generation === this.renderGeneration && card.isConnected) paint();
+      }
+    };
+
     const load = async bid => {
       if (!bid || loading.has(bid) || !backendSupportsTimerSettings(bid) ||
           !backendConnectionAllowed(bid)) return;
@@ -14076,6 +14153,10 @@ class SettingsView {
       else if (!current) nodeNote.textContent = "Waiting for timer settings…";
       else nodeNote.textContent = `Engine timers stored on ${node ? node.name : "this instance"}.`;
 
+      select.disabled = resetting;
+      resetButton.disabled = resetting || rows.some(record => record.saving);
+      resetButton.textContent = resetting ? "Resetting…" : "Reset all to defaults";
+
       for (const record of rows) {
         const { spec, input, unit, save } = record;
         const payload = timerPayload(spec);
@@ -14095,7 +14176,7 @@ class SettingsView {
           unit.textContent = spec.key.endsWith("_minutes") ? "min" : "sec";
           input.setAttribute("aria-label", spec.label);
         }
-        const disabled = record.saving || !payload || !canUse || !reachable;
+        const disabled = resetting || record.saving || !payload || !canUse || !reachable;
         input.disabled = disabled;
         save.disabled = disabled;
         save.textContent = record.saving ? "Saving…" : "Apply";
