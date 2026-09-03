@@ -1072,7 +1072,7 @@ select.choice-native{display:none!important}
   transition:opacity .15s var(--ease),color .15s var(--ease),background .15s var(--ease),transform .12s var(--ease);
 }
 .code-copy{opacity:.72}
-.user-copy{opacity:.3}
+.user-copy{opacity:0}
 .code-copy svg,.user-copy svg{display:block}
 @media (hover:hover){
   .code-copy:hover,.code-block:hover .code-copy{opacity:1}

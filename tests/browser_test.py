@@ -5699,7 +5699,7 @@ async def main() -> None:
             assert "if (text) n.appendChild(userMessageCopyButton(text));" in ui_source
             assert ".code-copy,.user-copy{" in css_source
             assert "position:absolute;z-index:1;top:6px;right:6px;width:27px;height:27px;" in css_source
-            assert ".user-copy{opacity:.3}" in css_source
+            assert ".user-copy{opacity:0}" in css_source
             assert ".code-copy:hover,.user-copy:hover{" in css_source
             # Complete status lines use one click; later desktop double-click
             # events cannot undo the first activation.
