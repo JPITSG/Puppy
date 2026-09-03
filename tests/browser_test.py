@@ -3341,6 +3341,10 @@ def check_timer_settings_ui(ui_source: str, css_source: str) -> None:
     assert 'backend.capabilities.includes("timer-settings")' in ui_source
     assert 'method: "PATCH", body: { [spec.key]: value }' in ui_source
     assert 'api(bid, "timers", { timeoutMs: 10000 })' in ui_source
+    assert '"Apply to other online backends?"' in ui_source
+    assert '{ confirmLabel: "Apply to all", destructive: false }' in ui_source
+    assert "Promise.allSettled(targets.map" in ui_source
+    assert 'failed: ${failed.join("; ")}' in ui_source
     assert 'Math.min(timerMilliseconds("remote_session_seconds"),' in ui_source
     assert 'timerMilliseconds("remote_engine_seconds")' in ui_source
     assert "state.remoteSessionCheckedAt" in ui_source
@@ -3373,6 +3377,96 @@ console.log(JSON.stringify({before,after:remotePollingTickMilliseconds(),valid:!
                           capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:700]
     assert json.loads(proc.stdout) == {"before": 12000, "after": 7000, "valid": True}
+
+    targets_start = ui_source.index("function onlineTimerPropagationTargets(")
+    targets_end = ui_source.index("\n\nfunction backendSupportsSystemPrompt", targets_start)
+    script = r'''const statuses={1:"ok",2:"ok",3:"bad",4:"ok",5:"ok"};
+const supported=new Set([0,1,2,3,5]);
+const reachable=new Set([0,1,2,3,4]);
+function backendSupportsTimerSettings(bid){return supported.has(bid);}
+function remoteAvailability(bid){return statuses[bid] || "pending";}
+function backendConnectionAllowed(bid){return reachable.has(bid);}
+''' + ui_source[targets_start:targets_end] + r'''
+const nodes=[
+  {bid:0,name:"Local"},{bid:1,name:"Source"},{bid:2,name:"Online"},
+  {bid:3,name:"Offline"},{bid:4,name:"Legacy"},{bid:5,name:"Blocked"},
+];
+console.log(JSON.stringify({
+  remote:onlineTimerPropagationTargets(nodes,1).map(node=>node.name),
+  local:onlineTimerPropagationTargets(nodes,0).map(node=>node.name),
+}));
+'''
+    proc = subprocess.run(["node", "--input-type=module", "-e", script],
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:700]
+    assert json.loads(proc.stdout) == {
+        "remote": ["Local", "Online"], "local": ["Source", "Online"]}
+
+    propagate_start = ui_source.index("async function propagateTimerSetting(")
+    propagate_end = ui_source.index("\n\nfunction backendSupportsSystemPrompt", propagate_start)
+    script = r'''const calls=[];
+async function api(bid,path,options){
+  calls.push({bid,path,options});
+  if(bid===3) throw new Error("offline during save");
+  return {timers:{bid}};
+}
+function rememberTimerSettings(bid,payload){return bid!==2 && payload.bid===bid;}
+''' + ui_source[propagate_start:propagate_end] + r'''
+const result=await propagateTimerSetting([
+  {bid:1,name:"Good"},{bid:2,name:"Malformed"},{bid:3,name:"Gone"},
+],"model_catalog_minutes",9);
+console.log(JSON.stringify({result,calls}));
+'''
+    proc = subprocess.run(["node", "--input-type=module", "-e", script],
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:700]
+    result = json.loads(proc.stdout)
+    assert result["result"] == {
+        "updated": ["Good"],
+        "failed": ["Malformed: backend returned invalid timer settings",
+                   "Gone: offline during save"],
+    }
+    assert [call["bid"] for call in result["calls"]] == [1, 2, 3]
+    assert all(call["path"] == "timers" and
+               call["options"]["body"] == {"model_catalog_minutes": 9}
+               for call in result["calls"])
+
+    # Dismissing either promise-backed dialog via Escape/backdrop must settle it;
+    # otherwise the caller can remain disabled forever after a close without a button.
+    confirm_start = ui_source.index("function modalConfirm(")
+    confirm_end = ui_source.index("\n\nfunction modalNotice", confirm_start)
+    prompt_start = ui_source.index("function modalPrompt(")
+    prompt_end = ui_source.index("\n\n/* Edit a paired backend", prompt_start)
+    assert "onClose(() =>" in ui_source[confirm_start:confirm_end]
+    assert "resolve(false)" in ui_source[confirm_start:confirm_end]
+    assert "onClose(() =>" in ui_source[prompt_start:prompt_end]
+    assert "resolve(null)" in ui_source[prompt_start:prompt_end]
+    script = r'''let current=null;
+function esc(value){return String(value);}
+function modal(html){
+  const controls={"#mc-no":{},"#mc-yes":{}};
+  let listener=()=>{};
+  const close=()=>listener();
+  current={html,controls,dismiss:()=>listener()};
+  return {m:{querySelector:key=>controls[key]},close,onClose:fn=>{listener=fn;}};
+}
+''' + ui_source[confirm_start:confirm_end] + r'''
+const dismissedPromise=modalConfirm("Title","Copy");
+current.dismiss();
+const dismissed=await dismissedPromise;
+const acceptedPromise=modalConfirm("Title","Copy",{
+  confirmLabel:"Apply fleet",destructive:false,
+});
+const styled=current.html.includes("btn btn-pri") && current.html.includes("Apply fleet");
+current.controls["#mc-yes"].onclick();
+const accepted=await acceptedPromise;
+console.log(JSON.stringify({dismissed,accepted,styled}));
+'''
+    proc = subprocess.run(["node", "--input-type=module", "-e", script],
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:700]
+    assert json.loads(proc.stdout) == {
+        "dismissed": False, "accepted": True, "styled": True}
 
 
 def check_session_provider_marks(css_source: str) -> None:

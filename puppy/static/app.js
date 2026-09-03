@@ -3963,6 +3963,37 @@ function backendSupportsTimerSettings(bid) {
     backend.capabilities.includes("timer-settings");
 }
 
+/* Propagation is deliberately limited to peers whose most recent live probe
+   succeeded. A stale cached timer payload is useful for editing while a node
+   is down, but it is not proof that a PATCH can reach that node now. */
+function onlineTimerPropagationTargets(nodes, sourceBid) {
+  const source = Number(sourceBid) || 0;
+  return (Array.isArray(nodes) ? nodes : []).filter(node => {
+    const bid = Number(node && node.bid) || 0;
+    if (bid === source || !backendSupportsTimerSettings(bid)) return false;
+    return !bid || (remoteAvailability(bid) === "ok" && backendConnectionAllowed(bid));
+  });
+}
+
+async function propagateTimerSetting(targets, key, value) {
+  const outcomes = await Promise.allSettled(targets.map(async target => {
+    const result = await api(target.bid, "timers", {
+      method: "PATCH", body: { [key]: value }, timeoutMs: 12000,
+    });
+    if (!rememberTimerSettings(target.bid, result && result.timers))
+      throw new Error("backend returned invalid timer settings");
+    return target;
+  }));
+  const updated = [];
+  const failed = [];
+  outcomes.forEach((outcome, index) => {
+    if (outcome.status === "fulfilled") updated.push(targets[index].name);
+    else failed.push(`${targets[index].name}: ${outcome.reason && outcome.reason.message ?
+      outcome.reason.message : "update failed"}`);
+  });
+  return { updated, failed };
+}
+
 function backendSupportsSystemPrompt(bid) {
   if (!bid) return true;
   const backend = state.backends.find(item => item.id === bid);
@@ -13968,8 +13999,30 @@ class SettingsView {
             startRemotePolling();
           const longUnit = limit.unit === "minutes" ?
             (value === 1 ? "minute" : "minutes") : (value === 1 ? "second" : "seconds");
-          toast(`${node ? node.name : "This instance"}: ${spec.label} set to ${value} ${longUnit}`,
-            "ok", 5000);
+          const sourceName = node ? node.name : "This instance";
+          const savedMessage = `${sourceName}: ${spec.label} set to ${value} ${longUnit}`;
+          const targets = spec.scope === "engine" ?
+            onlineTimerPropagationTargets(nodes, bid) : [];
+          if (!targets.length || !(await modalConfirm(
+            "Apply to other online backends?",
+            `${savedMessage}. Apply the same value to ${targets.length} other online ` +
+              `backend${targets.length === 1 ? "" : "s"}: ` +
+              `${targets.map(target => target.name).join(", ")}? ` +
+              "Offline or incompatible backends will be left unchanged.",
+            { confirmLabel: "Apply to all", destructive: false }))) {
+            if (generation === this.renderGeneration && card.isConnected)
+              toast(savedMessage, "ok", 5000);
+            return;
+          }
+          const { updated, failed } = await propagateTimerSetting(targets, spec.key, value);
+          if (generation !== this.renderGeneration || !card.isConnected) return;
+          paint();
+          if (!failed.length) {
+            toast(`${savedMessage} · also updated ${updated.join(", ")}`, "ok", 6500);
+          } else {
+            const success = updated.length ? ` · also updated ${updated.join(", ")}` : "";
+            toast(`${savedMessage}${success} · failed: ${failed.join("; ")}`, "error", 9000);
+          }
         } catch (error) {
           if (generation === this.renderGeneration && card.isConnected)
             toast(`${node ? node.name : "This instance"}: ${error.message}`, "error", 7000);
@@ -15495,12 +15548,28 @@ function modal(html, className = "") {
   return { m, close, onClose };
 }
 
-function modalConfirm(title, text) {
+function modalConfirm(title, text, options = {}) {
   return new Promise((resolve) => {
-    const { m, close } = modal(`<h2>${esc(title)}</h2><p class="modal-copy">${esc(text || "")}</p>
-      <div class="m-btns"><button class="btn" id="mc-no">Cancel</button><button class="btn btn-danger btn-solid" id="mc-yes">Confirm</button></div>`);
-    m.querySelector("#mc-no").onclick = () => { close(); resolve(false); };
-    m.querySelector("#mc-yes").onclick = () => { close(); resolve(true); };
+    const confirmLabel = typeof options.confirmLabel === "string" ?
+      options.confirmLabel : "Confirm";
+    const destructive = options.destructive !== false;
+    const actionClass = destructive ? "btn-danger btn-solid" : "btn-pri";
+    const { m, close, onClose } = modal(`<h2>${esc(title)}</h2><p class="modal-copy">${esc(text || "")}</p>
+      <div class="m-btns"><button class="btn" id="mc-no">Cancel</button><button class="btn ${actionClass}" id="mc-yes">${esc(confirmLabel)}</button></div>`);
+    let settled = false;
+    const finish = value => {
+      if (settled) return;
+      settled = true;
+      close();
+      resolve(value);
+    };
+    onClose(() => {
+      if (settled) return;
+      settled = true;
+      resolve(false);
+    });
+    m.querySelector("#mc-no").onclick = () => finish(false);
+    m.querySelector("#mc-yes").onclick = () => finish(true);
   });
 }
 
@@ -15513,13 +15582,24 @@ function modalNotice(title, text) {
 
 function modalPrompt(title, hint, value) {
   return new Promise((resolve) => {
-    const { m, close } = modal(`<h2>${esc(title)}</h2>
+    const { m, close, onClose } = modal(`<h2>${esc(title)}</h2>
       ${hint ? `<p class="modal-copy">${esc(hint)}</p>` : ""}
       <input type="text" id="mp-val">
       <div class="m-btns"><button class="btn" id="mp-no">Cancel</button><button class="btn btn-pri" id="mp-yes">OK</button></div>`);
     const inp = m.querySelector("#mp-val");
     inp.value = value || ""; inp.focus(); inp.select();
-    const done = (v) => { close(); resolve(v); };
+    let settled = false;
+    const done = (v) => {
+      if (settled) return;
+      settled = true;
+      close();
+      resolve(v);
+    };
+    onClose(() => {
+      if (settled) return;
+      settled = true;
+      resolve(null);
+    });
     m.querySelector("#mp-no").onclick = () => done(null);
     m.querySelector("#mp-yes").onclick = () => done(inp.value);
     inp.addEventListener("keydown", (e) => { if (e.key === "Enter") done(inp.value); });
