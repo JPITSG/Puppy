@@ -16,9 +16,12 @@ NOTE: spends a small amount of real subscription quota (one haiku turn plus a
 few side questions). Run deliberately: python3 tests/side_question_test.py
 """
 import asyncio
+import copy
 import json
 import os
+import secrets
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -84,10 +87,27 @@ async def main():
     for k in list(env):
         if k.startswith("CLAUDE_") or k == "CLAUDECODE":
             env.pop(k)
+    # the config file must match the current shape exactly - no partial file
+    sys.path.insert(0, BASE)
+    os.environ["PUPPY_DATA"] = data_dir
+    from puppy import config as puppy_config
+    cfg = copy.deepcopy(puppy_config.DEFAULTS)
+    cfg["web"] = dict(cfg["web"], host="127.0.0.1", port=PORT)
+    cfg["auth"] = dict(cfg["auth"], api_token=secrets.token_urlsafe(32))
     with open(os.path.join(data_dir, "config.json"), "w") as f:
-        json.dump({"web": {"host": "127.0.0.1", "port": PORT}}, f)
+        json.dump(cfg, f)
     with open(os.path.join(work, "ledger.txt"), "w") as f:
         f.write("alpha\nbravo\ncharlie\n")
+
+    # a leftover server on the test port would answer every request and look
+    # like a bewildering series of failures; refuse to start instead
+    probe = socket.socket()
+    try:
+        if probe.connect_ex(("127.0.0.1", PORT)) == 0:
+            print(f"port {PORT} is already in use - stop the stale test server first")
+            sys.exit(2)
+    finally:
+        probe.close()
 
     server = subprocess.Popen([sys.executable, "-m", "puppy"], cwd=BASE, env=env,
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -117,11 +137,11 @@ async def main():
                                  json={"username": "tester",
                                        "password": "secret123"}) as r:
                 check("admin setup", r.status == 200, str(r.status))
-            async with http.get(URL + "/api/state") as r:
-                state = await r.json()
+            async with http.get(URL + "/api/ping") as r:
+                ping = await r.json()
             check("node advertises the capability",
-                  "active-turn-side-question" in (state.get("capabilities") or []),
-                  str(state.get("capabilities"))[:200])
+                  "active-turn-side-question" in (ping.get("capabilities") or []),
+                  str(ping.get("capabilities"))[:200])
 
             async with http.post(URL + "/api/sessions", json={
                     "engine": "claude", "cwd": work, "model": "haiku",
@@ -148,9 +168,13 @@ async def main():
 
                 # ---- a real turn, deliberately slow enough to ask during ----
                 async with http.post(f"{URL}/api/sessions/{sid}/message", json={
-                        "text": "Read ledger.txt, then write a file called "
-                                "report.txt containing the word REPORT, then "
-                                "reply with exactly: DONE"}) as r:
+                        "text": "Work through this one step at a time. First "
+                                "read ledger.txt. Then, one at a time, create "
+                                "note1.txt through note6.txt, each containing "
+                                "only its own number, and read each file back "
+                                "with a separate Read immediately after writing "
+                                "it. Finally write report.txt containing the "
+                                "word REPORT and reply with exactly: DONE"}) as r:
                     check("turn started", r.status == 200, str(r.status))
 
                 ready = await sock.drain(
@@ -159,11 +183,18 @@ async def main():
                 check("becomes ready during the turn", ready is not None)
                 turn_id = (ready or {}).get("side_question", {}).get("turn_id", "")
 
-                # ---- question one ------------------------------------------
+                # ---- question one, once the turn has really read the file --
+                read = await sock.drain(
+                    until=lambda d: d.get("type") == "event" and
+                    d["event"]["kind"] == "tool_result" and
+                    "alpha" in str(d["event"]["data"].get("content") or ""),
+                    timeout=180)
+                check("the turn read the file before we ask", read is not None)
                 asked_at = time.time()
                 async with http.post(f"{URL}/api/sessions/{sid}/ask", json={
-                        "question": "In one short sentence: name the single file "
-                                    "you read from this working directory.",
+                        "question": "Name the single file you have read from "
+                                    "this working directory, then append the "
+                                    "word ZEBRA. Reply with nothing else.",
                         "request_id": "ask-one",
                         "expected_turn_id": turn_id}) as r:
                     body = await r.json()
@@ -186,9 +217,13 @@ async def main():
                       str(answer.get("text"))[:200])
 
                 # ---- follow-up: resolved only from the thread ---------------
+                again = await sock.drain(
+                    until=lambda d: d.get("type") == "side_question_state" and
+                    d.get("side_question", {}).get("ready") is True, timeout=120)
+                check("ready again once the answer landed", again is not None)
                 async with http.post(f"{URL}/api/sessions/{sid}/ask", json={
-                        "question": "How many lines did it have? Answer with the "
-                                    "number only.",
+                        "question": "What was the last word of your previous "
+                                    "answer? Reply with that word only.",
                         "request_id": "ask-two",
                         "expected_turn_id": turn_id}) as r:
                     body = await r.json()
@@ -201,8 +236,8 @@ async def main():
                 follow = (second or {}).get("event", {}).get("data", {})
                 check("follow-up answered", bool(follow.get("ok")), str(follow)[:300])
                 print(f"    answer 2: {str(follow.get('text'))[:160]}")
-                check("follow-up used the thread's subject",
-                      "3" in str(follow.get("text", "")),
+                check("follow-up answered from the thread, not the turn",
+                      "ZEBRA" in str(follow.get("text", "")).upper(),
                       str(follow.get("text"))[:200])
 
                 # ---- the turn itself is untouched ---------------------------
@@ -221,9 +256,9 @@ async def main():
 
             # ---- the engine never saw the exchange -------------------------
             async with http.post(f"{URL}/api/sessions/{sid}/message", json={
-                    "text": "Reply with exactly YES if I have asked you how many "
-                            "lines ledger.txt had at any point in this "
-                            "conversation, otherwise exactly NO."}) as r:
+                    "text": "Reply with exactly YES if the word ZEBRA has appeared "
+                            "anywhere in this conversation before now, otherwise "
+                            "exactly NO."}) as r:
                 check("second turn started", r.status == 200, str(r.status))
             async with http.ws_connect(f"{URL}/api/ws/session/{sid}") as raw:
                 sock2 = Socket(raw)
