@@ -1580,7 +1580,14 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   content:"";position:absolute;inset:0;z-index:21;pointer-events:none;
   border-radius:inherit;box-shadow:inset 0 0 0 1px var(--browser-frame);
 }
-.term-host .xterm{height:100%}
+/* The box the terminal is opened on, and the box FitAddon measures. It must
+   stay free of padding and borders: the addon reads the parent's computed
+   height, which border-box sizing reports as the padding box, so any inset
+   here would be counted as room for another row and the host's
+   overflow:hidden would clip that row in half. Put visual inset on
+   .term-host, which is what the black rounded frame belongs to. */
+.term-mount{height:100%}
+.term-mount .xterm{height:100%}
 /* Centred on the terminal box itself: the overlay is a child of .term-host, so
    both axes centre on the black rectangle rather than on the padded view. */
 .term-dead{

@@ -103,6 +103,26 @@ def check_static_contract() -> None:
         in css
     assert '.chip.browser,.chip.terminal{' in css
 
+    # The grid is fitted from the box the terminal is opened on, so that box
+    # must carry no inset of its own. FitAddon reads
+    # getComputedStyle(parent).height, which border-box sizing reports as the
+    # padding box: measuring the padded .term-host counted its 6px inset as
+    # room for another row, and .term-host{overflow:hidden} then cut that row
+    # in half along the bottom edge.
+    assert '<div class="term-mount"></div>' in ui
+    assert 'this.mount = this.root.querySelector(".term-mount");' in ui
+    assert "this.term.open(this.mount);" in ui
+    assert "this.resizeObs.observe(this.mount);" in ui
+    assert "this.term.open(this.host)" not in ui
+    assert ".term-mount{height:100%}" in css
+    assert ".term-mount .xterm{height:100%}" in css
+    mount_start = css.index(".term-mount{")
+    mount_rule = css[mount_start:css.index("}", mount_start)]
+    assert "padding" not in mount_rule and "border" not in mount_rule, mount_rule
+    # the visible inset stays on the frame, which is not what gets measured
+    assert ".term-host{" in css and "padding:6px" in css[
+        css.index(".term-host{"):css.index("}", css.index(".term-host{"))]
+
     start = ui.index("function terminalInstancesFor(")
     end = ui.index("\n}\n", start) + 2
     script = """

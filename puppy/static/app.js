@@ -10797,8 +10797,18 @@ class TermView {
           <span class="br-owner-arrow hidden"></span>
         </button>
       </div>
-      <div class="term-wrap"><div class="term-host"></div></div>`;
+      <div class="term-wrap"><div class="term-host">
+        <div class="term-mount"></div>
+      </div></div>`;
     this.host = this.root.querySelector(".term-host");
+    /* The terminal is opened on this inner box, never on .term-host itself.
+       FitAddon sizes the grid from getComputedStyle(parent).height, which
+       under the app's border-box default reports the PADDING box - so the
+       host's 6px inset would be counted as usable space, giving one row more
+       than fits and letting the host's overflow:hidden slice the last row in
+       half. The mount carries no padding of its own, so what the addon
+       measures is exactly the box the terminal fills. */
+    this.mount = this.root.querySelector(".term-mount");
     this.meta = this.root.querySelector(".term-meta");
     this.idText = this.root.querySelector(".term-id");
     this.copyIdBtn = this.root.querySelector(".term-copy-id");
@@ -10959,7 +10969,7 @@ class TermView {
     });
     this.fit = new FitAddon.FitAddon();
     this.term.loadAddon(this.fit);
-    this.term.open(this.host);
+    this.term.open(this.mount);
     this.copyIdBtn.onclick = async () => {
       const terminalId = String(this.tab.terminalId || "").toUpperCase();
       if (!terminalId || !await copyWithToast(
@@ -11010,7 +11020,7 @@ class TermView {
       try { this.fit.fit(); } catch (e) {}
       this.sendResize();
     });
-    this.resizeObs.observe(this.host);
+    this.resizeObs.observe(this.mount);
   }
   async createInstance(sequence, ownerSession = null) {
     const body = {
