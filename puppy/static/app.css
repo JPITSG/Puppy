@@ -2293,6 +2293,8 @@ html.light .sh-more:hover{background:rgba(15,23,42,.035)}
 .ws-fact .wsf-v.ok{color:var(--ok)}
 .ws-fact .wsf-v.warn{color:var(--warn)}
 .ws-fact .wsf-v.err{color:var(--err)}
+/* the preserved-versions row carries its own discard control */
+.ws-fact .wsf-clear{flex:0 0 auto;height:24px;padding:0 10px var(--label-pb);font-size:11px}
 .ws-conflict-box{margin-top:12px}
 .ws-conflict-hint{margin:4px 0 0}
 .wsc-row{

@@ -22,6 +22,8 @@ import json
 import logging
 import os
 import secrets
+import shutil
+import stat
 import time
 
 import aiohttp
@@ -159,8 +161,116 @@ def _save_base(uid: str, entries: dict) -> None:
     os.chmod(path, 0o600)
 
 
+# ---- preserved conflict losers ----
+#
+# A resolved conflict keeps the losing bytes under
+# ``data/workspace/keeps/<uid>/<generation>/``. They are the only copy of that
+# edit, so they are bounded by SIZE rather than aged out: a time rule deletes
+# on a schedule the user cannot see, and someone back from a fortnight away
+# would find their only copy gone. Above the cap the oldest generations are
+# evicted first, and nothing inside the minimum age is ever a candidate, so a
+# recent conflict stays recoverable however much churn follows it.
+
+KEEPS_MAX_BYTES = 200 * 1024 * 1024
+KEEPS_MIN_AGE_SECONDS = 30 * 24 * 60 * 60
+
+
+def _keeps_root(uid: str) -> str:
+    workspace_sync.mirror_base(uid)   # same private id shape as a mirror
+    return os.path.join(config.DATA_DIR, "workspace", "keeps", uid)
+
+
+def _keep_generations(uid: str) -> list:
+    """[(generation, mtime, bytes, path)] oldest first, ignoring stray names."""
+    root = _keeps_root(uid)
+    out = []
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return out
+    for name in names:
+        if not name.isdigit():
+            continue
+        path = os.path.join(root, name)
+        try:
+            info = os.lstat(path)
+            if not stat.S_ISDIR(info.st_mode):
+                continue
+        except OSError:
+            continue
+        total = 0
+        for walk_root, _dirs, files in os.walk(path):
+            for item in files:
+                try:
+                    total += os.lstat(os.path.join(walk_root, item)).st_size
+                except OSError:
+                    continue
+        out.append((int(name), info.st_mtime, total, path))
+    out.sort(key=lambda row: row[0])
+    return out
+
+
+def keeps_usage(uid: str) -> dict:
+    """What this link's preserved losers cost, for the workspace sheet."""
+    rows = _keep_generations(uid)
+    return {
+        "generations": len(rows),
+        "bytes": sum(row[2] for row in rows),
+        "oldest": rows[0][1] if rows else None,
+        "newest": rows[-1][1] if rows else None,
+        "max_bytes": KEEPS_MAX_BYTES,
+    }
+
+
+def enforce_keeps_budget(uid: str) -> int:
+    """Evict oldest generations until the link is back inside its budget.
+
+    Returns the number removed. Anything younger than KEEPS_MIN_AGE_SECONDS is
+    retained even when that leaves the link over budget: the cap protects the
+    disk, never at the cost of a conflict the user could still be looking for.
+    """
+    rows = _keep_generations(uid)
+    total = sum(row[2] for row in rows)
+    if total <= KEEPS_MAX_BYTES:
+        return 0
+    cutoff = time.time() - KEEPS_MIN_AGE_SECONDS
+    removed = 0
+    # By age, not by generation number: the two normally agree, but eviction
+    # must mean "oldest bytes first" even when a directory has been rewritten.
+    # A young generation is skipped rather than ending the pass, so it cannot
+    # shield older ones behind it.
+    for _generation, mtime, size, path in sorted(rows, key=lambda row: row[1]):
+        if total <= KEEPS_MAX_BYTES:
+            break
+        if mtime > cutoff:
+            continue
+        try:
+            shutil.rmtree(path)
+        except OSError as exc:
+            log.warning("preserved conflict data retained: %s", exc)
+            continue
+        total -= size
+        removed += 1
+    if removed:
+        log.info("evicted %s preserved conflict generation(s) for link %s",
+                 removed, uid)
+    return removed
+
+
+def clear_keeps(uid: str) -> int:
+    """Discard every preserved loser for one link, at the user's request."""
+    rows = _keep_generations(uid)
+    removed = 0
+    for _generation, _mtime, _size, path in rows:
+        try:
+            shutil.rmtree(path)
+            removed += 1
+        except OSError as exc:
+            log.warning("could not discard preserved conflict data: %s", exc)
+    return removed
+
+
 def _drop_link_files(uid: str) -> None:
-    import shutil
     try:
         os.unlink(_base_path(uid))
     except OSError:
@@ -643,6 +753,14 @@ async def run_reconcile(link_id: int) -> dict:
             if not failed:
                 fields["last_sync_at"] = time.time()
             _update_link(link_id, **fields)
+            if attempted and not failed:
+                # this pass just preserved losing bytes; hold the link inside
+                # its budget before anyone can accumulate the next generation
+                try:
+                    await asyncio.get_event_loop().run_in_executor(
+                        None, enforce_keeps_budget, str(link["uid"]))
+                except Exception as exc:
+                    log.warning("keeps budget check skipped: %s", exc)
             if failed:
                 _retry_after[link_id] = time.monotonic() + RETRY_SECONDS
             else:
@@ -1095,6 +1213,25 @@ async def h_delete(request: web.Request):
         return _error_response(exc)
 
 
+async def h_keeps_get(request: web.Request):
+    link = get_link(int(request.match_info["lid"]))
+    if link is None:
+        return web.json_response({"error": "unknown workspace link"}, status=404)
+    return web.json_response({"keeps": keeps_usage(str(link["uid"]))})
+
+
+async def h_keeps_clear(request: web.Request):
+    """Discard every preserved losing version this link still holds."""
+    link = get_link(int(request.match_info["lid"]))
+    if link is None:
+        return web.json_response({"error": "unknown workspace link"}, status=404)
+    removed = clear_keeps(str(link["uid"]))
+    log.info("link %s discarded %s preserved conflict generation(s)",
+             link["id"], removed)
+    return web.json_response({"ok": True, "removed": removed,
+                              "keeps": keeps_usage(str(link["uid"]))})
+
+
 # ---- lifecycle ----
 
 async def start_worker(app: web.Application) -> None:
@@ -1135,4 +1272,6 @@ def register(app: web.Application) -> None:
     r.add_post("/api/workspaces/sessions", h_create_session)
     r.add_post("/api/workspaces/{lid:\\d+}/sync", h_sync)
     r.add_post("/api/workspaces/{lid:\\d+}/resolve", h_resolve)
+    r.add_get("/api/workspaces/{lid:\\d+}/keeps", h_keeps_get)
+    r.add_delete("/api/workspaces/{lid:\\d+}/keeps", h_keeps_clear)
     r.add_delete("/api/workspaces/{lid:\\d+}", h_delete)

@@ -15602,11 +15602,26 @@ function modalWorkspaceLink(bid, session) {
     ok: "synced", conflict: "conflicts need a decision",
     error: "sync error" }[st] || st || "no link record");
 
-  const fact = (label, value, cls = "") => {
+  const fact = (label, value, cls = "", control = null) => {
     const row = el("div", "ws-fact");
     row.appendChild(el("span", "wsf-l", label));
     row.appendChild(el("span", "wsf-v" + (cls ? " " + cls : ""), value));
+    if (control) row.appendChild(control);
     facts.appendChild(row);
+  };
+
+  /* The losing side of every resolved conflict is preserved on the controller
+     and is the only copy of that edit, so it is never aged out silently - it
+     is bounded by size, and shown here so it can be cleared deliberately. */
+  let keeps = null;
+  const loadKeeps = async () => {
+    const link = linkForSession(bid, session.id);
+    if (!link) { keeps = null; return; }
+    try {
+      const r = await api(0, `workspaces/${link.id}/keeps`);
+      keeps = (r && r.keeps) || null;
+    } catch (e) { keeps = null; }
+    if (m.isConnected) render();
   };
 
   const render = () => {
@@ -15622,6 +15637,29 @@ function modalWorkspaceLink(bid, session) {
     if (link && link.last_error) fact("Last error", link.last_error, "err");
     if (link) fact("Last sync", link.last_sync_at ?
       fmtTime(link.last_sync_at) + " · pass " + link.generation : "not yet");
+    if (keeps && keeps.generations) {
+      const clear = el("button", "btn btn-sm wsf-clear", "Clear");
+      clear.type = "button";
+      clear.onclick = async () => {
+        const live = linkForSession(bid, session.id);
+        if (!live) return;
+        if (!await modalConfirm("Discard preserved versions",
+            `This removes the ${keeps.generations} preserved losing version` +
+            `${keeps.generations === 1 ? "" : "s"} of conflicted files ` +
+            `(${fmtBytes(keeps.bytes)}). They are the only copy of those ` +
+            `edits; the files in your workspace are not touched.`)) return;
+        clear.disabled = true;
+        try {
+          const r = await api(0, `workspaces/${live.id}/keeps`, { method: "DELETE" });
+          keeps = (r && r.keeps) || null;
+          toast("Preserved versions discarded", "ok");
+        } catch (e) { toast(e.message, "error"); }
+        if (m.isConnected) render();
+      };
+      fact("Preserved", `${keeps.generations} version` +
+        `${keeps.generations === 1 ? "" : "s"} · ${fmtBytes(keeps.bytes)}`,
+        "", clear);
+    }
     noLink.classList.toggle("hidden", !!link);
     syncBtn.classList.toggle("hidden", !link);
     const canShell = link && (link.ws_backend === 0 || backendHasCapability(
@@ -15658,6 +15696,7 @@ function modalWorkspaceLink(bid, session) {
     applyBtn.classList.toggle("hidden", !Object.keys(choices).length);
   };
   render();
+  loadKeeps();
   /* link state moves on its own (broadcasts land in state.workspaceLinks);
      the sheet re-reads it while open and the timer retires with the DOM */
   const timer = setInterval(() => {

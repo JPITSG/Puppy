@@ -398,6 +398,45 @@ async def exercise(harness: Harness) -> None:
     assert not list((Path(config.DATA_DIR) / "workspace" / "keeps" / uid)
                     .rglob(".puppy-keep-tmp-*"))
 
+    # -- preserved losers are bounded by size, never aged out silently --
+    keeps_root = Path(config.DATA_DIR) / "workspace" / "keeps" / uid
+    usage = workspace_links.keeps_usage(uid)
+    assert usage["generations"] >= 1 and usage["bytes"] > 0, usage
+    assert usage["max_bytes"] == workspace_links.KEEPS_MAX_BYTES
+
+    # three synthetic generations well past the minimum age, over budget
+    old = time.time() - workspace_links.KEEPS_MIN_AGE_SECONDS - 3600
+    for generation in (9001, 9002, 9003):
+        directory = keeps_root / str(generation)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "loser.bin").write_bytes(b"x" * 4096)
+        os.utime(str(directory), (old, old))
+    over = workspace_links.KEEPS_MAX_BYTES
+    workspace_links.KEEPS_MAX_BYTES = 6000       # fits one of them
+    try:
+        removed = workspace_links.enforce_keeps_budget(uid)
+        assert removed >= 2, removed
+        left = sorted(int(p.name) for p in keeps_root.iterdir() if p.name.isdigit())
+        # oldest first, and the newest generation always survives
+        assert 9003 in left and 9001 not in left, left
+
+        # nothing inside the minimum age is a candidate, even when over budget
+        young = keeps_root / "9100"
+        young.mkdir(parents=True, exist_ok=True)
+        (young / "loser.bin").write_bytes(b"y" * 20000)
+        workspace_links.KEEPS_MAX_BYTES = 1
+        before = sorted(p.name for p in keeps_root.iterdir())
+        workspace_links.enforce_keeps_budget(uid)
+        after = sorted(p.name for p in keeps_root.iterdir())
+        assert "9100" in after, after
+        assert len(after) <= len(before)
+    finally:
+        workspace_links.KEEPS_MAX_BYTES = over
+
+    # the explicit clear is the only thing that takes a recent version
+    assert workspace_links.clear_keeps(uid) >= 1
+    assert workspace_links.keeps_usage(uid)["generations"] == 0
+
     # -- an individual apply failure is a sync failure, never "Synced" --
     write_tree(project, {"docs/failing.txt": "must reach the mirror\n"})
     before_failure = workspace_links.get_link(link_id)
