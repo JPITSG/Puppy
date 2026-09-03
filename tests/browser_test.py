@@ -19,6 +19,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -1913,13 +1914,15 @@ function makeView(id="s:0:42") {
     draftSupported:true,draftReady:true,draftRevision:0,
     draftMaxChars:100000,status:"idle",_forceScroll:false,
     steering:{supported:true,ready:false,turn_id:""},steerPending:null,
+    sideQuestion:{supported:true,ready:false,turn_id:""},askPending:null,
     draftClientId:"device-a",draftClientSeq:0,draftLatestSeq:0,draftAckSeq:0,
     draftInFlightSeq:0,draftPendingText:null,
     draftDeferred:null,draftTouchedBeforeReady:false,draftJournal:null,
     queueEditSeq:0,queueEditPending:null,
     ws:{readyState:WebSocket.OPEN,send:value=>sent.push(JSON.parse(value))},
     renderAttachments(){},resizeComposer(){},releaseHistoryAttachments(){},
-    scrollBottom(){},updateRunState(){},setSteeringState(){},setStatus(){},
+    scrollBottom(){},updateRunState(){},setSteeringState(){},
+    setSideQuestionState(){},setStatus(){},
     discardServerUpload(){},updateSteerControl(){},
   });
   return {view,sent,queueClasses};
@@ -2671,10 +2674,11 @@ def check_active_turn_steering_ui(ui_source: str, css_source: str) -> None:
     # Steer is the green member of the existing composer button family. Wide
     # layouts retain words; narrow layouts retain all three actions as equal
     # square buttons, using the supplied stack-plus and branching-arrow ideas.
-    assert ".btn-send,.btn-queue,.btn-steer{" in css_source
+    assert ".btn-send,.btn-queue,.btn-steer,.btn-ask{" in css_source
     assert ".btn-steer{" in css_source
     assert "background-color:var(--ok-lo);" in css_source
-    assert ".btn-send:disabled,.btn-queue:disabled,.btn-steer:disabled{" in css_source
+    assert ".btn-send:disabled,.btn-queue:disabled,.btn-steer:disabled,\n.btn-ask:disabled{" \
+        in css_source
     assert ".btn-send.stop{width:34px;min-width:34px}" in css_source
     assert 'class="composer-action-label">Steer</span>' in ui_source
     assert 'class="composer-action-label">Queue</span>' in ui_source
@@ -2702,10 +2706,10 @@ def check_active_turn_steering_ui(ui_source: str, css_source: str) -> None:
     assert ".composer-action-icon svg{display:block}" in css_source
     assert ("display:inline-flex;width:34px;min-width:34px;height:34px;" +
             "padding:0;gap:0;") in css_source
-    assert (".btn-queue .composer-action-label,.btn-steer " +
-            ".composer-action-label{display:none}") in css_source
-    assert (".btn-queue .composer-action-icon,.btn-steer " +
-            ".composer-action-icon{display:flex}") in css_source
+    assert (".btn-queue .composer-action-label,.btn-steer .composer-action-label,\n" +
+            "  .btn-ask .composer-action-label{display:none}") in css_source
+    assert (".btn-queue .composer-action-icon,.btn-steer .composer-action-icon,\n" +
+            "  .btn-ask .composer-action-icon{display:flex}") in css_source
 
     start = ui_source.index("\n  async steer()") + 1
     brace = ui_source.index("{", start)
@@ -2767,6 +2771,84 @@ console.log(JSON.stringify({sent,afterNotReady:{calls:calls.length,toasts}}));
     assert result["afterNotReady"]["calls"] == 1
     assert result["afterNotReady"]["toasts"][-1][0] == \
         "The active turn is not ready for steering"
+
+
+def check_side_question_ui(ui_source: str, css_source: str) -> None:
+    """Ask sits in the composer's running-action family and folds its answer.
+
+    The control is the quiet member of that family: a question changes nothing
+    about the turn, so it wears the neutral control face rather than Send's
+    accent or Steer's go-colour, and it collapses to the drawn question mark
+    on the same square grid as the other two when labels are dropped.
+    """
+    ask_markup = ('<button class="btn-ask hidden" type="button" '
+                  'aria-label="Ask a side question">')
+    steer_markup = ('<button class="btn-steer hidden" type="button" '
+                    'aria-label="Steer the active turn">')
+    assert ask_markup in ui_source
+    assert ui_source.index(ask_markup) < ui_source.index(steer_markup)
+    assert 'class="composer-action-label">Ask</span>' in ui_source
+    assert "function askActionIcon(size = 18)" in ui_source
+    assert ('this.askBtn.querySelector(".composer-action-icon").' +
+            'appendChild(askActionIcon());') in ui_source
+    assert "this.askBtn.onclick = () => this.ask();" in ui_source
+    assert ".btn-ask{" in css_source
+    assert ".btn-queue,.btn-steer,.btn-ask{" in css_source
+    assert ".btn-ask .composer-action-icon{display:flex}" in css_source
+
+    # one sync point: the two live turn-input controls answer to the same
+    # conditions, so steering's updater drives this one too
+    assert "this.updateAskControl();" in ui_source
+    steer_control = ui_source[ui_source.index("  updateSteerControl() {"):
+                              ui_source.index("  visibleStatusText() {")]
+    assert "this.updateAskControl();" in steer_control
+
+    assert 'backend.capabilities.includes("active-turn-side-question")' in ui_source
+    assert 'api(this.tab.bid, `sessions/${this.tab.sid}/ask`' in ui_source
+    assert 'case "side_question_state":' in ui_source
+    assert 'case "side_question_progress":' in ui_source
+
+    # the answer is its own event folded into the question's card, the way a
+    # tool result folds into its tool call
+    assert 'case "side_question": {' in ui_source
+    assert 'case "side_question_result": {' in ui_source
+    assert "this.asideCards[d.request_id] = n;" in ui_source
+    assert "delete this.asideCards[d.request_id];" in ui_source
+    assert ".aside-card{" in css_source and ".aside-a{" in css_source
+
+
+def check_modal_surface(ui_source: str, css_source: str) -> None:
+    """Every modal wears the New session modal's surface and title.
+
+    That modal is the reference the others are matched to, so the panel
+    material and the title voice are declared once for cards and modals
+    together. The trap this guards is source order: `.modal` is defined far
+    below the shared rule, so a background restated there would silently win
+    and take every modal back to its own look.
+    """
+    assert ".card,.modal{" in css_source
+    assert ".card h2,.modal h2{" in css_source
+    # no modal may opt out of the shared surface with its own variant rule
+    assert ".modal.new-session-modal" not in css_source
+    assert ".modal.agent-notes-modal" not in css_source
+
+    start = css_source.index("\n.modal{") + 1
+    block = re.sub(r"/\*.*?\*/", "", css_source[start:css_source.index("}", start)],
+                   flags=re.S)
+    assert "background" not in block, block
+
+    # one body-copy voice: no modal restates it under a private name
+    assert ".modal-copy{" in css_source
+    assert ".backend-edit-intro{" not in css_source
+    assert ".listener-handoff-status{" not in css_source
+    for markup in ('<p class="modal-copy">Update its display name',
+                   '<p class="modal-copy">The session keeps its transcript'):
+        assert markup in ui_source, markup
+    assert 'el("p", "modal-copy listener-handoff-status"' in ui_source
+
+    # and one footer behaviour on a narrow touch viewport, for every modal
+    assert ".modal .m-btns .btn{flex:1 1 0;min-width:0}" in css_source
+    assert ".backend-edit-modal .m-btns" not in css_source
 
 
 def check_system_prompt_settings(ui_source: str, css_source: str) -> None:
@@ -5614,6 +5696,8 @@ async def main() -> None:
             check_user_message_copy(ui_source)
             check_queue_controls_ui(ui_source, css_source)
             check_active_turn_steering_ui(ui_source, css_source)
+            check_side_question_ui(ui_source, css_source)
+            check_modal_surface(ui_source, css_source)
             check_system_prompt_settings(ui_source, css_source)
             check_remote_workspace_picker(ui_source, css_source)
             check_opencode_chat_models(ui_source, css_source)

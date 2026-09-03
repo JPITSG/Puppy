@@ -177,6 +177,29 @@ function filledReferenceIcon(size, paths, strokeWidth = 0) {
   return svg;
 }
 
+/* The composer's side-question mark. Drawn rather than typeset for the same
+   reason the other composer actions are: a glyph from the UI font would not
+   share their optical box, so the three buttons would not line up when the
+   narrow layout drops their labels. */
+function askActionIcon(size = 18) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 800 800");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS(NS, "path");
+  path.setAttribute("fill", "currentColor");
+  path.setAttribute("d",
+    "M400 0C250 0 190 31 165 76c-23 43-25 105-25 171h132c0-57 3-92 20-112" +
+    "c20-23 58-30 108-30s88 7 108 30c18 20 25 60 25 112c0 53-15 83-55 103" +
+    "l-80 30c-60 23-80 50-90 90c-8 35-10 50-10 75h132c0-25 3-45 13-60" +
+    "c13-20 45-35 85-53c70-32 130-77 130-185c0-66-2-128-25-171C550 31 490 0 400 0Z" +
+    "M297 653h138v147H297Z");
+  svg.appendChild(path);
+  return svg;
+}
+
 function queueActionIcon(size = 18) {
   return filledReferenceIcon(size, [
     `M2945 7323 c-299 -35 -459 -102 -627 -262 -196 -186 -283 -380 -308
@@ -200,29 +223,6 @@ c-3 362 -4 373 -26 421 -37 80 -88 135 -157 168 -69 32 -165 44 -228 28z`,
 24 -1867 5 c-1026 3 -1870 9 -1875 13 -4 5 -10 849 -13 1875 l-5 1867 -23 51
 c-29 64 -102 137 -167 165 -61 27 -173 35 -230 16z`,
   ]);
-}
-
-/* The composer's side-question mark. Drawn rather than typeset for the same
-   reason the other composer actions are: a glyph from the UI font would not
-   share their optical box, so the three buttons would not line up when the
-   narrow layout drops their labels. */
-function askActionIcon(size = 18) {
-  const NS = "http://www.w3.org/2000/svg";
-  const svg = document.createElementNS(NS, "svg");
-  svg.setAttribute("viewBox", "0 0 800 800");
-  svg.setAttribute("width", size);
-  svg.setAttribute("height", size);
-  svg.setAttribute("aria-hidden", "true");
-  const path = document.createElementNS(NS, "path");
-  path.setAttribute("fill", "currentColor");
-  path.setAttribute("d",
-    "M400 0C250 0 190 31 165 76c-23 43-25 105-25 171h132c0-57 3-92 20-112" +
-    "c20-23 58-30 108-30s88 7 108 30c18 20 25 60 25 112c0 53-15 83-55 103" +
-    "l-80 30c-60 23-80 50-90 90c-8 35-10 50-10 75h132c0-25 3-45 13-60" +
-    "c13-20 45-35 85-53c70-32 130-77 130-185c0-66-2-128-25-171C550 31 490 0 400 0Z" +
-    "M297 653h138v147H297Z");
-  svg.appendChild(path);
-  return svg;
 }
 
 function steerActionIcon(size = 18) {
@@ -1160,7 +1160,7 @@ function followListenerHandoff(handoff) {
   const back = el("div", "modal-backdrop listener-handoff-backdrop");
   const m = el("div", "modal listener-handoff-modal");
   const title = el("h2", "", "Restart queued");
-  const status = el("p", "listener-handoff-status",
+  const status = el("p", "modal-copy listener-handoff-status",
     "Active work will finish first. Waiting for Puppy on the new listener…");
   status.setAttribute("role", "status");
   status.setAttribute("aria-live", "polite");
@@ -4267,7 +4267,7 @@ function describeAgentNote(file) {
    and stores the files, so a remote session edits its own working directory. */
 function modalAgentNotes(bid, s) {
   const { m, close } = modal(`<h2>Agent notes</h2>
-    <p class="backend-edit-intro agent-notes-intro"></p>
+    <p class="modal-copy agent-notes-intro"></p>
     <form id="agent-notes-form">
       <div class="agent-notes-files"><p class="modal-copy">Loading…</p></div>
       <p class="backend-edit-error hidden" role="alert"></p>
@@ -15058,7 +15058,7 @@ function modalNotice(title, text) {
 function modalPrompt(title, hint, value) {
   return new Promise((resolve) => {
     const { m, close } = modal(`<h2>${esc(title)}</h2>
-      ${hint ? `<p class="hint">${esc(hint)}</p>` : ""}
+      ${hint ? `<p class="modal-copy">${esc(hint)}</p>` : ""}
       <input type="text" id="mp-val">
       <div class="m-btns"><button class="btn" id="mp-no">Cancel</button><button class="btn btn-pri" id="mp-yes">OK</button></div>`);
     const inp = m.querySelector("#mp-val");
@@ -15077,7 +15077,7 @@ function modalPrompt(title, hint, value) {
    before committing them, so this modal never has to stage a half-edit. */
 function modalEditBackend(backend, onSaved) {
   const { m, close } = modal(`<h2>Edit backend</h2>
-    <p class="backend-edit-intro">Update its display name or connection. New connection details are tested before they replace the current settings.</p>
+    <p class="modal-copy">Update its display name or connection. New connection details are tested before they replace the current settings.</p>
     <form id="backend-edit-form">
       <div class="backend-edit-grid">
         <label>Name<input type="text" id="backend-edit-name" maxlength="80"></label>
@@ -15735,7 +15735,7 @@ function modalSwitchEngine(view) {
   const eff = typeof view.effectiveConfig === "function" ? view.effectiveConfig() : null;
   const pendingEngine = eff && eff.queuedEngine ? eff.engine : "";
   const { m, close } = modal(`<h2>Switch engine</h2>
-    <p class="hint">The session keeps its transcript and working directory. The new engine starts a fresh
+    <p class="modal-copy">The session keeps its transcript and working directory. The new engine starts a fresh
     native session seeded with a handoff of the conversation so far. Same-engine reseed is allowed
     (rebuilds context from the transcript).${canQueue ? ` While a turn runs or prompts wait, the
     switch joins the queue and applies in order - prompts sent before it keep the engine they
