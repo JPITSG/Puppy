@@ -2171,11 +2171,12 @@ function linkifyInto(node, text) {
 }
 
 /* A sent chat-box mention - inserted by the composer's @ shortcut, or typed by
-   hand in the same shape - renders as a token, confirming which Puppy browser
-   or terminal the message pointed the agent at. Surrounding prose keeps its
-   ordinary linkification. */
+   hand in the same shape - renders as a token, confirming which Puppy browser,
+   terminal, or spawn target the message pointed the agent at. A spawn token
+   stops before its "to" task separator; that separator and the surrounding
+   prose keep their ordinary rendering and linkification. */
 const MENTION_TOKEN_RE =
-  /(^|[\s([{'"])(@(?:Browser [A-Z0-9]{4}|Terminal [A-Z0-9]{4}|New browser|New terminal|Spawn (?:an agent|[0-9]{1,2} agents)(?: on (?:"[^"\n]{1,80}"|\S+))? using \S+(?: \S+)?(?: at \S+ effort)? to))(?=$|[\s.,;:!?)\]}'"])/g;
+  /(^|[\s([{'"])(@(?:Browser [A-Z0-9]{4}|Terminal [A-Z0-9]{4}|New browser|New terminal|Spawn (?:an agent|[0-9]{1,2} agents)(?: on (?:"[^"\n]{1,80}"|\S+))? using \S+(?: \S+)?(?: at \S+ effort)?(?= to(?=$|[\s.,;:!?)\]}'"]))))(?=$|[\s.,;:!?)\]}'"])/g;
 function decorateMentionsInto(node, text) {
   text = String(text == null ? "" : text);
   MENTION_TOKEN_RE.lastIndex = 0;

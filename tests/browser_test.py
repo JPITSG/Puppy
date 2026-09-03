@@ -4102,7 +4102,8 @@ console.log(JSON.stringify({
     assert "if (text) decorateMentionsInto(n, text);" in ui_source
     assert "Browser [A-Z0-9]{4}|Terminal [A-Z0-9]{4}|New browser|New terminal" \
         in ui_source
-    # the sent-message token regex recognises every spawn directive variant
+    # The sent-message token regex recognises every spawn directive variant,
+    # but leaves its final " to" task separator as ordinary prose.
     re_start = ui_source.index("const MENTION_TOKEN_RE")
     re_source = ui_source[re_start:ui_source.index("/g;", re_start) + 3]
     token_script = r"""
@@ -4128,13 +4129,13 @@ console.log(JSON.stringify({
     assert proc.returncode == 0, proc.stderr[:500]
     tokens = json.loads(proc.stdout.strip())
     assert tokens["full"] == \
-        "@Spawn an agent on build-node.lan using codex gpt-5.6-sol at max effort to", tokens
+        "@Spawn an agent on build-node.lan using codex gpt-5.6-sol at max effort", tokens
     assert tokens["quoted"] == \
-        '@Spawn an agent on "Build node west" using codex at low effort to', tokens
-    assert tokens["bare"] == "@Spawn an agent using claude to", tokens
-    assert tokens["modelOnly"] == "@Spawn an agent using claude haiku to", tokens
+        '@Spawn an agent on "Build node west" using codex at low effort', tokens
+    assert tokens["bare"] == "@Spawn an agent using claude", tokens
+    assert tokens["modelOnly"] == "@Spawn an agent using claude haiku", tokens
     assert tokens["fleet"] == \
-        "@Spawn 10 agents on build-node.lan using codex to", tokens
+        "@Spawn 10 agents on build-node.lan using codex", tokens
     assert tokens["browser"] == "@Browser AB12", tokens
     assert tokens["prose"] is None, tokens
     assert tokens["incomplete"] is None, tokens
