@@ -8,7 +8,9 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shutil
 import stat
+import threading
 import time
 import unicodedata
 from urllib.parse import unquote
@@ -85,11 +87,104 @@ def _private_directory(path: Path) -> None:
     path.chmod(0o700)
 
 
+# Orphan sweep. An upload is stranded when the composer that staged it never
+# sent and never discarded it - a closed tab, a lost connection. Age is what
+# makes this safe to run beside live uploads with no locking against them: a
+# file is legitimately unreferenced from its POST until the send that names
+# it, and a staged attachment lives in the durable draft, so nothing younger
+# than the gate is ever a candidate.
+SWEEP_INTERVAL_SECONDS = 60.0
+ORPHAN_AGE_SECONDS = 24 * 60 * 60
+_sweep_lock = threading.Lock()
+_last_sweep = 0.0
+
+
+def _upload_session_ids(root: Path) -> list:
+    ids = []
+    try:
+        children = sorted(root.iterdir())
+    except OSError:
+        return ids
+    for child in children:
+        if child.name.isdigit() and child.is_dir() and not child.is_symlink():
+            ids.append(int(child.name))
+    return ids
+
+
+def sweep_orphans(session_id=None) -> int:
+    """Remove upload directories no durable text names any more.
+
+    ``session_id`` limits the pass to one session; without it every session
+    that owns upload storage is swept, which is how a session nobody uploads
+    to again is reached. Every uncertainty retains the file: keeping private
+    bytes is cheaper than deleting one a message still names. A session whose
+    row is gone has no referencing text at all, so this also recovers the
+    storage of a delete that failed part way.
+    """
+    root = Path(config.DATA_DIR).resolve() / "uploads"
+    if not root.is_dir():
+        return 0
+    targets = [int(session_id)] if session_id is not None else _upload_session_ids(root)
+    now = time.time()
+    removed = 0
+    for sid in targets:
+        session_root = root / str(sid)
+        try:
+            children = sorted(session_root.iterdir())
+        except OSError:
+            continue
+        draft = ""
+        candidates = []
+        for child in children:
+            if not UPLOAD_ID.fullmatch(child.name) or child.is_symlink() or \
+                    not child.is_dir():
+                continue
+            try:
+                if now - child.lstat().st_mtime < ORPHAN_AGE_SECONDS:
+                    continue
+            except OSError:
+                continue
+            candidates.append(child)
+        if not candidates:
+            continue
+        try:
+            draft = str(db.get_session_draft(sid).get("text") or "")
+        except Exception as exc:
+            log.warning("upload sweep skipped session %s: %s", sid, exc)
+            continue
+        for child in candidates:
+            try:
+                if upload_is_referenced(sid, child.name, (draft,)):
+                    continue
+                shutil.rmtree(str(child))
+                removed += 1
+            except Exception as exc:
+                log.warning("stale upload retained: %s", exc)
+    if removed:
+        log.info("discarded %s stranded upload(s)", removed)
+    return removed
+
+
+def _sweep_due(session_id: int) -> None:
+    """Throttled sweep of one session, from the path that already writes it."""
+    global _last_sweep
+    now = time.monotonic()
+    with _sweep_lock:
+        if now - _last_sweep < SWEEP_INTERVAL_SECONDS:
+            return
+        _last_sweep = now
+    try:
+        sweep_orphans(session_id)
+    except Exception as exc:
+        log.warning("upload sweep failed: %s", exc)
+
+
 def _new_upload_directory(session_id: int) -> Path:
     root = Path(config.DATA_DIR).resolve() / "uploads"
     _private_directory(root)
     session_root = root / str(int(session_id))
     _private_directory(session_root)
+    _sweep_due(int(session_id))
     for _attempt in range(8):
         candidate = session_root / ("{}-{}".format(
             int(time.time() * 1000), secrets.token_hex(5)))

@@ -24,7 +24,6 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 
 import aiohttp
@@ -33,10 +32,9 @@ from aiohttp import web
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 
-PRIVATE_TESTS = BASE / "data" / "tests"
-PRIVATE_TESTS.mkdir(parents=True, exist_ok=True, mode=0o700)
-PRIVATE_TESTS.chmod(0o700)
-TEST_ROOT = Path(tempfile.mkdtemp(prefix="browser-", dir=str(PRIVATE_TESTS)))
+from tests.scratch import private_root  # noqa: E402
+
+TEST_ROOT = private_root("browser-")
 os.environ["PUPPY_DATA"] = str(TEST_ROOT / "data")
 STUB_LOG = TEST_ROOT / "stub-log"
 STUB_LOG.mkdir(mode=0o700)

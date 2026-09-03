@@ -602,5 +602,9 @@ def delete_session(session_id: int) -> None:
                      ("session_queue.{}".format(session_id),))
         conn.execute("DELETE FROM meta WHERE key=?",
                      ("session_completion.{}".format(session_id),))
+        # a pending engine-context rollback belongs to the session that queued
+        # it (drivers.base._UNDO_STATE_KEY), and outlives it otherwise
+        conn.execute("DELETE FROM meta WHERE key=?",
+                     ("session_undo.{}".format(session_id),))
         conn.commit()
     _notify_change(session_id)

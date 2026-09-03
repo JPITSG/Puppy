@@ -9,6 +9,7 @@ import logging
 from pathlib import Path
 import re
 import secrets
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -907,6 +908,32 @@ async def stop_health_worker(_app: web.Application = None) -> None:
         pass
 
 
+def _sweep_build_leftovers(work_root: Path) -> None:
+    """Drop build directories a killed process never unwound.
+
+    TemporaryDirectory removes its own on any ordinary exit, so anything left
+    here outlived the process that made it. Only this function's own prefix is
+    considered, and only after a day, so a build running beside this one is
+    never touched.
+    """
+    cutoff = time.time() - 24 * 60 * 60
+    try:
+        children = sorted(work_root.iterdir())
+    except OSError:
+        return
+    for child in children:
+        if not child.name.startswith("build-"):
+            continue
+        try:
+            if child.is_symlink() or not child.is_dir() or \
+                    child.lstat().st_mtime > cutoff:
+                continue
+            shutil.rmtree(str(child))
+            log.info("removed abandoned backend build directory %s", child.name)
+        except OSError as exc:
+            log.warning("abandoned backend build directory retained: %s", exc)
+
+
 def _build_upgrade_payload() -> tuple:
     """Build and independently self-test the current backend in private data."""
     root = Path(__file__).resolve().parent.parent
@@ -918,6 +945,7 @@ def _build_upgrade_payload() -> tuple:
     os_mode = work_root.stat().st_mode & 0o777
     if os_mode != 0o700:
         work_root.chmod(0o700)
+    _sweep_build_leftovers(work_root)
     with tempfile.TemporaryDirectory(prefix="build-", dir=str(work_root)) as temporary:
         temp_dir = Path(temporary)
         artifact = temp_dir / "puppy-backend.pyz"

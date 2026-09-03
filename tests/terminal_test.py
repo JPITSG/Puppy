@@ -9,15 +9,13 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
-import tempfile
 
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 
-PRIVATE_TESTS = BASE / "data" / "tests"
-PRIVATE_TESTS.mkdir(parents=True, exist_ok=True, mode=0o700)
-PRIVATE_TESTS.chmod(0o700)
-TEST_ROOT = Path(tempfile.mkdtemp(prefix="terminal-", dir=str(PRIVATE_TESTS)))
+from tests.scratch import private_root  # noqa: E402
+
+TEST_ROOT = private_root("terminal-")
 os.environ["PUPPY_DATA"] = str(TEST_ROOT / "data")
 
 from puppy import config, db, protocol, runner, system_prompts, terminal  # noqa: E402

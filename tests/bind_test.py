@@ -10,7 +10,6 @@ from pathlib import Path
 import shutil
 import socket
 import sys
-import tempfile
 import time
 from urllib.parse import urlsplit
 import warnings
@@ -21,10 +20,9 @@ from aiohttp import web
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 
-PRIVATE_TESTS = BASE / "data" / "tests"
-PRIVATE_TESTS.mkdir(parents=True, exist_ok=True, mode=0o700)
-PRIVATE_TESTS.chmod(0o700)
-TEST_ROOT = Path(tempfile.mkdtemp(prefix="bind-", dir=str(PRIVATE_TESTS)))
+from tests.scratch import private_root  # noqa: E402
+
+TEST_ROOT = private_root("bind-")
 os.environ["PUPPY_DATA"] = str(TEST_ROOT / "data")
 
 from puppy import auth, bind_verify, config, db, listener_handoff  # noqa: E402

@@ -9,7 +9,6 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
-import tempfile
 
 import aiohttp
 from aiohttp import web
@@ -17,10 +16,9 @@ from aiohttp import web
 
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
-PRIVATE_TESTS = BASE / "data" / "tests"
-PRIVATE_TESTS.mkdir(parents=True, exist_ok=True, mode=0o700)
-PRIVATE_TESTS.chmod(0o700)
-TEST_ROOT = Path(tempfile.mkdtemp(prefix="web-tls-", dir=str(PRIVATE_TESTS)))
+from tests.scratch import private_root  # noqa: E402
+
+TEST_ROOT = private_root("web-tls-")
 os.environ["PUPPY_DATA"] = str(TEST_ROOT / "data")
 os.environ["PUPPY_SETUP_CODE"] = "web-tls-bootstrap-code"
 

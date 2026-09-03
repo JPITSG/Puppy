@@ -11,7 +11,6 @@ import shutil
 import sqlite3
 import sys
 import tarfile
-import tempfile
 import time
 
 import aiohttp
@@ -20,10 +19,9 @@ from aiohttp import web
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 
-PRIVATE_TESTS = BASE / "data" / "tests"
-PRIVATE_TESTS.mkdir(parents=True, exist_ok=True, mode=0o700)
-PRIVATE_TESTS.chmod(0o700)
-TEST_ROOT = Path(tempfile.mkdtemp(prefix="snapshot-", dir=str(PRIVATE_TESTS)))
+from tests.scratch import private_root  # noqa: E402
+
+TEST_ROOT = private_root("snapshot-")
 os.environ["PUPPY_DATA"] = str(TEST_ROOT / "data")
 
 from puppy import (auth, config, db, listener_handoff, notify,

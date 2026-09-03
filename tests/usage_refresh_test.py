@@ -8,7 +8,6 @@ import os
 from pathlib import Path
 import shutil
 import sys
-import tempfile
 
 import aiohttp
 from aiohttp import web
@@ -16,10 +15,9 @@ from aiohttp import web
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 
-PRIVATE_TESTS = BASE / "data" / "tests"
-PRIVATE_TESTS.mkdir(parents=True, exist_ok=True, mode=0o700)
-PRIVATE_TESTS.chmod(0o700)
-TEST_ROOT = Path(tempfile.mkdtemp(prefix="usage-refresh-", dir=str(PRIVATE_TESTS)))
+from tests.scratch import private_root  # noqa: E402
+
+TEST_ROOT = private_root("usage-refresh-")
 os.environ["PUPPY_DATA"] = str(TEST_ROOT / "data")
 COUNTER = TEST_ROOT / "account-reads.txt"
 os.environ["PUPPY_USAGE_TEST_COUNTER"] = str(COUNTER)

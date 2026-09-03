@@ -7,7 +7,8 @@ import sys
 
 from aiohttp import web as aioweb
 
-from puppy import __version__, auth, config, db, localization, web_tls, workspaces
+from puppy import (__version__, auth, config, db, localization, uploads,
+                   web_tls, workspaces)
 
 
 def setup_logging() -> None:
@@ -38,6 +39,9 @@ def initialize_runtime() -> None:
     config.load()
     db.connect()
     workspaces.cleanup_orphans()
+    # Reaches sessions nobody uploads to again; the upload path itself sweeps
+    # the session it is writing to.
+    uploads.sweep_orphans()
     # A previous unclean shutdown can leave sessions stuck on 'running';
     # nothing is actually running when this new runtime initializes.
     db.execute("UPDATE sessions SET status='idle' WHERE status!='idle'")

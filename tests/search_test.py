@@ -8,7 +8,6 @@ import os
 from pathlib import Path
 import sqlite3
 import sys
-import tempfile
 import time
 
 import aiohttp
@@ -17,10 +16,9 @@ from aiohttp import web as aioweb
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 
-PRIVATE_TESTS = BASE / "data" / "tests"
-PRIVATE_TESTS.mkdir(parents=True, exist_ok=True, mode=0o700)
-PRIVATE_TESTS.chmod(0o700)
-TEST_ROOT = Path(tempfile.mkdtemp(prefix="search-", dir=str(PRIVATE_TESTS)))
+from tests.scratch import private_root  # noqa: E402
+
+TEST_ROOT = private_root("search-")
 os.environ["PUPPY_DATA"] = str(TEST_ROOT / "data")
 
 from puppy import cli_releases, config, db, protocol, search  # noqa: E402

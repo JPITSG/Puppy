@@ -12,7 +12,6 @@ import os
 from pathlib import Path
 import shutil
 import sys
-import tempfile
 import time
 
 import aiohttp
@@ -21,10 +20,9 @@ from aiohttp import web
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 
-PRIVATE_TESTS = BASE / "data" / "tests"
-PRIVATE_TESTS.mkdir(parents=True, exist_ok=True, mode=0o700)
-PRIVATE_TESTS.chmod(0o700)
-TEST_ROOT = Path(tempfile.mkdtemp(prefix="cli-upgrade-", dir=str(PRIVATE_TESTS)))
+from tests.scratch import private_root  # noqa: E402
+
+TEST_ROOT = private_root("cli-upgrade-")
 os.environ["PUPPY_DATA"] = str(TEST_ROOT / "data")
 
 from puppy import auth, cli_auto_upgrade, cli_releases, cli_upgrade  # noqa: E402

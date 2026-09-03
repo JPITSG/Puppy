@@ -8,16 +8,14 @@ import shutil
 from types import SimpleNamespace
 import subprocess
 import sys
-import tempfile
 from unittest import mock
 
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 
-PRIVATE_TESTS = BASE / "data" / "tests"
-PRIVATE_TESTS.mkdir(parents=True, exist_ok=True, mode=0o700)
-PRIVATE_TESTS.chmod(0o700)
-TEST_ROOT = Path(tempfile.mkdtemp(prefix="portability-", dir=str(PRIVATE_TESTS)))
+from tests.scratch import private_root  # noqa: E402
+
+TEST_ROOT = private_root("portability-")
 
 from puppy import user_paths  # noqa: E402
 from puppy.drivers.base import clean_env  # noqa: E402
