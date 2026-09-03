@@ -4718,8 +4718,34 @@ async def main() -> None:
                 assert r.status == 200, await read_json(r)
             catalog = json.loads(Path(browser._catalog_path()).read_text())
             assert catalog["ids"][closed_id]["closed_at"] is not None, catalog
+            # Closing discards the profile as soon as its process is down: the
+            # retention window reserves the four-character ID, not tens of
+            # megabytes of Chromium cache and site data.
+            closed_root = Path(browser._instance_root(closed_id))
+            await wait_for(lambda: not closed_root.exists(),
+                           message="closed browser storage discarded")
+            assert closed_id in catalog["ids"], catalog
+
             old_id = "Z9Z9" if "Z9Z9" not in created_ids else "Y8Y8"
             registry = browser.manager()
+
+            # A crash between writing the catalog and finishing that removal -
+            # or a browser closed by an older build that kept storage for the
+            # whole window - is swept at startup, ID still reserved.
+            stranded_id = "X4X4" if "X4X4" not in created_ids else "W3W3"
+            registry.records[stranded_id] = {
+                "created_at": 2.0, "closed_at": time.time(),
+                "origin": "user", "owner_session": None,
+            }
+            stranded_root = Path(browser._instance_root(stranded_id))
+            stranded_root.mkdir(parents=True, mode=0o700)
+            (stranded_root / "stranded-marker").write_text("stranded")
+            registry._discard_closed_storage()
+            await wait_for(lambda: not stranded_root.exists(),
+                           message="stranded closed-browser storage swept")
+            assert stranded_id in registry.records, registry.records
+            del registry.records[stranded_id]
+
             registry.records[old_id] = {
                 "created_at": 1.0,
                 "closed_at": 1.0,

@@ -18,7 +18,9 @@ Installing/maintaining the binary is deliberately the host's job.
 ``--no-sandbox`` is added exactly when this process runs as root, where
 Chromium refuses to start otherwise; unprivileged deployments keep the
 sandbox. Each four-character browser ID owns a separate profile below
-``data/browser/instances/`` (0700). Like the engines' native credential/session
+``data/browser/instances/`` (0700), discarded as soon as that browser is
+closed; only the ID itself is retained (ID_RETENTION_SECONDS), so a later
+allocation cannot reuse it. Like the engines' native credential/session
 stores this state is deliberately outside snapshot coverage: node-local render
 and login state, never required for restore.
 """
@@ -101,6 +103,9 @@ MAX_DOWNLOAD_IMAGE = 10 * 1024 * 1024
 COLOR_SCHEMES = ("dark", "light")
 BROWSER_ID_RE = re.compile(r"^[A-Z0-9]{4}$")
 BROWSER_ID_ALPHABET = string.ascii_uppercase + string.digits
+# How long a closed browser's ID stays reserved so a fresh allocation cannot
+# reuse it. Deliberately not how long its storage lives: the profile is
+# discarded when the browser closes.
 ID_RETENTION_SECONDS = 30 * 24 * 60 * 60
 CATALOG_VERSION = 1
 
@@ -3868,6 +3873,7 @@ class BrowserRegistry:
             self._schedule_blocking("prune Browser {}".format(browser_id),
                                     _safe_remove_instance_storage, browser_id)
         _catalog_cleanup_ids.clear()
+        self._discard_closed_storage()
         self._reclaim_unknown_stale_instances()
 
     def _schedule_blocking(self, label: str, function, *args) -> None:
@@ -3905,6 +3911,24 @@ class BrowserRegistry:
             })
         return payloads
 
+    def _discard_closed_storage(self) -> None:
+        """Hold the invariant that a closed browser owns no storage.
+
+        close() discards it once the process is down, but a crash between
+        writing the catalog and finishing that removal would strand a profile
+        until its ID retention expired. Anything still on disk for a closed ID
+        is swept here, which also collects browsers closed by an older build
+        that kept every profile for the full retention window.
+        """
+        for browser_id, record in self.records.items():
+            if record.get("closed_at") is None:
+                continue
+            if not os.path.lexists(_instance_root(browser_id)):
+                continue
+            self._schedule_blocking(
+                "discard storage for closed Browser {}".format(browser_id),
+                _safe_remove_instance_storage, browser_id)
+
     def _reclaim_unknown_stale_instances(self) -> None:
         try:
             names = os.listdir(_instances_root())
@@ -3912,6 +3936,11 @@ class BrowserRegistry:
             names = []
         for name in names:
             if not BROWSER_ID_RE.fullmatch(name):
+                continue
+            record = self.records.get(name)
+            if record is not None and record.get("closed_at") is not None:
+                # _discard_closed_storage owns this one, and kills its process
+                # before removing the directory
                 continue
             root = os.path.join(_instances_root(), name)
             try:
@@ -4041,6 +4070,15 @@ class BrowserRegistry:
             self.records = new_records
             self.bindings = new_bindings
         await instance.stop(reason)
+        # A closed browser is never reopened, so nothing reads its profile
+        # again. Its ID stays in the catalog for ID_RETENTION_SECONDS purely
+        # so the next allocation cannot reuse it, and that needs the record -
+        # a few bytes - not the profile, which is tens of megabytes of cache,
+        # service workers and site data. Storage therefore goes as soon as its
+        # process is down; _prune remains the backstop for anything missed.
+        self._schedule_blocking(
+            "discard storage for closed Browser {}".format(browser_id),
+            _safe_remove_instance_storage, browser_id)
         return True
 
     async def stop(self, reason: str) -> None:
