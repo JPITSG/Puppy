@@ -376,7 +376,10 @@ class ClaudeDriver(Driver):
                     acts.append({"a": "model", "model": ev["model"]})
                 return acts
             if sub == "status":
-                return [{"a": "transient", "msg": {"type": "status", "text": ev.get("status") or ""}}]
+                status = ev.get("status") or ""
+                if status == "requesting":
+                    status = "Requesting"
+                return [{"a": "transient", "msg": {"type": "status", "text": status}}]
             if sub == "thinking_tokens":
                 return [{"a": "transient", "msg": {"type": "thinking_tokens",
                                                    "tokens": ev.get("estimated_tokens", 0)}}]

@@ -45,6 +45,10 @@ def exercise_driver_normalization() -> None:
         "type": "user", "message": {"role": "user", "content": [
             {"type": "text", "text": "change direction"}]}}
     assert claude.parse_line(json.dumps({
+        "type": "system", "subtype": "status", "status": "requesting",
+    }), claude_ctx) == [{"a": "transient", "msg": {
+        "type": "status", "text": "Requesting"}}]
+    assert claude.parse_line(json.dumps({
         "type": "user", "message": {"role": "user", "content": [
             {"type": "text", "text": "change direction"}]},
     }), claude_ctx) == [{
