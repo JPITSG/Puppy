@@ -1069,7 +1069,7 @@ select.choice-native{display:none!important}
 }
 .md .code-block{position:relative}
 .md .code-block>pre{padding-right:46px}
-.code-copy,.user-copy{
+.code-copy,.user-copy,.aside-copy{
   position:absolute;z-index:1;top:6px;right:6px;width:27px;height:27px;
   display:inline-grid;place-items:center;cursor:pointer;line-height:0;
   color:var(--txt3);background:var(--panel2);border:1px solid var(--line2);
@@ -1077,15 +1077,19 @@ select.choice-native{display:none!important}
   transition:opacity .15s var(--ease),color .15s var(--ease),background .15s var(--ease),transform .12s var(--ease);
 }
 .code-copy{opacity:.72}
-.user-copy{opacity:0}
-.code-copy svg,.user-copy svg{display:block}
+.user-copy,.aside-copy{opacity:0}
+.code-copy svg,.user-copy svg,.aside-copy svg{display:block}
 @media (hover:hover){
   .code-copy:hover,.code-block:hover .code-copy{opacity:1}
-  .code-copy:hover,.user-copy:hover{color:var(--txt);background:var(--panel3);opacity:1}
+  .code-copy:hover,.user-copy:hover,.aside-copy:hover{
+    color:var(--txt);background:var(--panel3);opacity:1;
+  }
 }
-.user-copy:focus-visible{color:var(--txt);background:var(--panel3);opacity:1}
-.code-copy:active,.user-copy:active{transform:scale(.92)}
-.code-copy.done,.user-copy.done{color:var(--ok);opacity:1}
+.user-copy:focus-visible,.aside-copy:focus-visible{
+  color:var(--txt);background:var(--panel3);opacity:1;
+}
+.code-copy:active,.user-copy:active,.aside-copy:active{transform:scale(.92)}
+.code-copy.done,.user-copy.done,.aside-copy.done{color:var(--ok);opacity:1}
 .md code{font-family:var(--mono);font-size:.92em;background:rgba(255,255,255,.07);padding:1px 5px;border-radius:5px}
 .md pre code{background:none;padding:0}
 .md table{border-collapse:collapse;font-size:13px;display:block;overflow-x:auto}
@@ -1197,11 +1201,11 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   font-family:var(--mono);
 }
 /* A side question runs BESIDE the turn: the model answers it from a
-   tool-less fork of the same context and the turn never sees it. The rail
-   and the flat, unbubbled surface say "this is a note about the work", not
-   "someone said this in the conversation". */
+   tool-less fork of the same context and the turn never sees it. The flat,
+   unbubbled surface and the uppercase head say "this is a note about the
+   work", not "someone said this in the conversation". */
 .aside-card{
-  align-self:stretch;border:1px solid var(--line2);border-left:3px solid var(--acc-line);
+  align-self:stretch;border:1px solid var(--line2);
   border-radius:var(--r-md);padding:8px 12px 9px;background:var(--panel2);
 }
 .aside-head{
@@ -1213,11 +1217,12 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .aside-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .aside-state{flex:none;color:var(--txt3)}
 .aside-card.pending .aside-state{color:var(--acc2)}
-.aside-card.bad{border-left-color:var(--err-line)}
+.aside-card.bad{border-color:var(--err-line-soft)}
 .aside-card.bad .aside-state{color:var(--err)}
 .aside-card.synthetic .aside-state{color:var(--warn)}
 .aside-q{margin-top:5px;font-size:13px;color:var(--txt2);white-space:pre-wrap}
-.aside-a{margin-top:8px;padding-top:8px;border-top:1px solid var(--line)}
+.aside-a{position:relative;margin-top:8px;padding-top:8px;border-top:1px solid var(--line)}
+.aside-copy{top:5px;right:0}
 .aside-a .md{font-size:13.5px}
 .aside-err{font-size:12.5px;color:var(--err);font-family:var(--mono);white-space:pre-wrap}
 .aside-note{margin-top:6px;font-size:11.5px;color:var(--warn);font-family:var(--mono)}

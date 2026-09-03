@@ -894,10 +894,14 @@ async function copyWithToast(text, message = "Copied") {
   catch (e) { toast("Copy failed", "error"); return false; }
 }
 
-function userMessageCopyButton(text) {
-  const button = el("button", "user-copy");
+/* The hover-revealed copy control, shared by a sent message and a
+   side-question answer so the two behave identically: fully transparent at
+   rest, revealed by a direct hover of its own box or by keyboard focus, and
+   showing success in place for a moment before returning. */
+function hoverCopyButton(text, className, label) {
+  const button = el("button", className);
   button.type = "button";
-  button.setAttribute("aria-label", "Copy message");
+  button.setAttribute("aria-label", label);
   button.appendChild(copyIcon());
   button.onclick = async event => {
     event.preventDefault();
@@ -912,11 +916,22 @@ function userMessageCopyButton(text) {
         if (!button.isConnected) return;
         button.classList.remove("done");
         button.replaceChildren(copyIcon());
-        button.setAttribute("aria-label", "Copy message");
+        button.setAttribute("aria-label", label);
       }, 1400);
     } catch (error) { toast("Copy failed", "error"); }
   };
   return button;
+}
+
+function userMessageCopyButton(text) {
+  return hoverCopyButton(text, "user-copy", "Copy message");
+}
+
+/* Copies the answer's own markdown source, and belongs to the answer half of
+   the card: it sits below the divider so it can never be read as belonging to
+   the question above it. */
+function asideAnswerCopyButton(text) {
+  return hoverCopyButton(text, "aside-copy", "Copy answer");
 }
 
 /* The WebUI host publishes its LC_TIME hour cycle. Dates still use the
@@ -6799,6 +6814,9 @@ function fillAsideAnswer(card, d) {
     body.appendChild(box);
     if (d.fallback_notice)
       body.appendChild(el("div", "aside-note", d.fallback_notice));
+    /* Positioned over the answer's own top-right corner, the way a sent
+       message carries its copy control. */
+    if (d.text) body.appendChild(asideAnswerCopyButton(d.text));
   } else {
     card.classList.add("bad");
     if (state) state.textContent = "unanswered";

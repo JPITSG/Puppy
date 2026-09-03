@@ -2503,20 +2503,22 @@ console.log(JSON.stringify({revealHeld,revealPaused,minorityClosed,majorityOpen,
 
 def check_user_message_copy(ui_source: str) -> None:
     """Exercise the real user-message copy control and its success reset."""
-    start = ui_source.index("\nfunction userMessageCopyButton(") + 1
-    brace = ui_source.index("{", start)
-    depth = 0
-    end = None
-    for index in range(brace, len(ui_source)):
-        if ui_source[index] == "{":
-            depth += 1
-        elif ui_source[index] == "}":
-            depth -= 1
-            if depth == 0:
-                end = index + 1
-                break
-    assert end is not None, "unbalanced user-message copy helper"
-    helper = ui_source[start:end]
+    def extract(name: str) -> str:
+        start = ui_source.index("function {}(".format(name))
+        brace = ui_source.index("{", start)
+        depth = 0
+        for index in range(brace, len(ui_source)):
+            if ui_source[index] == "{":
+                depth += 1
+            elif ui_source[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    return ui_source[start:index + 1]
+        raise AssertionError("unbalanced {}".format(name))
+
+    # the sent message and the side-question answer share one implementation,
+    # so exercising the message control exercises both
+    helper = extract("hoverCopyButton") + "\n" + extract("userMessageCopyButton")
     script = r"""
 class Classes {
   constructor() { this.names = new Set(); }
@@ -2815,6 +2817,25 @@ def check_side_question_ui(ui_source: str, css_source: str) -> None:
     assert "this.asideCards[d.request_id] = n;" in ui_source
     assert "delete this.asideCards[d.request_id];" in ui_source
     assert ".aside-card{" in css_source and ".aside-a{" in css_source
+
+    # The answer half carries its own hover-revealed copy control, built from
+    # the very helper a sent message uses, and anchored below the divider so
+    # it can never read as belonging to the question above it.
+    assert 'return hoverCopyButton(text, "aside-copy", "Copy answer");' in ui_source
+    assert 'return hoverCopyButton(text, "user-copy", "Copy message");' in ui_source
+    assert "if (d.text) body.appendChild(asideAnswerCopyButton(d.text));" in ui_source
+    assert ".code-copy,.user-copy,.aside-copy{" in css_source
+    assert ".user-copy,.aside-copy{opacity:0}" in css_source
+    assert ".aside-copy{top:5px;right:0}" in css_source
+    aside_start = css_source.index("\n.aside-a{") + 1
+    assert "position:relative" in css_source[
+        aside_start:css_source.index("}", aside_start)]
+
+    # no accent rail on the card: the border is uniform on all four sides,
+    # in the base rule and in every state variant of it
+    card_start = css_source.index(".aside-card{")
+    aside_block = css_source[card_start:css_source.index(".result-line{", card_start)]
+    assert "border-left" not in aside_block, aside_block
 
     # The answer goes through the same md() as an assistant message, so the
     # markdown rules belong to the container rather than to whichever surface
@@ -3252,7 +3273,7 @@ def check_compact_control_alignment(ui_source: str, css_source: str) -> None:
     assert css_source.count(".burger{display:inline-grid}") == 2
 
     for selector in (".disclosure-toggle{", ".foot-node-act{", ".tab .t-close{",
-                     ".code-copy,.user-copy{", ".queue-strip .q-x{",
+                     ".code-copy,.user-copy,.aside-copy{", ".queue-strip .q-x{",
                      ".queue-strip .q-edit{", ".queue-strip .q-pause{",
                      ".queue-strip .q-resend{", ".attach-chip .attach-x{",
                      ".engine-node-refresh{"):
@@ -5794,10 +5815,10 @@ async def main() -> None:
             # positioning cannot reflow the bubble, and attachment markers are
             # stripped before both rendering and copying.
             assert "if (text) n.appendChild(userMessageCopyButton(text));" in ui_source
-            assert ".code-copy,.user-copy{" in css_source
+            assert ".code-copy,.user-copy,.aside-copy{" in css_source
             assert "position:absolute;z-index:1;top:6px;right:6px;width:27px;height:27px;" in css_source
-            assert ".user-copy{opacity:0}" in css_source
-            assert ".code-copy:hover,.user-copy:hover{" in css_source
+            assert ".user-copy,.aside-copy{opacity:0}" in css_source
+            assert ".code-copy:hover,.user-copy:hover,.aside-copy:hover{" in css_source
             # Complete status lines use one click; later desktop double-click
             # events cannot undo the first activation.
             assert "wireDisclosureSurface(name, disclosure);" not in ui_source
