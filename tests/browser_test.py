@@ -3330,6 +3330,51 @@ console.log(JSON.stringify({
         "known": ["", "high"], "retired": [""], "custom": ["", "max"]}
 
 
+def check_timer_settings_ui(ui_source: str, css_source: str) -> None:
+    """The six timer controls are real, node-aware settings, not display-only fields."""
+    for label in (
+            "Published CLI releases", "Model catalogs",
+            "Installed CLI versions and sign-in status", "Remote session polling",
+            "Remote node metadata and engine payloads",
+            "Remote completion notification synchronization"):
+        assert label in ui_source
+    assert 'backend.capabilities.includes("timer-settings")' in ui_source
+    assert 'method: "PATCH", body: { [spec.key]: value }' in ui_source
+    assert 'api(bid, "timers", { timeoutMs: 10000 })' in ui_source
+    assert 'Math.min(timerMilliseconds("remote_session_seconds"),' in ui_source
+    assert 'timerMilliseconds("remote_engine_seconds")' in ui_source
+    assert "state.remoteSessionCheckedAt" in ui_source
+    assert "remotePollingTickMilliseconds()" in ui_source
+    assert ".timer-row{" in css_source
+    assert ".timer-section{" in css_source
+    assert ".timer-node{" in css_source
+
+    constants_start = ui_source.index("const TIMER_DEFAULT_VALUES")
+    constants_end = ui_source.index("/* Browser-clock anchors", constants_start)
+    normalize_start = ui_source.index("function normalizeTimerSettings(")
+    normalize_end = ui_source.index("\n\n/* Every node's engine payload", normalize_start)
+    script = r'''const state={timers:null,remoteTimers:{}};
+''' + ui_source[constants_start:constants_end] + "\n" + \
+        ui_source[normalize_start:normalize_end] + r'''
+const payload={values:{...TIMER_DEFAULT_VALUES},defaults:{...TIMER_DEFAULT_VALUES},limits:{}};
+for(const name of Object.keys(TIMER_DEFAULT_VALUES)) payload.limits[name]={
+  min:name==="remote_session_seconds"?2:1,
+  max:10080,
+  unit:name.endsWith("_minutes")?"minutes":"seconds",
+};
+state.timers=normalizeTimerSettings(payload);
+const before=remotePollingTickMilliseconds();
+payload.values.remote_session_seconds=120;
+payload.values.remote_engine_seconds=7;
+state.timers=normalizeTimerSettings(payload);
+console.log(JSON.stringify({before,after:remotePollingTickMilliseconds(),valid:!!state.timers}));
+'''
+    proc = subprocess.run(["node", "--input-type=module", "-e", script],
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:700]
+    assert json.loads(proc.stdout) == {"before": 12000, "after": 7000, "valid": True}
+
+
 def check_session_provider_marks(css_source: str) -> None:
     """Detailed compact marks grow without changing the session-row layout slot."""
     assert '.si-row.sub .prov-anthropic,.si-row.sub .prov-openai{' in css_source
@@ -5858,6 +5903,7 @@ async def main() -> None:
             check_remote_workspace_picker(ui_source, css_source)
             check_opencode_chat_models(ui_source, css_source)
             check_dynamic_model_catalog_ui(ui_source)
+            check_timer_settings_ui(ui_source, css_source)
             check_session_provider_marks(css_source)
             check_sidebar_icon_alignment(css_source)
             check_compact_control_alignment(ui_source, css_source)

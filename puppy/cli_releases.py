@@ -43,6 +43,18 @@ _next_due = 0.0
 _last_attempt = 0.0
 _refresh_lock: Optional[asyncio.Lock] = None
 _refresh_loop = None
+_worker_wake: Optional[asyncio.Event] = None
+
+
+def check_interval_seconds() -> float:
+    """Configured successful-check cadence."""
+    from puppy import config
+    return config.timer_seconds("cli_release_minutes")
+
+
+def failure_retry_seconds() -> float:
+    """Retry failures promptly without exceeding a user's shorter cadence."""
+    return min(float(FAILURE_RETRY_SECONDS), check_interval_seconds())
 
 
 def _parsed_version(value: str, exact: bool = False):
@@ -249,7 +261,7 @@ async def refresh_if_due(drivers: Iterable, force: bool = False) -> float:
         except Exception as exc:
             successful = False
             log.warning("CLI latest-version refresh failed: %s", exc)
-        interval = CHECK_INTERVAL_SECONDS if successful else FAILURE_RETRY_SECONDS
+        interval = check_interval_seconds() if successful else failure_retry_seconds()
         _next_due = time.monotonic() + interval
         return float(interval)
 
@@ -258,17 +270,28 @@ async def _periodic_worker() -> None:
     from puppy.drivers import all_drivers
 
     while True:
+        wake = _worker_wake
+        if wake is not None:
+            wake.clear()
         try:
             delay = await refresh_if_due(all_drivers())
         except asyncio.CancelledError:
             raise
         except Exception:
             log.exception("CLI latest-version worker failed")
-            delay = FAILURE_RETRY_SECONDS
-        await asyncio.sleep(max(1.0, delay))
+            delay = failure_retry_seconds()
+        try:
+            if wake is None:
+                await asyncio.sleep(max(1.0, delay))
+            else:
+                await asyncio.wait_for(wake.wait(), timeout=max(1.0, delay))
+        except asyncio.TimeoutError:
+            pass
 
 
 async def _lifecycle(app):
+    global _worker_wake
+    _worker_wake = asyncio.Event()
     task = asyncio.create_task(_periodic_worker(), name="puppy-cli-release-check")
     app["puppy_cli_release_task"] = task
     try:
@@ -279,6 +302,7 @@ async def _lifecycle(app):
             await task
         except asyncio.CancelledError:
             pass
+        _worker_wake = None
 
 
 def register(app) -> None:
@@ -289,10 +313,19 @@ def register(app) -> None:
     app.cleanup_ctx.append(_lifecycle)
 
 
+def settings_changed() -> None:
+    """Apply a new interval immediately instead of waiting out the old sleep."""
+    global _next_due
+    _next_due = 0.0
+    if _worker_wake is not None:
+        _worker_wake.set()
+
+
 def reset_for_tests() -> None:
-    global _next_due, _last_attempt, _refresh_lock, _refresh_loop
+    global _next_due, _last_attempt, _refresh_lock, _refresh_loop, _worker_wake
     _cache.clear()
     _next_due = 0.0
     _last_attempt = 0.0
     _refresh_lock = None
     _refresh_loop = None
+    _worker_wake = None

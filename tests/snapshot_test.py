@@ -108,6 +108,7 @@ async def exercise_http(archive_ui: dict, session_id: int, project: Path) -> Non
 
             config.set_value("instance_name", "changed-over-http")
             config.set_value("engines.usage_refresh_minutes", 60)
+            config.set_timers({"remote_session_seconds": 30})
             config.set_value("uploads.max_file_size_mb", 2)
             app["puppy_bind_verifications"]["stale-before-restore"] = {
                 "timer": None, "server": None,
@@ -133,6 +134,7 @@ async def exercise_http(archive_ui: dict, session_id: int, project: Path) -> Non
             assert config.get("instance_name") == "saved-instance"
             assert config.get("sessions.default_cwd") == str(project)
             assert config.get("engines.usage_refresh_minutes") == 30
+            assert config.get("timers.remote_session_seconds") == 17
             assert config.get("engines.opencode") is None
             assert config.get("uploads.max_file_size_mb") == 19
             assert notify.completion_events(0)["stream_id"] != archived_stream
@@ -155,6 +157,14 @@ async def main() -> None:
         config.set_value("instance_name", "saved-instance")
         config.set_value("sessions.default_cwd", str(project))
         config.set_value("engines.usage_refresh_minutes", 30)
+        config.set_timers({
+            "cli_release_minutes": 240,
+            "model_catalog_minutes": 7,
+            "cli_status_minutes": 8,
+            "remote_session_seconds": 17,
+            "remote_engine_seconds": 75,
+            "completion_sync_seconds": 3,
+        })
         config.set_value("uploads.max_file_size_mb", 19)
         config.set_value("browser.enabled", True)
         config.set_value("browser.color_scheme", "light")
@@ -349,6 +359,14 @@ async def main() -> None:
         # Mutate every restored surface and an excluded ordinary project file.
         config.set_value("instance_name", "mutated-instance")
         config.set_value("engines.usage_refresh_minutes", 5)
+        config.set_timers({
+            "cli_release_minutes": 60,
+            "model_catalog_minutes": 2,
+            "cli_status_minutes": 2,
+            "remote_session_seconds": 3,
+            "remote_engine_seconds": 10,
+            "completion_sync_seconds": 1,
+        })
         config.set_value("uploads.max_file_size_mb", 2)
         config.set_value("browser.enabled", False)
         config.set_value("browser.color_scheme", "dark")
@@ -389,6 +407,14 @@ async def main() -> None:
         assert config.get("instance_name") == "saved-instance"
         assert config.get("sessions.default_cwd") == str(project)
         assert config.get("engines.usage_refresh_minutes") == 30
+        assert config.timer_values() == {
+            "cli_release_minutes": 240,
+            "model_catalog_minutes": 7,
+            "cli_status_minutes": 8,
+            "remote_session_seconds": 17,
+            "remote_engine_seconds": 75,
+            "completion_sync_seconds": 3,
+        }
         assert config.get("engines.opencode") is None
         assert config.get("uploads.max_file_size_mb") == 19
         assert config.get("browser.enabled") is True
@@ -418,13 +444,18 @@ async def main() -> None:
         previous_spawn_prompt_shape["system_prompt"].pop("spawn", None)
         missing_cwd = config.export_data()
         missing_cwd["sessions"].pop("default_cwd", None)
+        missing_timers = config.export_data()
+        missing_timers.pop("timers", None)
+        previous_timer_shape = config.export_data()
+        previous_timer_shape["timers"].pop("completion_sync_seconds", None)
         unknown_selection = config.export_data()
         unknown_selection["engines"]["opencode"] = {
             "models": ["provider/model-a", "second/model-b"]}
         for invalid in (missing_prompts, previous_prompt_shape,
                         previous_terminal_prompt_shape,
                         previous_spawn_prompt_shape,
-                        missing_cwd, unknown_selection):
+                        missing_cwd, missing_timers, previous_timer_shape,
+                        unknown_selection):
             try:
                 config.normalize_import(invalid)
             except ValueError:
@@ -439,6 +470,14 @@ async def main() -> None:
             assert "canonical" in str(exc), str(exc)
         else:
             raise AssertionError("noncanonical config values were accepted")
+        invalid_timer = config.export_data()
+        invalid_timer["timers"]["remote_session_seconds"] = 1
+        try:
+            config.normalize_import(invalid_timer)
+        except ValueError as exc:
+            assert "remote_session_seconds" in str(exc), str(exc)
+        else:
+            raise AssertionError("out-of-range timer was accepted")
         assert config.get("engines.auto_upgrade") == \
             {"enabled": True, "mode": "at", "at": "04:15"}
         # an unattended upgrade schedule must survive import validation intact
@@ -557,6 +596,7 @@ async def main() -> None:
         # A failed database install must put config and filesystem trees back.
         config.set_value("instance_name", "rollback-current")
         config.set_value("engines.usage_refresh_minutes", 60)
+        config.set_timers({"completion_sync_seconds": 9})
         config.set_value("uploads.max_file_size_mb", 23)
         current_upload = Path(config.DATA_DIR) / "uploads" / "current.txt"
         current_upload.write_text("keep me", encoding="utf-8")
@@ -585,6 +625,7 @@ async def main() -> None:
         assert calls["count"] == 2
         assert config.get("instance_name") == "rollback-current"
         assert config.get("engines.usage_refresh_minutes") == 60
+        assert config.get("timers.completion_sync_seconds") == 9
         assert config.get("uploads.max_file_size_mb") == 23
         assert current_upload.read_text(encoding="utf-8") == "keep me"
         assert tls_key.read_bytes() == b"keep current tls material"

@@ -50,6 +50,10 @@ _snapshot_paused = False
 _INVALID_META = object()
 
 
+def poll_seconds() -> float:
+    return config.timer_seconds("completion_sync_seconds")
+
+
 def _completion_key(session_id: int) -> str:
     return COMPLETION_SESSION_PREFIX + str(int(session_id))
 
@@ -562,11 +566,12 @@ async def _worker_loop(app) -> None:
             raise
         except Exception:
             log.exception("remote completion polling failed")
+        delay = poll_seconds()
         try:
             if _worker_wake is None:
-                await asyncio.sleep(POLL_SECONDS)
+                await asyncio.sleep(delay)
             else:
-                await asyncio.wait_for(_worker_wake.wait(), timeout=POLL_SECONDS)
+                await asyncio.wait_for(_worker_wake.wait(), timeout=delay)
         except asyncio.TimeoutError:
             pass
 

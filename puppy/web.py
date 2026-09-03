@@ -174,6 +174,7 @@ async def h_state(request: web.Request):
         "engines": engines,
         "usage_refresh": usage_refresh.payload(),
         "auto_upgrade": cli_auto_upgrade.payload(),
+        "timers": config.timers_payload(),
         "backends": backends.list_backends(),
         "sessions": session_state["sessions"],
         "server_time": session_state["server_time"],
@@ -192,6 +193,7 @@ async def h_engines(request: web.Request):
         "engines": engines,
         "usage_refresh": usage_refresh.payload(),
         "auto_upgrade": cli_auto_upgrade.payload(),
+        "timers": config.timers_payload(),
         # Retained for older consoles that label anonymous shell tabs.
         "user": _node_user(),
     })
@@ -201,6 +203,36 @@ async def h_usage_refresh_get(request: web.Request):
     return web.json_response({"usage_refresh": usage_refresh.payload()})
 
 
+async def h_timers_get(_request: web.Request):
+    return web.json_response({"timers": config.timers_payload()})
+
+
+async def h_timers_patch(request: web.Request):
+    """Update this node's cache/refresh timers and wake affected workers."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid timer settings request"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "invalid timer settings request"}, status=400)
+    before = config.timer_values()
+    try:
+        after = config.set_timers(body)
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    changed = {name for name in after if after[name] != before[name]}
+    if "cli_release_minutes" in changed:
+        cli_releases.settings_changed()
+    if "model_catalog_minutes" in changed:
+        for driver in all_drivers():
+            driver.invalidate_model_options()
+    if "cli_status_minutes" in changed:
+        driver_base.invalidate_status()
+    if "completion_sync_seconds" in changed:
+        notify.wake_worker()
+    return web.json_response({"ok": True, "timers": config.timers_payload()})
+
+
 async def h_usage_refresh_post(request: web.Request):
     await usage_refresh.maybe_refresh(force=True)
     return web.json_response({
@@ -208,6 +240,7 @@ async def h_usage_refresh_post(request: web.Request):
             refresh_usage=False, refresh_models=False),
         "usage_refresh": usage_refresh.payload(),
         "auto_upgrade": cli_auto_upgrade.payload(),
+        "timers": config.timers_payload(),
     })
 
 
@@ -233,6 +266,7 @@ async def h_engines_refresh(request: web.Request):
             refresh_usage=False, refresh_models=False),
         "usage_refresh": usage_refresh.payload(),
         "auto_upgrade": cli_auto_upgrade.payload(),
+        "timers": config.timers_payload(),
     })
 
 
@@ -287,6 +321,7 @@ async def h_engine_upgrade(request: web.Request):
             refresh_usage=False, refresh_models=False),
         "usage_refresh": usage_refresh.payload(),
         "auto_upgrade": cli_auto_upgrade.payload(),
+        "timers": config.timers_payload(),
     })
 
 
@@ -308,6 +343,7 @@ async def h_usage_refresh_patch(request: web.Request):
             refresh_usage=False, refresh_models=False),
         "usage_refresh": usage_refresh.payload(),
         "auto_upgrade": cli_auto_upgrade.payload(),
+        "timers": config.timers_payload(),
     })
 
 
@@ -826,6 +862,7 @@ async def h_settings_get(request: web.Request):
                                 web_tls.listener_key(runtime_web),
         "uptime_seconds": max(0, int(time.monotonic() - started)),
         "usage_refresh": usage_refresh.payload(),
+        "timers": config.timers_payload(),
         "uploads": uploads.settings_payload(),
         "version": __version__,
     })
@@ -1480,6 +1517,8 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     r.add_get("/api/engines/usage-refresh", h_usage_refresh_get)
     r.add_post("/api/engines/usage-refresh", h_usage_refresh_post)
     r.add_patch("/api/engines/usage-refresh", h_usage_refresh_patch)
+    r.add_get("/api/timers", h_timers_get)
+    r.add_patch("/api/timers", h_timers_patch)
     r.add_post("/api/engines/refresh", h_engines_refresh)
     r.add_get("/api/engines/auto-upgrade", h_engine_auto_upgrade_get)
     r.add_patch("/api/engines/auto-upgrade", h_engine_auto_upgrade_patch)

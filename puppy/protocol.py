@@ -46,6 +46,10 @@ BROWSER_SHARED_STORAGE_CAPABILITY = "browser-shared-storage"
 # is the engine-upgrade surface; this only decides when the node runs it, so a
 # node may support upgrading by hand without advertising the scheduler.
 ENGINE_AUTO_UPGRADE_CAPABILITY = "engine-auto-upgrade"
+# GET/PATCH of the node-owned engine cache timers. The same payload also
+# carries controller-only synchronization intervals; remote consoles expose
+# those only for their own controller, never as if a headless node used them.
+TIMER_SETTINGS_CAPABILITY = "timer-settings"
 # GET/PATCH of node-owned custom, remote-workspace, and browser system-prompt
 # text. Conditional guidance remains turn-scoped: remote-workspace text needs a
 # cross-node mirror, and browser text needs browser tools enabled for the turn.
@@ -195,6 +199,7 @@ BASE_CAPABILITIES = (
     BROWSER_SHARED_STORAGE_CAPABILITY,
     UPLOAD_PREVIEW_CAPABILITY,
     ENGINE_AUTO_UPGRADE_CAPABILITY,
+    TIMER_SETTINGS_CAPABILITY,
     SYSTEM_PROMPT_CAPABILITY,
     WORKSPACE_PROVIDER_CAPABILITY,
     WORKSPACE_MIRROR_CAPABILITY,

@@ -2390,6 +2390,7 @@ const state = {
   engMap: {},             // key -> engine info (local)
   usageRefresh: null,     // local account-usage refresh metadata
   autoUpgrade: null,      // this instance's engine-update schedule
+  timers: null,           // local cache/refresh timer settings
   uploadSettings: null,   // local per-file upload policy
   localEngineCheckedAt: 0,
   backends: [],           // remote backends [{id,name,url,urls,active_url}]
@@ -2406,8 +2407,10 @@ const state = {
   remoteEngineErrors: {}, // bid -> latest engine-status error (node can still be reachable)
   remoteEngineCheckedAt: {},
   remoteNodeCheckedAt: {},
+  remoteSessionCheckedAt: {},
   remoteUsageRefresh: {}, // bid -> account-usage refresh metadata
   remoteAutoUpgrade: {},  // bid -> unattended engine-update schedule
+  remoteTimers: {},       // bid -> cache/refresh timer settings
   remoteUploadSettings: {}, // bid -> remote per-file upload policy
   remoteSystemPrompts: {}, // bid -> last authenticated node prompt settings
   tabs: [],               // [{id,type,bid,sid,browserId,title,cmd}]
@@ -2420,9 +2423,7 @@ const state = {
   views: {},              // tab id -> view object
 };
 
-const REMOTE_POLL_INTERVAL = 12000;
 const REMOTE_POLL_TIMEOUT = 5000;
-const REMOTE_ENGINE_REFRESH = 60000;
 const ENGINE_POLL_TIMEOUT = 15000;
 const UPGRADE_READINESS_INTERVAL = 2000;
 const UPGRADE_READINESS_TIMEOUT = 4000;
@@ -2436,6 +2437,27 @@ let remotePollTimer = null;
 let remotePollingGeneration = 0;
 const remoteUpdateConnections = new Map();
 const enginePayloadListeners = new Set();
+
+const TIMER_DEFAULT_VALUES = Object.freeze({
+  cli_release_minutes: 360,
+  model_catalog_minutes: 5,
+  cli_status_minutes: 5,
+  remote_session_seconds: 12,
+  remote_engine_seconds: 60,
+  completion_sync_seconds: 2,
+});
+
+function timerMilliseconds(name) {
+  const values = state.timers && state.timers.values;
+  const fallback = TIMER_DEFAULT_VALUES[name];
+  const value = values && Number.isInteger(values[name]) ? values[name] : fallback;
+  return value * (name.endsWith("_minutes") ? 60000 : 1000);
+}
+
+function remotePollingTickMilliseconds() {
+  return Math.min(timerMilliseconds("remote_session_seconds"),
+    timerMilliseconds("remote_engine_seconds"));
+}
 
 /* Browser-clock anchors for uninterrupted work blocks. The server sends both
    active_since and server_time so a controller can display a remote duration
@@ -2529,9 +2551,12 @@ function reconcileRemoteState() {
                         state.remoteStopping,
                         state.engCache, state.remoteEngineErrors,
                         state.remoteEngineCheckedAt, state.remoteNodeCheckedAt,
+                        state.remoteSessionCheckedAt,
                         state.remoteUsageRefresh, state.remoteAutoUpgrade,
-                        state.remoteUploadSettings, state.remoteSystemPrompts,
+                        state.remoteTimers, state.remoteUploadSettings,
+                        state.remoteSystemPrompts,
                         state.remoteBrowser, remotePollSequence]) {
+    if (!bucket) continue;
     for (const id of Object.keys(bucket)) if (!live.has(String(id))) delete bucket[id];
   }
   for (const key of sessionActivityAnchors.keys()) {
@@ -2582,9 +2607,12 @@ function resetRemoteBackendConnection(bid) {
                         state.remoteStopping,
                         state.engCache, state.remoteEngineErrors,
                         state.remoteEngineCheckedAt, state.remoteNodeCheckedAt,
+                        state.remoteSessionCheckedAt,
                         state.remoteUsageRefresh, state.remoteAutoUpgrade,
-                        state.remoteUploadSettings, state.remoteSystemPrompts,
+                        state.remoteTimers, state.remoteUploadSettings,
+                        state.remoteSystemPrompts,
                         state.remoteBrowser]) {
+    if (!bucket) continue;
     delete bucket[bid];
   }
   for (const key of [...sessionActivityAnchors.keys()])
@@ -2977,6 +3005,7 @@ async function refreshState() {
     engines: Array.isArray(s.engines) ? s.engines : [],
     usage_refresh: s.usage_refresh || state.usageRefresh,
     auto_upgrade: s.auto_upgrade || state.autoUpgrade,
+    timers: s.timers || state.timers,
   });
   rememberUploadSettings(0, s.uploads);
   state.localEngineCheckedAt = 0;
@@ -3272,7 +3301,8 @@ function stopRemoteUpdateConnections() {
 
 async function pollLocalEngines(forceEngines = false) {
   const now = Date.now();
-  if (!forceEngines && now - Number(state.localEngineCheckedAt || 0) < REMOTE_ENGINE_REFRESH)
+  if (!forceEngines && now - Number(state.localEngineCheckedAt || 0) <
+      timerMilliseconds("remote_engine_seconds"))
     return;
   try {
     const payload = await api(0, "engines", { timeoutMs: ENGINE_POLL_TIMEOUT });
@@ -3281,71 +3311,81 @@ async function pollLocalEngines(forceEngines = false) {
     rememberEnginePayload(0, payload);
     state.localEngineCheckedAt = Date.now();
   } catch (error) {
-    /* A broken local request should not turn the 12-second session poll into
-       a tight engine-status retry loop. The normal one-minute cadence retries. */
+    /* A broken local request must not turn the shorter scheduler wake-up into
+       a tight engine-status retry loop. The configured cadence retries. */
     state.localEngineCheckedAt = Date.now();
     console.warn("local engine status refresh failed", error);
   }
 }
 
-async function pollRemoteBackend(backend, forceEngines = false) {
+async function pollRemoteBackend(backend, forceEngines = false, forceSessions = false) {
   const bid = backend.id;
   if (!backendConnectionAllowed(bid)) return;
   const sequence = (remotePollSequence[bid] || 0) + 1;
   remotePollSequence[bid] = sequence;
   const wasReachable = state.remoteOk[bid] === true;
-  let payload = null;
-  let failure = null;
+  const startedAt = Date.now();
+  const sessionCheckedAt = state.remoteSessionCheckedAt ||
+    (state.remoteSessionCheckedAt = {});
+  const hasSessions = Object.prototype.hasOwnProperty.call(state.remoteSessions, bid);
+  const sessionsAreDue = forceSessions || !hasSessions ||
+    startedAt - Number(sessionCheckedAt[bid] || 0) >=
+      timerMilliseconds("remote_session_seconds");
 
-  try {
-    payload = await api(bid, "sessions", { timeoutMs: REMOTE_POLL_TIMEOUT });
-    if (!payload || !Array.isArray(payload.sessions))
-      throw new Error("backend returned an invalid sessions response");
-  } catch (error) {
-    failure = error;
-  }
-  if (!remotePollIsCurrent(bid, sequence)) return;
-  if (failure) {
-    const current = state.backends.find(item => Number(item.id) === Number(bid));
-    const reported = failure.data && failure.data.availability;
-    if (controllerBackendHealth(reported ? { availability: reported } : null) && current)
-      current.availability = reported;
-    if (controllerBackendHealth(current)) {
-      /* The controller verdict owns reachability. In particular, a browser's
-         own five-second abort must not strand this node locally when the
-         controller completed a healthy request just after that deadline. */
-      reconcileRemoteState();
-    } else {
-      state.remoteOk[bid] = false; // older controller compatibility
-      state.remoteErrors[bid] = remoteStoppingMessage(bid) ||
-        failure.message || "Backend unavailable";
-    }
-    return;
-  }
-
-  /* The old process can finish an already accepted HTTP request during its
-     grace window. Only a fresh node descriptor saying it is no longer
-     draining clears an explicit lifecycle notice; ordinary traffic from the
-     departing process must not paint it green again. */
-  if (state.remoteStopping[bid]) {
+  if (sessionsAreDue) {
+    let payload = null;
+    let failure = null;
     try {
-      const node = await api(bid, "node", { timeoutMs: REMOTE_POLL_TIMEOUT });
-      if (!remotePollIsCurrent(bid, sequence)) return;
-      if (!node || node.shutting_down !== false) return;
-      clearRemoteNodeStopping(bid);
+      payload = await api(bid, "sessions", { timeoutMs: REMOTE_POLL_TIMEOUT });
+      if (!payload || !Array.isArray(payload.sessions))
+        throw new Error("backend returned an invalid sessions response");
     } catch (error) {
+      failure = error;
+    }
+    if (!remotePollIsCurrent(bid, sequence)) return;
+    sessionCheckedAt[bid] = Date.now();
+    if (failure) {
+      const current = state.backends.find(item => Number(item.id) === Number(bid));
+      const reported = failure.data && failure.data.availability;
+      if (controllerBackendHealth(reported ? { availability: reported } : null) && current)
+        current.availability = reported;
+      if (controllerBackendHealth(current)) {
+        /* The controller verdict owns reachability. In particular, a browser's
+           own timeout must not strand this node locally when the controller
+           completed a healthy request just after that deadline. */
+        reconcileRemoteState();
+      } else {
+        state.remoteOk[bid] = false; // older controller compatibility
+        state.remoteErrors[bid] = remoteStoppingMessage(bid) ||
+          failure.message || "Backend unavailable";
+      }
       return;
     }
-  }
 
-  state.remoteSessions[bid] = payload.sessions;
-  ingestSessionActivity(bid, payload.sessions, payload.server_time);
-  state.remoteOk[bid] = true;
-  delete state.remoteErrors[bid];
+    /* The old process can finish an already accepted HTTP request during its
+       grace window. Only a fresh node descriptor saying it is no longer
+       draining clears an explicit lifecycle notice; ordinary traffic from the
+       departing process must not paint it green again. */
+    if (state.remoteStopping[bid]) {
+      try {
+        const node = await api(bid, "node", { timeoutMs: REMOTE_POLL_TIMEOUT });
+        if (!remotePollIsCurrent(bid, sequence)) return;
+        if (!node || node.shutting_down !== false) return;
+        clearRemoteNodeStopping(bid);
+      } catch (error) {
+        return;
+      }
+    }
+
+    state.remoteSessions[bid] = payload.sessions;
+    ingestSessionActivity(bid, payload.sessions, payload.server_time);
+    state.remoteOk[bid] = true;
+    delete state.remoteErrors[bid];
+  }
 
   const now = Date.now();
   const nodeIsStale = now - Number(state.remoteNodeCheckedAt[bid] || 0) >=
-    REMOTE_ENGINE_REFRESH;
+    timerMilliseconds("remote_engine_seconds");
   if (forceEngines || nodeIsStale) {
     try {
       let node;
@@ -3375,11 +3415,9 @@ async function pollRemoteBackend(backend, forceEngines = false) {
       state.remoteNodeCheckedAt[bid] = Date.now();
     }
   }
-  const hasCachedEngines = Object.prototype.hasOwnProperty.call(state.engCache, bid);
   const enginesAreStale = now - Number(state.remoteEngineCheckedAt[bid] || 0) >=
-    REMOTE_ENGINE_REFRESH;
-  const refreshEngines = forceEngines || !wasReachable || !hasCachedEngines ||
-    enginesAreStale || !!state.remoteEngineErrors[bid];
+    timerMilliseconds("remote_engine_seconds");
+  const refreshEngines = forceEngines || !wasReachable || enginesAreStale;
   if (!refreshEngines) return;
 
   try {
@@ -3392,15 +3430,18 @@ async function pollRemoteBackend(backend, forceEngines = false) {
     delete state.remoteEngineErrors[bid];
   } catch (error) {
     if (!remotePollIsCurrent(bid, sequence)) return;
-    /* Sessions proved the node is reachable. Keep last-known engine data and
-       retry this narrower status request next cycle instead of marking the
-       whole backend down. */
+    /* Keep last-known engine data and retry on the configured cadence instead
+       of marking the whole backend down. */
     state.remoteEngineErrors[bid] = error.message || "engine status unavailable";
+    state.remoteEngineCheckedAt[bid] = Date.now();
   }
 }
 
 async function pollRemotes(options = {}) {
   const forceEngines = !!options.forceEngines;
+  /* Calls made by a user action/recovery path retain the old immediate-read
+     semantics. Only the recurring scheduler lets each timer gate its own job. */
+  const forceSessions = !!options.forceSessions || options.scheduled !== true;
   const backends = [...state.backends];
   /* Publish each node as soon as its own request settles. One sleeping remote
      must not hold healthy session lists (or local engine status) behind its
@@ -3413,7 +3454,7 @@ async function pollRemotes(options = {}) {
   await Promise.all([
     pollLocalEngines(forceEngines).finally(publish),
     ...backends.map(backend =>
-      pollRemoteBackend(backend, forceEngines).finally(publish)),
+      pollRemoteBackend(backend, forceEngines, forceSessions).finally(publish)),
   ]);
 }
 
@@ -3422,11 +3463,11 @@ function startRemotePolling() {
   const tick = async () => {
     remotePollTimer = null;
     if (!state.authed || generation !== remotePollingGeneration) return;
-    try { await pollRemotes(); }
+    try { await pollRemotes({ scheduled: true }); }
     catch (error) { console.warn("remote poll failed", error); }
     finally {
       if (state.authed && generation === remotePollingGeneration)
-        remotePollTimer = setTimeout(tick, REMOTE_POLL_INTERVAL);
+        remotePollTimer = setTimeout(tick, remotePollingTickMilliseconds());
     }
   };
   if (remotePollTimer !== null) clearTimeout(remotePollTimer);
@@ -3913,6 +3954,13 @@ function backendSupportsEngineUpgrade(bid) {
   const backend = state.backends.find(item => item.id === bid);
   return !!backend && Array.isArray(backend.capabilities) &&
     backend.capabilities.includes("engine-upgrade");
+}
+
+function backendSupportsTimerSettings(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(item => item.id === bid);
+  return !!backend && Array.isArray(backend.capabilities) &&
+    backend.capabilities.includes("timer-settings");
 }
 
 function backendSupportsSystemPrompt(bid) {
@@ -4846,6 +4894,38 @@ function quotaTitle(e) {
   return parts.join(" · ");
 }
 
+function normalizeTimerSettings(payload) {
+  if (!payload || typeof payload !== "object" || !payload.values ||
+      !payload.defaults || !payload.limits) return null;
+  const values = {};
+  const defaults = {};
+  const limits = {};
+  for (const name of Object.keys(TIMER_DEFAULT_VALUES)) {
+    const spec = payload.limits[name];
+    const value = Number(payload.values[name]);
+    const defaultValue = Number(payload.defaults[name]);
+    if (!spec || !Number.isInteger(value) || !Number.isInteger(defaultValue) ||
+        !Number.isInteger(Number(spec.min)) || !Number.isInteger(Number(spec.max)) ||
+        !["minutes", "seconds"].includes(spec.unit) ||
+        value < Number(spec.min) || value > Number(spec.max) ||
+        defaultValue < Number(spec.min) || defaultValue > Number(spec.max) ||
+        (name.endsWith("_minutes") ? spec.unit !== "minutes" : spec.unit !== "seconds"))
+      return null;
+    values[name] = value;
+    defaults[name] = defaultValue;
+    limits[name] = { min: Number(spec.min), max: Number(spec.max), unit: spec.unit };
+  }
+  return { values, defaults, limits };
+}
+
+function rememberTimerSettings(bid, payload) {
+  const normalized = normalizeTimerSettings(payload);
+  if (!normalized) return null;
+  if (bid) state.remoteTimers[bid] = normalized;
+  else state.timers = normalized;
+  return normalized;
+}
+
 /* Every node's engine payload is remembered here and nowhere else. Several
    callers do their own partial bookkeeping around it - a poll, a lazy load, the
    settings render - and a field wired into only some of them is precisely how
@@ -4855,12 +4935,14 @@ function rememberEnginePayload(bid, result) {
     state.engCache[bid] = result.engines;
     if (result.usage_refresh) state.remoteUsageRefresh[bid] = result.usage_refresh;
     if (result.auto_upgrade) state.remoteAutoUpgrade[bid] = result.auto_upgrade;
+    if (result.timers) rememberTimerSettings(bid, result.timers);
   } else {
     state.engines = result.engines;
     state.engMap = {};
     state.engines.forEach(engine => state.engMap[engine.key] = engine);
     if (result.usage_refresh) state.usageRefresh = result.usage_refresh;
     if (result.auto_upgrade) state.autoUpgrade = result.auto_upgrade;
+    if (result.timers) rememberTimerSettings(0, result.timers);
   }
   for (const listener of [...enginePayloadListeners]) {
     try { listener(Number(bid) || 0, result.engines); }
@@ -12666,6 +12748,7 @@ class SettingsView {
     this.engineUpgradePollGeneration = 0;
     this.localEngineGroup = null;
     this.systemPromptSync = null;
+    this.timerSettingsSync = null;
     this.root = el("div", "view settings");
     this.root.innerHTML = `<div class="settings-scroll"><div class="settings-inner"></div></div>`;
     this.inner = this.root.querySelector(".settings-inner");
@@ -12689,6 +12772,7 @@ class SettingsView {
     this.upgradesInProgress.clear();
     this.localEngineGroup = null;
     this.systemPromptSync = null;
+    this.timerSettingsSync = null;
     this.root.remove();
   }
   onShow() { this.render(); }
@@ -13052,6 +13136,7 @@ class SettingsView {
       }
     }
     if (this.systemPromptSync) this.systemPromptSync();
+    if (this.timerSettingsSync) this.timerSettingsSync();
     this.syncUpgradeButtons();
   }
 
@@ -13749,6 +13834,232 @@ class SettingsView {
     };
   }
 
+  timerSettingsCard(nodes, initialPayload, generation) {
+    const card = el("div", "card timers-card");
+    card.innerHTML = `<h2>Timers</h2>
+      <p class="timer-card-copy">Control how often Puppy refreshes engine information and
+        synchronizes remote activity. Engine checks belong to the selected backend; console
+        synchronization belongs to this instance.</p>`;
+
+    const specs = [
+      {
+        key: "cli_release_minutes", scope: "engine", label: "Published CLI releases",
+        description: "How often this backend asks vendors for newer CLI releases; failures retry sooner.",
+      },
+      {
+        key: "model_catalog_minutes", scope: "engine", label: "Model catalogs",
+        description: "How long a discovered model list is reused; failed discoveries retry sooner.",
+      },
+      {
+        key: "cli_status_minutes", scope: "engine",
+        label: "Installed CLI versions and sign-in status",
+        description: "How long installed-version and sign-in probes are reused before checking again.",
+      },
+      {
+        key: "remote_session_seconds", scope: "console", label: "Remote session polling",
+        description: "How often this console checks paired backends for session changes.",
+      },
+      {
+        key: "remote_engine_seconds", scope: "console",
+        label: "Remote node metadata and engine payloads",
+        description: "How often this console re-reads remote node details, models, versions, and status.",
+      },
+      {
+        key: "completion_sync_seconds", scope: "console",
+        label: "Remote completion notification synchronization",
+        description: "How often this controller checks remote completion logs for notification commands.",
+      },
+    ];
+
+    rememberTimerSettings(0, initialPayload);
+    const nodeByBid = bid => nodes.find(node => node.bid === bid);
+    let activeBid = 0;
+    const preferred = Number(this.timerSettingsBid) || 0;
+    if (nodes.some(node => node.bid === preferred)) activeBid = preferred;
+    const loading = new Set();
+    const rows = [];
+
+    const engineSection = el("section", "timer-section");
+    const engineHead = el("div", "timer-section-head");
+    engineHead.appendChild(el("h3", "", "Engine checks"));
+    engineHead.appendChild(el("p", "",
+      "These values are stored and used on the backend that runs the engine."));
+    engineSection.appendChild(engineHead);
+    const nodeField = el("label", "timer-node");
+    nodeField.appendChild(el("span", "timer-node-label", "Backend"));
+    const select = document.createElement("select");
+    select.setAttribute("aria-label", "Backend whose engine timers are being edited");
+    for (const node of nodes) {
+      const option = document.createElement("option");
+      option.value = String(node.bid);
+      option.textContent = node.name;
+      select.appendChild(option);
+    }
+    select.value = String(activeBid);
+    nodeField.appendChild(select);
+    const nodeNote = el("span", "timer-node-note");
+    nodeNote.setAttribute("role", "status");
+    nodeNote.setAttribute("aria-live", "polite");
+    nodeField.appendChild(nodeNote);
+    engineSection.appendChild(nodeField);
+    const engineList = el("div", "timer-list");
+    engineSection.appendChild(engineList);
+    card.appendChild(engineSection);
+
+    const consoleSection = el("section", "timer-section");
+    const consoleHead = el("div", "timer-section-head");
+    consoleHead.appendChild(el("h3", "", "Console synchronization"));
+    consoleHead.appendChild(el("p", "",
+      "These values are stored on this instance and coordinate its paired backends."));
+    consoleSection.appendChild(consoleHead);
+    const consoleList = el("div", "timer-list");
+    consoleSection.appendChild(consoleList);
+    card.appendChild(consoleSection);
+
+    const timerPayload = spec => spec.scope === "engine" ?
+      (activeBid ? state.remoteTimers[activeBid] : state.timers) : state.timers;
+    const targetBid = spec => spec.scope === "engine" ? activeBid : 0;
+
+    const addRow = spec => {
+      const root = el("div", "timer-row");
+      const copy = el("div", "timer-row-copy");
+      copy.appendChild(el("div", "timer-row-name", spec.label));
+      copy.appendChild(el("div", "timer-row-description", spec.description));
+      const controls = el("div", "timer-row-controls");
+      const input = document.createElement("input");
+      input.type = "number";
+      input.step = "1";
+      input.inputMode = "numeric";
+      const unit = el("span", "timer-row-unit");
+      const save = el("button", "btn btn-sm", "Apply");
+      save.type = "button";
+      controls.appendChild(input);
+      controls.appendChild(unit);
+      controls.appendChild(save);
+      root.appendChild(copy);
+      root.appendChild(controls);
+      (spec.scope === "engine" ? engineList : consoleList).appendChild(root);
+      const record = { spec, root, input, unit, save, saving: false };
+      rows.push(record);
+
+      save.onclick = async () => {
+        const payload = timerPayload(spec);
+        const limit = payload && payload.limits && payload.limits[spec.key];
+        const value = Number(input.value);
+        if (!limit || !Number.isInteger(value) || value < limit.min || value > limit.max) {
+          const range = limit ? `${limit.min} to ${limit.max}` : "the allowed range";
+          toast(`${spec.label} must be a whole number from ${range}`, "error");
+          input.focus();
+          input.select();
+          return;
+        }
+        const bid = targetBid(spec);
+        const node = nodeByBid(bid);
+        record.saving = true;
+        paint();
+        try {
+          const result = await api(bid, "timers", {
+            method: "PATCH", body: { [spec.key]: value }, timeoutMs: 12000,
+          });
+          if (generation !== this.renderGeneration || !card.isConnected) return;
+          const saved = rememberTimerSettings(bid, result && result.timers);
+          if (!saved) throw new Error("backend returned invalid timer settings");
+          if (!bid && ["remote_session_seconds", "remote_engine_seconds"].includes(spec.key))
+            startRemotePolling();
+          const longUnit = limit.unit === "minutes" ?
+            (value === 1 ? "minute" : "minutes") : (value === 1 ? "second" : "seconds");
+          toast(`${node ? node.name : "This instance"}: ${spec.label} set to ${value} ${longUnit}`,
+            "ok", 5000);
+        } catch (error) {
+          if (generation === this.renderGeneration && card.isConnected)
+            toast(`${node ? node.name : "This instance"}: ${error.message}`, "error", 7000);
+        } finally {
+          record.saving = false;
+          if (generation === this.renderGeneration && card.isConnected) paint();
+        }
+      };
+      input.onkeydown = event => {
+        if (event.key === "Enter") { event.preventDefault(); save.click(); }
+        else if (event.key === "Escape") {
+          const payload = timerPayload(spec);
+          if (payload) input.value = String(payload.values[spec.key]);
+          input.blur();
+        }
+      };
+    };
+    specs.forEach(addRow);
+
+    const load = async bid => {
+      if (!bid || loading.has(bid) || !backendSupportsTimerSettings(bid) ||
+          !backendConnectionAllowed(bid)) return;
+      loading.add(bid);
+      paint();
+      try {
+        const result = await api(bid, "timers", { timeoutMs: 10000 });
+        if (generation !== this.renderGeneration || !card.isConnected) return;
+        if (!rememberTimerSettings(bid, result && result.timers))
+          throw new Error("backend returned invalid timer settings");
+      } catch (error) {
+        if (generation === this.renderGeneration && card.isConnected)
+          console.warn("timer settings load failed", error);
+      } finally {
+        loading.delete(bid);
+        if (generation === this.renderGeneration && card.isConnected) paint();
+      }
+    };
+
+    const paint = () => {
+      const node = nodeByBid(activeBid);
+      const supported = backendSupportsTimerSettings(activeBid);
+      const availability = activeBid ? remoteAvailability(activeBid) : "ok";
+      const current = activeBid ? state.remoteTimers[activeBid] : state.timers;
+      nodeNote.classList.toggle("bad", !supported || availability === "bad");
+      if (!supported) nodeNote.textContent = "Backend upgrade required for timer settings.";
+      else if (loading.has(activeBid)) nodeNote.textContent = "Loading timer settings…";
+      else if (availability === "bad") nodeNote.textContent = current ?
+        "Backend unavailable · showing last known values." : "Backend unavailable.";
+      else if (availability !== "ok") nodeNote.textContent = current ?
+        "Checking backend · showing last known values." : "Checking backend…";
+      else if (!current) nodeNote.textContent = "Waiting for timer settings…";
+      else nodeNote.textContent = `Engine timers stored on ${node ? node.name : "this instance"}.`;
+
+      for (const record of rows) {
+        const { spec, input, unit, save } = record;
+        const payload = timerPayload(spec);
+        const limit = payload && payload.limits && payload.limits[spec.key];
+        const bid = targetBid(spec);
+        const canUse = spec.scope === "console" || backendSupportsTimerSettings(bid);
+        const reachable = !bid || backendConnectionAllowed(bid);
+        if (payload && document.activeElement !== input)
+          input.value = String(payload.values[spec.key]);
+        if (limit) {
+          input.min = String(limit.min);
+          input.max = String(limit.max);
+          unit.textContent = limit.unit === "minutes" ? "min" : "sec";
+          input.setAttribute("aria-label",
+            `${spec.label}, ${limit.unit}; minimum ${limit.min}, maximum ${limit.max}`);
+        } else {
+          unit.textContent = spec.key.endsWith("_minutes") ? "min" : "sec";
+          input.setAttribute("aria-label", spec.label);
+        }
+        const disabled = record.saving || !payload || !canUse || !reachable;
+        input.disabled = disabled;
+        save.disabled = disabled;
+        save.textContent = record.saving ? "Saving…" : "Apply";
+      }
+    };
+
+    select.onchange = () => {
+      activeBid = Number(select.value) || 0;
+      this.timerSettingsBid = activeBid;
+      paint();
+      if (activeBid && !state.remoteTimers[activeBid]) load(activeBid);
+    };
+    this.timerSettingsSync = paint;
+    paint();
+    return card;
+  }
+
   systemPromptCard(nodes, initialPayload, generation) {
     const card = el("div", "card system-prompt-card");
     card.innerHTML = `<h2>System prompt</h2>
@@ -14204,6 +14515,7 @@ class SettingsView {
     this.upgradeReadiness.clear();
     this.localEngineGroup = null;
     this.systemPromptSync = null;
+    this.timerSettingsSync = null;
 
     /* instance */
     const c1 = el("div", "card");
@@ -14593,6 +14905,8 @@ class SettingsView {
 
     const promptNodes = [{ bid: 0, name: settings.instance_name }]
       .concat(state.backends.map(backend => ({ bid: backend.id, name: backend.name })));
+    this.inner.appendChild(this.timerSettingsCard(
+      promptNodes, settings.timers, generation));
     this.inner.appendChild(this.systemPromptCard(
       promptNodes, promptSettings.system_prompt, generation));
 

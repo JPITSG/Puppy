@@ -527,6 +527,7 @@ def exercise_side_question_contract() -> None:
     assert CodexDriver().supports_side_questions is False
     assert OpenCodeDriver().supports_side_questions is False
     assert protocol.SIDE_QUESTION_CAPABILITY in protocol.BASE_CAPABILITIES
+    assert protocol.TIMER_SETTINGS_CAPABILITY in protocol.BASE_CAPABILITIES
 
 
 async def exercise_codex_app_server_turn(root, runner, db) -> None:
@@ -2303,6 +2304,16 @@ async def exercise_node(url: str, token: str, expected_version: str,
         async with http.get(url + "/api/engines", headers=good, ssl=pinned) as response:
             engine_payload = await response.json()
             assert response.status == 200, engine_payload
+        assert engine_payload["timers"]["defaults"] == {
+            "cli_release_minutes": 360,
+            "model_catalog_minutes": 5,
+            "cli_status_minutes": 5,
+            "remote_session_seconds": 12,
+            "remote_engine_seconds": 60,
+            "completion_sync_seconds": 2,
+        }
+        assert set(engine_payload["timers"]["values"]) == set(
+            engine_payload["timers"]["defaults"])
         by_key = {engine["key"]: engine for engine in engine_payload["engines"]}
         assert set(("claude", "codex", "opencode")).issubset(by_key)
         opencode = by_key["opencode"]
@@ -2350,6 +2361,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
             assert response.status == 200, rechecked
         assert isinstance(rechecked["engines"], list)
         assert "usage_refresh" in rechecked
+        assert "timers" in rechecked
         assert all("model_catalog_checked_at" in engine
                    for engine in rechecked["engines"])
         async with http.post(url + "/api/engines/not-an-engine/upgrade",
@@ -2370,6 +2382,24 @@ async def exercise_node(url: str, token: str, expected_version: str,
             assert response.status == 200, manual_refresh
         assert isinstance(manual_refresh["engines"], list)
         assert manual_refresh["usage_refresh"]["enabled"] is False
+        async with http.get(url + "/api/timers", headers=good, ssl=pinned) as response:
+            timer_settings = await response.json()
+            assert response.status == 200, timer_settings
+        assert timer_settings["timers"]["limits"]["model_catalog_minutes"] == {
+            "min": 1, "max": 1440, "unit": "minutes"}
+        async with http.patch(url + "/api/timers", headers=good, ssl=pinned,
+                              json={"model_catalog_minutes": 9}) as response:
+            changed_timers = await response.json()
+            assert response.status == 200, changed_timers
+        assert changed_timers["timers"]["values"]["model_catalog_minutes"] == 9
+        async with http.patch(url + "/api/timers", headers=good, ssl=pinned,
+                              json={"remote_session_seconds": 1}) as response:
+            assert response.status == 400, await response.text()
+        async with http.patch(url + "/api/timers", headers=good, ssl=pinned,
+                              json={"not_a_timer": 3}) as response:
+            assert response.status == 400, await response.text()
+        async with http.get(url + "/api/timers", ssl=pinned) as response:
+            assert response.status == 401, await response.text()
         async with http.patch(url + "/api/engines/usage-refresh",
                               headers=good, ssl=pinned,
                               json={"minutes": -1}) as response:
@@ -3001,6 +3031,12 @@ async def exercise_controller(url: str, token: str, backend_url: str,
             proxied_engines = await response.json()
             assert response.status == 200, proxied_engines
         assert isinstance(proxied_engines["engines"], list)
+        assert proxied_engines["timers"]["values"]["model_catalog_minutes"] == 9
+        async with http.patch(url + f"/api/b/{stored['id']}/timers", headers=headers,
+                              json={"cli_status_minutes": 11}) as response:
+            proxied_timers = await response.json()
+            assert response.status == 200, proxied_timers
+        assert proxied_timers["timers"]["values"]["cli_status_minutes"] == 11
         remote_updates = await http.ws_connect(
             url + f"/api/b/{stored['id']}/ws/updates", headers=headers)
         first = await remote_updates.receive_json(timeout=3)

@@ -26,6 +26,28 @@ MAX_UPLOAD_LIMIT_MB = 1024
 MAX_SYSTEM_PROMPT_CHARS = 32768
 MAX_MODEL_ID_CHARS = 256
 
+# Refresh/cache intervals exposed together in Settings. Engine-side values are
+# node-owned; console-side values are only consumed by the full WebUI runtime.
+# Keeping one exact persisted shape on both runtimes makes backup/restore and
+# remote configuration predictable even when a headless node ignores the
+# console-only fields.
+TIMER_DEFAULTS = {
+    "cli_release_minutes": 6 * 60,
+    "model_catalog_minutes": 5,
+    "cli_status_minutes": 5,
+    "remote_session_seconds": 12,
+    "remote_engine_seconds": 60,
+    "completion_sync_seconds": 2,
+}
+TIMER_LIMITS = {
+    "cli_release_minutes": (1, 7 * 24 * 60),
+    "model_catalog_minutes": (1, 24 * 60),
+    "cli_status_minutes": (1, 24 * 60),
+    "remote_session_seconds": (2, 5 * 60),
+    "remote_engine_seconds": (5, 60 * 60),
+    "completion_sync_seconds": (1, 5 * 60),
+}
+
 # This is model-visible only for turns where the node-owned managed browser is
 # enabled and available.  Keep the default beside the persisted setting rather
 # than in browser_agent.py so Settings, backup validation, and both runtimes all
@@ -113,6 +135,7 @@ DEFAULTS = {
         "usage_refresh_minutes": DEFAULT_USAGE_REFRESH_MINUTES,
         "auto_upgrade": {"enabled": False, "mode": "now", "at": "03:30"},
     },
+    "timers": dict(TIMER_DEFAULTS),
     "uploads": {"max_file_size_mb": DEFAULT_UPLOAD_LIMIT_MB},
     "terminal": {"command": "/bin/bash -l"},
     # node-owned managed headless browser; enabling requires the availability
@@ -288,6 +311,84 @@ def normalize_usage_refresh_minutes(value) -> int:
     return minutes
 
 
+def normalize_timers(value) -> dict:
+    """Validate the complete, canonical timer map used by config and the API."""
+    if not isinstance(value, dict):
+        raise ValueError("config.timers must be an object")
+    missing = sorted(set(TIMER_DEFAULTS) - set(value))
+    unknown = sorted(set(value) - set(TIMER_DEFAULTS))
+    if missing:
+        raise ValueError("config.timers is missing {}".format(", ".join(missing)))
+    if unknown:
+        raise ValueError("config.timers contains unknown fields: {}".format(
+            ", ".join(unknown)))
+    result = {}
+    for name in TIMER_DEFAULTS:
+        raw = value[name]
+        unit = "minutes" if name.endswith("_minutes") else "seconds"
+        if not _finite_number(raw) or raw != int(raw):
+            raise ValueError("{} must be a whole number of {}".format(name, unit))
+        number = int(raw)
+        minimum, maximum = TIMER_LIMITS[name]
+        if not minimum <= number <= maximum:
+            raise ValueError("{} must be between {} and {} {}".format(
+                name, minimum, maximum, unit))
+        result[name] = number
+    return result
+
+
+def timer_values() -> dict:
+    """Return a detached copy of this node's persisted timer values."""
+    values = get("timers")
+    return copy.deepcopy(values)
+
+
+def timer_seconds(name: str) -> float:
+    """Return one configured timer in seconds for runtime consumers."""
+    if name not in TIMER_DEFAULTS:
+        raise KeyError(name)
+    value = int(get("timers.{}".format(name), TIMER_DEFAULTS[name]))
+    return float(value * 60 if name.endswith("_minutes") else value)
+
+
+def timers_payload() -> dict:
+    """Self-describing timer settings used by local and remote consoles."""
+    return {
+        "values": timer_values(),
+        "defaults": dict(TIMER_DEFAULTS),
+        "limits": {
+            name: {
+                "min": limits[0],
+                "max": limits[1],
+                "unit": "minutes" if name.endswith("_minutes") else "seconds",
+            }
+            for name, limits in TIMER_LIMITS.items()
+        },
+    }
+
+
+def set_timers(patch: dict) -> dict:
+    """Validate and atomically persist a partial timer update."""
+    if not isinstance(patch, dict) or not patch:
+        raise ValueError("at least one timer setting is required")
+    unknown = sorted(set(patch) - set(TIMER_DEFAULTS))
+    if unknown:
+        raise ValueError("unknown timer settings: {}".format(", ".join(unknown)))
+    cfg = load()
+    candidate = dict(cfg["timers"])
+    candidate.update(patch)
+    normalized = normalize_timers(candidate)
+    with _lock:
+        previous = cfg["timers"]
+        cfg["timers"] = normalized
+        try:
+            _save_locked()
+        except Exception:
+            cfg["timers"] = previous
+            raise
+    return copy.deepcopy(normalized)
+
+
 def normalize_upload_limit_mb(value) -> int:
     """Validate the per-file MiB limit. Zero deliberately disables uploads."""
     if not _finite_number(value) or value != int(value):
@@ -357,6 +458,7 @@ def normalize_import(data: dict) -> dict:
         merged.get("engines", {}).get("usage_refresh_minutes"))
     merged["engines"]["auto_upgrade"] = normalize_engine_auto_upgrade(
         merged.get("engines", {}).get("auto_upgrade"))
+    merged["timers"] = normalize_timers(merged.get("timers"))
     merged["uploads"]["max_file_size_mb"] = normalize_upload_limit_mb(
         merged.get("uploads", {}).get("max_file_size_mb"))
     merged["system_prompt"]["custom"] = normalize_system_prompt(

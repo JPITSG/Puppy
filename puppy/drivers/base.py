@@ -93,6 +93,13 @@ MODEL_CATALOG_FORCE_MIN_INTERVAL_SECONDS = 5
 MODEL_PROBE_LINE_LIMIT = 4 * 1024 * 1024
 
 
+def _configured_timer_seconds(name: str, _fallback: float) -> float:
+    # The second argument preserves the long-standing test seam while the
+    # persisted setting is the runtime source of truth.
+    from puppy import config
+    return config.timer_seconds(name)
+
+
 class ModelCatalogResult:
     """One successful vendor discovery, before it replaces last-known-good.
 
@@ -168,13 +175,16 @@ class ModelCatalog:
         self.completed_mono = now_mono
         self.attempt_forced = bool(forced)
         self.failures = 0
-        self.next_due_mono = now_mono + MODEL_CATALOG_TTL_SECONDS
+        self.next_due_mono = now_mono + _configured_timer_seconds(
+            "model_catalog_minutes", MODEL_CATALOG_TTL_SECONDS)
 
     def failed(self, exc: Exception, forced: bool) -> None:
         now_mono = time.monotonic()
         self.failures += 1
         delay = MODEL_CATALOG_RETRY_SECONDS[
             min(self.failures - 1, len(MODEL_CATALOG_RETRY_SECONDS) - 1)]
+        delay = min(delay, _configured_timer_seconds(
+            "model_catalog_minutes", MODEL_CATALOG_TTL_SECONDS))
         self.error = (str(exc) or exc.__class__.__name__)[:400]
         self.note = ""
         self.checked_at = time.time()
@@ -690,7 +700,8 @@ class Driver:
         """{installed, version, auth, detail, ...extras}; slow checks are cached."""
         now = time.time()
         cached = _status_cache.get(self.key)
-        if cached and now - cached[0] < STATUS_TTL_SECONDS:
+        ttl = _configured_timer_seconds("cli_status_minutes", STATUS_TTL_SECONDS)
+        if cached and now - cached[0] < ttl:
             st = dict(cached[1])
             probed_at = cached[0]
         else:

@@ -639,6 +639,17 @@ authenticated session-list observation in a separate exact-version,
 rebuildable cache: an unavailable node's sessions remain visible and openable
 in the sidebar, visibly muted until the node is healthy again.
 
+## Timer settings
+
+Every node exposes its refresh/cache settings through `GET`/`PATCH /api/timers`
+and advertises the additive `timer-settings` capability. The response includes
+the current values, defaults, units, and accepted ranges. Published CLI release
+checks, model-catalog caching, and installed-version/sign-in caching are owned by
+the node running those engines. Remote session polling, remote node/engine
+polling, and completion synchronization are controller-owned; their persisted
+fields remain in the headless node's exact config shape for portable, strict
+backup validation but are not scheduled there.
+
 ## Unattended engine updates
 
 A node can install its own engine CLI updates on a schedule. It adds no upgrade
