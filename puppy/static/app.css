@@ -302,17 +302,19 @@ a{color:var(--acc2)}
 .sess-item .si-ws.warn{color:var(--warn)}
 .sess-item .si-ws.err{color:var(--err)}
 .sess-item .si-ws.busy{color:var(--acc2)}
-/* Quiet row actions share one target size. The pin sits immediately left of
-   agent notes; whichever action is last owns the row's compact right edge. */
+/* Quiet row actions form one compact, square-cornered lane. Keep the 24px
+   targets, but do not inherit the wider metadata gap between the two icons. */
+.sess-item .si-actions{
+  flex:0 0 auto;display:inline-flex;align-items:center;gap:0;
+  height:22px;margin:-4px -6px -4px 0;
+}
 .sess-item .si-pin,
 .sess-item .si-notes{
   flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;
-  width:24px;height:22px;margin:-4px 0;border-radius:var(--r-sm);
+  width:24px;height:22px;margin:0;border-radius:var(--btn-r);
   color:var(--txt3);opacity:.38;cursor:pointer;
   transition:opacity .15s var(--ease),background .15s var(--ease),color .15s var(--ease);
 }
-.sess-item .si-notes,
-.sess-item .si-pin:last-child{margin-right:-6px}
 .sess-item .si-pin svg{width:14px;height:14px}
 .sess-item .si-notes svg{width:12px;height:12px}
 .sess-item .si-pin.on{opacity:1;color:var(--acc2)}

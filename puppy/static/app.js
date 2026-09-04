@@ -4433,8 +4433,13 @@ function renderSidebar() {
           "Linked workspace" + (st ? " · " + st : ""));
         r2.appendChild(mark);
       }
-      if (backendSupportsSessionPinning(bid)) r2.appendChild(sessionPinMark(bid, s));
-      if (backendSupportsAgentNotes(bid)) r2.appendChild(agentNotesMark(bid, s));
+      /* Keep the two quiet row actions in their own compact lane. The row's
+         normal gap still separates this lane from workspace state, while the
+         controls themselves sit together as one deliberate pair. */
+      const actions = el("span", "si-actions");
+      if (backendSupportsSessionPinning(bid)) actions.appendChild(sessionPinMark(bid, s));
+      if (backendSupportsAgentNotes(bid)) actions.appendChild(agentNotesMark(bid, s));
+      if (actions.childElementCount) r2.appendChild(actions);
       item.appendChild(r1); item.appendChild(r2);
       const pointerForClick = activationPointer(item);
       item.onclick = event => {

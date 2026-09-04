@@ -3991,9 +3991,11 @@ def check_session_pins(ui_source: str, css_source: str) -> None:
         ui_source.index("function renderSidebar()"):
         ui_source.index("\nfunction sessDot", ui_source.index("function renderSidebar()"))]
     assert 'item.dataset.pinned = s.pinned === true ? "1" : "0";' in sidebar
-    pin_append = "r2.appendChild(sessionPinMark(bid, s))"
-    notes_append = "r2.appendChild(agentNotesMark(bid, s))"
+    pin_append = "actions.appendChild(sessionPinMark(bid, s))"
+    notes_append = "actions.appendChild(agentNotesMark(bid, s))"
     assert sidebar.index(pin_append) < sidebar.index(notes_append)
+    assert 'const actions = el("span", "si-actions")' in sidebar
+    assert "if (actions.childElementCount) r2.appendChild(actions);" in sidebar
     # Never locally sort on the flag: the array order is the node's contract.
     assert ".sort((" not in sidebar
 
@@ -4043,6 +4045,9 @@ def check_session_pins(ui_source: str, css_source: str) -> None:
         in payload_helper
 
     assert ".sess-item .si-pin," in css_source
+    assert ".sess-item .si-actions{" in css_source
+    assert "align-items:center;gap:0;" in css_source
+    assert "width:24px;height:22px;margin:0;border-radius:var(--btn-r);" in css_source
     assert ".sess-item .si-pin.on{opacity:1;color:var(--acc2)}" in css_source
     assert ".sess-item .si-pin:focus-visible," in css_source
 
