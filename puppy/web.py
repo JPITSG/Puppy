@@ -127,14 +127,30 @@ async def _engines_payload(refresh_usage: bool = True, refresh_models: bool = Tr
                             driver.key, result)
     engines = []
     for d, st in zip(drivers, statuses):
+        model_options = []
+        for raw_option in d.model_options():
+            option = dict(raw_option)
+            # Service-tier ids are execution details. Publish the semantic
+            # availability bit and keep the opaque value inside the driver.
+            option.pop("service_tiers", None)
+            model_options.append(option)
+        if d.supports_fast_mode:
+            # The browser needs only availability. The driver keeps ownership
+            # of mapping this semantic flag to the catalog's opaque tier id.
+            for option in model_options:
+                option["fast_mode_available"] = bool(
+                    d.fast_mode_tier(option.get("value") or ""))
+                option["fast_mode_hint"] = d.fast_mode_hint(
+                    option.get("value") or "")
         engines.append({
             "key": d.key, "label": d.label, **st,
             "availability_only": d.availability_only,
             "permission_options": d.permission_options(),
             "default_permission": d.default_permission(),
-            "model_options": d.model_options(),
+            "model_options": model_options,
             "effort_options": d.effort_options(),
             "tool_options": d.tool_options(),
+            "supports_fast_mode": bool(d.supports_fast_mode),
             "allow_custom_model": d.allow_custom_model,
             "dynamic_model_options": d.dynamic_model_options,
             "model_catalog_loaded": d.model_catalog_loaded(),
@@ -493,6 +509,9 @@ async def h_session_patch(request: web.Request):
     body = await request.json()
     if not isinstance(body, dict):
         return web.json_response({"error": "request body must be an object"}, status=400)
+    if "fast_mode" in body and type(body["fast_mode"]) is not bool:
+        return web.json_response(
+            {"error": "fast_mode must be true or false"}, status=400)
     fields = {}
     turn_config = {}
     pending = None
@@ -503,7 +522,7 @@ async def h_session_patch(request: web.Request):
         if type(body["pinned"]) is not bool:
             return web.json_response({"error": "pinned must be true or false"}, status=400)
         if any(key in body for key in (
-                "name", "model", "effort", "permission_mode", "color",
+                "name", "model", "effort", "permission_mode", "fast_mode", "color",
                 "archived", "show_meta")):
             return web.json_response(
                 {"error": "pinned must be updated separately"}, status=400)
@@ -511,7 +530,8 @@ async def h_session_patch(request: web.Request):
         if expected_pin is not None and type(expected_pin) is not bool:
             return web.json_response(
                 {"error": "expected_pinned must be true or false"}, status=400)
-    if "model" in body or "effort" in body or "permission_mode" in body:
+    if "model" in body or "effort" in body or \
+            "permission_mode" in body or "fast_mode" in body:
         # Validate against the engine these fields will actually reach: the
         # session's own engine plus every pending switch already queued. The
         # hub re-checks that engine when the change is queued, so a switch
@@ -523,7 +543,11 @@ async def h_session_patch(request: web.Request):
             return web.json_response(
                 {"error": "unknown engine '{}'".format(pending["engine"])},
                 status=400)
-        if "model" in body or "effort" in body:
+        if body.get("fast_mode") is True and not driver.supports_fast_mode:
+            return web.json_response(
+                {"error": "Fast mode is not available for {}".format(
+                    driver.label)}, status=400)
+        if "model" in body or "effort" in body or body.get("fast_mode") is True:
             await driver.refresh_model_options()
     if "name" in body:
         fields["name"] = str(body["name"]).strip()[:80]
@@ -547,6 +571,20 @@ async def h_session_patch(request: web.Request):
         if current_effort not in [o["value"] for o in
                                   driver.effort_options_for_model(turn_config["model"])]:
             turn_config["effort"] = ""
+    target_model = turn_config.get("model", pending["model"] or driver.default_model()) \
+        if pending is not None else ""
+    if "fast_mode" in body:
+        if body["fast_mode"]:
+            if not driver.fast_mode_tier(target_model):
+                return web.json_response(
+                    {"error": "The selected {} model does not offer Fast mode".format(
+                        driver.label)}, status=400)
+        turn_config["fast_mode"] = "on" if body["fast_mode"] else "off"
+    elif "model" in turn_config and pending.get("fast_mode") == "on" and \
+            not driver.fast_mode_tier(target_model):
+        # A queued or immediate model move must not leave an impossible Fast
+        # request attached to the new model.
+        turn_config["fast_mode"] = "off"
     if "permission_mode" in body:
         val = str(body["permission_mode"] or "").strip()
         if val not in [str(option.get("value") or "") for option in
@@ -575,6 +613,8 @@ async def h_session_patch(request: web.Request):
         if not queued_config:
             fields.update({k: v for k, v in turn_config.items()
                            if k in ("model", "effort", "permission_mode")})
+            if "fast_mode" in turn_config:
+                fields["fast_mode"] = 1 if turn_config["fast_mode"] == "on" else 0
     if pin_requested:
         try:
             pin_changed = db.set_session_pinned(

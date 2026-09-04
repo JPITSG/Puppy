@@ -4105,6 +4105,11 @@ def check_session_pins(ui_source: str, css_source: str) -> None:
 
 def check_queued_permission_choices(ui_source: str) -> None:
     """Permission options and value follow the queued engine/config tail."""
+    assert 'backend.capabilities.includes("session-fast-mode")' in ui_source
+    assert 'eng.supports_fast_mode === true' in ui_source
+    assert 'label: "Fast mode"' in ui_source
+    assert 'modelOption.fast_mode_available === true' in ui_source
+    assert 'const row = menuCheckRow(item.label, !!item.on' in ui_source
     choice_start = ui_source.index("  composerChoiceSpec(kind, native = false) {")
     choice_end = ui_source.index("\n  syncNativeComposerChoices(", choice_start)
     choice = ui_source[choice_start:choice_end]
@@ -4126,39 +4131,45 @@ const engines = {
 };
 const engineOf = key => engines[key] || null;
 const session = {engine:"claude", model:"sonnet", effort:"high",
-  permission_mode:"auto"};
+  permission_mode:"auto", fast_mode:false};
 const initial = effectiveQueuedConfig(session, [], engineOf);
 const legacySwitch = {kind:"engine", engine:"codex", model:"gpt-5.6-sol",
   effort:"max"};
 const legacy = effectiveQueuedConfig(session, [legacySwitch], engineOf);
 const switched = effectiveQueuedConfig(session, [{...legacySwitch,
-  permission_mode:"workspace-write"}], engineOf);
+  permission_mode:"workspace-write", fast_mode:"on"}], engineOf);
 const picked = effectiveQueuedConfig(session, [{...legacySwitch,
-  permission_mode:"workspace-write"}, {kind:"config", engine:"codex",
+  permission_mode:"workspace-write", fast_mode:"on"}, {kind:"config", engine:"codex",
   permission_mode:"danger-full-access"}], engineOf);
 const stale = effectiveQueuedConfig(session, [{...legacySwitch,
-  permission_mode:"workspace-write"}, {kind:"config", engine:"codex",
+  permission_mode:"workspace-write", fast_mode:"on"}, {kind:"config", engine:"codex",
   permission_mode:"danger-full-access"}, {kind:"config", engine:"claude",
   permission_mode:"plan"}], engineOf);
 const slim = value => ({engine:value.engine, permission:value.permission_mode,
-  queuedEngine:value.queuedEngine, queuedPermission:value.queuedPermission});
+  fast:value.fast_mode, queuedEngine:value.queuedEngine,
+  queuedPermission:value.queuedPermission, queuedFast:value.queuedFast});
 console.log(JSON.stringify([initial, legacy, switched, picked, stale].map(slim)));
 """ % ui_source[start:end]
     proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:700]
     assert json.loads(proc.stdout) == [
         {"engine": "claude", "permission": "auto",
-         "queuedEngine": False, "queuedPermission": False},
+         "fast": False, "queuedEngine": False, "queuedPermission": False,
+         "queuedFast": False},
         # Compatibility display for an older remote row: target default.
         {"engine": "codex", "permission": "workspace-write",
-         "queuedEngine": True, "queuedPermission": True},
+         "fast": False, "queuedEngine": True, "queuedPermission": True,
+         "queuedFast": True},
         {"engine": "codex", "permission": "workspace-write",
-         "queuedEngine": True, "queuedPermission": True},
+         "fast": True, "queuedEngine": True, "queuedPermission": True,
+         "queuedFast": True},
         {"engine": "codex", "permission": "danger-full-access",
-         "queuedEngine": True, "queuedPermission": True},
+         "fast": True, "queuedEngine": True, "queuedPermission": True,
+         "queuedFast": True},
         # A stale row validated for the old engine is ignored.
         {"engine": "codex", "permission": "danger-full-access",
-         "queuedEngine": True, "queuedPermission": True},
+         "fast": True, "queuedEngine": True, "queuedPermission": True,
+         "queuedFast": True},
     ]
 
 

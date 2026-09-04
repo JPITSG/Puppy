@@ -427,6 +427,10 @@ class Driver:
     # served to the ordinary session controls.
     dynamic_model_options = False
     allow_custom_model = True
+    # Engine-owned opt-in for a semantic Fast request. The driver resolves
+    # that request through its live model catalog; callers never learn or
+    # persist a vendor service-tier identifier.
+    supports_fast_mode = False
     model_catalog_timeout_seconds = 15.0
     # Loading a native session in a replacement temporary workspace is unsafe
     # for engines which bind permissions and tool routing to the creation cwd.
@@ -631,6 +635,20 @@ class Driver:
         if self.allow_custom_model:
             return self.effort_options()
         return [{"value": "", "label": "Default", "hint": "Engine model default"}]
+
+    def fast_mode_tier(self, model: str) -> str:
+        """Opaque service-tier id implementing Fast for ``model``, or ``""``.
+
+        Only a driver whose stable native protocol advertises this capability
+        should override it. The persisted/UI setting stays a boolean; opaque
+        ids are resolved afresh from the engine-owned model catalog for every
+        turn so a CLI upgrade may change them without changing Puppy state.
+        """
+        return ""
+
+    def fast_mode_hint(self, model: str) -> str:
+        """Catalog-owned description of Fast for display, if available."""
+        return ""
 
     def build_cmd(self, session: dict, first_turn: bool, prompt: str, pinned_id: str,
                   browser_mcp=None, system_prompt: str = "",

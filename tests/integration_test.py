@@ -10,6 +10,7 @@ NOTE: spends a small amount of real subscription quota (3 tiny haiku turns +
 import asyncio
 import json
 import os
+import secrets
 import shutil
 import signal
 import subprocess
@@ -20,6 +21,10 @@ import time
 import aiohttp
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, BASE)
+
+from puppy import config as puppy_config  # noqa: E402
+
 PORT = int(os.environ.get("PUPPY_TEST_PORT", "10999"))
 URL = f"http://127.0.0.1:{PORT}"
 
@@ -80,8 +85,13 @@ async def main():
 
     # test-port config
     os.makedirs(data_dir, exist_ok=True)
+    # Persist the exact current shape: production deliberately rejects partial
+    # or outdated config rather than migrating it at startup.
+    test_config = json.loads(json.dumps(puppy_config.DEFAULTS))
+    test_config["web"] = {"host": "127.0.0.1", "port": PORT}
+    test_config["auth"]["api_token"] = secrets.token_urlsafe(32)
     with open(os.path.join(data_dir, "config.json"), "w") as f:
-        json.dump({"web": {"host": "127.0.0.1", "port": PORT}}, f)
+        json.dump(test_config, f)
 
     server = subprocess.Popen([sys.executable, "-m", "puppy"], cwd=BASE, env=env,
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -105,7 +115,7 @@ async def main():
             if not up:
                 out = server.stdout.read() if server.poll() is not None else "(still running, unreachable)"
                 print(out[-3000:])
-                return
+                raise RuntimeError("isolated integration server did not boot")
 
             # ---- auth ----
             async with http.get(URL + "/api/auth/status") as r:
@@ -124,6 +134,10 @@ async def main():
                   str(engines.get("claude")))
             check("codex engine ready", engines.get("codex", {}).get("auth") == "ok",
                   str(engines.get("codex")))
+            fast_models = [option.get("value", "") for option in
+                           engines.get("codex", {}).get("model_options", [])
+                           if option.get("fast_mode_available") is True]
+            check("codex publishes catalog-driven Fast availability", bool(fast_models))
 
             # unauthenticated access denied
             async with aiohttp.ClientSession() as anon:
@@ -164,10 +178,19 @@ async def main():
             # ---- codex session: live turn ----
             async with http.post(URL + "/api/sessions", json={
                     "engine": "codex", "cwd": work2,
+                    "model": fast_models[0] if fast_models else "",
                     "permission_mode": "read-only"}) as r:
                 d = await r.json()
                 check("codex session created", r.status == 200, str(d))
                 sid2 = d["session"]["id"]
+
+            if fast_models:
+                async with http.patch(URL + f"/api/sessions/{sid2}",
+                                      json={"fast_mode": True}) as r:
+                    d = await r.json()
+                    check("Fast enabled from the session API",
+                          r.status == 200 and d["session"]["fast_mode"] is True,
+                          str(d))
 
             ws2 = await http.ws_connect(URL + f"/api/ws/session/{sid2}")
             await ws2.receive()  # snapshot
@@ -177,6 +200,13 @@ async def main():
             ac = " ".join(texts_of(framesc, "assistant"))
             check("codex turn completes", any(f.get("type") == "turn_done" for f in framesc))
             check("codex replied", "pineapple2" in ac, ac[:200])
+            if fast_models:
+                async with http.patch(URL + f"/api/sessions/{sid2}",
+                                      json={"fast_mode": False}) as r:
+                    d = await r.json()
+                    check("Fast disabled from the session API",
+                          r.status == 200 and d["session"]["fast_mode"] is False,
+                          str(d))
 
             # ---- engine switch codex -> claude with handoff ----
             async with http.post(URL + f"/api/sessions/{sid2}/switch",

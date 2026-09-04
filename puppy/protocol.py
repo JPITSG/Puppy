@@ -146,6 +146,11 @@ SESSION_EVENT_WINDOW_CAPABILITY = "session-event-window"
 # never touched). Each engine lists what it offers in the engines payload's
 # additive tool_options; a console shows the composer's tools menu only here.
 SESSION_TOOLS_CAPABILITY = "session-tools"
+# PATCH /api/sessions/{sid} accepts a semantic Fast boolean, ordered beside
+# model/effort/permission changes. Only an engine that advertises support and
+# a model whose live catalog supplies a Fast service tier may enable it; the
+# opaque native tier is never part of this wire contract.
+SESSION_FAST_MODE_CAPABILITY = "session-fast-mode"
 # GET/PUT /api/sessions/{sid}/agent-notes read and replace the AGENTS.md and
 # CLAUDE.md files in a session's working directory (exactly those two names,
 # bounded in size), and every session payload carries the additive
@@ -216,6 +221,7 @@ BASE_CAPABILITIES = (
     SEARCH_CAPABILITY,
     SESSION_EVENT_WINDOW_CAPABILITY,
     SESSION_TOOLS_CAPABILITY,
+    SESSION_FAST_MODE_CAPABILITY,
     SESSION_AGENT_NOTES_CAPABILITY,
     SESSION_PINNING_CAPABILITY,
     COMPLETION_EVENTS_CAPABILITY,

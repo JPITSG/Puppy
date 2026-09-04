@@ -634,6 +634,7 @@ select.choice-native{display:none!important}
 .choice-option:disabled{opacity:.38;cursor:not-allowed}
 .choice-option-label{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis}
 .choice-mark{width:14px;height:14px;display:flex;align-items:center;justify-content:center;flex:none;color:var(--acc2)}
+.choice-menu .menu-sep{height:1px;background:var(--line);margin:4px 6px}
 .choice-empty{display:block;padding:8px 10px;color:var(--txt3);font-size:12px;white-space:nowrap}
 
 /* ---------- tabbar ---------- */

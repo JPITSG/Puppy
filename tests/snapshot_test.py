@@ -221,7 +221,8 @@ async def main() -> None:
         # what the last turn requested; last_model separately carries any
         # provider reroute for transcript provenance
         db.touch_session(directory_id,
-                         used_config='{"model": "gpt-5.6-sol", "effort": "max"}')
+                         used_config='{"model": "gpt-5.6-sol", "effort": "max"}',
+                         fast_mode=1)
         scratch_path = workspaces.create_temporary()
         original_scratch = Path(scratch_path)
         scratch_id = db.create_session(
@@ -553,6 +554,8 @@ async def main() -> None:
         assert [row["pinned"] for row in restored_order] == [True, True, False]
         assert session_runner.parse_used_config(
             db.get_session(directory_id)["used_config"]) == {"model": "gpt-5.6-sol", "effort": "max"}
+        assert db.get_session(directory_id)["fast_mode"] is True
+        assert db.get_session(scratch_id)["fast_mode"] is False
         assert db.query_one("SELECT token FROM backends")["token"] == "private-backend-token"
         assert db.query_one("SELECT auto_upgrade FROM backends")["auto_upgrade"] == 1
         assert json.loads(db.query_one("SELECT urls FROM backends")["urls"]) == [

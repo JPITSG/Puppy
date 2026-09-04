@@ -4182,6 +4182,13 @@ function backendSupportsSessionTools(bid) {
     backend.capabilities.includes("session-tools");
 }
 
+function backendSupportsFastMode(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(item => item.id === bid);
+  return !!backend && Array.isArray(backend.capabilities) &&
+    backend.capabilities.includes("session-fast-mode");
+}
+
 function backendSupportsFileUploads(bid) {
   if (!bid) return true;
   const backend = state.backends.find(item => item.id === bid);
@@ -7502,8 +7509,9 @@ function effectiveQueuedConfig(session, queued, engineOf) {
   const s = session || {};
   const out = {
     engine: s.engine || "", model: s.model || "", effort: s.effort || "",
-    permission_mode: s.permission_mode || "", queuedEngine: false,
-    queuedModel: false, queuedEffort: false, queuedPermission: false,
+    permission_mode: s.permission_mode || "", fast_mode: !!s.fast_mode,
+    queuedEngine: false, queuedModel: false, queuedEffort: false,
+    queuedPermission: false, queuedFast: false,
   };
   for (const item of queued || []) {
     if (!item || typeof item !== "object") continue;
@@ -7514,10 +7522,12 @@ function effectiveQueuedConfig(session, queued, engineOf) {
       const target = engineOf(out.engine) || {};
       out.permission_mode = Object.prototype.hasOwnProperty.call(item, "permission_mode")
         ? item.permission_mode || "" : target.default_permission || "";
+      out.fast_mode = item.fast_mode === "on";
       out.queuedEngine = true;
       out.queuedModel = true;
       out.queuedEffort = true;
       out.queuedPermission = true;
+      out.queuedFast = true;
       continue;
     }
     /* A row whose validating engine no longer matches its position is an
@@ -7529,6 +7539,10 @@ function effectiveQueuedConfig(session, queued, engineOf) {
     if ("permission_mode" in item) {
       out.permission_mode = item.permission_mode || "";
       out.queuedPermission = true;
+    }
+    if ("fast_mode" in item) {
+      out.fast_mode = item.fast_mode === "on";
+      out.queuedFast = true;
     }
   }
   return out;
@@ -10545,12 +10559,16 @@ class SessionView {
         ? item.permission_mode : (eng && eng.default_permission) || "";
       if (permission)
         parts.push("Permission → " + permissionShorthand(eng, permission));
+      if ((eng && eng.supports_fast_mode === true) || item.fast_mode === "on")
+        parts.push("Fast → " + (item.fast_mode === "on" ? "on" : "off"));
       return parts.join(" · ");
     }
     if ("model" in item) parts.push("Model → " + (modelShorthand(eng, item.model) || "default"));
     if ("effort" in item) parts.push("Effort → " + (effortShorthand(eng, item.effort) || "default"));
     if ("permission_mode" in item)
       parts.push("Permission → " + permissionShorthand(eng, item.permission_mode));
+    if ("fast_mode" in item)
+      parts.push("Fast → " + (item.fast_mode === "on" ? "on" : "off"));
     return parts.join(" · ") || "Setting change";
   }
 
@@ -11098,7 +11116,8 @@ class SessionView {
      follows the engine the NEXT prompt will use */
   syncToolsButton() {
     if (!this.toolsButton) return;
-    this.toolsButton.classList.toggle("hidden", !backendSupportsSessionTools(this.tab.bid));
+    this.toolsButton.classList.toggle("hidden",
+      !backendSupportsSessionTools(this.tab.bid) && !backendSupportsFastMode(this.tab.bid));
   }
 
   showToolsMenu(anchor) {
@@ -11107,15 +11126,32 @@ class SessionView {
     const eng = engineInfo(this.tab.bid, eff.engine || this.session.engine);
     const offered = new Map(((eng && eng.tool_options) || []).map(o => [o.value, o]));
     const engineLabel = (eng && eng.label) || "this engine";
-    const options = SESSION_TOOLS.map(tool => {
+    const options = backendSupportsSessionTools(this.tab.bid) ? SESSION_TOOLS.map(tool => {
       const o = offered.get(tool.value);
       return {
         value: tool.value, label: tool.label, disabled: !o,
         hint: o ? (o.hint || tool.hint) : `Not available for ${engineLabel}`,
       };
-    });
+    }) : [];
+    const modelOption = ((eng && eng.model_options) || []).find(
+      option => String(option.value || "") === String(eff.model || ""));
+    const fastAvailable = !!modelOption && modelOption.fast_mode_available === true;
+    const checks = backendSupportsFastMode(this.tab.bid) &&
+      eng && eng.supports_fast_mode === true ? [{
+        label: "Fast mode", on: !!eff.fast_mode, disabled: !fastAvailable,
+        hint: fastAvailable ? (modelOption.fast_mode_hint ||
+          "Request the model's advertised Fast service tier for future turns") :
+          `Not available for ${(modelOption && modelOption.label) || "this model"}`,
+        onToggle: () => this.setFastMode(!eff.fast_mode),
+      }] : [];
     this.optionMenu(anchor, options, "", (value) => this.runSessionTool(value),
-      { actions: true });
+      { actions: true, checks });
+  }
+
+  async setFastMode(enabled) {
+    const result = await this.patchSession({ fast_mode: !!enabled });
+    if (result && result.queued_config)
+      toast(`Fast mode ${enabled ? "on" : "off"} queued behind pending work`, "ok");
   }
 
   async runSessionTool(tool) {
@@ -11161,13 +11197,14 @@ class SessionView {
     try {
       const r = await api(this.tab.bid, `sessions/${this.tab.sid}`, { method: "PATCH", body });
       this.session = r.session; this.updateHead();
-    } catch (e) { toast(e.message, "error"); }
+      return r;
+    } catch (e) { toast(e.message, "error"); return null; }
   }
 
   /* A choice menu opens on its current value: highlighted, focused, checked.
      An action menu ({actions: true}) has no current value, so nothing is
      highlighted until the pointer or the arrow keys reach a row. */
-  optionMenu(anchor, opts, current, onPick, { actions = false } = {}) {
+  optionMenu(anchor, opts, current, onPick, { actions = false, checks = [] } = {}) {
     if (closeAllMenus(anchor)) return null;
     const menu = el("div", "choice-menu composer-choice-menu dyn");
     menu._anchor = anchor;
@@ -11210,6 +11247,26 @@ class SessionView {
         if (o.disabled) return;
         dismiss(true);
         onPick(o.value);
+      };
+      rows.push(row);
+      menu.appendChild(row);
+    });
+    if (checks.length && rows.length)
+      menu.appendChild(el("div", "menu-sep"));
+    checks.forEach((item) => {
+      const index = rows.length;
+      const row = menuCheckRow(item.label, !!item.on, () => {});
+      row.classList.add("choice-option");
+      if (item.hint) row.title = item.hint;
+      row.disabled = !!item.disabled;
+      row.tabIndex = -1;
+      row.onmouseenter = () => highlight(index);
+      row.onfocus = row.onmouseenter;
+      row.onclick = (event) => {
+        event.stopPropagation();
+        if (item.disabled) return;
+        dismiss(true);
+        item.onToggle();
       };
       rows.push(row);
       menu.appendChild(row);

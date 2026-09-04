@@ -11,6 +11,10 @@ Contract verified against codex-cli 0.149.0 and 0.151.0:
   thread/started, turn/started, item/started|completed,
   thread/tokenUsage/updated, turn/completed
 
+Fast contract verified against 0.153.2: ``model/list`` advertises per-model
+``serviceTiers`` and stable ``turn/start`` accepts ``serviceTierForTurn``.
+The catalog's semantic name selects the tier; its opaque id is never assumed.
+
 Puppy's Codex permission setting remains a sandbox choice. We explicitly use
 ``approvalPolicy: never``, matching the old non-interactive ``codex exec``
 behavior: sandbox denials go back to the model rather than blocking on a UI
@@ -138,6 +142,25 @@ def _reasoning_options(levels, value_key: str, description_key: str) -> list:
     return options
 
 
+def _service_tier_options(tiers) -> list:
+    """Bounded opaque service tiers from the CLI-owned model catalog."""
+    options = []
+    seen = set()
+    for raw in tiers or []:
+        if not isinstance(raw, dict):
+            continue
+        value = str(raw.get("id") or "").strip()[:120]
+        label = str(raw.get("name") or "").strip()[:120]
+        if not value or not label or value in seen:
+            continue
+        seen.add(value)
+        options.append({
+            "value": value, "label": label,
+            "hint": str(raw.get("description") or "")[:240],
+        })
+    return options
+
+
 def _default_model_option(options: list) -> dict:
     preferred = None
     for item in options:
@@ -155,6 +178,11 @@ def _default_model_option(options: list) -> dict:
                "hint": "Codex config.toml default model"}
     if efforts:
         default["effort_options"] = [dict(item) for item in efforts]
+    # Only the model explicitly marked default can describe an omitted model.
+    # Never union tiers across models: Fast may be unavailable on one of them.
+    if preferred and isinstance(preferred.get("service_tiers"), list):
+        default["service_tiers"] = [dict(item) for item in
+                                    preferred["service_tiers"]]
     return default
 
 
@@ -178,6 +206,7 @@ def parse_model_catalog(models) -> list:
             "effort_options": _reasoning_options(
                 raw.get("supportedReasoningEfforts"),
                 "reasoningEffort", "description"),
+            "service_tiers": _service_tier_options(raw.get("serviceTiers")),
             "_default": raw.get("isDefault") is True,
         })
     default = _default_model_option(options)
@@ -199,6 +228,7 @@ def _cache_file_model_options() -> list:
                 "hint": str(m.get("description") or "")[:240],
                 "effort_options": _reasoning_options(
                     m.get("supported_reasoning_levels"), "effort", "description"),
+                "service_tiers": _service_tier_options(m.get("service_tiers")),
                 "_priority": m.get("priority")
                 if isinstance(m.get("priority"), int) else 999,
             })
@@ -645,6 +675,7 @@ class CodexDriver(Driver):
     supports_steering = True
     steering_acknowledged = True
     dynamic_model_options = True
+    supports_fast_mode = True
     release_source = {"kind": "npm", "package": "@openai/codex"}
     upgrade_source = {"kind": "self", "args": ["update"]}
 
@@ -691,6 +722,48 @@ class CodexDriver(Driver):
         return sorted(seen.values(), key=lambda item: (
             order.index(item["value"]) if item["value"] in order else len(order),
             item["value"]))
+
+    def _fast_mode_option(self, model: str):
+        # A cache file can outlive the binary that wrote it (notably after a
+        # downgrade).  Only a successful exchange with the currently running
+        # app-server proves that its turn protocol and catalog agree about
+        # service tiers.  A previous live success remains last-known-good
+        # across transient refresh failures, as the shared catalog owns that
+        # policy.
+        state = self._model_catalog_state()
+        if state.source != "engine":
+            return None
+        model = str(model or "")
+        for option in state.options:
+            if str(option.get("value") or "") != model:
+                continue
+            for tier in option.get("service_tiers") or []:
+                if isinstance(tier, dict) and \
+                        str(tier.get("label") or "").strip().casefold() == "fast":
+                    return tier
+            return None
+        return None
+
+    def fast_mode_tier(self, model: str) -> str:
+        """Resolve Fast exactly as the native client does: by the catalog's
+        semantic tier name, then carry its opaque id into this turn only."""
+        option = self._fast_mode_option(model)
+        return str((option or {}).get("value") or "").strip()
+
+    def fast_mode_hint(self, model: str) -> str:
+        option = self._fast_mode_option(model)
+        return str((option or {}).get("hint") or "")
+
+    def _service_tiers_available(self) -> bool:
+        """Whether this installed CLI's catalog proves the turn field exists.
+
+        Older app-server builds know nothing about service tiers. Omitting the
+        additive field there preserves their turns; a non-empty advertised
+        tier is the forward-compatible feature probe for explicit default/off.
+        """
+        state = self._model_catalog_state()
+        return state.source == "engine" and \
+            any(option.get("service_tiers") for option in state.options)
 
     def _extra_status(self):
         return {"quota": _weekly_quota()}
@@ -777,6 +850,13 @@ class CodexDriver(Driver):
             "cwd": str(session["cwd"]),
             "model": str(session.get("model") or "").strip(),
             "effort": str(session.get("effort") or "").strip(),
+            # "default" is the protocol's explicit off state. An enabled
+            # session resolves the opaque tier from the current model catalog;
+            # no vendor id is persisted or hardcoded here.
+            "service_tier": (
+                self.fast_mode_tier(session.get("model") or "")
+                if session.get("fast_mode") else
+                "default" if self._service_tiers_available() else None),
             "sandbox": str(session.get("permission_mode") or
                            self.default_permission()),
             "prompt": _with_runtime_guidance(
@@ -849,6 +929,8 @@ class CodexDriver(Driver):
             params["model"] = ctx["model"]
         if ctx.get("effort"):
             params["effort"] = ctx["effort"]
+        if ctx.get("service_tier") is not None:
+            params["serviceTierForTurn"] = ctx.get("service_tier") or "default"
         return _rpc(_ID_TURN, "turn/start", params)
 
     @staticmethod

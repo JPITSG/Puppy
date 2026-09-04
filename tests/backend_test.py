@@ -23,7 +23,7 @@ sys.path.insert(0, str(BASE))
 
 from puppy import __version__, protocol, upgrade_contract  # noqa: E402
 from puppy.drivers.claude import ClaudeDriver  # noqa: E402
-from puppy.drivers.codex import CodexDriver  # noqa: E402
+from puppy.drivers.codex import CodexDriver, parse_model_catalog as parse_codex_catalog  # noqa: E402
 
 
 def exercise_driver_normalization() -> None:
@@ -229,6 +229,13 @@ def exercise_driver_normalization() -> None:
         synthetic_ctx) == []
 
     driver = CodexDriver()
+    live_catalog = parse_codex_catalog([{
+        "model": "gpt-test", "displayName": "Test", "isDefault": True,
+        "supportedReasoningEfforts": [],
+        "serviceTiers": [{"id": "catalog-fast", "name": "Fast"}],
+    }])
+    driver._model_catalog_state().options = live_catalog
+    driver._model_catalog_state().source = "engine"
     assert driver.uses_stdin_stream is True
     assert driver.supports_steering is True
     assert driver.steering_acknowledged is True
@@ -282,6 +289,32 @@ def exercise_driver_normalization() -> None:
     assert "<puppy_system_prompt>\nNode policy." in \
         turn_request["params"]["input"][0]["text"]
     assert turn_request["params"]["effort"] == "high"
+    assert turn_request["params"]["serviceTierForTurn"] == "default"
+
+    legacy_driver = CodexDriver()
+    legacy_driver._cache_file_options = [{"value": "", "label": "Default"}, {
+        "value": "gpt-test", "label": "Test", "effort_options": []}]
+    legacy_ctx = legacy_driver.turn_context(
+        session, True, "hello", "legacy-message")
+    assert "serviceTierForTurn" not in \
+        legacy_driver._turn_request(legacy_ctx)["params"]
+
+    # Fast stores no native spelling: an arbitrary id discovered for this
+    # model is resolved into turn/start, while explicit off always asks for
+    # the protocol's standard/default service.
+    fast_driver = CodexDriver()
+    fast_catalog = parse_codex_catalog([{
+        "model": "future-model", "displayName": "Future", "isDefault": True,
+        "supportedReasoningEfforts": [],
+        "serviceTiers": [{"id": "opaque-speed-2040", "name": "Fast"}],
+    }])
+    fast_driver._model_catalog_state().options = fast_catalog
+    fast_driver._model_catalog_state().source = "engine"
+    fast_session = dict(session, model="future-model", fast_mode=True)
+    fast_ctx = fast_driver.turn_context(
+        fast_session, True, "hello", "future-message")
+    assert fast_driver._turn_request(fast_ctx)["params"][
+        "serviceTierForTurn"] == "opaque-speed-2040"
 
     started = driver.parse_line(json.dumps({
         "id": "puppy-turn", "result": {
@@ -529,6 +562,7 @@ def exercise_side_question_contract() -> None:
     assert protocol.SIDE_QUESTION_CAPABILITY in protocol.BASE_CAPABILITIES
     assert protocol.TIMER_SETTINGS_CAPABILITY in protocol.BASE_CAPABILITIES
     assert protocol.SESSION_PINNING_CAPABILITY in protocol.BASE_CAPABILITIES
+    assert protocol.SESSION_FAST_MODE_CAPABILITY in protocol.BASE_CAPABILITIES
 
 
 async def exercise_codex_app_server_turn(root, runner, db) -> None:
@@ -2144,6 +2178,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "session-search" in ping["capabilities"]
         assert "session-event-window" in ping["capabilities"]
         assert "session-tools" in ping["capabilities"]
+        assert "session-fast-mode" in ping["capabilities"]
         assert "session-agent-notes" in ping["capabilities"]
         assert "session-pinning" in ping["capabilities"]
         assert "completion-events" in ping["capabilities"]
@@ -2331,6 +2366,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
             assert opencode["detail"] == "binary available"
         for engine in engine_payload["engines"]:
             assert isinstance(engine["dynamic_model_options"], bool)
+            assert isinstance(engine["supports_fast_mode"], bool)
             assert isinstance(engine["model_catalog_loaded"], bool)
             assert isinstance(engine["model_catalog_error"], str)
             assert isinstance(engine["model_catalog_note"], str)
@@ -2350,6 +2386,13 @@ async def exercise_node(url: str, token: str, expected_version: str,
             assert engine["upgrade_result"] is None or \
                 isinstance(engine["upgrade_result"], dict)
             assert isinstance(engine["version_checked_at"], (int, float))
+        assert by_key["codex"]["supports_fast_mode"] is True
+        assert by_key["claude"]["supports_fast_mode"] is False
+        assert by_key["opencode"]["supports_fast_mode"] is False
+        for model in by_key["codex"]["model_options"]:
+            assert "service_tiers" not in model
+            assert isinstance(model["fast_mode_available"], bool)
+            assert isinstance(model["fast_mode_hint"], str)
         # Discovered choices feed model_options directly; there is no separate
         # controller-owned or node-owned allow-list API.
         async with http.patch(url + "/api/engines/opencode/models", headers=good,
@@ -3935,6 +3978,7 @@ async def exercise_queue_persistence(runner, db) -> None:
         eng_fields = {
             "engine": "codex", "model": "gpt-x", "effort": "",
             "permission_mode": get_driver("codex").default_permission(),
+            "fast_mode": "off",
         }
         old_eng_fields = {"engine": "codex", "model": "gpt-x", "effort": ""}
         tagged_fields = {"model": "claude-x", "engine": "claude"}
@@ -4573,7 +4617,7 @@ async def exercise_engine_switch_queue(url: str, token: str, runner, db) -> None
         assert runner._is_queued_engine(h.queue[2])
         assert h.queue[2]["fields"] == {
             "engine": "codex", "model": codex_default, "effort": "",
-            "permission_mode": codex_custom_permission}
+            "permission_mode": codex_custom_permission, "fast_mode": "off"}
         assert h._paused_wire() == [1] and h.held == ["held prompt"]
         # an engine upgrade must treat the queued switch target as busy work
         assert any(b["id"] == sid for b in runner.engine_blockers("codex"))
@@ -4588,7 +4632,7 @@ async def exercise_engine_switch_queue(url: str, token: str, runner, db) -> None
             {"model": "sonnet", "engine": "claude"})["error"]
         assert h.pending_config() == {
             "engine": "codex", "model": "o-mini", "effort": "",
-            "permission_mode": codex_custom_permission}
+            "permission_mode": codex_custom_permission, "fast_mode": "off"}
 
         # Re-picking collapses into the same pending row, resetting its
         # complete configuration to the newly chosen target's defaults.
@@ -4596,7 +4640,7 @@ async def exercise_engine_switch_queue(url: str, token: str, runner, db) -> None
             "claude", "", "", claude_permission) == {"queued": True}
         assert len(h.queue) == 3 and h.queue[2]["fields"] == {
             "engine": "claude", "model": "", "effort": "",
-            "permission_mode": claude_permission}
+            "permission_mode": claude_permission, "fast_mode": "off"}
         assert h.request_engine_switch(
             "codex", codex_default, "", codex_permission) == {"queued": True}
         assert h.queue_config({
@@ -4643,6 +4687,7 @@ async def exercise_engine_switch_queue(url: str, token: str, runner, db) -> None
         eng_fields = {
             "engine": "claude", "model": "", "effort": "",
             "permission_mode": claude_permission,
+            "fast_mode": "off",
         }
         eng_row = {"kind": "engine", "fields": dict(eng_fields),
                    "key": runner._queued_engine_key(eng_fields)}
@@ -4683,6 +4728,103 @@ async def exercise_engine_switch_queue(url: str, token: str, runner, db) -> None
         db.delete_session(sid)
 
 
+async def exercise_fast_mode(url: str, token: str, runner, db) -> None:
+    """Fast is model-advertised, boolean on disk, and ordered in the queue."""
+    from puppy.drivers import get_driver
+
+    driver = get_driver("codex")
+    sentinel = object()
+    previous = {name: driver.__dict__.get(name, sentinel) for name in
+                ("refresh_model_options", "model_options", "fast_mode_tier")}
+
+    async def no_refresh(force=False):
+        return None
+
+    options = [
+        {"value": "", "label": "Default", "fast_mode_available": True},
+        {"value": "future-fast", "label": "Future Fast",
+         "fast_mode_available": True},
+        {"value": "future-standard", "label": "Future Standard",
+         "fast_mode_available": False},
+    ]
+    driver.refresh_model_options = no_refresh
+    driver.model_options = lambda: [dict(item) for item in options]
+    driver.fast_mode_tier = lambda model: \
+        "catalog-tier-99" if str(model or "") in ("", "future-fast") else ""
+    sid = db.create_session(
+        "fast mode", "codex", "/tmp", "future-fast", "", "blue",
+        driver.default_permission())
+    hub = runner.hub(sid)
+    headers = {"X-Puppy-Token": token}
+    try:
+        async with aiohttp.ClientSession() as http:
+            async def patch(body):
+                async with http.patch(
+                        url + "/api/sessions/{}".format(sid),
+                        headers=headers, json=body) as response:
+                    return response.status, await response.json()
+
+            status, payload = await patch({"fast_mode": "yes"})
+            assert status == 400 and "true or false" in payload["error"], \
+                (status, payload)
+
+            status, payload = await patch({"fast_mode": True})
+            assert status == 200, payload
+            assert payload["session"]["fast_mode"] is True
+            assert db.get_session(sid)["fast_mode"] is True
+            listed = next(item for item in runner.sessions_payload()["sessions"]
+                          if item["id"] == sid)
+            assert listed["fast_mode"] is True
+
+            # A catalog row without Fast cannot be enabled, and moving onto
+            # that row turns an existing request off atomically.
+            status, payload = await patch({"model": "future-standard"})
+            assert status == 200, payload
+            assert payload["session"]["model"] == "future-standard"
+            assert payload["session"]["fast_mode"] is False
+            status, payload = await patch({"fast_mode": True})
+            assert status == 400 and "does not offer Fast" in payload["error"]
+
+            status, payload = await patch({"model": "future-fast"})
+            assert status == 200, payload
+            hub.status = "running"
+            status, payload = await patch({"fast_mode": True})
+            assert status == 200 and payload["queued_config"] is True, payload
+            assert hub.queue[0]["fields"] == {
+                "engine": "codex", "fast_mode": "on"}
+            assert hub.pending_config()["fast_mode"] == "on"
+
+        # Applying the settings-only queue performs the same boolean storage
+        # conversion as an immediate PATCH.
+        hub.status = "idle"
+        assert hub._take_next_turn() is None
+        assert db.get_session(sid)["fast_mode"] is True
+
+        # A subsequent engine reseed always starts with Fast off.
+        claude = get_driver("claude")
+        assert hub._apply_engine_switch({
+            "engine": "claude", "model": claude.default_model(), "effort": "",
+            "permission_mode": claude.default_permission(), "fast_mode": "off",
+        }) is True
+        assert db.get_session(sid)["fast_mode"] is False
+        async with aiohttp.ClientSession() as http:
+            async with http.patch(
+                    url + "/api/sessions/{}".format(sid), headers=headers,
+                    json={"fast_mode": True}) as response:
+                refused = await response.json()
+                assert response.status == 400, refused
+                assert "not available for Claude" in refused["error"]
+    finally:
+        hub.status = "idle"
+        runner.drop_hub(sid)
+        db.delete_session(sid)
+        for name, value in previous.items():
+            if value is sentinel:
+                driver.__dict__.pop(name, None)
+            else:
+                driver.__dict__[name] = value
+
+
 def exercise_effective_model_provenance(runner, db) -> None:
     """Requested picker history stays separate from engine-confirmed routing."""
     from puppy.drivers import get_driver
@@ -4712,6 +4854,7 @@ def exercise_effective_model_provenance(runner, db) -> None:
         assert hub._apply_engine_switch({
             "engine": "codex", "model": target.default_model(), "effort": "",
             "permission_mode": target.default_permission(),
+            "fast_mode": "off",
         }) is True
         moved = [event for event in db.get_events(sid)
                  if event["kind"] == "engine_switch"][-1]
@@ -5123,6 +5266,8 @@ async def main() -> None:
         await exercise_queue_pause_websocket(
             controller_url, controller_token, runner, db)
         await exercise_engine_switch_queue(
+            controller_url, controller_token, runner, db)
+        await exercise_fast_mode(
             controller_url, controller_token, runner, db)
         await exercise_controller(controller_url, controller_token, backend_url,
                                   backend_token, backend_fingerprint, old_version, state_dir)

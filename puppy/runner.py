@@ -149,7 +149,8 @@ def _valid_restored_item(item) -> bool:
     if not all(isinstance(value, str) for value in fields.values()):
         return False
     if _is_queued_engine(item):
-        if set(fields) != {"engine", "model", "effort", "permission_mode"}:
+        if set(fields) != {"engine", "model", "effort", "permission_mode",
+                           "fast_mode"}:
             return False
     elif _is_queued_tool(item):
         if set(fields) != {"engine", "tool"}:
@@ -162,8 +163,9 @@ def _valid_restored_item(item) -> bool:
                                   for option in driver.tool_options()]
     elif _is_queued_config(item):
         if not set(fields).issubset(
-                {"engine", "model", "effort", "permission_mode"}) or not \
-                any(k in fields for k in ("model", "effort", "permission_mode")):
+                {"engine", "model", "effort", "permission_mode", "fast_mode"}) or not \
+                any(k in fields for k in
+                    ("model", "effort", "permission_mode", "fast_mode")):
             return False
     else:
         return False
@@ -176,6 +178,8 @@ def _valid_restored_item(item) -> bool:
                 str(option.get("value") or "") for option in
                 driver.permission_options()]:
             return False
+    if "fast_mode" in fields and fields["fast_mode"] not in ("on", "off"):
+        return False
     return True
 
 
@@ -187,7 +191,8 @@ def _config_after(session: dict, items) -> dict:
     cfg = {"engine": str(session.get("engine") or ""),
            "model": str(session.get("model") or ""),
            "effort": str(session.get("effort") or ""),
-           "permission_mode": str(session.get("permission_mode") or "")}
+           "permission_mode": str(session.get("permission_mode") or ""),
+           "fast_mode": "on" if session.get("fast_mode") else "off"}
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -197,8 +202,9 @@ def _config_after(session: dict, items) -> dict:
             cfg["model"] = str(fields.get("model") or "")
             cfg["effort"] = str(fields.get("effort") or "")
             cfg["permission_mode"] = str(fields.get("permission_mode") or "")
+            cfg["fast_mode"] = str(fields.get("fast_mode") or "off")
         elif str(fields.get("engine") or "") == cfg["engine"]:
-            for k in ("model", "effort", "permission_mode"):
+            for k in ("model", "effort", "permission_mode", "fast_mode"):
                 if k in fields:
                     cfg[k] = str(fields.get(k) or "")
     return cfg
@@ -256,6 +262,7 @@ def session_payload(session):
     out["workspace_missing"] = workspaces.is_temporary(out) and not workspaces.is_available(out)
     out["used_config"] = parse_used_config(out["used_config"])
     out["show_meta"] = out["show_meta"] != 0
+    out["fast_mode"] = bool(out.get("fast_mode"))
     # Raw descriptor JSON becomes a structured object on the wire, while the
     # private mirror cwd never leaves the node.
     descriptor = workspace_sync.session_workspace(out)
@@ -290,7 +297,8 @@ def sessions_payload() -> dict:
                 h.last_completion_status if h and h.status == "idle" else
                 str((completion or {}).get("status") or "") if not h else ""),
             "updated_at": s["updated_at"], "model": s["model"], "last_model": s["last_model"],
-            "effort": s["effort"], "color": s["color"], "permission_mode": s["permission_mode"],
+            "effort": s["effort"], "fast_mode": bool(s.get("fast_mode")),
+            "color": s["color"], "permission_mode": s["permission_mode"],
             "has_native": bool(s["native_session_id"]),
             "workspace_kind": s["workspace_kind"],
             # which of AGENTS.md / CLAUDE.md the working directory holds
@@ -1419,8 +1427,11 @@ class SessionHub:
 
         {"handled": False} means the caller applies these fields now."""
         clean = {k: str(v) for k, v in fields.items()
-                 if k in ("model", "effort", "permission_mode")}
+                 if k in ("model", "effort", "permission_mode", "fast_mode")}
         tag = str(fields.get("engine") or "")
+
+        if "fast_mode" in clean and clean["fast_mode"] not in ("on", "off"):
+            return {"error": "invalid Fast mode"}
 
         def moved(current):
             return {"error": "that change belongs to {} - this session is on "
@@ -1458,7 +1469,8 @@ class SessionHub:
         absorb = tail is not None and \
             str((tail.get("fields") or {}).get("engine") or "") == base["engine"]
         merged = {k: v for k, v in (tail.get("fields") or {}).items()
-                  if k in ("model", "effort", "permission_mode")} if absorb else {}
+                  if k in ("model", "effort", "permission_mode", "fast_mode")} \
+            if absorb else {}
         merged.update(clean)
         merged = {k: v for k, v in merged.items() if v != base.get(k, "")}
         if absorb and merged:
@@ -1477,7 +1489,8 @@ class SessionHub:
         return {"handled": True}
 
     def request_engine_switch(self, engine: str, model: str,
-                              effort: str, permission_mode: str) -> dict:
+                              effort: str, permission_mode: str,
+                              fast_mode: str = "off") -> dict:
         """Switch now when nothing is pending, otherwise hold the switch at
         the queue tail so prompts sent before it keep the engine they were
         written under. Consecutive requests collapse into the one pending
@@ -1494,9 +1507,16 @@ class SessionHub:
         if permission_mode not in [str(option.get("value") or "") for option in
                                    driver.permission_options()]:
             return {"error": "invalid permission mode for {}".format(driver.label)}
+        fast_mode = str(fast_mode or "off")
+        if fast_mode not in ("on", "off"):
+            return {"error": "invalid Fast mode"}
+        if fast_mode == "on" and not driver.fast_mode_tier(model):
+            return {"error": "Fast mode is not available for that {} model".format(
+                driver.label)}
         fields = {"engine": str(engine or ""), "model": str(model or ""),
                   "effort": str(effort or ""),
-                  "permission_mode": permission_mode}
+                  "permission_mode": permission_mode,
+                  "fast_mode": fast_mode}
         if self.status == "running" or self.queue:
             tail = self.queue[-1] if self.queue and \
                 _is_queued_engine(self.queue[-1]) else None
@@ -1535,6 +1555,19 @@ class SessionHub:
                 "text": "Cannot switch to {} with an invalid permission mode".format(
                     driver.label)})
             return False
+        fast_mode = str(fields.get("fast_mode") or "off")
+        if fast_mode not in ("on", "off"):
+            self._emit("error", {
+                "text": "Cannot switch engines with an invalid Fast mode"})
+            return False
+        target_model = str(fields.get("model") or driver.default_model())
+        if fast_mode == "on" and not driver.fast_mode_tier(target_model):
+            fast_mode = "off"
+            self._emit("info", {
+                "subtype": "config_adjusted",
+                "text": "Fast mode was turned off because it is not available "
+                        "for the target model.",
+            })
         old = session["engine"]
         # Snapshot the outgoing request separately from the effective model
         # the engine reported. A provider fallback/reroute updates last_model,
@@ -1551,9 +1584,10 @@ class SessionHub:
         })
         db.touch_session(
             self.id, engine=engine, native_session_id="",
-            model=fields.get("model") or driver.default_model(),
+            model=target_model,
             effort=fields.get("effort") or "", last_model="", used_config="",
-            permission_mode=permission_mode)
+            permission_mode=permission_mode,
+            fast_mode=1 if fast_mode == "on" else 0)
         self.broadcast({"type": "session_meta",
                         "session": session_payload(db.get_session(self.id))})
         broadcast_sessions()
@@ -1795,7 +1829,8 @@ class SessionHub:
             self.held.pop(index)
             result = self.request_engine_switch(
                 engine, fields.get("model") or "", fields.get("effort") or "",
-                fields.get("permission_mode") or "")
+                fields.get("permission_mode") or "",
+                fields.get("fast_mode") or "off")
             if "error" in result:
                 self.held.insert(index, item)   # nothing changed: keep it held
             self._broadcast_queue()
@@ -1965,7 +2000,7 @@ class SessionHub:
 
     def _apply_queued_config(self, fields: dict) -> None:
         clean = {k: v for k, v in fields.items()
-                 if k in ("model", "effort", "permission_mode")}
+                 if k in ("model", "effort", "permission_mode", "fast_mode")}
         if not clean:
             return
         session = db.get_session(self.id)
@@ -1996,6 +2031,24 @@ class SessionHub:
                         driver.label),
                 })
                 return
+        if "fast_mode" in clean:
+            value = str(clean["fast_mode"])
+            if value not in ("on", "off"):
+                return
+            if value == "on":
+                try:
+                    driver = get_driver(str(session.get("engine") or ""))
+                except KeyError:
+                    return
+                target_model = str(clean.get("model", session.get("model") or ""))
+                if not driver.fast_mode_tier(target_model):
+                    clean["fast_mode"] = "off"
+                    self._emit("info", {
+                        "subtype": "config_adjusted",
+                        "text": "Fast mode was turned off because it is not "
+                                "available for the selected model.",
+                    })
+            clean["fast_mode"] = 1 if clean["fast_mode"] == "on" else 0
         db.touch_session(self.id, **clean)
         self.broadcast({"type": "session_meta",
                         "session": session_payload(db.get_session(self.id))})
@@ -2489,6 +2542,24 @@ class SessionHub:
                 self.broadcast({"type": "session_meta", "session": session_payload(session)})
                 broadcast_sessions()
             driver = get_driver(session["engine"])
+            # Fast is a semantic request, not a stored service-tier id. Refresh
+            # the engine-owned catalog before each enabled turn (normally a
+            # cache hit), then fail safe to standard if an upgrade removed or
+            # renamed the model capability. The transcript makes that
+            # adjustment explicit instead of silently claiming Fast stayed on.
+            if session.get("fast_mode"):
+                await driver.refresh_model_options()
+                if not driver.fast_mode_tier(session.get("model") or ""):
+                    db.touch_session(self.id, fast_mode=0)
+                    session = db.get_session(self.id)
+                    self._emit("info", {
+                        "subtype": "config_adjusted",
+                        "text": "Fast mode was turned off because this model's "
+                                "current catalog no longer offers it.",
+                    })
+                    self.broadcast({"type": "session_meta",
+                                    "session": session_payload(session)})
+                    broadcast_sessions()
             db.touch_session(self.id, status="running")
             broadcast_sessions()
 

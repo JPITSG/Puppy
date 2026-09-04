@@ -20,6 +20,7 @@ from puppy.drivers.claude import (  # noqa: E402
     parse_model_catalog as parse_claude_catalog,
 )
 from puppy.drivers.codex import (  # noqa: E402
+    CodexDriver,
     _read_model_catalog as read_codex_catalog,
     parse_model_catalog as parse_codex_catalog,
 )
@@ -165,7 +166,14 @@ def check_parsers_and_turn_ingest() -> None:
         {"model": "model-a", "displayName": "Model A", "isDefault": True,
          "supportedReasoningEfforts": [
              {"reasoningEffort": "low", "description": "quick"},
-             {"reasoningEffort": "max", "description": "deep"}]},
+             {"reasoningEffort": "max", "description": "deep"}],
+         # Deliberately invented id: production must carry catalog data, not
+         # know today's native service-tier spelling.
+         "serviceTiers": [
+             {"id": "speed-tier-v73", "name": "Fast",
+              "description": "faster service"},
+             {"id": "speed-tier-v73", "name": "duplicate"},
+             {"id": "", "name": "broken"}]},
         {"model": "hidden", "displayName": "Hidden", "hidden": True},
         {"model": "model-b", "displayName": "Model B",
          "supportedReasoningEfforts": [
@@ -175,6 +183,19 @@ def check_parsers_and_turn_ingest() -> None:
     assert values(codex[0]["effort_options"]) == ["", "low", "max"]
     assert values(codex[1]["effort_options"]) == ["", "low", "max"]
     assert values(codex[2]["effort_options"]) == ["", "medium"]
+    assert values(codex[0]["service_tiers"]) == ["speed-tier-v73"]
+    assert values(codex[1]["service_tiers"]) == ["speed-tier-v73"]
+    assert codex[2]["service_tiers"] == []
+    codex_driver = CodexDriver()
+    codex_driver._cache_file_options = codex
+    # A cache left by another binary is display fallback, not proof that the
+    # currently installed app-server accepts its optional turn field.
+    assert codex_driver.fast_mode_tier("") == ""
+    codex_driver._model_catalog_state().options = codex
+    codex_driver._model_catalog_state().source = "engine"
+    assert codex_driver.fast_mode_tier("") == "speed-tier-v73"
+    assert codex_driver.fast_mode_tier("model-a") == "speed-tier-v73"
+    assert codex_driver.fast_mode_tier("model-b") == ""
 
 
 async def check_protocol_probes(root: Path) -> None:
@@ -220,6 +241,8 @@ for line in sys.stdin:
                 "model": "first", "displayName": "First", "isDefault": True,
                 "supportedReasoningEfforts": [
                     {"reasoningEffort": "high", "description": "high"}],
+                "serviceTiers": [{"id": "next-fast-id", "name": "Fast",
+                                  "description": "quick"}],
             }], "nextCursor": "page-2"}
         else:
             assert cursor == "page-2"
@@ -234,6 +257,9 @@ for line in sys.stdin:
     assert values(found) == ["", "first", "second"]
     assert values(found[1]["effort_options"]) == ["", "high"]
     assert values(found[2]["effort_options"]) == [""]
+    assert values(found[0]["service_tiers"]) == ["next-fast-id"]
+    assert values(found[1]["service_tiers"]) == ["next-fast-id"]
+    assert found[2]["service_tiers"] == []
 
 
 async def check_probe_group_cleanup(root: Path) -> None:

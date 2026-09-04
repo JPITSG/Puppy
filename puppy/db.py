@@ -234,6 +234,22 @@ def require_current_schema(conn) -> None:
     if _schema_layout(conn) != wanted:
         raise SchemaMismatchError(
             "database schema is not current; update it manually before starting Puppy")
+    _require_current_session_fast_state(conn)
+
+
+_SESSION_FAST_PREFIX = "session_fast_mode."
+
+
+def _require_current_session_fast_state(conn) -> None:
+    """Validate the exact optional ledger shape: presence means boolean on."""
+    session_ids = {int(row[0]) for row in conn.execute("SELECT id FROM sessions")}
+    for key, value in conn.execute(
+            "SELECT key,value FROM meta WHERE key GLOB 'session_fast_mode.*'"):
+        suffix = str(key)[len(_SESSION_FAST_PREFIX):]
+        if not suffix.isdigit() or int(suffix) not in session_ids or value != "true":
+            raise SchemaMismatchError(
+                "session Fast-mode state is not current; update it manually "
+                "before starting Puppy")
 
 
 def query(sql: str, args=()) -> list:
@@ -398,6 +414,10 @@ def create_session(name: str, engine: str, cwd: str, model: str, effort: str,
 def session_row_to_dict(row) -> dict:
     d = dict(row)
     d["archived"] = bool(d.get("archived"))
+    raw_fast = d.pop("_fast_mode", None)
+    if raw_fast not in (None, "true"):
+        raise SchemaMismatchError("session Fast-mode state is not current")
+    d["fast_mode"] = raw_fast == "true"
     # The sign is deliberately part of the existing order value instead of a
     # new persisted column: old positive rows remain ordinary sessions and
     # the exact database shape stays unchanged.
@@ -406,15 +426,21 @@ def session_row_to_dict(row) -> dict:
 
 
 def get_session(session_id: int):
-    row = query_one("SELECT * FROM sessions WHERE id=?", (session_id,))
+    row = query_one(
+        "SELECT sessions.*,fast.value AS _fast_mode FROM sessions "
+        "LEFT JOIN meta AS fast ON fast.key=?||sessions.id WHERE sessions.id=?",
+        (_SESSION_FAST_PREFIX, session_id))
     return session_row_to_dict(row) if row else None
 
 
 def list_sessions(include_archived: bool = False) -> list:
     # Negative values are the manually ordered pinned block; non-negative
     # values are the activity/manual order below it.
-    sql = "SELECT * FROM sessions" + ("" if include_archived else " WHERE archived=0") + " ORDER BY sort_order, id"
-    return [session_row_to_dict(r) for r in query(sql)]
+    sql = ("SELECT sessions.*,fast.value AS _fast_mode FROM sessions "
+           "LEFT JOIN meta AS fast ON fast.key=?||sessions.id" +
+           ("" if include_archived else " WHERE sessions.archived=0") +
+           " ORDER BY sessions.sort_order,sessions.id")
+    return [session_row_to_dict(r) for r in query(sql, (_SESSION_FAST_PREFIX,))]
 
 
 class SessionOrderConflict(RuntimeError):
@@ -644,9 +670,30 @@ def consume_session_draft(session_id: int, expected_text: str) -> tuple:
 
 
 def touch_session(session_id: int, **fields) -> None:
+    missing = object()
+    fast_mode = fields.pop("fast_mode", missing)
+    fast_supplied = fast_mode is not missing
+    if fast_supplied and (type(fast_mode) not in (bool, int) or fast_mode not in (0, 1)):
+        raise ValueError("fast_mode must be boolean")
     fields["updated_at"] = time.time()
     keys = ", ".join(f"{k}=?" for k in fields)
-    execute(f"UPDATE sessions SET {keys} WHERE id=?", (*fields.values(), session_id))
+    with _lock:
+        conn = connect()
+        try:
+            changed = conn.execute(f"UPDATE sessions SET {keys} WHERE id=?",
+                                   (*fields.values(), session_id)).rowcount
+            if fast_supplied and bool(fast_mode) and changed:
+                conn.execute(
+                    "INSERT INTO meta(key,value) VALUES(?,?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (_SESSION_FAST_PREFIX + str(int(session_id)), "true"))
+            elif fast_supplied:
+                conn.execute("DELETE FROM meta WHERE key=?",
+                             (_SESSION_FAST_PREFIX + str(int(session_id)),))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
     if "name" in fields:
         _notify_change(session_id)
 
@@ -712,6 +759,8 @@ def delete_session(session_id: int) -> None:
             # it (drivers.base._UNDO_STATE_KEY), and outlives it otherwise
             conn.execute("DELETE FROM meta WHERE key=?",
                          ("session_undo.{}".format(session_id),))
+            conn.execute("DELETE FROM meta WHERE key=?",
+                         (_SESSION_FAST_PREFIX + str(int(session_id)),))
             pinned, unpinned = _session_order_lists(conn)
             _write_session_order(conn, pinned, unpinned)
             conn.commit()
