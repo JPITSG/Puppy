@@ -158,3 +158,54 @@ use with your own accounts.
 
 Puppy is released under the [MIT License](LICENSE). Vendored dependencies retain
 their own license notices and terms.
+
+
+## Session references and coordination
+
+Type `@session` in a chat composer to select one or several sessions, or choose
+**All sessions**. The picker searches titles, project folders, and node names,
+including archived conversations. Sent references display as links; their stable
+node/session identities survive renames and engine switches. A subsequent prompt
+without new mentions keeps the previous selection.
+
+The `puppy_session` MCP bridge offers three layers on every supported engine:
+
+- **References:** discover sessions, search their histories, and read transcript
+  pages with exact-message source links. Search pages both across sessions and
+  within a session's matches. Long messages have a character continuation cursor.
+  All excludes the originating session; offline or older nodes are reported as
+  unavailable instead of being silently included in the result.
+- **Communication:** explicitly send a question, task, steering update, or stop.
+  A question uses the engine's native side channel when ready; otherwise it
+  queues a conversational question. Tasks join the destination's normal queue.
+  Steering and stopping require its current turn token. Requests have durable
+  ids, per-destination statuses and answers, and cancellation affects only the
+  request's own queued or active work. Repeating a request id with different
+  content is rejected. An uncertain network response retains the original id.
+- **Coordination:** create up to 24 named question/task steps with explicit
+  dependencies. Independent steps start together, successful prerequisite answers
+  accompany dependent steps, and failed prerequisites block their dependants.
+  Plans and request ids survive turns and restarts. Use the transcript's **View
+  workflow** or **View request** button for results, refresh, and cancellation.
+
+Requests default to a one-hour deadline and workflows to two hours; the absolute
+maximum is two hours from creation, including time queued. A workflow never
+creates new agents or sessions. Up to 512 destinations can be selected for one
+request. Source sessions cannot target themselves, and unresolved requests may
+not form waiting cycles. Ordinary queue holds remain under the user's control.
+References authorize reading; cross-session actions require an explicit request.
+
+The controller brokers access to paired nodes over its existing authenticated,
+TLS-pinned channels. It opens a bounded relay socket so backend-hosted sessions
+can use references selected in the controller's console. Backend nodes never
+receive peer tokens or initiate direct peer connections. Older nodes remain
+usable but cannot offer these new features until upgraded.
+
+Reference selections, inbox/outbox receipts, and workflows live in the existing
+SQLite `meta` table and are included in full backups. Their records have exact
+current shapes with no runtime migration. Unfinished outgoing requests and
+workflows block snapshot export/import. Conversation citations describe recorded
+history; they do not verify that files still have the recorded contents.
+
+Run `python3 tests/session_links_test.py` for the no-quota reference, routing,
+queue, idempotency, cancellation, workflow, driver and MCP contract checks.

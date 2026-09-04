@@ -85,7 +85,7 @@ def _notification(method: str, params=None) -> dict:
 
 
 def _with_runtime_guidance(prompt: str, system_prompt: str, browser_mcp,
-                           terminal_mcp=None, spawn_mcp=None) -> str:
+                           terminal_mcp=None, spawn_mcp=None, session_mcp=None) -> str:
     """Add node and turn-scoped guidance without replacing native user config.
 
     Codex's developer_instructions config value is replacement-oriented. A
@@ -110,6 +110,9 @@ def _with_runtime_guidance(prompt: str, system_prompt: str, browser_mcp,
     if spawn:
         blocks.append("{}\n{}\n{}".format(
             _SPAWN_POLICY_OPEN, spawn, _SPAWN_POLICY_CLOSE))
+    session_policy = str((session_mcp or {}).get("engine_guidance") or "").strip()
+    if session_policy:
+        blocks.append("<puppy_session_policy>\n" + session_policy + "\n</puppy_session_policy>")
     if not blocks:
         return prompt
     return "{}\n\n{}".format("\n\n".join(blocks), prompt)
@@ -819,10 +822,10 @@ class CodexDriver(Driver):
                 "restore_text": str(last.get("text") or "")}
 
     def build_cmd(self, session, first_turn, prompt, pinned_id, browser_mcp=None,
-                  system_prompt="", terminal_mcp=None, spawn_mcp=None, tool=None):
+                  system_prompt="", terminal_mcp=None, spawn_mcp=None, session_mcp=None, tool=None):
         argv = [self.binary, "app-server", "--stdio"]
         # a tool turn only addresses the existing thread: no agent bridges
-        bridges = () if tool_name(tool) else (browser_mcp, terminal_mcp, spawn_mcp)
+        bridges = () if tool_name(tool) else (browser_mcp, terminal_mcp, spawn_mcp, session_mcp)
         for mcp in (item for item in bridges if item):
             prefix = "mcp_servers." + mcp["name"]
             argv += ["-c", prefix + ".command=" + json.dumps(mcp["command"]),
@@ -837,7 +840,7 @@ class CodexDriver(Driver):
         return argv
 
     def turn_context(self, session, first_turn, prompt, pinned_id, browser_mcp=None,
-                     system_prompt="", terminal_mcp=None, spawn_mcp=None, tool=None):
+                     system_prompt="", terminal_mcp=None, spawn_mcp=None, session_mcp=None, tool=None):
         return {
             "tool": tool_name(tool),
             "tool_params": dict(tool) if isinstance(tool, dict) else {},
@@ -860,7 +863,7 @@ class CodexDriver(Driver):
             "sandbox": str(session.get("permission_mode") or
                            self.default_permission()),
             "prompt": _with_runtime_guidance(
-                prompt, system_prompt, browser_mcp, terminal_mcp, spawn_mcp),
+                prompt, system_prompt, browser_mcp, terminal_mcp, spawn_mcp, session_mcp),
             "usage": {},
             "items": {},
             "item_seq": 0,

@@ -671,7 +671,7 @@ class Driver:
 
     def build_cmd(self, session: dict, first_turn: bool, prompt: str, pinned_id: str,
                   browser_mcp=None, system_prompt: str = "",
-                  terminal_mcp=None, spawn_mcp=None, tool=None) -> list:
+                  terminal_mcp=None, spawn_mcp=None, session_mcp=None, tool=None) -> list:
         """argv for one turn. pinned_id: uuid the runner pre-generated for new sessions
         (engines that support pinning use it; others derive their own native id).
         browser_mcp is an optional per-turn stdio MCP server descriptor. It may
@@ -686,13 +686,13 @@ class Driver:
 
     def build_env(self, session: dict, first_turn: bool, prompt: str, pinned_id: str,
                   browser_mcp=None, system_prompt: str = "",
-                  terminal_mcp=None, spawn_mcp=None, tool=None) -> dict:
+                  terminal_mcp=None, spawn_mcp=None, session_mcp=None, tool=None) -> dict:
         """Per-turn environment additions. Credentials remain CLI-owned."""
         return {}
 
     def turn_context(self, session: dict, first_turn: bool, prompt: str, pinned_id: str,
                      browser_mcp=None, system_prompt: str = "",
-                     terminal_mcp=None, spawn_mcp=None, tool=None) -> dict:
+                     terminal_mcp=None, spawn_mcp=None, session_mcp=None, tool=None) -> dict:
         """Driver scratch state shared across streamed protocol messages."""
         return {}
 

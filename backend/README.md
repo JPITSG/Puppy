@@ -768,3 +768,32 @@ Busy nodes are left alone and checked again shortly; unavailable or blocked
 nodes back off and retry. The backend still repeats its idle/readiness check at
 POST time, so a turn or terminal that starts during artifact preparation wins
 the race and safely rejects the automatic attempt.
+
+
+### Session references, communication, and coordination
+
+The shared execution API includes additive `session-references`,
+`session-communication`, and `session-coordination` capabilities. All three engines
+receive the turn-bound `puppy_session` stdio bridge. Stable references are
+`<node_uuid>/<session_id>`; composer mentions also carry the selecting controller's
+UUID. References remain valid across node/session renames.
+
+`GET /api/session-links/catalog` lists this runtime's available sessions and named
+coverage gaps. `POST /api/session-links/node` is the authenticated node-local
+read/search/request/status/cancel surface. `POST /api/session-links/action` exposes
+source-owned operations to consoles. A controller opens
+`/api/ws/session-links?controller=<uuid>` on each online capable backend to relay
+its active turns' requests back through that controller. The channel reuses the
+paired API token and certificate pin; nodes never learn other nodes' credentials.
+
+Questions use the native side-question channel when ready, or join the normal
+queue as conversational questions. Tasks always follow ordinary queue ordering.
+Steer/stop compare the destination's active turn id. Client-chosen request ids are
+idempotent and replies identify individual outcomes. Queues remain prompt strings;
+a visible request marker ties a prompt to its durable receipt. Requests and finite
+DAG workflows survive the requesting turn. A removed/held/restarted destination
+is reported explicitly; completed prerequisites alone release dependent steps.
+
+State is stored under exact-format `session_references.*`, `session_inbox.*`,
+`session_outbox.*`, and `session_workflow.*` meta namespaces, included in snapshots
+without automatic migrations. See the main README for tool behavior and limits.

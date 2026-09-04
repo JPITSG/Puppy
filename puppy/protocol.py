@@ -185,7 +185,12 @@ COMPLETION_EVENTS_CAPABILITY = "completion-events"
 # it; older nodes advertise nothing and consoles withhold the control.
 SIDE_QUESTION_CAPABILITY = "active-turn-side-question"
 
+SESSION_REFERENCES_CAPABILITY = "session-references"
+
 BASE_CAPABILITIES = (
+    SESSION_REFERENCES_CAPABILITY,
+    "session-communication",
+    "session-coordination",
     "sessions",
     "session-stream",
     "approvals",

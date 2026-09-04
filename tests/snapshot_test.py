@@ -29,6 +29,7 @@ from puppy import (auth, cli_releases, config, db, listener_handoff, notify,
                    web_tls, workspace_sync,
                    workspaces)  # noqa: E402
 from puppy.web import build_app  # noqa: E402
+from tests.session_state import completed_records
 
 RELEASE_OBSERVATION_KEY = cli_releases.OBSERVATION_PREFIX + "codex"
 RELEASE_OBSERVATION = {
@@ -385,6 +386,8 @@ async def main() -> None:
         handoff_path = Path(config.DATA_DIR) / "runtime" / "listener-handoff.json"
         assert handoff_path.is_file()
 
+        session_records = completed_records(db.node_uuid(), directory_id, scratch_id)
+        db.meta_apply(session_records)
         direct_archive = snapshots.create_archive(ui)
         archive_path = Path(direct_archive["path"])
         assert archive_path.stat().st_mode & 0o777 == 0o600
@@ -400,6 +403,7 @@ async def main() -> None:
 
         # Mutate every restored surface and an excluded ordinary project file.
         config.set_value("instance_name", "mutated-instance")
+        db.meta_apply(delete_keys=list(session_records))
         config.set_value("engines.usage_refresh_minutes", 5)
         config.set_timers({
             "cli_release_minutes": 60,
@@ -446,6 +450,19 @@ async def main() -> None:
         snapshots.discard_staged(staged)
         assert not handoff_path.exists()
         assert restored["ui"] == ui
+        for key, value in session_records.items():
+            assert db.meta_get(key) == value, key
+        # An outdated session-state shape is rejected, never filled in.
+        invalid_session_db = TEST_ROOT / "invalid-session-state.db"
+        db.backup_to(str(invalid_session_db))
+        invalid_conn = sqlite3.connect(str(invalid_session_db))
+        invalid_conn.execute("UPDATE meta SET value=? WHERE key=?", (
+            '{"format":0,"refs":[]}', "session_references.{}".format(directory_id)))
+        invalid_conn.commit()
+        invalid_conn.close()
+        expect_snapshot_error(lambda: snapshots._validate_database(invalid_session_db),
+                              "session references")
+        invalid_session_db.unlink()
         assert config.get("instance_name") == "saved-instance"
         assert config.get("sessions.default_cwd") == str(project)
         assert config.get("engines.usage_refresh_minutes") == 30

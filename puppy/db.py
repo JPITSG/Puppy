@@ -750,6 +750,8 @@ def delete_session(session_id: int) -> None:
             conn.execute("DELETE FROM events WHERE session_id=?", (session_id,))
             conn.execute("DELETE FROM session_drafts WHERE session_id=?", (session_id,))
             conn.execute("DELETE FROM sessions WHERE id=?", (session_id,))
+            conn.execute("DELETE FROM meta WHERE key=?",
+                         ("session_references.{}".format(session_id),))
             # the durable queue/held record rides under this session's meta key
             conn.execute("DELETE FROM meta WHERE key=?",
                          ("session_queue.{}".format(session_id),))

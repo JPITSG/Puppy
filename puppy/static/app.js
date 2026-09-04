@@ -2258,7 +2258,7 @@ function linkifyInto(node, text) {
    stops before its "to" task separator; that separator and the surrounding
    prose keep their ordinary rendering and linkification. */
 const MENTION_TOKEN_RE =
-  /(^|[\s([{'"])(@(?:Browser [A-Z0-9]{4}|Terminal [A-Z0-9]{4}|New browser|New terminal|Spawn (?:an agent|[0-9]{1,2} agents)(?: on (?:"[^"\n]{1,80}"|\S+))? using \S+(?: \S+)?(?: at \S+ effort)?(?= to(?=$|[\s.,;:!?)\]}'"]))))(?=$|[\s.,;:!?)\]}'"])/g;
+  /(^|[\s([{'"])(@(?:Session (?:[a-f0-9]{32}:)?(?:all|[a-f0-9]{32}\/[1-9][0-9]*)|Browser [A-Z0-9]{4}|Terminal [A-Z0-9]{4}|New browser|New terminal|Spawn (?:an agent|[0-9]{1,2} agents)(?: on (?:"[^"\n]{1,80}"|\S+))? using \S+(?: \S+)?(?: at \S+ effort)?(?= to(?=$|[\s.,;:!?)\]}'"]))))(?=$|[\s.,;:!?)\]}'"])/g;
 function decorateMentionsInto(node, text) {
   text = String(text == null ? "" : text);
   MENTION_TOKEN_RE.lastIndex = 0;
@@ -2266,7 +2266,22 @@ function decorateMentionsInto(node, text) {
   while ((m = MENTION_TOKEN_RE.exec(text))) {
     const start = m.index + m[1].length;
     if (start > last) linkifyInto(node, text.slice(last, start));
-    node.appendChild(el("span", "mention-token", m[2]));
+    const token = el("span", "mention-token", m[2]);
+    const session = /^@Session (?:[a-f0-9]{32}:)?([a-f0-9]{32}\/[1-9][0-9]*|all)$/.exec(m[2]);
+    if (session) {
+      const target = session[1] === "all" ? null : state.sessions
+        .concat(...Object.values(state.remoteSessions || {})).find(row => row.session_ref === session[1]);
+      token.textContent = session[1] === "all" ? "@All sessions" :
+        "@" + (target && target.name || "Session " + session[1].split("/")[1]);
+      token.title = m[2];
+      if (session[1] !== "all") {
+        token.tabIndex = 0;
+        token.setAttribute("role", "link");
+        token.onclick = () => openSessionReference(session[1]);
+        token.onkeydown = e => { if (e.key === "Enter") token.click(); };
+      }
+    }
+    node.appendChild(token);
     last = start + m[2].length;
   }
   if (last < text.length || !last) linkifyInto(node, text.slice(last));
@@ -3131,6 +3146,7 @@ async function enterApp() {
   renderTabs(); renderSidebar();
   connectUpdates();
   startRemotePolling();
+  openSessionHash();
 }
 
 async function refreshState() {
@@ -8075,7 +8091,7 @@ class SessionView {
       <div class="composer">
         <div class="composer-box">
           <div class="mention-pop hidden" role="listbox"
-            aria-label="Mention a Puppy browser or terminal"></div>
+            aria-label="Mention a Puppy session, browser, terminal, or spawn"></div>
           <textarea rows="1" placeholder="Message the agent…"></textarea>
           <div class="attach-strip hidden"></div>
           <div class="composer-row">
@@ -8939,7 +8955,7 @@ class SessionView {
       const item = m.items[m.sel];
       /* A mention already typed out in full has nothing left to complete;
          Enter keeps meaning send. Tab still completes the trailing space. */
-      if (!this.mentionSpawn && e.key === "Enter" &&
+      if (!this.mentionSpawn && !this.mentionSession && e.key === "Enter" &&
           item.search === m.query.toLowerCase()) {
         this.hideMention();
         return false;
@@ -8952,8 +8968,14 @@ class SessionView {
   }
 
   updateMention() {
-    const ctx = composerMentionContext(
+    let ctx = composerMentionContext(
       this.ta.value, this.ta.selectionStart, this.ta.selectionEnd);
+    if (this.mentionSession && this.mention && this.ta.selectionStart === this.ta.selectionEnd) {
+      const start = this.mention.start;
+      const query = this.ta.value.slice(start + 1, this.ta.selectionStart);
+      if (this.ta.value[start] === "@" && this.ta.selectionStart > start &&
+          !query.includes("\n") && query.length <= 400) ctx = {start, query};
+    }
     if (!ctx) {
       this.mentionDismissedAt = -1;   // left the token; dismissal is spent
       this.hideMention();
@@ -8966,7 +8988,9 @@ class SessionView {
     if (this.mentionDismissedAt === ctx.start) { this.hideMention(); return; }
     this.mentionDismissedAt = -1;
     let items;
-    if (this.mentionSpawn) {
+    if (this.mentionSession) {
+      items = this.sessionMentionItems(ctx.query);
+    } else if (this.mentionSpawn) {
       /* Wizard mode: the token's query filters the current step's choices,
          and the Back row stays put so a fruitless filter cannot strand the
          wizard with nowhere to go. */
@@ -8984,10 +9008,11 @@ class SessionView {
       item.kind === previous.kind && item.label === previous.label) : -1;
     this.mention = { start: ctx.start, query: ctx.query, items, sel: kept >= 0 ? kept : 0 };
     this.renderMention();
-    if (!this.mentionSpawn) this.refreshMentionInstances();
+    if (!this.mentionSpawn && !this.mentionSession) this.refreshMentionInstances();
   }
 
   hideMention() {
+    this.mentionSession = null;
     this.mentionSpawn = null;
     if (!this.mention) return;
     this.mention = null;
@@ -9002,6 +9027,7 @@ class SessionView {
     const wizard = this.mentionSpawn;
     this.mentionEl.textContent = "";
     this.mentionRowEls = [];
+    this.mentionEl.setAttribute("aria-multiselectable", this.mentionSession ? "true" : "false");
     if (wizard) {
       const head = el("div", "mention-step-head");
       const trail = ["New spawn"];
@@ -9022,7 +9048,8 @@ class SessionView {
         (item.kind === "spawn-wait" ? " quiet" : ""));
       row.type = "button";
       row.setAttribute("role", "option");
-      row.setAttribute("aria-selected", index === m.sel ? "true" : "false");
+      row.setAttribute("aria-selected", item.kind === "session-select" ?
+        String(this.mentionSession.selected.has(item.ref)) : String(index === m.sel));
       const ico = el("span", "mention-ico");
       if (item.kind === "spawn-back" || item.kind === "spawn-step") {
         ico.classList.add("mention-chev", item.kind === "spawn-back" ? "left" : "right");
@@ -9060,7 +9087,9 @@ class SessionView {
     m.sel = index;
     this.mentionRowEls.forEach((row, i) => {
       row.classList.toggle("sel", i === index);
-      row.setAttribute("aria-selected", i === index ? "true" : "false");
+      const item = m.items[i];
+      row.setAttribute("aria-selected", item.kind === "session-select" ?
+        String(this.mentionSession.selected.has(item.ref)) : String(i === index));
     });
     const sel = this.mentionRowEls[index];
     if (sel && sel.scrollIntoView) sel.scrollIntoView({ block: "nearest" });
@@ -9071,6 +9100,23 @@ class SessionView {
      whose re-evaluation then retires the completed token as prose. Wizard
      rows never insert directly: they advance, retreat, or retry a part. */
   applyMention(item) {
+    if (item.kind === "session-picker") { this.beginSessionMention(); return; }
+    if (item.kind === "session-wait") return;
+    if (item.kind === "session-back") {
+      this.mentionSession = null; this.spawnResetQuery(); return;
+    }
+    if (item.kind === "session-select") {
+      const selected = this.mentionSession.selected;
+      if (selected.has(item.ref)) selected.delete(item.ref); else selected.add(item.ref);
+      this.updateMention(); return;
+    }
+    if (item.kind === "session-all" || item.kind === "session-insert") {
+      const wizard = this.mentionSession;
+      const refs = item.kind === "session-all" ? ["all"] : [...wizard.selected];
+      this.mentionSession = null;
+      this.applyMention({insert: refs.map(ref => `@Session ${wizard.data.controller}:${ref}`).join(" ")});
+      return;
+    }
     if (item.kind === "new-spawn") { this.spawnMentionBegin(); return; }
     if (item.kind === "spawn-back") { this.spawnStepBack(); return; }
     if (item.kind === "spawn-step") { this.spawnStepChoose(item); return; }
@@ -9103,6 +9149,9 @@ class SessionView {
     const withBrowser = browserEnabledFor(bid);
     const withTerminal = !bid || backendHasCapability(backend, "terminal");
     const items = [];
+    if (!bid || backendHasCapability(backend, "session-references"))
+      items.push({kind: "session-picker", label: "Session", hint: "reference one, several, or all",
+        search: "session sessions", insert: ""});
     const push = (kind, label, hint, insert) =>
       items.push({ kind, label, hint, insert, search: label.toLowerCase() });
     const hintFor = (owner) => {
@@ -9129,6 +9178,39 @@ class SessionView {
      only the finished directive lands in the composer, so the exact wording
      never has to be remembered. Single-choice parts are skipped, typing
      filters the current part, and Escape/Backspace slide back. */
+
+  async beginSessionMention() {
+    const wizard = {selected: new Set(), data: null, error: ""};
+    this.mentionSession = wizard;
+    this.spawnResetQuery();
+    try { wizard.data = await api(0, "session-links/catalog"); }
+    catch (error) { wizard.error = error.message; }
+    if (this.mentionSession === wizard) this.updateMention();
+  }
+
+  sessionMentionItems(query) {
+    const wizard = this.mentionSession;
+    const items = [];
+    const add = (kind, label, hint = "", ref = "") => items.push({kind, label, hint, ref});
+    if (wizard.error) add("session-wait", wizard.error);
+    else if (!wizard.data) add("session-wait", "Loading sessions…");
+    else {
+      if (wizard.selected.size) add("session-insert", `Insert ${wizard.selected.size} selected`);
+      const q = query.toLowerCase();
+      if (!q || "all sessions".includes(q))
+        add("session-all", "All sessions", "includes archived sessions across nodes");
+      for (const row of wizard.data.sessions) {
+        if (row.bid === (this.tab.bid || 0) && row.id === this.tab.sid) continue;
+        if (q && !`${row.title} ${row.node_name} ${row.cwd}`.toLowerCase().includes(q)) continue;
+        add("session-select", `${wizard.selected.has(row.ref) ? "✓ " : ""}${row.title}`,
+          `${row.node_name} · ${row.archived ? "archived" : row.status} · ${row.cwd}`, row.ref);
+      }
+      for (const row of wizard.data.unavailable || [])
+        add("session-wait", `${row.node}: unavailable`, row.error);
+    }
+    add("session-back", "Back");
+    return items;
+  }
 
   spawnMentionBegin() {
     this.mentionSpawn = { step: "count", count: null, node: undefined,
@@ -10466,6 +10548,23 @@ class SessionView {
         return orphan;
       }
       case "info": {
+        if (d.subtype === "session_request" && d.session_request) {
+          const card = el("div", "session-request-card");
+          card.appendChild(el("div", "session-request-text", d.text || "Session request"));
+          const record = d.session_request;
+          const actions = el("div", "session-request-actions");
+          if (Array.isArray(record.targets)) {
+            const details = el("button", "btn small", record.workflow ? "View workflow" : "View request");
+            details.onclick = () => modalSessionRequest(record);
+            actions.appendChild(details);
+          } else if (record.source) {
+            const source = el("button", "btn small", "Open requesting session");
+            source.onclick = () => openSessionReference(record.source);
+            actions.appendChild(source);
+          }
+          card.appendChild(actions);
+          return card;
+        }
         if (d.subtype === "todo") {
           const n = el("div", "todo-card");
           for (const line of (d.text || "").split("\n")) {
@@ -17423,3 +17522,99 @@ initAuth().catch(e => {
   toast("Failed to reach backend: " + e.message, "error");
   showAuth("login");
 });
+
+
+async function openSessionReference(ref, seq = 0) {
+  try {
+    const data = await api(0, "session-links/catalog");
+    const row = data.sessions.find(item => item.ref === ref);
+    if (!row) throw new Error("That session is deleted or its node is unavailable");
+    const payload = await api(row.bid, `sessions/${row.id}`);
+    openSessionTab(row.bid, row.id, payload.session);
+    const view = state.views[`s:${row.bid}:${row.id}`];
+    if (seq > 0 && view) view.jumpToSeq(seq);
+  } catch (error) { toast(error.message, "error"); }
+}
+
+document.addEventListener("click", event => {
+  const anchor = event.target.closest("a[href]");
+  if (!anchor) return;
+  const url = new URL(anchor.href, location.href);
+  if (url.origin !== location.origin) return;
+  const match = /^#session=([a-f0-9]{32}\/[1-9][0-9]*)&seq=([0-9]+)$/.exec(url.hash);
+  if (!match) return;
+  event.preventDefault();
+  openSessionReference(match[1], Number(match[2]));
+});
+
+function openSessionHash() {
+  if (!state.authed) return;
+  const match = /^#session=([a-f0-9]{32}\/[1-9][0-9]*)&seq=([0-9]+)$/.exec(location.hash);
+  if (match) openSessionReference(match[1], Number(match[2]));
+}
+window.addEventListener("hashchange", openSessionHash);
+
+async function modalSessionRequest(record) {
+  const {m, close} = modal(`<h2>${record.workflow ? "Session workflow" : "Session request"}</h2>
+    <div class="session-request-detail">Loading…</div>
+    <div class="modal-actions"><button class="btn secondary sr-refresh">Refresh</button>
+    <button class="btn danger sr-cancel">Cancel remaining work</button>
+    <button class="btn sr-close">Close</button></div>`, "session-request-modal");
+  m.querySelector(".sr-close").onclick = close;
+  let targetBid = 0;
+  const detail = m.querySelector(".session-request-detail");
+  const cancel = m.querySelector(".sr-cancel");
+  const refresh = m.querySelector(".sr-refresh");
+  const terminal = new Set(["completed", "failed", "cancelled", "expired", "rejected", "lost"]);
+  const names = new Map();
+  const renderResult = (box, result) => {
+    const row = el("div", "session-request-result");
+    const target = el("button", "btn small", names.get(result.target) || "Open session");
+    target.onclick = () => openSessionReference(result.target, Number(result.end_seq || result.start_seq || 0));
+    row.appendChild(target);
+    row.appendChild(el("span", "session-request-status", result.status));
+    if (result.error) row.appendChild(el("p", "err-card", result.error));
+    if (result.answer) row.appendChild(el("pre", "session-request-answer", result.answer));
+    box.appendChild(row);
+  };
+  const load = async (stop = false) => {
+    refresh.disabled = true; cancel.disabled = true;
+    try {
+      const method = record.workflow ? (stop ? "cancel_workflow" : "workflow") : (stop ? "cancel" : "wait");
+      const data = await api(targetBid, "session-links/action", {method: "POST", body: {
+        source: record.source, method, params: record.workflow ? {id: record.id} : {id: record.id, wait_s: 0}}});
+      if (!m.isConnected) return;
+      detail.replaceChildren();
+      detail.appendChild(el("p", "modal-copy", `${data.title || "Request"} · ${data.status} · ${fmtDateTime(data.created_at)}`));
+      if (record.workflow) {
+        for (const step of data.steps || []) {
+          const section = el("section", "session-request-step");
+          section.appendChild(el("strong", "", `${step.spec.id} · ${step.status}`));
+          section.appendChild(el("p", "modal-copy", step.spec.text));
+          if (step.error) section.appendChild(el("p", "err-card", step.error));
+          for (const result of step.results || []) renderResult(section, result);
+          detail.appendChild(section);
+        }
+      } else for (const result of data.results || []) renderResult(detail, result);
+      for (const unavailable of data.unavailable || [])
+        detail.appendChild(el("p", "modal-copy", `${unavailable.node || "Session"}: ${unavailable.error}`));
+      cancel.classList.toggle("hidden", terminal.has(data.status));
+      cancel.disabled = false;
+    } catch (error) { detail.textContent = error.message; }
+    finally { refresh.disabled = false; }
+  };
+  refresh.onclick = () => load();
+  cancel.onclick = async () => {
+    if (await modalConfirm("Cancel remaining work?", "Pending steps and work belonging to this request will be cancelled.")) load(true);
+  };
+  try {
+    const catalog = await api(0, "session-links/catalog");
+    for (const row of catalog.sessions) names.set(row.ref, `${row.title} · ${row.node_name}`);
+    if (record.controller && catalog.controller !== record.controller) {
+      const row = catalog.sessions.find(item => item.node === record.controller);
+      if (!row) throw new Error("The console tracking this request is unavailable");
+      targetBid = row.bid;
+    }
+    await load();
+  } catch (error) { detail.textContent = error.message; }
+}

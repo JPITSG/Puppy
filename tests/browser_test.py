@@ -4830,6 +4830,24 @@ async function run(){
   streamed.type("@a");
   streamed.type("@");
   out.streamedBackspace=streamed.labels();
+  const controller="b".repeat(32), peer="a".repeat(32);
+  apiResult={controller,unavailable:[],sessions:[
+    {bid:0,id:9,ref:controller+"/9",title:"Origin",node_name:"local",cwd:"/project",status:"idle"},
+    {bid:0,id:10,ref:controller+"/10",title:"API decisions",node_name:"local",cwd:"/project",status:"idle"},
+    {bid:2,id:11,ref:peer+"/11",title:"Frontend layout notes",node_name:"NAS",cwd:"/ui",archived:true}
+  ]};
+  const selected=new View(0);
+  selected.type("@session"); selected.pick("Session");
+  await Promise.resolve();await Promise.resolve();
+  out.sessionChoices=selected.labels();
+  selected.type("@api"); out.sessionFiltered=selected.labels();
+  selected.pick("API decisions");
+  selected.type("@Frontend layout notes"); selected.pick("Frontend layout notes");
+  selected.pick("Insert 2 selected");
+  out.sessionsInserted=selected.ta.value;
+  selected.type("@session");selected.pick("Session");
+  await Promise.resolve();await Promise.resolve();
+  selected.pick("All sessions");out.allSessionsInserted=selected.ta.value;
   console.log(JSON.stringify(out));
 }
 run().catch(e=>{console.error(e&&e.stack||e);process.exit(1);});
@@ -4838,7 +4856,7 @@ run().catch(e=>{console.error(e&&e.stack||e);process.exit(1);});
                           capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:1200]
     flow = json.loads(proc.stdout.strip())
-    assert flow["flat"] == ["New terminal", "New spawn"], flow
+    assert flow["flat"] == ["Session", "New terminal", "New spawn"], flow
     assert flow["countStep"] == [13, "1 agent", "12 agents", "Back", "count"], flow
     assert flow["countFiltered"] == ["3 agents", "Back"], flow
     assert flow["nodeStep"] == [
@@ -4854,13 +4872,18 @@ run().catch(e=>{console.error(e&&e.stack||e);process.exit(1);});
         None, None], flow
     assert flow["backToNode"] == "node", flow
     assert flow["backToCount"] == "count", flow
-    assert flow["backOut"] == [None, ["New terminal", "New spawn"]], flow
+    assert flow["backOut"] == [None, ["Session", "New terminal", "New spawn"]], flow
     assert flow["remoteFlat"] == ["New spawn"], flow
     assert flow["remoteCount"] == "count", flow
     assert flow["remoteEngine"] == [["Solo", "Back"], "engine"], flow
     assert flow["remoteInserted"] == ["@Spawn an agent using solo to ", None], flow
-    assert flow["streamedOpen"] == ["New terminal", "New spawn"], flow
-    assert flow["streamedBackspace"] == ["New terminal", "New spawn"], flow
+    assert flow["streamedOpen"] == ["Session", "New terminal", "New spawn"], flow
+    assert flow["streamedBackspace"] == ["Session", "New terminal", "New spawn"], flow
+
+    assert flow["sessionChoices"] == ["All sessions", "API decisions", "Frontend layout notes", "Back"], flow
+    assert flow["sessionFiltered"] == ["API decisions", "Back"], flow
+    assert flow["sessionsInserted"] == "@Session {}:{}/10 @Session {}:{}/11 ".format("b"*32, "b"*32, "b"*32, "a"*32), flow
+    assert flow["allSessionsInserted"] == "@Session {}:all ".format("b"*32), flow
 
     # The "New spawn" wizard: capability-gated row, parts slide instead of
     # inserting, Escape/Backspace go back, and only the finished directive
@@ -4875,8 +4898,8 @@ run().catch(e=>{console.error(e&&e.stack||e);process.exit(1);});
     wizard_hide = ui_source.index("  hideMention() {")
     assert ui_source.index("this.mentionSpawn = null;", wizard_hide) < \
         ui_source.index("if (!this.mention) return;", wizard_hide)
-    assert '!this.mentionSpawn && e.key === "Enter"' in ui_source
-    assert "if (!this.mentionSpawn) this.refreshMentionInstances();" in ui_source
+    assert '!this.mentionSpawn && !this.mentionSession && e.key === "Enter"' in ui_source
+    assert "if (!this.mentionSpawn && !this.mentionSession) this.refreshMentionInstances();" in ui_source
     # a backend-hosted session can only spawn onto its own node
     spawn_nodes = ui_source[ui_source.index("  spawnNodeChoices() {"):
                             ui_source.index("\n  spawnTargetBid()")]

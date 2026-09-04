@@ -14,7 +14,7 @@ import time
 import uuid
 
 from puppy import (agent_notes, browser_agent, config, db, handoff, notify, spawn_agent,
-                   system_prompts, terminal_agent, uploads, workspace_sync,
+                   system_prompts, terminal_agent, session_agent, session_links, uploads, workspace_sync,
                    workspaces)
 from puppy.drivers import get_driver
 from puppy.drivers import base as driver_base
@@ -265,6 +265,7 @@ def session_payload(session):
     if session is None:
         return None
     out = dict(session)
+    out["session_ref"] = session_links.reference(session["id"])
     out["agent_notes"] = agent_notes.present(session.get("cwd"))
     out["workspace_missing"] = workspaces.is_temporary(out) and not workspaces.is_available(out)
     out["used_config"] = parse_used_config(out["used_config"])
@@ -461,6 +462,7 @@ def sessions_payload() -> dict:
         completion = notify.completion_record(s["id"])
         sessions.append({
             "id": s["id"], "name": s["name"], "engine": s["engine"],
+            "session_ref": session_links.reference(s["id"]),
             "cwd": workspace_sync.public_cwd(s),
             "status": (h.status if h else "idle"), "archived": s["archived"],
             "pinned": bool(s["pinned"]),
@@ -2831,10 +2833,17 @@ class SessionHub:
             browser_mcp = None if tool else browser_agent.turn_mcp(self.id, pinned)
             terminal_mcp = None if tool else terminal_agent.turn_mcp(self.id, pinned)
             spawn_mcp = None if tool else spawn_agent.turn_mcp(self.id, pinned)
+            if not tool:
+                session_links.prepare_turn(self.id, pinned, text)
+                from puppy import session_actions
+                session_actions.turn_started(self.id, text, pinned, user_seq)
+            session_mcp = None if tool else session_agent.turn_mcp(self.id, pinned)
             system_prompt_text = "" if tool else system_prompts.turn_prompt(
                 remote_workspace=descriptor is not None)
             driver_kwargs = {"browser_mcp": browser_mcp, "terminal_mcp": terminal_mcp,
                              "spawn_mcp": spawn_mcp, "system_prompt": system_prompt_text}
+            if session_mcp:
+                driver_kwargs["session_mcp"] = session_mcp
             if tool:
                 driver_kwargs["tool"] = tool_fields
             argv = driver.build_cmd(session, first_turn, prompt, pinned, **driver_kwargs)
@@ -3183,6 +3192,7 @@ class SessionHub:
                 except Exception:
                     pass
             if ended_turn_id:
+                session_links.end_turn(self.id, ended_turn_id)
                 # Everything this turn spawned dies with it - here, before the
                 # post-turn sync or the next queued prompt can touch the same
                 # working directory, not on the sweeper's next pass.
@@ -3226,6 +3236,10 @@ class SessionHub:
                 retry_item = {"kind": "retry", "fields": {
                     "text": text, "attempt": attempt + 1,
                     "delay": retry_delay, "user_seq": user_seq}}
+            if retry_item is None and not tool:
+                from puppy import session_actions
+                session_actions.turn_finished(self.id, text,
+                    "interrupted" if self.interrupted else self._block_status, user_seq)
             if retry_item is not None:
                 # the same prompt again after its back-off, ahead of the queue
                 nxt = retry_item

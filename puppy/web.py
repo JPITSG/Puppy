@@ -1747,6 +1747,8 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     uploads.register(app)
     workspace_sync.register(app)
     spawn_exec.register(app)
+    from puppy import session_links
+    session_links.register(app)
     search.register(app)
     agent_notes.register(app)
     state_stream.register(

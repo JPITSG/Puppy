@@ -120,6 +120,9 @@ def blockers() -> List[str]:
     reasons.extend(workspace_links.snapshot_blockers())
     from puppy import notify
     reasons.extend(notify.snapshot_blockers())
+    from puppy import session_coordination
+    if session_coordination.busy():
+        reasons.append("unfinished session requests or coordination workflows")
     return reasons
 
 
@@ -585,6 +588,11 @@ def _validate_database(path: Path):
             db.require_current_schema(connection)
         except db.SchemaMismatchError as exc:
             raise SnapshotError("snapshot database schema is not current") from exc
+        from puppy import session_links
+        try:
+            session_links.validate_persisted(connection)
+        except (ValueError, TypeError) as exc:
+            raise SnapshotError("snapshot session references are not current") from exc
         transport_row = connection.execute(
             "SELECT value FROM meta WHERE key=?", (web_tls.STATE_KEY,)).fetchone()
         if transport_row is None:

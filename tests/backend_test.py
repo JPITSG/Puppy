@@ -5405,6 +5405,8 @@ async def main() -> None:
         assert any(name.startswith("puppy/drivers/") for name in names)
         assert "puppy/browser_agent.py" in names
         assert "puppy/terminal_agent.py" in names
+        for name in ("session_agent", "session_links", "session_actions", "session_coordination"):
+            assert "puppy/{}.py".format(name) in names
         assert "LICENSE" in names
         assert not any(name.startswith("puppy/static/") for name in names)
         mcp_env = dict(os.environ)
@@ -5438,6 +5440,9 @@ async def main() -> None:
         ], text=True).splitlines()[-1])
         assert self_test["ok"] is True and self_test["version"] == __version__
         assert "/api/terminal/instances" in self_test["routes"]
+        assert "/api/session-links/node" in self_test["routes"]
+        assert "/api/session-links/action" in self_test["routes"]
+        assert "/api/ws/session-links" in self_test["routes"]
         assert "/api/ws/terminal/{terminal_id}" in self_test["routes"]
 
         # Configuration alone is insufficient: a directly launched zipapp must
