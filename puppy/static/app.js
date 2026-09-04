@@ -6063,8 +6063,15 @@ function syncHorizontalOverflow(scroller, viewport = scroller && scroller.parent
   const maximum = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
   const position = Math.max(0, Math.min(maximum, scroller.scrollLeft));
   const overflowed = scroller.clientWidth > 0 && maximum > 1;
-  viewport.classList.toggle("more-left", overflowed && position > 1);
-  viewport.classList.toggle("more-right", overflowed && position < maximum - 1);
+  const fadeLimit = Math.max(0, parseFloat(
+    getComputedStyle(viewport).getPropertyValue("--edge-scroll-fade-size")) || 0);
+  /* The cue narrows with the content still hidden on that side. A binary
+     full-width gradient plus an opacity transition used to linger over the
+     final content after smooth scrolling had effectively reached an edge. */
+  const left = overflowed ? Math.min(fadeLimit, position) : 0;
+  const right = overflowed ? Math.min(fadeLimit, maximum - position) : 0;
+  viewport.style.setProperty("--edge-scroll-left-fade-size", left + "px");
+  viewport.style.setProperty("--edge-scroll-right-fade-size", right + "px");
 }
 
 /* The horizontal strips (the tab bar, the chat head's chips, the composer's

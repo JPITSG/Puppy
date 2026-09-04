@@ -4592,8 +4592,44 @@ run().catch(e=>{console.error(e&&e.stack||e);process.exit(1);});
     assert spawn_tools["cancel"]["inputSchema"]["required"] == ["jobs"]
 
 
-def check_smooth_wheel_swipe(ui_source: str) -> None:
-    """Every touch-swipe strip shares one smooth, boundary-aware wheel path."""
+def check_smooth_wheel_swipe(ui_source: str, css_source: str) -> None:
+    """Wheel motion and its edge cues settle on the same exact boundary."""
+    fade_start = ui_source.index("function syncHorizontalOverflow")
+    fade_end = ui_source.index("\n\n/* The horizontal strips", fade_start)
+    fade_source = ui_source[fade_start:fade_end]
+    fade_script = r"""
+const values = {};
+const viewport = {style:{setProperty(name,value){values[name]=value;}}};
+const scroller = {scrollLeft:0,scrollWidth:500,clientWidth:100,
+                  parentElement:viewport};
+const getComputedStyle = () => ({getPropertyValue:() => "34px"});
+%s
+function sample(left, width=500) {
+  scroller.scrollLeft=left; scroller.scrollWidth=width;
+  syncHorizontalOverflow(scroller);
+  return [parseFloat(values["--edge-scroll-left-fade-size"]),
+          parseFloat(values["--edge-scroll-right-fade-size"])];
+}
+console.log(JSON.stringify([
+  sample(0), sample(12.5), sample(34), sample(390), sample(400),
+  sample(450), sample(0,100)
+]));
+""" % fade_source
+    fade_proc = subprocess.run(["node", "-e", fade_script],
+                               capture_output=True, text=True)
+    assert fade_proc.returncode == 0, fade_proc.stderr[:1000]
+    assert json.loads(fade_proc.stdout) == [
+        [0, 34], [12.5, 34], [34, 34], [34, 10], [34, 0],
+        [34, 0], [0, 0],
+    ]
+    edge_start = css_source.index("/* Shared overflow cues")
+    edge_end = css_source.index("/* Give the strip", edge_start)
+    edge_css = css_source[edge_start:edge_end]
+    assert "--edge-scroll-left-fade-size:0px" in edge_css
+    assert "--edge-scroll-right-fade-size:0px" in edge_css
+    assert "transition:opacity" not in edge_css
+    assert ".edge-scroll-viewport.more-left" not in edge_css
+
     start = ui_source.index("const WHEEL_SWIPE_STRIPS")
     end = ui_source.index("\nfunction syncAllTabOverflow", start)
     source = ui_source[start:end]
@@ -6421,7 +6457,7 @@ async def main() -> None:
             check_engine_picker_alignment(css_source)
             check_browser_chip_order(ui_source)
             check_composer_mentions(ui_source, css_source)
-            check_smooth_wheel_swipe(ui_source)
+            check_smooth_wheel_swipe(ui_source, css_source)
             check_chat_status_bar_layout(ui_source, css_source)
             check_backend_name_single_activation(ui_source)
             check_browser_disable_closes_scoped_tabs(ui_source)

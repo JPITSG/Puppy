@@ -746,26 +746,28 @@ select.choice-native{display:none!important}
 .tabbar .burger svg{display:block}
 /* the visual box stays 26px; the tap target fills the bar's height */
 .tabbar .burger::after,.tab-add-wrap .icon-btn::after{content:"";position:absolute;inset:-8px -6px}
-/* Shared overflow cues for compact horizontal lanes. JS applies each side
-   independently from the live scroll position: no cue at a reached edge,
-   both cues while content remains in both directions. */
+/* Shared overflow cues for compact horizontal lanes. JS gives each side the
+   lesser of the full fade width and the exact content distance still hidden
+   there, so the cue reaches zero on the same frame as its scroll boundary. */
 .edge-scroll-viewport{
   --edge-scroll-fade-size:34px;
+  --edge-scroll-left-fade-size:0px;
+  --edge-scroll-right-fade-size:0px;
   --edge-scroll-fade-color:var(--bg);
   position:relative;overflow:hidden;
 }
 .edge-scroll-viewport::before,.edge-scroll-viewport::after{
   content:"";position:absolute;z-index:4;top:0;bottom:0;
-  width:var(--edge-scroll-fade-size);pointer-events:none;opacity:0;
-  transition:opacity .16s var(--ease);
+  pointer-events:none;
 }
 .edge-scroll-viewport::before{
-  left:0;background:linear-gradient(90deg,var(--edge-scroll-fade-color) 12%,transparent);
+  left:0;width:var(--edge-scroll-left-fade-size);
+  background:linear-gradient(90deg,var(--edge-scroll-fade-color) 12%,transparent);
 }
 .edge-scroll-viewport::after{
-  right:0;background:linear-gradient(90deg,transparent,var(--edge-scroll-fade-color) 88%);
+  right:0;width:var(--edge-scroll-right-fade-size);
+  background:linear-gradient(90deg,transparent,var(--edge-scroll-fade-color) 88%);
 }
-.edge-scroll-viewport.more-left::before,.edge-scroll-viewport.more-right::after{opacity:1}
 /* Give the strip a definite zero flex basis. In the phone workspace the tree
    deliberately uses max-content sizing so saved split panes can be panned;
    without this viewport, a long tab collection also became max-content and
