@@ -3610,7 +3610,10 @@ def check_dynamic_model_catalog_ui(ui_source: str) -> None:
     assert "renderEngines(loaded, true);" in ui_source
     assert "select.dataset.engineChoicesDirty = \"true\";" in ui_source
     assert "select.dataset.engineChoiceBusy = \"true\";" in ui_source
-    assert "this.syncNativeComposerChoices();\n    this.syncComposerMeta();" in ui_source
+    assert ("this.syncNativeComposerChoices();\n"
+            "    this.syncToolsButton();\n"
+            "    this.syncFastIndicator();\n"
+            "    this.syncComposerMeta();") in ui_source
     assert "Re-check engine versions, sign-in and model lists" in ui_source
     assert "Model-list refresh warning" in ui_source
 
@@ -4402,6 +4405,102 @@ console.log(JSON.stringify([initial, legacy, switched, picked, stale].map(slim))
          "fast": True, "queuedEngine": True, "queuedPermission": True,
          "queuedFast": True},
     ]
+
+
+def check_fast_mode_indicator(ui_source: str, css_source: str) -> None:
+    """Fast gets one feature-gated square and no off-state placeholder."""
+    template_start = ui_source.index('<div class="composer-meta-scroll">')
+    template_end = ui_source.index('${composerChoice("model"', template_start)
+    template = ui_source[template_start:template_end]
+    assert template.index('class="mini attach-add"') < \
+        template.index('class="mini tools-open hidden"') < \
+        template.index('class="mini fast-indicator hidden"') < \
+        template.index('${composerChoice("perm"')
+    assert 'class="mini fast-indicator hidden" role="img"' in template
+    assert 'aria-label="Fast mode is on" title="Fast mode is on"' in template
+    assert 'this.fastIndicator.firstElementChild.appendChild(fastModeIcon(12));' \
+        in ui_source
+
+    icon_start = ui_source.index("function fastModeIcon(")
+    icon_end = ui_source.index("\n\n/* A font's vertical-ellipsis", icon_start)
+    icon = ui_source[icon_start:icon_end]
+    assert 'svg.setAttribute("viewBox", "0 0 16 16")' in icon
+    assert 'p.setAttribute("fill", "currentColor")' in icon
+
+    method_start = ui_source.index("  syncFastIndicator() {")
+    method_end = ui_source.index("\n\n  showToolsMenu(", method_start)
+    method = ui_source[method_start:method_end]
+    assert "backendSupportsFastMode(this.tab.bid)" in method
+    assert "eng.supports_fast_mode === true" in method
+    assert "eff.fast_mode === true" in method
+    assert 'classList.toggle("hidden", !visible)' in method
+    assert '"Fast mode is on for the next turn"' in method
+    # Engine feature metadata is the boundary; names and tier ids would make
+    # this presentation brittle across catalog and CLI changes.
+    assert "codex" not in method and "service_tier" not in method
+
+    script = r"""
+let capability = true;
+const engines = {
+  tiered: {supports_fast_mode:true},
+  ordinary: {supports_fast_mode:false},
+};
+const engineInfo = (_bid, key) => engines[key] || null;
+const backendSupportsFastMode = () => capability;
+class Harness {
+  constructor(config) {
+    this.config = config;
+    this.session = {engine:config.engine};
+    this.tab = {bid:0};
+    const classes = new Set(["hidden"]);
+    const attrs = {};
+    this.fastIndicator = {
+      _classes:classes, _attrs:attrs, title:"",
+      classList:{toggle:(name, on) => on ? classes.add(name) : classes.delete(name)},
+      setAttribute:(name, value) => { attrs[name] = value; },
+      removeAttribute:(name) => { delete attrs[name]; },
+    };
+  }
+  effectiveConfig() { return this.config; }
+%s
+}
+const read = config => {
+  const h = new Harness(config); h.syncFastIndicator();
+  return {hidden:h.fastIndicator._classes.has("hidden"),
+    label:h.fastIndicator._attrs["aria-label"] || ""};
+};
+const results = [];
+results.push(read({engine:"tiered", fast_mode:true, queuedFast:false}));
+results.push(read({engine:"tiered", fast_mode:false, queuedFast:false}));
+results.push(read({engine:"ordinary", fast_mode:true, queuedFast:false}));
+results.push(read({engine:"tiered", fast_mode:true, queuedFast:true}));
+capability = false;
+results.push(read({engine:"tiered", fast_mode:true, queuedFast:false}));
+capability = true;
+const changed = new Harness({engine:"tiered", fast_mode:true, queuedFast:false});
+changed.syncFastIndicator();
+changed.config = {engine:"tiered", fast_mode:false, queuedFast:true};
+changed.syncFastIndicator();
+results.push({hidden:changed.fastIndicator._classes.has("hidden")});
+console.log(JSON.stringify(results));
+""" % method
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:700]
+    assert json.loads(proc.stdout) == [
+        {"hidden": False, "label": "Fast mode is on"},
+        {"hidden": True, "label": ""},
+        {"hidden": True, "label": ""},
+        {"hidden": False, "label": "Fast mode is on for the next turn"},
+        {"hidden": True, "label": ""},
+        {"hidden": True},
+    ]
+
+    assert (".composer-row .mini.attach-add,.composer-row .mini.tools-open,\n"
+            ".composer-row .mini.fast-indicator{width:24px;padding:0}") \
+        in css_source
+    assert ".composer-row .mini.fast-indicator{color:var(--fast-mode);cursor:default}" \
+        in css_source
+    assert css_source.count("--fast-mode:") == 2
 
 
 def check_switch_engine_initial_selection(ui_source: str) -> None:
@@ -6700,6 +6799,7 @@ async def main() -> None:
             check_node_owned_session_order(ui_source, css_source)
             check_session_pins(ui_source, css_source)
             check_queued_permission_choices(ui_source)
+            check_fast_mode_indicator(ui_source, css_source)
             check_switch_engine_initial_selection(ui_source)
             check_engine_picker_alignment(css_source)
             check_browser_chip_order(ui_source)

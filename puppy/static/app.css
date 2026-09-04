@@ -17,6 +17,7 @@
   --acc:#5aa2f5; --acc2:#8cc3ff; --acc-dim:rgba(90,162,245,.14);
   --ok:#22e5a4; --ok-dim:rgba(34,229,164,.12);
   --warn:#ffb64d; --warn-dim:rgba(255,182,77,.12);
+  --fast-mode:#ffd24a;
   --err:#ff6b81; --err-dim:rgba(255,107,129,.12);
   /* State lines keep their hierarchy while following each theme's palette. */
   --focus-line:rgba(90,162,245,.55); --focus-ring:rgba(90,162,245,.12);
@@ -1542,10 +1543,13 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   transition:background .15s var(--ease),border-color .15s var(--ease),
              color .15s var(--ease),transform .12s var(--ease);
 }
-.composer-row .mini.attach-add,.composer-row .mini.tools-open{width:24px;padding:0}
+.composer-row .mini.attach-add,.composer-row .mini.tools-open,
+.composer-row .mini.fast-indicator{width:24px;padding:0}
 /* drawn plus, so the ink centres on the box rather than on the font's axis */
-.composer-row .mini.attach-add>span,.composer-row .mini.tools-open>span{display:flex}
-.composer-row .mini.attach-add svg,.composer-row .mini.tools-open svg{display:block}
+.composer-row .mini.attach-add>span,.composer-row .mini.tools-open>span,
+.composer-row .mini.fast-indicator>span{display:flex}
+.composer-row .mini.attach-add svg,.composer-row .mini.tools-open svg,
+.composer-row .mini.fast-indicator svg{display:block}
 .composer-row .mini.attach-add.uploading>span{animation:attach-pulse 1s ease-in-out infinite}
 .composer-row .mini:disabled{cursor:not-allowed;opacity:.38}
 /* the pill shows what the NEXT prompt will use; italics while that value is
@@ -1568,6 +1572,11 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .composer-row .mini:not(:disabled):active{transform:scale(.96);background:var(--hov)}
 .composer-row .mini .mini-value{color:var(--txt2)}
 @media (hover:hover){.composer-row .mini:hover .mini-value{color:var(--txt)}}
+.composer-row .mini.fast-indicator{color:var(--fast-mode);cursor:default}
+@media (hover:hover){.composer-row .mini.fast-indicator:hover{
+  color:var(--fast-mode);border-color:var(--line);background:none;
+}}
+.composer-row .mini.fast-indicator:active{transform:none;background:none}
 .btn-send,.btn-queue,.btn-steer,.btn-ask{
   display:inline-flex;align-items:center;justify-content:center;gap:7px;flex-shrink:0;
   height:32px;min-width:86px;padding:0 16px var(--label-pb);border:none;border-radius:var(--btn-r);
@@ -2679,6 +2688,7 @@ html.light{
   --acc:#2b69bd; --acc2:#2563c4; --acc-dim:rgba(59,130,224,.13);
   --ok:#077553; --ok-dim:rgba(11,158,113,.10);
   --warn:#9e5203; --warn-dim:rgba(178,98,5,.10);
+  --fast-mode:#946f00;
   --err:#b52640; --err-dim:rgba(214,69,93,.10);
   --focus-line:rgba(59,130,224,.55); --focus-ring:rgba(59,130,224,.12);
   --focus-ring-soft:rgba(59,130,224,.10); --focus-stage-ring:#a9c7ef;

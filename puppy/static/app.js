@@ -131,6 +131,23 @@ function toolsIcon(size) {
   return svg;
 }
 
+/* Fast is an active service-tier state, not another editable choice in this
+   row. Give it a compact filled mark that remains legible at the same 12px
+   ink size as the neighbouring attach and tools controls. */
+function fastModeIcon(size) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const p = document.createElementNS(NS, "path");
+  p.setAttribute("d", "M9.15 1.25 3.7 8.45h3.55l-.65 6.3 5.7-7.45H8.8z");
+  p.setAttribute("fill", "currentColor");
+  svg.appendChild(p);
+  return svg;
+}
+
 /* A font's vertical-ellipsis ink is not guaranteed to share its em-box centre.
    Draw the session-menu mark on a symmetric viewBox like every other compact
    chrome button, so the hover square and the visible dots have one centre. */
@@ -8024,6 +8041,9 @@ class SessionView {
                   <span aria-hidden="true"></span></button>
                 <button type="button" class="mini tools-open hidden" aria-label="Session tools">
                   <span aria-hidden="true"></span></button>
+                <span class="mini fast-indicator hidden" role="img"
+                  aria-label="Fast mode is on" title="Fast mode is on">
+                  <span aria-hidden="true"></span></span>
                 ${composerChoice("perm", "Permissions", "Permission mode")}
                 ${composerChoice("model", "Model", "Model")}
                 ${composerChoice("effort", "Effort", "Reasoning effort")}
@@ -8105,7 +8125,10 @@ class SessionView {
     this.toolsButton = root.querySelector(".tools-open");
     this.toolsButton.firstElementChild.appendChild(toolsIcon(12));
     this.toolsButton.onclick = (e) => { e.stopPropagation(); this.showToolsMenu(e.currentTarget); };
+    this.fastIndicator = root.querySelector(".fast-indicator");
+    this.fastIndicator.firstElementChild.appendChild(fastModeIcon(12));
     this.syncToolsButton();
+    this.syncFastIndicator();
     this.fileInput = root.querySelector(".attach-input");
     this.headMeta.addEventListener("scroll", () => this.syncHeadOverflow(), { passive: true });
     this.composerMeta.addEventListener("scroll", () => this.syncComposerOverflow(), { passive: true });
@@ -8432,6 +8455,8 @@ class SessionView {
 
   syncRemoteState() {
     this.syncNativeComposerChoices();
+    this.syncToolsButton();
+    this.syncFastIndicator();
     this.syncComposerMeta();
     this.syncUploadButton();
     const stopping = !!remoteStoppingMessage(this.tab.bid);
@@ -9710,6 +9735,7 @@ class SessionView {
     this.syncSwitchLines();   // the newest divider tracks the live selection
     this.syncNativeComposerChoices();
     this.syncToolsButton();
+    this.syncFastIndicator();
     this.syncComposerMeta();
     this.syncHeadOverflow();
     this.tab.title = s.name || `Session ${s.id}`;
@@ -11531,6 +11557,25 @@ class SessionView {
     if (!this.toolsButton) return;
     this.toolsButton.classList.toggle("hidden",
       !backendSupportsSessionTools(this.tab.bid) && !backendSupportsFastMode(this.tab.bid));
+  }
+
+  /* The composer describes the NEXT prompt, so a queued on/off change is
+     reflected immediately. Feature metadata, rather than an engine/model
+     name, is the durable boundary; an unsupported engine can never light it. */
+  syncFastIndicator() {
+    if (!this.fastIndicator) return;
+    const eff = this.effectiveConfig();
+    const eng = engineInfo(this.tab.bid,
+      eff.engine || (this.session && this.session.engine));
+    const visible = backendSupportsFastMode(this.tab.bid) &&
+      eff.fast_mode === true && !!eng && eng.supports_fast_mode === true;
+    this.fastIndicator.classList.toggle("hidden", !visible);
+    if (!visible) return;
+    const label = eff.queuedFast ?
+      "Fast mode is on for the next turn" : "Fast mode is on";
+    this.fastIndicator.setAttribute("aria-label", label);
+    this.fastIndicator.title = label;
+    this.fastIndicator.removeAttribute("data-tip");
   }
 
   showToolsMenu(anchor) {
