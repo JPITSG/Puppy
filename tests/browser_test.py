@@ -4628,7 +4628,8 @@ const state={instance:"controller",backends:[
   {key:"solo",label:"Solo",installed:true,auth:"ok",
    model_options:[{value:"",label:"Default"}],
    effort_options:[{value:"",label:"Default"}]},
-]},tabs:[]};
+]},tabs:[],browserStatus:{enabled:false,instances:[]},
+  remoteBrowserStatus:{},terminalInstances:{0:[]}};
 const backendName=bid=>bid?(state.backends.find(b=>b.id===bid)||{}).name||("backend "+bid):state.instance;
 const spawnExecFor=bid=>{if(!bid)return true;
   const backend=state.backends.find(item=>item.id===bid);
@@ -4636,7 +4637,8 @@ const spawnExecFor=bid=>{if(!bid)return true;
     Array.isArray(backend.capabilities)&&backend.capabilities.includes("spawn-exec");};
 const backendConnectionAllowed=()=>true;
 const backendHasCapability=()=>false;
-const nodeStateStreamActive=()=>false;
+let liveStateStream=false;
+const nodeStateStreamActive=()=>liveStateStream;
 const browserEnabledFor=()=>false;
 const browserInstancesFor=()=>false;
 const terminalInstancesFor=()=>false;
@@ -4719,6 +4721,16 @@ async function run(){
   out.remoteEngine=[remote.labels(),remote.mentionSpawn.step];
   remote.pick("Solo");
   out.remoteInserted=[remote.ta.value,remote.mentionSpawn];
+  // A live state stream already seeds mentionData and must not recursively
+  // re-enter updateMention from refreshMentionInstances. Exercise both the
+  // initial @ and the common query -> Backspace -> @ sequence.
+  const streamed=new View(0);
+  liveStateStream=true;
+  streamed.type("@");
+  out.streamedOpen=streamed.labels();
+  streamed.type("@a");
+  streamed.type("@");
+  out.streamedBackspace=streamed.labels();
   console.log(JSON.stringify(out));
 }
 run().catch(e=>{console.error(e&&e.stack||e);process.exit(1);});
@@ -4748,6 +4760,8 @@ run().catch(e=>{console.error(e&&e.stack||e);process.exit(1);});
     assert flow["remoteCount"] == "count", flow
     assert flow["remoteEngine"] == [["Solo", "Back"], "engine"], flow
     assert flow["remoteInserted"] == ["@Spawn an agent using solo to ", None], flow
+    assert flow["streamedOpen"] == ["New terminal", "New spawn"], flow
+    assert flow["streamedBackspace"] == ["New terminal", "New spawn"], flow
 
     # The "New spawn" wizard: capability-gated row, parts slide instead of
     # inserting, Escape/Backspace go back, and only the finished directive

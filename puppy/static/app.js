@@ -9328,13 +9328,10 @@ class SessionView {
     const bid = this.tab.bid || 0;
     const data = this.mentionData;
     if (nodeStateStreamActive(bid)) {
-      const browserCatalog = bid ? state.remoteBrowserStatus[bid] : state.browserStatus;
-      data.browsers = browserCatalog && Array.isArray(browserCatalog.instances) ?
-        browserCatalog.instances : null;
-      data.terminals = Array.isArray(state.terminalInstances[bid]) ?
-        state.terminalInstances[bid] : null;
-      data.at = Date.now();
-      if (this.mention && !this.closed) this.updateMention();
+      /* Stream snapshots seed new views in the constructor and update open
+         views through syncInstanceCatalogIntoViews. Re-entering
+         updateMention() from its own refresh tail recursively rebuilt the
+         popup until the browser hit its call-stack limit on every keystroke. */
       return;
     }
     if (data.promise || Date.now() - data.at < 10000) return;
