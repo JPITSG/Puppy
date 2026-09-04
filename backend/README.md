@@ -4,6 +4,15 @@ This directory contains the separately deployable, API-only Puppy runtime. It
 shares the console's database, runner and engine drivers at build time, but the
 resulting artifact exposes no web GUI, cookie login, settings, or backend proxy.
 
+Nodes advertising `session-tasks-toggle` accept a boolean `tasks_enabled` as a
+standalone `PATCH /api/sessions/{sid}` update and publish it on session payloads.
+Tasks default to enabled. Disabling requires a Main session with no child task
+conversations (including finished or hidden ones), and is serialized with task
+creation. Disabled sessions reject new tasks until re-enabled. This preference
+is node-owned, survives restarts and travels in full-WebUI backups. Deleting a
+session or resetting its scratch workspace is refused with 409 only while that
+session's own tasks exist or a task copy, review or apply is using its files.
+
 ## Build
 
 ```bash

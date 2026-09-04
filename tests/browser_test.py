@@ -677,6 +677,102 @@ console.log(JSON.stringify([oldLocal,backendSupportsSessionTasks(0),backendSuppo
     assert json.loads(proc.stdout) == [False, True, False, False, True, False]
 
 
+def check_session_task_helpers(ui_source: str) -> None:
+    """The task strip, the Tasks sheet and the sidebar's activity slot all take
+    their words and colours from one state table, and the review sheet colours
+    a unified diff by line role."""
+    start = ui_source.index("const TASK_STATES =")
+    end = ui_source.index("function tasksIcon(", start)
+    script = """
+%s
+console.log(JSON.stringify({
+  labels: ["running","queued","pending","held","ready","applied","stopped","failed","odd"]
+    .map(state => [taskStateLabel({state}), taskStateClass({state})]),
+  approval: [taskStateLabel({state:"running", needs_approval:true}),
+             taskStateClass({state:"running", needs_approval:true})],
+  reviewable: ["running","queued","held","ready","applied","stopped","failed"]
+    .map(state => taskReviewable({state})),
+  activity: [null, {total:0}, {total:2,running:0,approval:0,ready:2},
+             {total:2,running:1,approval:0,ready:0},
+             {total:3,running:2,approval:1,ready:0}].map(taskActivityLabel),
+  title: taskActivityTitle({total:3,running:2,approval:1,ready:0}),
+  diff: ["diff --git a/x b/x","index 1..2 100644","--- a/x","+++ b/x","@@ -1 +1 @@",
+         "-old","+new"," same","Binary files differ"].map(diffLineClass),
+}));
+""" % ui_source[start:end]
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:600]
+    result = json.loads(proc.stdout)
+    assert result["labels"] == [
+        ["Running", "busy"], ["Queued", "busy"], ["Starting", "busy"], ["Held", "warn"],
+        ["Ready to review", "ok"], ["Applied", ""], ["Stopped", "warn"], ["Failed", "bad"],
+        ["odd", ""]], result
+    assert result["approval"] == ["Needs approval", "warn"], result
+    assert result["reviewable"] == [False, False, False, True, True, True, True], result
+    assert result["activity"] == [
+        None, None, None, {"cls": "active-time", "text": "1 task"},
+        {"cls": "attention", "text": "1 needs input"}], result
+    assert result["title"] == "3 tasks: 2 running, 1 needs input", result
+    assert result["diff"] == [
+        "meta", "meta", "meta", "meta", "hunk", "del", "add", "", "meta"], result
+
+
+def check_session_task_visibility(ui_source: str) -> None:
+    """A per-session Tasks toggle must land on an open workspace without
+    rebuilding its strip or touching the chat underneath, and a node whose
+    bootstrap has not arrived is never read as disabled."""
+    start = ui_source.index("function liveViews()")
+    end = ui_source.index("async function modalNewTask(", start)
+    script = """
+const assert = require("assert");
+let session = { id: 1, tasks_enabled: true, status: "idle", color: "#abc", engine: "codex" };
+let building = true;
+const classes = () => {
+  const values = new Set();
+  return { contains: v => values.has(v), add: v => values.add(v), remove: v => values.delete(v),
+           toggle: (v, on) => on ? values.add(v) : values.delete(v) };
+};
+const node = () => ({ classList: classes(), style: {}, dataset: {}, children: [],
+  appendChild(child) { this.children.push(child); }, replaceChildren() { this.children = []; },
+  setAttribute() {}, querySelector() { return null; }, querySelectorAll() { return []; } });
+const state = { views: {} };
+const sessionsFor = () => session ? [session] : [];
+const findSessionMeta = () => session;
+const el = () => {
+  if (!building) throw new Error("An unchanged task list should retain its rendered controls");
+  return node();
+};
+const syncPromptSpinnerPhase = () => {};
+const syncHorizontalOverflow = () => {};
+const xIcon = () => node();
+const localStorage = { getItem() { return null; }, setItem() {} };
+%s
+const view = Object.create(SessionWorkspaceView.prototype);
+const main = { root: node(), draft: "Keep this draft" };
+Object.assign(view, { tab: { bid: 0, sid: 1 }, root: node(), strip: node(), overviewButton: node(),
+  taskViews: new Map([[1, main]]), opened: [], selected: 1, seen: {}, overview: null, rendered: "" });
+view.refreshTasks();
+const painted = view.strip.children.length;
+building = false;
+for (const enabled of [true, false, true, false]) {
+  session.tasks_enabled = enabled;
+  view.refreshTasks();
+  assert.strictEqual(view.root.classList.contains("tasks-disabled"), !enabled);
+  assert.strictEqual(view.activeView(), main);
+  assert.strictEqual(main.draft, "Keep this draft");
+}
+building = true;
+session = null;
+view.refreshTasks();
+console.log(JSON.stringify({ painted, disabledWithoutBootstrap: view.root.classList.contains("tasks-disabled"),
+  mainShown: main.root.classList.contains("on") }));
+""" % ui_source[start:end]
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:800]
+    assert json.loads(proc.stdout) == {
+        "painted": 1, "disabledWithoutBootstrap": False, "mainShown": True}, proc.stdout
+
+
 def check_reconnect_status(ui_source: str, css_source: str) -> None:
     """A transport outage must overlay, not destroy, model activity text.
 
@@ -5118,7 +5214,7 @@ console.log(JSON.stringify({selectors:WHEEL_SWIPE_STRIPS, passive:listeners.whee
     assert proc.returncode == 0, proc.stderr[:1000]
     result = json.loads(proc.stdout.strip())
     assert result["selectors"] == [
-        ".session-task-tabs", ".tabs", ".chat-meta-scroll", ".composer-meta-scroll"], result
+        ".tabs", ".chat-meta-scroll", ".composer-meta-scroll"], result
     assert result["passive"] is False and result["pointerPassive"] is True, result
     assert result["first"] and result["second"], result
     assert result["queued"] == {"left": 0, "frames": 1}, result
@@ -6807,6 +6903,8 @@ async def main() -> None:
             check_server_clock_format(ui_source)
             check_reconnect_status(ui_source, css_source)
             check_session_task_capability(ui_source)
+            check_session_task_helpers(ui_source)
+            check_session_task_visibility(ui_source)
             check_backend_shutdown_notice(ui_source)
             check_offline_sidebar_sessions(ui_source, css_source)
             check_controller_backend_pooling(ui_source)

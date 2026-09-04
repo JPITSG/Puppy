@@ -590,6 +590,19 @@ async def h_session_patch(request: web.Request):
     body = await request.json()
     if not isinstance(body, dict):
         return web.json_response({"error": "request body must be an object"}, status=400)
+    if "tasks_enabled" in body:
+        if type(body["tasks_enabled"]) is not bool or set(body) != {"tasks_enabled"}:
+            return web.json_response(
+                {"error": "tasks_enabled must be a boolean and updated separately"}, status=400)
+        from puppy import session_tasks
+        try:
+            await session_tasks.set_enabled(s["id"], body["tasks_enabled"])
+        except session_tasks.TaskError as exc:
+            return web.json_response({"error": str(exc)}, status=409)
+        payload = runner.session_payload(db.get_session(s["id"]))
+        runner.broadcast_sessions()
+        runner.hub(s["id"]).broadcast({"type": "session_meta", "session": payload})
+        return web.json_response({"ok": True, "session": payload})
     if "fast_mode" in body and type(body["fast_mode"]) is not bool:
         return web.json_response(
             {"error": "fast_mode must be true or false"}, status=400)
@@ -726,8 +739,9 @@ async def h_session_patch(request: web.Request):
 async def h_session_delete(request: web.Request):
     s = _session_or_404(request)
     from puppy import session_tasks
-    if session_tasks.busy() or session_tasks.children(s["id"]):
-        return web.json_response({"error": "Remove this session's tasks first; wait for any copy/apply operation to finish"}, status=409)
+    blocker = session_tasks.delete_blocker(s)
+    if blocker:
+        return web.json_response({"error": blocker}, status=409)
     if runner.hub(s["id"]).status == "running":
         return web.json_response(
             {"error": "turn in progress - stop it before deleting the session"}, status=409)
@@ -760,8 +774,9 @@ async def h_session_delete(request: web.Request):
 async def h_session_workspace_reset(request: web.Request):
     s = _session_or_404(request)
     from puppy import session_tasks
-    if session_tasks.busy() or session_tasks.record(s["id"]) or session_tasks.children(s["id"]):
-        return web.json_response({"error": "Task workspaces cannot be reset; remove the task or create a new one"}, status=409)
+    blocker = session_tasks.reset_blocker(s)
+    if blocker:
+        return web.json_response({"error": blocker}, status=409)
     h = runner.hub(s["id"])
     if h.status == "running":
         return web.json_response(

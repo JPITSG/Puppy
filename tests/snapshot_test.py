@@ -387,6 +387,17 @@ async def main() -> None:
         assert handoff_path.is_file()
 
         from puppy import session_tasks
+        await session_tasks.set_enabled(linked_id, False)
+        invalid_tasks_db = TEST_ROOT / "invalid-tasks-setting.db"
+        for key, value in ((session_tasks.DISABLED_PREFIX + str(linked_id), 'false'),
+                           (session_tasks.DISABLED_PREFIX + '999999', 'true')):
+            db.backup_to(str(invalid_tasks_db))
+            connection = sqlite3.connect(str(invalid_tasks_db))
+            connection.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)", (key, value))
+            connection.commit()
+            connection.close()
+            expect_snapshot_error(lambda: snapshots._validate_database(invalid_tasks_db), "not current")
+        invalid_tasks_db.unlink()
         session_tasks._git(original_scratch, "init", "--quiet")
         session_tasks._git(original_scratch, "add", "-A")
         session_tasks._git(original_scratch, "commit", "-qm", "Task baseline")
@@ -399,6 +410,7 @@ async def main() -> None:
         session_records = completed_records(db.node_uuid(), directory_id, scratch_id)
         db.meta_apply(session_records)
         direct_archive = snapshots.create_archive(ui)
+        await session_tasks.set_enabled(linked_id, True)
         archive_path = Path(direct_archive["path"])
         assert archive_path.stat().st_mode & 0o777 == 0o600
         with tarfile.open(str(archive_path), "r:gz") as archive:
@@ -621,6 +633,8 @@ async def main() -> None:
         restored_scratch = db.get_session(scratch_id)
         assert restored_scratch["cwd"] != str(original_scratch)
         assert session_tasks.record(scratch_id) == task_record
+        assert session_tasks.enabled(linked_id) is False
+        assert session_tasks.enabled(directory_id) is True
         session_tasks.validate_persisted(db.connect())
         session_tasks._git(restored_scratch["cwd"], "cat-file", "-e", task_base)
         assert session_tasks.children(directory_id) == [scratch_id]

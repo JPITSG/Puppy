@@ -189,6 +189,8 @@ SESSION_REFERENCES_CAPABILITY = "session-references"
 
 BASE_CAPABILITIES = (
     "session-tasks",
+    # Per-session tasks_enabled PATCH; disabling requires no child tasks.
+    "session-tasks-toggle",
     SESSION_REFERENCES_CAPABILITY,
     "session-communication",
     "session-coordination",

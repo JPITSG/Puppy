@@ -23,6 +23,9 @@ from aiohttp import web
 from puppy import config, db, workspaces
 
 PREFIX = "session_task."
+# Optional membership ledger, like session_fast_mode: an exact true marker
+# means disabled; absence means enabled. Existing records/shapes are unchanged.
+DISABLED_PREFIX = "session_tasks_disabled."
 KEYS = {"format", "parent", "request_id", "prompt", "context", "base", "created_at",
         "outcome", "summary", "completed_at", "applied_at", "result_seq"}
 _operations = set()
@@ -71,6 +74,47 @@ def validate_persisted(connection):
         parent = connection.execute("SELECT id FROM sessions WHERE id=?", (value["parent"],)).fetchone()
         if not child or child[0] != workspaces.KIND_TEMPORARY or not parent or value["parent"] in values:
             raise TaskError("task must belong to one existing main session and own a scratch workspace")
+    parents = {value["parent"] for value in values.values()}
+    session_ids = {row[0] for row in connection.execute("SELECT id FROM sessions")}
+    for key, raw in connection.execute("SELECT key,value FROM meta WHERE key GLOB ?", (DISABLED_PREFIX + "*",)):
+        suffix = key[len(DISABLED_PREFIX):]
+        if not re.fullmatch(r"[1-9][0-9]*", suffix) or int(suffix) not in session_ids or \
+                int(suffix) in values or int(suffix) in parents or raw != "true":
+            raise TaskError("session tasks setting is not current")
+
+
+def enabled(sid):
+    row = db.query_one("SELECT value FROM meta WHERE key=?", (DISABLED_PREFIX + str(sid),))
+    if row and row["value"] != "true":
+        raise TaskError("session tasks setting is not current")
+    return row is None
+
+
+def disabled_ids():
+    """Every session whose Tasks are off, read in one query for list payloads."""
+    out = set()
+    for row in db.query("SELECT key,value FROM meta WHERE key GLOB ?", (DISABLED_PREFIX + "*",)):
+        suffix = row["key"][len(DISABLED_PREFIX):]
+        if row["value"] != "true" or not suffix.isdigit():
+            raise TaskError("session tasks setting is not current")
+        out.add(int(suffix))
+    return out
+
+
+async def set_enabled(sid, value):
+    if type(value) is not bool:
+        raise TaskError("tasks_enabled must be true or false")
+    # Serialize with creation, including the time spent copying a project.
+    # A concurrent disable either wins first or sees the newly created child.
+    async with _locks.setdefault(sid, asyncio.Lock()):
+        if db.get_session(sid) is None or record(sid):
+            raise TaskError("Tasks are managed from the main session")
+        if not value and children(sid):
+            raise TaskError("Remove all task conversations before disabling Tasks; hiding their tabs is not enough")
+        if value:
+            db.meta_apply(delete_keys=(DISABLED_PREFIX + str(sid),))
+        else:
+            db.meta_set(DISABLED_PREFIX + str(sid), True)
 
 
 def children(parent):
@@ -102,6 +146,9 @@ def public(sid, value=None):
 
 def decorate(rows):
     lookup = {row["id"]: row for row in rows}
+    disabled = disabled_ids()
+    for row in rows:
+        row["tasks_enabled"] = row["id"] not in disabled
     for sid, value in records().items():
         if sid not in lookup:
             continue
@@ -135,7 +182,7 @@ def guidance(sid, first_turn=False):
         session = db.get_session(tid)
         if session:
             info = public(tid, value)
-            parts.append("{}: {}. {}".format(session["name"], info["state"], info["summary"][:1500]))
+            parts.append("{}: {}. {}".format(session["name"], info["state"], info["summary"][:800]))
     return "\n".join(parts)
 
 
@@ -151,8 +198,8 @@ def finished(sid, status, user_seq):
     _save(sid, value)
 
 
-def _git(cwd, *args, data=None, timeout=60):
-    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+def _git(cwd, *args, data=None, timeout=60, env=None):
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", **(env or {}))
     result = subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "commit.gpgSign=false",
                              "-c", "user.name=Puppy", "-c", "user.email=puppy@localhost", *args],
                             cwd=cwd, env=env, input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
@@ -196,6 +243,35 @@ def busy():
 
 def busy_sessions():
     return set(_operation_sessions.values())
+
+
+def _root_busy(session):
+    """Whether a copy, review or apply currently owns this session's files."""
+    path = os.path.realpath(session["cwd"])
+    return any(os.path.commonpath([root, path]) == root for root in _busy_roots)
+
+
+def delete_blocker(session):
+    """Why this session cannot be deleted right now, or None.
+
+    Only the session's own tasks and the operations touching its files block
+    it; unrelated copies elsewhere on the node never do."""
+    if children(session["id"]):
+        return "Remove this session's tasks before deleting it"
+    if session["id"] in busy_sessions() or _root_busy(session):
+        return "A task copy, review or apply is using this session's files; try again when it finishes"
+    return None
+
+
+def reset_blocker(session):
+    """Why this session's scratch workspace cannot be reset right now, or None."""
+    if record(session["id"]):
+        return "Task working copies cannot be reset; remove the task or create a new one"
+    if children(session["id"]):
+        return "Remove this session's tasks before resetting its workspace"
+    if session["id"] in busy_sessions() or _root_busy(session):
+        return "A task copy, review or apply is using this session's files; try again when it finishes"
+    return None
 
 
 def _copy_project(root, destination):
@@ -278,18 +354,44 @@ def _copy_project(root, destination):
         if os.path.lexists(os.path.join(destination, name)):
             _git(destination, "add", "--force", "--", name)
     _git(destination, "commit", "--quiet", "--allow-empty", "-m", "Task starting point")
-    return _git(destination, "rev-parse", "HEAD").decode().strip()
+    base = _git(destination, "rev-parse", "HEAD").decode().strip()
+    # The review baseline stays reachable however the engine rewrites the
+    # branch: Git never prunes an object a ref still names.
+    _git(destination, "update-ref", "refs/puppy/base", base)
+    return base
 
 
 def _changes(session, value):
+    """The task's delta since its base, computed without touching its index.
+
+    A review must never leave the copy's real index staged behind the engine's
+    back (its own git status would then lie about what it did), so the
+    working tree is captured through a private index seeded from the real one:
+    tracked-but-ignored files such as a force-added CLAUDE.md stay tracked, and
+    untracked files join exactly as `git add -A` would stage them."""
     if not workspaces.is_available(session):
         raise TaskError("This task's working copy is unavailable")
-    _git(session["cwd"], "add", "-A")
-    patch = _git(session["cwd"], "diff", "--cached", "--binary", "--no-ext-diff", value["base"])
-    if len(patch) > MAX_PATCH:
-        raise TaskError("Task changes exceed the 16 MiB review limit; split the work into smaller tasks")
-    tree = _git(session["cwd"], "write-tree").decode().strip()
-    files = _git(session["cwd"], "diff", "--cached", "--name-status", "--no-ext-diff", value["base"]).decode("utf-8", "replace")
+    cwd = session["cwd"]
+    git_dir = os.fsdecode(_git(cwd, "rev-parse", "--absolute-git-dir").strip())
+    index = os.path.join(git_dir, "puppy-review-index")
+    env = {"GIT_INDEX_FILE": index}
+    try:
+        if os.path.lexists(index):
+            os.unlink(index)
+        real_index = os.path.join(git_dir, "index")
+        if os.path.isfile(real_index):
+            shutil.copyfile(real_index, index)
+        _git(cwd, "add", "-A", env=env)
+        patch = _git(cwd, "diff", "--cached", "--binary", "--no-ext-diff", value["base"], env=env)
+        if len(patch) > MAX_PATCH:
+            raise TaskError("Task changes exceed the 16 MiB review limit; split the work into smaller tasks")
+        tree = _git(cwd, "write-tree", env=env).decode().strip()
+        files = _git(cwd, "diff", "--cached", "--name-status", "--no-ext-diff", value["base"], env=env).decode("utf-8", "replace")
+    finally:
+        try:
+            os.unlink(index)
+        except FileNotFoundError:
+            pass
     return patch, tree, files
 
 
@@ -304,6 +406,8 @@ async def create(parent_id, args):
     if not isinstance(name, str) or len(name) > 80 or not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,100}", key):
         raise TaskError("Invalid task name or request identity")
     async with _locks.setdefault(parent_id, asyncio.Lock()):
+        if not enabled(parent_id):
+            raise TaskError("Tasks are disabled for this session; enable Tasks before creating one")
         for tid, value in records().items():
             if value["parent"] == parent_id and value["request_id"] == key:
                 if value["prompt"] != prompt.strip():
@@ -388,6 +492,9 @@ async def review(parent_id, sid, expected=None):
                 if patch:
                     await asyncio.to_thread(_git, root, "apply", "--check", "--binary", "-", data=patch)
                     await asyncio.to_thread(_git, root, "apply", "--binary", "-", data=patch)
+                # The applied tree becomes the next baseline; naming it keeps
+                # it out of the copy's garbage collection.
+                await asyncio.to_thread(_git, task["cwd"], "update-ref", "refs/puppy/base", tree)
                 value.update(base=tree, applied_at=time.time())
                 _save(sid, value)
                 if workspace_sync.session_workspace(parent):
@@ -485,6 +592,7 @@ def detach_for_rollback():
         raise TaskError("Puppy's configured listener is still accepting connections; stop the node first")
     validate_persisted(db.connect())
     values = records()
+    disabled = sorted(disabled_ids())
     folder = Path(config.DATA_DIR) / "rollback"
     if folder.is_symlink():
         raise TaskError("Rollback folder must not be a symlink")
@@ -492,7 +600,8 @@ def detach_for_rollback():
     import uuid
     path = folder / ("session-tasks-" + uuid.uuid4().hex + ".json")
     archive = {"format": 1, "tasks": [{"id": sid, "name": db.get_session(sid)["name"], "record": value}
-                                     for sid, value in values.items()]}
+                                     for sid, value in values.items()],
+               "tasks_disabled": disabled}
     fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w") as output:
         json.dump(archive, output, ensure_ascii=False, indent=2)
@@ -513,6 +622,8 @@ def detach_for_rollback():
             conn.execute("UPDATE sessions SET name=? WHERE id=?",
                          ((parent["name"] or "Main") + " / " + child["name"], sid))
             conn.execute("DELETE FROM meta WHERE key=?", (PREFIX + str(sid),))
+        for sid in disabled:
+            conn.execute("DELETE FROM meta WHERE key=?", (DISABLED_PREFIX + str(sid),))
         conn.commit()
     except BaseException:
         conn.rollback()

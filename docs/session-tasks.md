@@ -1,17 +1,32 @@
 # Tasks within a session
 
+**Enable tasks** in Main's session menu or its sidebar context menu controls
+Tasks for that session, independently of **Show status bar**. Tasks start enabled;
+turning them off hides the conversation strip. The setting follows the session
+across consoles and restarts and is included in backups. Remove every task
+conversation before disabling Tasks, including finished tasks whose tabs were
+hidden. Hiding a tab alone does not close its conversation or stop its work.
+
 Open a session and select **+ Task** beside **Main**. Enter a prompt and optionally
 name it. The task opens in its own inner tab; create another to work on a second
 feature concurrently. Tasks inherit Main's engine, model, effort, permissions and
 Fast setting at creation, plus bounded recent conversation excerpts. Each task
 keeps its own conversation, draft, message queue, approvals and Stop control.
-Sending a message targets the selected conversation. Closing an inner tab only
-hides it; reopen it from the task cards in Main. The sidebar lists the parent once
-and shows task activity or approvals needing attention. Task links and search
-results open the corresponding inner conversation.
+Sending a message targets the selected conversation. Each tab shows the
+conversation's dot (spinning while it works) and the task's state; hiding a tab
+with its close mark never stops the task. Reopen hidden tabs from the **Tasks**
+sheet, opened by the button beside **+** on the strip. The sidebar lists the parent
+once; while Main is idle its activity slot reports working tasks or an approval
+waiting for input. Task links and search results open the corresponding inner
+conversation.
 
-Main's cards show progress and the latest answer. **Review changes** shows the
-files and diff; **Apply to Main** applies that task's delta to Main's working files.
+The **Tasks** sheet lists every task with its state, latest answer and the
+**Open**, **Review changes** and **Remove** actions, without scrolling Main's
+chat. Review stays visible but disabled while a task or its queue is working and
+becomes available as it finishes; a task's own menu offers the same review.
+**Review changes** shows the changed files and a coloured diff; **Apply to Main**
+applies that task's delta to Main's working files. A review reads the task copy
+through a private Git index, so it never stages files behind the engine's back.
 This does not commit or deploy. It checks that the reviewed delta is still current
 and refuses overlapping changes that cannot apply cleanly. Applied tasks can be
 continued; the next review contains only changes since their last apply. Review
@@ -40,7 +55,12 @@ deleting their parent. Applied changes remain in Main after removing a task.
 The pre-feature code is retained on branch `rollback/before-session-tasks` at
 `e1389ca` (v1.0.434). This feature is landed in one commit so it can be reverted
 without resetting unrelated later commits. There are no changes to existing
-SQL tables or persisted configuration settings.
+SQL tables or persisted configuration settings. The per-session Tasks toggle
+uses a separate optional `session_tasks_disabled.<sid>` meta ledger: an exact
+`true` marker means off, and no entry means on. Startup and snapshot restore
+reject malformed entries; existing task records and config shapes are unchanged.
+Each task copy also names its review baseline as the Git ref `refs/puppy/base`
+so the engine's own history rewriting can never garbage-collect it.
 
 For a rollback **preserving work**:
 
@@ -53,8 +73,9 @@ For a rollback **preserving work**:
 3. With the feature code still present, run on each affected node:
    `PUPPY_DATA=/path/to/node/data /usr/local/bin/python3 -m puppy.session_tasks --detach-for-rollback`.
    It refuses a live configured listener or running work. It writes a private,
-   fsync'd archive at `data/rollback/session-tasks-<id>.json`, then removes only
-   the grouping metadata in one database transaction. Keep this archive with
+   fsync'd archive at `data/rollback/session-tasks-<id>.json` (the grouping
+   records plus the ids whose Tasks toggle was off), then removes only that
+   grouping metadata and toggle ledger in one database transaction. Keep this archive with
    the backup; it is a manual recovery record, outside full-backup coverage.
 4. Revert the feature commit with `git revert --no-commit <feature-commit>`, set
    `puppy/__init__.py` to the next patch version, and commit the rollback under

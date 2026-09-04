@@ -751,6 +751,7 @@ def delete_session(session_id: int) -> None:
         conn = connect()
         try:
             conn.execute("DELETE FROM meta WHERE key=?", ("session_task." + str(session_id),))
+            conn.execute("DELETE FROM meta WHERE key=?", (session_tasks.DISABLED_PREFIX + str(session_id),))
             conn.execute("DELETE FROM events WHERE session_id=?", (session_id,))
             conn.execute("DELETE FROM session_drafts WHERE session_id=?", (session_id,))
             conn.execute("DELETE FROM sessions WHERE id=?", (session_id,))

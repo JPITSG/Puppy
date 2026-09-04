@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shutil
 import sys
+import threading
 from unittest.mock import patch
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
@@ -69,6 +70,65 @@ async def actual_runner(parent):
     print('PASS: real concurrent runner lifecycle, task guidance and independent Stop')
 
 
+async def toggle_api(app, parent, child):
+    from aiohttp.test_utils import TestClient, TestServer
+    # Exercise real routes/middleware without starting external engine probes.
+    app.on_startup.clear()
+    app.on_shutdown.clear()
+    app.cleanup_ctx.clear()
+    client = TestClient(TestServer(app), headers={'X-Puppy-Token': config.get('auth.api_token')})
+    await client.start_server()
+    empty = db.create_session('Toggle only', 'codex', str(ROOT), '', '', '#e0784f', 'workspace-write')
+    route = '/api/sessions/' + str(empty)
+    try:
+        assert 'session-tasks-toggle' in app['puppy_capabilities']
+        for value in (None, 'false', 0, 1, [], {}):
+            response = await client.patch(route, json={'tasks_enabled': value})
+            assert response.status == 400, await response.text()
+        response = await client.patch(route, json={'tasks_enabled': False, 'name': 'Wrong'})
+        assert response.status == 400 and db.get_session(empty)['name'] == 'Toggle only'
+        # Main may still be running; only task conversations are blockers.
+        runner.hub(empty).status = 'running'
+        with patch.object(runner.hub(empty), 'broadcast') as broadcast:
+            response = await client.patch(route, json={'tasks_enabled': False})
+            data = await response.json()
+            assert response.status == 200 and data['session']['tasks_enabled'] is False, data
+            assert broadcast.call_args[0][0]['session']['tasks_enabled'] is False
+        runner.hub(empty).status = 'idle'
+        assert (await (await client.get(route)).json())['session']['tasks_enabled'] is False
+        listed = (await (await client.get('/api/sessions')).json())['sessions']
+        assert next(s for s in listed if s['id'] == empty)['tasks_enabled'] is False
+        assert next(s for s in listed if s['id'] == parent)['tasks_enabled'] is True
+        response = await client.post(route + '/tasks', json={'prompt': 'Blocked', 'request_id': 'disabled'})
+        assert response.status == 409 and 'disabled' in (await response.json())['error']
+        # Status-bar visibility is independent and does not re-enable Tasks.
+        response = await client.patch(route, json={'show_meta': False})
+        assert response.status == 200 and (await response.json())['session']['tasks_enabled'] is False
+        response = await client.patch(route, json={'tasks_enabled': True})
+        data = await response.json()
+        assert data['session']['tasks_enabled'] is True and data['session']['show_meta'] is False
+        assert db.meta_get(tasks.DISABLED_PREFIX + str(empty)) is None
+        # Finished/hidden, running, queued, and held children all block it.
+        hub = runner.hub(child)
+        for status, queue, held in [('idle', [], []), ('running', [], []),
+                                     ('idle', ['Later'], []), ('idle', [], ['Held'])]:
+            hub.status, hub.queue, hub.held = status, queue, held
+            response = await client.patch('/api/sessions/' + str(parent), json={'tasks_enabled': False})
+            assert response.status == 409 and 'Remove all' in (await response.json())['error']
+            assert tasks.enabled(parent)
+        hub.status, hub.queue, hub.held = 'idle', [], []
+        response = await client.patch('/api/sessions/' + str(child), json={'tasks_enabled': False})
+        assert response.status == 409
+        await tasks.set_enabled(empty, False)
+        tasks.validate_persisted(db.connect())
+    finally:
+        runner.drop_hub(empty)
+        db.delete_session(empty)
+        assert db.meta_get(tasks.DISABLED_PREFIX + str(empty)) is None
+        await client.close()
+    print('PASS: ' + app['puppy_role'] + ' task toggle, broadcasts, per-session persistence, blockers and validation')
+
+
 async def main():
     config.ensure_dirs()
     project = ROOT / 'project'
@@ -76,7 +136,8 @@ async def main():
     tasks._git(project, 'init', '--quiet')
     (project/'a.txt').write_text('original a\n')
     (project/'b.txt').write_text('original b\n')
-    (project/'.gitignore').write_text('ignored/\n')
+    (project/'.gitignore').write_text('ignored/\nCLAUDE.md\n')
+    (project/'CLAUDE.md').write_text('project notes\n')
     (project/'ignored').mkdir()
     (project/'ignored'/'secret').write_text('synthetic private file')
     tasks._git(project,'add','-A')
@@ -86,13 +147,37 @@ async def main():
     parent = db.create_session('Project','codex',str(project),'','','#e0784f','workspace-write')
     db.add_event(parent,'user',{'text':'Use the existing design language.'})
     with patch.object(runner.SessionHub, '_start_turn', start):
-        a, b = await asyncio.gather(tasks.create(parent, {'prompt':'Feature A','request_id':'a'}),
-                                     tasks.create(parent, {'prompt':'Feature B','request_id':'b'}))
+        # A disable arriving during a real clone must wait and then refuse;
+        # another queued creation still succeeds and retains its own work.
+        loop = asyncio.get_running_loop()
+        copying, release = asyncio.Event(), threading.Event()
+        copy_project = tasks._copy_project
+        def slow_copy(*args):
+            loop.call_soon_threadsafe(copying.set)
+            if not release.wait(10):
+                raise AssertionError('copy was not released')
+            return copy_project(*args)
+        with patch.object(tasks, '_copy_project', slow_copy):
+            first = asyncio.create_task(tasks.create(parent, {'prompt':'Feature A','request_id':'a'}))
+            try:
+                await asyncio.wait_for(copying.wait(), 5)
+                disable = asyncio.create_task(tasks.set_enabled(parent, False))
+                second = asyncio.create_task(tasks.create(parent, {'prompt':'Feature B','request_id':'b'}))
+                await asyncio.sleep(0)
+                assert not disable.done()
+            finally:
+                release.set()
+            a, b = await asyncio.gather(first, second)
+            await rejected(disable, 'Remove all')
+        assert tasks.enabled(parent)
         aid, bid = a['id'], b['id']
         ap, bp = Path(a['cwd']), Path(b['cwd'])
         assert ap != bp and ap != project and bp != project
         assert (ap/'b.txt').read_text() == 'uncommitted baseline b\n'
         assert (bp/'untracked.txt').is_file() and not (bp/'ignored').exists()
+        assert (ap/'CLAUDE.md').read_text() == 'project notes\n'
+        assert tasks._git(ap,'rev-parse','--verify','refs/puppy/base').decode().strip() == tasks.record(aid)['base']
+        assert all('tasks_enabled' in s for s in runner.sessions_payload()['sessions'])
         assert tasks._git(ap,'remote').strip() == b''
         assert a['permission_mode'] == 'workspace-write'
         assert 'Use the existing design' in tasks.guidance(aid, True)
@@ -110,9 +195,24 @@ async def main():
         assert tasks.public(aid)['state'] == 'ready'
         review = await tasks.review(parent,aid)
         assert 'a.txt' in review['files'] and 'feature a' in review['diff']
+        # The review reads the working tree through a private index: nothing
+        # is staged behind the engine's back, and the force-copied notes file
+        # stays tracked instead of showing up as a deletion.
+        assert tasks._git(ap,'diff','--cached','--name-only').strip() == b''
+        assert 'CLAUDE.md' not in review['files'] and not (ap/'.git'/'puppy-review-index').exists()
+        # Only this session's own tasks and operations block deleting it.
+        assert 'tasks' in tasks.delete_blocker(db.get_session(parent))
+        assert tasks.delete_blocker(db.get_session(aid)) is None
+        tasks._busy_roots.add(str(ap))
+        assert 'using' in tasks.delete_blocker(db.get_session(aid))
+        assert 'using' in tasks.reset_blocker(db.get_session(parent)) or 'tasks' in tasks.reset_blocker(db.get_session(parent))
+        tasks._busy_roots.discard(str(ap))
+        assert 'working copies' in tasks.reset_blocker(db.get_session(aid))
         await tasks.review(parent,aid,review['token'])
         assert (project/'a.txt').read_text() == 'feature a\n'
         assert tasks.public(aid)['state'] == 'applied'
+        # The applied tree is the next baseline and stays pinned in the copy.
+        assert tasks._git(ap,'rev-parse','--verify','refs/puppy/base').decode().strip() == tasks.record(aid)['base']
         review = await tasks.review(parent,bid)
         await tasks.review(parent,bid,review['token'])
         assert (project/'b.txt').read_text() == 'feature b\n'
@@ -161,15 +261,22 @@ async def main():
     from puppy.web import build_app
     sys.path.insert(0,str(BASE/'backend'))
     from puppy_backend.app import build_app as backend_app
-    for app in (build_app(),backend_app()):
+    for build in (build_app, backend_app):
+        app = build()
         assert 'session-tasks' in app['puppy_capabilities']
         assert '/api/sessions/{sid}/tasks/{tid}/{action}' in {r.resource.canonical for r in app.router.routes()}
-    # Offline rollback retains all session ids, messages and private files.
+        await toggle_api(app, parent, aid)
+    # Offline rollback retains all session ids, messages and private files,
+    # and archives the per-session Tasks toggle with the grouping it removes.
+    keep = db.create_session('Toggle kept', 'codex', str(ROOT), '', '', '#e0784f', 'workspace-write')
+    await tasks.set_enabled(keep, False)
     before = {s['id']: (s['cwd'], db.get_events(s['id'])) for s in db.list_sessions(True)}
     with patch('socket.create_connection', side_effect=OSError('offline')):
         archive = tasks.detach_for_rollback()
     assert archive.stat().st_mode & 0o777 == 0o600
-    assert json.loads(archive.read_text())['tasks'] and not tasks.records()
+    archived = json.loads(archive.read_text())
+    assert archived['tasks'] and archived['tasks_disabled'] == [keep] and not tasks.records()
+    assert db.meta_get(tasks.DISABLED_PREFIX + str(keep)) is None and not tasks.disabled_ids()
     assert before == {s['id']: (s['cwd'], db.get_events(s['id'])) for s in db.list_sessions(True)}
     print('PASS: rollback preserves conversations and working copies')
     print('PASS: concurrent independent queues/copies, dirty baselines, context/settings, idempotency, review tokens, compatible apply, atomic conflict rejection, busy ownership, lifecycle and both runtimes')

@@ -901,8 +901,9 @@ select.choice-native{display:none!important}
   font:inherit;font-size:12.5px;padding:7px 11px;border-radius:var(--btn-r);cursor:pointer;
   transition:background .12s var(--ease),color .12s var(--ease);
 }
-@media (hover:hover){.menu button:hover{background:var(--float-menu-hover)}}
-.menu button:active{background:var(--float-menu-hover);filter:brightness(.95)}
+@media (hover:hover){.menu button:not(:disabled):hover{background:var(--float-menu-hover)}}
+.menu button:not(:disabled):active{background:var(--float-menu-hover);filter:brightness(.95)}
+.menu button:disabled{color:var(--txt3);cursor:not-allowed}
 .menu button.danger{color:var(--err)}
 /* the tick is pushed out to the right margin, leaving the label on the menu's
    own text column - so a checked row lines up with the plain rows above it */
@@ -2373,7 +2374,8 @@ html.light .sh-more:hover{background:rgba(15,23,42,.035)}
 .workspace-pick .wp-sub{max-width:100%;font:10px var(--mono);color:var(--txt3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .scratch-note{margin-top:0}
 /* linked-workspace sheet */
-.ws-link-modal .ws-facts{display:flex;flex-direction:column;gap:6px;margin:10px 0 4px}
+.ws-link-modal .ws-facts,.task-review-facts{display:flex;flex-direction:column;gap:6px;margin:10px 0 4px}
+.task-review-facts{margin-bottom:10px}
 .ws-fact{display:flex;gap:10px;align-items:baseline;min-width:0}
 .ws-fact .wsf-l{flex:0 0 84px;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--txt3)}
 .ws-fact .wsf-v{flex:1;min-width:0;font:12px var(--mono);color:var(--txt2);overflow-wrap:anywhere}
@@ -2780,34 +2782,62 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
 .session-request-modal .m-btns { flex-wrap: wrap; }
 .session-request-modal .m-btns .btn { min-width: max-content; }
 
-/* Main and task conversations share one workspace pane. */
+/* ---------- session tasks ---------- */
+/* Main and its task conversations share one workspace tab. The strip above
+   the selected chat is the outer tab bar's own vocabulary one step smaller:
+   the session dot (spinning while that conversation works), a close mark that
+   only hides a task's tab, and the + at the right. The outer bar's focused
+   accent stays with the pane's own tabs; this one keeps the plain active face. */
 .session-task-body{position:relative;flex:1;min-height:0;min-width:0}
-.session-task-tabs{display:flex;align-items:stretch;gap:4px;overflow-x:auto;scrollbar-width:none;touch-action:pan-x;flex-shrink:0;padding:6px 10px;border-bottom:1px solid var(--line);background:var(--panel)}
-.session-task-tabs::-webkit-scrollbar{display:none}
-.session-task-tab{display:flex;flex-shrink:0;align-items:center;border-radius:var(--r-sm);overflow:hidden}
-.task-tab-button,.task-tab-close,.task-add{font:inherit;font-size:12px;color:var(--txt2);background:transparent;border:0;cursor:pointer;white-space:nowrap;padding:8px 10px}
-.task-tab-button{display:flex;gap:8px;align-items:center;max-width:320px;overflow:hidden;text-overflow:ellipsis}
-.task-tab-button[aria-selected="true"]{color:var(--txt);background:var(--panel2)}
-.task-tab-button:hover,.task-tab-close:hover,.task-add:hover{background:var(--panel2);color:var(--txt)}
-.task-tab-close{padding:8px 6px;font-size:16px}
-.task-tab-status{font-size:10px;color:var(--txt2)}
-.task-tab-status.running,.task-card-state.running{color:var(--acc)}
-.session-task-tabs .attention,.task-card-state.attention,.si-task-count.attention,.si-be.attention{color:var(--warn)}
-.session-task-overview{max-width:var(--chat-width, 900px);margin:0 auto 18px}
-.task-overview-title{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--txt2);margin-bottom:8px}
-.session-task-card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-md);padding:12px;margin-bottom:8px}
-.task-card-head{display:flex;gap:12px;align-items:baseline;justify-content:space-between;font-size:13px}
-.task-card-head strong{overflow-wrap:anywhere}
-.task-card-state{font-size:11px;color:var(--txt2);flex-shrink:0}
-.task-card-summary{font-size:12px;color:var(--txt2);line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere;margin:8px 0}
+.task-tabbar{min-height:36px;padding:6px 8px 0;z-index:1}
+.task-tabbar .tab{font-size:12px;padding:5px var(--tab-space);max-width:200px}
+.task-tabbar .tab-add-wrap{margin-top:-6px;gap:2px}
+.task-tabbar .icon-btn.attention{color:var(--warn)}
+.task-tabbar .t-state{font-size:10px;color:var(--txt3);flex-shrink:0;white-space:nowrap}
+/* an answer nobody has looked at yet */
+.task-tabbar .t-state.unread::before{
+  content:"";display:inline-block;width:5px;height:5px;border-radius:50%;
+  background:var(--acc);margin-right:5px;vertical-align:1px;
+}
+.task-tabbar .t-state.ok,.task-card-head .t-state.ok{color:var(--ok)}
+.task-tabbar .t-state.warn,.task-card-head .t-state.warn{color:var(--warn)}
+.task-tabbar .t-state.bad,.task-card-head .t-state.bad{color:var(--err)}
+.task-tabbar .t-state.busy,.task-card-head .t-state.busy{color:var(--acc2)}
+.session-workspace.tasks-disabled .task-tabbar{display:none}
+/* the sidebar's activity slot while a Main session's task waits for input */
+.si-be.attention{color:var(--warn)}
+/* the Tasks sheet: one card per task on the transcript's tool-card surface */
+.task-overview-modal{max-width:640px}
+.task-list{max-height:60vh;overflow-y:auto;margin-bottom:4px}
+.session-task-card{
+  background:var(--panel);border:1px solid var(--line);border-radius:var(--r-md);
+  padding:10px 12px;margin-bottom:8px;
+}
+.task-card-head{display:flex;align-items:center;gap:8px;min-width:0;font-size:12.5px}
+.task-card-head .t-name{
+  flex:1;min-width:0;font-weight:650;color:var(--txt);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.task-card-head .t-state{font-size:10px;color:var(--txt3);flex-shrink:0;white-space:nowrap}
+.task-card-summary{
+  margin:6px 0 9px;color:var(--txt2);font-size:12px;line-height:1.5;
+  white-space:pre-wrap;overflow-wrap:anywhere;
+}
 .task-card-actions{display:flex;gap:6px;flex-wrap:wrap}
-.task-card-actions .btn{font-size:11px;padding:5px 9px}
-.si-task-count{font-size:10px;white-space:nowrap;color:var(--txt2);flex-shrink:0}
-.task-dialog-error{font-size:12px;color:var(--err);white-space:pre-wrap;overflow-wrap:anywhere}
 .new-task-modal textarea{min-height:130px;resize:vertical}
+/* the review sheet: facts in the linked-workspace sheet's voice, the file
+   list and diff on the transcript's code-block surface */
 .task-review-modal{max-width:820px}
-.task-review-name{font-weight:600;overflow-wrap:anywhere}
-.task-review-summary{white-space:pre-wrap;max-height:180px;overflow:auto}
-.task-review-files,.task-review-diff{font-size:11px;line-height:1.5;overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:var(--r-sm);padding:10px;max-height:40vh;white-space:pre}
-.task-review-diff:empty{display:none}
-@media(max-width:600px){.session-task-tabs{padding:4px 6px}.task-tab-button{max-width:240px}.task-card-head{align-items:flex-start}.task-card-state{max-width:110px;text-align:right;white-space:normal}}
+.task-review-summary{white-space:pre-wrap;max-height:120px;overflow:auto}
+.task-review-files,.task-review-diff{
+  margin:0 0 10px;padding:10px 12px;background:var(--panel);border:1px solid var(--line);
+  border-radius:var(--r-sm);font-family:var(--mono);font-size:11.5px;line-height:1.45;
+  color:var(--txt2);overflow:auto;
+}
+.task-review-files{max-height:160px;white-space:pre-wrap;word-break:break-word}
+.task-review-diff{max-height:45vh;white-space:pre}
+.task-review-diff .add{color:var(--ok)}
+.task-review-diff .del{color:var(--err)}
+.task-review-diff .hunk{color:var(--acc2)}
+.task-review-diff .meta{color:var(--txt3)}
+@media (max-width:600px){.task-tabbar .tab{max-width:150px}}

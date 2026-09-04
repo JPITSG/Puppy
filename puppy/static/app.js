@@ -4568,9 +4568,37 @@ function backendSupportsSideQuestions(bid) {
 }
 
 function backendSupportsSessionTasks(bid) {
-  const backend = bid ? state.backends.find(item => item.id === bid) : null;
-  const capabilities = bid ? backend && backend.capabilities : state.nodeCapabilities;
-  return Array.isArray(capabilities) && capabilities.includes("session-tasks");
+  return nodeHasCapability(bid, "session-tasks");
+}
+
+/* The local node advertises its capabilities on /api/state; a paired backend
+   carries its own list. Legacy nodes advertise nothing and so support none. */
+function nodeHasCapability(bid, capability) {
+  const capabilities = bid ?
+    (state.backends.find(item => item.id === bid) || {}).capabilities : state.nodeCapabilities;
+  return Array.isArray(capabilities) && capabilities.includes(capability);
+}
+
+/* "Enable tasks" sits beside "Show status bar" in both session menus. The node
+   refuses to turn Tasks off while task conversations exist, and that refusal
+   arrives as a toast like every other declined menu action. */
+function appendSessionTasksToggle(menu, bid, session) {
+  if (!session || session.task || !nodeHasCapability(bid, "session-tasks-toggle")) return;
+  const current = findSessionMeta(bid, session.id) || session;
+  const enabled = current.tasks_enabled !== false;
+  menu.appendChild(menuCheckRow("Enable tasks", enabled, async () => {
+    try {
+      const result = await api(bid, `sessions/${session.id}`, {
+        method: "PATCH", body: { tasks_enabled: !enabled },
+      });
+      const meta = findSessionMeta(bid, session.id);
+      if (meta) Object.assign(meta, result.session);
+      const view = sessionViewFor(bid, session.id);
+      if (view) { view.session = result.session; view.updateHead(); }
+      renderSidebar();
+      if (bid) refreshGroup(bid);
+    } catch (error) { toast(error.message, "error"); }
+  }));
 }
 
 function backendSupportsSessionTools(bid) {
@@ -4822,15 +4850,23 @@ function renderSidebar() {
         activity.textContent = backendName(bid);
         activity.setAttribute("aria-label", `Session idle on ${backendName(bid)}`);
       }
-      if (s.task_activity && s.task_activity.total) {
-        const tasks = s.task_activity;
-        const label = tasks.approval ? `${tasks.approval} need input` : tasks.running ? `${tasks.running} tasks running` : `${tasks.total} tasks`;
-        const badge = s.status === "running" ? el("span", "si-task-count", `${tasks.total} tasks`) : activity;
-        if (badge === activity) { activity.classList.remove("node"); activity.textContent = label; }
-        badge.classList.toggle("attention", !!tasks.approval);
-        badge.title = `${tasks.total} tasks · ${tasks.ready} ready to review`;
-        badge.setAttribute("aria-label", label);
-        if (badge !== activity) r1.appendChild(badge);
+      const taskActivity = taskActivityLabel(s.task_activity);
+      if (taskActivity && s.status !== "running") {
+        /* Main is idle but its tasks are not: the slot reports them in the
+           running clock's own voice, so a working task or a waiting approval
+           is visible from the list without opening the session. */
+        activity.className = "si-be " + taskActivity.cls;
+        activity.textContent = taskActivity.text;
+        if (taskActivity.cls === "active-time") syncPromptSpinnerPhase(activity);
+        activity.title = taskActivityTitle(s.task_activity);
+        activity.setAttribute("aria-label", activity.title);
+      } else if (taskActivity && taskActivity.cls === "attention") {
+        /* the clock keeps its slot while Main works; only an approval that
+           blocks a task earns a second word beside it */
+        const waiting = el("span", "si-be attention", taskActivity.text);
+        waiting.title = taskActivityTitle(s.task_activity);
+        waiting.setAttribute("aria-label", waiting.title);
+        r1.appendChild(waiting);
       }
       r1.appendChild(activity);
       const r2 = el("div", "si-row sub");
@@ -5219,6 +5255,7 @@ function sessionContextMenu(ev, bid, s) {
      with it, and this is where the setting stays reachable afterwards. */
   menu.appendChild(menuCheckRow("Show status bar", sessionShowsMeta(s),
     () => patch({ show_meta: !sessionShowsMeta(s) })));
+  appendSessionTasksToggle(menu, bid, s);
   menu.appendChild(el("div", "menu-sep"));
   const sessionWs = sessionWorkspace(s);
   add(isScratchWorkspace(s) ? "Copy workspace path" :
@@ -6507,7 +6544,7 @@ function syncHorizontalOverflow(scroller, viewport = scroller && scroller.parent
    through to whatever scrolls behind it, and a trackpad's own sideways delta
    is left to the browser. Every strip that gets the touch-swipe treatment
    (overflow-x:auto with touch-action:pan-x) must be listed here too. */
-const WHEEL_SWIPE_STRIPS = [".session-task-tabs", ".tabs", ".chat-meta-scroll", ".composer-meta-scroll"];
+const WHEEL_SWIPE_STRIPS = [".tabs", ".chat-meta-scroll", ".composer-meta-scroll"];
 const wheelSwipeAnimations = new WeakMap();
 
 function stopWheelSwipe(strip) {
@@ -8009,24 +8046,120 @@ function sessionViewFor(bid, sid) {
     if (view && view.tab && view.tab.type === "session" && Number(view.tab.bid) === Number(bid) && view.tab.sid === sid) return view;
   return null;
 }
+/* The wrapper that owns a Main session's open tab, or null. */
+function workspaceViewFor(bid, sid) {
+  const view = state.views[`s:${bid}:${sid}`];
+  return view && view.taskViews ? view : null;
+}
+/* Label and colour voice for one task state: the transcript's tool-card
+   ok/bad states plus the warn and busy accents the rest of the console uses. */
+const TASK_STATES = {
+  running: ["Running", "busy"], queued: ["Queued", "busy"], pending: ["Starting", "busy"],
+  held: ["Held", "warn"], ready: ["Ready to review", "ok"], applied: ["Applied", ""],
+  stopped: ["Stopped", "warn"], failed: ["Failed", "bad"],
+};
 function taskStateLabel(task) {
   if (task.needs_approval) return "Needs approval";
-  return ({running:"Running", queued:"Queued", held:"Held", ready:"Ready to review", applied:"Applied",
-    stopped:"Stopped", failed:"Failed", pending:"Starting"})[task.state] || task.state;
+  return (TASK_STATES[task.state] || [task.state || "Unknown"])[0];
+}
+function taskStateClass(task) {
+  if (task.needs_approval) return "warn";
+  return (TASK_STATES[task.state] || ["", ""])[1];
+}
+function taskReviewable(task) {
+  return ["ready", "applied", "failed", "stopped"].includes(task.state);
+}
+/* The sidebar's activity slot for a Main session whose tasks are busy: the
+   running clock's voice for work, the warn voice for an approval that waits.
+   Null when no task needs the slot. */
+function taskActivityLabel(activity) {
+  if (!activity || !activity.total) return null;
+  if (activity.approval)
+    return { cls: "attention", text: activity.approval === 1 ? "1 needs input" : `${activity.approval} need input` };
+  if (activity.running)
+    return { cls: "active-time", text: activity.running === 1 ? "1 task" : `${activity.running} tasks` };
+  return null;
+}
+function taskActivityTitle(activity) {
+  const parts = [];
+  if (activity.running) parts.push(`${activity.running} running`);
+  if (activity.approval) parts.push(`${activity.approval} need${activity.approval === 1 ? "s" : ""} input`);
+  if (activity.ready) parts.push(`${activity.ready} ready to review`);
+  return `${activity.total} task${activity.total === 1 ? "" : "s"}` + (parts.length ? ": " + parts.join(", ") : "");
+}
+/* One unified-diff line's role, for the review sheet's colouring. */
+function diffLineClass(line) {
+  if (/^(diff --git |index |--- |\+\+\+ |new file mode|deleted file mode|similarity index|dissimilarity index|rename |copy |old mode|new mode|Binary files)/.test(line)) return "meta";
+  if (line.startsWith("@@")) return "hunk";
+  if (line.startsWith("+")) return "add";
+  if (line.startsWith("-")) return "del";
+  return "";
+}
+/* two offset frames: a working copy beside its original, on the 12-grid the
+   tab bar's + and x share */
+function tasksIcon(size) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 12 12");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const p = document.createElementNS(NS, "path");
+  p.setAttribute("d", "M2 2h5.5v5.5H2z M4.5 10H10V4.5");
+  p.setAttribute("stroke", "currentColor");
+  p.setAttribute("stroke-width", "1.5");
+  p.setAttribute("stroke-linecap", "round");
+  p.setAttribute("stroke-linejoin", "round");
+  p.setAttribute("fill", "none");
+  svg.appendChild(p);
+  return svg;
+}
+async function removeTask(bid, session) {
+  if (!await modalConfirm("Remove task?", sessionDeleteMessage(session))) return;
+  try {
+    await api(bid, `sessions/${session.id}`, { method: "DELETE" });
+    toast("Task removed");
+    await refreshSessionList(bid);
+    renderSidebar();
+  } catch (error) { toast(error.message, "error"); }
 }
 class SessionWorkspaceView {
   constructor(tab) {
     this.tab = tab;
     this.root = el("div", "view session-workspace");
-    this.strip = el("div", "session-task-tabs");
+    /* The strip is the outer tab bar's own vocabulary one step smaller: the
+       session dot (spinning while that conversation works), a close mark
+       that only hides a task's tab, and the + at the right. */
+    this.bar = el("div", "tabbar task-tabbar");
+    const scroll = el("div", "tab-scroll edge-scroll-viewport");
+    this.strip = el("div", "tabs task-tabs");
     this.strip.setAttribute("role", "tablist");
     this.strip.setAttribute("aria-label", "Session conversations");
+    this.strip.addEventListener("scroll", () => syncHorizontalOverflow(this.strip), { passive: true });
+    scroll.appendChild(this.strip);
+    const actions = el("div", "tab-add-wrap task-tab-actions");
+    this.overviewButton = el("button", "icon-btn task-overview-button hidden");
+    this.overviewButton.type = "button";
+    this.overviewButton.setAttribute("aria-label", "Tasks");
+    this.overviewButton.setAttribute("aria-haspopup", "dialog");
+    this.overviewButton.appendChild(tasksIcon(14));
+    this.overviewButton.onclick = () => this.openTaskOverview();
+    const add = el("button", "icon-btn task-add-button");
+    add.type = "button";
+    add.setAttribute("aria-label", "New task");
+    add.title = "New task";
+    add.appendChild(plusIcon(14));
+    add.onclick = () => modalNewTask(this);
+    actions.append(this.overviewButton, add);
+    this.bar.append(scroll, actions);
     this.body = el("div", "session-task-body");
-    this.root.append(this.strip, this.body);
+    this.root.append(this.bar, this.body);
     this.taskViews = new Map();
     this.selected = tab.sid;
     this.opened = [];
     this.seen = {};
+    this.overview = null;        // the open Tasks sheet's list, while it is open
+    this.taskOverview = null;
     this.storageKey = `puppy.sessionTasks.${tab.bid}.${tab.sid}`;
     try {
       const saved = JSON.parse(localStorage.getItem(this.storageKey));
@@ -8042,8 +8175,6 @@ class SessionWorkspaceView {
     const main = new SessionView(tab);
     this.taskViews.set(tab.sid, main);
     this.body.appendChild(main.root);
-    this.overview = el("div", "session-task-overview");
-    main.scroll.insertBefore(this.overview, main.scroll.firstChild);
     this.refreshTasks();
     // Existing workspace shortcuts act on the selected conversation. Outer
     // layout ownership (root, tab, lifecycle) stays with this wrapper.
@@ -8061,6 +8192,69 @@ class SessionWorkspaceView {
   }
   activeView() { return this.taskViews.get(this.selected) || this.taskViews.get(this.tab.sid); }
   tasks() { return sessionsFor(this.tab.bid).filter(s => s.task && s.task.parent === this.tab.sid); }
+  openTaskOverview() {
+    if (this.taskOverview) return;
+    const dialog = modal(`<h2>Tasks</h2>
+      <p class="modal-copy">Each task works in its own chat and copy of Main’s project. Review a finished task to apply its changes to Main; Main must be idle while they are applied.</p>
+      <div class="task-list"></div>
+      <div class="m-btns"><button class="btn" id="to-close">Close</button><button class="btn btn-pri" id="to-new">New task</button></div>`, "task-overview-modal");
+    this.taskOverview = dialog;
+    this.overview = dialog.m.querySelector(".task-list");
+    this.renderedOverview = "";
+    dialog.onClose(() => {
+      this.taskOverview = null;
+      this.overview = null;
+      if (this.overviewButton.isConnected) this.overviewButton.focus();
+    });
+    dialog.m.querySelector("#to-close").onclick = dialog.close;
+    dialog.m.querySelector("#to-new").onclick = () => { dialog.close(); modalNewTask(this); };
+    this.renderOverview(this.tasks());
+    dialog.m.querySelector("#to-close").focus();
+  }
+  closeTaskOverview() { if (this.taskOverview) this.taskOverview.close(); }
+  /* The sheet's cards: the transcript's tool-card surface with the session
+     dot, the task's state in the tab strip's voice, its latest answer, and
+     the three verbs as small buttons. Re-rendered live while the sheet is
+     open, so a task finishing under it lights its Review button. */
+  renderOverview(tasks) {
+    const box = this.overview;
+    if (!box) return;
+    const signature = JSON.stringify(tasks.map(s => [s.id, s.name, s.status, s.color, s.task]));
+    if (signature === this.renderedOverview) return;
+    this.renderedOverview = signature;
+    box.replaceChildren();
+    if (!tasks.length) {
+      box.appendChild(el("div", "sess-empty", "No tasks yet"));
+      return;
+    }
+    for (const session of tasks) {
+      const task = session.task;
+      const card = el("div", "session-task-card");
+      const head = el("div", "task-card-head");
+      head.appendChild(sessDot(session));
+      head.appendChild(el("span", "t-name", session.name || `Task ${session.id}`));
+      const cls = taskStateClass(task);
+      head.appendChild(el("span", "t-state" + (cls ? " " + cls : ""), taskStateLabel(task)));
+      card.appendChild(head);
+      const summary = task.summary || task.prompt || "";
+      card.appendChild(el("p", "task-card-summary", summary.length > 280 ? summary.slice(0, 280) + "…" : summary));
+      const actions = el("div", "task-card-actions");
+      const open = el("button", "btn btn-sm", task.needs_approval ? "Open approval" : "Open");
+      open.type = "button";
+      open.onclick = () => { this.closeTaskOverview(); this.openTask(session.id); };
+      const review = el("button", "btn btn-sm" + (task.state === "ready" ? " btn-pri" : ""), "Review changes");
+      review.type = "button";
+      review.disabled = !taskReviewable(task);
+      review.onclick = () => { this.closeTaskOverview(); modalReviewTask(this, session); };
+      const remove = el("button", "btn btn-sm btn-danger", "Remove");
+      remove.type = "button";
+      remove.disabled = ["running", "queued"].includes(task.state);
+      remove.onclick = () => { this.closeTaskOverview(); removeTask(this.tab.bid, session); };
+      actions.append(open, review, remove);
+      card.appendChild(actions);
+      box.appendChild(card);
+    }
+  }
   save() {
     try { localStorage.setItem(this.storageKey, JSON.stringify({format:1, open:this.opened, active:this.selected, seen:this.seen})); } catch (_) {}
   }
@@ -8089,20 +8283,25 @@ class SessionWorkspaceView {
     if (selected) selected.scrollIntoView({block:"nearest", inline:"nearest"});
     this.save();
   }
-  closeTask(sid) {
+  /* Hiding a tab never touches the conversation: its work, queue and
+     approvals continue, and the Tasks sheet reopens it. */
+  closeTask(sid, render = true) {
     this.opened = this.opened.filter(id => id !== sid);
     const view = this.taskViews.get(sid);
     if (view) view.destroy();
     this.taskViews.delete(sid);
     if (this.selected === sid) this.selected = this.tab.sid;
-    this.refreshTasks(); this.save();
+    if (render) { this.refreshTasks(); this.save(); }
   }
   refreshTasks() {
     const tasks = this.tasks();
+    const main = findSessionMeta(this.tab.bid, this.tab.sid);
+    // Visibility is independent of the strip's render cache: a toggle must
+    // land even when the task list itself has not changed.
+    this.root.classList.toggle("tasks-disabled", !!main && main.tasks_enabled === false);
     // Do not erase restored selection before its node's bootstrap arrives.
-    const loaded = !!findSessionMeta(this.tab.bid, this.tab.sid);
-    if (loaded) {
-      for (const sid of [...this.opened]) if (!tasks.some(s => s.id === sid)) this.closeTask(sid);
+    if (main) {
+      for (const sid of [...this.opened]) if (!tasks.some(s => s.id === sid)) this.closeTask(sid, false);
       if (this.selected !== this.tab.sid && !tasks.some(s => s.id === this.selected)) this.selected = this.tab.sid;
     }
     for (const task of tasks) if (this.opened.includes(task.id)) this.ensureTask(task);
@@ -8111,136 +8310,155 @@ class SessionWorkspaceView {
       if (task) this.seen[task.id] = task.task.result_seq;
     }
     for (const [sid, view] of this.taskViews) view.root.classList.toggle("on", sid === this.selected);
-    const signature = JSON.stringify([this.selected, this.opened, this.seen, tasks.map(s => [s.id,s.name,s.task])]);
+    if (this.overview) this.renderOverview(tasks);
+    const face = s => [s.id, s.name, s.status, s.color, s.engine, s.task];
+    const signature = JSON.stringify([this.selected, this.opened, this.seen, main ? face(main) : null, tasks.map(face)]);
     if (signature === this.rendered) return;
     this.rendered = signature;
+    this.overviewButton.classList.toggle("hidden", !tasks.length);
+    this.overviewButton.classList.toggle("attention", tasks.some(s => s.task.needs_approval));
+    this.overviewButton.title = main && main.task_activity ? taskActivityTitle(main.task_activity) : "Tasks";
     this.strip.replaceChildren();
-    const addTab = (sid, title, task = null) => {
-      const wrap = el("div", "session-task-tab");
-      const button = el("button", "task-tab-button", title);
-      button.type = "button"; button.setAttribute("role", "tab");
-      button.setAttribute("aria-selected", String(sid === this.selected));
-      button.tabIndex = sid === this.selected ? 0 : -1;
-      button.onclick = () => this.select(sid);
-      button.onkeydown = event => {
+    const addTab = (sid, title, session, task = null) => {
+      const running = !!session && session.status === "running";
+      const tab = el("div", "tab" + (sid === this.selected ? " active" : "") + (running ? " running" : ""));
+      tab.setAttribute("role", "tab");
+      tab.setAttribute("aria-selected", String(sid === this.selected));
+      tab.tabIndex = sid === this.selected ? 0 : -1;
+      tab.dataset.sid = String(sid);
+      const dot = el("span", "t-dot " + ((session && session.engine) || "claude"));
+      if (session && session.color) dot.style.color = session.color;
+      if (running) syncPromptSpinnerPhase(dot);
+      tab.appendChild(dot);
+      tab.appendChild(el("span", "t-title", title));
+      tab.onclick = () => this.select(sid);
+      tab.onkeydown = event => {
         if (!["ArrowLeft","ArrowRight","Home","End"].includes(event.key)) return;
         event.preventDefault();
         const tabs = [...this.strip.querySelectorAll('[role="tab"]')];
-        const at = tabs.indexOf(button);
+        const at = tabs.indexOf(tab);
         const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length-1 : (at + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
         tabs[next].click(); tabs[next].focus();
       };
       if (task) {
         const unread = task.result_seq > (this.seen[sid] || 0);
-        button.appendChild(el("span", `task-tab-status ${task.needs_approval ? "attention" : task.state}`, `${unread ? "• " : ""}${taskStateLabel(task)}`));
-        button.title = `${title} — ${taskStateLabel(task)}`;
+        const cls = taskStateClass(task);
+        tab.appendChild(el("span", "t-state" + (cls ? " " + cls : "") + (unread ? " unread" : ""), taskStateLabel(task)));
+        tab.title = `${title} · ${taskStateLabel(task)}`;
+        const close = el("button", "t-close");
+        close.type = "button";
+        close.setAttribute("aria-label", `Hide ${title}`);
+        close.title = "Hide this tab; the task keeps working";
+        close.appendChild(xIcon(12));
+        close.onclick = event => { event.stopPropagation(); this.closeTask(sid); };
+        tab.appendChild(close);
       }
-      wrap.appendChild(button);
-      if (task) {
-        const close = el("button", "task-tab-close", "×");
-        close.type = "button"; close.title = "Hide task tab; work keeps running";
-        close.setAttribute("aria-label", "Hide " + title);
-        close.onclick = () => this.closeTask(sid); wrap.appendChild(close);
-      }
-      this.strip.appendChild(wrap);
+      this.strip.appendChild(tab);
     };
-    addTab(this.tab.sid, "Main");
+    addTab(this.tab.sid, "Main", main);
     for (const sid of this.opened) {
       const task = tasks.find(s => s.id === sid);
-      if (task) addTab(sid, task.name, task.task);
+      if (task) addTab(sid, task.name || `Task ${sid}`, task, task.task);
     }
-    const add = el("button", "task-add", "+ Task"); add.type = "button";
-    add.onclick = () => modalNewTask(this);
-    this.strip.appendChild(add);
-    this.overview.replaceChildren();
-    if (tasks.length) {
-      const title = el("div", "task-overview-title", "Tasks");
-      this.overview.appendChild(title);
-    }
-    for (const task of tasks) {
-      const card = el("div", "session-task-card");
-      const head = el("div", "task-card-head");
-      head.appendChild(el("strong", "", task.name));
-      head.appendChild(el("span", "task-card-state " + (task.task.needs_approval ? "attention" : task.task.state), taskStateLabel(task.task)));
-      card.appendChild(head);
-      const summary = task.task.summary || task.task.prompt;
-      card.appendChild(el("p", "task-card-summary", summary.length > 260 ? summary.slice(0,260) + "…" : summary));
-      const controls = el("div", "task-card-actions");
-      const open = el("button", "btn", task.task.needs_approval ? "Open approval" : "Open task");
-      open.onclick = () => this.openTask(task.id); controls.appendChild(open);
-      if (["ready","applied","failed","stopped"].includes(task.task.state)) {
-        const review = el("button", "btn", "Review changes");
-        review.onclick = () => modalReviewTask(this, task); controls.appendChild(review);
-      }
-      const remove = el("button", "btn", "Remove");
-      remove.disabled = ["running","queued"].includes(task.task.state);
-      remove.onclick = async () => {
-        if (!await modalConfirm("Remove task?", "This deletes the task conversation and its private working copy. Changes already applied to Main are kept.")) return;
-        try { await api(this.tab.bid, `sessions/${task.id}`, {method:"DELETE"}); await refreshSessionList(this.tab.bid); renderSidebar(); }
-        catch (error) { toast(error.message, "error"); }
-      };
-      controls.appendChild(remove); card.appendChild(controls); this.overview.appendChild(card);
-    }
-    this.overview.classList.toggle("hidden", !tasks.length);
+    syncHorizontalOverflow(this.strip);
     this.save();
   }
   onShow(focus = true) { this.refreshTasks(); this.activeView().onShow(focus); }
   onVisibility(visible) { if (visible) this.refreshTasks(); }
   captureScroll() { return [...this.taskViews].map(([sid, view]) => [sid, view.captureScroll()]); }
   restoreScroll(values) { for (const [sid, saved] of values || []) { const view = this.taskViews.get(sid); if (view) view.restoreScroll(saved); } }
-  destroy() { for (const view of this.taskViews.values()) view.destroy(); this.taskViews.clear(); this.root.remove(); }
+  destroy() { this.closeTaskOverview(); for (const view of this.taskViews.values()) view.destroy(); this.taskViews.clear(); this.root.remove(); }
 }
 async function modalNewTask(workspace) {
-  const {m, close} = modal(`<h2>New task</h2>
-    <label>Name <span class="field-optional">(optional, auto from prompt)</span><input id="nt-name" maxlength="80"></label>
+  const { m, close } = modal(`<h2>New task</h2>
+    <p class="modal-copy">The task works in its own chat and copy of Main’s project. Review its changes and apply them to Main when it is done.</p>
     <label>Task<textarea id="nt-prompt" rows="6" placeholder="Describe the feature or change…"></textarea></label>
-    <p class="hint">Starts with Main’s current engine, model and permissions, plus recent conversation context. Each task has its own chat and working copy.</p>
-    <p class="hint">Changes stay in the task until you review and apply them. Main must be idle while preparing or applying a task; other tasks can keep running. Local Git projects only. Ignored files, such as installed dependencies, are not copied.</p>
-    <div class="task-dialog-error" role="alert"></div>
+    <label>Name <span class="field-optional">(optional, auto from the task)</span><input type="text" id="nt-name" maxlength="80"></label>
+    <p class="hint">Uses Main’s engine, model, effort and permissions, plus recent conversation context. Main must be idle to create or apply a task. Local Git projects only; ignored files are not copied.</p>
+    <p class="backend-edit-error hidden" role="alert"></p>
     <div class="m-btns"><button class="btn" id="nt-cancel">Cancel</button><button class="btn btn-pri" id="nt-start">Start task</button></div>`, "new-task-modal");
   const prompt = m.querySelector("#nt-prompt"), start = m.querySelector("#nt-start");
+  const error = m.querySelector(".backend-edit-error");
+  /* One identity for this dialog's lifetime: a retry after a lost answer
+     returns the task the node already created instead of a duplicate. */
   const requestId = globalThis.crypto && crypto.randomUUID ? crypto.randomUUID() : `task-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   m.querySelector("#nt-cancel").onclick = close;
   prompt.focus();
   start.onclick = async () => {
     if (!prompt.value.trim()) { prompt.focus(); return; }
     start.disabled = true; start.textContent = "Preparing…";
-    m.querySelector(".task-dialog-error").textContent = "";
+    error.classList.add("hidden");
     try {
-      const data = await api(workspace.tab.bid, `sessions/${workspace.tab.sid}/tasks`, {method:"POST",
-        body:{name:m.querySelector("#nt-name").value, prompt:prompt.value, request_id:requestId}});
+      const data = await api(workspace.tab.bid, `sessions/${workspace.tab.sid}/tasks`, { method: "POST", timeoutMs: 180000,
+        body: { name: m.querySelector("#nt-name").value, prompt: prompt.value, request_id: requestId } });
       const list = sessionsFor(workspace.tab.bid);
       if (!list.some(s => s.id === data.session.id)) list.push(data.session);
       close(); workspace.openTask(data.session.id); renderSidebar();
-    } catch (error) { m.querySelector(".task-dialog-error").textContent = error.message; }
+    } catch (err) { error.textContent = err.message; error.classList.remove("hidden"); }
     finally { start.disabled = false; start.textContent = "Start task"; }
   };
 }
-async function modalReviewTask(workspace, task) {
-  const {m, close} = modal(`<h2>Review task</h2><p class="task-review-name"></p><p class="hint task-review-summary"></p>
-    <pre class="task-review-files">Loading changes…</pre><pre class="task-review-diff"></pre>
-    <p class="hint task-review-note"></p><div class="task-dialog-error" role="alert"></div>
+/* The review sheet: the task's facts in the linked-workspace sheet's voice,
+   then its changed files and diff in the transcript's code-block surface.
+   Apply carries the review's token, so changes made after this look are
+   refused instead of silently applied. */
+async function modalReviewTask(workspace, session) {
+  const task = session.task || {};
+  const { m, close } = modal(`<h2>Review task</h2>
+    <div class="ws-facts task-review-facts"></div>
+    <p class="hint task-review-summary hidden"></p>
+    <div class="field-lbl">Changed files</div>
+    <pre class="task-review-files">Loading changes…</pre>
+    <pre class="task-review-diff hidden"></pre>
+    <p class="hint task-review-note hidden"></p>
+    <p class="backend-edit-error hidden" role="alert"></p>
     <div class="m-btns"><button class="btn" id="tr-close">Close</button><button class="btn btn-pri" id="tr-apply" disabled>Apply to Main</button></div>`, "task-review-modal");
-  m.querySelector(".task-review-name").textContent = task.name;
-  m.querySelector(".task-review-summary").textContent = task.task.summary;
+  const facts = m.querySelector(".task-review-facts");
+  const fact = (label, value, cls = "") => {
+    const row = el("div", "ws-fact");
+    row.appendChild(el("span", "wsf-l", label));
+    row.appendChild(el("span", "wsf-v" + (cls ? " " + cls : ""), value));
+    facts.appendChild(row);
+  };
+  fact("Task", session.name || `Task ${session.id}`);
+  fact("State", taskStateLabel(task), ({ ok: "ok", warn: "warn", bad: "err" })[taskStateClass(task)] || "");
+  if (task.applied_at) fact("Last applied", fmtTime(task.applied_at));
+  const summary = m.querySelector(".task-review-summary");
+  if (task.summary) { summary.textContent = task.summary; summary.classList.remove("hidden"); }
+  const files = m.querySelector(".task-review-files"), diff = m.querySelector(".task-review-diff");
+  const note = m.querySelector(".task-review-note"), error = m.querySelector(".backend-edit-error");
+  const apply = m.querySelector("#tr-apply");
+  const fail = text => { error.textContent = text; error.classList.remove("hidden"); };
   m.querySelector("#tr-close").onclick = close;
-  const apply = m.querySelector("#tr-apply"), errorBox = m.querySelector(".task-dialog-error");
   try {
-    const base = `sessions/${workspace.tab.sid}/tasks/${task.id}`;
-    const data = await api(workspace.tab.bid, base + "/review", {method:"POST", body:{}});
-    m.querySelector(".task-review-files").textContent = data.files || "No changes to apply.";
-    m.querySelector(".task-review-diff").textContent = data.diff;
-    m.querySelector(".task-review-note").textContent = (data.truncated ? "Diff preview shortened. " : "") + "Applies changes to Main’s working files. It does not commit or deploy. Overlapping edits must be resolved before applying.";
+    const base = `sessions/${workspace.tab.sid}/tasks/${session.id}`;
+    const data = await api(workspace.tab.bid, base + "/review", { method: "POST", body: {}, timeoutMs: 120000 });
+    if (!m.isConnected) return;
+    const list = String(data.files || "").trim();
+    const count = list ? list.split("\n").length : 0;
+    fact("Changes", count ? `${count} file${count === 1 ? "" : "s"}` : "none since the last apply");
+    files.textContent = list || "No changes to apply.";
+    if (data.diff) {
+      diff.replaceChildren();
+      for (const line of String(data.diff).split("\n"))
+        diff.appendChild(el("span", diffLineClass(line), line + "\n"));
+      diff.classList.remove("hidden");
+    }
+    note.textContent = (data.truncated ? "The diff preview is shortened. " : "") +
+      "Applying writes these changes into Main’s working files without committing or deploying; overlapping edits must be resolved first.";
+    note.classList.remove("hidden");
+    apply.textContent = data.has_changes ? "Apply to Main" : "Mark as reviewed";
     apply.disabled = false;
-    apply.textContent = data.has_changes ? "Apply to Main" : "Mark reviewed";
     apply.onclick = async () => {
-      apply.disabled = true; errorBox.textContent = "";
+      apply.disabled = true; error.classList.add("hidden");
       try {
-        await api(workspace.tab.bid, base + "/apply", {method:"POST", body:{token:data.token}});
-        close(); toast(data.has_changes ? "Task changes applied to Main" : "Task reviewed"); await refreshSessionList(workspace.tab.bid); renderSidebar();
-      } catch (error) { errorBox.textContent = error.message; apply.disabled = false; }
+        await api(workspace.tab.bid, base + "/apply", { method: "POST", body: { token: data.token }, timeoutMs: 120000 });
+        close();
+        toast(data.has_changes ? "Task changes applied to Main" : "Task marked as reviewed", "ok");
+        await refreshSessionList(workspace.tab.bid); renderSidebar();
+      } catch (err) { fail(err.message); apply.disabled = false; }
     };
-  } catch (error) { errorBox.textContent = error.message; m.querySelector(".task-review-files").textContent = ""; }
+  } catch (err) { files.textContent = ""; fail(err.message); }
 }
 
 class SessionView {
@@ -11852,12 +12070,21 @@ class SessionView {
       const b = el("button", danger ? "danger" : "", label);
       b.onclick = (e) => { e.stopPropagation(); menu.remove(); fn(); };
       menu.appendChild(b);
+      return b;
     };
     add("Rename", () => this.rename());
     add("Dot color", () => this.pickColor(anchor));
     add("Switch engine", () => modalSwitchEngine(this));
+    if (this.session && this.session.task) {
+      /* kept visible while the task still works, like the tools menu's rows,
+         so the answer to "where is review?" is on the row itself */
+      const workspace = workspaceViewFor(this.tab.bid, this.session.task.parent);
+      const review = add("Review changes", () => { if (workspace) modalReviewTask(workspace, this.session); });
+      review.disabled = !workspace || !taskReviewable(this.session.task);
+    }
     menu.appendChild(menuCheckRow("Show status bar", sessionShowsMeta(this.session),
       () => this.patchSession({ show_meta: !sessionShowsMeta(this.session) })));
+    appendSessionTasksToggle(menu, this.tab.bid, this.session);
     menu.appendChild(el("div", "menu-sep"));
     const sessionWs = sessionWorkspace(this.session);
     add(isScratchWorkspace(this.session) ? "Copy workspace path" :

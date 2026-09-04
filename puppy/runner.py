@@ -273,6 +273,7 @@ def session_payload(session):
     out["workspace_missing"] = workspaces.is_temporary(out) and not workspaces.is_available(out)
     out["used_config"] = parse_used_config(out["used_config"])
     out["show_meta"] = out["show_meta"] != 0
+    out["tasks_enabled"] = session_tasks.enabled(session["id"])
     out["fast_mode"] = bool(out.get("fast_mode"))
     # Raw descriptor JSON becomes a structured object on the wire, while the
     # private mirror cwd never leaves the node.
@@ -490,6 +491,7 @@ def sessions_payload() -> dict:
             # list has to carry this too - reading it only from the single
             # session payload left that menu permanently showing "on"
             "show_meta": s["show_meta"] != 0,
+            # tasks_enabled and task grouping are added by session_tasks.decorate
             "steering": (h.steering_state(s) if h else {
                 "supported": _driver_steering_supported(s),
                 "ready": False,
