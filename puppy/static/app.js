@@ -90,6 +90,31 @@ function themeIcon(size, moon) {
   return svg;
 }
 
+/* Sign-out door: the same centred 24-box, 1.5-stroke line art as the footer's
+   gear, theme and bell, so the whole row reads as one set. */
+function logoutIcon(size) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const draw = (d) => {
+    const p = document.createElementNS(NS, "path");
+    p.setAttribute("d", d);
+    p.setAttribute("fill", "none");
+    p.setAttribute("stroke", "currentColor");
+    p.setAttribute("stroke-width", "1.5");
+    p.setAttribute("stroke-linecap", "round");
+    p.setAttribute("stroke-linejoin", "round");
+    svg.appendChild(p);
+  };
+  draw("M10 7.5V7a4 4 0 0 1 4-4h3a4 4 0 0 1 4 4v10a4 4 0 0 1-4 4h-3a4 4 0 0 1-4-4v-.5");
+  draw("M14 12H3");
+  draw("M6.5 8.5 3 12l3.5 3.5");
+  return svg;
+}
+
 /* Same reason as the close cross above: a "+" character is placed on the font's
    math axis, which is not the middle of its line box, so the glyph lands about
    1.5px low in a flex-centred button however the box is aligned. Drawn ink is
@@ -7229,6 +7254,25 @@ function syncBell() {
       `${label}; activate to ${n.enabled ? "disable" : "enable"}`);
   }
 }
+
+/* sign out of this console: only this browser's session ends, every session on
+   the node keeps running - Settings offers the same action in words. The
+   lookup tolerates absence like the bell's, so a page still cached by an
+   older listener keeps working without the button. */
+const logoutButton = $("btn-logout");
+if (logoutButton) {
+  logoutButton.appendChild(logoutIcon(14));
+  logoutButton.onclick = async () => {
+    if (!await modalConfirm("Log out?",
+        "This console signs out. Sessions on the node keep running.",
+        { confirmLabel: "Log out", destructive: false })) return;
+    try {
+      await api(0, "auth/logout", { method: "POST" });
+      location.reload();
+    } catch (e) { toast(e.message, "error"); }
+  };
+}
+
 $("btn-bell").onclick = async () => {
   const want = !(state.notify && state.notify.enabled);
   try {
