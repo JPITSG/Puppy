@@ -4722,6 +4722,68 @@ def exercise_effective_model_provenance(runner, db) -> None:
         db.delete_session(sid)
 
 
+def exercise_claude_model_alias_provenance(runner, db) -> None:
+    """Claude catalog aliases compare by resolution, not hardcoded names."""
+    sid = db.create_session("model alias provenance", "claude", "/tmp",
+                            "future-long[2m]", "high", "blue", "auto")
+    hub = runner.hub(sid)
+    driver = ClaudeDriver()
+    try:
+        session = db.get_session(sid)
+        ctx = driver.turn_context(session, True, "hello", "pin")
+        assert driver.parse_line(json.dumps({
+            "type": "control_response",
+            "response": {"subtype": "success", "request_id": "init_1",
+                         "response": {"models": [
+                             {"value": "default", "displayName": "Default"},
+                             {"value": "future-long[2m]", "displayName": "Future",
+                              "resolvedModel": "vendor-future-9[2m]"},
+                         ]}},
+        }), ctx) == []
+
+        before = len(db.get_events(sid))
+        init_actions = driver.parse_line(json.dumps({
+            "type": "system", "subtype": "init", "session_id": "native",
+            "model": "vendor-future-9[2m]", "tools": [],
+        }), ctx)
+        report = next(action for action in init_actions if action["a"] == "model")
+        hub._note_effective_model(session, driver, ctx, report["model"])
+        assert len(db.get_events(sid)) == before
+        assert db.get_session(sid)["last_model"] == "vendor-future-9[2m]"
+
+        # The provider-facing assistant form drops the capacity selector. It
+        # is neither another model action nor last_model churn.
+        assert driver.parse_line(json.dumps({
+            "type": "assistant", "message": {
+                "model": "vendor-future-9", "content": []},
+        }), ctx) == []
+        assert len(db.get_events(sid)) == before
+        assert db.get_session(sid)["last_model"] == "vendor-future-9[2m]"
+
+        # A persisted provider form from an earlier response is equivalent to
+        # the next turn's system/init form and must not churn back and forth.
+        session["last_model"] = "vendor-future-9"
+        db.touch_session(sid, last_model="vendor-future-9")
+        hub._note_effective_model(
+            session, driver, ctx, "vendor-future-9[2m]")
+        assert len(db.get_events(sid)) == before
+        assert db.get_session(sid)["last_model"] == "vendor-future-9"
+
+        # A genuinely different resolved id is still detected and retained.
+        hub._note_effective_model(session, driver, ctx, "vendor-other-1")
+        warning = db.get_events(sid)[-1]
+        assert warning["kind"] == "info"
+        assert warning["data"] == {
+            "subtype": "model_switch",
+            "text": "requested model 'future-long[2m]' but engine is serving "
+                    "vendor-other-1",
+        }
+        assert db.get_session(sid)["last_model"] == "vendor-other-1"
+    finally:
+        runner.drop_hub(sid)
+        db.delete_session(sid)
+
+
 async def exercise_queue_pause_websocket(url: str, token: str, runner, db) -> None:
     """The authenticated socket carries pause and revision-guarded reorder."""
     sid = db.create_session("queue pause socket", "claude", "/tmp", "", "",
@@ -5044,6 +5106,7 @@ async def main() -> None:
         exercise_abandoned_upload_cleanup(runner, db, uploads, config)
         exercise_session_show_meta(runner, db)
         exercise_effective_model_provenance(runner, db)
+        exercise_claude_model_alias_provenance(runner, db)
         await exercise_auth_probes(temp_root / "auth-probes")
         exercise_auth_evidence(temp_root / "auth-evidence", db)
         exercise_host_cpu_math(host_metrics)

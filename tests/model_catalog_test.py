@@ -97,6 +97,7 @@ def check_parsers_and_turn_ingest() -> None:
     assert values(claude[0]["effort_options"]) == ["", "low", "high"]
     assert values(claude[1]["effort_options"]) == [""]
     assert "vendor-default" in claude[0]["hint"]
+    assert claude[0]["resolved_model"] == "vendor-default"
 
     # The catalog already returned by a real turn is useful evidence too and
     # must update the same last-known-good state as the no-turn probe.
@@ -107,13 +108,58 @@ def check_parsers_and_turn_ingest() -> None:
         "response": {"subtype": "success", "request_id": "init_1",
                      "response": {"models": [
                          {"value": "default", "displayName": "Default"},
-                         {"value": "turn-new", "displayName": "Turn New",
+                         {"value": "turn-new[2m]", "displayName": "Turn New",
+                          "resolvedModel": "vendor-future-9[2m]",
                           "supportedEffortLevels": ["max"]},
                      ]}},
     }), ctx) == []
     assert ctx["control_ready"] is True
-    assert values(driver.model_options()) == ["", "turn-new"]
+    assert values(driver.model_options()) == ["", "turn-new[2m]"]
     assert driver.model_catalog_source() == "turn"
+    # No family or version knowledge is needed: the live catalog maps an
+    # invented future alias, and the driver tolerates the CLI/provider forms
+    # with and without their capacity selector.
+    assert driver.model_request_matches(
+        "turn-new[2m]", "vendor-future-9", ctx) is True
+    assert driver.models_equivalent(
+        "vendor-future-9[2m]", "vendor-future-9", ctx) is True
+    assert driver.model_request_matches(
+        "turn-new[2m]", "vendor-other-1", ctx) is False
+    assert driver.models_equivalent(
+        "vendor-future-9", "vendor-other-1", ctx) is False
+
+    # Contract observed from Claude Code 2.1.260. These names live only in the
+    # regression: production follows value -> resolvedModel from initialize.
+    current = parse_claude_catalog([
+        {"value": "opus[1m]", "displayName": "Opus (1M context)",
+         "resolvedModel": "claude-opus-5[1m]"},
+        {"value": "fable[1m]", "displayName": "Fable",
+         "resolvedModel": "claude-fable-5-1"},
+    ])
+    current_ctx = {"model_options": current}
+    assert driver.model_request_matches(
+        "opus[1m]", "claude-opus-5[1m]", current_ctx) is True
+    assert driver.model_request_matches(
+        "opus[1m]", "claude-opus-5", current_ctx) is True
+    assert driver.model_request_matches(
+        "fable[1m]", "claude-fable-5-1", current_ctx) is True
+    assert driver.model_request_matches(
+        "fable[1m]", "claude-opus-5", current_ctx) is False
+    # Full model ids remain valid even when they are not picker rows.
+    assert driver.model_request_matches(
+        "claude-opus-5[1m]", "claude-opus-5", {"model_options": []}) is True
+    stream_ctx = driver.turn_context(
+        {"model": "opus[1m]"}, True, "hello", "current-pin")
+    stream_ctx["model_options"] = current
+    init_actions = driver.parse_line(json.dumps({
+        "type": "system", "subtype": "init", "session_id": "current",
+        "model": "claude-opus-5[1m]", "tools": [],
+    }), stream_ctx)
+    assert any(action["a"] == "model" for action in init_actions)
+    assert driver.parse_line(json.dumps({
+        "type": "assistant", "message": {
+            "model": "claude-opus-5", "content": []},
+    }), stream_ctx) == []
 
     codex = parse_codex_catalog([
         {"model": "model-a", "displayName": "Model A", "isDefault": True,

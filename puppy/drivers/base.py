@@ -52,7 +52,10 @@ Actions returned by parse_line() (consumed by the runner):
     {"a": "event", "kind": ..., "data": {...}}      persist + broadcast
     {"a": "transient", "msg": {...}}                 broadcast only (deltas, status)
     {"a": "native_id", "id": "..."}                  store engine-native session id
-    {"a": "model", "model": "..."}                   engine-confirmed effective model
+    {"a": "model", "model": "..."}                   engine-confirmed effective model;
+                                                     the runner asks the driver
+                                                     whether requested/reported
+                                                     names are equivalent
     {"a": "approval", "req": {...}}                  interactive permission request
     {"a": "approval_cancel", "request_id": "..."}
     {"a": "stdin", "data": {...}}                    continue a JSONL handshake
@@ -498,6 +501,26 @@ class Driver:
             seen.add(raw["value"])
             result.append(dict(raw))
         return result
+
+    def model_request_matches(self, requested: str, reported: str, ctx=None) -> bool:
+        """Whether one engine report satisfies the model Puppy requested.
+
+        The generic contract preserves the historical alias check: a short
+        requested name may appear inside the engine's fully resolved id.
+        Drivers whose catalog supplies an explicit alias mapping should use
+        that mapping instead of teaching the runner vendor naming rules.
+        """
+        requested = str(requested or "").strip()
+        reported = str(reported or "").strip()
+        return not requested or requested.casefold() in reported.casefold()
+
+    def models_equivalent(self, first: str, second: str, ctx=None) -> bool:
+        """Whether two engine reports identify the same effective model.
+
+        Exact equality is deliberately conservative. A driver may override
+        this when its protocol emits multiple representations of one model.
+        """
+        return str(first or "") == str(second or "")
 
     def _model_catalog_state(self) -> ModelCatalog:
         state = getattr(self, "_model_catalog", None)

@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 
 from puppy.drivers import base as driver_base
 from puppy.drivers.base import Driver, ToolUnavailable, stringify_content
@@ -53,6 +54,11 @@ _ID_SQ_PREFIX = "puppy-sq:"
 _MODEL_REQUEST_ID = "puppy-models"
 _MODEL_OUTPUT_LIMIT = 8 * 1024 * 1024
 _MODEL_MESSAGE_LIMIT = 128
+# Claude's documented context selector is metadata on a model choice. The
+# provider-facing assistant event can omit it even when system/init and the
+# picker resolution retain it. Match the capacity syntax, never a model family
+# or version, so future catalog names remain opaque to Puppy.
+_CONTEXT_SELECTOR_RE = re.compile(r"\[[1-9][0-9]*(?:\.[0-9]+)?[km]\]$", re.I)
 _EFFORT_ORDER = ("low", "medium", "high", "xhigh", "max", "ultra")
 _EFFORT_HINTS = {
     "low": "Fastest, minimal reasoning",
@@ -113,6 +119,10 @@ def parse_model_catalog(models) -> list:
             hint = "{}{}{}".format(hint, " · " if hint else "", resolved)
         option = {"value": value, "label": label or ("Default" if not value else value),
                   "hint": hint[:240]}
+        if resolved:
+            # Keep the engine's mapping as data. Model-move detection must not
+            # reverse-engineer a changing alias or version from display text.
+            option["resolved_model"] = resolved
         levels = raw.get("supportedEffortLevels")
         if raw.get("supportsEffort") is False:
             option["effort_options"] = _claude_efforts([])
@@ -275,6 +285,53 @@ class ClaudeDriver(Driver):
         return sorted(seen.values(), key=lambda item: (
             order.get(item["value"], len(order)), item["value"]))
 
+    @staticmethod
+    def _reported_model_forms(value: str) -> set:
+        """Comparable forms of a Claude-reported model id.
+
+        Claude Code may keep a capacity selector in its picker/system model
+        while stripping it from the provider-facing assistant model. Nothing
+        else is parsed: family names and version components remain opaque.
+        """
+        value = str(value or "").strip()
+        if not value:
+            return set()
+        without_selector = _CONTEXT_SELECTOR_RE.sub("", value)
+        return {value, without_selector}
+
+    def models_equivalent(self, first: str, second: str, ctx=None) -> bool:
+        return bool(self._reported_model_forms(first) &
+                    self._reported_model_forms(second))
+
+    def model_request_matches(self, requested: str, reported: str, ctx=None) -> bool:
+        requested = str(requested or "").strip()
+        if not requested:
+            return True
+        options = ctx.get("model_options") if isinstance(ctx, dict) else None
+        if not isinstance(options, list):
+            options = self.model_options()
+        # Values are engine-owned and normally compared exactly. The casefold
+        # fallback retains the CLI's long-standing case-insensitive aliases
+        # without making provider-specific ids case-insensitive generally.
+        option = next((item for item in options
+                       if isinstance(item, dict) and
+                       item.get("value") == requested), None)
+        if option is None:
+            folded = requested.casefold()
+            option = next((item for item in options
+                           if isinstance(item, dict) and
+                           str(item.get("value") or "").casefold() == folded), None)
+        resolved = str((option or {}).get("resolved_model") or "").strip()
+        if resolved:
+            return self.models_equivalent(resolved, reported, ctx)
+        # Older CLIs and explicit full ids may not have a catalog row. Retain
+        # the generic short-alias behavior, but compare forms after removing
+        # only Claude's documented capacity selector.
+        requested_forms = self._reported_model_forms(requested)
+        reported_forms = self._reported_model_forms(reported)
+        return any(left.casefold() in right.casefold()
+                   for left in requested_forms for right in reported_forms)
+
     def tool_options(self):
         return [
             {"value": "compact", "label": "Compact context",
@@ -432,6 +489,10 @@ class ClaudeDriver(Driver):
             # itself is live, which is what a side question rides on. The
             # user-message replay proves only that the query accepts prompts.
             "control_ready": False,
+            # A turn's initialize mapping is authoritative for its own alias.
+            # Start with last-known-good so an older CLI that omits the list
+            # still benefits without coupling concurrent turns to later ingest.
+            "model_options": self.model_options(),
             # background work the CLI still owns: REPLACE semantics from
             # background_tasks_changed, task edges as the fallback
             "background_tasks": [],
@@ -659,7 +720,7 @@ class ClaudeDriver(Driver):
                      "cache_creation_input_tokens", "output_tokens"))
             # per-response model id - catches mid-turn fallback (e.g. fable -> opus)
             mdl = msg.get("model") or ""
-            if mdl and mdl != ctx.get("model_seen"):
+            if mdl and not self.models_equivalent(mdl, ctx.get("model_seen"), ctx):
                 ctx["model_seen"] = mdl
                 acts.append({"a": "model", "model": mdl})
             for blk in msg.get("content") or []:
@@ -721,6 +782,7 @@ class ClaudeDriver(Driver):
                 if ctx["control_ready"] and isinstance(resp.get("response"), dict):
                     try:
                         options = parse_model_catalog(resp["response"].get("models"))
+                        ctx["model_options"] = options
                         self._model_catalog_state().ingest(options, source="turn")
                     except Exception:
                         # Picker metadata is optional and cannot affect the

@@ -2379,6 +2379,52 @@ class SessionHub:
         self.broadcast({"type": "session_meta",
                         "session": session_payload(db.get_session(self.id))})
 
+    def _note_effective_model(self, session, driver, ctx, new_model: str) -> None:
+        """Record an engine model report and surface only semantic moves.
+
+        Requested aliases and effective ids belong to the driver protocol.
+        The runner keeps their raw values for audit/display, but delegates
+        equivalence so it never learns vendor families, versions or modifiers.
+        """
+        new_model = str(new_model or "")
+        if not new_model:
+            return
+        old_model = session.get("last_model") or ""
+        requested = (session.get("model") or "").strip()
+        mismatch = bool(requested) and not driver.model_request_matches(
+            requested, new_model, ctx)
+        model_changed = bool(old_model) and not driver.models_equivalent(
+            old_model, new_model, ctx)
+        first_report = not old_model
+        if not (first_report or model_changed or mismatch):
+            return
+
+        # This turn's own divider already announced a requested move, so only
+        # an unasked-for effective move is worth another transcript line.
+        announced = self._model_move_announced and not mismatch
+        self._model_move_announced = False
+        if not announced:
+            if mismatch:
+                self._emit("info", {
+                    "subtype": "model_switch",
+                    "text": "requested model '{}' but engine is serving {}".format(
+                        requested, new_model),
+                })
+            elif model_changed:
+                self._emit("info", {
+                    "subtype": "model_switch",
+                    "text": "engine model changed: {} → {}".format(
+                        old_model, new_model),
+                })
+
+        # Equivalent protocol spellings do not churn last_model or its
+        # session_meta broadcast. The first report and a real move remain raw.
+        if first_report or model_changed:
+            session["last_model"] = new_model
+            db.touch_session(self.id, last_model=new_model)
+            self.broadcast({"type": "session_meta",
+                            "session": session_payload(db.get_session(self.id))})
+
     async def _retry_pause(self, fields: dict, attempt: int) -> bool:
         """Hold a retried prompt for its back-off. False when the wait was cut
         short: a stop drops the prompt like any interrupted turn, a shutdown
@@ -2746,27 +2792,8 @@ class SessionHub:
                             session["native_session_id"] = nid
                             db.touch_session(self.id, native_session_id=nid)
                     elif a == "model":
-                        new_model = act["model"]
-                        old_model = session.get("last_model") or ""
-                        requested = (session.get("model") or "").strip()
-                        mismatch = requested and requested.lower() not in new_model.lower()
-                        if new_model != old_model or mismatch:
-                            # this turn's own divider already announced the move,
-                            # so only an unasked-for one is worth a warning line
-                            announced = self._model_move_announced and not mismatch
-                            self._model_move_announced = False
-                            if not announced:
-                                if mismatch:
-                                    self._emit("info", {"subtype": "model_switch",
-                                                        "text": f"requested model '{requested}' but engine is serving {new_model}"})
-                                elif old_model:
-                                    self._emit("info", {"subtype": "model_switch",
-                                                        "text": f"engine model changed: {old_model} → {new_model}"})
-                            if new_model != old_model:
-                                session["last_model"] = new_model
-                                db.touch_session(self.id, last_model=new_model)
-                                self.broadcast({"type": "session_meta",
-                                                "session": session_payload(db.get_session(self.id))})
+                        self._note_effective_model(
+                            session, driver, ctx, act.get("model"))
                     elif a == "approval":
                         # stored raw: the reply must echo the engine's own
                         # paths, so only the broadcast copy is rewritten
