@@ -4844,10 +4844,8 @@ console.log(JSON.stringify({remoteCount,afterRemote,localCount,closed,
 
 
 def check_quota_math(ui_source: str) -> None:
-    """The footer's weekly figure, run through node against every payload shape.
-    claude's `utilization` is a 0..1 fraction and codex's `used_percent` is
-    0..100 - the scale must follow the field name, never the magnitude, which
-    once rendered an 89%-consumed week as "99% wk"."""
+    """The footer selects the all-model week without guessing from its value
+    or allowing a currently-binding model-specific window to take its place."""
     def extract(start):
         i = ui_source.index(start)
         b = ui_source.index("{", i)
@@ -4860,40 +4858,67 @@ def check_quota_math(ui_source: str) -> None:
                 if depth == 0:
                     return ui_source[i:j + 1]
         raise AssertionError("unbalanced " + start)
-    script = (extract("\nfunction weeklyUsedPercent(") +
+    script = (extract("\nfunction weeklyQuotaSample(") +
               extract("\nfunction weeklyQuotaLeft(") +
               extract("\nfunction quotaTitle(") + """
 const fmtDateTime = epoch => String(epoch);
-const claude = {rateLimitType: "seven_day_overage_included", utilization: 0.89,
-  unifiedWindows: {five_hour: {utilization: 0.29}, seven_day: {utilization: 0.68},
-                   seven_day_overage_included: {utilization: 0.89}}};
+const claude = {rateLimitType: "seven_day_overage_included", utilization: 0.94,
+  unifiedWindows: {five_hour: {utilization: 0.26}, seven_day: {utilization: 0.52},
+                   seven_day_overage_included: {utilization: 0.94}},
+  captured_at: 222};
+const left = (value, now = 100) =>
+  weeklyQuotaLeft(weeklyQuotaSample(value, now));
 const values = [
-  weeklyQuotaLeft({rate_limit: claude}),                                  // 11
-  weeklyQuotaLeft({rate_limit: {rateLimitType: "five_hour", utilization: 0.3,
+  left({rate_limit: claude}),                                             // 48
+  left({rate_limit: {rateLimitType: "five_hour", utilization: 0.3,
     unifiedWindows: {seven_day: {utilization: 0.68}}}}),                  // 32
-  weeklyQuotaLeft({quota: {weekly_used_percent: 19}}),                    // 81
-  weeklyQuotaLeft({rate_limit: {primary: {window_minutes: 10080,
-                                          used_percent: 40}}}),           // 60
-  weeklyQuotaLeft({rate_limit: null}),                                    // null
-  weeklyQuotaLeft({rate_limit: {rateLimitType: "seven_day",
-                                utilization: 1.15}}),                     // 0
+  left({quota: {weekly_used_percent: 19}}),                               // 81
+  left({rate_limit: {primary: {window_minutes: 10080,
+                               used_percent: 40}}}),                      // 60
+  left({rate_limit: {secondary: {windowDurationMins: 10080,
+                                 usedPercent: 41}}}),                     // 59
+  left({rate_limit: null}),                                               // null
+  left({rate_limit: {rateLimitType: "seven_day",
+                     utilization: 1.15}}),                                // 0
+  left({rate_limit: {rateLimitType: "seven_day_opus",
+                     utilization: 0.9}}),                                 // null
+  left({rate_limit: {rateLimitType: "seven_day_overage_included",
+                     utilization: 0.9}}),                                 // null
+  left({rate_limit: {rateLimitType: "future_weekly_model",
+                     utilization: 0.9}}),                                 // null
+  left({rate_limit: {unifiedWindows: {
+    seven_day: {utilization: Number.NaN}}}}),                             // null
+  left({rate_limit: {unifiedWindows: {
+    seven_day: {utilization: Number.POSITIVE_INFINITY}}}}),               // null
+  left({rate_limit: {unifiedWindows: {
+    seven_day: {utilization: 0.4, resetsAt: 99}}}}, 100),                 // null
 ];
-const provenance = quotaTitle({
+const quotaEngine = {
   quota: {weekly_used_percent: 19, resets_at: 333, as_of: 222},
   rate_limit: {captured_at: 111, unifiedWindows: {
     five_hour: {utilization: 0.9}, seven_day: {utilization: 0.8}}},
-});
-console.log(JSON.stringify({values, provenance}));
+};
+const provenance = quotaTitle(quotaEngine, weeklyQuotaSample(quotaEngine, 100));
+const claudeEngine = {rate_limit: claude};
+const claudeProvenance = quotaTitle(
+  claudeEngine, weeklyQuotaSample(claudeEngine, 100));
+console.log(JSON.stringify({values, provenance, claudeProvenance}));
 """)
     proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:400]
     result = json.loads(proc.stdout.strip())
     rounded = [None if v is None else round(v) for v in result["values"]]
-    assert rounded == [11, 32, 81, 60, None, 0], result
+    assert rounded == [48, 32, 81, 60, 59, None, 0, None, None, None,
+                       None, None, None], result
     assert "week 19% used" in result["provenance"], result
     assert "reported 222" in result["provenance"], result
     assert "111" not in result["provenance"] and \
         "5h" not in result["provenance"], result
+    assert "all-model week 52% used" in result["claudeProvenance"], result
+    assert "model-specific week 94% used" in result["claudeProvenance"], result
+    assert "5h 26% used" in result["claudeProvenance"], result
+    assert "overage" not in result["claudeProvenance"], result
+    assert "reported 222" in result["claudeProvenance"], result
 
 
 def check_browser_loading_ui(ui_source: str, css_source: str) -> None:

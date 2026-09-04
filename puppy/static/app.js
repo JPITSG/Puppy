@@ -5077,74 +5077,88 @@ function wireSessionDropZone(root) {
 // below this much of the weekly allowance remaining, the figure reads as a warning
 const QUOTA_LOW_PERCENT = 33;
 
-/* Scale is decided by the field's NAME, never its magnitude: claude's
-   `utilization` is a 0..1 fraction, codex's `used_percent` is 0..100. Guessing
-   by size once showed "99% wk" for a week that was 89% consumed. */
-function weeklyUsedPercent(e) {
-  if (e.quota && typeof e.quota.weekly_used_percent === "number")
-    return e.quota.weekly_used_percent;
+/* Resolve the all-model week and its provenance together so the pill and its
+   tooltip cannot describe different windows. Field names own their scales:
+   Claude utilization is a 0..1 fraction; canonical used_percent is 0..100. */
+function weeklyQuotaSample(e, now = Date.now() / 1000) {
+  const finite = value => typeof value === "number" && Number.isFinite(value);
+  const sample = (usedPercent, resetsAt, asOf, source, label = "week") => {
+    if (!finite(usedPercent)) return null;
+    // After a known reset, the old observation says nothing about the new week.
+    if (finite(resetsAt) && resetsAt > 0 && resetsAt <= now) return null;
+    return { usedPercent, resetsAt, asOf, source, label };
+  };
+
+  if (e.quota && finite(e.quota.weekly_used_percent))
+    return sample(e.quota.weekly_used_percent, e.quota.resets_at,
+      e.quota.as_of, "quota");
+
   const rl = e.rate_limit;
   if (!rl || typeof rl !== "object") return null;
-  // the window the CLI itself calls binding, when that window is a weekly one
-  if (/seven_day|weekly/i.test(rl.rateLimitType || "") &&
-      typeof rl.utilization === "number")
-    return rl.utilization * 100;
   const windows = rl.unifiedWindows;
-  if (windows && typeof windows === "object")
-    for (const name of ["seven_day", "seven_day_overage_included"]) {
-      const w = windows[name];
-      if (w && typeof w.utilization === "number") return w.utilization * 100;
-    }
-  for (const w of [rl.primary, rl.secondary])
-    if (w && w.window_minutes === 10080 && typeof w.used_percent === "number")
-      return w.used_percent;
+  const weekly = windows && typeof windows === "object" && windows.seven_day;
+  if (weekly && finite(weekly.utilization))
+    return sample(weekly.utilization * 100, weekly.resetsAt,
+      rl.captured_at, "unified-seven-day", "all-model week");
+
+  /* Older Claude events exposed only the binding window. An exact match is a
+     safe fallback; fuzzy matching would mislabel Opus/Sonnet/Fable buckets. */
+  if (rl.rateLimitType === "seven_day" && finite(rl.utilization))
+    return sample(rl.utilization * 100, rl.resetsAt,
+      rl.captured_at, "binding-seven-day");
+
+  for (const w of [rl.primary, rl.secondary]) {
+    if (!w || typeof w !== "object") continue;
+    const minutes = w.window_minutes ?? w.windowDurationMins;
+    const used = w.used_percent ?? w.usedPercent;
+    if (minutes === 10080 && finite(used))
+      return sample(used, w.resets_at ?? w.resetsAt,
+        rl.captured_at, "duration-seven-day");
+  }
   return null;
 }
 
-function weeklyQuotaLeft(e) {
-  const used = weeklyUsedPercent(e);
-  return used === null ? null : Math.max(0, Math.min(100, 100 - used));
+function weeklyQuotaLeft(sample) {
+  return sample === null ? null :
+    Math.max(0, Math.min(100, 100 - sample.usedPercent));
 }
 
-/* One line of provenance for the quota pill: every window the engine reported,
-   the weekly reset, and when the figure was captured - it only moves when a
-   turn runs (claude) or the account is read (codex), so its age matters. */
-function quotaTitle(e) {
+/* One line of provenance for the quota pill: the selected week, related Claude
+   windows, and when the figure was captured. Claude moves it on a turn; Codex
+   moves it on an account read, so the observation's age matters. */
+function quotaTitle(e, selected) {
+  if (!selected) return "";
   const parts = [];
   const clock = (epoch) => {
-    if (typeof epoch !== "number" || !isFinite(epoch)) return "";
+    if (typeof epoch !== "number" || !Number.isFinite(epoch)) return "";
     try { return fmtDateTime(epoch, {
       weekday: "short", hour: "2-digit", minute: "2-digit" }); }
     catch (error) { return ""; }
   };
   const rl = e.rate_limit;
   const windows = rl && rl.unifiedWindows;
-  /* weeklyUsedPercent prefers the account/rollout quota snapshot whenever it
-     exists, so provenance must come from that same object. Mixing its fresh
-     percentage with an older turn-level rate_limit timestamp made a correct
-     number look stale (and described different source windows). */
-  const quotaSelected = e.quota &&
-    typeof e.quota.weekly_used_percent === "number";
-  if (quotaSelected) {
-    let piece = `week ${Math.round(e.quota.weekly_used_percent)}% used`;
-    const reset = clock(e.quota.resets_at);
-    if (reset) piece += ` (resets ${reset})`;
-    parts.push(piece);
-  } else if (windows && typeof windows === "object") {
-    const label = { five_hour: "5h", seven_day: "week",
-                    seven_day_overage_included: "week incl. overage" };
-    for (const name of ["five_hour", "seven_day", "seven_day_overage_included"]) {
+  let piece = `${selected.label} ${Math.round(selected.usedPercent)}% used`;
+  const selectedReset = clock(selected.resetsAt);
+  if (selectedReset) piece += ` (resets ${selectedReset})`;
+  parts.push(piece);
+
+  /* Keep the other Claude windows visible as context, but never let a
+     model-specific allowance masquerade as the selected all-model week. */
+  if (selected.source !== "quota" && windows && typeof windows === "object") {
+    for (const [name, label] of [["five_hour", "5h"],
+                                ["seven_day_overage_included",
+                                 "model-specific week"]]) {
       const w = windows[name];
-      if (w && typeof w.utilization === "number") {
-        let piece = `${label[name]} ${Math.round(w.utilization * 100)}% used`;
+      if (w && typeof w.utilization === "number" &&
+          Number.isFinite(w.utilization)) {
+        let extra = `${label} ${Math.round(w.utilization * 100)}% used`;
         const reset = clock(w.resetsAt);
-        if (reset) piece += ` (resets ${reset})`;
-        parts.push(piece);
+        if (reset) extra += ` (resets ${reset})`;
+        parts.push(extra);
       }
     }
   }
-  if (!parts.length) return "";
-  const asOf = clock(quotaSelected ? e.quota.as_of : (rl && rl.captured_at));
+  const asOf = clock(selected.asOf);
   if (asOf) parts.push(`reported ${asOf}`);
   return parts.join(" · ");
 }
@@ -5515,7 +5529,8 @@ function renderFootEngines() {
       ico.appendChild(el("span", `engine-dot ${e.key}`));
       row.appendChild(ico);
       row.appendChild(document.createTextNode(e.label));
-      const pct = weeklyQuotaLeft(e);
+      const quotaSample = weeklyQuotaSample(e);
+      const pct = weeklyQuotaLeft(quotaSample);
       const healthy = engineReady(e);
       /* Two independent signals in one line, so each gets its own element: the
          engine's own health, and what is left of the weekly allowance. Sharing
@@ -5530,7 +5545,7 @@ function renderFootEngines() {
         st.appendChild(el("span", "st-sep", " · "));
         const quota = el("span", "st-quota" + (pct < QUOTA_LOW_PERCENT ? " low" : ""),
           `${Math.round(pct)}% wk`);
-        const detail = quotaTitle(e);
+        const detail = quotaTitle(e, quotaSample);
         if (detail) { quota.title = detail; quota.setAttribute("aria-label", detail); }
         st.appendChild(quota);
       }
