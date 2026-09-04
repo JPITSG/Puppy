@@ -911,7 +911,8 @@ console.log(JSON.stringify({
     assert "this session can still be opened" in sidebar
     assert "item.disabled" not in sidebar
     assert "openSessionTab(bid, s.id, s);" in sidebar
-    assert ".sess-item.backend-unavailable{opacity:.48;filter:grayscale(1)}" in css_source
+    assert ".sess-item.backend-unavailable{opacity:.56;filter:grayscale(1)}" in css_source
+    assert ".sess-item.archived.backend-unavailable{opacity:.4}" in css_source
 
 
 def check_controller_backend_pooling(ui_source: str) -> None:
@@ -1071,7 +1072,7 @@ console.log(JSON.stringify({engines:state.engCache[7],usage:state.remoteUsageRef
     assert "if (normalized) current = normalized;" in ui_source
     assert "Backend unavailable · showing last known setting" in ui_source
     assert "Backend unavailable · showing last known prompt settings." in ui_source
-    assert ".engine-node-offline-values .engine-row{opacity:.48}" in css_source
+    assert ".engine-node-offline-values .engine-row{opacity:.6}" in css_source
     assert ".usage-refresh-controls input:disabled{opacity:.5;cursor:not-allowed}" \
         in css_source
 
@@ -2747,7 +2748,7 @@ def check_queue_controls_ui(ui_source: str, css_source: str) -> None:
         css_source.index('.queue-strip .q-pause::after')]
     assert 'width:16px;height:16px;' in css_source
     assert '.queue-strip.editing .q-live button:disabled{' in css_source
-    assert '.queue-strip .q-item.q-paused .q-t{opacity:.58}' in css_source
+    assert '.queue-strip .q-item.q-paused .q-t{opacity:.72}' in css_source
     assert '.queue-strip .q-item.q-sortable{cursor:grab;user-select:none}' in css_source
     assert '.queue-strip .q-live-list.reordering .q-live{will-change:transform}' in css_source
 
@@ -3617,6 +3618,56 @@ def check_sidebar_icon_alignment(css_source: str) -> None:
                           css_source.index(".conn-dot.ok", css_source.index(".conn-dot{"))]
     assert "margin-left:6px;" in conn_dot
     assert "position:" not in conn_dot and "top:" not in conn_dot
+
+
+def check_ui_contrast_palette(ui_source: str, css_source: str) -> None:
+    """Small readable copy keeps AA contrast on every common app surface."""
+    def palette(marker: str) -> dict:
+        start = css_source.index(marker) + len(marker)
+        end = css_source.index("\n}", start)
+        return dict(re.findall(
+            r"--([a-z0-9-]+)\s*:\s*(#[0-9a-fA-F]{6})",
+            css_source[start:end]))
+
+    def luminance(value: str) -> float:
+        channels = [int(value[index:index + 2], 16) / 255
+                    for index in (1, 3, 5)]
+        linear = [channel / 12.92 if channel <= .04045 else
+                  ((channel + .055) / 1.055) ** 2.4
+                  for channel in channels]
+        return .2126 * linear[0] + .7152 * linear[1] + .0722 * linear[2]
+
+    def contrast(first: str, second: str) -> float:
+        high, low = sorted((luminance(first), luminance(second)), reverse=True)
+        return (high + .05) / (low + .05)
+
+    dark = palette(":root{")
+    light = palette("html.light{")
+    for name, colors in (("dark", dark), ("light", light)):
+        for ink in ("txt", "txt2", "txt3"):
+            for surface in ("bg", "panel", "panel2"):
+                ratio = contrast(colors[ink], colors[surface])
+                assert ratio >= 4.5, (name, ink, surface, ratio)
+        # These tokens label compact status and control surfaces, not merely
+        # decorative artwork, so panel2 is the conservative common backdrop.
+        for ink in ("acc", "ok", "warn", "err"):
+            ratio = contrast(colors[ink], colors["panel2"])
+            assert ratio >= 4.5, (name, ink, "panel2", ratio)
+
+    assert "color:var(--terminal-overlay-ink);" in css_source
+    assert contrast(dark["terminal-overlay-ink"], dark["bg"]) >= 7
+    assert "@media (hover:none){\n  .sess-item .si-pin,.sess-item .si-notes{opacity:.55}" \
+        in css_source
+
+    # A fresh managed browser paints its own standalone document, so it must
+    # carry the same readable light ink instead of silently retaining the old
+    # palette outside app.css.
+    for token in ("acc", "ok", "txt3"):
+        assert "--{}:{};".format(token, light[token]) in browser.START_PAGE_HTML
+
+    # Terminal programs own their ANSI choices. Puppy's neutral foreground is
+    # already very high contrast and should not rewrite application palettes.
+    assert 'foreground: "#e8e8ec"' in ui_source
 
 
 def check_compact_control_alignment(ui_source: str, css_source: str) -> None:
@@ -6319,6 +6370,7 @@ async def main() -> None:
             check_timer_settings_ui(ui_source, css_source)
             check_session_provider_marks(css_source)
             check_sidebar_icon_alignment(css_source)
+            check_ui_contrast_palette(ui_source, css_source)
             check_compact_control_alignment(ui_source, css_source)
             check_session_activity_clock(ui_source, css_source)
             check_sidebar_footer_buttons(ui_source, css_source)

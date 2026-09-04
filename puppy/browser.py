@@ -480,8 +480,8 @@ START_PAGE_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
  @media (prefers-color-scheme:light){{
   :root{{
    --bg-top:#ffffff; --bg-bottom:#eef1f7; --txt:#1b2434; --id:#101828;
-   --acc:#3b82e0; --acc-bg:rgba(59,130,224,.10); --acc-line:rgba(59,130,224,.30);
-   --ok:#0b9e71; --txt2:#48536b; --txt3:#8a94a8;
+   --acc:#2b69bd; --acc-bg:rgba(59,130,224,.10); --acc-line:rgba(59,130,224,.30);
+   --ok:#077553; --txt2:#48536b; --txt3:#606c82;
    --kbd-bg:rgba(15,23,42,.05); --kbd-line:rgba(15,23,42,.14); --kbd-txt:#48536b;
   }}
  }}

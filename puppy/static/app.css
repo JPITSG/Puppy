@@ -11,7 +11,9 @@
   --alert-triangle:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 1.7 14.4 13.2H1.6Z' fill='none' stroke='black' stroke-width='1.6' stroke-linejoin='round'/%3E%3Cpath d='M8 5.1v4.1' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round'/%3E%3Ccircle cx='8' cy='11.2' r='.8' fill='black'/%3E%3C/svg%3E");
   --bg:#07080b; --panel:#0e1015; --panel2:#13161e; --panel3:#191d27;
   --line:rgba(255,255,255,.075); --line2:rgba(255,255,255,.14);
-  --txt:#eceef4; --txt2:#a6adbf; --txt3:#6b7286;
+  /* Tertiary copy is often only 9-12px. Keep it quieter than --txt2 while
+     retaining normal-text contrast on the app's common surfaces. */
+  --txt:#eceef4; --txt2:#a6adbf; --txt3:#7d8599;
   --acc:#5aa2f5; --acc2:#8cc3ff; --acc-dim:rgba(90,162,245,.14);
   --ok:#22e5a4; --ok-dim:rgba(34,229,164,.12);
   --warn:#ffb64d; --warn-dim:rgba(255,182,77,.12);
@@ -19,7 +21,7 @@
   /* State lines keep their hierarchy while following each theme's palette. */
   --focus-line:rgba(90,162,245,.55); --focus-ring:rgba(90,162,245,.12);
   --focus-ring-soft:rgba(90,162,245,.10); --focus-stage-ring:#284669;
-  --browser-frame:#2a2b2d;
+  --browser-frame:#2a2b2d; --terminal-overlay-ink:#c5c9d3;
   --acc-line-soft:rgba(90,162,245,.28); --acc-line:rgba(90,162,245,.58);
   --acc-line-hi:rgba(90,162,245,.62);
   --ok-line:rgba(34,229,164,.4);
@@ -286,8 +288,8 @@ a{color:var(--acc2)}
 .sess-item:active{background:var(--hov)}
 .sess-item.active{background:var(--acc-dim);border-color:var(--acc-line-soft)}
 .sess-item.archived{opacity:.5}
-.sess-item.backend-unavailable{opacity:.48;filter:grayscale(1)}
-.sess-item.archived.backend-unavailable{opacity:.34}
+.sess-item.backend-unavailable{opacity:.56;filter:grayscale(1)}
+.sess-item.archived.backend-unavailable{opacity:.4}
 .sess-item.dragging{opacity:.28}
 #sess-groups.reordering .sess-item{will-change:transform}
 .engine-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0;color:var(--txt3);background:currentColor}
@@ -324,6 +326,11 @@ a{color:var(--acc2)}
   .sess-item .si-pin:hover,.sess-item .si-notes:hover{
     opacity:1;background:var(--hov);color:var(--txt)
   }
+}
+/* Pointer users reveal the repeated row actions on hover. A touch screen has
+   no such reveal, so its resting controls must remain findable. */
+@media (hover:none){
+  .sess-item .si-pin,.sess-item .si-notes{opacity:.55}
 }
 .sess-item .si-pin:focus-visible,
 .sess-item .si-notes:focus-visible{
@@ -1320,7 +1327,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   transition:background .12s var(--ease),color .12s var(--ease),transform .12s var(--ease);
 }
 .queue-strip .q-pause::after{content:"";position:absolute;inset:-7px -1px -7px -6px}
-.queue-strip .q-item.q-paused .q-t{opacity:.58}
+.queue-strip .q-item.q-paused .q-t{opacity:.72}
 .queue-strip .q-item.q-paused .q-n{color:var(--warn);opacity:.9}
 .queue-strip .q-item.q-paused .q-pause{color:var(--ok)}
 @media (hover:hover){
@@ -1623,7 +1630,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   position:absolute;inset:0;top:0;right:0;bottom:0;left:0;
   display:flex;flex-direction:column;gap:12px;
   align-items:center;justify-content:center;text-align:center;padding:12px;
-  background:rgba(7,8,11,.82);backdrop-filter:blur(3px);color:var(--txt2);
+  background:rgba(7,8,11,.82);backdrop-filter:blur(3px);color:var(--terminal-overlay-ink);
   /* above every xterm layer: its helpers sit at 5 and the accessibility
      tree at 10, and the overlay now shares their stacking context. */
   z-index:20;
@@ -1836,7 +1843,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .engine-row-statuses{display:flex;align-items:center;justify-content:flex-end;gap:6px;min-width:0;flex-wrap:wrap}
 .engine-row-statuses .pill{min-width:0}
 .engine-row-actions{display:flex;align-items:center;justify-content:flex-end;min-width:0}
-.engine-node-offline-values .engine-row{opacity:.48}
+.engine-node-offline-values .engine-row{opacity:.6}
 .engine-update{flex:0 0 auto;min-width:82px}
 .engine-update.wants-update{color:var(--warn);border-color:var(--warn-line);background:var(--warn-dim)}
 @media (hover:hover){
@@ -2663,11 +2670,13 @@ html.light{
   color-scheme:light;
   --bg:#f3f5f9; --panel:#ffffff; --panel2:#eaeef5; --panel3:#dfe5ee;
   --line:rgba(15,23,42,.10); --line2:rgba(15,23,42,.18);
-  --txt:#1b2434; --txt2:#48536b; --txt3:#8a94a8;
-  --acc:#3b82e0; --acc2:#2563c4; --acc-dim:rgba(59,130,224,.13);
-  --ok:#0b9e71; --ok-dim:rgba(11,158,113,.10);
-  --warn:#b26205; --warn-dim:rgba(178,98,5,.10);
-  --err:#d6455d; --err-dim:rgba(214,69,93,.10);
+  --txt:#1b2434; --txt2:#48536b; --txt3:#606c82;
+  /* Text-bearing colors are deliberately darker than their soft decorative
+     tints so small status words remain readable on pale cards and fields. */
+  --acc:#2b69bd; --acc2:#2563c4; --acc-dim:rgba(59,130,224,.13);
+  --ok:#077553; --ok-dim:rgba(11,158,113,.10);
+  --warn:#9e5203; --warn-dim:rgba(178,98,5,.10);
+  --err:#b52640; --err-dim:rgba(214,69,93,.10);
   --focus-line:rgba(59,130,224,.55); --focus-ring:rgba(59,130,224,.12);
   --focus-ring-soft:rgba(59,130,224,.10); --focus-stage-ring:#a9c7ef;
   --browser-frame:#cacdd4;
