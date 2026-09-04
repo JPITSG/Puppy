@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
+import shutil
 import sys
 
 from aiohttp import web
@@ -12,7 +14,12 @@ from aiohttp import web
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 
-from puppy import cli_releases  # noqa: E402
+from tests.scratch import private_root  # noqa: E402
+
+TEST_ROOT = private_root("cli-releases-")
+os.environ["PUPPY_DATA"] = str(TEST_ROOT / "data")
+
+from puppy import cli_releases, config, db  # noqa: E402
 
 
 class FakeDriver:
@@ -21,6 +28,8 @@ class FakeDriver:
 
 
 async def main() -> None:
+    config.load()
+    db.connect()
     assert cli_releases.compare_versions("future-cli 1.2.3", "1.2.3") == 0
     assert cli_releases.compare_versions("v1.2.2 (Future CLI)", "1.2.3") == -1
     assert cli_releases.compare_versions("future-cli 2.0.0", "1.9.9") == 1
@@ -87,6 +96,30 @@ async def main() -> None:
         assert cli_releases.status(driver, "future-cli 1.2.3")["update_available"] is False
         assert cli_releases.status(driver, "future-cli 1.3.0")["update_available"] is False
 
+        # A successful npm read starts one durable, version-specific ten-minute
+        # window. Re-reading the same version and restarting the in-memory cache
+        # must preserve the original sighting rather than postpone it forever.
+        stability = cli_releases.release_stability(driver)
+        assert stability["required"] and not stability["ready"], stability
+        assert stability["version"] == "1.2.3" and stability["observed_at"], stability
+        first_seen = stability["observed_at"]
+        assert not cli_releases.release_stability(
+            driver, now=first_seen + cli_releases.RELEASE_STABILIZATION_SECONDS - 0.1
+        )["ready"]
+        assert cli_releases.release_stability(
+            driver, now=first_seen + cli_releases.RELEASE_STABILIZATION_SECONDS
+        )["ready"]
+        await check_now()
+        assert cli_releases.release_stability(driver)["observed_at"] == first_seen
+        cli_releases._cache.clear()
+        await check_now()
+        assert cli_releases.release_stability(driver)["observed_at"] == first_seen
+        stored = db.meta_get(cli_releases.OBSERVATION_PREFIX + driver.key)
+        assert stored == {
+            "source": "npm:@vendor/future-cli", "version": "1.2.3",
+            "first_seen_at": first_seen,
+        }, stored
+
         # A later registry failure retains the last known advisory result and
         # moves onto the shorter retry cadence instead of breaking status.
         state["mode"] = "invalid"
@@ -111,6 +144,9 @@ async def main() -> None:
         assert split["latest_version"] == "1.2.4", split
         assert split["latest_check_error"] == "", split
         assert split["update_available"] is True
+        changed = cli_releases.release_stability(driver)
+        assert changed["version"] == "1.2.4" and not changed["ready"], changed
+        assert changed["observed_at"] >= first_seen, changed
 
         # Reading to EOF must not cost the cap: an endless body is still refused,
         # and the last known advisory version survives it.
@@ -125,11 +161,16 @@ async def main() -> None:
         })(), "1.0.0")
         assert unknown["latest_version"] == ""
         assert unknown["update_available"] is None
+        no_gate = cli_releases.release_stability(type("NoReleaseDriver", (), {
+            "key": "none", "release_source": None,
+        })())
+        assert no_gate["ready"] and not no_gate["required"], no_gate
     finally:
         cli_releases.NPM_REGISTRY_BASE = original_registry
         cli_releases.reset_for_tests()
         await runner.cleanup()
-    print("CLI release version parsing, coalescing, and failure fallback passed")
+        shutil.rmtree(TEST_ROOT, ignore_errors=True)
+    print("CLI release parsing, durable stabilization, coalescing, and fallback passed")
 
 
 if __name__ == "__main__":

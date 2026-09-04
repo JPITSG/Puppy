@@ -9,6 +9,11 @@ concurrently.
 
 Two rules shape the schedule:
 
+* A newly observed npm release stabilizes for ten minutes before either the
+  automatic scheduler or the manual Update button may run its vendor updater.
+  The first sighting is durable and version-specific, so refreshes and restarts
+  cannot shorten or endlessly reset the window.
+
 * One attempt per version pair. A pair is (installed version -> latest version).
   Once puppy has *run* the updater for a pair it never runs it again for that
   same pair, whether it worked or not. A pair only changes when one of the two
@@ -34,7 +39,7 @@ import re
 import time
 from typing import Optional
 
-from puppy import cli_upgrade, config, db
+from puppy import cli_releases, cli_upgrade, config, db
 
 log = logging.getLogger("puppy.cli_auto_upgrade")
 
@@ -159,6 +164,9 @@ def _skip_reason(driver, status: dict) -> Optional[str]:
         return "no update available"
     if not str(status.get("latest_version") or ""):
         return "latest version unknown"
+    if not cli_releases.release_stability(
+            driver, str(status.get("latest_version") or "")).get("ready"):
+        return "latest release is still stabilizing"
     return None
 
 

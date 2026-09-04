@@ -202,6 +202,20 @@ async def exercise_http() -> None:
                 assert response.status == 400, refused
                 assert "cannot be upgraded" in refused["error"]
 
+            # Manual and automatic callers converge on cli_upgrade.start. A
+            # freshly observed npm release is refused there before a subprocess
+            # can replace the working installation; the ordinary API error is
+            # what Settings presents in its toast.
+            async with http.post(
+                    url + "/api/engines/stub/upgrade", headers=headers) as response:
+                stabilizing = await response.json()
+                assert response.status == 409, stabilizing
+                assert "still stabilizing" in stabilizing["error"]
+                assert "10 minutes" in stabilizing["error"]
+            assert VERSION_FILE.read_text(encoding="utf-8").strip() == "1.0.0"
+            assert cli_upgrade.running_keys() == []
+            seed_latest("2.0.0")
+
             # Idle gate: queued work on this engine must block the rewrite,
             # while another engine's busy session must not.
             other = db.create_session("busy elsewhere", "bare", str(TEST_ROOT),
@@ -396,12 +410,20 @@ async def check_timeout() -> None:
         BEHAVIOUR_FILE.write_text("ok", encoding="utf-8")
 
 
-def seed_latest(version: str, key: str = "stub", package: str = "stub-cli") -> None:
-    """Publish a latest version for the stub without touching the network."""
+def seed_latest(version: str, key: str = "stub", package: str = "stub-cli",
+                age_seconds: float = None) -> None:
+    """Publish an observed latest version for a stub without network access."""
+    age = cli_releases.RELEASE_STABILIZATION_SECONDS + 1 \
+        if age_seconds is None else float(age_seconds)
+    observed_at = time.time() - age
+    source = "npm:" + package
     cli_releases._cache[key] = {
-        "source": "npm:" + package, "latest_version": version,
-        "checked_at": time.time(), "error": "",
+        "source": source, "latest_version": version,
+        "checked_at": time.time(), "observed_at": observed_at, "error": "",
     }
+    db.meta_set(cli_releases.OBSERVATION_PREFIX + key, {
+        "source": source, "version": version, "first_seen_at": observed_at,
+    })
 
 
 async def check_schedule() -> None:
@@ -441,11 +463,18 @@ async def check_attempt_once() -> None:
     cli_upgrade.reset_for_tests()
     cli_auto_upgrade.forget("stub")
     cli_auto_upgrade.set_settings({"enabled": True, "mode": "now"})
-    seed_latest("2.0.0")
+    seed_latest("2.0.0", age_seconds=0)
     # Keep the second test engine current so this test continues to isolate
     # the original single-engine attempt-ledger behavior.
     OTHER_VERSION_FILE.write_text("2.0.0\n")
     seed_latest("2.0.0", "other", "other-stub-cli")
+
+    # Merely enabling "now" cannot spend an attempt or launch the updater
+    # during the new version's stabilization window.
+    assert await cli_auto_upgrade.cycle(None) is None
+    assert not cli_auto_upgrade.attempted("stub", "1.0.0", "2.0.0")
+    assert VERSION_FILE.read_text(encoding="utf-8").strip() == "1.0.0"
+    seed_latest("2.0.0")
 
     # A busy engine defers without spending the pair's single attempt.
     busy = db.create_session("busy stub", "stub", str(TEST_ROOT), "", "", "blue", "auto")
@@ -549,6 +578,8 @@ async def main() -> None:
         cli_releases._refresh = no_registry_refresh
         driver_base.invalidate_status()
         cli_upgrade.reset_for_tests()
+        seed_latest("2.0.0", age_seconds=0)
+        seed_latest("2.0.0", "other", "other-stub-cli")
         await exercise_http()
         await check_timeout()
         await check_idle()

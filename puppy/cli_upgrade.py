@@ -7,7 +7,9 @@ declares only a fixed, argument-free self-update verb and this module owns the
 bounded subprocess around it: driver-owned argv (never client input), no shell,
 at most one run per engine, a hard timeout, and a capped transcript. Different
 engine vendors may update concurrently; the vendor updater remains responsible
-for its own installation method and locking.
+for its own installation method and locking. npm-backed engines also pass the
+shared durable release-stabilization gate immediately before either a manual or
+automatic run, preventing a freshly moved dist-tag from replacing a working CLI.
 
 The run is a detached background task. Callers start it and observe progress
 through the engine payload, which keeps the HTTP request short enough to survive
@@ -48,6 +50,7 @@ _IO_TRICKLE_BYTES = 4096
 _ARG_RE = re.compile(r"^-{0,2}[A-Za-z0-9][A-Za-z0-9._=-]*$")
 
 _runs: Dict[str, dict] = {}
+_preparing = set()
 
 
 def _source(driver) -> Optional[List[str]]:
@@ -85,23 +88,39 @@ def _argv(driver) -> Optional[List[str]]:
 
 def is_running(key: str) -> bool:
     """True while this engine's updater owns its per-engine slot."""
-    return (_runs.get(str(key)) or {}).get("state") == "running"
+    key = str(key)
+    return key in _preparing or (_runs.get(key) or {}).get("state") == "running"
 
 
 def running_keys() -> List[str]:
     """Engine keys whose independent vendor updaters are in flight."""
-    return sorted(key for key, record in _runs.items()
-                  if record.get("state") == "running")
+    return sorted(_preparing | {
+        key for key, record in _runs.items() if record.get("state") == "running"})
 
 
 def state(driver) -> dict:
     """Additive upgrade fields merged into one engine's status payload."""
-    record = _runs.get(str(driver.key)) or {}
+    key = str(driver.key)
+    record = _runs.get(key) or {}
     return {
         "upgrade_supported": supported(driver),
-        "upgrade_state": "running" if record.get("state") == "running" else "idle",
+        "upgrade_state": "running" if key in _preparing or
+        record.get("state") == "running" else "idle",
         "upgrade_result": record.get("result"),
     }
+
+
+def _stabilization_error(driver, stability: dict) -> str:
+    version = str(stability.get("version") or "the latest version")
+    remaining = stability.get("remaining_seconds")
+    if remaining is None:
+        return ("npm release {} has not been observed on this backend yet; "
+                "no update was started").format(version)
+    seconds = max(1, int(float(remaining) + 0.999))
+    minutes = (seconds + 59) // 60
+    return ("npm release {} is still stabilizing; try again in about {} "
+            "minute{} (updates wait at least 10 minutes after first sighting)".format(
+                version, minutes, "" if minutes == 1 else "s"))
 
 
 def _tail(text: str) -> str:
@@ -387,22 +406,37 @@ async def start(driver) -> dict:
     if argv is None:
         raise RuntimeError("{} is not installed on this backend".format(driver.label))
 
-    # Claim this engine's slot before the first await: two clicks arriving
-    # together must not both start a vendor updater for the same installation.
-    record = _runs.setdefault(key, {})
-    token = object()
-    record["state"] = "running"
-    record["started_at"] = time.time()
-    record["result"] = None
-    record["token"] = token
-    record.pop("task", None)
+    # Claim this engine before the first await. The npm preflight is network
+    # work, but a second click or a new turn must not slip through while it is
+    # deciding whether the observed release is old enough to install.
+    _preparing.add(key)
     try:
-        status = await driver.status()
-        from_version = str(status.get("version") or "")
-    except Exception:
-        from_version = ""
-    task = asyncio.ensure_future(_run(driver, argv, from_version, token))
-    record["task"] = task
+        if cli_releases.npm_based(driver):
+            if not await cli_releases.refresh_before_upgrade(driver):
+                raise RuntimeError(
+                    "could not verify the latest npm release; no update was started")
+            stability = cli_releases.release_stability(driver)
+            if not stability.get("ready"):
+                raise RuntimeError(_stabilization_error(driver, stability))
+        # Keep the pre-existing repair path: an updater may still be useful
+        # when a damaged installation cannot answer --version. Registry age is
+        # the safety prerequisite; the local version probe remains advisory.
+        try:
+            status = await driver.status()
+            from_version = str(status.get("version") or "")
+        except Exception:
+            from_version = ""
+        record = _runs.setdefault(key, {})
+        token = object()
+        record["state"] = "running"
+        record["started_at"] = time.time()
+        record["result"] = None
+        record["token"] = token
+        record.pop("task", None)
+        task = asyncio.ensure_future(_run(driver, argv, from_version, token))
+        record["task"] = task
+    finally:
+        _preparing.discard(key)
 
     def _done(finished) -> None:
         if record.get("token") is not token:
@@ -426,6 +460,7 @@ async def start(driver) -> dict:
 
 
 def reset_for_tests() -> None:
+    _preparing.clear()
     for record in _runs.values():
         task = record.get("task")
         if task is not None and not task.done():

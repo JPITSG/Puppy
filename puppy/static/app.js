@@ -13495,7 +13495,7 @@ class SettingsView {
     const seg = el("div", "seg");
     seg.setAttribute("role", "group");
     seg.setAttribute("aria-label", `When ${name} installs engine updates`);
-    const nowBtn = el("button", "seg-btn", "Right away");
+    const nowBtn = el("button", "seg-btn", "When ready");
     const atBtn = el("button", "seg-btn", "At");
     nowBtn.type = atBtn.type = "button";
     seg.appendChild(nowBtn);
@@ -13556,7 +13556,7 @@ class SettingsView {
       if (current.mode === "at")
         return `Installs in the ${current.window_minutes || 120} minutes after ${
           fmtClockSetting(current.at)}`;
-      return "Installs as soon as an update is found";
+      return "Installs after the 10-minute release wait";
     };
 
     const paint = () => {
@@ -15090,9 +15090,10 @@ class SettingsView {
     const autoSection = el("section", "engine-updates-section");
     autoSection.innerHTML = `<h2>Engine updates</h2>
       <p class="usage-refresh-copy">Let a backend install its own engine CLI updates using the
-        same vendor updater the Update button runs. Each version is tried once: if an update
-        fails it is not retried until a newer one appears, and a backend with a busy session
-        waits rather than replacing an engine underneath it.</p>`;
+        same vendor updater the Update button runs. New npm releases wait at least 10 minutes
+        after this backend first sees them. Each version is then tried once: if an update fails
+        it is not retried until a newer one appears, and a backend with a busy session waits
+        rather than replacing an engine underneath it.</p>`;
     const autoList = el("div", "eau-list");
     const localAuto = this.autoUpgradeRow(settings.instance_name, 0);
     localAuto.update(state.autoUpgrade, "ok", true);

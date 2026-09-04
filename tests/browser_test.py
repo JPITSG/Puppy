@@ -2946,6 +2946,9 @@ def check_modal_surface(ui_source: str, css_source: str) -> None:
 def check_system_prompt_settings(ui_source: str, css_source: str) -> None:
     """The prompt editor stays backend-aware and Engine updates shares its card."""
     assert ui_source.count("<h2>Engine updates</h2>") == 1
+    assert "New npm releases wait at least 10 minutes" in ui_source
+    assert 'el("button", "seg-btn", "When ready")' in ui_source
+    assert 'return "Installs after the 10-minute release wait";' in ui_source
     section = ui_source.index('const autoSection = el("section", "engine-updates-section")')
     attach = ui_source.index("c2.appendChild(autoSection)", section)
     card = ui_source.index("this.inner.appendChild(c2)", attach)

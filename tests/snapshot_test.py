@@ -24,11 +24,18 @@ from tests.scratch import private_root  # noqa: E402
 TEST_ROOT = private_root("snapshot-")
 os.environ["PUPPY_DATA"] = str(TEST_ROOT / "data")
 
-from puppy import (auth, config, db, listener_handoff, notify,
+from puppy import (auth, cli_releases, config, db, listener_handoff, notify,
                    runner as session_runner, snapshots, terminal, uploads,
                    web_tls, workspace_sync,
                    workspaces)  # noqa: E402
 from puppy.web import build_app  # noqa: E402
+
+RELEASE_OBSERVATION_KEY = cli_releases.OBSERVATION_PREFIX + "codex"
+RELEASE_OBSERVATION = {
+    "source": "npm:@openai/codex",
+    "version": "9.8.7",
+    "first_seen_at": 1700000000.0,
+}
 
 
 def expect_snapshot_error(call, contains: str) -> None:
@@ -110,6 +117,10 @@ async def exercise_http(archive_ui: dict, session_id: int, project: Path) -> Non
             config.set_value("engines.usage_refresh_minutes", 60)
             config.set_timers({"remote_session_seconds": 30})
             config.set_value("uploads.max_file_size_mb", 2)
+            db.meta_set(RELEASE_OBSERVATION_KEY, {
+                "source": "npm:@openai/codex", "version": "changed",
+                "first_seen_at": time.time(),
+            })
             app["puppy_bind_verifications"]["stale-before-restore"] = {
                 "timer": None, "server": None,
             }
@@ -199,6 +210,10 @@ async def main() -> None:
             "sessions": [{"id": 91, "name": "cached remote session",
                           "status": "idle", "active_since": None}],
         })
+        # First-seen npm release ages are safety state: restoring a node must
+        # retain the elapsed stabilization window rather than starting an
+        # update immediately or silently resetting every version to minute zero.
+        db.meta_set(RELEASE_OBSERVATION_KEY, RELEASE_OBSERVATION)
 
         directory_id = db.create_session(
             "directory session", "codex", str(project), "", "", "#4dd0c4",
@@ -542,6 +557,7 @@ async def main() -> None:
         assert restored_session_cache == {"version": 1, "sessions": [
             {"id": 91, "name": "cached remote session",
              "status": "idle", "active_since": None}]}
+        assert db.meta_get(RELEASE_OBSERVATION_KEY) == RELEASE_OBSERVATION
         assert db.query_one("SELECT username FROM users")["username"] == "snapshot-user"
         restored_scratch = db.get_session(scratch_id)
         assert restored_scratch["cwd"] != str(original_scratch)

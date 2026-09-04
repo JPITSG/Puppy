@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import re
 import time
 from typing import Any, Dict, Iterable, Optional, Tuple
@@ -29,6 +30,12 @@ FORCE_MIN_INTERVAL_SECONDS = 10
 REQUEST_TIMEOUT_SECONDS = 6
 MAX_RESPONSE_BYTES = 64 * 1024
 NPM_REGISTRY_BASE = "https://registry.npmjs.org"
+# npm publishes a CLI's small launcher and its platform packages as separate
+# artifacts. The dist-tag can therefore move before every required artifact is
+# consistently downloadable from registry edges. A version must remain the
+# observed latest for this long before Puppy lets any vendor updater run.
+RELEASE_STABILIZATION_SECONDS = 10 * 60
+OBSERVATION_PREFIX = "cli_release_observed."
 
 _SEMVER_RE = re.compile(
     r"(?<![0-9A-Za-z])v?"
@@ -111,6 +118,89 @@ def _driver_source(driver) -> Optional[Tuple[str, str]]:
             any(ord(char) < 33 for char in package):
         return None
     return kind, package
+
+
+def npm_based(driver) -> bool:
+    """Whether this driver's available-release signal comes from npm."""
+    return _driver_source(driver) is not None
+
+
+def _observation_key(key: str) -> str:
+    return OBSERVATION_PREFIX + str(key)
+
+
+def _valid_observed_at(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and \
+        math.isfinite(value) and value > 0
+
+
+def _load_observation(key: str, source: str, version: str) -> Optional[float]:
+    """Read one exact durable observation; every mismatch fails closed."""
+    from puppy import db
+
+    record = db.meta_get(_observation_key(key))
+    if not isinstance(record, dict) or set(record) != {
+            "source", "version", "first_seen_at"}:
+        return None
+    if record.get("source") != source or record.get("version") != version or \
+            not _valid_observed_at(record.get("first_seen_at")):
+        return None
+    return float(record["first_seen_at"])
+
+
+def _remember_observation(key: str, source: str, version: str,
+                          seen_at: float) -> float:
+    """Keep the first sighting of this exact source/version across restarts."""
+    from puppy import db
+
+    observed_at = _load_observation(key, source, version)
+    if observed_at is not None:
+        return observed_at
+    record = {
+        "source": source,
+        "version": version,
+        "first_seen_at": float(seen_at),
+    }
+    db.meta_set(_observation_key(key), record)
+    return float(seen_at)
+
+
+def release_stability(driver, latest_version: str = "", now: float = None) -> dict:
+    """Return whether an npm release has completed its observation window.
+
+    The caller may supply the latest version it already read from status. When
+    omitted, the current last-known-good registry cache owns the target. A
+    missing or malformed durable observation is never guessed from cache age:
+    it stays ineligible until a successful registry read records it.
+    """
+    source = _driver_source(driver)
+    if source is None:
+        return {
+            "required": False, "version": "", "observed_at": None,
+            "ready_at": None, "remaining_seconds": 0.0, "ready": True,
+        }
+    signature = "{}:{}".format(*source)
+    cached = _cache.get(str(driver.key)) or {}
+    version = str(latest_version or cached.get("latest_version") or "")
+    observed_at = None
+    if version and cached.get("source") == signature and \
+            cached.get("latest_version") == version and \
+            _valid_observed_at(cached.get("observed_at")):
+        observed_at = float(cached["observed_at"])
+    elif version:
+        observed_at = _load_observation(str(driver.key), signature, version)
+    if observed_at is None:
+        return {
+            "required": True, "version": version, "observed_at": None,
+            "ready_at": None, "remaining_seconds": None, "ready": False,
+        }
+    ready_at = observed_at + RELEASE_STABILIZATION_SECONDS
+    remaining = max(0.0, ready_at - (time.time() if now is None else float(now)))
+    return {
+        "required": True, "version": version, "observed_at": observed_at,
+        "ready_at": ready_at, "remaining_seconds": remaining,
+        "ready": remaining <= 0,
+    }
 
 
 def status(driver, installed_output: str) -> dict:
@@ -225,11 +315,29 @@ async def _refresh(drivers: Iterable) -> bool:
                 }
                 log.warning("%s latest-version check failed: %s", key, error)
             else:
+                try:
+                    observed_at = _remember_observation(
+                        key, signature, result, checked_at)
+                except Exception as exc:
+                    all_ok = False
+                    error = "could not record release observation: {}".format(
+                        str(exc) or exc.__class__.__name__)[:240]
+                    _cache[key] = {
+                        "source": signature,
+                        "latest_version": result,
+                        "checked_at": checked_at,
+                        "attempted_at": checked_at,
+                        "observed_at": None,
+                        "error": error,
+                    }
+                    log.warning("%s latest-version check failed: %s", key, error)
+                    continue
                 _cache[key] = {
                     "source": signature,
                     "latest_version": result,
                     "checked_at": checked_at,
                     "attempted_at": checked_at,
+                    "observed_at": observed_at,
                     "error": "",
                 }
     return all_ok
@@ -264,6 +372,26 @@ async def refresh_if_due(drivers: Iterable, force: bool = False) -> float:
         interval = check_interval_seconds() if successful else failure_retry_seconds()
         _next_due = time.monotonic() + interval
         return float(interval)
+
+
+async def refresh_before_upgrade(driver) -> bool:
+    """Read npm immediately before an upgrade and refresh its observation.
+
+    This deliberately bypasses the periodic/refresh-button cadence. Otherwise
+    a version published after the last scheduled check could be installed by a
+    vendor's unpinned self-update command without ever serving its own ten-minute
+    observation window. The ordinary refresh lock still makes this single-flight.
+    """
+    if not npm_based(driver):
+        return True
+    async with _lock_for_running_loop():
+        try:
+            return bool(await _refresh([driver]))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("CLI pre-upgrade latest-version refresh failed: %s", exc)
+            return False
 
 
 async def _periodic_worker() -> None:
