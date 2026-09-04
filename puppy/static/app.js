@@ -9149,9 +9149,6 @@ class SessionView {
     const withBrowser = browserEnabledFor(bid);
     const withTerminal = !bid || backendHasCapability(backend, "terminal");
     const items = [];
-    if (!bid || backendHasCapability(backend, "session-references"))
-      items.push({kind: "session-picker", label: "Session", hint: "reference one, several, or all",
-        search: "session sessions", insert: ""});
     const push = (kind, label, hint, insert) =>
       items.push({ kind, label, hint, insert, search: label.toLowerCase() });
     const hintFor = (owner) => {
@@ -9165,6 +9162,9 @@ class SessionView {
       push("browser", `Browser ${inst.id}`, hintFor(inst.session_id), `@Browser ${inst.id}`);
     for (const inst of this.knownMentionInstances("terminal", withTerminal))
       push("terminal", `Terminal ${inst.id}`, hintFor(inst.session_id), `@Terminal ${inst.id}`);
+    if (!bid || backendHasCapability(backend, "session-references"))
+      items.push({kind: "session-picker", label: "Session", hint: "reference one, several, or all",
+        search: "session sessions", insert: ""});
     if (withBrowser) push("new-browser", "New browser", "another isolated browser", "@New browser");
     if (withTerminal) push("new-terminal", "New terminal", "another shared terminal", "@New terminal");
     if (spawnExecFor(bid))
@@ -17556,10 +17556,10 @@ window.addEventListener("hashchange", openSessionHash);
 
 async function modalSessionRequest(record) {
   const {m, close} = modal(`<h2>${record.workflow ? "Session workflow" : "Session request"}</h2>
-    <div class="session-request-detail">Loading…</div>
-    <div class="modal-actions"><button class="btn secondary sr-refresh">Refresh</button>
-    <button class="btn danger sr-cancel">Cancel remaining work</button>
-    <button class="btn sr-close">Close</button></div>`, "session-request-modal");
+    <div class="session-request-detail"><p class="modal-copy">Loading…</p></div>
+    <div class="m-btns"><button class="btn sr-close">Close</button>
+    <button class="btn btn-danger sr-cancel" disabled>Cancel remaining work</button>
+    <button class="btn btn-pri sr-refresh">Refresh</button></div>`, "session-request-modal");
   m.querySelector(".sr-close").onclick = close;
   let targetBid = 0;
   const detail = m.querySelector(".session-request-detail");
@@ -17567,14 +17567,19 @@ async function modalSessionRequest(record) {
   const refresh = m.querySelector(".sr-refresh");
   const terminal = new Set(["completed", "failed", "cancelled", "expired", "rejected", "lost"]);
   const names = new Map();
+  const field = (box, label, value) => {
+    const wrap = el("div", "field-lbl", label);
+    wrap.appendChild(typeof value === "string" ? el("div", "session-request-value", value) : value);
+    box.appendChild(wrap);
+  };
   const renderResult = (box, result) => {
     const row = el("div", "session-request-result");
-    const target = el("button", "btn small", names.get(result.target) || "Open session");
+    const target = el("button", "btn session-request-target", names.get(result.target) || "Open session");
     target.onclick = () => openSessionReference(result.target, Number(result.end_seq || result.start_seq || 0));
-    row.appendChild(target);
-    row.appendChild(el("span", "session-request-status", result.status));
+    field(row, "Session", target);
+    field(row, "Status", result.status);
     if (result.error) row.appendChild(el("p", "err-card", result.error));
-    if (result.answer) row.appendChild(el("pre", "session-request-answer", result.answer));
+    if (result.answer) field(row, "Answer", result.answer);
     box.appendChild(row);
   };
   const load = async (stop = false) => {
@@ -17585,12 +17590,16 @@ async function modalSessionRequest(record) {
         source: record.source, method, params: record.workflow ? {id: record.id} : {id: record.id, wait_s: 0}}});
       if (!m.isConnected) return;
       detail.replaceChildren();
-      detail.appendChild(el("p", "modal-copy", `${data.title || "Request"} · ${data.status} · ${fmtDateTime(data.created_at)}`));
+      if (data.title) field(detail, "Name", data.title);
+      const summary = el("div", "field-row");
+      field(summary, "Status", data.status);
+      field(summary, "Created", fmtDateTime(data.created_at));
+      detail.appendChild(summary);
       if (record.workflow) {
         for (const step of data.steps || []) {
           const section = el("section", "session-request-step");
-          section.appendChild(el("strong", "", `${step.spec.id} · ${step.status}`));
-          section.appendChild(el("p", "modal-copy", step.spec.text));
+          field(section, "Step", `${step.spec.id} · ${step.status}`);
+          field(section, "Request", step.spec.text);
           if (step.error) section.appendChild(el("p", "err-card", step.error));
           for (const result of step.results || []) renderResult(section, result);
           detail.appendChild(section);
@@ -17600,7 +17609,7 @@ async function modalSessionRequest(record) {
         detail.appendChild(el("p", "modal-copy", `${unavailable.node || "Session"}: ${unavailable.error}`));
       cancel.classList.toggle("hidden", terminal.has(data.status));
       cancel.disabled = false;
-    } catch (error) { detail.textContent = error.message; }
+    } catch (error) { detail.replaceChildren(el("p", "modal-copy", error.message)); }
     finally { refresh.disabled = false; }
   };
   refresh.onclick = () => load();
@@ -17616,5 +17625,5 @@ async function modalSessionRequest(record) {
       targetBid = row.bid;
     }
     await load();
-  } catch (error) { detail.textContent = error.message; }
+  } catch (error) { detail.replaceChildren(el("p", "modal-copy", error.message)); }
 }

@@ -2762,11 +2762,20 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
 /* Session references share the existing mention picker; request history stays
    in the transcript and its detail sheet uses explicit refreshes. */
 .mention-token[role="link"] { cursor: pointer; }
-.session-request-card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 8px 0; }
+.session-request-card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-md); padding: 10px 12px; margin: 8px 0; }
 .session-request-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.session-request-modal { width: min(760px, 96vw); }
-.session-request-detail { max-height: 65vh; overflow-y: auto; }
-.session-request-step { padding: 12px 0; border-bottom: 1px solid var(--line); }
-.session-request-result { margin: 10px 0; }
-.session-request-status { margin-left: 8px; font-size: 12px; }
-.session-request-answer { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; padding: 8px; }
+.session-request-detail .field-row > * { min-width: 0; }
+.session-request-step,.session-request-result { padding-top: 10px; border-top: 1px solid var(--line); }
+.session-request-value {
+  margin-top: 5px; padding: 8px 10px; min-height: var(--field-h);
+  background: var(--panel2); border: 1px solid var(--line2); border-radius: var(--r-sm);
+  color: var(--txt); font-size: 13px; line-height: 1.5; text-transform: none; letter-spacing: 0;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.session-request-target {
+  margin-top: 5px; width: 100%; height: auto; min-height: var(--field-h); padding: 8px 10px;
+  justify-content: flex-start; text-align: left; text-transform: none; letter-spacing: 0;
+  white-space: normal; overflow-wrap: anywhere;
+}
+.session-request-modal .m-btns { flex-wrap: wrap; }
+.session-request-modal .m-btns .btn { min-width: max-content; }
