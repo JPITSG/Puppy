@@ -3918,7 +3918,10 @@ def check_flat_session_list(ui_source: str, css_source: str) -> None:
     assert "`Open browser on ${g.name}`" in foot
     assert "`Open terminal on ${g.name}`" in foot
     # reorder drags stay scoped to one backend inside the shared flat surface
-    assert 'const rowSelector = () => `.sess-item[data-bid="${dragSess.bid}"]`;' in ui_source
+    assert 'const rowSelector = () => `.sess-item[data-bid="${dragSess.bid}"]` +' \
+        in ui_source
+    assert '(dragSess.pinning ? `[data-pinned="${dragSess.pinned}"]` : "");' \
+        in ui_source
     assert 'reorderChildren(root, `.sess-item[data-bid="${bid}"]`)' in ui_source
     assert "container.insertBefore(dragged, siblings[siblings.length - 1].nextSibling);" \
         in ui_source
@@ -3980,6 +3983,68 @@ def check_node_owned_session_order(ui_source: str, css_source: str) -> None:
     assert ui_source.count("{ duration: REORDER_MOTION_MS, easing: REORDER_EASING });") == 2
     assert ".si-be.node{" in css_source
     assert ".si-be.idle" not in css_source
+
+
+def check_session_pins(ui_source: str, css_source: str) -> None:
+    """Pins are capable-node actions and the node remains order-authoritative."""
+    sidebar = ui_source[
+        ui_source.index("function renderSidebar()"):
+        ui_source.index("\nfunction sessDot", ui_source.index("function renderSidebar()"))]
+    assert 'item.dataset.pinned = s.pinned === true ? "1" : "0";' in sidebar
+    pin_append = "r2.appendChild(sessionPinMark(bid, s))"
+    notes_append = "r2.appendChild(agentNotesMark(bid, s))"
+    assert sidebar.index(pin_append) < sidebar.index(notes_append)
+    # Never locally sort on the flag: the array order is the node's contract.
+    assert ".sort((" not in sidebar
+
+    support = ui_source[
+        ui_source.index("function backendSupportsSessionPinning("):
+        ui_source.index("\nfunction backendSupportsAgentNotes(")]
+    assert 'backend.capabilities.includes("session-pinning")' in support
+    assert "backendHasCapability" not in support
+
+    mark = ui_source[
+        ui_source.index("function sessionPinMark("):
+        ui_source.index("\n/* Bottom-right", ui_source.index("function sessionPinMark("))]
+    for needle in ('mark.setAttribute("role", "button")',
+                   'mark.setAttribute("aria-pressed"',
+                   'mark.setAttribute("aria-label"',
+                   'mark.addEventListener("pointerdown"',
+                   'mark.addEventListener("contextmenu"',
+                   'mark.addEventListener("dragstart"'):
+        assert needle in mark
+    assert '"Pin session to top"' in mark and '"Unpin session"' in mark
+
+    context = ui_source[
+        ui_source.index("function sessionContextMenu("):
+        ui_source.index("\n/* Live sortable layouts", ui_source.index(
+            "function sessionContextMenu("))]
+    assert "backendSupportsSessionPinning(bid)" in context
+    assert '"Pin session to top"' in context and '"Unpin session"' in context
+
+    drag = ui_source[
+        ui_source.index("let dragSess = null;"):
+        ui_source.index("\n// below this much", ui_source.index("let dragSess = null;"))]
+    assert 'e.target.closest(".si-pin,.si-notes")' in drag
+    assert "sessionOrderPending.has(nodeKey)" in drag
+    assert "orderSnapshot: sessionOrderSnapshot(bid)" in drag
+    assert "sameSessionOrderSnapshot(" in drag
+    assert "expected_order: previousIds" in drag
+    assert "expected_pinned: previousPinned" in drag
+    # Slot motion is cohort-scoped, but reconstruction deliberately includes
+    # both cohorts so hidden archived/filter rows retain their slots.
+    assert '`[data-pinned="${dragSess.pinned}"]`' in drag
+    assert 'reorderChildren(root, `.sess-item[data-bid="${bid}"]`)' in drag
+
+    payload_helper = ui_source[
+        ui_source.index("function acceptSessionListPayload("):
+        ui_source.index("\nasync function refreshSessionList(")]
+    assert "remotePollSequence[node] = (remotePollSequence[node] || 0) + 1" \
+        in payload_helper
+
+    assert ".sess-item .si-pin," in css_source
+    assert ".sess-item .si-pin.on{opacity:1;color:var(--acc2)}" in css_source
+    assert ".sess-item .si-pin:focus-visible," in css_source
 
 
 def check_queued_permission_choices(ui_source: str) -> None:
@@ -6257,6 +6322,7 @@ async def main() -> None:
             check_shared_node_order(ui_source, css_source)
             check_flat_session_list(ui_source, css_source)
             check_node_owned_session_order(ui_source, css_source)
+            check_session_pins(ui_source, css_source)
             check_queued_permission_choices(ui_source)
             check_switch_engine_initial_selection(ui_source)
             check_engine_picker_alignment(css_source)

@@ -682,6 +682,24 @@ function attachmentFileIcon(size = 18) {
   return svg;
 }
 
+function sessionPinIcon(size = 14) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 18 18");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const pin = document.createElementNS(NS, "path");
+  pin.setAttribute("d", "M6 2.5h6M7 2.5l-.45 4-1.8 2v1.35h8.5V8.5l-1.8-2-.45-4M9 9.85v5.65");
+  pin.setAttribute("fill", "none");
+  pin.setAttribute("stroke", "currentColor");
+  pin.setAttribute("stroke-width", "1.25");
+  pin.setAttribute("stroke-linecap", "round");
+  pin.setAttribute("stroke-linejoin", "round");
+  svg.appendChild(pin);
+  return svg;
+}
+
 /* A compact transport indicator for backend rows. Shape as well as colour
    carries the state, so the distinction survives colour-vision differences:
    encrypted connections get a check; cleartext connections get an X. */
@@ -3554,6 +3572,76 @@ document.addEventListener("visibilitychange", () => {
 function sessionsFor(bid) {
   return bid ? (state.remoteSessions[bid] || []) : state.sessions;
 }
+
+/* Pinning and drag-reorder mutate the same node-owned sequence. Serialize
+   those requests per node in this console, while compare tokens protect
+   against a second console changing it between dragstart and commit. */
+const sessionOrderPending = new Set();
+
+function sessionOrderNodeKey(bid) {
+  return String(Number(bid) || 0);
+}
+
+function sessionOrderSnapshot(bid) {
+  return sessionsFor(bid).map(session => [
+    Number(session.id), session.pinned === true,
+  ]);
+}
+
+function sameSessionOrderSnapshot(left, right) {
+  return left.length === right.length && left.every((entry, index) =>
+    entry[0] === right[index][0] && entry[1] === right[index][1]);
+}
+
+function acceptSessionListPayload(bid, payload) {
+  if (!payload || !Array.isArray(payload.sessions)) return false;
+  const node = Number(bid) || 0;
+  if (node) {
+    /* This payload was read after the user's mutation. Retire any scheduled
+       poll that began before it so a delayed old GET cannot overwrite it. */
+    remotePollSequence[node] = (remotePollSequence[node] || 0) + 1;
+    state.remoteSessions[node] = payload.sessions;
+    const checked = state.remoteSessionCheckedAt ||
+      (state.remoteSessionCheckedAt = {});
+    checked[node] = Date.now();
+    state.remoteOk[node] = true;
+    delete state.remoteErrors[node];
+  } else {
+    state.sessions = payload.sessions;
+  }
+  ingestSessionActivity(node, payload.sessions, payload.server_time);
+  syncTabsWithSessions();
+  return true;
+}
+
+async function refreshSessionList(bid) {
+  const payload = await api(bid, "sessions", { timeoutMs: 10000 });
+  if (!acceptSessionListPayload(bid, payload))
+    throw new Error("backend returned an invalid sessions response");
+  return payload;
+}
+
+async function setSessionPinned(bid, session, pinned) {
+  const nodeKey = sessionOrderNodeKey(bid);
+  if (sessionOrderPending.has(nodeKey)) return;
+  sessionOrderPending.add(nodeKey);
+  renderSidebar();
+  try {
+    const payload = await api(bid, `sessions/${session.id}`, {
+      method: "PATCH", timeoutMs: 12000,
+      body: { pinned: !!pinned, expected_pinned: session.pinned === true },
+    });
+    if (!acceptSessionListPayload(bid, payload))
+      throw new Error("backend returned an invalid sessions response");
+  } catch (error) {
+    try { await refreshSessionList(bid); } catch (refreshError) {}
+    toast(error.message, "error");
+  } finally {
+    sessionOrderPending.delete(nodeKey);
+    renderSidebar();
+  }
+}
+
 function backendName(bid) {
   if (!bid) return state.instance || "local";
   const b = state.backends.find(x => x.id === bid);
@@ -4297,6 +4385,7 @@ function renderSidebar() {
         (backendUnavailable ? " backend-unavailable" : ""));
       item.dataset.sessionId = String(s.id);
       item.dataset.bid = String(bid);
+      item.dataset.pinned = s.pinned === true ? "1" : "0";
       item.dataset.sessionKey = sidebarSessionKey(bid, s.id);
       if (backendUnavailable) {
         item.dataset.backendAvailability = state.remoteOk[bid] === false ? "offline" : "checking";
@@ -4344,6 +4433,7 @@ function renderSidebar() {
           "Linked workspace" + (st ? " · " + st : ""));
         r2.appendChild(mark);
       }
+      if (backendSupportsSessionPinning(bid)) r2.appendChild(sessionPinMark(bid, s));
       if (backendSupportsAgentNotes(bid)) r2.appendChild(agentNotesMark(bid, s));
       item.appendChild(r1); item.appendChild(r2);
       const pointerForClick = activationPointer(item);
@@ -4374,11 +4464,57 @@ function renderSidebar() {
 const AGENT_NOTE_FILES = ["AGENTS.md", "CLAUDE.md"];
 const AGENT_NOTE_READERS = { "AGENTS.md": "Codex and OpenCode", "CLAUDE.md": "Claude Code" };
 
+function backendSupportsSessionPinning(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(b => b.id === bid);
+  /* This changes a node-owned ordering contract. Never infer it for a legacy
+     protocol-0 backend whose reorder handler could put pins below plain rows. */
+  return !!backend && Array.isArray(backend.capabilities) &&
+    backend.capabilities.includes("session-pinning");
+}
+
 function backendSupportsAgentNotes(bid) {
   if (!bid) return true;
   const backend = state.backends.find(b => b.id === bid);
   return !!backend && Array.isArray(backend.capabilities) &&
     backend.capabilities.includes("session-agent-notes");
+}
+
+/* The row itself is a button, so this follows the notes control's established
+   focusable-span vocabulary instead of nesting another button. The context
+   menu supplies the same action for keyboard context-menu and long-press use. */
+function sessionPinMark(bid, s) {
+  const on = s.pinned === true;
+  const pending = sessionOrderPending.has(sessionOrderNodeKey(bid));
+  const mark = el("span", "si-pin" + (on ? " on" : "") +
+    (pending ? " pending" : ""));
+  mark.setAttribute("role", "button");
+  mark.tabIndex = pending ? -1 : 0;
+  mark.setAttribute("aria-pressed", on ? "true" : "false");
+  mark.setAttribute("aria-label", on ? "Unpin session" : "Pin session to top");
+  mark.title = on ? "Unpin session" : "Pin session to top";
+  mark.draggable = false;
+  if (pending) {
+    mark.setAttribute("aria-busy", "true");
+    mark.setAttribute("aria-disabled", "true");
+  }
+  mark.appendChild(sessionPinIcon(14));
+  const toggle = event => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!pending) setSessionPinned(bid, s, !on);
+  };
+  mark.addEventListener("click", toggle);
+  mark.addEventListener("keydown", event => {
+    if (!event.repeat && (event.key === "Enter" || event.key === " ")) toggle(event);
+  });
+  mark.addEventListener("pointerdown", event => event.stopPropagation());
+  mark.addEventListener("contextmenu", event => event.stopPropagation());
+  mark.addEventListener("dragstart", event => {
+    event.preventDefault();
+    event.stopPropagation();
+  });
+  return mark;
 }
 
 /* Bottom-right of every row: whether the working directory holds AGENTS.md or
@@ -4654,6 +4790,9 @@ function sessionContextMenu(ev, bid, s) {
   add("Switch engine", () => modalSwitchEngine({
     session: s, tab: { bid, sid: s.id }, updateHead() { refreshGroup(bid); },
   }));
+  if (backendSupportsSessionPinning(bid))
+    add(s.pinned === true ? "Unpin session" : "Pin session to top",
+      () => setSessionPinned(bid, s, s.pinned !== true));
   /* Also here, not only in the head's own menu: hiding the head takes its ⋮
      with it, and this is where the setting stays reachable afterwards. */
   menu.appendChild(menuCheckRow("Show status bar", sessionShowsMeta(s),
@@ -4782,22 +4921,14 @@ function restoreDragSlots(context, selector) {
   });
 }
 
-function sortSessionsByOrder(sessions, ids) {
-  const positions = new Map(ids.map((id, index) => [id, index]));
-  sessions.sort((a, b) => {
-    const ap = positions.has(a.id) ? positions.get(a.id) : Number.MAX_SAFE_INTEGER;
-    const bp = positions.has(b.id) ? positions.get(b.id) : Number.MAX_SAFE_INTEGER;
-    return ap - bp;
-  });
-}
-
 function acceptReorderDrag(event) {
   event.preventDefault();
   if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
 }
 
-/* Sticky manual ordering remains scoped to one backend. Hidden archived rows
-   retain their durable slots while the visible rows move around them. */
+/* Sticky manual ordering remains scoped to one backend and one pin cohort.
+   Hidden archived/search-filtered rows retain their durable slots while the
+   visible rows move around them. */
 let dragSess = null;
 
 function cancelSessionDrag(item = null) {
@@ -4818,10 +4949,23 @@ function wireSessionDrag(item, bid, sid) {
   item.draggable = true;
   const blockTouchDrag = guardNativeTouchDrag(item);
   item.addEventListener("dragstart", (e) => {
+    if (e.target && e.target.closest && e.target.closest(".si-pin,.si-notes")) {
+      e.preventDefault();
+      return;
+    }
     if (blockTouchDrag(e)) return;
+    const nodeKey = sessionOrderNodeKey(bid);
+    if (sessionOrderPending.has(nodeKey)) {
+      e.preventDefault();
+      return;
+    }
     const container = item.parentElement;
     dragSess = {
       bid, sid, item, container, renderPending: false,
+      nodeKey,
+      pinning: backendSupportsSessionPinning(bid),
+      pinned: item.dataset.pinned,
+      orderSnapshot: sessionOrderSnapshot(bid),
       originalOrder: reorderChildren(container, ".sess-item"),
     };
     container.classList.add("reordering");
@@ -4844,7 +4988,8 @@ function wireSessionDropZone(root) {
   if (root.dataset.sessionReorderWired === "1") return;
   root.dataset.sessionReorderWired = "1";
   const mine = () => !!dragSess && dragSess.container === root;
-  const rowSelector = () => `.sess-item[data-bid="${dragSess.bid}"]`;
+  const rowSelector = () => `.sess-item[data-bid="${dragSess.bid}"]` +
+    (dragSess.pinning ? `[data-pinned="${dragSess.pinned}"]` : "");
   root.addEventListener("dragenter", (e) => {
     if (mine()) acceptReorderDrag(e);
   });
@@ -4870,8 +5015,16 @@ function wireSessionDropZone(root) {
     }
 
     const bid = context.bid;
+    if (!sameSessionOrderSnapshot(
+        context.orderSnapshot, sessionOrderSnapshot(bid))) {
+      renderSidebar();
+      toast("Session order changed while you were dragging; try again", "error");
+      return;
+    }
     const all = sessionsFor(bid);
-    const previousIds = all.map(session => session.id);
+    const previousIds = context.orderSnapshot.map(entry => entry[0]);
+    const previousPinned = context.orderSnapshot
+      .filter(entry => entry[1]).map(entry => entry[0]);
     const visibleIds = reorderChildren(root, `.sess-item[data-bid="${bid}"]`)
       .map(node => Number(node.dataset.sessionId));
     const visibleSet = new Set(visibleIds);
@@ -4893,18 +5046,25 @@ function wireSessionDropZone(root) {
       return;
     }
 
-    sortSessionsByOrder(all, ids); // optimistic; the DOM is already in this order
-    if (context.renderPending) renderSidebar();
+    sessionOrderPending.add(context.nodeKey);
     try {
-      await api(bid, "sessions/reorder", { method: "POST", body: { order: ids } });
+      const payload = await api(bid, "sessions/reorder", {
+        method: "POST", timeoutMs: 12000,
+        body: {
+          order: ids,
+          expected_order: previousIds,
+          expected_pinned: previousPinned,
+        },
+      });
+      /* Older unpinned-only nodes answer {ok:true}; fetch their resulting
+         order immediately instead of waiting for the scheduled remote poll. */
+      if (!acceptSessionListPayload(bid, payload)) await refreshSessionList(bid);
+    } catch (error) {
+      try { await refreshSessionList(bid); } catch (refreshError) {}
+      toast(error.message, "error");
+    } finally {
+      sessionOrderPending.delete(context.nodeKey);
       renderSidebar();
-    } catch (err) {
-      const current = sessionsFor(bid);
-      if (current.length === previousIds.length &&
-          current.every(session => previousIds.includes(session.id)))
-        sortSessionsByOrder(current, previousIds);
-      renderSidebar();
-      toast(err.message, "error");
     }
   });
 }

@@ -373,7 +373,8 @@ def create_session(name: str, engine: str, cwd: str, model: str, effort: str,
         cursor = None
         try:
             row = conn.execute(
-                "SELECT COALESCE(MAX(sort_order),0)+1 AS n FROM sessions").fetchone()
+                "SELECT COALESCE(MAX(CASE WHEN sort_order>0 THEN sort_order END),0)+1 "
+                "AS n FROM sessions").fetchone()
             cursor = conn.execute(
                 "INSERT INTO sessions(name,engine,cwd,model,effort,color,permission_mode,"
                 "workspace_kind,workspace,sort_order,created_at,updated_at) "
@@ -381,6 +382,8 @@ def create_session(name: str, engine: str, cwd: str, model: str, effort: str,
                 (name, engine, cwd, model, effort, color, permission_mode,
                  workspace_kind, workspace, row["n"], now, now))
             session_id = int(cursor.lastrowid)
+            pinned, unpinned = _session_order_lists(conn)
+            _write_session_order(conn, pinned, unpinned)
             conn.commit()
         except Exception:
             conn.rollback()
@@ -395,6 +398,10 @@ def create_session(name: str, engine: str, cwd: str, model: str, effort: str,
 def session_row_to_dict(row) -> dict:
     d = dict(row)
     d["archived"] = bool(d.get("archived"))
+    # The sign is deliberately part of the existing order value instead of a
+    # new persisted column: old positive rows remain ordinary sessions and
+    # the exact database shape stays unchanged.
+    d["pinned"] = int(d.get("sort_order") or 0) < 0
     return d
 
 
@@ -404,46 +411,144 @@ def get_session(session_id: int):
 
 
 def list_sessions(include_archived: bool = False) -> list:
-    # sticky user-defined order (drag & drop), not recency - sessions must not jump around
+    # Negative values are the manually ordered pinned block; non-negative
+    # values are the activity/manual order below it.
     sql = "SELECT * FROM sessions" + ("" if include_archived else " WHERE archived=0") + " ORDER BY sort_order, id"
     return [session_row_to_dict(r) for r in query(sql)]
 
 
-def reorder_sessions(ids: list) -> None:
+class SessionOrderConflict(RuntimeError):
+    """A reorder was based on a session list that is no longer current."""
+
+
+def _session_order_lists(conn) -> tuple:
+    """Return every session id, including archived rows, split by pin state."""
+    rows = conn.execute(
+        "SELECT id,sort_order FROM sessions ORDER BY sort_order,id").fetchall()
+    return (
+        [int(row["id"]) for row in rows if int(row["sort_order"]) < 0],
+        [int(row["id"]) for row in rows if int(row["sort_order"]) >= 0],
+    )
+
+
+def _write_session_order(conn, pinned: list, unpinned: list) -> None:
+    """Write the canonical dense representation without touching timestamps."""
+    pinned_count = len(pinned)
+    ordered = [(sid, index - pinned_count)
+               for index, sid in enumerate(pinned)]
+    ordered.extend((sid, index + 1) for index, sid in enumerate(unpinned))
+    for sid, value in ordered:
+        conn.execute(
+            "UPDATE sessions SET sort_order=? WHERE id=? AND sort_order<>?",
+            (value, int(sid), value))
+
+
+def _validated_session_ids(value, label: str) -> list:
+    if not isinstance(value, list) or any(type(sid) is not int or sid <= 0
+                                          for sid in value):
+        raise ValueError("{} must be a list of session ids".format(label))
+    if len(set(value)) != len(value):
+        raise ValueError("{} contains duplicate session ids".format(label))
+    return list(value)
+
+
+def reorder_sessions(ids: list, expected_order=None,
+                     expected_pinned=None) -> list:
+    """Apply one full order without ever allowing a row across the pin edge.
+
+    New clients provide the order and pin cohort they began dragging from, so
+    another console's activation, pin, reorder, creation, or deletion wins
+    cleanly instead of being overwritten. Older clients may omit those compare
+    values; the authoritative stable partition still protects the boundary.
+    """
+    requested = _validated_session_ids(ids, "order")
+    before = (None if expected_order is None else
+              _validated_session_ids(expected_order, "expected_order"))
+    before_pinned = (None if expected_pinned is None else
+                     _validated_session_ids(expected_pinned, "expected_pinned"))
     with _lock:
         conn = connect()
-        for i, sid in enumerate(ids):
-            conn.execute("UPDATE sessions SET sort_order=? WHERE id=?", (i + 1, int(sid)))
-        conn.commit()
+        try:
+            pinned, unpinned = _session_order_lists(conn)
+            current = pinned + unpinned
+            if len(requested) != len(current) or set(requested) != set(current):
+                raise SessionOrderConflict("session list changed on this node")
+            if before is not None and before != current:
+                raise SessionOrderConflict("session order changed on this node")
+            if before_pinned is not None and before_pinned != pinned:
+                raise SessionOrderConflict("session pins changed on this node")
+            pinned_set = set(pinned)
+            next_pinned = [sid for sid in requested if sid in pinned_set]
+            next_unpinned = [sid for sid in requested if sid not in pinned_set]
+            _write_session_order(conn, next_pinned, next_unpinned)
+            conn.commit()
+            return next_pinned + next_unpinned
+        except Exception:
+            conn.rollback()
+            raise
+
+
+def set_session_pinned(session_id: int, pinned: bool,
+                       expected=None) -> bool:
+    """Set one pin and return whether it changed.
+
+    A new pin joins the foot of the pinned block, preserving priorities the
+    user already arranged. An unpinned row enters at the head of the ordinary
+    block, the same place its next activity promotion would put it.
+    """
+    if type(session_id) is not int or session_id <= 0 or type(pinned) is not bool:
+        raise ValueError("invalid session pin")
+    if expected is not None and type(expected) is not bool:
+        raise ValueError("expected_pinned must be true or false")
+    with _lock:
+        conn = connect()
+        try:
+            pinned_ids, unpinned_ids = _session_order_lists(conn)
+            if session_id in pinned_ids:
+                current = True
+            elif session_id in unpinned_ids:
+                current = False
+            else:
+                raise SessionOrderConflict("session list changed on this node")
+            if expected is not None and expected is not current:
+                raise SessionOrderConflict("session pin changed on this node")
+            if pinned is current:
+                return False
+            if pinned:
+                unpinned_ids.remove(session_id)
+                pinned_ids.append(session_id)
+            else:
+                pinned_ids.remove(session_id)
+                unpinned_ids.insert(0, session_id)
+            _write_session_order(conn, pinned_ids, unpinned_ids)
+            conn.commit()
+            return True
+        except Exception:
+            conn.rollback()
+            raise
 
 
 def bump_session_to_top(session_id: int) -> None:
-    """Move one session to the front of the durable order, pushing the rows
-    above it down one place; everything else keeps its relative order.
+    """Move one ordinary session to the front below every pinned session.
 
     The runner calls this on every idle -> running transition, so the
     order is a move-to-front history of activity that the user's manual
-    drag-and-drop then edits - one order, held by the node, seen by every
-    console."""
+    drag-and-drop then edits. Pinned sessions and their manual order never
+    move merely because work starts."""
     with _lock:
         conn = connect()
-        row = conn.execute("SELECT sort_order FROM sessions WHERE id=?",
-                           (int(session_id),)).fetchone()
-        if row is None:
-            return
-        conn.execute(
-            "UPDATE sessions SET sort_order=sort_order+1 "
-            "WHERE sort_order<=? AND id<>?", (row["sort_order"], int(session_id)))
-        conn.execute(
-            "UPDATE sessions SET sort_order=(SELECT COALESCE(MIN(sort_order),1) "
-            "FROM sessions WHERE id<>?) - 1 WHERE id=?",
-            (int(session_id), int(session_id)))
-        # keep the numbering dense so a long history never drifts
-        rows = conn.execute("SELECT id FROM sessions ORDER BY sort_order, id").fetchall()
-        for index, item in enumerate(rows):
-            conn.execute("UPDATE sessions SET sort_order=? WHERE id=?",
-                         (index + 1, int(item["id"])))
-        conn.commit()
+        try:
+            pinned, unpinned = _session_order_lists(conn)
+            sid = int(session_id)
+            if sid in pinned or sid not in unpinned or unpinned[0] == sid:
+                return
+            unpinned.remove(sid)
+            unpinned.insert(0, sid)
+            _write_session_order(conn, pinned, unpinned)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
 
 def get_session_draft(session_id: int) -> dict:
@@ -594,17 +699,23 @@ def get_events(session_id: int, before_seq=None, limit: int = 200,
 def delete_session(session_id: int) -> None:
     with _lock:
         conn = connect()
-        conn.execute("DELETE FROM events WHERE session_id=?", (session_id,))
-        conn.execute("DELETE FROM session_drafts WHERE session_id=?", (session_id,))
-        conn.execute("DELETE FROM sessions WHERE id=?", (session_id,))
-        # the durable queue/held record rides under this session's meta key
-        conn.execute("DELETE FROM meta WHERE key=?",
-                     ("session_queue.{}".format(session_id),))
-        conn.execute("DELETE FROM meta WHERE key=?",
-                     ("session_completion.{}".format(session_id),))
-        # a pending engine-context rollback belongs to the session that queued
-        # it (drivers.base._UNDO_STATE_KEY), and outlives it otherwise
-        conn.execute("DELETE FROM meta WHERE key=?",
-                     ("session_undo.{}".format(session_id),))
-        conn.commit()
+        try:
+            conn.execute("DELETE FROM events WHERE session_id=?", (session_id,))
+            conn.execute("DELETE FROM session_drafts WHERE session_id=?", (session_id,))
+            conn.execute("DELETE FROM sessions WHERE id=?", (session_id,))
+            # the durable queue/held record rides under this session's meta key
+            conn.execute("DELETE FROM meta WHERE key=?",
+                         ("session_queue.{}".format(session_id),))
+            conn.execute("DELETE FROM meta WHERE key=?",
+                         ("session_completion.{}".format(session_id),))
+            # a pending engine-context rollback belongs to the session that queued
+            # it (drivers.base._UNDO_STATE_KEY), and outlives it otherwise
+            conn.execute("DELETE FROM meta WHERE key=?",
+                         ("session_undo.{}".format(session_id),))
+            pinned, unpinned = _session_order_lists(conn)
+            _write_session_order(conn, pinned, unpinned)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
     _notify_change(session_id)

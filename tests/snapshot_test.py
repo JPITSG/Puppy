@@ -242,6 +242,11 @@ async def main() -> None:
                 "label": "saved-backend:" + str(project),
             }, separators=(",", ":")))
         db.touch_session(linked_id, native_session_id="native-linked", ws_dirty=0)
+        db.set_session_pinned(linked_id, True)
+        db.set_session_pinned(directory_id, True)
+        saved_session_order = [row["id"] for row in
+                               db.list_sessions(include_archived=True)]
+        assert saved_session_order == [linked_id, directory_id, scratch_id]
         saved_completion = notify._record_completion(
             db.get_session(linked_id), "ok", 7)
         db.execute(
@@ -543,6 +548,9 @@ async def main() -> None:
         assert config.get("notify.backend") == 1
         assert config.get("notify.command") == "printf done: %s {session}"
         assert len(db.list_sessions(include_archived=True)) == 3
+        restored_order = db.list_sessions(include_archived=True)
+        assert [row["id"] for row in restored_order] == saved_session_order
+        assert [row["pinned"] for row in restored_order] == [True, True, False]
         assert session_runner.parse_used_config(
             db.get_session(directory_id)["used_config"]) == {"model": "gpt-5.6-sol", "effort": "max"}
         assert db.query_one("SELECT token FROM backends")["token"] == "private-backend-token"

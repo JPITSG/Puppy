@@ -528,6 +528,7 @@ def exercise_side_question_contract() -> None:
     assert OpenCodeDriver().supports_side_questions is False
     assert protocol.SIDE_QUESTION_CAPABILITY in protocol.BASE_CAPABILITIES
     assert protocol.TIMER_SETTINGS_CAPABILITY in protocol.BASE_CAPABILITIES
+    assert protocol.SESSION_PINNING_CAPABILITY in protocol.BASE_CAPABILITIES
 
 
 async def exercise_codex_app_server_turn(root, runner, db) -> None:
@@ -2144,6 +2145,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "session-event-window" in ping["capabilities"]
         assert "session-tools" in ping["capabilities"]
         assert "session-agent-notes" in ping["capabilities"]
+        assert "session-pinning" in ping["capabilities"]
         assert "completion-events" in ping["capabilities"]
         assert "workspace-mirror-reset" in ping["capabilities"]
         assert "shutdown-notice" in ping["capabilities"]
@@ -2448,10 +2450,65 @@ async def exercise_node(url: str, token: str, expected_version: str,
         listed_scratch = next(row for row in listed_payload["sessions"]
                               if row["id"] == scratch["id"])
         assert listed_scratch["status"] == "idle"
+        assert listed_scratch["pinned"] is False
         assert listed_scratch["active_since"] is None
         assert listed_scratch["steering"] == {
             "supported": True, "ready": False, "turn_id": ""}
         assert isinstance(listed_payload["server_time"], (int, float))
+
+        # Pinning is strict, compare-protected, immediately returns the whole
+        # canonical order, and shares the same route on a headless node.
+        pin_updates = await http.ws_connect(
+            url + "/api/ws/updates", headers=good, ssl=pinned)
+        pin_initial = await pin_updates.receive_json(timeout=3)
+        assert pin_initial["type"] == "sessions"
+        async with http.patch(
+                url + f"/api/sessions/{scratch['id']}", headers=good, ssl=pinned,
+                json={"pinned": "yes"}) as response:
+            assert response.status == 400, await response.text()
+        async with http.patch(
+                url + f"/api/sessions/{scratch['id']}", headers=good, ssl=pinned,
+                json={"pinned": True, "archived": True}) as response:
+            assert response.status == 400, await response.text()
+        async with http.patch(
+                url + f"/api/sessions/{scratch['id']}", headers=good, ssl=pinned,
+                json={"pinned": True, "expected_pinned": True}) as response:
+            assert response.status == 409, await response.text()
+        async with http.patch(
+                url + f"/api/sessions/{scratch['id']}", headers=good, ssl=pinned,
+                json={"pinned": True, "expected_pinned": False}) as response:
+            pinned_payload = await response.json()
+            assert response.status == 200, pinned_payload
+        assert pinned_payload["session"]["pinned"] is True
+        assert pinned_payload["sessions"][0]["id"] == scratch["id"]
+        assert pinned_payload["sessions"][0]["pinned"] is True
+        while True:
+            pin_notice = await pin_updates.receive_json(timeout=3)
+            if pin_notice.get("type") == "sessions":
+                break
+        assert pin_notice["sessions"][0]["pinned"] is True
+        await pin_updates.close()
+        async with http.post(url + "/api/sessions/reorder", headers=good,
+                             ssl=pinned, json={
+                                 "order": [scratch["id"], scratch["id"]],
+                             }) as response:
+            assert response.status == 400, await response.text()
+        async with http.post(url + "/api/sessions/reorder", headers=good,
+                             ssl=pinned, json={
+                                 "order": [scratch["id"]],
+                                 "expected_order": [scratch["id"]],
+                                 "expected_pinned": [],
+                             }) as response:
+            assert response.status == 409, await response.text()
+        async with http.post(url + "/api/sessions/reorder", headers=good,
+                             ssl=pinned, json={
+                                 "order": [scratch["id"]],
+                                 "expected_order": [scratch["id"]],
+                                 "expected_pinned": [scratch["id"]],
+                             }) as response:
+            reordered_payload = await response.json()
+            assert response.status == 200, reordered_payload
+        assert reordered_payload["sessions"][0]["pinned"] is True
 
         # Model a boot-time /tmp cleanup. The durable transcript/session stays,
         # advertises the expiration, and can be given a fresh private workspace.
@@ -2808,6 +2865,7 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert "queue-pause" in full_ping["capabilities"]
         assert "queue-edit" in full_ping["capabilities"]
         assert "queue-reorder" in full_ping["capabilities"]
+        assert "session-pinning" in full_ping["capabilities"]
         assert "session-drafts" in full_ping["capabilities"]
         assert "active-turn-steering" in full_ping["capabilities"]
         assert "browser-handoff" in full_ping["capabilities"]
@@ -2868,6 +2926,7 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert "queue-pause" in stored["capabilities"]
         assert "queue-edit" in stored["capabilities"]
         assert "queue-reorder" in stored["capabilities"]
+        assert "session-pinning" in stored["capabilities"]
         assert "session-drafts" in stored["capabilities"]
         assert "active-turn-steering" in stored["capabilities"]
         assert "browser-handoff" in stored["capabilities"]
@@ -4000,18 +4059,33 @@ async def exercise_queue_pause(runner, db) -> None:
 
 
 async def exercise_session_order(runner, db) -> None:
-    """The sidebar order is the node's: every idle -> running transition moves
-    that session to the front, continuations within one activity block and
-    completions leave it, and drag-and-drop edits the same durable order."""
+    """Pins and activity/manual ordering form one canonical node-owned list."""
+    assert db.list_sessions(include_archived=True) == []
     ids = [db.create_session("order {}".format(name), "claude", "/tmp", "", "",
                              "blue", "auto") for name in ("a", "b", "c")]
     a, b, c = ids
 
     def order():
-        return [s["id"] for s in db.list_sessions() if s["id"] in ids]
+        return [s["id"] for s in db.list_sessions(include_archived=True)]
 
     def numbering():
-        return [s["sort_order"] for s in db.list_sessions() if s["id"] in ids]
+        return [s["sort_order"] for s in db.list_sessions(include_archived=True)]
+
+    def pinned_ids():
+        return [s["id"] for s in db.list_sessions(include_archived=True)
+                if s["pinned"]]
+
+    def assert_canonical():
+        count = len(pinned_ids())
+        assert numbering() == list(range(-count, 0)) + \
+            list(range(1, len(order()) - count + 1)), numbering()
+
+    def assert_raises(kind, call):
+        try:
+            call()
+        except kind:
+            return
+        raise AssertionError("{} was not raised".format(kind.__name__))
 
     hubs = {}
     tasks = []
@@ -4042,19 +4116,86 @@ async def exercise_session_order(runner, db) -> None:
         hubs[a]._start_turn("newest prompt")
         tasks.append(hubs[a].turn_task)
         assert order() == [a, b, c], order()
-        assert numbering() == sorted(numbering()) and \
-            len(set(numbering())) == 3, numbering()
+        assert_canonical()
         # a manual drag edits the same order the activations produced
-        db.reorder_sessions([c, a, b])
+        db.reorder_sessions([c, a, b], expected_order=[a, b, c],
+                            expected_pinned=[])
         assert order() == [c, a, b], order()
         hubs[a].status = "idle"
         hubs[a].active_since = None
         hubs[a]._start_turn("again")
         tasks.append(hubs[a].turn_task)
         assert order() == [a, c, b], order()
+
+        # New pins join below established pins. Repeating the same PATCH is a
+        # true no-op, and activity never disturbs their manual priority.
+        assert db.set_session_pinned(c, True, expected=False) is True
+        assert order() == [c, a, b]
+        assert db.set_session_pinned(b, True, expected=False) is True
+        assert order() == [c, b, a]
+        assert db.set_session_pinned(b, True, expected=True) is False
+        db.bump_session_to_top(b)
+        assert order() == [c, b, a]
+        assert pinned_ids() == [c, b]
+        assert_canonical()
+
+        # Even an old or hostile client asking to cross the boundary can only
+        # reorder within the two authoritative cohorts.
+        db.reorder_sessions([a, b, c])
+        assert order() == [b, c, a]
+        db.reorder_sessions([c, b, a], expected_order=[b, c, a],
+                            expected_pinned=[b, c])
+        assert order() == [c, b, a]
+        assert db.set_session_pinned(c, False, expected=True) is True
+        assert order() == [b, c, a]
+        db.bump_session_to_top(a)
+        assert order() == [b, a, c]
+        assert_canonical()
+
+        # Archived rows remain members of both compare tokens and the pin
+        # partition even while the ordinary sidebar view hides them.
+        db.touch_session(b, archived=1)
+        assert [s["id"] for s in db.list_sessions()] == [a, c]
+        assert order() == [b, a, c]
+
+        # All-pinned is a special create edge: the new ordinary row must be 1,
+        # never zero (which is legacy-unpinned but non-canonical).
+        d = db.create_session("order d", "claude", "/tmp", "", "", "blue", "auto")
+        ids.append(d)
+        for sid in (a, c, d):
+            assert db.set_session_pinned(sid, True, expected=False) is True
+        assert order() == [b, a, c, d]
+        e = db.create_session("order e", "claude", "/tmp", "", "", "blue", "auto")
+        ids.append(e)
+        assert order() == [b, a, c, d, e]
+        assert numbering() == [-4, -3, -2, -1, 1]
+
+        # Syntax failures are 400 at the HTTP layer; stale membership, order,
+        # cohort, and pin expectations are conflicts and never write.
+        assert_raises(ValueError,
+                      lambda: db.reorder_sessions([b, a, a, c, d, e]))
+        assert_raises(db.SessionOrderConflict,
+                      lambda: db.reorder_sessions([b, a, c, d]))
+        assert_raises(db.SessionOrderConflict, lambda: db.reorder_sessions(
+            [b, a, c, d, e], expected_order=[e, b, a, c, d],
+            expected_pinned=[b, a, c, d]))
+        assert_raises(db.SessionOrderConflict, lambda: db.reorder_sessions(
+            [b, a, c, d, e], expected_order=[b, a, c, d, e],
+            expected_pinned=[a, b, c, d]))
+        assert_raises(db.SessionOrderConflict,
+                      lambda: db.set_session_pinned(e, True, expected=True))
+        assert order() == [b, a, c, d, e]
+
+        # A valid request may arrange either cohort, but never interleave them.
+        db.reorder_sessions([e, d, c, b, a],
+                            expected_order=[b, a, c, d, e],
+                            expected_pinned=[b, a, c, d])
+        assert order() == [d, c, b, a, e]
+        assert pinned_ids() == [d, c, b, a]
+        assert_canonical()
         payload = runner.sessions_payload()["sessions"]
-        listed = [s["id"] for s in payload if s["id"] in ids]
-        assert listed == [a, c, b], listed
+        assert [s["id"] for s in payload] == [d, c, b, a, e]
+        assert [s["pinned"] for s in payload] == [True, True, True, True, False]
         await asyncio.gather(*tasks, return_exceptions=True)
     finally:
         for sid in ids:
@@ -4798,6 +4939,7 @@ async def main() -> None:
         assert "queue-pause" in pairing["capabilities"]
         assert "queue-edit" in pairing["capabilities"]
         assert "queue-reorder" in pairing["capabilities"]
+        assert "session-pinning" in pairing["capabilities"]
         assert "session-drafts" in pairing["capabilities"]
         assert "active-turn-steering" in pairing["capabilities"]
         assert "engine-model-selection" not in pairing["capabilities"]

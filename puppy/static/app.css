@@ -302,19 +302,32 @@ a{color:var(--acc2)}
 .sess-item .si-ws.warn{color:var(--warn)}
 .sess-item .si-ws.err{color:var(--err)}
 .sess-item .si-ws.busy{color:var(--acc2)}
-/* agent notes mark (bottom-right of a row): faint when the working directory
-   holds neither AGENTS.md nor CLAUDE.md, full strength when it holds one */
+/* Quiet row actions share one target size. The pin sits immediately left of
+   agent notes; whichever action is last owns the row's compact right edge. */
+.sess-item .si-pin,
 .sess-item .si-notes{
   flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;
-  width:24px;height:22px;margin:-4px -6px -4px 0;border-radius:var(--r-sm);
+  width:24px;height:22px;margin:-4px 0;border-radius:var(--r-sm);
   color:var(--txt3);opacity:.38;cursor:pointer;
   transition:opacity .15s var(--ease),background .15s var(--ease),color .15s var(--ease);
 }
+.sess-item .si-notes,
+.sess-item .si-pin:last-child{margin-right:-6px}
+.sess-item .si-pin svg{width:14px;height:14px}
 .sess-item .si-notes svg{width:12px;height:12px}
+.sess-item .si-pin.on{opacity:1;color:var(--acc2)}
+.sess-item .si-pin.pending{opacity:.55;cursor:wait}
 .sess-item .si-notes.has{opacity:1;color:var(--acc2)}
-@media (hover:hover){.sess-item .si-notes:hover{opacity:1;background:var(--hov);color:var(--txt)}}
-.sess-item .si-notes:focus-visible{opacity:1;outline:1px solid var(--acc-line);outline-offset:1px}
-.sess-item .si-notes:active{background:var(--hov)}
+@media (hover:hover){
+  .sess-item .si-pin:hover,.sess-item .si-notes:hover{
+    opacity:1;background:var(--hov);color:var(--txt)
+  }
+}
+.sess-item .si-pin:focus-visible,
+.sess-item .si-notes:focus-visible{
+  opacity:1;outline:1px solid var(--acc-line);outline-offset:1px
+}
+.sess-item .si-pin:active,.sess-item .si-notes:active{background:var(--hov)}
 .linklike{
   display:inline-flex;align-items:center;background:none;border:none;color:var(--txt3);
   font:inherit;font-size:11px;line-height:1;cursor:pointer;padding:8px 6px;border-radius:var(--btn-r);

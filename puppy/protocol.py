@@ -152,6 +152,11 @@ SESSION_TOOLS_CAPABILITY = "session-tools"
 # agent_notes list naming which of them exist. A console shows the sidebar's
 # notes button and its editor only for nodes that advertise this.
 SESSION_AGENT_NOTES_CAPABILITY = "session-agent-notes"
+# PATCH /api/sessions/{sid} accepts a node-owned pinned flag and the session
+# list keeps every pinned row above the ordinary activity/manual order. The
+# same capability covers the hardened full-order compare contract used by
+# drag-and-drop; older nodes retain their one unpinned order and no pin control.
+SESSION_PINNING_CAPABILITY = "session-pinning"
 # A node keeps a bounded, durable sequence of authoritative activity-block
 # completions and serves GET /api/completions?after=<seq>. Controllers use it
 # for remote completion commands without relying on an open browser.
@@ -212,6 +217,7 @@ BASE_CAPABILITIES = (
     SESSION_EVENT_WINDOW_CAPABILITY,
     SESSION_TOOLS_CAPABILITY,
     SESSION_AGENT_NOTES_CAPABILITY,
+    SESSION_PINNING_CAPABILITY,
     COMPLETION_EVENTS_CAPABILITY,
 )
 TERMINAL_CAPABILITY = "terminal"

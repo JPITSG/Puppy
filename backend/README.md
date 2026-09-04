@@ -162,11 +162,12 @@ activity block and can still notify when that later work actually finishes.
 
 The order of `GET /api/sessions` (and of every `sessions` broadcast) is the
 node's durable `sort_order`, and it is the order a console renders within
-that node's group. The node moves a session to the front every time it goes
+that node's group. Pinned sessions form a manually ordered block first. The
+node moves an ordinary session to the head below that block every time it goes
 from idle to running - the start of an activity block, not a queued
 continuation or a completion - and `POST /api/sessions/reorder` (drag-and-drop
-in the console) edits that same order. Nothing about the order lives in the
-browser, so every console and every reload sees the same list.
+in the console) edits the same order within each block. Nothing about the order
+lives in the browser, so every console and every reload sees the same list.
 
 ## Transient engine failures
 
@@ -527,6 +528,18 @@ broadcasts carry an additive `held` array old consoles simply ignore, and the
 session websocket accepts `requeue_held` / `discard_held` with the same
 stale-index guard as `unqueue`. A prompt is consumed durably the moment its
 turn starts, so a crash never runs one twice.
+
+## Pinned sessions
+
+Nodes advertising `session-pinning` accept a boolean `pinned` field on
+`PATCH /api/sessions/{sid}` and carry that flag on every session payload. A new
+pin joins the bottom of the existing pinned block; unpinning places it at the
+top of the ordinary block. Activity never rearranges pins. Reorder requests
+are full permutations, are stable-partitioned against the node's authoritative
+pin state, and may include `expected_order` plus `expected_pinned` compare
+values so simultaneous consoles fail with 409 instead of overwriting one
+another. Malformed or duplicate lists return 400; changed membership, order,
+or pin state returns 409.
 
 ## Agent notes
 

@@ -284,6 +284,7 @@ def sessions_payload() -> dict:
             "id": s["id"], "name": s["name"], "engine": s["engine"],
             "cwd": workspace_sync.public_cwd(s),
             "status": (h.status if h else "idle"), "archived": s["archived"],
+            "pinned": bool(s["pinned"]),
             "active_since": (h.active_since if h and h.status == "running" else None),
             "completion_status": (
                 h.last_completion_status if h and h.status == "idle" else
@@ -404,8 +405,10 @@ def _notify_workspace_phase(session_id: int, phase: str) -> None:
             log.exception("workspace hook failed for session %s", session_id)
 
 
-def broadcast_sessions() -> None:
-    broadcast_update(sessions_payload())
+def broadcast_sessions() -> dict:
+    payload = sessions_payload()
+    broadcast_update(payload)
+    return payload
 
 
 def broadcast_update(payload: dict) -> None:
@@ -1849,9 +1852,9 @@ class SessionHub:
         if self.active_since is None:
             self.active_since = time.time()
             self.last_completion_status = ""
-            # Idle -> running moves the session to the front of the durable
-            # order every console shares; queued continuations within the
-            # same activity block leave it where it is, and so does finishing.
+            # Idle -> running moves an ordinary session to the front below the
+            # pinned block in the durable order every console shares. Pinned
+            # rows, queued continuations, and completions keep their positions.
             try:
                 db.bump_session_to_top(self.id)
             except Exception:

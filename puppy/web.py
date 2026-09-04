@@ -460,12 +460,20 @@ async def h_session_create(request: web.Request):
 
 async def h_sessions_reorder(request: web.Request):
     body = await request.json()
+    if not isinstance(body, dict):
+        return web.json_response({"error": "request body must be an object"}, status=400)
     ids = body.get("order")
-    if not isinstance(ids, list) or not all(isinstance(x, int) for x in ids):
-        return web.json_response({"error": "order must be a list of session ids"}, status=400)
-    db.reorder_sessions(ids)
-    runner.broadcast_sessions()
-    return web.json_response({"ok": True})
+    expected_order = body.get("expected_order") if "expected_order" in body else None
+    expected_pinned = body.get("expected_pinned") if "expected_pinned" in body else None
+    try:
+        db.reorder_sessions(ids, expected_order=expected_order,
+                            expected_pinned=expected_pinned)
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    except db.SessionOrderConflict as exc:
+        return web.json_response({"error": str(exc)}, status=409)
+    payload = runner.broadcast_sessions()
+    return web.json_response(dict(payload, ok=True))
 
 
 async def h_session_get(request: web.Request):
@@ -483,10 +491,26 @@ async def h_session_get(request: web.Request):
 async def h_session_patch(request: web.Request):
     s = _session_or_404(request)
     body = await request.json()
+    if not isinstance(body, dict):
+        return web.json_response({"error": "request body must be an object"}, status=400)
     fields = {}
     turn_config = {}
     pending = None
     driver = None
+    pin_requested = "pinned" in body
+    pin_changed = False
+    if pin_requested:
+        if type(body["pinned"]) is not bool:
+            return web.json_response({"error": "pinned must be true or false"}, status=400)
+        if any(key in body for key in (
+                "name", "model", "effort", "permission_mode", "color",
+                "archived", "show_meta")):
+            return web.json_response(
+                {"error": "pinned must be updated separately"}, status=400)
+        expected_pin = body.get("expected_pinned") if "expected_pinned" in body else None
+        if expected_pin is not None and type(expected_pin) is not bool:
+            return web.json_response(
+                {"error": "expected_pinned must be true or false"}, status=400)
     if "model" in body or "effort" in body or "permission_mode" in body:
         # Validate against the engine these fields will actually reach: the
         # session's own engine plus every pending switch already queued. The
@@ -551,14 +575,31 @@ async def h_session_patch(request: web.Request):
         if not queued_config:
             fields.update({k: v for k, v in turn_config.items()
                            if k in ("model", "effort", "permission_mode")})
+    if pin_requested:
+        try:
+            pin_changed = db.set_session_pinned(
+                s["id"], body["pinned"], expected=expected_pin)
+        except db.SessionOrderConflict as exc:
+            return web.json_response({"error": str(exc)}, status=409)
     if fields:
         db.touch_session(s["id"], **fields)
-        runner.broadcast_sessions()
+    list_payload = None
+    if fields or pin_changed:
+        list_payload = runner.broadcast_sessions()
         runner.hub(s["id"]).broadcast(
             {"type": "session_meta", "session": runner.session_payload(db.get_session(s["id"]))})
-    return web.json_response(
-        {"ok": True, "queued_config": queued_config,
-         "session": runner.session_payload(db.get_session(s["id"]))})
+    response = {
+        "ok": True, "queued_config": queued_config,
+        "session": runner.session_payload(db.get_session(s["id"])),
+    }
+    # Pin callers need the authoritative stable-partitioned order immediately,
+    # especially through a remote proxy whose session list otherwise polls.
+    if pin_requested:
+        if list_payload is None:
+            list_payload = runner.sessions_payload()
+        response["sessions"] = list_payload["sessions"]
+        response["server_time"] = list_payload["server_time"]
+    return web.json_response(response)
 
 
 async def h_session_delete(request: web.Request):
