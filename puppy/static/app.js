@@ -1934,6 +1934,8 @@ function sessionLocationTitle(session, bid) {
 }
 
 function sessionDeleteMessage(session) {
+  if (session && session.task)
+    return "The task conversation and its private working copy are removed permanently. Changes already applied to Main are kept.";
   const ws = sessionWorkspace(session);
   if (ws) {
     return "The transcript and this backend's private synchronized copy are removed permanently." +
@@ -3151,6 +3153,7 @@ async function enterApp() {
 
 async function refreshState() {
   const s = await api(0, "state");
+  state.nodeCapabilities = Array.isArray(s.capabilities) ? s.capabilities : [];
   state.instance = s.instance_name;
   if (typeof s.version === "string") state.version = s.version;
   state.runtimeId = typeof s.runtime_id === "string" ? s.runtime_id : "";
@@ -3227,7 +3230,7 @@ function acceptStateSnapshot(bid, message) {
 }
 
 function syncInstanceCatalogIntoViews(bid, kind, instances) {
-  for (const view of Object.values(state.views)) {
+  for (const view of liveViews()) {
     if (!view || !view.tab || view.tab.type !== "session" ||
         Number(view.tab.bid || 0) !== Number(bid || 0) || !view.mentionData) continue;
     if (kind === "browser") view.mentionData.browsers = instances;
@@ -3530,7 +3533,7 @@ function remotePollIsCurrent(bid, sequence) {
 
 function syncRemoteStateViews() {
   try { renderSidebar(); } catch (error) { console.warn("remote sidebar update failed", error); }
-  for (const view of Object.values(state.views)) {
+  for (const view of liveViews()) {
     if (!view || typeof view.syncRemoteState !== "function") continue;
     try { view.syncRemoteState(); } catch (error) { console.warn("remote state view update failed", error); }
   }
@@ -3573,7 +3576,7 @@ function handleRemoteNodeStopping(rawBid, notice = {}) {
   state.remoteOk[bid] = false;
   state.remoteErrors[bid] = message;
   retireRemoteSessionActivity(bid);
-  for (const view of Object.values(state.views)) {
+  for (const view of liveViews()) {
     if (!view || !view.tab || Number(view.tab.bid || 0) !== Number(bid)) continue;
     if (typeof view.handleNodeStopping === "function") view.handleNodeStopping(message);
   }
@@ -3586,7 +3589,7 @@ function clearRemoteNodeStopping(rawBid) {
   if (!bid || !state.remoteStopping[bid]) return;
   delete state.remoteStopping[bid];
   delete state.remoteErrors[bid];
-  for (const view of Object.values(state.views)) {
+  for (const view of liveViews()) {
     if (!view || !view.tab || Number(view.tab.bid || 0) !== bid) continue;
     if (typeof view.clearNodeStopping === "function") view.clearNodeStopping();
   }
@@ -3908,7 +3911,7 @@ function noteRemoteSocketReachable(bid, recoveredFromStopping = false) {
    closed during that freeze, do not leave its accumulated backoff sitting
    between the user and a fresh snapshot after the page becomes usable again. */
 function wakeSessionConnections() {
-  for (const view of Object.values(state.views))
+  for (const view of liveViews())
     if (view && typeof view.resumeConnection === "function") view.resumeConnection();
 }
 
@@ -4430,7 +4433,7 @@ function linkForSession(bid, sid) {
 }
 
 function refreshWorkspaceChips() {
-  for (const view of Object.values(state.views)) {
+  for (const view of liveViews()) {
     if (view && view.session && typeof view.updateHead === "function")
       view.updateHead();
   }
@@ -4564,6 +4567,12 @@ function backendSupportsSideQuestions(bid) {
     backend.capabilities.includes("active-turn-side-question");
 }
 
+function backendSupportsSessionTasks(bid) {
+  const backend = bid ? state.backends.find(item => item.id === bid) : null;
+  const capabilities = bid ? backend && backend.capabilities : state.nodeCapabilities;
+  return Array.isArray(capabilities) && capabilities.includes("session-tasks");
+}
+
 function backendSupportsSessionTools(bid) {
   if (!bid) return true;
   const backend = state.backends.find(item => item.id === bid);
@@ -4668,7 +4677,7 @@ function rememberUploadSettings(bid, value) {
   if (!normalized) return null;
   if (bid) state.remoteUploadSettings[bid] = normalized;
   else state.uploadSettings = normalized;
-  for (const view of Object.values(state.views)) {
+  for (const view of liveViews()) {
     if (!view || !view.tab || view.tab.type !== "session" || Number(view.tab.bid || 0) !== Number(bid || 0))
       continue;
     view.uploadPolicy = normalized;
@@ -4737,6 +4746,7 @@ function animateSessionRows(root, rebuild) {
 }
 
 function renderSidebar() {
+  for (const view of Object.values(state.views)) if (view && view.taskViews) view.refreshTasks();
   if (dragSess && dragSess.item && dragSess.item.isConnected) {
     dragSess.renderPending = true;
     return;
@@ -4751,6 +4761,7 @@ function renderSidebar() {
   const rows = [];
   for (const node of nodes)
     for (const s of sessionsFor(node.bid)) {
+      if (s.task) continue;
       if (s.status === "running" &&
           !sessionActivityAnchors.has(sessionActivityKey(node.bid, s.id)))
         ingestOneSessionActivity(node.bid, s, null, Date.now());
@@ -4810,6 +4821,16 @@ function renderSidebar() {
         activity.classList.add("node");
         activity.textContent = backendName(bid);
         activity.setAttribute("aria-label", `Session idle on ${backendName(bid)}`);
+      }
+      if (s.task_activity && s.task_activity.total) {
+        const tasks = s.task_activity;
+        const label = tasks.approval ? `${tasks.approval} need input` : tasks.running ? `${tasks.running} tasks running` : `${tasks.total} tasks`;
+        const badge = s.status === "running" ? el("span", "si-task-count", `${tasks.total} tasks`) : activity;
+        if (badge === activity) { activity.classList.remove("node"); activity.textContent = label; }
+        badge.classList.toggle("attention", !!tasks.approval);
+        badge.title = `${tasks.total} tasks · ${tasks.ready} ready to review`;
+        badge.setAttribute("aria-label", label);
+        if (badge !== activity) r1.appendChild(badge);
       }
       r1.appendChild(activity);
       const r2 = el("div", "si-row sub");
@@ -6059,6 +6080,15 @@ function putTabAfter(tabId, afterTabId, groupId = null) {
 }
 
 function openSessionTab(bid, sid, meta, groupId = null) {
+  const known = meta && meta.task ? meta : findSessionMeta(bid, sid);
+  if (known && known.task) {
+    const rows = sessionsFor(bid);
+    if (!rows.some(row => row.id === sid)) rows.push(known);
+    openSessionTab(bid, known.task.parent, findSessionMeta(bid, known.task.parent), groupId);
+    const parent = state.views[`s:${bid}:${known.task.parent}`];
+    if (parent && parent.openTask) parent.openTask(sid);
+    return;
+  }
   const id = `s:${bid}:${sid}`;
   let tab = state.tabs.find(t => t.id === id);
   if (!tab) {
@@ -6138,7 +6168,7 @@ function openBrowserTab(bid, browserId = "", groupId = null, options = {}) {
    browsers re-read their linked session's name and colour for the link pill.
    Cheap: both lists are tiny and each view updates only its own controls. */
 function syncSessionBrowserChips() {
-  for (const view of Object.values(state.views)) {
+  for (const view of liveViews()) {
     if (view && typeof view.syncBrowserChips === "function") view.syncBrowserChips();
     if (view && typeof view.syncTerminalChips === "function") view.syncTerminalChips();
     if (view && typeof view.renderBinding === "function") view.renderBinding();
@@ -6163,7 +6193,10 @@ function handleBrowserActivity(bid, sid, turnId, browserId = "") {
 
   if (bid) state.remoteBrowser[bid] = { enabled: true };
   else state.browser = { enabled: true };
-  const sessionTabId = `s:${bid}:${sid}`;
+  const owner = liveViews().find(view => view && view.tab && view.tab.type === "session" &&
+    view.tab.bid === bid && view.tab.sid === sid);
+  const parent = owner && owner.session && owner.session.task ? owner.session.task.parent : sid;
+  const sessionTabId = `s:${bid}:${parent}`;
   const sessionPane = workspacePaneForTab(sessionTabId);
   openBrowserTab(bid, browserId, sessionPane ? sessionPane.id : null,
     { activate: false, afterTabId: sessionTabId, sid });
@@ -6183,7 +6216,10 @@ function handleTerminalActivity(bid, sid, turnId, terminalId = "") {
   terminalActivityTurns.set(key, Date.now());
   while (terminalActivityTurns.size > 128)
     terminalActivityTurns.delete(terminalActivityTurns.keys().next().value);
-  const sessionTabId = `s:${bid}:${sid}`;
+  const owner = liveViews().find(view => view && view.tab && view.tab.type === "session" &&
+    view.tab.bid === bid && view.tab.sid === sid);
+  const parent = owner && owner.session && owner.session.task ? owner.session.task.parent : sid;
+  const sessionTabId = `s:${bid}:${parent}`;
   const sessionPane = workspacePaneForTab(sessionTabId);
   openTermTab(bid, "", sessionPane ? sessionPane.id : null, "", terminalId,
     { activate: false, afterTabId: sessionTabId, sid });
@@ -6292,7 +6328,7 @@ function activateTab(id, groupId = null) {
 function ensureTabView(tab) {
   let view = state.views[tab.id];
   if (!view) {
-    if (tab.type === "session") view = new SessionView(tab);
+    if (tab.type === "session") view = backendSupportsSessionTasks(tab.bid) ? new SessionWorkspaceView(tab) : new SessionView(tab);
     else if (tab.type === "term") view = new TermView(tab);
     else if (tab.type === "browser") view = new BrowserView(tab);
     else if (tab.type === "search") view = new SearchView(tab);
@@ -6471,7 +6507,7 @@ function syncHorizontalOverflow(scroller, viewport = scroller && scroller.parent
    through to whatever scrolls behind it, and a trackpad's own sideways delta
    is left to the browser. Every strip that gets the touch-swipe treatment
    (overflow-x:auto with touch-action:pan-x) must be listed here too. */
-const WHEEL_SWIPE_STRIPS = [".tabs", ".chat-meta-scroll", ".composer-meta-scroll"];
+const WHEEL_SWIPE_STRIPS = [".session-task-tabs", ".tabs", ".chat-meta-scroll", ".composer-meta-scroll"];
 const wheelSwipeAnimations = new WeakMap();
 
 function stopWheelSwipe(strip) {
@@ -7000,10 +7036,10 @@ document.addEventListener("dragover", event => {
    start on the default. Correct them as soon as the list lands, rather than
    waiting for each socket snapshot. */
 function syncSessionMetaVisibility() {
-  for (const tab of state.tabs) {
-    if (tab.type !== "session") continue;
-    const view = state.views[tab.id];
-    if (!view || !view.root || view.session) continue;   // its own data wins
+  for (const view of liveViews()) {
+    const tab = view && view.tab;
+    if (!tab || tab.type !== "session") continue;
+    if (!view.root || view.session) continue;   // its own data wins
     const meta = findSessionMeta(tab.bid, tab.sid);
     if (meta) view.root.classList.toggle("meta-hidden", !sessionShowsMeta(meta));
   }
@@ -7224,7 +7260,7 @@ function applyTheme(t) {
   /* The theme is this browser's own state, so each node has to be told: its
      managed browsers render pages with the matching prefers-color-scheme. */
   const browserNodes = new Map();
-  for (const view of Object.values(state.views)) {
+  for (const view of liveViews()) {
     if (!view || typeof view.sendColorScheme !== "function") continue;
     const node = Number(view.tab && view.tab.bid) || 0;
     const selected = browserNodes.get(node);
@@ -7961,6 +7997,250 @@ function effectiveQueuedConfig(session, queued, engineOf) {
     }
   }
   return out;
+}
+
+/* One workspace tab owns Main and its task conversations. Leaf SessionViews
+   retain their existing sockets, drafts, queues, approvals and controls. */
+function liveViews() {
+  return Object.values(state.views).flatMap(view => view && view.taskViews ? [...view.taskViews.values()] : [view]);
+}
+function sessionViewFor(bid, sid) {
+  for (const view of liveViews())
+    if (view && view.tab && view.tab.type === "session" && Number(view.tab.bid) === Number(bid) && view.tab.sid === sid) return view;
+  return null;
+}
+function taskStateLabel(task) {
+  if (task.needs_approval) return "Needs approval";
+  return ({running:"Running", queued:"Queued", held:"Held", ready:"Ready to review", applied:"Applied",
+    stopped:"Stopped", failed:"Failed", pending:"Starting"})[task.state] || task.state;
+}
+class SessionWorkspaceView {
+  constructor(tab) {
+    this.tab = tab;
+    this.root = el("div", "view session-workspace");
+    this.strip = el("div", "session-task-tabs");
+    this.strip.setAttribute("role", "tablist");
+    this.strip.setAttribute("aria-label", "Session conversations");
+    this.body = el("div", "session-task-body");
+    this.root.append(this.strip, this.body);
+    this.taskViews = new Map();
+    this.selected = tab.sid;
+    this.opened = [];
+    this.seen = {};
+    this.storageKey = `puppy.sessionTasks.${tab.bid}.${tab.sid}`;
+    try {
+      const saved = JSON.parse(localStorage.getItem(this.storageKey));
+      if (saved && saved.format === 1 && Object.keys(saved).sort().join() === "active,format,open,seen" &&
+          Array.isArray(saved.open) && saved.open.every(Number.isInteger) && Number.isInteger(saved.active) &&
+          saved.seen && typeof saved.seen === "object" && !Array.isArray(saved.seen) &&
+          Object.values(saved.seen).every(n => Number.isInteger(n) && n >= 0)) {
+        this.opened = [...new Set(saved.open)].slice(0, 64);
+        this.selected = saved.active;
+        this.seen = saved.seen;
+      }
+    } catch (_) {}
+    const main = new SessionView(tab);
+    this.taskViews.set(tab.sid, main);
+    this.body.appendChild(main.root);
+    this.overview = el("div", "session-task-overview");
+    main.scroll.insertBefore(this.overview, main.scroll.firstChild);
+    this.refreshTasks();
+    // Existing workspace shortcuts act on the selected conversation. Outer
+    // layout ownership (root, tab, lifecycle) stays with this wrapper.
+    return new Proxy(this, {
+      get(target, key) {
+        const owner = key in target ? target : target.activeView();
+        const value = owner[key];
+        return typeof value === "function" ? value.bind(owner) : value;
+      },
+      set(target, key, value) {
+        const owner = key in target ? target : target.activeView();
+        owner[key] = value; return true;
+      }
+    });
+  }
+  activeView() { return this.taskViews.get(this.selected) || this.taskViews.get(this.tab.sid); }
+  tasks() { return sessionsFor(this.tab.bid).filter(s => s.task && s.task.parent === this.tab.sid); }
+  save() {
+    try { localStorage.setItem(this.storageKey, JSON.stringify({format:1, open:this.opened, active:this.selected, seen:this.seen})); } catch (_) {}
+  }
+  ensureTask(task) {
+    if (!this.taskViews.has(task.id)) {
+      const view = new SessionView({id:`s:${this.tab.bid}:${task.id}`, type:"session", bid:this.tab.bid, sid:task.id, title:task.name});
+      view.root.dataset.taskId = task.id;
+      this.taskViews.set(task.id, view);
+      this.body.appendChild(view.root);
+    }
+  }
+  openTask(sid) {
+    const task = this.tasks().find(s => s.id === sid);
+    if (!task) return;
+    this.ensureTask(task);
+    if (!this.opened.includes(sid)) this.opened.push(sid);
+    this.select(sid);
+  }
+  select(sid) {
+    const old = this.activeView();
+    old.restoreScroll(old.captureScroll());
+    this.selected = sid;
+    this.refreshTasks();
+    this.activeView().onShow(true);
+    const selected = this.strip.querySelector('[aria-selected="true"]');
+    if (selected) selected.scrollIntoView({block:"nearest", inline:"nearest"});
+    this.save();
+  }
+  closeTask(sid) {
+    this.opened = this.opened.filter(id => id !== sid);
+    const view = this.taskViews.get(sid);
+    if (view) view.destroy();
+    this.taskViews.delete(sid);
+    if (this.selected === sid) this.selected = this.tab.sid;
+    this.refreshTasks(); this.save();
+  }
+  refreshTasks() {
+    const tasks = this.tasks();
+    // Do not erase restored selection before its node's bootstrap arrives.
+    const loaded = !!findSessionMeta(this.tab.bid, this.tab.sid);
+    if (loaded) {
+      for (const sid of [...this.opened]) if (!tasks.some(s => s.id === sid)) this.closeTask(sid);
+      if (this.selected !== this.tab.sid && !tasks.some(s => s.id === this.selected)) this.selected = this.tab.sid;
+    }
+    for (const task of tasks) if (this.opened.includes(task.id)) this.ensureTask(task);
+    if (this.taskViews.has(this.selected) && this.root.classList.contains("on")) {
+      const task = tasks.find(s => s.id === this.selected);
+      if (task) this.seen[task.id] = task.task.result_seq;
+    }
+    for (const [sid, view] of this.taskViews) view.root.classList.toggle("on", sid === this.selected);
+    const signature = JSON.stringify([this.selected, this.opened, this.seen, tasks.map(s => [s.id,s.name,s.task])]);
+    if (signature === this.rendered) return;
+    this.rendered = signature;
+    this.strip.replaceChildren();
+    const addTab = (sid, title, task = null) => {
+      const wrap = el("div", "session-task-tab");
+      const button = el("button", "task-tab-button", title);
+      button.type = "button"; button.setAttribute("role", "tab");
+      button.setAttribute("aria-selected", String(sid === this.selected));
+      button.tabIndex = sid === this.selected ? 0 : -1;
+      button.onclick = () => this.select(sid);
+      button.onkeydown = event => {
+        if (!["ArrowLeft","ArrowRight","Home","End"].includes(event.key)) return;
+        event.preventDefault();
+        const tabs = [...this.strip.querySelectorAll('[role="tab"]')];
+        const at = tabs.indexOf(button);
+        const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length-1 : (at + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+        tabs[next].click(); tabs[next].focus();
+      };
+      if (task) {
+        const unread = task.result_seq > (this.seen[sid] || 0);
+        button.appendChild(el("span", `task-tab-status ${task.needs_approval ? "attention" : task.state}`, `${unread ? "• " : ""}${taskStateLabel(task)}`));
+        button.title = `${title} — ${taskStateLabel(task)}`;
+      }
+      wrap.appendChild(button);
+      if (task) {
+        const close = el("button", "task-tab-close", "×");
+        close.type = "button"; close.title = "Hide task tab; work keeps running";
+        close.setAttribute("aria-label", "Hide " + title);
+        close.onclick = () => this.closeTask(sid); wrap.appendChild(close);
+      }
+      this.strip.appendChild(wrap);
+    };
+    addTab(this.tab.sid, "Main");
+    for (const sid of this.opened) {
+      const task = tasks.find(s => s.id === sid);
+      if (task) addTab(sid, task.name, task.task);
+    }
+    const add = el("button", "task-add", "+ Task"); add.type = "button";
+    add.onclick = () => modalNewTask(this);
+    this.strip.appendChild(add);
+    this.overview.replaceChildren();
+    if (tasks.length) {
+      const title = el("div", "task-overview-title", "Tasks");
+      this.overview.appendChild(title);
+    }
+    for (const task of tasks) {
+      const card = el("div", "session-task-card");
+      const head = el("div", "task-card-head");
+      head.appendChild(el("strong", "", task.name));
+      head.appendChild(el("span", "task-card-state " + (task.task.needs_approval ? "attention" : task.task.state), taskStateLabel(task.task)));
+      card.appendChild(head);
+      const summary = task.task.summary || task.task.prompt;
+      card.appendChild(el("p", "task-card-summary", summary.length > 260 ? summary.slice(0,260) + "…" : summary));
+      const controls = el("div", "task-card-actions");
+      const open = el("button", "btn", task.task.needs_approval ? "Open approval" : "Open task");
+      open.onclick = () => this.openTask(task.id); controls.appendChild(open);
+      if (["ready","applied","failed","stopped"].includes(task.task.state)) {
+        const review = el("button", "btn", "Review changes");
+        review.onclick = () => modalReviewTask(this, task); controls.appendChild(review);
+      }
+      const remove = el("button", "btn", "Remove");
+      remove.disabled = ["running","queued"].includes(task.task.state);
+      remove.onclick = async () => {
+        if (!await modalConfirm("Remove task?", "This deletes the task conversation and its private working copy. Changes already applied to Main are kept.")) return;
+        try { await api(this.tab.bid, `sessions/${task.id}`, {method:"DELETE"}); await refreshSessionList(this.tab.bid); renderSidebar(); }
+        catch (error) { toast(error.message, "error"); }
+      };
+      controls.appendChild(remove); card.appendChild(controls); this.overview.appendChild(card);
+    }
+    this.overview.classList.toggle("hidden", !tasks.length);
+    this.save();
+  }
+  onShow(focus = true) { this.refreshTasks(); this.activeView().onShow(focus); }
+  onVisibility(visible) { if (visible) this.refreshTasks(); }
+  captureScroll() { return [...this.taskViews].map(([sid, view]) => [sid, view.captureScroll()]); }
+  restoreScroll(values) { for (const [sid, saved] of values || []) { const view = this.taskViews.get(sid); if (view) view.restoreScroll(saved); } }
+  destroy() { for (const view of this.taskViews.values()) view.destroy(); this.taskViews.clear(); this.root.remove(); }
+}
+async function modalNewTask(workspace) {
+  const {m, close} = modal(`<h2>New task</h2>
+    <label>Name <span class="field-optional">(optional, auto from prompt)</span><input id="nt-name" maxlength="80"></label>
+    <label>Task<textarea id="nt-prompt" rows="6" placeholder="Describe the feature or change…"></textarea></label>
+    <p class="hint">Starts with Main’s current engine, model and permissions, plus recent conversation context. Each task has its own chat and working copy.</p>
+    <p class="hint">Changes stay in the task until you review and apply them. Main must be idle while preparing or applying a task; other tasks can keep running. Local Git projects only. Ignored files, such as installed dependencies, are not copied.</p>
+    <div class="task-dialog-error" role="alert"></div>
+    <div class="m-btns"><button class="btn" id="nt-cancel">Cancel</button><button class="btn btn-pri" id="nt-start">Start task</button></div>`, "new-task-modal");
+  const prompt = m.querySelector("#nt-prompt"), start = m.querySelector("#nt-start");
+  const requestId = globalThis.crypto && crypto.randomUUID ? crypto.randomUUID() : `task-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  m.querySelector("#nt-cancel").onclick = close;
+  prompt.focus();
+  start.onclick = async () => {
+    if (!prompt.value.trim()) { prompt.focus(); return; }
+    start.disabled = true; start.textContent = "Preparing…";
+    m.querySelector(".task-dialog-error").textContent = "";
+    try {
+      const data = await api(workspace.tab.bid, `sessions/${workspace.tab.sid}/tasks`, {method:"POST",
+        body:{name:m.querySelector("#nt-name").value, prompt:prompt.value, request_id:requestId}});
+      const list = sessionsFor(workspace.tab.bid);
+      if (!list.some(s => s.id === data.session.id)) list.push(data.session);
+      close(); workspace.openTask(data.session.id); renderSidebar();
+    } catch (error) { m.querySelector(".task-dialog-error").textContent = error.message; }
+    finally { start.disabled = false; start.textContent = "Start task"; }
+  };
+}
+async function modalReviewTask(workspace, task) {
+  const {m, close} = modal(`<h2>Review task</h2><p class="task-review-name"></p><p class="hint task-review-summary"></p>
+    <pre class="task-review-files">Loading changes…</pre><pre class="task-review-diff"></pre>
+    <p class="hint task-review-note"></p><div class="task-dialog-error" role="alert"></div>
+    <div class="m-btns"><button class="btn" id="tr-close">Close</button><button class="btn btn-pri" id="tr-apply" disabled>Apply to Main</button></div>`, "task-review-modal");
+  m.querySelector(".task-review-name").textContent = task.name;
+  m.querySelector(".task-review-summary").textContent = task.task.summary;
+  m.querySelector("#tr-close").onclick = close;
+  const apply = m.querySelector("#tr-apply"), errorBox = m.querySelector(".task-dialog-error");
+  try {
+    const base = `sessions/${workspace.tab.sid}/tasks/${task.id}`;
+    const data = await api(workspace.tab.bid, base + "/review", {method:"POST", body:{}});
+    m.querySelector(".task-review-files").textContent = data.files || "No changes to apply.";
+    m.querySelector(".task-review-diff").textContent = data.diff;
+    m.querySelector(".task-review-note").textContent = (data.truncated ? "Diff preview shortened. " : "") + "Applies changes to Main’s working files. It does not commit or deploy. Overlapping edits must be resolved before applying.";
+    apply.disabled = false;
+    apply.textContent = data.has_changes ? "Apply to Main" : "Mark reviewed";
+    apply.onclick = async () => {
+      apply.disabled = true; errorBox.textContent = "";
+      try {
+        await api(workspace.tab.bid, base + "/apply", {method:"POST", body:{token:data.token}});
+        close(); toast(data.has_changes ? "Task changes applied to Main" : "Task reviewed"); await refreshSessionList(workspace.tab.bid); renderSidebar();
+      } catch (error) { errorBox.textContent = error.message; apply.disabled = false; }
+    };
+  } catch (error) { errorBox.textContent = error.message; m.querySelector(".task-review-files").textContent = ""; }
 }
 
 class SessionView {
@@ -11585,12 +11865,13 @@ class SessionView {
       () => copyWithToast(sessionWs ? sessionWs.root : this.session.cwd));
     if (this.session && this.session.native_session_id)
       add("Copy native session id", () => copyWithToast(this.session.native_session_id));
-    if (isScratchWorkspace(this.session))
+    if (isScratchWorkspace(this.session) && !this.session.task)
       add(this.session.workspace_missing ? "Recreate scratch workspace" :
         "Reset scratch workspace", () => this.resetWorkspace());
     menu.appendChild(el("div", "menu-sep"));
-    add(this.session && this.session.archived ? "Unarchive" : "Archive", () => this.archive());
-    add("Delete session", () => this.deleteSession(), true);
+    if (!(this.session && this.session.task))
+      add(this.session && this.session.archived ? "Unarchive" : "Archive", () => this.archive());
+    add(this.session && this.session.task ? "Remove task" : "Delete session", () => this.deleteSession(), true);
     /* On <body>, like every other float here. Inside the head it inherited
        .chat-head's z-index:2 stacking context, so its own z-index:100 only
        ranked it against its siblings - in a split, the divider (24) and the
@@ -11955,13 +12236,14 @@ class SessionView {
   }
 
   async deleteSession() {
-    const ok = await modalConfirm("Delete session?", sessionDeleteMessage(this.session));
+    const isTask = !!(this.session && this.session.task);
+    const ok = await modalConfirm(isTask ? "Remove task?" : "Delete session?", sessionDeleteMessage(this.session));
     if (!ok) return;
     try {
       await api(this.tab.bid, `sessions/${this.tab.sid}`, { method: "DELETE" });
       closeTab(this.tab.id);
       if (this.tab.bid) refreshGroup(this.tab.bid);
-      toast("Session deleted");
+      toast(isTask ? "Task removed" : "Session deleted");
     } catch (e) { toast(e.message, "error"); }
   }
 
@@ -13740,7 +14022,7 @@ class SearchView {
   openMatch(bid, session, seq) {
     openSessionTab(bid, session.id, session);
     if (seq > 0) {
-      const view = state.views[`s:${bid}:${session.id}`];
+      const view = sessionViewFor(bid, session.id);
       if (view && typeof view.jumpToSeq === "function") view.jumpToSeq(seq);
     }
   }
@@ -16381,7 +16663,7 @@ class SettingsView {
           toast(`${(result.backend && result.backend.name) || b.name}: Backend updated`, "ok");
           if (this.inner.isConnected) await this.render();
           if (result.connection_changed) {
-            for (const view of Object.values(state.views)) {
+            for (const view of liveViews()) {
               if (!view || !view.tab || view.tab.type !== "browser" ||
                   Number(view.tab.bid) !== Number(b.id) || typeof view.connect !== "function")
                 continue;
@@ -17531,7 +17813,7 @@ async function openSessionReference(ref, seq = 0) {
     if (!row) throw new Error("That session is deleted or its node is unavailable");
     const payload = await api(row.bid, `sessions/${row.id}`);
     openSessionTab(row.bid, row.id, payload.session);
-    const view = state.views[`s:${row.bid}:${row.id}`];
+    const view = sessionViewFor(row.bid, row.id);
     if (seq > 0 && view) view.jumpToSeq(seq);
   } catch (error) { toast(error.message, "error"); }
 }

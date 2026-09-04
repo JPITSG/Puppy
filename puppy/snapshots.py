@@ -120,6 +120,9 @@ def blockers() -> List[str]:
     reasons.extend(workspace_links.snapshot_blockers())
     from puppy import notify
     reasons.extend(notify.snapshot_blockers())
+    from puppy import session_tasks
+    if session_tasks.busy():
+        reasons.append("task workspace copy or apply in progress")
     from puppy import session_coordination
     if session_coordination.busy():
         reasons.append("unfinished session requests or coordination workflows")
@@ -591,6 +594,8 @@ def _validate_database(path: Path):
         from puppy import session_links
         try:
             session_links.validate_persisted(connection)
+            from puppy import session_tasks
+            session_tasks.validate_persisted(connection)
         except (ValueError, TypeError) as exc:
             raise SnapshotError("snapshot session references are not current") from exc
         transport_row = connection.execute(

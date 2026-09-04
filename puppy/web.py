@@ -264,6 +264,7 @@ async def h_state(request: web.Request):
     engines = await _engines_payload(refresh_usage=False, refresh_models=False)
     session_state = runner.sessions_payload()
     payload = {
+        "capabilities": list(request.app.get("puppy_capabilities", protocol.execution_capabilities())),
         "version": __version__,
         # Process identity lets an already-open console distinguish a brief
         # socket interruption from a same-listener restart. The latter needs a
@@ -724,6 +725,9 @@ async def h_session_patch(request: web.Request):
 
 async def h_session_delete(request: web.Request):
     s = _session_or_404(request)
+    from puppy import session_tasks
+    if session_tasks.busy() or session_tasks.children(s["id"]):
+        return web.json_response({"error": "Remove this session's tasks first; wait for any copy/apply operation to finish"}, status=409)
     if runner.hub(s["id"]).status == "running":
         return web.json_response(
             {"error": "turn in progress - stop it before deleting the session"}, status=409)
@@ -755,6 +759,9 @@ async def h_session_delete(request: web.Request):
 
 async def h_session_workspace_reset(request: web.Request):
     s = _session_or_404(request)
+    from puppy import session_tasks
+    if session_tasks.busy() or session_tasks.record(s["id"]) or session_tasks.children(s["id"]):
+        return web.json_response({"error": "Task workspaces cannot be reset; remove the task or create a new one"}, status=409)
     h = runner.hub(s["id"])
     if h.status == "running":
         return web.json_response(
@@ -1749,6 +1756,8 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     spawn_exec.register(app)
     from puppy import session_links
     session_links.register(app)
+    from puppy import session_tasks
+    session_tasks.register(app)
     search.register(app)
     agent_notes.register(app)
     state_stream.register(

@@ -5,6 +5,9 @@ Persistent AI coding session manager. A web console for organizing and driving
 session switching, interactive permission approvals, multi-backend support and
 built-in web terminals.
 
+Tasks can run concurrently inside one session, with separate conversations and
+review/apply controls. See [session tasks and rollback](docs/session-tasks.md).
+
 ## How it works
 
 - **Backend** (`puppy/`, Python 3.9+ / aiohttp): spawns the installed `claude`,

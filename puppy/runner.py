@@ -15,7 +15,7 @@ import uuid
 
 from puppy import (agent_notes, browser_agent, config, db, handoff, notify, spawn_agent,
                    system_prompts, terminal_agent, session_agent, session_links, uploads, workspace_sync,
-                   workspaces)
+                   workspaces, session_tasks)
 from puppy.drivers import get_driver
 from puppy.drivers import base as driver_base
 from puppy.drivers.base import clean_env
@@ -265,6 +265,9 @@ def session_payload(session):
     if session is None:
         return None
     out = dict(session)
+    task = session_tasks.public(session["id"])
+    if task:
+        out["task"] = task
     out["session_ref"] = session_links.reference(session["id"])
     out["agent_notes"] = agent_notes.present(session.get("cwd"))
     out["workspace_missing"] = workspaces.is_temporary(out) and not workspaces.is_available(out)
@@ -498,15 +501,20 @@ def sessions_payload() -> dict:
                 "turn_id": "",
             }),
         })
+    session_tasks.decorate(sessions)
     return {"type": "sessions", "server_time": now, "sessions": sessions}
 
 
 def upgrade_blockers() -> list:
     """Sessions whose running turn or queued work makes a restart unsafe."""
-    return [
+    blockers = [
         {"id": h.id, "running": h.status == "running", "queued": len(h.queue)}
         for h in _hubs.values() if h.status == "running" or h.queue
     ]
+    known = {row["id"] for row in blockers}
+    blockers.extend({"id": sid, "running": True, "queued": 0}
+                    for sid in session_tasks.busy_sessions() if sid not in known)
+    return blockers
 
 
 def engine_blockers(engine: str) -> list:
@@ -2078,7 +2086,8 @@ class SessionHub:
             # pinned block in the durable order every console shares. Pinned
             # rows, queued continuations, and completions keep their positions.
             try:
-                db.bump_session_to_top(self.id)
+                task = session_tasks.record(self.id)
+                db.bump_session_to_top(task["parent"] if task else self.id)
             except Exception:
                 log.warning("could not move session %s to the front", self.id,
                             exc_info=True)
@@ -2353,6 +2362,8 @@ class SessionHub:
         if not pending or pending.get("request_id") != request_id:
             return
         self.pending_approval = None
+        if session_tasks.record(self.id):
+            broadcast_sessions()
         session = db.get_session(self.id)
         driver = get_driver(session["engine"])
         try:
@@ -2712,6 +2723,7 @@ class SessionHub:
         self._block_status = "error"   # until a result says otherwise
         try:
             session = db.get_session(self.id)
+            await session_tasks.wait_for_workspace(session, self)
             descriptor = workspace_sync.session_workspace(session)
             self._ws_map = ((session["cwd"],
                              str(descriptor.get("root") or session["cwd"]))
@@ -2840,6 +2852,10 @@ class SessionHub:
             session_mcp = None if tool else session_agent.turn_mcp(self.id, pinned)
             system_prompt_text = "" if tool else system_prompts.turn_prompt(
                 remote_workspace=descriptor is not None)
+            if not tool:
+                task_context = session_tasks.guidance(self.id, first_turn)
+                if task_context:
+                    system_prompt_text += "\n\n" + task_context
             driver_kwargs = {"browser_mcp": browser_mcp, "terminal_mcp": terminal_mcp,
                              "spawn_mcp": spawn_mcp, "system_prompt": system_prompt_text}
             if session_mcp:
@@ -3063,11 +3079,15 @@ class SessionHub:
                         # stored raw: the reply must echo the engine's own
                         # paths, so only the broadcast copy is rewritten
                         self.pending_approval = act["req"]
+                        if session_tasks.record(self.id):
+                            broadcast_sessions()
                         self.broadcast({"type": "approval_request",
                                         "req": self._scrub_value(act["req"])})
                     elif a == "approval_cancel":
                         if self.pending_approval and self.pending_approval.get("request_id") == act.get("request_id"):
                             self.pending_approval = None
+                            if session_tasks.record(self.id):
+                                broadcast_sessions()
                         self.broadcast({"type": "approval_resolved",
                                         "request_id": act.get("request_id", ""), "behavior": "cancelled"})
                     elif a == "stdin":
@@ -3239,6 +3259,8 @@ class SessionHub:
             if retry_item is None and not tool:
                 from puppy import session_actions
                 session_actions.turn_finished(self.id, text,
+                    "interrupted" if self.interrupted else self._block_status, user_seq)
+                session_tasks.finished(self.id,
                     "interrupted" if self.interrupted else self._block_status, user_seq)
             if retry_item is not None:
                 # the same prompt again after its back-off, ahead of the queue

@@ -744,9 +744,13 @@ def get_events(session_id: int, before_seq=None, limit: int = 200,
 
 
 def delete_session(session_id: int) -> None:
+    from puppy import session_tasks
+    if session_tasks.children(session_id):
+        raise ValueError("Remove task conversations before deleting their main session")
     with _lock:
         conn = connect()
         try:
+            conn.execute("DELETE FROM meta WHERE key=?", ("session_task." + str(session_id),))
             conn.execute("DELETE FROM events WHERE session_id=?", (session_id,))
             conn.execute("DELETE FROM session_drafts WHERE session_id=?", (session_id,))
             conn.execute("DELETE FROM sessions WHERE id=?", (session_id,))

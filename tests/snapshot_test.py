@@ -386,6 +386,16 @@ async def main() -> None:
         handoff_path = Path(config.DATA_DIR) / "runtime" / "listener-handoff.json"
         assert handoff_path.is_file()
 
+        from puppy import session_tasks
+        session_tasks._git(original_scratch, "init", "--quiet")
+        session_tasks._git(original_scratch, "add", "-A")
+        session_tasks._git(original_scratch, "commit", "-qm", "Task baseline")
+        task_base = session_tasks._git(original_scratch, "rev-parse", "HEAD").decode().strip()
+        task_record = {"format":1, "parent":directory_id, "request_id":"snapshot-task",
+            "prompt":"Keep this task", "context":"Main context", "base":task_base,
+            "created_at":1, "outcome":"ok", "summary":"Ready for review", "completed_at":2,
+            "applied_at":0, "result_seq":1}
+        session_tasks._save(scratch_id, task_record)
         session_records = completed_records(db.node_uuid(), directory_id, scratch_id)
         db.meta_apply(session_records)
         direct_archive = snapshots.create_archive(ui)
@@ -610,6 +620,10 @@ async def main() -> None:
         assert db.query_one("SELECT username FROM users")["username"] == "snapshot-user"
         restored_scratch = db.get_session(scratch_id)
         assert restored_scratch["cwd"] != str(original_scratch)
+        assert session_tasks.record(scratch_id) == task_record
+        session_tasks.validate_persisted(db.connect())
+        session_tasks._git(restored_scratch["cwd"], "cat-file", "-e", task_base)
+        assert session_tasks.children(directory_id) == [scratch_id]
         assert (Path(restored_scratch["cwd"]) / "nested" / "file.txt").read_text(
             encoding="utf-8") == "scratch contents"
         assert (Path(restored_scratch["cwd"]) / "safe-link").read_text(

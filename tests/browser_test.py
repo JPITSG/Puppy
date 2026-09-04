@@ -653,6 +653,30 @@ def check_static_template_styles(ui_source: str) -> None:
     assert 'style="' not in ui_source
 
 
+def with_live_views(script):
+    """Isolated UI snippets share the production task-view traversal helper."""
+    if "liveViews()" in script and "function liveViews()" not in script:
+        source = (BASE / "puppy" / "static" / "app.js").read_text()
+        start = source.index("function liveViews()")
+        script = source[start:source.index("function sessionViewFor(", start)] + "\n" + script
+    return script
+
+
+def check_session_task_capability(ui_source):
+    start = ui_source.index("function backendSupportsSessionTasks(")
+    helper = ui_source[start:ui_source.index("function backendSupportsSessionTools(", start)]
+    script = """
+const state = {backends:[{id:1,protocol:0},{id:2,capabilities:[]},{id:3,capabilities:['session-tasks']}]};
+%s
+const oldLocal = backendSupportsSessionTasks(0);
+state.nodeCapabilities = ['session-tasks'];
+console.log(JSON.stringify([oldLocal,backendSupportsSessionTasks(0),backendSupportsSessionTasks(1),backendSupportsSessionTasks(2),backendSupportsSessionTasks(3),backendSupportsSessionTasks(99)]));
+""" % helper
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == [False, True, False, False, True, False]
+
+
 def check_reconnect_status(ui_source: str, css_source: str) -> None:
     """A transport outage must overlay, not destroy, model activity text.
 
@@ -758,7 +782,7 @@ console.log(JSON.stringify({before, lost, changedWhileLost, gracefulStop, recove
 """ % (function("promptStatusBase"), function("syncPromptSpinnerPhase"),
          function("promptSpinnerNode"), function("promptStatusLabel"),
          function("updatePromptStatusLabel"), ",\n".join(methods))
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:400]
     result = json.loads(proc.stdout.strip())
     assert result["before"]["metadataHidden"] is False, result
@@ -796,7 +820,7 @@ def check_backend_shutdown_notice(ui_source: str) -> None:
 
     source = "\n".join(function(name) for name in (
         "controllerBackendHealth", "remoteStoppingMessage",
-        "retireRemoteSessionActivity", "handleRemoteNodeStopping",
+        "liveViews", "retireRemoteSessionActivity", "handleRemoteNodeStopping",
         "clearRemoteNodeStopping"))
     script = r"""
 const state = {
@@ -816,6 +840,7 @@ state.views = {
   matching: {tab: {bid: 7}, handleNodeStopping(message) {
     if (message.includes("restarting")) stopped++;
   }, clearNodeStopping() { cleared++; }},
+  nested: {taskViews: new Map([[3, {tab: {bid: 7}, handleNodeStopping(message) { if (message.includes("restarting")) stopped++; }, clearNodeStopping() { cleared++; }}]])},
   other: {tab: {bid: 8}, handleNodeStopping() { otherStopped++; }},
 };
 const renderTabs = () => { rendered++; };
@@ -834,7 +859,7 @@ const clearedState = {notice: state.remoteStopping[7] || null,
   error: state.remoteErrors[7] || null, cleared};
 console.log(JSON.stringify({stoppedState, clearedState}));
 """ % source
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:500]
     result = json.loads(proc.stdout.strip())
     stopped = result["stoppedState"]
@@ -846,8 +871,8 @@ console.log(JSON.stringify({stoppedState, clearedState}));
     assert stopped["localAnchorGone"] and stopped["otherAnchorKept"], stopped
     assert stopped["sequence"] == 4, stopped
     assert stopped["rendered"] == 1 and stopped["synced"] == 1, stopped
-    assert stopped["stopped"] == 1 and stopped["otherStopped"] == 0, stopped
-    assert result["clearedState"] == {"notice": None, "error": None, "cleared": 1}, result
+    assert stopped["stopped"] == 2 and stopped["otherStopped"] == 0, stopped
+    assert result["clearedState"] == {"notice": None, "error": None, "cleared": 2}, result
 
 
 def check_offline_sidebar_sessions(ui_source: str, css_source: str) -> None:
@@ -896,7 +921,7 @@ console.log(JSON.stringify({
   anchorGone: !sessionActivityAnchors.has("7:44"),
 }));
 """ % source
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:700]
     result = json.loads(proc.stdout.strip())
     assert result["copied"] and result["becameOnline"] is False, result
@@ -1005,7 +1030,7 @@ console.log(JSON.stringify({
   recoveredAfterController, recoveredOnline: state.remoteOk[9], stoppingClears,
 }));
 """ % source
-    proc = subprocess.run(["node", "--input-type=module", "-e", script],
+    proc = subprocess.run(["node", "--input-type=module", "-e", with_live_views(script)],
                           capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:700]
     result = json.loads(proc.stdout.strip())
@@ -1095,7 +1120,7 @@ console.log(JSON.stringify({
   missingCap:backendSupportsStateStream({protocol:1,capabilities:[]}),
 }));
 """ % source
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:900]
     result = json.loads(proc.stdout.strip())
     assert result == {
@@ -1140,7 +1165,7 @@ noteLocalStateStreamTopic({type:"terminal_instances",state_topic:"terminal_insta
 console.log(JSON.stringify({partialReady,malformedReady,
   completeReady:state.stateStreamReady[0],pollingStarts}));
 """ % topic_source
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:900]
     assert json.loads(proc.stdout.strip()) == {
         "partialReady": False, "malformedReady": False,
@@ -1175,7 +1200,7 @@ applyRemoteStreamState({backend_id:7,connected:false,node_runtime_id:"remote-b"}
 console.log(JSON.stringify({staleConnectRejected,onlineAccepted,
   disconnected:state.stateStreamReady[7]===false,syncs,polls}));
 """ % remote_stream_source
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:900]
     result = json.loads(proc.stdout.strip())
     assert result == {
@@ -1219,7 +1244,7 @@ console.log(JSON.stringify({engines:state.engCache[7],usage:state.remoteUsageRef
   browser:state.remoteBrowser[7],prompt:state.remoteSystemPrompts[7],
   rejected:state.remoteUsageRefresh[8]||null}));
 """ % source
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:700]
     result = json.loads(proc.stdout.strip())
     assert result == {
@@ -1295,7 +1320,7 @@ ingestOneSessionActivity(8,
   {id: 4, status: "idle", completion_status: "ok"}, 20, 5000);
 console.log(JSON.stringify({posts, remaining: sessionActivityAnchors.size}));
 """ % source
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:500]
     result = json.loads(proc.stdout.strip())
     assert result["remaining"] == 0, result
@@ -1387,7 +1412,7 @@ console.log(JSON.stringify({codex,tool,toolStayed,claude,idle:view.statusRow,
          function("promptSpinnerNode"), function("promptStatusLabel"),
          function("updatePromptStatusLabel"), function("thinkingIconNode"),
          function("isThinkingStatus"), method)
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:500]
     result = json.loads(proc.stdout.strip())
     assert result["codex"] == {"cls": "think-brain", "text": "🧠"}, result
@@ -1412,7 +1437,7 @@ console.log(JSON.stringify([
   promptStatusBase("Starting next queued message…"),
 ]));
 """
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:500]
     assert json.loads(proc.stdout) == [
         "Thinking", "Thinking 42 tokens", "Using shell",
@@ -1446,7 +1471,7 @@ const parent=syncPromptSpinnerPhase(el("span","active-time"),450);
 console.log(JSON.stringify([one.style.values["--prompt-spin-delay"],
   two.style.values["--prompt-spin-delay"],parent.style.values["--prompt-spin-delay"]]));
 """ % spinner_source
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:500]
     assert json.loads(proc.stdout) == ["-150ms", "-150ms", "-450ms"]
     for selector in (".si-be.active-time::before{",
@@ -1572,7 +1597,7 @@ console.log(JSON.stringify({invalid,cancelled,ordinary,paired,cleartext,saved:sa
 """.replace("__REAL_CONTROL__", editor_control).replace(
         "__CONFIGURED__", configured).replace("__PAIRED_URLS__", paired_urls).replace(
         "__EDITOR__", editor)
-    proc = subprocess.run(["node", "--input-type=module", "-e", script],
+    proc = subprocess.run(["node", "--input-type=module", "-e", with_live_views(script)],
                           capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:700]
     result = json.loads(proc.stdout.strip())
@@ -1928,7 +1953,7 @@ console.log(JSON.stringify({anchored,paused,partialClosed,majorityOpen,
                             closingHeld,positionClosed,verticalUntouched,flickOpen,
                             nextSideTap,gestureClickBlocked}));
 """ % gesture
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:500]
     result = json.loads(proc.stdout.strip())
     assert result["anchored"] == {
@@ -1991,7 +2016,7 @@ timers.delete(queuedId);
 queued.fn();
 console.log(JSON.stringify({sent,cleared,timers:timers.size,delay:queued.delay}));
 """ % browser_view
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:700]
     result = json.loads(proc.stdout)
     assert result == {
@@ -2109,7 +2134,7 @@ console.log(JSON.stringify({beforeFlush,sent,activitySent,viewportQueues,
   firstDelay,nextDelay:reconnect.reconnectDelay,connects,
   terminalTimers,hiddenTimers,invisibleTimers,closeNotices,closeRetries}));
 """ % browser_view
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:1000]
     result = json.loads(proc.stdout)
     assert result["beforeFlush"] == 0, result
@@ -2173,7 +2198,7 @@ const state={views:{
 applyTheme("dark");
 console.log(JSON.stringify(calls));
 """ % source
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:800]
     assert json.loads(proc.stdout) == ["connected", "remote"], proc.stdout
 
@@ -2542,7 +2567,7 @@ const cleared={queued:frames.size,text:textNode.data,writes:textNode.writes,
 console.log(JSON.stringify({before,after,secondPaint,cleared}));
 """ % ",\n".join(method(name) for name in (
         "appendLive", "flushLive", "clearLive"))
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:1000]
     result = json.loads(proc.stdout)
     assert result == {
@@ -2791,7 +2816,7 @@ console.log(JSON.stringify({revealHeld,revealPaused,minorityClosed,majorityOpen,
   collapseHeld,positionClosed,laneRestoresOpen,restoredWidth,flickOpen,cancelRestored,
   doubleClickReset}));
 """ % gesture
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:600]
     result = json.loads(proc.stdout.strip())
     assert result["revealHeld"] == {
@@ -2863,7 +2888,7 @@ function clearTimeout() { timer=null; }
   console.log(JSON.stringify({done,reset,toasts}));
 })().catch(error=>{console.error(error);process.exit(1);});
 """ % helper
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:500]
     result = json.loads(proc.stdout.strip())
     assert result["done"] == {
@@ -3059,7 +3084,7 @@ await view.steer();
 console.log(JSON.stringify({sent,afterNotReady:{calls:calls.length,toasts}}));
 """ % steer_method
     proc = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
+        ["node", "--input-type=module", "-e", with_live_views(script)],
         capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:700]
     result = json.loads(proc.stdout)
@@ -3427,7 +3452,7 @@ const unsupported={disabled:custom.disabled&&remoteWorkspace.disabled&&browser.d
   status:status.textContent};
 console.log(JSON.stringify({before,dirty,resetState,saved,remote,offline,legacy,unsupported,calls}));
 """.replace("__METHOD__", method)
-    proc = subprocess.run(["node", "--input-type=module", "-e", script],
+    proc = subprocess.run(["node", "--input-type=module", "-e", with_live_views(script)],
                           capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:1000]
     result = json.loads(proc.stdout)
@@ -3538,7 +3563,7 @@ const none={count:choices.length,value:empty.value,disabled:empty.disabled,
     disabled:o.disabled,selected:o.selected}))};
 console.log(JSON.stringify({first,preserved,local,none,refreshes}));
 """.replace("__HELPERS__", helpers)
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:1000]
     result = json.loads(proc.stdout)
     assert result["first"] == {
@@ -3591,7 +3616,7 @@ def check_opencode_chat_models(ui_source: str, css_source: str) -> None:
     start = ui_source.index("const PROVIDERS =")
     end = ui_source.index("\nfunction provIcon(", start)
     script = ui_source[start:end] + "\nconsole.log(JSON.stringify(provSpec('opencode')));"
-    proc = subprocess.run(["node", "--input-type=module", "-e", script],
+    proc = subprocess.run(["node", "--input-type=module", "-e", with_live_views(script)],
                           capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:700]
     assert json.loads(proc.stdout) == {
@@ -3632,7 +3657,7 @@ console.log(JSON.stringify({
   custom:effortOptionsForModel(custom,"custom-id").map(item=>item.value),
 }));
 '''
-    proc = subprocess.run(["node", "--input-type=module", "-e", script],
+    proc = subprocess.run(["node", "--input-type=module", "-e", with_live_views(script)],
                           capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:700]
     assert json.loads(proc.stdout) == {
@@ -3689,7 +3714,7 @@ payload.values.remote_engine_seconds=7;
 state.timers=normalizeTimerSettings(payload);
 console.log(JSON.stringify({before,after:remotePollingTickMilliseconds(),valid:!!state.timers}));
 '''
-    proc = subprocess.run(["node", "--input-type=module", "-e", script],
+    proc = subprocess.run(["node", "--input-type=module", "-e", with_live_views(script)],
                           capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:700]
     assert json.loads(proc.stdout) == {"before": 12000, "after": 7000, "valid": True}
@@ -3713,7 +3738,7 @@ console.log(JSON.stringify({
   local:onlineTimerPropagationTargets(nodes,0).map(node=>node.name),
 }));
 '''
-    proc = subprocess.run(["node", "--input-type=module", "-e", script],
+    proc = subprocess.run(["node", "--input-type=module", "-e", with_live_views(script)],
                           capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:700]
     assert json.loads(proc.stdout) == {
@@ -3735,7 +3760,7 @@ const result=await propagateTimerSetting([
 ],"model_catalog_minutes",9);
 console.log(JSON.stringify({result,calls}));
 '''
-    proc = subprocess.run(["node", "--input-type=module", "-e", script],
+    proc = subprocess.run(["node", "--input-type=module", "-e", with_live_views(script)],
                           capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:700]
     result = json.loads(proc.stdout)
@@ -3770,7 +3795,7 @@ const result=await resetTimerSettings([
 ]);
 console.log(JSON.stringify({result,calls}));
 '''
-    proc = subprocess.run(["node", "--input-type=module", "-e", script],
+    proc = subprocess.run(["node", "--input-type=module", "-e", with_live_views(script)],
                           capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:700]
     result = json.loads(proc.stdout)
@@ -3818,7 +3843,7 @@ current.controls["#mc-yes"].onclick();
 const accepted=await acceptedPromise;
 console.log(JSON.stringify({dismissed,accepted,styled}));
 '''
-    proc = subprocess.run(["node", "--input-type=module", "-e", script],
+    proc = subprocess.run(["node", "--input-type=module", "-e", with_live_views(script)],
                           capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:700]
     assert json.loads(proc.stdout) == {
@@ -3964,7 +3989,7 @@ const start = 100000;
 console.log(JSON.stringify([0, 5, 61, 3599, 3600, 3661, 36000]
   .map(seconds => formatSessionActivity(start, start + seconds * 1000))));
 """
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:700]
     assert json.loads(proc.stdout) == [
         "0:00", "0:05", "1:01", "59:59", "1:00:00", "1:01:01", "10:00:00",
@@ -4126,7 +4151,7 @@ console.log(JSON.stringify({mouse:mouse.stats,vertical:vertical.stats,left:left.
     shortMove:shortMove.prevented,shortUp:shortUp.prevented,longUp:longUp.prevented},
   shortLive,shortBefore,shortAfter,longAnimating}));
 """ % swipe_source
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:700]
     result = json.loads(proc.stdout.strip())
     assert result["mouse"] == {"paused": 0, "resumed": 0, "dismissed": 0}, result
@@ -4235,7 +4260,7 @@ console.log(JSON.stringify([
   sessionLocationLabel(expired,7),
 ]));
 """ % helpers
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:600]
     assert json.loads(proc.stdout) == [
         "/srv/apps/puppy",
@@ -4384,7 +4409,7 @@ const slim = value => ({engine:value.engine, permission:value.permission_mode,
   queuedPermission:value.queuedPermission, queuedFast:value.queuedFast});
 console.log(JSON.stringify([initial, legacy, switched, picked, stale].map(slim)));
 """ % ui_source[start:end]
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:700]
     assert json.loads(proc.stdout) == [
         {"engine": "claude", "permission": "auto",
@@ -4484,7 +4509,7 @@ changed.syncFastIndicator();
 results.push({hidden:changed.fastIndicator._classes.has("hidden")});
 console.log(JSON.stringify(results));
 """ % method
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:700]
     assert json.loads(proc.stdout) == [
         {"hidden": False, "label": "Fast mode is on"},
@@ -4583,7 +4608,7 @@ console.log(JSON.stringify({
     .map(option => option.value),
 }));
 """ % helpers
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:500]
     result = json.loads(proc.stdout.strip())
     assert result["bare"] == {"start": 0, "query": ""}, result
@@ -5089,11 +5114,11 @@ console.log(JSON.stringify({selectors:WHEEL_SWIPE_STRIPS, passive:listeners.whee
   line:line.prevented, lineLeft, page:page.prevented, pageLeft,
   pointerResult, detachedResult, reducedResult}));
 """ % source
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:1000]
     result = json.loads(proc.stdout.strip())
     assert result["selectors"] == [
-        ".tabs", ".chat-meta-scroll", ".composer-meta-scroll"], result
+        ".session-task-tabs", ".tabs", ".chat-meta-scroll", ".composer-meta-scroll"], result
     assert result["passive"] is False and result["pointerPassive"] is True, result
     assert result["first"] and result["second"], result
     assert result["queued"] == {"left": 0, "frames": 1}, result
@@ -5137,7 +5162,7 @@ console.log(JSON.stringify({
   long:workspaceLocationLabel(long,7,20),
 }));
 """ % helpers
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:600]
     result = json.loads(proc.stdout)
     assert result == {
@@ -5202,7 +5227,7 @@ const buttonEvent=target.emit("click",{detail:1,target:disclosure});
 const buttonChildEvent=target.emit("click",{detail:1,target:disclosure.child});
 console.log(JSON.stringify({clicks:disclosure.clicks,events,buttonEvent,buttonChildEvent}));
 """ % wire
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:600]
     result = json.loads(proc.stdout.strip())
     assert result["clicks"] == 2, result  # one physical click + programmatic activation
@@ -5248,7 +5273,7 @@ const localCount=closeBrowserTabsForBackend(0);
 console.log(JSON.stringify({remoteCount,afterRemote,localCount,closed,
   remaining:state.tabs.map(tab=>tab.id)}));
 """ % helper
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:500]
     result = json.loads(proc.stdout.strip())
     assert result["remoteCount"] == 2 and result["localCount"] == 1, result
@@ -5319,7 +5344,7 @@ const claudeProvenance = quotaTitle(
   claudeEngine, weeklyQuotaSample(claudeEngine, 100));
 console.log(JSON.stringify({values, provenance, claudeProvenance}));
 """)
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:400]
     result = json.loads(proc.stdout.strip())
     rounded = [None if v is None else round(v) for v in result["values"]]
@@ -5370,7 +5395,7 @@ view.setLoading(true);
 const selfExpired=!classes.has("loading")&&view.loadingTimer===null;
 console.log(JSON.stringify({armed,delay,clearedOnStatus,selfExpired}));
 """ % view_source
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:700]
     result = json.loads(proc.stdout)
     assert result == {"armed": True, "delay": 20000, "clearedOnStatus": True,
@@ -5437,7 +5462,7 @@ const rows = [
 rows.sort(searchRelevanceCompare);
 console.log(JSON.stringify(rows.map(row => row.id)));
 ''')
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:500]
     assert json.loads(proc.stdout) == [
         "rank-first-new", "rank-first-old", "raw-winner"]
@@ -5536,7 +5561,7 @@ result.reject12=parseClockSetting("15:30");
 result.example12=clockSettingExample();
 console.log(JSON.stringify(result));
 ''' % helpers
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:700]
     assert json.loads(proc.stdout) == {
         "cycle24": {"weekday": "short", "hourCycle": "h23"},
@@ -6781,6 +6806,7 @@ async def main() -> None:
             check_static_template_styles(ui_source)
             check_server_clock_format(ui_source)
             check_reconnect_status(ui_source, css_source)
+            check_session_task_capability(ui_source)
             check_backend_shutdown_notice(ui_source)
             check_offline_sidebar_sessions(ui_source, css_source)
             check_controller_backend_pooling(ui_source)

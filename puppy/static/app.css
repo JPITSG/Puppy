@@ -2779,3 +2779,35 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
 }
 .session-request-modal .m-btns { flex-wrap: wrap; }
 .session-request-modal .m-btns .btn { min-width: max-content; }
+
+/* Main and task conversations share one workspace pane. */
+.session-task-body{position:relative;flex:1;min-height:0;min-width:0}
+.session-task-tabs{display:flex;align-items:stretch;gap:4px;overflow-x:auto;scrollbar-width:none;touch-action:pan-x;flex-shrink:0;padding:6px 10px;border-bottom:1px solid var(--line);background:var(--panel)}
+.session-task-tabs::-webkit-scrollbar{display:none}
+.session-task-tab{display:flex;flex-shrink:0;align-items:center;border-radius:var(--r-sm);overflow:hidden}
+.task-tab-button,.task-tab-close,.task-add{font:inherit;font-size:12px;color:var(--txt2);background:transparent;border:0;cursor:pointer;white-space:nowrap;padding:8px 10px}
+.task-tab-button{display:flex;gap:8px;align-items:center;max-width:320px;overflow:hidden;text-overflow:ellipsis}
+.task-tab-button[aria-selected="true"]{color:var(--txt);background:var(--panel2)}
+.task-tab-button:hover,.task-tab-close:hover,.task-add:hover{background:var(--panel2);color:var(--txt)}
+.task-tab-close{padding:8px 6px;font-size:16px}
+.task-tab-status{font-size:10px;color:var(--txt2)}
+.task-tab-status.running,.task-card-state.running{color:var(--acc)}
+.session-task-tabs .attention,.task-card-state.attention,.si-task-count.attention,.si-be.attention{color:var(--warn)}
+.session-task-overview{max-width:var(--chat-width, 900px);margin:0 auto 18px}
+.task-overview-title{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--txt2);margin-bottom:8px}
+.session-task-card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-md);padding:12px;margin-bottom:8px}
+.task-card-head{display:flex;gap:12px;align-items:baseline;justify-content:space-between;font-size:13px}
+.task-card-head strong{overflow-wrap:anywhere}
+.task-card-state{font-size:11px;color:var(--txt2);flex-shrink:0}
+.task-card-summary{font-size:12px;color:var(--txt2);line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere;margin:8px 0}
+.task-card-actions{display:flex;gap:6px;flex-wrap:wrap}
+.task-card-actions .btn{font-size:11px;padding:5px 9px}
+.si-task-count{font-size:10px;white-space:nowrap;color:var(--txt2);flex-shrink:0}
+.task-dialog-error{font-size:12px;color:var(--err);white-space:pre-wrap;overflow-wrap:anywhere}
+.new-task-modal textarea{min-height:130px;resize:vertical}
+.task-review-modal{max-width:820px}
+.task-review-name{font-weight:600;overflow-wrap:anywhere}
+.task-review-summary{white-space:pre-wrap;max-height:180px;overflow:auto}
+.task-review-files,.task-review-diff{font-size:11px;line-height:1.5;overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:var(--r-sm);padding:10px;max-height:40vh;white-space:pre}
+.task-review-diff:empty{display:none}
+@media(max-width:600px){.session-task-tabs{padding:4px 6px}.task-tab-button{max-width:240px}.task-card-head{align-items:flex-start}.task-card-state{max-width:110px;text-align:right;white-space:normal}}
