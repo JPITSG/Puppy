@@ -3598,6 +3598,75 @@ def check_session_provider_marks(css_source: str) -> None:
     assert ".si-row.sub .prov-opencode{color:var(--txt3)}" in css_source
 
 
+def check_chrome_icon_clarity(ui_source: str, css_source: str) -> None:
+    """Tiny chrome icons are drawn for their 11-14px slots on 1x displays."""
+    def function(name):
+        start = ui_source.index("function " + name + "(")
+        brace = ui_source.index("{", start)
+        depth = 0
+        for index in range(brace, len(ui_source)):
+            if ui_source[index] == "{":
+                depth += 1
+            elif ui_source[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    return ui_source[start:index + 1]
+        raise AssertionError("unbalanced " + name)
+
+    def rule(selector):
+        start = css_source.index("\n" + selector) + 1   # a line-start match
+        return css_source[start:css_source.index("}", start)]
+
+    # The OpenAI mark: the compact copy is the upstream path with a 1.1-unit
+    # stroke, used for every .prov mark; the 18px engine picker keeps the
+    # faithful original.
+    vendor = BASE / "puppy" / "static" / "vendor"
+    upstream = (vendor / "openai.svg").read_text()
+    compact = (vendor / "openai-compact.svg").read_text()
+    assert "stroke" not in upstream
+    path = upstream[upstream.index(' d="') + 4:]
+    path = path[:path.index('"')]
+    assert path.startswith("M22.2819 9.8211") and len(path) > 1000
+    assert ('<path stroke="#000" stroke-width="1.1" stroke-linejoin="round" d="'
+            + path + '"') in compact
+    assert compact.count("<path ") == 1
+    assert ('mask:url("/static/vendor/openai-compact.svg") center/contain no-repeat'
+            in rule(".prov-openai{"))
+    picker = rule(".engine-pick .ep .ep-ico.prov-openai{")
+    assert "background:#10a37f" in picker
+    assert 'mask-image:url("/static/vendor/openai.svg")' in picker
+    # Whole-pixel line boxes: 19 + 17 keeps the 56px session row and lands the
+    # 13px mark (11px slot, -1px margins) and the 9px dot (+1px) on pixels.
+    assert "line-height:19px" in rule(".sess-item .si-name{")
+    assert "line-height:17px" in rule(".sess-item .si-sub{")
+    assert "line-height:18px" in rule(".tab{")
+    # Settings: a filled 16-grid cog, no strokes, hub punched with evenodd.
+    gear = function("gearIcon")
+    assert 'setAttribute("viewBox", "0 0 16 16")' in gear
+    assert 'setAttribute("d", COG_PATH)' in gear
+    assert 'setAttribute("fill", "currentColor")' in gear
+    assert 'setAttribute("fill-rule", "evenodd")' in gear
+    assert "stroke" not in gear
+    assert 'const COG_PATH = "M6.72 2.65L6.69 0.11A8 8 0 0 1 9.31 0.11L' in ui_source
+    assert "ZM5.4 8a2.6 2.6 0 1 0 5.2 0a2.6 2.6 0 1 0 -5.2 0Z\";" in ui_source
+    assert 'tdot.appendChild(gearIcon(12));' in ui_source
+    assert '$("btn-settings").appendChild(gearIcon(14));' in ui_source
+    assert "gearIcon(14, 1.5)" not in ui_source
+    # Browser: a 12-grid globe with a 1.5 ring, one meridian and the equator.
+    globe = function("globeIcon")
+    assert 'setAttribute("viewBox", "0 0 12 12")' in globe
+    assert '"M6 1.25a4.75 4.75 0 1 0 0 9.5 4.75 4.75 0 0 0 0-9.5Z"' in globe
+    assert '"m0 0a2.15 4.75 0 1 0 0 9.5 2.15 4.75 0 0 0 0-9.5Z"' in globe
+    assert '"M1.25 6h9.5"' in globe
+    assert 'setAttribute("stroke-width", "1.5")' in globe
+    assert "h11.6" not in globe and "5.9h" not in globe and "1.15" not in globe
+    for call in ("tdot.appendChild(globeIcon(12));",
+                 "browse.appendChild(globeIcon(12));",
+                 "chip.appendChild(globeIcon(11));",
+                 'item.kind === "browser" ? globeIcon(12) :'):
+        assert call in ui_source, call
+
+
 def check_sidebar_icon_alignment(css_source: str) -> None:
     """Text-adjacent marks may be optical; button ink stays box-centred."""
     assert ".sess-group-title{" in css_source
@@ -6370,6 +6439,7 @@ async def main() -> None:
             check_timer_settings_ui(ui_source, css_source)
             check_session_provider_marks(css_source)
             check_sidebar_icon_alignment(css_source)
+            check_chrome_icon_clarity(ui_source, css_source)
             check_ui_contrast_palette(ui_source, css_source)
             check_compact_control_alignment(ui_source, css_source)
             check_session_activity_clock(ui_source, css_source)

@@ -41,8 +41,8 @@ function bellIcon(size, off) {
     p.setAttribute("d", d);
     p.setAttribute("stroke", "currentColor");
     /* lighter than the 2 a tab dot uses: this is 24-box art in a 14px footer
-       button, where 2 reads heavy - the gear beside it runs 1.5 for the same
-       reason, and both sit next to the ☀ glyph */
+       button, where 2 reads heavy - the sun beside it runs 1.5 for the same
+       reason, and both sit next to the filled cog */
     p.setAttribute("stroke-width", "1.5");
     p.setAttribute("stroke-linecap", "round");
     p.setAttribute("stroke-linejoin", "round");
@@ -56,7 +56,7 @@ function bellIcon(size, off) {
 }
 
 /* The font sun/moon this replaces has an asymmetric em box. Keep both theme
-   states in the same centred 24-box as the footer's gear and bell instead. */
+   states in the same centred 24-box as the footer's bell instead. */
 function themeIcon(size, moon) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
@@ -112,7 +112,7 @@ function plusIcon(size) {
 }
 
 /* the composer's session-tools trigger: a wrench on the same 24-grid the
-   settings gear uses, so both read as chrome rather than as content */
+   footer's bell and sun use, so it reads as chrome rather than as content */
 function toolsIcon(size) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
@@ -418,29 +418,24 @@ function wireDirectoryPicker(input, box, bidFor) {
   return browse;
 }
 
-function gearIcon(size, stroke = 2) {
+/* Settings: a filled eight-tooth cog on a 16-grid with a punched hub, drawn
+   for the 12px tab slot and the 14px footer button. The stroked Lucide gear
+   it replaced dissolved into grey at those sizes: its eight rounded teeth are
+   one-pixel features traced by a sub-pixel line. A solid silhouette keeps
+   every tooth and the hub hole readable on a 1x display. */
+const COG_PATH = "M6.72 2.65L6.69 0.11A8 8 0 0 1 9.31 0.11L9.28 2.65A5.5 5.5 0 0 1 10.87 3.31L12.65 1.49A8 8 0 0 1 14.51 3.35L12.69 5.13A5.5 5.5 0 0 1 13.35 6.72L15.89 6.69A8 8 0 0 1 15.89 9.31L13.35 9.28A5.5 5.5 0 0 1 12.69 10.87L14.51 12.65A8 8 0 0 1 12.65 14.51L10.87 12.69A5.5 5.5 0 0 1 9.28 13.35L9.31 15.89A8 8 0 0 1 6.69 15.89L6.72 13.35A5.5 5.5 0 0 1 5.13 12.69L3.35 14.51A8 8 0 0 1 1.49 12.65L3.31 10.87A5.5 5.5 0 0 1 2.65 9.28L0.11 9.31A8 8 0 0 1 0.11 6.69L2.65 6.72A5.5 5.5 0 0 1 3.31 5.13L1.49 3.35A8 8 0 0 1 3.35 1.49L5.13 3.31A5.5 5.5 0 0 1 6.72 2.65ZM5.4 8a2.6 2.6 0 1 0 5.2 0a2.6 2.6 0 1 0 -5.2 0Z";
+function gearIcon(size) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
-  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("viewBox", "0 0 16 16");
   svg.setAttribute("width", size);
   svg.setAttribute("height", size);
   svg.setAttribute("aria-hidden", "true");
-  const gear = document.createElementNS(NS, "path");
-  gear.setAttribute("d", "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.09a2 2 0 0 1 1 1.74v.5a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.09a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2Z");
-  gear.setAttribute("fill", "none");
-  gear.setAttribute("stroke", "currentColor");
-  gear.setAttribute("stroke-width", String(stroke));
-  gear.setAttribute("stroke-linecap", "round");
-  gear.setAttribute("stroke-linejoin", "round");
-  const hub = document.createElementNS(NS, "circle");
-  hub.setAttribute("cx", "12");
-  hub.setAttribute("cy", "12");
-  hub.setAttribute("r", "3");
-  hub.setAttribute("fill", "none");
-  hub.setAttribute("stroke", "currentColor");
-  hub.setAttribute("stroke-width", String(stroke));
-  svg.appendChild(gear);
-  svg.appendChild(hub);
+  const cog = document.createElementNS(NS, "path");
+  cog.setAttribute("d", COG_PATH);
+  cog.setAttribute("fill", "currentColor");
+  cog.setAttribute("fill-rule", "evenodd");
+  svg.appendChild(cog);
   return svg;
 }
 
@@ -472,21 +467,24 @@ function terminalIcon(size) {
   return svg;
 }
 
+/* Browser: a globe on a 12-grid, drawn for the 11-14px slots it fills - one
+   1.5-unit ring, one meridian ellipse and the equator. The 16-grid Lucide
+   globe it replaced (two latitude lines, 1.15 stroke) put ~0.85px lines a few
+   pixels apart at 12px, which a 1x display renders as a grey smudge. */
 function globeIcon(size) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
-  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("viewBox", "0 0 12 12");
   svg.setAttribute("width", size);
   svg.setAttribute("height", size);
   svg.setAttribute("aria-hidden", "true");
   const path = document.createElementNS(NS, "path");
-  path.setAttribute("d", "M8 1.75a6.25 6.25 0 1 0 0 12.5 6.25 6.25 0 0 0 0-12.5Z" +
-    "M8 1.75c-1.9 1.7-2.85 3.85-2.85 6.25S6.1 12.55 8 14.25" +
-    "m0-12.5c1.9 1.7 2.85 3.85 2.85 6.25S9.9 12.55 8 14.25" +
-    "M2.2 5.9h11.6M2.2 10.1h11.6");
+  path.setAttribute("d", "M6 1.25a4.75 4.75 0 1 0 0 9.5 4.75 4.75 0 0 0 0-9.5Z" +
+    "m0 0a2.15 4.75 0 1 0 0 9.5 2.15 4.75 0 0 0 0-9.5Z" +
+    "M1.25 6h9.5");
   path.setAttribute("fill", "none");
   path.setAttribute("stroke", "currentColor");
-  path.setAttribute("stroke-width", "1.15");
+  path.setAttribute("stroke-width", "1.5");
   path.setAttribute("stroke-linecap", "round");
   path.setAttribute("stroke-linejoin", "round");
   svg.appendChild(path);
@@ -6618,9 +6616,9 @@ $("tab-add-menu").addEventListener("click", (e) => {
   else if (act === "search") openSearchTab(groupId);
 });
 $("btn-new-session").onclick = () => { modalNewSession(state.activeGroup); closeDrawer(); };
-/* the same drawn cog its own tab shows: the ⚙ glyph this replaced is a
-   different icon altogether - filled, sharp-toothed, and font-dependent */
-$("btn-settings").appendChild(gearIcon(14, 1.5));
+/* the same drawn cog its own tab shows, at the footer button's 14px: the
+   ⚙ glyph this replaced was a different, font-dependent icon */
+$("btn-settings").appendChild(gearIcon(14));
 $("btn-settings").onclick = () => { openSettingsTab(state.activeGroup); closeDrawer(); };
 
 /* drawer (mobile) */

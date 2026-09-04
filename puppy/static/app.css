@@ -264,9 +264,11 @@ a{color:var(--acc2)}
   font-size:9px;font-weight:700;color:var(--txt3);background:none;
 }
 .prov-anthropic,.prov-openai{background:var(--txt3)}
-/* Compact session sub-rows have a 16.5px line box. Draw these detailed marks
-   at 13px, while negative margins preserve their original 11px layout slot so
-   workspace labels stay aligned with session names and row height is unchanged. */
+/* Compact session sub-rows have a 17px line box (.si-sub). Draw these
+   detailed marks at 13px, while negative margins preserve their original 11px
+   layout slot so workspace labels stay aligned with session names and row
+   height is unchanged; 13px in an 11px slot of a 17px row also lands the mark
+   on a whole pixel. */
 .si-row.sub .prov-anthropic,.si-row.sub .prov-openai{
   width:13px;height:13px;margin:-1px;
 }
@@ -274,9 +276,12 @@ a{color:var(--acc2)}
   -webkit-mask:url("/static/vendor/anthropic.svg") center/contain no-repeat;
           mask:url("/static/vendor/anthropic.svg") center/contain no-repeat;
 }
+/* The OpenAI knot's arms are under a pixel wide at these sizes and blur into
+   grey; the compact copy strokes the same path 1.1 units wider so it stays a
+   solid mark. The 18px engine picker keeps the faithful original below. */
 .prov-openai{
-  -webkit-mask:url("/static/vendor/openai.svg") center/contain no-repeat;
-          mask:url("/static/vendor/openai.svg") center/contain no-repeat;
+  -webkit-mask:url("/static/vendor/openai-compact.svg") center/contain no-repeat;
+          mask:url("/static/vendor/openai-compact.svg") center/contain no-repeat;
 }
 .prov-opencode{
   width:17px;height:11px;color:var(--opencode);background:currentColor;font-size:0;
@@ -296,8 +301,11 @@ a{color:var(--acc2)}
 .engine-dot.claude{color:var(--claude)}
 .engine-dot.codex{color:var(--codex)}
 .engine-dot.opencode{color:var(--opencode)}
-.sess-item .si-name{flex:1;min-width:0;font-size:13px;font-weight:570;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.sess-item .si-sub{flex:1;min-width:0;font-size:11px;color:var(--txt3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:var(--mono)}
+/* Whole-pixel line boxes (the inherited 1.5 would give 19.5px and 16.5px) so
+   every 56px session row, its status dot and its 13px provider mark land on
+   device pixels: a half-pixel offset smears a masked mark across two rows. */
+.sess-item .si-name{flex:1;min-width:0;font-size:13px;line-height:19px;font-weight:570;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sess-item .si-sub{flex:1;min-width:0;font-size:11px;line-height:17px;color:var(--txt3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:var(--mono)}
 .sess-item .si-sub.warn{color:var(--warn)}
 /* linked-workspace marker: quiet when synced, tinted when it needs a look */
 .sess-item .si-ws{flex:0 0 auto;font:11px var(--mono);color:var(--txt3);line-height:1}
@@ -792,6 +800,9 @@ select.choice-native{display:none!important}
   display:flex;align-items:center;gap:var(--tab-space);max-width:220px;flex-shrink:0;
   padding:7px var(--tab-space);border-radius:10px 10px 0 0;cursor:pointer;
   border:1px solid transparent;border-bottom:none;color:var(--txt2);font-size:12.5px;
+  /* an 18px line box (the inherited 1.5 gives 18.75px) keeps the 12px tab
+     icons on whole pixels; the 18px close button is the same height */
+  line-height:18px;
   background:transparent;user-select:none;position:relative;
 }
 /* The dimmed live slot moves with the pointer while sibling tabs slide into
@@ -2338,7 +2349,10 @@ html.light .sh-more:hover{background:rgba(15,23,42,.035)}
 /* provider logos in company colors */
 .engine-pick .ep .ep-ico{display:flex;width:18px;height:18px;margin:0 auto 6px;font-size:13px;color:var(--txt2)}
 .engine-pick .ep .ep-ico.prov-anthropic{background:#d97757}
-.engine-pick .ep .ep-ico.prov-openai{background:#10a37f}
+.engine-pick .ep .ep-ico.prov-openai{
+  background:#10a37f;
+  -webkit-mask-image:url("/static/vendor/openai.svg");mask-image:url("/static/vendor/openai.svg");
+}
 .engine-pick .ep .ep-ico.prov-opencode{
   width:22px;height:18px;color:var(--opencode);
 }
