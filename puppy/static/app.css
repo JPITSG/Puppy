@@ -225,6 +225,7 @@ a{color:var(--acc2)}
   border:2px solid var(--spin-track);
   border-color:color-mix(in srgb,currentColor 30%,transparent);
   border-top-color:currentColor;border-radius:50%;animation:spin .8s linear infinite;
+  animation-delay:var(--prompt-spin-delay,0ms);
 }
 /* idle rows name their executing backend here, dressed like the status box's
    node labels; capped so a long name cannot crowd out the session's own */
@@ -246,6 +247,7 @@ a{color:var(--acc2)}
   border-color:color-mix(in srgb,currentColor 30%,transparent);
   border-top-color:currentColor;
   animation:spin .8s linear infinite;
+  animation-delay:var(--prompt-spin-delay,0ms);
 }
 /* the tab dot is 8px, so it takes a thinner ring to keep the same ring-to-hole
    proportion as the 9px session dots */
@@ -1011,6 +1013,7 @@ select.choice-native{display:none!important}
 .chat-status .spinner{
   flex:0 0 auto;width:10px;height:10px;border:2px solid var(--acc-dim);
   border-top-color:var(--acc);border-radius:50%;animation:spin .8s linear infinite;
+  animation-delay:var(--prompt-spin-delay,0ms);
 }
 @keyframes spin{to{transform:rotate(360deg)}}
 /* match the tabbar's + button: 26px, centers on the same vertical axis
@@ -1129,6 +1132,7 @@ details.think summary::before{
   flex-shrink:0;width:9px;height:9px;border-radius:50%;
   border:2.5px solid var(--spin-track);border-top-color:currentColor;
   animation:spin .8s linear infinite;
+  animation-delay:var(--prompt-spin-delay,0ms);
 }
 details.think[open] summary::before{transform:rotate(0)}
 details.think summary:hover{color:var(--txt2)}

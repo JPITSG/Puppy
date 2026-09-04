@@ -1017,6 +1017,24 @@ const JUMP_LEGACY_PAGES = 60;
 const JUMP_CONTEXT_BEFORE = 60;
 const JUMP_WINDOW = 160;
 
+/* Prompt activity rings all run on the same 800ms cycle. Some surfaces (the
+   sidebar and tab strips) deliberately rebuild their rows as node-owned state
+   changes, so DOM identity cannot carry a CSS animation through every render.
+   Start every new ring at the document's current phase instead: replacing a
+   node then continues at the same angle rather than visibly snapping to zero. */
+const PROMPT_SPIN_MS = 800;
+function syncPromptSpinnerPhase(node, now = null) {
+  const current = Number.isFinite(now) ? Number(now) :
+    (typeof performance !== "undefined" && typeof performance.now === "function" ?
+      performance.now() : Date.now());
+  const phase = ((current % PROMPT_SPIN_MS) + PROMPT_SPIN_MS) % PROMPT_SPIN_MS;
+  node.style.setProperty("--prompt-spin-delay", `${-phase}ms`);
+  return node;
+}
+function promptSpinnerNode(now = null) {
+  return syncPromptSpinnerPhase(el("span", "spinner"), now);
+}
+
 /* the header's thinking status; the live thinking block mirrors the header
    verbatim, so this is also what that block reads while a turn is thinking */
 function thinkingLabel(tokens) {
@@ -1058,8 +1076,12 @@ function promptStatusBase(text) {
     .replace(/\s*(?:…|\.{3})\s*/, " ").trim();
 }
 function promptStatusLabel(text, className) {
+  return updatePromptStatusLabel(
+    el("span", `${className} prompt-status-label`), text);
+}
+function updatePromptStatusLabel(label, text) {
   const value = String(text == null ? "" : text);
-  const label = el("span", `${className} prompt-status-label`, promptStatusBase(value));
+  label.textContent = promptStatusBase(value);
   /* Generated dots are visual only. The stable source phrase prevents an
      assistive technology from announcing every animation frame. */
   label.setAttribute("aria-label", value);
@@ -4290,6 +4312,7 @@ function renderSidebar() {
         const key = sessionActivityKey(bid, s.id);
         activity.classList.add("active-time");
         activity.dataset.activityKey = key;
+        syncPromptSpinnerPhase(activity); // inherited by the ::before ring
         /* The clock ring and text use the same blue as prompt status messages,
            independent of the session colour used by the status ring at left. */
         activity.textContent = formatSessionActivity(sessionActivityAnchors.get(key));
@@ -4528,6 +4551,7 @@ function modalAgentNotes(bid, s) {
 function sessDot(s) {
   const dot = el("span", "sess-dot" + (s.status === "running" ? " running" : ""));
   dot.style.color = s.color || "var(--txt3)";   // fill and spinner both ride currentColor
+  if (s.status === "running") syncPromptSpinnerPhase(dot);
   return dot;
 }
 
@@ -5822,6 +5846,7 @@ function renderTabNode(t, pane, tabsRoot) {
   else if (t.type === "search") dotCls = "search";
   const tdot = el("span", "t-dot " + dotCls);
   if (dotColor) tdot.style.color = dotColor;
+  if (tab.classList.contains("running")) syncPromptSpinnerPhase(tdot);
   if (t.type === "settings") tdot.appendChild(gearIcon(12));
   else if (t.type === "search") tdot.appendChild(searchIcon(12));
   else if (t.type === "term") tdot.appendChild(terminalIcon(12));
@@ -9250,10 +9275,21 @@ class SessionView {
 
   renderStatus() {
     const text = this.visibleStatusText();
-    const label = promptStatusBase(text);
-    this.statusEl.innerHTML = text ?
-      `<span class="spinner"></span><span class="status-text prompt-status-label" ` +
-      `aria-label="${esc(text)}">${esc(label)}</span>` : "";
+    if (!text) {
+      /* Empty marks the actual end of this status lifetime. Until then, keep
+         the same ring node while only its neighbouring words change. */
+      this.statusEl.replaceChildren();
+    } else {
+      let spinner = this.statusEl.querySelector(".spinner");
+      let label = this.statusEl.querySelector(".status-text");
+      if (!spinner || !label) {
+        spinner = promptSpinnerNode();
+        label = promptStatusLabel(text, "status-text");
+        this.statusEl.replaceChildren(spinner, label);
+      } else {
+        updatePromptStatusLabel(label, text);
+      }
+    }
     this.syncLiveStatus();
     this.syncHeadOverflow();
   }
@@ -9901,13 +9937,23 @@ class SessionView {
     if (!this.statusRow) {
       this.statusRow = el("div", "live-status");
     }
-    /* Codex reports this phase as `status: thinking...` rather than a streamed
-       thinking block. Swap only the marker; commands and writing retain the
-       generic activity spinner. Replacing these two tiny children also handles
-       transitions between those states without leaving the old icon behind. */
-    this.statusRow.replaceChildren(
-      isThinkingStatus(text) ? thinkingIconNode() : el("span", "spinner"),
-      promptStatusLabel(text, "think-label"));
+    /* A status update changes only the label. Keep the generic ring itself
+       alive across shell/writing/tool phases; thinking deliberately swaps it
+       for the brain marker, and a later ring rejoins the shared document phase. */
+    const wantsThinking = isThinkingStatus(text);
+    let marker = this.statusRow.querySelector(".think-brain") ||
+      this.statusRow.querySelector(".spinner");
+    let label = this.statusRow.querySelector(".think-label");
+    if (!marker || !label) {
+      marker = wantsThinking ? thinkingIconNode() : promptSpinnerNode();
+      label = promptStatusLabel(text, "think-label");
+      this.statusRow.replaceChildren(marker, label);
+    } else {
+      const hasThinking = !!this.statusRow.querySelector(".think-brain");
+      if (hasThinking !== wantsThinking)
+        marker.replaceWith(wantsThinking ? thinkingIconNode() : promptSpinnerNode());
+      updatePromptStatusLabel(label, text);
+    }
     if (this.inner.lastChild !== this.statusRow) {
       const follow = this.atBottom();
       this.inner.appendChild(this.statusRow);   // stays the last thing in the transcript

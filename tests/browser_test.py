@@ -690,10 +690,29 @@ def check_reconnect_status(ui_source: str, css_source: str) -> None:
     methods = [method(name) for name in (
         "visibleStatusText", "renderStatus", "setReconnecting", "setStatus")]
     script = """
-const esc = value => String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;");
+class Node {
+  constructor(tag="", cls="", text="") {
+    this.tag=tag;this.className=cls;this.textContent=text;this.children=[];
+    this.attributes={};this.style={values:{},setProperty:(key,value)=>{
+      this.style.values[key]=String(value);
+    }};
+  }
+  setAttribute(name,value){this.attributes[name]=String(value);}
+  appendChild(child){this.children.push(child);return child;}
+  replaceChildren(...children){this.children=[];children.forEach(child=>this.appendChild(child));}
+  querySelector(selector){const cls=selector.slice(1);for(const child of this.children){
+    if(child.className.split(" ").includes(cls))return child;
+    const nested=child.querySelector(selector);if(nested)return nested;}return null;}
+}
+const el=(tag,cls="",text="")=>new Node(tag,cls,text);
+const PROMPT_SPIN_MS=800;
+%s
+%s
+%s
+%s
+%s
 let stopping = "";
 const remoteStoppingMessage = () => stopping;
-%s
 const proto = {
 %s
 };
@@ -702,7 +721,7 @@ const view = Object.assign(Object.create(proto), {
   tab: {bid: 7},
   reconnecting: false,
   statusText: "thinking 42 tokens",
-  statusEl: {innerHTML: ""},
+  statusEl: new Node("span", "chat-status"),
   root: {classList: {toggle(name, on) {
     if (on) classes.add(name); else classes.delete(name);
   }}},
@@ -711,13 +730,16 @@ const view = Object.assign(Object.create(proto), {
   syncHeadOverflow() {},
   updateSteerControl() {},
 });
-const take = () => ({header: view.statusEl.innerHTML, live: view.liveText,
+const headerText=()=>view.statusEl.children.map(child=>child.textContent).join(" ");
+const take = () => ({header: headerText(), live: view.liveText,
                      activity: view.statusText, reconnecting: view.reconnecting,
                      metadataHidden: classes.has("transport-lost")});
 view.renderStatus();
+const firstSpinner=view.statusEl.querySelector(".spinner");
 const before = take();
 view.setReconnecting(true);
 const lost = take();
+const lostSpinner=view.statusEl.querySelector(".spinner");
 view.setStatus("using shell");
 const changedWhileLost = take();
 stopping = "Backend shutting down…";
@@ -726,8 +748,16 @@ const gracefulStop = take();
 stopping = "";
 view.setReconnecting(false);
 const recovered = take();
-console.log(JSON.stringify({before, lost, changedWhileLost, gracefulStop, recovered}));
-""" % (function("promptStatusBase"), ",\n".join(methods))
+const spinnerStayed=firstSpinner===lostSpinner&&firstSpinner===view.statusEl.querySelector(".spinner");
+view.setStatus("");
+const cleared=view.statusEl.children.length===0;
+view.setStatus("Starting…");
+const newRoundSpinner=view.statusEl.querySelector(".spinner")!==firstSpinner;
+console.log(JSON.stringify({before, lost, changedWhileLost, gracefulStop, recovered,
+  spinnerStayed,cleared,newRoundSpinner}));
+""" % (function("promptStatusBase"), function("syncPromptSpinnerPhase"),
+         function("promptSpinnerNode"), function("promptStatusLabel"),
+         function("updatePromptStatusLabel"), ",\n".join(methods))
     proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:400]
     result = json.loads(proc.stdout.strip())
@@ -744,6 +774,8 @@ console.log(JSON.stringify({before, lost, changedWhileLost, gracefulStop, recove
     assert "Connection lost" not in result["recovered"]["header"], result
     assert result["recovered"]["metadataHidden"] is False, result
     assert result["recovered"]["live"] == "using shell", result
+    assert result["spinnerStayed"] and result["cleared"] and \
+        result["newRoundSpinner"], result
     assert ".chat.transport-lost .chat-meta-scroll>.chip{display:none}" in css_source
 
 
@@ -1131,7 +1163,9 @@ def check_thinking_icons(ui_source: str) -> None:
 class Node {
   constructor(tag,cls="",text="") {
     this.tag=tag;this.className=cls;this.textContent=text;this.children=[];this.parent=null;
-    this.attributes={};
+    this.attributes={};this.style={values:{},setProperty:(key,value)=>{
+      this.style.values[key]=String(value);
+    }};
   }
   setAttribute(name,value){this.attributes[name]=String(value);}
   appendChild(child){child.parent=this;this.children.push(child);return child;}
@@ -1148,6 +1182,10 @@ class Node {
   get lastChild(){return this.children[this.children.length-1]||null;}
 }
 const el=(tag,cls="",text="")=>new Node(tag,cls,text);
+const PROMPT_SPIN_MS=800;
+%s
+%s
+%s
 %s
 %s
 %s
@@ -1162,20 +1200,26 @@ const marker=()=>view.statusRow&&view.statusRow.children[0];
 view.syncLiveStatus();const codex={cls:marker().className,text:marker().textContent};
 view.statusText="using shell";view.syncLiveStatus();
 const tool={cls:marker().className,text:marker().textContent};
+const toolMarker=marker();
+view.statusText="writing file";view.syncLiveStatus();
+const toolStayed=marker()===toolMarker;
 view.statusText="thinking… 42 tokens";view.syncLiveStatus();
 const claude={cls:marker().className,text:marker().textContent};
 view.status="idle";view.syncLiveStatus();
-console.log(JSON.stringify({codex,tool,claude,idle:view.statusRow,
+console.log(JSON.stringify({codex,tool,toolStayed,claude,idle:view.statusRow,
   classified:[isThinkingStatus("thinking"),isThinkingStatus("Thinking 9 tokens"),
     isThinkingStatus("rethinking"),isThinkingStatus("writing...")]}));
-""" % (function("promptStatusBase"), function("promptStatusLabel"),
-         function("thinkingIconNode"), function("isThinkingStatus"), method)
+""" % (function("promptStatusBase"), function("syncPromptSpinnerPhase"),
+         function("promptSpinnerNode"), function("promptStatusLabel"),
+         function("updatePromptStatusLabel"), function("thinkingIconNode"),
+         function("isThinkingStatus"), method)
     proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:500]
     result = json.loads(proc.stdout.strip())
     assert result["codex"] == {"cls": "think-brain", "text": "🧠"}, result
     assert result["claude"] == {"cls": "think-brain", "text": "🧠"}, result
     assert result["tool"] == {"cls": "spinner", "text": ""}, result
+    assert result["toolStayed"] is True, result
     assert result["idle"] is None, result
     assert result["classified"] == [True, True, False, False], result
     assert ui_source.count("sum.appendChild(thinkingIconNode())") == 2
@@ -1200,7 +1244,8 @@ console.log(JSON.stringify([
         "Thinking", "Thinking 42 tokens", "Using shell",
         "Starting next queued message",
     ]
-    assert 'class="status-text prompt-status-label"' in ui_source
+    assert 'label = promptStatusLabel(text, "status-text");' in ui_source
+    assert "updatePromptStatusLabel(label, text);" in ui_source
     assert ui_source.count('promptStatusLabel(text, "think-label")') == 2
     assert "this.statusText || thinkingLabel(0), \"think-label\"" in ui_source
     assert ".prompt-status-label::after{" in css_source
@@ -1209,6 +1254,33 @@ console.log(JSON.stringify([
     assert '66%,100%{content:"..."}' in css_source
     assert "display:inline-block;width:3ch;text-align:left" in css_source
     assert "prefers-reduced-motion:reduce){.prompt-status-label::after" in css_source
+
+    # Rebuilt prompt rings start on one document-wide phase. At 950ms and
+    # 1750ms (one full cycle later), replacement nodes therefore receive the
+    # same negative delay instead of restarting from zero.
+    spinner_start = ui_source.index("const PROMPT_SPIN_MS = 800;")
+    spinner_end = ui_source.index("\n/* the header's thinking status", spinner_start)
+    spinner_source = ui_source[spinner_start:spinner_end]
+    script = r"""
+const el=(tag,cls)=>({tag,className:cls,style:{values:{},setProperty(key,value){
+  this.values[key]=value;
+}}});
+%s
+const one=promptSpinnerNode(950);
+const two=promptSpinnerNode(1750);
+const parent=syncPromptSpinnerPhase(el("span","active-time"),450);
+console.log(JSON.stringify([one.style.values["--prompt-spin-delay"],
+  two.style.values["--prompt-spin-delay"],parent.style.values["--prompt-spin-delay"]]));
+""" % spinner_source
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:500]
+    assert json.loads(proc.stdout) == ["-150ms", "-150ms", "-450ms"]
+    for selector in (".si-be.active-time::before{",
+                     ".sess-dot.running,.engine-dot.running,.tab.running .t-dot{",
+                     ".chat-status .spinner{", ".live-status .spinner{"):
+        start = css_source.index(selector)
+        rule = css_source[start:css_source.index("}", start)]
+        assert "animation-delay:var(--prompt-spin-delay,0ms)" in rule
 
 
 def check_backend_editor(ui_source: str, css_source: str) -> None:
@@ -3622,6 +3694,16 @@ console.log(JSON.stringify([0, 5, 61, 3599, 3600, 3661, 36000]
     assert "position:relative;top:1px;color:var(--acc2);" in css_source
     assert "border-top-color:currentColor;border-radius:50%;animation:spin .8s linear infinite;" \
         in css_source
+    assert "syncPromptSpinnerPhase(activity); // inherited by the ::before ring" \
+        in sidebar
+    dot_start = ui_source.index("function sessDot(")
+    dot_end = ui_source.index("\nconst PROVIDERS", dot_start)
+    assert 'if (s.status === "running") syncPromptSpinnerPhase(dot);' in \
+        ui_source[dot_start:dot_end]
+    tab_start = ui_source.index("function renderTabNode(")
+    tab_end = ui_source.index("\nfunction syncHorizontalOverflow", tab_start)
+    assert 'if (tab.classList.contains("running")) syncPromptSpinnerPhase(tdot);' \
+        in ui_source[tab_start:tab_end]
 
 
 def check_sidebar_footer_buttons(ui_source: str, css_source: str) -> None:
