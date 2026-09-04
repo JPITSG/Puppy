@@ -109,8 +109,8 @@ function logoutIcon(size) {
     p.setAttribute("stroke-linejoin", "round");
     svg.appendChild(p);
   };
-  draw("M10 7.5V7a4 4 0 0 1 4-4h3a4 4 0 0 1 4 4v10a4 4 0 0 1-4 4h-3a4 4 0 0 1-4-4v-.5");
-  draw("M14 12H3");
+  draw("M14 4h2.5a4 4 0 0 1 4 4v8a4 4 0 0 1-4 4H14");
+  draw("M15 12H3");
   draw("M6.5 8.5 3 12l3.5 3.5");
   return svg;
 }
