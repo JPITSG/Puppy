@@ -17,7 +17,7 @@ import zipfile
 
 from aiohttp import web
 
-from puppy import (__version__, config, protocol, runner, spawn_exec, terminal,
+from puppy import (__version__, config, protocol, runner, spawn_exec, state_stream, terminal,
                    upgrade_contract,
                    uploads)
 
@@ -351,6 +351,7 @@ async def h_upgrade(request: web.Request) -> web.Response:
     async with _upgrade_lock:
         accepted_upgrade = False
         request.app["puppy_upgrade_draining"] = True
+        state_stream.wake("node")
         try:
             payload = await request.read()
             manifest = upgrade_contract.decode_manifest(
@@ -430,6 +431,7 @@ async def h_upgrade(request: web.Request) -> web.Response:
             log.warning("accepted signed backend upgrade %s -> %s (%s)",
                         __version__, manifest["version"], manifest["sha256"][:12])
             accepted_upgrade = True
+            state_stream.wake("node")
             asyncio.create_task(_exit_for_launcher(request.app))
             return web.json_response({
                 "ok": True, "accepted": True, "from_version": __version__,
@@ -444,6 +446,7 @@ async def h_upgrade(request: web.Request) -> web.Response:
         finally:
             if not accepted_upgrade:
                 request.app["puppy_upgrade_draining"] = False
+                state_stream.wake("node")
 
 
 def register(app: web.Application) -> None:

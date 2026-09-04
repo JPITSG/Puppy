@@ -19,7 +19,7 @@ from puppy import (__version__, agent_notes, auth, backends, bind_verify, browse
                    cli_upgrade, config, db, host_metrics, listener_handoff, notify,
                    live_websockets, localization, protocol, runner, search, snapshots,
                    spawn_exec,
-                   system_prompts, terminal, uploads,
+                   state_stream, system_prompts, terminal, uploads,
                    usage_refresh, workspace_links, workspace_sync, workspaces)
 from puppy import web_tls
 from puppy.drivers import all_drivers, get_driver
@@ -79,35 +79,40 @@ async def h_favicon(request: web.Request):
 
 # ---- core api ----
 
-async def h_ping(request: web.Request):
+def _node_payload(app: web.Application) -> dict:
     payload = {
         "ok": True,
         "name": config.get("instance_name"),
         "version": __version__,
+        "runtime_id": str(app.get("puppy_runtime_id") or ""),
         "protocol": protocol.API_PROTOCOL,
         # stable machine identity: lets a controller notice that an execution
         # node and a workspace node are one box and skip the mirror entirely
         "node_uuid": db.node_uuid(),
-        "role": request.app.get("puppy_role", "full"),
-        "capabilities": list(request.app.get(
+        "role": app.get("puppy_role", "full"),
+        "capabilities": list(app.get(
             "puppy_capabilities", protocol.execution_capabilities())),
         "uploads": uploads.settings_payload(),
         "browser": browser.ping_payload(),
     }
-    if request.app.get("puppy_role") == "backend":
-        payload["shutting_down"] = bool(request.app.get("puppy_shutdown_draining"))
-    upgrade = request.app.get("puppy_upgrade")
+    if app.get("puppy_role") == "backend":
+        payload["shutting_down"] = bool(app.get("puppy_shutdown_draining"))
+    upgrade = app.get("puppy_upgrade")
     if callable(upgrade):
         upgrade = upgrade()
     if upgrade is not None:
         payload["upgrade"] = upgrade
-    build = request.app.get("puppy_build")
+    build = app.get("puppy_build")
     if build is not None:
         payload["build"] = build
-    transport = request.app.get("puppy_transport")
+    transport = app.get("puppy_transport")
     if transport is not None:
         payload["transport"] = dict(transport)
-    return web.json_response(payload)
+    return payload
+
+
+async def h_ping(request: web.Request):
+    return web.json_response(_node_payload(request.app))
 
 
 async def _engines_payload(refresh_usage: bool = True, refresh_models: bool = True):
@@ -164,6 +169,85 @@ async def _engines_payload(refresh_usage: bool = True, refresh_models: bool = Tr
     return engines
 
 
+async def _engines_response(refresh_usage: bool = True,
+                            refresh_models: bool = True) -> dict:
+    return {
+        "engines": await _engines_payload(refresh_usage, refresh_models),
+        "usage_refresh": usage_refresh.payload(),
+        "auto_upgrade": cli_auto_upgrade.payload(),
+        "timers": config.timers_payload(),
+        # Retained for older consoles that label anonymous shell tabs.
+        "user": _node_user(),
+    }
+
+
+def _publish_engines(payload: dict) -> None:
+    state_stream.publish({"type": "engines", **payload})
+
+
+def _state_stream_interval() -> float:
+    intervals = [
+        config.timer_seconds("cli_status_minutes"),
+        config.timer_seconds("model_catalog_minutes"),
+        config.timer_seconds("cli_release_minutes"),
+    ]
+    usage_minutes = usage_refresh.minutes()
+    if usage_minutes > 0:
+        intervals.append(float(usage_minutes * 60))
+    return min(intervals)
+
+
+async def _state_stream_snapshots(app: web.Application, topics,
+                                  probes: bool) -> list:
+    if probes and app.get("puppy_snapshot_busy"):
+        return []
+    wanted = None if topics is None else set(topics)
+    includes = lambda name: wanted is None or name in wanted
+    payloads = []
+    if includes("node"):
+        payloads.append({"type": "node", **_node_payload(app)})
+    # The lifecycle's pre-listener pass must stay syscall-only.  CLI status,
+    # account/model discovery, and the browser binary probe run in the
+    # publisher task after startup (or in the established bootstrap request),
+    # never delay the socket from becoming reachable.
+    if includes("engines") and probes:
+        payloads.append({
+            "type": "engines",
+            **await _engines_response(
+                refresh_usage=probes, refresh_models=probes),
+        })
+    if includes("browser_status") and probes:
+        payloads.append({"type": "browser_status",
+                         **await browser.status_payload()})
+    if includes("terminal_instances") and \
+            protocol.TERMINAL_INSTANCES_CAPABILITY in \
+            app.get("puppy_capabilities", ()):
+        payloads.append({"type": "terminal_instances",
+                         "instances": terminal.manager().instance_payloads()})
+    return payloads
+
+
+async def _publish_restored_state(app: web.Application) -> None:
+    """Replace every snapshot whose durable source was just restored.
+
+    Restore closes existing viewers, but a new WebSocket may attach without
+    first calling ``/api/state``.  Never let that attach inherit snapshots
+    cached from the database that was replaced.  Expensive engine/browser
+    observations are discarded and rebuilt by the process publisher; cheap
+    durable and runtime-owned topics are installed synchronously here.
+    """
+    runner.clear_published_state("engines")
+    runner.clear_published_state("browser_status")
+    runner.broadcast_sessions()
+    runner.publish_state({"type": "backends", "backends": backends.list_backends()})
+    runner.publish_state({"type": "workspace_links",
+                          "links": workspace_links.public_links()})
+    runner.publish_state({"type": "notify", **notify.public_state()})
+    for payload in await _state_stream_snapshots(app, None, probes=False):
+        runner.publish_state(payload)
+    state_stream.wake()
+
+
 def _node_user() -> str:
     """Account this node's puppy process runs as - what a shell here lands on."""
     try:
@@ -174,11 +258,12 @@ def _node_user() -> str:
 
 
 async def h_state(request: web.Request):
-    # Keep initial app/auth entry fast. The browser immediately follows with
-    # an asynchronous engine poll, which performs a due account refresh.
+    # Keep initial app/auth entry fast. The process-owned state publisher does
+    # due probes once and pushes the result to every console; app entry never
+    # multiplies vendor/account checks by the number of open browsers.
     engines = await _engines_payload(refresh_usage=False, refresh_models=False)
     session_state = runner.sessions_payload()
-    return web.json_response({
+    payload = {
         "version": __version__,
         # Process identity lets an already-open console distinguish a brief
         # socket interruption from a same-listener restart. The latter needs a
@@ -200,19 +285,25 @@ async def h_state(request: web.Request):
         "session_colors": db.SESSION_COLORS,
         "notify": notify.public_state(),
         "browser": browser.ping_payload(),
+    }
+    _publish_engines({
+        "engines": engines,
+        "usage_refresh": payload["usage_refresh"],
+        "auto_upgrade": payload["auto_upgrade"],
+        "timers": payload["timers"],
+        "user": payload["user"],
     })
+    runner.publish_state({"type": "backends", "backends": payload["backends"]})
+    runner.publish_state({"type": "workspace_links",
+                          "links": payload["workspace_links"]})
+    runner.publish_state({"type": "notify", **payload["notify"]})
+    return web.json_response(payload)
 
 
 async def h_engines(request: web.Request):
-    engines = await _engines_payload()
-    return web.json_response({
-        "engines": engines,
-        "usage_refresh": usage_refresh.payload(),
-        "auto_upgrade": cli_auto_upgrade.payload(),
-        "timers": config.timers_payload(),
-        # Retained for older consoles that label anonymous shell tabs.
-        "user": _node_user(),
-    })
+    payload = await _engines_response()
+    _publish_engines(payload)
+    return web.json_response(payload)
 
 
 async def h_usage_refresh_get(request: web.Request):
@@ -246,18 +337,16 @@ async def h_timers_patch(request: web.Request):
         driver_base.invalidate_status()
     if "completion_sync_seconds" in changed:
         notify.wake_worker()
+    state_stream.wake("engines", "node")
     return web.json_response({"ok": True, "timers": config.timers_payload()})
 
 
 async def h_usage_refresh_post(request: web.Request):
     await usage_refresh.maybe_refresh(force=True)
-    return web.json_response({
-        "engines": await _engines_payload(
-            refresh_usage=False, refresh_models=False),
-        "usage_refresh": usage_refresh.payload(),
-        "auto_upgrade": cli_auto_upgrade.payload(),
-        "timers": config.timers_payload(),
-    })
+    payload = await _engines_response(
+        refresh_usage=False, refresh_models=False)
+    _publish_engines(payload)
+    return web.json_response(payload)
 
 
 async def h_engines_refresh(request: web.Request):
@@ -277,13 +366,10 @@ async def h_engines_refresh(request: web.Request):
     for result in results:
         if isinstance(result, BaseException):
             log.warning("manual engine refresh component failed: %s", result)
-    return web.json_response({
-        "engines": await _engines_payload(
-            refresh_usage=False, refresh_models=False),
-        "usage_refresh": usage_refresh.payload(),
-        "auto_upgrade": cli_auto_upgrade.payload(),
-        "timers": config.timers_payload(),
-    })
+    payload = await _engines_response(
+        refresh_usage=False, refresh_models=False)
+    _publish_engines(payload)
+    return web.json_response(payload)
 
 
 async def h_engine_auto_upgrade_get(_request: web.Request):
@@ -302,6 +388,7 @@ async def h_engine_auto_upgrade_patch(request: web.Request):
         cli_auto_upgrade.set_settings(body)
     except ValueError as exc:
         return web.json_response({"error": str(exc)}, status=400)
+    state_stream.wake("engines")
     return web.json_response({"ok": True, "auto_upgrade": cli_auto_upgrade.payload()})
 
 
@@ -331,14 +418,10 @@ async def h_engine_upgrade(request: web.Request):
         await cli_upgrade.start(driver)
     except RuntimeError as exc:
         return web.json_response({"error": str(exc)}, status=409)
-    return web.json_response({
-        "ok": True,
-        "engines": await _engines_payload(
-            refresh_usage=False, refresh_models=False),
-        "usage_refresh": usage_refresh.payload(),
-        "auto_upgrade": cli_auto_upgrade.payload(),
-        "timers": config.timers_payload(),
-    })
+    payload = await _engines_response(
+        refresh_usage=False, refresh_models=False)
+    _publish_engines(payload)
+    return web.json_response({"ok": True, **payload})
 
 
 async def h_usage_refresh_patch(request: web.Request):
@@ -354,13 +437,10 @@ async def h_usage_refresh_patch(request: web.Request):
         return web.json_response({"error": str(exc)}, status=400)
     if interval > 0:
         await usage_refresh.maybe_refresh(force=True)
-    return web.json_response({
-        "engines": await _engines_payload(
-            refresh_usage=False, refresh_models=False),
-        "usage_refresh": usage_refresh.payload(),
-        "auto_upgrade": cli_auto_upgrade.payload(),
-        "timers": config.timers_payload(),
-    })
+    payload = await _engines_response(
+        refresh_usage=False, refresh_models=False)
+    _publish_engines(payload)
+    return web.json_response(payload)
 
 
 # ---- sessions ----
@@ -713,39 +793,72 @@ async def h_session_message(request: web.Request):
     return web.json_response(res, status=status)
 
 
+async def _session_steer(s: dict, body) -> tuple:
+    """Validate and hand off one steer for either HTTP or the session socket."""
+    if not isinstance(body, dict):
+        return {"error": "steering request must be an object"}, 400
+    text = body.get("text", "")
+    if not isinstance(text, str):
+        return {"error": "steering text must be text"}, 400
+    text = text.strip()
+    if not text:
+        return {"error": "empty steering message"}, 400
+    if len(text) > runner.MAX_STEER_CHARS:
+        return {
+            "error": "steering message cannot exceed {} characters".format(
+                runner.MAX_STEER_CHARS)}, 400
+    request_id = body.get("request_id", "")
+    if request_id is None:
+        request_id = ""
+    if not isinstance(request_id, str) or \
+            (request_id and not runner.valid_steer_request_id(request_id)):
+        return {"error": "invalid steering request id"}, 400
+    expected_turn_id = body.get("expected_turn_id", "")
+    if not isinstance(expected_turn_id, str) or not expected_turn_id or \
+            len(expected_turn_id) > runner.MAX_STEER_TURN_ID_CHARS:
+        return {"error": "a valid expected turn id is required"}, 400
+    res = await runner.hub(s["id"]).steer(
+        text, request_id, expected_turn_id=expected_turn_id)
+    return res, 409 if "error" in res else 200
+
+
 async def h_session_steer(request: web.Request):
     s = _session_or_404(request)
     try:
         body = await request.json()
     except Exception:
         return web.json_response({"error": "invalid steering request"}, status=400)
+    res, status = await _session_steer(s, body)
+    return web.json_response(res, status=status)
+
+
+async def _session_ask(s: dict, body) -> tuple:
+    """Validate and hand off one side question over either transport."""
     if not isinstance(body, dict):
-        return web.json_response({"error": "steering request must be an object"},
-                                 status=400)
-    text = body.get("text", "")
-    if not isinstance(text, str):
-        return web.json_response({"error": "steering text must be text"}, status=400)
-    text = text.strip()
-    if not text:
-        return web.json_response({"error": "empty steering message"}, status=400)
-    if len(text) > runner.MAX_STEER_CHARS:
-        return web.json_response({
-            "error": "steering message cannot exceed {} characters".format(
-                runner.MAX_STEER_CHARS)}, status=400)
+        return {"error": "question request must be an object"}, 400
+    question = body.get("question", "")
+    if not isinstance(question, str):
+        return {"error": "the question must be text"}, 400
+    question = question.strip()
+    if not question:
+        return {"error": "empty question"}, 400
+    if len(question) > runner.MAX_SIDE_QUESTION_CHARS:
+        return {
+            "error": "a question cannot exceed {} characters".format(
+                runner.MAX_SIDE_QUESTION_CHARS)}, 400
     request_id = body.get("request_id", "")
     if request_id is None:
         request_id = ""
     if not isinstance(request_id, str) or \
             (request_id and not runner.valid_steer_request_id(request_id)):
-        return web.json_response({"error": "invalid steering request id"}, status=400)
+        return {"error": "invalid question id"}, 400
     expected_turn_id = body.get("expected_turn_id", "")
     if not isinstance(expected_turn_id, str) or not expected_turn_id or \
             len(expected_turn_id) > runner.MAX_STEER_TURN_ID_CHARS:
-        return web.json_response({"error": "a valid expected turn id is required"},
-                                 status=400)
-    res = await runner.hub(s["id"]).steer(
-        text, request_id, expected_turn_id=expected_turn_id)
-    return web.json_response(res, status=409 if "error" in res else 200)
+        return {"error": "a valid expected turn id is required"}, 400
+    res = await runner.hub(s["id"]).ask(
+        question, request_id, expected_turn_id=expected_turn_id)
+    return res, 409 if "error" in res else 200
 
 
 async def h_session_ask(request: web.Request):
@@ -755,33 +868,8 @@ async def h_session_ask(request: web.Request):
         body = await request.json()
     except Exception:
         return web.json_response({"error": "invalid question request"}, status=400)
-    if not isinstance(body, dict):
-        return web.json_response({"error": "question request must be an object"},
-                                 status=400)
-    question = body.get("question", "")
-    if not isinstance(question, str):
-        return web.json_response({"error": "the question must be text"}, status=400)
-    question = question.strip()
-    if not question:
-        return web.json_response({"error": "empty question"}, status=400)
-    if len(question) > runner.MAX_SIDE_QUESTION_CHARS:
-        return web.json_response({
-            "error": "a question cannot exceed {} characters".format(
-                runner.MAX_SIDE_QUESTION_CHARS)}, status=400)
-    request_id = body.get("request_id", "")
-    if request_id is None:
-        request_id = ""
-    if not isinstance(request_id, str) or \
-            (request_id and not runner.valid_steer_request_id(request_id)):
-        return web.json_response({"error": "invalid question id"}, status=400)
-    expected_turn_id = body.get("expected_turn_id", "")
-    if not isinstance(expected_turn_id, str) or not expected_turn_id or \
-            len(expected_turn_id) > runner.MAX_STEER_TURN_ID_CHARS:
-        return web.json_response({"error": "a valid expected turn id is required"},
-                                 status=400)
-    res = await runner.hub(s["id"]).ask(
-        question, request_id, expected_turn_id=expected_turn_id)
-    return web.json_response(res, status=409 if "error" in res else 200)
+    res, status = await _session_ask(s, body)
+    return web.json_response(res, status=status)
 
 
 async def h_session_interrupt(request: web.Request):
@@ -951,6 +1039,7 @@ async def h_settings_get(request: web.Request):
 
 async def h_settings_patch(request: web.Request):
     body = await request.json()
+    node_changed = False
     if "instance_name" in body:
         instance_name = str(body["instance_name"]).strip()[:60] or "puppy"
         # the spawn bridge resolves this name to the local node, so it must
@@ -959,10 +1048,13 @@ async def h_settings_patch(request: web.Request):
         if conflict:
             return web.json_response({"error": conflict}, status=409)
         config.set_value("instance_name", instance_name)
+        node_changed = True
     if "terminal_command" in body:
         config.set_value("terminal.command", str(body["terminal_command"]).strip() or "/bin/bash -l")
     if "default_cwd" in body:
         config.set_value("sessions.default_cwd", str(body["default_cwd"]).strip() or "/")
+    if node_changed:
+        state_stream.wake("node")
     return await h_settings_get(request)
 
 
@@ -1167,6 +1259,7 @@ async def h_snapshot_export(request: web.Request):
         request.app["puppy_snapshot_busy"] = None
         workspace_links.resume_after_snapshot()
         notify.resume_after_snapshot()
+        state_stream.wake()
 
 
 async def h_snapshot_download(request: web.Request):
@@ -1234,6 +1327,7 @@ async def h_snapshot_import(request: web.Request):
 
         request.app["puppy_snapshot_busy"] = "restore"
         owns_busy = True
+        state_stream.invalidate()
         workspace_links.pause_for_snapshot()
         notify.pause_for_snapshot()
         # Recheck states that could have changed immediately before the marker
@@ -1272,6 +1366,7 @@ async def h_snapshot_import(request: web.Request):
             await backends.close_client()
         except Exception as exc:
             log.warning("restored state but could not close the old backend client: %s", exc)
+        await _publish_restored_state(request.app)
         return web.json_response(result)
     except snapshots.SnapshotError as exc:
         return web.json_response({"error": str(exc)}, status=400)
@@ -1283,6 +1378,7 @@ async def h_snapshot_import(request: web.Request):
             request.app["puppy_snapshot_busy"] = None
             workspace_links.resume_after_snapshot(restored=restored_state)
             notify.resume_after_snapshot()
+            state_stream.wake()
         snapshots.discard_staged(staged)
         try:
             os.unlink(upload_name)
@@ -1318,20 +1414,34 @@ async def ws_session(request: web.Request):
                 continue
             t = data.get("type")
             if request.app.get("puppy_snapshot_busy"):
-                await ws.send_json({
-                    "type": "toast", "level": "error",
-                    "text": "backup or restore in progress",
-                })
+                if t in ("steer", "ask"):
+                    await ws.send_json({
+                        "type": "{}_complete".format(t),
+                        "request_id": str(data.get("request_id") or "")[:128],
+                        "error": "backup or restore in progress",
+                    })
+                else:
+                    await ws.send_json({
+                        "type": "toast", "level": "error",
+                        "text": "backup or restore in progress",
+                    })
                 continue
             if request.app.get("puppy_upgrade_draining") or \
                     request.app.get("puppy_shutdown_draining"):
                 message = ("backend is restarting for an upgrade" if
                            request.app.get("puppy_upgrade_draining") else
                            "backend is shutting down")
-                await ws.send_json({
-                    "type": "toast", "level": "error",
-                    "text": message,
-                })
+                if t in ("steer", "ask"):
+                    await ws.send_json({
+                        "type": "{}_complete".format(t),
+                        "request_id": str(data.get("request_id") or "")[:128],
+                        "error": message,
+                    })
+                else:
+                    await ws.send_json({
+                        "type": "toast", "level": "error",
+                        "text": message,
+                    })
                 continue
             if t == "approval_response":
                 await h.approval_response(
@@ -1374,6 +1484,16 @@ async def ws_session(request: web.Request):
                 if "error" in draft_result:
                     await ws.send_json({"type": "toast", "level": "error",
                                         "text": draft_result["error"]})
+            elif t in ("steer", "ask"):
+                if t == "steer":
+                    res, _status = await _session_steer(s, data)
+                else:
+                    res, _status = await _session_ask(s, data)
+                await ws.send_json({
+                    "type": "{}_complete".format(t),
+                    "request_id": str(data.get("request_id") or "")[:128],
+                    **res,
+                })
             elif t == "unqueue":
                 try:
                     idx = int(data.get("index", -1))
@@ -1447,11 +1567,6 @@ async def ws_updates(request: web.Request):
     live_websockets.track(request, ws)
     runner.updates_attach(ws)
     try:
-        await ws.send_json(runner.sessions_payload())
-        if request.app.get("puppy_role") == "full":
-            metrics = host_metrics.latest(request.app)
-            if metrics is not None:
-                await ws.send_json(metrics)
         async for msg in ws:
             if msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
                 break
@@ -1496,7 +1611,7 @@ async def h_completions(request: web.Request):
 
 
 def _notify_broadcast() -> None:
-    runner.broadcast_update({"type": "notify", **notify.public_state()})
+    runner.publish_state({"type": "notify", **notify.public_state()})
 
 
 async def h_notify_get(request: web.Request):
@@ -1634,6 +1749,11 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     spawn_exec.register(app)
     search.register(app)
     agent_notes.register(app)
+    state_stream.register(
+        app, _state_stream_snapshots, _state_stream_interval,
+        snapshot_topics=("engines", "node", "browser_status",
+                         "terminal_instances"),
+        periodic_topics=("engines", "node", "browser_status"))
 
 
 def build_app(runtime_web: dict = None,
@@ -1650,6 +1770,7 @@ def build_app(runtime_web: dict = None,
         config.get("web.host", "127.0.0.1"), int(config.get("web.port", 10888))))
     app["puppy_runtime_ssl_context"] = runtime_ssl_context
     app["puppy_runtime_id"] = secrets.token_urlsafe(16)
+    runner.configure_updates(app["puppy_runtime_id"])
     app["puppy_bind_verifications"] = {}
     listener_handoff.cleanup()
     app["puppy_capabilities"] = protocol.execution_capabilities(include_terminal=True)

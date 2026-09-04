@@ -116,7 +116,7 @@ def public_links() -> list:
 
 
 def _broadcast_links() -> None:
-    runner.broadcast_update({"type": "workspace_links", "links": public_links()})
+    runner.publish_state({"type": "workspace_links", "links": public_links()})
 
 
 def _update_link(link_id: int, **fields) -> None:

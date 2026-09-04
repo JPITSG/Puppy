@@ -563,6 +563,8 @@ def exercise_side_question_contract() -> None:
     assert protocol.TIMER_SETTINGS_CAPABILITY in protocol.BASE_CAPABILITIES
     assert protocol.SESSION_PINNING_CAPABILITY in protocol.BASE_CAPABILITIES
     assert protocol.SESSION_FAST_MODE_CAPABILITY in protocol.BASE_CAPABILITIES
+    assert protocol.NODE_STATE_STREAM_CAPABILITY in protocol.BASE_CAPABILITIES
+    assert protocol.SESSION_CONTROL_WS_CAPABILITY in protocol.BASE_CAPABILITIES
 
 
 async def exercise_codex_app_server_turn(root, runner, db) -> None:
@@ -1910,6 +1912,123 @@ def exercise_health_retry_bound(backends_module) -> None:
         backends_module._clear_backend_health(bid)
 
 
+def exercise_update_revision_epoch(runner_module) -> None:
+    """Replacing a remote runtime never rewinds the controller topic clock."""
+    runner_module.configure_updates("controller-epoch-test")
+    first = runner_module.publish_state(
+        {"type": "remote_state", "backend_id": 7,
+         "event": {"type": "sessions"}},
+        topic="remote:7:sessions")
+    unchanged = runner_module.publish_state(
+        {"type": "remote_state", "backend_id": 7,
+         "event": {"type": "sessions"}},
+        topic="remote:7:sessions")
+    assert unchanged["state_revision"] == first["state_revision"]
+    runner_module.clear_published_state("remote:7:")
+    replacement = runner_module.publish_state(
+        {"type": "remote_state", "backend_id": 7,
+         "event": {"type": "sessions", "runtime_id": "replacement"}},
+        topic="remote:7:sessions")
+    assert replacement["runtime_id"] == "controller-epoch-test"
+    assert replacement["state_topic"] == "remote:7:sessions"
+    assert replacement["state_revision"] == first["state_revision"] + 1
+
+
+def exercise_restore_stream_clear(backends_module, runner_module) -> None:
+    """Restore drops cached state even for a currently disconnected backend."""
+    runner_module.configure_updates("restore-cache-epoch")
+    runner_module.publish_state(
+        {"type": "remote_stream", "backend_id": 77, "connected": False},
+        topic="remote:77:stream")
+    runner_module.publish_state(
+        {"type": "remote_state", "backend_id": 77,
+         "event": {"type": "sessions", "sessions": []}},
+        topic="remote:77:sessions")
+    assert any(key.startswith("remote:77:") for key in runner_module._update_state)
+    backends_module.reset_auto_upgrade_schedule()
+    assert not any(key.startswith("remote:") for key in runner_module._update_state)
+
+
+async def exercise_update_stream_ordering(runner_module) -> None:
+    """Slow viewers coalesce state, but an edge remains an ordering barrier."""
+    class SlowCapture:
+        def __init__(self):
+            self.messages = []
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def send_json(self, payload):
+            self.messages.append(payload)
+            if len(self.messages) == 1:
+                self.started.set()
+                await self.release.wait()
+
+        async def close(self, **_kwargs):
+            self.release.set()
+
+    runner_module.configure_updates("queue-epoch-test")
+    capture = SlowCapture()
+    runner_module.updates_attach(capture)
+    try:
+        await asyncio.wait_for(capture.started.wait(), timeout=1)
+        runner_module.publish_state({"type": "probe", "value": 1})
+        runner_module.publish_state({"type": "probe", "value": 2})
+        runner_module.broadcast_update({"type": "edge", "value": "between"})
+        runner_module.publish_state({"type": "probe", "value": 3})
+        capture.release.set()
+        deadline = asyncio.get_event_loop().time() + 1
+        while len(capture.messages) < 5 and \
+                asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0)
+        kinds = [message["type"] for message in capture.messages]
+        assert kinds == ["updates_ready", "sessions", "probe", "edge", "probe"], \
+            capture.messages
+        probes = [message for message in capture.messages
+                  if message["type"] == "probe"]
+        assert [(item["value"], item["state_revision"])
+                for item in probes] == [(2, 2), (3, 3)]
+    finally:
+        runner_module.updates_detach(capture)
+
+
+async def exercise_state_topic_isolation(state_stream_module, runner_module) -> None:
+    """A slow or failed probe cannot hold independent node state behind it."""
+    slow_started = asyncio.Event()
+    release_slow = asyncio.Event()
+
+    async def builder(_app, topics, _probes):
+        topic = next(iter(topics))
+        if topic == "engines":
+            slow_started.set()
+            await release_slow.wait()
+        if topic == "broken":
+            raise RuntimeError("synthetic isolated probe failure")
+        return [{"type": topic, "value": topic}]
+
+    runner_module.configure_updates("parallel-snapshot-epoch")
+    publisher = state_stream_module._Publisher(
+        {}, builder, lambda: 60,
+        ("node", "engines", "browser_status", "broken"),
+        ("node", "engines", "browser_status"))
+    refresh = asyncio.create_task(publisher.refresh(None, probes=True))
+    await asyncio.wait_for(slow_started.wait(), timeout=1)
+    for _ in range(20):
+        if "node" in runner_module._update_state and \
+                "browser_status" in runner_module._update_state:
+            break
+        await asyncio.sleep(0)
+    assert "node" in runner_module._update_state
+    assert "browser_status" in runner_module._update_state
+    assert "engines" not in runner_module._update_state
+    publisher.invalidate()
+    release_slow.set()
+    await asyncio.wait_for(refresh, timeout=1)
+    assert "engines" not in runner_module._update_state
+
+    await publisher.refresh({"engines"}, probes=True)
+    assert runner_module._update_state["engines"]["value"] == "engines"
+
+
 async def exercise_shutdown_broadcast(runner_module) -> None:
     """Both node and open-session watchers receive the same bounded notice."""
     class Capture:
@@ -1929,8 +2048,10 @@ async def exercise_shutdown_broadcast(runner_module) -> None:
     try:
         await runner_module.announce_node_stopping("restart")
         for capture in (updates, session):
-            assert len(capture.messages) == 1
-            notice = capture.messages[0]
+            notices = [message for message in capture.messages
+                       if message.get("type") == "node_stopping"]
+            assert len(notices) == 1, capture.messages
+            notice = notices[0]
             assert notice["type"] == "node_stopping"
             assert notice["reason"] == "restart"
             assert isinstance(notice["server_time"], (int, float))
@@ -2086,6 +2207,37 @@ def stop_process(process: subprocess.Popen) -> None:
         process.wait(timeout=5)
 
 
+async def receive_json_type(ws, kind: str, timeout: float = 3):
+    """Read one WebSocket JSON object of *kind*, ignoring other live topics."""
+    deadline = asyncio.get_event_loop().time() + timeout
+    seen = []
+    while True:
+        remaining = deadline - asyncio.get_event_loop().time()
+        if remaining <= 0:
+            raise AssertionError(
+                "timed out waiting for {!r}; saw {}".format(kind, seen))
+        # Bound each raw receive too. aiohttp consumes heartbeat frames inside
+        # receive_json(), which can otherwise restart its own timeout forever
+        # on a healthy socket that never emits the requested application type.
+        try:
+            frame = await ws.receive(timeout=min(1.0, remaining))
+        except asyncio.TimeoutError:
+            continue
+        if frame.type != aiohttp.WSMsgType.TEXT:
+            if frame.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING,
+                              aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                raise AssertionError(
+                    "socket closed waiting for {!r}; saw {}".format(kind, seen))
+            continue
+        try:
+            message = json.loads(frame.data)
+        except (TypeError, ValueError):
+            continue
+        seen.append(message.get("type") if isinstance(message, dict) else None)
+        if isinstance(message, dict) and message.get("type") == kind:
+            return message
+
+
 async def stop_process_with_notice(process: subprocess.Popen, url: str, token: str,
                                    fingerprint: str = "") -> None:
     """SIGTERM announces, closes live sockets, and exits without a 10s drain."""
@@ -2094,10 +2246,11 @@ async def stop_process_with_notice(process: subprocess.Popen, url: str, token: s
         updates = await http.ws_connect(
             url + "/api/ws/updates", headers=headers, ssl=ssl_pin(fingerprint))
         first = await updates.receive_json(timeout=3)
-        assert first["type"] == "sessions"
+        assert first["type"] == "updates_ready"
+        assert first["stream_version"] == 1 and first["runtime_id"]
         stop_started = time.monotonic()
         process.terminate()
-        notice = await updates.receive_json(timeout=3)
+        notice = await receive_json_type(updates, "node_stopping", timeout=3)
         assert notice["type"] == "node_stopping", notice
         assert notice["reason"] == "shutdown", notice
         assert isinstance(notice["server_time"], (int, float)), notice
@@ -2170,6 +2323,8 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "queued-permission-config" in ping["capabilities"]
         assert "session-drafts" in ping["capabilities"]
         assert "active-turn-steering" in ping["capabilities"]
+        assert "session-control-ws-v1" in ping["capabilities"]
+        assert "node-state-stream-v1" in ping["capabilities"]
         assert "system-prompt" in ping["capabilities"]
         assert "spawn-exec" in ping["capabilities"]
         assert "spawn-progress-limits" in ping["capabilities"]
@@ -2464,8 +2619,26 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert upload_settings["uploads"]["max_file_size_bytes"] == 1024 * 1024
         updates = await http.ws_connect(url + "/api/ws/updates", headers=good, ssl=pinned)
         first = await updates.receive_json(timeout=3)
-        assert first["type"] == "sessions" and first["sessions"] == []
-        assert isinstance(first["server_time"], (int, float))
+        assert first["type"] == "updates_ready", first
+        assert first["stream_version"] == 1 and first["runtime_id"]
+        stream_runtime = first["runtime_id"]
+        snapshots = {}
+        deadline = asyncio.get_event_loop().time() + 45
+        while len(snapshots) < 4 and asyncio.get_event_loop().time() < deadline:
+            snapshot = await updates.receive_json(timeout=45)
+            topic = snapshot.get("type")
+            if topic not in ("sessions", "node", "engines", "browser_status"):
+                continue
+            assert snapshot["runtime_id"] == stream_runtime, snapshot
+            assert snapshot["state_topic"] == topic, snapshot
+            assert isinstance(snapshot["state_revision"], int), snapshot
+            assert snapshot["state_revision"] >= 1, snapshot
+            snapshots[topic] = snapshot
+        assert set(snapshots) == {"sessions", "node", "engines", "browser_status"}, \
+            snapshots
+        session_snapshot = snapshots["sessions"]
+        assert session_snapshot["sessions"] == []
+        assert isinstance(session_snapshot["server_time"], (int, float))
         await updates.close()
 
         async with http.post(url + "/api/sessions", headers=good, ssl=pinned, json={
@@ -2504,7 +2677,9 @@ async def exercise_node(url: str, token: str, expected_version: str,
         pin_updates = await http.ws_connect(
             url + "/api/ws/updates", headers=good, ssl=pinned)
         pin_initial = await pin_updates.receive_json(timeout=3)
-        assert pin_initial["type"] == "sessions"
+        assert pin_initial["type"] == "updates_ready"
+        pin_before = await receive_json_type(pin_updates, "sessions", timeout=3)
+        pin_revision = pin_before["state_revision"]
         async with http.patch(
                 url + f"/api/sessions/{scratch['id']}", headers=good, ssl=pinned,
                 json={"pinned": "yes"}) as response:
@@ -2527,7 +2702,8 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert pinned_payload["sessions"][0]["pinned"] is True
         while True:
             pin_notice = await pin_updates.receive_json(timeout=3)
-            if pin_notice.get("type") == "sessions":
+            if pin_notice.get("type") == "sessions" and \
+                    pin_notice.get("state_revision", 0) > pin_revision:
                 break
         assert pin_notice["sessions"][0]["pinned"] is True
         await pin_updates.close()
@@ -2676,6 +2852,25 @@ async def exercise_node(url: str, token: str, expected_version: str,
                 "supported": True, "ready": False, "turn_id": ""}
             assert first_snapshot["draft"] == {
                 "text": "", "revision": 0, "updated_at": None}
+            # Correlated active-turn controls share the already-open session
+            # socket on capable nodes.  Idle conflicts exercise the complete
+            # transport and shared validation path without spending quota.
+            await session_ws.send_json({
+                "type": "steer", "text": "change direction",
+                "request_id": "socket-steer-1", "expected_turn_id": "idle-turn",
+            })
+            steer_complete = await receive_json_type(
+                session_ws, "steer_complete", timeout=3)
+            assert steer_complete["request_id"] == "socket-steer-1"
+            assert "error" in steer_complete, steer_complete
+            await session_ws.send_json({
+                "type": "ask", "question": "Why?",
+                "request_id": "socket-ask-1", "expected_turn_id": "idle-turn",
+            })
+            ask_complete = await receive_json_type(
+                session_ws, "ask_complete", timeout=3)
+            assert ask_complete["request_id"] == "socket-ask-1"
+            assert "error" in ask_complete, ask_complete
             peer_ws = await http.ws_connect(
                 url + f"/api/ws/session/{normal['id']}", headers=good, ssl=pinned)
             assert (await peer_ws.receive_json(timeout=3))["draft"]["revision"] == 0
@@ -2911,6 +3106,8 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert "session-pinning" in full_ping["capabilities"]
         assert "session-drafts" in full_ping["capabilities"]
         assert "active-turn-steering" in full_ping["capabilities"]
+        assert "session-control-ws-v1" in full_ping["capabilities"]
+        assert "node-state-stream-v1" in full_ping["capabilities"]
         assert "browser-handoff" in full_ping["capabilities"]
         assert "browser-file-workflows" in full_ping["capabilities"]
         assert "completion-events" in full_ping["capabilities"]
@@ -2919,7 +3116,13 @@ async def exercise_controller(url: str, token: str, backend_url: str,
 
         updates = await http.ws_connect(url + "/api/ws/updates", headers=headers)
         first = await updates.receive_json(timeout=3)
-        assert first["type"] == "sessions"
+        assert first["type"] == "updates_ready", first
+        assert first["stream_version"] == 1 and first["runtime_id"]
+        full_sessions = await receive_json_type(updates, "sessions", timeout=5)
+        assert full_sessions["runtime_id"] == first["runtime_id"]
+        full_terminals = await receive_json_type(
+            updates, "terminal_instances", timeout=5)
+        assert full_terminals["instances"] == []
         while True:
             metric = await updates.receive_json(timeout=5)
             if metric.get("type") == "host_metrics":
@@ -2952,6 +3155,9 @@ async def exercise_controller(url: str, token: str, backend_url: str,
             assert response.status == 200, added
         assert added["remote"]["role"] == "backend"
         assert added["remote"]["protocol"] == 1
+        assert added["backend"]["id"] == added["id"]
+        assert added["backend"]["availability"]["state"] == "online"
+        assert "token" not in added["backend"]
 
         async with http.get(url + "/api/backends", headers=headers) as response:
             listed = (await response.json())["backends"]
@@ -2972,6 +3178,8 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert "session-pinning" in stored["capabilities"]
         assert "session-drafts" in stored["capabilities"]
         assert "active-turn-steering" in stored["capabilities"]
+        assert "session-control-ws-v1" in stored["capabilities"]
+        assert "node-state-stream-v1" in stored["capabilities"]
         assert "browser-handoff" in stored["capabilities"]
         assert "browser-file-workflows" in stored["capabilities"]
         assert "shutdown-notice" in stored["capabilities"]
@@ -2993,6 +3201,47 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert stored["last_known"]["browser"] == {"enabled": False}
         assert stored["last_known"]["uploads"]["max_file_size_mb"] >= 0
         assert "token" not in stored
+
+        # The controller owns one upstream subscription and fans revisioned
+        # remote snapshots into its local update socket.  Consoles therefore
+        # do not open one remote polling loop (or socket) apiece.
+        fanout_updates = await http.ws_connect(
+            url + "/api/ws/updates", headers=headers)
+        fanout_ready = await fanout_updates.receive_json(timeout=3)
+        assert fanout_ready["type"] == "updates_ready", fanout_ready
+        fanout_topics = set()
+        fanout_runtime = ""
+        fanout_connected = False
+        fanout_deadline = asyncio.get_event_loop().time() + 12
+        while asyncio.get_event_loop().time() < fanout_deadline and \
+                (not fanout_connected or fanout_topics != {
+                    "sessions", "node", "engines", "browser_status"}):
+            message = await fanout_updates.receive_json(timeout=12)
+            if message.get("type") == "remote_stream" and \
+                    message.get("backend_id") == stored["id"] and \
+                    message.get("connected") is True:
+                assert {"sessions", "node", "engines", "browser_status"}.issubset(
+                    fanout_topics), (fanout_topics, message)
+                fanout_connected = True
+                fanout_runtime = message.get("node_runtime_id") or ""
+            if message.get("type") != "remote_state" or \
+                    message.get("backend_id") != stored["id"]:
+                continue
+            event = message.get("event") or {}
+            topic = event.get("type")
+            if topic not in ("sessions", "node", "engines", "browser_status"):
+                continue
+            assert event.get("state_topic") == topic, event
+            assert isinstance(event.get("state_revision"), int), event
+            assert event.get("runtime_id"), event
+            if fanout_runtime:
+                assert event["runtime_id"] == fanout_runtime, event
+            fanout_topics.add(topic)
+        assert fanout_connected, "controller did not connect its backend state stream"
+        assert fanout_runtime
+        assert fanout_topics == {
+            "sessions", "node", "engines", "browser_status"}, fanout_topics
+        await fanout_updates.close()
 
         # Node names must resolve unambiguously for spawned agents: a backend
         # may not reuse another backend's name (in any case), this
@@ -3071,6 +3320,9 @@ async def exercise_controller(url: str, token: str, backend_url: str,
                              headers=headers) as response:
             retained = await response.json()
             assert response.status == 200 and retained["ok"] is True, retained
+        assert retained["backend"]["id"] == stored["id"]
+        assert retained["backend"]["availability"]["state"] == "online"
+        assert "token" not in retained["backend"]
         async with http.get(url + "/api/backends", headers=headers) as response:
             after_rejection = (await response.json())["backends"][0]
         assert after_rejection["name"] == "Edited backend", after_rejection
@@ -3081,6 +3333,8 @@ async def exercise_controller(url: str, token: str, backend_url: str,
                              headers=headers) as response:
             tested = await response.json()
             assert response.status == 200 and tested["ok"] is True, tested
+        assert tested["backend"]["id"] == stored["id"]
+        assert tested["backend"]["remote_version"] == old_version
 
         async with http.get(url + f"/api/b/{stored['id']}/sessions",
                             headers=headers) as response:
@@ -3142,8 +3396,11 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         remote_updates = await http.ws_connect(
             url + f"/api/b/{stored['id']}/ws/updates", headers=headers)
         first = await remote_updates.receive_json(timeout=3)
-        assert first["type"] == "sessions" and first["sessions"] == []
-        assert isinstance(first["server_time"], (int, float))
+        assert first["type"] == "updates_ready", first
+        remote_sessions = await receive_json_type(
+            remote_updates, "sessions", timeout=5)
+        assert remote_sessions["sessions"] == []
+        assert isinstance(remote_sessions["server_time"], (int, float))
         # A real connection edit is probed before it is stored, and closes the
         # affected backend's existing proxy channels so they reconnect through
         # the new URL/token/pin rather than remaining attached to the old peer.
@@ -3154,9 +3411,13 @@ async def exercise_controller(url: str, token: str, backend_url: str,
             assert response.status == 200, moved
         assert moved["connection_changed"] is True, moved
         assert moved["backend"]["url"] == alternate_url, moved
-        closed = await remote_updates.receive(timeout=5)
-        assert closed.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED,
-                               aiohttp.WSMsgType.CLOSING), closed
+        close_deadline = asyncio.get_event_loop().time() + 5
+        while True:
+            closed = await remote_updates.receive(timeout=5)
+            if closed.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED,
+                               aiohttp.WSMsgType.CLOSING):
+                break
+            assert asyncio.get_event_loop().time() < close_deadline, closed
         await remote_updates.close()
         async with http.patch(url + f"/api/backends/{stored['id']}", headers=headers,
                               json={"name": "backend-test-node",
@@ -3252,6 +3513,13 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         # New controllers allocate a node-owned, identified PTY before opening
         # its viewer socket. The process survives a viewer reconnect and keeps
         # one four-character identity for both the user and terminal MCP tools.
+        terminal_updates = await http.ws_connect(
+            url + "/api/ws/updates", headers=headers)
+        assert (await terminal_updates.receive_json(timeout=3))["type"] == \
+            "updates_ready"
+        terminal_before = await receive_json_type(
+            terminal_updates, "terminal_instances", timeout=5)
+        terminal_revision = terminal_before["state_revision"]
         async with http.post(url + "/api/terminal/instances", headers=headers,
                              json={"command": "/bin/bash", "cols": 80,
                                    "rows": 24}) as response:
@@ -3260,6 +3528,14 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         terminal_id = created_terminal["terminal"]["id"]
         assert len(terminal_id) == 4 and terminal_id.isalnum() and \
             terminal_id == terminal_id.upper(), terminal_id
+        while True:
+            terminal_pushed = await receive_json_type(
+                terminal_updates, "terminal_instances", timeout=5)
+            if terminal_pushed["state_revision"] > terminal_revision and any(
+                    item["id"] == terminal_id
+                    for item in terminal_pushed["instances"]):
+                break
+        terminal_revision = terminal_pushed["state_revision"]
         async with http.get(url + "/api/terminal/instances",
                             headers=headers) as response:
             terminal_list = await response.json()
@@ -3289,6 +3565,14 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         async with http.delete(url + "/api/terminal/instances/" + terminal_id,
                                headers=headers) as response:
             assert response.status == 200, await response.text()
+        while True:
+            terminal_pushed = await receive_json_type(
+                terminal_updates, "terminal_instances", timeout=5)
+            if terminal_pushed["state_revision"] > terminal_revision and not any(
+                    item["id"] == terminal_id
+                    for item in terminal_pushed["instances"]):
+                break
+        await terminal_updates.close()
 
         # Keep the anonymous create-on-connect socket for older controllers.
         terminal = await http.ws_connect(
@@ -3309,10 +3593,26 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         # Enabling the controller-owned policy wakes its background worker.
         # The node's live readiness remains authoritative, then the exact same
         # signed/restart/rollback pipeline used by the manual action runs.
+        lifecycle_fanout = await http.ws_connect(
+            url + "/api/ws/updates", headers=headers)
+        assert (await lifecycle_fanout.receive_json(timeout=3))["type"] == \
+            "updates_ready"
+        old_stream_runtime = ""
+        old_stream_revision = 0
+        fanout_deadline = asyncio.get_event_loop().time() + 10
+        while asyncio.get_event_loop().time() < fanout_deadline:
+            message = await lifecycle_fanout.receive_json(timeout=10)
+            if message.get("type") == "remote_stream" and \
+                    message.get("backend_id") == stored["id"] and \
+                    message.get("connected") is True:
+                old_stream_runtime = message.get("node_runtime_id") or ""
+                old_stream_revision = int(message.get("state_revision") or 0)
+                break
+        assert old_stream_runtime and old_stream_revision > 0
         lifecycle_updates = await http.ws_connect(
             url + f"/api/b/{stored['id']}/ws/updates", headers=headers)
         lifecycle_snapshot = await lifecycle_updates.receive_json(timeout=3)
-        assert lifecycle_snapshot["type"] == "sessions"
+        assert lifecycle_snapshot["type"] == "updates_ready"
         async with http.patch(url + f"/api/backends/{stored['id']}", headers=headers,
                               json={"auto_upgrade": True}) as response:
             toggled = await response.json()
@@ -3338,6 +3638,20 @@ async def exercise_controller(url: str, token: str, backend_url: str,
             "Controller-configured guidance."
         assert any(session["id"] == proxied_scratch["id"]
                    for session in stopping_backend["last_known"]["sessions"])
+
+        # The controller must replace its cached connected verdict even when
+        # the upstream ended deliberately.  Otherwise a console attaching in
+        # this restart window can suppress fallback against an offline node.
+        disconnected_revision = 0
+        disconnect_deadline = asyncio.get_event_loop().time() + 10
+        while asyncio.get_event_loop().time() < disconnect_deadline:
+            message = await lifecycle_fanout.receive_json(timeout=10)
+            if message.get("type") == "remote_stream" and \
+                    message.get("backend_id") == stored["id"] and \
+                    message.get("connected") is False:
+                disconnected_revision = int(message.get("state_revision") or 0)
+                break
+        assert disconnected_revision > old_stream_revision
         await lifecycle_updates.close()
 
         deadline = asyncio.get_event_loop().time() + 120
@@ -3354,6 +3668,34 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert refreshed["availability"]["state"] == "online", refreshed
         assert refreshed["auto_upgrade"] is True
         assert "remote-upgrade" in refreshed["capabilities"]
+
+        # The controller process did not restart, so its outer topic revision
+        # stays monotonic while the nested backend runtime/revisions restart.
+        # An already-open console must accept, not discard, the replacement.
+        new_stream_runtime = ""
+        new_stream_revision = 0
+        saw_current_node = False
+        fanout_deadline = asyncio.get_event_loop().time() + 15
+        while asyncio.get_event_loop().time() < fanout_deadline and \
+                (not new_stream_runtime or not saw_current_node):
+            message = await lifecycle_fanout.receive_json(timeout=15)
+            if message.get("type") == "remote_stream" and \
+                    message.get("backend_id") == stored["id"] and \
+                    message.get("connected") is True and \
+                    message.get("node_runtime_id") != old_stream_runtime:
+                new_stream_runtime = message.get("node_runtime_id") or ""
+                new_stream_revision = int(message.get("state_revision") or 0)
+            if message.get("type") == "remote_state" and \
+                    message.get("backend_id") == stored["id"]:
+                event = message.get("event") or {}
+                if event.get("type") == "node" and \
+                        event.get("runtime_id") != old_stream_runtime and \
+                        event.get("version") == __version__:
+                    saw_current_node = True
+        assert new_stream_runtime and new_stream_runtime != old_stream_runtime
+        assert new_stream_revision > disconnected_revision
+        assert saw_current_node
+        await lifecycle_fanout.close()
         async with http.delete(
                 url + f"/api/b/{stored['id']}/sessions/{proxied_scratch['id']}",
                 headers=headers) as response:
@@ -5147,6 +5489,8 @@ async def main() -> None:
         assert "session-pinning" in pairing["capabilities"]
         assert "session-drafts" in pairing["capabilities"]
         assert "active-turn-steering" in pairing["capabilities"]
+        assert "session-control-ws-v1" in pairing["capabilities"]
+        assert "node-state-stream-v1" in pairing["capabilities"]
         assert "engine-model-selection" not in pairing["capabilities"]
         assert pairing["max_upload_size_mb"] == 3
         assert (backend_data / "config.json").stat().st_mode & 0o777 == 0o600
@@ -5218,7 +5562,7 @@ async def main() -> None:
         assert "puppy.config" not in sys.modules, \
             "puppy.config was imported before the test data path was set"
         from puppy import (auth, backends as controller_backends, config, db,
-                           host_metrics, runner, terminal, uploads)
+                           host_metrics, runner, state_stream, terminal, uploads)
         from backend.puppy_backend import upgrade as backend_upgrade
         from puppy import web as puppy_web
         from puppy.web import build_app
@@ -5240,6 +5584,10 @@ async def main() -> None:
         exercise_auth_hardening(auth)
         exercise_activity_blocks(runner.SessionHub)
         exercise_health_retry_bound(controller_backends)
+        exercise_restore_stream_clear(controller_backends, runner)
+        exercise_update_revision_epoch(runner)
+        await exercise_update_stream_ordering(runner)
+        await exercise_state_topic_isolation(state_stream, runner)
         await exercise_shutdown_broadcast(runner)
         await exercise_queue_persistence(runner, db)
         await exercise_queue_pause(runner, db)

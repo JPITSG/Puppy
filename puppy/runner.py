@@ -4,6 +4,7 @@ relays interactive approvals, handles interrupts and a simple message queue."""
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -22,7 +23,13 @@ from puppy.drivers.base import clean_env
 log = logging.getLogger("puppy.runner")
 
 _hubs = {}
-_updates_watchers = set()  # websockets watching the session list
+_updates_watchers = {}  # websocket -> one ordered, bounded node-state writer
+_update_runtime_id = ""
+_update_state = {}       # topic -> last revisioned snapshot
+_update_revisions = {}   # topic -> process-local monotonic revision
+
+UPDATE_STREAM_VERSION = 1
+UPDATE_QUEUE_LIMIT = 256
 
 STREAM_LIMIT = 16 * 1024 * 1024
 QUEUE_REORDER_HOLD_SECONDS = 30
@@ -272,12 +279,177 @@ def session_payload(session):
     return out
 
 
+class _UpdateWatcher:
+    """One serialized writer for the node-wide update stream.
+
+    Replaceable state snapshots coalesce while they wait behind a slow socket;
+    edge events never do.  Closing a client that cannot keep up is safer than
+    letting an unbounded queue retain stale state indefinitely: reconnecting
+    sends a fresh snapshot of every topic.
+    """
+
+    def __init__(self, ws):
+        self.ws = ws
+        self.queue = asyncio.Queue(maxsize=UPDATE_QUEUE_LIMIT)
+        self.pending = {}
+        self.barrier = 0
+        self.closed = False
+        self.waiters = set()
+        self.task = asyncio.ensure_future(self._run())
+
+    def send(self, payload: dict, state_topic: str = "", wait: bool = False):
+        if self.closed:
+            return None
+        future = asyncio.get_running_loop().create_future() if wait else None
+        if future is not None:
+            self.waiters.add(future)
+        topic = str(state_topic or "")
+        key = (topic, self.barrier) if topic and future is None else None
+        previous = self.pending.get(key) if key is not None else None
+        if previous is not None:
+            previous["payload"] = copy.deepcopy(payload)
+            return future
+        if not topic:
+            self.barrier += 1
+        item = {
+            "payload": copy.deepcopy(payload), "key": key, "future": future,
+        }
+        if key is not None:
+            self.pending[key] = item
+        try:
+            self.queue.put_nowait(item)
+        except asyncio.QueueFull:
+            if key is not None and self.pending.get(key) is item:
+                self.pending.pop(key, None)
+            if future is not None and not future.done():
+                future.set_exception(RuntimeError("update stream queue is full"))
+            self._fail_slow_client()
+        return future
+
+    def _fail_slow_client(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        asyncio.ensure_future(self.ws.close(
+            code=1011, message=b"node-state viewer could not keep up"))
+
+    def cancel(self) -> None:
+        self.closed = True
+        if not self.task.done():
+            self.task.cancel()
+        for future in list(self.waiters):
+            if not future.done():
+                future.cancel()
+        self.waiters.clear()
+
+    async def _run(self) -> None:
+        try:
+            while True:
+                item = await self.queue.get()
+                key = item["key"]
+                if key is not None and self.pending.get(key) is item:
+                    self.pending.pop(key, None)
+                future = item["future"]
+                try:
+                    await self.ws.send_json(item["payload"])
+                except Exception as exc:
+                    if future is not None and not future.done():
+                        future.set_exception(exc)
+                    raise
+                else:
+                    if future is not None and not future.done():
+                        future.set_result(True)
+                finally:
+                    if future is not None:
+                        self.waiters.discard(future)
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+        finally:
+            self.closed = True
+            if _updates_watchers.get(self.ws) is self:
+                _updates_watchers.pop(self.ws, None)
+            for future in list(self.waiters):
+                if not future.done():
+                    future.cancel()
+            self.waiters.clear()
+
+
+def configure_updates(runtime_id: str) -> None:
+    """Start one process-local state epoch before its application accepts I/O."""
+    global _update_runtime_id
+    _update_runtime_id = str(runtime_id or "")
+    _update_state.clear()
+    _update_revisions.clear()
+    publish_state(sessions_payload(), broadcast=False)
+
+
+def _state_topic(payload: dict, topic: str = "") -> str:
+    return str(topic or payload.get("type") or "")[:120]
+
+
+def publish_state(payload: dict, topic: str = "", force: bool = False,
+                  broadcast: bool = True) -> dict:
+    """Remember and optionally broadcast one replaceable state snapshot."""
+    if not isinstance(payload, dict):
+        raise TypeError("state payload must be an object")
+    key = _state_topic(payload, topic)
+    if not key:
+        raise ValueError("state payload needs a topic")
+    canonical = copy.deepcopy(payload)
+    canonical.pop("state_revision", None)
+    canonical.pop("state_topic", None)
+    canonical.pop("runtime_id", None)
+    previous = _update_state.get(key)
+    if not force and previous is not None:
+        old = dict(previous)
+        old.pop("state_revision", None)
+        old.pop("state_topic", None)
+        old.pop("runtime_id", None)
+        if old == canonical:
+            return copy.deepcopy(previous)
+    revision = int(_update_revisions.get(key, 0)) + 1
+    _update_revisions[key] = revision
+    canonical["state_revision"] = revision
+    canonical["state_topic"] = key
+    canonical["runtime_id"] = _update_runtime_id
+    _update_state[key] = canonical
+    if broadcast:
+        for watcher in list(_updates_watchers.values()):
+            watcher.send(canonical, state_topic=key)
+    return copy.deepcopy(canonical)
+
+
+def clear_published_state(prefix: str) -> None:
+    """Discard transient cached topics without rewinding this process's clock.
+
+    A browser may already have observed the topic.  Keeping its revision
+    counter monotonic lets a replacement backend/runtime reuse the same topic
+    safely while its own nested runtime id resets the remote revisions.
+    """
+    prefix = str(prefix or "")
+    for key in list(_update_state):
+        if key.startswith(prefix):
+            _update_state.pop(key, None)
+
+
 def updates_attach(ws) -> None:
-    _updates_watchers.add(ws)
+    watcher = _UpdateWatcher(ws)
+    _updates_watchers[ws] = watcher
+    watcher.send({
+        "type": "updates_ready", "stream_version": UPDATE_STREAM_VERSION,
+        "runtime_id": _update_runtime_id,
+        "topics": list(_update_state),
+    })
+    for topic, payload in list(_update_state.items()):
+        watcher.send(payload, state_topic=topic)
 
 
 def updates_detach(ws) -> None:
-    _updates_watchers.discard(ws)
+    watcher = _updates_watchers.pop(ws, None)
+    if watcher is not None:
+        watcher.cancel()
 
 
 def sessions_payload() -> dict:
@@ -389,6 +561,8 @@ async def detach_for_restore() -> None:
                 asyncio.gather(*(close_socket(ws) for ws in sockets)), timeout=3)
         except asyncio.TimeoutError:
             pass
+    for watcher in list(_updates_watchers.values()):
+        watcher.cancel()
     _updates_watchers.clear()
     _hubs.clear()
 
@@ -415,14 +589,19 @@ def _notify_workspace_phase(session_id: int, phase: str) -> None:
 
 def broadcast_sessions() -> dict:
     payload = sessions_payload()
-    broadcast_update(payload)
+    publish_state(payload)
+    try:
+        from puppy import state_stream
+        state_stream.wake("node")
+    except Exception:
+        pass
     return payload
 
 
 def broadcast_update(payload: dict) -> None:
     """Send an additive controller update to every authenticated list watcher."""
-    for ws in list(_updates_watchers):
-        asyncio.ensure_future(_safe_send(ws, payload, _updates_watchers))
+    for watcher in list(_updates_watchers.values()):
+        watcher.send(payload)
 
 
 async def announce_node_stopping(reason: str = "shutdown") -> None:
@@ -438,14 +617,20 @@ async def announce_node_stopping(reason: str = "shutdown") -> None:
         "reason": "restart" if reason == "restart" else "shutdown",
         "server_time": time.time(),
     }
-    sockets = set(_updates_watchers)
+    update_waiters = []
+    for watcher in list(_updates_watchers.values()):
+        future = watcher.send(payload, wait=True)
+        if future is not None:
+            update_waiters.append(future)
+    sockets = set()
     for h in _hubs.values():
         sockets.update(h.watchers)
-    if not sockets:
+    if not sockets and not update_waiters:
         return
     try:
         await asyncio.wait_for(
-            asyncio.gather(*(_safe_send(ws, payload) for ws in sockets),
+            asyncio.gather(*update_waiters,
+                           *(_safe_send(ws, payload) for ws in sockets),
                            return_exceptions=True),
             timeout=1.0)
     except asyncio.TimeoutError:

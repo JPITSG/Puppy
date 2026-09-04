@@ -36,6 +36,14 @@ from puppy.drivers.base import clean_env
 
 log = logging.getLogger("puppy.spawn")
 
+
+def _state_changed() -> None:
+    try:
+        from puppy import state_stream
+        state_stream.wake("node")
+    except Exception:
+        pass
+
 STREAM_LIMIT = 16 * 1024 * 1024
 MAX_PROMPT_CHARS = 120000
 ANSWER_LIMIT = 40000
@@ -872,6 +880,8 @@ class _Manager:
         job = SpawnJob(request, owner, job_id=job_id)
         self.jobs[job.id] = job
         job.task = asyncio.ensure_future(job.run())
+        job.task.add_done_callback(lambda _finished: _state_changed())
+        _state_changed()
         self.ensure_sweeper()
         log.info("spawn %s started: %s %s cwd=%s owner=%s", job.id,
                  job.engine, job.model or "(default model)", job.cwd,

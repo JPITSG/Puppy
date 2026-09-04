@@ -220,6 +220,15 @@ class BrowserError(RuntimeError):
     pass
 
 
+def _state_changed() -> None:
+    """Refresh the node-wide browser catalog and upgrade readiness."""
+    try:
+        from puppy import state_stream
+        state_stream.wake("browser_status", "node")
+    except Exception:
+        pass
+
+
 def invalidate_probe() -> None:
     global _probe_cache
     _probe_cache = None
@@ -413,6 +422,8 @@ async def set_color_scheme(value) -> str:
         await asyncio.gather(*(instance.apply_color_scheme()
                                for instance in list(_manager.instances.values())),
                              return_exceptions=True)
+    if changed:
+        _state_changed()
     return scheme
 
 
@@ -1049,6 +1060,7 @@ class Manager:
                     # the sync itself never raises.
                     await self._store_sync()
                 self.started_at = time.time()
+                _state_changed()
                 log.info("managed Browser %s started pid=%s %s%s", self.browser_id, spawned,
                          version.get("product", ""),
                          " (no sandbox: running as root)" if os.geteuid() == 0 else "")
@@ -1091,6 +1103,7 @@ class Manager:
             if pid is not None:
                 await _reap_group(pid)
             self.stopping = False
+            _state_changed()
 
     async def _teardown(self) -> None:
         self.running = False
@@ -1161,6 +1174,7 @@ class Manager:
                 fut.set_exception(BrowserError("Browser exited"))
         self.pending.clear()
         self._broadcast_json({"type": "gone", "reason": "The browser exited"})
+        _state_changed()
         if pid is not None:
             asyncio.ensure_future(_reap_group(pid))
         asyncio.ensure_future(self._teardown())
@@ -1883,6 +1897,7 @@ class Manager:
         self._cancel_idle()
         viewer = _Viewer(ws, self._frame_forwarded)
         self.viewers[ws] = viewer
+        _state_changed()
         viewer.send_json({"type": "status", "running": True, **self.nav})
         viewer.send_json(_binding_payload(self))
         viewer.send_json({"type": "frame_meta", **self.frame_meta})
@@ -1919,6 +1934,7 @@ class Manager:
             asyncio.ensure_future(self._stop_screencast_if_idle())
         if not self.viewers and self.running:
             self._arm_idle()
+        _state_changed()
 
     # ---- input from viewers ----
 
@@ -4042,7 +4058,9 @@ class BrowserRegistry:
         owner_session = self._normalize_owner(owner_session)
         async with self.lock:
             instance = self._create_locked(origin, owner_session)
-        return await self._start_created(instance)
+        instance = await self._start_created(instance)
+        _state_changed()
+        return instance
 
     def get(self, browser_id) -> Manager:
         browser_id = normalize_browser_id(browser_id)
@@ -4079,6 +4097,7 @@ class BrowserRegistry:
         self._schedule_blocking(
             "discard storage for closed Browser {}".format(browser_id),
             _safe_remove_instance_storage, browser_id)
+        _state_changed()
         return True
 
     async def stop(self, reason: str) -> None:
@@ -4103,6 +4122,7 @@ class BrowserRegistry:
             for instance in self.instances.values():
                 instance.owner_session = None
                 instance._broadcast_json(_binding_payload(instance))
+        _state_changed()
 
     async def bind(self, browser_id, session_id=None) -> Manager:
         """Make one live logical browser the exclusive default for one chat."""
@@ -4127,6 +4147,7 @@ class BrowserRegistry:
                     continue
                 changed.owner_session = new_records[selected].get("owner_session")
                 changed._broadcast_json(_binding_payload(changed))
+            _state_changed()
             return instance
 
     async def clear_session_binding(self, session_id: int) -> None:
@@ -4147,6 +4168,7 @@ class BrowserRegistry:
                     continue
                 changed.owner_session = new_records[selected].get("owner_session")
                 changed._broadcast_json(_binding_payload(changed))
+        _state_changed()
 
     async def agent_browser(self, session_id: int, requested_id=None,
                             fresh: bool = False) -> Manager:
@@ -4194,7 +4216,13 @@ class BrowserRegistry:
 # ---- HTTP + websocket surface (registered by register_execution_api) ----
 
 async def h_status(request: web.Request):
-    return web.json_response(await status_payload())
+    payload = await status_payload()
+    try:
+        from puppy import state_stream
+        state_stream.publish({"type": "browser_status", **payload})
+    except Exception:
+        pass
+    return web.json_response(payload)
 
 
 async def h_enabled(request: web.Request):
@@ -4215,6 +4243,7 @@ async def h_enabled(request: web.Request):
         runner.broadcast_update({"type": "browser", **ping_payload()})
     except Exception:
         pass
+    _state_changed()
     return web.json_response({"ok": True, **payload})
 
 
@@ -4229,6 +4258,7 @@ async def h_shared_storage(request: web.Request):
     payload = await set_shared_storage(body["enabled"])
     log.info("managed browser shared sign-in storage %s on this node",
              "enabled" if body["enabled"] else "disabled")
+    _state_changed()
     return web.json_response({"ok": True, **payload})
 
 

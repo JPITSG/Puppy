@@ -46,6 +46,7 @@ def build_app(include_terminal: bool = True, transport=None,
     live_websockets.initialize(app)
     app["puppy_role"] = "backend"
     app["puppy_runtime_id"] = secrets.token_urlsafe(16)
+    runner.configure_updates(app["puppy_runtime_id"])
     app["puppy_started_monotonic"] = time.monotonic()
     transport = dict(transport or {"encrypted": False})
     tls_enabled = bool(transport.get("encrypted"))

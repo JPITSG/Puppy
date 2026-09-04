@@ -128,4 +128,9 @@ async def maybe_refresh(force: bool = False) -> dict:
         if errors:
             log.warning("engine usage refresh failed: %s", _state["last_error"])
         _state["last_completed_mono"] = time.monotonic()
+        try:
+            from puppy import state_stream
+            state_stream.wake("engines")
+        except Exception:
+            pass
         return payload()

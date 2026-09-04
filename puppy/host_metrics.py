@@ -80,7 +80,9 @@ async def _sample_loop(app) -> None:
             "sampled_at": time.time(),
         }
         state["latest"] = payload
-        runner.broadcast_update(payload)
+        # This is replaceable telemetry, not an edge: a slow or backgrounded
+        # console needs only the newest sample and receives it on reconnect.
+        runner.publish_state(payload)
 
 
 async def _lifecycle(app):

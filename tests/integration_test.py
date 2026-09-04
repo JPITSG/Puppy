@@ -134,9 +134,32 @@ async def main():
                   str(engines.get("claude")))
             check("codex engine ready", engines.get("codex", {}).get("auth") == "ok",
                   str(engines.get("codex")))
-            fast_models = [option.get("value", "") for option in
-                           engines.get("codex", {}).get("model_options", [])
-                           if option.get("fast_mode_available") is True]
+            # Bootstrap is intentionally cache-only. The one process-owned
+            # publisher performs catalog probes and delivers their result to
+            # every console without multiplying probes per browser.
+            updates = await http.ws_connect(URL + "/api/ws/updates")
+            ready = False
+            fast_models = []
+            deadline = time.monotonic() + 45
+            while time.monotonic() < deadline and not fast_models:
+                try:
+                    frame = await updates.receive(timeout=5)
+                except asyncio.TimeoutError:
+                    continue
+                if frame.type != aiohttp.WSMsgType.TEXT:
+                    continue
+                update = json.loads(frame.data)
+                if update.get("type") == "updates_ready":
+                    ready = update.get("stream_version") == 1 and \
+                        bool(update.get("runtime_id"))
+                if update.get("type") != "engines":
+                    continue
+                streamed = {item["key"]: item for item in update.get("engines", [])}
+                fast_models = [option.get("value", "") for option in
+                               streamed.get("codex", {}).get("model_options", [])
+                               if option.get("fast_mode_available") is True]
+            await updates.close()
+            check("node state stream negotiates", ready)
             check("codex publishes catalog-driven Fast availability", bool(fast_models))
 
             # unauthenticated access denied

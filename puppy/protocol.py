@@ -63,6 +63,17 @@ UPLOAD_PREVIEW_CAPABILITY = "upload-preview"
 # Full WebUI runtimes do not advertise this: only the separately managed
 # backend process owns this lifecycle signal.
 SHUTDOWN_NOTICE_CAPABILITY = "shutdown-notice"
+# `/api/ws/updates` is an ordered, revisioned node-state stream.  It sends a
+# full snapshot on every attach and then replaces session, engine, node,
+# browser and terminal topics as their owners change.  A controller may keep
+# one upstream subscription for a capable backend and stop browser-driven
+# polling; older nodes remain on the existing HTTP timers.
+NODE_STATE_STREAM_CAPABILITY = "node-state-stream-v1"
+# The existing per-session WebSocket accepts the two active-turn controls and
+# returns a correlated completion frame for each handoff.  The native request
+# id remains the turn-scoped idempotency key; this marker only changes how the
+# browser transports it.  Older nodes retain their authenticated HTTP routes.
+SESSION_CONTROL_WS_CAPABILITY = "session-control-ws-v1"
 # Session snapshots/broadcasts expose paused queue indexes and the session
 # socket accepts ``set_queue_paused``. Older controllers ignore the field;
 # newer controllers hide the control until a remote node advertises support.
@@ -225,6 +236,8 @@ BASE_CAPABILITIES = (
     SESSION_AGENT_NOTES_CAPABILITY,
     SESSION_PINNING_CAPABILITY,
     COMPLETION_EVENTS_CAPABILITY,
+    NODE_STATE_STREAM_CAPABILITY,
+    SESSION_CONTROL_WS_CAPABILITY,
 )
 TERMINAL_CAPABILITY = "terminal"
 # Identified node-owned PTYs, their create/list/delete routes, and the

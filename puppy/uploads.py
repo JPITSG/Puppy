@@ -62,6 +62,14 @@ def active_count() -> int:
     return max(0, int(_active_uploads))
 
 
+def _state_changed() -> None:
+    try:
+        from puppy import state_stream
+        state_stream.wake("node")
+    except Exception:
+        pass
+
+
 def _safe_filename(value: str) -> str:
     try:
         value = unquote(str(value or ""), errors="strict")
@@ -334,6 +342,7 @@ async def h_settings_patch(request: web.Request):
     except ValueError as exc:
         return web.json_response({"error": str(exc)}, status=400)
     config.set_value("uploads.max_file_size_mb", value)
+    _state_changed()
     return web.json_response({"ok": True, "uploads": settings_payload()})
 
 
@@ -373,6 +382,7 @@ async def h_session_upload(request: web.Request):
     directory = None
     partial = None
     _active_uploads += 1
+    _state_changed()
     try:
         directory = _new_upload_directory(session_id)
         final_path = directory / filename
@@ -427,6 +437,7 @@ async def h_session_upload(request: web.Request):
         return web.json_response({"error": "file upload was interrupted"}, status=500)
     finally:
         _active_uploads = max(0, _active_uploads - 1)
+        _state_changed()
 
 
 async def h_session_upload_delete(request: web.Request):

@@ -2444,7 +2444,14 @@ const state = {
   engCache: {},           // bid -> engines[]
   notify: { configured: false, enabled: false },   // completion-alert bell
   browser: { enabled: false },  // this instance's managed-browser toggle
+  browserStatus: null,          // full local browser status from node-state stream
   remoteBrowser: {},      // bid -> {enabled} from that node's ping metadata
+  remoteBrowserStatus: {}, // bid -> full managed-browser status
+  terminalInstances: {},  // bid (including 0) -> identified PTY catalog
+  stateStreamReady: {},   // bid (including 0) -> authoritative stream attached
+  stateStreamRuntime: {}, // bid -> the node process epoch behind that stream
+  stateStreamRevisions: {}, // "bid:topic" -> latest accepted node revision
+  remoteNodeUpgrade: {},  // bid -> live signed-backend upgrade descriptor
   remoteEngineErrors: {}, // bid -> latest engine-status error (node can still be reachable)
   remoteEngineCheckedAt: {},
   remoteNodeCheckedAt: {},
@@ -2596,19 +2603,28 @@ function reconcileRemoteState() {
                         state.remoteUsageRefresh, state.remoteAutoUpgrade,
                         state.remoteTimers, state.remoteUploadSettings,
                         state.remoteSystemPrompts,
-                        state.remoteBrowser, remotePollSequence]) {
+                        state.remoteBrowser, state.remoteBrowserStatus,
+                        state.terminalInstances, state.stateStreamReady,
+                        state.stateStreamRuntime, state.remoteNodeUpgrade,
+                        remotePollSequence]) {
     if (!bucket) continue;
-    for (const id of Object.keys(bucket)) if (!live.has(String(id))) delete bucket[id];
+    for (const id of Object.keys(bucket))
+      if (String(id) !== "0" && !live.has(String(id))) delete bucket[id];
   }
   for (const key of sessionActivityAnchors.keys()) {
     const bid = key.slice(0, key.indexOf(":"));
     if (bid !== "0" && !live.has(bid)) sessionActivityAnchors.delete(key);
+  }
+  for (const key of Object.keys(state.stateStreamRevisions)) {
+    const bid = key.slice(0, key.indexOf(":"));
+    if (bid !== "0" && !live.has(bid)) delete state.stateStreamRevisions[key];
   }
   let becameOnline = false;
   for (const backend of state.backends) {
     const health = controllerBackendHealth(backend);
     if (!health) continue; // compatibility with controllers predating this field
     const bid = Number(backend.id);
+    if (!backendSupportsStateStream(backend)) state.stateStreamReady[bid] = false;
     const previous = state.remoteOk[bid];
     if (health.state === "online") {
       const stopping = state.remoteStopping[bid];
@@ -2626,6 +2642,7 @@ function reconcileRemoteState() {
         state.remoteStopping[bid].controllerOfflineSeen = true;
       state.remoteOk[bid] = false;
       state.remoteErrors[bid] = health.reason || "Backend unavailable";
+      state.stateStreamReady[bid] = false;
       retireRemoteSessionActivity(bid);
     } else {
       delete state.remoteOk[bid];
@@ -2652,10 +2669,14 @@ function resetRemoteBackendConnection(bid) {
                         state.remoteUsageRefresh, state.remoteAutoUpgrade,
                         state.remoteTimers, state.remoteUploadSettings,
                         state.remoteSystemPrompts,
-                        state.remoteBrowser]) {
+                        state.remoteBrowser, state.remoteBrowserStatus,
+                        state.terminalInstances, state.stateStreamReady,
+                        state.stateStreamRuntime, state.remoteNodeUpgrade]) {
     if (!bucket) continue;
     delete bucket[bid];
   }
+  for (const key of Object.keys(state.stateStreamRevisions))
+    if (key.startsWith(`${bid}:`)) delete state.stateStreamRevisions[key];
   for (const key of [...sessionActivityAnchors.keys()])
     if (key.startsWith(`${bid}:`)) sessionActivityAnchors.delete(key);
 }
@@ -2685,6 +2706,35 @@ function hydrateBackendLastKnown(backends) {
     if (known.system_prompt && typeof known.system_prompt === "object")
       state.remoteSystemPrompts[bid] = known.system_prompt;
   }
+}
+
+/* Backend management replies carry the controller's complete public record.
+   Apply that authoritative result directly: the updates socket remains the
+   source for subsequent changes, while the command that just succeeded does
+   not need to turn around and bootstrap the whole application again. */
+function installBackendRecord(record, resetConnection = false) {
+  const bid = Number(record && record.id) || 0;
+  if (!bid || !record || typeof record !== "object") return null;
+  if (resetConnection) resetRemoteBackendConnection(bid);
+  const normalized = { ...record, id: bid };
+  const index = state.backends.findIndex(item => Number(item.id) === bid);
+  if (index < 0) state.backends.push(normalized);
+  else state.backends[index] = normalized;
+  hydrateBackendLastKnown([normalized]);
+  reconcileRemoteState();
+  syncRemoteStateViews();
+  startRemotePolling();
+  return normalized;
+}
+
+function discardBackendRecord(bid) {
+  bid = Number(bid) || 0;
+  if (!bid) return;
+  resetRemoteBackendConnection(bid);
+  state.backends = state.backends.filter(item => Number(item.id) !== bid);
+  reconcileRemoteState();
+  syncRemoteStateViews();
+  startRemotePolling();
 }
 
 function controllerBackendHealth(backend) {
@@ -2957,6 +3007,11 @@ function showAuth(mode, setupCodeRequired) {
   }
   state.authed = false;
   stopRemotePolling();
+  state.stateStreamReady[0] = false;
+  if (updatesLegacyRefreshTimer !== null) {
+    clearTimeout(updatesLegacyRefreshTimer);
+    updatesLegacyRefreshTimer = null;
+  }
   if (updatesWs) try { updatesWs.close(); } catch (error) {}
   setLocalConnection(false);
   $("app").classList.add("hidden");
@@ -3009,8 +3064,10 @@ $("auth-form").addEventListener("submit", async (ev) => {
 let updatesWs = null;
 let updatesRetry = 800;
 let updatesReconnectTimer = null;
+let updatesLegacyRefreshTimer = null;
 let updatesConnectionSequence = 0;
 let updatesHasOpened = false;
+let localStateStreamTopics = new Set();
 
 async function enterApp() {
   state.authed = true;
@@ -3062,6 +3119,253 @@ async function refreshState() {
   return s;
 }
 
+function clearNodeStateRevisions(bid) {
+  const prefix = `${Number(bid) || 0}:`;
+  for (const key of Object.keys(state.stateStreamRevisions))
+    if (key.startsWith(prefix)) delete state.stateStreamRevisions[key];
+}
+
+function noteLocalStateStreamTopic(message) {
+  if (!message || !Number.isInteger(message.state_revision) ||
+      message.state_revision < 1 || message.state_topic !== message.type ||
+      typeof message.runtime_id !== "string" ||
+      message.runtime_id !== state.stateStreamRuntime[0]) return;
+  localStateStreamTopics.add(message.type);
+  const required = ["sessions", "engines", "node", "browser_status",
+                    "terminal_instances"];
+  if (state.stateStreamReady[0] ||
+      !required.every(topic => localStateStreamTopics.has(topic))) return;
+  state.stateStreamReady[0] = true;
+  if (updatesLegacyRefreshTimer !== null) {
+    clearTimeout(updatesLegacyRefreshTimer);
+    updatesLegacyRefreshTimer = null;
+  }
+  startRemotePolling();
+}
+
+function acceptStateSnapshot(bid, message) {
+  if (!message || typeof message !== "object") return false;
+  const revision = message.state_revision;
+  const topic = message.state_topic;
+  const runtime = message.runtime_id;
+  if (!Number.isInteger(revision) || revision < 1 ||
+      typeof topic !== "string" || !topic ||
+      typeof runtime !== "string" || !runtime)
+    return false;
+  bid = Number(bid) || 0;
+  if (!bid && state.runtimeId && runtime !== state.runtimeId) {
+    location.reload();
+    return false;
+  }
+  if (bid) {
+    const knownRuntime = state.stateStreamRuntime[bid];
+    if (knownRuntime && knownRuntime !== runtime) clearNodeStateRevisions(bid);
+    state.stateStreamRuntime[bid] = runtime;
+  }
+  const key = `${bid}:${topic}`;
+  if (revision <= Number(state.stateStreamRevisions[key] || 0)) return false;
+  state.stateStreamRevisions[key] = revision;
+  return true;
+}
+
+function syncInstanceCatalogIntoViews(bid, kind, instances) {
+  for (const view of Object.values(state.views)) {
+    if (!view || !view.tab || view.tab.type !== "session" ||
+        Number(view.tab.bid || 0) !== Number(bid || 0) || !view.mentionData) continue;
+    if (kind === "browser") view.mentionData.browsers = instances;
+    else view.mentionData.terminals = instances;
+    view.mentionData.at = Date.now();
+    if (view.mention && !view.closed) view.updateMention();
+  }
+  syncSessionBrowserChips();
+}
+
+function applyBrowserStatusSnapshot(bid, payload) {
+  if (!payload || typeof payload.enabled !== "boolean" ||
+      !Array.isArray(payload.instances)) return;
+  bid = Number(bid) || 0;
+  if (bid) {
+    state.remoteBrowserStatus[bid] = payload;
+    state.remoteBrowser[bid] = { enabled: payload.enabled };
+  } else {
+    state.browserStatus = payload;
+    state.browser = payload;
+  }
+  syncInstanceCatalogIntoViews(bid, "browser", payload.instances);
+  if (!payload.enabled) closeBrowserTabsForBackend(bid);
+  syncRemoteStateViews();
+}
+
+function applyTerminalInstancesSnapshot(bid, payload) {
+  if (!payload || !Array.isArray(payload.instances)) return;
+  bid = Number(bid) || 0;
+  state.terminalInstances[bid] = payload.instances;
+  syncInstanceCatalogIntoViews(bid, "terminal", payload.instances);
+  syncRemoteStateViews();
+}
+
+function applyNodeSnapshot(bid, payload, markReachable = true) {
+  bid = Number(bid) || 0;
+  if (!payload || payload.ok !== true) return;
+  if (!bid) {
+    if (typeof payload.name === "string") state.instance = payload.name;
+    if (typeof payload.version === "string") state.version = payload.version;
+    rememberUploadSettings(0, payload.uploads);
+    if (payload.browser && typeof payload.browser.enabled === "boolean")
+      state.browser = { ...state.browser, enabled: payload.browser.enabled };
+  } else {
+    const backend = state.backends.find(item => Number(item.id) === bid);
+    if (!backend) return;
+    if (typeof payload.version === "string") backend.remote_version = payload.version;
+    if (typeof payload.role === "string") backend.role = payload.role;
+    if (Number.isInteger(payload.protocol)) backend.protocol = payload.protocol;
+    if (Array.isArray(payload.capabilities)) backend.capabilities = payload.capabilities;
+    rememberUploadSettings(bid, payload.uploads);
+    if (payload.browser && typeof payload.browser.enabled === "boolean")
+      state.remoteBrowser[bid] = { enabled: payload.browser.enabled };
+    if (payload.upgrade && typeof payload.upgrade === "object") {
+      state.remoteNodeUpgrade[bid] = payload.upgrade;
+      backend.upgrade = payload.upgrade;
+    }
+    state.remoteNodeCheckedAt[bid] = Date.now();
+    if (markReachable) {
+      state.remoteOk[bid] = true;
+      delete state.remoteErrors[bid];
+    }
+  }
+  syncRemoteStateViews();
+}
+
+function applyNodeStateSnapshot(bid, message) {
+  if (!message || message.state_topic !== message.type) return;
+  const valid =
+    (message.type === "sessions" && Array.isArray(message.sessions)) ||
+    (message.type === "engines" && Array.isArray(message.engines) &&
+      message.usage_refresh && typeof message.usage_refresh === "object" &&
+      message.auto_upgrade && typeof message.auto_upgrade === "object" &&
+      message.timers && typeof message.timers === "object") ||
+    (message.type === "node" && message.ok === true &&
+      Array.isArray(message.capabilities)) ||
+    (message.type === "browser_status" && typeof message.enabled === "boolean" &&
+      Array.isArray(message.instances)) ||
+    (message.type === "terminal_instances" && Array.isArray(message.instances));
+  if (!valid) return;
+  bid = Number(bid) || 0;
+  const accepted = acceptStateSnapshot(bid, message);
+  /* Reconnect snapshots can have the same revisions this page already saw.
+     They still prove that every required topic is present on the new socket. */
+  if (!bid) noteLocalStateStreamTopic(message);
+  if (!accepted) return;
+  const markReachable = !bid || nodeStateStreamActive(bid);
+  if (message.type === "sessions") {
+    if (bid) {
+      state.remoteSessions[bid] = message.sessions;
+      state.remoteSessionCheckedAt[bid] = Date.now();
+      if (markReachable) {
+        state.remoteOk[bid] = true;
+        delete state.remoteErrors[bid];
+      }
+    } else {
+      state.sessions = message.sessions;
+    }
+    ingestSessionActivity(bid, message.sessions, message.server_time);
+    if (bid) syncRemoteStateViews();
+    else {
+      renderSidebar();
+      syncTabsWithSessions();
+    }
+  } else if (message.type === "engines") {
+    applyEnginesPayload(bid, message, markReachable);
+  } else if (message.type === "node") {
+    applyNodeSnapshot(bid, message, markReachable);
+  } else if (message.type === "browser_status") {
+    applyBrowserStatusSnapshot(bid, message);
+  } else if (message.type === "terminal_instances") {
+    applyTerminalInstancesSnapshot(bid, message);
+  }
+}
+
+function applyRemoteStreamState(message) {
+  const bid = Number(message && message.backend_id) || 0;
+  const backend = state.backends.find(item => Number(item.id) === bid);
+  if (!bid || !backend) return;
+  if (!message.connected) {
+    state.stateStreamReady[bid] = false;
+    syncRemoteStateViews();
+    startRemotePolling();
+    return;
+  }
+  const health = controllerBackendHealth(backend);
+  if (health && health.state !== "online") {
+    state.stateStreamReady[bid] = false;
+    startRemotePolling();
+    return;
+  }
+  const runtime = typeof message.node_runtime_id === "string" ?
+    message.node_runtime_id : "";
+  if (!runtime) return;
+  if (state.stateStreamRuntime[bid] && state.stateStreamRuntime[bid] !== runtime)
+    clearNodeStateRevisions(bid);
+  state.stateStreamRuntime[bid] = runtime;
+  state.stateStreamReady[bid] = true;
+  syncRemoteStateViews();
+  startRemotePolling();
+}
+
+function handleUpdatesMessage(d) {
+  if (!d || typeof d !== "object") return;
+  const nodeTopic = ["sessions", "engines", "node", "browser_status",
+                     "terminal_instances"].includes(d.type);
+  if (nodeTopic) {
+    applyNodeStateSnapshot(0, d);
+    return;
+  }
+  if (d.state_revision != null && !acceptStateSnapshot(0, d)) return;
+  if (d.type === "updates_ready") {
+    const runtime = typeof d.runtime_id === "string" ? d.runtime_id : "";
+    if (d.stream_version !== 1 || !runtime) return;
+    if (state.runtimeId && runtime !== state.runtimeId) {
+      location.reload();
+      return;
+    }
+    state.stateStreamReady[0] = false;
+    state.stateStreamRuntime[0] = runtime;
+    localStateStreamTopics = new Set();
+    startRemotePolling();
+  } else if (d.type === "remote_stream") {
+    applyRemoteStreamState(d);
+  } else if (d.type === "remote_state") {
+    const bid = Number(d.backend_id) || 0;
+    const event = d.event;
+    if (!bid || !event || typeof event !== "object") return;
+    if (event.type === "node_stopping") handleRemoteNodeStopping(bid, event);
+    else applyNodeStateSnapshot(bid, event);
+  } else if (d.type === "backends" && Array.isArray(d.backends)) {
+    state.backends = d.backends;
+    hydrateBackendLastKnown(state.backends);
+    reconcileRemoteState();
+    syncRemoteStateViews();
+    startRemotePolling();
+  } else if (d.type === "host_metrics") {
+    renderHostCpu(d.cpu_percent);
+  } else if (d.type === "notify") {
+    state.notify = { configured: !!d.configured, enabled: !!d.enabled };
+    syncBell();
+  } else if (d.type === "browser") {
+    state.browser = { ...state.browser, enabled: !!d.enabled };
+    if (d.enabled === false) closeBrowserTabsForBackend(0);
+    renderSidebar();
+  } else if (d.type === "browser_activity") {
+    handleBrowserActivity(0, d.session_id, d.turn_id, d.browser_id);
+  } else if (d.type === "terminal_activity") {
+    handleTerminalActivity(0, d.session_id, d.turn_id, d.terminal_id);
+  } else if (d.type === "workspace_links" && Array.isArray(d.links)) {
+    state.workspaceLinks = d.links;
+    renderSidebar();
+    refreshWorkspaceChips();
+  }
+}
+
 async function refreshAfterUpdatesReconnect(sequence, ws) {
   const previousRuntime = state.runtimeId;
   try {
@@ -3102,51 +3406,33 @@ function connectUpdates() {
     updatesHasOpened = true;
     updatesRetry = 800;
     setLocalConnection(true);
-    if (reconnect) refreshAfterUpdatesReconnect(sequence, ws);
+    if (reconnect) {
+      if (updatesLegacyRefreshTimer !== null) clearTimeout(updatesLegacyRefreshTimer);
+      updatesLegacyRefreshTimer = setTimeout(() => {
+        updatesLegacyRefreshTimer = null;
+        if (!nodeStateStreamActive(0)) refreshAfterUpdatesReconnect(sequence, ws);
+      }, 1500);
+    }
   };
   ws.onmessage = (ev) => {
     if (sequence !== updatesConnectionSequence || updatesWs !== ws) return;
     try {
       const d = JSON.parse(ev.data);
-      if (d.type === "sessions" && Array.isArray(d.sessions)) {
-        state.sessions = d.sessions;
-        ingestSessionActivity(0, state.sessions, d.server_time);
-        renderSidebar();
-        syncTabsWithSessions();
-      } else if (d.type === "backends" && Array.isArray(d.backends)) {
-        state.backends = d.backends;
-        hydrateBackendLastKnown(state.backends);
-        const becameOnline = reconcileRemoteState();
-        renderSidebar();
-        syncRemoteStateViews();
-        if (becameOnline)
-          pollRemotes({ forceEngines: true })
-            .catch(error => console.warn("backend recovery poll failed", error));
-      } else if (d.type === "host_metrics") {
-        renderHostCpu(d.cpu_percent);
-      } else if (d.type === "notify") {
-        state.notify = { configured: !!d.configured, enabled: !!d.enabled };
-        syncBell();
-      } else if (d.type === "browser") {
-        state.browser = { enabled: !!d.enabled };
-        if (d.enabled === false) closeBrowserTabsForBackend(0);
-        renderSidebar();
-      } else if (d.type === "browser_activity") {
-        handleBrowserActivity(0, d.session_id, d.turn_id, d.browser_id);
-      } else if (d.type === "terminal_activity") {
-        handleTerminalActivity(0, d.session_id, d.turn_id, d.terminal_id);
-      } else if (d.type === "workspace_links" && Array.isArray(d.links)) {
-        state.workspaceLinks = d.links;
-        renderSidebar();
-        refreshWorkspaceChips();
-      }
+      handleUpdatesMessage(d);
     } catch (e) {}
   };
   ws.onclose = () => {
     if (sequence !== updatesConnectionSequence || updatesWs !== ws) return;
     updatesWs = null;
+    state.stateStreamReady[0] = false;
+    localStateStreamTopics = new Set();
+    if (updatesLegacyRefreshTimer !== null) {
+      clearTimeout(updatesLegacyRefreshTimer);
+      updatesLegacyRefreshTimer = null;
+    }
     setLocalConnection(false);
     if (!state.authed) return;
+    startRemotePolling();
     const delay = Math.round(updatesRetry * (.85 + Math.random() * .3));
     updatesRetry = Math.min(updatesRetry * 1.6, 15000);
     updatesReconnectTimer = setTimeout(() => {
@@ -3263,6 +3549,7 @@ function closeRemoteUpdateConnection(rawBid) {
 function connectRemoteUpdates(backend) {
   const bid = Number(backend && backend.id) || 0;
   if (!bid || !state.authed || !backendSupportsShutdownNotice(backend) ||
+      backendSupportsStateStream(backend) ||
       !backendConnectionAllowed(bid)) return;
   let entry = remoteUpdateConnections.get(bid);
   if (!entry) {
@@ -3301,6 +3588,7 @@ function connectRemoteUpdates(backend) {
     entry.ws = null;
     const live = state.backends.find(item => item.id === bid);
     if (!state.authed || !backendSupportsShutdownNotice(live) ||
+        backendSupportsStateStream(live) ||
         !backendConnectionAllowed(bid)) return;
     const delay = Math.round(entry.retry * (.85 + Math.random() * .3));
     entry.retry = Math.min(entry.retry * 1.7, 15000);
@@ -3315,6 +3603,7 @@ function connectRemoteUpdates(backend) {
 function syncRemoteUpdateConnections() {
   const desired = new Map(state.backends
     .filter(backend => backendSupportsShutdownNotice(backend) &&
+      !backendSupportsStateStream(backend) &&
       backendPoolable(backend) &&
       state.remoteOk[Number(backend.id)] === true)
     .map(backend => [Number(backend.id), backend]));
@@ -3341,6 +3630,7 @@ function stopRemoteUpdateConnections() {
 }
 
 async function pollLocalEngines(forceEngines = false) {
+  if (nodeStateStreamActive(0)) return;
   const now = Date.now();
   if (!forceEngines && now - Number(state.localEngineCheckedAt || 0) <
       timerMilliseconds("remote_engine_seconds"))
@@ -3361,6 +3651,7 @@ async function pollLocalEngines(forceEngines = false) {
 
 async function pollRemoteBackend(backend, forceEngines = false, forceSessions = false) {
   const bid = backend.id;
+  if (backendSupportsStateStream(backend) && nodeStateStreamActive(bid)) return;
   if (!backendConnectionAllowed(bid)) return;
   const sequence = (remotePollSequence[bid] || 0) + 1;
   remotePollSequence[bid] = sequence;
@@ -3499,20 +3790,34 @@ async function pollRemotes(options = {}) {
   ]);
 }
 
+function legacyStatePollingNeeded() {
+  if (!nodeStateStreamActive(0)) return true;
+  return state.backends.some(backend => backendConnectionAllowed(backend.id) &&
+    (!backendSupportsStateStream(backend) || !nodeStateStreamActive(backend.id)));
+}
+
 function startRemotePolling() {
   const generation = ++remotePollingGeneration;
+  if (remotePollTimer !== null) clearTimeout(remotePollTimer);
+  remotePollTimer = null;
+  if (!state.authed || !legacyStatePollingNeeded()) return;
   const tick = async () => {
     remotePollTimer = null;
-    if (!state.authed || generation !== remotePollingGeneration) return;
+    if (!state.authed || generation !== remotePollingGeneration ||
+        !legacyStatePollingNeeded()) return;
     try { await pollRemotes({ scheduled: true }); }
     catch (error) { console.warn("remote poll failed", error); }
     finally {
-      if (state.authed && generation === remotePollingGeneration)
+      if (state.authed && generation === remotePollingGeneration &&
+          legacyStatePollingNeeded())
         remotePollTimer = setTimeout(tick, remotePollingTickMilliseconds());
     }
   };
-  if (remotePollTimer !== null) clearTimeout(remotePollTimer);
-  tick();
+  /* Give the local stream and the controller's already-running backend
+     subscriptions a brief chance to deliver their attach snapshots.  A node
+     without the capability, or a capable stream that stays down, then falls
+     back to exactly the established timer-driven reads. */
+  remotePollTimer = setTimeout(tick, 1500);
 }
 
 function stopRemotePolling() {
@@ -3978,6 +4283,32 @@ function backendHasCapability(backend, capability) {
 function backendSupportsShutdownNotice(backend) {
   return !!backend && backend.role === "backend" && Number(backend.protocol || 0) > 0 &&
     Array.isArray(backend.capabilities) && backend.capabilities.includes("shutdown-notice");
+}
+
+function backendSupportsStateStream(backend) {
+  /* Never infer this contract from protocol 0 or another additive feature.
+     A missing marker keeps the established HTTP polling fallback intact. */
+  return !!backend && Number(backend.protocol || 0) > 0 &&
+    Array.isArray(backend.capabilities) &&
+    backend.capabilities.includes("node-state-stream-v1");
+}
+
+function backendSupportsSessionControlSocket(bid) {
+  bid = Number(bid) || 0;
+  if (!bid) return true;
+  const backend = state.backends.find(item => Number(item.id) === bid);
+  return !!backend && Number(backend.protocol || 0) > 0 &&
+    Array.isArray(backend.capabilities) &&
+    backend.capabilities.includes("session-control-ws-v1");
+}
+
+function nodeStateStreamActive(bid) {
+  bid = Number(bid) || 0;
+  /* A remote subscription terminates at the controller.  It can replace
+     browser polling only while this console can also hear the controller's
+     fanout; if that local leg drops, the established HTTP path takes over. */
+  return state.stateStreamReady[bid] === true &&
+    (!bid || state.stateStreamReady[0] === true);
 }
 
 /* Distinct from backendSupportsAutoUpgrade below, which answers whether the
@@ -5226,16 +5557,16 @@ function rememberEnginePayload(bid, result) {
   }
 }
 
-function applyEnginesPayload(bid, result) {
+function applyEnginesPayload(bid, result, markReachable = true) {
   if (!result || !Array.isArray(result.engines) || !result.usage_refresh)
     throw new Error("backend returned an invalid engine response");
   rememberEnginePayload(bid, result);
-  if (bid) {
+  if (bid && markReachable) {
     state.remoteOk[bid] = true;
     delete state.remoteErrors[bid];
     state.remoteEngineCheckedAt[bid] = Date.now();
     delete state.remoteEngineErrors[bid];
-  } else {
+  } else if (!bid) {
     state.localEngineCheckedAt = Date.now();
   }
   syncRemoteStateViews();
@@ -7564,6 +7895,7 @@ class SessionView {
     this.steerPending = null;
     this.sideQuestion = { supported: false, ready: false, turn_id: "" };
     this.askPending = null;
+    this.controlRequests = new Map(); // active-turn socket handoffs awaiting correlated replies
     /* Question cards awaiting their answer, by request id - the answer is its
        own event and folds into the card it belongs to, exactly as a tool
        result folds into its tool call. */
@@ -7625,7 +7957,16 @@ class SessionView {
     this.terminalChipKey = null;  // set of linked-terminal bubbles now rendered
     this.mention = null;          // open @-mention popup: {start, query, items, sel}
     this.mentionDismissedAt = -1; // Esc'd token start; stays hidden while it lives
-    this.mentionData = { at: 0, browsers: null, terminals: null, promise: null };
+    const nodeBid = Number(this.tab.bid) || 0;
+    const browserCatalog = nodeBid ? state.remoteBrowserStatus[nodeBid] : state.browserStatus;
+    this.mentionData = {
+      at: nodeStateStreamActive(nodeBid) ? Date.now() : 0,
+      browsers: browserCatalog && Array.isArray(browserCatalog.instances) ?
+        browserCatalog.instances : null,
+      terminals: Array.isArray(state.terminalInstances[nodeBid]) ?
+        state.terminalInstances[nodeBid] : null,
+      promise: null,
+    };
     this.mentionSpawn = null;     // "New spawn" wizard: {step, node, engine, model, …}
     this.mentionRowEls = [];      // selectable rows, excluding the wizard header
     this.pendingScroll = null;    // position owed back after a workspace rebuild
@@ -7950,6 +8291,7 @@ class SessionView {
       this.draftReady = false;
       this.draftInFlightSeq = 0;
       this.draftPendingText = null;
+      this.rejectControlRequests("Connection lost before the node confirmed the request");
       this.cancelQueueEdit("Connection lost before the queued message could be edited");
       this.cancelQueueDrag(null, false);
       if (this.closed) return;
@@ -7971,8 +8313,56 @@ class SessionView {
     this.connect();
   }
 
+  rejectControlRequests(message) {
+    for (const pending of this.controlRequests.values()) {
+      if (pending.timer !== null) clearTimeout(pending.timer);
+      pending.reject(new Error(message));
+    }
+    this.controlRequests.clear();
+  }
+
+  sendActiveTurnControl(type, payload) {
+    return new Promise((resolve, reject) => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        reject(new Error("Not connected"));
+        return;
+      }
+      const requestId = String(payload.request_id || "");
+      const key = `${type}:${requestId}`;
+      if (!requestId || this.controlRequests.has(key)) {
+        reject(new Error("A matching request is already pending"));
+        return;
+      }
+      const pending = { type, requestId, resolve, reject, timer: null };
+      pending.timer = setTimeout(() => {
+        if (this.controlRequests.get(key) !== pending) return;
+        this.controlRequests.delete(key);
+        reject(new Error("Backend did not confirm the request"));
+      }, 15000);
+      this.controlRequests.set(key, pending);
+      try {
+        this.ws.send(JSON.stringify({ type, ...payload }));
+      } catch (error) {
+        clearTimeout(pending.timer);
+        this.controlRequests.delete(key);
+        reject(error);
+      }
+    });
+  }
+
+  completeActiveTurnControl(type, message) {
+    const key = `${type}:${String(message.request_id || "")}`;
+    const pending = this.controlRequests.get(key);
+    if (!pending) return;
+    this.controlRequests.delete(key);
+    if (pending.timer !== null) clearTimeout(pending.timer);
+    if (message.error) pending.reject(new Error(message.error));
+    else pending.resolve(message);
+  }
+
   destroy() {
     this.closed = true;
+    this.rejectControlRequests("Session view closed before the node confirmed the request");
     this.cancelQueueEdit("", false);
     this.cancelQueueDrag(null, true);
     if (this._stopLoadOlder) this._stopLoadOlder();
@@ -8937,6 +9327,16 @@ class SessionView {
   refreshMentionInstances() {
     const bid = this.tab.bid || 0;
     const data = this.mentionData;
+    if (nodeStateStreamActive(bid)) {
+      const browserCatalog = bid ? state.remoteBrowserStatus[bid] : state.browserStatus;
+      data.browsers = browserCatalog && Array.isArray(browserCatalog.instances) ?
+        browserCatalog.instances : null;
+      data.terminals = Array.isArray(state.terminalInstances[bid]) ?
+        state.terminalInstances[bid] : null;
+      data.at = Date.now();
+      if (this.mention && !this.closed) this.updateMention();
+      return;
+    }
     if (data.promise || Date.now() - data.at < 10000) return;
     if (bid && !backendConnectionAllowed(bid)) return;
     const wantBrowsers = browserEnabledFor(bid) && browserInstancesFor(bid);
@@ -9090,6 +9490,12 @@ class SessionView {
         break;
       case "side_question_progress":
         this.noteAskProgress(d);
+        break;
+      case "ask_complete":
+        this.completeActiveTurnControl("ask", d);
+        break;
+      case "steer_complete":
+        this.completeActiveTurnControl("steer", d);
         break;
       case "steer_status":
         if (this.steerPending && d.request_id === this.steerPending.requestId &&
@@ -9417,15 +9823,17 @@ class SessionView {
     this.updateAskControl();
     this._forceScroll = true;
     try {
-      await api(this.tab.bid, `sessions/${this.tab.sid}/ask`, {
-        method: "POST",
-        body: {
-          question,
-          request_id: request.requestId,
-          expected_turn_id: request.turnId,
-        },
-        timeoutMs: 15000,
-      });
+      const body = {
+        question,
+        request_id: request.requestId,
+        expected_turn_id: request.turnId,
+      };
+      if (backendSupportsSessionControlSocket(this.tab.bid))
+        await this.sendActiveTurnControl("ask", body);
+      else
+        await api(this.tab.bid, `sessions/${this.tab.sid}/ask`, {
+          method: "POST", body, timeoutMs: 15000,
+        });
     } catch (error) {
       if (this.askPending === request) this.askPending = null;
       this._forceScroll = false;
@@ -10396,15 +10804,16 @@ class SessionView {
     this._forceScroll = true;
     let result;
     try {
-      result = await api(this.tab.bid, `sessions/${this.tab.sid}/steer`, {
-        method: "POST",
-        body: {
-          text,
-          request_id: request.requestId,
-          expected_turn_id: request.turnId,
-        },
-        timeoutMs: 15000,
-      });
+      const body = {
+        text,
+        request_id: request.requestId,
+        expected_turn_id: request.turnId,
+      };
+      result = backendSupportsSessionControlSocket(this.tab.bid) ?
+        await this.sendActiveTurnControl("steer", body) :
+        await api(this.tab.bid, `sessions/${this.tab.sid}/steer`, {
+          method: "POST", body, timeoutMs: 15000,
+        });
     } catch (error) {
       if (this.steerPending === request) this.steerPending = null;
       this._forceScroll = false;
@@ -13169,6 +13578,7 @@ class SettingsView {
     this.upgradesInProgress = new Set();
     this.upgradePollTimer = null;
     this.upgradePollGeneration = 0;
+    this.upgradePollActive = false;
     this.engineUpgradeState = new Map();   // "bid:engine" -> "running" | "idle"
     this.engineUpgradeStarts = new Set();  // POST accepted or rejected asynchronously
     this.engineUpgradePollTimer = null;
@@ -13206,6 +13616,7 @@ class SettingsView {
 
   stopUpgradeReadinessPolling() {
     this.upgradePollGeneration++;
+    this.upgradePollActive = false;
     if (this.upgradePollTimer !== null) clearTimeout(this.upgradePollTimer);
     this.upgradePollTimer = null;
   }
@@ -13227,14 +13638,14 @@ class SettingsView {
   }
 
   syncEngineUpgrades() {
-    let running = false;
+    let legacyRunning = false;
     for (const node of this.engineNodes()) {
       if (!Array.isArray(node.engines)) continue;
       for (const engine of node.engines) {
         const id = `${node.bid}:${engine.key}`;
         const was = this.engineUpgradeState.get(id);
         if (engine.upgrade_state === "running" || this.engineUpgradeStarts.has(id)) {
-          running = true;
+          if (!nodeStateStreamActive(node.bid)) legacyRunning = true;
           this.engineUpgradeState.set(id, "running");
         } else {
           this.engineUpgradeState.set(id, "idle");
@@ -13242,7 +13653,7 @@ class SettingsView {
         }
       }
     }
-    if (running) this.startEngineUpgradePolling();
+    if (legacyRunning) this.startEngineUpgradePolling();
     else this.stopEngineUpgradePolling();
   }
 
@@ -13280,7 +13691,8 @@ class SettingsView {
       if (generation !== this.engineUpgradePollGeneration) return;
       const nodes = [...new Set([...this.engineUpgradeState]
         .filter(([, value]) => value === "running")
-        .map(([id]) => Number(id.split(":")[0])))];
+        .map(([id]) => Number(id.split(":")[0])))].filter(bid =>
+          !nodeStateStreamActive(bid));
       await Promise.all(nodes.map(async bid => {
         if (bid && !backendConnectionAllowed(bid)) return;
         try {
@@ -13290,8 +13702,11 @@ class SettingsView {
         }
       }));
       if (generation !== this.engineUpgradePollGeneration) return;
-      if ([...this.engineUpgradeState.values()].includes("running"))
+      if ([...this.engineUpgradeState].some(([id, value]) =>
+          value === "running" && !nodeStateStreamActive(Number(id.split(":")[0]))))
         this.engineUpgradePollTimer = setTimeout(tick, ENGINE_UPGRADE_POLL_INTERVAL);
+      else
+        this.stopEngineUpgradePolling();
     };
     this.engineUpgradePollTimer = setTimeout(tick, ENGINE_UPGRADE_POLL_INTERVAL);
   }
@@ -13421,7 +13836,8 @@ class SettingsView {
     const candidates = [...this.upgradeButtons.entries()]
       .filter(([, record]) => this.isUpgradeCandidate(record) &&
         !this.upgradesInProgress.has(record.backend.id) &&
-        backendConnectionAllowed(record.backend.id));
+        backendConnectionAllowed(record.backend.id) &&
+        !nodeStateStreamActive(record.backend.id));
     const results = await Promise.all(candidates.map(async ([bid]) => {
       try {
         const descriptor = await api(bid, "node/upgrade", {
@@ -13452,24 +13868,48 @@ class SettingsView {
   }
 
   startUpgradeReadinessPolling() {
-    this.stopUpgradeReadinessPolling();
-    const generation = this.upgradePollGeneration;
-    if (![...this.upgradeButtons.values()].some(record => this.isUpgradeCandidate(record)))
-      return;
+    if (this.upgradePollActive) return;
+    if (![...this.upgradeButtons.values()].some(record =>
+        this.isUpgradeCandidate(record) &&
+        backendConnectionAllowed(record.backend.id) &&
+        !nodeStateStreamActive(record.backend.id))) return;
+    this.upgradePollActive = true;
+    const generation = ++this.upgradePollGeneration;
     const tick = async () => {
       this.upgradePollTimer = null;
       if (generation !== this.upgradePollGeneration || !isTabVisible(this.tab.id) ||
-          !this.root.isConnected) return;
+          !this.root.isConnected) {
+        this.upgradePollActive = false;
+        return;
+      }
       try { await this.refreshUpgradeReadiness(generation); }
       catch (error) { console.warn("upgrade readiness poll failed", error); }
+      const stillNeeded = [...this.upgradeButtons.values()].some(record =>
+        this.isUpgradeCandidate(record) &&
+        backendConnectionAllowed(record.backend.id) &&
+        !nodeStateStreamActive(record.backend.id));
       if (generation === this.upgradePollGeneration && isTabVisible(this.tab.id) &&
-          this.root.isConnected)
+          this.root.isConnected && stillNeeded)
         this.upgradePollTimer = setTimeout(tick, UPGRADE_READINESS_INTERVAL);
+      else
+        this.upgradePollActive = false;
     };
     tick();
   }
 
   syncRemoteState() {
+    for (const [bid, record] of this.upgradeButtons) {
+      if (!this.isUpgradeCandidate(record) || !nodeStateStreamActive(bid)) continue;
+      const descriptor = state.remoteNodeUpgrade[bid];
+      if (descriptor) this.upgradeReadiness.set(
+        bid, this.readinessFromDescriptor(bid, descriptor));
+    }
+    const readinessFallback = [...this.upgradeButtons.values()].some(record =>
+      this.isUpgradeCandidate(record) &&
+      backendConnectionAllowed(record.backend.id) &&
+      !nodeStateStreamActive(record.backend.id));
+    if (readinessFallback) this.startUpgradeReadinessPolling();
+    else if (this.upgradePollActive) this.stopUpgradeReadinessPolling();
     this.syncEngineUpgrades();
     if (this.localEngineGroup)
       this.localEngineGroup.update({ status: "ok", engines: state.engines });
@@ -13542,15 +13982,23 @@ class SettingsView {
         remoteAvailability(bid), backendSupportsFileUploads(bid));
     }
     for (const [bid, record] of this.remoteBrowserToggles) {
+      const status = bid ? state.remoteBrowserStatus[bid] : state.browserStatus;
+      if (nodeStateStreamActive(bid) && status && record.apply) {
+        record.apply(status);
+        continue;
+      }
+      if (!bid) continue;
       const availability = remoteAvailability(bid);
       const unavailable = !backendConnectionAllowed(bid);
       record.input.checked = browserEnabledFor(bid);
       if (unavailable) {
         record.input.disabled = true;
-        record.root.classList.add("disabled");
-        record.root.title = availability === "bad" ?
-          "Backend unavailable · showing last known value" :
-          "Checking backend · showing last known value";
+        if (record.root) {
+          record.root.classList.add("disabled");
+          record.root.title = availability === "bad" ?
+            "Backend unavailable · showing last known value" :
+            "Checking backend · showing last known value";
+        }
         if (record.shared) {
           record.shared.input.disabled = true;
           if (record.shared.root) record.shared.root.classList.add("disabled");
@@ -14076,6 +14524,11 @@ class SettingsView {
     };
     const load = async () => {
       if (!supported) return;
+      const streamed = bid ? state.remoteUploadSettings[bid] : state.uploadSettings;
+      if (nodeStateStreamActive(bid) && streamed) {
+        update(streamed, bid ? remoteAvailability(bid) : "ok", true);
+        return;
+      }
       if (bid && !backendConnectionAllowed(bid)) {
         loadError = "Backend unavailable";
         update(current, remoteAvailability(bid), true);
@@ -14140,10 +14593,10 @@ class SettingsView {
     const name = backendName(bid);
     if (!shared && existingRecord && existingRecord.shared)
       shared = existingRecord.shared;
-    const browserRecord = existingRecord || (bid && root ? {
+    const browserRecord = existingRecord || {
       input, root, shared, wasOffline: false,
-    } : null);
-    if (browserRecord) this.remoteBrowserToggles.set(bid, browserRecord);
+    };
+    this.remoteBrowserToggles.set(Number(bid) || 0, browserRecord);
     const setNote = (text, warn) => {
       if (note) {
         note.textContent = text;
@@ -14175,7 +14628,13 @@ class SettingsView {
     const apply = st => {
       if (browserRecord) browserRecord.wasOffline = false;
       input.checked = !!st.enabled;
-      if (bid) state.remoteBrowser[bid] = { enabled: !!st.enabled };
+      if (bid) {
+        state.remoteBrowser[bid] = { enabled: !!st.enabled };
+        state.remoteBrowserStatus[bid] = st;
+      } else {
+        state.browser = st;
+        state.browserStatus = st;
+      }
       input.disabled = !st.available && !st.enabled;
       if (root) {
         root.classList.toggle("disabled", input.disabled);
@@ -14194,6 +14653,7 @@ class SettingsView {
         setNote(st.reason || "No usable browser on this backend", true);
       }
     };
+    browserRecord.apply = apply;
     /* Only availability needs the probe: whether the toggle is on is already
        known from /api/state and the node pings. Seed the switch from that, or
        it renders off and visibly flips on a moment later. */
@@ -14208,19 +14668,22 @@ class SettingsView {
         "Checking backend · showing last known value", true);
       return;
     }
-    let status;
-    try {
-      status = await api(bid, "browser/status", { timeoutMs: ENGINE_POLL_TIMEOUT });
-    } catch (error) {
-      if (generation !== this.renderGeneration || !input.isConnected) return;
-      input.disabled = true;
-      if (root) root.classList.add("disabled");
-      setSharedUsable(false);
-      setNote(error.message || "Browser status unavailable", true);
-      return;
+    let status = bid ? state.remoteBrowserStatus[bid] : state.browserStatus;
+    if (!nodeStateStreamActive(bid)) {
+      try {
+        status = await api(bid, "browser/status", { timeoutMs: ENGINE_POLL_TIMEOUT });
+      } catch (error) {
+        if (generation !== this.renderGeneration || !input.isConnected) return;
+        input.disabled = true;
+        if (root) root.classList.add("disabled");
+        setSharedUsable(false);
+        setNote(error.message || "Browser status unavailable", true);
+        return;
+      }
     }
     if (generation !== this.renderGeneration || !input.isConnected) return;
-    apply(status);
+    if (status) apply(status);
+    else setNote("Waiting for browser status…", false);
     input.onchange = async () => {
       const desired = input.checked;
       input.disabled = true;
@@ -14229,8 +14692,6 @@ class SettingsView {
         const result = await api(bid, "browser/enabled", {
           method: "POST", body: { enabled: desired } });
         apply(result);
-        if (bid) state.remoteBrowser[bid] = { enabled: !!result.enabled };
-        else state.browser = { enabled: !!result.enabled };
         if (result.enabled === false) closeBrowserTabsForBackend(bid);
         renderSidebar();
         toast(`${name}: Browser ${result.enabled ? "enabled" : "disabled"}`, "ok");
@@ -14283,13 +14744,13 @@ class SettingsView {
         description: "How long installed-version and sign-in probes are reused before checking again.",
       },
       {
-        key: "remote_session_seconds", scope: "console", label: "Remote session polling",
-        description: "How often this console checks paired backends for session changes.",
+        key: "remote_session_seconds", scope: "console", label: "Remote session fallback polling",
+        description: "Fallback cadence for older backends or a temporarily unavailable state stream.",
       },
       {
         key: "remote_engine_seconds", scope: "console",
-        label: "Remote node metadata and engine payloads",
-        description: "How often this console re-reads remote node details, models, versions, and status.",
+        label: "Remote metadata fallback polling",
+        description: "Fallback cadence for node and engine state when a live state stream is unavailable.",
       },
       {
         key: "completion_sync_seconds", scope: "console",
@@ -14484,6 +14945,10 @@ class SettingsView {
     const load = async bid => {
       if (!bid || loading.has(bid) || !backendSupportsTimerSettings(bid) ||
           !backendConnectionAllowed(bid)) return;
+      if (nodeStateStreamActive(bid)) {
+        paint();
+        return;
+      }
       loading.add(bid);
       paint();
       try {
@@ -14980,8 +15445,14 @@ class SettingsView {
     const generation = ++this.renderGeneration;
     let settings, engines, promptSettings;
     try {
+      const liveEngines = nodeStateStreamActive(0) ? Promise.resolve({
+        engines: state.engines,
+        usage_refresh: state.usageRefresh,
+        auto_upgrade: state.autoUpgrade,
+        timers: state.timers,
+      }) : api(0, "engines");
       [settings, engines, promptSettings] = await Promise.all([
-        api(0, "settings"), api(0, "engines"), api(0, "system-prompt"),
+        api(0, "settings"), liveEngines, api(0, "system-prompt"),
       ]);
     } catch (e) {
       if (generation === this.renderGeneration)
@@ -15721,16 +16192,9 @@ class SettingsView {
         const edit = el("button", "btn btn-sm", "Edit");
         edit.setAttribute("aria-label", `Edit backend ${b.name}`);
         edit.onclick = () => modalEditBackend(b, async result => {
-          const current = state.backends.find(item => item.id === b.id);
-          if (current && result.backend) Object.assign(current, result.backend);
-          if (result.connection_changed) resetRemoteBackendConnection(b.id);
+          installBackendRecord(result.backend, !!result.connection_changed);
           toast(`${(result.backend && result.backend.name) || b.name}: Backend updated`, "ok");
-          try {
-            await refreshState();
-            if (this.inner.isConnected) await this.render();
-          } catch (error) {
-            console.warn("post-edit backend refresh failed", error);
-          }
+          if (this.inner.isConnected) await this.render();
           if (result.connection_changed) {
             for (const view of Object.values(state.views)) {
               if (!view || !view.tab || view.tab.type !== "browser" ||
@@ -15740,19 +16204,17 @@ class SettingsView {
               catch (error) { console.warn("backend browser reconnect failed", error); }
             }
           }
-          pollRemotes({ forceEngines: true })
-            .catch(error => console.warn("edited-backend poll failed", error));
         });
         const test = el("button", "btn btn-sm", "Test");
         test.onclick = async () => {
           test.textContent = "…";
           try {
             const r = await api(0, `backends/${b.id}/test`, { method: "POST" });
+            installBackendRecord(r.backend);
             if (r.ok) {
               state.remoteOk[b.id] = true;
               delete state.remoteErrors[b.id];
               toast(`${b.name}: OK (${r.remote && r.remote.version})`, "ok");
-              await refreshState(); await this.render();
             } else {
               const message = r.error || "HTTP " + r.status;
               state.remoteOk[b.id] = false;
@@ -15760,12 +16222,11 @@ class SettingsView {
               syncRemoteStateViews();
               toast(`${b.name}: ${message}`, "error");
             }
+            if (this.inner.isConnected) await this.render();
           } catch (e) {
             toast(e.message, "error");
           } finally {
             if (test.isConnected) test.textContent = "Test";
-            pollRemotes({ forceEngines: true })
-              .catch(error => console.warn("backend test follow-up poll failed", error));
           }
         };
         const upgrade = el("button", "btn btn-sm", "Upgrade");
@@ -15793,24 +16254,17 @@ class SettingsView {
             return;
           }
           this.upgradesInProgress.delete(b.id);
-          const upgradedBackend = state.backends.find(item => item.id === b.id);
-          if (upgradedBackend && result && result.to_version)
-            upgradedBackend.remote_version = result.to_version;
+          installBackendRecord(result && result.backend);
           this.syncUpgradeButtons();
-          delete state.engCache[b.id];
-          delete state.remoteEngineCheckedAt[b.id];
-          delete state.remoteEngineErrors[b.id];
-          try { await refreshState(); await this.render(); }
-          catch (error) { console.warn("post-upgrade settings refresh failed", error); }
-          pollRemotes({ forceEngines: true })
-            .catch(error => console.warn("post-upgrade remote poll failed", error));
+          if (this.inner.isConnected) await this.render();
         };
         const rm = el("button", "btn btn-danger btn-sm", "Remove");
         rm.onclick = async () => {
           const addresses = configuredBackendUrls(b).join(", ");
           if (!(await modalConfirm("Remove backend?", `${b.name} (${addresses})`))) return;
           await api(0, `backends/${b.id}`, { method: "DELETE" });
-          await refreshState(); await this.render();
+          discardBackendRecord(b.id);
+          if (this.inner.isConnected) await this.render();
         };
         actions.appendChild(edit); actions.appendChild(test);
         actions.appendChild(upgrade); actions.appendChild(rm);
@@ -15845,6 +16299,7 @@ class SettingsView {
           tls_fingerprint: pairingValue("#be-tls", "tls_sha256"),
           auto_upgrade: c3.querySelector("#be-auto").checked,
         }});
+        installBackendRecord(added.backend);
         toast("Backend added", "ok");
         c3.querySelector("#be-name").value = c3.querySelector("#be-token").value =
           c3.querySelector("#be-tls").value = "";
@@ -15856,9 +16311,7 @@ class SettingsView {
            exists to answer once it has been added. A refusal leaves the backend
            in place - it is a separate setting, not part of the connection. */
         if (wantBrowser) await enableAddedBackendBrowser(added);
-        await refreshState(); await this.render();
-        pollRemotes({ forceEngines: true })
-          .catch(error => console.warn("new-backend poll failed", error));
+        if (this.inner.isConnected) await this.render();
       } catch (e) { toast(e.message, "error"); }
     };
     /* security */

@@ -150,6 +150,27 @@ async def exercise_http(archive_ui: dict, session_id: int, project: Path) -> Non
             assert config.get("uploads.max_file_size_mb") == 19
             assert notify.completion_events(0)["stream_id"] != archived_stream
             assert db.meta_get(cursor_key) is None
+
+            # Restore closes pre-restore viewers. A newly attached state
+            # consumer must nevertheless receive snapshots from the replaced
+            # database, even if it does not bootstrap through /api/state.
+            updates = await http.ws_connect(url + "/api/ws/updates", headers=headers)
+            ready = await updates.receive_json(timeout=3)
+            assert ready["type"] == "updates_ready" and ready["stream_version"] == 1
+            wanted = {"sessions", "node", "backends", "workspace_links", "notify"}
+            streamed = {}
+            deadline = time.monotonic() + 6
+            while wanted - set(streamed) and time.monotonic() < deadline:
+                message = await updates.receive_json(timeout=6)
+                if message.get("type") in wanted:
+                    streamed[message["type"]] = message
+            await updates.close()
+            assert set(streamed) == wanted, streamed.keys()
+            assert streamed["node"]["name"] == "saved-instance"
+            assert len(streamed["sessions"]["sessions"]) == 3
+            assert len(streamed["backends"]["backends"]) == 1
+            assert streamed["workspace_links"]["links"]
+            assert streamed["notify"]["configured"] is True
     finally:
         await runner.cleanup()
 

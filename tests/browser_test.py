@@ -867,7 +867,8 @@ def check_offline_sidebar_sessions(ui_source: str, css_source: str) -> None:
 
     source = "\n".join(function(name) for name in (
         "hydrateBackendLastKnown", "controllerBackendHealth",
-        "retireRemoteSessionActivity", "reconcileRemoteState"))
+        "retireRemoteSessionActivity", "backendSupportsStateStream",
+        "reconcileRemoteState"))
     script = r"""
 const cached = {id: 44, name: "cached", status: "running", active_since: 10};
 const state = {
@@ -877,6 +878,8 @@ const state = {
   engCache: {}, remoteEngineErrors: {}, remoteEngineCheckedAt: {},
   remoteNodeCheckedAt: {}, remoteUsageRefresh: {}, remoteAutoUpgrade: {},
   remoteUploadSettings: {}, remoteSystemPrompts: {}, remoteBrowser: {},
+  remoteBrowserStatus: {}, terminalInstances: {}, stateStreamReady: {},
+  stateStreamRuntime: {}, stateStreamRevisions: {}, remoteNodeUpgrade: {},
 };
 const remotePollSequence = {};
 const sessionActivityAnchors = new Map([["7:44", 10]]);
@@ -936,7 +939,8 @@ def check_controller_backend_pooling(ui_source: str) -> None:
 
     source = "\n".join(function(name) for name in (
         "controllerBackendHealth", "backendPoolable", "backendConnectionAllowed",
-        "retireRemoteSessionActivity", "reconcileRemoteState",
+        "retireRemoteSessionActivity", "backendSupportsStateStream",
+        "nodeStateStreamActive", "reconcileRemoteState",
         "remotePollIsCurrent", "pollRemoteBackend"))
     script = r"""
 const state = {
@@ -952,6 +956,8 @@ const state = {
   engCache: {}, remoteEngineErrors: {}, remoteEngineCheckedAt: {},
   remoteNodeCheckedAt: {}, remoteUsageRefresh: {}, remoteAutoUpgrade: {},
   remoteUploadSettings: {}, remoteSystemPrompts: {}, remoteBrowser: {},
+  remoteBrowserStatus: {}, terminalInstances: {}, stateStreamReady: {},
+  stateStreamRuntime: {}, stateStreamRevisions: {}, remoteNodeUpgrade: {},
 };
 const remotePollSequence = {};
 const REMOTE_POLL_TIMEOUT = 5000;
@@ -1018,6 +1024,166 @@ console.log(JSON.stringify({
     assert "backendConnectionAllowed(record.backend.id)" in ui_source
 
 
+def check_node_state_stream_ui(ui_source: str) -> None:
+    """Push state is capability-gated, revisioned, and keeps HTTP fallback."""
+    def function(name):
+        markers = ("function " + name + "(", "async function " + name + "(")
+        starts = [ui_source.find(marker) for marker in markers]
+        starts = [start for start in starts if start >= 0]
+        assert starts, name
+        start = min(starts)
+        brace = ui_source.index(") {", start) + 2
+        depth = 0
+        for index in range(brace, len(ui_source)):
+            if ui_source[index] == "{":
+                depth += 1
+            elif ui_source[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    return ui_source[start:index + 1]
+        raise AssertionError("unbalanced " + name)
+
+    source = "\n".join(function(name) for name in (
+        "clearNodeStateRevisions", "acceptStateSnapshot",
+        "backendSupportsStateStream", "nodeStateStreamActive",
+        "legacyStatePollingNeeded"))
+    script = r"""
+let reloads=0;
+const location={reload(){reloads++;}};
+const state={
+  runtimeId:"controller-runtime", stateStreamRevisions:{},
+  stateStreamRuntime:{7:"remote-a"}, stateStreamReady:{0:true,7:true},
+  backends:[
+    {id:7,protocol:1,capabilities:["node-state-stream-v1"]},
+    {id:8,protocol:1,capabilities:[]},
+  ],
+};
+const backendConnectionAllowed=()=>true;
+%s
+const localFirst=acceptStateSnapshot(0,{type:"sessions",state_topic:"sessions",
+  state_revision:1,runtime_id:"controller-runtime"});
+const localDuplicate=acceptStateSnapshot(0,{type:"sessions",state_topic:"sessions",
+  state_revision:1,runtime_id:"controller-runtime"});
+const booleanRevision=acceptStateSnapshot(0,{type:"sessions",state_topic:"sessions",
+  state_revision:true,runtime_id:"controller-runtime"});
+const numericRuntime=acceptStateSnapshot(0,{type:"sessions",state_topic:"sessions",
+  state_revision:2,runtime_id:123});
+const wrongLocal=acceptStateSnapshot(0,{type:"sessions",state_topic:"sessions",
+  state_revision:2,runtime_id:"other-controller"});
+state.stateStreamRevisions["7:sessions"]=5;
+state.stateStreamRevisions["7:engines"]=9;
+const remoteNext=acceptStateSnapshot(7,{type:"sessions",state_topic:"sessions",
+  state_revision:6,runtime_id:"remote-a"});
+const remoteRestart=acceptStateSnapshot(7,{type:"sessions",state_topic:"sessions",
+  state_revision:1,runtime_id:"remote-b"});
+const withLegacy=legacyStatePollingNeeded();
+state.backends=state.backends.slice(0,1);
+const allLive=legacyStatePollingNeeded();
+state.stateStreamReady[7]=false;
+const remoteDown=legacyStatePollingNeeded();
+state.stateStreamReady[7]=true;state.stateStreamReady[0]=false;
+const localDown=legacyStatePollingNeeded();
+const remoteViaDeadController=nodeStateStreamActive(7);
+console.log(JSON.stringify({
+  localFirst,localDuplicate,booleanRevision,numericRuntime,wrongLocal,reloads,
+  remoteNext,remoteRestart,
+  remoteRuntime:state.stateStreamRuntime[7],remoteSessions:state.stateStreamRevisions["7:sessions"],
+  oldEngineRevision:Object.prototype.hasOwnProperty.call(state.stateStreamRevisions,"7:engines"),
+  withLegacy,allLive,remoteDown,localDown,remoteViaDeadController,
+  exactCap:backendSupportsStateStream({protocol:1,capabilities:["node-state-stream-v1"]}),
+  protocolZero:backendSupportsStateStream({protocol:0,capabilities:["node-state-stream-v1"]}),
+  missingCap:backendSupportsStateStream({protocol:1,capabilities:[]}),
+}));
+""" % source
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:900]
+    result = json.loads(proc.stdout.strip())
+    assert result == {
+        "localFirst": True, "localDuplicate": False, "wrongLocal": False,
+        "booleanRevision": False, "numericRuntime": False,
+        "reloads": 1, "remoteNext": True, "remoteRestart": True,
+        "remoteRuntime": "remote-b", "remoteSessions": 1,
+        "oldEngineRevision": False, "withLegacy": True, "allLive": False,
+        "remoteDown": True, "localDown": True, "remoteViaDeadController": False,
+        "exactCap": True,
+        "protocolZero": False, "missingCap": False,
+    }, result
+
+    ingest = function("ingestSessionActivity")
+    reconcile = function("reconcileRemoteState")
+    assert "live.has" not in ingest
+    assert "state.stateStreamRevisions" in reconcile
+    assert "if (!message || message.state_topic !== message.type) return;" in ui_source
+    assert "if (nodeStateStreamActive(0)) return;" in ui_source
+    assert "backendSupportsStateStream(backend) && nodeStateStreamActive(bid)" in ui_source
+    assert "!backendSupportsStateStream(backend)" in ui_source
+    assert "if (nodeStateStreamActive(bid)) {" in ui_source
+    assert "!nodeStateStreamActive(record.backend.id)" in ui_source
+    assert "d.stream_version !== 1" in ui_source
+
+    topic_source = function("noteLocalStateStreamTopic")
+    script = r"""
+const state={stateStreamReady:{0:false},stateStreamRuntime:{0:"local-run"}};
+let localStateStreamTopics=new Set();
+let updatesLegacyRefreshTimer=null;
+let pollingStarts=0;
+const startRemotePolling=()=>{pollingStarts++;};
+%s
+for(const type of ["sessions","engines","node","browser_status"])
+  noteLocalStateStreamTopic({type,state_topic:type,state_revision:1,runtime_id:"local-run"});
+const partialReady=state.stateStreamReady[0];
+noteLocalStateStreamTopic({type:"terminal_instances",state_topic:"terminal_instances",
+  state_revision:true,runtime_id:"local-run"});
+const malformedReady=state.stateStreamReady[0];
+noteLocalStateStreamTopic({type:"terminal_instances",state_topic:"terminal_instances",
+  state_revision:1,runtime_id:"local-run"});
+console.log(JSON.stringify({partialReady,malformedReady,
+  completeReady:state.stateStreamReady[0],pollingStarts}));
+""" % topic_source
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:900]
+    assert json.loads(proc.stdout.strip()) == {
+        "partialReady": False, "malformedReady": False,
+        "completeReady": True, "pollingStarts": 1,
+    }
+
+    remote_stream_source = function("applyRemoteStreamState")
+    script = r"""
+let syncs=0,polls=0;
+const state={
+  stateStreamReady:{7:false},stateStreamRuntime:{7:"remote-a"},
+  stateStreamRevisions:{"7:sessions":4},
+  backends:[{id:7,availability:{state:"offline",reason:"restarting"}}],
+};
+const controllerBackendHealth=backend=>backend.availability;
+const syncRemoteStateViews=()=>{syncs++;};
+const startRemotePolling=()=>{polls++;};
+const clearNodeStateRevisions=bid=>{
+  for(const key of Object.keys(state.stateStreamRevisions))
+    if(key.startsWith(`${bid}:`)) delete state.stateStreamRevisions[key];
+};
+%s
+applyRemoteStreamState({backend_id:7,connected:true,node_runtime_id:"remote-b"});
+const staleConnectRejected=state.stateStreamReady[7]===false &&
+  state.stateStreamRuntime[7]==="remote-a";
+state.backends[0].availability={state:"online",reason:""};
+applyRemoteStreamState({backend_id:7,connected:true,node_runtime_id:"remote-b"});
+const onlineAccepted=state.stateStreamReady[7]===true &&
+  state.stateStreamRuntime[7]==="remote-b" &&
+  !Object.prototype.hasOwnProperty.call(state.stateStreamRevisions,"7:sessions");
+applyRemoteStreamState({backend_id:7,connected:false,node_runtime_id:"remote-b"});
+console.log(JSON.stringify({staleConnectRejected,onlineAccepted,
+  disconnected:state.stateStreamReady[7]===false,syncs,polls}));
+""" % remote_stream_source
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:900]
+    result = json.loads(proc.stdout.strip())
+    assert result == {
+        "staleConnectRejected": True, "onlineAccepted": True,
+        "disconnected": True, "syncs": 2, "polls": 3,
+    }, result
+
+
 def check_backend_last_known_settings(ui_source: str, css_source: str) -> None:
     """A controller snapshot hydrates every node-owned Settings value."""
     def function(name):
@@ -1075,6 +1241,13 @@ console.log(JSON.stringify({engines:state.engCache[7],usage:state.remoteUsageRef
     assert ".engine-node-offline-values .engine-row{opacity:.6}" in css_source
     assert ".usage-refresh-controls input:disabled{opacity:.5;cursor:not-allowed}" \
         in css_source
+    backend_actions = ui_source[
+        ui_source.index("    /* backends */"):
+        ui_source.index("    /* security */", ui_source.index("    /* backends */"))]
+    assert "installBackendRecord(" in backend_actions
+    assert "discardBackendRecord(" in backend_actions
+    assert "refreshState()" not in backend_actions
+    assert "pollRemotes(" not in backend_actions
 
 
 def check_interrupted_completion(ui_source: str) -> None:
@@ -1430,7 +1603,8 @@ console.log(JSON.stringify({invalid,cancelled,ordinary,paired,cleartext,saved:sa
     assert "working address stays preferred" in result["html"]
     assert 'const edit = el("button", "btn btn-sm", "Edit");' in ui_source
     assert "edit.onclick = () => modalEditBackend(b" in ui_source
-    assert "if (result.connection_changed) resetRemoteBackendConnection(b.id);" in ui_source
+    assert "installBackendRecord(result.backend, !!result.connection_changed);" in ui_source
+    assert "function installBackendRecord(record, resetConnection = false)" in ui_source
     assert ".backend-edit-grid{display:grid;grid-template-columns:" in css_source
     assert ".backend-url-row{display:flex;align-items:center;gap:6px;min-width:0}" in css_source
     assert "transition:opacity .25s var(--ease)" in css_source
@@ -2768,6 +2942,8 @@ def check_active_turn_steering_ui(ui_source: str, css_source: str) -> None:
     assert 'if (e.key === "Enter" && !e.shiftKey && !e.isComposing) ' \
         '{ e.preventDefault(); this.submit(); return; }' in ui_source
     assert 'backend.capabilities.includes("active-turn-steering")' in ui_source
+    assert 'backend.capabilities.includes("session-control-ws-v1")' in ui_source
+    assert 'await this.sendActiveTurnControl("steer", body)' in ui_source
 
     # Copy shortcuts inside the textarea stay entirely browser-native. Escape
     # and the visible Stop button are the explicit ways to interrupt a turn.
@@ -2861,6 +3037,7 @@ def check_active_turn_steering_ui(ui_source: str, css_source: str) -> None:
 let calls=[],toasts=[],draftSaves=0,controlSyncs=0;
 const newDraftClientId=()=>"request-1";
 const toast=(...args)=>toasts.push(args);
+const backendSupportsSessionControlSocket=()=>false;
 const api=async (bid,path,options)=>{
   calls.push({bid,path,options});
   return {ok:true,status:"sent",request_id:options.body.request_id};
@@ -2905,6 +3082,58 @@ console.log(JSON.stringify({sent,afterNotReady:{calls:calls.length,toasts}}));
     assert result["afterNotReady"]["toasts"][-1][0] == \
         "The active turn is not ready for steering"
 
+    def class_method(name):
+        start = ui_source.index("\n  " + name + "(") + 1
+        brace = ui_source.index("{", start)
+        depth = 0
+        for index in range(brace, len(ui_source)):
+            if ui_source[index] == "{":
+                depth += 1
+            elif ui_source[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    return ui_source[start:index + 1]
+        raise AssertionError("unbalanced SessionView." + name)
+
+    control_script = r"""
+const WebSocket={OPEN:1};
+const frames=[];
+const proto={%s,%s};
+const view=Object.assign(Object.create(proto),{
+  ws:{readyState:1,send:value=>frames.push(JSON.parse(value))},
+  controlRequests:new Map(),
+});
+const accepted=view.sendActiveTurnControl("steer",{
+  text:"new direction",request_id:"steer-1",expected_turn_id:"turn-1"});
+const waiting=view.controlRequests.size;
+view.completeActiveTurnControl("steer",{
+  type:"steer_complete",request_id:"steer-1",ok:true,status:"sent"});
+const acceptedResult=await accepted;
+const rejected=view.sendActiveTurnControl("ask",{
+  question:"why?",request_id:"ask-1",expected_turn_id:"turn-1"});
+view.completeActiveTurnControl("ask",{
+  type:"ask_complete",request_id:"ask-1",error:"turn ended"});
+let rejectedMessage="";
+try{await rejected;}catch(error){rejectedMessage=error.message;}
+console.log(JSON.stringify({frames,waiting,remaining:view.controlRequests.size,
+  accepted:acceptedResult.status,rejectedMessage}));
+""" % (class_method("sendActiveTurnControl"),
+         class_method("completeActiveTurnControl"))
+    proc = subprocess.run(["node", "--input-type=module", "-e", control_script],
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[:700]
+    control = json.loads(proc.stdout)
+    assert control == {
+        "frames": [
+            {"type": "steer", "text": "new direction", "request_id": "steer-1",
+             "expected_turn_id": "turn-1"},
+            {"type": "ask", "question": "why?", "request_id": "ask-1",
+             "expected_turn_id": "turn-1"},
+        ],
+        "waiting": 1, "remaining": 0, "accepted": "sent",
+        "rejectedMessage": "turn ended",
+    }, control
+
 
 def check_side_question_ui(ui_source: str, css_source: str) -> None:
     """Ask sits in the composer's running-action family and folds its answer.
@@ -2938,6 +3167,7 @@ def check_side_question_ui(ui_source: str, css_source: str) -> None:
 
     assert 'backend.capabilities.includes("active-turn-side-question")' in ui_source
     assert 'api(this.tab.bid, `sessions/${this.tab.sid}/ask`' in ui_source
+    assert 'await this.sendActiveTurnControl("ask", body)' in ui_source
     assert 'case "side_question_state":' in ui_source
     assert 'case "side_question_progress":' in ui_source
 
@@ -3407,11 +3637,12 @@ console.log(JSON.stringify({
 
 
 def check_timer_settings_ui(ui_source: str, css_source: str) -> None:
-    """The six timer controls are real, node-aware settings, not display-only fields."""
+    """The six timer controls include explicit legacy/disconnect fallbacks."""
     for label in (
             "Published CLI releases", "Model catalogs",
-            "Installed CLI versions and sign-in status", "Remote session polling",
-            "Remote node metadata and engine payloads",
+            "Installed CLI versions and sign-in status",
+            "Remote session fallback polling",
+            "Remote metadata fallback polling",
             "Remote completion notification synchronization"):
         assert label in ui_source
     assert 'backend.capabilities.includes("timer-settings")' in ui_source
@@ -4405,6 +4636,7 @@ const spawnExecFor=bid=>{if(!bid)return true;
     Array.isArray(backend.capabilities)&&backend.capabilities.includes("spawn-exec");};
 const backendConnectionAllowed=()=>true;
 const backendHasCapability=()=>false;
+const nodeStateStreamActive=()=>false;
 const browserEnabledFor=()=>false;
 const browserInstancesFor=()=>false;
 const terminalInstancesFor=()=>false;
@@ -6416,6 +6648,7 @@ async def main() -> None:
             check_backend_shutdown_notice(ui_source)
             check_offline_sidebar_sessions(ui_source, css_source)
             check_controller_backend_pooling(ui_source)
+            check_node_state_stream_ui(ui_source)
             check_backend_last_known_settings(ui_source, css_source)
             check_interrupted_completion(ui_source)
             check_thinking_icons(ui_source)
@@ -6535,7 +6768,7 @@ async def main() -> None:
             assert ui_source.count("event.detail > 0 && event.detail % 2 === 0") == 1
             # A node disable already stops its processes. The settings response
             # and asynchronous state paths also retire only that node's tabs.
-            assert ui_source.count("closeBrowserTabsForBackend(") == 4
+            assert ui_source.count("closeBrowserTabsForBackend(") == 5
             assert "if (result.enabled === false) closeBrowserTabsForBackend(bid);" in ui_source
             assert "if (node.browser && node.browser.enabled === false)" in ui_source
             # the head strip hides per session, and the toggle sits in BOTH the

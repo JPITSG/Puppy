@@ -391,6 +391,11 @@ async def _run(driver, argv: List[str], from_version: str, token) -> None:
         # Catalog discovery retains its previous good list and normally owns
         # its own error state; this guard also protects third-party test drivers.
         log.warning("%s model refresh after upgrade failed: %s", key, exc)
+    try:
+        from puppy import state_stream
+        state_stream.wake("engines")
+    except Exception:
+        pass
     log.info("%s upgrade finished: %s -> %s (%s)", key, from_version or "?",
              to_version or "?", error or "ok")
 
@@ -410,6 +415,11 @@ async def start(driver) -> dict:
     # work, but a second click or a new turn must not slip through while it is
     # deciding whether the observed release is old enough to install.
     _preparing.add(key)
+    try:
+        from puppy import state_stream
+        state_stream.wake("engines")
+    except Exception:
+        pass
     try:
         if cli_releases.npm_based(driver):
             if not await cli_releases.refresh_before_upgrade(driver):
@@ -437,6 +447,11 @@ async def start(driver) -> dict:
         record["task"] = task
     finally:
         _preparing.discard(key)
+        try:
+            from puppy import state_stream
+            state_stream.wake("engines")
+        except Exception:
+            pass
 
     def _done(finished) -> None:
         if record.get("token") is not token:

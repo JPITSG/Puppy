@@ -335,6 +335,14 @@ def _evidence_key(key: str) -> str:
     return "auth_evidence.{}".format(key)
 
 
+def _wake_engine_state() -> None:
+    try:
+        from puppy import state_stream
+        state_stream.wake("engines")
+    except Exception:
+        pass
+
+
 def note_auth_failure(key: str, detail: str) -> None:
     """Record hard evidence that this engine's login no longer works: a real
     vendor response said so. Durable, so a puppy restart does not fall back to
@@ -343,6 +351,7 @@ def note_auth_failure(key: str, detail: str) -> None:
     try:
         db.meta_set(_evidence_key(key), {
             "at": time.time(), "detail": str(detail or "")[:400]})
+        _wake_engine_state()
     except Exception as e:
         log.warning("could not record auth evidence for %s: %s", key, e)
 
@@ -350,7 +359,11 @@ def note_auth_failure(key: str, detail: str) -> None:
 def clear_auth_failure(key: str) -> None:
     from puppy import db
     try:
-        db.meta_set(_evidence_key(key), None)
+        evidence_key = _evidence_key(key)
+        changed = db.meta_get(evidence_key) is not None
+        db.meta_set(evidence_key, None)
+        if changed:
+            _wake_engine_state()
     except Exception:
         pass
 
@@ -390,6 +403,7 @@ def invalidate_status(key=None) -> None:
         _status_cache.clear()
     else:
         _status_cache.pop(str(key), None)
+    _wake_engine_state()
 
 
 class Driver:
@@ -591,6 +605,11 @@ class Driver:
                         int(self.model_catalog_timeout(force))))
                 state.failed(exc, force)
                 log.warning("%s model discovery failed: %s", self.key, exc)
+            try:
+                from puppy import state_stream
+                state_stream.wake("engines")
+            except Exception:
+                pass
         return None
 
     def model_catalog_error(self) -> str:

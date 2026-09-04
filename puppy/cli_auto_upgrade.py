@@ -55,6 +55,14 @@ _task = None
 _wake: Optional[asyncio.Event] = None
 
 
+def _state_changed() -> None:
+    try:
+        from puppy import state_stream
+        state_stream.wake("engines")
+    except Exception:
+        pass
+
+
 # ---- settings ----
 
 def settings() -> dict:
@@ -71,6 +79,7 @@ def set_settings(value) -> dict:
     stored = config.normalize_engine_auto_upgrade(merged)
     config.set_value("engines.auto_upgrade", stored)
     wake()
+    _state_changed()
     return stored
 
 
@@ -98,11 +107,13 @@ def _record(key: str, from_version: str, to_version: str, result: dict) -> None:
         "error": str(result.get("error") or "")[:300],
         "installed_after": str(result.get("to_version") or ""),
     })
+    _state_changed()
 
 
 def forget(key: str) -> None:
     """Drop one engine's ledger so its current pair may be tried again."""
     db.meta_set(LEDGER_PREFIX + str(key), None)
+    _state_changed()
 
 
 # ---- schedule ----

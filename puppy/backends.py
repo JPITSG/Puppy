@@ -40,8 +40,10 @@ _health_retry_after = {}
 _health_retry_delay = {}
 _active_urls = {}
 _url_cursors = {}
+_state_stream_tasks = {}  # backend id -> one controller-owned upstream socket
 
 FAILOVER_CONNECT_TIMEOUT = 2.5
+STATE_STREAM_HANDSHAKE_TIMEOUT = 5.0
 PROXY_TOTAL_TIMEOUT = 60.0
 PROXY_UPLOAD_TIMEOUT = 15 * 60.0
 MAX_BACKEND_URLS = 8
@@ -295,6 +297,10 @@ def _clear_backend_health(bid: int) -> None:
     _health.pop(bid, None)
     _health_retry_after.pop(bid, None)
     _health_retry_delay.pop(bid, None)
+    task = _state_stream_tasks.pop(bid, None)
+    if task is not None:
+        task.cancel()
+    runner.clear_published_state("remote:{}:".format(bid))
 
 
 def _wake_health() -> None:
@@ -435,7 +441,7 @@ def _cache_remote_payload(bid: int, tail: str, payload: dict) -> bool:
                 updates[name] = payload[name]
     elif tail == "uploads/settings" and "uploads" in payload:
         updates["uploads"] = payload["uploads"]
-    elif tail in ("browser/status", "browser/enabled") and \
+    elif tail in ("browser/status", "browser/enabled", "browser_status") and \
             type(payload.get("enabled")) is bool:
         updates["browser"] = {"enabled": payload["enabled"]}
     elif tail == "system-prompt" and "system_prompt" in payload:
@@ -536,7 +542,216 @@ def backend_supports(bid: int, capability: str) -> bool:
 
 
 def _broadcast_backends() -> None:
-    runner.broadcast_update({"type": "backends", "backends": list_backends()})
+    runner.publish_state({"type": "backends", "backends": list_backends()})
+
+
+def _publish_remote_stream(bid: int, connected: bool,
+                           node_runtime_id: str = "") -> None:
+    runner.publish_state({
+        "type": "remote_stream", "backend_id": int(bid),
+        "connected": bool(connected),
+        "node_runtime_id": str(node_runtime_id or ""),
+    }, topic="remote:{}:stream".format(int(bid)))
+
+
+def _publish_remote_state(bid: int, message: dict) -> None:
+    runner.publish_state({
+        "type": "remote_state", "backend_id": int(bid),
+        "event": dict(message),
+    }, topic="remote:{}:{}".format(int(bid), message.get("type") or "unknown"))
+
+
+def _valid_stream_state(message: dict, runtime_id: str,
+                        revisions: dict) -> bool:
+    kind = message.get("type")
+    if kind not in ("sessions", "node", "engines", "browser_status",
+                    "terminal_instances"):
+        return False
+    if not isinstance(message.get("runtime_id"), str) or \
+            message["runtime_id"] != runtime_id:
+        return False
+    if str(message.get("state_topic") or "") != kind:
+        return False
+    revision = message.get("state_revision")
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+        return False
+    if revision <= int(revisions.get(kind, 0)):
+        return False
+    valid = (
+        (kind == "sessions" and isinstance(message.get("sessions"), list)) or
+        (kind == "node" and message.get("ok") is True and
+         isinstance(message.get("capabilities"), list)) or
+        (kind == "engines" and isinstance(message.get("engines"), list) and
+         isinstance(message.get("usage_refresh"), dict) and
+         isinstance(message.get("auto_upgrade"), dict) and
+         isinstance(message.get("timers"), dict)) or
+        (kind == "browser_status" and type(message.get("enabled")) is bool and
+         isinstance(message.get("instances"), list)) or
+        (kind == "terminal_instances" and isinstance(message.get("instances"), list))
+    )
+    if valid:
+        revisions[kind] = revision
+    return bool(valid)
+
+
+async def _backend_state_stream(bid: int) -> None:
+    """Maintain one authenticated state subscription for one capable node."""
+    retry = 0.8
+    last_runtime = ""
+    while True:
+        backend = get_backend(bid)
+        if backend is None or not backend_is_online(bid) or \
+                protocol.NODE_STATE_STREAM_CAPABILITY not in \
+                _backend_capabilities(backend):
+            return
+        socket = None
+        selected_url = ""
+        error = "backend state stream is unavailable"
+        for url in _ordered_backend_urls(backend):
+            target = "ws" + (url + "/api/ws/updates")[4:]
+            try:
+                socket = await asyncio.wait_for(client().ws_connect(
+                    target,
+                    headers={"X-Puppy-Token": backend["token"]},
+                    heartbeat=30, max_msg_size=runner.STREAM_LIMIT,
+                    ssl=_ssl_pin(backend.get("tls_fingerprint") or "")),
+                    timeout=FAILOVER_CONNECT_TIMEOUT)
+                selected_url = url
+                break
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                error = _connection_error(exc)
+        if socket is None:
+            _publish_remote_stream(bid, False)
+            log.debug("backend %s state stream unavailable: %s",
+                      backend.get("name") or bid, error)
+        else:
+            if _remember_active_url(bid, selected_url, _backend_urls(backend)):
+                _broadcast_backends()
+            runtime_id = ""
+            revisions = {}
+            required = {"sessions", "node", "engines", "browser_status"}
+            seen = set()
+            stream_ready = False
+            try:
+                # Capability negotiation promises this exact first frame.
+                # Bound it independently from the long-lived heartbeat so a
+                # mislabelled/future-incompatible peer cannot retain a dead
+                # controller subscription forever.
+                frame = await asyncio.wait_for(
+                    socket.receive(), timeout=STATE_STREAM_HANDSHAKE_TIMEOUT)
+                if frame.type != WSMsgType.TEXT:
+                    raise RuntimeError("backend state stream sent no handshake")
+                try:
+                    ready = json.loads(frame.data)
+                except Exception as exc:
+                    raise RuntimeError(
+                        "backend state stream sent invalid JSON") from exc
+                candidate = ready.get("runtime_id", "") \
+                    if isinstance(ready, dict) and \
+                    isinstance(ready.get("runtime_id"), str) else ""
+                if not isinstance(ready, dict) or \
+                        ready.get("type") != "updates_ready" or \
+                        type(ready.get("stream_version")) is not int or \
+                        ready.get("stream_version") != 1 or not candidate or \
+                        len(candidate) > 128:
+                    raise RuntimeError("backend state stream handshake is incompatible")
+                if last_runtime and candidate != last_runtime:
+                    runner.clear_published_state("remote:{}:".format(bid))
+                last_runtime = runtime_id = candidate
+                retry = 0.8
+                async for frame in socket:
+                    if frame.type != WSMsgType.TEXT:
+                        if frame.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
+                            break
+                        continue
+                    try:
+                        message = json.loads(frame.data)
+                    except Exception:
+                        continue
+                    if not isinstance(message, dict):
+                        continue
+                    kind = message.get("type")
+                    if kind == "updates_ready":
+                        raise RuntimeError(
+                            "backend state stream repeated its handshake")
+                    if kind == "node_stopping":
+                        action = "restarting" if message.get("reason") == "restart" \
+                            else "shutting down"
+                        if _mark_backend_offline(
+                                bid, "Backend {}".format(action)):
+                            _broadcast_backends()
+                        runner.broadcast_update({
+                            "type": "remote_state", "backend_id": bid,
+                            "event": message,
+                        })
+                        break
+                    if not runtime_id or not _valid_stream_state(
+                            message, runtime_id, revisions):
+                        continue
+                    changed = False
+                    if kind == "sessions":
+                        changed = _cache_remote_payload(bid, "sessions", message)
+                    elif kind == "engines":
+                        changed = _cache_remote_payload(bid, "engines", message)
+                    elif kind == "node":
+                        changed = _store_metadata(bid, message)
+                    elif kind == "browser_status":
+                        changed = _cache_remote_payload(
+                            bid, "browser/status", message)
+                    _publish_remote_state(bid, message)
+                    seen.add(kind)
+                    if kind == "node" and \
+                            protocol.TERMINAL_INSTANCES_CAPABILITY in \
+                            (message.get("capabilities") or []):
+                        required.add("terminal_instances")
+                    if not stream_ready and required.issubset(seen):
+                        stream_ready = True
+                        _publish_remote_stream(bid, True, runtime_id)
+                    if kind == "node" and changed:
+                        _broadcast_backends()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.debug("backend %s state stream ended: %s",
+                          backend.get("name") or bid, _connection_error(exc))
+            finally:
+                await socket.close()
+            # This replaceable verdict must also supersede the cached true
+            # state after an orderly node_stopping edge. Otherwise a console
+            # attaching during the restart can see health=offline followed by
+            # an obsolete connected snapshot and suppress its fallback path.
+            _publish_remote_stream(bid, False, runtime_id)
+        await asyncio.sleep(retry)
+        retry = min(retry * 1.7, 15.0)
+
+
+def _sync_state_streams() -> None:
+    desired = {
+        int(item["id"]) for item in list_backends()
+        if item.get("availability", {}).get("state") == "online" and
+        protocol.NODE_STATE_STREAM_CAPABILITY in (item.get("capabilities") or [])
+    }
+    for bid, task in list(_state_stream_tasks.items()):
+        if bid not in desired:
+            _state_stream_tasks.pop(bid, None)
+            task.cancel()
+            _publish_remote_stream(bid, False)
+    for bid in sorted(desired):
+        task = _state_stream_tasks.get(bid)
+        if task is not None and not task.done():
+            continue
+        task = asyncio.create_task(
+            _backend_state_stream(bid),
+            name="puppy-backend-state-{}".format(bid))
+        _state_stream_tasks[bid] = task
+
+        def finished(done, selected=bid):
+            if _state_stream_tasks.get(selected) is done:
+                _state_stream_tasks.pop(selected, None)
+
+        task.add_done_callback(finished)
 
 
 def _wake_auto_upgrade() -> None:
@@ -545,7 +760,21 @@ def _wake_auto_upgrade() -> None:
 
 
 def reset_auto_upgrade_schedule() -> None:
-    """Forget timing state after a database restore and evaluate its policies."""
+    """Forget transient controller state after a database restore.
+
+    The restored database can reuse a backend id for a different connection.
+    Tear down every pre-restore upstream socket before health discovery reads
+    the replacement rows; no bytes learned under an old token/endpoint may be
+    published into the restored controller epoch.
+    """
+    old_streams = list(_state_stream_tasks.items())
+    _state_stream_tasks.clear()
+    for _bid, task in old_streams:
+        task.cancel()
+    # Disconnected nodes retain their last replaceable snapshots even though
+    # they have no live task.  A restored database may remove or reuse any id,
+    # so clear the complete controller fanout namespace, not just active ids.
+    runner.clear_published_state("remote:")
     _auto_upgrade_retry_after.clear()
     _auto_upgrade_checked_at.clear()
     _auto_upgrade_last_errors.clear()
@@ -861,6 +1090,7 @@ async def health_cycle(app: web.Application) -> None:
            if int(row["id"]) not in _upgrades_in_progress and
            _health_retry_after.get(int(row["id"]), 0) <= now]
     await asyncio.gather(*(_probe_backend_health(backend) for backend in due))
+    _sync_state_streams()
 
 
 async def _health_loop(app: web.Application) -> None:
@@ -899,13 +1129,18 @@ async def stop_health_worker(_app: web.Application = None) -> None:
     task = _health_task
     _health_task = None
     _health_wake = None
-    if task is None:
-        return
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
+    state_tasks = list(_state_stream_tasks.values())
+    _state_stream_tasks.clear()
+    for state_task in state_tasks:
+        state_task.cancel()
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    if state_tasks:
+        await asyncio.gather(*state_tasks, return_exceptions=True)
 
 
 def _sweep_build_leftovers(work_root: Path) -> None:
@@ -1091,11 +1326,14 @@ async def h_add(request: web.Request):
     _remember_active_url(bid, result["active_url"], urls)
     _mark_backend_online(bid)
     _broadcast_backends()
+    _wake_health()
     if auto_upgrade:
         _wake_auto_upgrade()
+    added_backend = next(item for item in list_backends() if item["id"] == bid)
     return web.json_response({"ok": True, "id": bid, "remote": remote,
                               "active_url": result["active_url"], "urls": urls,
-                              "auto_upgrade": auto_upgrade})
+                              "auto_upgrade": auto_upgrade,
+                              "backend": added_backend})
 
 
 async def h_patch(request: web.Request):
@@ -1202,6 +1440,12 @@ async def h_patch(request: web.Request):
         (name, urls[0], _urls_json(urls), token, api_protocol, capabilities, remote_version, role,
          tls_fingerprint, int(enabled), bid))
     if connection_changed:
+        # A backend id survives an endpoint/token/pin edit, but its upstream
+        # state socket must not.  Cancel it before installing observations from
+        # the newly authenticated connection; the health worker creates one
+        # fresh subscription using the new transport tuple.
+        _clear_backend_health(bid)
+        _publish_remote_stream(bid, False)
         same_node = bool(
             previous_last_known and
             isinstance(previous_last_known.get("node_uuid"), str) and
@@ -1222,6 +1466,7 @@ async def h_patch(request: web.Request):
         _wake_auto_upgrade()
     if connection_changed:
         await close_proxy_websockets(bid, "Backend connection changed")
+        _wake_health()
     updated = next(item for item in list_backends() if item["id"] == bid)
     return web.json_response({"ok": True, "backend": updated,
                               "remote": remote,
@@ -1262,7 +1507,9 @@ async def h_test(request: web.Request):
         await close_proxy_websockets(bid, "Backend unavailable")
     if changed:
         _broadcast_backends()
-    return web.json_response(result)
+    _wake_health()
+    current = next((item for item in list_backends() if item["id"] == bid), None)
+    return web.json_response({**result, "backend": current})
 
 
 class BackendUpgradeError(RuntimeError):
@@ -1410,8 +1657,10 @@ async def upgrade_backend(bid: int, remote_hint=None) -> dict:
 
 async def h_upgrade(request: web.Request):
     try:
-        result = await upgrade_backend(int(request.match_info["bid"]))
-        return web.json_response(result)
+        bid = int(request.match_info["bid"])
+        result = await upgrade_backend(bid)
+        current = next((item for item in list_backends() if item["id"] == bid), None)
+        return web.json_response({**result, "backend": current})
     except BackendUpgradeError as exc:
         return web.json_response(exc.payload(), status=exc.status)
 

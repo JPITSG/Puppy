@@ -371,6 +371,11 @@ async def refresh_if_due(drivers: Iterable, force: bool = False) -> float:
             log.warning("CLI latest-version refresh failed: %s", exc)
         interval = check_interval_seconds() if successful else failure_retry_seconds()
         _next_due = time.monotonic() + interval
+        try:
+            from puppy import state_stream
+            state_stream.wake("engines")
+        except Exception:
+            pass
         return float(interval)
 
 

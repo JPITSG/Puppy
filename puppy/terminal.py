@@ -56,6 +56,17 @@ class TerminalError(RuntimeError):
     pass
 
 
+def _state_changed() -> None:
+    """Publish the cheap catalog and refresh backend-upgrade readiness."""
+    try:
+        from puppy import state_stream
+        instances = _manager.instance_payloads() if _manager is not None else []
+        state_stream.publish({"type": "terminal_instances", "instances": instances})
+        state_stream.wake("node")
+    except Exception:
+        pass
+
+
 def active_count() -> int:
     return _active_terminals
 
@@ -295,6 +306,7 @@ class TerminalInstance:
         self.running = True
         self.started_at = time.time()
         _active_terminals += 1
+        _state_changed()
         self._arm_idle()
         log.info("Terminal %s spawned pid=%s cmd=%r", self.terminal_id, pid,
                  self.command)
@@ -458,6 +470,7 @@ class TerminalInstance:
         for offset in range(0, len(raw), 65536):
             viewer.send_bytes(raw[offset:offset + 65536])
         self.viewers[ws] = viewer
+        _state_changed()
         if not self.running:
             viewer.finish()
 
@@ -467,6 +480,7 @@ class TerminalInstance:
             viewer.cancel()
         if not self.viewers and self.running:
             self._arm_idle()
+        _state_changed()
 
     def binding_changed(self) -> None:
         self._broadcast_json(_binding_payload(self))
@@ -500,6 +514,7 @@ class TerminalInstance:
             except OSError:
                 pass
         _active_terminals = max(0, _active_terminals - 1)
+        _state_changed()
         self._wake_output_waiters()
         payload = self.status_payload()
         for viewer in list(self.viewers.values()):
@@ -625,6 +640,7 @@ class TerminalRegistry:
                         self.bindings.get(owner_session) == instance.terminal_id:
                     self.bindings.pop(owner_session, None)
             raise
+        _state_changed()
         return instance
 
     def get(self, terminal_id) -> TerminalInstance:
@@ -647,6 +663,7 @@ class TerminalRegistry:
                 self.bindings.pop(instance.owner_session, None)
             instance.owner_session = None
         await instance.stop(reason)
+        _state_changed()
         return True
 
     async def bind(self, terminal_id, session_id=None) -> TerminalInstance:
@@ -661,6 +678,7 @@ class TerminalRegistry:
                 raise TerminalError(
                     "Terminal {} has ended".format(terminal_id))
             self._bind_locked(instance, session_id)
+            _state_changed()
             return instance
 
     async def clear_session_binding(self, session_id: int) -> None:
@@ -671,6 +689,7 @@ class TerminalRegistry:
             if instance is not None:
                 instance.owner_session = None
                 instance.binding_changed()
+        _state_changed()
 
     async def clear_session_bindings(self) -> None:
         async with self.lock:
@@ -679,6 +698,7 @@ class TerminalRegistry:
                 if instance.owner_session is not None:
                     instance.owner_session = None
                     instance.binding_changed()
+        _state_changed()
 
     async def linked_terminal(self, session_id: int) -> TerminalInstance:
         """Return this chat's current terminal without allocating a new one."""
