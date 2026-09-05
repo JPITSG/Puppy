@@ -190,6 +190,8 @@ SIDE_QUESTION_CAPABILITY = "active-turn-side-question"
 SESSION_REFERENCES_CAPABILITY = "session-references"
 
 BASE_CAPABILITIES = (
+    # Apply may start one conflict-resolution prompt in the task, for re-review.
+    "session-task-conflict-resolution",
     "session-tasks",
     # Task creation accepts explicit engine/model/effort/permission choices.
     "session-task-config",

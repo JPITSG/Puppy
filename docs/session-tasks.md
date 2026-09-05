@@ -42,6 +42,36 @@ continued; the next review contains only changes since their last apply. Review
 and apply again after resolving conflicts in the task or Main. Main does not
 silently synchronize changes back into already-created task copies.
 
+The review sheet's **Resolve conflicts** switch is off for each new review.
+When enabled, a conflicting **Apply to Main** sends one follow-up prompt to
+that task's existing agent conversation. Puppy supplies snapshots of the old
+baseline, the reviewed task, and Main's latest working files. The agent uses
+the task's current engine settings, normal permissions and model quota to
+reconcile both sets of changes inside the task copy. It may also inspect live
+Main read-only when needed. Main is untouched by this
+resolution attempt. Review the updated diff and apply again when the agent
+finishes; the switch never approves unseen changes or starts an automatic
+retry loop. Stop and approvals work as they do for other task turns. An engine
+failure or an unresolved conflict may still need your input.
+
+Applies to the same repository run one at a time, including when separate Main
+sessions point to it. A later apply checks the files left by earlier applies;
+if it conflicts, its resolution snapshot includes those changes. Main stays
+available while agents resolve in their own copies. Another task or an external
+editor can change Main again before the next apply, so another explicit review
+and resolution may be necessary. Stale reviews, busy sessions, missing copies
+and other operational failures do not trigger agent follow-ups.
+
+The shared task guidance authorizes read-only inspection of Main when resolving
+conflicts or source drift, including manual follow-ups such as “fix the drift.”
+It supplies Main's current working-directory path on every turn, so the agent
+does not need a separate user confirmation or a manually provided snapshot.
+Engine permissions still apply. Supplied snapshots remain the preferred inputs;
+the automatic resolution prompt also supplies Main's repository root and keeps
+the pinned snapshot as the review baseline if live Main changes again. All edits,
+generated files, Git writes and test runs stay in the task copy. Git inspection
+of Main uses `--no-optional-locks` to avoid incidental index writes.
+
 Main must use a local project directory on its executing node; linked remote
 workspace mirrors are not supported for tasks yet. Each task uses an independent local Git clone in a Puppy-owned scratch workspace.
 It starts with Main's working files, including uncommitted changes and nonignored
@@ -70,6 +100,12 @@ uses a separate optional `session_tasks_disabled.<sid>` meta ledger: an exact
 reject malformed entries; existing task records and config shapes are unchanged.
 Each task copy also names its review baseline as the Git ref `refs/puppy/base`
 so the engine's own history rewriting can never garbage-collect it.
+Conflict-resolution inputs are preserved at
+`refs/puppy/resolve/<review-token>/{base,task,main}` inside that copy. The next
+review uses the supplied Main snapshot as its baseline; preparation leaves the
+task's working files and index intact for its agent to reconcile. These refs and
+their independent Git objects are included in full backups. The switch is a
+per-request choice, with no new persisted configuration or task-record shape.
 
 For a rollback **preserving work**:
 

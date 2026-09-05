@@ -2855,4 +2855,7 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
 .task-review-diff .del{color:var(--err)}
 .task-review-diff .hunk{color:var(--acc2)}
 .task-review-diff .meta{color:var(--txt3)}
+.task-review-resolve{display:flex;align-items:flex-start;gap:8px}
+.task-review-resolve .be-auto-track{margin-top:1px}
+.task-review-resolve .be-auto-copy small{font:11.5px/1.5 var(--sans)}
 @media (max-width:600px){.task-tabbar .tab{max-width:150px}}

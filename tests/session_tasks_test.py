@@ -41,6 +41,195 @@ async def rejected(call, contains):
         raise AssertionError('expected rejection: ' + contains)
 
 
+def assert_main_inspection(text, path):
+    assert json.dumps(str(path), ensure_ascii=False) in text
+    assert 'read-only' in text and 'separate user confirmation' in text
+    assert 'engine\'s permissions in force' in text
+    assert 'Keep all edits, generated files, Git writes and test runs in' in text
+    assert "Never modify Main's files, index or refs" in text
+    assert 'git --no-optional-locks' in text
+    assert 'Do not access or edit' not in text
+
+
+async def resolution_api(client, parent):
+    prefix = '/api/sessions/{}/tasks'.format(parent)
+    project = Path(db.get_session(parent)['cwd'])
+    sid = None
+    try:
+        with patch.object(runner.SessionHub, '_start_turn', start):
+            response = await client.post(prefix, json={'prompt': 'HTTP conflicts', 'request_id': 'http-conflicts'})
+            assert response.status == 200, await response.text()
+            row = (await response.json())['session']
+            sid = row['id']
+            (Path(row['cwd']) / 'http-conflict').write_text('task addition\n')
+            (project / 'http-conflict').write_text('Main addition\n')
+            finish(sid)
+            route = prefix + '/' + str(sid)
+            data = await (await client.post(route + '/review', json={})).json()
+            token = data['token']
+            for value in ('true', 1, None, [], {}):
+                response = await client.post(route + '/apply', json={'token': token, 'resolve_conflicts': value})
+                assert response.status == 409 and 'true or false' in (await response.json())['error']
+            response = await client.post(route + '/apply', json={'token': token})
+            assert response.status == 409 and 'already exists' in (await response.json())['error']
+            assert len([event for event in db.get_events(sid) if event['kind'] == 'user']) == 1
+            response = await client.post(route + '/apply', json={'token': token, 'resolve_conflicts': True})
+            data = await response.json()
+            assert response.status == 200 and data['resolving'] and not data['applied'], data
+            assert data['task']['id'] == sid and data['task']['task']['state'] == 'running'
+            response = await client.post(route + '/apply', json={'token': token, 'resolve_conflicts': True})
+            assert response.status == 409
+            assert len([event for event in db.get_events(sid) if event['kind'] == 'user']) == 2
+            assert (project / 'http-conflict').read_text() == 'Main addition\n'
+            finish(sid)
+    finally:
+        (project / 'http-conflict').unlink(missing_ok=True)
+        if sid:
+            runner.hub(sid).status = 'idle'
+            workspaces.remove_temporary(db.get_session(sid))
+            runner.drop_hub(sid)
+            db.delete_session(sid)
+    print('PASS: conflict-resolution HTTP opt-in, validation, follow-up delivery and duplicate rejection')
+
+
+async def conflict_resolution():
+    project = ROOT / 'resolution-project'
+    project.mkdir()
+    tasks._git(project, 'init', '--quiet')
+    for name, text in {'a.txt': 'original\n', 'b.txt': 'original b\n', 'deleted.txt': 'delete me\n'}.items():
+        (project / name).write_text(text)
+    tasks._git(project, 'add', '-A')
+    tasks._git(project, 'commit', '-qm', 'Initial')
+    parent = db.create_session('Resolution', 'codex', str(project), '', '', '#e0784f', 'workspace-write')
+    subdir = project / 'nested "Main"'
+    subdir.mkdir()
+    alias = db.create_session('Same project', 'codex', str(subdir), '', '', '#e0784f', 'workspace-write')
+    with patch.object(runner.SessionHub, '_start_turn', start):
+        rows = [await tasks.create(pid, {'prompt': 'Feature ' + name, 'request_id': name})
+                for pid, name in ((parent, 'A'), (parent, 'B'), (alias, 'C'))]
+        a, b, c = [row['id'] for row in rows]
+        ap, bp, cp = [Path(row['cwd']) for row in rows]
+        for sid, path, name in zip((a, b, c), (ap, bp, cp), ('A', 'B', 'C')):
+            (path / 'a.txt').write_text(name + '\n')
+            (path / ('new-' + name)).write_text(name + '\n')
+            finish(sid)
+        # Staged work must survive resolution preparation byte for byte.
+        tasks._git(bp, 'add', '--', 'new-B')
+        index = (bp / '.git' / 'index').read_bytes()
+        main_index = (project / '.git' / 'index').read_bytes()
+        reviews = [await tasks.review(pid, sid) for pid, sid in ((parent, a), (parent, b), (alias, c))]
+        old_b = tasks.record(b)
+        token = reviews[1]['token']
+        users = lambda sid: len([row for row in db.get_events(sid) if row['kind'] == 'user'])
+        for value in ('true', 1, None, [], {}):
+            await rejected(tasks.review(parent, b, token, value), 'true or false')
+        (project / 'a.txt').write_text('drift\n')
+        await rejected(tasks.review(parent, b, token), 'patch')
+        assert tasks.record(b) == old_b and users(b) == 1
+        (bp / 'new-B').write_text('changed since review\n')
+        await rejected(tasks.review(parent, b, token, True), 'review them again')
+        (bp / 'new-B').write_text('B\n')
+        runner.hub(parent).status = 'running'
+        await rejected(tasks.review(parent, b, token, True), 'idle')
+        runner.hub(parent).status = 'idle'
+        # A refused engine dispatch rolls the baseline back. The same review
+        # can retry even if Main has drifted again since its failed snapshot.
+        with patch.object(runner.hub(b), 'send_message', return_value={'error': 'Engine unavailable'}):
+            await rejected(tasks.review(parent, b, token, True), 'Engine unavailable')
+        assert tasks.record(b) == old_b and users(b) == 1
+        assert tasks._git(bp, 'rev-parse', 'refs/puppy/base').decode().strip() == old_b['base']
+        (project / 'a.txt').write_text('different drift\n')
+        with patch.object(runner.hub(b), 'send_message', return_value={'error': 'Engine unavailable'}):
+            await rejected(tasks.review(parent, b, token, True), 'Engine unavailable')
+        assert tasks.record(b) == old_b
+        (project / 'a.txt').write_text('original\n')
+        (project / 'b.txt').write_text('Main uncommitted change\n')
+        (project / 'main-only').write_text('Main addition\n')
+        (project / 'deleted.txt').unlink()
+        original_git = tasks._git
+        def fatal_git(cwd, *args, **kwargs):
+            if args[:2] == ('apply', '--check'):
+                raise tasks.GitError('Invalid patch', 128)
+            return original_git(cwd, *args, **kwargs)
+        with patch.object(tasks, '_git', fatal_git):
+            await rejected(tasks.review(parent, b, token, True), 'Invalid patch')
+        assert users(b) == 1
+        # Hold A inside its project lock; both same-parent B and other-parent C
+        # must wait, then capture A's applied result instead of racing it.
+        loop = asyncio.get_running_loop()
+        applying, release = asyncio.Event(), threading.Event()
+        def slow_git(cwd, *args, **kwargs):
+            if str(cwd) == str(project) and args[:2] == ('apply', '--binary'):
+                loop.call_soon_threadsafe(applying.set)
+                assert release.wait(10)
+            return original_git(cwd, *args, **kwargs)
+        with patch.object(tasks, '_git', slow_git):
+            first = asyncio.create_task(tasks.review(parent, a, reviews[0]['token'], True))
+            try:
+                await asyncio.wait_for(applying.wait(), 5)
+                second = asyncio.create_task(tasks.review(parent, b, token, True))
+                third = asyncio.create_task(tasks.review(alias, c, reviews[2]['token'], True))
+                await asyncio.sleep(.05)
+                assert not second.done() and not third.done()
+            finally:
+                release.set()
+            ar, br, cr = await asyncio.gather(first, second, third)
+        assert ar['applied'] and not ar.get('resolving')
+        assert br['resolving'] and cr['resolving'] and not br['applied'] and not cr['applied']
+        assert users(a) == 1 and users(b) == users(c) == 2
+        assert (project / 'a.txt').read_text() == 'A\n'
+        assert not (project / 'new-B').exists() and not (project / 'new-C').exists()
+        assert (bp / 'a.txt').read_text() == 'B\n' and (bp / '.git' / 'index').read_bytes() == index
+        for sid, path, before in ((b, bp, reviews[1]), (c, cp, reviews[2])):
+            ref = 'refs/puppy/resolve/' + before['token']
+            assert tasks._git(path, 'show', ref + '/main:a.txt') == b'A\n'
+            assert tasks._git(path, 'show', ref + '/main:b.txt') == b'Main uncommitted change\n'
+            assert tasks._git(path, 'show', ref + '/task:a.txt') == (b'B\n' if sid == b else b'C\n')
+            assert tasks._git(path, 'show', ref + '/base:a.txt') == b'original\n'
+            assert tasks._git(path, 'remote').strip() == b''
+            prompt = runner.hub(sid)._active_prompt_text
+            assert ref in prompt and 'must review again' in prompt
+            assert_main_inspection(prompt, project)
+            assert 'rather than changing the pinned review baseline' in prompt
+            assert_main_inspection(tasks.guidance(sid), project if sid == b else subdir)
+        await rejected(tasks.review(parent, b, token, True), 'finish')
+        # A failed/stopped resolution never applies or starts another prompt.
+        finish(b, 'Needs more work', 'error')
+        assert users(b) == 2 and (project / 'a.txt').read_text() == 'A\n'
+        await rejected(tasks.review(parent, b, token, True), 'review them again')
+        def reconcile(sid, path, merged, name):
+            # Simulate the agent integrating the supplied Main snapshot and
+            # reapplying its intent, including a staged file and Main deletes.
+            tasks._git(path, 'restore', '--source', tasks.record(sid)['base'], '--worktree', '--', '.')
+            (path / 'a.txt').write_text(merged + '\n')
+            (path / ('new-' + name)).write_text(name + '\n')
+            finish(sid, 'Resolved and checked')
+        reconcile(b, bp, 'A+B', 'B')
+        reconcile(c, cp, 'A+C', 'C')
+        new_b, new_c = await tasks.review(parent, b), await tasks.review(alias, c)
+        assert new_b['token'] != token and 'b.txt' not in new_b['files'] and 'deleted.txt' not in new_b['files']
+        assert 'main-only' not in new_b['files'] and 'new-B' in new_b['files']
+        await tasks.review(parent, b, new_b['token'])
+        # C resolved against A, but B landed first. Its next explicit apply
+        # takes a fresh snapshot and starts exactly one further resolution.
+        cr = await tasks.review(alias, c, new_c['token'], True)
+        assert cr['resolving'] and users(c) == 3
+        assert tasks._git(cp, 'show', tasks.record(c)['base'] + ':a.txt') == b'A+B\n'
+        reconcile(c, cp, 'A+B+C', 'C')
+        await tasks.review(alias, c, (await tasks.review(alias, c))['token'])
+        assert (project / 'a.txt').read_text() == 'A+B+C\n'
+        assert all((project / ('new-' + name)).is_file() for name in ('A', 'B', 'C'))
+        assert (project / 'b.txt').read_text() == 'Main uncommitted change\n'
+        assert not (project / 'deleted.txt').exists()
+        assert (project / '.git' / 'index').read_bytes() == main_index
+        blob = tasks._git(bp, 'rev-parse', old_b['base'] + ':a.txt').decode().strip()
+        tasks._git(bp, 'update-index', '--index-info', data=(
+            '0 {0}\ta.txt\n100644 {1} 1\ta.txt\n100644 {1} 2\ta.txt\n'.format('0' * len(blob), blob)).encode())
+        await rejected(tasks.review(parent, b), 'unresolved Git conflicts')
+        tasks.validate_persisted(db.connect())
+    print('PASS: opt-in conflict turns, snapshot preservation, refusal rollback, stale/duplicate guards, ordered cross-parent applies and repeated Main drift')
+
+
 async def actual_runner(parent):
     from puppy.drivers.base import Driver
     class ScriptDriver(Driver):
@@ -49,7 +238,11 @@ async def actual_runner(parent):
         binary = sys.executable
         def build_cmd(self, session, first_turn, prompt, pinned_id, **kwargs):
             assert "isolated project copy" in kwargs["system_prompt"]
-            return [sys.executable, "-c", "import json,time; time.sleep(" + ("3" if "Stop me" in prompt else ".4") + "); print(json.dumps({'a':'event','kind':'assistant','data':{'text':'Actual runner finished'}})); print(json.dumps({'a':'result','data':{'ok':True}}))"]
+            assert_main_inspection(kwargs['system_prompt'], db.get_session(parent)['cwd'])
+            if 'Resolve conflicts for' in prompt:
+                assert not first_turn and session['native_session_id'] == 'test-native-task'
+                assert_main_inspection(prompt, db.get_session(parent)['cwd'])
+            return [sys.executable, "-c", "import json,time; time.sleep(" + ("3" if "Stop me" in prompt else ".4") + "); print(json.dumps({'a':'native_id','id':'test-native-task'})); print(json.dumps({'a':'event','kind':'assistant','data':{'text':'Actual runner finished'}})); print(json.dumps({'a':'result','data':{'ok':True}}))"]
         def parse_line(self, line, ctx):
             return [json.loads(line)]
     with patch.object(runner, "get_driver", return_value=ScriptDriver()):
@@ -60,6 +253,17 @@ async def actual_runner(parent):
         for row in (a,b):
             assert tasks.public(row['id'])['state'] == 'ready', db.get_events(row['id'])
             assert tasks.public(row['id'])['summary'] == 'Actual runner finished'
+        project = Path(db.get_session(parent)['cwd'])
+        (Path(a['cwd']) / 'runner-conflict').write_text('task addition\n')
+        (project / 'runner-conflict').write_text('Main addition\n')
+        review = await tasks.review(parent, a['id'])
+        response = await tasks.review(parent, a['id'], review['token'], True)
+        assert response['resolving']
+        await runner.hub(a['id']).turn_task
+        assert tasks.public(a['id'])['state'] == 'ready', db.get_events(a['id'])
+        assert len([row for row in db.get_events(a['id']) if row['kind'] == 'user']) == 2
+        assert (project / 'runner-conflict').read_text() == 'Main addition\n'
+        (project / 'runner-conflict').unlink()
         slow = await tasks.create(parent, {"prompt":"Stop me", "request_id":"stop-runner"})
         fast = await tasks.create(parent, {"prompt":"Keep working", "request_id":"keep-runner"})
         slow_hub, fast_hub = runner.hub(slow['id']), runner.hub(fast['id'])
@@ -68,7 +272,7 @@ async def actual_runner(parent):
         await asyncio.gather(slow_hub.turn_task, fast_hub.turn_task)
         assert tasks.public(slow['id'])['state'] == 'stopped'
         assert tasks.public(fast['id'])['state'] == 'ready'
-    print('PASS: real concurrent runner lifecycle, task guidance and independent Stop')
+    print('PASS: real concurrent runner lifecycle, native history on conflict follow-ups, task guidance and independent Stop')
 
 
 async def toggle_api(app, parent, child):
@@ -84,7 +288,9 @@ async def toggle_api(app, parent, child):
     try:
         assert 'session-tasks-toggle' in app['puppy_capabilities']
         assert 'session-task-config' in app['puppy_capabilities']
+        assert 'session-task-conflict-resolution' in app['puppy_capabilities']
         await configured_creation_api(client, parent)
+        await resolution_api(client, parent)
         for value in (None, 'false', 0, 1, [], {}):
             response = await client.patch(route, json={'tasks_enabled': value})
             assert response.status == 400, await response.text()
@@ -273,6 +479,7 @@ async def attachment_adoption(parent):
 
 async def main():
     config.ensure_dirs()
+    await conflict_resolution()
     project = ROOT / 'project'
     project.mkdir()
     tasks._git(project, 'init', '--quiet')
@@ -323,6 +530,19 @@ async def main():
         assert tasks._git(ap,'remote').strip() == b''
         assert a['permission_mode'] == 'workspace-write'
         assert 'Use the existing design' in tasks.guidance(aid, True)
+        assert_main_inspection(tasks.guidance(aid, True), project)
+        assert_main_inspection(tasks.guidance(aid, False), project)
+        # A manual drift follow-up gets the current path even without a
+        # resolution snapshot. Quote unusual paths as data on one line.
+        moved = str(ROOT / 'Main "renamed"\nfolder')
+        try:
+            db.touch_session(parent, cwd=moved)
+            text = tasks.guidance(aid, False)
+            assert_main_inspection(text, moved)
+            assert json.loads(text.split('JSON-quoted path): ', 1)[1].splitlines()[0]) == moved
+            assert 'Use the existing design' not in text
+        finally:
+            db.touch_session(parent, cwd=str(project))
         assert (await tasks.create(parent, {'prompt':'Feature A','request_id':'a'}))['id'] == aid
         await rejected(tasks.create(parent, {'prompt':'Different','request_id':'a'}),'different')
         assert runner.hub(aid).status == runner.hub(bid).status == 'running'

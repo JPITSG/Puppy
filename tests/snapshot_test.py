@@ -410,6 +410,15 @@ async def main() -> None:
         session_tasks._git(original_scratch, "add", "-A")
         session_tasks._git(original_scratch, "commit", "-qm", "Task baseline")
         task_base = session_tasks._git(original_scratch, "rev-parse", "HEAD").decode().strip()
+        # Resolution inputs are ordinary pinned Git objects in the managed
+        # task copy, including trees never committed by the engine.
+        resolution_ref = "refs/puppy/resolve/" + "1" * 64
+        resolution_blob = session_tasks._git(original_scratch, "hash-object", "-w", "--stdin",
+                                             data=b"resolution-only bytes\n").decode().strip()
+        resolution_tree = session_tasks._git(original_scratch, "mktree", data=(
+            "100644 blob " + resolution_blob + "\tresolution.txt\n").encode()).decode().strip()
+        for name, oid in (("base", task_base), ("main", task_base), ("task", resolution_tree)):
+            session_tasks._git(original_scratch, "update-ref", resolution_ref + "/" + name, oid)
         task_record = {"format":1, "parent":directory_id, "request_id":"snapshot-task",
             "prompt":"Keep this task", "context":"Main context", "base":task_base,
             "created_at":1, "outcome":"ok", "summary":"Ready for review", "completed_at":2,
@@ -654,6 +663,9 @@ async def main() -> None:
         assert session_tasks.enabled(directory_id) is True
         session_tasks.validate_persisted(db.connect())
         session_tasks._git(restored_scratch["cwd"], "cat-file", "-e", task_base)
+        for name in ("base", "main", "task"):
+            session_tasks._git(restored_scratch["cwd"], "cat-file", "-e", resolution_ref + "/" + name)
+        assert session_tasks._git(restored_scratch["cwd"], "show", resolution_ref + "/task:resolution.txt") == b"resolution-only bytes\n"
         assert session_tasks.children(directory_id) == [scratch_id]
         assert (Path(restored_scratch["cwd"]) / "nested" / "file.txt").read_text(
             encoding="utf-8") == "scratch contents"

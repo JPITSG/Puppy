@@ -9816,6 +9816,7 @@ async function modalNewTask(workspace) {
    refused instead of silently applied. */
 async function modalReviewTask(workspace, session) {
   const task = session.task || {};
+  const canResolve = nodeHasCapability(workspace.tab.bid, "session-task-conflict-resolution");
   const { m, close } = modal(`<h2>Review task</h2>
     <div class="ws-facts task-review-facts"></div>
     <div class="field-lbl task-review-summary-lbl hidden">Summary</div>
@@ -9824,6 +9825,12 @@ async function modalReviewTask(workspace, session) {
     <pre class="task-review-files">Loading changes…</pre>
     <pre class="task-review-diff hidden"></pre>
     <p class="hint task-review-note hidden"></p>
+    ${canResolve ? `<label class="be-auto be-auto-add task-review-resolve hidden" id="tr-resolve-wrap">
+      <input type="checkbox" id="tr-resolve" aria-labelledby="tr-resolve-label" aria-describedby="tr-resolve-note" disabled>
+      <span class="be-auto-track" aria-hidden="true"><span></span></span>
+      <span class="be-auto-copy"><span id="tr-resolve-label">Resolve conflicts</span>
+        <small id="tr-resolve-note">If Main has conflicting changes, send one follow-up to this task’s agent with a fresh copy of Main. It uses the task’s history, current settings, permissions and normal model quota to reconcile the changes in its own copy. It may also inspect Main read-only when needed. You must review and apply again afterward. Applies run one at a time; if another task changes Main again, another resolution may be needed. Off by default for each review.</small></span>
+    </label>` : ""}
     <p class="backend-edit-error hidden" role="alert"></p>
     <div class="m-btns"><button class="btn" id="tr-close">Close</button><button class="btn btn-pri" id="tr-apply" disabled>Apply to Main</button></div>`, "task-review-modal");
   const facts = m.querySelector(".task-review-facts");
@@ -9844,6 +9851,7 @@ async function modalReviewTask(workspace, session) {
   const files = m.querySelector(".task-review-files"), diff = m.querySelector(".task-review-diff");
   const note = m.querySelector(".task-review-note"), error = m.querySelector(".backend-edit-error");
   const apply = m.querySelector("#tr-apply");
+  const resolve = m.querySelector("#tr-resolve"), resolveWrap = m.querySelector("#tr-resolve-wrap");
   const fail = text => { error.textContent = text; error.classList.remove("hidden"); };
   m.querySelector("#tr-close").onclick = close;
   try {
@@ -9861,18 +9869,34 @@ async function modalReviewTask(workspace, session) {
       diff.classList.remove("hidden");
     }
     note.textContent = (data.truncated ? "The diff preview is shortened. " : "") +
-      "Applying writes these changes into Main’s working files without committing or deploying; overlapping edits must be resolved first.";
+      "Applying writes these changes into Main’s working files without committing or deploying. Main must be idle; conflicting changes are never overwritten automatically.";
     note.classList.remove("hidden");
+    if (resolve && data.has_changes) {
+      resolve.disabled = false; resolveWrap.classList.remove("hidden");
+    }
     apply.textContent = data.has_changes ? "Apply to Main" : "Mark as reviewed";
     apply.disabled = false;
     apply.onclick = async () => {
+      if (apply.disabled) return;
       apply.disabled = true; error.classList.add("hidden");
+      if (resolve) { resolve.disabled = true; resolveWrap.classList.add("disabled"); }
+      apply.textContent = "Applying…";
       try {
-        await api(workspace.tab.bid, base + "/apply", { method: "POST", body: { token: data.token }, timeoutMs: 120000 });
+        const result = await api(workspace.tab.bid, base + "/apply", { method: "POST",
+          body: { token: data.token, ...(resolve && data.has_changes ? { resolve_conflicts: resolve.checked } : {}) }, timeoutMs: 180000 });
         close();
-        toast(data.has_changes ? "Task changes applied to Main" : "Task marked as reviewed", "ok");
+        if (result.resolving) {
+          workspace.openTask(session.id);
+          toast("Conflict resolution started in the task. Review its changes when it finishes.", "ok");
+        } else {
+          toast(data.has_changes ? "Task changes applied to Main" : "Task marked as reviewed", "ok");
+        }
         await refreshSessionList(workspace.tab.bid); renderSidebar();
-      } catch (err) { fail(err.message); apply.disabled = false; }
+      } catch (err) {
+        fail(err.message); apply.disabled = false;
+        apply.textContent = data.has_changes ? "Apply to Main" : "Mark as reviewed";
+        if (resolve) { resolve.disabled = !data.has_changes; resolveWrap.classList.remove("disabled"); }
+      }
     };
   } catch (err) { files.textContent = ""; fail(err.message); }
 }
