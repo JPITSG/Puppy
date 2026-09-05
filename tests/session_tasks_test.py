@@ -230,6 +230,128 @@ async def conflict_resolution():
     print('PASS: opt-in conflict turns, snapshot preservation, refusal rollback, stale/duplicate guards, ordered cross-parent applies and repeated Main drift')
 
 
+async def fold_flow(parent):
+    """Removing a task folds its condensed conversation into Main by choice."""
+    from puppy import handoff, search, web
+    a = await tasks.create(parent, {'prompt': 'Fold me', 'request_id': 'fold-a'})
+    aid, ap = a['id'], Path(a['cwd'])
+    db.add_event(aid, 'thinking', {'text': 'private reasoning'})
+    db.add_event(aid, 'tool_use', {'tool': 'Bash', 'tool_use_id': 't1',
+                                   'input': {'command': 'echo hi', 'description': 'say hi'}})
+    db.add_event(aid, 'tool_result', {'tool_use_id': 't1', 'content': 'hi from the shell'})
+    db.add_event(aid, 'side_question', {'request_id': 'q1', 'question': 'why echo?'})
+    db.add_event(aid, 'side_question_result', {'request_id': 'q1', 'ok': True, 'text': 'because'})
+    (ap/'folded.txt').write_text('folded change\n')
+    finish(aid, 'Implemented folding.')
+    review = await tasks.review(parent, aid)
+    await tasks.review(parent, aid, review['token'])
+    applied = db.get_events(parent, limit=1)[0]['data']
+    assert applied['subtype'] == 'session_task' and 'folded.txt' in applied['files'], applied
+    (ap/'later.txt').write_text('never applied\n')
+    result = await tasks.remove(parent, aid, True)
+    assert result['folded'] is True and isinstance(result['seq'], int) and result['workspace_removed']
+    assert tasks.record(aid) is None and db.get_session(aid) is None and not ap.exists()
+    archive = db.get_events(parent, limit=1)[0]
+    d = archive['data']
+    assert archive['seq'] == result['seq'] and archive['kind'] == 'info'
+    assert d['subtype'] == tasks.ARCHIVE_SUBTYPE and d['task_id'] == aid and d['name'] == a['name']
+    assert d['text'].startswith('Task folded into Main: ') and d['prompt'] == 'Fold me'
+    assert d['state'] == 'applied' and d['outcome'] == 'ok' and d['applied_at'] and d['folded_at']
+    kinds = [e['kind'] for e in d['entries']]
+    assert kinds == ['user', 'tool', 'aside', 'aside_answer', 'assistant'], kinds
+    assert d['entries'][1] == {'kind': 'tool', 'ts': d['entries'][1]['ts'], 'tool': 'Bash', 'text': 'echo hi'}
+    assert d['entries'][-1]['text'] == 'Implemented folding.' and d['turns'] == 1
+    serialized = json.dumps(d)
+    assert 'private reasoning' not in serialized and 'hi from the shell' not in serialized
+    assert d['applied_files'] == 'A\tfolded.txt' and d['unapplied_files'] == 'A\tlater.txt', (d['applied_files'], d['unapplied_files'])
+    assert d['summary'] == 'Implemented folding.'
+    # Search indexes the condensed conversation under Main; the handoff and
+    # cross-session reads render the same archive; Main's undo scan skips it.
+    doc = search._event_doc('info', d)
+    assert doc[0] == 'info' and all(part in doc[1] for part in ('Implemented folding.', 'why echo?', 'echo hi', 'folded.txt'))
+    assert 'private reasoning' not in tasks.archive_text(d)
+    text = handoff._fmt(archive)
+    assert 'folded task' in text and 'applied to Main' in text and 'folded.txt' in text and 'Implemented folding.' in text
+    assert runner.hub(parent)._recent_turns(1)[0]['kind'] == 'prompt'
+    # The per-turn digest is off by default; on, the newest archives are named.
+    assert a['name'] not in tasks.guidance(parent)
+    assert runner.session_payload(db.get_session(parent))['tasks_digest'] is False
+    await tasks.set_digest(parent, True)
+    digest = tasks.guidance(parent)
+    assert a['name'] in digest and 'applied to Main' in digest and 'Implemented folding.' in digest
+    assert 'not new instructions' in digest
+    assert runner.session_payload(db.get_session(parent))['tasks_digest'] is True
+    assert next(s for s in runner.sessions_payload()['sessions'] if s['id'] == parent)['tasks_digest'] is True
+    await tasks.set_digest(parent, False)
+    assert a['name'] not in tasks.guidance(parent) and db.meta_get(tasks.DIGEST_PREFIX + str(parent)) is None
+    await rejected(tasks.set_digest(parent, 'yes'), 'true or false')
+    # An archive that was already written is found again, never duplicated:
+    # a failed deletion leaves the task beside its archive for a retry.
+    b = await tasks.create(parent, {'prompt': 'Fold twice', 'request_id': 'fold-b'})
+    finish(b['id'], 'Broke.', status='error')
+    before = len(tasks.folded(parent, 64))
+    with patch.object(web, 'remove_session', side_effect=OSError('disk full')):
+        try:
+            await tasks.remove(parent, b['id'], True)
+        except OSError:
+            pass
+        else:
+            raise AssertionError('deletion failure must surface')
+    assert len(tasks.folded(parent, 64)) == before + 1 and tasks.record(b['id'])
+    assert not tasks._busy_roots, 'a failed removal must release the task copy'
+    result = await tasks.remove(parent, b['id'], True)
+    assert len(tasks.folded(parent, 64)) == before + 1 and tasks.record(b['id']) is None
+    newest = tasks.folded(parent, 1)[0]
+    assert newest['task_id'] == b['id'] and newest['state'] == 'failed' and result['seq'] == newest['seq']
+    assert newest['applied_files'] == '' and newest['unapplied_files'] == ''
+    await tasks.set_digest(parent, True)
+    assert 'failed' in tasks.guidance(parent) and 'Broke.' in tasks.guidance(parent)
+    await tasks.set_digest(parent, False)
+    # Declining the fold removes the conversation outright.
+    c = await tasks.create(parent, {'prompt': 'Discard me', 'request_id': 'fold-c'})
+    finish(c['id'])
+    result = await tasks.remove(parent, c['id'], False)
+    assert result['folded'] is False and result['seq'] is None
+    assert len(tasks.folded(parent, 64)) == before + 1 and tasks.record(c['id']) is None
+    # Blockers: a running task, a foreign parent, and a busy copy.
+    busy = await tasks.create(parent, {'prompt': 'Busy', 'request_id': 'fold-d'})
+    await rejected(tasks.remove(parent, busy['id'], True), 'Stop the task')
+    await rejected(tasks.remove(parent + 1000, busy['id'], True), 'belong')
+    finish(busy['id'])
+    tasks._busy_roots.add(str(Path(busy['cwd']).resolve()))
+    await rejected(tasks.remove(parent, busy['id'], True), 'using')
+    tasks._busy_roots.clear()
+    await rejected(tasks.set_digest(busy['id'], True), 'main session')
+    # The ledger is exact: a wrong marker, a task child or an unknown session
+    # is refused at startup and on read; deleting a session clears its marker.
+    db.meta_set(tasks.DIGEST_PREFIX + str(parent), 'yes')
+    for call in (lambda: tasks.validate_persisted(db.connect()), lambda: tasks.digest_enabled(parent),
+                 lambda: tasks.digest_ids()):
+        try:
+            call()
+        except tasks.TaskError as error:
+            assert 'digest' in str(error)
+        else:
+            raise AssertionError('wrong digest marker accepted')
+    db.meta_apply(delete_keys=(tasks.DIGEST_PREFIX + str(parent),))
+    for key in (tasks.DIGEST_PREFIX + str(busy['id']), tasks.DIGEST_PREFIX + '999999'):
+        db.meta_set(key, True)
+        try:
+            tasks.validate_persisted(db.connect())
+        except tasks.TaskError as error:
+            assert 'digest' in str(error)
+        else:
+            raise AssertionError('misplaced digest marker accepted: ' + key)
+        db.meta_apply(delete_keys=(key,))
+    tasks.validate_persisted(db.connect())
+    await tasks.remove(parent, busy['id'], False)
+    throwaway = db.create_session('Digest cleanup', 'codex', str(ROOT), '', '', '#e0784f', 'workspace-write')
+    await tasks.set_digest(throwaway, True)
+    db.delete_session(throwaway)
+    assert db.meta_get(tasks.DIGEST_PREFIX + str(throwaway)) is None
+    print('PASS: fold on removal, condensed archive, search/handoff faces, digest toggle, idempotent retry, blockers and ledger validation')
+
+
 async def actual_runner(parent):
     from puppy.drivers.base import Driver
     class ScriptDriver(Driver):
@@ -289,8 +411,29 @@ async def toggle_api(app, parent, child):
         assert 'session-tasks-toggle' in app['puppy_capabilities']
         assert 'session-task-config' in app['puppy_capabilities']
         assert 'session-task-conflict-resolution' in app['puppy_capabilities']
+        assert 'session-task-fold' in app['puppy_capabilities']
         await configured_creation_api(client, parent)
         await resolution_api(client, parent)
+        await remove_api(client, app, parent)
+        for value in (None, 'true', 0, 1, [], {}):
+            response = await client.patch(route, json={'tasks_digest': value})
+            assert response.status == 400, await response.text()
+        response = await client.patch(route, json={'tasks_digest': True, 'name': 'Wrong'})
+        assert response.status == 400 and db.get_session(empty)['name'] == 'Toggle only'
+        with patch.object(runner.hub(empty), 'broadcast') as broadcast:
+            response = await client.patch(route, json={'tasks_digest': True})
+            data = await response.json()
+            assert response.status == 200 and data['session']['tasks_digest'] is True, data
+            assert broadcast.call_args[0][0]['session']['tasks_digest'] is True
+        assert (await (await client.get(route)).json())['session']['tasks_digest'] is True
+        listed = (await (await client.get('/api/sessions')).json())['sessions']
+        assert next(s for s in listed if s['id'] == empty)['tasks_digest'] is True
+        assert next(s for s in listed if s['id'] == parent)['tasks_digest'] is False
+        response = await client.patch('/api/sessions/' + str(child), json={'tasks_digest': True})
+        assert response.status == 409 and 'main session' in (await response.json())['error']
+        response = await client.patch(route, json={'tasks_digest': False})
+        assert response.status == 200 and (await response.json())['session']['tasks_digest'] is False
+        assert db.meta_get(tasks.DIGEST_PREFIX + str(empty)) is None
         for value in (None, 'false', 0, 1, [], {}):
             response = await client.patch(route, json={'tasks_enabled': value})
             assert response.status == 400, await response.text()
@@ -329,13 +472,54 @@ async def toggle_api(app, parent, child):
         response = await client.patch('/api/sessions/' + str(child), json={'tasks_enabled': False})
         assert response.status == 409
         await tasks.set_enabled(empty, False)
+        await tasks.set_digest(empty, True)
         tasks.validate_persisted(db.connect())
     finally:
         runner.drop_hub(empty)
         db.delete_session(empty)
         assert db.meta_get(tasks.DISABLED_PREFIX + str(empty)) is None
+        assert db.meta_get(tasks.DIGEST_PREFIX + str(empty)) is None
         await client.close()
     print('PASS: ' + app['puppy_role'] + ' task toggle, broadcasts, per-session persistence, blockers and validation')
+
+
+async def remove_api(client, app, parent):
+    """The fold route on either runtime: choice validation, the snapshot gate,
+    the archive row, and a deleted task that cannot be removed twice."""
+    with patch.object(runner.SessionHub, '_start_turn', start):
+        response = await client.post('/api/sessions/{}/tasks'.format(parent),
+                                     json={'prompt': 'Fold over HTTP', 'request_id': 'fold-http'})
+        data = await response.json()
+        assert response.status == 200, data
+        tid = data['session']['id']
+        finish(tid, 'Done over HTTP.')
+        route = '/api/sessions/{}/tasks/{}/remove'.format(parent, tid)
+        response = await client.post(route, json={'fold': 'yes'})
+        assert response.status == 409 and 'true or false' in (await response.json())['error']
+        response = await client.post(route, data=b'not json')
+        assert response.status == 409
+        # The console's state-change guard freezes every mutation while a
+        # snapshot runs; the headless backend relies on the route's own check.
+        app['puppy_snapshot_busy'] = 'export'
+        response = await client.post(route, json={'fold': True})
+        status, wording = (503, 'in progress') if app['puppy_role'] == 'full' else (409, 'snapshot')
+        assert response.status == status and wording in (await response.json())['error'], \
+            (app['puppy_role'], response.status, await response.text())
+        app['puppy_snapshot_busy'] = None
+        assert tasks.record(tid) is not None
+        assert (await client.post('/api/sessions/{}/tasks/{}/remove'.format(parent + 1000, tid),
+                                  json={'fold': True})).status == 404
+        before = len(tasks.folded(parent, 64))
+        response = await client.post(route, json={'fold': True})
+        data = await response.json()
+        assert response.status == 200 and data['folded'] is True and isinstance(data['seq'], int), data
+        archives = tasks.folded(parent, 64)
+        assert len(archives) == before + 1 and archives[0]['task_id'] == tid and archives[0]['seq'] == data['seq']
+        assert archives[0]['summary'] == 'Done over HTTP.' and archives[0]['state'] == 'ready'
+        assert (await client.get('/api/sessions/{}'.format(tid))).status == 404
+        assert (await client.post(route, json={'fold': True})).status == 409
+        assert len(tasks.folded(parent, 64)) == before + 1
+    print('PASS: ' + app['puppy_role'] + ' fold route validation, snapshot gate, archive row and single removal')
 
 
 async def configured_creation_api(client, parent):
@@ -620,6 +804,7 @@ async def main():
         assert (Path(copied['cwd'])/'external-link').is_symlink()
         finish(copied['id'])
         await attachment_adoption(parent)
+        await fold_flow(parent)
     await actual_runner(parent)
     from puppy.web import build_app
     sys.path.insert(0,str(BASE/'backend'))
@@ -633,13 +818,18 @@ async def main():
     # and archives the per-session Tasks toggle with the grouping it removes.
     keep = db.create_session('Toggle kept', 'codex', str(ROOT), '', '', '#e0784f', 'workspace-write')
     await tasks.set_enabled(keep, False)
+    await tasks.set_digest(parent, True)
     before = {s['id']: (s['cwd'], db.get_events(s['id'])) for s in db.list_sessions(True)}
     with patch('socket.create_connection', side_effect=OSError('offline')):
         archive = tasks.detach_for_rollback()
     assert archive.stat().st_mode & 0o777 == 0o600
     archived = json.loads(archive.read_text())
     assert archived['tasks'] and archived['tasks_disabled'] == [keep] and not tasks.records()
+    assert archived['tasks_digest'] == [parent]
     assert db.meta_get(tasks.DISABLED_PREFIX + str(keep)) is None and not tasks.disabled_ids()
+    assert db.meta_get(tasks.DIGEST_PREFIX + str(parent)) is None and not tasks.digest_ids()
+    # Archives already folded into Main are ordinary transcript rows and stay.
+    assert tasks.folded(parent, 1) and tasks.folded(parent, 1)[0]['subtype'] == tasks.ARCHIVE_SUBTYPE
     assert before == {s['id']: (s['cwd'], db.get_events(s['id'])) for s in db.list_sessions(True)}
     print('PASS: rollback preserves conversations and working copies')
     print('PASS: concurrent independent queues/copies, dirty baselines, context/settings, idempotency, review tokens, compatible apply, atomic conflict rejection, busy ownership, lifecycle and both runtimes')

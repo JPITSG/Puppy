@@ -76,6 +76,7 @@ class FakeElement {
     this.scrollHeight = 0; this.clientHeight = 0; this.offsetHeight = 0;
     this.scrollWidth = 0; this.clientWidth = 0; this.offsetWidth = 0; this.scrollTop = 0;
     this.files = null;
+    this.checked = false;
     const classes = this._classes;
     this.classList = {
       add: (...keys) => keys.forEach(key => classes.add(key)),
@@ -122,6 +123,7 @@ class FakeElement {
     this.attributes[key] = String(value);
     if (key === "class") this.className = value;
     else if (key === "disabled") this.disabled = true;
+    else if (key === "checked") this.checked = true;   // a checkbox's initial state, like the browser's
     else if (key === "value") this.value = String(value);
   }
   getAttribute(key) {

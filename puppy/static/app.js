@@ -2329,6 +2329,7 @@ function decorateMentionsInto(node, text) {
    Empty titles keep an empty `data-tip` so they still suppress an ancestor's
    bubble the way `title=""` does natively. */
 const tips = (() => {
+  const CLIPPED_TITLES = ".tab .t-title,.task-card-head .t-name";
   const SHOW_MS = 500;   // first-hover delay
   const WARM_MS = 350;   // instant re-show window after a hide
   const GAP = 7, EDGE = 8;
@@ -2344,6 +2345,11 @@ const tips = (() => {
      copy because renderers keep assigning `.title` after adoption */
   const text = (a) => {
     if (!a) return "";
+    // Read live layout and text: resizing or renaming can change whether the
+    // title needs a bubble, including while that bubble is already visible.
+    if (a.matches(CLIPPED_TITLES)) {
+      return a.clientWidth > 0 && a.scrollWidth > a.clientWidth ? (a.textContent || "").trim() : "";
+    }
     const v = a.hasAttribute("title") ? a.getAttribute("title") : a.getAttribute("data-tip");
     return (v || "").trim();
   };
@@ -2362,7 +2368,7 @@ const tips = (() => {
     }
   };
 
-  const anchorOf = (n) => (n instanceof Element) ? n.closest("[title],[data-tip]") : null;
+  const anchorOf = (n) => (n instanceof Element) ? n.closest(`[title],[data-tip],${CLIPPED_TITLES}`) : null;
 
   function place(glide) {
     const r = anchor.getBoundingClientRect();
@@ -4607,6 +4613,11 @@ function backendSupportsSideQuestions(bid) {
 function backendSupportsSessionTasks(bid) {
   return nodeHasCapability(bid, "session-tasks");
 }
+/* The node folds a removed task's condensed conversation into Main and offers
+   the per-session digest toggle; older nodes only know the plain delete. */
+function backendSupportsTaskFold(bid) {
+  return nodeHasCapability(bid, "session-task-fold");
+}
 
 /* The local node advertises its capabilities on /api/state; a paired backend
    carries its own list. Legacy nodes advertise nothing and so support none. */
@@ -4623,11 +4634,9 @@ function appendSessionTasksToggle(menu, bid, session) {
   if (!session || session.task || !nodeHasCapability(bid, "session-tasks-toggle")) return;
   const current = findSessionMeta(bid, session.id) || session;
   const enabled = current.tasks_enabled !== false;
-  menu.appendChild(menuCheckRow("Enable tasks", enabled, async () => {
+  const patch = async body => {
     try {
-      const result = await api(bid, `sessions/${session.id}`, {
-        method: "PATCH", body: { tasks_enabled: !enabled },
-      });
+      const result = await api(bid, `sessions/${session.id}`, { method: "PATCH", body });
       const meta = findSessionMeta(bid, session.id);
       if (meta) Object.assign(meta, result.session);
       const view = sessionViewFor(bid, session.id);
@@ -4635,7 +4644,16 @@ function appendSessionTasksToggle(menu, bid, session) {
       renderSidebar();
       if (bid) refreshGroup(bid);
     } catch (error) { toast(error.message, "error"); }
-  }));
+  };
+  menu.appendChild(menuCheckRow("Enable tasks", enabled, () => patch({ tasks_enabled: !enabled })));
+  /* Off by default: every folded task would otherwise ride along on every
+     one of Main's turns. On, the model is told the newest folded tasks and
+     their final answers at the start of each turn. */
+  if (backendSupportsTaskFold(bid)) {
+    const digest = current.tasks_digest === true;
+    menu.appendChild(menuCheckRow("Model sees folded tasks", digest,
+      () => patch({ tasks_digest: !digest })));
+  }
 }
 
 function backendSupportsSessionTools(bid) {
@@ -9372,6 +9390,134 @@ function taskStateClass(task) {
 function taskReviewable(task) {
   return ["ready", "applied", "failed", "stopped"].includes(task.state);
 }
+/* A removed task's condensed conversation, folded into Main where it was
+   removed. Its state is the task's last state in the sheet's voice, except
+   that "ready" no longer means anything can be reviewed. */
+const TASK_ARCHIVE_STATES = {
+  applied: ["Applied", "ok"], ready: ["Not applied", "warn"], stopped: ["Stopped", "warn"],
+  failed: ["Failed", "bad"], pending: ["Unfinished", "warn"],
+};
+function taskArchiveState(d) {
+  return TASK_ARCHIVE_STATES[d.state] || [d.state || "Unknown", ""];
+}
+/* git name-status lines -> [{status, path}], tolerant of missing tabs */
+function nameStatusList(text) {
+  return String(text || "").split("\n").map(line => line.trim()).filter(Boolean).map(line => {
+    const parts = line.split("\t");
+    return { status: parts.length > 1 ? parts[0] : "", path: parts[parts.length - 1] };
+  });
+}
+const ARCHIVE_STAMP = { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" };
+/* The tool card's disclosure, so a Main with hundreds of folded tasks stays
+   a list of one-line heads. An archive is uncapped, so its body is only
+   built the first time it is opened. */
+function taskArchiveNode(d, ts, bid) {
+  const n = el("div", "tool-card task-archive");
+  const head = el("div", "tool-head");
+  const caret = el("span", "t-caret");
+  caret.appendChild(choiceSvg("arrow"));
+  head.appendChild(caret);
+  const icon = el("span", "t-ico");
+  icon.appendChild(tasksIcon(12));
+  head.appendChild(icon);
+  head.appendChild(el("span", "t-name", d.name || (d.task_id ? `Task ${d.task_id}` : "Task")));
+  const applied = nameStatusList(d.applied_files);
+  const bits = [];
+  const turns = Number(d.turns) || 0;
+  if (turns) bits.push(turns === 1 ? "1 prompt" : `${turns} prompts`);
+  if (applied.length) bits.push(applied.length === 1 ? "1 file applied" : `${applied.length} files applied`);
+  const stamp = fmtDateTime(d.folded_at || ts, ARCHIVE_STAMP);
+  if (stamp) bits.push("folded " + stamp);
+  head.appendChild(el("span", "t-sum", bits.join(" · ")));
+  const [label, cls] = taskArchiveState(d);
+  head.appendChild(el("span", "t-state" + (cls ? " " + cls : ""), label));
+  const body = el("div", "tool-body");
+  let built = false;
+  head.onclick = () => {
+    if (!built) { built = true; fillTaskArchive(body, d, applied, bid); }
+    n.classList.toggle("open");
+  };
+  n.appendChild(head);
+  n.appendChild(body);
+  return n;
+}
+function fillTaskArchive(body, d, applied, bid) {
+  const facts = el("div", "ta-facts");
+  const fact = (label, value) => {
+    if (!value) return;
+    facts.appendChild(el("span", "ta-fact-label", label));
+    facts.appendChild(el("span", "ta-fact-value", value));
+  };
+  fact("Outcome", taskArchiveState(d)[0]);
+  const [engine, detail] = engineConfigParts(bid, d.engine, d.model, d.effort);
+  fact("Engine", d.engine ? [engine, detail].filter(Boolean).join(" ") : "");
+  fact("Created", fmtDateTime(d.created_at, ARCHIVE_STAMP));
+  fact("Finished", d.completed_at ? fmtDateTime(d.completed_at, ARCHIVE_STAMP) : "");
+  fact("Applied", d.applied_at ? fmtDateTime(d.applied_at, ARCHIVE_STAMP) : "");
+  body.appendChild(facts);
+  if (d.prompt) {
+    body.appendChild(el("div", "tb-label", "task"));
+    body.appendChild(el("div", "ta-prompt", d.prompt));
+  }
+  const fileList = (label, items) => {
+    if (!items.length) return;
+    body.appendChild(el("div", "tb-label", label));
+    body.appendChild(linkifyInto(el("pre", "ta-files"),
+      items.map(item => (item.status ? item.status + "  " : "") + item.path).join("\n")));
+  };
+  fileList("files applied to Main", applied);
+  fileList("changed but not applied", nameStatusList(d.unapplied_files));
+  /* the assistant bubble's own markdown pipeline, so both read the same */
+  const mdBox = text => {
+    const box = el("div", "md");
+    box.innerHTML = md(text || "");
+    decorateMarkdownLinks(box);
+    decorateMarkdownImages(box);
+    decorateCodeBlocks(box);
+    return box;
+  };
+  const entries = Array.isArray(d.entries) ? d.entries.filter(e => e && typeof e === "object") : [];
+  if (entries.length) {
+    body.appendChild(el("div", "tb-label", "conversation"));
+    const list = el("div", "ta-entries");
+    for (const e of entries) {
+      const text = String(e.text || "");
+      if (e.kind === "user") {
+        /* the transcript's own sent bubble, so theme changes reach it */
+        const row = el("div", "ta-entry msg msg-user");
+        decorateMentionsInto(row, splitAttachmentMarkers(text).text || text);
+        list.appendChild(row);
+      } else if (e.kind === "assistant") {
+        const row = el("div", "ta-entry ta-assistant");
+        row.appendChild(mdBox(text));
+        list.appendChild(row);
+      } else if (e.kind === "tool") {
+        const row = el("div", "ta-entry ta-tool");
+        row.appendChild(el("span", "t-ico", toolIcon(e.tool)));
+        row.appendChild(el("span", "ta-tool-name", toolLabel(e.tool)));
+        linkifyInto(row.appendChild(el("span", "ta-tool-sum")), text);
+        row.title = text;
+        list.appendChild(row);
+      } else if (e.kind === "aside" || e.kind === "aside_answer") {
+        const row = el("div", "ta-entry ta-aside");
+        row.appendChild(el("span", "ta-aside-label", e.kind === "aside" ? "side question" : "answer"));
+        if (e.kind === "aside") row.appendChild(el("div", "ta-aside-q", text));
+        else row.appendChild(mdBox(text));
+        list.appendChild(row);
+      } else if (e.kind === "error") {
+        list.appendChild(el("div", "ta-entry ta-error", text));
+      } else if (e.kind === "switch") {
+        list.appendChild(el("div", "ta-entry ta-switch", text));
+      }
+    }
+    body.appendChild(list);
+  } else if (d.summary) {
+    body.appendChild(el("div", "tb-label", "final answer"));
+    const row = el("div", "ta-entry ta-assistant");
+    row.appendChild(mdBox(d.summary));
+    body.appendChild(row);
+  }
+}
 /* The sidebar's activity slot for a Main session whose tasks are busy: the
    running clock's voice for work, the warn voice for an approval that waits.
    Null when no task needs the slot. */
@@ -9417,11 +9563,56 @@ function tasksIcon(size) {
   svg.appendChild(p);
   return svg;
 }
-async function removeTask(bid, session) {
-  if (!await modalConfirm("Remove task?", sessionDeleteMessage(session))) return;
-  try {
+/* Removing a task is the moment its conversation would be lost, so the
+   confirm offers to fold a condensed copy into Main first. The checkbox is on
+   by default and is the whole decision: a failed or stopped task folds the
+   same way. Nodes without the fold route keep the plain delete confirm. */
+function modalRemoveTask(session) {
+  return new Promise(resolve => {
+    const { m, close, onClose } = modal(`<h2>Remove task?</h2>
+      <p class="modal-copy">${esc(session.name || "The task")}’s private working copy is removed permanently. Changes already applied to Main are kept.</p>
+      <label class="check fold-check"><input type="checkbox" id="rt-fold" checked> Keep the conversation in Main as a condensed archive</label>
+      <p class="hint fold-hint">When off, the conversation is removed permanently.</p>
+      <div class="m-btns"><button class="btn" id="rt-no">Cancel</button><button class="btn btn-danger btn-solid" id="rt-yes">Remove</button></div>`,
+      "remove-task-modal");
+    let settled = false;
+    const finish = value => {
+      if (settled) return;
+      settled = true;
+      close();
+      resolve(value);
+    };
+    onClose(() => {
+      if (settled) return;
+      settled = true;
+      resolve(null);
+    });
+    m.querySelector("#rt-no").onclick = () => finish(null);
+    m.querySelector("#rt-yes").onclick = () => finish({ fold: m.querySelector("#rt-fold").checked });
+    m.querySelector("#rt-yes").focus();
+  });
+}
+/* null when the person cancels; otherwise the removal choice to carry out. */
+async function confirmTaskRemoval(bid, session) {
+  if (backendSupportsTaskFold(bid)) return modalRemoveTask(session);
+  return (await modalConfirm("Remove task?", sessionDeleteMessage(session))) ? { fold: false, legacy: true } : null;
+}
+/* Resolves to whether the conversation was folded into Main. */
+async function removeTaskSession(bid, session, choice) {
+  if (choice.legacy || !session.task) {
     await api(bid, `sessions/${session.id}`, { method: "DELETE" });
-    toast("Task removed");
+    return false;
+  }
+  const result = await api(bid, `sessions/${session.task.parent}/tasks/${session.id}/remove`,
+    { method: "POST", body: { fold: !!choice.fold }, timeoutMs: 120000 });
+  return !!result.folded;
+}
+async function removeTask(bid, session) {
+  const choice = await confirmTaskRemoval(bid, session);
+  if (!choice) return;
+  try {
+    const folded = await removeTaskSession(bid, session, choice);
+    toast(folded ? "Task folded into Main" : "Task removed");
     await refreshSessionList(bid);
     renderSidebar();
   } catch (error) { toast(error.message, "error"); }
@@ -9521,6 +9712,9 @@ class SessionWorkspaceView {
   renderOverview(tasks) {
     const box = this.overview;
     if (!box) return;
+    // Keep the node's order within each group: active, unmerged, then applied.
+    const rank = s => ["running", "queued"].includes(s.task.state) ? 0 : s.task.state === "applied" ? 2 : 1;
+    tasks = [...tasks].sort((a, b) => rank(a) - rank(b));
     const signature = JSON.stringify(tasks.map(s => [s.id, s.name, s.status, s.color, s.task]));
     if (signature === this.renderedOverview) return;
     this.renderedOverview = signature;
@@ -11619,6 +11813,7 @@ class SessionView {
         return orphan;
       }
       case "info": {
+        if (d.subtype === "session_task_archive") return taskArchiveNode(d, ev.ts, this.tab.bid);
         if (d.subtype === "session_request" && d.session_request) {
           const card = el("div", "session-request-card");
           card.appendChild(el("div", "session-request-text", d.text || "Session request"));
@@ -12859,14 +13054,24 @@ class SessionView {
   }
 
   async deleteSession() {
-    const isTask = !!(this.session && this.session.task);
-    const ok = await modalConfirm(isTask ? "Remove task?" : "Delete session?", sessionDeleteMessage(this.session));
+    if (this.session && this.session.task) {
+      const choice = await confirmTaskRemoval(this.tab.bid, this.session);
+      if (!choice) return;
+      try {
+        const folded = await removeTaskSession(this.tab.bid, this.session, choice);
+        closeTab(this.tab.id);
+        if (this.tab.bid) refreshGroup(this.tab.bid);
+        toast(folded ? "Task folded into Main" : "Task removed");
+      } catch (e) { toast(e.message, "error"); }
+      return;
+    }
+    const ok = await modalConfirm("Delete session?", sessionDeleteMessage(this.session));
     if (!ok) return;
     try {
       await api(this.tab.bid, `sessions/${this.tab.sid}`, { method: "DELETE" });
       closeTab(this.tab.id);
       if (this.tab.bid) refreshGroup(this.tab.bid);
-      toast(isTask ? "Task removed" : "Session deleted");
+      toast("Session deleted");
     } catch (e) { toast(e.message, "error"); }
   }
 

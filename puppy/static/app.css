@@ -305,8 +305,8 @@ a{color:var(--acc2)}
 .sess-item .si-ws.warn{color:var(--warn)}
 .sess-item .si-ws.err{color:var(--err)}
 .sess-item .si-ws.busy{color:var(--acc2)}
-/* Quiet row actions form one compact, square-cornered lane. Keep the 24px
-   targets, but do not inherit the wider metadata gap between the two icons. */
+/* Quiet row actions form one compact, square-cornered lane. Use 22px
+   targets without inheriting the wider metadata gap between the two icons. */
 .sess-item .si-actions{
   flex:0 0 auto;display:inline-flex;align-items:center;gap:0;
   height:22px;margin:-4px -6px -4px 0;
@@ -314,7 +314,7 @@ a{color:var(--acc2)}
 .sess-item .si-pin,
 .sess-item .si-notes{
   flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;
-  width:24px;height:22px;margin:0;border-radius:var(--btn-r);
+  width:22px;height:22px;margin:0;border-radius:var(--btn-r);
   color:var(--txt3);opacity:.38;cursor:pointer;
   transition:opacity .15s var(--ease),background .15s var(--ease),color .15s var(--ease);
 }
@@ -2836,6 +2836,32 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
   white-space:pre-wrap;overflow-wrap:anywhere;
 }
 .task-card-actions{display:flex;gap:6px;flex-wrap:wrap}
+/* A folded task in Main's transcript: the tool card's disclosure carrying the
+   task sheet's state voice, with the condensed conversation inside. */
+.task-archive .t-ico svg{display:block}
+.task-archive .tool-head .t-state.warn{color:var(--warn)}
+.ta-facts{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;font-size:11.5px;margin-bottom:4px}
+.ta-fact-label{font-size:10px;text-transform:uppercase;letter-spacing:.09em;color:var(--txt3);align-self:center}
+.ta-fact-value{color:var(--txt2);min-width:0;overflow-wrap:anywhere}
+.ta-prompt{white-space:pre-wrap;overflow-wrap:anywhere;color:var(--txt2);font-size:12px;line-height:1.5}
+.task-archive .tool-body pre.ta-files{max-height:180px}
+.ta-entries{display:flex;flex-direction:column;align-items:stretch;gap:8px;margin-top:4px}
+.ta-entry{min-width:0;font-size:12.5px;line-height:1.55;overflow-wrap:break-word}
+.ta-entries .msg-user{font-size:12.5px}
+.ta-assistant{padding:0 2px}
+.ta-tool,.ta-switch{
+  display:flex;align-items:center;gap:6px;min-width:0;font-family:var(--mono);font-size:11.5px;color:var(--txt3);
+}
+.ta-tool .t-ico{flex-shrink:0;width:18px;display:inline-flex;justify-content:center;font-size:12px}
+.ta-tool-name{flex-shrink:0;color:var(--txt2)}
+.ta-tool-sum{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ta-switch{justify-content:center}
+.ta-error{font-family:var(--mono);font-size:11.5px;color:var(--err);white-space:pre-wrap}
+.ta-aside{font-size:12px;color:var(--txt2);border-left:2px solid var(--line2);padding:2px 10px}
+.ta-aside-label{display:block;font-size:10px;text-transform:uppercase;letter-spacing:.09em;color:var(--txt3);margin-bottom:2px}
+.ta-aside-q{white-space:pre-wrap;overflow-wrap:anywhere}
+.remove-task-modal .fold-check{margin:0 0 6px}
+.remove-task-modal .fold-hint{margin:0 0 14px}
 /* the task box is the shared prompt box at the old field's height; the
    caption sits as close to it as a label's own control */
 .new-task-modal .task-composer-lbl{margin-bottom:5px}

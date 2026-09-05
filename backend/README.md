@@ -20,6 +20,22 @@ is node-owned, survives restarts and travels in full-WebUI backups. Deleting a
 session or resetting its scratch workspace is refused with 409 only while that
 session's own tasks exist or a task copy, review or apply is using its files.
 
+Nodes advertising `session-task-fold` accept
+`POST /api/sessions/{sid}/tasks/{tid}/remove` with `{"fold": true|false}`
+(default true). With `fold` on, the node appends one `info` event of subtype
+`session_task_archive` to the Main session before deleting the task: `name`,
+`prompt`, `engine`/`model`/`effort`, `outcome` and last `state`, timestamps,
+`applied_files`/`unapplied_files` (git name-status text), `turns`, the final
+`summary`, and uncapped `entries` (`user`, `assistant`, `tool`, `aside`,
+`aside_answer`, `error` and `switch` rows with timestamps; thinking, tool results
+and turn results are omitted). The reply carries `folded`, the archive's `seq`
+and `workspace_removed`; a retry after a failed deletion finds the existing
+archive instead of writing another. Applied rows (`info`/`session_task`) also
+carry their `files` list. The same nodes accept a standalone boolean
+`tasks_digest` `PATCH /api/sessions/{sid}` (published on session payloads,
+default false) controlling whether Main's turns are told about its folded tasks.
+Refusals are 409; the snapshot guard answers 503.
+
 Nodes advertising `session-task-config` accept optional `engine`, `model`,
 `effort` and `permission_mode` fields on `POST /api/sessions/{sid}/tasks`.
 Omitted choices inherit Main; changing the engine uses the target engine's saved

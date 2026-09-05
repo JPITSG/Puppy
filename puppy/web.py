@@ -626,6 +626,19 @@ async def h_session_patch(request: web.Request):
         runner.broadcast_sessions()
         runner.hub(s["id"]).broadcast({"type": "session_meta", "session": payload})
         return web.json_response({"ok": True, "session": payload})
+    if "tasks_digest" in body:
+        if type(body["tasks_digest"]) is not bool or set(body) != {"tasks_digest"}:
+            return web.json_response(
+                {"error": "tasks_digest must be a boolean and updated separately"}, status=400)
+        from puppy import session_tasks
+        try:
+            await session_tasks.set_digest(s["id"], body["tasks_digest"])
+        except session_tasks.TaskError as exc:
+            return web.json_response({"error": str(exc)}, status=409)
+        payload = runner.session_payload(db.get_session(s["id"]))
+        runner.broadcast_sessions()
+        runner.hub(s["id"]).broadcast({"type": "session_meta", "session": payload})
+        return web.json_response({"ok": True, "session": payload})
     if "fast_mode" in body and type(body["fast_mode"]) is not bool:
         return web.json_response(
             {"error": "fast_mode must be true or false"}, status=400)
@@ -769,9 +782,18 @@ async def h_session_delete(request: web.Request):
         return web.json_response(
             {"error": "turn in progress - stop it before deleting the session"}, status=409)
     try:
-        workspace_removed = workspaces.remove_temporary(s)
+        workspace_removed = await remove_session(s)
     except workspaces.WorkspaceError as exc:
         return web.json_response({"error": str(exc)}, status=500)
+    return web.json_response({"ok": True, "workspace_removed": workspace_removed})
+
+
+async def remove_session(s) -> bool:
+    """Delete a session whose blockers were already checked: its private
+    workspace, mirror, queue, uploads, browser/terminal bindings and rows.
+    The plain delete route and a task's fold-and-remove share this so the two
+    cannot drift; a WorkspaceError leaves the session in place."""
+    workspace_removed = workspaces.remove_temporary(s)
     descriptor = workspace_sync.session_workspace(s)
     if descriptor is not None:
         try:
@@ -791,7 +813,7 @@ async def h_session_delete(request: web.Request):
     db.delete_session(s["id"])
     runner.broadcast_sessions()
     log.info("session %s deleted workspace_removed=%s", s["id"], workspace_removed)
-    return web.json_response({"ok": True, "workspace_removed": workspace_removed})
+    return workspace_removed
 
 
 async def h_session_workspace_reset(request: web.Request):

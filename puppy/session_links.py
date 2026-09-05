@@ -165,7 +165,12 @@ def _events(sid, args):
     result = []
     for row in rows:
         payload = row["data"]
-        raw = search._scrub(search._text_of(payload.get("content", payload)))
+        if row["kind"] == "info" and payload.get("subtype") == "session_task_archive":
+            # the folded task reads in full through the character cursor
+            from puppy import session_tasks
+            raw = search._scrub(session_tasks.archive_text(payload))
+        else:
+            raw = search._scrub(search._text_of(payload.get("content", payload)))
         content = raw[offset:offset + min(budget, 16000)]
         item = {"seq": row["seq"], "kind": row["kind"], "ts": row["ts"],
                 "text": content, "offset": offset,

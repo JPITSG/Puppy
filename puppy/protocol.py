@@ -200,6 +200,11 @@ BASE_CAPABILITIES = (
     "session-task-attachments",
     # Per-session tasks_enabled PATCH; disabling requires no child tasks.
     "session-tasks-toggle",
+    # POST .../tasks/{tid}/remove folds a task's condensed conversation into
+    # Main as an info row (subtype session_task_archive) before deleting it,
+    # applied rows carry their file list, and the per-session tasks_digest
+    # PATCH controls whether Main's turns are told about folded tasks.
+    "session-task-fold",
     SESSION_REFERENCES_CAPABILITY,
     "session-communication",
     "session-coordination",

@@ -33,6 +33,23 @@ def _fmt(ev) -> str:
     if k == "info" and d.get("subtype") == "workspace_reset":
         return ("[scratch workspace reset: the previous temporary files were cleared; "
                 "this is a new empty workspace]")
+    if k == "info" and d.get("subtype") == "session_task_archive":
+        # A removed task's conversation, folded into this transcript: its
+        # outcome, what it wrote into the project and its final answer. The
+        # condensed exchange itself is for the console; the preamble's own
+        # cap decides how much of the narrative survives.
+        from puppy import session_tasks
+        files = str(d.get("applied_files") or "").splitlines()
+        shown = "; ".join(line.split("\t")[-1] for line in files[:20])
+        if len(files) > 20:
+            shown += "; ... {} more".format(len(files) - 20)
+        summary = str(d.get("summary") or "")
+        if len(summary) > 2000:
+            summary = summary[:2000] + "..."
+        return "[folded task \"{}\": {}{}{}]".format(
+            d.get("name") or "Task", session_tasks.state_phrase(d.get("state")),
+            "; files applied to Main: " + shown if shown else "",
+            "; final answer: " + summary if summary else "")
     if k == "error":
         return f"[error: {d.get('text', '')}]"
     return ""

@@ -396,9 +396,12 @@ async def main() -> None:
 
         from puppy import session_tasks
         await session_tasks.set_enabled(linked_id, False)
+        await session_tasks.set_digest(directory_id, True)
         invalid_tasks_db = TEST_ROOT / "invalid-tasks-setting.db"
         for key, value in ((session_tasks.DISABLED_PREFIX + str(linked_id), 'false'),
-                           (session_tasks.DISABLED_PREFIX + '999999', 'true')):
+                           (session_tasks.DISABLED_PREFIX + '999999', 'true'),
+                           (session_tasks.DIGEST_PREFIX + str(directory_id), 'false'),
+                           (session_tasks.DIGEST_PREFIX + '999999', 'true')):
             db.backup_to(str(invalid_tasks_db))
             connection = sqlite3.connect(str(invalid_tasks_db))
             connection.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)", (key, value))
@@ -424,6 +427,15 @@ async def main() -> None:
             "created_at":1, "outcome":"ok", "summary":"Ready for review", "completed_at":2,
             "applied_at":0, "result_seq":1}
         session_tasks._save(scratch_id, task_record)
+        # a task conversation never owns a folded-task digest marker
+        db.backup_to(str(invalid_tasks_db))
+        connection = sqlite3.connect(str(invalid_tasks_db))
+        connection.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)",
+                           (session_tasks.DIGEST_PREFIX + str(scratch_id), 'true'))
+        connection.commit()
+        connection.close()
+        expect_snapshot_error(lambda: snapshots._validate_database(invalid_tasks_db), "not current")
+        invalid_tasks_db.unlink()
         session_records = completed_records(db.node_uuid(), directory_id, scratch_id)
         db.meta_apply(session_records)
         direct_archive = snapshots.create_archive(ui)
@@ -661,6 +673,8 @@ async def main() -> None:
         assert session_tasks.record(scratch_id) == task_record
         assert session_tasks.enabled(linked_id) is False
         assert session_tasks.enabled(directory_id) is True
+        assert session_tasks.digest_enabled(directory_id) is True
+        assert session_tasks.digest_enabled(linked_id) is False
         session_tasks.validate_persisted(db.connect())
         session_tasks._git(restored_scratch["cwd"], "cat-file", "-e", task_base)
         for name in ("base", "main", "task"):

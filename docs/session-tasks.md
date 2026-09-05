@@ -72,6 +72,24 @@ the pinned snapshot as the review baseline if live Main changes again. All edits
 generated files, Git writes and test runs stay in the task copy. Git inspection
 of Main uses `--no-optional-locks` to avoid incidental index writes.
 
+**Remove** asks whether to keep the task's conversation. The choice is one
+checkbox that starts on: Puppy folds a condensed copy of the conversation into
+Main's transcript as a single collapsible card at the point of removal, then
+deletes the task and its working copy. The card carries the task's prompt,
+outcome, engine, timestamps, the files its applies wrote into Main, files it
+changed but never applied, and the exchange itself: every prompt and answer in
+full, side questions with their answers, tool calls as one-line summaries,
+errors and engine switches, without a size cap. Thinking, tool results and
+turn results are not kept. A failed or stopped task folds the same way while
+the box is on; turning it off removes the conversation permanently. The card is
+searchable under Main and readable through the session tools; a folded task
+cannot be reopened, continued or undone. Main's model is not told about folded
+tasks unless **Model sees folded tasks** in Main's session menu is on, in which
+case the newest folded tasks and their final answers are named at the start of
+each of Main's turns. That setting is off by default, follows the session across
+consoles and restarts, and is included in backups. Nodes without this version
+keep the plain remove.
+
 Main must use a local project directory on its executing node; linked remote
 workspace mirrors are not supported for tasks yet. Each task uses an independent local Git clone in a Puppy-owned scratch workspace.
 It starts with Main's working files, including uncommitted changes and nonignored
@@ -86,8 +104,9 @@ working copies are not an OS security sandbox.
 Task conversations, grouping and Git working copies are covered by the existing
 full backup/restore. Scratch storage may be cleared by the host; if a copy is
 missing, Puppy keeps the transcript and refuses to silently recreate an empty
-task. Remove a task only when its work is no longer needed. Remove children before
-deleting their parent. Applied changes remain in Main after removing a task.
+task. Remove a task only when its work is no longer needed; folding keeps its
+conversation, never its working copy. Remove children before deleting their
+parent. Applied changes remain in Main after removing a task.
 
 ## Rollback
 
@@ -96,8 +115,12 @@ The pre-feature code is retained on branch `rollback/before-session-tasks` at
 without resetting unrelated later commits. There are no changes to existing
 SQL tables or persisted configuration settings. The per-session Tasks toggle
 uses a separate optional `session_tasks_disabled.<sid>` meta ledger: an exact
-`true` marker means off, and no entry means on. Startup and snapshot restore
-reject malformed entries; existing task records and config shapes are unchanged.
+`true` marker means off, and no entry means on. **Model sees folded tasks** uses
+the same pattern under `session_tasks_digest.<sid>`: an exact `true` marker
+means on, and no entry means off. Startup and snapshot restore reject malformed
+entries; existing task records and config shapes are unchanged. A folded task
+is an ordinary `info` row of Main's transcript (subtype `session_task_archive`)
+and needs no rollback handling: older code shows it as a one-line note.
 Each task copy also names its review baseline as the Git ref `refs/puppy/base`
 so the engine's own history rewriting can never garbage-collect it.
 Conflict-resolution inputs are preserved at
@@ -119,8 +142,9 @@ For a rollback **preserving work**:
    `PUPPY_DATA=/path/to/node/data /usr/local/bin/python3 -m puppy.session_tasks --detach-for-rollback`.
    It refuses a live configured listener or running work. It writes a private,
    fsync'd archive at `data/rollback/session-tasks-<id>.json` (the grouping
-   records plus the ids whose Tasks toggle was off), then removes only that
-   grouping metadata and toggle ledger in one database transaction. Keep this archive with
+   records plus the ids whose Tasks toggle was off and whose folded-task digest
+   was on), then removes only that grouping metadata and both toggle ledgers in
+   one database transaction. Keep this archive with
    the backup; it is a manual recovery record, outside full-backup coverage.
 4. Revert the feature commit with `git revert --no-commit <feature-commit>`, set
    `puppy/__init__.py` to the next patch version, and commit the rollback under

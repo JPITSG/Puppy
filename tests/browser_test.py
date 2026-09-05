@@ -4535,7 +4535,7 @@ def check_session_pins(ui_source: str, css_source: str) -> None:
     assert ".sess-item .si-pin," in css_source
     assert ".sess-item .si-actions{" in css_source
     assert "align-items:center;gap:0;" in css_source
-    assert "width:24px;height:22px;margin:0;border-radius:var(--btn-r);" in css_source
+    assert "width:22px;height:22px;margin:0;border-radius:var(--btn-r);" in css_source
     assert ".sess-item .si-pin.on{opacity:1;color:var(--acc2)}" in css_source
     assert ".sess-item .si-pin:focus-visible," in css_source
 

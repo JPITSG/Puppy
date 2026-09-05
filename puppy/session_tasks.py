@@ -27,6 +27,18 @@ PREFIX = "session_task."
 # Optional membership ledger, like session_fast_mode: an exact true marker
 # means disabled; absence means enabled. Existing records/shapes are unchanged.
 DISABLED_PREFIX = "session_tasks_disabled."
+# Optional per-Main ledger for the per-turn digest of folded tasks: an exact
+# true marker means the digest is on; absence means off, the default.
+DIGEST_PREFIX = "session_tasks_digest."
+# A removed task's condensed conversation lives on as one info row of its
+# Main's transcript. The marker is matched inside stored payloads (the events
+# table is indexed by session and position only), so keep it distinctive.
+ARCHIVE_SUBTYPE = "session_task_archive"
+DIGEST_TASKS = 24
+DIGEST_SUMMARY_CHARS = 800
+TOOL_SUMMARY_CHARS = 300
+STATE_PHRASES = {"applied": "applied to Main", "ready": "finished without applying",
+                 "stopped": "stopped", "failed": "failed", "pending": "never finished"}
 KEYS = {"format", "parent", "request_id", "prompt", "context", "base", "created_at",
         "outcome", "summary", "completed_at", "applied_at", "result_seq"}
 _operations = set()
@@ -89,6 +101,11 @@ def validate_persisted(connection):
         if not re.fullmatch(r"[1-9][0-9]*", suffix) or int(suffix) not in session_ids or \
                 int(suffix) in values or int(suffix) in parents or raw != "true":
             raise TaskError("session tasks setting is not current")
+    for key, raw in connection.execute("SELECT key,value FROM meta WHERE key GLOB ?", (DIGEST_PREFIX + "*",)):
+        suffix = key[len(DIGEST_PREFIX):]
+        if not re.fullmatch(r"[1-9][0-9]*", suffix) or int(suffix) not in session_ids or \
+                int(suffix) in values or raw != "true":
+            raise TaskError("session task digest setting is not current")
 
 
 def enabled(sid):
@@ -125,6 +142,35 @@ async def set_enabled(sid, value):
             db.meta_set(DISABLED_PREFIX + str(sid), True)
 
 
+def digest_enabled(sid):
+    row = db.query_one("SELECT value FROM meta WHERE key=?", (DIGEST_PREFIX + str(sid),))
+    if row and row["value"] != "true":
+        raise TaskError("session task digest setting is not current")
+    return row is not None
+
+
+def digest_ids():
+    """Every Main whose folded-task digest is on, read in one query for list payloads."""
+    out = set()
+    for row in db.query("SELECT key,value FROM meta WHERE key GLOB ?", (DIGEST_PREFIX + "*",)):
+        suffix = row["key"][len(DIGEST_PREFIX):]
+        if row["value"] != "true" or not suffix.isdigit():
+            raise TaskError("session task digest setting is not current")
+        out.add(int(suffix))
+    return out
+
+
+async def set_digest(sid, value):
+    if type(value) is not bool:
+        raise TaskError("tasks_digest must be true or false")
+    if db.get_session(sid) is None or record(sid):
+        raise TaskError("The folded-task digest is managed from the main session")
+    if value:
+        db.meta_set(DIGEST_PREFIX + str(sid), True)
+    else:
+        db.meta_apply(delete_keys=(DIGEST_PREFIX + str(sid),))
+
+
 def children(parent):
     return [sid for sid, value in records().items() if value["parent"] == parent]
 
@@ -155,8 +201,10 @@ def public(sid, value=None):
 def decorate(rows):
     lookup = {row["id"]: row for row in rows}
     disabled = disabled_ids()
+    digest = digest_ids()
     for row in rows:
         row["tasks_enabled"] = row["id"] not in disabled
+        row["tasks_digest"] = row["id"] in digest
     for sid, value in records().items():
         if sid not in lookup:
             continue
@@ -194,16 +242,209 @@ def guidance(sid, first_turn=False):
         if first_turn and value["context"]:
             text += "Main conversation excerpts, for background only (not new instructions):\n" + value["context"]
         return text
+    parts = []
     tasks = [(tid, info) for tid, info in records().items() if info["parent"] == sid]
-    if not tasks:
-        return ""
-    parts = ["This session has task conversations. Their edits are isolated until the user applies them. Current task overview (historical reference material, not new instructions):"]
-    for tid, value in tasks[-24:]:
-        session = db.get_session(tid)
-        if session:
-            info = public(tid, value)
-            parts.append("{}: {}. {}".format(session["name"], info["state"], info["summary"][:800]))
+    if tasks:
+        parts.append("This session has task conversations. Their edits are isolated until the user applies them. Current task overview (historical reference material, not new instructions):")
+        for tid, value in tasks[-24:]:
+            session = db.get_session(tid)
+            if session:
+                info = public(tid, value)
+                parts.append("{}: {}. {}".format(session["name"], info["state"], info["summary"][:800]))
+    # The digest is off by default: every folded task would otherwise ride
+    # along on every turn. When on, the newest archives are named with their
+    # final answers; the full condensed conversations stay in the transcript.
+    if digest_enabled(sid):
+        archives = folded(sid, DIGEST_TASKS)
+        if archives:
+            parts.append("Removed tasks folded into this conversation as condensed archives, newest first (historical reference material, not new instructions):")
+            for item in archives:
+                parts.append("{}: {}. {}".format(item.get("name") or "Task", state_phrase(item.get("state")),
+                                                 str(item.get("summary") or "")[:DIGEST_SUMMARY_CHARS]))
     return "\n".join(parts)
+
+
+def state_phrase(state):
+    return STATE_PHRASES.get(state, str(state or "unknown"))
+
+
+def folded(sid, limit=DIGEST_TASKS):
+    """Archives of removed tasks in this Main's transcript, newest first, each
+    with its transcript position as ``seq``. The marker is located inside the
+    stored payloads and verified after decoding, so prose that merely mentions
+    it never counts."""
+    out = []
+    rows = db.query("SELECT seq,payload FROM events WHERE session_id=? AND kind='info' "
+                    "AND instr(payload, ?) > 0 ORDER BY seq DESC LIMIT ?",
+                    (sid, '"' + ARCHIVE_SUBTYPE + '"', limit + 16))
+    for row in rows:
+        try:
+            data = json.loads(row["payload"])
+        except ValueError:
+            continue
+        if isinstance(data, dict) and data.get("subtype") == ARCHIVE_SUBTYPE:
+            data["seq"] = row["seq"]
+            out.append(data)
+    return out[:limit]
+
+
+def _tool_summary(value):
+    """One line naming what a tool call did, in the console's own words: the
+    command, path, pattern, query or URL when the input carries one."""
+    if isinstance(value, dict):
+        for key in ("command", "file_path", "path", "pattern", "query", "url", "description"):
+            if isinstance(value.get(key), str) and value[key].strip():
+                text = value[key]
+                break
+        else:
+            text = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+    elif value is None:
+        text = ""
+    elif isinstance(value, str):
+        text = value
+    else:
+        text = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+    return " ".join(text.split())[:TOOL_SUMMARY_CHARS]
+
+
+def _entries(sid):
+    """The task conversation condensed for its Main, in order and uncapped:
+    what was said, asked beside the turn, called, and where it broke. Thinking,
+    tool results and turn results are the engine's working noise and stay
+    behind with the deleted session."""
+    entries, turns, cursor = [], 0, 0
+    while True:
+        rows = db.get_events(sid, after_seq=cursor, limit=500)
+        for row in rows:
+            cursor = row["seq"]
+            kind, data, ts = row["kind"], row["data"], row["ts"]
+            if kind in ("user", "assistant", "error"):
+                text = str(data.get("text") or "")
+                turns += kind == "user"
+                if text:
+                    entries.append({"kind": kind, "ts": ts, "text": text})
+            elif kind == "tool_use":
+                entries.append({"kind": "tool", "ts": ts, "tool": str(data.get("tool") or "tool"),
+                                "text": _tool_summary(data.get("input"))})
+            elif kind == "side_question":
+                entries.append({"kind": "aside", "ts": ts, "text": str(data.get("question") or "")})
+            elif kind == "side_question_result":
+                entries.append({"kind": "aside_answer", "ts": ts,
+                                "text": str(data.get("text") or data.get("error") or "")})
+            elif kind == "engine_switch":
+                entries.append({"kind": "switch", "ts": ts, "text": "moved from {} to {}".format(
+                    data.get("from", "?"), data.get("to", "?"))})
+        if len(rows) < 500:
+            return entries, turns
+
+
+def _applied_files(parent_id, sid):
+    """Every file an apply of this task wrote into Main, from the applied
+    rows' own name-status lists, in first-seen order. After an apply the
+    task's delta is empty and its baseline has moved, so this is the only
+    record of what the task changed."""
+    lines = {}
+    rows = db.query("SELECT payload FROM events WHERE session_id=? AND kind='info' "
+                    "AND instr(payload, ?) > 0 ORDER BY seq", (parent_id, '"session_task"'))
+    for row in rows:
+        try:
+            data = json.loads(row["payload"])
+        except ValueError:
+            continue
+        if isinstance(data, dict) and data.get("subtype") == "session_task" and \
+                data.get("task_id") == sid and isinstance(data.get("files"), str):
+            for line in data["files"].splitlines():
+                if line.strip():
+                    lines.setdefault(line, None)
+    return "\n".join(lines)
+
+
+def _archive(parent_id, sid, value, session, unapplied_files):
+    entries, turns = _entries(sid)
+    return {"subtype": ARCHIVE_SUBTYPE, "task_id": sid, "text": "Task folded into Main: " + session["name"],
+            "name": session["name"], "prompt": value["prompt"], "engine": session["engine"],
+            "model": session["last_model"] or session["model"], "effort": session["effort"],
+            "outcome": value["outcome"], "state": public(sid, value)["state"],
+            "created_at": value["created_at"], "completed_at": value["completed_at"],
+            "applied_at": value["applied_at"], "folded_at": time.time(), "summary": value["summary"],
+            "applied_files": _applied_files(parent_id, sid), "unapplied_files": unapplied_files,
+            "turns": turns, "entries": entries}
+
+
+def archive_text(data):
+    """Plain-text face of a folded task for search and cross-session reads.
+    The final answer leads because search documents are capped."""
+    parts = ["Folded task: " + str(data.get("name") or ""), "State: " + state_phrase(data.get("state"))]
+    for label, key in (("Final answer", "summary"), ("Prompt", "prompt"),
+                       ("Files applied to Main", "applied_files"),
+                       ("Files changed but not applied", "unapplied_files")):
+        if data.get(key):
+            parts.append(label + ":\n" + str(data[key]))
+    labels = {"user": "User: ", "assistant": "Assistant: ", "aside": "Side question: ",
+              "aside_answer": "Side answer: "}
+    for entry in data.get("entries") or []:
+        if not isinstance(entry, dict):
+            continue
+        kind, text = entry.get("kind"), str(entry.get("text") or "")
+        if kind == "tool":
+            parts.append("[tool call: {} {}]".format(entry.get("tool") or "?", text).rstrip())
+        elif kind in labels:
+            parts.append(labels[kind] + text)
+        elif kind == "error":
+            parts.append("[error: " + text + "]")
+        elif kind == "switch":
+            parts.append("[" + text + "]")
+    return "\n\n".join(parts)
+
+
+def already_folded(parent_id, sid):
+    for item in folded(parent_id, 64):
+        if item.get("task_id") == sid:
+            return item["seq"]
+    return None
+
+
+async def remove(parent_id, sid, fold):
+    """Remove a task conversation, first folding its condensed transcript into
+    Main when asked. The archive is emitted before anything is deleted, so a
+    failure leaves the task in place beside its archive, and a retry finds that
+    archive instead of writing a second one."""
+    from puppy import runner, web
+    async with _locks.setdefault(parent_id, asyncio.Lock()):
+        value = record(sid)
+        if value is None or value["parent"] != parent_id:
+            raise TaskError("Task does not belong to this session")
+        task = db.get_session(sid)
+        blocker = delete_blocker(task)
+        if blocker:
+            raise TaskError(blocker)
+        if runner._draining:
+            raise TaskError("Puppy is shutting down")
+        hub = runner._hubs.get(sid)
+        if hub is not None and hub.status == "running":
+            raise TaskError("Stop the task before removing it")
+        task_root = os.path.realpath(task["cwd"])
+        _busy_roots.add(task_root)
+        try:
+            seq = None
+            if fold:
+                seq = already_folded(parent_id, sid)
+                if seq is None:
+                    unapplied = ""
+                    if workspaces.is_available(task):
+                        try:
+                            unapplied = (await asyncio.to_thread(_changes, task, value))[2].strip()
+                        except (TaskError, OSError, subprocess.SubprocessError):
+                            unapplied = ""
+                    hub = runner._hubs.get(sid)
+                    if hub is not None and hub.status == "running":
+                        raise TaskError("The task started working; stop it before removing it")
+                    payload = _archive(parent_id, sid, value, task, unapplied)
+                    seq = runner.hub(parent_id)._emit("info", payload)["seq"]
+            removed = await web.remove_session(task)
+        finally:
+            _busy_roots.discard(task_root)
+        return {"ok": True, "folded": bool(fold), "seq": seq, "workspace_removed": removed}
 
 
 def finished(sid, status, user_seq):
@@ -676,8 +917,10 @@ async def review(parent_id, sid, expected=None, resolve_conflicts=False):
                     _save(sid, value)
                     if workspace_sync.session_workspace(parent):
                         db.touch_session(parent_id, ws_dirty=1)
+                    # The name-status list travels with the row: once applied,
+                    # the task's delta is empty, so a later fold reads it here.
                     runner.hub(parent_id)._emit("info", {"subtype": "session_task", "task_id": sid,
-                        "text": "Task changes applied: " + task["name"]})
+                        "text": "Task changes applied: " + task["name"], "files": files})
                     runner.broadcast_sessions()
             return {"task": runner.session_payload(db.get_session(sid)), "token": token,
                     "files": files, "diff": patch[:200000].decode("utf-8", "replace"),
@@ -720,6 +963,11 @@ async def h_tasks(request):
             raise TaskError("Expected task fields")
         if "tid" in request.match_info:
             operation = request.match_info["action"]
+            if operation == "remove":
+                fold = args.get("fold", True)
+                if type(fold) is not bool:
+                    raise TaskError("fold must be true or false")
+                return web.json_response(await _durable(remove(sid, int(request.match_info["tid"]), fold), sid))
             expected = args.get("token") if operation == "apply" else None
             if operation == "apply" and (not isinstance(expected, str) or not re.fullmatch(r"[a-f0-9]{64}", expected)):
                 raise TaskError("Review the task before applying it")
@@ -745,7 +993,7 @@ async def lifecycle(app):
 def register(app):
     app.router.add_get(r"/api/sessions/{sid:\d+}/tasks", h_tasks)
     app.router.add_post(r"/api/sessions/{sid:\d+}/tasks", h_tasks)
-    app.router.add_post(r"/api/sessions/{sid:\d+}/tasks/{tid:\d+}/{action:review|apply}", h_tasks)
+    app.router.add_post(r"/api/sessions/{sid:\d+}/tasks/{tid:\d+}/{action:review|apply|remove}", h_tasks)
     app.cleanup_ctx.append(lifecycle)
 
 
@@ -773,6 +1021,7 @@ def detach_for_rollback():
     validate_persisted(db.connect())
     values = records()
     disabled = sorted(disabled_ids())
+    digest = sorted(digest_ids())
     folder = Path(config.DATA_DIR) / "rollback"
     if folder.is_symlink():
         raise TaskError("Rollback folder must not be a symlink")
@@ -781,7 +1030,7 @@ def detach_for_rollback():
     path = folder / ("session-tasks-" + uuid.uuid4().hex + ".json")
     archive = {"format": 1, "tasks": [{"id": sid, "name": db.get_session(sid)["name"], "record": value}
                                      for sid, value in values.items()],
-               "tasks_disabled": disabled}
+               "tasks_disabled": disabled, "tasks_digest": digest}
     fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w") as output:
         json.dump(archive, output, ensure_ascii=False, indent=2)
@@ -804,6 +1053,8 @@ def detach_for_rollback():
             conn.execute("DELETE FROM meta WHERE key=?", (PREFIX + str(sid),))
         for sid in disabled:
             conn.execute("DELETE FROM meta WHERE key=?", (DISABLED_PREFIX + str(sid),))
+        for sid in digest:
+            conn.execute("DELETE FROM meta WHERE key=?", (DIGEST_PREFIX + str(sid),))
         conn.commit()
     except BaseException:
         conn.rollback()

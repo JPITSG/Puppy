@@ -250,6 +250,11 @@ def _event_doc(kind, data):
         kind = "tool"
     elif kind in ("info", "error"):
         text = data.get("text")
+        if data.get("subtype") == "session_task_archive":
+            # a removed task's whole condensed conversation, folded into its
+            # Main: searchable there because the task's own rows are gone
+            from puppy import session_tasks
+            text = session_tasks.archive_text(data)
         kind = "info"
     elif kind == "side_question":
         # asked beside a turn rather than inside it, but the person did write
