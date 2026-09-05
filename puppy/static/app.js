@@ -10032,7 +10032,7 @@ async function modalReviewTask(workspace, session) {
         <small id="tr-resolve-note">If Main has conflicting changes, send one follow-up to this task’s agent with a fresh copy of Main. It uses the task’s history, current settings, permissions and normal model quota to reconcile the changes in its own copy. It may also inspect Main read-only when needed. You must review and apply again afterward. Applies run one at a time; if another task changes Main again, another resolution may be needed. Off by default for each review.</small></span>
     </label>` : ""}
     <p class="backend-edit-error hidden" role="alert"></p>
-    <div class="m-btns"><button class="btn" id="tr-close">Close</button><button class="btn btn-pri" id="tr-apply" disabled>Apply to Main</button></div>`, "task-review-modal");
+    <div class="m-btns"><button class="btn" id="tr-close">Close</button><button class="btn btn-pri hidden" id="tr-apply" disabled>Apply to Main</button></div>`, "task-review-modal");
   const facts = m.querySelector(".task-review-facts");
   const fact = (label, value, cls = "") => {
     const row = el("div", "ws-fact");
@@ -10074,6 +10074,8 @@ async function modalReviewTask(workspace, session) {
     if (resolve && data.has_changes) {
       resolve.disabled = false; resolveWrap.classList.remove("hidden");
     }
+    if (!data.has_changes && task.state === "applied") return;
+    apply.classList.remove("hidden");
     apply.textContent = data.has_changes ? "Apply to Main" : "Mark as reviewed";
     apply.disabled = false;
     apply.onclick = async () => {

@@ -661,8 +661,26 @@ async def attachment_adoption(parent):
     print('PASS: task prompts adopt Main-staged attachments, keep prose, refuse missing files and retry by identity')
 
 
+def auto_titles():
+    # The first prompt names an unnamed session or task: first non-blank line,
+    # cut hard at 48 characters, trailing whitespace trimmed, and an ellipsis
+    # only when the line was actually cut.
+    cut = db.auto_session_name
+    assert cut('Feature A') == 'Feature A'
+    assert cut('  \n\n  Feature A  \nmore') == 'Feature A'
+    assert cut('') == '' and cut(None) == ''
+    exact = 'x' * 48
+    assert cut(exact) == exact and cut(exact + 'y') == exact + '\u2026'
+    assert cut('when a task i active, the spinner for the session tab keeps') == \
+        'when a task i active, the spinner for the sessio\u2026'
+    assert cut('the buttons / icons in the session list, the pin and archive') == \
+        'the buttons / icons in the session list, the pin\u2026'
+    assert not cut('a' * 47 + ' b').endswith(' \u2026')
+
+
 async def main():
     config.ensure_dirs()
+    auto_titles()
     await conflict_resolution()
     project = ROOT / 'project'
     project.mkdir()
@@ -713,6 +731,7 @@ async def main():
         assert all('tasks_enabled' in s for s in runner.sessions_payload()['sessions'])
         assert tasks._git(ap,'remote').strip() == b''
         assert a['permission_mode'] == 'workspace-write'
+        assert db.get_session(aid)['name'] == 'Feature A'
         assert 'Use the existing design' in tasks.guidance(aid, True)
         assert_main_inspection(tasks.guidance(aid, True), project)
         assert_main_inspection(tasks.guidance(aid, False), project)

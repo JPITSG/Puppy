@@ -830,7 +830,7 @@ async def create(parent_id, args):
                 context = "Main's project directory is the subdirectory: " + relative + "\n" + context
             if runner._draining:
                 raise TaskError("Puppy is shutting down; retry after the restart")
-            sid = db.create_session(name.strip() or original.splitlines()[0][:48], engine, path,
+            sid = db.create_session(name.strip() or db.auto_session_name(original), engine, path,
                                     choices["model"], choices["effort"], parent["color"], choices["permission_mode"],
                                     workspace_kind=workspaces.KIND_TEMPORARY)
             # The task's transcript is what names the prompt's files from here

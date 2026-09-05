@@ -1073,7 +1073,7 @@ class SessionHub:
             return {"error": "{} is being updated - try again when it finishes".format(
                 engine or "the engine")}
         if not session["name"]:
-            name = text.splitlines()[0][:48]
+            name = db.auto_session_name(text)
             db.touch_session(self.id, name=name)
             broadcast_sessions()
         # also queue behind a non-empty queue while idle (the moment between a

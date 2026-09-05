@@ -39,6 +39,22 @@ def _notify_change(session_id) -> None:
 # remaining far beyond an ordinary interactive prompt.
 MAX_DRAFT_CHARS = 256 * 1024
 
+# An unnamed session or task is titled by the first line of its first prompt.
+# The line is cut hard (mid-word is fine) so the sidebar, tabs, task cards,
+# notifications and cross-session listings all get the same short title; the
+# ellipsis says the title is a cut, and the cut is trimmed first so it never
+# reads "word …".  Every auto title goes through here - the stored name IS the
+# display form, so no surface needs to know whether a name was typed or cut.
+AUTO_NAME_CHARS = 48
+AUTO_NAME_ELLIPSIS = "\u2026"
+
+
+def auto_session_name(text: str) -> str:
+    line = next((l.strip() for l in str(text or "").splitlines() if l.strip()), "")
+    if len(line) <= AUTO_NAME_CHARS:
+        return line
+    return line[:AUTO_NAME_CHARS].rstrip() + AUTO_NAME_ELLIPSIS
+
 # Selectable session dot colors - gray is reserved for the Settings tab. The
 # second ten fill the hue gaps the first ten left (yellow-green through green,
 # and magenta) and lean on lightness where hue alone would not separate them:
