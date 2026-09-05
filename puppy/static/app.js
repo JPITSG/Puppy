@@ -725,6 +725,16 @@ function attachmentFileIcon(size = 18) {
   return svg;
 }
 
+/* The sidebar row's two marks - this pin and the agent-notes page below it -
+   are drawn as one pair on a shared grid: the same 18-unit viewBox at the same
+   14px size, the same 1.25 stroke, and each glyph placed so its inked centre of
+   mass, not its bounding box, sits on the grid's middle. That last rule is what
+   makes them look level. A pushpin carries nearly all its ink in the head, so a
+   box-centred one measures its mass at 7.6 of 18 and reads a full pixel high
+   beside an evenly weighted page; the geometry below is the same pin shifted
+   0.95 down onto 9.0, which is why its head starts low and its point runs close
+   to the bottom edge. Keep both glyphs on this grid, and re-measure the mass
+   rather than the bounds, whenever either one changes. */
 function sessionPinIcon(size = 14) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
@@ -733,13 +743,36 @@ function sessionPinIcon(size = 14) {
   svg.setAttribute("height", size);
   svg.setAttribute("aria-hidden", "true");
   const pin = document.createElementNS(NS, "path");
-  pin.setAttribute("d", "M6 2.5h6M7 2.5l-.45 4-1.8 2v1.35h8.5V8.5l-1.8-2-.45-4M9 9.85v5.65");
+  pin.setAttribute("d",
+    "M7.15 4.25h3.7M7.15 4.25L6.8 7.55 5.2 9.25v1.3h7.6v-1.3l-1.6-1.7-.35-3.3M9 10.55v5.5");
   pin.setAttribute("fill", "none");
   pin.setAttribute("stroke", "currentColor");
   pin.setAttribute("stroke-width", "1.25");
   pin.setAttribute("stroke-linecap", "round");
   pin.setAttribute("stroke-linejoin", "round");
   svg.appendChild(pin);
+  return svg;
+}
+
+/* The pin's partner. A page rather than the attachment chip's file glyph,
+   which is drawn nearly full-bleed for its own 18px box and would tower over
+   the pin here; this one is sized so the two carry the same weight side by
+   side, and is already mass-centred because a rectangle is evenly inked. */
+function agentNotesIcon(size = 14) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 18 18");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const page = document.createElementNS(NS, "path");
+  page.setAttribute("d", "M5.75 3.75h3.8l2.7 2.7v7.8H5.75Z M9.55 3.75v2.7h2.7");
+  page.setAttribute("fill", "none");
+  page.setAttribute("stroke", "currentColor");
+  page.setAttribute("stroke-width", "1.25");
+  page.setAttribute("stroke-linecap", "round");
+  page.setAttribute("stroke-linejoin", "round");
+  svg.appendChild(page);
   return svg;
 }
 
@@ -5035,7 +5068,7 @@ function agentNotesMark(bid, s) {
   mark.setAttribute("aria-label", names.length ?
     `Agent notes: ${names.join(", ")} · open editor` :
     "No agent notes · create AGENTS.md or CLAUDE.md");
-  mark.appendChild(attachmentFileIcon(12));
+  mark.appendChild(agentNotesIcon(14));
   const open = event => {
     event.preventDefault();
     event.stopPropagation();
@@ -11969,9 +12002,13 @@ class SessionView {
          all), so the line would stop meaning the same thing everywhere. */
       case "result": {
         const n = el("div", "result-line");
+        const outcome = el("span", d.ok ? "ok" : "bad");
+        outcome.appendChild(d.ok ? checkIcon(13) : xIcon(13));
+        if (d.ok) {
+          outcome.setAttribute("role", "img");
+          outcome.setAttribute("aria-label", "Completed");
+        } else outcome.appendChild(document.createTextNode(" " + (d.error || "Failed").slice(0, 80)));
         const bits = [];
-        if (!d.ok) bits.push(`<span class="bad">✗ ${esc((d.error || "Failed").slice(0, 80))}</span>`);
-        else bits.push("✔");
         if (d.duration_ms != null)
           bits.push((Math.max(0, Number(d.duration_ms) || 0) / 1000).toFixed(1) + "s");
         const u = d.usage || {};
@@ -11988,7 +12025,7 @@ class SessionView {
         if (d.context_window > 0 && d.context_used != null)
           bits.push(Math.round(100 * d.context_used / d.context_window) + "% ctx");
         bits.push(fmtTime(ev.ts));
-        n.innerHTML = bits.join(" · ");
+        n.append(outcome, document.createTextNode(" · " + bits.join(" · ")));
         return n;
       }
     }

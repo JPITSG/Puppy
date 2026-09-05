@@ -339,8 +339,9 @@ a{color:var(--acc2)}
   color:var(--txt3);opacity:.38;cursor:pointer;
   transition:opacity var(--t-base) var(--ease),background var(--t-base) var(--ease),color var(--t-base) var(--ease);
 }
-.sess-item .si-pin svg{width:14px;height:14px}
-.sess-item .si-notes svg{width:12px;height:12px}
+/* One drawing size for the pair: both glyphs are cut on the same 18-unit grid
+   at the same stroke, so the marks read as one weight rather than two. */
+.sess-item .si-pin svg,.sess-item .si-notes svg{width:14px;height:14px}
 .sess-item .si-pin.on{opacity:1;color:var(--acc2)}
 .sess-item .si-pin.pending{opacity:.55;cursor:wait}
 .sess-item .si-notes.has{opacity:1;color:var(--acc2)}
@@ -1299,6 +1300,8 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .aside-err{font-size:var(--fs-md);color:var(--err);font-family:var(--mono);white-space:pre-wrap}
 .aside-note{margin-top:6px;font-size:var(--fs-sm);color:var(--warn);font-family:var(--mono)}
 .result-line{align-self:flex-end;font-size:var(--fs-xs);color:var(--txt3);font-family:var(--mono);padding:0 4px}
+.result-line svg{vertical-align:-2px}
+.result-line .ok{color:var(--ok)}
 .result-line .bad{color:var(--err)}
 
 /* approval */

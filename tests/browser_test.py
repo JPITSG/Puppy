@@ -4565,6 +4565,19 @@ def check_session_pins(ui_source: str, css_source: str) -> None:
     assert ".sess-item .si-pin.on{opacity:1;color:var(--acc2)}" in css_source
     assert ".sess-item .si-pin:focus-visible," in css_source
 
+    # The row's two marks are one pair, not two icons that happen to sit side by
+    # side: one drawing size in CSS, and one grid and stroke in the glyphs, so
+    # neither can drift into looking heavier than the other.
+    assert ".sess-item .si-pin svg,.sess-item .si-notes svg{width:14px;height:14px}" \
+        in css_source
+    assert "mark.appendChild(sessionPinIcon(14));" in ui_source
+    assert "mark.appendChild(agentNotesIcon(14));" in ui_source
+    for glyph in ("sessionPinIcon", "agentNotesIcon"):
+        body = ui_source[ui_source.index("function %s(size = 14) {" % glyph):]
+        body = body[:body.index("\n}\n")]
+        assert 'setAttribute("viewBox", "0 0 18 18")' in body, glyph
+        assert 'setAttribute("stroke-width", "1.25")' in body, glyph
+
 
 def check_queued_permission_choices(ui_source: str) -> None:
     """Permission options and value follow the queued engine/config tail."""
