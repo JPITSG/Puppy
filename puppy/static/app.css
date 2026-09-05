@@ -2861,7 +2861,6 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
 .ta-aside-label{display:block;font-size:10px;text-transform:uppercase;letter-spacing:.09em;color:var(--txt3);margin-bottom:2px}
 .ta-aside-q{white-space:pre-wrap;overflow-wrap:anywhere}
 .remove-task-modal .fold-check{margin:0 0 6px}
-.remove-task-modal .fold-hint{margin:0 0 14px}
 /* the task box is the shared prompt box at the old field's height; the
    caption sits as close to it as a label's own control */
 .new-task-modal .task-composer-lbl{margin-bottom:5px}

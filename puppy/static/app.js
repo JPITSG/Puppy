@@ -9572,7 +9572,6 @@ function modalRemoveTask(session) {
     const { m, close, onClose } = modal(`<h2>Remove task?</h2>
       <p class="modal-copy">${esc(session.name || "The task")}’s private working copy is removed permanently. Changes already applied to Main are kept.</p>
       <label class="check fold-check"><input type="checkbox" id="rt-fold" checked> Keep the conversation in Main as a condensed archive</label>
-      <p class="hint fold-hint">When off, the conversation is removed permanently.</p>
       <div class="m-btns"><button class="btn" id="rt-no">Cancel</button><button class="btn btn-danger btn-solid" id="rt-yes">Remove</button></div>`,
       "remove-task-modal");
     let settled = false;
