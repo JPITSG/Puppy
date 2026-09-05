@@ -4447,8 +4447,8 @@ const tailPath=(path,n)=>path.length>n?"…"+path.slice(-n):path;
 const plain={cwd:"/srv/apps/puppy"};
 const linked={cwd:"/private/mirror/never-show",workspace:{
   root:"/srv/projects/sample-media",node:"Builder"}};
-const scratch={cwd:"/tmp/puppy-scratch/x",workspace_kind:"temporary"};
-const expired={cwd:"/tmp/puppy-scratch/x",workspace_kind:"temporary",
+const scratch={cwd:"/srv/puppy/data/workspaces/session-test",workspace_kind:"temporary"};
+const missing={cwd:"/srv/puppy/data/workspaces/session-test",workspace_kind:"temporary",
   workspace_missing:true};
 console.log(JSON.stringify([
   sessionLocationLabel(plain,0),
@@ -4456,7 +4456,9 @@ console.log(JSON.stringify([
   sessionLocationLabel(linked,0),
   sessionLocationTitle(linked,0),
   sessionLocationLabel(scratch,7),
-  sessionLocationLabel(expired,7),
+  sessionLocationLabel(missing,7),
+  workspaceTitle(missing),
+  workspaceTitle({...missing,task:{parent:1}}),
 ]));
 """ % helpers
     proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
@@ -4467,7 +4469,9 @@ console.log(JSON.stringify([
         "Builder:…cts/sample-media",
         "Builder:/srv/projects/sample-media",
         "Scratch workspace",
-        "Scratch workspace expired",
+        "Scratch workspace missing",
+        "This scratch workspace is missing. It will be recreated before the next turn.",
+        "This task's working copy is missing. Its conversation is kept; create a new task to resume the work.",
     ]
 
 
@@ -5366,7 +5370,7 @@ console.log(JSON.stringify({
     assert result == {
         "direct": ["Primary:/srv/apps/puppy", "Primary:/srv/apps/puppy"],
         "remote": ["Builder:/srv/projects/sample-app", "Builder:/srv/projects/sample-app"],
-        "missing": "Primary:Scratch workspace expired",
+        "missing": "Primary:Scratch workspace missing",
         "longFull": "Builder:/one/two/three/four/five",
         "long": "Builder:…ee/four/five",
     }, result

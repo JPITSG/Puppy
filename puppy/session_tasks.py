@@ -480,11 +480,22 @@ def _repo(session):
         raise TaskError("Tasks need a Git repository so their changes can be reviewed and applied independently") from exc
 
 
+def _project_contains(root, path):
+    if os.path.commonpath([root, path]) != root:
+        return False
+    # Puppy's own project contains data/workspaces. Copies stored there are
+    # independent from the enclosing project; an operation inside a managed
+    # copy still owns that copy and its subdirectories.
+    managed = str(workspaces.temporary_root())
+    return not (os.path.commonpath([managed, path]) == managed and
+                os.path.commonpath([managed, root]) != managed)
+
+
 def _idle_project(root, exclude=0):
     from puppy import runner
     for sid, hub in runner._hubs.items():
         session = db.get_session(sid)
-        if session and sid != exclude and os.path.commonpath([root, os.path.realpath(session["cwd"])]) == root and \
+        if session and sid != exclude and _project_contains(root, os.path.realpath(session["cwd"])) and \
                 (hub.status == "running" or hub.queue):
             raise TaskError("Main or another session is using this project; try again when it is idle")
 
@@ -508,8 +519,7 @@ async def _apply_operation(root):
 async def wait_for_workspace(session, hub):
     if record(session["id"]) and not workspaces.is_available(session):
         raise TaskError("Task working copy is missing. Its conversation is kept; create a new task to resume the work.")
-    path = os.path.realpath(session["cwd"])
-    while any(os.path.commonpath([root, path]) == root for root in _busy_roots):
+    while _root_busy(session):
         if hub.interrupted:
             raise TaskError("Stopped while waiting for the task workspace operation")
         await asyncio.sleep(.1)
@@ -526,7 +536,7 @@ def busy_sessions():
 def _root_busy(session):
     """Whether a copy, review or apply currently owns this session's files."""
     path = os.path.realpath(session["cwd"])
-    return any(os.path.commonpath([root, path]) == root for root in _busy_roots)
+    return any(_project_contains(root, path) for root in _busy_roots)
 
 
 def delete_blocker(session):

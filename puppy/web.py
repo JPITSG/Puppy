@@ -833,7 +833,7 @@ async def h_session_workspace_reset(request: web.Request):
         return web.json_response({"error": str(exc)}, status=500)
     ev = db.add_event(s["id"], "info", {
         "subtype": "workspace_reset",
-        "text": "Scratch workspace reset; its previous temporary files were cleared.",
+        "text": "Scratch workspace reset; this is a new empty workspace.",
     })
     h.broadcast({"type": "event", "event": ev})
     h.broadcast({"type": "session_meta", "session": runner.session_payload(updated)})

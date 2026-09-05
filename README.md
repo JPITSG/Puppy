@@ -36,10 +36,10 @@ review/apply controls. See [session tasks](docs/session-tasks.md).
   Provider credentials, plugins, project rules, and native sessions stay owned
   by that node's ordinary OpenCode installation.
 - **Scratch workspaces**: a session can start in a private, disposable workspace
-  without choosing a project directory. Its transcript remains durable while
-  its files live under the host's temporary filesystem and are removed with the
-  session. If the host clears them (commonly on reboot), Puppy marks the
-  workspace expired and safely starts fresh instead of resuming stale context.
+  without choosing a project directory. Its files live in `data/workspaces/`,
+  survive service restarts and reboots, and are removed with the session or an
+  explicit workspace reset. If the directory goes missing, Puppy reports it
+  and starts a fresh workspace before the next turn.
 - **Multi-backend**: pair full Puppy instances or the API-only headless package
   in `backend/` (Settings → Backends, using pairing JSON or URL + API token).
   The browser stays single-origin; this instance proxies HTTP + websockets to
@@ -143,9 +143,10 @@ Persistent private state lives in `data/` (gitignored): `config.json` (instance
 name, bind host/port, api token, default working directory, terminal command,
 usage-refresh interval, and upload-size limit),
 `puppy.db` (sessions, transcripts, shared drafts, users), backend TLS identities,
-and `puppy.log`. Scratch-session files are the
-intentional exception: they live in a mode-0700, instance-specific namespace
-under the OS temporary directory and are disposable. Public source releases
+and `puppy.log`. Scratch-session files and isolated task project copies live in
+`data/workspaces/session-<random>/`, with mode-0700 directories and a lifecycle
+owned by their session. `PUPPY_DATA` relocates the data directory, including
+workspace storage; no installation path is hardcoded. Public source releases
 must include tracked files only: never package the working directory or its
 ignored `data/` and `backend/dist/data/` trees. Export archives contain password
 hashes, API/backend tokens, and TLS material; treat them as private credentials

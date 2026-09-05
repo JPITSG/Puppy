@@ -31,7 +31,7 @@ def _fmt(ev) -> str:
     if k == "engine_switch":
         return f"[session was moved from {d.get('from', '?')} to {d.get('to', '?')}]"
     if k == "info" and d.get("subtype") == "workspace_reset":
-        return ("[scratch workspace reset: the previous temporary files were cleared; "
+        return ("[scratch workspace reset: the previous workspace files are unavailable; "
                 "this is a new empty workspace]")
     if k == "info" and d.get("subtype") == "session_task_archive":
         # A removed task's conversation, folded into this transcript: its

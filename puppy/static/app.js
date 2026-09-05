@@ -1878,7 +1878,7 @@ function workspaceLabel(session, n = 26) {
   const ws = sessionWorkspace(session);
   if (ws) return tailPath(ws.root, n);
   if (!isScratchWorkspace(session)) return tailPath((session && session.cwd) || "", n);
-  return session.workspace_missing ? "Scratch workspace expired" : "Scratch workspace";
+  return session.workspace_missing ? "Scratch workspace missing" : "Scratch workspace";
 }
 
 function workspaceTitle(session) {
@@ -1886,7 +1886,8 @@ function workspaceTitle(session) {
   if (ws) return `${ws.root} · files on ${ws.node || "another backend"}`;
   if (!isScratchWorkspace(session)) return (session && session.cwd) || "";
   if (session.workspace_missing)
-    return "The host cleared this scratch workspace. It will be recreated before the next turn.";
+    return session.task ? "This task's working copy is missing. Its conversation is kept; create a new task to resume the work." :
+      "This scratch workspace is missing. It will be recreated before the next turn.";
   return `Disposable scratch workspace · ${session.cwd}`;
 }
 
@@ -1901,7 +1902,7 @@ function workspaceLocationNode(session, bid) {
 function workspaceLocationPath(session) {
   const ws = sessionWorkspace(session);
   if (ws) return ws.root;
-  if (session && session.workspace_missing) return "Scratch workspace expired";
+  if (session && session.workspace_missing) return "Scratch workspace missing";
   return (session && session.cwd) || "";
 }
 
@@ -18246,7 +18247,7 @@ async function modalNewSession(groupId = null) {
       <div class="dirpick hidden" id="ns-dirs"></div>
       <label class="check new-session-mkdir"><input type="checkbox" id="ns-mkdir"> Create directory if missing</label>
     </div>
-    <p class="hint scratch-note hidden" id="ns-scratch-note">Puppy creates a private empty workspace in the host's temporary storage (normally /tmp). It survives Puppy restarts and is deleted with this session, but the host may clear it, commonly on reboot. The transcript is kept and Puppy can start a fresh workspace.</p>
+    <p class="hint scratch-note hidden" id="ns-scratch-note">Puppy creates a private empty workspace for this session. Its files are deleted when you reset the workspace or delete this session.</p>
     <label>Name <span class="field-optional">(optional, auto from first message)</span><input type="text" id="ns-name"></label>
     <div class="field-row">
       <label>Model<select id="ns-model"></select></label>

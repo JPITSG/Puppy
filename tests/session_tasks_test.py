@@ -13,7 +13,7 @@ BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 from tests.scratch import private_root
 ROOT = private_root('session-tasks-')
-os.environ['PUPPY_DATA'] = str(ROOT / 'data')
+os.environ['PUPPY_DATA'] = str(ROOT / 'project' / 'data')
 from puppy import config, db, runner, session_tasks as tasks, uploads, workspaces
 
 
@@ -682,12 +682,14 @@ async def main():
     config.ensure_dirs()
     auto_titles()
     await conflict_resolution()
+    # Match developing Puppy through itself: its private data/workspaces and
+    # independent task repositories are physically inside Main's project.
     project = ROOT / 'project'
-    project.mkdir()
+    project.mkdir(exist_ok=True)
     tasks._git(project, 'init', '--quiet')
     (project/'a.txt').write_text('original a\n')
     (project/'b.txt').write_text('original b\n')
-    (project/'.gitignore').write_text('ignored/\nCLAUDE.md\n')
+    (project/'.gitignore').write_text('data/\nignored/\nCLAUDE.md\n')
     (project/'CLAUDE.md').write_text('project notes\n')
     (project/'ignored').mkdir()
     (project/'ignored'/'secret').write_text('synthetic private file')
@@ -724,8 +726,10 @@ async def main():
         aid, bid = a['id'], b['id']
         ap, bp = Path(a['cwd']), Path(b['cwd'])
         assert ap != bp and ap != project and bp != project
+        assert ap.parent == bp.parent == Path(config.DATA_DIR).resolve() / 'workspaces'
         assert (ap/'b.txt').read_text() == 'uncommitted baseline b\n'
         assert (bp/'untracked.txt').is_file() and not (bp/'ignored').exists()
+        assert not (ap/'data').exists() and not (bp/'data').exists()
         assert (ap/'CLAUDE.md').read_text() == 'project notes\n'
         assert tasks._git(ap,'rev-parse','--verify','refs/puppy/base').decode().strip() == tasks.record(aid)['base']
         assert all('tasks_enabled' in s for s in runner.sessions_payload()['sessions'])
@@ -749,13 +753,20 @@ async def main():
         assert (await tasks.create(parent, {'prompt':'Feature A','request_id':'a'}))['id'] == aid
         await rejected(tasks.create(parent, {'prompt':'Different','request_id':'a'}),'different')
         assert runner.hub(aid).status == runner.hub(bid).status == 'running'
+        tasks._busy_roots.add(str(project))
+        try:
+            assert tasks._root_busy(db.get_session(parent))
+            assert tasks.delete_blocker(db.get_session(aid)) is None
+            await asyncio.wait_for(tasks.wait_for_workspace(db.get_session(aid), runner.hub(aid)), .5)
+        finally:
+            tasks._busy_roots.discard(str(project))
         runner.hub(aid).send_message('A follow-up')
         assert runner.hub(aid).queue == ['A follow-up'] and not runner.hub(bid).queue
         runner.hub(aid).queue.clear()
         await rejected(tasks.review(parent,aid),'finish')
         (ap/'a.txt').write_text('feature a\n')
         (bp/'b.txt').write_text('feature b\n')
-        finish(aid); finish(bid)
+        finish(aid)
         assert (project/'a.txt').read_text() == 'original a\n'
         assert tasks.public(aid)['state'] == 'ready'
         review = await tasks.review(parent,aid)
@@ -776,6 +787,8 @@ async def main():
         await tasks.review(parent,aid,review['token'])
         assert (project/'a.txt').read_text() == 'feature a\n'
         assert tasks.public(aid)['state'] == 'applied'
+        assert runner.hub(bid).status == 'running'
+        finish(bid)
         # The applied tree is the next baseline and stays pinned in the copy.
         assert tasks._git(ap,'rev-parse','--verify','refs/puppy/base').decode().strip() == tasks.record(aid)['base']
         review = await tasks.review(parent,bid)

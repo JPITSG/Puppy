@@ -688,6 +688,8 @@ async def main() -> None:
         assert db.query_one("SELECT username FROM users")["username"] == "snapshot-user"
         restored_scratch = db.get_session(scratch_id)
         assert restored_scratch["cwd"] != str(original_scratch)
+        assert Path(restored_scratch["cwd"]).parent == Path(config.DATA_DIR).resolve() / "workspaces"
+        assert not original_scratch.exists()
         assert session_tasks.record(scratch_id) == task_record
         assert session_tasks.enabled(linked_id) is False
         assert session_tasks.enabled(directory_id) is True

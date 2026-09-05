@@ -1,14 +1,12 @@
 """Owned lifecycle for disposable session workspaces.
 
-Scratch sessions deliberately live in the host's temporary filesystem. The
-database remains durable, so a host cleanup can expire the files without
-destroying the transcript; the next turn receives a fresh workspace and a new
-engine-native session. All removal is constrained to Puppy's private,
-per-user/per-data-directory namespace.
+Scratch sessions and task copies live in the configured data directory, so
+their files survive service and host restarts. Their session still owns their
+lifecycle: deletion, reset and orphan cleanup stay constrained to Puppy's
+private workspace namespace, never an ordinary project directory.
 """
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
 from pathlib import Path
@@ -21,6 +19,7 @@ from puppy import config, db
 log = logging.getLogger("puppy.workspaces")
 
 KIND_DIRECTORY = "directory"
+# Persisted and wire vocabulary: disposable by session lifecycle, stored in data.
 KIND_TEMPORARY = "temporary"
 KINDS = (KIND_DIRECTORY, KIND_TEMPORARY)
 _PREFIX = "session-"
@@ -36,11 +35,8 @@ def _uid() -> int:
 
 
 def temporary_root() -> Path:
-    """Stable private namespace for this Unix user and Puppy data directory."""
-    data_key = hashlib.sha256(
-        str(Path(config.DATA_DIR).resolve()).encode("utf-8")).hexdigest()[:12]
-    return Path(tempfile.gettempdir()).resolve() / \
-        "puppy-workspaces-{}".format(_uid()) / data_key
+    """Private, persistent storage for session-owned disposable workspaces."""
+    return Path(config.DATA_DIR).resolve() / "workspaces"
 
 
 def _ensure_private_dir(path: Path) -> None:
@@ -75,7 +71,15 @@ def _managed_path(value) -> Path:
     root = temporary_root()
     if candidate.parent != root or not candidate.name.startswith(_PREFIX) or \
             len(candidate.name) <= len(_PREFIX):
-        raise WorkspaceError("refusing unmanaged temporary workspace path: {}".format(candidate))
+        raise WorkspaceError("refusing unmanaged scratch workspace path: {}".format(candidate))
+    try:
+        info = root.lstat()
+    except FileNotFoundError:
+        return candidate
+    except OSError as exc:
+        raise WorkspaceError("cannot inspect workspace storage: {}".format(exc)) from exc
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != _uid():
+        raise WorkspaceError("refusing an unowned workspace storage directory")
     return candidate
 
 
@@ -112,13 +116,12 @@ def create_temporary() -> str:
     return str(path)
 
 
-def _prune_empty_roots() -> None:
-    root = temporary_root()
-    for path in (root, root.parent):
-        try:
-            path.rmdir()
-        except OSError:
-            pass
+def _prune_empty_root() -> None:
+    # The parent is the data directory itself, not another disposable namespace.
+    try:
+        temporary_root().rmdir()
+    except OSError:
+        pass
 
 
 def _remove_path(value, prune: bool = True) -> bool:
@@ -127,7 +130,7 @@ def _remove_path(value, prune: bool = True) -> bool:
         info = path.lstat()
     except FileNotFoundError:
         if prune:
-            _prune_empty_roots()
+            _prune_empty_root()
         return False
     except OSError as exc:
         raise WorkspaceError("cannot inspect scratch workspace: {}".format(exc)) from exc
@@ -138,7 +141,7 @@ def _remove_path(value, prune: bool = True) -> bool:
     except OSError as exc:
         raise WorkspaceError("cannot remove scratch workspace: {}".format(exc)) from exc
     if prune:
-        _prune_empty_roots()
+        _prune_empty_root()
     return True
 
 
@@ -239,7 +242,7 @@ def cleanup_orphans() -> int:
                 removed += 1
         except WorkspaceError as exc:
             log.warning("orphan scratch workspace retained for safety: %s", exc)
-    _prune_empty_roots()
+    _prune_empty_root()
     if removed:
         log.info("removed %d orphan scratch workspace(s)", removed)
     return removed

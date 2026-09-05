@@ -2295,7 +2295,8 @@ async def wait_for_backend(url: str, process: subprocess.Popen,
 
 
 async def exercise_node(url: str, token: str, expected_version: str,
-                        upgrade_enabled: bool, fingerprint: str = "") -> None:
+                        upgrade_enabled: bool, data_dir: Path,
+                        fingerprint: str = "") -> None:
     good = {"X-Puppy-Token": token}
     pinned = ssl_pin(fingerprint)
     async with aiohttp.ClientSession() as http:
@@ -2680,7 +2681,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         scratch_path = Path(scratch["cwd"])
         assert scratch_path.is_dir()
         assert scratch_path.name.startswith("session-")
-        assert scratch_path.parent.parent.name.startswith("puppy-workspaces-")
+        assert scratch_path.parent == data_dir.resolve() / "workspaces"
         assert scratch_path.stat().st_mode & 0o777 == 0o700
         (scratch_path / "throw-away.txt").write_text("disposable", encoding="utf-8")
 
@@ -2760,17 +2761,17 @@ async def exercise_node(url: str, token: str, expected_version: str,
             assert response.status == 200, reordered_payload
         assert reordered_payload["sessions"][0]["pinned"] is True
 
-        # Model a boot-time /tmp cleanup. The durable transcript/session stays,
-        # advertises the expiration, and can be given a fresh private workspace.
+        # Model a workspace removed outside Puppy. The transcript/session stays,
+        # advertises the missing files, and can be given a fresh private workspace.
         shutil.rmtree(scratch_path)
         async with http.get(url + f"/api/sessions/{scratch['id']}",
                             headers=good, ssl=pinned) as response:
-            expired_payload = await response.json()
-            expired = expired_payload["session"]
+            missing_payload = await response.json()
+            missing = missing_payload["session"]
             assert response.status == 200
-        assert expired_payload["steering"] == {
+        assert missing_payload["steering"] == {
             "supported": True, "ready": False, "turn_id": ""}
-        assert expired["workspace_missing"] is True
+        assert missing["workspace_missing"] is True
         async with http.post(url + f"/api/sessions/{scratch['id']}/workspace/reset",
                              headers=good, ssl=pinned) as response:
             reset = await response.json()
@@ -5494,7 +5495,8 @@ async def main() -> None:
             sys.executable, str(release_artifact), "serve", "--data-dir", str(disabled_data),
         ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         await wait_for_backend(disabled_url, disabled_process)
-        await exercise_node(disabled_url, backend_token, __version__, upgrade_enabled=False)
+        await exercise_node(disabled_url, backend_token, __version__, upgrade_enabled=False,
+                            data_dir=disabled_data)
         await stop_process_with_notice(disabled_process, disabled_url, backend_token)
         disabled_process = None
 
@@ -5574,7 +5576,7 @@ async def main() -> None:
             env=legacy_launcher_env)
         await wait_for_backend(backend_url, process, backend_fingerprint)
         await exercise_node(backend_url, backend_token, old_version, upgrade_enabled=False,
-                            fingerprint=backend_fingerprint)
+                            data_dir=backend_data, fingerprint=backend_fingerprint)
         await stop_process_with_notice(
             process, backend_url, backend_token, backend_fingerprint)
         process = None
@@ -5586,7 +5588,7 @@ async def main() -> None:
         ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         await wait_for_backend(backend_url, process, backend_fingerprint)
         await exercise_node(backend_url, backend_token, old_version, upgrade_enabled=True,
-                            fingerprint=backend_fingerprint)
+                            data_dir=backend_data, fingerprint=backend_fingerprint)
         await reject_bad_signature(backend_url, backend_token, backend_fingerprint)
 
         # Import the full application only after its independent data path is set.

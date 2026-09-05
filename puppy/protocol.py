@@ -9,7 +9,8 @@ from __future__ import annotations
 API_PROTOCOL = 2
 SUPPORTED_BACKEND_PROTOCOLS = (API_PROTOCOL,)
 
-# The node owns create/reset/delete/reboot-expiry semantics for scratch paths.
+# The node owns scratch creation, reset, deletion and missing-workspace recovery.
+# The wire name describes the session-owned lifecycle, not OS-temp storage.
 TEMPORARY_WORKSPACE_CAPABILITY = "temporary-workspaces"
 USAGE_REFRESH_CAPABILITY = "engine-usage-refresh"
 MANUAL_USAGE_REFRESH_CAPABILITY = "engine-usage-refresh-manual"

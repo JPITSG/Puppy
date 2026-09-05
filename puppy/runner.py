@@ -2752,7 +2752,7 @@ class SessionHub:
             if workspace_reset:
                 self._emit("info", {
                     "subtype": "workspace_reset",
-                    "text": "Scratch workspace recreated; its previous temporary files were cleared.",
+                    "text": "Scratch workspace recreated; its previous files were unavailable.",
                 })
                 self.broadcast({"type": "session_meta", "session": session_payload(session)})
                 broadcast_sessions()

@@ -102,9 +102,10 @@ continue running. External editors remain the user's responsibility; these
 working copies are not an OS security sandbox.
 
 Task conversations, grouping and Git working copies are covered by the existing
-full backup/restore. Scratch storage may be cleared by the host; if a copy is
-missing, Puppy keeps the transcript and refuses to silently recreate an empty
-task. Remove a task only when its work is no longer needed; folding keeps its
+full backup/restore. Copies live at `<data-dir>/workspaces/session-<random>/`
+and survive service restarts and reboots. If a copy is missing, Puppy keeps the
+transcript and refuses to silently recreate an empty task. Remove a task only
+when its work is no longer needed; folding keeps its
 conversation, never its working copy. Remove children before deleting their
 parent. Applied changes remain in Main after removing a task.
 
