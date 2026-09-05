@@ -4145,12 +4145,53 @@ console.log(JSON.stringify([0, 5, 61, 3599, 3600, 3661, 36000]
         in sidebar
     dot_start = ui_source.index("function sessDot(")
     dot_end = ui_source.index("\nconst PROVIDERS", dot_start)
-    assert 'if (s.status === "running") syncPromptSpinnerPhase(dot);' in \
+    assert 'if (running) syncPromptSpinnerPhase(dot);' in \
         ui_source[dot_start:dot_end]
     tab_start = ui_source.index("function renderTabNode(")
     tab_end = ui_source.index("\nfunction syncHorizontalOverflow", tab_start)
     assert 'if (tab.classList.contains("running")) syncPromptSpinnerPhase(tdot);' \
         in ui_source[tab_start:tab_end]
+    script = r"""
+const assert = require('node:assert/strict');
+const {FakeDocument} = require(%s);
+const document = new FakeDocument();
+const el = (tag, cls, text = '') => {
+  const node = document.createElement(tag);
+  node.className = cls; node.textContent = text; return node;
+};
+const syncPromptSpinnerPhase = node => { node.synced = true; };
+const guardNativeTouchDrag = () => () => false;
+const suppressContextGestureActivation = () => {};
+const xIcon = () => el('span', '');
+let meta;
+const findSessionMeta = () => meta;
+%s
+%s
+for (const [session, running] of [
+  [{status:'idle'}, false],
+  [{status:'running'}, true],
+  [{status:'idle', task_activity:{total:2, running:1}}, true],
+  [{status:'idle', task_activity:{total:2, running:2, approval:1}}, true],
+  [{status:'running', task_activity:{total:2, running:0}}, true],
+  [{status:'idle', task_activity:{total:2, running:0, ready:2}}, false],
+  [{status:'idle', task_activity:{total:0, running:0}}, false],
+]) {
+  meta = {...session, color:'#abc'};
+  const dot = sessDot(meta);
+  const tab = renderTabNode({id:'session', type:'session', bid:0, sid:1}, {}, null);
+  assert.equal(dot.classList.contains('running'), running);
+  assert.equal(tab.classList.contains('running'), running);
+  assert.equal(!!dot.synced, running);
+  assert.equal(!!tab.querySelector('.t-dot').synced, running);
+  assert.equal(dot.style.color, '#abc');
+  assert.equal(tab.querySelector('.t-dot').style.color, '#abc');
+}
+meta = null;
+assert.equal(renderTabNode({type:'session', sid:1}, {}, null).classList.contains('running'), false);
+""" % (json.dumps(str(BASE / "tests" / "fake_dom.js")),
+       ui_source[dot_start:dot_end], ui_source[tab_start:tab_end])
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
 
 
 def check_sidebar_footer_buttons(ui_source: str, css_source: str) -> None:

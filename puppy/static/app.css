@@ -812,11 +812,13 @@ select.choice-native{display:none!important}
   background:linear-gradient(180deg,var(--tab-active-bg),var(--bg) 92%);
   border-color:var(--line2);color:var(--txt);
 }
-.workspace-pane.focused>.tabbar .tab.active{
+.workspace-pane.focused>.tabbar .tab.active,
+.workspace-pane.focused .task-tabbar .tab.active{
   background:linear-gradient(180deg,var(--tab-active-focus-bg),var(--bg) 92%);
   border-color:var(--acc-line);
 }
-.workspace-pane.focused>.tabbar::after{
+.workspace-pane.focused>.tabbar::after,
+.workspace-pane.focused .task-tabbar::after{
   background:var(--acc-line-soft);
 }
 /* Rasterising a 1px divider and the tab face that hides it can disagree on the
@@ -2796,8 +2798,8 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
 /* Main and its task conversations share one workspace tab. The strip above
    the selected chat is the outer tab bar's own vocabulary one step smaller:
    the session dot (spinning while that conversation works), a close mark that
-   only hides a task's tab, and the + at the right. The outer bar's focused
-   accent stays with the pane's own tabs; this one keeps the plain active face. */
+   only hides a task's tab, and the + at the right. The selected conversation
+   shares the outer session tab's focused accent. */
 .session-task-body{position:relative;flex:1;min-height:0;min-width:0}
 .task-tabbar{min-height:36px;padding:6px 8px 0;z-index:1}
 .task-tabbar .tab{font-size:12px;padding:5px var(--tab-space);max-width:200px}
@@ -2841,16 +2843,28 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
 .new-task-modal .composer-box textarea{min-height:130px;max-height:40vh}
 .new-task-modal .field-row>*{min-width:0}
 /* the review sheet: facts in the linked-workspace sheet's voice, then the
-   summary, file list and diff on one shared code-block surface */
-.task-review-modal{max-width:820px}
+   summary, file list and diff on the same surface every other modal gives a
+   textarea (the agent-notes editor's mono voice), each scrolling on its own.
+   The sheet is a flex column so, when the three boxes would push it past the
+   viewport, they give up height before the modal itself has to scroll: the
+   summary and file list fold to a few lines first, the diff (what the
+   review is about) keeps the most; the modal's own scrollbar remains the
+   fallback for a viewport the fixed rows alone cannot fit. */
+.task-review-modal{max-width:820px;display:flex;flex-direction:column}
+.task-review-modal>*{flex:0 0 auto}
+.task-review-modal .field-lbl{margin-bottom:5px}
 .task-review-summary,.task-review-files,.task-review-diff{
-  margin:0 0 10px;padding:10px 12px;background:var(--panel);border:1px solid var(--line);
-  border-radius:var(--r-sm);font-family:var(--mono);font-size:11.5px;line-height:1.45;
-  color:var(--txt2);overflow:auto;
+  flex:0 1 auto;margin:0 0 10px;padding:8px 10px;background:var(--panel2);
+  border:1px solid var(--line2);border-radius:var(--r-sm);
+  font-family:var(--mono);font-size:12px;line-height:1.45;tab-size:4;
+  color:var(--txt);overflow:auto;
 }
-.task-review-summary{max-height:120px;white-space:pre-wrap;word-break:break-word}
-.task-review-files{max-height:160px;white-space:pre-wrap;word-break:break-word}
-.task-review-diff{max-height:45vh;white-space:pre}
+.task-review-summary,.task-review-files{
+  flex-shrink:3;min-height:56px;white-space:pre-wrap;overflow-wrap:anywhere;overflow-x:hidden;
+}
+.task-review-summary{max-height:120px}
+.task-review-files{max-height:160px}
+.task-review-diff{min-height:160px;max-height:45vh;white-space:pre}
 .task-review-diff .add{color:var(--ok)}
 .task-review-diff .del{color:var(--err)}
 .task-review-diff .hunk{color:var(--acc2)}

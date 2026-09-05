@@ -5178,10 +5178,17 @@ function modalAgentNotes(bid, s) {
 }
 
 function sessDot(s) {
-  const dot = el("span", "sess-dot" + (s.status === "running" ? " running" : ""));
+  const running = sessionHasActivity(s);
+  const dot = el("span", "sess-dot" + (running ? " running" : ""));
   dot.style.color = s.color || "var(--txt3)";   // fill and spinner both ride currentColor
-  if (s.status === "running") syncPromptSpinnerPhase(dot);
+  if (running) syncPromptSpinnerPhase(dot);
   return dot;
+}
+
+/* Whole-session indicators include work in its task copies. Leaf conversation
+   controls and clocks still follow that conversation's own status. */
+function sessionHasActivity(s) {
+  return !!s && (s.status === "running" || s.task_activity?.running > 0);
 }
 
 const PROVIDERS = { claude: "anthropic", codex: "openai", opencode: "opencode" };
@@ -6529,7 +6536,7 @@ function renderTabNode(t, pane, tabsRoot) {
     const meta = findSessionMeta(t.bid, t.sid);
     dotCls = meta ? meta.engine : "claude";
     if (meta && meta.color) dotColor = meta.color;
-    if (meta && meta.status === "running") tab.classList.add("running");
+    if (sessionHasActivity(meta)) tab.classList.add("running");
     if (meta) t.title = meta.name || `Session ${t.sid}`;
   } else if (t.type === "term") dotCls = "term";
   else if (t.type === "browser") dotCls = "browser";
