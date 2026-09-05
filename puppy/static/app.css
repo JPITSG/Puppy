@@ -2906,7 +2906,8 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
 /* the summary is prose, the same voice the Tasks sheet gives it; only the
    file list and diff take the code surface */
 .task-review-summary{
-  flex:0 3 auto;margin:0 0 10px;max-height:120px;overflow:auto;
+  /* Keep two readable lines when the diff and guidance fill the viewport. */
+  flex:0 3 auto;margin:0 0 10px;min-height:3em;max-height:120px;overflow:auto;
   color:var(--txt2);font-size:var(--fs-md);line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere;
 }
 .task-review-files,.task-review-diff{
