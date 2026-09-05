@@ -33,6 +33,7 @@ function modal(html) {
     const cls = /class="([^"]*)"/.exec(attrs)?.[1] || "";
     const node = new Element(tag, cls);
     node.disabled = /\bdisabled\b/.test(attrs);
+    node.checked = /\bchecked\b/.test(attrs);
     for (const name of cls.split(/\s+/).filter(Boolean)) nodes["." + name] = node;
     const id = /\bid="([^"]+)"/.exec(attrs)?.[1];
     if (id) nodes["#" + id] = node;
@@ -71,10 +72,10 @@ async function open(data = changed) {
 const lastBody = () => JSON.parse(JSON.stringify(requests.at(-1).body));
 (async () => {
   let nodes = await open();
-  assert.equal(nodes["#tr-resolve"].checked, false, "each review starts opted out");
+  assert.equal(nodes["#tr-resolve"].checked, true, "each review starts with conflict resolution checked");
   assert.equal(nodes["#tr-resolve"].disabled, false);
   assert.equal(nodes["#tr-resolve-wrap"].classes.has("hidden"), false);
-  assert.equal(nodes["#tr-fold"].checked, false, "folding starts opted out");
+  assert.equal(nodes["#tr-fold"].checked, true, "each review starts with folding checked");
   assert.equal(nodes["#tr-fold"].disabled, false);
   assert.equal(nodes["#tr-fold-wrap"].classes.has("hidden"), false);
   assert.match(dialog.m.html, /aria-describedby="tr-fold-note"/);
@@ -94,13 +95,15 @@ const lastBody = () => JSON.parse(JSON.stringify(requests.at(-1).body));
   assert.equal(nodes[".task-review-summary"], undefined, "review omits the task summary");
   assert.equal(nodes[".task-review-summary-lbl"], undefined, "review omits the summary label");
   assert.ok(nodes[".task-review-diff"].children.some(line => line.classes.has("add")));
+  nodes["#tr-resolve"].checked = false;
+  nodes["#tr-fold"].checked = false;
   response = { applied: true };
   await nodes["#tr-apply"].onclick();
   assert.deepEqual(lastBody(), { token: changed.token, resolve_conflicts: false });
   assert.equal(dialog.m.isConnected, false);
   assert.match(notices[0], /applied to Main/);
   assert.equal(workspace.opened, null);
-  assert.equal(requests.length, 2, "default applies without removing the task");
+  assert.equal(requests.length, 2, "unchecking folding applies without removing the task");
   assert.deepEqual(navigation, []);
 
   for (const bid of [0, 7]) {
@@ -108,12 +111,15 @@ const lastBody = () => JSON.parse(JSON.stringify(requests.at(-1).body));
       workspace.tab.bid = bid;
       workspace.tab.id = `s:${bid}:10`;
       nodes = await open({ ...changed, has_changes: hasChanges });
-      nodes["#tr-fold"].checked = true;
+      assert.equal(nodes["#tr-resolve"].checked, true, "a new review resets conflict resolution to checked");
+      assert.equal(nodes["#tr-fold"].checked, true, "a new review resets folding to checked");
       response = { applied: true };
       await nodes["#tr-apply"].onclick();
       assert.deepEqual(requests.map(request => request.route), [
         "sessions/10/tasks/12/review", "sessions/10/tasks/12/apply", "sessions/10/tasks/12/remove"]);
       assert.ok(requests.every(request => request.bid === bid));
+      assert.deepEqual(JSON.parse(JSON.stringify(requests[1].body)), {
+        token: changed.token, ...(hasChanges ? { resolve_conflicts: true } : {}) });
       assert.deepEqual(lastBody(), { fold: true });
       assert.deepEqual(navigation, [["close", 12], ["closeOverview"], ["select", 10], ["activate", `s:${bid}:10`]]);
       assert.equal(dialog.m.isConnected, false);
@@ -122,7 +128,7 @@ const lastBody = () => JSON.parse(JSON.stringify(requests.at(-1).body));
   }
 
   nodes = await open();
-  assert.equal(nodes["#tr-fold"].checked, false, "folding choice does not persist across reviews");
+  assert.equal(nodes["#tr-fold"].checked, true, "folding defaults on across reviews");
   nodes["#tr-fold"].checked = true;
   response = { applied: true }; foldFailure = "Task started working";
   await nodes["#tr-apply"].onclick();
@@ -183,7 +189,7 @@ const lastBody = () => JSON.parse(JSON.stringify(requests.at(-1).body));
   assert.deepEqual(navigation, []);
 
   nodes = await open();
-  assert.equal(nodes["#tr-resolve"].checked, false, "opting in does not persist into a later review");
+  assert.equal(nodes["#tr-resolve"].checked, true, "conflict resolution defaults on across reviews");
   failure = "Main is busy";
   nodes["#tr-resolve"].checked = true;
   nodes["#tr-fold"].checked = true;
@@ -207,6 +213,7 @@ const lastBody = () => JSON.parse(JSON.stringify(requests.at(-1).body));
   assert.equal(nodes["#tr-resolve-wrap"].classes.has("hidden"), true);
   assert.equal(nodes["#tr-resolve"].disabled, true);
   assert.equal(nodes["#tr-apply"].textContent, "Mark as reviewed");
+  nodes["#tr-fold"].checked = false;
   response = { applied: true }; await nodes["#tr-apply"].onclick();
   assert.deepEqual(lastBody(), { token: changed.token });
   assert.match(notices[0], /marked as reviewed/);
@@ -216,6 +223,7 @@ const lastBody = () => JSON.parse(JSON.stringify(requests.at(-1).body));
   assert.equal(nodes["#tr-apply"].classes.has("hidden"), false, "an applied task can still be reviewed again");
   assert.equal(nodes["#tr-apply"].disabled, false);
   assert.equal(nodes["#tr-apply"].textContent, "Mark as reviewed");
+  nodes["#tr-fold"].checked = false;
   response = { applied: true }; await nodes["#tr-apply"].onclick();
   assert.deepEqual(lastBody(), { token: changed.token });
   assert.equal(dialog.m.isConnected, false);

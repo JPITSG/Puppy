@@ -10151,13 +10151,13 @@ async function modalReviewTask(workspace, session) {
     <p class="hint task-review-truncated hidden">The diff preview is shortened.</p>
     <p class="hint task-review-note hidden"></p>
     <div class="task-review-resolve hidden" id="tr-resolve-wrap">
-      <label class="check"><input type="checkbox" id="tr-resolve" aria-describedby="tr-resolve-note" disabled> Resolve conflicts</label>
+      <label class="check"><input type="checkbox" id="tr-resolve" aria-describedby="tr-resolve-note" checked disabled> Resolve conflicts</label>
       <p class="help task-review-resolve-note" id="tr-resolve-note"><span class="note-para">If Main has conflicting changes, send one follow-up to this task's agent with a fresh copy of Main. It uses the task's history, current settings, permissions and normal model quota to reconcile the changes in its own copy. It may also inspect Main read-only when needed.</span>
-        <span class="note-para">You must review and apply again afterward. Applies run one at a time; if another task changes Main again, another resolution may be needed. Off by default for each review.</span></p>
+        <span class="note-para">You must review and apply again afterward. Applies run one at a time; if another task changes Main again, another resolution may be needed. On by default for each review.</span></p>
     </div>
     <div class="task-review-fold hidden" id="tr-fold-wrap">
-      <label class="check"><input type="checkbox" id="tr-fold" aria-describedby="tr-fold-note" disabled> Fold into Main after applying</label>
-      <p class="help task-review-fold-note" id="tr-fold-note">After a successful apply, keep the conversation in Main as a condensed archive, permanently remove the task's private working copy, close its tab and focus Main. Off by default for each review.</p>
+      <label class="check"><input type="checkbox" id="tr-fold" aria-describedby="tr-fold-note" checked disabled> Fold into Main after applying</label>
+      <p class="help task-review-fold-note" id="tr-fold-note">After a successful apply, keep the conversation in Main as a condensed archive, permanently remove the task's private working copy, close its tab and focus Main. On by default for each review.</p>
     </div>
     <p class="form-error hidden" role="alert"></p>
     <div class="m-btns"><button type="button" class="btn" id="tr-close">Cancel</button><button type="button" class="btn btn-pri" id="tr-apply" disabled>Apply to Main</button></div>`, "task-review-modal");
@@ -12004,10 +12004,8 @@ class SessionView {
         const n = el("div", "result-line");
         const outcome = el("span", d.ok ? "ok" : "bad");
         outcome.appendChild(d.ok ? checkIcon(13) : xIcon(13));
-        if (d.ok) {
-          outcome.setAttribute("role", "img");
-          outcome.setAttribute("aria-label", "Completed");
-        } else outcome.appendChild(document.createTextNode(" " + (d.error || "Failed").slice(0, 80)));
+        outcome.setAttribute("role", "img");
+        outcome.setAttribute("aria-label", d.ok ? "Completed" : "Failed");
         const bits = [];
         if (d.duration_ms != null)
           bits.push((Math.max(0, Number(d.duration_ms) || 0) / 1000).toFixed(1) + "s");
