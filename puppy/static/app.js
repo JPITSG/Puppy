@@ -8531,14 +8531,16 @@ async function modalNewTask(workspace) {
   };
 }
 /* The review sheet: the task's facts in the linked-workspace sheet's voice,
-   then its changed files and diff in the transcript's code-block surface.
+   then its summary, changed files and diff on the transcript's code-block
+   surface.
    Apply carries the review's token, so changes made after this look are
    refused instead of silently applied. */
 async function modalReviewTask(workspace, session) {
   const task = session.task || {};
   const { m, close } = modal(`<h2>Review task</h2>
     <div class="ws-facts task-review-facts"></div>
-    <p class="hint task-review-summary hidden"></p>
+    <div class="field-lbl task-review-summary-lbl hidden">Summary</div>
+    <pre class="task-review-summary hidden"></pre>
     <div class="field-lbl">Changed files</div>
     <pre class="task-review-files">Loading changes…</pre>
     <pre class="task-review-diff hidden"></pre>
@@ -8556,7 +8558,10 @@ async function modalReviewTask(workspace, session) {
   fact("State", taskStateLabel(task), ({ ok: "ok", warn: "warn", bad: "err" })[taskStateClass(task)] || "");
   if (task.applied_at) fact("Last applied", fmtTime(task.applied_at));
   const summary = m.querySelector(".task-review-summary");
-  if (task.summary) { summary.textContent = task.summary; summary.classList.remove("hidden"); }
+  if (task.summary) {
+    summary.textContent = task.summary;
+    summary.classList.remove("hidden"); m.querySelector(".task-review-summary-lbl").classList.remove("hidden");
+  }
   const files = m.querySelector(".task-review-files"), diff = m.querySelector(".task-review-diff");
   const note = m.querySelector(".task-review-note"), error = m.querySelector(".backend-edit-error");
   const apply = m.querySelector("#tr-apply");
