@@ -1866,6 +1866,35 @@ async def exercise_agent_notes(http, url, headers, pinned, session, cwd: Path) -
                                                response.status, await response.text())
     assert (cwd / "AGENTS.md").read_text(encoding="utf-8") == "via the link\n"
 
+    # Sharing is detected from the files, split on Save, and re-created only
+    # when no independent instructions would be lost. Old revisions conflict.
+    async with http.get(notes_url, headers=headers, ssl=pinned) as response:
+        shared = (await response.json())["shared"]
+    assert shared["linked"] and shared["available"]
+    async with http.put(notes_url, headers=headers, ssl=pinned, json={
+            "shared": False, "expected_revision": shared["revision"],
+            "texts": {"AGENTS.md": "via the link\n", "CLAUDE.md": "separate\n"}}) as response:
+        split = await response.json()
+        assert response.status == 200, split
+    assert not (cwd / "CLAUDE.md").is_symlink()
+    assert not split["shared"]["linked"] and not split["shared"]["available"]
+    async with http.put(notes_url, headers=headers, ssl=pinned, json={
+            "shared": True, "text": "replacement", "expected_revision": split["shared"]["revision"]}) as response:
+        assert response.status == 409, await response.text()
+    assert (cwd / "CLAUDE.md").read_text() == "separate\n"
+    async with http.put(notes_url, headers=headers, ssl=pinned,
+                        json={"name": "CLAUDE.md", "text": ""}) as response:
+        empty = await response.json()
+        assert response.status == 200, empty
+    async with http.put(notes_url, headers=headers, ssl=pinned, json={
+            "shared": True, "text": "replacement", "expected_revision": shared["revision"]}) as response:
+        assert response.status == 409, await response.text()
+    async with http.put(notes_url, headers=headers, ssl=pinned, json={
+            "shared": True, "text": "via the link\n", "expected_revision": empty["shared"]["revision"]}) as response:
+        joined = await response.json()
+        assert response.status == 200, joined
+    assert joined["shared"]["linked"] and (cwd / "CLAUDE.md").is_symlink()
+
     async with http.put(notes_url, headers=headers, ssl=pinned,
                         json={"name": "CLAUDE.md", "delete": True}) as response:
         removed = await response.json()

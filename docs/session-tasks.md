@@ -42,6 +42,15 @@ continued; the next review contains only changes since their last apply. Review
 and apply again after resolving conflicts in the task or Main. Main does not
 silently synchronize changes back into already-created task copies.
 
+The review sheet's **Fold into Main after applying** checkbox is off for each
+new review. When enabled, a successful apply (including **Mark as reviewed**)
+keeps the condensed conversation in Main and removes the task and its private
+working copy, using the same folding flow as **Remove task**. Its open tab and
+the Tasks sheet close, and Main takes focus. A failed apply or a conflict
+resolution follow-up leaves the task in place. If applying succeeds but folding
+fails, the dialog reports that distinction and offers **Retry folding** without
+applying the changes again.
+
 The review sheet's **Resolve conflicts** switch is off for each new review.
 When enabled, a conflicting **Apply to Main** sends one follow-up prompt to
 that task's existing agent conversation. Puppy supplies snapshots of the old

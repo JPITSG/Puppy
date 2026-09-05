@@ -5060,14 +5060,17 @@ function describeAgentNote(file) {
   return parts.join(" · ");
 }
 
-/* The editor for both note files at once: two labelled text areas, each saved
-   only when its text changed, on the same modal, form, error and button
+/* The editor for both note files: separate text areas or one shared source
+   with CLAUDE.md linked to AGENTS.md, on the same modal, form, error and button
    vocabulary as the backend editor. The node that runs the session serves
    and stores the files, so a remote session edits its own working directory. */
 function modalAgentNotes(bid, s) {
   const { m, close } = modal(`<h2>Agent notes</h2>
     <p class="modal-copy agent-notes-intro"></p>
     <form id="agent-notes-form">
+      <label class="check hidden" id="agent-notes-shared-wrap"><input type="checkbox" id="agent-notes-shared"
+        aria-describedby="agent-notes-shared-help"> Use one file for both</label>
+      <p class="help backend-edit-help hidden" id="agent-notes-shared-help">Links <span class="mono-inline">CLAUDE.md</span> to <span class="mono-inline">AGENTS.md</span>. Uncheck to keep separate copies. Changes apply on Save.</p>
       <div class="agent-notes-files"><p class="modal-copy">Loading…</p></div>
       <p class="form-error hidden" role="alert"></p>
       <div class="m-btns"><button type="button" class="btn" id="agent-notes-cancel">Cancel</button>
@@ -5079,18 +5082,27 @@ function modalAgentNotes(bid, s) {
   const error = m.querySelector(".form-error");
   const cancel = m.querySelector("#agent-notes-cancel");
   const save = m.querySelector("#agent-notes-save");
+  const sharedWrap = m.querySelector("#agent-notes-shared-wrap");
+  const sharedHelp = m.querySelector("#agent-notes-shared-help");
+  const shared = m.querySelector("#agent-notes-shared");
   intro.textContent = `${s.name || `Session ${s.id}`} · ${sessionLocationLabel(s, bid)}`;
   const path = `sessions/${s.id}/agent-notes`;
   let loaded = new Map();     // name -> file record as served
   const areas = new Map();    // name -> textarea
+  let sharedState = null;     // absent on older backends
+  let drafts = new Map();
+  let joinedText = "";
+  let busy = false;
 
   const setError = text => {
     error.textContent = text || "";
     error.classList.toggle("hidden", !text);
   };
-  const setBusy = busy => {
+  const setBusy = value => {
+    busy = value;
     form.setAttribute("aria-busy", busy ? "true" : "false");
-    form.querySelectorAll("textarea,button").forEach(control => control.disabled = busy);
+    form.querySelectorAll("textarea,input,button").forEach(control =>
+      control.disabled = busy || control.dataset.readonly === "true");
     save.textContent = busy ? "Saving…" : "Save";
   };
   const applyPresence = data => {
@@ -5100,30 +5112,36 @@ function modalAgentNotes(bid, s) {
     s.agent_notes = data.present.slice();
     renderSidebar();
   };
-  const render = data => {
+  const renderEditors = () => {
     files.innerHTML = "";
-    loaded = new Map();
     areas.clear();
-    for (const file of data.files || []) {
-      loaded.set(file.name, file);
+    for (const file of loaded.values()) {
+      if (shared.checked && file.name === "CLAUDE.md") continue;
       const block = el("div", "agent-notes-file");
       const head = el("div", "agent-notes-head");
       head.appendChild(el("span", "agent-notes-name", file.name));
-      head.appendChild(el("span", "field-optional", describeAgentNote(file)));
-      if (file.exists) {
+      head.appendChild(el("span", "field-optional", shared.checked ?
+        "read by Codex, OpenCode and Claude Code" :
+        describeAgentNote(sharedState?.linked ? { ...file, symlink: "" } : file)));
+      if (file.exists && shared.checked === !!sharedState?.linked &&
+          (!shared.checked || sharedState.available)) {
         /* the same square icon button the URL editor uses for its rows */
         const remove = el("button", "icon-btn agent-notes-remove");
         remove.type = "button";
-        remove.setAttribute("aria-label", `Remove ${file.name}`);
+        const subject = shared.checked ? "AGENTS.md and CLAUDE.md" : file.name;
+        remove.setAttribute("aria-label", `Remove ${subject}`);
         remove.appendChild(xIcon(12));
         remove.onclick = async () => {
-          if (!await modalConfirm(`Remove ${file.name}?`,
-              `${file.name} is deleted from ${sessionLocationLabel(s, bid)}.`,
+          if (!await modalConfirm(`Remove ${subject}?`,
+              `${subject} ${shared.checked ? "are" : "is"} deleted from ${sessionLocationLabel(s, bid)}.`,
               { confirmLabel: "Remove", destructive: true })) return;
           setError("");
           setBusy(true);
           try {
-            const result = await api(bid, path, { method: "PUT", body: { name: file.name, delete: true } });
+            const body = shared.checked ?
+              { shared: true, delete: true, expected_revision: sharedState.revision } :
+              { name: file.name, delete: true };
+            const result = await api(bid, path, { method: "PUT", body });
             applyPresence(result);
             render(result);
           } catch (err) {
@@ -5136,11 +5154,14 @@ function modalAgentNotes(bid, s) {
       }
       block.appendChild(head);
       const area = el("textarea", "config-textarea agent-notes-text");
-      area.value = file.text || "";
+      area.value = shared.checked ? joinedText : (drafts.get(file.name) || "");
+      area.setAttribute("aria-label", shared.checked ? "Shared agent notes" : file.name);
       area.spellcheck = false;
       area.placeholder = file.exists ? "" :
-        `Standing instructions for ${AGENT_NOTE_READERS[file.name] || "the engines"}…`;
-      area.disabled = file.readable === false || !!file.truncated;
+        `Standing instructions for ${shared.checked ? "all three engines" : AGENT_NOTE_READERS[file.name] || "the engines"}…`;
+      area.disabled = file.readable === false || !!file.truncated ||
+        (shared.checked && !sharedState?.available);
+      area.dataset.readonly = String(area.disabled);
       area.addEventListener("keydown", event => {
         if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
           event.preventDefault();
@@ -5153,13 +5174,55 @@ function modalAgentNotes(bid, s) {
     }
     save.disabled = false;
   };
+  const render = data => {
+    loaded = new Map((data.files || []).map(file => [file.name, file]));
+    drafts = new Map((data.files || []).map(file => [file.name, file.text || ""]));
+    sharedState = data.shared || null;
+    shared.checked = !!sharedState?.linked;
+    shared.disabled = !sharedState?.available;
+    shared.dataset.readonly = String(shared.disabled);
+    const showShared = !!(sharedState?.available || sharedState?.linked);
+    sharedWrap.classList.toggle("hidden", !showShared);
+    sharedHelp.classList.toggle("hidden", !showShared);
+    joinedText = drafts.get("AGENTS.md") || drafts.get("CLAUDE.md") || "";
+    renderEditors();
+  };
+  shared.onchange = () => {
+    setError("");
+    if (shared.checked) {
+      drafts = new Map([...areas].map(([name, area]) => [name, area.value]));
+      const agents = drafts.get("AGENTS.md") || "", claude = drafts.get("CLAUDE.md") || "";
+      if (agents && claude && agents !== claude) {
+        shared.checked = false;
+        setError("The files have different text. Make them match or empty one before sharing.");
+        return;
+      }
+      joinedText = agents || claude;
+    } else {
+      const text = areas.get("AGENTS.md").value;
+      // A reversible toggle preserves separate drafts until the shared text
+      // is edited; edited shared instructions become both independent copies.
+      if (text !== joinedText)
+        drafts = new Map(AGENT_NOTE_FILES.map(name => [name, text]));
+    }
+    renderEditors();
+  };
 
   cancel.onclick = close;
   form.onsubmit = async event => {
     event.preventDefault();
+    if (busy) return;
     setError("");
     const changes = [];
-    for (const [name, area] of areas) {
+    if (shared.checked && sharedState?.available) {
+      const text = areas.get("AGENTS.md").value;
+      if (!sharedState.linked || !loaded.get("AGENTS.md").exists || text !== loaded.get("AGENTS.md").text)
+        changes.push({ shared: true, text, expected_revision: sharedState.revision });
+    } else if (sharedState?.linked && !shared.checked) {
+      changes.push({ shared: false,
+        texts: Object.fromEntries([...areas].map(([name, area]) => [name, area.value])),
+        expected_revision: sharedState.revision });
+    } else for (const [name, area] of areas) {
       const file = loaded.get(name) || {};
       if (area.disabled) continue;
       const text = area.value;
@@ -10059,6 +10122,10 @@ async function modalReviewTask(workspace, session) {
       <p class="help task-review-resolve-note" id="tr-resolve-note"><span class="note-para">If Main has conflicting changes, send one follow-up to this task's agent with a fresh copy of Main. It uses the task's history, current settings, permissions and normal model quota to reconcile the changes in its own copy. It may also inspect Main read-only when needed.</span>
         <span class="note-para">You must review and apply again afterward. Applies run one at a time; if another task changes Main again, another resolution may be needed. Off by default for each review.</span></p>
     </div>
+    <div class="task-review-fold hidden" id="tr-fold-wrap">
+      <label class="check"><input type="checkbox" id="tr-fold" aria-describedby="tr-fold-note" disabled> Fold into Main after applying</label>
+      <p class="help task-review-fold-note" id="tr-fold-note">After a successful apply, keep the conversation in Main as a condensed archive, permanently remove the task's private working copy, close its tab and focus Main. Off by default for each review.</p>
+    </div>
     <p class="form-error hidden" role="alert"></p>
     <div class="m-btns"><button type="button" class="btn" id="tr-close">Cancel</button><button type="button" class="btn btn-pri" id="tr-apply" disabled>Apply to Main</button></div>`, "task-review-modal");
   const facts = m.querySelector(".task-review-facts");
@@ -10075,6 +10142,7 @@ async function modalReviewTask(workspace, session) {
   const note = m.querySelector(".task-review-note"), error = m.querySelector(".form-error");
   const apply = m.querySelector("#tr-apply");
   const resolve = m.querySelector("#tr-resolve"), resolveWrap = m.querySelector("#tr-resolve-wrap");
+  const fold = m.querySelector("#tr-fold"), foldWrap = m.querySelector("#tr-fold-wrap");
   const fail = text => { error.textContent = text; error.classList.remove("hidden"); };
   m.querySelector("#tr-close").onclick = close;
   try {
@@ -10099,26 +10167,55 @@ async function modalReviewTask(workspace, session) {
     }
     apply.textContent = data.has_changes ? "Apply to Main" : "Mark as reviewed";
     apply.disabled = false;
+    if (backendSupportsTaskFold(workspace.tab.bid)) {
+      fold.disabled = false; foldWrap.classList.remove("hidden");
+    }
+    // If folding fails after apply succeeds, retry only the removal. The
+    // review token has already been consumed and must not be applied again.
+    let applied = false;
     apply.onclick = async () => {
       if (apply.disabled) return;
+      const foldAfterApply = applied || (!fold.disabled && fold.checked);
       apply.disabled = true; error.classList.add("hidden");
       if (resolve) { resolve.disabled = true; resolveWrap.classList.add("disabled"); }
-      apply.textContent = "Applying…";
+      fold.disabled = true; foldWrap.classList.add("disabled");
+      apply.textContent = applied ? "Folding…" : "Applying…";
+      let result;
       try {
-        const result = await api(workspace.tab.bid, base + "/apply", { method: "POST",
+        result = applied ? { applied: true } : await api(workspace.tab.bid, base + "/apply", { method: "POST",
           body: { token: data.token, ...(resolve && data.has_changes ? { resolve_conflicts: resolve.checked } : {}) }, timeoutMs: 180000 });
-        close();
-        if (result.resolving) {
-          workspace.openTask(session.id);
-          toast("Conflict resolution started in the task · review its changes when it finishes", "ok", TOAST_LONG);
-        } else {
-          toast(data.has_changes ? "Task changes applied to Main" : "Task marked as reviewed", "ok");
+        if (result.applied && !result.resolving && foldAfterApply) {
+          applied = true;
+          apply.textContent = "Folding…";
+          await removeTaskSession(workspace.tab.bid, session, { fold: true });
         }
+      } catch (err) {
+        fail(applied ? `Applied to Main, but the task could not be folded: ${err.message}` : err.message);
+        apply.disabled = false;
+        apply.textContent = applied ? "Retry folding" : data.has_changes ? "Apply to Main" : "Mark as reviewed";
+        if (!applied) {
+          if (resolve) { resolve.disabled = !data.has_changes; resolveWrap.classList.remove("disabled"); }
+          fold.disabled = !backendSupportsTaskFold(workspace.tab.bid); foldWrap.classList.remove("disabled");
+        }
+        return;
+      }
+      close();
+      if (applied) {
+        workspace.closeTask(session.id);
+        workspace.closeTaskOverview();
+        workspace.select(workspace.tab.sid);
+        activateTab(workspace.tab.id);
+        toast(`${backendName(workspace.tab.bid)}: Task applied and folded into Main`, "ok");
+      } else if (result.resolving) {
+        workspace.openTask(session.id);
+        toast("Conflict resolution started in the task · review its changes when it finishes", "ok", TOAST_LONG);
+      } else {
+        toast(data.has_changes ? "Task changes applied to Main" : "Task marked as reviewed", "ok");
+      }
+      try {
         await refreshSessionList(workspace.tab.bid); renderSidebar();
       } catch (err) {
-        fail(err.message); apply.disabled = false;
-        apply.textContent = data.has_changes ? "Apply to Main" : "Mark as reviewed";
-        if (resolve) { resolve.disabled = !data.has_changes; resolveWrap.classList.remove("disabled"); }
+        toast(`${backendName(workspace.tab.bid)}: ${err.message}`, "error", TOAST_LONG);
       }
     };
   } catch (err) { files.textContent = ""; fail(err.message); }

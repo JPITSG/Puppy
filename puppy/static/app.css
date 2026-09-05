@@ -2917,7 +2917,7 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
 .task-review-diff .del{color:var(--err)}
 .task-review-diff .hunk{color:var(--acc2)}
 .task-review-diff .meta{color:var(--txt3)}
-.task-review-resolve{margin:0 0 6px}
-.task-review-resolve-note{margin:0 0 10px}
+.task-review-resolve,.task-review-fold{margin:0 0 6px}
+.task-review-resolve-note,.task-review-fold-note{margin:0 0 10px}
 .task-review-resolve-note .note-para+.note-para{margin-top:4px}
 @media (max-width:560px){.task-tabbar .tab{max-width:150px}}

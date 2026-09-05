@@ -16,11 +16,14 @@ class Element {
   appendChild(child) { this.children.push(child); return child; }
   replaceChildren() { this.children = []; }
 }
-let dialog, requests, notices, response, failure, held;
-const state = { nodeCapabilities: ["session-task-conflict-resolution"],
-  backends: [{ id: 7, capabilities: ["session-task-conflict-resolution"] }] };
-const session = { id: 12, name: "Task", task: { state: "ready", summary: "Checked <script>text</script>" } };
-const workspace = { tab: { bid: 7, sid: 10 }, openTask(id) { this.opened = id; } };
+let dialog, requests, notices, response, failure, held, foldFailure, navigation, refreshFailure;
+const state = { nodeCapabilities: ["session-task-conflict-resolution", "session-task-fold"],
+  backends: [{ id: 7, capabilities: ["session-task-conflict-resolution", "session-task-fold"] }] };
+const session = { id: 12, name: "Task", task: { parent: 10, state: "ready", summary: "Checked <script>text</script>" } };
+const workspace = { tab: { id: "s:7:10", bid: 7, sid: 10 }, openTask(id) { this.opened = id; },
+  closeTask(id) { navigation.push(["close", id]); },
+  closeTaskOverview() { navigation.push(["closeOverview"]); },
+  select(id) { navigation.push(["select", id]); } };
 const changed = { files: "M\ta.txt\n", diff: "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
   token: "review-token", has_changes: true };
 function modal(html) {
@@ -42,17 +45,26 @@ async function api(bid, route, options) {
   requests.push({ bid, route, ...options });
   if (held) await held;
   if (failure) throw new Error(failure);
+  if (route.endsWith("/remove")) {
+    if (foldFailure) throw new Error(foldFailure);
+    return { folded: true };
+  }
   return response;
 }
 const context = vm.createContext({ state, modal, api, el: (...args) => new Element(...args),
-  fmtStamp: () => "12:00", TOAST_LONG: 7000, toast: text => notices.push(text), refreshSessionList: async () => {}, renderSidebar() {} });
+  backendName: bid => bid ? "Remote" : "Local",
+  fmtStamp: () => "12:00", TOAST_LONG: 7000, toast: text => notices.push(text),
+  activateTab: id => navigation.push(["activate", id]),
+  refreshSessionList: async () => { if (refreshFailure) throw new Error(refreshFailure); }, renderSidebar() {} });
 vm.runInContext([
-  between("function nodeHasCapability(", "/* \"Enable tasks\""),
+  between("function backendSupportsTaskFold(", "/* \"Enable tasks\""),
   between("const TASK_STATES =", "/* two offset frames:"),
+  between("async function removeTaskSession(", "async function removeTask("),
   between("async function modalReviewTask(", "class SessionView {"),
 ].join("\n"), context);
 async function open(data = changed) {
   response = data; failure = ""; requests = []; notices = []; held = null; workspace.opened = null;
+  foldFailure = ""; navigation = []; refreshFailure = "";
   await context.modalReviewTask(workspace, session);
   return dialog.nodes;
 }
@@ -62,6 +74,13 @@ const lastBody = () => JSON.parse(JSON.stringify(requests.at(-1).body));
   assert.equal(nodes["#tr-resolve"].checked, false, "each review starts opted out");
   assert.equal(nodes["#tr-resolve"].disabled, false);
   assert.equal(nodes["#tr-resolve-wrap"].classes.has("hidden"), false);
+  assert.equal(nodes["#tr-fold"].checked, false, "folding starts opted out");
+  assert.equal(nodes["#tr-fold"].disabled, false);
+  assert.equal(nodes["#tr-fold-wrap"].classes.has("hidden"), false);
+  assert.match(dialog.m.html, /aria-describedby="tr-fold-note"/);
+  assert.match(dialog.m.html, /permanently remove the task's private working copy/);
+  assert.ok(dialog.m.html.indexOf('id="tr-fold-wrap"') > dialog.m.html.indexOf('id="tr-resolve-wrap"'),
+    "folding is the bottom review option");
   assert.match(dialog.m.html, /aria-describedby="tr-resolve-note"/);
   assert.match(dialog.m.html, /one follow-up/);
   assert.match(dialog.m.html, /normal model quota/);
@@ -81,6 +100,62 @@ const lastBody = () => JSON.parse(JSON.stringify(requests.at(-1).body));
   assert.equal(dialog.m.isConnected, false);
   assert.match(notices[0], /applied to Main/);
   assert.equal(workspace.opened, null);
+  assert.equal(requests.length, 2, "default applies without removing the task");
+  assert.deepEqual(navigation, []);
+
+  for (const bid of [0, 7]) {
+    for (const hasChanges of [true, false]) {
+      workspace.tab.bid = bid;
+      workspace.tab.id = `s:${bid}:10`;
+      nodes = await open({ ...changed, has_changes: hasChanges });
+      nodes["#tr-fold"].checked = true;
+      response = { applied: true };
+      await nodes["#tr-apply"].onclick();
+      assert.deepEqual(requests.map(request => request.route), [
+        "sessions/10/tasks/12/review", "sessions/10/tasks/12/apply", "sessions/10/tasks/12/remove"]);
+      assert.ok(requests.every(request => request.bid === bid));
+      assert.deepEqual(lastBody(), { fold: true });
+      assert.deepEqual(navigation, [["close", 12], ["closeOverview"], ["select", 10], ["activate", `s:${bid}:10`]]);
+      assert.equal(dialog.m.isConnected, false);
+      assert.match(notices[0], /applied and folded into Main/);
+    }
+  }
+
+  nodes = await open();
+  assert.equal(nodes["#tr-fold"].checked, false, "folding choice does not persist across reviews");
+  nodes["#tr-fold"].checked = true;
+  response = { applied: true }; foldFailure = "Task started working";
+  await nodes["#tr-apply"].onclick();
+  assert.equal(dialog.m.isConnected, true);
+  assert.match(nodes[".form-error"].textContent, /Applied to Main, but.*Task started working/);
+  assert.equal(nodes["#tr-apply"].textContent, "Retry folding");
+  assert.equal(nodes["#tr-fold"].disabled, true);
+  assert.equal(nodes["#tr-resolve"].disabled, true);
+  assert.deepEqual(navigation, [], "failed folding leaves the task open and focused");
+  assert.deepEqual(notices, []);
+  foldFailure = "";
+  await nodes["#tr-apply"].onclick();
+  assert.equal(requests.filter(request => request.route.endsWith("/apply")).length, 1,
+    "fold retry never reuses the consumed apply token");
+  assert.equal(requests.filter(request => request.route.endsWith("/remove")).length, 2);
+  assert.equal(dialog.m.isConnected, false);
+  assert.deepEqual(navigation, [["close", 12], ["closeOverview"], ["select", 10], ["activate", "s:7:10"]]);
+
+  nodes = await open();
+  nodes["#tr-fold"].checked = true;
+  response = { applied: true }; refreshFailure = "Could not refresh sessions";
+  await nodes["#tr-apply"].onclick();
+  assert.equal(dialog.m.isConnected, false, "list refresh failure does not offer apply or fold again");
+  assert.equal(requests.length, 3);
+  assert.equal(notices.at(-1), `Remote: ${refreshFailure}`);
+
+  state.backends[0].capabilities = ["session-task-conflict-resolution"];
+  nodes = await open();
+  assert.equal(nodes["#tr-fold-wrap"].classes.has("hidden"), true);
+  assert.equal(nodes["#tr-fold"].disabled, true);
+  response = { applied: true }; await nodes["#tr-apply"].onclick();
+  assert.equal(requests.length, 2, "backends without folding still apply normally");
+  state.backends[0].capabilities.push("session-task-fold");
 
   nodes = await open({ ...changed, truncated: true });
   assert.equal(nodes[".task-review-truncated"].classes.has("hidden"), false, "a cut preview says so above the note");
@@ -88,11 +163,13 @@ const lastBody = () => JSON.parse(JSON.stringify(requests.at(-1).body));
 
   nodes = await open();
   nodes["#tr-resolve"].checked = true;
+  nodes["#tr-fold"].checked = true;
   response = { applied: false, resolving: true };
   let release; held = new Promise(resolve => { release = resolve; });
   const pending = nodes["#tr-apply"].onclick();
   assert.equal(nodes["#tr-apply"].disabled, true);
   assert.equal(nodes["#tr-resolve"].disabled, true);
+  assert.equal(nodes["#tr-fold"].disabled, true);
   assert.match(nodes["#tr-apply"].textContent, /Applying/);
   await nodes["#tr-apply"].onclick();
   assert.equal(requests.length, 2, "review plus exactly one apply even under a double click");
@@ -102,11 +179,14 @@ const lastBody = () => JSON.parse(JSON.stringify(requests.at(-1).body));
   assert.equal(dialog.m.isConnected, false);
   assert.match(notices[0], /resolution started/);
   assert.doesNotMatch(notices[0], /applied to Main/);
+  assert.equal(requests.length, 2, "conflict resolution never folds the task");
+  assert.deepEqual(navigation, []);
 
   nodes = await open();
   assert.equal(nodes["#tr-resolve"].checked, false, "opting in does not persist into a later review");
   failure = "Main is busy";
   nodes["#tr-resolve"].checked = true;
+  nodes["#tr-fold"].checked = true;
   await nodes["#tr-apply"].onclick();
   assert.equal(dialog.m.isConnected, true);
   assert.equal(nodes["#tr-apply"].disabled, false);
@@ -114,6 +194,11 @@ const lastBody = () => JSON.parse(JSON.stringify(requests.at(-1).body));
   assert.equal(nodes["#tr-resolve"].checked, true, "a refused request keeps the dialog choice");
   assert.equal(nodes[".form-error"].textContent, failure);
   assert.equal(notices.length, 0);
+  assert.equal(nodes["#tr-fold"].disabled, false);
+  assert.equal(nodes["#tr-fold"].checked, true);
+  assert.equal(requests.length, 2, "a refused apply never removes the task");
+  assert.deepEqual(navigation, []);
+  nodes["#tr-fold"].checked = false;
   failure = ""; response = { applied: true };
   await nodes["#tr-apply"].onclick();
   assert.deepEqual(lastBody(), { token: changed.token, resolve_conflicts: true });
@@ -144,5 +229,6 @@ const lastBody = () => JSON.parse(JSON.stringify(requests.at(-1).body));
   await context.modalReviewTask(workspace, session);
   assert.equal(dialog.nodes["#tr-apply"].disabled, true);
   assert.equal(dialog.nodes["#tr-resolve"].disabled, true);
-  console.log("PASS: review toggle explanation, defaults, opt-in, duplicate guard, progress, errors, task navigation, empty changes and local/remote nodes");
+  assert.equal(dialog.nodes["#tr-fold"].disabled, true);
+  console.log("PASS: review toggles, apply then fold, fold retry, defaults, duplicate guard, progress, errors, Main focus, empty changes and local/remote capabilities");
 })().catch(error => { console.error(error); process.exitCode = 1; });
