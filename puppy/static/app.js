@@ -5364,7 +5364,7 @@ function sessionContextMenu(ev, bid, s) {
     session: s, tab: { bid, sid: s.id }, updateHead() { refreshGroup(bid); },
   }));
   if (backendSupportsEngineDefaults(bid))
-    add("Engine defaults…", () => {
+    add("Engine defaults", () => {
       const view = sessionViewFor(bid, s.id);
       if (view) view.editEngineDefaults();
       else modalEngineDefaults(bid, s.engine);
@@ -12748,7 +12748,7 @@ class SessionView {
     add("Dot color", () => this.pickColor(anchor));
     add("Switch engine", () => modalSwitchEngine(this));
     if (backendSupportsEngineDefaults(this.tab.bid))
-      add("Engine defaults…", () => this.editEngineDefaults());
+      add("Engine defaults", () => this.editEngineDefaults());
     if (this.session && this.session.task) {
       /* kept visible while the task still works, like the tools menu's rows,
          so the answer to "where is review?" is on the row itself */
@@ -13184,7 +13184,7 @@ class SessionView {
 
   engineDefaultsActions() {
     return backendSupportsEngineDefaults(this.tab.bid) ?
-      [{ label: "Engine defaults…", run: () => this.editEngineDefaults() }] : [];
+      [{ label: "Engine defaults", run: () => this.editEngineDefaults() }] : [];
   }
 
   async applyModelChoice(value) {
