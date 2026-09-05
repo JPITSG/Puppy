@@ -41,14 +41,14 @@ const context = vm.createContext({
   toast: text => toasts.push(text), refreshSessionList: async () => {}, renderSidebar: () => {},
   modalConfirm: async () => confirmResult, sessionDeleteMessage: () => "legacy copy",
   choiceSvg: icon, tasksIcon: icon,
-  fmtDateTime: ts => (ts ? "stamp" : ""),
+  fmtDateTime: ts => (ts ? "stamp" : ""), fmtStamp: ts => (ts ? "stamp" : ""),
   engineConfigParts: (bid, engine, model, effort) => [String(engine), [model, effort].filter(Boolean).join(" ")],
   linkifyInto: (node, text) => { node.textContent = text; return node; },
   md: text => "<p>" + text + "</p>",
   decorateMarkdownLinks: () => {}, decorateMarkdownImages: () => {}, decorateCodeBlocks: () => {},
   decorateMentionsInto: (node, text) => { node.textContent = text; },
   splitAttachmentMarkers: text => ({ text, attachments: [] }),
-  toolIcon: () => "$", toolLabel: tool => String(tool),
+  toolIconNode: icon, toolLabel: tool => String(tool),
 });
 vm.runInContext([
   between("const el = ", "/* Close buttons"),
@@ -71,10 +71,10 @@ const node = key => dialog.m.querySelector(key);
   assert.ok(dialog.m.classList.contains("remove-task-modal"));
   assert.equal(node("#rt-fold").checked, true, "folding is on by default");
   assert.equal(node(".modal-subject").textContent, "Fold me", "the name is a line of its own");
-  assert.ok(!dialog.m.textContent.includes("Fold me’s"), "the name is not run into the sentence");
-  assert.ok(dialog.m.querySelectorAll(".modal-copy")[1].textContent.startsWith("The task’s private working copy"),
+  assert.ok(!dialog.m.textContent.includes("Fold me's"), "the name is not run into the sentence");
+  assert.ok(dialog.m.querySelectorAll(".modal-copy")[1].textContent.startsWith("The task's private working copy"),
     "the copy follows the name as its own paragraph");
-  assert.equal(document.activeElement, node("#rt-yes"));
+  assert.equal(document.activeElement, node("#rt-no"), "a destructive confirm starts on Cancel");
   node("#rt-yes").onclick();
   assert.deepEqual(plain(await pending), { fold: true });
   assert.equal(dialog.m.isConnected, false);

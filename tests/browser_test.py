@@ -678,7 +678,9 @@ console.log(JSON.stringify([oldLocal,backendSupportsSessionTasks(0),backendSuppo
 
 
 def check_task_config_ui() -> None:
-    for name in ("composer_ui_test.js", "task_config_ui_test.js"):
+    for name in ("composer_ui_test.js", "task_config_ui_test.js",
+                 "task_menu_ui_test.js", "task_review_ui_test.js",
+                 "task_fold_ui_test.js", "live_controls_ui_test.js"):
         proc = subprocess.run(["node", str(BASE / "tests" / name)],
                               capture_output=True, text=True)
         assert proc.returncode == 0, proc.stderr
@@ -1364,8 +1366,9 @@ console.log(JSON.stringify({engines:state.engCache[7],usage:state.remoteUsageRef
         'if (metadata && typeof metadata === "object") current = metadata;') >= 2
     assert "const normalized = normalizeUploadSettings(metadata);" in ui_source
     assert "if (normalized) current = normalized;" in ui_source
-    assert "Backend unavailable · showing last known setting" in ui_source
-    assert "Backend unavailable · showing last known prompt settings." in ui_source
+    assert "Backend unavailable · showing last known ${noun}" in function("backendStateNote")
+    assert 'backendStateNote(availability, !!current)' in ui_source
+    assert 'backendStateNote(backendStatus, true, "prompt settings")' in ui_source
     assert ".engine-node-offline-values .engine-row{opacity:.6}" in css_source
     assert ".usage-refresh-controls input:disabled{opacity:.5;cursor:not-allowed}" \
         in css_source
@@ -1646,7 +1649,7 @@ function modal(html,className){
     "#backend-edit-urls":control(),"#backend-edit-token":control(),
     "#backend-edit-tls":control(),"#backend-edit-pairing":control(),
     "#backend-edit-cancel":control(),"#backend-edit-save":control(),
-    ".backend-edit-error":control()};
+    ".form-error":control()};
   const fields=Object.values(nodes).filter((value,index)=>index>0&&index<8);
   nodes["#backend-edit-form"].querySelectorAll=()=>fields;
   const m={html,className,isConnected:true,querySelector:selector=>nodes[selector]};
@@ -1669,8 +1672,8 @@ const first=modalEditBackend(backend,result=>saved.push(result));
 const one=modals[0].nodes;
 one["#backend-edit-pairing"].value="{";
 await one["#backend-edit-form"].onsubmit({preventDefault(){}});
-const invalid={message:one[".backend-edit-error"].textContent,
-  visible:!one[".backend-edit-error"].classList.contains("hidden"),calls:calls.length};
+const invalid={message:one[".form-error"].textContent,
+  visible:!one[".form-error"].classList.contains("hidden"),calls:calls.length};
 one["#backend-edit-cancel"].onclick();
 const cancelled=first.m.closed===true;
 
@@ -1735,7 +1738,7 @@ console.log(JSON.stringify({invalid,cancelled,ordinary,paired,cleartext,saved:sa
     assert "function installBackendRecord(record, resetConnection = false)" in ui_source
     assert ".backend-edit-grid{display:grid;grid-template-columns:" in css_source
     assert ".backend-url-row{display:flex;align-items:center;gap:6px;min-width:0}" in css_source
-    assert "transition:opacity .25s var(--ease)" in css_source
+    assert "transition:opacity var(--t-slow) var(--ease)" in css_source
     assert "grid-template-columns:repeat(4,minmax(0,1fr))" in css_source
     assert (".be-actions{grid-column:1;grid-row:3;" +
             "grid-template-columns:repeat(2,minmax(0,1fr))}") in css_source
@@ -1802,7 +1805,7 @@ console.log(JSON.stringify({before,after,connected}));
             'engines === null && !!bid;') in ui_source
     assert 'checkingBackend ? "Checking backend…" : "Checking engines…"' in ui_source
     assert '(loading ? " engine-node-loading" : "")' in ui_source
-    assert '"engine-node-message engine-node-empty", "No engines reported"' in ui_source
+    assert '"engine-node-message engine-node-empty", "No engines installed"' in ui_source
     assert "icon.appendChild(refreshIcon(10));" in ui_source
     assert (".engine-node-meta .be-url{\n  display:inline-flex;align-items:baseline;" in
             css_source)
@@ -1812,8 +1815,8 @@ console.log(JSON.stringify({before,after,connected}));
     assert ".engine-node-message.engine-node-empty{" in css_source
     assert "display:inline-grid;grid-template-columns:6px auto" in css_source
     assert "margin:5px 0 3px;padding:5px 0;" in css_source
-    assert ".engine-node-message,.usage-refresh-note,.eau-note{" in css_source
-    assert "font-family:var(--sans);font-size:10.5px;font-weight:400;" in css_source
+    assert ".hint,.help,.engine-node-message,.usage-refresh-note,.eau-note," in css_source
+    assert "font-family:var(--sans);font-size:var(--fs-xs);font-weight:400;" in css_source
     assert ".engine-node-message{padding:7px 0 5px 30px;color:var(--txt3)}" in css_source
     assert ".engine-node-loading-icon svg{display:block;flex:0 0 auto;animation:spin" in css_source
     assert (".engine-node-message.engine-node-unavailable::before," +
@@ -1822,7 +1825,7 @@ console.log(JSON.stringify({before,after,connected}));
     assert ".engine-node-message.engine-node-stale::before{" in css_source
     assert 'content:"";display:block;align-self:center;' in css_source
     assert "background:var(--err);-webkit-mask:var(--alert-triangle)" in css_source
-    assert (".engine-node-stale{display:flex;align-items:flex-start;gap:7px;" +
+    assert (".engine-node-stale{display:flex;align-items:flex-start;gap:8px;" +
             "padding-left:12px") in css_source
     assert (".be-url-track{\n  position:relative;display:grid;flex:0 1 auto;" in
             css_source)
@@ -1851,6 +1854,7 @@ console.log(JSON.stringify({before,after,connected}));
     refresh_script = r"""
 const ENGINE_REFRESH_TIMEOUT=1234;
 const ENGINE_REFRESH_RESULT_MS=3200;
+const TOAST_LONG=7000;
 let shouldFail=true,synced=0,applied=0;const calls=[],toasts=[];
 const syncRemoteStateViews=()=>{synced++;};
 const api=async(bid,path,options)=>{calls.push({bid,path,options});
@@ -2958,7 +2962,8 @@ def check_user_message_copy(ui_source: str) -> None:
 
     # the sent message and the side-question answer share one implementation,
     # so exercising the message control exercises both
-    helper = extract("hoverCopyButton") + "\n" + extract("userMessageCopyButton")
+    helper = "\n".join(extract(name) for name in (
+        "wireCopyButton", "hoverCopyButton", "userMessageCopyButton"))
     script = r"""
 class Classes {
   constructor() { this.names = new Set(); }
@@ -3106,7 +3111,7 @@ def check_active_turn_steering_ui(ui_source: str, css_source: str) -> None:
     assert "this.steerBtn.classList.toggle(\"hidden\", !(running && supported));" \
         in ui_source
     assert "hasAttachments" in ui_source and \
-        "Steering accepts text only; use Queue for attachments" in ui_source
+        "Steering accepts text only · queue the message to attach files" in ui_source
 
     # Stop keeps its accessible name while its visible face is only one drawn
     # square. Width, height, padding, and the icon's zero margin make both
@@ -3354,7 +3359,9 @@ def check_side_question_ui(ui_source: str, css_source: str) -> None:
     for rule in (".md>*+*{", ".md pre{", ".md code{", ".md ul,.md ol{",
                  ".md blockquote{", ".md table{", ".md h1,.md h2,.md h3{"):
         assert rule in css_source, rule
-    assert "html.light .md code{" in css_source
+    assert ".md code{font-family:var(--mono);font-size:.92em;background:var(--hov);" in css_source
+    light_theme = css_source[css_source.index("html.light{"):]
+    assert "--hov:" in light_theme
     assert ".msg-assistant ul" not in css_source
     assert ".msg-assistant code{" not in css_source
     assert ".msg-assistant pre{" not in css_source
@@ -3420,14 +3427,14 @@ def check_system_prompt_settings(ui_source: str, css_source: str) -> None:
     remote_copy = ("Sent only when this backend runs a model against a project "
                    "stored on another backend.")
     assert remote_copy in ui_source
-    guidance_copy = ("Sent to every model turn on backends where Browser is enabled; "
-                     "it is not sent on backends where Browser is off.")
+    guidance_copy = ("Sent to every model turn on backends where the browser is enabled; "
+                     "it is not sent on backends where it is off.")
     assert guidance_copy in ui_source.replace('" +\n      "', "")
-    terminal_copy = ("Sent only when this backend offers shared Terminal tools; "
-                     "it is not sent when Terminal is unavailable.")
+    terminal_copy = ("Sent only when this backend offers shared terminal tools; "
+                     "it is not sent when the terminal is unavailable.")
     assert terminal_copy in ui_source.replace('" +\n      "', "")
     spawn_copy = ("Sent with every model turn on this backend; it governs when "
-                  "the agent may delegate one-shot spawned agents to Puppy's nodes.")
+                  "the agent may delegate one-shot spawned agents to Puppy's backends.")
     assert spawn_copy in ui_source.replace('" +\n      "', "")
     assert "browserNote.textContent = `Sent only for turns on ${node.name}" not in ui_source
     assert 'body.remote_workspace = record.remoteWorkspaceDraft' in ui_source
@@ -3485,6 +3492,8 @@ class MockNode {
     this.disabled=false;this.isConnected=true;this.maxLength=-1;this.html="";
   }
   appendChild(child){this.children.push(child);child.parentNode=this;return child;}
+  addEventListener(name,listener){this["on"+name]=listener;}
+  click(){return this.onclick();}
   setAttribute(name,value){this.attributes[name]=String(value);}
   removeAttribute(name){delete this.attributes[name];if(name==="maxlength")this.maxLength=-1;}
   focus(){document.activeElement=this;}
@@ -3493,6 +3502,9 @@ class MockNode {
 }
 const document={activeElement:null,createElement:tag=>new MockNode(tag)};
 const el=(tag,cls="",text="")=>new MockNode(tag,cls,text);
+const enhanceChoiceSelect=()=>{},refreshChoiceSelect=()=>{};
+const TOAST_LONG=7000;
+__BACKEND_NOTE__
 const supported=new Set([0,1,2]);
 const backendSupportsSystemPrompt=bid=>supported.has(bid);
 let backendAllowed=true;
@@ -3578,7 +3590,9 @@ select.value="3";document.activeElement=select;select.onchange();
 const unsupported={disabled:custom.disabled&&remoteWorkspace.disabled&&browser.disabled&&terminal.disabled&&spawn.disabled&&save.disabled,
   status:status.textContent};
 console.log(JSON.stringify({before,dirty,resetState,saved,remote,offline,legacy,unsupported,calls}));
-""".replace("__METHOD__", method)
+""".replace("__METHOD__", method).replace("__BACKEND_NOTE__", ui_source[
+        ui_source.index("function backendStateNote("):
+        ui_source.index("function engineStatusText(")])
     proc = subprocess.run(["node", "--input-type=module", "-e", with_live_views(script)],
                           capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:1000]
@@ -3586,7 +3600,7 @@ console.log(JSON.stringify({before,dirty,resetState,saved,remote,offline,legacy,
     assert result["before"] == {
         "custom": "LOCAL", "remoteWorkspace": "REMOTE DEFAULT", "browser": "DEFAULT",
         "terminal": "TERMINAL DEFAULT", "spawn": "SPAWN DEFAULT",
-        "status": "Up to 100 characters per field.",
+        "status": "Up to 100 characters per field",
         "remoteNote": remote_copy, "browserNote": guidance_copy,
         "terminalNote": terminal_copy, "spawnNote": spawn_copy,
     }, result
@@ -3596,7 +3610,7 @@ console.log(JSON.stringify({before,dirty,resetState,saved,remote,offline,legacy,
         "terminal": "TERMINAL DEFAULT", "spawn": "SPAWN DEFAULT",
         "status": "Unsaved changes"}, result
     assert result["saved"] == {
-        "status": "Saved for new turns.", "toast": "Primary: System prompt saved"}, result
+        "status": "Saved for new turns", "toast": "Primary: System prompt saved"}, result
     assert result["remote"]["custom"] == "REMOTE" and \
         result["remote"]["remoteWorkspace"] == "REMOTE WORKSPACE" and \
         result["remote"]["browser"] == "REMOTE BROWSER" and \
@@ -3606,7 +3620,7 @@ console.log(JSON.stringify({before,dirty,resetState,saved,remote,offline,legacy,
         "custom": "REMOTE", "remoteWorkspace": "REMOTE WORKSPACE",
         "browser": "REMOTE BROWSER", "terminal": "REMOTE TERMINAL",
         "spawn": "REMOTE SPAWN",
-        "status": "Backend unavailable · showing last known prompt settings.",
+        "status": "Backend unavailable · showing last known prompt settings",
         "disabled": True,
     }, result
     assert result["legacy"] == {
@@ -3614,14 +3628,14 @@ console.log(JSON.stringify({before,dirty,resetState,saved,remote,offline,legacy,
         "remoteDisabled": True,
         "remotePlaceholder": "Upgrade this backend to configure remote workspace guidance",
         "terminalDisabled": True,
-        "terminalPlaceholder": "Upgrade this backend to configure Terminal guidance",
+        "terminalPlaceholder": "Upgrade this backend to configure terminal guidance",
         "spawnDisabled": True,
         "spawnPlaceholder": "Upgrade this backend to configure spawned agent guidance",
         "saveDisabled": False,
     }, result
     assert result["unsupported"] == {
         "disabled": True,
-        "status": "Backend upgrade required for system prompt settings."}, result
+        "status": "Backend upgrade required for system prompt settings"}, result
     assert [call["method"] for call in result["calls"]] == \
         ["PATCH", "GET", "GET", "PATCH"], result
     assert result["calls"][0]["body"]["remote_workspace"] == "REMOTE DEFAULT", result
@@ -3966,7 +3980,7 @@ console.log(JSON.stringify({result,calls}));
     script = r'''let current=null;
 function esc(value){return String(value);}
 function modal(html){
-  const controls={"#mc-no":{},"#mc-yes":{}};
+  const controls={"#mc-no":{focus(){}},"#mc-yes":{focus(){}}};
   let listener=()=>{};
   const close=()=>listener();
   current={html,controls,dismiss:()=>listener()};
@@ -4233,7 +4247,7 @@ def check_sidebar_footer_buttons(ui_source: str, css_source: str) -> None:
     # 10px edge. Narrow: both use 10px directly after the nudge is cancelled.
     assert ".tabbar{\n  display:flex;align-items:center;gap:4px;padding:8px 10px 0;" \
         in css_source
-    assert ".chat-head{\n  display:flex;align-items:center;gap:9px;padding:9px 14px;" \
+    assert ".chat-head{\n  display:flex;align-items:center;gap:8px;padding:9px 14px;" \
         in css_source
     assert ".chat-head{padding:8px 10px;gap:6px}" in css_source
     assert ".chat-head .menu-btn{margin-right:0}" in css_source
@@ -4410,8 +4424,11 @@ def check_flat_session_list(ui_source: str, css_source: str) -> None:
     assert 'el("section", "sess-group")' not in sidebar
     assert "sess-group-title" not in sidebar
     assert "item.dataset.bid = String(bid);" in sidebar
-    assert "sessionLocationLabel(s, bid));" in sidebar
-    assert "sessionLocationTitle(s, bid));" in sidebar
+    assert "sessionRowRows(bid, s," in sidebar
+    shared_rows = ui_source[ui_source.index("function sessionRowRows("):
+                            ui_source.index("function renderSidebar()")]
+    assert "sessionLocationLabel(s, bid));" in shared_rows
+    assert "sessionLocationTitle(s, bid));" in shared_rows
     # the per-node openers moved to the status box beside its disclosures
     foot = ui_source[
         ui_source.index("function renderFootEngines()"):
@@ -5564,7 +5581,7 @@ def check_browser_loading_ui(ui_source: str, css_source: str) -> None:
     assert view_source.index("this.setLoading(true);") < \
         view_source.index('this.send({ type: "navigate", url: target });')
     assert "if (d.terminal === true) {" in view_source
-    assert 'toast(d.text || "Browser error", "error", 5000);' in view_source
+    assert 'toast(d.text || "Browser error", "error", TOAST_LONG);' in view_source
     script = r"""
 const timers=new Map();let nextTimer=0;
 const setTimeout=(fn,delay)=>{const id=++nextTimer;timers.set(id,{fn,delay});return id;};
@@ -5607,7 +5624,7 @@ def check_shared_storage_settings_ui(ui_source: str, css_source: str) -> None:
     assert "persistence failed" in ui_source
     assert "non-partitioned cookies" in ui_source
     assert "IndexedDB, sessionStorage, or service workers" in ui_source
-    assert "node-local store is excluded from backups" in ui_source
+    assert "backend-local store is excluded from backups" in ui_source
     assert "record.shared.input.disabled = true;" in ui_source
     assert "be-browser-share" in ui_source
     assert ".browser-share-toggle" in css_source
@@ -5730,7 +5747,7 @@ def check_server_clock_format(ui_source: str) -> None:
 
     helpers = "\n".join(extract(name) for name in (
         "serverClockOptions", "fmtClockSetting", "parseClockSetting",
-        "clockSettingExample"))
+        "clockSettingExample", "fmtTime", "fmtDateTime", "fmtStamp"))
     script = r'''
 const state={clockFormat:"24h"};
 %s
@@ -5750,6 +5767,18 @@ result.pm=parseClockSetting("12:05 PM");
 result.dotted=parseClockSetting("3:30 p.m.");
 result.reject12=parseClockSetting("15:30");
 result.example12=clockSettingExample();
+Date.prototype.toLocaleString=Date.prototype.toLocaleTimeString=function(locales,options){return options;};
+const today=new Date(),year=today.getFullYear();
+const otherDay=new Date(year,today.getMonth()===0?11:0,1);
+const samples=[today,otherDay,new Date(year-1,0,1)];
+for(const cycle of ["24h","12h"]){
+  state.clockFormat=cycle;
+  result["stamps"+cycle]=samples.map(date=>{
+    const options=fmtStamp(date.getTime()/1000);
+    return [options.hourCycle,"month" in options,"year" in options];
+  });
+}
+result.invalidStamp=fmtStamp("invalid");
 console.log(JSON.stringify(result));
 ''' % helpers
     proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
@@ -5762,6 +5791,9 @@ console.log(JSON.stringify(result));
         "midnight": "12:05 AM", "morning": "3:30 AM",
         "afternoon": "3:30 PM", "am": "00:05", "pm": "12:05",
         "dotted": "15:30", "reject12": "", "example12": "3:30 AM",
+        "stamps24h": [["h23", False, False], ["h23", True, False], ["h23", True, True]],
+        "stamps12h": [["h12", False, False], ["h12", True, False], ["h12", True, True]],
+        "invalidStamp": "",
     }
     assert 'time.type = "time"' not in ui_source
     assert 'time.type = "text"' in ui_source

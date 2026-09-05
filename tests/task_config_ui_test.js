@@ -161,7 +161,7 @@ const deletes = from => requests.slice(from).filter(r => r.method === "DELETE").
   release(); await pending; hold = null;
   assert.equal(requests.length, 1, "no duplicate submission while preparing");
   assert.equal(dialog.m.isConnected, true);
-  assert.equal(n[".backend-edit-error"].textContent, "Reply lost");
+  assert.equal(n[".form-error"].textContent, "Reply lost");
   assert.equal(n["#nt-model"].disabled, false);
   assert.equal(n["#nt-prompt"].readOnly, false);
   assert.equal(n[".attach-add"].disabled, false);
@@ -223,11 +223,11 @@ const deletes = from => requests.slice(from).filter(r => r.method === "DELETE").
   state.backends[0].capabilities = capabilities.filter(key => key !== "session-task-attachments");
   n = await open();
   assert.equal(n[".attach-add"].disabled, true);
-  assert.equal(n[".attach-add"].getAttribute("aria-label"), "Upgrade this node to attach files to tasks");
+  assert.equal(n[".attach-add"].getAttribute("aria-label"), "Upgrade this backend to attach files to tasks");
   const before = fetches.length;
   paste(n["#nt-prompt"]);
   assert.equal(fetches.length, before);
-  assert.equal(toasts[toasts.length - 1].text, "Upgrade this node to attach files to tasks");
+  assert.equal(toasts[toasts.length - 1].text, "Upgrade this backend to attach files to tasks");
   dialog.close();
   state.backends[0].capabilities = capabilities;
 

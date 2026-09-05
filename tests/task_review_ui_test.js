@@ -45,7 +45,7 @@ async function api(bid, route, options) {
   return response;
 }
 const context = vm.createContext({ state, modal, api, el: (...args) => new Element(...args),
-  fmtTime: () => "12:00", toast: text => notices.push(text), refreshSessionList: async () => {}, renderSidebar() {} });
+  fmtStamp: () => "12:00", TOAST_LONG: 7000, toast: text => notices.push(text), refreshSessionList: async () => {}, renderSidebar() {} });
 vm.runInContext([
   between("function nodeHasCapability(", "/* \"Enable tasks\""),
   between("const TASK_STATES =", "/* two offset frames:"),
@@ -111,7 +111,7 @@ const lastBody = () => JSON.parse(JSON.stringify(requests.at(-1).body));
   assert.equal(nodes["#tr-apply"].disabled, false);
   assert.equal(nodes["#tr-resolve"].disabled, false);
   assert.equal(nodes["#tr-resolve"].checked, true, "a refused request keeps the dialog choice");
-  assert.equal(nodes[".backend-edit-error"].textContent, failure);
+  assert.equal(nodes[".form-error"].textContent, failure);
   assert.equal(notices.length, 0);
   failure = ""; response = { applied: true };
   await nodes["#tr-apply"].onclick();
@@ -124,6 +124,16 @@ const lastBody = () => JSON.parse(JSON.stringify(requests.at(-1).body));
   response = { applied: true }; await nodes["#tr-apply"].onclick();
   assert.deepEqual(lastBody(), { token: changed.token });
   assert.match(notices[0], /marked as reviewed/);
+
+  session.task.state = "applied";
+  nodes = await open({ token: changed.token, has_changes: false });
+  assert.equal(nodes["#tr-apply"].classes.has("hidden"), false, "an applied task can still be reviewed again");
+  assert.equal(nodes["#tr-apply"].disabled, false);
+  assert.equal(nodes["#tr-apply"].textContent, "Mark as reviewed");
+  response = { applied: true }; await nodes["#tr-apply"].onclick();
+  assert.deepEqual(lastBody(), { token: changed.token });
+  assert.equal(dialog.m.isConnected, false);
+  session.task.state = "ready";
 
   state.backends[0].capabilities = ["session-tasks"];
   nodes = await open();

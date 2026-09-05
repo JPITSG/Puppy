@@ -24,6 +24,11 @@ class FakeEvent {
 }
 
 function matchesCompound(node, compound) {
+  const attributes = [...compound.matchAll(/\[([\w-]+)(?:="([^"]*)")?\]/g)];
+  compound = compound.replace(/\[([\w-]+)(?:="([^"]*)")?\]/g, "");
+  for (const [, name, value] of attributes) {
+    if (!node.hasAttribute(name) || (value !== undefined && node.getAttribute(name) !== value)) return false;
+  }
   const parts = /^([a-zA-Z][\w-]*|\*)?((?:[#.][\w-]+)*)$/.exec(compound);
   if (!parts) throw new Error("unsupported selector: " + compound);
   if (parts[1] && parts[1] !== "*" && node.tag !== parts[1].toLowerCase()) return false;
@@ -101,6 +106,7 @@ class FakeElement {
     return false;
   }
   get firstElementChild() { return this.children[0] || null; }
+  get options() { return this.tag === "select" ? this.children : undefined; }
   get textContent() { return this._text + this.children.map(child => child.textContent).join(""); }
   set textContent(value) { this._text = String(value); this.children = []; }
   set innerHTML(html) { this.children = []; this._text = ""; parseInto(this, String(html)); }
@@ -112,6 +118,11 @@ class FakeElement {
     return child;
   }
   append(...nodes) { nodes.forEach(node => this.appendChild(node)); }
+  replaceChildren(...nodes) {
+    for (const child of [...this.children]) this.removeChild(child);
+    this._text = "";
+    this.append(...nodes);
+  }
   removeChild(child) {
     const index = this.children.indexOf(child);
     if (index >= 0) this.children.splice(index, 1);
@@ -125,6 +136,7 @@ class FakeElement {
     else if (key === "disabled") this.disabled = true;
     else if (key === "checked") this.checked = true;   // a checkbox's initial state, like the browser's
     else if (key === "value") this.value = String(value);
+    else if (key.startsWith("data-")) this.dataset[key.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = String(value);
   }
   getAttribute(key) {
     if (key === "class") return this.className;
@@ -152,7 +164,7 @@ class FakeElement {
   }
   focus() { this.ownerDocument.activeElement = this; }
   blur() { if (this.ownerDocument.activeElement === this) this.ownerDocument.activeElement = null; }
-  click() { this.dispatchEvent(new FakeEvent("click", { bubbles: true })); }
+  click() { if (!this.disabled) this.dispatchEvent(new FakeEvent("click", { bubbles: true })); }
   setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
   matches(selector) { return selector.split(",").some(part => matchesSelector(this, part)); }
   closest(selector) {

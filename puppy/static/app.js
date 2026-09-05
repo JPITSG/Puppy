@@ -901,6 +901,9 @@ function wireToastSwipe(target, dismiss, pause, resume) {
   target.addEventListener("pointercancel", event => finish(event, true));
 }
 
+/* Two toast lives: the default for a plain confirmation, TOAST_LONG for
+   anything that names a next step or an error worth reading twice. */
+const TOAST_LONG = 7000;
 function toast(text, level = "info", ms = 4200) {
   const t = el("div", "toast " + (level === "error" ? "err" : level === "ok" ? "ok" : ""), text);
   $("toasts").appendChild(t);
@@ -954,20 +957,21 @@ async function copyWithToast(text, message = "Copied") {
   catch (e) { toast("Copy failed", "error"); return false; }
 }
 
-/* The hover-revealed copy control, shared by a sent message and a
-   side-question answer so the two behave identically: fully transparent at
-   rest, revealed by a direct hover of its own box or by keyboard focus, and
-   showing success in place for a moment before returning. */
-function hoverCopyButton(text, className, label) {
-  const button = el("button", className);
+/* Every copy button behaves the same way: the copy glyph, success shown in
+   place as a check for a moment, "Copied" for a screen reader meanwhile, and
+   one failure toast. `text` may be a function, for an ID that is only known
+   once the tab has connected. */
+function wireCopyButton(button, text, label) {
   button.type = "button";
   button.setAttribute("aria-label", label);
-  button.appendChild(copyIcon());
+  button.replaceChildren(copyIcon());
   button.onclick = async event => {
     event.preventDefault();
     event.stopPropagation();
+    const value = typeof text === "function" ? text() : text;
+    if (value === null || value === undefined || value === "") return;
     try {
-      await writeClipboardText(text);
+      await writeClipboardText(value);
       clearTimeout(button._copyReset);
       button.classList.add("done");
       button.replaceChildren(copyIcon(true));
@@ -981,6 +985,13 @@ function hoverCopyButton(text, className, label) {
     } catch (error) { toast("Copy failed", "error"); }
   };
   return button;
+}
+
+/* The hover-revealed copy control, shared by a sent message and a
+   side-question answer so the two behave identically: fully transparent at
+   rest, revealed by a direct hover of its own box or by keyboard focus. */
+function hoverCopyButton(text, className, label) {
+  return wireCopyButton(el("button", className), text, label);
 }
 
 function userMessageCopyButton(text) {
@@ -1041,15 +1052,18 @@ function parseClockSetting(value) {
 function clockSettingExample() {
   return state.clockFormat === "12h" ? "3:30 AM" : "03:30";
 }
-/* clock time today, "Mar 4" this year, "Mar 4, 2025" beyond - the shortest
-   stamp that still places a search hit in time */
-function fmtWhen(ts) {
-  const d = new Date(ts * 1000);
+/* One stamp for "when": the clock alone today, the day and clock this year,
+   the year as well beyond it - the shortest form that still places a search
+   hit, a sync, an apply or a request in time. Only the live transcript's
+   result rows use the bare clock (fmtTime): they are always today. */
+function fmtStamp(ts) {
+  const d = new Date(Number(ts) * 1000);
+  if (Number.isNaN(d.getTime())) return "";
   const now = new Date();
   if (d.toDateString() === now.toDateString()) return fmtTime(ts);
-  const opts = { month: "short", day: "numeric" };
+  const opts = { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" };
   if (d.getFullYear() !== now.getFullYear()) opts.year = "numeric";
-  return d.toLocaleDateString([], opts);
+  return fmtDateTime(ts, opts);
 }
 function fmtTokens(n) {
   if (n == null) return "";
@@ -1970,6 +1984,17 @@ function engineReady(engine) {
     (engine.availability_only === true || engine.auth === "ok");
 }
 
+/* One wording for a backend that is not answering right now: the last known
+   value stays on screen with this note, or the note stands alone when nothing
+   was ever loaded. Empty while the backend is fine. */
+function backendStateNote(availability, hasKnown, noun = "setting") {
+  if (availability === "bad")
+    return hasKnown ? `Backend unavailable · showing last known ${noun}` : "Backend unavailable";
+  if (availability !== "ok")
+    return hasKnown ? `Checking backend · showing last known ${noun}` : "Checking backend…";
+  return "";
+}
+
 function engineStatusText(engine) {
   if (!engine || !engine.installed)
     return engine && engine.availability_only === true ? "No binary" : "Missing";
@@ -1998,6 +2023,20 @@ function initialEngineConfig(engine) {
   if (engine && engine.session_defaults) return { ...engine.session_defaults };
   return { permission_mode: (engine && engine.default_permission) || "",
     model: (((engine && engine.model_options) || [])[0] || {}).value || "", effort: "" };
+}
+
+/* One engine card for every picker (New session, New task, Switch engine): a
+   real button with a pressed state, so keyboard focus, activation and the
+   selected look are the same in each. */
+function engineCardNode(info, { sub = "", selected = false } = {}) {
+  const card = el("button", "ep" + (selected ? " sel" : ""));
+  card.type = "button";
+  card.dataset.key = info.key;
+  card.setAttribute("aria-pressed", String(selected));
+  const icon = provSpec(info.key);
+  card.innerHTML = `<span class="ep-ico prov ${icon.className}">${esc(icon.text)}</span>
+    <span class="ep-name">${esc(info.label)}</span><span class="ep-sub">${esc(sub || engineStatusText(info))}</span>`;
+  return card;
 }
 
 /* Preserve an unavailable saved value visibly until the user repairs it. A
@@ -2583,6 +2622,7 @@ let remotePollTimer = null;
 let remotePollingGeneration = 0;
 const remoteUpdateConnections = new Map();
 const enginePayloadListeners = new Set();
+const nodeStateListeners = new Set();
 
 const TIMER_DEFAULT_VALUES = Object.freeze({
   cli_release_minutes: 360,
@@ -3370,11 +3410,8 @@ function applyNodeStateSnapshot(bid, message) {
       state.sessions = message.sessions;
     }
     ingestSessionActivity(bid, message.sessions, message.server_time);
-    if (bid) syncRemoteStateViews();
-    else {
-      renderSidebar();
-      syncTabsWithSessions();
-    }
+    syncRemoteStateViews();
+    if (!bid) syncTabsWithSessions();
   } else if (message.type === "engines") {
     applyEnginesPayload(bid, message, markReachable);
   } else if (message.type === "node") {
@@ -3576,6 +3613,10 @@ function syncRemoteStateViews() {
   for (const view of liveViews()) {
     if (!view || typeof view.syncRemoteState !== "function") continue;
     try { view.syncRemoteState(); } catch (error) { console.warn("remote state view update failed", error); }
+  }
+  for (const composer of Composer.live) composer.syncUploadButton();
+  for (const listener of [...nodeStateListeners]) {
+    try { listener(); } catch (error) { console.warn("node state listener failed", error); }
   }
 }
 
@@ -4016,6 +4057,7 @@ function acceptSessionListPayload(bid, payload) {
     state.sessions = payload.sessions;
   }
   ingestSessionActivity(node, payload.sessions, payload.server_time);
+  syncRemoteStateViews();
   syncTabsWithSessions();
   return true;
 }
@@ -4092,7 +4134,7 @@ async function enableAddedBackendBrowser(added) {
   const capabilities = (added.remote && added.remote.capabilities) || [];
   if (Number(added.remote && added.remote.protocol || 0) !== 0 &&
       !(Array.isArray(capabilities) && capabilities.includes("browser"))) {
-    toast(`${name}: This backend does not offer a managed browser`, "error", 7000);
+    toast(`${name}: This backend does not offer a managed browser`, "error", TOAST_LONG);
     return;
   }
   try {
@@ -4101,7 +4143,7 @@ async function enableAddedBackendBrowser(added) {
     state.remoteBrowser[bid] = { enabled: !!result.enabled };
     toast(`${name}: Browser enabled`, "ok");
   } catch (error) {
-    toast(`${name}: Browser not enabled · ${error.message}`, "error", 8000);
+    toast(`${name}: Browser not enabled · ${error.message}`, "error", TOAST_LONG);
   }
 }
 
@@ -4164,7 +4206,7 @@ async function openNewBrowser(bid, groupId = null) {
     openBrowserTab(bid, browserId, groupId);
   } catch (error) {
     toast(`${backendName(bid)}: ${error.message || "Could not open browser"}`,
-      "error", 7000);
+      "error", TOAST_LONG);
   }
 }
 
@@ -4829,6 +4871,34 @@ function animateSessionRows(root, rebuild) {
   }
 }
 
+/* The two places a session is listed - the sidebar and the Open session
+   picker - draw it through this one builder, so a session looks the same in
+   both: dot, name and the row's trailing slots; then engine mark, location
+   and the linked-workspace state. */
+function sessionRowRows(bid, s, slots = []) {
+  const r1 = el("div", "si-row");
+  r1.appendChild(sessDot(s));
+  r1.appendChild(el("div", "si-name", s.name || `Session ${s.id}`));
+  for (const slot of slots) if (slot) r1.appendChild(slot);
+  const r2 = el("div", "si-row sub");
+  r2.appendChild(provIcon(s.engine));
+  const workspace = el("div", "si-sub" + (s.workspace_missing ? " warn" : ""),
+    sessionLocationLabel(s, bid));
+  workspace.setAttribute("aria-label", sessionLocationTitle(s, bid));
+  r2.appendChild(workspace);
+  if (sessionWorkspace(s)) {
+    const wsLink = linkForSession(bid, s.id);
+    const st = wsLink ? wsLink.state : (s.ws_dirty ? "pending" : "");
+    const mark = el("span", "si-ws" +
+      (st === "conflict" || st === "pending" ? " warn" :
+       st === "error" ? " bad" :
+       st === "syncing" || st === "init" ? " busy" : ""), "⇄");
+    mark.setAttribute("aria-label", "Linked workspace" + (st ? " · " + st : ""));
+    r2.appendChild(mark);
+  }
+  return { r1, r2 };
+}
+
 function renderSidebar() {
   for (const view of Object.values(state.views)) if (view && view.taskViews) view.refreshTasks();
   if (dragSess && dragSess.item && dragSess.item.isConnected) {
@@ -4868,7 +4938,7 @@ function renderSidebar() {
     root.innerHTML = "";
     if (!list.length)
       root.appendChild(el("div", "sess-empty", filterTerms.length ?
-        `No sessions match “${state.sessionFilter}”` : rows.length ?
+        `No sessions match "${state.sessionFilter}"` : rows.length ?
         "Archived sessions hidden" : "No sessions yet"));
     for (const { bid, s } of list) {
       const backendUnavailable = !!bid && state.remoteOk[bid] !== true;
@@ -4884,9 +4954,7 @@ function renderSidebar() {
           `${backendName(bid)} is unavailable; this session can still be opened`);
       }
       if (selectedSession === item.dataset.sessionKey) item.classList.add("active");
-      const r1 = el("div", "si-row");
-      r1.appendChild(sessDot(s));
-      r1.appendChild(el("div", "si-name", s.name || `Session ${s.id}`));
+      const slots = [];
       const activity = el("span", "si-be");
       if (s.status === "running") {
         const key = sessionActivityKey(bid, s.id);
@@ -4922,26 +4990,10 @@ function renderSidebar() {
         const waiting = el("span", "si-be attention", taskActivity.text);
         waiting.title = taskActivityTitle(s.task_activity);
         waiting.setAttribute("aria-label", waiting.title);
-        r1.appendChild(waiting);
+        slots.push(waiting);
       }
-      r1.appendChild(activity);
-      const r2 = el("div", "si-row sub");
-      r2.appendChild(provIcon(s.engine));
-      const workspace = el("div", "si-sub" + (s.workspace_missing ? " warn" : ""),
-        sessionLocationLabel(s, bid));
-      workspace.setAttribute("aria-label", sessionLocationTitle(s, bid));
-      r2.appendChild(workspace);
-      if (sessionWorkspace(s)) {
-        const wsLink = linkForSession(bid, s.id);
-        const st = wsLink ? wsLink.state : (s.ws_dirty ? "pending" : "");
-        const mark = el("span", "si-ws" +
-          (st === "conflict" || st === "pending" ? " warn" :
-           st === "error" ? " err" :
-           st === "syncing" || st === "init" ? " busy" : ""), "⇄");
-        mark.setAttribute("aria-label",
-          "Linked workspace" + (st ? " · " + st : ""));
-        r2.appendChild(mark);
-      }
+      slots.push(activity);
+      const { r1, r2 } = sessionRowRows(bid, s, slots);
       /* Keep the two quiet row actions in their own compact lane. The row's
          normal gap still separates this lane from workspace state, while the
          controls themselves sit together as one deliberate pair. */
@@ -5076,14 +5128,14 @@ function modalAgentNotes(bid, s) {
     <p class="modal-copy agent-notes-intro"></p>
     <form id="agent-notes-form">
       <div class="agent-notes-files"><p class="modal-copy">Loading…</p></div>
-      <p class="backend-edit-error hidden" role="alert"></p>
+      <p class="form-error hidden" role="alert"></p>
       <div class="m-btns"><button type="button" class="btn" id="agent-notes-cancel">Cancel</button>
         <button type="submit" class="btn btn-pri" id="agent-notes-save" disabled>Save</button></div>
     </form>`, "agent-notes-modal");
   const form = m.querySelector("#agent-notes-form");
   const intro = m.querySelector(".agent-notes-intro");
   const files = m.querySelector(".agent-notes-files");
-  const error = m.querySelector(".backend-edit-error");
+  const error = m.querySelector(".form-error");
   const cancel = m.querySelector("#agent-notes-cancel");
   const save = m.querySelector("#agent-notes-save");
   intro.textContent = `${s.name || `Session ${s.id}`} · ${sessionLocationLabel(s, bid)}`;
@@ -5125,7 +5177,8 @@ function modalAgentNotes(bid, s) {
         remove.appendChild(xIcon(12));
         remove.onclick = async () => {
           if (!await modalConfirm(`Remove ${file.name}?`,
-              `${file.name} is deleted from ${sessionLocationLabel(s, bid)}.`)) return;
+              `${file.name} is deleted from ${sessionLocationLabel(s, bid)}.`,
+              { confirmLabel: "Remove", destructive: true })) return;
           setError("");
           setBusy(true);
           try {
@@ -5292,7 +5345,7 @@ function sessionContextMenu(ev, bid, s) {
     catch (e) { toast(e.message, "error"); }
   };
   add("Rename", async () => {
-    const val = await modalPrompt("Rename session", "", s.name || "");
+    const val = await modalPrompt("Rename session", "", s.name || "", { confirmLabel: "Rename" });
     if (val !== null) patch({ name: val.trim() });
   });
   add("Dot color", () => {
@@ -5347,7 +5400,8 @@ function sessionContextMenu(ev, bid, s) {
       s.workspace_missing ? "Recreate scratch workspace?" : "Reset scratch workspace?",
       s.workspace_missing ?
         "Puppy will create a new empty workspace. The transcript is kept." :
-        "All files in this scratch workspace are removed permanently. The transcript is kept.");
+        "All files in this scratch workspace are removed permanently. The transcript is kept.",
+      { confirmLabel: s.workspace_missing ? "Recreate" : "Reset", destructive: !s.workspace_missing });
     if (!ok) return;
     try {
       await api(bid, `sessions/${s.id}/workspace/reset`, { method: "POST" });
@@ -5358,7 +5412,8 @@ function sessionContextMenu(ev, bid, s) {
   menu.appendChild(el("div", "menu-sep"));
   add(s.archived ? "Unarchive" : "Archive", () => patch({ archived: !s.archived }));
   add("Delete session", async () => {
-    const ok = await modalConfirm("Delete session?", sessionDeleteMessage(s));
+    const ok = await modalConfirm("Delete session?", sessionDeleteMessage(s),
+      { confirmLabel: "Delete", destructive: true });
     if (!ok) return;
     try {
       /* a linked session cascades through its controller-side link so the
@@ -5545,7 +5600,7 @@ function wireSessionDropZone(root) {
     if (!sameSessionOrderSnapshot(
         context.orderSnapshot, sessionOrderSnapshot(bid))) {
       renderSidebar();
-      toast("Session order changed while you were dragging; try again", "error");
+      toast("Session order changed while you were dragging · try again", "error");
       return;
     }
     const all = sessionsFor(bid);
@@ -5851,7 +5906,7 @@ async function refreshEngineVersions(bid, button, nodeName) {
     toast(feedback.text, feedback.ok ? "ok" : "error", feedback.ok ? 5500 : 9000);
   } catch (error) {
     feedback = engineRefreshFeedback(nodeName, null, error.message || "request failed");
-    toast(feedback.text, "error", 9000);
+    toast(feedback.text, "error", TOAST_LONG);
   } finally {
     if (button.isConnected) {
       button.disabled = false;
@@ -6044,7 +6099,7 @@ function renderFootEngines() {
     } else if (g.engines === null) {
       body.appendChild(el("div", "foot-engine-empty", "Checking engines…"));
     } else if (!g.engines.length) {
-      body.appendChild(el("div", "foot-engine-empty", "No engines reported"));
+      body.appendChild(el("div", "foot-engine-empty", "No engines installed"));
     } else for (const e of g.engines) {
       const row = el("div", "foot-eng");
       const ico = el("span", "foot-ico");
@@ -6061,7 +6116,7 @@ function renderFootEngines() {
       const word = el("span", "st-word " + (healthy ? "ok" : "bad"),
         engineStatusText(e));
       // ready, but the CLI is behind its latest release
-      if (healthy && e.update_available === true) word.classList.add("stale");
+      if (healthy && e.update_available === true) word.classList.add("warn");
       st.appendChild(word);
       if (pct != null) {
         st.appendChild(el("span", "st-sep", " · "));
@@ -6371,7 +6426,7 @@ function closeTab(id) {
       { method: "DELETE" }).catch(error => {
         if (error.status !== 404)
           toast(`Browser ${closing.browserId} may still be running: ${error.message}`,
-            "error", 7000);
+            "error", TOAST_LONG);
       });
   }
   if (closing.type === "term" && closing.terminalId &&
@@ -6381,7 +6436,7 @@ function closeTab(id) {
       { method: "DELETE" }).catch(error => {
         if (error.status !== 404)
           toast(`Terminal ${closing.terminalId} may still be running: ${error.message}`,
-            "error", 7000);
+            "error", TOAST_LONG);
       });
   }
   const pane = removeTabFromPane(id);
@@ -7177,6 +7232,8 @@ $("tab-add-menu").addEventListener("click", (e) => {
   else if (act === "search") openSearchTab(groupId);
 });
 $("btn-new-session").onclick = () => { modalNewSession(state.activeGroup); closeDrawer(); };
+/* the same drawn plus every other "new" control uses, not the font's glyph */
+$("btn-new-session").querySelector(".btn-ico").appendChild(plusIcon(12));
 /* the same drawn cog its own tab shows: the ⚙ glyph this replaced is a
    different icon altogether - filled, sharp-toothed, and font-dependent */
 $("btn-settings").appendChild(gearIcon(14, 1.5));
@@ -7412,22 +7469,23 @@ function syncBell() {
   }
 }
 
-/* sign out of this console: only this browser's session ends, every session on
-   the node keeps running - Settings offers the same action in words. The
-   lookup tolerates absence like the bell's, so a page still cached by an
-   older listener keeps working without the button. */
+/* Sign out of this console: only this browser's session ends, every session
+   on every backend keeps running. The footer button and Settings' button run
+   this same confirm. The lookup tolerates absence like the bell's, so a page
+   still cached by an older listener keeps working without the button. */
+async function signOut() {
+  if (!await modalConfirm("Sign out?",
+      "This console signs out. Sessions keep running on their backends.",
+      { confirmLabel: "Sign out" })) return;
+  try {
+    await api(0, "auth/logout", { method: "POST" });
+    location.reload();
+  } catch (e) { toast(e.message, "error"); }
+}
 const logoutButton = $("btn-logout");
 if (logoutButton) {
   logoutButton.appendChild(logoutIcon(14));
-  logoutButton.onclick = async () => {
-    if (!await modalConfirm("Log out?",
-        "This console signs out. Sessions on the node keep running.",
-        { confirmLabel: "Log out", destructive: false })) return;
-    try {
-      await api(0, "auth/logout", { method: "POST" });
-      location.reload();
-    } catch (e) { toast(e.message, "error"); }
-  };
+  logoutButton.onclick = signOut;
 }
 
 $("btn-bell").onclick = async () => {
@@ -8656,7 +8714,7 @@ class Composer {
             { engine, value: engine.key });
         }
         if (!items.length)
-          items.push({ kind: "spawn-wait", label: "No engines installed on this node",
+          items.push({ kind: "spawn-wait", label: "No engines installed on this backend",
                        search: "" });
       }
     } else if (wizard.step === "model") {
@@ -8915,7 +8973,7 @@ class Composer {
     const dropped = filesFromDataTransfer(event.dataTransfer);
     this.clearFileDropTarget();
     if (dropped.directories)
-      toast("Folders cannot be attached · drop individual files instead", "error", 6000);
+      toast("Folders cannot be attached · drop individual files instead", "error", TOAST_LONG);
     if (dropped.files.length) this.uploadFiles(dropped.files);
   }
 
@@ -8950,7 +9008,7 @@ class Composer {
       }
       if (policy && file.size > policy.max_file_size_bytes) {
         toast(`${file.name || "file"} is ${fmtBytes(file.size)} · maximum is ` +
-          `${policy.max_file_size_mb} MiB`, "error", 6500);
+          `${policy.max_file_size_mb} MiB`, "error", TOAST_LONG);
         continue;
       }
       this.uploadFile(file, legacyImage);
@@ -9007,7 +9065,7 @@ class Composer {
         const wasAborted = !!(controller && controller.signal.aborted);
         this.removeAttachment(attachment, true);
         if (!wasAborted)
-          toast(`File upload failed: ${error.message}`, "error", 6500);
+          toast(`File upload failed: ${error.message}`, "error", TOAST_LONG);
       }
     }
   }
@@ -9065,9 +9123,38 @@ class Composer {
 Composer.live = new Set();   // every box alive on this page
 
 /* ================= SessionView ================= */
-const TOOL_ICONS = {
-  Bash: "$", shell: "$", Read: "📄", Write: "✏️", Edit: "✏️", file_change: "✏️",
-  Grep: "🔎", Glob: "🔎", WebSearch: "🌐", WebFetch: "🌐", Task: "🤖", TodoWrite: "☑",
+/* A small delegate mark for agent/task tools: a head with two eyes and an
+   antenna, drawn on the 16-box the other tool glyphs share. */
+function agentIcon(size = 12) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const draw = (tag, attrs) => {
+    const node = document.createElementNS(NS, tag);
+    for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+    node.setAttribute("fill", "none");
+    node.setAttribute("stroke", "currentColor");
+    node.setAttribute("stroke-width", "1.3");
+    node.setAttribute("stroke-linecap", "round");
+    node.setAttribute("stroke-linejoin", "round");
+    svg.appendChild(node);
+  };
+  draw("rect", { x: "2.5", y: "5.5", width: "11", height: "8", rx: "2" });
+  draw("path", { d: "M8 5.5V3M6 9.2h.01M10 9.2h.01M6 11.3h4" });
+  return svg;
+}
+/* Tool cards and the folded-task archive draw their tool marks: a glyph from
+   the emoji font neither shares the UI colour nor centres in the 18px slot. */
+const TOOL_ICON_DRAWERS = {
+  Bash: () => terminalIcon(12), shell: () => terminalIcon(12),
+  Read: () => attachmentFileIcon(12),
+  Write: () => queueEditIcon(12), Edit: () => queueEditIcon(12), file_change: () => queueEditIcon(12),
+  Grep: () => searchIcon(12), Glob: () => searchIcon(12),
+  WebSearch: () => globeIcon(12), WebFetch: () => globeIcon(12),
+  Task: () => agentIcon(12), TodoWrite: () => checkIcon(12),
 };
 function displayValue(value, limit = 12000) {
   let text;
@@ -9080,16 +9167,24 @@ function displayValue(value, limit = 12000) {
   }
   return text.length > limit ? text.slice(0, limit) + "…" : text;
 }
-function toolIcon(tool) {
-  if (TOOL_ICONS[tool]) return TOOL_ICONS[tool];
+function toolIconNode(tool) {
+  if (TOOL_ICON_DRAWERS[tool]) return TOOL_ICON_DRAWERS[tool]();
   const name = String(tool || "").toLowerCase();
-  if (/(web|search|browse|fetch|url)/.test(name)) return "🌐";
-  if (/(read|view|image)/.test(name)) return "📄";
-  if (/(write|edit|patch|change|file)/.test(name)) return "✏️";
-  if (/(shell|exec|command|bash)/.test(name)) return "$";
-  if (/(todo|plan)/.test(name)) return "☑";
-  if (/(task|agent|collab)/.test(name)) return "🤖";
-  return "🔧";
+  if (/(web|search|browse|fetch|url)/.test(name)) return globeIcon(12);
+  if (/(read|view|image)/.test(name)) return attachmentFileIcon(12);
+  if (/(write|edit|patch|change|file)/.test(name)) return queueEditIcon(12);
+  if (/(shell|exec|command|bash)/.test(name)) return terminalIcon(12);
+  if (/(todo|plan)/.test(name)) return checkIcon(12);
+  if (/(task|agent|collab)/.test(name)) return agentIcon(12);
+  return toolsIcon(12);
+}
+/* The card's state mark: the shared ring while the tool runs, then the same
+   check or cross every other status in the app draws. */
+function toolStateInto(stateEl, completed, isError) {
+  stateEl.className = "t-state " + (completed ? (isError ? "bad" : "ok") : "busy");
+  stateEl.replaceChildren(completed ? (isError ? xIcon(11) : checkIcon(11)) : promptSpinnerNode());
+  stateEl.setAttribute("aria-label", completed ? (isError ? "failed" : "done") : "running");
+  return stateEl;
 }
 function toolLabel(tool) {
   return String(tool || "tool").replace(/_/g, " ");
@@ -9159,11 +9254,13 @@ function toolCardNode(data, completed = false) {
   const caret = el("span", "t-caret");
   caret.appendChild(choiceSvg("arrow"));
   head.appendChild(caret);
-  head.appendChild(el("span", "t-ico", toolIcon(d.tool)));
+  const ico = el("span", "t-ico");
+  ico.appendChild(toolIconNode(d.tool));
+  head.appendChild(ico);
   head.appendChild(el("span", "t-name", toolLabel(d.tool)));
   head.appendChild(linkifyInto(el("span", "t-sum"), toolSummary(d.tool, d.input)));
-  const stateEl = el("span", "t-state", completed ? (d.is_error ? "✗" : "✔") : "…");
-  if (completed) stateEl.classList.add(d.is_error ? "bad" : "ok");
+  const stateEl = el("span", "t-state");
+  toolStateInto(stateEl, completed, d.is_error);
   head.appendChild(stateEl);
   const body = el("div", "tool-body");
   if (d.input !== undefined) {
@@ -9409,7 +9506,6 @@ function nameStatusList(text) {
     return { status: parts.length > 1 ? parts[0] : "", path: parts[parts.length - 1] };
   });
 }
-const ARCHIVE_STAMP = { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" };
 /* The tool card's disclosure, so a Main with hundreds of folded tasks stays
    a list of one-line heads. An archive is uncapped, so its body is only
    built the first time it is opened. */
@@ -9428,7 +9524,7 @@ function taskArchiveNode(d, ts, bid) {
   const turns = Number(d.turns) || 0;
   if (turns) bits.push(turns === 1 ? "1 prompt" : `${turns} prompts`);
   if (applied.length) bits.push(applied.length === 1 ? "1 file applied" : `${applied.length} files applied`);
-  const stamp = fmtDateTime(d.folded_at || ts, ARCHIVE_STAMP);
+  const stamp = fmtStamp(d.folded_at || ts);
   if (stamp) bits.push("folded " + stamp);
   head.appendChild(el("span", "t-sum", bits.join(" · ")));
   const [label, cls] = taskArchiveState(d);
@@ -9453,9 +9549,9 @@ function fillTaskArchive(body, d, applied, bid) {
   fact("Outcome", taskArchiveState(d)[0]);
   const [engine, detail] = engineConfigParts(bid, d.engine, d.model, d.effort);
   fact("Engine", d.engine ? [engine, detail].filter(Boolean).join(" ") : "");
-  fact("Created", fmtDateTime(d.created_at, ARCHIVE_STAMP));
-  fact("Finished", d.completed_at ? fmtDateTime(d.completed_at, ARCHIVE_STAMP) : "");
-  fact("Applied", d.applied_at ? fmtDateTime(d.applied_at, ARCHIVE_STAMP) : "");
+  fact("Created", fmtStamp(d.created_at));
+  fact("Finished", d.completed_at ? fmtStamp(d.completed_at) : "");
+  fact("Applied", d.applied_at ? fmtStamp(d.applied_at) : "");
   body.appendChild(facts);
   if (d.prompt) {
     body.appendChild(el("div", "tb-label", "task"));
@@ -9495,7 +9591,9 @@ function fillTaskArchive(body, d, applied, bid) {
         list.appendChild(row);
       } else if (e.kind === "tool") {
         const row = el("div", "ta-entry ta-tool");
-        row.appendChild(el("span", "t-ico", toolIcon(e.tool)));
+        const ico = el("span", "t-ico");
+        ico.appendChild(toolIconNode(e.tool));
+        row.appendChild(ico);
         row.appendChild(el("span", "ta-tool-name", toolLabel(e.tool)));
         linkifyInto(row.appendChild(el("span", "ta-tool-sum")), text);
         row.title = text;
@@ -9571,14 +9669,14 @@ function tasksIcon(size) {
    same way. Nodes without the fold route keep the plain delete confirm. The
    task's name stands on its own line above the copy: an automatic title is a
    sentence fragment, and run into the explanation it read as one garbled
-   sentence. */
+   sentence. Like every destructive confirm, focus starts on Cancel. */
 function modalRemoveTask(session) {
   return new Promise(resolve => {
     const { m, close, onClose } = modal(`<h2>Remove task?</h2>
       ${modalSubjectHtml(session.name)}
-      <p class="modal-copy">The task’s private working copy is removed permanently. Changes already applied to Main are kept.</p>
+      <p class="modal-copy">The task's private working copy is removed permanently. Changes already applied to Main are kept.</p>
       <label class="check fold-check"><input type="checkbox" id="rt-fold" checked> Keep the conversation in Main as a condensed archive</label>
-      <div class="m-btns"><button class="btn" id="rt-no">Cancel</button><button class="btn btn-danger btn-solid" id="rt-yes">Remove</button></div>`,
+      <div class="m-btns"><button type="button" class="btn" id="rt-no">Cancel</button><button type="button" class="btn btn-danger btn-solid" id="rt-yes">Remove</button></div>`,
       "remove-task-modal");
     let settled = false;
     const finish = value => {
@@ -9594,13 +9692,15 @@ function modalRemoveTask(session) {
     });
     m.querySelector("#rt-no").onclick = () => finish(null);
     m.querySelector("#rt-yes").onclick = () => finish({ fold: m.querySelector("#rt-fold").checked });
-    m.querySelector("#rt-yes").focus();
+    /* destructive: Enter must not remove; Cancel takes the first focus */
+    m.querySelector("#rt-no").focus();
   });
 }
 /* null when the person cancels; otherwise the removal choice to carry out. */
 async function confirmTaskRemoval(bid, session) {
   if (backendSupportsTaskFold(bid)) return modalRemoveTask(session);
-  return (await modalConfirm("Remove task?", sessionDeleteMessage(session), { subject: session.name })) ?
+  return (await modalConfirm("Remove task?", sessionDeleteMessage(session),
+    { subject: session.name, confirmLabel: "Remove", destructive: true })) ?
     { fold: false, legacy: true } : null;
 }
 /* Resolves to whether the conversation was folded into Main. */
@@ -9694,9 +9794,9 @@ class SessionWorkspaceView {
   openTaskOverview() {
     if (this.taskOverview) return;
     const dialog = modal(`<h2>Tasks</h2>
-      <p class="modal-copy">Each task works in its own chat and copy of Main’s project. Review a finished task to apply its changes to Main; Main must be idle while they are applied.</p>
+      <p class="modal-copy">Each task works in its own chat and copy of Main's project. Review a finished task to apply its changes to Main; Main must be idle while they are applied.</p>
       <div class="task-list"></div>
-      <div class="m-btns"><button class="btn" id="to-close">Close</button><button class="btn btn-pri" id="to-new">New task</button></div>`, "task-overview-modal");
+      <div class="m-btns"><button type="button" class="btn" id="to-close">Close</button><button type="button" class="btn btn-pri" id="to-new">New task</button></div>`, "task-overview-modal");
     this.taskOverview = dialog;
     this.overview = dialog.m.querySelector(".task-list");
     this.renderedOverview = "";
@@ -9767,6 +9867,12 @@ class SessionWorkspaceView {
       this.taskViews.set(task.id, view);
       this.body.appendChild(view.root);
     }
+    // Completion arrives through the node's session list, without necessarily
+    // sending session_meta on the task's own socket. Keep its review state live
+    // without replacing the conversation's independently updated metadata.
+    const view = this.taskViews.get(task.id);
+    if (view.session) view.session.task = task.task;
+    view.syncTaskReviewMenu();
   }
   openTask(sid) {
     const task = this.tasks().find(s => s.id === sid);
@@ -9883,7 +9989,7 @@ async function modalNewTask(workspace) {
     sessionsFor(bid).find(session => session.id === sid)) };
   let engine = initial.engine || "", engines = [], preparing = false;
   const { m, close, onClose } = modal(`<h2>New task</h2>
-    <p class="modal-copy">The task works in its own chat and copy of Main’s project. Review its changes and apply them to Main when it is done.</p>
+    <p class="modal-copy">The task works in its own chat and copy of Main's project. Review its changes and apply them to Main when it is done.</p>
     ${configurable ? '<div class="engine-pick" id="nt-engines" role="group" aria-label="Engine"></div>' : ""}
     <label for="nt-prompt" class="task-composer-lbl">Task</label>
     ${composerBoxHtml({ id: "nt-prompt", rows: 6, placeholder: "Describe the feature or change…",
@@ -9895,12 +10001,12 @@ async function modalNewTask(workspace) {
       <label>Permissions<select id="nt-perm"></select></label>
     </div>
     <label class="hidden" id="nt-model-custom-wrap">Custom model<input type="text" id="nt-model-custom" placeholder="Model ID" spellcheck="false" maxlength="256"></label>` : ""}
-    <p class="hint">${configurable ? "Starts with Main’s selected settings and recent conversation context." : "Uses Main’s engine, model, effort and permissions, plus recent conversation context."}</p>
+    <p class="hint">${configurable ? "Starts with Main's selected settings and recent conversation context." : "Uses Main's engine, model, effort and permissions, plus recent conversation context."}</p>
     <p class="hint">Main must be idle to create or apply a task. Local Git projects only; ignored files are not copied.</p>
-    <p class="backend-edit-error hidden" role="alert"></p>
-    <div class="m-btns"><button class="btn" id="nt-cancel">Cancel</button><button class="btn btn-pri" id="nt-start">Start task</button></div>`, "new-task-modal");
+    <p class="form-error hidden" role="alert"></p>
+    <div class="m-btns"><button type="button" class="btn" id="nt-cancel">Cancel</button><button type="button" class="btn btn-pri" id="nt-start">Start task</button></div>`, "new-task-modal");
   const start = m.querySelector("#nt-start");
-  const error = m.querySelector(".backend-edit-error");
+  const error = m.querySelector(".form-error");
   /* The task box is the chat's own prompt box - the same "@" list, pasted
      and dropped files, Enter to start and Shift+Enter for a new line - hosted
      here with Main as the session it speaks for. Escape is left to the
@@ -9909,7 +10015,7 @@ async function modalNewTask(workspace) {
   const composer = new Composer(m.querySelector(".composer-box"), {
     bid, sid, selfHint: "Main",
     submit: () => start.onclick(),
-    uploadsBlocked: () => attachable ? "" : "Upgrade this node to attach files to tasks",
+    uploadsBlocked: () => attachable ? "" : "Upgrade this backend to attach files to tasks",
   });
   onClose(() => composer.destroy({ discardUploads: !handedOver }));
   const engBox = m.querySelector("#nt-engines"), model = m.querySelector("#nt-model");
@@ -9950,11 +10056,7 @@ async function modalNewTask(workspace) {
     engines = Array.isArray(loaded) ? loaded : [];
     engBox.innerHTML = "";
     for (const info of engines) {
-      const card = el("button", "ep"), icon = provSpec(info.key);
-      card.type = "button";
-      card.dataset.key = info.key;
-      card.innerHTML = `<span class="ep-ico prov ${icon.className}">${esc(icon.text)}</span>
-        <div class="ep-name">${esc(info.label)}</div><div class="ep-sub">${engineStatusText(info)}</div>`;
+      const card = engineCardNode(info);
       card.onclick = () => {
         if (engine === info.key) return;
         renderChoices(info.key === initial.engine ? initial : { engine: info.key, ...initialEngineConfig(info) });
@@ -10028,21 +10130,19 @@ async function modalReviewTask(workspace, session) {
   const { m, close } = modal(`<h2>Review task</h2>
     <div class="ws-facts task-review-facts"></div>
     <div class="field-lbl task-review-summary-lbl hidden">Summary</div>
-    <pre class="task-review-summary hidden"></pre>
+    <p class="task-review-summary hidden"></p>
     <div class="field-lbl">Changed files</div>
     <pre class="task-review-files">Loading changes…</pre>
     <pre class="task-review-diff hidden"></pre>
     <p class="hint task-review-truncated hidden">The diff preview is shortened.</p>
     <p class="hint task-review-note hidden"></p>
-    ${canResolve ? `<label class="be-auto be-auto-add task-review-resolve hidden" id="tr-resolve-wrap">
-      <input type="checkbox" id="tr-resolve" aria-labelledby="tr-resolve-label" aria-describedby="tr-resolve-note" disabled>
-      <span class="be-auto-track" aria-hidden="true"><span></span></span>
-      <span class="be-auto-copy"><span id="tr-resolve-label">Resolve conflicts</span>
-        <small id="tr-resolve-note"><span class="note-para">If Main has conflicting changes, send one follow-up to this task’s agent with a fresh copy of Main. It uses the task’s history, current settings, permissions and normal model quota to reconcile the changes in its own copy. It may also inspect Main read-only when needed.</span>
-          <span class="note-para">You must review and apply again afterward. Applies run one at a time; if another task changes Main again, another resolution may be needed. Off by default for each review.</span></small></span>
-    </label>` : ""}
-    <p class="backend-edit-error hidden" role="alert"></p>
-    <div class="m-btns"><button class="btn" id="tr-close">Close</button><button class="btn btn-pri" id="tr-apply" disabled>Apply to Main</button></div>`, "task-review-modal");
+    ${canResolve ? `<div class="task-review-resolve hidden" id="tr-resolve-wrap">
+      <label class="check"><input type="checkbox" id="tr-resolve" aria-describedby="tr-resolve-note" disabled> Resolve conflicts</label>
+      <p class="help task-review-resolve-note" id="tr-resolve-note"><span class="note-para">If Main has conflicting changes, send one follow-up to this task's agent with a fresh copy of Main. It uses the task's history, current settings, permissions and normal model quota to reconcile the changes in its own copy. It may also inspect Main read-only when needed.</span>
+        <span class="note-para">You must review and apply again afterward. Applies run one at a time; if another task changes Main again, another resolution may be needed. Off by default for each review.</span></p>
+    </div>` : ""}
+    <p class="form-error hidden" role="alert"></p>
+    <div class="m-btns"><button type="button" class="btn" id="tr-close">Cancel</button><button type="button" class="btn btn-pri" id="tr-apply" disabled>Apply to Main</button></div>`, "task-review-modal");
   const facts = m.querySelector(".task-review-facts");
   const fact = (label, value, cls = "") => {
     const row = el("div", "ws-fact");
@@ -10051,15 +10151,15 @@ async function modalReviewTask(workspace, session) {
     facts.appendChild(row);
   };
   fact("Task", session.name || `Task ${session.id}`);
-  fact("State", taskStateLabel(task), ({ ok: "ok", warn: "warn", bad: "err" })[taskStateClass(task)] || "");
-  if (task.applied_at) fact("Last applied", fmtTime(task.applied_at));
+  fact("State", taskStateLabel(task), taskStateClass(task));
+  if (task.applied_at) fact("Last applied", fmtStamp(task.applied_at));
   const summary = m.querySelector(".task-review-summary");
   if (task.summary) {
     summary.textContent = task.summary;
     summary.classList.remove("hidden"); m.querySelector(".task-review-summary-lbl").classList.remove("hidden");
   }
   const files = m.querySelector(".task-review-files"), diff = m.querySelector(".task-review-diff");
-  const note = m.querySelector(".task-review-note"), error = m.querySelector(".backend-edit-error");
+  const note = m.querySelector(".task-review-note"), error = m.querySelector(".form-error");
   const apply = m.querySelector("#tr-apply");
   const resolve = m.querySelector("#tr-resolve"), resolveWrap = m.querySelector("#tr-resolve-wrap");
   const fail = text => { error.textContent = text; error.classList.remove("hidden"); };
@@ -10071,7 +10171,7 @@ async function modalReviewTask(workspace, session) {
     const list = String(data.files || "").trim();
     const count = list ? list.split("\n").length : 0;
     fact("Changes", count ? `${count} file${count === 1 ? "" : "s"}` : "none since the last apply");
-    files.textContent = list || "No changes to apply.";
+    files.textContent = list || "No changes to apply";
     if (data.diff) {
       diff.replaceChildren();
       for (const line of String(data.diff).split("\n"))
@@ -10079,7 +10179,7 @@ async function modalReviewTask(workspace, session) {
       diff.classList.remove("hidden");
     }
     if (data.truncated) m.querySelector(".task-review-truncated").classList.remove("hidden");
-    note.textContent = "Applying writes these changes into Main’s working files without committing or deploying. Main must be idle; conflicting changes are never overwritten automatically.";
+    note.textContent = "Applying writes these changes into Main's working files without committing or deploying. Main must be idle; conflicting changes are never overwritten automatically.";
     note.classList.remove("hidden");
     if (resolve && data.has_changes) {
       resolve.disabled = false; resolveWrap.classList.remove("hidden");
@@ -10097,7 +10197,7 @@ async function modalReviewTask(workspace, session) {
         close();
         if (result.resolving) {
           workspace.openTask(session.id);
-          toast("Conflict resolution started in the task. Review its changes when it finishes.", "ok");
+          toast("Conflict resolution started in the task · review its changes when it finishes", "ok", TOAST_LONG);
         } else {
           toast(data.has_changes ? "Task changes applied to Main" : "Task marked as reviewed", "ok");
         }
@@ -10408,7 +10508,7 @@ class SessionView {
       this.draftReady = false;
       this.draftInFlightSeq = 0;
       this.draftPendingText = null;
-      this.rejectControlRequests("Connection lost before the node confirmed the request");
+      this.rejectControlRequests("Connection lost before the backend confirmed the request");
       this.cancelQueueEdit("Connection lost before the queued message could be edited");
       this.cancelQueueDrag(null, false);
       if (this.closed) return;
@@ -10479,7 +10579,7 @@ class SessionView {
 
   destroy() {
     this.closed = true;
-    this.rejectControlRequests("Session view closed before the node confirmed the request");
+    this.rejectControlRequests("Session view closed before the backend confirmed the request");
     this.cancelQueueEdit("", false);
     this.cancelQueueDrag(null, true);
     if (this._stopLoadOlder) this._stopLoadOlder();
@@ -10930,7 +11030,7 @@ class SessionView {
           this.updateSteerControl();
         }
         if (d.status === "rejected")
-          toast(d.error || "Steering was not accepted", "error", 6000);
+          toast(d.error || "Steering was not accepted", "error", TOAST_LONG);
         break;
       case "queued":
         this.renderQueue(d.queued || [], d.held || [], d.paused || [],
@@ -11070,7 +11170,7 @@ class SessionView {
     const text = labels[st] || "Linked";
     const cls = "chip ws" +
       (st === "conflict" || st === "pending" ? " warn" :
-       st === "error" ? " err" : st === "syncing" || st === "init" ? " busy" : "");
+       st === "error" ? " bad" : st === "syncing" || st === "init" ? " busy" : "");
     let chip = existing;
     if (!chip) {
       chip = el("button", cls);
@@ -11095,6 +11195,7 @@ class SessionView {
   updateHead() {
     const s = this.session;
     if (!s) return;
+    this.syncTaskReviewMenu();
     this.root.classList.toggle("meta-hidden", !sessionShowsMeta(s));
     const eff = this.effectiveConfig();
     const eng = this.root.querySelector(".chip.eng");
@@ -11233,7 +11334,7 @@ class SessionView {
     const question = composerText.trim();
     if (!question) return;
     if (this.composer.attachments.length) {
-      toast("A side question is text only · use Queue for attachments", "error", 6000);
+      toast("A side question is text only · queue the message to attach files", "error", TOAST_LONG);
       return;
     }
     if (!this.sideQuestion.ready || !this.sideQuestion.turn_id) {
@@ -11265,7 +11366,7 @@ class SessionView {
       if (this.askPending === request) this.askPending = null;
       this._forceScroll = false;
       this.updateAskControl();
-      toast(error.message || "The question could not be sent", "error", 6000);
+      toast(error.message || "The question could not be sent", "error", TOAST_LONG);
       return;
     }
     /* The reply only acknowledges the handoff; the answer arrives over the
@@ -11291,7 +11392,7 @@ class SessionView {
       !!this.steerPending || this.reconnecting || stopping || unavailable ||
       hasAttachments;
     let label = "Steer the active turn";
-    if (hasAttachments) label = "Steering accepts text only; use Queue for attachments";
+    if (hasAttachments) label = "Steering accepts text only · queue the message to attach files";
     else if (this.steerPending) label = "Sending steering guidance";
     else if (!this.steering.ready) label = "The active turn is not ready for steering";
     this.steerBtn.setAttribute("aria-label", label);
@@ -11458,7 +11559,7 @@ class SessionView {
       const target = this.findEventNode(seq);
       if (!target) {
         toast(windowed ? "That message is no longer in this transcript" :
-          "This backend needs a Puppy upgrade to jump that far back", "info", 6000);
+          "This backend needs a Puppy upgrade to jump that far back", "info", TOAST_LONG);
         return;
       }
       target.scrollIntoView({ block: "center" });
@@ -11782,9 +11883,7 @@ class SessionView {
       case "tool_result": {
         const card = d.tool_use_id && this.toolCards[d.tool_use_id];
         if (card) {
-          const stateEl = card.querySelector(".t-state");
-          stateEl.textContent = d.is_error ? "✗" : "✔";
-          stateEl.className = "t-state " + (d.is_error ? "bad" : "ok");
+          toolStateInto(card.querySelector(".t-state"), true, d.is_error);
           if (d.is_error) card.classList.add("err");
           const body = card.querySelector(".tool-body");
           body.appendChild(el("div", "tb-label", d.is_error ? "error" : "result"));
@@ -12031,11 +12130,11 @@ class SessionView {
     const text = composerText.trim();
     if (!text) return;
     if (this.composer.attachments.length) {
-      toast("Steering accepts text only · use Queue for attachments", "error", 6000);
+      toast("Steering accepts text only · queue the message to attach files", "error", TOAST_LONG);
       return;
     }
     if (this.draftSupported && !this.draftReady) {
-      toast("Draft is still syncing; wait for the session to reconnect", "error");
+      toast("Draft is still syncing · wait for the session to reconnect", "error");
       return;
     }
     if (!this.steering.ready || !this.steering.turn_id) {
@@ -12067,7 +12166,7 @@ class SessionView {
       if (this.steerPending === request) this.steerPending = null;
       this._forceScroll = false;
       this.updateSteerControl();
-      toast(error.message || "Steering could not be sent", "error", 6000);
+      toast(error.message || "Steering could not be sent", "error", TOAST_LONG);
       return;
     }
     /* A native acknowledgement can arrive over the session socket before the
@@ -12088,12 +12187,12 @@ class SessionView {
     const draft = this.draftValue();
     if (this.composer.isEmpty()) return;
     if (this.draftSupported && !this.draftReady) {
-      toast("Draft is still syncing; wait for the session to reconnect", "error");
+      toast("Draft is still syncing · wait for the session to reconnect", "error");
       return;
     }
     if (this.draftSupported && this.draftReady && draft.length > this.draftMaxChars) {
       toast(`Draft is too long (${draft.length.toLocaleString()} / ${this.draftMaxChars.toLocaleString()} characters)`,
-        "error", 6500);
+        "error", TOAST_LONG);
       return;
     }
     const blocker = this.composer.sendBlocker();
@@ -12147,7 +12246,7 @@ class SessionView {
     this.approvalEl.classList.remove("hidden");
     this.approvalEl.innerHTML = "";
     this.approvalEl.appendChild(el("div", "ap-title", `⚠ Approval: ${req.display_name || req.tool_name}` +
-      (req.description ? ` — ${req.description}` : "")));
+      (req.description ? ` · ${req.description}` : "")));
     const pre = el("pre");
     const inp = req.input || {};
     linkifyInto(pre, inp.command || inp.file_path && (inp.file_path + (inp.content ? "\n---\n" + String(inp.content).slice(0, 800) : ""))
@@ -12520,7 +12619,7 @@ class SessionView {
       };
       if (!this.draftReady) this.draftTouchedBeforeReady = true;
     }
-    if (message) toast(message, "error", 6500);
+    if (message) toast(message, "error", TOAST_LONG);
   }
 
   editQueued(index, text) {
@@ -12530,7 +12629,7 @@ class SessionView {
       return;
     }
     if (!this.draftSupported || !this.draftReady) {
-      toast("Draft is still syncing; wait for the session to reconnect", "error");
+      toast("Draft is still syncing · wait for the session to reconnect", "error");
       return;
     }
     const requestId = `${Date.now().toString(36)}-edit-${++this.queueEditSeq}`;
@@ -12569,14 +12668,14 @@ class SessionView {
       /* The server rejected the queue identity, so restore the composer value
          whose pending transmission the explicit replacement superseded. */
       this.saveDraft();
-      toast(message.error, "error", 6500);
+      toast(message.error, "error", TOAST_LONG);
       return;
     }
     const draft = message.draft;
     if (!draft || typeof draft.text !== "string" ||
         !Number.isInteger(draft.revision) || draft.revision < 0) {
       this.saveDraft();
-      toast("Backend returned an invalid edited draft", "error", 6500);
+      toast("Backend returned an invalid edited draft", "error", TOAST_LONG);
       return;
     }
     /* A different device may have authored a later revision after this click.
@@ -12626,6 +12725,14 @@ class SessionView {
   }
 
   /* ---- menus / meta ops ---- */
+  syncTaskReviewMenu() {
+    const review = this.taskReviewMenuButton;
+    if (!review || !review.isConnected) return;
+    const task = this.session && this.session.task;
+    review.disabled = !task || !workspaceViewFor(this.tab.bid, task.parent) ||
+      !taskReviewable(task);
+  }
+
   showMenu(anchor) {
     if (closeAllMenus(anchor)) return;
     const menu = el("div", "menu dyn");
@@ -12645,9 +12752,11 @@ class SessionView {
     if (this.session && this.session.task) {
       /* kept visible while the task still works, like the tools menu's rows,
          so the answer to "where is review?" is on the row itself */
-      const workspace = workspaceViewFor(this.tab.bid, this.session.task.parent);
-      const review = add("Review changes", () => { if (workspace) modalReviewTask(workspace, this.session); });
-      review.disabled = !workspace || !taskReviewable(this.session.task);
+      this.taskReviewMenuButton = add("Review changes", () => {
+        const task = this.session && this.session.task;
+        const workspace = task && workspaceViewFor(this.tab.bid, task.parent);
+        if (workspace && taskReviewable(task)) modalReviewTask(workspace, this.session);
+      });
     }
     menu.appendChild(menuCheckRow("Show status bar", sessionShowsMeta(this.session),
       () => this.patchSession({ show_meta: !sessionShowsMeta(this.session) })));
@@ -12671,6 +12780,7 @@ class SessionView {
        ranked it against its siblings - in a split, the divider (24) and the
        neighbouring pane's terminal layers painted straight over it. */
     document.body.appendChild(menu);
+    this.syncTaskReviewMenu();
     positionAnchoredMenu(menu, anchor);
   }
 
@@ -12739,6 +12849,7 @@ class SessionView {
   }
 
   syncNativeComposerChoices(forceKind = "") {
+    if (this.composerMenu && this.composerMenu.isConnected) this.composerMenu.sync();
     if (!this.nativeComposerChoices || !this.composerNativeSelects || !this.session) return;
     for (const kind of ["perm", "model", "effort"]) {
       const select = this.composerNativeSelects[kind];
@@ -12798,6 +12909,12 @@ class SessionView {
 
   showToolsMenu(anchor) {
     if (!this.session) return;
+    const spec = this.toolsMenuSpec();
+    this.optionMenu(anchor, spec.opts, spec.current, value => this.runSessionTool(value),
+      { actions: true, checks: spec.checks, live: () => this.toolsMenuSpec() });
+  }
+
+  toolsMenuSpec() {
     const eff = this.effectiveConfig();
     const eng = engineInfo(this.tab.bid, eff.engine || this.session.engine);
     const offered = new Map(((eng && eng.tool_options) || []).map(o => [o.value, o]));
@@ -12818,10 +12935,9 @@ class SessionView {
         hint: fastAvailable ? (modelOption.fast_mode_hint ||
           "Request the model's advertised Fast service tier for future turns") :
           `Not available for ${(modelOption && modelOption.label) || "this model"}`,
-        onToggle: () => this.setFastMode(!eff.fast_mode),
+        onToggle: () => this.setFastMode(!this.effectiveConfig().fast_mode),
       }] : [];
-    this.optionMenu(anchor, options, "", (value) => this.runSessionTool(value),
-      { actions: true, checks });
+    return { opts: options, current: "", checks };
   }
 
   async setFastMode(enabled) {
@@ -12832,10 +12948,11 @@ class SessionView {
 
   async runSessionTool(tool) {
     if (tool === "undo") {
-      const ok = await modalConfirm("Undo last turn",
+      const ok = await modalConfirm("Undo last turn?",
         "Reverts only the native engine context, so the next prompt continues " +
         "from before your last turn.\n\nThat prompt and reply stay visible in " +
-        "Puppy's transcript, and files changed by the turn are not reverted.");
+        "Puppy's transcript, and files changed by the turn are not reverted.",
+        { confirmLabel: "Undo" });
       if (!ok) return;
     }
     try {
@@ -12857,7 +12974,8 @@ class SessionView {
       return;
     }
     this.optionMenu(anchor, spec.options, spec.selected,
-      (value) => this.applyPermissionChoice(value), { footers: this.engineDefaultsActions() });
+      (value) => this.applyPermissionChoice(value),
+      { footers: this.engineDefaultsActions(), live: () => this.choiceMenuSpec("perm") });
   }
 
   async applyPermissionChoice(value) {
@@ -12877,12 +12995,22 @@ class SessionView {
     } catch (e) { toast(e.message, "error"); return null; }
   }
 
+  choiceMenuSpec(kind) {
+    const spec = this.composerChoiceSpec(kind);
+    return { opts: spec.options.map(option => ({ ...option,
+      disabled: spec.disabled || option.disabled })), current: spec.selected,
+      checks: [], footers: this.engineDefaultsActions() };
+  }
+
   /* A choice menu opens on its current value: highlighted, focused, checked.
      An action menu ({actions: true}) has no current value, so nothing is
      highlighted until the pointer or the arrow keys reach a row. */
-  optionMenu(anchor, opts, current, onPick, { actions = false, checks = [], footers = [] } = {}) {
+  optionMenu(anchor, opts, current, onPick,
+      { actions = false, checks = [], footers = [], live = null } = {}) {
     if (closeAllMenus(anchor)) return null;
     const menu = el("div", "choice-menu composer-choice-menu dyn");
+    this.composerMenu = menu;
+    menu._ownerView = this.root;
     menu._anchor = anchor;
     menu.setAttribute("role", footers.length ? "group" : actions ? "menu" : "listbox");
     menu.setAttribute("aria-label",
@@ -12890,12 +13018,7 @@ class SessionView {
     menu.style.visibility = "hidden";
     anchor.setAttribute("aria-haspopup", actions ? "menu" : "listbox");
     anchor.setAttribute("aria-expanded", "true");
-    const list = footers.length ? el("div") : menu;
-    if (list !== menu) {
-      list.setAttribute("role", actions ? "menu" : "listbox");
-      list.setAttribute("aria-label", menu.getAttribute("aria-label"));
-      menu.appendChild(list);
-    }
+    let list = menu;
     const rows = [];
     const dismiss = (returnFocus = false) => {
       menu.remove();
@@ -12912,63 +13035,101 @@ class SessionView {
       const selectedAt = rows.findIndex(row => row.classList.contains("selected"));
       return selectedAt >= 0 ? selectedAt : 0;
     };
-    opts.forEach((o, index) => {
-      const selected = !actions && current === o.value;
-      const row = choiceOptionNode(o.label, selected);
-      if (actions) {
-        row.setAttribute("role", "menuitem");
-        row.removeAttribute("aria-selected");
+    let signature = "";
+    menu.sync = () => {
+      if (live) {
+        const spec = live();
+        opts = spec.opts; current = spec.current;
+        checks = spec.checks || []; footers = spec.footers || [];
       }
-      if (o.hint) row.title = o.hint;
-      row.disabled = !!o.disabled;
-      row.tabIndex = selected ? 0 : -1;
-      row.onmouseenter = () => highlight(index);
-      row.onfocus = row.onmouseenter;
-      row.onclick = (event) => {
-        event.stopPropagation();
-        if (o.disabled) return;
-        dismiss(true);
-        onPick(o.value);
-      };
-      rows.push(row);
-      list.appendChild(row);
-    });
-    if (checks.length && rows.length)
-      menu.appendChild(el("div", "menu-sep"));
-    checks.forEach((item) => {
-      const index = rows.length;
-      const row = menuCheckRow(item.label, !!item.on, () => {});
-      row.classList.add("choice-option");
-      if (item.hint) row.title = item.hint;
-      row.disabled = !!item.disabled;
-      row.tabIndex = -1;
-      row.onmouseenter = () => highlight(index);
-      row.onfocus = row.onmouseenter;
-      row.onclick = (event) => {
-        event.stopPropagation();
-        if (item.disabled) return;
-        dismiss(true);
-        item.onToggle();
-      };
-      rows.push(row);
-      menu.appendChild(row);
-    });
-    if (footers.length && rows.length) menu.appendChild(el("div", "menu-sep"));
-    footers.forEach(item => {
-      const index = rows.length;
-      const row = el("button", "choice-option", item.label);
-      row.type = "button";
-      row.tabIndex = -1;
-      row.onmouseenter = () => highlight(index);
-      row.onfocus = row.onmouseenter;
-      row.onclick = event => {
-        event.stopPropagation();
-        dismiss(true);
-        item.run();
-      };
-      rows.push(row);
-      menu.appendChild(row);
-    });
+      const next = JSON.stringify([opts, current, checks, footers.map(item => item.label)]);
+      if (signature === next) return;
+      signature = next;
+      const focused = rows.indexOf(document.activeElement);
+      const focusKey = focused < 0 ? null : rows[focused]._choiceKey;
+      const scrollTop = menu.scrollTop;
+      menu.replaceChildren();
+      menu.setAttribute("role", footers.length ? "group" : actions ? "menu" : "listbox");
+      list = footers.length ? el("div") : menu;
+      if (list !== menu) {
+        list.setAttribute("role", actions ? "menu" : "listbox");
+        list.setAttribute("aria-label", menu.getAttribute("aria-label"));
+        menu.appendChild(list);
+      }
+      rows.length = 0;
+      opts.forEach((o, index) => {
+        const selected = !actions && current === o.value;
+        const row = choiceOptionNode(o.label, selected);
+        row._choiceKey = "option:" + o.value;
+        if (actions) {
+          row.setAttribute("role", "menuitem");
+          row.removeAttribute("aria-selected");
+        }
+        if (o.hint) row.title = o.hint;
+        row.disabled = !!o.disabled;
+        row.tabIndex = selected ? 0 : -1;
+        row.onmouseenter = () => highlight(index);
+        row.onfocus = row.onmouseenter;
+        row.onclick = (event) => {
+          event.stopPropagation();
+          if (o.disabled) return;
+          dismiss(true);
+          onPick(o.value);
+        };
+        rows.push(row);
+        list.appendChild(row);
+      });
+      if (checks.length && rows.length)
+        menu.appendChild(el("div", "menu-sep"));
+      checks.forEach((item) => {
+        const index = rows.length;
+        const row = menuCheckRow(item.label, !!item.on, () => {});
+        row._choiceKey = "check:" + item.label;
+        row.classList.add("choice-option");
+        if (item.hint) row.title = item.hint;
+        row.disabled = !!item.disabled;
+        row.tabIndex = -1;
+        row.onmouseenter = () => highlight(index);
+        row.onfocus = row.onmouseenter;
+        row.onclick = (event) => {
+          event.stopPropagation();
+          if (item.disabled) return;
+          dismiss(true);
+          item.onToggle();
+        };
+        rows.push(row);
+        menu.appendChild(row);
+      });
+      if (footers.length && rows.length) menu.appendChild(el("div", "menu-sep"));
+      footers.forEach(item => {
+        const index = rows.length;
+        const row = el("button", "choice-option", item.label);
+        row._choiceKey = "footer:" + item.label;
+        row.type = "button";
+        row.tabIndex = -1;
+        row.onmouseenter = () => highlight(index);
+        row.onfocus = row.onmouseenter;
+        row.onclick = event => {
+          event.stopPropagation();
+          dismiss(true);
+          item.run();
+        };
+        rows.push(row);
+        menu.appendChild(row);
+      });
+      if (!rows.length) menu.appendChild(el("span", "choice-empty", "No choices available"));
+      highlight(resting());
+      if (menu.isConnected) {
+        positionChoiceMenu({ menu, button: anchor });
+        if (focusKey !== null) {
+          const target = rows.find(row => row._choiceKey === focusKey && !row.disabled);
+          menu.tabIndex = -1;
+          (target || menu).focus({ preventScroll: true });
+        }
+        menu.scrollTop = scrollTop;
+      }
+    };
+    menu.sync();
     menu.onkeydown = (event) => {
       if (event.key === "Escape") {
         event.preventDefault();
@@ -12979,18 +13140,19 @@ class SessionView {
         dismiss();
         return;
       }
-      if (!rows.length) return;
-      const at = rows.indexOf(document.activeElement);   // -1: focus is on the menu itself
+      const enabled = rows.filter(row => !row.disabled);
+      if (!enabled.length) return;
+      const at = enabled.indexOf(document.activeElement);
       let next = null;
-      if (event.key === "ArrowDown") next = at < 0 ? 0 : (at + 1) % rows.length;
+      if (event.key === "ArrowDown") next = at < 0 ? 0 : (at + 1) % enabled.length;
       else if (event.key === "ArrowUp")
-        next = at < 0 ? rows.length - 1 : (at - 1 + rows.length) % rows.length;
+        next = at < 0 ? enabled.length - 1 : (at - 1 + enabled.length) % enabled.length;
       else if (event.key === "Home") next = 0;
-      else if (event.key === "End") next = rows.length - 1;
+      else if (event.key === "End") next = enabled.length - 1;
       if (next !== null) {
         event.preventDefault();
-        rows.forEach((row, index) => { row.tabIndex = index === next ? 0 : -1; });
-        rows[next].focus();
+        rows.forEach(row => { row.tabIndex = row === enabled[next] ? 0 : -1; });
+        enabled[next].focus();
       }
     };
     /* the pointer takes its highlight with it when it goes */
@@ -13005,9 +13167,6 @@ class SessionView {
       positionChoiceMenu({ menu, button: anchor });
       (rows[openAt] || menu).focus({ preventScroll: true });
     });
-    if (!rows.length) {
-      menu.appendChild(el("span", "choice-empty", "No choices available"));
-    }
     return menu;
   }
 
@@ -13015,7 +13174,7 @@ class SessionView {
     if (!this.session) return;
     const spec = this.composerChoiceSpec("model");
     this.optionMenu(anchor, spec.options, spec.selected, (value) => this.applyModelChoice(value),
-      { footers: this.engineDefaultsActions() });
+      { footers: this.engineDefaultsActions(), live: () => this.choiceMenuSpec("model") });
   }
 
   editEngineDefaults() {
@@ -13033,7 +13192,7 @@ class SessionView {
     if (value !== "__custom__") { await this.patchSession({ model: value }); return; }
     const current = this.effectiveConfig().model || "";
     const val = await modalPrompt("Model override",
-      "Model for this session (empty = engine default).", current);
+      "Model for this session (empty = engine default).", current, { confirmLabel: "Apply" });
     if (val !== null) await this.patchSession({ model: val.trim() });
   }
 
@@ -13042,11 +13201,13 @@ class SessionView {
     const spec = this.composerChoiceSpec("effort");
     if (!spec.options.length) { toast("Engine has no effort levels", "info"); return; }
     this.optionMenu(anchor, spec.options, spec.selected,
-      (value) => this.patchSession({ effort: value }), { footers: this.engineDefaultsActions() });
+      (value) => this.patchSession({ effort: value }),
+      { footers: this.engineDefaultsActions(), live: () => this.choiceMenuSpec("effort") });
   }
 
   async rename() {
-    const val = await modalPrompt("Rename session", "", this.session ? this.session.name : "");
+    const val = await modalPrompt("Rename session", "", this.session ? this.session.name : "",
+      { confirmLabel: "Rename" });
     if (val === null) return;
     try {
       const r = await api(this.tab.bid, `sessions/${this.tab.sid}`, { method: "PATCH", body: { name: val.trim() } });
@@ -13074,7 +13235,8 @@ class SessionView {
       } catch (e) { toast(e.message, "error"); }
       return;
     }
-    const ok = await modalConfirm("Delete session?", sessionDeleteMessage(this.session));
+    const ok = await modalConfirm("Delete session?", sessionDeleteMessage(this.session),
+      { confirmLabel: "Delete", destructive: true });
     if (!ok) return;
     try {
       await api(this.tab.bid, `sessions/${this.tab.sid}`, { method: "DELETE" });
@@ -13090,7 +13252,8 @@ class SessionView {
     const ok = await modalConfirm(
       wasMissing ? "Recreate scratch workspace?" : "Reset scratch workspace?",
       wasMissing ? "Puppy will create a new empty workspace. The transcript is kept." :
-        "All files in this scratch workspace are removed permanently. The transcript is kept.");
+        "All files in this scratch workspace are removed permanently. The transcript is kept.",
+      { confirmLabel: wasMissing ? "Recreate" : "Reset", destructive: !wasMissing });
     if (!ok) return;
     try {
       const r = await api(this.tab.bid, `sessions/${this.tab.sid}/workspace/reset`,
@@ -13149,8 +13312,8 @@ class TermView {
     this.mount = this.root.querySelector(".term-mount");
     this.meta = this.root.querySelector(".term-meta");
     this.idText = this.root.querySelector(".term-id");
-    this.copyIdBtn = this.root.querySelector(".term-copy-id");
-    this.copyIdBtn.appendChild(copyIcon());
+    this.copyIdBtn = wireCopyButton(this.root.querySelector(".term-copy-id"),
+      () => String(this.tab.terminalId || "").toUpperCase(), "Copy Terminal ID");
     this.ownerBtn = this.root.querySelector(".term-owner");
     this.ownerText = this.root.querySelector(".br-owner-text");
     this.ownerGlyph = this.root.querySelector(".br-owner-glyph");
@@ -13199,6 +13362,7 @@ class TermView {
       this.ownerDot.classList.toggle("hidden", !dot);
       if (dot) this.ownerDot.style.color = dot;
       this.ownerArrow.classList.toggle("hidden", !arrow);
+      if (this.linkMenu && this.linkMenu.isConnected) this.linkMenu.sync();
     };
     if (!terminalHandoffFor(this.tab.bid)) {
       set("Session linking requires an updated backend", { disabled: true, glyph: true });
@@ -13248,7 +13412,7 @@ class TermView {
         `Terminal ${terminalId} unlinked`, "ok");
     } catch (error) {
       this.linkBusy = "";
-      toast(`Terminal ${terminalId}: ${error.message}`, "error", 7000);
+      toast(`Terminal ${terminalId}: ${error.message}`, "error", TOAST_LONG);
     } finally {
       this.renderBinding();
     }
@@ -13257,44 +13421,68 @@ class TermView {
   showLinkMenu(anchor) {
     if (closeAllMenus(anchor)) return;
     const bid = this.tab.bid;
-    const ownerId = Number(this.binding.sessionId) || null;
     const menu = el("div", "menu dyn br-link-menu");
     const scroll = el("div", "br-link-scroll");
     menu.appendChild(scroll);
     menu._anchor = anchor;
     menu._ownerView = this.root;
     anchor.setAttribute("aria-expanded", "true");
-    const add = (label, fn) => {
-      const b = el("button", "", label);
-      b.type = "button";
-      b.onclick = e => { e.stopPropagation(); menu.remove(); fn(); };
-      scroll.appendChild(b);
-    };
-    const sessions = sessionsFor(bid).filter(s => !s.archived || s.id === ownerId);
-    if (!sessions.length) {
-      const none = el("button", "", "No sessions on this backend");
-      none.type = "button"; none.disabled = true; scroll.appendChild(none);
-    }
-    for (const s of sessions) {
-      const linked = s.id === ownerId;
-      const row = el("button", "br-link-sess");
-      row.type = "button";
-      row.setAttribute("role", "menuitemradio");
-      row.setAttribute("aria-checked", linked ? "true" : "false");
-      row.appendChild(sessDot(s));
-      row.appendChild(el("span", "menu-check-label", s.name || `Session ${s.id}`));
-      const mark = el("span", "br-link-mark");
-      if (linked) mark.appendChild(choiceSvg("check"));
-      row.appendChild(mark);
-      row.onclick = e => {
-        e.stopPropagation(); menu.remove(); this.changeBinding(s.id);
+    this.linkMenu = menu;
+    let signature = "";
+    menu.sync = () => {
+      const ownerId = Number(this.binding.sessionId) || null;
+      const sessions = sessionsFor(bid).filter(s => !s.archived || s.id === ownerId);
+      const disabled = anchor.disabled;
+      const next = JSON.stringify([ownerId, disabled, sessions.map(s => [s.id, s.name, s.color, s.engine])]);
+      if (signature === next) return;
+      signature = next;
+      const focused = document.activeElement;
+      const focusId = focused && scroll.contains(focused) ? (focused.dataset.sessionId || "unlink") : null;
+      const scrollTop = scroll.scrollTop;
+      scroll.replaceChildren();
+      const add = (label, fn) => {
+        const b = el("button", "", label);
+        b.type = "button";
+        b.onclick = e => { e.stopPropagation(); menu.remove(); fn(); };
+        scroll.appendChild(b);
       };
-      scroll.appendChild(row);
-    }
-    if (ownerId) {
-      scroll.appendChild(el("div", "menu-sep"));
-      add("Unlink terminal", () => this.changeBinding(null));
-    }
+      if (!sessions.length) {
+        const none = el("button", "", "No sessions on this backend");
+        none.type = "button"; none.disabled = true; scroll.appendChild(none);
+      }
+      for (const s of sessions) {
+        const linked = s.id === ownerId;
+        const row = el("button", "br-link-sess");
+        row.type = "button";
+        row.dataset.sessionId = String(s.id);
+        row.setAttribute("role", "menuitemradio");
+        row.setAttribute("aria-checked", linked ? "true" : "false");
+        row.appendChild(sessDot(s));
+        row.appendChild(el("span", "menu-check-label", s.name || `Session ${s.id}`));
+        const mark = el("span", "br-link-mark");
+        if (linked) mark.appendChild(choiceSvg("check"));
+        row.appendChild(mark);
+        row.onclick = e => {
+          e.stopPropagation(); menu.remove(); this.changeBinding(s.id);
+        };
+        scroll.appendChild(row);
+      }
+      if (ownerId) {
+        scroll.appendChild(el("div", "menu-sep"));
+        add("Unlink terminal", () => this.changeBinding(null));
+      }
+      if (disabled) scroll.querySelectorAll("button").forEach(row => row.disabled = true);
+      if (menu.isConnected) {
+        positionAnchoredMenu(menu, anchor);
+        if (focusId) {
+          const row = [...scroll.querySelectorAll("button")].find(row =>
+            (row.dataset.sessionId || "unlink") === focusId && !row.disabled);
+          (row || anchor).focus({ preventScroll: true });
+        }
+        scroll.scrollTop = scrollTop;
+      }
+    };
+    menu.sync();
     document.body.appendChild(menu);
     positionAnchoredMenu(menu, anchor);
   }
@@ -13308,16 +13496,6 @@ class TermView {
     this.fit = new FitAddon.FitAddon();
     this.term.loadAddon(this.fit);
     this.term.open(this.mount);
-    this.copyIdBtn.onclick = async () => {
-      const terminalId = String(this.tab.terminalId || "").toUpperCase();
-      if (!terminalId || !await copyWithToast(
-          terminalId, `Terminal ${terminalId} ID copied`)) return;
-      clearTimeout(this.copyIdBtn._copyReset);
-      this.copyIdBtn.replaceChildren(copyIcon(true));
-      this.copyIdBtn._copyReset = setTimeout(() => {
-        if (this.copyIdBtn.isConnected) this.copyIdBtn.replaceChildren(copyIcon());
-      }, 1400);
-    };
     this.ownerBtn.onclick = e => {
       e.stopPropagation(); this.showLinkMenu(this.ownerBtn);
     };
@@ -13371,7 +13549,7 @@ class TermView {
     });
     const terminalId = String(result && result.terminal && result.terminal.id || "").toUpperCase();
     if (!/^[A-Z0-9]{4}$/.test(terminalId))
-      throw new Error("backend returned an invalid Terminal ID");
+      throw new Error("backend returned an invalid terminal ID");
     if (this.closed || sequence !== this.connectionSequence) {
       api(this.tab.bid, `terminal/instances/${encodeURIComponent(terminalId)}`,
         { method: "DELETE" }).catch(() => {});
@@ -13444,7 +13622,7 @@ class TermView {
           if (data.replay_truncated && !this.replayWarned) {
             this.replayWarned = true;
             toast(`Terminal ${terminalId}: earlier output was omitted from reconnect replay`,
-              "error", 7000);
+              "error", TOAST_LONG);
           }
           if (data.running === false) {
             this.nodeEnded = true;
@@ -13486,7 +13664,7 @@ class TermView {
     writeClipboardText(text).catch(() => {
       if (this.copyWarned) return;                         // once per terminal, not per drag
       this.copyWarned = true;
-      toast("Could not copy the selection to the clipboard", "error");
+      toast("Copy failed", "error");
     });
   }
   async pasteClipboard() {
@@ -13499,7 +13677,7 @@ class TermView {
     } catch (e) {
       if (this.pasteWarned) return;
       this.pasteWarned = true;
-      toast("Clipboard paste was blocked · use Shift+right-click for the browser menu", "error", 7000);
+      toast("Clipboard paste was blocked · use Shift+right-click for the browser menu", "error", TOAST_LONG);
     }
   }
 
@@ -13574,6 +13752,7 @@ class TermView {
     this.syncRemoteState();
   }
   syncRemoteState() {
+    this.renderBinding();
     const unavailable = !!this.tab.bid && !backendConnectionAllowed(this.tab.bid);
     if (unavailable && this.ws) {
       const ws = this.ws;
@@ -13707,8 +13886,8 @@ class BrowserView {
     this.kbdBtn = this.root.querySelector(".br-kbd");
     this.meta = this.root.querySelector(".br-meta");
     this.idText = this.root.querySelector(".br-id");
-    this.copyIdBtn = this.root.querySelector(".br-copy-id");
-    this.copyIdBtn.appendChild(copyIcon());
+    this.copyIdBtn = wireCopyButton(this.root.querySelector(".br-copy-id"),
+      () => String(this.tab.browserId || "").toUpperCase(), "Copy Browser ID");
     this.ownerBtn = this.root.querySelector(".br-owner");
     this.ownerText = this.root.querySelector(".br-owner-text");
     this.ownerGlyph = this.root.querySelector(".br-owner-glyph");
@@ -13786,6 +13965,7 @@ class BrowserView {
       this.ownerDot.classList.toggle("hidden", !dot);
       if (dot) this.ownerDot.style.color = dot;
       this.ownerArrow.classList.toggle("hidden", !arrow);
+      if (this.linkMenu && this.linkMenu.isConnected) this.linkMenu.sync();
     };
     if (!browserHandoffFor(this.tab.bid)) {
       set("Session linking requires an updated backend", { disabled: true, glyph: true });
@@ -13836,7 +14016,7 @@ class BrowserView {
         `Browser ${browserId} unlinked`, "ok");
     } catch (error) {
       this.linkBusy = "";
-      toast(`Browser ${browserId}: ${error.message}`, "error", 7000);
+      toast(`Browser ${browserId}: ${error.message}`, "error", TOAST_LONG);
     } finally {
       this.renderBinding();
     }
@@ -13849,7 +14029,6 @@ class BrowserView {
   showLinkMenu(anchor) {
     if (closeAllMenus(anchor)) return;
     const bid = this.tab.bid;
-    const ownerId = Number(this.binding.sessionId) || null;
     const menu = el("div", "menu dyn br-link-menu");
     /* Keep the native scrollport inside the framed menu. If the border and
        scrollport share an element, Chromium paints the thumb through the
@@ -13859,49 +14038,74 @@ class BrowserView {
     menu._anchor = anchor;
     menu._ownerView = this.root;
     anchor.setAttribute("aria-expanded", "true");
-    const add = (label, fn) => {
-      const b = el("button", "", label);
-      b.type = "button";
-      b.onclick = (e) => { e.stopPropagation(); menu.remove(); fn(); };
-      scroll.appendChild(b);
-      return b;
-    };
-    /* the user's own sidebar order; archived chats are offered only while one
-       still holds the link, so its checked row always exists */
-    const sessions = sessionsFor(bid).filter(s => !s.archived || s.id === ownerId);
-    if (!sessions.length) {
-      const none = el("button", "", "No sessions on this backend");
-      none.type = "button";
-      none.disabled = true;
-      scroll.appendChild(none);
-    }
-    for (const s of sessions) {
-      const linked = s.id === ownerId;
-      /* pick-one rows wear the plain check of the choice menus, not the
-         drawn checkbox settings toggles use - only the linked row carries
-         a mark, every row reserves its column so labels align */
-      const row = el("button", "br-link-sess");
-      row.type = "button";
-      row.setAttribute("role", "menuitemradio");
-      row.setAttribute("aria-checked", linked ? "true" : "false");
-      row.appendChild(sessDot(s));
-      row.appendChild(el("span", "menu-check-label", s.name || `Session ${s.id}`));
-      const mark = el("span", "br-link-mark");
-      if (linked) mark.appendChild(choiceSvg("check"));
-      row.appendChild(mark);
-      row.onclick = (e) => {
-        e.stopPropagation();
-        menu.remove();
-        this.changeBinding(s.id);
+    this.linkMenu = menu;
+    let signature = "";
+    menu.sync = () => {
+      const ownerId = Number(this.binding.sessionId) || null;
+      const sessions = sessionsFor(bid).filter(s => !s.archived || s.id === ownerId);
+      const disabled = anchor.disabled;
+      const next = JSON.stringify([ownerId, disabled, sessions.map(s => [s.id, s.name, s.color, s.engine])]);
+      if (signature === next) return;
+      signature = next;
+      const focused = document.activeElement;
+      const focusId = focused && scroll.contains(focused) ? (focused.dataset.sessionId || "unlink") : null;
+      const scrollTop = scroll.scrollTop;
+      scroll.replaceChildren();
+      const add = (label, fn) => {
+        const b = el("button", "", label);
+        b.type = "button";
+        b.onclick = (e) => { e.stopPropagation(); menu.remove(); fn(); };
+        scroll.appendChild(b);
+        return b;
       };
-      scroll.appendChild(row);
-    }
-    if (ownerId) {
-      scroll.appendChild(el("div", "menu-sep"));
-      add("Unlink browser", () => this.changeBinding(null));
-    }
-    /* on <body> like every dynamic menu: the pane stacking context would
-       otherwise paint neighbours over it in a split */
+      /* the user's own sidebar order; archived chats are offered only while one
+         still holds the link, so its checked row always exists */
+      if (!sessions.length) {
+        const none = el("button", "", "No sessions on this backend");
+        none.type = "button";
+        none.disabled = true;
+        scroll.appendChild(none);
+      }
+      for (const s of sessions) {
+        const linked = s.id === ownerId;
+        /* pick-one rows wear the plain check of the choice menus, not the
+           drawn checkbox settings toggles use - only the linked row carries
+           a mark, every row reserves its column so labels align */
+        const row = el("button", "br-link-sess");
+        row.type = "button";
+        row.dataset.sessionId = String(s.id);
+        row.setAttribute("role", "menuitemradio");
+        row.setAttribute("aria-checked", linked ? "true" : "false");
+        row.appendChild(sessDot(s));
+        row.appendChild(el("span", "menu-check-label", s.name || `Session ${s.id}`));
+        const mark = el("span", "br-link-mark");
+        if (linked) mark.appendChild(choiceSvg("check"));
+        row.appendChild(mark);
+        row.onclick = (e) => {
+          e.stopPropagation();
+          menu.remove();
+          this.changeBinding(s.id);
+        };
+        scroll.appendChild(row);
+      }
+      if (ownerId) {
+        scroll.appendChild(el("div", "menu-sep"));
+        add("Unlink browser", () => this.changeBinding(null));
+      }
+      /* on <body> like every dynamic menu: the pane stacking context would
+         otherwise paint neighbours over it in a split */
+      if (disabled) scroll.querySelectorAll("button").forEach(row => row.disabled = true);
+      if (menu.isConnected) {
+        positionAnchoredMenu(menu, anchor);
+        if (focusId) {
+          const row = [...scroll.querySelectorAll("button")].find(row =>
+            (row.dataset.sessionId || "unlink") === focusId && !row.disabled);
+          (row || anchor).focus({ preventScroll: true });
+        }
+        scroll.scrollTop = scrollTop;
+      }
+    };
+    menu.sync();
     document.body.appendChild(menu);
     positionAnchoredMenu(menu, anchor);
   }
@@ -14004,16 +14208,6 @@ class BrowserView {
   start() {
     this.resizeObs = new ResizeObserver(() => this.queueViewport());
     this.resizeObs.observe(this.stage);
-    this.copyIdBtn.onclick = async () => {
-      const browserId = String(this.tab.browserId || "").toUpperCase();
-      if (!browserId || !await copyWithToast(browserId, `Browser ${browserId} ID copied`))
-        return;
-      clearTimeout(this.copyIdBtn._copyReset);
-      this.copyIdBtn.replaceChildren(copyIcon(true));
-      this.copyIdBtn._copyReset = setTimeout(() => {
-        if (this.copyIdBtn.isConnected) this.copyIdBtn.replaceChildren(copyIcon());
-      }, 1400);
-    };
     this.ownerBtn.onclick = (e) => {
       e.stopPropagation();
       this.showLinkMenu(this.ownerBtn);
@@ -14243,7 +14437,7 @@ class BrowserView {
         this.applyBinding(d);
       } else if (d.type === "dialog") {
         toast(`Page ${d.kind || "dialog"} ${d.action}: ${d.message || ""}`.trim(),
-          "info", 6000);
+          "info", TOAST_LONG);
       } else if (d.type === "error") {
         /* Only a terminal verdict ends this pane; a transient failure (a
            refused navigation, a slow screencast call) is a toast, not a
@@ -14253,7 +14447,7 @@ class BrowserView {
           this.showDead(d.text || "Browser unavailable", true);
         } else {
           this.setLoading(false);
-          toast(d.text || "Browser error", "error", 5000);
+          toast(d.text || "Browser error", "error", TOAST_LONG);
         }
       } else if (d.type === "gone") {
         this.terminalGone = true;
@@ -14368,6 +14562,7 @@ class BrowserView {
   }
 
   syncRemoteState() {
+    this.renderBinding();
     const stopping = remoteStoppingMessage(this.tab.bid);
     const unavailable = !!this.tab.bid && !backendConnectionAllowed(this.tab.bid);
     if (unavailable) {
@@ -14611,9 +14806,15 @@ class SearchView {
       ...row, on: row.enabled && !this.excludedNodes.has(row.bid) }));
   }
 
+  syncRemoteState() { this.renderNodeChips(); }
+
   renderNodeChips() {
+    const nodes = this.nodesCatalog();
+    const signature = JSON.stringify(nodes);
+    if (signature === this.renderedNodes) return;
+    this.renderedNodes = signature;
     this.nodesBox.replaceChildren();
-    for (const node of this.nodesCatalog()) {
+    for (const node of nodes) {
       const chip = el("button", "search-chip" + (node.on ? " on" : ""));
       chip.type = "button";
       chip.appendChild(el("span",
@@ -14704,15 +14905,14 @@ class SearchView {
     const targets = catalog.filter(node => node.on);
     const skipped = catalog.filter(node => !node.enabled);
     if (!targets.length) {
-      this.setStatus("No online nodes are selected to search.");
+      this.setStatus("No online backends are selected to search");
       return;
     }
     const core = this.coreParams(query);
     this.lastCore = core;
     this.resultsBox.replaceChildren();
     const spinner = el("span", "spinner");
-    this.setStatus(spinner, `Searching ${targets.length} node${
-      targets.length === 1 ? "" : "s"}…`);
+    this.setStatus(spinner, `Searching ${targets.length} backend${targets.length === 1 ? "" : "s"}…`);
     const params = new URLSearchParams({ ...core,
       per: String(SEARCH_PER_SESSION), sessions: String(SEARCH_MAX_SESSIONS) });
     const settled = await Promise.allSettled(targets.map(node =>
@@ -14749,10 +14949,9 @@ class SearchView {
     if (total > 0)
       fragments.push([`${total} match${total === 1 ? "" : "es"} in ${
         sessionCount} session${sessionCount === 1 ? "" : "s"} · searched ${
-        targets.length} node${targets.length === 1 ? "" : "s"}`, ""]);
+        targets.length} backend${targets.length === 1 ? "" : "s"}`, ""]);
     if (skipped.length)
-      fragments.push([`${skipped.length} node${
-        skipped.length === 1 ? "" : "s"} skipped (${
+      fragments.push([`${skipped.length} backend${skipped.length === 1 ? "" : "s"} skipped (${
         [...new Set(skipped.map(node => node.reason.split(" - ")[0]))].join(", ")})`,
         "warn"]);
     for (const failure of failures)
@@ -14769,7 +14968,7 @@ class SearchView {
 
     if (!groups.length) {
       this.resultsBox.appendChild(el("div", "search-empty",
-        `No matches for “${query}”.`));
+        `No matches for "${query}"`));
       return;
     }
     for (const entry of groups)
@@ -14819,7 +15018,7 @@ class SearchView {
     const snippet = el("span", "sh-snippet");
     searchSnippetInto(snippet, match.snippet);
     row.appendChild(snippet);
-    row.appendChild(el("span", "sh-when", fmtWhen(match.ts)));
+    row.appendChild(el("span", "sh-when", fmtStamp(match.ts)));
     row.onclick = () => this.openMatch(bid, session, match.seq);
     return row;
   }
@@ -14887,6 +15086,7 @@ class SettingsView {
     this.engineUpgradePollTimer = null;
     this.engineUpgradePollGeneration = 0;
     this.localEngineGroup = null;
+    this.notifyBackendsSync = null;
     this.systemPromptSync = null;
     this.timerSettingsSync = null;
     this.root = el("div", "view settings");
@@ -14911,6 +15111,7 @@ class SettingsView {
     this.upgradeReadiness.clear();
     this.upgradesInProgress.clear();
     this.localEngineGroup = null;
+    this.notifyBackendsSync = null;
     this.systemPromptSync = null;
     this.timerSettingsSync = null;
     this.root.remove();
@@ -14963,11 +15164,11 @@ class SettingsView {
   reportEngineUpgrade(nodeName, engine) {
     const result = engine.upgrade_result;
     if (!result) {
-      toast(`${nodeName}: ${engine.label} update finished`, "info", 6000);
+      toast(`${nodeName}: ${engine.label} update finished`, "info", TOAST_LONG);
       return;
     }
     if (!result.ok) {
-      toast(`${nodeName}: ${engine.label} update failed`, "error", 7000);
+      toast(`${nodeName}: ${engine.label} update failed`, "error", TOAST_LONG);
       modalNotice(`${engine.label} update failed`,
         `${nodeName}: ${result.error || "the updater reported a failure"}` +
         (result.output ? `\n\n${result.output}` : ""));
@@ -14975,13 +15176,13 @@ class SettingsView {
     }
     if (result.changed) {
       toast(`${nodeName}: ${engine.label} updated to ${result.to_version || "a new version"}`,
-        "ok", 6000);
+        "ok", TOAST_LONG);
       return;
     }
     /* Exit status alone is not proof: the vendor updater can succeed without
        moving the version. Report what it said and let the pill speak. */
     toast(`${nodeName}: ${engine.label} unchanged on ${result.to_version || "its version"}` +
-      (result.message ? ` · ${result.message}` : ""), "info", 7000);
+      (result.message ? ` · ${result.message}` : ""), "info", TOAST_LONG);
   }
 
   startEngineUpgradePolling() {
@@ -15225,7 +15426,7 @@ class SettingsView {
         state.engCache[bid] : null;
       if (reachable === false) {
         group.update({
-          status: "bad", engines: cached, message: "Backend unavailable · showing last known values",
+          status: "bad", engines: cached, message: backendStateNote("bad", true, "engines"),
           detail: state.remoteErrors[bid] || "The controller cannot reach this backend",
         });
       } else if (reachable === true && cached === null) {
@@ -15238,7 +15439,7 @@ class SettingsView {
       } else if (reachable !== true && cached !== null) {
         group.update({
           status: "pending", engines: cached,
-          message: "Checking backend · showing last known values",
+          message: backendStateNote("pending", true, "engines"),
         });
       } else {
         group.update({
@@ -15286,7 +15487,8 @@ class SettingsView {
     }
     for (const [bid, record] of this.remoteBrowserToggles) {
       const status = bid ? state.remoteBrowserStatus[bid] : state.browserStatus;
-      if (nodeStateStreamActive(bid) && status && record.apply) {
+      if ((!bid || backendConnectionAllowed(bid)) &&
+          nodeStateStreamActive(bid) && status && record.apply) {
         record.apply(status);
         continue;
       }
@@ -15298,9 +15500,7 @@ class SettingsView {
         record.input.disabled = true;
         if (record.root) {
           record.root.classList.add("disabled");
-          record.root.title = availability === "bad" ?
-            "Backend unavailable · showing last known value" :
-            "Checking backend · showing last known value";
+          record.root.title = backendStateNote(availability, true);
         }
         if (record.shared) {
           record.shared.input.disabled = true;
@@ -15313,6 +15513,7 @@ class SettingsView {
           bid, record.input, null, this.renderGeneration, record.root, record);
       }
     }
+    if (this.notifyBackendsSync) this.notifyBackendsSync();
     if (this.systemPromptSync) this.systemPromptSync();
     if (this.timerSettingsSync) this.timerSettingsSync();
     this.syncUpgradeButtons();
@@ -15338,8 +15539,7 @@ class SettingsView {
     if (described !== version.textContent) version.title = described;
     statuses.appendChild(version);
     const ready = engineReady(e2);
-    statuses.appendChild(el("span", "pill " + (ready ? "ok" : "bad"),
-      e2.availability_only === true ? engineStatusText(e2) : "Auth: " + e2.auth));
+    statuses.appendChild(el("span", "pill " + (ready ? "ok" : "bad"), engineStatusText(e2)));
     row.appendChild(identity);
     row.appendChild(statuses);
     const action = this.engineUpdateButton(bid, nodeName, e2);
@@ -15401,7 +15601,7 @@ class SettingsView {
       applyEnginesPayload(bid, result);
       toast(`${nodeName}: updating ${e2.label}…`, "info");
     } catch (error) {
-      toast(`${nodeName}: ${error.message}`, "error", 7000);
+      toast(`${nodeName}: ${error.message}`, "error", TOAST_LONG);
     } finally {
       this.engineUpgradeStarts.delete(id);
       /* A successful updater can finish before its POST response is painted.
@@ -15447,19 +15647,19 @@ class SettingsView {
     head.appendChild(nameEl);
     head.appendChild(metaEl);
     let refresh = null;
-    if (backendSupportsEngineUpgrade(bid)) {
-      refresh = el("button", "engine-node-refresh");
-      refresh.type = "button";
-      refresh.setAttribute("aria-label",
-        `Re-check engine versions, sign-in and model lists on ${name}`);
-      refresh.appendChild(refreshIcon(12));
-      refresh.onclick = () => refreshEngineVersions(bid, refresh, name);
-      head.appendChild(refresh);
-    }
     const body = el("div", "engine-node-body");
     root.appendChild(head); root.appendChild(body);
 
     const update = ({ status = "pending", engines = null, message = "", detail = "" }) => {
+      if (!refresh && backendSupportsEngineUpgrade(bid)) {
+        refresh = el("button", "engine-node-refresh");
+        refresh.type = "button";
+        refresh.setAttribute("aria-label",
+          `Re-check engine versions, sign-in and model lists on ${name}`);
+        refresh.appendChild(refreshIcon(12));
+        refresh.onclick = () => refreshEngineVersions(bid, refresh, name);
+        head.appendChild(refresh);
+      }
       dot.className = "gdot " + status;
       root.classList.toggle("engine-node-offline-values",
         status !== "ok" && Array.isArray(engines));
@@ -15497,7 +15697,7 @@ class SettingsView {
           body.appendChild(note);
         }
       } else if (!engines.length) {
-        const note = el("div", "engine-node-message engine-node-empty", "No engines reported");
+        const note = el("div", "engine-node-message engine-node-empty", "No engines installed");
         note.setAttribute("aria-label", note.textContent);
         body.appendChild(note);
       } else {
@@ -15528,7 +15728,7 @@ class SettingsView {
     const identity = el("div", "eau-identity");
     const nameEl = el("div", "eau-name", name);
     nameEl.setAttribute("aria-label", name);
-    const note = el("div", "eau-note", "Checking setting…");
+    const note = el("div", "eau-note", "Checking backend…");
     identity.appendChild(nameEl);
     identity.appendChild(note);
 
@@ -15571,11 +15771,9 @@ class SettingsView {
 
     const describe = () => {
       if (!supported) return "Backend upgrade required";
-      if (availability === "bad") return current ?
-        "Backend unavailable · showing last known setting" : "Backend unavailable";
-      if (availability !== "ok") return current ?
-        "Checking backend · showing last known setting" : "Checking backend setting…";
-      if (!current) return "Checking backend setting…";
+      const stateNote = backendStateNote(availability, !!current);
+      if (stateNote) return stateNote;
+      if (!current) return "Checking backend…";
       if (saving) return "Saving…";
       const attempts = current.last_attempts || {};
       const keys = Object.keys(attempts);
@@ -15585,10 +15783,10 @@ class SettingsView {
         const newest = keys.map(k => ({ key: k, ...attempts[k] }))
           .sort((a, b) => Number(b.at || 0) - Number(a.at || 0))[0];
         const engine = state.engMap[newest.key] ? state.engMap[newest.key].label : newest.key;
-        const formatted = fmtDateTime(newest.at);
+        const formatted = fmtStamp(newest.at);
         const stamp = formatted ? ` · ${formatted}` : "";
         if (!newest.ok) {
-          return `${engine} ${newest.to_version || ""} failed${stamp} — will not retry ` +
+          return `${engine} ${newest.to_version || ""} failed${stamp} · will not retry ` +
             `until a newer version appears`;
         }
         return `${engine} updated to ${newest.installed_after || newest.to_version}${stamp}`;
@@ -15637,7 +15835,7 @@ class SettingsView {
         if (bid) state.remoteAutoUpgrade[bid] = current;
         else state.autoUpgrade = current;
       } catch (error) {
-        toast(`${name}: ${error.message}`, "error", 6500);
+        toast(`${name}: ${error.message}`, "error", TOAST_LONG);
       } finally {
         saving = false;
         paint();
@@ -15684,7 +15882,7 @@ class SettingsView {
     const identity = el("div", "usage-refresh-identity");
     const nameEl = el("div", "usage-refresh-name", name);
     nameEl.setAttribute("aria-label", name);
-    const note = el("div", "usage-refresh-note", "Checking setting…");
+    const note = el("div", "usage-refresh-note", "Checking backend…");
     identity.appendChild(nameEl);
     identity.appendChild(note);
 
@@ -15711,15 +15909,13 @@ class SettingsView {
     let saving = false;
     const describe = (metadata, reachable, canConfigure) => {
       if (!canConfigure) return "Backend upgrade required";
-      if (reachable === "bad") return metadata ?
-        "Backend unavailable · showing last known setting" : "Backend unavailable";
-      if (reachable !== "ok") return metadata ?
-        "Checking backend · showing last known setting" : "Checking backend setting…";
-      if (!metadata) return "Checking backend setting…";
+      const stateNote = backendStateNote(reachable, !!metadata);
+      if (stateNote) return stateNote;
+      if (!metadata) return "Checking backend…";
       if (!metadata.enabled) return "Automatic refresh is off";
       if (metadata.last_error) return `Last refresh failed · ${metadata.last_error}`;
       if (metadata.last_success_at) {
-        const stamp = fmtDateTime(metadata.last_success_at);
+        const stamp = fmtStamp(metadata.last_success_at);
         if (stamp) return `Last refreshed ${stamp}`;
       }
       return "Refreshes on the next engine-status check";
@@ -15760,9 +15956,9 @@ class SettingsView {
         current = result.usage_refresh;
         const suffix = result.usage_refresh.last_error ? " · refresh failed" : "";
         toast(`${name}: Usage refresh saved${suffix}`,
-          result.usage_refresh.last_error ? "error" : "ok", 6000);
+          result.usage_refresh.last_error ? "error" : "ok", TOAST_LONG);
       } catch (error) {
-        toast(`${name}: ${error.message}`, "error", 7000);
+        toast(`${name}: ${error.message}`, "error", TOAST_LONG);
       } finally {
         saving = false;
         save.textContent = "Apply";
@@ -15777,7 +15973,7 @@ class SettingsView {
     const identity = el("div", "usage-refresh-identity");
     const nameEl = el("div", "usage-refresh-name", name);
     nameEl.setAttribute("aria-label", name);
-    const note = el("div", "usage-refresh-note", "Checking setting…");
+    const note = el("div", "usage-refresh-note", "Checking backend…");
     identity.appendChild(nameEl);
     identity.appendChild(note);
 
@@ -15814,12 +16010,10 @@ class SettingsView {
       limit.disabled = disabled;
       save.disabled = disabled;
       let description;
+      const stateNote = backendStateNote(reachable, !!current);
       if (!canConfigure) description = "Backend upgrade required";
-      else if (reachable === "bad") description = current ?
-        "Backend unavailable · showing last known setting" : "Backend unavailable";
-      else if (reachable !== "ok") description = current ?
-        "Checking backend · showing last known setting" : "Checking backend setting…";
-      else if (!current) description = loadError || "Checking backend setting…";
+      else if (stateNote) description = stateNote;
+      else if (!current) description = loadError || "Checking backend…";
       else if (!current.enabled) description = "File uploads are disabled";
       else description = `Any file type · ${current.max_file_size_mb} MiB maximum each`;
       note.textContent = description;
@@ -15875,7 +16069,7 @@ class SettingsView {
         current = policy;
         toast(`${name}: File uploads ${policy.enabled ? `limited to ${megabytes} MiB` : "disabled"}`, "ok");
       } catch (error) {
-        toast(`${name}: ${error.message}`, "error", 7000);
+        toast(`${name}: ${error.message}`, "error", TOAST_LONG);
       } finally {
         saving = false;
         save.textContent = "Apply";
@@ -15920,7 +16114,7 @@ class SettingsView {
         `Persistence error: ${health.error || "the shared store could not be saved"}` :
         "Shares non-partitioned cookies and best-effort localStorage captured from visited " +
         "pages across browsers and restarts. It does not copy partitioned cookies, " +
-        "IndexedDB, sessionStorage, or service workers. This node-local store is excluded " +
+        "IndexedDB, sessionStorage, or service workers. This backend-local store is excluded " +
         "from backups.";
       if (shared.note) {
         shared.note.textContent = copy;
@@ -15930,7 +16124,8 @@ class SettingsView {
     };
     const apply = st => {
       if (browserRecord) browserRecord.wasOffline = false;
-      input.checked = !!st.enabled;
+      browserRecord.status = st;
+      if (!browserRecord.saving) input.checked = !!st.enabled;
       if (bid) {
         state.remoteBrowser[bid] = { enabled: !!st.enabled };
         state.remoteBrowserStatus[bid] = st;
@@ -15938,25 +16133,74 @@ class SettingsView {
         state.browser = st;
         state.browserStatus = st;
       }
-      input.disabled = !st.available && !st.enabled;
+      const unavailable = !!bid && !backendConnectionAllowed(bid);
+      input.disabled = !!browserRecord.saving || unavailable || (!st.available && !st.enabled);
       if (root) {
         root.classList.toggle("disabled", input.disabled);
-        root.onclick = input.disabled ?
-          () => toast(`${name}: ${st.reason || "No usable browser"}`, "error", 6000) : null;
+        root.onclick = !st.available && !st.enabled && !browserRecord.saving ?
+          () => toast(`${name}: ${st.reason || "No usable browser"}`, "error", TOAST_LONG) : null;
       }
       if (shared) {
-        shared.input.checked = st.shared_storage === true;
-        setSharedUsable(typeof st.shared_storage === "boolean");
+        if (!browserRecord.sharedSaving) shared.input.checked = st.shared_storage === true;
+        setSharedUsable(!browserRecord.sharedSaving && !unavailable &&
+          typeof st.shared_storage === "boolean");
         setSharedStatus(st);
       }
+      if (browserRecord.saving) return;
       if (st.available) {
         setNote((st.product || "Browser available") +
           (st.sandbox === "no-sandbox" ? " · sandbox off (runs as root)" : ""), false);
       } else {
-        setNote(st.reason || "No usable browser on this backend", true);
+        setNote(st.reason || "No usable browser", true);
       }
     };
     browserRecord.apply = apply;
+    // Recovery can arrive from the stream even if the first status read fails.
+    // Install the actions before that read or the initial offline return.
+    input.onchange = async () => {
+      if (browserRecord.saving) return;
+      browserRecord.saving = true;
+      const desired = input.checked;
+      input.disabled = true;
+      setNote(desired ? "Enabling…" : "Disabling…", false);
+      try {
+        const result = await api(bid, "browser/enabled", {
+          method: "POST", body: { enabled: desired } });
+        apply(result);
+        if (result.enabled === false) closeBrowserTabsForBackend(bid);
+        renderSidebar();
+        toast(`${name}: Browser ${result.enabled ? "enabled" : "disabled"}`, "ok");
+      } catch (error) {
+        input.checked = !desired;
+        setNote(error.message, true);
+        toast(`${name}: ${error.message}`, "error", TOAST_LONG);
+      } finally {
+        browserRecord.saving = false;
+        if (browserRecord.status) apply(browserRecord.status);
+      }
+    };
+    if (shared) shared.input.onchange = async () => {
+      if (browserRecord.sharedSaving) return;
+      browserRecord.sharedSaving = true;
+      const desired = shared.input.checked;
+      shared.input.disabled = true;
+      try {
+        const result = await api(bid, "browser/shared-storage", {
+          method: "POST", body: { enabled: desired } });
+        apply(result);
+        const failed = result.shared_storage && result.shared_storage_health &&
+          result.shared_storage_health.ok === false;
+        toast(`${name}: Shared cookies & storage ${
+          result.shared_storage ? "enabled" : "disabled"}${failed ?
+          " · persistence failed" : ""}`, failed ? "error" : "ok");
+      } catch (error) {
+        shared.input.checked = !desired;
+        toast(`${name}: ${error.message}`, "error", TOAST_LONG);
+      } finally {
+        browserRecord.sharedSaving = false;
+        if (browserRecord.status) apply(browserRecord.status);
+      }
+    };
     /* Only availability needs the probe: whether the toggle is on is already
        known from /api/state and the node pings. Seed the switch from that, or
        it renders off and visibly flips on a moment later. */
@@ -15966,9 +16210,7 @@ class SettingsView {
       if (root) root.classList.add("disabled");
       setSharedUsable(false);
       if (browserRecord) browserRecord.wasOffline = true;
-      setNote(remoteAvailability(bid) === "bad" ?
-        "Backend unavailable · showing last known value" :
-        "Checking backend · showing last known value", true);
+      setNote(backendStateNote(remoteAvailability(bid), true), true);
       return;
     }
     let status = bid ? state.remoteBrowserStatus[bid] : state.browserStatus;
@@ -15987,42 +16229,6 @@ class SettingsView {
     if (generation !== this.renderGeneration || !input.isConnected) return;
     if (status) apply(status);
     else setNote("Waiting for browser status…", false);
-    input.onchange = async () => {
-      const desired = input.checked;
-      input.disabled = true;
-      setNote(desired ? "Enabling…" : "Disabling…", false);
-      try {
-        const result = await api(bid, "browser/enabled", {
-          method: "POST", body: { enabled: desired } });
-        apply(result);
-        if (result.enabled === false) closeBrowserTabsForBackend(bid);
-        renderSidebar();
-        toast(`${name}: Browser ${result.enabled ? "enabled" : "disabled"}`, "ok");
-      } catch (error) {
-        input.checked = !desired;
-        input.disabled = false;
-        setNote(error.message, true);
-        toast(`${name}: ${error.message}`, "error", 6500);
-      }
-    };
-    if (shared) shared.input.onchange = async () => {
-      const desired = shared.input.checked;
-      shared.input.disabled = true;
-      try {
-        const result = await api(bid, "browser/shared-storage", {
-          method: "POST", body: { enabled: desired } });
-        apply(result);
-        const failed = result.shared_storage && result.shared_storage_health &&
-          result.shared_storage_health.ok === false;
-        toast(`${name}: Shared cookies & storage ${
-          result.shared_storage ? "enabled" : "disabled"}${failed ?
-          " · persistence failed" : ""}`, failed ? "error" : "ok");
-      } catch (error) {
-        shared.input.checked = !desired;
-        shared.input.disabled = false;
-        toast(`${name}: ${error.message}`, "error", 6500);
-      }
-    };
   }
 
   timerSettingsCard(nodes, initialPayload, generation) {
@@ -16053,7 +16259,7 @@ class SettingsView {
       {
         key: "remote_engine_seconds", scope: "console",
         label: "Remote metadata fallback polling",
-        description: "Fallback cadence for node and engine state when a live state stream is unavailable.",
+        description: "Fallback cadence for backend and engine state when a live state stream is unavailable.",
       },
       {
         key: "completion_sync_seconds", scope: "console",
@@ -16089,6 +16295,7 @@ class SettingsView {
     }
     select.value = String(activeBid);
     nodeField.appendChild(select);
+    enhanceChoiceSelect(select);
     const nodeNote = el("span", "timer-node-note");
     nodeNote.setAttribute("role", "status");
     nodeNote.setAttribute("aria-live", "polite");
@@ -16172,21 +16379,21 @@ class SettingsView {
               "Offline or incompatible backends will be left unchanged.",
             { confirmLabel: "Apply to all", destructive: false }))) {
             if (generation === this.renderGeneration && card.isConnected)
-              toast(savedMessage, "ok", 5000);
+              toast(savedMessage, "ok", TOAST_LONG);
             return;
           }
           const { updated, failed } = await propagateTimerSetting(targets, spec.key, value);
           if (generation !== this.renderGeneration || !card.isConnected) return;
           paint();
           if (!failed.length) {
-            toast(`${savedMessage} · also updated ${updated.join(", ")}`, "ok", 6500);
+            toast(`${savedMessage} · also updated ${updated.join(", ")}`, "ok", TOAST_LONG);
           } else {
             const success = updated.length ? ` · also updated ${updated.join(", ")}` : "";
-            toast(`${savedMessage}${success} · failed: ${failed.join("; ")}`, "error", 9000);
+            toast(`${savedMessage}${success} · failed: ${failed.join("; ")}`, "error", TOAST_LONG);
           }
         } catch (error) {
           if (generation === this.renderGeneration && card.isConnected)
-            toast(`${node ? node.name : "This instance"}: ${error.message}`, "error", 7000);
+            toast(`${node ? node.name : "This instance"}: ${error.message}`, "error", TOAST_LONG);
         } finally {
           record.saving = false;
           if (generation === this.renderGeneration && card.isConnected) paint();
@@ -16218,7 +16425,7 @@ class SettingsView {
       const confirmed = await modalConfirm(
         "Reset timers everywhere?",
         `This will reset all six timer values on ${scope}: ` +
-          `${targets.map(target => target.name).join(", ")}.\n\nEach node will use the ` +
+          `${targets.map(target => target.name).join(", ")}.\n\nEach backend will use the ` +
           "defaults advertised by its installed Puppy version. Offline or incompatible " +
           "backends will not be changed.",
         { confirmLabel: "Reset all", destructive: false });
@@ -16230,15 +16437,15 @@ class SettingsView {
         if (localUpdated) startRemotePolling();
         if (generation !== this.renderGeneration || !card.isConnected) return;
         if (!failed.length) {
-          toast(`Timer defaults restored on ${updated.join(", ")}`, "ok", 7000);
+          toast(`Timer defaults restored on ${updated.join(", ")}`, "ok", TOAST_LONG);
         } else {
           const prefix = updated.length ?
             `Timer defaults restored on ${updated.join(", ")} · ` : "Timer reset ";
-          toast(`${prefix}failed: ${failed.join("; ")}`, "error", 10000);
+          toast(`${prefix}failed: ${failed.join("; ")}`, "error", TOAST_LONG);
         }
       } catch (error) {
         if (generation === this.renderGeneration && card.isConnected)
-          toast(`Timer reset failed: ${error.message}`, "error", 8000);
+          toast(`Timer reset failed: ${error.message}`, "error", TOAST_LONG);
       } finally {
         resetting = false;
         if (generation === this.renderGeneration && card.isConnected) paint();
@@ -16274,16 +16481,15 @@ class SettingsView {
       const availability = activeBid ? remoteAvailability(activeBid) : "ok";
       const current = activeBid ? state.remoteTimers[activeBid] : state.timers;
       nodeNote.classList.toggle("bad", !supported || availability === "bad");
-      if (!supported) nodeNote.textContent = "Backend upgrade required for timer settings.";
+      if (!supported) nodeNote.textContent = "Backend upgrade required for timer settings";
       else if (loading.has(activeBid)) nodeNote.textContent = "Loading timer settings…";
-      else if (availability === "bad") nodeNote.textContent = current ?
-        "Backend unavailable · showing last known values." : "Backend unavailable.";
-      else if (availability !== "ok") nodeNote.textContent = current ?
-        "Checking backend · showing last known values." : "Checking backend…";
+      else if (availability !== "ok")
+        nodeNote.textContent = backendStateNote(availability, !!current, "timers");
       else if (!current) nodeNote.textContent = "Waiting for timer settings…";
-      else nodeNote.textContent = `Engine timers stored on ${node ? node.name : "this instance"}.`;
+      else nodeNote.textContent = `Engine timers stored on ${node ? node.name : "this instance"}`;
 
       select.disabled = resetting;
+      refreshChoiceSelect(select);
       resetButton.disabled = resetting || rows.some(record => record.saving);
       resetButton.textContent = resetting ? "Resetting…" : "Reset all to defaults";
 
@@ -16341,6 +16547,7 @@ class SettingsView {
       select.appendChild(option);
     }
     nodeField.appendChild(select);
+    enhanceChoiceSelect(select);
     card.appendChild(nodeField);
 
     const customSection = el("section", "system-prompt-section");
@@ -16383,8 +16590,8 @@ class SettingsView {
     const browserCopy = el("div", "system-prompt-section-copy");
     browserCopy.appendChild(el("h3", "", "Browser guidance"));
     const browserNote = el("p", "",
-      "Sent to every model turn on backends where Browser is enabled; it is not sent " +
-      "on backends where Browser is off.");
+      "Sent to every model turn on backends where the browser is enabled; it is not sent " +
+      "on backends where it is off.");
     browserCopy.appendChild(browserNote);
     const browserReset = el("button", "btn btn-sm btn-ghost system-prompt-reset",
       "Reset to default");
@@ -16404,8 +16611,8 @@ class SettingsView {
     const terminalCopy = el("div", "system-prompt-section-copy");
     terminalCopy.appendChild(el("h3", "", "Terminal guidance"));
     const terminalNote = el("p", "",
-      "Sent only when this backend offers shared Terminal tools; it is not sent " +
-      "when Terminal is unavailable.");
+      "Sent only when this backend offers shared terminal tools; it is not sent " +
+      "when the terminal is unavailable.");
     terminalCopy.appendChild(terminalNote);
     const terminalReset = el("button", "btn btn-sm btn-ghost system-prompt-reset",
       "Reset to default");
@@ -16426,7 +16633,7 @@ class SettingsView {
     spawnCopy.appendChild(el("h3", "", "Spawned agent guidance"));
     const spawnNote = el("p", "",
       "Sent with every model turn on this backend; it governs when the agent " +
-      "may delegate one-shot spawned agents to Puppy's nodes.");
+      "may delegate one-shot spawned agents to Puppy's backends.");
     spawnCopy.appendChild(spawnNote);
     const spawnReset = el("button", "btn btn-sm btn-ghost system-prompt-reset",
       "Reset to default");
@@ -16556,7 +16763,7 @@ class SettingsView {
         terminalText.removeAttribute("maxlength");
         spawnText.removeAttribute("maxlength");
         save.disabled = true;
-        status.textContent = "Backend upgrade required for system prompt settings.";
+        status.textContent = "Backend upgrade required for system prompt settings";
       } else if (!record || record.loading) {
         custom.value = remoteText.value = browserText.value =
           terminalText.value = spawnText.value = "";
@@ -16567,7 +16774,7 @@ class SettingsView {
           terminalText.value = spawnText.value = "";
         save.disabled = false;
         save.textContent = "Retry";
-        status.textContent = record.error || "Prompt settings unavailable.";
+        status.textContent = record.error || "Prompt settings unavailable";
         status.classList.add("bad");
       } else {
         custom.maxLength = remoteText.maxLength = browserText.maxLength =
@@ -16581,16 +16788,14 @@ class SettingsView {
         if (document.activeElement !== terminalText)
           terminalText.value = record.terminalDraft;
         terminalText.placeholder = record.terminalSupported ? "" :
-          "Upgrade this backend to configure Terminal guidance";
+          "Upgrade this backend to configure terminal guidance";
         if (document.activeElement !== spawnText)
           spawnText.value = record.spawnDraft;
         spawnText.placeholder = record.spawnSupported ? "" :
           "Upgrade this backend to configure spawned agent guidance";
         save.textContent = record.saving ? "Saving…" : "Save prompt";
         if (unavailable) {
-          status.textContent = backendStatus === "bad" ?
-            "Backend unavailable · showing last known prompt settings." :
-            "Checking backend · showing last known prompt settings.";
+          status.textContent = backendStateNote(backendStatus, true, "prompt settings");
           status.classList.add("bad");
         } else if (record.error) {
           status.textContent = record.error;
@@ -16599,9 +16804,9 @@ class SettingsView {
           status.textContent = "Unsaved changes";
           status.classList.add("dirty");
         } else if (record.saved) {
-          status.textContent = "Saved for new turns.";
+          status.textContent = "Saved for new turns";
         } else {
-          status.textContent = `Up to ${record.maxChars.toLocaleString()} characters per field.`;
+          status.textContent = `Up to ${record.maxChars.toLocaleString()} characters per field`;
         }
       }
     };
@@ -16662,6 +16867,14 @@ class SettingsView {
     browserText.oninput = edited;
     terminalText.oninput = edited;
     spawnText.oninput = edited;
+    /* the multi-line editor contract: Ctrl/Cmd+Enter saves, as in agent notes */
+    for (const area of [custom, remoteText, browserText, terminalText, spawnText])
+      area.addEventListener("keydown", event => {
+        if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !save.disabled) {
+          event.preventDefault();
+          save.click();
+        }
+      });
     remoteReset.onclick = () => {
       const record = records.get(activeBid);
       if (!record || !record.loaded || record.saving ||
@@ -16729,7 +16942,7 @@ class SettingsView {
         record.saving = false;
         record.error = error.message || "Could not save prompt settings";
         records.set(bid, record);
-        toast(`${node ? node.name : "Backend"}: ${record.error}`, "error", 7000);
+        toast(`${node ? node.name : "Backend"}: ${record.error}`, "error", TOAST_LONG);
       }
       if (bid === activeBid) paint();
     };
@@ -16737,6 +16950,7 @@ class SettingsView {
     const preferred = Number(this.systemPromptBid) || 0;
     if (nodes.some(node => node.bid === preferred)) activeBid = preferred;
     select.value = String(activeBid);
+    refreshChoiceSelect(select);
     this.systemPromptSync = paint;
     paint();
     if (!records.has(activeBid)) Promise.resolve().then(() => load());
@@ -16784,6 +16998,7 @@ class SettingsView {
        than briefly enabling a button from an arbitrarily old ready result. */
     this.upgradeReadiness.clear();
     this.localEngineGroup = null;
+    this.notifyBackendsSync = null;
     this.systemPromptSync = null;
     this.timerSettingsSync = null;
 
@@ -16823,8 +17038,9 @@ class SettingsView {
           <small id="set-browser-share-note">Shares non-partitioned cookies and best-effort
             localStorage captured from visited pages across browsers and restarts. It does not
             copy partitioned cookies, IndexedDB, sessionStorage, or service workers. This
-            node-local store is excluded from backups.</small></span>
+            backend-local store is excluded from backups.</small></span>
       </label>
+      <p class="help instance-switch-note">The two switches apply immediately. Every other field on this card waits for Save.</p>
       <div class="bind-fields">
         <label>Bind IP<input type="text" id="set-bind" value="${esc(settings.web.host)}"
           inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
@@ -16882,7 +17098,8 @@ class SettingsView {
         data-uptime-sampled-at="${uptimeSampledAt}">${esc(formatUptime(settings.uptime_seconds))}</span></div>
       <div class="settings-actions">
         <button class="btn btn-pri btn-sm" id="set-save">Save</button>
-        <button class="btn btn-sm btn-ghost" id="set-logout">Log out</button>
+        <button class="btn btn-sm btn-ghost" id="set-logout">Sign out</button>
+        <span class="help settings-status" id="set-status" role="status" aria-live="polite"></span>
       </div>
 `;
     this.inner.appendChild(c1);
@@ -16905,6 +17122,19 @@ class SettingsView {
     const autoPanel = c1.querySelector("#set-cert-auto-panel");
     const customPanel = c1.querySelector("#set-cert-custom-panel");
     certificateAuto.disabled = !settings.web.openssl_available && !autoIdentity.available;
+    /* the same "Unsaved changes" the System prompt card shows, so what Save
+       still has to do is visible before it is pressed */
+    const statusEl = c1.querySelector("#set-status");
+    const settingsSnapshot = () => [...c1.querySelectorAll(
+      "#set-name,#set-cwd,#set-term,#set-bind,#set-port,#set-tls-cert,#set-tls-key")]
+      .map(field => field.value).join("\u0000") + `|${selectedScheme}|${selectedCertificateSource}`;
+    const savedSnapshot = settingsSnapshot();
+    const paintSettingsStatus = () => {
+      const dirty = settingsSnapshot() !== savedSnapshot;
+      statusEl.textContent = dirty ? "Unsaved changes" : "";
+      statusEl.classList.toggle("dirty", dirty);
+    };
+    c1.addEventListener("input", paintSettingsStatus);
     const paintTransport = () => {
       const secure = selectedScheme === "https";
       protocolHttp.classList.toggle("on", !secure);
@@ -16919,6 +17149,7 @@ class SettingsView {
       certificateCustom.setAttribute("aria-pressed", String(!automatic));
       autoPanel.classList.toggle("hidden", !automatic);
       customPanel.classList.toggle("hidden", automatic);
+      paintSettingsStatus();
     };
     protocolHttp.onclick = () => { selectedScheme = "http"; paintTransport(); };
     protocolHttps.onclick = () => {
@@ -17011,7 +17242,8 @@ class SettingsView {
           ? fmtEndpoint(proposedBind, proposedPort) : "the proposed endpoint"} directly. ` +
         `Only after that succeeds will it save ${fmtListenerEndpoint(proposedListener)} ` +
         `and queue a graceful restart.\n\n` +
-        "Active turns are allowed to finish, then this page reconnects automatically."))) return;
+        "Active turns are allowed to finish, then this page reconnects automatically.",
+        { confirmLabel: listenerChanged ? "Change and restart" : "Restart" }))) return;
       saveButton.disabled = true;
       if (activateButton) activateButton.disabled = true;
       saveButton.textContent = endpointProofNeeded ? "Verifying…" : "Saving…";
@@ -17078,7 +17310,7 @@ class SettingsView {
         }
         await refreshState();
         await this.render();
-        toast("Saved", "ok");
+        toast("Instance settings saved", "ok");
       } catch (e) {
         if (bindCommit) {
           const activation = bindCommit.restart_required
@@ -17125,10 +17357,7 @@ class SettingsView {
     c1.querySelector("#set-save").onclick = () => saveSettings(false);
     const activateButton = c1.querySelector("#set-activate");
     if (activateButton) activateButton.onclick = () => saveSettings(true);
-    c1.querySelector("#set-logout").onclick = async () => {
-      await api(0, "auth/logout", { method: "POST" });
-      location.reload();
-    };
+    c1.querySelector("#set-logout").onclick = signOut;
 
     /* engines */
     const c2 = el("div", "card");
@@ -17243,8 +17472,8 @@ class SettingsView {
           <span class="be-auto-label">Enabled</span>
         </label>
       </div>
-      <p class="usage-refresh-copy">When a session finishes its work — its prompt and
-        anything queued behind it — run this command on a backend: play a sound, ping your home
+      <p class="usage-refresh-copy">When a session finishes its work, including anything queued
+        behind its prompt, run this command on a backend: play a sound, ping your home
         automation, anything. Arm or silence it any time with the bell in the sidebar footer.</p>
       <div class="notify-fields">
         <label>Run on<select id="nf-backend" aria-label="Backend the command runs on"></select></label>
@@ -17258,8 +17487,9 @@ class SettingsView {
         <span class="mono-inline">{duration_hms}</span> the same span as a clock
         (<span class="mono-inline">9:59</span>, <span class="mono-inline">10:00</span>,
         <span class="mono-inline">1:00:00</span>).</p>
-      <p class="usage-refresh-copy">The switch and sidebar bell control the same enabled state.
-        With no command, completions do nothing and the bell stays hidden.</p>
+      <p class="usage-refresh-copy">The switch and sidebar bell control the same enabled state and
+        apply immediately; the backend and command wait for Save. With no command, completions do
+        nothing and the bell stays hidden.</p>
       <div class="notify-actions">
         <button class="btn btn-pri btn-sm" id="nf-save">Save</button>
         <button class="btn btn-sm" id="nf-test">Test</button>
@@ -17269,30 +17499,53 @@ class SettingsView {
     const nfCmd = notifyCard.querySelector("#nf-cmd");
     const nfEnabled = notifyCard.querySelector("#nf-enabled");
     const nfNote = notifyCard.querySelector("#nf-note");
-    const nfLocal = document.createElement("option");
-    nfLocal.value = "0";
-    nfLocal.textContent = `${backendName(0)} (local)`;
-    nfBackend.appendChild(nfLocal);
-    for (const b of state.backends) {
-      const option = document.createElement("option");
-      option.value = String(b.id);
-      const capable = Array.isArray(b.capabilities) && b.capabilities.includes("notify-exec");
-      option.textContent = b.name + (capable ? "" : " — upgrade to enable");
-      option.disabled = !capable;
-      nfBackend.appendChild(option);
-    }
+    let notifyNodeSignature = "";
+    this.notifyBackendsSync = () => {
+      const signature = JSON.stringify([backendName(0), state.backends.map(b =>
+        [b.id, b.name, b.capabilities])]);
+      if (signature === notifyNodeSignature) return;
+      notifyNodeSignature = signature;
+      const selected = nfBackend.value || "0";
+      nfBackend.replaceChildren();
+      const nfLocal = document.createElement("option");
+      nfLocal.value = "0";
+      nfLocal.textContent = `${backendName(0)} (local)`;
+      nfBackend.appendChild(nfLocal);
+      for (const b of state.backends) {
+        const option = document.createElement("option");
+        option.value = String(b.id);
+        const capable = Array.isArray(b.capabilities) && b.capabilities.includes("notify-exec");
+        option.textContent = b.name + (capable ? "" : " · upgrade to enable");
+        option.disabled = !capable;
+        nfBackend.appendChild(option);
+      }
+      nfBackend.value = [...nfBackend.options].some(option => option.value === selected) ? selected : "0";
+      refreshChoiceSelect(nfBackend);
+    };
+    this.notifyBackendsSync();
     this.inner.appendChild(notifyCard);
     syncBell();
     enhanceChoiceSelect(nfBackend);
-    const nfNoteSet = (text, bad = false) => {
+    const nfNoteSet = (text, bad = false, dirty = false) => {
       nfNote.textContent = text;
       nfNote.classList.toggle("bad", !!bad);
+      nfNote.classList.toggle("dirty", !!dirty);
     };
+    let nfSaved = null;
+    const nfSnapshot = () => `${nfBackend.value}|${nfCmd.value}`;
+    const nfPaintDirty = () => {
+      if (nfSaved === null) return;
+      if (nfSnapshot() !== nfSaved) nfNoteSet("Unsaved changes", false, true);
+      else if (nfNote.classList.contains("dirty")) nfNoteSet("");
+    };
+    nfCmd.addEventListener("input", nfPaintDirty);
+    nfBackend.addEventListener("change", nfPaintDirty);
     api(0, "notify").then((r) => {
       nfCmd.value = r.settings.command || "";
       const have = [...nfBackend.options].some(o => o.value === String(r.settings.backend));
       nfBackend.value = have ? String(r.settings.backend) : "0";
       refreshChoiceSelect(nfBackend);
+      nfSaved = nfSnapshot();
       state.notify = { configured: !!(r.settings.command || "").trim(),
                        enabled: !!r.settings.enabled };
       syncBell();
@@ -17323,6 +17576,7 @@ class SettingsView {
         state.notify = { configured: !!(r.settings.command || "").trim(),
                          enabled: !!r.settings.enabled };
         syncBell();
+        nfSaved = nfSnapshot();
         nfNoteSet("Saved");
         toast(state.notify.configured ? "Completion alert saved" :
           "Completion alert command cleared", "ok");
@@ -17363,11 +17617,12 @@ class SettingsView {
         </label>
         <label class="be-auto be-auto-add full">
           <input type="checkbox" id="be-browser"
-            aria-label="Turn on the managed browser on this backend once it is added">
+            aria-label="Enable the managed browser on this backend once it is added">
           <span class="be-auto-track" aria-hidden="true"><span></span></span>
           <span class="be-auto-copy"><span>Managed browser</span>
             <small>Enabled once the backend is added, if that backend supports one</small></span>
         </label>
+        <p class="form-error full hidden" role="alert"></p>
         <div class="full"><button class="btn btn-pri btn-sm" id="be-add">Add backend</button></div>
       </div>`;
     const addUrlEditor = backendUrlEditor(c3.querySelector("#be-urls"));
@@ -17421,7 +17676,7 @@ class SettingsView {
             const current = state.backends.find(item => item.id === b.id);
             if (current) current.auto_upgrade = previous;
             b.auto_upgrade = previous;
-            toast(`${b.name}: ${error.message}`, "error", 6500);
+            toast(`${b.name}: ${error.message}`, "error", TOAST_LONG);
           } finally {
             autoRecord.saving = false;
             this.syncBackendAutoToggles();
@@ -17483,7 +17738,7 @@ class SettingsView {
             sharedRoot.title =
               "Shares non-partitioned cookies and best-effort localStorage captured from " +
               "visited pages across browsers and restarts. It does not copy partitioned " +
-              "cookies, IndexedDB, sessionStorage, or service workers. This node-local " +
+              "cookies, IndexedDB, sessionStorage, or service workers. This backend-local " +
               "store is excluded from backups.";
             shared = { input: sharedInput, root: sharedRoot };
           }
@@ -17566,7 +17821,8 @@ class SettingsView {
         const rm = el("button", "btn btn-danger btn-sm", "Remove");
         rm.onclick = async () => {
           const addresses = configuredBackendUrls(b).join(", ");
-          if (!(await modalConfirm("Remove backend?", addresses, { subject: b.name }))) return;
+          if (!(await modalConfirm("Remove backend?", addresses,
+              { subject: b.name, confirmLabel: "Remove", destructive: true }))) return;
           await api(0, `backends/${b.id}`, { method: "DELETE" });
           discardBackendRecord(b.id);
           if (this.inner.isConnected) await this.render();
@@ -17580,7 +17836,16 @@ class SettingsView {
     this.inner.insertBefore(c3, c2);
     renderBes();
     this.syncUpgradeButtons();
-    c3.querySelector("#be-add").onclick = async () => {
+    const addButton = c3.querySelector("#be-add");
+    const addError = c3.querySelector(".backend-add-form .form-error");
+    const setAddError = text => {
+      addError.textContent = text || "";
+      addError.classList.toggle("hidden", !text);
+    };
+    addButton.onclick = async () => {
+      setAddError("");
+      addButton.disabled = true;
+      addButton.textContent = "Adding…";
       try {
         let paired = {};
         const raw = c3.querySelector("#be-pairing").value.trim();
@@ -17617,7 +17882,11 @@ class SettingsView {
            in place - it is a separate setting, not part of the connection. */
         if (wantBrowser) await enableAddedBackendBrowser(added);
         if (this.inner.isConnected) await this.render();
-      } catch (e) { toast(e.message, "error"); }
+      } catch (e) {
+        setAddError(e.message);
+      } finally {
+        if (addButton.isConnected) { addButton.disabled = false; addButton.textContent = "Add backend"; }
+      }
     };
     /* security */
     const c4 = el("div", "card");
@@ -17640,7 +17909,7 @@ class SettingsView {
     /* backup and restore */
     const c5 = el("div", "card snapshot-card");
     c5.innerHTML = `<h2>Backup &amp; restore</h2>
-      <p class="snapshot-copy">A backup restores this instance’s settings, accounts, backend
+      <p class="snapshot-copy">A backup restores this instance's settings, accounts, backend
         connections, local sessions and transcripts, uploads, scratch workspaces, tabs, and drafts.</p>
       <p class="snapshot-copy">Remote sessions remain on their registered backends. Ordinary project
         directories and engine sign-ins/native caches remain on their machines.</p>
@@ -17671,7 +17940,7 @@ class SettingsView {
         link.remove();
         toast(`Backup ready · ${prepared.sessions} sessions · ${fmtBytes(prepared.size)}`, "ok");
       } catch (error) {
-        toast(error.message, "error", 7000);
+        toast(error.message, "error", TOAST_LONG);
       } finally {
         if (exportButton.isConnected) {
           exportButton.disabled = false;
@@ -17685,8 +17954,9 @@ class SettingsView {
       const file = fileInput.files && fileInput.files[0];
       if (!file) return;
       const confirmed = await modalConfirm("Restore Puppy backup?",
-        `This replaces current Puppy settings and sessions with “${file.name}”.\n\n` +
-        "Running turns, queued messages, and terminals must be stopped first.");
+        `This replaces current Puppy settings and sessions with "${file.name}".\n\n` +
+        "Running turns, queued messages, and terminals must be stopped first.",
+        { confirmLabel: "Restore", destructive: true });
       if (!confirmed) { fileInput.value = ""; return; }
       exportButton.disabled = true;
       importButton.disabled = true;
@@ -17702,7 +17972,7 @@ class SettingsView {
         restoreBrowserState(result.ui || {});
         location.reload();
       } catch (error) {
-        toast(error.message, "error", 8000);
+        toast(error.message, "error", TOAST_LONG);
         if (importButton.isConnected) {
           exportButton.disabled = false;
           importButton.disabled = false;
@@ -17718,37 +17988,74 @@ class SettingsView {
 }
 
 /* ================= modals ================= */
+/* One frame for every dialog. It owns the stack, so only the topmost dialog
+   answers Escape (a confirm raised over an editor closes alone), keeps Tab
+   inside the open dialog, gives focus back to the control that opened it, and
+   closes on a backdrop press. Callers place their own first focus: a field
+   for a form, the safe or the primary button for a confirm. */
+const modalStack = [];
+const MODAL_FOCUSABLE = 'a[href],button:not([disabled]),input:not([disabled]):not([type=hidden]),' +
+  'select:not([disabled]):not(.choice-native),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
 function modal(html, className = "") {
   const back = el("div", "modal-backdrop");
   const m = el("div", "modal" + (className ? " " + className : ""));
+  m.setAttribute("role", "dialog");
+  m.setAttribute("aria-modal", "true");
   m.innerHTML = html;
   back.appendChild(m);
   $("modal-root").appendChild(back);
   m.querySelectorAll("select").forEach(select => enhanceChoiceSelect(select));
+  const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   let closed = false;
   const closeListeners = new Set();
+  const record = { m, close: null };
   const close = () => {
     if (closed) return;
     closed = true;
     closeChoiceMenu();
+    const at = modalStack.indexOf(record);
+    if (at >= 0) modalStack.splice(at, 1);
     back.remove();
-    document.removeEventListener("keydown", escH);
     for (const listener of closeListeners) {
       try { listener(); } catch (error) { console.warn("modal close listener failed", error); }
     }
     closeListeners.clear();
+    /* back to where the dialog was opened from - the button in the sidebar,
+       the row in a list, or the field in the dialog below this one */
+    if (opener && opener.isConnected && opener !== document.body &&
+        (!document.activeElement || document.activeElement === document.body ||
+         !document.activeElement.isConnected)) {
+      try { opener.focus({ preventScroll: true }); } catch (error) { /* not focusable any more */ }
+    }
   };
+  record.close = close;
+  modalStack.push(record);
   const onClose = listener => {
     if (closed) listener();
     else closeListeners.add(listener);
   };
   back.addEventListener("mousedown", (e) => { if (e.target === back) close(); });
-  function escH(e) {
-    if (e.key === "Escape" && !e.defaultPrevented && !openChoiceControl) close();
-  }
-  document.addEventListener("keydown", escH);
   return { m, close, onClose };
 }
+document.addEventListener("keydown", (e) => {
+  const top = modalStack[modalStack.length - 1];
+  if (!top) return;
+  if (e.key === "Escape") {
+    /* a list inside the dialog (directory picker, choice menu) takes the
+       first Escape itself and marks it handled */
+    if (!e.defaultPrevented && !openChoiceControl) top.close();
+    return;
+  }
+  if (e.key !== "Tab" || openChoiceControl) return;
+  const focusable = [...top.m.querySelectorAll(MODAL_FOCUSABLE)]
+    .filter(node => node.offsetParent !== null || node === document.activeElement);
+  if (!focusable.length) { e.preventDefault(); return; }
+  const first = focusable[0], last = focusable[focusable.length - 1];
+  const active = document.activeElement;
+  if (!top.m.contains(active)) { e.preventDefault(); (e.shiftKey ? last : first).focus(); return; }
+  if (!e.shiftKey && active === last) { e.preventDefault(); first.focus(); }
+  else if (e.shiftKey && active === first) { e.preventDefault(); last.focus(); }
+});
 
 /* ---- modal copy ----
    The thing a confirm is about (a task or backend name) stands on its own
@@ -17772,14 +18079,19 @@ function modalCopyHtml(text) {
     `<p class="modal-copy">${part.split("\n").map(line => esc(line)).join("<br>")}</p>`).join("");
 }
 
+/* A confirm names its verb: `confirmLabel` should always be given (the
+   title's first word is only the fallback), and red is opt-in - `destructive`
+   marks what cannot be undone, so the solid red button keeps meaning exactly
+   that. Focus starts on Cancel for a destructive confirm and on the action
+   for an ordinary one, so Enter does the safe thing in both. */
 function modalConfirm(title, text, options = {}) {
   return new Promise((resolve) => {
-    const confirmLabel = typeof options.confirmLabel === "string" ?
-      options.confirmLabel : "Confirm";
-    const destructive = options.destructive !== false;
+    const confirmLabel = typeof options.confirmLabel === "string" && options.confirmLabel.trim() ?
+      options.confirmLabel : (String(title).replace(/\?$/, "").trim().split(/\s+/)[0] || "Confirm");
+    const destructive = options.destructive === true;
     const actionClass = destructive ? "btn-danger btn-solid" : "btn-pri";
     const { m, close, onClose } = modal(`<h2>${esc(title)}</h2>${modalSubjectHtml(options.subject)}${modalCopyHtml(text)}
-      <div class="m-btns"><button class="btn" id="mc-no">Cancel</button><button class="btn ${actionClass}" id="mc-yes">${esc(confirmLabel)}</button></div>`);
+      <div class="m-btns"><button type="button" class="btn" id="mc-no">Cancel</button><button type="button" class="btn ${actionClass}" id="mc-yes">${esc(confirmLabel)}</button></div>`);
     let settled = false;
     const finish = value => {
       if (settled) return;
@@ -17794,22 +18106,28 @@ function modalConfirm(title, text, options = {}) {
     });
     m.querySelector("#mc-no").onclick = () => finish(false);
     m.querySelector("#mc-yes").onclick = () => finish(true);
+    m.querySelector(destructive ? "#mc-no" : "#mc-yes").focus();
   });
 }
 
 function modalNotice(title, text) {
   const { m, close } = modal(`<h2>${esc(title)}</h2>
     ${modalCopyHtml(text)}
-    <div class="m-btns"><button class="btn btn-pri" id="mn-ok">OK</button></div>`);
+    <div class="m-btns"><button type="button" class="btn btn-pri" id="mn-ok">OK</button></div>`);
   m.querySelector("#mn-ok").onclick = close;
+  m.querySelector("#mn-ok").focus();
 }
 
-function modalPrompt(title, hint, value) {
+/* A one-field prompt is a form: Enter submits it like every other dialog with
+   a text field, and the action names its verb (Rename, Apply) rather than OK. */
+function modalPrompt(title, hint, value, options = {}) {
   return new Promise((resolve) => {
+    const confirmLabel = typeof options.confirmLabel === "string" && options.confirmLabel ?
+      options.confirmLabel : "OK";
     const { m, close, onClose } = modal(`<h2>${esc(title)}</h2>
       ${hint ? modalCopyHtml(hint) : ""}
-      <input type="text" id="mp-val">
-      <div class="m-btns"><button class="btn" id="mp-no">Cancel</button><button class="btn btn-pri" id="mp-yes">OK</button></div>`);
+      <form id="mp-form"><input type="text" id="mp-val">
+      <div class="m-btns"><button type="button" class="btn" id="mp-no">Cancel</button><button type="submit" class="btn btn-pri" id="mp-yes">${esc(confirmLabel)}</button></div></form>`);
     const inp = m.querySelector("#mp-val");
     inp.value = value || ""; inp.focus(); inp.select();
     let settled = false;
@@ -17825,8 +18143,7 @@ function modalPrompt(title, hint, value) {
       resolve(null);
     });
     m.querySelector("#mp-no").onclick = () => done(null);
-    m.querySelector("#mp-yes").onclick = () => done(inp.value);
-    inp.addEventListener("keydown", (e) => { if (e.key === "Enter") done(inp.value); });
+    m.querySelector("#mp-form").onsubmit = (e) => { e.preventDefault(); done(inp.value); };
   });
 }
 
@@ -17853,7 +18170,7 @@ function modalEditBackend(backend, onSaved) {
           <textarea class="config-textarea" id="backend-edit-pairing" rows="3"
             placeholder="Paste new puppy-backend pairing output"></textarea></label>
         <p class="backend-edit-help full">Pairing JSON supplies the primary URL, token and certificate. Other entered URLs remain as fallbacks; the display name stays as entered.</p>
-        <p class="backend-edit-error full hidden" role="alert"></p>
+        <p class="form-error full hidden" role="alert"></p>
       </div>
       <div class="m-btns"><button type="button" class="btn" id="backend-edit-cancel">Cancel</button>
         <button type="submit" class="btn btn-pri" id="backend-edit-save">Save changes</button></div>
@@ -17867,7 +18184,7 @@ function modalEditBackend(backend, onSaved) {
   const pairing = m.querySelector("#backend-edit-pairing");
   const cancel = m.querySelector("#backend-edit-cancel");
   const save = m.querySelector("#backend-edit-save");
-  const error = m.querySelector(".backend-edit-error");
+  const error = m.querySelector(".form-error");
   name.value = backend.name || "";
   fingerprint.value = backend.tls_fingerprint || "";
 
@@ -17932,7 +18249,7 @@ function modalEditBackend(backend, onSaved) {
         setBusy(false);
         setError(caught.message || "Backend could not be updated");
       } else {
-        toast(caught.message || "Backend could not be updated", "error", 7000);
+        toast(caught.message || "Backend could not be updated", "error", TOAST_LONG);
       }
     }
   };
@@ -17991,11 +18308,11 @@ function modalEngineDefaults(bid, key, conversationChoices = null) {
     <form id="engine-defaults-form" aria-busy="true">
       <label>Permissions<select id="ed-permission" disabled></select></label>
       <label>Model<select id="ed-model" disabled></select></label>
-      <label class="hidden" id="ed-custom-wrap">Custom model<input id="ed-custom" spellcheck="false" maxlength="256"></label>
+      <label class="hidden" id="ed-custom-wrap">Custom model<input type="text" id="ed-custom" placeholder="Model ID" spellcheck="false" maxlength="256"></label>
       <label>Effort<select id="ed-effort" disabled></select></label>
       <p class="hint" id="ed-hint" role="status">Loading…</p>
-      <button type="button" class="btn btn-sm" id="ed-copy" disabled>Use this conversation’s choices</button>
-      <p class="backend-edit-error hidden" role="alert"></p>
+      <button type="button" class="btn btn-sm" id="ed-copy" disabled>Use this conversation's choices</button>
+      <p class="form-error hidden" role="alert"></p>
       <div class="m-btns">
         <button type="button" class="btn" id="ed-reset" disabled>Reset</button>
         <button type="button" class="btn" id="ed-cancel">Cancel</button>
@@ -18009,7 +18326,7 @@ function modalEngineDefaults(bid, key, conversationChoices = null) {
   const custom = m.querySelector("#ed-custom");
   const customWrap = m.querySelector("#ed-custom-wrap");
   const hint = m.querySelector("#ed-hint");
-  const error = m.querySelector(".backend-edit-error");
+  const error = m.querySelector(".form-error");
   const copy = m.querySelector("#ed-copy");
   const save = m.querySelector("#ed-save");
   const reset = m.querySelector("#ed-reset");
@@ -18079,7 +18396,7 @@ function modalEngineDefaults(bid, key, conversationChoices = null) {
       const data = await api(bid, path, { method: "PUT", body });
       remember(data);
       close();
-      toast(`${name} defaults saved on ${backendName(bid)}`, "ok");
+      toast(`${backendName(bid)}: ${name} defaults saved`, "ok");
     } catch (err) {
       if (m.isConnected) setError(err.message || "Defaults could not be saved");
       else toast(err.message || "Defaults could not be saved", "error");
@@ -18104,12 +18421,13 @@ function modalEngineDefaults(bid, key, conversationChoices = null) {
 async function modalNewSession(groupId = null) {
   const beOpts = [{ id: 0, name: backendName(0) }].concat(state.backends);
   const { m, close, onClose } = modal(`<h2>New session</h2>
+    <form id="ns-form">
     <label>Backend<select id="ns-be">${beOpts.map(b => {
       const offline = b.id && !backendConnectionAllowed(b.id);
       return `<option value="${b.id}"${offline ? " disabled" : ""}>` +
         `${esc(b.name)}${offline ? " (offline)" : ""}</option>`;
     }).join("")}</select></label>
-    <div class="engine-pick" id="ns-engines"></div>
+    <div class="engine-pick" id="ns-engines" role="group" aria-label="Engine"></div>
     <div class="field-lbl">Workspace
       <div class="workspace-pick" id="ns-workspace">
         <button type="button" class="wp sel" data-kind="directory" aria-pressed="true">
@@ -18129,7 +18447,7 @@ async function modalNewSession(groupId = null) {
       <div class="dirpick hidden" id="ns-dirs"></div>
       <label class="check new-session-mkdir"><input type="checkbox" id="ns-mkdir"> Create directory if missing</label>
     </div>
-    <p class="hint scratch-note hidden" id="ns-scratch-note">Puppy creates a private empty workspace in the host's temporary storage (normally /tmp). It survives Puppy restarts and is deleted with this session, but the host may clear it—commonly on reboot. The transcript is kept and Puppy can start a fresh workspace.</p>
+    <p class="hint scratch-note hidden" id="ns-scratch-note">Puppy creates a private empty workspace in the host's temporary storage (normally /tmp). It survives Puppy restarts and is deleted with this session, but the host may clear it, commonly on reboot. The transcript is kept and Puppy can start a fresh workspace.</p>
     <label>Name <span class="field-optional">(optional, auto from first message)</span><input type="text" id="ns-name"></label>
     <div class="field-row">
       <label>Model<select id="ns-model"></select></label>
@@ -18138,7 +18456,9 @@ async function modalNewSession(groupId = null) {
     </div>
     <label class="hidden" id="ns-model-custom-wrap">Custom model<input type="text" id="ns-model-custom" placeholder="Model ID"></label>
     <div class="field-lbl new-session-color">Color<div class="swatch-row" id="ns-colors"></div></div>
-    <div class="m-btns"><button class="btn" id="ns-cancel">Cancel</button><button class="btn btn-pri" id="ns-go">Start session</button></div>`,
+    <p class="form-error hidden" role="alert"></p>
+    <div class="m-btns"><button type="button" class="btn" id="ns-cancel">Cancel</button><button type="submit" class="btn btn-pri" id="ns-go">Start session</button></div>
+    </form>`,
     "new-session-modal");
 
   const beSel = m.querySelector("#ns-be");
@@ -18155,6 +18475,29 @@ async function modalNewSession(groupId = null) {
   const remoteButton = workspaceBox.querySelector('[data-kind="remote"]');
   const wsbeWrap = m.querySelector("#ns-wsbe-wrap");
   const wsbeSel = m.querySelector("#ns-wsbe");
+  /* the same inline error and busy treatment the backend editor and the New
+     task dialog give a form: a failure stays on the sheet beside its fields */
+  const form = m.querySelector("#ns-form");
+  const goButton = m.querySelector("#ns-go");
+  const formError = m.querySelector(".form-error");
+  const setError = text => {
+    formError.textContent = text || "";
+    formError.classList.toggle("hidden", !text);
+  };
+  let busyControls = [];
+  const setBusy = busy => {
+    form.setAttribute("aria-busy", busy ? "true" : "false");
+    if (busy) {
+      busyControls = [...form.querySelectorAll("input,textarea,select,button")]
+        .filter(control => !control.disabled);
+      for (const control of busyControls) { control.disabled = true; refreshChoiceSelect(control); }
+    } else {
+      for (const control of busyControls)
+        if (control.isConnected) { control.disabled = false; refreshChoiceSelect(control); }
+      busyControls = [];
+    }
+    goButton.textContent = busy ? "Starting…" : "Start session";
+  };
   let workspaceKind = "directory";
   modelSel.onchange = () => customWrap.classList.toggle("hidden", modelSel.value !== "__custom__");
 
@@ -18283,7 +18626,7 @@ async function modalNewSession(groupId = null) {
       }
     } catch (e) {
       if (sequence !== engineLoadSequence || parseInt(beSel.value, 10) !== bid) return;
-      toast("Backend unavailable: " + e.message, "error");
+      setError(`Backend unavailable · ${e.message}`);
       if (bid) {
         state.remoteEngineErrors[bid] = e.message;
         syncRemoteStateViews();
@@ -18306,12 +18649,7 @@ async function modalNewSession(groupId = null) {
     engines = Array.isArray(loaded) ? loaded : [];
     engBox.innerHTML = "";
     for (const e2 of engines) {
-      const card = el("div", "ep");
-      const icon = provSpec(e2.key);
-      card.dataset.key = e2.key;
-      card.innerHTML = `<div class="ep-ico prov ${icon.className}">${esc(icon.text)}</div>
-        <div class="ep-name">${esc(e2.label)}</div>
-        <div class="ep-sub">${engineStatusText(e2)}</div>`;
+      const card = engineCardNode(e2);
       card.onclick = () => pick(e2.key);
       engBox.appendChild(card);
     }
@@ -18322,7 +18660,10 @@ async function modalNewSession(groupId = null) {
 
   function pick(key, previous = null) {
     engine = key;
-    engBox.querySelectorAll(".ep").forEach(c => c.classList.toggle("sel", c.dataset.key === key));
+    engBox.querySelectorAll(".ep").forEach(c => {
+      c.classList.toggle("sel", c.dataset.key === key);
+      c.setAttribute("aria-pressed", String(c.dataset.key === key));
+    });
     const e2 = engines.find(x => x.key === key);
     const defaults = initialEngineConfig(e2);
     fillEngineChoice(permSel, e2 ? e2.permission_options : [],
@@ -18361,6 +18702,33 @@ async function modalNewSession(groupId = null) {
   };
   enginePayloadListeners.add(enginePayloadListener);
   onClose(() => enginePayloadListeners.delete(enginePayloadListener));
+  // Backend recovery and capability changes must also reach an already-open
+  // dialog. Preserve its choices and rebuild only when that catalog changes.
+  let nodeSignature = "";
+  const syncNodes = () => {
+    if (!m.isConnected) return;
+    const nodes = [{ id: 0, name: backendName(0) }].concat(state.backends);
+    const signature = JSON.stringify(nodes.map(node => [node.id, node.name,
+      !node.id || backendConnectionAllowed(node.id), node.capabilities, node.protocol]));
+    if (signature === nodeSignature) return;
+    nodeSignature = signature;
+    const selected = beSel.value;
+    beSel.replaceChildren();
+    for (const node of nodes) {
+      const offline = !!node.id && !backendConnectionAllowed(node.id);
+      const option = el("option", "", node.name + (offline ? " (offline)" : ""));
+      option.value = String(node.id);
+      option.disabled = offline;
+      beSel.appendChild(option);
+    }
+    beSel.value = nodes.some(node => String(node.id) === selected) ? selected : "0";
+    refreshChoiceSelect(beSel);
+    syncWorkspaceSupport();
+    if (beSel.value !== selected) loadEngines();
+  };
+  nodeStateListeners.add(syncNodes);
+  onClose(() => nodeStateListeners.delete(syncNodes));
+  syncNodes();
   beSel.onchange = () => { syncWorkspaceSupport(); loadEngines(); };
   syncWorkspaceSupport();
   await loadEngines();
@@ -18371,14 +18739,17 @@ async function modalNewSession(groupId = null) {
     parseInt(wsbeSel.value, 10) : parseInt(beSel.value, 10));
 
   m.querySelector("#ns-cancel").onclick = close;
-  m.querySelector("#ns-go").onclick = async () => {
+  form.onsubmit = async event => {
+    event.preventDefault();
     const bid = parseInt(beSel.value, 10);
-    if (!engine) { toast("Pick an engine", "error"); return; }
+    setError("");
+    if (!engine) { setError("Pick an engine"); return; }
     const shared = {
       engine, name: m.querySelector("#ns-name").value,
       model: modelSel.value === "__custom__" ? customInp.value.trim() : modelSel.value,
       effort: effortSel.value, permission_mode: permSel.value, color: nsColor,
     };
+    setBusy(true);
     try {
       if (workspaceKind === "remote") {
         const workspaceBackend = parseInt(wsbeSel.value, 10);
@@ -18392,7 +18763,7 @@ async function modalNewSession(groupId = null) {
         }, timeoutMs: 120000 });
         close();
         if (r.same_node)
-          toast("Both backends resolve to the same machine - using the directory directly");
+          toast("Both backends resolve to the same machine · using the directory directly");
         if (r.bid) await pollRemotes();
         openSessionTab(r.bid || 0, r.session.id, r.session, groupId);
         return;
@@ -18405,7 +18776,10 @@ async function modalNewSession(groupId = null) {
       close();
       if (bid) await pollRemotes();
       openSessionTab(bid, r.session.id, r.session, groupId);
-    } catch (e) { toast(e.message, "error"); }
+    } catch (e) {
+      if (m.isConnected) { setBusy(false); setError(e.message); }
+      else toast(e.message, "error");
+    }
   };
 }
 
@@ -18413,7 +18787,7 @@ async function modalNewSession(groupId = null) {
 function modalOpenSession(groupId = null) {
   const groups = [{ bid: 0, name: backendName(0), sessions: state.sessions }]
     .concat(state.backends.map(b => ({ bid: b.id, name: b.name, sessions: state.remoteSessions[b.id] || [] })));
-  let html = `<h2>Open session</h2><input type="text" id="os-filter" placeholder="Filter…"><div id="os-list" class="open-session-list"></div>`;
+  let html = `<h2>Open session</h2><input type="text" id="os-filter" placeholder="Filter sessions" aria-label="Filter sessions"><div id="os-list" class="open-session-list"></div>`;
   const { m, close } = modal(html);
   const list = m.querySelector("#os-list");
   const filterInp = m.querySelector("#os-filter");
@@ -18426,16 +18800,9 @@ function modalOpenSession(groupId = null) {
       if (!matches.length) continue;
       if (groups.length > 1) list.appendChild(el("div", "sess-group-title", g.name));
       for (const s of matches) {
-        const item = el("button", "sess-item");
-        const r1 = el("div", "si-row");
-        r1.appendChild(sessDot(s));
-        r1.appendChild(el("div", "si-name", (s.name || `Session ${s.id}`) + (s.archived ? " (archived)" : "")));
-        const r2 = el("div", "si-row sub");
-        r2.appendChild(provIcon(s.engine));
-        const workspace = el("div", "si-sub" + (s.workspace_missing ? " warn" : ""),
-          workspaceLabel(s));
-        workspace.setAttribute("aria-label", workspaceTitle(s));
-        r2.appendChild(workspace);
+        const item = el("button", "sess-item" + (s.archived ? " archived" : ""));
+        const { r1, r2 } = sessionRowRows(g.bid, s,
+          [s.archived ? el("span", "si-be node", "archived") : null]);
         item.appendChild(r1); item.appendChild(r2);
         item.onclick = () => { close(); openSessionTab(g.bid, s.id, s, groupId); };
         list.appendChild(item);
@@ -18465,9 +18832,9 @@ function modalWorkspaceLink(bid, session) {
     <p class="hint ws-nolink hidden">This console has no link record for this session,
     so it cannot sync it. The controller that created the link manages synchronization.</p>
     <div class="m-btns">
-      <button class="btn" id="wsl-close">Close</button>
-      <button class="btn hidden" id="wsl-term">Terminal</button>
-      <button class="btn btn-pri" id="wsl-sync">Sync now</button>
+      <button type="button" class="btn" id="wsl-close">Cancel</button>
+      <button type="button" class="btn hidden" id="wsl-term">Terminal</button>
+      <button type="button" class="btn btn-pri" id="wsl-sync">Sync now</button>
     </div>`, "ws-link-modal");
   const facts = m.querySelector(".ws-facts");
   const conflictWrap = m.querySelector(".ws-conflict-box");
@@ -18511,22 +18878,23 @@ function modalWorkspaceLink(bid, session) {
     fact("Runs on", link ? link.exec_name : backendName(bid));
     const st = link ? link.state : "";
     fact("State", stateText(st),
-      st === "conflict" ? "warn" : st === "error" ? "err" :
-      st === "ok" ? "ok" : "");
-    if (link && link.last_error) fact("Last error", link.last_error, "err");
+      st === "conflict" ? "warn" : st === "error" ? "bad" :
+      st === "ok" ? "ok" : st === "syncing" || st === "init" ? "busy" : "");
+    if (link && link.last_error) fact("Last error", link.last_error, "bad");
     if (link) fact("Last sync", link.last_sync_at ?
-      fmtTime(link.last_sync_at) + " · pass " + link.generation : "not yet");
+      fmtStamp(link.last_sync_at) + " · pass " + link.generation : "not yet");
     if (keeps && keeps.generations) {
-      const clear = el("button", "btn btn-sm wsf-clear", "Clear");
+      const clear = el("button", "btn btn-sm btn-danger wsf-clear", "Clear");
       clear.type = "button";
       clear.onclick = async () => {
         const live = linkForSession(bid, session.id);
         if (!live) return;
-        if (!await modalConfirm("Discard preserved versions",
+        if (!await modalConfirm("Discard preserved versions?",
             `This removes the ${keeps.generations} preserved losing version` +
             `${keeps.generations === 1 ? "" : "s"} of conflicted files ` +
             `(${fmtBytes(keeps.bytes)}).\n\nThey are the only copy of those ` +
-            `edits; the files in your workspace are not touched.`)) return;
+            `edits; the files in your workspace are not touched.`,
+            { confirmLabel: "Discard", destructive: true })) return;
         clear.disabled = true;
         try {
           const r = await api(0, `workspaces/${live.id}/keeps`, { method: "DELETE" });
@@ -18629,18 +18997,20 @@ function modalNewTerminal(groupId = null) {
   const beOpts = [{ id: 0, name: backendName(0) }]
     .concat(state.backends.filter(b => backendHasCapability(b, "terminal")));
   const { m, close } = modal(`<h2>New terminal</h2>
+    <form id="nt-form">
     <label>Backend<select id="nt-be">${beOpts.map(b => `<option value="${b.id}">${esc(b.name)}</option>`).join("")}</select></label>
-    <label>Command <span class="field-optional">(optional)</span><input type="text" id="nt-cmd" placeholder="Default shell — or e.g. ssh user@host"></label>
-    <div class="m-btns"><button class="btn" id="nt-cancel">Cancel</button><button class="btn btn-pri" id="nt-go">Open</button></div>`);
+    <label>Command <span class="field-optional">(optional)</span><input type="text" id="nt-cmd" placeholder="Default shell, or e.g. ssh user@host"></label>
+    <div class="m-btns"><button type="button" class="btn" id="nt-cancel">Cancel</button><button type="submit" class="btn btn-pri" id="nt-go">Open terminal</button></div>
+    </form>`);
   m.querySelector("#nt-cancel").onclick = close;
-  const go = () => {
+  m.querySelector("#nt-form").onsubmit = event => {
+    event.preventDefault();
     const bid = parseInt(m.querySelector("#nt-be").value, 10);
     const cmd = m.querySelector("#nt-cmd").value.trim();
     close();
     openTermTab(bid, cmd, groupId);
   };
-  m.querySelector("#nt-go").onclick = go;
-  m.querySelector("#nt-cmd").addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+  m.querySelector("#nt-cmd").focus();
 }
 
 /* new isolated browser */
@@ -18649,7 +19019,7 @@ function openBrowserFromMenu(groupId = null) {
     .concat(state.backends)
     .filter(node => browserEnabledFor(node.id));
   if (!nodes.length) {
-    toast("No backend has its browser enabled · see Settings", "error", 6000);
+    toast("No backend has its browser enabled · see Settings", "error", TOAST_LONG);
     openSettingsTab(groupId);
     return;
   }
@@ -18657,17 +19027,21 @@ function openBrowserFromMenu(groupId = null) {
     openNewBrowser(nodes[0].id, groupId);
     return;
   }
-  const { m, close } = modal(`<h2>Open browser</h2>
+  const { m, close } = modal(`<h2>New browser</h2>
+    <form id="nb-form">
     <label>Backend<select id="nb-be">${nodes.map(b =>
       `<option value="${b.id}">${esc(b.name)}</option>`).join("")}</select></label>
-    <div class="m-btns"><button class="btn" id="nb-cancel">Cancel</button>
-    <button class="btn btn-pri" id="nb-go">Open</button></div>`);
+    <div class="m-btns"><button type="button" class="btn" id="nb-cancel">Cancel</button>
+    <button type="submit" class="btn btn-pri" id="nb-go">Open browser</button></div>
+    </form>`);
   m.querySelector("#nb-cancel").onclick = close;
-  m.querySelector("#nb-go").onclick = () => {
+  m.querySelector("#nb-form").onsubmit = event => {
+    event.preventDefault();
     const bid = parseInt(m.querySelector("#nb-be").value, 10) || 0;
     close();
     openNewBrowser(bid, groupId);
   };
+  m.querySelector("#nb-go").focus();
 }
 
 /* switch engine */
@@ -18685,31 +19059,30 @@ function modalSwitchEngine(view) {
     native session seeded with a handoff of the conversation so far. Same-engine reseed is allowed
     (rebuilds context from the transcript).</p>
     <p class="modal-copy">${canQueue ? `While a turn runs or prompts wait, the switch joins the
-    queue and applies in order - prompts sent before it keep the engine they were written under.` :
+    queue and applies in order; prompts sent before it keep the engine they were written under.` :
     `Queued prompts remain; pending model and reasoning changes are cleared because they belong
     to the previous engine configuration.`}</p>
-    <div class="engine-pick" id="se-engines"></div>
-    <div class="m-btns"><button class="btn" id="se-cancel">Cancel</button><button class="btn btn-pri" id="se-go">Switch</button></div>`);
+    <form id="se-form">
+    <div class="engine-pick" id="se-engines" role="group" aria-label="Engine"></div>
+    <div class="m-btns"><button type="button" class="btn" id="se-cancel">Cancel</button><button type="submit" class="btn btn-pri" id="se-go">Switch</button></div>
+    </form>`);
   const box = m.querySelector("#se-engines");
   let pick = (engines.find(engine => engine.key === (pendingEngine || s.engine)) ||
     engines[0] || {}).key || "";
   const render = () => {
     box.innerHTML = "";
     for (const e2 of engines) {
-      const card = el("div", "ep" + (pick === e2.key ? " sel" : ""));
-      const icon = provSpec(e2.key);
       const sub = e2.key === pendingEngine ? "Switch queued" :
         e2.key === s.engine ? "Current (reseed)" : engineStatusText(e2);
-      card.innerHTML = `<div class="ep-ico prov ${icon.className}">${esc(icon.text)}</div>
-        <div class="ep-name">${esc(e2.label)}</div>
-        <div class="ep-sub">${esc(sub)}</div>`;
+      const card = engineCardNode(e2, { sub, selected: pick === e2.key });
       card.onclick = () => { pick = e2.key; render(); };
       box.appendChild(card);
     }
   };
   render();
   m.querySelector("#se-cancel").onclick = close;
-  m.querySelector("#se-go").onclick = async () => {
+  m.querySelector("#se-form").onsubmit = async event => {
+    event.preventDefault();
     try {
       const r = await api(view.tab.bid, `sessions/${view.tab.sid}/switch`, { method: "POST", body: { engine: pick } });
       view.session = r.session;
@@ -18782,7 +19155,7 @@ async function openSessionReference(ref, seq = 0) {
   try {
     const data = await api(0, "session-links/catalog");
     const row = data.sessions.find(item => item.ref === ref);
-    if (!row) throw new Error("That session is deleted or its node is unavailable");
+    if (!row) throw new Error("That session is deleted or its backend is unavailable");
     const payload = await api(row.bid, `sessions/${row.id}`);
     openSessionTab(row.bid, row.id, payload.session);
     const view = sessionViewFor(row.bid, row.id);
@@ -18811,9 +19184,9 @@ window.addEventListener("hashchange", openSessionHash);
 async function modalSessionRequest(record) {
   const {m, close} = modal(`<h2>${record.workflow ? "Session workflow" : "Session request"}</h2>
     <div class="session-request-detail"><p class="modal-copy">Loading…</p></div>
-    <div class="m-btns"><button class="btn sr-close">Close</button>
-    <button class="btn btn-danger sr-cancel" disabled>Cancel remaining work</button>
-    <button class="btn btn-pri sr-refresh">Refresh</button></div>`, "session-request-modal");
+    <div class="m-btns"><button type="button" class="btn sr-close">Close</button>
+    <button type="button" class="btn btn-danger sr-cancel" disabled>Stop remaining work</button>
+    <button type="button" class="btn btn-pri sr-refresh">Refresh</button></div>`, "session-request-modal");
   m.querySelector(".sr-close").onclick = close;
   let targetBid = 0;
   const detail = m.querySelector(".session-request-detail");
@@ -18821,17 +19194,30 @@ async function modalSessionRequest(record) {
   const refresh = m.querySelector(".sr-refresh");
   const terminal = new Set(["completed", "failed", "cancelled", "expired", "rejected", "lost"]);
   const names = new Map();
-  const field = (box, label, value) => {
+  /* a request's state in words, with the tone every other status word uses */
+  const REQUEST_STATES = {
+    pending: ["Pending", "busy"], submitting: ["Submitting", "busy"], waiting: ["Waiting", "busy"],
+    running: ["Running", "busy"], unconfirmed: ["Unconfirmed", "warn"], completed: ["Completed", "ok"],
+    failed: ["Failed", "bad"], cancelled: ["Cancelled", "warn"], expired: ["Expired", "warn"],
+    rejected: ["Rejected", "bad"], lost: ["Lost", "bad"],
+  };
+  const requestState = status => REQUEST_STATES[status] || [String(status || "Unknown"), ""];
+  const field = (box, label, value, tone = "") => {
     const wrap = el("div", "field-lbl", label);
-    wrap.appendChild(typeof value === "string" ? el("div", "session-request-value", value) : value);
+    if (typeof value === "string")
+      wrap.appendChild(el("div", "session-request-value" + (tone ? " state-word " + tone : ""), value));
+    else wrap.appendChild(value);
     box.appendChild(wrap);
   };
+  const statusField = (box, status) => field(box, "Status", ...requestState(status));
   const renderResult = (box, result) => {
     const row = el("div", "session-request-result");
-    const target = el("button", "btn session-request-target", names.get(result.target) || "Open session");
+    const target = el("button", "btn btn-sm session-request-target");
+    target.type = "button";
+    target.appendChild(el("span", "", names.get(result.target) || "Open session"));
     target.onclick = () => openSessionReference(result.target, Number(result.end_seq || result.start_seq || 0));
     field(row, "Session", target);
-    field(row, "Status", result.status);
+    statusField(row, result.status);
     if (result.error) row.appendChild(el("p", "err-card", result.error));
     if (result.answer) field(row, "Answer", result.answer);
     box.appendChild(row);
@@ -18846,13 +19232,13 @@ async function modalSessionRequest(record) {
       detail.replaceChildren();
       if (data.title) field(detail, "Name", data.title);
       const summary = el("div", "field-row");
-      field(summary, "Status", data.status);
-      field(summary, "Created", fmtDateTime(data.created_at));
+      statusField(summary, data.status);
+      field(summary, "Created", fmtStamp(data.created_at));
       detail.appendChild(summary);
       if (record.workflow) {
         for (const step of data.steps || []) {
           const section = el("section", "session-request-step");
-          field(section, "Step", `${step.spec.id} · ${step.status}`);
+          field(section, "Step", `${step.spec.id} · ${requestState(step.status)[0]}`);
           field(section, "Request", step.spec.text);
           if (step.error) section.appendChild(el("p", "err-card", step.error));
           for (const result of step.results || []) renderResult(section, result);
@@ -18868,7 +19254,9 @@ async function modalSessionRequest(record) {
   };
   refresh.onclick = () => load();
   cancel.onclick = async () => {
-    if (await modalConfirm("Cancel remaining work?", "Pending steps and work belonging to this request will be cancelled.")) load(true);
+    if (await modalConfirm("Stop remaining work?",
+        "Pending steps and work belonging to this request are cancelled.",
+        { confirmLabel: "Stop work", destructive: true })) load(true);
   };
   try {
     const catalog = await api(0, "session-links/catalog");
