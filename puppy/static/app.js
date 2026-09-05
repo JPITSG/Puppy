@@ -9558,7 +9558,7 @@ function tasksIcon(size) {
   const p = document.createElementNS(NS, "path");
   p.setAttribute("d", "M2 2h5.5v5.5H2z M4.5 10H10V4.5");
   p.setAttribute("stroke", "currentColor");
-  p.setAttribute("stroke-width", "1.5");
+  p.setAttribute("stroke-width", "1.1");
   p.setAttribute("stroke-linecap", "round");
   p.setAttribute("stroke-linejoin", "round");
   p.setAttribute("fill", "none");
@@ -9744,7 +9744,7 @@ class SessionWorkspaceView {
       const open = el("button", "btn btn-sm", task.needs_approval ? "Open approval" : "Open");
       open.type = "button";
       open.onclick = () => { this.closeTaskOverview(); this.openTask(session.id); };
-      const review = el("button", "btn btn-sm" + (task.state === "ready" ? " btn-pri" : ""), task.state === "applied" ? "View" : "Review changes");
+      const review = el("button", "btn btn-sm" + (task.state === "ready" ? " btn-pri" : ""), "Review changes");
       review.type = "button";
       review.disabled = !taskReviewable(task);
       review.onclick = () => { this.closeTaskOverview(); modalReviewTask(this, session); };
@@ -10042,7 +10042,7 @@ async function modalReviewTask(workspace, session) {
           <span class="note-para">You must review and apply again afterward. Applies run one at a time; if another task changes Main again, another resolution may be needed. Off by default for each review.</span></small></span>
     </label>` : ""}
     <p class="backend-edit-error hidden" role="alert"></p>
-    <div class="m-btns"><button class="btn" id="tr-close">Close</button><button class="btn btn-pri hidden" id="tr-apply" disabled>Apply to Main</button></div>`, "task-review-modal");
+    <div class="m-btns"><button class="btn" id="tr-close">Close</button><button class="btn btn-pri" id="tr-apply" disabled>Apply to Main</button></div>`, "task-review-modal");
   const facts = m.querySelector(".task-review-facts");
   const fact = (label, value, cls = "") => {
     const row = el("div", "ws-fact");
@@ -10084,8 +10084,6 @@ async function modalReviewTask(workspace, session) {
     if (resolve && data.has_changes) {
       resolve.disabled = false; resolveWrap.classList.remove("hidden");
     }
-    if (!data.has_changes && task.state === "applied") return;
-    apply.classList.remove("hidden");
     apply.textContent = data.has_changes ? "Apply to Main" : "Mark as reviewed";
     apply.disabled = false;
     apply.onclick = async () => {

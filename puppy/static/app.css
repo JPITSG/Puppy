@@ -2814,7 +2814,9 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
    only hides a task's tab, and the + at the right. The selected conversation
    shares the outer session tab's focused accent. */
 .session-task-body{position:relative;flex:1;min-height:0;min-width:0}
-.task-tabbar{min-height:36px;padding:6px 8px 0;z-index:1}
+/* the right padding matches the outer bar's 10px so the strip's + sits on
+   the same vertical line as the pane's New-tab + directly above it */
+.task-tabbar{min-height:36px;padding:6px 10px 0 8px;z-index:1}
 .task-tabbar .tab{font-size:12px;padding:5px var(--tab-space);max-width:200px}
 .task-tabbar .tab-add-wrap{margin-top:-6px;gap:2px}
 .task-tabbar .icon-btn.attention{color:var(--warn)}
