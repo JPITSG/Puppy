@@ -561,6 +561,7 @@ def exercise_side_question_contract() -> None:
     assert OpenCodeDriver().supports_side_questions is False
     assert protocol.SIDE_QUESTION_CAPABILITY in protocol.BASE_CAPABILITIES
     assert protocol.TIMER_SETTINGS_CAPABILITY in protocol.BASE_CAPABILITIES
+    assert protocol.ENGINE_DEFAULTS_CAPABILITY in protocol.BASE_CAPABILITIES
     assert protocol.SESSION_PINNING_CAPABILITY in protocol.BASE_CAPABILITIES
     assert protocol.SESSION_FAST_MODE_CAPABILITY in protocol.BASE_CAPABILITIES
     assert protocol.NODE_STATE_STREAM_CAPABILITY in protocol.BASE_CAPABILITIES
@@ -2508,6 +2509,28 @@ async def exercise_node(url: str, token: str, expected_version: str,
             engine_payload["timers"]["defaults"])
         by_key = {engine["key"]: engine for engine in engine_payload["engines"]}
         assert set(("claude", "codex", "opencode")).issubset(by_key)
+        assert "engine-defaults" in ping["capabilities"]
+        for key, engine in by_key.items():
+            defaults_url = url + "/api/engines/{}/defaults".format(key)
+            async with http.get(defaults_url, ssl=pinned) as response:
+                assert response.status == 401
+            async with http.get(defaults_url, headers=good, ssl=pinned) as response:
+                read_defaults = await response.json()
+                assert response.status == 200, read_defaults
+            assert read_defaults["engine"]["session_defaults"] == engine["session_defaults"]
+            assert set(engine["session_defaults"]) == {"permission_mode", "model", "effort"}
+            chosen = {**engine["factory_defaults"],
+                      "permission_mode": engine["permission_options"][0]["value"]}
+            async with http.put(defaults_url, headers=good, ssl=pinned, json=chosen) as response:
+                saved_defaults = await response.json()
+                assert response.status == 200, saved_defaults
+                assert saved_defaults["engine"]["session_defaults"] == chosen
+            async with http.put(defaults_url, headers=good, ssl=pinned,
+                                json={**chosen, "effort": "not-an-effort"}) as response:
+                assert response.status == 400
+            async with http.put(defaults_url, headers=good, ssl=pinned,
+                                json=engine["factory_defaults"]) as response:
+                assert response.status == 200, await response.text()
         opencode = by_key["opencode"]
         assert opencode["availability_only"] is True
         assert opencode["dynamic_model_options"] is True

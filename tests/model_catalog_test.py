@@ -373,6 +373,7 @@ async def check_manual_refresh_route() -> None:
     from puppy import web as web_module
 
     driver = FakeCatalogDriver()
+    driver.key = "claude"  # one registered engine's persisted defaults row
     await driver.refresh_model_options()
     assert driver.calls == [False]
     originals = (

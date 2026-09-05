@@ -116,6 +116,7 @@ async def exercise_http(archive_ui: dict, session_id: int, project: Path) -> Non
 
             config.set_value("instance_name", "changed-over-http")
             config.set_value("engines.usage_refresh_minutes", 60)
+            config.set_engine_defaults("codex", {"permission_mode": "", "model": "", "effort": ""})
             config.set_timers({"remote_session_seconds": 30})
             config.set_value("uploads.max_file_size_mb", 2)
             db.meta_set(RELEASE_OBSERVATION_KEY, {
@@ -146,6 +147,8 @@ async def exercise_http(archive_ui: dict, session_id: int, project: Path) -> Non
             assert config.get("instance_name") == "saved-instance"
             assert config.get("sessions.default_cwd") == str(project)
             assert config.get("engines.usage_refresh_minutes") == 30
+            assert config.get("engines.defaults.codex") == {
+                "permission_mode": "read-only", "model": "saved/model", "effort": "high"}
             assert config.get("timers.remote_session_seconds") == 17
             assert config.get("engines.opencode") is None
             assert config.get("uploads.max_file_size_mb") == 19
@@ -190,6 +193,11 @@ async def main() -> None:
         config.set_value("instance_name", "saved-instance")
         config.set_value("sessions.default_cwd", str(project))
         config.set_value("engines.usage_refresh_minutes", 30)
+        for key in ("claude", "codex", "opencode"):
+            config.set_engine_defaults(key, {
+                "permission_mode": "read-only" if key == "codex" else "auto",
+                "model": "saved/model", "effort": "high"})
+        saved_engine_defaults = config.get("engines.defaults").copy()
         config.set_timers({
             "cli_release_minutes": 240,
             "model_catalog_minutes": 7,
@@ -427,6 +435,7 @@ async def main() -> None:
         config.set_value("instance_name", "mutated-instance")
         db.meta_apply(delete_keys=list(session_records))
         config.set_value("engines.usage_refresh_minutes", 5)
+        config.set_engine_defaults("codex", {"permission_mode": "", "model": "", "effort": ""})
         config.set_timers({
             "cli_release_minutes": 60,
             "model_catalog_minutes": 2,
@@ -488,6 +497,7 @@ async def main() -> None:
         assert config.get("instance_name") == "saved-instance"
         assert config.get("sessions.default_cwd") == str(project)
         assert config.get("engines.usage_refresh_minutes") == 30
+        assert config.get("engines.defaults") == saved_engine_defaults
         assert config.timer_values() == {
             "cli_release_minutes": 240,
             "model_catalog_minutes": 7,
@@ -529,6 +539,12 @@ async def main() -> None:
         missing_timers.pop("timers", None)
         previous_timer_shape = config.export_data()
         previous_timer_shape["timers"].pop("completion_sync_seconds", None)
+        missing_engine_defaults = config.export_data()
+        missing_engine_defaults["engines"].pop("defaults")
+        partial_engine_defaults = config.export_data()
+        partial_engine_defaults["engines"]["defaults"]["codex"].pop("effort")
+        mistyped_engine_defaults = config.export_data()
+        mistyped_engine_defaults["engines"]["defaults"]["claude"]["model"] = None
         unknown_selection = config.export_data()
         unknown_selection["engines"]["opencode"] = {
             "models": ["provider/model-a", "second/model-b"]}
@@ -536,7 +552,8 @@ async def main() -> None:
                         previous_terminal_prompt_shape,
                         previous_spawn_prompt_shape,
                         missing_cwd, missing_timers, previous_timer_shape,
-                        unknown_selection):
+                        unknown_selection, missing_engine_defaults,
+                        partial_engine_defaults, mistyped_engine_defaults):
             try:
                 config.normalize_import(invalid)
             except ValueError:
@@ -688,6 +705,8 @@ async def main() -> None:
 
         # A failed database install must put config and filesystem trees back.
         config.set_value("instance_name", "rollback-current")
+        rollback_choices = {"permission_mode": "workspace-write", "model": "rollback/model", "effort": "low"}
+        config.set_engine_defaults("codex", rollback_choices)
         config.set_value("engines.usage_refresh_minutes", 60)
         config.set_timers({"completion_sync_seconds": 9})
         config.set_value("uploads.max_file_size_mb", 23)
@@ -717,6 +736,7 @@ async def main() -> None:
             snapshots.discard_staged(staged)
         assert calls["count"] == 2
         assert config.get("instance_name") == "rollback-current"
+        assert config.get("engines.defaults.codex") == rollback_choices
         assert config.get("engines.usage_refresh_minutes") == 60
         assert config.get("timers.completion_sync_seconds") == 9
         assert config.get("uploads.max_file_size_mb") == 23

@@ -134,6 +134,10 @@ DEFAULTS = {
     "engines": {
         "usage_refresh_minutes": DEFAULT_USAGE_REFRESH_MINUTES,
         "auto_upgrade": {"enabled": False, "mode": "now", "at": "03:30"},
+        # Empty values delegate to the driver/engine. These initialize sessions;
+        # existing sessions and queued switches retain their own choices.
+        "defaults": {key: {"permission_mode": "", "model": "", "effort": ""}
+                     for key in ("claude", "codex", "opencode")},
     },
     "timers": dict(TIMER_DEFAULTS),
     "uploads": {"max_file_size_mb": DEFAULT_UPLOAD_LIMIT_MB},
@@ -293,6 +297,39 @@ def normalize_engine_auto_upgrade(value) -> dict:
     if not _ENGINE_AT_RE.match(at):
         raise ValueError("config.engines.auto_upgrade.at must be HH:MM in 24-hour form")
     return {"enabled": enabled, "mode": mode, "at": at}
+
+
+def normalize_engine_defaults(value) -> dict:
+    """Validate one complete defaults row without consulting a live catalog.
+
+    Backups must work with engines offline and preserve retired model IDs so
+    they can be explicitly repaired. Catalog validation happens before use.
+    """
+    if not isinstance(value, dict) or set(value) != {"permission_mode", "model", "effort"}:
+        raise ValueError("engine defaults must contain permission_mode, model, and effort")
+    for key, item in value.items():
+        if not isinstance(item, str) or len(item) > MAX_MODEL_ID_CHARS or \
+                item != item.strip() or any(ord(char) < 32 or ord(char) == 127 for char in item):
+            raise ValueError("engine default {} must be canonical text of at most {} characters".format(
+                key, MAX_MODEL_ID_CHARS))
+    return dict(value)
+
+
+def set_engine_defaults(key: str, value: dict) -> dict:
+    """Atomically replace one engine's defaults, retaining other engines."""
+    if key not in DEFAULTS["engines"]["defaults"]:
+        raise ValueError("unknown engine defaults")
+    normalized = normalize_engine_defaults(value)
+    cfg = load()
+    with _lock:
+        previous = cfg["engines"]["defaults"][key]
+        cfg["engines"]["defaults"][key] = normalized
+        try:
+            _save_locked()
+        except Exception:
+            cfg["engines"]["defaults"][key] = previous
+            raise
+    return dict(normalized)
 
 
 def _finite_number(value) -> bool:
@@ -458,6 +495,8 @@ def normalize_import(data: dict) -> dict:
         merged.get("engines", {}).get("usage_refresh_minutes"))
     merged["engines"]["auto_upgrade"] = normalize_engine_auto_upgrade(
         merged.get("engines", {}).get("auto_upgrade"))
+    for key, value in merged["engines"]["defaults"].items():
+        merged["engines"]["defaults"][key] = normalize_engine_defaults(value)
     merged["timers"] = normalize_timers(merged.get("timers"))
     merged["uploads"]["max_file_size_mb"] = normalize_upload_limit_mb(
         merged.get("uploads", {}).get("max_file_size_mb"))

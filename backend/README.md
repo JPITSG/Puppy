@@ -1,5 +1,12 @@
 # Puppy headless backend
 
+Nodes advertising `engine-defaults` offer authenticated GET/PUT
+`/api/engines/{key}/defaults` and publish `session_defaults`/`factory_defaults` in
+each engine payload. New sessions and requested engine switches use those
+node-owned choices; existing sessions and queued switches retain theirs. See
+[Engine defaults](../docs/engine-defaults.md) for the exact API and the manual
+config-shape update required before starting this version on an existing node.
+
 This directory contains the separately deployable, API-only Puppy runtime. It
 shares the console's database, runner and engine drivers at build time, but the
 resulting artifact exposes no web GUI, cookie login, settings, or backend proxy.

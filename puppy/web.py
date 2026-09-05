@@ -16,7 +16,7 @@ from aiohttp import WSMsgType, web
 
 from puppy import (__version__, agent_notes, auth, backends, bind_verify, browser,
                    cli_auto_upgrade, cli_releases,
-                   cli_upgrade, config, db, host_metrics, listener_handoff, notify,
+                   cli_upgrade, config, db, engine_defaults, host_metrics, listener_handoff, notify,
                    live_websockets, localization, protocol, runner, search, snapshots,
                    spawn_exec,
                    state_stream, system_prompts, terminal, uploads,
@@ -130,43 +130,47 @@ async def _engines_payload(refresh_usage: bool = True, refresh_models: bool = Tr
             if isinstance(result, BaseException):
                 log.warning("%s model catalog refresh escaped its driver: %s",
                             driver.key, result)
-    engines = []
-    for d, st in zip(drivers, statuses):
-        model_options = []
-        for raw_option in d.model_options():
-            option = dict(raw_option)
-            # Service-tier ids are execution details. Publish the semantic
-            # availability bit and keep the opaque value inside the driver.
-            option.pop("service_tiers", None)
-            model_options.append(option)
-        if d.supports_fast_mode:
-            # The browser needs only availability. The driver keeps ownership
-            # of mapping this semantic flag to the catalog's opaque tier id.
-            for option in model_options:
-                option["fast_mode_available"] = bool(
-                    d.fast_mode_tier(option.get("value") or ""))
-                option["fast_mode_hint"] = d.fast_mode_hint(
-                    option.get("value") or "")
-        engines.append({
-            "key": d.key, "label": d.label, **st,
-            "availability_only": d.availability_only,
-            "permission_options": d.permission_options(),
-            "default_permission": d.default_permission(),
-            "model_options": model_options,
-            "effort_options": d.effort_options(),
-            "tool_options": d.tool_options(),
-            "supports_fast_mode": bool(d.supports_fast_mode),
-            "allow_custom_model": d.allow_custom_model,
-            "dynamic_model_options": d.dynamic_model_options,
-            "model_catalog_loaded": d.model_catalog_loaded(),
-            "model_catalog_error": d.model_catalog_error(),
-            "model_catalog_note": d.model_catalog_note(),
-            "model_catalog_source": d.model_catalog_source(),
-            "model_catalog_checked_at": d.model_catalog_checked_at(),
-            "model_catalog_updated_at": d.model_catalog_updated_at(),
-            "rate_limit": db.meta_get(f"rate_limit.{d.key}"),
-        })
-    return engines
+    return [{**status, **_engine_choices(driver)}
+            for driver, status in zip(drivers, statuses)]
+
+
+def _engine_choices(d) -> dict:
+    model_options = []
+    for raw_option in d.model_options():
+        option = dict(raw_option)
+        # Service-tier ids are execution details. Publish the semantic
+        # availability bit and keep the opaque value inside the driver.
+        option.pop("service_tiers", None)
+        model_options.append(option)
+    if d.supports_fast_mode:
+        # The browser needs only availability. The driver keeps ownership
+        # of mapping this semantic flag to the catalog's opaque tier id.
+        for option in model_options:
+            option["fast_mode_available"] = bool(
+                d.fast_mode_tier(option.get("value") or ""))
+            option["fast_mode_hint"] = d.fast_mode_hint(
+                option.get("value") or "")
+    return {
+        "key": d.key, "label": d.label,
+        "availability_only": d.availability_only,
+        "permission_options": d.permission_options(),
+        "default_permission": d.default_permission(),
+        "session_defaults": engine_defaults.values(d),
+        "factory_defaults": engine_defaults.factory(d),
+        "model_options": model_options,
+        "effort_options": d.effort_options(),
+        "tool_options": d.tool_options(),
+        "supports_fast_mode": bool(d.supports_fast_mode),
+        "allow_custom_model": d.allow_custom_model,
+        "dynamic_model_options": d.dynamic_model_options,
+        "model_catalog_loaded": d.model_catalog_loaded(),
+        "model_catalog_error": d.model_catalog_error(),
+        "model_catalog_note": d.model_catalog_note(),
+        "model_catalog_source": d.model_catalog_source(),
+        "model_catalog_checked_at": d.model_catalog_checked_at(),
+        "model_catalog_updated_at": d.model_catalog_updated_at(),
+        "rate_limit": db.meta_get(f"rate_limit.{d.key}"),
+    }
 
 
 async def _engines_response(refresh_usage: bool = True,
@@ -377,6 +381,32 @@ async def h_engine_auto_upgrade_get(_request: web.Request):
     return web.json_response({"auto_upgrade": cli_auto_upgrade.payload()})
 
 
+async def h_engine_defaults(request: web.Request):
+    """Read/replace this node's starting choices for one engine."""
+    try:
+        driver = get_driver(request.match_info["key"])
+    except KeyError:
+        return web.json_response({"error": "unknown engine"}, status=404)
+    if request.method == "PUT":
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid request"}, status=400)
+        try:
+            config.normalize_engine_defaults(body)
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+    await driver.refresh_model_options()
+    if request.method == "PUT":
+        try:
+            engine_defaults.validate(driver, body)
+            config.set_engine_defaults(driver.key, body)
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        state_stream.wake("engines")
+    return web.json_response({"engine": _engine_choices(driver)})
+
+
 async def h_engine_auto_upgrade_patch(request: web.Request):
     """Set this node's unattended engine-update schedule."""
     try:
@@ -461,12 +491,18 @@ async def h_sessions_list(request: web.Request):
 
 async def h_session_create(request: web.Request):
     body = await request.json()
+    if not isinstance(body, dict):
+        return web.json_response({"error": "invalid request"}, status=400)
     engine = body.get("engine") or ""
     try:
         driver = get_driver(engine)
     except KeyError:
         return web.json_response({"error": f"unknown engine '{engine}'"}, status=400)
     await driver.refresh_model_options()
+    try:
+        choices = engine_defaults.for_session(driver, body)
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
     workspace_kind = str(body.get("workspace_kind") or workspaces.KIND_DIRECTORY)
     if workspace_kind not in workspaces.KINDS:
         return web.json_response({"error": "unknown workspace kind"}, status=400)
@@ -514,20 +550,7 @@ async def h_session_create(request: web.Request):
                 return web.json_response(
                     {"error": f"directory does not exist: {cwd}", "mkdir_possible": True},
                     status=400)
-    perm = body.get("permission_mode") or driver.default_permission()
-    if perm not in [o["value"] for o in driver.permission_options()]:
-        perm = driver.default_permission()
-    model = str(body.get("model") or "").strip()[:config.MAX_MODEL_ID_CHARS]
-    if not model:
-        model = driver.default_model()
-    allowed_models = [str(option.get("value") or "") for option in driver.model_options()]
-    if not driver.allow_custom_model and model not in allowed_models:
-        return web.json_response({
-            "error": "That {} model is not available on this backend".format(driver.label)},
-            status=400)
-    effort = str(body.get("effort") or "").strip()
-    if effort not in [o["value"] for o in driver.effort_options_for_model(model)]:
-        effort = ""
+    perm, model, effort = choices["permission_mode"], choices["model"], choices["effort"]
     color = body.get("color") if body.get("color") in db.SESSION_COLORS else random.choice(db.SESSION_COLORS)
     name = str(body.get("name") or "").strip()[:80]
     created_workspace = ""
@@ -928,8 +951,12 @@ async def h_session_switch(request: web.Request):
         return web.json_response(
             {"error": "{} is being updated - try again when it finishes".format(
                 driver.label)}, status=409)
+    try:
+        choices = engine_defaults.for_session(driver, {})
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
     result = runner.hub(s["id"]).request_engine_switch(
-        engine, driver.default_model(), "", driver.default_permission())
+        engine, choices["model"], choices["effort"], choices["permission_mode"])
     if "error" in result:
         return web.json_response({"error": result["error"]}, status=409)
     return web.json_response(
@@ -1740,6 +1767,8 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     r.add_post("/api/engines/refresh", h_engines_refresh)
     r.add_get("/api/engines/auto-upgrade", h_engine_auto_upgrade_get)
     r.add_patch("/api/engines/auto-upgrade", h_engine_auto_upgrade_patch)
+    r.add_get("/api/engines/{key:[A-Za-z0-9_-]{1,32}}/defaults", h_engine_defaults)
+    r.add_put("/api/engines/{key:[A-Za-z0-9_-]{1,32}}/defaults", h_engine_defaults)
     r.add_post("/api/engines/{key:[A-Za-z0-9_-]{1,32}}/upgrade", h_engine_upgrade)
 
     r.add_get("/api/sessions", h_sessions_list)

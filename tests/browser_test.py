@@ -3747,17 +3747,31 @@ const exact={allow_custom_model:false,model_options:[
   effort_options:[{value:"",label:"Default"},{value:"max",label:"Max"}]};
 const custom={allow_custom_model:true,model_options:[],
   effort_options:[{value:"",label:"Default"},{value:"max",label:"Max"}]};
+const saved={permission_mode:"read-only",model:"known",effort:"high"};
+const current=initialEngineConfig({...exact,session_defaults:saved});
+current.model="changed";
+const select={children:[],appendChild(row){this.children.push(row)}};
+globalThis.document={createElement(){return {}}};
+globalThis.refreshChoiceSelect=()=>{};
+fillEngineChoice(select, [{value:"",label:"Engine default"}], "retired");
 console.log(JSON.stringify({
   known:effortOptionsForModel(exact,"known").map(item=>item.value),
   retired:effortOptionsForModel(exact,"retired").map(item=>item.value),
   custom:effortOptionsForModel(custom,"custom-id").map(item=>item.value),
+  saved:initialEngineConfig({...exact,session_defaults:saved}),
+  legacy:initialEngineConfig({default_permission:"auto",model_options:[{value:""}]}),
+  nativeDefault:effortOptionsForModel(exact,"known")[0].label,
+  unavailable:select.children[0].disabled && select.value === "retired",
 }));
 '''
     proc = subprocess.run(["node", "--input-type=module", "-e", with_live_views(script)],
                           capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:700]
     assert json.loads(proc.stdout) == {
-        "known": ["", "high"], "retired": [""], "custom": ["", "max"]}
+        "known": ["", "high"], "retired": [""], "custom": ["", "max"],
+        "saved": {"permission_mode": "read-only", "model": "known", "effort": "high"},
+        "legacy": {"permission_mode": "auto", "model": "", "effort": ""},
+        "nativeDefault": "Engine default", "unavailable": True}
 
 
 def check_timer_settings_ui(ui_source: str, css_source: str) -> None:

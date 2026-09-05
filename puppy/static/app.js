@@ -1978,13 +1978,44 @@ function engineStatusText(engine) {
 function effortOptionsForModel(engine, model) {
   const match = ((engine && engine.model_options) || [])
     .find(option => option && option.value === model);
-  if (match && Array.isArray(match.effort_options)) return match.effort_options;
+  if (match && Array.isArray(match.effort_options)) return engineDefaultLabels(match.effort_options);
   /* A catalog-only engine rejects retired/unknown model IDs server-side. Do
      not offer its global effort union for such a model: those combinations
      are not evidence-backed and the PATCH would be ignored. */
   if (engine && engine.allow_custom_model === false)
-    return [{ value: "", label: "Default", hint: "Engine model default" }];
-  return [...((engine && engine.effort_options) || [])];
+    return [{ value: "", label: "Engine default", hint: "Engine model default" }];
+  return engineDefaultLabels((engine && engine.effort_options) || []);
+}
+
+function engineDefaultLabels(options) {
+  return options.map(option => option.value === "" ?
+    { ...option, label: "Engine default" } : { ...option });
+}
+
+function initialEngineConfig(engine) {
+  if (engine && engine.session_defaults) return { ...engine.session_defaults };
+  return { permission_mode: (engine && engine.default_permission) || "",
+    model: (((engine && engine.model_options) || [])[0] || {}).value || "", effort: "" };
+}
+
+/* Preserve an unavailable saved value visibly until the user repairs it. A
+   catalog refresh must never silently pick a different model or effort. */
+function fillEngineChoice(select, options, selected) {
+  const rows = [...options];
+  if (!rows.some(option => option.value === selected)) rows.unshift({
+    value: selected, label: `Unavailable: ${selected || "Engine default"}`, disabled: true,
+  });
+  select.innerHTML = "";
+  for (const row of rows) {
+    const option = document.createElement("option");
+    option.value = row.value;
+    option.textContent = row.label;
+    option.title = row.hint || "";
+    option.disabled = !!row.disabled;
+    select.appendChild(option);
+  }
+  select.value = selected;
+  refreshChoiceSelect(select);
 }
 
 const headWord = (s) => (String(s).match(/^[^\s\-_/]+/) || [""])[0];
@@ -4382,6 +4413,11 @@ function backendSupportsEngineAutoUpgrade(bid) {
     backendSupportsEngineUpgrade(bid);
 }
 
+function backendSupportsEngineDefaults(bid) {
+  if (!bid) return true;
+  return backendHasCapability(state.backends.find(b => b.id === bid), "engine-defaults");
+}
+
 function backendSupportsUploadPreviews(bid) {
   if (!bid) return true;
   const backend = state.backends.find(b => b.id === bid);
@@ -5248,6 +5284,12 @@ function sessionContextMenu(ev, bid, s) {
   add("Switch engine", () => modalSwitchEngine({
     session: s, tab: { bid, sid: s.id }, updateHead() { refreshGroup(bid); },
   }));
+  if (backendSupportsEngineDefaults(bid))
+    add("Engine defaults…", () => {
+      const view = sessionViewFor(bid, s.id);
+      if (view) view.editEngineDefaults();
+      else modalEngineDefaults(bid, s.engine);
+    });
   if (backendSupportsSessionPinning(bid))
     add(s.pinned === true ? "Unpin session" : "Pin session to top",
       () => setSessionPinned(bid, s, s.pinned !== true));
@@ -12075,6 +12117,8 @@ class SessionView {
     add("Rename", () => this.rename());
     add("Dot color", () => this.pickColor(anchor));
     add("Switch engine", () => modalSwitchEngine(this));
+    if (backendSupportsEngineDefaults(this.tab.bid))
+      add("Engine defaults…", () => this.editEngineDefaults());
     if (this.session && this.session.task) {
       /* kept visible while the task still works, like the tools menu's rows,
          so the answer to "where is review?" is on the row itself */
@@ -12150,7 +12194,7 @@ class SessionView {
       options: effortOptionsForModel(eng, eff.model || ""),
       selected: eff.effort || "",
     };
-    const options = [...((eng && eng.model_options) || [])];
+    const options = engineDefaultLabels((eng && eng.model_options) || []);
     const current = eff.model || "";
     const custom = !!current && !options.some(option => option.value === current);
     const customAllowed = !eng || eng.allow_custom_model !== false;
@@ -12290,7 +12334,7 @@ class SessionView {
       return;
     }
     this.optionMenu(anchor, spec.options, spec.selected,
-      (value) => this.applyPermissionChoice(value));
+      (value) => this.applyPermissionChoice(value), { footers: this.engineDefaultsActions() });
   }
 
   async applyPermissionChoice(value) {
@@ -12313,16 +12357,22 @@ class SessionView {
   /* A choice menu opens on its current value: highlighted, focused, checked.
      An action menu ({actions: true}) has no current value, so nothing is
      highlighted until the pointer or the arrow keys reach a row. */
-  optionMenu(anchor, opts, current, onPick, { actions = false, checks = [] } = {}) {
+  optionMenu(anchor, opts, current, onPick, { actions = false, checks = [], footers = [] } = {}) {
     if (closeAllMenus(anchor)) return null;
     const menu = el("div", "choice-menu composer-choice-menu dyn");
     menu._anchor = anchor;
-    menu.setAttribute("role", actions ? "menu" : "listbox");
+    menu.setAttribute("role", footers.length ? "group" : actions ? "menu" : "listbox");
     menu.setAttribute("aria-label",
       anchor.getAttribute("aria-label") || tips.text(anchor) || "Choices");
     menu.style.visibility = "hidden";
     anchor.setAttribute("aria-haspopup", actions ? "menu" : "listbox");
     anchor.setAttribute("aria-expanded", "true");
+    const list = footers.length ? el("div") : menu;
+    if (list !== menu) {
+      list.setAttribute("role", actions ? "menu" : "listbox");
+      list.setAttribute("aria-label", menu.getAttribute("aria-label"));
+      menu.appendChild(list);
+    }
     const rows = [];
     const dismiss = (returnFocus = false) => {
       menu.remove();
@@ -12358,7 +12408,7 @@ class SessionView {
         onPick(o.value);
       };
       rows.push(row);
-      menu.appendChild(row);
+      list.appendChild(row);
     });
     if (checks.length && rows.length)
       menu.appendChild(el("div", "menu-sep"));
@@ -12376,6 +12426,22 @@ class SessionView {
         if (item.disabled) return;
         dismiss(true);
         item.onToggle();
+      };
+      rows.push(row);
+      menu.appendChild(row);
+    });
+    if (footers.length && rows.length) menu.appendChild(el("div", "menu-sep"));
+    footers.forEach(item => {
+      const index = rows.length;
+      const row = el("button", "choice-option", item.label);
+      row.type = "button";
+      row.tabIndex = -1;
+      row.onmouseenter = () => highlight(index);
+      row.onfocus = row.onmouseenter;
+      row.onclick = event => {
+        event.stopPropagation();
+        dismiss(true);
+        item.run();
       };
       rows.push(row);
       menu.appendChild(row);
@@ -12425,7 +12491,18 @@ class SessionView {
   showModelMenu(anchor) {
     if (!this.session) return;
     const spec = this.composerChoiceSpec("model");
-    this.optionMenu(anchor, spec.options, spec.selected, (value) => this.applyModelChoice(value));
+    this.optionMenu(anchor, spec.options, spec.selected, (value) => this.applyModelChoice(value),
+      { footers: this.engineDefaultsActions() });
+  }
+
+  editEngineDefaults() {
+    const engine = this.effectiveConfig().engine;
+    modalEngineDefaults(this.tab.bid, engine, () => this.effectiveConfig());
+  }
+
+  engineDefaultsActions() {
+    return backendSupportsEngineDefaults(this.tab.bid) ?
+      [{ label: "Engine defaults…", run: () => this.editEngineDefaults() }] : [];
   }
 
   async applyModelChoice(value) {
@@ -12442,7 +12519,7 @@ class SessionView {
     const spec = this.composerChoiceSpec("effort");
     if (!spec.options.length) { toast("Engine has no effort levels", "info"); return; }
     this.optionMenu(anchor, spec.options, spec.selected,
-      (value) => this.patchSession({ effort: value }));
+      (value) => this.patchSession({ effort: value }), { footers: this.engineDefaultsActions() });
   }
 
   async rename() {
@@ -17347,6 +17424,126 @@ function renderWorkspaceBackendOptions(select, execBid) {
   return choices;
 }
 
+/* The same editor serves composer pickers and the session menu on touch
+   devices, where native selects deliberately contain only actual choices. */
+function modalEngineDefaults(bid, key, conversationChoices = null) {
+  if (!backendSupportsEngineDefaults(bid)) return;
+  let engine = engineInfo(bid, key);
+  const name = (engine && engine.label) || key;
+  const { m, close } = modal(`<h2>${esc(name)} defaults</h2>
+    <p class="modal-copy">${esc(backendName(bid))} · Used for new sessions and when switching to ${esc(name)}.</p>
+    <form id="engine-defaults-form" aria-busy="true">
+      <label>Permissions<select id="ed-permission" disabled></select></label>
+      <label>Model<select id="ed-model" disabled></select></label>
+      <label class="hidden" id="ed-custom-wrap">Custom model<input id="ed-custom" spellcheck="false" maxlength="256"></label>
+      <label>Effort<select id="ed-effort" disabled></select></label>
+      <p class="hint" id="ed-hint" role="status">Loading…</p>
+      <button type="button" class="btn btn-sm" id="ed-copy" disabled>Use this conversation’s choices</button>
+      <p class="backend-edit-error hidden" role="alert"></p>
+      <div class="m-btns">
+        <button type="button" class="btn" id="ed-reset" disabled>Reset</button>
+        <button type="button" class="btn" id="ed-cancel">Cancel</button>
+        <button type="submit" class="btn btn-pri" id="ed-save" disabled>Save defaults</button>
+      </div>
+    </form>`, "engine-defaults-modal");
+  const form = m.querySelector("form");
+  const permission = m.querySelector("#ed-permission");
+  const model = m.querySelector("#ed-model");
+  const effort = m.querySelector("#ed-effort");
+  const custom = m.querySelector("#ed-custom");
+  const customWrap = m.querySelector("#ed-custom-wrap");
+  const hint = m.querySelector("#ed-hint");
+  const error = m.querySelector(".backend-edit-error");
+  const copy = m.querySelector("#ed-copy");
+  const save = m.querySelector("#ed-save");
+  const reset = m.querySelector("#ed-reset");
+  const path = `engines/${encodeURIComponent(key)}/defaults`;
+  const getModel = () => model.value === "__custom__" ? custom.value.trim() : model.value;
+  const setError = text => {
+    error.textContent = text || "";
+    error.classList.toggle("hidden", !text);
+  };
+  const setBusy = busy => {
+    form.setAttribute("aria-busy", String(busy));
+    for (const control of [permission, model, effort, custom, copy, reset, save]) {
+      control.disabled = busy;
+      refreshChoiceSelect(control);
+    }
+    copy.disabled = busy || !conversationChoices;
+    save.textContent = busy ? "Saving…" : "Save defaults";
+  };
+  const remember = data => {
+    engine = data.engine;
+    const engines = bid ? state.engCache[bid] || [] : state.engines;
+    rememberEnginePayload(bid, { engines: engines.map(item => item.key === key ?
+      { ...item, ...engine } : item) });
+  };
+  const render = choices => {
+    setError("");
+    hint.textContent = "Engine default lets the engine choose its model or effort.";
+    fillEngineChoice(permission, engine.permission_options || [], choices.permission_mode);
+    const models = engineDefaultLabels(engine.model_options || []);
+    const isCustom = !!choices.model && !models.some(item => item.value === choices.model) &&
+      engine.allow_custom_model !== false;
+    if (engine.allow_custom_model !== false) models.push({ value: "__custom__", label: "Custom…" });
+    custom.value = isCustom ? choices.model : "";
+    fillEngineChoice(model, models, isCustom ? "__custom__" : choices.model);
+    customWrap.classList.toggle("hidden", !isCustom);
+    fillEngineChoice(effort, effortOptionsForModel(engine, choices.model), choices.effort);
+  };
+  const syncEffort = () => {
+    const options = effortOptionsForModel(engine, getModel());
+    const supported = options.some(item => item.value === effort.value);
+    const changed = !!effort.value && !supported;
+    fillEngineChoice(effort, options, supported ? effort.value : "");
+    customWrap.classList.toggle("hidden", model.value !== "__custom__");
+    hint.textContent = changed ? "Effort reset to Engine default for this model." :
+      "Engine default lets the engine choose its model or effort.";
+    setError("");
+  };
+  model.onchange = syncEffort;
+  custom.oninput = syncEffort;
+  reset.onclick = () => render(engine.factory_defaults);
+  copy.onclick = () => {
+    const choices = conversationChoices();
+    if (!choices || choices.engine !== key) {
+      setError(`This conversation now uses another engine. Reopen its defaults editor.`);
+      return;
+    }
+    render(choices);
+  };
+  m.querySelector("#ed-cancel").onclick = close;
+  form.onsubmit = async event => {
+    event.preventDefault();
+    if (save.disabled) return;
+    const body = { permission_mode: permission.value, model: getModel(), effort: effort.value };
+    setError("");
+    setBusy(true);
+    try {
+      const data = await api(bid, path, { method: "PUT", body });
+      remember(data);
+      close();
+      toast(`${name} defaults saved on ${backendName(bid)}`, "ok");
+    } catch (err) {
+      if (m.isConnected) setError(err.message || "Defaults could not be saved");
+      else toast(err.message || "Defaults could not be saved", "error");
+    } finally {
+      if (m.isConnected) setBusy(false);
+    }
+  };
+  api(bid, path).then(data => {
+    if (!m.isConnected) return;
+    remember(data);
+    render(engine.session_defaults);
+    setBusy(false);
+  }).catch(err => {
+    if (!m.isConnected) return;
+    form.setAttribute("aria-busy", "false");
+    hint.textContent = "";
+    setError(err.message || "Defaults could not be loaded");
+  });
+}
+
 /* new session */
 async function modalNewSession(groupId = null) {
   const beOpts = [{ id: 0, name: backendName(0) }].concat(state.backends);
@@ -17571,44 +17768,35 @@ async function modalNewSession(groupId = null) {
     engine = key;
     engBox.querySelectorAll(".ep").forEach(c => c.classList.toggle("sel", c.dataset.key === key));
     const e2 = engines.find(x => x.key === key);
-    const fill = (sel, opts, selected) => {
-      sel.innerHTML = "";
-      for (const o of opts) {
-        const opt = document.createElement("option");
-        opt.value = o.value; opt.textContent = o.label; opt.title = o.hint || "";
-        opt.disabled = !!o.disabled;
-        if (o.value === selected) opt.selected = true;
-        sel.appendChild(opt);
-      }
-      refreshChoiceSelect(sel);
-    };
-    const permissions = e2 ? e2.permission_options : [];
-    const permission = previous && permissions.some(o => o.value === previous.permission)
-      ? previous.permission : (e2 ? e2.default_permission : "");
-    fill(permSel, permissions, permission);
-    const modelOptions = [...((e2 && e2.model_options) || [])];
+    const defaults = initialEngineConfig(e2);
+    fillEngineChoice(permSel, e2 ? e2.permission_options : [],
+      previous ? previous.permission : defaults.permission_mode);
+    const modelOptions = engineDefaultLabels((e2 && e2.model_options) || []);
+    let model = previous ? previous.model : defaults.model;
+    const isCustom = !!model && !modelOptions.some(option => option.value === model) &&
+      (!e2 || e2.allow_custom_model !== false);
     if (!e2 || e2.allow_custom_model !== false)
       modelOptions.push({ value: "__custom__", label: "Custom…" });
-    if (!modelOptions.length)
-      modelOptions.push({ value: "", label: "No models reported", disabled: true });
-    const model = previous && modelOptions.some(o => o.value === previous.model)
-      ? previous.model : modelOptions[0].value;
-    fill(modelSel, modelOptions, model);
-    if (previous && model === "__custom__") customInp.value = previous.custom;
+    if (isCustom && model !== "__custom__") {
+      customInp.value = model;
+      model = "__custom__";
+    } else if (previous && model === "__custom__") customInp.value = previous.custom;
+    fillEngineChoice(modelSel, modelOptions, model);
     modelSel.disabled = !e2 || (e2.allow_custom_model === false &&
       !(e2.model_options || []).length);
     refreshChoiceSelect(modelSel);
-    let preserveEffort = !!previous;
+    let initialEffort = previous ? previous.effort : defaults.effort;
     const syncEffort = () => {
-      const model = modelSel.value === "__custom__" ? "" : modelSel.value;
-      const effortOptions = effortOptionsForModel(e2, model);
-      const effort = preserveEffort && effortOptions.some(o => o.value === previous.effort)
-        ? previous.effort : "";
-      preserveEffort = false;
-      fill(effortSel, effortOptions, effort);
+      const model = modelSel.value === "__custom__" ? customInp.value.trim() : modelSel.value;
+      const options = effortOptionsForModel(e2, model);
+      const effort = initialEffort !== null ? initialEffort :
+        options.some(option => option.value === effortSel.value) ? effortSel.value : "";
+      initialEffort = null;
+      fillEngineChoice(effortSel, options, effort);
       customWrap.classList.toggle("hidden", modelSel.value !== "__custom__");
     };
     modelSel.onchange = syncEffort;
+    customInp.oninput = syncEffort;
     syncEffort();
   }
   const enginePayloadListener = (bid, loaded) => {
