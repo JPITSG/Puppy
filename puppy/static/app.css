@@ -2860,6 +2860,9 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
 /* A folded task in Main's transcript: the tool card's disclosure carrying the
    task sheet's state voice, with the condensed conversation inside. */
 .task-archive .t-ico svg{display:block}
+.task-archive .tool-head .t-name{
+  min-width:0;flex-shrink:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
 .ta-facts{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:var(--fs-sm);margin-bottom:4px}
 .ta-fact-label{font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.09em;color:var(--txt3);align-self:center}
 .ta-fact-value{color:var(--txt2);min-width:0;overflow-wrap:anywhere}
