@@ -8,9 +8,13 @@ conversation before disabling Tasks, including finished tasks whose tabs were
 hidden. Hiding a tab alone does not close its conversation or stop its work.
 
 Open a session and select **+ Task** beside **Main**. Enter a prompt and optionally
-name it. The task opens in its own inner tab; create another to work on a second
-feature concurrently. Tasks inherit Main's engine, model, effort, permissions and
-Fast setting at creation, plus bounded recent conversation excerpts. Each task
+name it. Engine, model, effort and permissions start with Main's selected choices
+when the dialog opens, even if another task tab is selected. Adjust any of them
+before starting; these choices apply only to the new task. Switching engines
+loads that engine's saved defaults, and effort choices follow the selected model.
+The task opens in its own inner tab; create another to work on a second
+feature concurrently. Tasks inherit Main's Fast setting when keeping its engine,
+plus bounded recent conversation excerpts. Each task
 keeps its own conversation, draft, message queue, approvals and Stop control.
 Sending a message targets the selected conversation. Each tab shows the
 conversation's dot (spinning while it works) and the task's state; hiding a tab

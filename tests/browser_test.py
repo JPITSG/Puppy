@@ -677,6 +677,12 @@ console.log(JSON.stringify([oldLocal,backendSupportsSessionTasks(0),backendSuppo
     assert json.loads(proc.stdout) == [False, True, False, False, True, False]
 
 
+def check_task_config_ui() -> None:
+    proc = subprocess.run(["node", str(BASE / "tests" / "task_config_ui_test.js")],
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+
+
 def check_session_task_helpers(ui_source: str) -> None:
     """The task strip, the Tasks sheet and the sidebar's activity slot all take
     their words and colours from one state table, and the review sheet colours
@@ -6917,6 +6923,7 @@ async def main() -> None:
             check_server_clock_format(ui_source)
             check_reconnect_status(ui_source, css_source)
             check_session_task_capability(ui_source)
+            check_task_config_ui()
             check_session_task_helpers(ui_source)
             check_session_task_visibility(ui_source)
             check_backend_shutdown_notice(ui_source)

@@ -20,6 +20,14 @@ is node-owned, survives restarts and travels in full-WebUI backups. Deleting a
 session or resetting its scratch workspace is refused with 409 only while that
 session's own tasks exist or a task copy, review or apply is using its files.
 
+Nodes advertising `session-task-config` accept optional `engine`, `model`,
+`effort` and `permission_mode` fields on `POST /api/sessions/{sid}/tasks`.
+Omitted choices inherit Main; changing the engine uses the target engine's saved
+defaults for omitted fields and resets Fast. Explicit empty model/effort values
+mean engine default. Supplied choices are validated against that node's selected
+engine and model before allocating a task copy. The first turn uses those
+choices without editing Main. Older nodes retain the inheritance-only dialog.
+
 ## Build
 
 ```bash

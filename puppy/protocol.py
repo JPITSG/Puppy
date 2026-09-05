@@ -191,6 +191,8 @@ SESSION_REFERENCES_CAPABILITY = "session-references"
 
 BASE_CAPABILITIES = (
     "session-tasks",
+    # Task creation accepts explicit engine/model/effort/permission choices.
+    "session-task-config",
     # Per-session tasks_enabled PATCH; disabling requires no child tasks.
     "session-tasks-toggle",
     SESSION_REFERENCES_CAPABILITY,

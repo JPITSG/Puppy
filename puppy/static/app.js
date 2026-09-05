@@ -8408,32 +8408,126 @@ class SessionWorkspaceView {
   destroy() { this.closeTaskOverview(); for (const view of this.taskViews.values()) view.destroy(); this.taskViews.clear(); this.root.remove(); }
 }
 async function modalNewTask(workspace) {
-  const { m, close } = modal(`<h2>New task</h2>
+  const bid = Number(workspace.tab.bid) || 0, sid = workspace.tab.sid;
+  const configurable = nodeHasCapability(bid, "session-task-config");
+  const main = workspace.taskViews.get(sid);
+  // Read Main even when New task was opened from another task's tab. Capture
+  // its visible choices now; session updates must not rewrite this dialog.
+  const initial = { ...(main && main.session ? main.effectiveConfig() :
+    sessionsFor(bid).find(session => session.id === sid)) };
+  let engine = initial.engine || "", engines = [], preparing = false;
+  const { m, close, onClose } = modal(`<h2>New task</h2>
     <p class="modal-copy">The task works in its own chat and copy of Main’s project. Review its changes and apply them to Main when it is done.</p>
+    ${configurable ? '<div class="engine-pick" id="nt-engines" role="group" aria-label="Engine"></div>' : ""}
     <label>Task<textarea id="nt-prompt" rows="6" placeholder="Describe the feature or change…"></textarea></label>
     <label>Name <span class="field-optional">(optional, auto from the task)</span><input type="text" id="nt-name" maxlength="80"></label>
-    <p class="hint">Uses Main’s engine, model, effort and permissions, plus recent conversation context. Main must be idle to create or apply a task. Local Git projects only; ignored files are not copied.</p>
+    ${configurable ? `<div class="field-row">
+      <label>Model<select id="nt-model"></select></label>
+      <label>Effort<select id="nt-effort"></select></label>
+      <label>Permissions<select id="nt-perm"></select></label>
+    </div>
+    <label class="hidden" id="nt-model-custom-wrap">Custom model<input type="text" id="nt-model-custom" placeholder="Model ID" spellcheck="false" maxlength="256"></label>` : ""}
+    <p class="hint">${configurable ? "Starts with Main’s selected settings and recent conversation context." : "Uses Main’s engine, model, effort and permissions, plus recent conversation context."} Main must be idle to create or apply a task. Local Git projects only; ignored files are not copied.</p>
     <p class="backend-edit-error hidden" role="alert"></p>
     <div class="m-btns"><button class="btn" id="nt-cancel">Cancel</button><button class="btn btn-pri" id="nt-start">Start task</button></div>`, "new-task-modal");
   const prompt = m.querySelector("#nt-prompt"), start = m.querySelector("#nt-start");
   const error = m.querySelector(".backend-edit-error");
+  const engBox = m.querySelector("#nt-engines"), model = m.querySelector("#nt-model");
+  const effort = m.querySelector("#nt-effort"), permission = m.querySelector("#nt-perm");
+  const custom = m.querySelector("#nt-model-custom"), customWrap = m.querySelector("#nt-model-custom-wrap");
+  const getModel = () => model.value === "__custom__" ? custom.value.trim() : model.value;
+  const choices = () => ({ engine, model: getModel(), effort: effort.value, permission_mode: permission.value });
+  const syncBusy = () => {
+    start.disabled = preparing || (configurable && !engines.some(item => item.key === engine));
+    start.textContent = preparing ? "Preparing…" : "Start task";
+    m.setAttribute("aria-busy", String(preparing));
+    for (const control of m.querySelectorAll("input,textarea,select,#nt-engines button")) {
+      control.disabled = preparing;
+      refreshChoiceSelect(control);
+    }
+  };
+  const renderChoices = selected => {
+    engine = selected.engine;
+    const info = engines.find(item => item.key === engine);
+    engBox.querySelectorAll(".ep").forEach(card => {
+      card.classList.toggle("sel", card.dataset.key === engine);
+      card.setAttribute("aria-pressed", String(card.dataset.key === engine));
+    });
+    fillEngineChoice(permission, (info && info.permission_options) || [], selected.permission_mode || "");
+    const options = engineDefaultLabels((info && info.model_options) || []);
+    const customAllowed = info && info.allow_custom_model !== false;
+    const isCustom = customAllowed && (selected.custom ||
+      (!!selected.model && !options.some(item => item.value === selected.model)));
+    if (customAllowed) options.push({ value: "__custom__", label: "Custom…" });
+    custom.value = isCustom ? selected.model : "";
+    fillEngineChoice(model, options, isCustom ? "__custom__" : selected.model || "");
+    customWrap.classList.toggle("hidden", !isCustom);
+    fillEngineChoice(effort, effortOptionsForModel(info, selected.model || ""), selected.effort || "");
+    syncBusy();
+  };
+  const renderEngines = (loaded, selected) => {
+    engines = Array.isArray(loaded) ? loaded : [];
+    engBox.innerHTML = "";
+    for (const info of engines) {
+      const card = el("button", "ep"), icon = provSpec(info.key);
+      card.type = "button";
+      card.dataset.key = info.key;
+      card.innerHTML = `<span class="ep-ico prov ${icon.className}">${esc(icon.text)}</span>
+        <div class="ep-name">${esc(info.label)}</div><div class="ep-sub">${engineStatusText(info)}</div>`;
+      card.onclick = () => {
+        if (engine === info.key) return;
+        renderChoices(info.key === initial.engine ? initial : { engine: info.key, ...initialEngineConfig(info) });
+      };
+      engBox.appendChild(card);
+    }
+    renderChoices(selected);
+  };
+  if (configurable) {
+    renderEngines(bid ? state.engCache[bid] : state.engines, initial);
+    const syncEffort = () => {
+      const options = effortOptionsForModel(engines.find(item => item.key === engine), getModel());
+      fillEngineChoice(effort, options, options.some(item => item.value === effort.value) ? effort.value : "");
+      customWrap.classList.toggle("hidden", model.value !== "__custom__");
+    };
+    model.onchange = syncEffort;
+    custom.oninput = syncEffort;
+    const listener = (changedBid, loaded) => {
+      if (m.isConnected && changedBid === bid)
+        renderEngines(loaded, { ...choices(), custom: model.value === "__custom__" });
+    };
+    enginePayloadListeners.add(listener);
+    onClose(() => enginePayloadListeners.delete(listener));
+    // Use this node's cached catalog immediately, just as New session does.
+    // Only a missing/unloaded catalog needs an extra request.
+    if (!engines.length || engines.some(info => info.dynamic_model_options && info.model_catalog_loaded !== true)) {
+      api(bid, "engines", { timeoutMs: ENGINE_POLL_TIMEOUT }).then(data => {
+        if (!m.isConnected) return;
+        if (!data || !Array.isArray(data.engines)) throw new Error("Could not load engine choices");
+        rememberEnginePayload(bid, data);
+      }).catch(err => {
+        if (m.isConnected) { error.textContent = err.message; error.classList.remove("hidden"); }
+      });
+    }
+  }
   /* One identity for this dialog's lifetime: a retry after a lost answer
      returns the task the node already created instead of a duplicate. */
   const requestId = globalThis.crypto && crypto.randomUUID ? crypto.randomUUID() : `task-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   m.querySelector("#nt-cancel").onclick = close;
   prompt.focus();
   start.onclick = async () => {
+    if (start.disabled) return;
     if (!prompt.value.trim()) { prompt.focus(); return; }
-    start.disabled = true; start.textContent = "Preparing…";
+    const body = { name: m.querySelector("#nt-name").value, prompt: prompt.value, request_id: requestId,
+      ...(configurable ? choices() : {}) };
+    preparing = true; syncBusy();
     error.classList.add("hidden");
     try {
-      const data = await api(workspace.tab.bid, `sessions/${workspace.tab.sid}/tasks`, { method: "POST", timeoutMs: 180000,
-        body: { name: m.querySelector("#nt-name").value, prompt: prompt.value, request_id: requestId } });
-      const list = sessionsFor(workspace.tab.bid);
+      const data = await api(bid, `sessions/${sid}/tasks`, { method: "POST", timeoutMs: 180000, body });
+      const list = sessionsFor(bid);
       if (!list.some(s => s.id === data.session.id)) list.push(data.session);
       close(); workspace.openTask(data.session.id); renderSidebar();
     } catch (err) { error.textContent = err.message; error.classList.remove("hidden"); }
-    finally { start.disabled = false; start.textContent = "Start task"; }
+    finally { preparing = false; if (m.isConnected) syncBusy(); }
   };
 }
 /* The review sheet: the task's facts in the linked-workspace sheet's voice,

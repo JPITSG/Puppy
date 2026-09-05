@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Task isolation, queue ownership, review/apply and API contracts without quota."""
 import asyncio
+from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
 import shutil
 import sys
 import threading
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 from tests.scratch import private_root
@@ -82,6 +83,8 @@ async def toggle_api(app, parent, child):
     route = '/api/sessions/' + str(empty)
     try:
         assert 'session-tasks-toggle' in app['puppy_capabilities']
+        assert 'session-task-config' in app['puppy_capabilities']
+        await configured_creation_api(client, parent)
         for value in (None, 'false', 0, 1, [], {}):
             response = await client.patch(route, json={'tasks_enabled': value})
             assert response.status == 400, await response.text()
@@ -127,6 +130,75 @@ async def toggle_api(app, parent, child):
         assert db.meta_get(tasks.DISABLED_PREFIX + str(empty)) is None
         await client.close()
     print('PASS: ' + app['puppy_role'] + ' task toggle, broadcasts, per-session persistence, blockers and validation')
+
+
+async def configured_creation_api(client, parent):
+    """Explicit dialog choices reach the very first turn on either runtime."""
+    from puppy.drivers import all_drivers
+    models = [
+        {'value': '', 'label': 'Default', 'effort_options': [{'value': ''}]},
+        {'value': 'precise', 'label': 'Precise', 'effort_options': [{'value': ''}, {'value': 'high'}]},
+        {'value': 'quick', 'label': 'Quick', 'effort_options': [{'value': ''}, {'value': 'low'}]},
+    ]
+    original = db.get_session(parent)
+    before = set(tasks.children(parent))
+    fields = ('engine', 'model', 'effort', 'permission_mode')
+    chosen = dict(engine='codex', model='precise', effort='high', permission_mode='read-only')
+    started = []
+    def capture(hub, prompt):
+        started.append({key: db.get_session(hub.id)[key] for key in fields})
+        start(hub, prompt)
+    async def create(body, status=200):
+        response = await client.post('/api/sessions/{}/tasks'.format(parent), json=body)
+        data = await response.json()
+        assert response.status == status, (response.status, data)
+        return data
+    try:
+        with ExitStack() as stack:
+            for driver in all_drivers():
+                stack.enter_context(patch.object(driver, 'refresh_model_options', AsyncMock()))
+                stack.enter_context(patch.object(driver, 'model_options', return_value=models))
+                stack.enter_context(patch.object(driver, 'allow_custom_model', False))
+            stack.enter_context(patch.object(runner.SessionHub, '_start_turn', capture))
+            db.touch_session(parent, **chosen, fast_mode=1)
+            inherited = (await create({'prompt': 'Inherited', 'request_id': 'inherit-config'}))['session']
+            assert started[-1] == chosen and inherited['fast_mode'] is True
+            # Main changes after the browser captured its selections.
+            db.touch_session(parent, model='quick', effort='low', permission_mode='workspace-write')
+            main_now = db.get_session(parent)
+            body = dict(chosen, prompt='Captured choices', request_id='explicit-config')
+            explicit = (await create(body))['session']
+            assert started[-1] == chosen
+            assert (await create(body))['session']['id'] == explicit['id']
+            assert len(started) == 2, 'an uncertain retry must not start twice'
+            switched = dict(chosen, engine='claude', permission_mode='bypassPermissions')
+            other = (await create(dict(switched, prompt='Other engine', request_id='other-config')))['session']
+            assert started[-1] == switched and other['fast_mode'] is False
+            native = dict(chosen, model='', effort='')
+            await create(dict(native, prompt='Native defaults', request_id='native-config'))
+            assert started[-1] == native, 'empty choices must not become saved defaults'
+            with patch('puppy.engine_defaults.values', return_value={
+                    'model': 'quick', 'effort': 'low', 'permission_mode': 'auto'}):
+                await create({'engine': 'claude', 'prompt': 'Engine defaults', 'request_id': 'engine-config'})
+                assert started[-1] == dict(engine='claude', model='quick', effort='low', permission_mode='auto')
+            for index, invalid in enumerate(({'engine': []}, {'engine': 'unknown'},
+                    {'model': 'retired'}, {'model': None}, {'effort': 'low'},
+                    {'effort': 1}, {'permission_mode': 'invalid'}, {'permission_mode': None})):
+                with patch.object(workspaces, 'create_temporary') as allocate:
+                    data = await create(dict(body, **invalid, request_id='invalid-' + str(index)), 409)
+                    assert data['error']
+                    allocate.assert_not_called()
+            assert all(db.get_session(parent)[key] == main_now[key] for key in fields + ('fast_mode',)), \
+                'task choices must not edit Main'
+            tasks.validate_persisted(db.connect())
+    finally:
+        db.touch_session(parent, **{key: original[key] for key in fields}, fast_mode=original['fast_mode'])
+        for sid in set(tasks.children(parent)) - before:
+            runner.hub(sid).status = 'idle'
+            workspaces.remove_temporary(db.get_session(sid))
+            runner.drop_hub(sid)
+            db.delete_session(sid)
+    print('PASS: task config inheritance, explicit first-turn choices, validation, defaults, Fast reset and retries')
 
 
 async def main():

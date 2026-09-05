@@ -417,6 +417,29 @@ async def create(parent_id, args):
             raise TaskError("This session already has 64 tasks")
         if runner._draining:
             raise TaskError("Puppy is shutting down")
+        # Older consoles omit these fields and keep Main's choices. A new
+        # console sends the choices captured when its dialog opened, so a
+        # later edit to Main cannot change the task the user is preparing.
+        engine = args.get("engine", parent["engine"])
+        choices = {field: parent[field] for field in ("model", "effort", "permission_mode")}
+        if "engine" in args or any(field in args for field in choices):
+            from puppy import engine_defaults
+            from puppy.drivers import get_driver
+            if not isinstance(engine, str):
+                raise TaskError("Invalid task engine")
+            try:
+                driver = get_driver(engine)
+            except KeyError:
+                raise TaskError("Unknown task engine: " + engine)
+            await driver.refresh_model_options()
+            try:
+                if engine != parent["engine"]:
+                    choices = engine_defaults.for_session(driver, args)
+                else:
+                    choices.update({field: args[field] for field in choices if field in args})
+                    choices = engine_defaults.validate(driver, choices)
+            except ValueError as exc:
+                raise TaskError(str(exc))
         root = await asyncio.to_thread(_repo, parent)
         _idle_project(root)
         if root in _busy_roots:
@@ -434,13 +457,13 @@ async def create(parent_id, args):
                 context = "Main's project directory is the subdirectory: " + relative + "\n" + context
             if runner._draining:
                 raise TaskError("Puppy is shutting down; retry after the restart")
-            sid = db.create_session(name.strip() or prompt.strip().splitlines()[0][:48], parent["engine"], path,
-                                    parent["model"], parent["effort"], parent["color"], parent["permission_mode"],
+            sid = db.create_session(name.strip() or prompt.strip().splitlines()[0][:48], engine, path,
+                                    choices["model"], choices["effort"], parent["color"], choices["permission_mode"],
                                     workspace_kind=workspaces.KIND_TEMPORARY)
             _save(sid, {"format": 1, "parent": parent_id, "request_id": key, "prompt": prompt.strip(),
                         "context": context, "base": base, "created_at": time.time(), "outcome": "pending",
                         "summary": "", "completed_at": 0, "applied_at": 0, "result_seq": 0})
-            if parent.get("fast_mode"):
+            if parent.get("fast_mode") and engine == parent["engine"]:
                 db.touch_session(sid, fast_mode=1)
             result = runner.hub(sid).send_message(prompt.strip())
             if result.get("error"):
