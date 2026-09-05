@@ -193,6 +193,9 @@ BASE_CAPABILITIES = (
     "session-tasks",
     # Task creation accepts explicit engine/model/effort/permission choices.
     "session-task-config",
+    # Task creation copies the files a prompt's attachment marker lines stage
+    # under Main into the task's own upload storage and rewrites their paths.
+    "session-task-attachments",
     # Per-session tasks_enabled PATCH; disabling requires no child tasks.
     "session-tasks-toggle",
     SESSION_REFERENCES_CAPABILITY,

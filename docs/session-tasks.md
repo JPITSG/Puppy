@@ -7,9 +7,14 @@ across consoles and restarts and is included in backups. Remove every task
 conversation before disabling Tasks, including finished tasks whose tabs were
 hidden. Hiding a tab alone does not close its conversation or stop its work.
 
-Open a session and select **+ Task** beside **Main**. Enter a prompt and optionally
-name it. Engine, model, effort and permissions start with Main's selected choices
-when the dialog opens, even if another task tab is selected. Adjust any of them
+Open a session and select **+ Task** beside **Main**. The task box is the chat's
+own prompt box: `@` offers Main's browsers, terminals, sessions and a spawn,
+images and files can be pasted, dropped or attached with **+**, Enter starts the
+task and Shift+Enter breaks the line. Attached files are copied into the task's
+own storage as it starts, so they belong to the task like any message's
+attachments. Optionally name the task. Engine, model, effort and permissions
+start with Main's selected choices when the dialog opens, even if another task
+tab is selected. Adjust any of them
 before starting; these choices apply only to the new task. Switching engines
 loads that engine's saved defaults, and effort choices follow the selected model.
 The task opens in its own inner tab; create another to work on a second

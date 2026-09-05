@@ -1367,7 +1367,10 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 /* an expanded queue scrolls rather than shoving the composer off the screen */
 .queue-strip.expanded{max-height:36vh;overflow-y:auto;overscroll-behavior:contain}
 
-/* composer */
+/* composer - the chat's frame around the shared prompt box. Everything from
+   .composer-box down is the box itself (Composer in app.js), which the New
+   task dialog hosts as well, so its rules are keyed on the box, never on the
+   chat's frame. */
 .composer{
   flex-shrink:0;padding:8px calc(16px + var(--sbw,0px)) calc(12px + env(safe-area-inset-bottom)) 16px;
   display:flex;flex-direction:column;gap:6px;align-items:center;
@@ -1384,7 +1387,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   white-space:pre-wrap;overflow-wrap:break-word;
 }
 /* browsers with field-sizing: the textarea sizes itself natively - no JS at all */
-.composer textarea.fs-content{field-sizing:content;height:auto!important}
+.composer-box textarea.fs-content{field-sizing:content;height:auto!important}
 .composer-box:focus-within{border-color:var(--focus-line);box-shadow:0 0 0 3px var(--focus-ring)}
 .composer-box.file-drag{border-color:var(--acc-line-hi);box-shadow:0 0 0 3px var(--focus-ring-soft)}
 .composer-box.file-drag::after{
@@ -1396,11 +1399,13 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 }
 .composer-box.file-drag.drop-rejected{border-color:var(--err-line-hi);box-shadow:0 0 0 3px var(--err-ring-soft)}
 .composer-box.file-drag.drop-rejected::after{border-color:var(--err-line);color:var(--err)}
-.composer textarea{
+.composer-box textarea{
   border:none;background:none;box-shadow:none!important;resize:none;padding:2px 3px;
   /* integer line-height: fractional line heights (1.45*13.5=19.575px) make every
      content height sub-pixel; integer height writes then overflow by a fraction
-     and Firefox jitters its internal scroll per keystroke to keep the caret visible */
+     and Firefox jitters its internal scroll per keystroke to keep the caret visible.
+     min/max-height are read back by Composer.resize for browsers without
+     field-sizing, so a host that wants a taller box restyles only these. */
   min-height:24px;max-height:224px;font-size:13.5px;line-height:20px;
 }
 /* ---------- composer @-mentions ---------- */
@@ -1446,6 +1451,10 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .mention-chev svg{transition:none}
 .mention-chev.right svg{transform:rotate(-90deg)}
 .mention-chev.left svg{transform:rotate(90deg)}
+/* A box near the top of a scrolling sheet (the New task dialog) opens its
+   list downward: the sheet's overflow would clip an upward float, whereas a
+   downward one only extends what the sheet can scroll to. */
+.composer-box.mention-below .mention-pop{top:calc(100% + 6px);bottom:auto}
 .mention-pop.slide-next{animation:mention-slide-next .16s var(--ease)}
 .mention-pop.slide-back{animation:mention-slide-back .16s var(--ease)}
 @keyframes mention-slide-next{from{transform:translateX(26px);opacity:.3}to{transform:none;opacity:1}}
@@ -2546,7 +2555,7 @@ html.light .sh-more:hover{background:rgba(15,23,42,.035)}
   .burger{display:inline-grid}
   .chat-scroll{padding:12px 10px 6px}
   .composer{padding:6px 10px calc(10px + env(safe-area-inset-bottom))}
-  .composer textarea{font-size:16px}
+  .composer-box textarea{font-size:16px}
   .approval,.queue-strip{margin:0 10px 6px;width:calc(100% - 20px)}
   .chat-head{padding:8px 10px;gap:6px}
   /* the head's own padding already matches the tabbar's, so the desktop
@@ -2825,7 +2834,11 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
   white-space:pre-wrap;overflow-wrap:anywhere;
 }
 .task-card-actions{display:flex;gap:6px;flex-wrap:wrap}
-.new-task-modal textarea{min-height:130px;resize:vertical}
+/* the task box is the shared prompt box at the old field's height; the
+   caption sits as close to it as a label's own control */
+.new-task-modal .task-composer-lbl{margin-bottom:5px}
+.new-task-modal .composer-box{margin-bottom:10px}
+.new-task-modal .composer-box textarea{min-height:130px;max-height:40vh}
 .new-task-modal .field-row>*{min-width:0}
 /* the review sheet: facts in the linked-workspace sheet's voice, then the
    summary, file list and diff on one shared code-block surface */

@@ -326,6 +326,120 @@ def discard_abandoned(session_id: int, abandoned, retained=()) -> int:
     return removed
 
 
+class AttachmentError(ValueError):
+    """A staged file a message names cannot be carried over as asked."""
+
+
+def _upload_root(session_id: int) -> str:
+    return str(Path(config.DATA_DIR).resolve() / "uploads" / str(int(session_id))) + "/"
+
+
+def rewrite_attachment_paths(source_id: int, target_id: int, text: str) -> str:
+    """``text`` with its marker lines' ``source_id`` upload paths pointing at
+    the same upload ids under ``target_id``.
+
+    Pure: nothing is copied or checked, and prose that merely mentions such a
+    path is left alone. This is also how a retried task creation is compared
+    against the record it made: the retry still carries Main's paths.
+    """
+    if not isinstance(text, str) or not text:
+        return text
+    source_root = _upload_root(source_id)
+    if source_root not in text:
+        return text
+    target_root = _upload_root(target_id)
+    pattern = re.compile(re.escape(source_root) + r"(\d{13}-[0-9a-f]{10})/")
+    lines = []
+    for line in text.split("\n"):
+        if (line.startswith(ATTACH_IMAGE_PREFIX) and line.endswith(ATTACH_IMAGE_SUFFIX)) or \
+                (line.startswith(ATTACH_FILE_PREFIX) and line.endswith(ATTACH_FILE_SUFFIX)):
+            line = pattern.sub(lambda match: target_root + match.group(1) + "/", line)
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _staged_file(session_id: int, upload_id: str) -> Path:
+    """A staged upload another conversation is about to take over, or raise
+    AttachmentError in the words the dialog should show."""
+    try:
+        return _validated_upload_file(session_id, upload_id)
+    except FileNotFoundError:
+        raise AttachmentError(
+            "An attached file is no longer available; remove it and attach it again")
+    except OSError as exc:
+        log.warning("session %s upload %s failed adoption validation: %s",
+                    session_id, upload_id, exc)
+        raise AttachmentError("An attached file failed safety validation")
+
+
+def verify_attachments(source_id: int, text: str) -> None:
+    """Raise AttachmentError unless every upload ``text``'s marker lines stage
+    under ``source_id`` is still present and valid. Cheap, so a task can refuse
+    before it allocates a working copy; adoption re-checks each file anyway."""
+    for upload_id in sorted(_attachment_upload_ids(int(source_id), text)):
+        _staged_file(int(source_id), upload_id)
+
+
+def adopt_attachments(source_id: int, target_id: int, text: str) -> str:
+    """Copy the uploads ``text``'s marker lines stage under ``source_id`` into
+    ``target_id``'s private storage and return the text naming the copies.
+
+    A task's first prompt is written in Main's dialog, so its files were
+    uploaded under Main; from then on the task's transcript is what names
+    them, and bytes must live with the conversation that names them - Main's
+    orphan sweep and deletion would otherwise take them from under the task.
+    Each copy keeps its upload id, unique by construction, so previews and
+    history recall find it under the task. Fails closed: a file that is gone
+    or fails validation refuses the whole adoption and removes the copies made
+    so far, and the caller keeps the prompt it was given.
+    """
+    source_id, target_id = int(source_id), int(target_id)
+    upload_ids = _attachment_upload_ids(source_id, text)
+    if not upload_ids:
+        return text
+    root = Path(config.DATA_DIR).resolve() / "uploads"
+    target_root = root / str(target_id)
+    copied = []
+    try:
+        for upload_id in sorted(upload_ids):
+            source = _staged_file(source_id, upload_id)
+            _private_directory(root)
+            _private_directory(target_root)
+            destination = target_root / upload_id
+            destination.mkdir(mode=0o700)
+            copied.append(destination)
+            target = destination / source.name
+            with source.open("rb") as reader, target.open("xb") as writer:
+                os.chmod(str(target), 0o600)
+                shutil.copyfileobj(reader, writer, STREAM_CHUNK_BYTES)
+                writer.flush()
+                os.fsync(writer.fileno())
+    except AttachmentError:
+        for directory in copied:
+            shutil.rmtree(str(directory), ignore_errors=True)
+        raise
+    except OSError as exc:
+        for directory in copied:
+            shutil.rmtree(str(directory), ignore_errors=True)
+        log.warning("session %s could not adopt session %s uploads: %s",
+                    target_id, source_id, exc)
+        raise AttachmentError("An attached file could not be copied into the task")
+    log.info("session %s adopted %d upload(s) from session %s",
+             target_id, len(copied), source_id)
+    return rewrite_attachment_paths(source_id, target_id, text)
+
+
+def remove_session_storage(session_id: int) -> None:
+    """Drop a session's entire private upload storage.
+
+    Only for a session that no longer exists: one just deleted, or one whose
+    creation failed after files had been copied in for it.
+    """
+    # Keep the path free of a trailing slash so rmtree refuses a symlink
+    # instead of traversing its target.
+    shutil.rmtree(Path(_upload_root(session_id)), ignore_errors=True)
+
+
 async def h_settings_get(_request: web.Request):
     return web.json_response({"uploads": settings_payload()})
 

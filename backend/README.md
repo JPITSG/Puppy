@@ -28,6 +28,17 @@ mean engine default. Supplied choices are validated against that node's selected
 engine and model before allocating a task copy. The first turn uses those
 choices without editing Main. Older nodes retain the inheritance-only dialog.
 
+Nodes advertising `session-task-attachments` accept attachment marker lines in a
+task `prompt` that name files staged under Main (`data/uploads/<main sid>/…`,
+as the console's prompt box writes them). Before the first turn the node copies
+each such file into the new task's own private upload storage under the same
+upload id, rewrites those marker paths to the copies, and then discards Main's
+copies that nothing of Main's (draft, queue, transcript) still names. A retry
+carrying the same `request_id` may still name Main's original paths. A staged
+file that is missing or fails validation refuses the task with 409 and leaves
+Main untouched. Older nodes would leave Main-owned paths in the task prompt,
+so consoles offer task attachments only behind this capability.
+
 ## Build
 
 ```bash

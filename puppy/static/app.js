@@ -3260,14 +3260,15 @@ function acceptStateSnapshot(bid, message) {
   return true;
 }
 
-function syncInstanceCatalogIntoViews(bid, kind, instances) {
-  for (const view of liveViews()) {
-    if (!view || !view.tab || view.tab.type !== "session" ||
-        Number(view.tab.bid || 0) !== Number(bid || 0) || !view.mentionData) continue;
-    if (kind === "browser") view.mentionData.browsers = instances;
-    else view.mentionData.terminals = instances;
-    view.mentionData.at = Date.now();
-    if (view.mention && !view.closed) view.updateMention();
+/* Every prompt box on that node - chat composers and an open New task dialog
+   alike - learns the live instance set its "@" list offers. */
+function syncInstanceCatalogIntoComposers(bid, kind, instances) {
+  for (const composer of Composer.live) {
+    if (Number(composer.host.bid || 0) !== Number(bid || 0)) continue;
+    if (kind === "browser") composer.mentionData.browsers = instances;
+    else composer.mentionData.terminals = instances;
+    composer.mentionData.at = Date.now();
+    if (composer.mention && !composer.closed) composer.updateMention();
   }
   syncSessionBrowserChips();
 }
@@ -3283,7 +3284,7 @@ function applyBrowserStatusSnapshot(bid, payload) {
     state.browserStatus = payload;
     state.browser = payload;
   }
-  syncInstanceCatalogIntoViews(bid, "browser", payload.instances);
+  syncInstanceCatalogIntoComposers(bid, "browser", payload.instances);
   if (!payload.enabled) closeBrowserTabsForBackend(bid);
   syncRemoteStateViews();
 }
@@ -3292,7 +3293,7 @@ function applyTerminalInstancesSnapshot(bid, payload) {
   if (!payload || !Array.isArray(payload.instances)) return;
   bid = Number(bid) || 0;
   state.terminalInstances[bid] = payload.instances;
-  syncInstanceCatalogIntoViews(bid, "terminal", payload.instances);
+  syncInstanceCatalogIntoComposers(bid, "terminal", payload.instances);
   syncRemoteStateViews();
 }
 
@@ -4741,11 +4742,10 @@ function rememberUploadSettings(bid, value) {
   if (!normalized) return null;
   if (bid) state.remoteUploadSettings[bid] = normalized;
   else state.uploadSettings = normalized;
-  for (const view of liveViews()) {
-    if (!view || !view.tab || view.tab.type !== "session" || Number(view.tab.bid || 0) !== Number(bid || 0))
-      continue;
-    view.uploadPolicy = normalized;
-    if (typeof view.syncUploadButton === "function") view.syncUploadButton();
+  for (const composer of Composer.live) {
+    if (Number(composer.host.bid || 0) !== Number(bid || 0)) continue;
+    composer.uploadPolicy = normalized;
+    composer.syncUploadButton();
   }
   return normalized;
 }
@@ -7660,24 +7660,22 @@ function scrollCaretIntoView(ta) {
   else if (top < ta.scrollTop) ta.scrollTop = top;
 }
 
-/* ctrl+j -> newline in the composer (CLI muscle memory; keeps Firefox from
-   opening its Downloads/bookmarks popup). Terminal tabs keep native handling. */
+/* ctrl+j -> newline in the prompt box (CLI muscle memory; keeps Firefox from
+   opening its Downloads/bookmarks popup): the box being typed in, else the
+   active chat's. Terminal tabs keep native handling, and any other field just
+   swallows the browser shortcut. */
 document.addEventListener("keydown", (e) => {
   if (!e.ctrlKey || e.metaKey || e.altKey || (e.key !== "j" && e.key !== "J")) return;
   const t = e.target;
   if (t && t.closest && t.closest(".view.term")) return; // xterm owns keys there
   e.preventDefault();
-  const view = state.views[state.active];
-  if (!view || !view.ta) return;
-  const ta = view.ta;
-  // don't hijack typing in modal/settings inputs - just swallow the browser shortcut
-  if (t !== ta && t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
-  ta.focus();
-  const s = ta.selectionStart, en = ta.selectionEnd;
-  ta.value = ta.value.slice(0, s) + "\n" + ta.value.slice(en);
-  ta.selectionStart = ta.selectionEnd = s + 1;
-  ta.dispatchEvent(new Event("input", { bubbles: true }));   // resizes first
-  scrollCaretIntoView(ta);
+  let composer = Composer.of(t);
+  if (!composer) {
+    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+    const view = state.views[state.active];
+    composer = view && view.composer;
+  }
+  if (composer) composer.newline();
 });
 
 /* Every float in the app closes through here, so opening one always retires
@@ -7781,6 +7779,1263 @@ function spawnEffortOptionsFor(engine, modelOption) {
     (engine && Array.isArray(engine.effort_options) ? engine.effort_options : []);
   return options.filter(option => option && typeof option.value === "string");
 }
+
+/* ================= Composer ================= */
+/* The prompt box: the one implementation of everything a place to type at an
+   agent needs - the textarea and its autosize, the "@" mention list with its
+   session picker and spawn wizard, staged attachments (paste, drop, the +
+   button, previews), shell-style recall of sent messages, and the keyboard
+   contract (Enter sends, Shift+Enter breaks the line, Escape and the arrows
+   belong to the open list first, ctrl+j inserts a newline from anywhere).
+   The chat's composer and the New task dialog are both HOSTS of this class:
+   a host owns what surrounds the box and what "send" means, and never grows a
+   second text box with its own copy of these behaviours. composerBoxHtml
+   builds the box for every host, so the markup cannot fork either.
+   A host is a plain object:
+     bid, sid          the node and session the box speaks for: files are
+                       staged under that session, and its own browsers and
+                       terminals lead the "@" list
+     selfHint          the "@" list's tag on that session's own instances
+                       (default "this session")
+     submit()          Enter, and the host's own send control
+     escape(event)     Escape with no list open (optional; the event otherwise
+                       propagates, so a dialog's Escape still closes it)
+     edited()          the value changed through a local edit or recall:
+                       persist it (optional)
+     updated()         the value changed in any way: refresh the controls
+                       that depend on it (optional)
+     beforeResize() / afterResize(token)
+                       bracket a height change so the host can keep its own
+                       scroll position (optional)
+     uploadsBlocked()  a reason files cannot be attached through this host
+                       beyond the node's own upload policy, or "" (optional)
+     privateUploads()  whether staged server files belong to this box alone,
+                       so removing a chip may delete them; a shared draft may
+                       still own them on another device (optional, default
+                       true) */
+function composerBoxHtml({ id = "", placeholder = "", rows = 1, className = "",
+                           controls = "", actions = "" } = {}) {
+  return `<div class="composer-box${className ? " " + esc(className) : ""}">
+    <div class="mention-pop hidden" role="listbox"
+      aria-label="Mention a Puppy session, browser, terminal, or spawn"></div>
+    <textarea rows="${Number(rows) || 1}"${id ? ` id="${esc(id)}"` : ""} placeholder="${esc(placeholder)}"></textarea>
+    <div class="attach-strip hidden"></div>
+    <div class="composer-row">
+      <div class="composer-meta-viewport edge-scroll-viewport">
+        <div class="composer-meta-scroll">
+          <button type="button" class="mini attach-add" aria-label="Attach files">
+            <span aria-hidden="true"></span></button>${controls}
+        </div>
+      </div>${actions}
+    </div>
+    <input class="hidden attach-input" type="file" multiple>
+  </div>`;
+}
+
+class Composer {
+  constructor(box, host) {
+    this.box = box;
+    this.host = Object.assign({ selfHint: "this session", privateUploads: () => true }, host);
+    this.closed = false;
+    this.busy = false;                // a host transaction holds the box read-only
+    this.ta = box.querySelector("textarea");
+    this.mentionEl = box.querySelector(".mention-pop");
+    this.attachStrip = box.querySelector(".attach-strip");
+    this.attachButton = box.querySelector(".attach-add");
+    this.fileInput = box.querySelector(".attach-input");
+    this.history = [];        // sent messages, oldest first (shell-style recall)
+    this.histIdx = null;
+    this.histDraft = "";
+    this.attachments = [];    // staged server files represented by marker lines
+    this.histAttach = null;   // staged attachments parked while history recall is active
+    this.sentThumbs = new Map();  // path -> object URL, so recall can re-show previews
+    this.uploadPolicy = uploadSettingsFor(this.host.bid);
+    this.fileDragDepth = 0;
+    this.mention = null;          // open @-mention popup: {start, query, items, sel}
+    this.mentionDismissedAt = -1; // Esc'd token start; stays hidden while it lives
+    this.mentionSession = null;   // session picker: {selected, data, error}
+    this.mentionSpawn = null;     // "New spawn" wizard: {step, node, engine, model, …}
+    this.mentionRowEls = [];      // selectable rows, excluding the wizard header
+    const nodeBid = Number(this.host.bid) || 0;
+    const browserCatalog = nodeBid ? state.remoteBrowserStatus[nodeBid] : state.browserStatus;
+    this.mentionData = {
+      at: nodeStateStreamActive(nodeBid) ? Date.now() : 0,
+      browsers: browserCatalog && Array.isArray(browserCatalog.instances) ?
+        browserCatalog.instances : null,
+      terminals: Array.isArray(state.terminalInstances[nodeBid]) ?
+        state.terminalInstances[nodeBid] : null,
+      promise: null,
+    };
+    /* Pointer presses anywhere on the list (rows, padding, scrollbar) keep the
+       box focused; the row's click still lands and wheel/touch scrolling is
+       untouched. A blur would otherwise take the list down mid-pick. */
+    this.mentionEl.addEventListener("pointerdown", (e) => e.preventDefault());
+    this.attachButton.firstElementChild.appendChild(plusIcon(12));
+    this.ta.addEventListener("paste", (e) => this.handlePaste(e));
+    box.addEventListener("dragenter", (e) => this.handleFileDragEnter(e));
+    box.addEventListener("dragover", (e) => this.handleFileDragOver(e));
+    box.addEventListener("dragleave", (e) => this.handleFileDragLeave(e));
+    box.addEventListener("drop", (e) => this.handleFileDrop(e));
+    this.attachButton.onclick = () => {
+      this.fileInput.value = "";
+      this.fileInput.click();
+    };
+    this.fileInput.onchange = () => {
+      const files = this.fileInput.files ? [...this.fileInput.files] : [];
+      this.fileInput.value = "";
+      if (files.length) this.uploadFiles(files);
+    };
+    this.syncUploadButton();
+
+    this.fieldSizing = window.CSS && CSS.supports && CSS.supports("field-sizing", "content");
+    if (this.fieldSizing) {
+      this.ta.classList.add("fs-content");
+    } else {
+      this.taGhost = el("div", "ta-ghost");
+      const tcs = getComputedStyle(this.ta);
+      for (const p of ["fontFamily", "fontSize", "fontWeight", "lineHeight", "letterSpacing",
+                       "paddingTop", "paddingBottom", "paddingLeft", "paddingRight",
+                       "borderTopWidth", "borderBottomWidth", "borderLeftWidth", "borderRightWidth", "boxSizing"])
+        this.taGhost.style[p] = tcs[p];
+      box.appendChild(this.taGhost);
+    }
+    this._lastTaH = 0;
+
+    this.ta.addEventListener("input", () => {
+      this.histIdx = null;   // manual edits exit history mode
+      this.releaseHistoryAttachments();
+      this.resize();
+      this.notify(true);
+      this.updateMention();
+    });
+    this.ta.addEventListener("keydown", (e) => this.keydown(e));
+    /* Rows keep the box focused via pointerdown preventDefault, so any real
+       blur means the user left it and the list goes with them. */
+    this.ta.addEventListener("blur", () => this.hideMention());
+    /* Arrow keys and clicks move the caret without an input event; the mention
+       list follows the caret, so it listens to the document-level selection. */
+    this._onSelectionChange = () => {
+      if (document.activeElement === this.ta) this.updateMention();
+    };
+    document.addEventListener("selectionchange", this._onSelectionChange);
+    Composer.live.add(this);
+  }
+
+  /* The box whose textarea is `element`, or null. */
+  static of(element) {
+    for (const composer of Composer.live)
+      if (composer.ta === element) return composer;
+    return null;
+  }
+
+  /* One keyboard contract for every host. The open mention list owns its
+     navigation keys first - most importantly Escape, which must close the
+     list and nothing else. */
+  keydown(e) {
+    if (e.isComposing) return;
+    if (this.mentionKeydown(e)) return;
+    if (e.key === "Escape") {
+      if (this.host.escape) this.host.escape(e);
+      return;
+    }
+    /* Ctrl/Cmd+C has no shortcut here: it falls through to the modifier
+       guard below so textarea selection and native clipboard copy work. */
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); this.host.submit(); return; }
+    if (e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return;
+    const ta = this.ta;
+    const atStart = ta.selectionStart === 0 && ta.selectionEnd === 0;
+    const atEnd = ta.selectionStart === ta.value.length && ta.selectionEnd === ta.value.length;
+    if (e.key === "ArrowUp" && atStart && this.history.length) {
+      if (this.histIdx === null) {
+        this.histIdx = this.history.length;
+        this.histDraft = ta.value;
+        this.histAttach = this.attachments;   // parked, not discarded
+      }
+      if (this.histIdx > 0) {
+        e.preventDefault();
+        this.histIdx--;
+        this.recall(this.history[this.histIdx]);
+      }
+    } else if (e.key === "ArrowDown" && atEnd && this.histIdx !== null) {
+      e.preventDefault();
+      this.histIdx++;
+      if (this.histIdx >= this.history.length) {
+        this.attachments = this.histAttach || [];
+        this.histAttach = null;
+        this.renderAttachments();
+        this.set(this.histDraft);
+        this.histIdx = null;
+      } else {
+        this.recall(this.history[this.histIdx]);
+      }
+    }
+  }
+
+  /* ctrl+j: a newline at the caret through the ordinary edit path (resize,
+     persist), then the caret brought back into view. */
+  newline() {
+    const ta = this.ta;
+    ta.focus();
+    const s = ta.selectionStart, en = ta.selectionEnd;
+    ta.value = ta.value.slice(0, s) + "\n" + ta.value.slice(en);
+    ta.selectionStart = ta.selectionEnd = s + 1;
+    ta.dispatchEvent(new Event("input", { bubbles: true }));   // resizes first
+    scrollCaretIntoView(ta);
+  }
+
+  notify(edited) {
+    if (edited && this.host.edited) this.host.edited();
+    if (this.host.updated) this.host.updated();
+  }
+
+  /* ---- the value ---- */
+  text() { return this.ta.value; }
+
+  /* The box in the form its message would be sent in: attachment marker lines
+     make the same value portable to another browser without a second
+     attachment data model. Files still uploading have no path yet. */
+  value() {
+    const markers = this.attachments.filter(a => a.path).map(attachmentMarkerLine).join("\n");
+    const text = this.ta.value;
+    return markers ? (text ? text + "\n\n" + markers : markers) : text;
+  }
+
+  /* The message a send would carry: trimmed prose above the marker block.
+     A message that is only attachments is a message. */
+  message() {
+    const text = this.ta.value.trim();
+    const lines = this.attachments.map(attachmentMarkerLine).join("\n");
+    return lines ? (text ? text + "\n\n" + lines : lines) : text;
+  }
+
+  isEmpty() { return !this.ta.value.trim() && !this.attachments.length; }
+
+  /* Why a send must wait, or "". Every host asks before it sends. */
+  sendBlocker() {
+    return this.attachments.some(attachment => attachment.uploading) ?
+      "Wait for file uploads to finish" : "";
+  }
+
+  /* Hand the message over and empty the box: sent images keep their preview
+     for recall, everything else the box created is released. Persisting the
+     emptied value is the host's decision (a send has its own draft frame). */
+  take() {
+    const message = this.message();
+    this.attachments.forEach(a => this.retireSentAttachment(a));
+    this.attachments = [];
+    this.renderAttachments(false);
+    this.ta.value = "";
+    this.hideMention();
+    this.resize();
+    this.histIdx = null;
+    this.histDraft = "";
+    this.releaseHistoryAttachments();
+    return message;
+  }
+
+  set(v) {
+    this.ta.value = v;
+    this.ta.selectionStart = this.ta.selectionEnd = v.length;
+    this.resize();
+    scrollCaretIntoView(this.ta);   // recalling a long entry lands on its end
+    this.notify(true);
+  }
+
+  setHistory(list) {
+    this.history = list;
+    this.histIdx = null;
+  }
+
+  rememberSent(text) { this.history.push(text); }
+
+  /* The preview this page still holds for a sent image, else "". */
+  sentPreview(path) { return this.sentThumbs.get(path) || ""; }
+
+  caretToEnd() {
+    const end = this.ta.value.length;
+    try { this.ta.setSelectionRange(end, end); } catch (_) {}
+  }
+
+  focus(revealCaret = false) {
+    this.ta.focus();
+    if (revealCaret) scrollCaretIntoView(this.ta);
+  }
+
+  /* A host transaction that will replace the whole value (a queued-message
+     edit, a task being prepared) holds the box: read-only text, no new files. */
+  setBusy(busy) {
+    this.busy = !!busy;
+    this.ta.readOnly = this.busy;
+    this.syncUploadButton();
+  }
+
+  /* with field-sizing the browser autosizes natively; otherwise measure on the
+     hidden mirror and only write the height when it actually changed. Either
+     way the host learns of a height change, bracketed so it can re-pin its own
+     scroll position. */
+  resize() {
+    const ta = this.ta, host = this.host;
+    const token = host.beforeResize ? host.beforeResize() : undefined;
+    if (!this.fieldSizing) {
+      const g = this.taGhost;
+      g.style.width = ta.offsetWidth + "px";
+      const v = ta.value;
+      g.textContent = v.endsWith("\n") ? v + "\u200b" : (v || "\u200b");
+      const bounds = this.heightBounds();
+      const needed = Math.min(Math.max(g.offsetHeight, bounds[0]), bounds[1]);
+      if (needed !== ta.offsetHeight) ta.style.height = needed + "px";
+    }
+    const h = ta.offsetHeight;
+    if (h !== this._lastTaH) {
+      this._lastTaH = h;
+      if (host.afterResize) host.afterResize(token);
+    }
+  }
+
+  /* The textarea's own min/max-height, so a host that styles its box taller
+     (the New task dialog) is measured against its own bounds; the chat's
+     values stand in until the element is laid out. */
+  heightBounds() {
+    if (!this.ta.isConnected) return [24, 224];
+    const cs = getComputedStyle(this.ta);
+    return [parseFloat(cs.minHeight) || 24, parseFloat(cs.maxHeight) || 224];
+  }
+
+  syncUploadButton() {
+    if (!this.attachButton) return;
+    const bid = this.host.bid;
+    const supported = backendSupportsFileUploads(bid);
+    const unavailable = !!bid && !backendConnectionAllowed(bid);
+    const policy = this.uploadPolicy || uploadSettingsFor(bid);
+    const disabledByPolicy = !!policy && !policy.enabled;
+    const blocked = this.host.uploadsBlocked ? this.host.uploadsBlocked() : "";
+    this.attachButton.disabled = this.busy || !!blocked || !supported || unavailable ||
+      disabledByPolicy;
+    let label;
+    if (blocked) label = blocked;
+    else if (!supported) label = "Upgrade this backend to attach arbitrary files";
+    else if (unavailable) label = "Backend unavailable";
+    else if (disabledByPolicy) label = "File uploads are disabled on this backend";
+    else if (policy) label = `Attach files · ${policy.max_file_size_mb} MiB maximum each`;
+    else label = "Attach files";
+    this.attachButton.removeAttribute("title");
+    this.attachButton.removeAttribute("data-tip");
+    this.attachButton.setAttribute("aria-label", label);
+  }
+
+  /* Leave the box. Bytes still in flight are aborted and browser-owned
+     previews released; completed server uploads are discarded only when the
+     host says they belong to nobody else (a cancelled dialog), never for a
+     view whose durable draft still names them. */
+  destroy({ discardUploads = false } = {}) {
+    this.closed = true;
+    Composer.live.delete(this);
+    this.clearFileDropTarget();
+    document.removeEventListener("selectionchange", this._onSelectionChange);
+    this.hideMention();
+    const staged = new Set([...(this.histAttach || []), ...this.attachments]);
+    this.histAttach = null;
+    this.attachments = [];
+    for (const attachment of staged) {
+      attachment.removed = true;
+      if (attachment.controller) attachment.controller.abort();
+      if (attachment.url && attachment.ownsUrl) URL.revokeObjectURL(attachment.url);
+      attachment.url = "";
+      if (discardUploads && attachment.uploadId) this.discardServerUpload(attachment.uploadId, true);
+    }
+    for (const url of this.sentThumbs.values()) URL.revokeObjectURL(url);
+    this.sentThumbs.clear();
+  }
+
+  /* Replace prose and completed attachment chips, ordinarily preserving local
+     uploads still in flight. An explicit queue edit replaces those too.
+     Matching local image blobs are reused; everything else is released. */
+  replace(text, caretAtEnd = false, replaceUploading = false) {
+    const restored = splitAttachmentMarkers(text);
+    const sources = [...(this.histAttach || []), ...this.attachments];
+    const byPath = new Map();
+    for (const source of sources)
+      if (source.path && !byPath.has(source.path)) byPath.set(source.path, source);
+    const reused = new Set();
+    for (const attachment of restored.attachments) {
+      const source = byPath.get(attachment.path);
+      if (!source) continue;
+      reused.add(source);
+      attachment.uploadId = source.uploadId || "";
+      attachment.url = source.url || "";
+      attachment.ownsUrl = !!source.ownsUrl;
+      attachment.preview = source.preview;
+      attachment.size = source.size;
+      attachment.sizeText = source.sizeText;
+      attachment.contentType = source.contentType;
+    }
+    const uploading = [];
+    for (const source of sources) {
+      if (!replaceUploading && source.uploading && !source.removed) {
+        if (!uploading.includes(source)) uploading.push(source);
+        continue;
+      }
+      if (reused.has(source)) continue;
+      source.removed = true;
+      if (source.controller) source.controller.abort();
+      if (replaceUploading && source.uploadId)
+        this.discardServerUpload(source.uploadId, true);
+      if (source.url && source.ownsUrl) URL.revokeObjectURL(source.url);
+      source.url = "";
+    }
+    this.histAttach = null;
+    this.histIdx = null;
+    this.histDraft = "";
+    this.attachments = restored.attachments.concat(uploading);
+
+    const oldText = this.ta.value;
+    const oldStart = this.ta.selectionStart;
+    const oldEnd = this.ta.selectionEnd;
+    let prefix = 0;
+    while (prefix < oldText.length && prefix < restored.text.length &&
+           oldText[prefix] === restored.text[prefix]) prefix++;
+    let suffix = 0;
+    while (suffix < oldText.length - prefix && suffix < restored.text.length - prefix &&
+           oldText[oldText.length - 1 - suffix] ===
+             restored.text[restored.text.length - 1 - suffix]) suffix++;
+    const oldChangedEnd = oldText.length - suffix;
+    const newChangedEnd = restored.text.length - suffix;
+    const remap = position => position <= prefix ? position :
+      position >= oldChangedEnd ? newChangedEnd + (position - oldChangedEnd) : newChangedEnd;
+    this.ta.value = restored.text;
+    try {
+      if (caretAtEnd)
+        this.ta.setSelectionRange(restored.text.length, restored.text.length);
+      else
+        this.ta.setSelectionRange(remap(oldStart), remap(oldEnd));
+    } catch (_) {}
+    this.renderAttachments(false);
+    this.resize();
+  }
+
+  /* Recall a sent message: its attachment markers become chips again, and the
+     preview from the original send is reused when this tab still holds it. */
+  recall(text) {
+    const recalled = splitAttachmentMarkers(text);
+    for (const attachment of recalled.attachments) {
+      if (!attachment.preview) continue;
+      const url = this.sentThumbs.get(attachment.path);
+      if (url) attachment.url = url;   // owned by sentThumbs, never revoked here
+    }
+    this.attachments = recalled.attachments;   // the parked list keeps its own array
+    this.renderAttachments();
+    this.set(recalled.text);
+  }
+
+  /* History mode ended without walking back to the draft, so release the local
+     attachment objects it parked. Shared server bytes follow session lifecycle. */
+  releaseHistoryAttachments() {
+    if (!this.histAttach) return;
+    const parked = this.histAttach;
+    this.histAttach = null;
+    for (const attachment of parked)
+      if (!this.attachments.includes(attachment)) this.removeAttachment(attachment, true);
+  }
+
+  /* ---- @-mentions ---- */
+  mentionKeydown(e) {
+    const m = this.mention;
+    if (!m) return false;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      /* Inside the spawn wizard, Escape slides back one part; only the flat
+         list dismisses. Leaving the wizard's first part returns to the list. */
+      if (this.mentionSpawn) { this.spawnStepBack(); return true; }
+      this.mentionDismissedAt = m.start;   // this token asked to be left alone
+      this.hideMention();
+      return true;
+    }
+    if (this.mentionSpawn && e.key === "Backspace" && !m.query) {
+      e.preventDefault();
+      this.spawnStepBack();
+      return true;
+    }
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      this.selectMention((m.sel + (e.key === "ArrowDown" ? 1 : m.items.length - 1))
+        % m.items.length);
+      return true;
+    }
+    if (e.key === "Enter" || e.key === "Tab") {
+      const item = m.items[m.sel];
+      /* A mention already typed out in full has nothing left to complete;
+         Enter keeps meaning send. Tab still completes the trailing space. */
+      if (!this.mentionSpawn && !this.mentionSession && e.key === "Enter" &&
+          item.search === m.query.toLowerCase()) {
+        this.hideMention();
+        return false;
+      }
+      e.preventDefault();
+      this.applyMention(item);
+      return true;
+    }
+    return false;
+  }
+
+  updateMention() {
+    let ctx = composerMentionContext(
+      this.ta.value, this.ta.selectionStart, this.ta.selectionEnd);
+    if (this.mentionSession && this.mention && this.ta.selectionStart === this.ta.selectionEnd) {
+      const start = this.mention.start;
+      const query = this.ta.value.slice(start + 1, this.ta.selectionStart);
+      if (this.ta.value[start] === "@" && this.ta.selectionStart > start &&
+          !query.includes("\n") && query.length <= 400) ctx = {start, query};
+    }
+    if (!ctx) {
+      this.mentionDismissedAt = -1;   // left the token; dismissal is spent
+      this.hideMention();
+      return;
+    }
+    /* History recall parks the caret at the end of restored text; a recalled
+       "@…" tail must not steal the arrow keys mid-walk. Typing exits history
+       mode first, so the list is back for every real keystroke. */
+    if (this.histIdx !== null) { this.hideMention(); return; }
+    if (this.mentionDismissedAt === ctx.start) { this.hideMention(); return; }
+    this.mentionDismissedAt = -1;
+    let items;
+    if (this.mentionSession) {
+      items = this.sessionMentionItems(ctx.query);
+    } else if (this.mentionSpawn) {
+      /* Wizard mode: the token's query filters the current step's choices,
+         and the Back row stays put so a fruitless filter cannot strand the
+         wizard with nowhere to go. */
+      const stepItems = this.spawnStepItems();
+      items = filterMentionItems(
+        stepItems.filter(item => item.kind !== "spawn-back"), ctx.query);
+      const back = stepItems.find(item => item.kind === "spawn-back");
+      if (back) items.push(back);
+    } else {
+      items = filterMentionItems(this.mentionCandidates(), ctx.query);
+    }
+    if (!items.length) { this.hideMention(); return; }
+    const previous = this.mention && this.mention.items[this.mention.sel];
+    const kept = previous ? items.findIndex(item =>
+      item.kind === previous.kind && item.label === previous.label) : -1;
+    this.mention = { start: ctx.start, query: ctx.query, items, sel: kept >= 0 ? kept : 0 };
+    this.renderMention();
+    if (!this.mentionSpawn && !this.mentionSession) this.refreshMentionInstances();
+  }
+
+  hideMention() {
+    this.mentionSession = null;
+    this.mentionSpawn = null;
+    if (!this.mention) return;
+    this.mention = null;
+    this.mentionRowEls = [];
+    this.mentionEl.textContent = "";
+    this.mentionEl.classList.add("hidden");
+    this.mentionEl.classList.remove("slide-next", "slide-back");
+  }
+
+  renderMention() {
+    const m = this.mention;
+    const wizard = this.mentionSpawn;
+    this.mentionEl.textContent = "";
+    this.mentionRowEls = [];
+    this.mentionEl.setAttribute("aria-multiselectable", this.mentionSession ? "true" : "false");
+    if (wizard) {
+      const head = el("div", "mention-step-head");
+      const trail = ["New spawn"];
+      if (wizard.count > 1) trail.push(`${wizard.count} agents`);
+      if (wizard.node) trail.push(wizard.node.name);
+      else if (wizard.node === null) trail.push(backendName(this.host.bid || 0));
+      if (wizard.engine) trail.push(wizard.engine.key);
+      if (wizard.step === "effort" && wizard.model)
+        trail.push(wizard.model.value || "default model");
+      head.appendChild(el("span", "mention-step-trail", trail.join(" · ")));
+      head.appendChild(el("span", "mention-step-name",
+        { count: "Agents", node: "Node", engine: "Engine", model: "Model",
+          effort: "Effort" }[wizard.step] || ""));
+      this.mentionEl.appendChild(head);
+    }
+    m.items.forEach((item, index) => {
+      const row = el("button", "mention-item" + (index === m.sel ? " sel" : "") +
+        (item.kind === "spawn-wait" ? " quiet" : ""));
+      row.type = "button";
+      row.setAttribute("role", "option");
+      row.setAttribute("aria-selected", item.kind === "session-select" ?
+        String(this.mentionSession.selected.has(item.ref)) : String(index === m.sel));
+      const ico = el("span", "mention-ico");
+      if (item.kind === "spawn-back" || item.kind === "spawn-step") {
+        ico.classList.add("mention-chev", item.kind === "spawn-back" ? "left" : "right");
+        ico.appendChild(choiceSvg("arrow"));
+      } else if (item.kind === "spawn-retry") {
+        ico.appendChild(refreshIcon(11));
+      } else if (item.kind !== "spawn-wait") {
+        ico.appendChild(item.kind === "browser" ? globeIcon(12) :
+          item.kind === "terminal" ? terminalIcon(12) : plusIcon(11));
+      }
+      row.appendChild(ico);
+      row.appendChild(el("span", "mention-label", item.label));
+      if (item.hint) row.appendChild(el("span", "mention-hint", item.hint));
+      row.onclick = () => this.applyMention(item);
+      row.onmouseenter = () => { if (this.mention === m) this.selectMention(index); };
+      this.mentionEl.appendChild(row);
+      this.mentionRowEls.push(row);
+    });
+    this.mentionEl.classList.remove("hidden");
+    this.mentionEl.classList.remove("slide-next", "slide-back");
+    if (wizard && wizard.slide) {
+      /* Re-adding the class after a reflow restarts the glide for every step,
+         so each part visibly slides in from its travel direction. */
+      void this.mentionEl.offsetWidth;
+      this.mentionEl.classList.add(wizard.slide < 0 ? "slide-back" : "slide-next");
+      wizard.slide = 0;
+    }
+    const sel = this.mentionRowEls[m.sel];
+    if (sel && sel.scrollIntoView) sel.scrollIntoView({ block: "nearest" });
+  }
+
+  selectMention(index) {
+    const m = this.mention;
+    if (!m || !m.items[index]) return;
+    m.sel = index;
+    this.mentionRowEls.forEach((row, i) => {
+      row.classList.toggle("sel", i === index);
+      const item = m.items[i];
+      row.setAttribute("aria-selected", item.kind === "session-select" ?
+        String(this.mentionSession.selected.has(item.ref)) : String(i === index));
+    });
+    const sel = this.mentionRowEls[index];
+    if (sel && sel.scrollIntoView) sel.scrollIntoView({ block: "nearest" });
+  }
+
+  /* Replace the token with the canonical mention and one trailing space. The
+     synthetic input event runs the ordinary edit path (resize, draft save),
+     whose re-evaluation then retires the completed token as prose. Wizard
+     rows never insert directly: they advance, retreat, or retry a part. */
+  applyMention(item) {
+    if (item.kind === "session-picker") { this.beginSessionMention(); return; }
+    if (item.kind === "session-wait") return;
+    if (item.kind === "session-back") {
+      this.mentionSession = null; this.spawnResetQuery(); return;
+    }
+    if (item.kind === "session-select") {
+      const selected = this.mentionSession.selected;
+      if (selected.has(item.ref)) selected.delete(item.ref); else selected.add(item.ref);
+      this.updateMention(); return;
+    }
+    if (item.kind === "session-all" || item.kind === "session-insert") {
+      const wizard = this.mentionSession;
+      const refs = item.kind === "session-all" ? ["all"] : [...wizard.selected];
+      this.mentionSession = null;
+      this.applyMention({insert: refs.map(ref => `@Session ${wizard.data.controller}:${ref}`).join(" ")});
+      return;
+    }
+    if (item.kind === "new-spawn") { this.spawnMentionBegin(); return; }
+    if (item.kind === "spawn-back") { this.spawnStepBack(); return; }
+    if (item.kind === "spawn-step") { this.spawnStepChoose(item); return; }
+    if (item.kind === "spawn-retry") { this.spawnFetchEngines(true); return; }
+    if (item.kind === "spawn-wait") return;
+    const m = this.mention;
+    if (!m) return;
+    const ta = this.ta;
+    const end = ta.selectionStart;
+    const rest = ta.value.slice(end);
+    const pad = rest.startsWith(" ") || rest.startsWith("\n") ? "" : " ";
+    ta.value = ta.value.slice(0, m.start) + item.insert + pad + rest;
+    const caret = m.start + item.insert.length + 1;
+    ta.setSelectionRange(caret, caret);
+    this.mentionDismissedAt = -1;
+    this.hideMention();
+    ta.focus();
+    ta.dispatchEvent(new Event("input", { bubbles: true }));
+    scrollCaretIntoView(ta);
+  }
+
+  /* What "@" can point the agent at on this session's node: live instances
+     first (its own before other sessions'), then the explicit new-instance
+     requests. Every row is gated on what the node actually offers the engine:
+     browser rows only where Browser is enabled, terminal rows only where the
+     node has terminals at all. */
+  mentionCandidates() {
+    const bid = this.host.bid || 0;
+    const backend = bid ? state.backends.find(b => b.id === bid) : null;
+    const withBrowser = browserEnabledFor(bid);
+    const withTerminal = !bid || backendHasCapability(backend, "terminal");
+    const items = [];
+    const push = (kind, label, hint, insert) =>
+      items.push({ kind, label, hint, insert, search: label.toLowerCase() });
+    const hintFor = (owner) => {
+      const sid = Number(owner) || 0;
+      if (sid <= 0) return "";
+      if (sid === this.host.sid) return this.host.selfHint;
+      const meta = findSessionMeta(bid, sid);
+      return meta ? (meta.name || `Session ${sid}`) : "";
+    };
+    for (const inst of this.knownMentionInstances("browser", withBrowser))
+      push("browser", `Browser ${inst.id}`, hintFor(inst.session_id), `@Browser ${inst.id}`);
+    for (const inst of this.knownMentionInstances("terminal", withTerminal))
+      push("terminal", `Terminal ${inst.id}`, hintFor(inst.session_id), `@Terminal ${inst.id}`);
+    if (!bid || backendHasCapability(backend, "session-references"))
+      items.push({kind: "session-picker", label: "Session", hint: "reference one, several, or all",
+        search: "session sessions", insert: ""});
+    if (withBrowser) push("new-browser", "New browser", "another isolated browser", "@New browser");
+    if (withTerminal) push("new-terminal", "New terminal", "another shared terminal", "@New terminal");
+    if (spawnExecFor(bid))
+      push("new-spawn", "New spawn", "delegate a one-shot agent", "");
+    return items;
+  }
+
+  /* ---- the "New spawn" wizard ----
+     Selecting the row does not insert text; the popup slides through the
+     directive's parts - how many agents, node, engine, model, effort - and
+     only the finished directive lands in the composer, so the exact wording
+     never has to be remembered. Single-choice parts are skipped, typing
+     filters the current part, and Escape/Backspace slide back. */
+
+  async beginSessionMention() {
+    const wizard = {selected: new Set(), data: null, error: ""};
+    this.mentionSession = wizard;
+    this.spawnResetQuery();
+    try { wizard.data = await api(0, "session-links/catalog"); }
+    catch (error) { wizard.error = error.message; }
+    if (this.mentionSession === wizard) this.updateMention();
+  }
+
+  sessionMentionItems(query) {
+    const wizard = this.mentionSession;
+    const items = [];
+    const add = (kind, label, hint = "", ref = "") => items.push({kind, label, hint, ref});
+    if (wizard.error) add("session-wait", wizard.error);
+    else if (!wizard.data) add("session-wait", "Loading sessions…");
+    else {
+      if (wizard.selected.size) add("session-insert", `Insert ${wizard.selected.size} selected`);
+      const q = query.toLowerCase();
+      if (!q || "all sessions".includes(q))
+        add("session-all", "All sessions", "includes archived sessions across nodes");
+      for (const row of wizard.data.sessions) {
+        if (row.bid === (this.host.bid || 0) && row.id === this.host.sid) continue;
+        if (q && !`${row.title} ${row.node_name} ${row.cwd}`.toLowerCase().includes(q)) continue;
+        add("session-select", `${wizard.selected.has(row.ref) ? "✓ " : ""}${row.title}`,
+          `${row.node_name} · ${row.archived ? "archived" : row.status} · ${row.cwd}`, row.ref);
+      }
+      for (const row of wizard.data.unavailable || [])
+        add("session-wait", `${row.node}: unavailable`, row.error);
+    }
+    add("session-back", "Back");
+    return items;
+  }
+
+  spawnMentionBegin() {
+    this.mentionSpawn = { step: "count", count: null, node: undefined,
+                          engine: null, model: null, effort: null,
+                          fetching: false, error: "", slide: 1 };
+    this.spawnResetQuery();
+  }
+
+  spawnEnterNodeStep() {
+    const wizard = this.mentionSpawn;
+    const nodes = this.spawnNodeChoices();
+    if (nodes.length <= 1) {
+      wizard.node = nodes.length ? nodes[0].node : null;
+      wizard.step = "engine";
+      this.spawnFetchEngines();
+    } else {
+      wizard.step = "node";
+    }
+    wizard.slide = 1;
+    this.spawnResetQuery();
+  }
+
+  /* The session's own node always leads (node null: the spawn tool's default
+     target). Other nodes exist only for controller-hosted sessions, whose
+     node can relay; a backend-hosted engine can only spawn onto itself. */
+  spawnNodeChoices() {
+    const bid = this.host.bid || 0;
+    const choices = [{ node: null, label: backendName(bid),
+                       hint: "this session's node" }];
+    if (!bid) {
+      for (const backend of state.backends) {
+        if (!spawnExecFor(backend.id) || !backendConnectionAllowed(backend.id))
+          continue;
+        choices.push({ node: { bid: backend.id, name: String(backend.name || "") },
+                       label: String(backend.name || `backend ${backend.id}`),
+                       hint: "backend node" });
+      }
+    }
+    return choices;
+  }
+
+  spawnTargetBid() {
+    const wizard = this.mentionSpawn;
+    return wizard && wizard.node ? wizard.node.bid : (this.host.bid || 0);
+  }
+
+  spawnTargetEngines() {
+    const tid = this.spawnTargetBid();
+    const engines = tid ? state.engCache[tid] : state.engines;
+    return Array.isArray(engines) ? engines : null;
+  }
+
+  spawnFetchEngines(force) {
+    const wizard = this.mentionSpawn;
+    if (!wizard || wizard.fetching) return;
+    if (this.spawnTargetEngines() && !force) return;
+    const tid = this.spawnTargetBid();
+    wizard.fetching = true;
+    wizard.error = "";
+    if (force) this.updateMention();
+    api(tid, "engines", { timeoutMs: 15000 }).then(result => {
+      if (result && Array.isArray(result.engines))
+        rememberEnginePayload(tid, result);
+      if (this.mentionSpawn !== wizard) return;
+      wizard.fetching = false;
+      if (!this.spawnTargetEngines())
+        wizard.error = "node returned no engines";
+      this.updateMention();
+    }, error => {
+      if (this.mentionSpawn !== wizard) return;
+      wizard.fetching = false;
+      wizard.error = (error && error.message) || "engines unavailable";
+      this.updateMention();
+    });
+  }
+
+  spawnStepItems() {
+    const wizard = this.mentionSpawn;
+    const items = [];
+    const step = (label, hint, extra) => items.push({
+      kind: "spawn-step", label, hint: hint || "",
+      search: (label + " " + (extra.value || "")).toLowerCase(), ...extra });
+    if (wizard.step === "count") {
+      for (let n = 1; n <= 12; n++)
+        step(n === 1 ? "1 agent" : `${n} agents`,
+          n === 1 ? "a single one-shot run" : "parallel one-shot runs",
+          { count: n, value: String(n) });
+    } else if (wizard.step === "node") {
+      for (const choice of this.spawnNodeChoices())
+        step(choice.label, choice.hint, { node: choice.node, value: "" });
+    } else if (wizard.step === "engine") {
+      const engines = this.spawnTargetEngines();
+      if (wizard.fetching || (!engines && !wizard.error)) {
+        items.push({ kind: "spawn-wait", label: "Loading engines…", search: "" });
+        if (!wizard.fetching) this.spawnFetchEngines();
+      } else if (wizard.error) {
+        items.push({ kind: "spawn-retry", label: "Retry - " + wizard.error,
+                     search: "" });
+      } else {
+        for (const engine of engines) {
+          if (!engine || !engine.installed || !engine.key) continue;
+          step(engine.label || engine.key,
+            [engine.version, engine.auth === "ok" ? "" : engine.auth]
+              .filter(Boolean).join(" · "),
+            { engine, value: engine.key });
+        }
+        if (!items.length)
+          items.push({ kind: "spawn-wait", label: "No engines installed on this node",
+                       search: "" });
+      }
+    } else if (wizard.step === "model") {
+      for (const option of this.spawnModelOptions(wizard.engine))
+        step(option.label || option.value || "Default", option.hint,
+          { model: option, value: option.value });
+    } else if (wizard.step === "effort") {
+      for (const option of spawnEffortOptionsFor(wizard.engine, wizard.model))
+        step(option.label || option.value || "Default", option.hint,
+          { effort: option, value: option.value });
+    }
+    items.push({ kind: "spawn-back", label: "Back", hint: "", search: "back" });
+    return items;
+  }
+
+  spawnModelOptions(engine) {
+    const options = engine && Array.isArray(engine.model_options)
+      ? engine.model_options : [];
+    return options.filter(option => option && typeof option.value === "string");
+  }
+
+  spawnStepChoose(item) {
+    const wizard = this.mentionSpawn;
+    if (!wizard) return;
+    if (wizard.step === "count") {
+      wizard.count = item.count;
+      this.spawnEnterNodeStep();
+      return;
+    }
+    if (wizard.step === "node") {
+      wizard.node = item.node;
+      wizard.step = "engine";
+      wizard.slide = 1;
+      this.spawnFetchEngines();
+      this.spawnResetQuery();
+      return;
+    }
+    if (wizard.step === "engine") {
+      wizard.engine = item.engine;
+      if (this.spawnModelOptions(item.engine).length <= 1) {
+        wizard.model = this.spawnModelOptions(item.engine)[0] || { value: "" };
+        this.spawnAfterModel();
+        return;
+      }
+      wizard.step = "model";
+      wizard.slide = 1;
+      this.spawnResetQuery();
+      return;
+    }
+    if (wizard.step === "model") {
+      wizard.model = item.model;
+      this.spawnAfterModel();
+      return;
+    }
+    if (wizard.step === "effort") {
+      wizard.effort = item.effort;
+      this.spawnFinish();
+    }
+  }
+
+  spawnAfterModel() {
+    const wizard = this.mentionSpawn;
+    const efforts = spawnEffortOptionsFor(wizard.engine, wizard.model);
+    if (efforts.length <= 1) {
+      wizard.effort = efforts[0] || { value: "" };
+      this.spawnFinish();
+      return;
+    }
+    wizard.step = "effort";
+    wizard.slide = 1;
+    this.spawnResetQuery();
+  }
+
+  spawnStepBack() {
+    const wizard = this.mentionSpawn;
+    if (!wizard) return;
+    wizard.slide = -1;
+    if (wizard.step === "effort") {
+      wizard.effort = null;
+      wizard.model = null;
+      if (this.spawnModelOptions(wizard.engine).length > 1) {
+        wizard.step = "model";
+      } else {
+        wizard.engine = null;
+        wizard.step = "engine";
+      }
+    } else if (wizard.step === "model") {
+      wizard.model = null;
+      wizard.engine = null;
+      wizard.step = "engine";
+    } else if (wizard.step === "engine" && this.spawnNodeChoices().length > 1) {
+      wizard.engine = null;
+      wizard.node = undefined;
+      wizard.step = "node";
+    } else if (wizard.step === "engine" || wizard.step === "node") {
+      wizard.engine = null;
+      wizard.node = undefined;
+      wizard.count = null;
+      wizard.step = "count";
+    } else {
+      this.mentionSpawn = null;   // back out of the wizard, keep the "@" list
+    }
+    this.spawnResetQuery();
+  }
+
+  spawnFinish() {
+    const wizard = this.mentionSpawn;
+    this.mentionSpawn = null;
+    this.applyMention({ insert: spawnMentionInsert(wizard) });
+  }
+
+  /* Clear the token's typed filter (everything after the "@") so each part
+     starts with a clean query. The synthetic input re-runs updateMention,
+     which renders the new step through the ordinary path. */
+  spawnResetQuery() {
+    const m = this.mention;
+    if (!m) return;
+    const ta = this.ta;
+    const end = ta.selectionStart;
+    ta.value = ta.value.slice(0, m.start + 1) + ta.value.slice(end);
+    ta.setSelectionRange(m.start + 1, m.start + 1);
+    ta.focus();
+    ta.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  /* Live instances on this session's node: whatever the node last reported,
+     joined with instances this workspace already has tabs for, so the list is
+     useful before (or without) a fetch. This session's own come first. */
+  knownMentionInstances(kind, allowed) {
+    if (!allowed) return [];
+    const bid = this.host.bid || 0;
+    const known = new Map();
+    const fetched = kind === "browser" ? this.mentionData.browsers : this.mentionData.terminals;
+    for (const inst of fetched || []) {
+      const id = String(inst && inst.id || "").toUpperCase();
+      if (!/^[A-Z0-9]{4}$/.test(id) || inst.running === false) continue;
+      known.set(id, { id, session_id: Number(inst.session_id) || 0 });
+    }
+    for (const t of state.tabs) {
+      if ((t.bid || 0) !== bid) continue;
+      if (kind === "browser" && (t.type !== "browser" || t.browserGone === true)) continue;
+      if (kind === "terminal" &&
+          (t.type !== "term" || t.ended === true || t.terminalGone === true)) continue;
+      const id = String((kind === "browser" ? t.browserId : t.terminalId) || "").toUpperCase();
+      if (!/^[A-Z0-9]{4}$/.test(id) || known.has(id)) continue;
+      known.set(id, { id, session_id: Number(t.sid) > 0 ? Number(t.sid) : 0 });
+    }
+    const instances = [...known.values()];
+    return instances.filter(inst => inst.session_id === this.host.sid)
+      .concat(instances.filter(inst => inst.session_id !== this.host.sid));
+  }
+
+  /* One coalesced, briefly cached snapshot of the node's live instances: the
+     list opens instantly from local knowledge and refines itself when this
+     lands. An offline node is never probed - the controller's authenticated
+     ping owns outage recovery. */
+  refreshMentionInstances() {
+    const bid = this.host.bid || 0;
+    const data = this.mentionData;
+    if (nodeStateStreamActive(bid)) {
+      /* Stream snapshots seed new boxes in the constructor and update open
+         ones through syncInstanceCatalogIntoComposers. Re-entering
+         updateMention() from its own refresh tail recursively rebuilt the
+         popup until the browser hit its call-stack limit on every keystroke. */
+      return;
+    }
+    if (data.promise || Date.now() - data.at < 10000) return;
+    if (bid && !backendConnectionAllowed(bid)) return;
+    const wantBrowsers = browserEnabledFor(bid) && browserInstancesFor(bid);
+    const wantTerminals = terminalInstancesFor(bid);
+    data.at = Date.now();
+    if (!wantBrowsers && !wantTerminals) return;
+    const jobs = [];
+    if (wantBrowsers)
+      jobs.push(api(bid, "browser/status", { timeoutMs: 15000 }).then(r => {
+        if (r && Array.isArray(r.instances)) data.browsers = r.instances;
+      }, () => {}));
+    if (wantTerminals)
+      jobs.push(api(bid, "terminal/instances", { timeoutMs: 15000 }).then(r => {
+        if (r && Array.isArray(r.instances)) data.terminals = r.instances;
+      }, () => {}));
+    data.promise = Promise.all(jobs).then(() => {
+      data.promise = null;
+      data.at = Date.now();
+      if (this.mention && !this.closed) this.updateMention();
+    });
+  }
+
+  /* A sent image's object URL outlives its chip so recall can show the preview;
+     everything else the composer created is released immediately. */
+  retireSentAttachment(attachment) {
+    if (!attachment.url || !attachment.ownsUrl) return;
+    if (!attachment.preview || !attachment.path) {
+      URL.revokeObjectURL(attachment.url);
+      return;
+    }
+    const previous = this.sentThumbs.get(attachment.path);
+    if (previous && previous !== attachment.url) URL.revokeObjectURL(previous);
+    this.sentThumbs.delete(attachment.path);
+    this.sentThumbs.set(attachment.path, attachment.url);
+    while (this.sentThumbs.size > SENT_THUMBNAIL_LIMIT) {
+      const oldest = this.sentThumbs.keys().next().value;
+      URL.revokeObjectURL(this.sentThumbs.get(oldest));
+      this.sentThumbs.delete(oldest);
+    }
+  }
+
+  showFileDropTarget() {
+    if (!this.box) return;
+    this.syncUploadButton();
+    const unavailable = this.attachButton && this.attachButton.disabled;
+    this.box.dataset.dropHint = unavailable ?
+      (this.attachButton.getAttribute("aria-label") || "Files cannot be attached") :
+      "Drop files to attach";
+    this.box.classList.add("file-drag");
+    this.box.classList.toggle("drop-rejected", !!unavailable);
+  }
+
+  clearFileDropTarget() {
+    this.fileDragDepth = 0;
+    if (!this.box) return;
+    this.box.classList.remove("file-drag", "drop-rejected");
+    delete this.box.dataset.dropHint;
+  }
+
+  handleFileDragEnter(event) {
+    if (!dataTransferHasFiles(event.dataTransfer)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    this.fileDragDepth++;
+    this.showFileDropTarget();
+  }
+
+  handleFileDragOver(event) {
+    if (!dataTransferHasFiles(event.dataTransfer)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    this.showFileDropTarget();
+    try {
+      event.dataTransfer.dropEffect = this.attachButton.disabled ? "none" : "copy";
+    } catch (_) { /* some browsers expose a read-only dropEffect */ }
+  }
+
+  handleFileDragLeave(event) {
+    if (!this.box.classList.contains("file-drag")) return;
+    event.preventDefault();
+    event.stopPropagation();
+    this.fileDragDepth = Math.max(0, this.fileDragDepth - 1);
+    if (this.fileDragDepth === 0) this.clearFileDropTarget();
+  }
+
+  handleFileDrop(event) {
+    if (!dataTransferHasFiles(event.dataTransfer)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const dropped = filesFromDataTransfer(event.dataTransfer);
+    this.clearFileDropTarget();
+    if (dropped.directories)
+      toast("Folders cannot be attached · drop individual files instead", "error", 6000);
+    if (dropped.files.length) this.uploadFiles(dropped.files);
+  }
+
+  handlePaste(e) {
+    const items = e.clipboardData ? [...e.clipboardData.items] : [];
+    const files = items.filter(item => item.kind === "file")
+      .map(item => item.getAsFile()).filter(Boolean);
+    if (!files.length) return;
+    e.preventDefault();
+    this.uploadFiles(files, true);
+  }
+
+  uploadFiles(files, fromClipboard = false) {
+    if (this.busy) return;
+    const blocked = this.host.uploadsBlocked ? this.host.uploadsBlocked() : "";
+    if (blocked) {
+      toast(blocked, "error");
+      return;
+    }
+    const arbitraryFiles = backendSupportsFileUploads(this.host.bid);
+    const policy = this.uploadPolicy || uploadSettingsFor(this.host.bid);
+    if (policy && !policy.enabled) {
+      toast("File uploads are disabled on this backend", "error");
+      return;
+    }
+    for (const file of files) {
+      const legacyImage = !arbitraryFiles && fromClipboard &&
+        ATTACHMENT_PREVIEW_TYPES.has(String(file.type || "").toLowerCase());
+      if (!arbitraryFiles && !legacyImage) {
+        toast("Upgrade this backend to attach arbitrary files", "error");
+        continue;
+      }
+      if (policy && file.size > policy.max_file_size_bytes) {
+        toast(`${file.name || "file"} is ${fmtBytes(file.size)} · maximum is ` +
+          `${policy.max_file_size_mb} MiB`, "error", 6500);
+        continue;
+      }
+      this.uploadFile(file, legacyImage);
+    }
+  }
+
+  async uploadFile(file, legacyImage = false) {
+    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const preview = ATTACHMENT_PREVIEW_TYPES.has(String(file.type || "").toLowerCase());
+    const attachment = {
+      name: file.name || "file", size: file.size, contentType: file.type || "application/octet-stream",
+      path: "", uploadId: "", url: preview ? URL.createObjectURL(file) : "",
+      ownsUrl: preview, sizeText: "", line: "",
+      preview, uploading: true, controller, removed: false,
+    };
+    this.attachments.push(attachment);
+    this.renderAttachments();
+    try {
+      const response = await fetch(apiPath(this.host.bid, `sessions/${this.host.sid}/upload`), {
+        method: "POST",
+        headers: {
+          "Content-Type": attachment.contentType,
+          "X-Puppy-Filename": encodeURIComponent(attachment.name),
+          "X-Puppy-Size": String(file.size),
+        },
+        body: file,
+        redirect: "error",
+        ...(controller ? { signal: controller.signal } : {}),
+      });
+      const result = await response.json().catch(() => null);
+      const policy = rememberUploadSettings(this.host.bid, result && result.uploads);
+      if (policy) this.uploadPolicy = policy;
+      if (!response.ok) throw new Error((result && result.error) || `HTTP ${response.status}`);
+      if (!result || typeof result.path !== "string" ||
+          (!legacyImage && typeof result.upload_id !== "string"))
+        throw new Error("backend returned an invalid upload response");
+      if (attachment.removed) {
+        if (result.upload_id) this.discardServerUpload(result.upload_id, true);
+        return;
+      }
+      attachment.path = result.path;
+      attachment.uploadId = result.upload_id || "";
+      attachment.name = result.name || attachment.name;
+      const reportedSize = result.size == null ? file.size : Number(result.size);
+      if (!Number.isFinite(reportedSize) || reportedSize < 0)
+        throw new Error("backend returned an invalid upload size");
+      attachment.size = reportedSize;
+      attachment.contentType = result.content_type || attachment.contentType;
+      attachment.uploading = false;
+      attachment.controller = null;
+      this.renderAttachments();
+    } catch (error) {
+      if (!attachment.removed) {
+        const wasAborted = !!(controller && controller.signal.aborted);
+        this.removeAttachment(attachment, true);
+        if (!wasAborted)
+          toast(`File upload failed: ${error.message}`, "error", 6500);
+      }
+    }
+  }
+
+  discardServerUpload(uploadId, quiet = false) {
+    if (!uploadId) return;
+    api(this.host.bid, `sessions/${this.host.sid}/upload/${uploadId}`, {
+      method: "DELETE", keepalive: true, timeoutMs: 10000,
+    }).catch(error => {
+      if (!quiet) toast(`Could not discard upload: ${error.message}`, "error");
+    });
+  }
+
+  removeAttachment(attachment, quiet = false) {
+    if (!attachment || attachment.removed) return;
+    attachment.removed = true;
+    if (attachment.controller) attachment.controller.abort();
+    if (attachment.url) {
+      // a recalled chip borrows its preview from sentThumbs; only revoke our own
+      if (attachment.ownsUrl) URL.revokeObjectURL(attachment.url);
+      attachment.url = "";
+    }
+    this.attachments = this.attachments.filter(item => item !== attachment);
+    this.renderAttachments();
+    /* Only a host whose staged files belong to this box alone may delete
+       the bytes: a shared draft is a full-document last-writer-wins stream,
+       and another browser may already have sent a later edit which still
+       contains this marker. Session deletion cleans such private staged
+       bytes otherwise. */
+    if (attachment.uploadId && this.host.privateUploads())
+      this.discardServerUpload(attachment.uploadId, quiet);
+  }
+
+  renderAttachments(persist = true) {
+    this.attachStrip.innerHTML = "";
+    this.attachStrip.classList.toggle("hidden", !this.attachments.length);
+    for (const a of this.attachments) {
+      // the local blob while this page still holds it, else the node's copy
+      const chip = attachmentChipNode(a, a.preview
+        ? (a.url || uploadPreviewUrl(this.host.bid, a.path)) : "", a.uploading);
+      const x = el("button", "attach-x");
+      x.type = "button";
+      x.appendChild(xIcon(12));
+      x.setAttribute("aria-label", "Remove attachment");
+      x.onclick = () => this.removeAttachment(a);
+      chip.appendChild(x);
+      this.attachStrip.appendChild(chip);
+    }
+    if (this.attachButton)
+      this.attachButton.classList.toggle("uploading",
+        this.attachments.some(attachment => attachment.uploading));
+    this.notify(persist && !this.closed);
+  }
+}
+Composer.live = new Set();   // every box alive on this page
 
 /* ================= SessionView ================= */
 const TOOL_ICONS = {
@@ -8410,6 +9665,10 @@ class SessionWorkspaceView {
 async function modalNewTask(workspace) {
   const bid = Number(workspace.tab.bid) || 0, sid = workspace.tab.sid;
   const configurable = nodeHasCapability(bid, "session-task-config");
+  /* Files staged for a task are copied into the task's own storage by the
+     node; an older node would leave them under Main, where the orphan sweep
+     takes them from under the task's transcript, so it gets no attach control. */
+  const attachable = nodeHasCapability(bid, "session-task-attachments");
   const main = workspace.taskViews.get(sid);
   // Read Main even when New task was opened from another task's tab. Capture
   // its visible choices now; session updates must not rewrite this dialog.
@@ -8419,7 +9678,9 @@ async function modalNewTask(workspace) {
   const { m, close, onClose } = modal(`<h2>New task</h2>
     <p class="modal-copy">The task works in its own chat and copy of Main’s project. Review its changes and apply them to Main when it is done.</p>
     ${configurable ? '<div class="engine-pick" id="nt-engines" role="group" aria-label="Engine"></div>' : ""}
-    <label>Task<textarea id="nt-prompt" rows="6" placeholder="Describe the feature or change…"></textarea></label>
+    <label for="nt-prompt" class="task-composer-lbl">Task</label>
+    ${composerBoxHtml({ id: "nt-prompt", rows: 6, placeholder: "Describe the feature or change…",
+                        className: "mention-below" })}
     <label>Name <span class="field-optional">(optional, auto from the task)</span><input type="text" id="nt-name" maxlength="80"></label>
     ${configurable ? `<div class="field-row">
       <label>Model<select id="nt-model"></select></label>
@@ -8430,8 +9691,19 @@ async function modalNewTask(workspace) {
     <p class="hint">${configurable ? "Starts with Main’s selected settings and recent conversation context." : "Uses Main’s engine, model, effort and permissions, plus recent conversation context."} Main must be idle to create or apply a task. Local Git projects only; ignored files are not copied.</p>
     <p class="backend-edit-error hidden" role="alert"></p>
     <div class="m-btns"><button class="btn" id="nt-cancel">Cancel</button><button class="btn btn-pri" id="nt-start">Start task</button></div>`, "new-task-modal");
-  const prompt = m.querySelector("#nt-prompt"), start = m.querySelector("#nt-start");
+  const start = m.querySelector("#nt-start");
   const error = m.querySelector(".backend-edit-error");
+  /* The task box is the chat's own prompt box - the same "@" list, pasted
+     and dropped files, Enter to start and Shift+Enter for a new line - hosted
+     here with Main as the session it speaks for. Escape is left to the
+     dialog once no list is open. */
+  let handedOver = false;   // the node took the staged files with the task
+  const composer = new Composer(m.querySelector(".composer-box"), {
+    bid, sid, selfHint: "Main",
+    submit: () => start.onclick(),
+    uploadsBlocked: () => attachable ? "" : "Upgrade this node to attach files to tasks",
+  });
+  onClose(() => composer.destroy({ discardUploads: !handedOver }));
   const engBox = m.querySelector("#nt-engines"), model = m.querySelector("#nt-model");
   const effort = m.querySelector("#nt-effort"), permission = m.querySelector("#nt-perm");
   const custom = m.querySelector("#nt-model-custom"), customWrap = m.querySelector("#nt-model-custom-wrap");
@@ -8445,6 +9717,7 @@ async function modalNewTask(workspace) {
       control.disabled = preparing;
       refreshChoiceSelect(control);
     }
+    composer.setBusy(preparing);
   };
   const renderChoices = selected => {
     engine = selected.engine;
@@ -8513,11 +9786,16 @@ async function modalNewTask(workspace) {
      returns the task the node already created instead of a duplicate. */
   const requestId = globalThis.crypto && crypto.randomUUID ? crypto.randomUUID() : `task-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   m.querySelector("#nt-cancel").onclick = close;
-  prompt.focus();
+  composer.focus();
   start.onclick = async () => {
     if (start.disabled) return;
-    if (!prompt.value.trim()) { prompt.focus(); return; }
-    const body = { name: m.querySelector("#nt-name").value, prompt: prompt.value, request_id: requestId,
+    const blocker = composer.sendBlocker();
+    if (blocker) { toast(blocker, "error"); return; }
+    /* the prompt is the box's message: prose above its attachment markers,
+       exactly what a send from the chat would carry */
+    const prompt = composer.message();
+    if (!prompt) { composer.focus(); return; }
+    const body = { name: m.querySelector("#nt-name").value, prompt, request_id: requestId,
       ...(configurable ? choices() : {}) };
     preparing = true; syncBusy();
     error.classList.add("hidden");
@@ -8525,6 +9803,7 @@ async function modalNewTask(workspace) {
       const data = await api(bid, `sessions/${sid}/tasks`, { method: "POST", timeoutMs: 180000, body });
       const list = sessionsFor(bid);
       if (!list.some(s => s.id === data.session.id)) list.push(data.session);
+      handedOver = true;
       close(); workspace.openTask(data.session.id); renderSidebar();
     } catch (err) { error.textContent = err.message; error.classList.remove("hidden"); }
     finally { preparing = false; if (m.isConnected) syncBusy(); }
@@ -8642,13 +9921,6 @@ class SessionView {
     this.detached = false;    // showing a window of history rather than the live tail
     this.skippedEvents = [];  // live events held while detached
     this.newSinceDetach = 0;
-    this.history = [];        // sent messages, oldest first (shell-style recall)
-    this.histIdx = null;
-    this.histDraft = "";
-    this.attachments = [];    // staged server files represented by draft marker lines
-    this.histAttach = null;   // staged attachments parked while history recall is active
-    this.sentThumbs = new Map();  // path -> object URL, so recall can re-show previews
-    this.uploadPolicy = uploadSettingsFor(this.tab.bid);
     this.draftSupported = backendSupportsSessionDrafts(this.tab.bid);
     this.draftMaxChars = DEFAULT_DRAFT_MAX_CHARS;
     this.draftReady = false;      // true after this socket's authoritative snapshot
@@ -8663,24 +9935,9 @@ class SessionView {
     this.draftTouchedBeforeReady = false;
     this.draftJournal = this.draftSupported ? readDraftJournal(this.tab.id) :
       readLocalDraft(this.tab.id);
-    this.fileDragDepth = 0;
     this.nativeComposerChoices = prefersNativeChoices();
     this.browserChipKey = null;   // set of linked-browser bubbles now rendered
     this.terminalChipKey = null;  // set of linked-terminal bubbles now rendered
-    this.mention = null;          // open @-mention popup: {start, query, items, sel}
-    this.mentionDismissedAt = -1; // Esc'd token start; stays hidden while it lives
-    const nodeBid = Number(this.tab.bid) || 0;
-    const browserCatalog = nodeBid ? state.remoteBrowserStatus[nodeBid] : state.browserStatus;
-    this.mentionData = {
-      at: nodeStateStreamActive(nodeBid) ? Date.now() : 0,
-      browsers: browserCatalog && Array.isArray(browserCatalog.instances) ?
-        browserCatalog.instances : null,
-      terminals: Array.isArray(state.terminalInstances[nodeBid]) ?
-        state.terminalInstances[nodeBid] : null,
-      promise: null,
-    };
-    this.mentionSpawn = null;     // "New spawn" wizard: {step, node, engine, model, …}
-    this.mentionRowEls = [];      // selectable rows, excluding the wizard header
     this.pendingScroll = null;    // position owed back after a workspace rebuild
     this.lastScroll = null;       // last position seen while this view was visible
     this.buildDom();
@@ -8688,12 +9945,6 @@ class SessionView {
     this.syncTerminalChips();
     this._onResize = () => { this.syncGutter(); this.syncComposerMeta(); this.syncHeadOverflow(); this.syncQueueFade(); };
     window.addEventListener("resize", this._onResize);
-    /* Arrow keys and clicks move the caret without an input event; the mention
-       list follows the caret, so it listens to the document-level selection. */
-    this._onSelectionChange = () => {
-      if (document.activeElement === this.ta) this.updateMention();
-    };
-    document.addEventListener("selectionchange", this._onSelectionChange);
     this.connect();
   }
 
@@ -8724,16 +9975,10 @@ class SessionView {
       <div class="queue-strip hidden"></div>
       <div class="approval hidden"></div>
       <div class="composer">
-        <div class="composer-box">
-          <div class="mention-pop hidden" role="listbox"
-            aria-label="Mention a Puppy session, browser, terminal, or spawn"></div>
-          <textarea rows="1" placeholder="Message the agent…"></textarea>
-          <div class="attach-strip hidden"></div>
-          <div class="composer-row">
-            <div class="composer-meta-viewport edge-scroll-viewport">
-              <div class="composer-meta-scroll">
-                <button type="button" class="mini attach-add" aria-label="Attach files">
-                  <span aria-hidden="true"></span></button>
+        ${composerBoxHtml({
+          placeholder: "Message the agent…",
+          /* this session's own controls, after the shared + button */
+          controls: `
                 <button type="button" class="mini tools-open hidden" aria-label="Session tools">
                   <span aria-hidden="true"></span></button>
                 <span class="mini fast-indicator hidden" role="img"
@@ -8741,9 +9986,8 @@ class SessionView {
                   <span aria-hidden="true"></span></span>
                 ${composerChoice("perm", "Permissions", "Permission mode")}
                 ${composerChoice("model", "Model", "Model")}
-                ${composerChoice("effort", "Effort", "Reasoning effort")}
-              </div>
-            </div>
+                ${composerChoice("effort", "Effort", "Reasoning effort")}`,
+          actions: `
             <button class="btn-ask hidden" type="button" aria-label="Ask a side question">
               <span class="composer-action-label">Ask</span>
               <span class="composer-action-icon" aria-hidden="true"></span>
@@ -8756,10 +10000,8 @@ class SessionView {
               <span class="composer-action-label">Queue</span>
               <span class="composer-action-icon" aria-hidden="true"></span>
             </button>
-            <button class="btn-send" type="button">Send</button>
-          </div>
-          <input class="hidden attach-input" type="file" multiple>
-        </div>
+            <button class="btn-send" type="button">Send</button>`,
+        })}
       </div>`;
     this.root = root;
     root.querySelector(".menu-btn").appendChild(moreIcon());
@@ -8787,13 +10029,6 @@ class SessionView {
     this.tailButton.onclick = () => this.returnToTail();
     this.tailPill.appendChild(this.tailButton);
     this.scroll.appendChild(this.tailPill);
-    this.ta = root.querySelector("textarea");
-    this.composerBox = root.querySelector(".composer-box");
-    this.mentionEl = root.querySelector(".mention-pop");
-    /* Pointer presses anywhere on the list (rows, padding, scrollbar) keep the
-       composer focused; the row's click still lands and wheel/touch scrolling
-       is untouched. A blur would otherwise take the list down mid-pick. */
-    this.mentionEl.addEventListener("pointerdown", (e) => e.preventDefault());
     this.sendBtn = root.querySelector(".btn-send");
     this.steerBtn = root.querySelector(".btn-steer");
     this.askBtn = root.querySelector(".btn-ask");
@@ -8814,9 +10049,6 @@ class SessionView {
     this.statusEl = root.querySelector(".chat-status");
     this.approvalEl = root.querySelector(".approval");
     this.queueEl = root.querySelector(".queue-strip");
-    this.attachStrip = root.querySelector(".attach-strip");
-    this.attachButton = root.querySelector(".attach-add");
-    this.attachButton.firstElementChild.appendChild(plusIcon(12));
     this.toolsButton = root.querySelector(".tools-open");
     this.toolsButton.firstElementChild.appendChild(toolsIcon(12));
     this.toolsButton.onclick = (e) => { e.stopPropagation(); this.showToolsMenu(e.currentTarget); };
@@ -8824,104 +10056,37 @@ class SessionView {
     this.fastIndicator.firstElementChild.appendChild(fastModeIcon(12));
     this.syncToolsButton();
     this.syncFastIndicator();
-    this.fileInput = root.querySelector(".attach-input");
     this.headMeta.addEventListener("scroll", () => this.syncHeadOverflow(), { passive: true });
     this.composerMeta.addEventListener("scroll", () => this.syncComposerOverflow(), { passive: true });
-    this.ta.addEventListener("paste", (e) => this.handlePaste(e));
-    this.composerBox.addEventListener("dragenter", (e) => this.handleFileDragEnter(e));
-    this.composerBox.addEventListener("dragover", (e) => this.handleFileDragOver(e));
-    this.composerBox.addEventListener("dragleave", (e) => this.handleFileDragLeave(e));
-    this.composerBox.addEventListener("drop", (e) => this.handleFileDrop(e));
-    this.attachButton.onclick = () => {
-      this.fileInput.value = "";
-      this.fileInput.click();
-    };
-    this.fileInput.onchange = () => {
-      const files = this.fileInput.files ? [...this.fileInput.files] : [];
-      this.fileInput.value = "";
-      if (files.length) this.uploadFiles(files);
-    };
-    this.syncUploadButton();
-
-    this.fieldSizing = window.CSS && CSS.supports && CSS.supports("field-sizing", "content");
-    if (this.fieldSizing) {
-      this.ta.classList.add("fs-content");
-    } else {
-      this.taGhost = el("div", "ta-ghost");
-      const tcs = getComputedStyle(this.ta);
-      for (const p of ["fontFamily", "fontSize", "fontWeight", "lineHeight", "letterSpacing",
-                       "paddingTop", "paddingBottom", "paddingLeft", "paddingRight",
-                       "borderTopWidth", "borderBottomWidth", "borderLeftWidth", "borderRightWidth", "boxSizing"])
-        this.taGhost.style[p] = tcs[p];
-      root.querySelector(".composer-box").appendChild(this.taGhost);
-    }
-    this._lastTaH = 0;
-
-    // Paint the crash journal immediately; the socket snapshot decides whether
-    // it is still newer than the durable shared value.
-    if (this.draftJournal && this.draftJournal.text) {
-      const restored = splitAttachmentMarkers(this.draftJournal.text);
-      this.ta.value = restored.text;
-      try { this.ta.setSelectionRange(restored.text.length, restored.text.length); }
-      catch (_) {}
-      this.attachments = restored.attachments;
-      this.renderAttachments(false);
-      this.resizeComposer();
-    }
-    this.ta.addEventListener("input", () => {
-      this.histIdx = null;   // manual edits exit history mode
-      this.releaseHistoryAttachments();
-      this.resizeComposer();
-      this.saveDraft();
-      this.updateSteerControl();
-      this.updateMention();
-    });
-    this.ta.addEventListener("keydown", (e) => {
-      if (e.isComposing) return;
-      /* The open mention list owns its navigation keys - most importantly
-         Escape, which must close the list, never interrupt the turn. */
-      if (this.mentionKeydown(e)) return;
-      if (e.key === "Escape") {
+    /* The prompt box itself - text, "@" list, attachments, keys - is the
+       shared Composer. This view says what sending, Escape and a height
+       change mean here, and persists the value as the session's draft. */
+    this.composer = new Composer(root.querySelector(".composer-box"), {
+      bid: Number(this.tab.bid) || 0,
+      sid: this.tab.sid,
+      submit: () => this.submit(),
+      /* Escape with no list open interrupts the turn; it is consumed here so
+         nothing above the view reads it as its own. */
+      escape: (e) => {
         e.preventDefault();
         e.stopPropagation();
         if (e.repeat) return;
         this.interrupt();
-        return;
-      }
-      /* Ctrl/Cmd+C has no shortcut here: it falls through to the modifier
-         guard below so textarea selection and native clipboard copy work. */
-      if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); this.submit(); return; }
-      if (e.shiftKey || e.ctrlKey || e.altKey || e.metaKey || e.isComposing) return;
-      const atStart = this.ta.selectionStart === 0 && this.ta.selectionEnd === 0;
-      const atEnd = this.ta.selectionStart === this.ta.value.length && this.ta.selectionEnd === this.ta.value.length;
-      if (e.key === "ArrowUp" && atStart && this.history.length) {
-        if (this.histIdx === null) {
-          this.histIdx = this.history.length;
-          this.histDraft = this.ta.value;
-          this.histAttach = this.attachments;   // parked, not discarded
-        }
-        if (this.histIdx > 0) {
-          e.preventDefault();
-          this.histIdx--;
-          this.recallComposer(this.history[this.histIdx]);
-        }
-      } else if (e.key === "ArrowDown" && atEnd && this.histIdx !== null) {
-        e.preventDefault();
-        this.histIdx++;
-        if (this.histIdx >= this.history.length) {
-          this.attachments = this.histAttach || [];
-          this.histAttach = null;
-          this.renderAttachments();
-          this.setComposer(this.histDraft);
-          this.histIdx = null;
-        } else {
-          this.recallComposer(this.history[this.histIdx]);
-        }
-      }
+      },
+      edited: () => this.saveDraft(),
+      updated: () => this.updateSteerControl(),
+      /* re-pin the transcript when the box's height moved it */
+      beforeResize: () => this.scroll.scrollHeight - this.scroll.scrollTop - this.scroll.clientHeight < 60,
+      afterResize: (pinned) => { if (pinned) this.scroll.scrollTop = this.scroll.scrollHeight; },
+      /* Staged files are private only without a shared draft; with one,
+         another device's later edit may still name them. */
+      privateUploads: () => !this.draftSupported,
     });
-    /* Rows keep composer focus via pointerdown preventDefault, so any real
-       blur means the user left the composer and the list goes with them. */
-    this.ta.addEventListener("blur", () => this.hideMention());
+
+    // Paint the crash journal immediately; the socket snapshot decides whether
+    // it is still newer than the durable shared value.
+    if (this.draftJournal && this.draftJournal.text)
+      this.composer.replace(this.draftJournal.text, true);
     this.sendBtn.onclick = () => this.status === "running" ? this.interrupt() : this.submit();
     this.steerBtn.onclick = () => this.steer();
     this.askBtn.onclick = () => this.ask();
@@ -9084,28 +10249,16 @@ class SessionView {
     this.cancelQueueEdit("", false);
     this.cancelQueueDrag(null, true);
     if (this._stopLoadOlder) this._stopLoadOlder();
-    this.clearFileDropTarget();
     this.connectionSequence++;
     if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
     window.removeEventListener("resize", this._onResize);
-    document.removeEventListener("selectionchange", this._onSelectionChange);
     if (this.ws) try { this.ws.close(); } catch (e) {}
     this.clearLive();
-    /* Closing a view is not deleting its shared draft. Abort only bytes still
-       in flight and release browser-owned previews; completed server uploads
-       remain owned by the durable draft and can reopen on another device. */
-    const staged = new Set([...(this.histAttach || []), ...this.attachments]);
-    this.histAttach = null;
-    this.attachments = [];
-    for (const attachment of staged) {
-      attachment.removed = true;
-      if (attachment.controller) attachment.controller.abort();
-      if (attachment.url && attachment.ownsUrl) URL.revokeObjectURL(attachment.url);
-      attachment.url = "";
-    }
-    for (const url of this.sentThumbs.values()) URL.revokeObjectURL(url);
-    this.sentThumbs.clear();
+    /* Closing a view is not deleting its shared draft: completed server
+       uploads remain owned by the durable draft and can reopen on another
+       device, so the box keeps them and only releases what this page holds. */
+    this.composer.destroy();
     /* the menus now sit on <body>, so closing this view no longer takes them
        with it - drop the ones it owns */
     for (const menu of document.querySelectorAll(".menu.dyn"))
@@ -9115,11 +10268,11 @@ class SessionView {
 
   onShow(focus = true) {
     this.syncGutter(); this.syncComposerMeta(); this.syncHeadOverflow();
-    this.syncUploadButton();
+    this.composer.syncUploadButton();
     /* A position owed from a rebuild wins over jumping to the newest message:
        the user did not open this tab, it was re-attached underneath them. */
     if (!this.applyPendingScroll()) this.scrollBottom(true);
-    if (focus) this.ta.focus();
+    if (focus) this.composer.focus();
   }
 
   /* Read live while visible; a hidden view has no scroll box to read, so it
@@ -9153,7 +10306,7 @@ class SessionView {
     this.syncToolsButton();
     this.syncFastIndicator();
     this.syncComposerMeta();
-    this.syncUploadButton();
+    this.composer.syncUploadButton();
     const stopping = !!remoteStoppingMessage(this.tab.bid);
     const unavailable = !!this.tab.bid && !backendConnectionAllowed(this.tab.bid);
     if (unavailable) {
@@ -9196,24 +10349,6 @@ class SessionView {
     this.syncRemoteState();
   }
 
-  syncUploadButton() {
-    if (!this.attachButton) return;
-    const supported = backendSupportsFileUploads(this.tab.bid);
-    const unavailable = !!this.tab.bid && !backendConnectionAllowed(this.tab.bid);
-    const policy = this.uploadPolicy || uploadSettingsFor(this.tab.bid);
-    const disabledByPolicy = !!policy && !policy.enabled;
-    this.attachButton.disabled = !supported || unavailable || disabledByPolicy;
-    let label;
-    if (!supported) label = "Upgrade this backend to attach arbitrary files";
-    else if (unavailable) label = "Backend unavailable";
-    else if (disabledByPolicy) label = "File uploads are disabled on this backend";
-    else if (policy) label = `Attach files · ${policy.max_file_size_mb} MiB maximum each`;
-    else label = "Attach files";
-    this.attachButton.removeAttribute("title");
-    this.attachButton.removeAttribute("data-tip");
-    this.attachButton.setAttribute("aria-label", label);
-  }
-
   /* transcript sits left of the scrollbar; export its width so the composer /
      approval / queue columns can align with the transcript column exactly */
   syncGutter() {
@@ -9240,42 +10375,11 @@ class SessionView {
     this.syncComposerOverflow();
   }
 
-  /* with field-sizing the browser autosizes natively; otherwise measure on the
-     hidden mirror and only write the height when it actually changed. Either way,
-     re-pin the transcript when the composer's height moved. */
-  resizeComposer() {
-    const ta = this.ta, sc = this.scroll;
-    const pinned = sc.scrollHeight - sc.scrollTop - sc.clientHeight < 60;
-    if (!this.fieldSizing) {
-      const g = this.taGhost;
-      g.style.width = ta.offsetWidth + "px";
-      const v = ta.value;
-      g.textContent = v.endsWith("\n") ? v + "\u200b" : (v || "\u200b");
-      const needed = Math.min(Math.max(g.offsetHeight, 24), 224);
-      if (needed !== ta.offsetHeight) ta.style.height = needed + "px";
-    }
-    const h = ta.offsetHeight;
-    if (h !== this._lastTaH) {
-      this._lastTaH = h;
-      if (pinned) sc.scrollTop = sc.scrollHeight;
-    }
-  }
-
-  setComposer(v) {
-    this.ta.value = v;
-    this.ta.selectionStart = this.ta.selectionEnd = v.length;
-    this.resizeComposer();
-    scrollCaretIntoView(this.ta);   // recalling a long entry lands on its end
-    this.saveDraft();
-  }
-
-  /* Keep the draft in the form the message would be sent in: attachment marker
-     lines make the same value portable to another browser without a second
-     attachment data model. */
+  /* The draft is kept in the form the message would be sent in: attachment
+     marker lines make the same value portable to another browser without a
+     second attachment data model. */
   draftValue() {
-    const markers = this.attachments.filter(a => a.path).map(attachmentMarkerLine).join("\n");
-    const text = this.ta.value;
-    return markers ? (text ? text + "\n\n" + markers : markers) : text;
+    return this.composer.value();
   }
 
   saveDraft() {
@@ -9353,8 +10457,7 @@ class SessionView {
       this.draftReady = false;
       if (this.draftJournal) {
         lsSet("puppy.draft." + this.tab.id, this.draftJournal.text);
-        const end = this.ta.value.length;
-        try { this.ta.setSelectionRange(end, end); } catch (_) {}
+        this.composer.caretToEnd();
       }
       return;
     }
@@ -9381,7 +10484,7 @@ class SessionView {
     }
     if (journal && journal.text !== serverText &&
         (!journal.submitted || serverRevision <= journal.baseRevision)) {
-      this.applySharedDraft(journal.text, true);
+      this.composer.replace(journal.text, true);
       writeDraftJournal(this.tab.id, journal.text, serverRevision);
       this.draftJournal = {
         text: journal.text, baseRevision: serverRevision,
@@ -9393,7 +10496,7 @@ class SessionView {
       }
       return;
     }
-    this.applySharedDraft(serverText, true);
+    this.composer.replace(serverText, true);
     this.clearDraftJournal();
   }
 
@@ -9436,7 +10539,7 @@ class SessionView {
         return;
       }
       if (value.consumed === false) {
-        this.applySharedDraft(value.text);
+        this.composer.replace(value.text);
         this.clearDraftJournal();
       } else if (this.draftValue() === value.text) {
         this.clearDraftJournal();
@@ -9467,698 +10570,8 @@ class SessionView {
         this.draftDeferred = value;
       return;
     }
-    this.applySharedDraft(value.text);
+    this.composer.replace(value.text);
     this.clearDraftJournal();
-  }
-
-  /* Replace prose and completed attachment chips, ordinarily preserving local
-     uploads still in flight. An explicit queue edit replaces those too.
-     Matching local image blobs are reused; everything else is released. */
-  applySharedDraft(text, caretAtEnd = false, replaceUploading = false) {
-    const restored = splitAttachmentMarkers(text);
-    const sources = [...(this.histAttach || []), ...this.attachments];
-    const byPath = new Map();
-    for (const source of sources)
-      if (source.path && !byPath.has(source.path)) byPath.set(source.path, source);
-    const reused = new Set();
-    for (const attachment of restored.attachments) {
-      const source = byPath.get(attachment.path);
-      if (!source) continue;
-      reused.add(source);
-      attachment.uploadId = source.uploadId || "";
-      attachment.url = source.url || "";
-      attachment.ownsUrl = !!source.ownsUrl;
-      attachment.preview = source.preview;
-      attachment.size = source.size;
-      attachment.sizeText = source.sizeText;
-      attachment.contentType = source.contentType;
-    }
-    const uploading = [];
-    for (const source of sources) {
-      if (!replaceUploading && source.uploading && !source.removed) {
-        if (!uploading.includes(source)) uploading.push(source);
-        continue;
-      }
-      if (reused.has(source)) continue;
-      source.removed = true;
-      if (source.controller) source.controller.abort();
-      if (replaceUploading && source.uploadId)
-        this.discardServerUpload(source.uploadId, true);
-      if (source.url && source.ownsUrl) URL.revokeObjectURL(source.url);
-      source.url = "";
-    }
-    this.histAttach = null;
-    this.histIdx = null;
-    this.histDraft = "";
-    this.attachments = restored.attachments.concat(uploading);
-
-    const oldText = this.ta.value;
-    const oldStart = this.ta.selectionStart;
-    const oldEnd = this.ta.selectionEnd;
-    let prefix = 0;
-    while (prefix < oldText.length && prefix < restored.text.length &&
-           oldText[prefix] === restored.text[prefix]) prefix++;
-    let suffix = 0;
-    while (suffix < oldText.length - prefix && suffix < restored.text.length - prefix &&
-           oldText[oldText.length - 1 - suffix] ===
-             restored.text[restored.text.length - 1 - suffix]) suffix++;
-    const oldChangedEnd = oldText.length - suffix;
-    const newChangedEnd = restored.text.length - suffix;
-    const remap = position => position <= prefix ? position :
-      position >= oldChangedEnd ? newChangedEnd + (position - oldChangedEnd) : newChangedEnd;
-    this.ta.value = restored.text;
-    try {
-      if (caretAtEnd)
-        this.ta.setSelectionRange(restored.text.length, restored.text.length);
-      else
-        this.ta.setSelectionRange(remap(oldStart), remap(oldEnd));
-    } catch (_) {}
-    this.renderAttachments(false);
-    this.resizeComposer();
-  }
-
-  /* Recall a sent message: its attachment markers become chips again, and the
-     preview from the original send is reused when this tab still holds it. */
-  recallComposer(text) {
-    const recalled = splitAttachmentMarkers(text);
-    for (const attachment of recalled.attachments) {
-      if (!attachment.preview) continue;
-      const url = this.sentThumbs.get(attachment.path);
-      if (url) attachment.url = url;   // owned by sentThumbs, never revoked here
-    }
-    this.attachments = recalled.attachments;   // the parked list keeps its own array
-    this.renderAttachments();
-    this.setComposer(recalled.text);
-  }
-
-  /* History mode ended without walking back to the draft, so release the local
-     attachment objects it parked. Shared server bytes follow session lifecycle. */
-  releaseHistoryAttachments() {
-    if (!this.histAttach) return;
-    const parked = this.histAttach;
-    this.histAttach = null;
-    for (const attachment of parked)
-      if (!this.attachments.includes(attachment)) this.removeAttachment(attachment, true);
-  }
-
-  /* ---- composer @-mentions ---- */
-  mentionKeydown(e) {
-    const m = this.mention;
-    if (!m) return false;
-    if (e.key === "Escape") {
-      e.preventDefault();
-      e.stopPropagation();
-      /* Inside the spawn wizard, Escape slides back one part; only the flat
-         list dismisses. Leaving the wizard's first part returns to the list. */
-      if (this.mentionSpawn) { this.spawnStepBack(); return true; }
-      this.mentionDismissedAt = m.start;   // this token asked to be left alone
-      this.hideMention();
-      return true;
-    }
-    if (this.mentionSpawn && e.key === "Backspace" && !m.query) {
-      e.preventDefault();
-      this.spawnStepBack();
-      return true;
-    }
-    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-      e.preventDefault();
-      this.selectMention((m.sel + (e.key === "ArrowDown" ? 1 : m.items.length - 1))
-        % m.items.length);
-      return true;
-    }
-    if (e.key === "Enter" || e.key === "Tab") {
-      const item = m.items[m.sel];
-      /* A mention already typed out in full has nothing left to complete;
-         Enter keeps meaning send. Tab still completes the trailing space. */
-      if (!this.mentionSpawn && !this.mentionSession && e.key === "Enter" &&
-          item.search === m.query.toLowerCase()) {
-        this.hideMention();
-        return false;
-      }
-      e.preventDefault();
-      this.applyMention(item);
-      return true;
-    }
-    return false;
-  }
-
-  updateMention() {
-    let ctx = composerMentionContext(
-      this.ta.value, this.ta.selectionStart, this.ta.selectionEnd);
-    if (this.mentionSession && this.mention && this.ta.selectionStart === this.ta.selectionEnd) {
-      const start = this.mention.start;
-      const query = this.ta.value.slice(start + 1, this.ta.selectionStart);
-      if (this.ta.value[start] === "@" && this.ta.selectionStart > start &&
-          !query.includes("\n") && query.length <= 400) ctx = {start, query};
-    }
-    if (!ctx) {
-      this.mentionDismissedAt = -1;   // left the token; dismissal is spent
-      this.hideMention();
-      return;
-    }
-    /* History recall parks the caret at the end of restored text; a recalled
-       "@…" tail must not steal the arrow keys mid-walk. Typing exits history
-       mode first, so the list is back for every real keystroke. */
-    if (this.histIdx !== null) { this.hideMention(); return; }
-    if (this.mentionDismissedAt === ctx.start) { this.hideMention(); return; }
-    this.mentionDismissedAt = -1;
-    let items;
-    if (this.mentionSession) {
-      items = this.sessionMentionItems(ctx.query);
-    } else if (this.mentionSpawn) {
-      /* Wizard mode: the token's query filters the current step's choices,
-         and the Back row stays put so a fruitless filter cannot strand the
-         wizard with nowhere to go. */
-      const stepItems = this.spawnStepItems();
-      items = filterMentionItems(
-        stepItems.filter(item => item.kind !== "spawn-back"), ctx.query);
-      const back = stepItems.find(item => item.kind === "spawn-back");
-      if (back) items.push(back);
-    } else {
-      items = filterMentionItems(this.mentionCandidates(), ctx.query);
-    }
-    if (!items.length) { this.hideMention(); return; }
-    const previous = this.mention && this.mention.items[this.mention.sel];
-    const kept = previous ? items.findIndex(item =>
-      item.kind === previous.kind && item.label === previous.label) : -1;
-    this.mention = { start: ctx.start, query: ctx.query, items, sel: kept >= 0 ? kept : 0 };
-    this.renderMention();
-    if (!this.mentionSpawn && !this.mentionSession) this.refreshMentionInstances();
-  }
-
-  hideMention() {
-    this.mentionSession = null;
-    this.mentionSpawn = null;
-    if (!this.mention) return;
-    this.mention = null;
-    this.mentionRowEls = [];
-    this.mentionEl.textContent = "";
-    this.mentionEl.classList.add("hidden");
-    this.mentionEl.classList.remove("slide-next", "slide-back");
-  }
-
-  renderMention() {
-    const m = this.mention;
-    const wizard = this.mentionSpawn;
-    this.mentionEl.textContent = "";
-    this.mentionRowEls = [];
-    this.mentionEl.setAttribute("aria-multiselectable", this.mentionSession ? "true" : "false");
-    if (wizard) {
-      const head = el("div", "mention-step-head");
-      const trail = ["New spawn"];
-      if (wizard.count > 1) trail.push(`${wizard.count} agents`);
-      if (wizard.node) trail.push(wizard.node.name);
-      else if (wizard.node === null) trail.push(backendName(this.tab.bid || 0));
-      if (wizard.engine) trail.push(wizard.engine.key);
-      if (wizard.step === "effort" && wizard.model)
-        trail.push(wizard.model.value || "default model");
-      head.appendChild(el("span", "mention-step-trail", trail.join(" · ")));
-      head.appendChild(el("span", "mention-step-name",
-        { count: "Agents", node: "Node", engine: "Engine", model: "Model",
-          effort: "Effort" }[wizard.step] || ""));
-      this.mentionEl.appendChild(head);
-    }
-    m.items.forEach((item, index) => {
-      const row = el("button", "mention-item" + (index === m.sel ? " sel" : "") +
-        (item.kind === "spawn-wait" ? " quiet" : ""));
-      row.type = "button";
-      row.setAttribute("role", "option");
-      row.setAttribute("aria-selected", item.kind === "session-select" ?
-        String(this.mentionSession.selected.has(item.ref)) : String(index === m.sel));
-      const ico = el("span", "mention-ico");
-      if (item.kind === "spawn-back" || item.kind === "spawn-step") {
-        ico.classList.add("mention-chev", item.kind === "spawn-back" ? "left" : "right");
-        ico.appendChild(choiceSvg("arrow"));
-      } else if (item.kind === "spawn-retry") {
-        ico.appendChild(refreshIcon(11));
-      } else if (item.kind !== "spawn-wait") {
-        ico.appendChild(item.kind === "browser" ? globeIcon(12) :
-          item.kind === "terminal" ? terminalIcon(12) : plusIcon(11));
-      }
-      row.appendChild(ico);
-      row.appendChild(el("span", "mention-label", item.label));
-      if (item.hint) row.appendChild(el("span", "mention-hint", item.hint));
-      row.onclick = () => this.applyMention(item);
-      row.onmouseenter = () => { if (this.mention === m) this.selectMention(index); };
-      this.mentionEl.appendChild(row);
-      this.mentionRowEls.push(row);
-    });
-    this.mentionEl.classList.remove("hidden");
-    this.mentionEl.classList.remove("slide-next", "slide-back");
-    if (wizard && wizard.slide) {
-      /* Re-adding the class after a reflow restarts the glide for every step,
-         so each part visibly slides in from its travel direction. */
-      void this.mentionEl.offsetWidth;
-      this.mentionEl.classList.add(wizard.slide < 0 ? "slide-back" : "slide-next");
-      wizard.slide = 0;
-    }
-    const sel = this.mentionRowEls[m.sel];
-    if (sel && sel.scrollIntoView) sel.scrollIntoView({ block: "nearest" });
-  }
-
-  selectMention(index) {
-    const m = this.mention;
-    if (!m || !m.items[index]) return;
-    m.sel = index;
-    this.mentionRowEls.forEach((row, i) => {
-      row.classList.toggle("sel", i === index);
-      const item = m.items[i];
-      row.setAttribute("aria-selected", item.kind === "session-select" ?
-        String(this.mentionSession.selected.has(item.ref)) : String(i === index));
-    });
-    const sel = this.mentionRowEls[index];
-    if (sel && sel.scrollIntoView) sel.scrollIntoView({ block: "nearest" });
-  }
-
-  /* Replace the token with the canonical mention and one trailing space. The
-     synthetic input event runs the ordinary edit path (resize, draft save),
-     whose re-evaluation then retires the completed token as prose. Wizard
-     rows never insert directly: they advance, retreat, or retry a part. */
-  applyMention(item) {
-    if (item.kind === "session-picker") { this.beginSessionMention(); return; }
-    if (item.kind === "session-wait") return;
-    if (item.kind === "session-back") {
-      this.mentionSession = null; this.spawnResetQuery(); return;
-    }
-    if (item.kind === "session-select") {
-      const selected = this.mentionSession.selected;
-      if (selected.has(item.ref)) selected.delete(item.ref); else selected.add(item.ref);
-      this.updateMention(); return;
-    }
-    if (item.kind === "session-all" || item.kind === "session-insert") {
-      const wizard = this.mentionSession;
-      const refs = item.kind === "session-all" ? ["all"] : [...wizard.selected];
-      this.mentionSession = null;
-      this.applyMention({insert: refs.map(ref => `@Session ${wizard.data.controller}:${ref}`).join(" ")});
-      return;
-    }
-    if (item.kind === "new-spawn") { this.spawnMentionBegin(); return; }
-    if (item.kind === "spawn-back") { this.spawnStepBack(); return; }
-    if (item.kind === "spawn-step") { this.spawnStepChoose(item); return; }
-    if (item.kind === "spawn-retry") { this.spawnFetchEngines(true); return; }
-    if (item.kind === "spawn-wait") return;
-    const m = this.mention;
-    if (!m) return;
-    const ta = this.ta;
-    const end = ta.selectionStart;
-    const rest = ta.value.slice(end);
-    const pad = rest.startsWith(" ") || rest.startsWith("\n") ? "" : " ";
-    ta.value = ta.value.slice(0, m.start) + item.insert + pad + rest;
-    const caret = m.start + item.insert.length + 1;
-    ta.setSelectionRange(caret, caret);
-    this.mentionDismissedAt = -1;
-    this.hideMention();
-    ta.focus();
-    ta.dispatchEvent(new Event("input", { bubbles: true }));
-    scrollCaretIntoView(ta);
-  }
-
-  /* What "@" can point the agent at on this session's node: live instances
-     first (its own before other sessions'), then the explicit new-instance
-     requests. Every row is gated on what the node actually offers the engine:
-     browser rows only where Browser is enabled, terminal rows only where the
-     node has terminals at all. */
-  mentionCandidates() {
-    const bid = this.tab.bid || 0;
-    const backend = bid ? state.backends.find(b => b.id === bid) : null;
-    const withBrowser = browserEnabledFor(bid);
-    const withTerminal = !bid || backendHasCapability(backend, "terminal");
-    const items = [];
-    const push = (kind, label, hint, insert) =>
-      items.push({ kind, label, hint, insert, search: label.toLowerCase() });
-    const hintFor = (owner) => {
-      const sid = Number(owner) || 0;
-      if (sid <= 0) return "";
-      if (sid === this.tab.sid) return "this session";
-      const meta = findSessionMeta(bid, sid);
-      return meta ? (meta.name || `Session ${sid}`) : "";
-    };
-    for (const inst of this.knownMentionInstances("browser", withBrowser))
-      push("browser", `Browser ${inst.id}`, hintFor(inst.session_id), `@Browser ${inst.id}`);
-    for (const inst of this.knownMentionInstances("terminal", withTerminal))
-      push("terminal", `Terminal ${inst.id}`, hintFor(inst.session_id), `@Terminal ${inst.id}`);
-    if (!bid || backendHasCapability(backend, "session-references"))
-      items.push({kind: "session-picker", label: "Session", hint: "reference one, several, or all",
-        search: "session sessions", insert: ""});
-    if (withBrowser) push("new-browser", "New browser", "another isolated browser", "@New browser");
-    if (withTerminal) push("new-terminal", "New terminal", "another shared terminal", "@New terminal");
-    if (spawnExecFor(bid))
-      push("new-spawn", "New spawn", "delegate a one-shot agent", "");
-    return items;
-  }
-
-  /* ---- the "New spawn" wizard ----
-     Selecting the row does not insert text; the popup slides through the
-     directive's parts - how many agents, node, engine, model, effort - and
-     only the finished directive lands in the composer, so the exact wording
-     never has to be remembered. Single-choice parts are skipped, typing
-     filters the current part, and Escape/Backspace slide back. */
-
-  async beginSessionMention() {
-    const wizard = {selected: new Set(), data: null, error: ""};
-    this.mentionSession = wizard;
-    this.spawnResetQuery();
-    try { wizard.data = await api(0, "session-links/catalog"); }
-    catch (error) { wizard.error = error.message; }
-    if (this.mentionSession === wizard) this.updateMention();
-  }
-
-  sessionMentionItems(query) {
-    const wizard = this.mentionSession;
-    const items = [];
-    const add = (kind, label, hint = "", ref = "") => items.push({kind, label, hint, ref});
-    if (wizard.error) add("session-wait", wizard.error);
-    else if (!wizard.data) add("session-wait", "Loading sessions…");
-    else {
-      if (wizard.selected.size) add("session-insert", `Insert ${wizard.selected.size} selected`);
-      const q = query.toLowerCase();
-      if (!q || "all sessions".includes(q))
-        add("session-all", "All sessions", "includes archived sessions across nodes");
-      for (const row of wizard.data.sessions) {
-        if (row.bid === (this.tab.bid || 0) && row.id === this.tab.sid) continue;
-        if (q && !`${row.title} ${row.node_name} ${row.cwd}`.toLowerCase().includes(q)) continue;
-        add("session-select", `${wizard.selected.has(row.ref) ? "✓ " : ""}${row.title}`,
-          `${row.node_name} · ${row.archived ? "archived" : row.status} · ${row.cwd}`, row.ref);
-      }
-      for (const row of wizard.data.unavailable || [])
-        add("session-wait", `${row.node}: unavailable`, row.error);
-    }
-    add("session-back", "Back");
-    return items;
-  }
-
-  spawnMentionBegin() {
-    this.mentionSpawn = { step: "count", count: null, node: undefined,
-                          engine: null, model: null, effort: null,
-                          fetching: false, error: "", slide: 1 };
-    this.spawnResetQuery();
-  }
-
-  spawnEnterNodeStep() {
-    const wizard = this.mentionSpawn;
-    const nodes = this.spawnNodeChoices();
-    if (nodes.length <= 1) {
-      wizard.node = nodes.length ? nodes[0].node : null;
-      wizard.step = "engine";
-      this.spawnFetchEngines();
-    } else {
-      wizard.step = "node";
-    }
-    wizard.slide = 1;
-    this.spawnResetQuery();
-  }
-
-  /* The session's own node always leads (node null: the spawn tool's default
-     target). Other nodes exist only for controller-hosted sessions, whose
-     node can relay; a backend-hosted engine can only spawn onto itself. */
-  spawnNodeChoices() {
-    const bid = this.tab.bid || 0;
-    const choices = [{ node: null, label: backendName(bid),
-                       hint: "this session's node" }];
-    if (!bid) {
-      for (const backend of state.backends) {
-        if (!spawnExecFor(backend.id) || !backendConnectionAllowed(backend.id))
-          continue;
-        choices.push({ node: { bid: backend.id, name: String(backend.name || "") },
-                       label: String(backend.name || `backend ${backend.id}`),
-                       hint: "backend node" });
-      }
-    }
-    return choices;
-  }
-
-  spawnTargetBid() {
-    const wizard = this.mentionSpawn;
-    return wizard && wizard.node ? wizard.node.bid : (this.tab.bid || 0);
-  }
-
-  spawnTargetEngines() {
-    const tid = this.spawnTargetBid();
-    const engines = tid ? state.engCache[tid] : state.engines;
-    return Array.isArray(engines) ? engines : null;
-  }
-
-  spawnFetchEngines(force) {
-    const wizard = this.mentionSpawn;
-    if (!wizard || wizard.fetching) return;
-    if (this.spawnTargetEngines() && !force) return;
-    const tid = this.spawnTargetBid();
-    wizard.fetching = true;
-    wizard.error = "";
-    if (force) this.updateMention();
-    api(tid, "engines", { timeoutMs: 15000 }).then(result => {
-      if (result && Array.isArray(result.engines))
-        rememberEnginePayload(tid, result);
-      if (this.mentionSpawn !== wizard) return;
-      wizard.fetching = false;
-      if (!this.spawnTargetEngines())
-        wizard.error = "node returned no engines";
-      this.updateMention();
-    }, error => {
-      if (this.mentionSpawn !== wizard) return;
-      wizard.fetching = false;
-      wizard.error = (error && error.message) || "engines unavailable";
-      this.updateMention();
-    });
-  }
-
-  spawnStepItems() {
-    const wizard = this.mentionSpawn;
-    const items = [];
-    const step = (label, hint, extra) => items.push({
-      kind: "spawn-step", label, hint: hint || "",
-      search: (label + " " + (extra.value || "")).toLowerCase(), ...extra });
-    if (wizard.step === "count") {
-      for (let n = 1; n <= 12; n++)
-        step(n === 1 ? "1 agent" : `${n} agents`,
-          n === 1 ? "a single one-shot run" : "parallel one-shot runs",
-          { count: n, value: String(n) });
-    } else if (wizard.step === "node") {
-      for (const choice of this.spawnNodeChoices())
-        step(choice.label, choice.hint, { node: choice.node, value: "" });
-    } else if (wizard.step === "engine") {
-      const engines = this.spawnTargetEngines();
-      if (wizard.fetching || (!engines && !wizard.error)) {
-        items.push({ kind: "spawn-wait", label: "Loading engines…", search: "" });
-        if (!wizard.fetching) this.spawnFetchEngines();
-      } else if (wizard.error) {
-        items.push({ kind: "spawn-retry", label: "Retry - " + wizard.error,
-                     search: "" });
-      } else {
-        for (const engine of engines) {
-          if (!engine || !engine.installed || !engine.key) continue;
-          step(engine.label || engine.key,
-            [engine.version, engine.auth === "ok" ? "" : engine.auth]
-              .filter(Boolean).join(" · "),
-            { engine, value: engine.key });
-        }
-        if (!items.length)
-          items.push({ kind: "spawn-wait", label: "No engines installed on this node",
-                       search: "" });
-      }
-    } else if (wizard.step === "model") {
-      for (const option of this.spawnModelOptions(wizard.engine))
-        step(option.label || option.value || "Default", option.hint,
-          { model: option, value: option.value });
-    } else if (wizard.step === "effort") {
-      for (const option of spawnEffortOptionsFor(wizard.engine, wizard.model))
-        step(option.label || option.value || "Default", option.hint,
-          { effort: option, value: option.value });
-    }
-    items.push({ kind: "spawn-back", label: "Back", hint: "", search: "back" });
-    return items;
-  }
-
-  spawnModelOptions(engine) {
-    const options = engine && Array.isArray(engine.model_options)
-      ? engine.model_options : [];
-    return options.filter(option => option && typeof option.value === "string");
-  }
-
-  spawnStepChoose(item) {
-    const wizard = this.mentionSpawn;
-    if (!wizard) return;
-    if (wizard.step === "count") {
-      wizard.count = item.count;
-      this.spawnEnterNodeStep();
-      return;
-    }
-    if (wizard.step === "node") {
-      wizard.node = item.node;
-      wizard.step = "engine";
-      wizard.slide = 1;
-      this.spawnFetchEngines();
-      this.spawnResetQuery();
-      return;
-    }
-    if (wizard.step === "engine") {
-      wizard.engine = item.engine;
-      if (this.spawnModelOptions(item.engine).length <= 1) {
-        wizard.model = this.spawnModelOptions(item.engine)[0] || { value: "" };
-        this.spawnAfterModel();
-        return;
-      }
-      wizard.step = "model";
-      wizard.slide = 1;
-      this.spawnResetQuery();
-      return;
-    }
-    if (wizard.step === "model") {
-      wizard.model = item.model;
-      this.spawnAfterModel();
-      return;
-    }
-    if (wizard.step === "effort") {
-      wizard.effort = item.effort;
-      this.spawnFinish();
-    }
-  }
-
-  spawnAfterModel() {
-    const wizard = this.mentionSpawn;
-    const efforts = spawnEffortOptionsFor(wizard.engine, wizard.model);
-    if (efforts.length <= 1) {
-      wizard.effort = efforts[0] || { value: "" };
-      this.spawnFinish();
-      return;
-    }
-    wizard.step = "effort";
-    wizard.slide = 1;
-    this.spawnResetQuery();
-  }
-
-  spawnStepBack() {
-    const wizard = this.mentionSpawn;
-    if (!wizard) return;
-    wizard.slide = -1;
-    if (wizard.step === "effort") {
-      wizard.effort = null;
-      wizard.model = null;
-      if (this.spawnModelOptions(wizard.engine).length > 1) {
-        wizard.step = "model";
-      } else {
-        wizard.engine = null;
-        wizard.step = "engine";
-      }
-    } else if (wizard.step === "model") {
-      wizard.model = null;
-      wizard.engine = null;
-      wizard.step = "engine";
-    } else if (wizard.step === "engine" && this.spawnNodeChoices().length > 1) {
-      wizard.engine = null;
-      wizard.node = undefined;
-      wizard.step = "node";
-    } else if (wizard.step === "engine" || wizard.step === "node") {
-      wizard.engine = null;
-      wizard.node = undefined;
-      wizard.count = null;
-      wizard.step = "count";
-    } else {
-      this.mentionSpawn = null;   // back out of the wizard, keep the "@" list
-    }
-    this.spawnResetQuery();
-  }
-
-  spawnFinish() {
-    const wizard = this.mentionSpawn;
-    this.mentionSpawn = null;
-    this.applyMention({ insert: spawnMentionInsert(wizard) });
-  }
-
-  /* Clear the token's typed filter (everything after the "@") so each part
-     starts with a clean query. The synthetic input re-runs updateMention,
-     which renders the new step through the ordinary path. */
-  spawnResetQuery() {
-    const m = this.mention;
-    if (!m) return;
-    const ta = this.ta;
-    const end = ta.selectionStart;
-    ta.value = ta.value.slice(0, m.start + 1) + ta.value.slice(end);
-    ta.setSelectionRange(m.start + 1, m.start + 1);
-    ta.focus();
-    ta.dispatchEvent(new Event("input", { bubbles: true }));
-  }
-
-  /* Live instances on this session's node: whatever the node last reported,
-     joined with instances this workspace already has tabs for, so the list is
-     useful before (or without) a fetch. This session's own come first. */
-  knownMentionInstances(kind, allowed) {
-    if (!allowed) return [];
-    const bid = this.tab.bid || 0;
-    const known = new Map();
-    const fetched = kind === "browser" ? this.mentionData.browsers : this.mentionData.terminals;
-    for (const inst of fetched || []) {
-      const id = String(inst && inst.id || "").toUpperCase();
-      if (!/^[A-Z0-9]{4}$/.test(id) || inst.running === false) continue;
-      known.set(id, { id, session_id: Number(inst.session_id) || 0 });
-    }
-    for (const t of state.tabs) {
-      if ((t.bid || 0) !== bid) continue;
-      if (kind === "browser" && (t.type !== "browser" || t.browserGone === true)) continue;
-      if (kind === "terminal" &&
-          (t.type !== "term" || t.ended === true || t.terminalGone === true)) continue;
-      const id = String((kind === "browser" ? t.browserId : t.terminalId) || "").toUpperCase();
-      if (!/^[A-Z0-9]{4}$/.test(id) || known.has(id)) continue;
-      known.set(id, { id, session_id: Number(t.sid) > 0 ? Number(t.sid) : 0 });
-    }
-    const instances = [...known.values()];
-    return instances.filter(inst => inst.session_id === this.tab.sid)
-      .concat(instances.filter(inst => inst.session_id !== this.tab.sid));
-  }
-
-  /* One coalesced, briefly cached snapshot of the node's live instances: the
-     list opens instantly from local knowledge and refines itself when this
-     lands. An offline node is never probed - the controller's authenticated
-     ping owns outage recovery. */
-  refreshMentionInstances() {
-    const bid = this.tab.bid || 0;
-    const data = this.mentionData;
-    if (nodeStateStreamActive(bid)) {
-      /* Stream snapshots seed new views in the constructor and update open
-         views through syncInstanceCatalogIntoViews. Re-entering
-         updateMention() from its own refresh tail recursively rebuilt the
-         popup until the browser hit its call-stack limit on every keystroke. */
-      return;
-    }
-    if (data.promise || Date.now() - data.at < 10000) return;
-    if (bid && !backendConnectionAllowed(bid)) return;
-    const wantBrowsers = browserEnabledFor(bid) && browserInstancesFor(bid);
-    const wantTerminals = terminalInstancesFor(bid);
-    data.at = Date.now();
-    if (!wantBrowsers && !wantTerminals) return;
-    const jobs = [];
-    if (wantBrowsers)
-      jobs.push(api(bid, "browser/status", { timeoutMs: 15000 }).then(r => {
-        if (r && Array.isArray(r.instances)) data.browsers = r.instances;
-      }, () => {}));
-    if (wantTerminals)
-      jobs.push(api(bid, "terminal/instances", { timeoutMs: 15000 }).then(r => {
-        if (r && Array.isArray(r.instances)) data.terminals = r.instances;
-      }, () => {}));
-    data.promise = Promise.all(jobs).then(() => {
-      data.promise = null;
-      data.at = Date.now();
-      if (this.mention && !this.closed) this.updateMention();
-    });
-  }
-
-  /* A sent image's object URL outlives its chip so recall can show the preview;
-     everything else the composer created is released immediately. */
-  retireSentAttachment(attachment) {
-    if (!attachment.url || !attachment.ownsUrl) return;
-    if (!attachment.preview || !attachment.path) {
-      URL.revokeObjectURL(attachment.url);
-      return;
-    }
-    const previous = this.sentThumbs.get(attachment.path);
-    if (previous && previous !== attachment.url) URL.revokeObjectURL(previous);
-    this.sentThumbs.delete(attachment.path);
-    this.sentThumbs.set(attachment.path, attachment.url);
-    while (this.sentThumbs.size > SENT_THUMBNAIL_LIMIT) {
-      const oldest = this.sentThumbs.keys().next().value;
-      URL.revokeObjectURL(this.sentThumbs.get(oldest));
-      this.sentThumbs.delete(oldest);
-    }
   }
 
   /* ---- incoming ---- */
@@ -10170,13 +10583,10 @@ class SessionView {
         this.setSideQuestionState(d.side_question);
         if (Number.isInteger(d.draft_max_chars) && d.draft_max_chars > 0)
           this.draftMaxChars = d.draft_max_chars;
-        if (d.uploads) {
-          const policy = rememberUploadSettings(this.tab.bid, d.uploads);
-          if (policy) this.uploadPolicy = policy;
-        }
+        if (d.uploads) rememberUploadSettings(this.tab.bid, d.uploads);   // reaches this box
         if (Object.prototype.hasOwnProperty.call(d, "draft")) this.initializeDraft(d.draft);
         else this.initializeDraft(null);  // older remote node: local-only compatibility
-        this.syncUploadButton();
+        this.composer.syncUploadButton();
         this.status = d.status;
         noteSessionActivity(this.tab.bid, this.tab.sid, d.status === "running",
           d.active_since, d.server_time, d.completion_status);
@@ -10191,9 +10601,8 @@ class SessionView {
             attached: true, mayHaveOlder: d.events.length >= 200 });
           this.mergeSkipped();
         }
-        this.history = d.events.filter(ev => ev.kind === "user")
-          .map(ev => (ev.data && ev.data.text) || "").filter(Boolean);
-        this.histIdx = null;
+        this.composer.setHistory(d.events.filter(ev => ev.kind === "user")
+          .map(ev => (ev.data && ev.data.text) || "").filter(Boolean));
         this.renderQueue(d.queued || [], d.held || [], d.paused || [],
           d.queue_revision);
         // before updateHead: pickers read the queue
@@ -10224,7 +10633,7 @@ class SessionView {
           if (this.skippedEvents.length > 2000) this.skippedEvents.shift();
           this.newSinceDetach++;
           if (d.event.kind === "user" && d.event.data && d.event.data.text)
-            this.history.push(d.event.data.text);
+            this.composer.rememberSent(d.event.data.text);
           this.syncTailPill();
           break;
         }
@@ -10232,7 +10641,7 @@ class SessionView {
         this.clearLive();
         this.renderEvent(d.event, true, follow);
         if (d.event.kind === "user") {
-          if (d.event.data && d.event.data.text) this.history.push(d.event.data.text);
+          if (d.event.data && d.event.data.text) this.composer.rememberSent(d.event.data.text);
           if (this._forceScroll) { this._forceScroll = false; this.scrollBottom(true); }
         }
         this.syncLiveStatus();
@@ -10570,7 +10979,7 @@ class SessionView {
     this.askBtn.classList.toggle("hidden", !(running && supported));
     const stopping = !!remoteStoppingMessage(this.tab.bid);
     const unavailable = !!this.tab.bid && !backendConnectionAllowed(this.tab.bid);
-    const hasAttachments = this.attachments.length > 0;
+    const hasAttachments = this.composer.attachments.length > 0;
     this.askBtn.disabled = !running || !supported || !this.sideQuestion.ready ||
       !!this.askPending || this.reconnecting || stopping || unavailable ||
       hasAttachments;
@@ -10586,10 +10995,10 @@ class SessionView {
      not paused, not steered, and never sees the exchange. Follow-ups need no
      separate control - the node threads this turn's answered pairs. */
   async ask() {
-    const composerText = this.ta.value;
+    const composerText = this.composer.text();
     const question = composerText.trim();
     if (!question) return;
-    if (this.attachments.length) {
+    if (this.composer.attachments.length) {
       toast("A side question is text only · use Queue for attachments", "error", 6000);
       return;
     }
@@ -10627,12 +11036,8 @@ class SessionView {
     }
     /* The reply only acknowledges the handoff; the answer arrives over the
        session socket as its own rows, which is what releases the control. */
-    if (this.ta.value === composerText) {
-      this.ta.value = "";
-      this.resizeComposer();
-      this.histIdx = null;
-      this.histDraft = "";
-      this.releaseHistoryAttachments();
+    if (this.composer.text() === composerText) {
+      this.composer.take();
       this.saveDraft();
     }
     this.updateAskControl();
@@ -10647,7 +11052,7 @@ class SessionView {
     this.steerBtn.classList.toggle("hidden", !(running && supported));
     const stopping = !!remoteStoppingMessage(this.tab.bid);
     const unavailable = !!this.tab.bid && !backendConnectionAllowed(this.tab.bid);
-    const hasAttachments = this.attachments.length > 0;
+    const hasAttachments = this.composer.attachments.length > 0;
     this.steerBtn.disabled = !running || !supported || !this.steering.ready ||
       !!this.steerPending || this.reconnecting || stopping || unavailable ||
       hasAttachments;
@@ -11102,7 +11507,7 @@ class SessionView {
             /* The blob this view still holds, else the node's stored copy, so a
                reload keeps its thumbnails rather than a row of named cards. */
             const chip = attachmentChipNode(a, a.preview
-              ? (this.sentThumbs.get(a.path) || uploadPreviewUrl(this.tab.bid, a.path))
+              ? (this.composer.sentPreview(a.path) || uploadPreviewUrl(this.tab.bid, a.path))
               : "");
             chip.setAttribute("aria-label", `${a.name} · ${a.path}`);
             strip.appendChild(chip);
@@ -11386,203 +11791,11 @@ class SessionView {
   }
 
   /* ---- outgoing ---- */
-  showFileDropTarget() {
-    if (!this.composerBox) return;
-    this.syncUploadButton();
-    const unavailable = this.attachButton && this.attachButton.disabled;
-    this.composerBox.dataset.dropHint = unavailable ?
-      (this.attachButton.getAttribute("aria-label") || "Files cannot be attached") :
-      "Drop files to attach";
-    this.composerBox.classList.add("file-drag");
-    this.composerBox.classList.toggle("drop-rejected", !!unavailable);
-  }
-
-  clearFileDropTarget() {
-    this.fileDragDepth = 0;
-    if (!this.composerBox) return;
-    this.composerBox.classList.remove("file-drag", "drop-rejected");
-    delete this.composerBox.dataset.dropHint;
-  }
-
-  handleFileDragEnter(event) {
-    if (!dataTransferHasFiles(event.dataTransfer)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    this.fileDragDepth++;
-    this.showFileDropTarget();
-  }
-
-  handleFileDragOver(event) {
-    if (!dataTransferHasFiles(event.dataTransfer)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    this.showFileDropTarget();
-    try {
-      event.dataTransfer.dropEffect = this.attachButton.disabled ? "none" : "copy";
-    } catch (_) { /* some browsers expose a read-only dropEffect */ }
-  }
-
-  handleFileDragLeave(event) {
-    if (!this.composerBox.classList.contains("file-drag")) return;
-    event.preventDefault();
-    event.stopPropagation();
-    this.fileDragDepth = Math.max(0, this.fileDragDepth - 1);
-    if (this.fileDragDepth === 0) this.clearFileDropTarget();
-  }
-
-  handleFileDrop(event) {
-    if (!dataTransferHasFiles(event.dataTransfer)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    const dropped = filesFromDataTransfer(event.dataTransfer);
-    this.clearFileDropTarget();
-    if (dropped.directories)
-      toast("Folders cannot be attached · drop individual files instead", "error", 6000);
-    if (dropped.files.length) this.uploadFiles(dropped.files);
-  }
-
-  handlePaste(e) {
-    const items = e.clipboardData ? [...e.clipboardData.items] : [];
-    const files = items.filter(item => item.kind === "file")
-      .map(item => item.getAsFile()).filter(Boolean);
-    if (!files.length) return;
-    e.preventDefault();
-    this.uploadFiles(files, true);
-  }
-
-  uploadFiles(files, fromClipboard = false) {
-    const arbitraryFiles = backendSupportsFileUploads(this.tab.bid);
-    const policy = this.uploadPolicy || uploadSettingsFor(this.tab.bid);
-    if (policy && !policy.enabled) {
-      toast("File uploads are disabled on this backend", "error");
-      return;
-    }
-    for (const file of files) {
-      const legacyImage = !arbitraryFiles && fromClipboard &&
-        ATTACHMENT_PREVIEW_TYPES.has(String(file.type || "").toLowerCase());
-      if (!arbitraryFiles && !legacyImage) {
-        toast("Upgrade this backend to attach arbitrary files", "error");
-        continue;
-      }
-      if (policy && file.size > policy.max_file_size_bytes) {
-        toast(`${file.name || "file"} is ${fmtBytes(file.size)} · maximum is ` +
-          `${policy.max_file_size_mb} MiB`, "error", 6500);
-        continue;
-      }
-      this.uploadFile(file, legacyImage);
-    }
-  }
-
-  async uploadFile(file, legacyImage = false) {
-    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
-    const preview = ATTACHMENT_PREVIEW_TYPES.has(String(file.type || "").toLowerCase());
-    const attachment = {
-      name: file.name || "file", size: file.size, contentType: file.type || "application/octet-stream",
-      path: "", uploadId: "", url: preview ? URL.createObjectURL(file) : "",
-      ownsUrl: preview, sizeText: "", line: "",
-      preview, uploading: true, controller, removed: false,
-    };
-    this.attachments.push(attachment);
-    this.renderAttachments();
-    try {
-      const response = await fetch(apiPath(this.tab.bid, `sessions/${this.tab.sid}/upload`), {
-        method: "POST",
-        headers: {
-          "Content-Type": attachment.contentType,
-          "X-Puppy-Filename": encodeURIComponent(attachment.name),
-          "X-Puppy-Size": String(file.size),
-        },
-        body: file,
-        redirect: "error",
-        ...(controller ? { signal: controller.signal } : {}),
-      });
-      const result = await response.json().catch(() => null);
-      const policy = rememberUploadSettings(this.tab.bid, result && result.uploads);
-      if (policy) this.uploadPolicy = policy;
-      if (!response.ok) throw new Error((result && result.error) || `HTTP ${response.status}`);
-      if (!result || typeof result.path !== "string" ||
-          (!legacyImage && typeof result.upload_id !== "string"))
-        throw new Error("backend returned an invalid upload response");
-      if (attachment.removed) {
-        if (result.upload_id) this.discardServerUpload(result.upload_id, true);
-        return;
-      }
-      attachment.path = result.path;
-      attachment.uploadId = result.upload_id || "";
-      attachment.name = result.name || attachment.name;
-      const reportedSize = result.size == null ? file.size : Number(result.size);
-      if (!Number.isFinite(reportedSize) || reportedSize < 0)
-        throw new Error("backend returned an invalid upload size");
-      attachment.size = reportedSize;
-      attachment.contentType = result.content_type || attachment.contentType;
-      attachment.uploading = false;
-      attachment.controller = null;
-      this.renderAttachments();
-    } catch (error) {
-      if (!attachment.removed) {
-        const wasAborted = !!(controller && controller.signal.aborted);
-        this.removeAttachment(attachment, true);
-        if (!wasAborted)
-          toast(`File upload failed: ${error.message}`, "error", 6500);
-      }
-    }
-  }
-
-  discardServerUpload(uploadId, quiet = false) {
-    if (!uploadId) return;
-    api(this.tab.bid, `sessions/${this.tab.sid}/upload/${uploadId}`, {
-      method: "DELETE", keepalive: true, timeoutMs: 10000,
-    }).catch(error => {
-      if (!quiet) toast(`Could not discard upload: ${error.message}`, "error");
-    });
-  }
-
-  removeAttachment(attachment, quiet = false) {
-    if (!attachment || attachment.removed) return;
-    attachment.removed = true;
-    if (attachment.controller) attachment.controller.abort();
-    if (attachment.url) {
-      // a recalled chip borrows its preview from sentThumbs; only revoke our own
-      if (attachment.ownsUrl) URL.revokeObjectURL(attachment.url);
-      attachment.url = "";
-    }
-    this.attachments = this.attachments.filter(item => item !== attachment);
-    this.renderAttachments();
-    /* A shared draft is a full-document last-writer-wins stream. Another
-       browser may already have sent a later edit which still contains this
-       marker, so deleting the bytes here could leave that accepted edit with
-       a broken chip. Session deletion cleans these private staged bytes. */
-    if (attachment.uploadId && !this.draftSupported)
-      this.discardServerUpload(attachment.uploadId, quiet);
-  }
-
-  renderAttachments(persist = true) {
-    this.attachStrip.innerHTML = "";
-    this.attachStrip.classList.toggle("hidden", !this.attachments.length);
-    for (const a of this.attachments) {
-      // the local blob while this page still holds it, else the node's copy
-      const chip = attachmentChipNode(a, a.preview
-        ? (a.url || uploadPreviewUrl(this.tab.bid, a.path)) : "", a.uploading);
-      const x = el("button", "attach-x");
-      x.type = "button";
-      x.appendChild(xIcon(12));
-      x.setAttribute("aria-label", "Remove attachment");
-      x.onclick = () => this.removeAttachment(a);
-      chip.appendChild(x);
-      this.attachStrip.appendChild(chip);
-    }
-    if (this.attachButton)
-      this.attachButton.classList.toggle("uploading",
-        this.attachments.some(attachment => attachment.uploading));
-    this.updateSteerControl();
-    if (persist && !this.closed) this.saveDraft();
-  }
-
   async steer() {
-    const composerText = this.ta.value;
+    const composerText = this.composer.text();
     const text = composerText.trim();
     if (!text) return;
-    if (this.attachments.length) {
+    if (this.composer.attachments.length) {
       toast("Steering accepts text only · use Queue for attachments", "error", 6000);
       return;
     }
@@ -11627,12 +11840,8 @@ class SessionView {
        successful transport handoff, so another steer may follow while its
        later accepted/rejected status remains visible through the socket. */
     if (this.steerPending === request) this.steerPending = null;
-    if (this.ta.value === composerText) {
-      this.ta.value = "";
-      this.resizeComposer();
-      this.histIdx = null;
-      this.histDraft = "";
-      this.releaseHistoryAttachments();
+    if (this.composer.text() === composerText) {
+      this.composer.take();
       this.saveDraft();
     }
     this.updateSteerControl();
@@ -11642,8 +11851,7 @@ class SessionView {
   submit() {
     const wasRunning = this.status === "running";
     const draft = this.draftValue();
-    let text = this.ta.value.trim();
-    if (!text && !this.attachments.length) return;
+    if (this.composer.isEmpty()) return;
     if (this.draftSupported && !this.draftReady) {
       toast("Draft is still syncing; wait for the session to reconnect", "error");
       return;
@@ -11653,19 +11861,10 @@ class SessionView {
         "error", 6500);
       return;
     }
-    if (this.attachments.some(attachment => attachment.uploading)) {
-      toast("Wait for file uploads to finish", "error");
-      return;
-    }
+    const blocker = this.composer.sendBlocker();
+    if (blocker) { toast(blocker, "error"); return; }
     if (!this.ws || this.ws.readyState !== 1) { toast("Not connected", "error"); return; }
-    if (this.attachments.length) {
-      const lines = this.attachments.map(attachmentMarkerLine).join("\n");
-      text = text ? text + "\n\n" + lines : lines;
-      this.attachments.forEach(a => this.retireSentAttachment(a));
-      this.attachments = [];
-      this.renderAttachments(false);
-    }
-    const message = { type: "message", text };
+    const message = { type: "message", text: this.composer.take() };
     if (this.draftSupported && this.draftReady) {
       writeDraftJournal(this.tab.id, draft, this.draftRevision, true);
       this.draftJournal = {
@@ -11686,11 +11885,6 @@ class SessionView {
       message.draft_client_seq = clientSeq;
     }
     this.ws.send(JSON.stringify(message));
-    this.ta.value = "";
-    this.hideMention();
-    this.resizeComposer();
-    this.histIdx = null; this.histDraft = "";
-    this.releaseHistoryAttachments();
     // sending always jumps to the bottom - now, and again when the sent
     // message echoes back as a transcript event (even if it was queued)
     this._forceScroll = true;
@@ -12074,7 +12268,7 @@ class SessionView {
     this.queueEl.querySelectorAll(".q-live button").forEach(button => {
       button.disabled = busy;
     });
-    this.ta.readOnly = busy;
+    this.composer.setBusy(busy);
   }
 
   cancelQueueEdit(message = "", preserveDraft = true) {
@@ -12159,12 +12353,12 @@ class SessionView {
     if (draft.revision >= this.draftRevision) {
       this.draftRevision = draft.revision;
       this.draftPendingText = null;
-      this.applySharedDraft(draft.text, true, true);
+      this.composer.replace(draft.text, true, true);
       this.clearDraftJournal();
     } else if (deferred && deferred.revision === this.draftRevision) {
       /* A peer authored a newer value after the queue edit. Preserve that
          normal last-writer-wins result instead of reviving our older one. */
-      this.applySharedDraft(deferred.text);
+      this.composer.replace(deferred.text);
       this.clearDraftJournal();
     }
     if (message.started) {
@@ -12172,8 +12366,7 @@ class SessionView {
       this.updateRunState();
       this.setStatus("Starting next queued message…");
     }
-    this.ta.focus();
-    scrollCaretIntoView(this.ta);
+    this.composer.focus(true);
   }
 
   unqueue(index, text) {
@@ -12417,7 +12610,7 @@ class SessionView {
         "Compaction queued behind the pending work", "ok");
       /* the undone prompt comes back to the composer for editing, never on
          top of something already being written */
-      if (r.restore_text && !this.ta.value.trim()) this.setComposer(r.restore_text);
+      if (r.restore_text && !this.composer.text().trim()) this.composer.set(r.restore_text);
     } catch (e) { toast(e.message, "error"); }
   }
 

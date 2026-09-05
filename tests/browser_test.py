@@ -678,9 +678,10 @@ console.log(JSON.stringify([oldLocal,backendSupportsSessionTasks(0),backendSuppo
 
 
 def check_task_config_ui() -> None:
-    proc = subprocess.run(["node", str(BASE / "tests" / "task_config_ui_test.js")],
-                          capture_output=True, text=True)
-    assert proc.returncode == 0, proc.stderr
+    for name in ("composer_ui_test.js", "task_config_ui_test.js"):
+        proc = subprocess.run(["node", str(BASE / "tests" / name)],
+                              capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
 
 
 def check_session_task_helpers(ui_source: str) -> None:
@@ -2315,6 +2316,8 @@ def check_session_draft_sync(ui_source: str) -> None:
         ui_source.index("function dataTransferHasFiles")]
     start = ui_source.index("class SessionView {")
     session_view = ui_source[start:ui_source.index("class TermView", start)]
+    composer = ui_source[ui_source.index("class Composer {"):
+                         ui_source.index("/* ================= SessionView =================")]
     script = r"""
 const storage=new Map();
 const lsGet=key=>storage.has(key)?storage.get(key):null;
@@ -2329,20 +2332,17 @@ const toast=()=>{};
 %s
 %s
 %s
+%s
 function makeView(id="s:0:42") {
   const sent=[];
   const queueClasses=new Set();
   const view=Object.create(SessionView.prototype);
   Object.assign(view, {
     tab:{id,bid:0,sid:42}, closed:false,
-    ta:{value:"",selectionStart:0,selectionEnd:0,readOnly:false,focused:false,
-      focus(){this.focused=true;},
-      setSelectionRange(start,end){this.selectionStart=start;this.selectionEnd=end;}},
     queueEl:{
       classList:{toggle(name,on){if(on)queueClasses.add(name);else queueClasses.delete(name);}},
       setAttribute(){},removeAttribute(){},querySelectorAll(){return[];},
     },
-    attachments:[],histAttach:null,histIdx:null,histDraft:"",sentThumbs:new Map(),
     draftSupported:true,draftReady:true,draftRevision:0,
     draftMaxChars:100000,status:"idle",_forceScroll:false,
     steering:{supported:true,ready:false,turn_id:""},steerPending:null,
@@ -2352,17 +2352,25 @@ function makeView(id="s:0:42") {
     draftDeferred:null,draftTouchedBeforeReady:false,draftJournal:null,
     queueEditSeq:0,queueEditPending:null,
     ws:{readyState:WebSocket.OPEN,send:value=>sent.push(JSON.parse(value))},
-    renderAttachments(){},resizeComposer(){},releaseHistoryAttachments(){},
     scrollBottom(){},updateRunState(){},setSteeringState(){},
     setSideQuestionState(){},setStatus(){},
-    discardServerUpload(){},updateSteerControl(){},
+    updateSteerControl(){},
+  });
+  view.composer=Object.assign(Object.create(Composer.prototype), {
+    host:{bid:0,sid:42,privateUploads:()=>false}, closed:false,busy:false,
+    ta:{value:"",selectionStart:0,selectionEnd:0,readOnly:false,focused:false,
+      focus(){this.focused=true;},
+      setSelectionRange(start,end){this.selectionStart=start;this.selectionEnd=end;}},
+    attachments:[],histAttach:null,histIdx:null,histDraft:"",sentThumbs:new Map(),
+    history:[],renderAttachments(){},resize(){},hideMention(){},
+    discardServerUpload(){},syncUploadButton(){},
   });
   return {view,sent,queueClasses};
 }
 
 const first=makeView();
-first.view.ta.value="Test";
-first.view.ta.selectionStart=first.view.ta.selectionEnd=4;
+first.view.composer.ta.value="Test";
+first.view.composer.ta.selectionStart=first.view.composer.ta.selectionEnd=4;
 first.view.saveDraft();
 const pendingJournal=JSON.parse(storage.get("puppy.draft.s:0:42"));
 first.view.receiveDraft({type:"draft",text:"Test",revision:1,updated_at:1,
@@ -2370,16 +2378,16 @@ first.view.receiveDraft({type:"draft",text:"Test",revision:1,updated_at:1,
 const journalCleared=!storage.has("puppy.draft.s:0:42");
 first.view.receiveDraft({type:"draft",text:"from device b",revision:2,updated_at:2,
   client_id:"device-b",client_seq:1});
-const followed=first.view.ta.value;
+const followed=first.view.composer.ta.value;
 
-first.view.ta.value="local winner";
+first.view.composer.ta.value="local winner";
 first.view.saveDraft();
 first.view.receiveDraft({type:"draft",text:"peer in flight",revision:3,updated_at:3,
   client_id:"device-b",client_seq:2});
-const whilePending={text:first.view.ta.value,deferred:first.view.draftDeferred.text};
+const whilePending={text:first.view.composer.ta.value,deferred:first.view.draftDeferred.text};
 first.view.receiveDraft({type:"draft",text:"local winner",revision:4,updated_at:4,
   client_id:"device-a",client_seq:2});
-const afterAck={text:first.view.ta.value,deferred:first.view.draftDeferred,
+const afterAck={text:first.view.composer.ta.value,deferred:first.view.draftDeferred,
   journal:storage.has("puppy.draft.s:0:42")};
 first.view.receiveDraft({type:"draft",text:"latest peer",revision:5,updated_at:5,
   client_id:"device-b",client_seq:3});
@@ -2388,21 +2396,21 @@ const imagePath="/private/uploads/42/1700000000000-abcdef0123/photo.png";
 const marker=`${ATTACH_IMAGE_PREFIX}${imagePath}${ATTACH_IMAGE_SUFFIX}`;
 first.view.receiveDraft({type:"draft",text:marker,revision:6,updated_at:6,
   client_id:"device-b",client_seq:4});
-const sharedAttachment={count:first.view.attachments.length,
-  path:first.view.attachments[0].path,prose:first.view.ta.value};
-first.view.attachments.push({path:"",url:"blob:upload",ownsUrl:true,uploading:true,
+const sharedAttachment={count:first.view.composer.attachments.length,
+  path:first.view.composer.attachments[0].path,prose:first.view.composer.ta.value};
+first.view.composer.attachments.push({path:"",url:"blob:upload",ownsUrl:true,uploading:true,
   removed:false,controller:null});
 first.view.receiveDraft({type:"draft",text:"peer prose",revision:7,updated_at:7,
   client_id:"device-b",client_seq:5});
-const uploadPreserved={count:first.view.attachments.length,
-  uploading:first.view.attachments[0].uploading,text:first.view.ta.value};
+const uploadPreserved={count:first.view.composer.attachments.length,
+  uploading:first.view.composer.attachments[0].uploading,text:first.view.composer.ta.value};
 
 storage.set("puppy.draft.s:0:43", "local-only text");
 const localOnly=makeView("s:0:43");
 localOnly.view.draftSupported=false;
 localOnly.view.draftReady=false;
 localOnly.view.draftJournal=readLocalDraft("s:0:43");
-localOnly.view.ta.value=localOnly.view.draftJournal.text;
+localOnly.view.composer.ta.value=localOnly.view.draftJournal.text;
 localOnly.view.initializeDraft(null);
 storage.set("puppy.draft.s:0:47", "not a versioned journal");
 const invalidJournal=readDraftJournal("s:0:47");
@@ -2421,7 +2429,7 @@ unacked.view.initializeDraft({text:"accepted prefix",revision:3,updated_at:8});
 
 const offline=makeView("s:0:46");
 offline.view.ws=null;
-offline.view.ta.value="typed while disconnected";
+offline.view.composer.ta.value="typed while disconnected";
 offline.view.saveDraft();
 const offlineBefore={ready:offline.view.draftReady,
   touched:offline.view.draftTouchedBeforeReady};
@@ -2430,11 +2438,11 @@ offline.view.ws={readyState:WebSocket.OPEN,
 offline.view.initializeDraft({text:"server while away",revision:8,updated_at:9});
 
 const burst=makeView("s:0:48");
-burst.view.ta.value="a";
+burst.view.composer.ta.value="a";
 burst.view.saveDraft();
-burst.view.ta.value="ab";
+burst.view.composer.ta.value="ab";
 burst.view.saveDraft();
-burst.view.ta.value="latest";
+burst.view.composer.ta.value="latest";
 burst.view.saveDraft();
 const burstBeforeAck=burst.sent.slice();
 burst.view.receiveDraft({type:"draft",text:"a",revision:1,updated_at:10,
@@ -2444,9 +2452,9 @@ burst.view.receiveDraft({type:"draft",text:"latest",revision:2,updated_at:11,
   client_id:"device-a",client_seq:2});
 
 const submission=makeView("s:0:49");
-submission.view.ta.value="first";
+submission.view.composer.ta.value="first";
 submission.view.saveDraft();
-submission.view.ta.value="send this exact value";
+submission.view.composer.ta.value="send this exact value";
 submission.view.saveDraft();
 submission.view.submit();
 const submissionSent=submission.sent.slice();
@@ -2461,12 +2469,12 @@ submission.view.receiveDraft({type:"draft",text:"",revision:3,updated_at:14,
    by an upload completing behind the click. Its broadcast is held until the
    direct completion can discard the replaced in-flight upload atomically. */
 const editing=makeView("s:0:50");
-editing.view.ta.value="old composer";
+editing.view.composer.ta.value="old composer";
 editing.view.saveDraft();
-editing.view.ta.value="newest old composer";
+editing.view.composer.ta.value="newest old composer";
 editing.view.saveDraft();
 let uploadAborted=false;
-editing.view.attachments=[{path:"",url:"blob:editing",ownsUrl:true,uploading:true,
+editing.view.composer.attachments=[{path:"",url:"blob:editing",ownsUrl:true,uploading:true,
   removed:false,uploadId:"",controller:{abort(){uploadAborted=true;}}}];
 editing.view.editQueued(1,"queued replacement");
 const journalDuringEdit=JSON.parse(storage.get("puppy.draft.s:0:50"));
@@ -2475,35 +2483,35 @@ editing.view.receiveDraft({type:"draft",text:"old composer",revision:1,updated_a
   client_id:"device-a",client_seq:1});
 editing.view.receiveDraft({type:"draft",text:"queued replacement",revision:2,
   updated_at:16,client_id:"",client_seq:0});
-const beforeEditComplete={text:editing.view.ta.value,sent:editing.sent.slice(),
-  readOnly:editing.view.ta.readOnly,deferred:editing.view.draftDeferred.text};
+const beforeEditComplete={text:editing.view.composer.ta.value,sent:editing.sent.slice(),
+  readOnly:editing.view.composer.ta.readOnly,deferred:editing.view.draftDeferred.text};
 editing.view.queueEditComplete({type:"queue_edit_complete",request_id:
   editing.sent[1].request_id,ok:true,started:false,
   draft:{type:"draft",text:"queued replacement",revision:2,updated_at:16,
     client_id:"",client_seq:0}});
 
 console.log(JSON.stringify({sent:first.sent,pendingJournal,journalCleared,followed,
-  whilePending,afterAck,latest:first.view.ta.value,sharedAttachment,uploadPreserved,
-  localOnly:{text:localOnly.view.ta.value,sent:localOnly.sent,
-             caret:localOnly.view.ta.selectionStart},invalidJournal,
-  stale:{text:stale.view.ta.value,sent:stale.sent,
+  whilePending,afterAck,latest:first.view.composer.ta.value,sharedAttachment,uploadPreserved,
+  localOnly:{text:localOnly.view.composer.ta.value,sent:localOnly.sent,
+             caret:localOnly.view.composer.ta.selectionStart},invalidJournal,
+  stale:{text:stale.view.composer.ta.value,sent:stale.sent,
          journal:storage.has("puppy.draft.s:0:44"),
-         caret:stale.view.ta.selectionStart},
-  unacked:{text:unacked.view.ta.value,sent:unacked.sent,
-           caret:unacked.view.ta.selectionStart},
-  offline:{before:offlineBefore,text:offline.view.ta.value,sent:offline.sent},
+         caret:stale.view.composer.ta.selectionStart},
+  unacked:{text:unacked.view.composer.ta.value,sent:unacked.sent,
+           caret:unacked.view.composer.ta.selectionStart},
+  offline:{before:offlineBefore,text:offline.view.composer.ta.value,sent:offline.sent},
   burst:{beforeAck:burstBeforeAck,afterFirstAck:burstAfterFirstAck,
          journal:storage.has("puppy.draft.s:0:48")},
-  submission:{sent:submissionSent,text:submission.view.ta.value,
+  submission:{sent:submissionSent,text:submission.view.composer.ta.value,
               journal:storage.has("puppy.draft.s:0:49")},
   editing:{before:beforeEditComplete,journalDuringEdit,
-           text:editing.view.ta.value,caret:editing.view.ta.selectionStart,
-           readOnly:editing.view.ta.readOnly,focused:editing.view.ta.focused,
+           text:editing.view.composer.ta.value,caret:editing.view.composer.ta.selectionStart,
+           readOnly:editing.view.composer.ta.readOnly,focused:editing.view.composer.ta.focused,
            pending:editing.view.queueEditPending,uploadAborted,
            revoked:URL.revoked.includes("blob:editing"),
-           attachments:editing.view.attachments.length,
+           attachments:editing.view.composer.attachments.length,
            journal:storage.has("puppy.draft.s:0:50")}}));
-""" % (draft_helpers, attachment_helpers, session_view)
+""" % (draft_helpers, attachment_helpers, composer, session_view)
     # The embedded SessionView class exceeds the kernel's single-argument cap
     # (MAX_ARG_STRLEN, 128 KiB), so this script rides stdin rather than -e.
     proc = subprocess.run(["node"], input=script, capture_output=True, text=True)
@@ -3038,7 +3046,7 @@ def check_queue_controls_ui(ui_source: str, css_source: str) -> None:
     assert "!context.ready" in ui_source
     assert 'moveDragSlot(container, this.queueDrag.item, ".q-live"' in ui_source
     assert "if (this.queueEditPending) {" in ui_source
-    assert "this.applySharedDraft(draft.text, true, true);" in ui_source
+    assert "this.composer.replace(draft.text, true, true);" in ui_source
     assert 'this.cancelQueueEdit("Connection lost before the queued message could be edited")' \
         in ui_source
     assert '.queue-strip .q-edit{' in css_source
@@ -3066,19 +3074,24 @@ def check_active_turn_steering_ui(ui_source: str, css_source: str) -> None:
         ui_source.index(send_markup)
     assert "this.steerBtn.onclick = () => this.steer();" in ui_source
     assert "this.queueBtn.onclick = () => this.submit();" in ui_source
-    assert 'if (e.key === "Enter" && !e.shiftKey && !e.isComposing) ' \
-        '{ e.preventDefault(); this.submit(); return; }' in ui_source
+    assert 'if (e.isComposing) return;' in ui_source
+    assert 'if (e.key === "Enter" && !e.shiftKey) ' \
+        '{ e.preventDefault(); this.host.submit(); return; }' in ui_source
+    assert 'submit: () => this.submit(),' in ui_source
     assert 'backend.capabilities.includes("active-turn-steering")' in ui_source
     assert 'backend.capabilities.includes("session-control-ws-v1")' in ui_source
     assert 'await this.sendActiveTurnControl("steer", body)' in ui_source
 
     # Copy shortcuts inside the textarea stay entirely browser-native. Escape
     # and the visible Stop button are the explicit ways to interrupt a turn.
-    keydown_start = ui_source.index('this.ta.addEventListener("keydown"')
-    keydown_end = ui_source.index('this.ta.addEventListener("blur"', keydown_start)
+    keydown_start = ui_source.index('  keydown(e) {')
+    keydown_end = ui_source.index('  newline() {', keydown_start)
     keydown = ui_source[keydown_start:keydown_end]
     assert 'if (e.key === "Escape") {' in keydown
-    assert "this.interrupt();" in keydown
+    assert "this.host.escape(e);" in keydown
+    host_start = ui_source.index('this.composer = new Composer(')
+    host_end = ui_source.index('    // Paint the crash journal', host_start)
+    assert "this.interrupt();" in ui_source[host_start:host_end]
     assert 'e.key === "c"' not in keydown and 'e.key === "C"' not in keydown
     assert "ctrlCStreak" not in ui_source
     assert ('this.sendBtn.onclick = () => this.status === "running" ? '
@@ -3160,6 +3173,8 @@ def check_active_turn_steering_ui(ui_source: str, css_source: str) -> None:
                 steer_method = ui_source[start:index + 1]
                 break
     assert steer_method is not None, "unbalanced SessionView.steer"
+    composer = ui_source[ui_source.index("class Composer {"):
+                         ui_source.index("/* ================= SessionView =================")]
     script = r"""
 let calls=[],toasts=[],draftSaves=0,controlSyncs=0;
 const newDraftClientId=()=>"request-1";
@@ -3169,22 +3184,28 @@ const api=async (bid,path,options)=>{
   calls.push({bid,path,options});
   return {ok:true,status:"sent",request_id:options.body.request_id};
 };
+const attachmentMarkerLine=()=>{throw new Error("unexpected attachment in steering fixture");};
+%s
 const proto={%s};
 const view=Object.assign(Object.create(proto),{
-  tab:{bid:7,sid:42},ta:{value:"  updated direction  "},attachments:[],
+  tab:{bid:7,sid:42},
   draftSupported:true,draftReady:true,steering:{supported:true,ready:true,turn_id:"turn-9"},
   steerPending:null,_forceScroll:false,histIdx:3,histDraft:"old",
   updateSteerControl(){controlSyncs++;},resizeComposer(){},
   releaseHistoryAttachments(){},saveDraft(){draftSaves++;},scrollBottom(){},
 });
+view.composer=Object.assign(Object.create(Composer.prototype), {
+  host:{bid:7,sid:42},ta:{value:"  updated direction  "},attachments:[],
+  histAttach:null,resize(){},renderAttachments(){},hideMention(){},
+});
 await view.steer();
-const sent={calls,toasts,draftSaves,controlSyncs,text:view.ta.value,
+const sent={calls,toasts,draftSaves,controlSyncs,text:view.composer.ta.value,
   pending:view.steerPending,forceScroll:view._forceScroll};
-view.ta.value="later";
+view.composer.ta.value="later";
 view.steering={supported:true,ready:false,turn_id:""};
 await view.steer();
 console.log(JSON.stringify({sent,afterNotReady:{calls:calls.length,toasts}}));
-""" % steer_method
+""" % (composer, steer_method)
     proc = subprocess.run(
         ["node", "--input-type=module", "-e", with_live_views(script)],
         capture_output=True, text=True)
@@ -4895,7 +4916,7 @@ class MockTa {
   dispatchEvent(){this.view.updateMention();}
 }
 class View {
-  constructor(bid){this.tab={bid,sid:9};this.mention=null;this.mentionDismissedAt=-1;
+  constructor(bid){this.host={bid,sid:9,selfHint:"this session"};this.mention=null;this.mentionDismissedAt=-1;
     this.mentionSpawn=null;this.mentionRowEls=[];this.histIdx=null;
     this.mentionData={at:Date.now(),browsers:null,terminals:null,promise:null};
     this.mentionEl=new MockNode("div");

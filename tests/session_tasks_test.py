@@ -14,7 +14,7 @@ sys.path.insert(0, str(BASE))
 from tests.scratch import private_root
 ROOT = private_root('session-tasks-')
 os.environ['PUPPY_DATA'] = str(ROOT / 'data')
-from puppy import config, db, runner, session_tasks as tasks, workspaces
+from puppy import config, db, runner, session_tasks as tasks, uploads, workspaces
 
 
 def start(hub, prompt):
@@ -201,6 +201,76 @@ async def configured_creation_api(client, parent):
     print('PASS: task config inheritance, explicit first-turn choices, validation, defaults, Fast reset and retries')
 
 
+async def attachment_adoption(parent):
+    """Files staged under Main travel into the task's own storage with its prompt."""
+    root = Path(config.DATA_DIR) / 'uploads'
+    def stage(upload_id, name, data):
+        directory = root / str(parent) / upload_id
+        directory.mkdir(parents=True, mode=0o700)
+        (directory / name).write_bytes(data)
+        return str(directory / name)
+    image = stage('1700000000000-a1b2c3d4e5', 'shot.png', b'png-bytes')
+    doc = stage('1700000000001-b2c3d4e5f6', 'notes.txt', b'notes')
+    kept = stage('1700000000002-c3d4e5f6a7', 'draft.png', b'main-draft')
+    db.set_session_draft(parent, '[image attached: ' + kept + ' — view it with your image/file tools]')
+    # prose naming a Main upload path is prose; only marker lines are adopted
+    prose = 'Build it like the mockup at ' + image + ' and mention @Browser AB12'
+    markers = ('[image attached: ' + image + ' — view it with your image/file tools]\n'
+               '[file attached: ' + doc + ' (notes.txt, 5 B) — inspect it with your file tools]\n'
+               '[image attached: ' + kept + ' — view it with your image/file tools]')
+    prompt = prose + '\n\n' + markers
+    tid = None
+    try:
+        with patch.object(workspaces, 'create_temporary') as allocate:
+            gone = str(root / str(parent) / '1700000000009-d4e5f6a7b8' / 'gone.png')
+            await rejected(tasks.create(parent, {'prompt': '[image attached: ' + gone +
+                ' — view it with your image/file tools]', 'request_id': 'gone'}), 'no longer available')
+            allocate.assert_not_called()
+        created = await tasks.create(parent, {'prompt': prompt, 'request_id': 'attachments'})
+        tid = created['id']
+        task_root = root / str(tid)
+        assert (task_root / '1700000000000-a1b2c3d4e5' / 'shot.png').read_bytes() == b'png-bytes'
+        assert (task_root / '1700000000001-b2c3d4e5f6' / 'notes.txt').read_bytes() == b'notes'
+        assert (task_root / '1700000000002-c3d4e5f6a7' / 'draft.png').read_bytes() == b'main-draft'
+        expected = prose + '\n\n' + markers.replace(str(root / str(parent)) + '/', str(task_root) + '/')
+        assert expected != prompt and str(root / str(parent)) in expected, 'prose keeps its path'
+        assert tasks.record(tid)['prompt'] == expected, tasks.record(tid)['prompt']
+        assert runner.hub(tid)._active_prompt_text == expected, 'the first turn carries the copies'
+        assert [e['data']['text'] for e in db.get_events(tid) if e['kind'] == 'user'] == [expected]
+        # Main's copies served only the dialog, except the one its own draft still names.
+        assert not (root / str(parent) / '1700000000000-a1b2c3d4e5').exists()
+        assert not (root / str(parent) / '1700000000001-b2c3d4e5f6').exists()
+        assert (root / str(parent) / '1700000000002-c3d4e5f6a7' / 'draft.png').is_file()
+        # A retry after a lost reply still carries Main's paths and finds its task.
+        assert (await tasks.create(parent, {'prompt': prompt, 'request_id': 'attachments'}))['id'] == tid
+        await rejected(tasks.create(parent, {'prompt': prompt + ' changed', 'request_id': 'attachments'}), 'different')
+        assert uploads.rewrite_attachment_paths(parent, tid, 'no markers here') == 'no markers here'
+        tasks.validate_persisted(db.connect())
+    finally:
+        db.set_session_draft(parent, '')
+        shutil.rmtree(root / str(parent), ignore_errors=True)
+        if tid is not None:
+            runner.hub(tid).status = 'idle'
+            workspaces.remove_temporary(db.get_session(tid))
+            runner.drop_hub(tid)
+            db.delete_session(tid)
+            uploads.remove_session_storage(tid)
+            assert not (root / str(tid)).exists()
+            protected = ROOT / 'protected-upload-cleanup'
+            protected.mkdir()
+            (protected / 'keep.txt').write_text('preserve these bytes')
+            link = root / str(tid)
+            link.symlink_to(protected, target_is_directory=True)
+            try:
+                uploads.remove_session_storage(tid)
+                assert (protected / 'keep.txt').read_text() == 'preserve these bytes'
+                assert link.is_symlink()
+            finally:
+                link.unlink()
+                shutil.rmtree(protected)
+    print('PASS: task prompts adopt Main-staged attachments, keep prose, refuse missing files and retry by identity')
+
+
 async def main():
     config.ensure_dirs()
     project = ROOT / 'project'
@@ -329,6 +399,7 @@ async def main():
         copied = await tasks.create(parent, {'prompt':'Symlink copy','request_id':'symlink'})
         assert (Path(copied['cwd'])/'external-link').is_symlink()
         finish(copied['id'])
+        await attachment_adoption(parent)
     await actual_runner(parent)
     from puppy.web import build_app
     sys.path.insert(0,str(BASE/'backend'))

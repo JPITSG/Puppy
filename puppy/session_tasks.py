@@ -20,7 +20,7 @@ import time
 
 from aiohttp import web
 
-from puppy import config, db, workspaces
+from puppy import config, db, uploads, workspaces
 
 PREFIX = "session_task."
 # Optional membership ledger, like session_fast_mode: an exact true marker
@@ -405,12 +405,17 @@ async def create(parent_id, args):
         raise TaskError("Enter a task prompt")
     if not isinstance(name, str) or len(name) > 80 or not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,100}", key):
         raise TaskError("Invalid task name or request identity")
+    # As written in Main's dialog: its attachment marker lines name files staged
+    # under Main, which the task adopts into its own storage below.
+    original = prompt.strip()
     async with _locks.setdefault(parent_id, asyncio.Lock()):
         if not enabled(parent_id):
             raise TaskError("Tasks are disabled for this session; enable Tasks before creating one")
         for tid, value in records().items():
             if value["parent"] == parent_id and value["request_id"] == key:
-                if value["prompt"] != prompt.strip():
+                # A retry after a lost reply still carries Main's staged paths;
+                # the record names the task's copies, so compare in its terms.
+                if value["prompt"] != uploads.rewrite_attachment_paths(parent_id, tid, original):
                     raise TaskError("Task identity was already used with a different prompt")
                 return runner.session_payload(db.get_session(tid))
         if len(children(parent_id)) >= 64:
@@ -440,6 +445,12 @@ async def create(parent_id, args):
                     choices = engine_defaults.validate(driver, choices)
             except ValueError as exc:
                 raise TaskError(str(exc))
+        # Refuse a prompt naming a staged file that is already gone before any
+        # working copy is allocated; adoption below re-checks every file.
+        try:
+            uploads.verify_attachments(parent_id, original)
+        except uploads.AttachmentError as exc:
+            raise TaskError(str(exc))
         root = await asyncio.to_thread(_repo, parent)
         _idle_project(root)
         if root in _busy_roots:
@@ -457,25 +468,40 @@ async def create(parent_id, args):
                 context = "Main's project directory is the subdirectory: " + relative + "\n" + context
             if runner._draining:
                 raise TaskError("Puppy is shutting down; retry after the restart")
-            sid = db.create_session(name.strip() or prompt.strip().splitlines()[0][:48], engine, path,
+            sid = db.create_session(name.strip() or original.splitlines()[0][:48], engine, path,
                                     choices["model"], choices["effort"], parent["color"], choices["permission_mode"],
                                     workspace_kind=workspaces.KIND_TEMPORARY)
-            _save(sid, {"format": 1, "parent": parent_id, "request_id": key, "prompt": prompt.strip(),
+            # The task's transcript is what names the prompt's files from here
+            # on, so they are copied into its own private storage - its
+            # lifecycle, previews and deletion - before the first turn exists.
+            try:
+                prompt = await asyncio.to_thread(uploads.adopt_attachments, parent_id, sid, original)
+            except uploads.AttachmentError as exc:
+                raise TaskError(str(exc))
+            if len(prompt) > db.MAX_DRAFT_CHARS:
+                raise TaskError("The task prompt is too long")
+            _save(sid, {"format": 1, "parent": parent_id, "request_id": key, "prompt": prompt,
                         "context": context, "base": base, "created_at": time.time(), "outcome": "pending",
                         "summary": "", "completed_at": 0, "applied_at": 0, "result_seq": 0})
             if parent.get("fast_mode") and engine == parent["engine"]:
                 db.touch_session(sid, fast_mode=1)
-            result = runner.hub(sid).send_message(prompt.strip())
+            result = runner.hub(sid).send_message(prompt)
             if result.get("error"):
                 raise TaskError(result["error"])
             runner.hub(parent_id)._emit("info", {"subtype": "session_task", "task_id": sid,
                 "text": "Task started: " + db.get_session(sid)["name"]})
+            # Main's copies served only this dialog; whatever Main's own draft,
+            # queue or transcript still names is kept by the same rule as a
+            # cancelled queued prompt.
+            if prompt != original:
+                runner.hub(parent_id)._discard_abandoned_uploads([original])
             runner.broadcast_sessions()
             return runner.session_payload(db.get_session(sid))
         except BaseException:
             if sid is not None:
                 runner.drop_hub(sid)
                 db.delete_session(sid)
+                uploads.remove_session_storage(sid)   # copies made for a task that never was
             if path:
                 workspaces.discard_created(path)
             raise
