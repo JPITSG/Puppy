@@ -4986,7 +4986,6 @@ function sessionPinMark(bid, s) {
   mark.tabIndex = pending ? -1 : 0;
   mark.setAttribute("aria-pressed", on ? "true" : "false");
   mark.setAttribute("aria-label", on ? "Unpin session" : "Pin session to top");
-  mark.title = on ? "Unpin session" : "Pin session to top";
   mark.draggable = false;
   if (pending) {
     mark.setAttribute("aria-busy", "true");
@@ -8189,7 +8188,6 @@ class SessionWorkspaceView {
     const add = el("button", "icon-btn task-add-button");
     add.type = "button";
     add.setAttribute("aria-label", "New task");
-    add.title = "New task";
     add.appendChild(plusIcon(14));
     add.onclick = () => modalNewTask(this);
     actions.append(this.overviewButton, add);
@@ -8386,11 +8384,9 @@ class SessionWorkspaceView {
         const unread = task.result_seq > (this.seen[sid] || 0);
         const cls = taskStateClass(task);
         tab.appendChild(el("span", "t-state" + (cls ? " " + cls : "") + (unread ? " unread" : ""), taskStateLabel(task)));
-        tab.title = `${title} · ${taskStateLabel(task)}`;
         const close = el("button", "t-close");
         close.type = "button";
         close.setAttribute("aria-label", `Hide ${title}`);
-        close.title = "Hide this tab; the task keeps working";
         close.appendChild(xIcon(12));
         close.onclick = event => { event.stopPropagation(); this.closeTask(sid); };
         tab.appendChild(close);
@@ -14088,7 +14084,7 @@ class SearchView {
       chip.appendChild(el("span", "search-chip-label", node.name));
       if (!node.enabled) {
         chip.disabled = true;
-        chip.title = node.reason;
+        chip.setAttribute("aria-description", node.reason);
       } else {
         chip.setAttribute("aria-pressed", node.on ? "true" : "false");
         chip.onclick = () => {
@@ -14260,7 +14256,6 @@ class SearchView {
     head.appendChild(location);
     head.appendChild(el("span", "sh-count",
       `${group.total} match${group.total === 1 ? "" : "es"}`));
-    head.title = `${backendName(bid)} · ${sessionLocationTitle(session, bid)}`;
     head.setAttribute("aria-label",
       `Open ${session.name || `session ${session.id}`} on ${backendName(bid)}`);
     head.onclick = () => this.openMatch(bid, session, 0);
