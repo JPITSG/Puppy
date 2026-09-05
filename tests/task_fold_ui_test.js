@@ -1,6 +1,6 @@
 /* Run with node tests/task_fold_ui_test.js. No browser or engine required.
    The console side of folding a removed task into Main, against the fake DOM:
-   the remove confirm and its default, the route chosen per node capability,
+   the remove confirm and its default, the task removal route,
    and the archive card built lazily from one transcript row. */
 "use strict";
 const assert = require("node:assert/strict");
@@ -17,7 +17,7 @@ const between = (from, to) => {
 
 const document = new FakeDocument();
 const state = { backends: [{ id: 7, capabilities: ["session-tasks", "session-task-fold"] }], nodeCapabilities: [] };
-let dialog = null, requests = [], toasts = [], apiReply = { folded: true }, confirmResult = true;
+let dialog = null, requests = [], toasts = [], apiReply = { folded: true };
 /* the dialog frame: real elements from the dialog's own markup, closed by
    leaving the document, so isConnected and onClose behave as in the app */
 function modal(html, className = "") {
@@ -39,7 +39,6 @@ const context = vm.createContext({
   document, state, modal, api,
   esc: text => String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"),
   toast: text => toasts.push(text), refreshSessionList: async () => {}, renderSidebar: () => {},
-  modalConfirm: async () => confirmResult, sessionDeleteMessage: () => "legacy copy",
   choiceSvg: icon, tasksIcon: icon,
   fmtDateTime: ts => (ts ? "stamp" : ""), fmtStamp: ts => (ts ? "stamp" : ""),
   engineConfigParts: (bid, engine, model, effort) => [String(engine), [model, effort].filter(Boolean).join(" ")],
@@ -94,9 +93,8 @@ const node = key => dialog.m.querySelector(key);
   node("#rt-no").onclick();
   assert.equal(await pending, null);
 
-  // A capable node gets the fold route with the chosen flag; a legacy node
-  // keeps the plain confirm and DELETE, and never sees a fold request.
-  let choice = context.confirmTaskRemoval(7, session);
+  // Every task removal uses the fold route with the chosen flag.
+  let choice = context.confirmTaskRemoval(session);
   node("#rt-yes").onclick();
   assert.deepEqual(plain(await choice), { fold: true });
   assert.equal(await context.removeTaskSession(7, session, { fold: true }), true);
@@ -105,15 +103,6 @@ const node = key => dialog.m.querySelector(key);
   apiReply = { folded: false };
   assert.equal(await context.removeTaskSession(7, session, { fold: false }), false);
   assert.deepEqual(plain(requests.at(-1).body), { fold: false });
-  state.backends[0].capabilities = ["session-tasks"];
-  choice = await context.confirmTaskRemoval(7, session);
-  assert.deepEqual(plain(choice), { fold: false, legacy: true });
-  assert.equal(await context.removeTaskSession(7, session, choice), false);
-  assert.deepEqual(plain(requests.at(-1)), { bid: 7, route: "sessions/50", method: "DELETE" });
-  confirmResult = false;
-  assert.equal(await context.confirmTaskRemoval(7, session), null);
-
-  // The sheet's Remove, end to end on a capable node.
   state.backends[0].capabilities = ["session-tasks", "session-task-fold"];
   apiReply = { folded: true };
   const run = context.removeTask(7, session);
@@ -177,5 +166,5 @@ const node = key => dialog.m.querySelector(key);
   assert.ok(!collect(bare.children[0]).includes("prompts"));
   bare.children[0].onclick();
   assert.ok(collect(bare.children[1]).includes("Partial."));
-  console.log("PASS: remove confirm default and choices, capability routing, sheet removal toasts, lazily built archive card, states and file lists");
+  console.log("PASS: remove confirm default and choices, task removal routing, sheet removal toasts, lazily built archive card, states and file lists");
 })().catch(error => { console.error(error); process.exitCode = 1; });

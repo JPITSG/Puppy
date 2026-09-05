@@ -133,14 +133,13 @@ def _queued_item_key(item: dict) -> str:
 
 
 def _queued_item_wire(item):
-    """Wire form of one queue entry: prompts stay plain strings, so consoles
-    from before pending changes existed keep rendering them; a pending change
-    is an additive {kind, key, ...fields} entry. Config rows carry the engine
+    """Wire form of one queue entry: prompts are strings; a pending change
+    is a {kind, key, ...fields} entry. Config rows carry the engine
     whose catalog validated them, engine rows the switch target."""
     if not isinstance(item, dict):
         return item
-    entry = {"kind": item.get("kind") or "config", "key": item.get("key") or ""}
-    entry.update(item.get("fields") or {})
+    entry = {"kind": item["kind"], "key": item["key"]}
+    entry.update(item["fields"])
     return entry
 
 
@@ -150,10 +149,14 @@ def _valid_restored_item(item) -> bool:
     and every engine row carries all target defaults)."""
     if isinstance(item, str):
         return bool(item.strip())
+    if not isinstance(item, dict) or set(item) != {"kind", "fields", "key"}:
+        return False
     fields = item.get("fields") if isinstance(item, dict) else None
     if not isinstance(fields, dict) or not str(fields.get("engine") or ""):
         return False
     if not all(isinstance(value, str) for value in fields.values()):
+        return False
+    if item["key"] != _queued_item_key(item):
         return False
     if _is_queued_engine(item):
         if set(fields) != {"engine", "model", "effort", "permission_mode",
@@ -188,6 +191,33 @@ def _valid_restored_item(item) -> bool:
     if "fast_mode" in fields and fields["fast_mode"] not in ("on", "off"):
         return False
     return True
+
+
+def validate_queue_record(value):
+    """Reject a non-current durable queue without dropping or repairing work."""
+    if not isinstance(value, dict) or set(value) != {"queue", "held", "paused"} or \
+            any(not isinstance(value[key], list) for key in ("queue", "held", "paused")):
+        raise ValueError("session queue state is not current")
+    if not value["queue"] and not value["held"]:
+        raise ValueError("empty session queue records must be absent")
+    if not all(_valid_restored_item(item) for item in value["queue"] + value["held"]):
+        raise ValueError("session queue contains a non-current item")
+    paused = value["paused"]
+    if any(type(index) is not int or not 0 <= index < len(value["queue"]) or
+           not isinstance(value["queue"][index], str) for index in paused) or \
+            paused != sorted(set(paused)):
+        raise ValueError("session queue pause state is not current")
+    return value
+
+
+def validate_persisted_queues(connection):
+    session_ids = {row[0] for row in connection.execute("SELECT id FROM sessions")}
+    for key, raw in connection.execute(
+            "SELECT key,value FROM meta WHERE key GLOB 'session_queue.*'"):
+        suffix = key[len("session_queue."):]
+        if not re.fullmatch(r"[1-9][0-9]*", suffix) or int(suffix) not in session_ids:
+            raise ValueError("session queue owner is not current")
+        validate_queue_record(json.loads(raw))
 
 
 def _config_after(session: dict, items) -> dict:
@@ -688,9 +718,7 @@ class SessionHub:
         self.id = session_id
         self.watchers = set()
         self.queue = []
-        # Indexes in ``queue`` whose prompt must not start automatically.  The
-        # queue itself deliberately stays in its old string/config wire shape;
-        # an additive parallel list lets older consoles keep rendering it.
+        # Indexes in ``queue`` whose prompt must not start automatically.
         self.paused_queue = set()
         # Queue mutations carry a process-local revision so a drag can submit
         # a permutation of duplicate prompts without relying on their text.
@@ -704,23 +732,12 @@ class SessionHub:
         # on their own: the world may have moved since they were written, so
         # each one waits for an explicit re-send (or discard) in the console.
         self.held = []
-        try:
-            record = db.meta_get("session_queue.{}".format(session_id)) or {}
-            restored = list(record.get("queue") or []) + list(record.get("held") or [])
-            for item in restored:
-                if not _valid_restored_item(item):
-                    continue
-                if isinstance(item, dict):
-                    # rebuilt in the current shape; the cancel identity is
-                    # recomputed rather than trusted from disk
-                    item = {"kind": item.get("kind"),
-                            "fields": dict(item.get("fields") or {})}
-                    item["key"] = _queued_item_key(item)
-                self.held.append(item)
-            if record:
-                self._persist_queue()   # everything now lives under "held"
-        except Exception as exc:
-            log.warning("could not restore queue for session %s: %s", session_id, exc)
+        stored = db.query_one("SELECT value FROM meta WHERE key=?",
+                              ("session_queue.{}".format(session_id),))
+        if stored is not None:
+            record = validate_queue_record(json.loads(stored["value"]))
+            self.held = record["queue"] + record["held"]
+            self._persist_queue()   # restart parks valid work; nothing runs itself
         self.status = "idle"
         # Start of one uninterrupted block of work. Queued turns inherit this
         # timestamp; it is cleared only when the turn and its queue are empty.
@@ -892,13 +909,9 @@ class SessionHub:
         return self.status == "running" and bool(turn_id) and \
             turn_id == self._active_turn_id
 
-    def browser_turn_active(self, turn_id: str) -> bool:
-        """Compatibility name retained for the browser bridge and its tests."""
-        return self.tool_turn_active(turn_id)
-
     def browser_activity(self, turn_id: str, browser_id: str) -> bool:
         """Authorize and announce one browser used by the current turn."""
-        if not self.browser_turn_active(turn_id):
+        if not self.tool_turn_active(turn_id):
             return False
         if browser_id in self._browser_activity_announced:
             return True

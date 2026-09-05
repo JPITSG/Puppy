@@ -48,11 +48,9 @@ STREAM_LIMIT = 16 * 1024 * 1024
 MAX_PROMPT_CHARS = 120000
 ANSWER_LIMIT = 40000
 # A silent engine gets ten minutes to produce recognized progress. Productive
-# runs may continue for at most two hours from job creation. ``timeout_s`` is
-# retained as a legacy API alias for the absolute runtime limit.
+# runs may continue for at most two hours from job creation.
 DEFAULT_IDLE_TIMEOUT_S = 600
 DEFAULT_MAX_RUNTIME_S = 7200
-DEFAULT_TIMEOUT_S = DEFAULT_MAX_RUNTIME_S
 MIN_TIMEOUT_S = 30
 MAX_TIMEOUT_S = 7200
 WAIT_MAX_S = 30
@@ -272,19 +270,10 @@ async def prepare_request(body: dict) -> dict:
     idle_timeout_s = _validated_seconds(
         body.get("idle_timeout_s", DEFAULT_IDLE_TIMEOUT_S),
         "idle_timeout_s")
-    if "max_runtime_s" in body:
-        max_runtime_s = _validated_seconds(
-            body.get("max_runtime_s"), "max_runtime_s")
-        if "timeout_s" in body:
-            legacy_timeout_s = _validated_seconds(
-                body.get("timeout_s"), "timeout_s")
-            if legacy_timeout_s != max_runtime_s:
-                raise SpawnError(
-                    "timeout_s and max_runtime_s must match when both are passed")
-    else:
-        max_runtime_s = _validated_seconds(
-            body.get("timeout_s", DEFAULT_MAX_RUNTIME_S),
-            "timeout_s" if "timeout_s" in body else "max_runtime_s")
+    if "timeout_s" in body:
+        raise SpawnError("timeout_s is unsupported; use max_runtime_s")
+    max_runtime_s = _validated_seconds(
+        body.get("max_runtime_s", DEFAULT_MAX_RUNTIME_S), "max_runtime_s")
 
     lease_s = 0
     if body.get("lease_s") is not None:
@@ -295,9 +284,7 @@ async def prepare_request(body: dict) -> dict:
             "permission_mode": permission, "prompt": prompt, "cwd": cwd,
             "idle_timeout_s": idle_timeout_s,
             "max_runtime_s": max_runtime_s,
-            "lease_s": lease_s,
-            # Compatibility for callers/tests that still inspect the old field.
-            "timeout_s": max_runtime_s}
+            "lease_s": lease_s}
 
 
 class SpawnJob:
@@ -310,13 +297,8 @@ class SpawnJob:
         self.permission_mode = request["permission_mode"]
         self.prompt = request["prompt"]
         self.cwd = request["cwd"]
-        self.idle_timeout_s = int(request.get(
-            "idle_timeout_s", DEFAULT_IDLE_TIMEOUT_S))
-        self.max_runtime_s = int(request.get(
-            "max_runtime_s", request.get("timeout_s", DEFAULT_MAX_RUNTIME_S)))
-        # ``timeout_s`` remains a read-only alias in payloads for old
-        # controllers. New callers should use the two explicit limits.
-        self.timeout_s = self.max_runtime_s
+        self.idle_timeout_s = request["idle_timeout_s"]
+        self.max_runtime_s = request["max_runtime_s"]
         self.created_at = time.time()
         self.created_clock = time.monotonic()
         # 0 means unleased (a turn-owned job dies with its turn instead)
@@ -492,7 +474,6 @@ class SpawnJob:
                 "ago".format(int(now - self.created_clock)), 409)
         self.idle_timeout_s = idle_timeout_s
         self.max_runtime_s = max_runtime_s
-        self.timeout_s = max_runtime_s
         # Wake a reader currently sleeping against the previous deadline so a
         # steering update takes effect immediately, including a shorter limit.
         self.limits_changed.set()
@@ -509,7 +490,6 @@ class SpawnJob:
             "status": self.status,
             "idle_timeout_s": self.idle_timeout_s,
             "max_runtime_s": self.max_runtime_s,
-            "timeout_s": self.max_runtime_s,
             "elapsed_s": int(now - self.created_clock),
             "last_progress_age_s": int(max(
                 0, now - self.last_progress_clock)),
@@ -1155,7 +1135,7 @@ def resolve_target(node_name):
     controller's backends table, so a headless backend can only ever resolve
     itself - which is exactly the reach it has. A name that fits more than
     one node (this node and a backend, or two backends - the controller
-    refuses new collisions, but older rows may carry them) is an error that
+    validates names, but the primary name may subsequently change) is an error that
     names every candidate's #id, never a silent pick of the first."""
     from puppy import backends
     wanted = str(node_name or "").strip()
@@ -1342,23 +1322,16 @@ def job_text(job: dict, node_name: str, answer_limit=None) -> str:
     status = str(job.get("status") or "")
     elapsed = int(job.get("elapsed_s") or 0)
     if status == "running":
-        if job.get("idle_timeout_s") is not None and \
-                job.get("max_runtime_s") is not None:
-            lines.append(
-                "Status: running for {}s · last recognized progress {}s ago "
-                "({}) · inactivity limit {}s ({}s left) · hard runtime {}s "
-                "from start ({}s left).".format(
-                    elapsed, int(job.get("last_progress_age_s") or 0),
-                    job.get("last_progress_kind") or "engine output",
-                    job.get("idle_timeout_s"),
-                    int(job.get("idle_remaining_s") or 0),
-                    job.get("max_runtime_s"),
-                    int(job.get("hard_remaining_s") or 0)))
-        else:
-            # A controller may still be collecting a job from a pre-progress-
-            # lease backend during a rolling upgrade.
-            lines.append("Status: running for {}s (legacy timeout {}s).".format(
-                elapsed, job.get("timeout_s")))
+        lines.append(
+            "Status: running for {}s · last recognized progress {}s ago "
+            "({}) · inactivity limit {}s ({}s left) · hard runtime {}s "
+            "from start ({}s left).".format(
+                elapsed, int(job.get("last_progress_age_s") or 0),
+                job.get("last_progress_kind") or "engine output",
+                job.get("idle_timeout_s"),
+                int(job.get("idle_remaining_s") or 0),
+                job.get("max_runtime_s"),
+                int(job.get("hard_remaining_s") or 0)))
         if job.get("wait_note"):
             lines.append("Note: {}".format(job["wait_note"]))
         lines.append("The result is not ready yet. Call wait with jobs "
@@ -1532,33 +1505,27 @@ def _unconfirmed_job(job_id: str, body: dict, exc: SpawnError) -> dict:
 
 
 async def _start_remote(session: dict, turn_id: str, target: dict,
-                        channel: dict, body: dict, wait_s: float,
-                        client_ids: bool, lease: bool) -> dict:
+                        channel: dict, body: dict, wait_s: float) -> dict:
     """One relayed start. The handle is registered under a controller-chosen
     id BEFORE transmission, so an answer lost in flight still leaves a job
-    the turn can wait for, cancel, and reap. A node too old to honor client
-    ids answers with its own id and the handle is re-keyed to it; an answer
-    that never arrives from such a node cannot be tracked and is an error.
-    A node that supports ownership leases is asked for one, which this
-    controller then renews for as long as the turn wants the job."""
+    the turn can wait for, cancel, and reap. Ownership leases are renewed for
+    as long as the turn owns the job."""
     job_id = secrets.token_hex(4)
-    handle = _register_remote(session, turn_id, target, job_id, lease=lease)
+    handle = _register_remote(session, turn_id, target, job_id, lease=True)
     request = dict(body, wait_s=int(wait_s), job_id=job_id)
-    if lease:
-        request["lease_s"] = REMOTE_LEASE_S
+    request["lease_s"] = REMOTE_LEASE_S
     try:
         data = await _node_request(
             channel, "POST", "spawn", body=request,
             timeout_s=wait_s + REMOTE_START_SLACK_S)
         job = _relayed_job(data, target["name"])
     except SpawnError as exc:
-        if exc.unreached and client_ids:
+        if exc.unreached:
             return _unconfirmed_job(job_id, body, exc)
         _discard_remote(job_id, handle)
         raise
     if str(job["id"]) != job_id:
-        _discard_remote(job_id, handle)
-        _register_remote(session, turn_id, target, str(job["id"]), lease=lease)
+        raise SpawnError("node returned an unexpected spawned-agent id")
     _note_remote_outcome(job)
     return job
 
@@ -1579,13 +1546,9 @@ async def _cancel_remote(channel: dict, job_id: str) -> None:
 async def _start_remote_fleet(session: dict, turn_id: str, target: dict,
                               channel: dict, body: dict, count: int,
                               wait_s: float) -> list:
-    capabilities = channel.get("capabilities") or []
-    client_ids = protocol.SPAWN_CLIENT_IDS_CAPABILITY in capabilities
-    lease = protocol.SPAWN_OWNER_LEASE_CAPABILITY in capabilities
     if count == 1:
         return [await _start_remote(session, turn_id, target, channel, body,
-                                    min(wait_s, REMOTE_START_WAIT_S),
-                                    client_ids, lease)]
+                                    min(wait_s, REMOTE_START_WAIT_S))]
     # A fan-out is relayed as independent single starts, so any spawn-exec
     # node can host a fleet without a wire change. All or nothing: if one
     # start fails, the started remainder is cancelled (concurrently, so the
@@ -1593,8 +1556,7 @@ async def _start_remote_fleet(session: dict, turn_id: str, target: dict,
     # surprise partial fleet running. A cancel the node did not acknowledge
     # keeps its handle, and the turn's end reaps it.
     outcomes = await asyncio.gather(
-        *(_start_remote(session, turn_id, target, channel, body, 0,
-                        client_ids, lease) for _ in range(count)),
+        *(_start_remote(session, turn_id, target, channel, body, 0) for _ in range(count)),
         return_exceptions=True)
     failure = next((item for item in outcomes
                     if isinstance(item, BaseException)), None)
@@ -1620,8 +1582,9 @@ async def _start_remote_fleet(session: dict, turn_id: str, target: dict,
 async def start_for_turn(session: dict, turn_id: str, params: dict) -> dict:
     target = resolve_target(params.get("node"))
     count = _validated_count(params.get("count"))
-    max_runtime_s = params.get(
-        "max_runtime_s", params.get("timeout_s", DEFAULT_MAX_RUNTIME_S))
+    if "timeout_s" in params:
+        raise SpawnError("timeout_s is unsupported; use max_runtime_s")
+    max_runtime_s = params.get("max_runtime_s", DEFAULT_MAX_RUNTIME_S)
     body = {
         "engine": str(params.get("engine") or "").strip() or
         str(session.get("engine") or ""),
@@ -1634,9 +1597,6 @@ async def start_for_turn(session: dict, turn_id: str, params: dict) -> dict:
         "idle_timeout_s": params.get(
             "idle_timeout_s", DEFAULT_IDLE_TIMEOUT_S),
         "max_runtime_s": max_runtime_s,
-        # Rolling-upgrade compatibility: an old node ignores the two new fields
-        # and still enforces this value as its fixed deadline.
-        "timeout_s": max_runtime_s,
     }
     initial_wait = _clamp_wait(params.get("wait_s"), default=15)
     if target["bid"]:
@@ -1868,12 +1828,9 @@ async def targets_for_turn(session: dict, params: dict) -> dict:
         online = backends.backend_is_online(int(item["id"]))
         capable = protocol.SPAWN_EXEC_CAPABILITY in \
             (item.get("capabilities") or [])
-        live_limits = protocol.SPAWN_LIMITS_CAPABILITY in \
-            (item.get("capabilities") or [])
         lines.append("- {} (#{}, {}{})".format(
             name, item["id"], "online" if online else "offline",
-            ("" if live_limits else ", legacy fixed timeout only")
-            if capable else ", needs a Puppy upgrade for spawned agents"))
+            "" if capable else ", spawned agents unavailable"))
     lines.append("Call targets with a node name (or its #id) for its engines, "
                  "models, efforts, and permission modes.")
     return {"text": "\n".join(lines)}

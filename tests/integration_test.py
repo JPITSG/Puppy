@@ -253,7 +253,11 @@ async def main():
                 check("events pagination", r.status == 200 and len(d["events"]) == 2, str(len(d.get("events", []))))
 
             # ---- terminal ws ----
-            wst = await http.ws_connect(URL + "/api/ws/term?cols=80&rows=24&cmd=/bin/bash")
+            async with http.post(URL + "/api/terminal/instances",
+                                 json={"cols": 80, "rows": 24, "command": "/bin/bash"}) as r:
+                terminal_id = (await r.json())["terminal"]["id"]
+                check("terminal create", r.status == 201)
+            wst = await http.ws_connect(URL + "/api/ws/terminal/" + terminal_id)
             await wst.send_bytes(b"echo PUPPY_$((40+2))\n")
             got = b""
             deadline = time.time() + 15

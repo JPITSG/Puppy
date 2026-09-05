@@ -494,20 +494,18 @@ def _validated_session_ids(value, label: str) -> list:
     return list(value)
 
 
-def reorder_sessions(ids: list, expected_order=None,
-                     expected_pinned=None) -> list:
+def reorder_sessions(ids: list, expected_order,
+                     expected_pinned) -> list:
     """Apply one full order without ever allowing a row across the pin edge.
 
-    New clients provide the order and pin cohort they began dragging from, so
+    Clients provide the order and pin cohort they began dragging from, so
     another console's activation, pin, reorder, creation, or deletion wins
-    cleanly instead of being overwritten. Older clients may omit those compare
-    values; the authoritative stable partition still protects the boundary.
+    cleanly instead of being overwritten. The stable partition also protects
+    the pin boundary.
     """
     requested = _validated_session_ids(ids, "order")
-    before = (None if expected_order is None else
-              _validated_session_ids(expected_order, "expected_order"))
-    before_pinned = (None if expected_pinned is None else
-                     _validated_session_ids(expected_pinned, "expected_pinned"))
+    before = _validated_session_ids(expected_order, "expected_order")
+    before_pinned = _validated_session_ids(expected_pinned, "expected_pinned")
     with _lock:
         conn = connect()
         try:
@@ -515,9 +513,9 @@ def reorder_sessions(ids: list, expected_order=None,
             current = pinned + unpinned
             if len(requested) != len(current) or set(requested) != set(current):
                 raise SessionOrderConflict("session list changed on this node")
-            if before is not None and before != current:
+            if before != current:
                 raise SessionOrderConflict("session order changed on this node")
-            if before_pinned is not None and before_pinned != pinned:
+            if before_pinned != pinned:
                 raise SessionOrderConflict("session pins changed on this node")
             pinned_set = set(pinned)
             next_pinned = [sid for sid in requested if sid in pinned_set]

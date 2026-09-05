@@ -42,7 +42,7 @@ Omitted choices inherit Main; changing the engine uses the target engine's saved
 defaults for omitted fields and resets Fast. Explicit empty model/effort values
 mean engine default. Supplied choices are validated against that node's selected
 engine and model before allocating a task copy. The first turn uses those
-choices without editing Main. Older nodes retain the inheritance-only dialog.
+choices without editing Main.
 
 Nodes advertising `session-task-attachments` accept attachment marker lines in a
 task `prompt` that name files staged under Main (`data/uploads/<main sid>/…`,
@@ -52,8 +52,14 @@ upload id, rewrites those marker paths to the copies, and then discards Main's
 copies that nothing of Main's (draft, queue, transcript) still names. A retry
 carrying the same `request_id` may still name Main's original paths. A staged
 file that is missing or fails validation refuses the task with 409 and leaves
-Main untouched. Older nodes would leave Main-owned paths in the task prompt,
-so consoles offer task attachments only behind this capability.
+Main untouched.
+
+## Current controller contract
+
+Only Puppy API protocol 2 peers are accepted. All instances in a deployment must
+speak this contract; protocol 0/1 inference and retired routes are removed.
+[Current contract](../docs/current-contract.md) lists the required formats and
+the coordinated installation boundary for this change.
 
 ## Build
 
@@ -134,7 +140,7 @@ followed with backend credentials.
 
 For a CA-issued certificate, use `--tls-cert` and `--tls-key` instead of
 `--auto-tls`; these paths are persisted in backend configuration. Pairing still
-includes a pin. `--disable-tls` retains legacy cleartext HTTP compatibility,
+includes a pin. `--disable-tls` explicitly selects cleartext HTTP,
 which the WebUI labels explicitly and which should only be used over a trusted,
 encrypted private network such as WireGuard. The API token grants the authority
 of the Unix account running this service; never expose token-authenticated
@@ -155,8 +161,7 @@ Controllers can create a session with `workspace_kind: "temporary"` instead of
 supplying a working directory. The backend creates a mode-0700 directory inside
 a private namespace under the OS temporary directory (normally `/tmp`), scoped
 to both the service user and backend data directory. It advertises this contract
-with the `temporary-workspaces` capability, so controllers do not offer it for
-older nodes that would ignore the field.
+with the `temporary-workspaces` capability.
 
 Scratch files survive an ordinary service restart but are deliberately not
 durable host data. Deleting the session removes them; a reboot or the host's
@@ -202,8 +207,8 @@ session also includes `active_since`, the start of its current uninterrupted
 work block. That start is retained while queued messages flow into subsequent
 turns and is cleared only after both the active turn and queue are empty. This
 lets a controller show one continuous elapsed time while compensating for clock
-differences between the controller and backend. These fields are additive;
-controllers can continue to attach older nodes that do not send them.
+differences between the controller and backend. Both timing fields are part of
+the current contract; the console does not estimate a missing start time.
 
 When a work block becomes idle, session lists, snapshots and `turn_done` also
 carry the additive `completion_status`. A controller uses `interrupted` to
@@ -255,8 +260,7 @@ so far becomes the result and the completion status is `interrupted`.
 Session sockets receive an additive `background_tasks` message
 (`{tasks, waiting, text}`) whenever the live set changes or a wait starts or
 ends, and snapshots carry the same object as `background_tasks`; while
-`waiting` is true, `text` is the status line to show. Older controllers can
-ignore both and still see the plain `status` text and the transcript rows.
+`waiting` is true, `text` is the status line to show.
 
 ## Active-turn steering transport
 
@@ -283,8 +287,6 @@ Claude runs with input replay enabled, so `accepted` means its stream protocol
 replayed that exact steering message rather than merely draining bytes into the
 CLI pipe. Any engine result which arrives before its acknowledgement resolves
 the outstanding receipt as `rejected`.
-Older nodes omit the capability, so controllers must not expose the route even
-if they happen to run the earlier transport preview.
 
 ## Account usage refresh
 
@@ -293,14 +295,12 @@ runtime. Set it while pairing or serving with `--usage-refresh-minutes N` (1 to
 1440 minutes); use `0` to disable it. Once attached, the controller exposes the
 same value in Settings → Usage refresh and can change it through the authenticated
 `/api/engines/usage-refresh` endpoint. The node advertises this support with the
-`engine-usage-refresh` capability, so older backends remain explicitly disabled
-in the Settings UI.
+`engine-usage-refresh` capability.
 
-New nodes also advertise `engine-usage-refresh-manual`. The authenticated POST
+Nodes also advertise `engine-usage-refresh-manual`. The authenticated POST
 form of the same endpoint performs one immediate read even when the automatic
 interval is disabled. Controllers use it for the compact refresh control beside
-a ready Codex status; older nodes omit the capability, so the control is hidden
-until they are upgraded.
+a ready Codex status.
 
 The refresh is lazy: a due engine-status poll asks supported installed CLIs for
 their current read-only account-limit snapshot. It does not start a turn or
@@ -397,9 +397,8 @@ The headless artifact serves the same node-owned managed-browser execution
 surface as the full runtime. Browser viewer WebSockets accept the additive
 `viewer_active` boolean message: inactive sockets retain the page and binding
 but receive no frames, and Chromium's screencast pauses when no viewer is
-active. Reactivation starts the stream and sends an explicit fresh frame. Older
-consoles remain compatible because a newly attached viewer defaults to active;
-older nodes simply ignore the new message.
+active. Reactivation starts the stream and sends an explicit fresh frame. A
+newly attached viewer defaults to active.
 
 Each entry in the Browser status `instances` array includes ephemeral
 `frame_flow` counters and rates for screencast frames received, screenshots
@@ -420,7 +419,7 @@ navigation messages are processed while a slow site is still committing.
 Status broadcasts carry an additive `loading` boolean driven by main-frame
 lifecycle events (with an optimistic set when a viewer requests a navigation),
 and a refused or failed navigation is reported as a non-terminal `error`
-message on the same socket. Older consoles ignore both additions.
+message on the same socket.
 
 `browser.shared_storage` is node-owned config behind the additive
 `browser-shared-storage` capability: `POST /api/browser/shared-storage`
@@ -457,8 +456,8 @@ after validating the request against that node's installed engines, and
 it. Jobs default to a 600-second sliding silence limit, renewed by positive
 normalized engine progress, and a hard 7200-second ceiling measured from job
 creation. Identical repeating status noise does not renew the lease. The PATCH
-route is advertised separately as `spawn-progress-limits`, so a controller
-never offers it to an older node with the legacy fixed timeout. `POST
+route is advertised as `spawn-progress-limits`. The retired `timeout_s` request
+field is rejected; use `idle_timeout_s` and `max_runtime_s`. `POST
 /api/spawn` also honors a controller-chosen `job_id`, advertised as
 `spawn-client-job-ids`: the start is idempotent for that id (the same id
 answered again returns the job it already started) and the poll/cancel routes
@@ -466,7 +465,7 @@ wait behind an in-flight start of it, so a controller registers its relay
 handle before transmitting and a start whose answer is lost still names a job
 that can be waited for, cancelled, and reaped; a later 404 from the node ends
 that job as `lost`, while an unreachable node keeps the handle for retry.
-Nodes advertising `spawn-owner-lease` accept `lease_s` on that start: the
+Every relayed start carries `lease_s` under `spawn-owner-lease`: the
 controller renews the lease in the background (`POST /api/spawn/renew` with
 a batch of ids; a poll or limit change renews too), and a job whose
 controller stops renewing - a crash or a partition, never a brief blip - is
@@ -508,19 +507,18 @@ directive `@Spawn <an agent|N agents> on <node> using <engine> [<model>]
 
 An attached console reads and edits these fields through authenticated
 `GET/PATCH /api/system-prompt`. Nodes advertise the additive `system-prompt`
-capability, so older backends remain visibly unavailable in the editor rather
-than accepting a controller-only setting they would never send. The API limits
+capability. The console requires every current prompt and default field. The API limits
 each field to 32,768 characters and returns Puppy's shipped conditional texts
 so the console can implement Reset to default without embedding second copies.
 
 ## Shared terminals
 
 Terminal-enabled nodes advertise `terminal-instances` and `terminal-handoff`
-beside the legacy `terminal` capability. A controller creates a node-owned PTY
+beside the `terminal` capability. A controller creates a node-owned PTY
 through `POST /api/terminal/instances`, then attaches xterm.js to its
 ID-scoped WebSocket. Four-character Terminal IDs, process lifetime, transcript
-replay, and session links therefore survive viewer reconnects; the anonymous
-`/api/ws/term` create-on-connect route remains for older controllers.
+replay, and session links therefore survive viewer reconnects. Viewer sockets
+always name an existing terminal.
 
 A terminal can be linked to exactly one chat and a chat to one current
 terminal. Every engine turn on a terminal-enabled node receives a private stdio
@@ -647,8 +645,7 @@ Attachment marker lines are part of the same value, so staged chips and image
 previews restore from the node-owned upload rather than a browser-only blob.
 Draft-only files are retained until an unambiguous lifecycle boundary instead
 of being eagerly deleted while another console may still have an update in
-flight. Older nodes omit the capability and keep their existing local-browser
-draft behavior.
+flight.
 
 ## Session search
 
@@ -664,7 +661,7 @@ phrases, `-` exclusion, `OR`, kind/time/session filters, relevance or recency
 order, and grouped-by-session or per-session paginated responses with
 control-character-delimited snippet highlights. A controller fans one query
 out to itself and its online capable nodes and merges results; offline or
-older nodes simply contribute nothing, so no transcript is mirrored for
+offline or search-incapable nodes contribute nothing, so no transcript is mirrored for
 search. Opening a hit lands on that exact message: nodes advertising the
 additive `session-event-window` capability accept an `after_seq` cursor on
 `GET /api/sessions/{sid}/events` (oldest first), so the console loads a
@@ -722,7 +719,7 @@ machinery: the scheduler decides *when* to run the same vendor-delegated updater
 manual run with nobody clicking. `GET`/`PATCH /api/engines/auto-upgrade` read and
 set `{enabled, mode, at}` - `mode` is `now` or `at`, and `at` is a local `HH:MM`.
 The node advertises the routes with the additive `engine-auto-upgrade`
-capability; older nodes simply keep updating by hand.
+capability.
 
 Two rules bound the damage an unattended updater can do:
 

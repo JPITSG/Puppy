@@ -152,43 +152,36 @@ def _load_blocking(path: str) -> "dict | None":
         return None
     except Exception as exc:
         raise RuntimeError("shared browser store is unreadable: {}".format(exc))
-    if not isinstance(raw, dict) or raw.get("v") != STORE_VERSION:
-        # No-migration rule: an unsupported persisted shape is rejected, and
-        # for this rebuildable login cache rejection means a fresh store.
+    if not isinstance(raw, dict) or set(raw) != {"v", "serial", "cookies", "storage"} or \
+            type(raw["v"]) is not int or raw["v"] != STORE_VERSION or \
+            type(raw["serial"]) is not int or raw["serial"] < 0 or \
+            not isinstance(raw["cookies"], list) or not isinstance(raw["storage"], dict):
         raise RuntimeError("shared browser store has an unsupported shape")
+
+    def timestamp(value):
+        return type(value) is float and math.isfinite(value) and value >= 0
+
     cookies = {}
-    for entry in raw.get("cookies") or []:
-        if not isinstance(entry, dict):
-            continue
-        # Stored cookies carry no "session" flag: session cookies simply have
-        # no expires field, so the CDP normalizer revalidates them as-is.
-        cookie = cookie_from_cdp(entry.get("cookie"))
-        if cookie is None:
-            continue
-        seen = entry.get("seen")
-        cookies[cookie_key(cookie)] = {
-            "cookie": cookie,
-            "seen": float(seen) if isinstance(seen, (int, float)) and
-            not isinstance(seen, bool) and math.isfinite(seen) else time.time(),
-        }
+    for entry in raw["cookies"]:
+        if not isinstance(entry, dict) or set(entry) != {"cookie", "seen"} or \
+                not timestamp(entry["seen"]):
+            raise RuntimeError("shared browser store contains an invalid cookie record")
+        cookie = entry["cookie"]
+        normalized = cookie_from_cdp(cookie)
+        if normalized is None or not config._same_shape_and_values(cookie, normalized):
+            raise RuntimeError("shared browser store contains a non-current cookie")
+        key = cookie_key(cookie)
+        if key in cookies:
+            raise RuntimeError("shared browser store contains a duplicate cookie")
+        cookies[key] = entry
     storage = {}
-    raw_storage = raw.get("storage")
-    if isinstance(raw_storage, dict):
-        for origin, entry in raw_storage.items():
-            if not isinstance(origin, str) or not isinstance(entry, dict):
-                continue
-            items = _valid_items(entry.get("items"))
-            if not items:
-                continue
-            ts = entry.get("ts")
-            storage[origin] = {
-                "items": items,
-                "ts": float(ts) if isinstance(ts, (int, float)) and
-                not isinstance(ts, bool) and math.isfinite(ts) else time.time(),
-            }
-    serial = raw.get("serial")
-    if not isinstance(serial, int) or isinstance(serial, bool) or serial < 0:
-        serial = 0
+    for origin, entry in raw["storage"].items():
+        if not isinstance(origin, str) or not isinstance(entry, dict) or \
+                set(entry) != {"items", "ts"} or not timestamp(entry["ts"]) or \
+                _valid_items(entry["items"]) is None:
+            raise RuntimeError("shared browser store contains an invalid storage record")
+        storage[origin] = entry
+    serial = raw["serial"]
     try:
         saved_at = float(os.path.getmtime(path))
     except OSError:
@@ -226,6 +219,7 @@ class SharedStore:
     def __init__(self):
         self._lock = asyncio.Lock()
         self._loaded = False
+        self._load_failed = False
         self._cookies = {}    # key -> {"cookie": {...}, "seen": ts}
         self._storage = {}    # origin -> {"items": {...}, "ts": ts}
         self._serial = 0
@@ -241,15 +235,16 @@ class SharedStore:
             loaded = await asyncio.get_event_loop().run_in_executor(
                 None, _load_blocking, store_path())
         except Exception as exc:
-            # The shared store is a rebuildable node-local cache, so an
-            # unreadable/current-shape failure starts from empty as before,
-            # but it is no longer silent. Mark it dirty so the first browser
-            # sync attempts a current-shape durable replacement.
+            # Preserve unreadable/non-current files. A load failure must never
+            # become a successful empty load followed by a replacement write.
             self._persistence_error = str(exc)[:400]
             self._persistence_error_at = time.time()
-            self._dirty = True
-            log.warning("%s; starting empty", exc)
-            loaded = None
+            self._load_failed = True
+            log.warning("%s; shared storage is unavailable", exc)
+            return
+        self._load_failed = False
+        self._persistence_error = ""
+        self._persistence_error_at = None
         if loaded is not None:
             self._cookies = loaded["cookies"]
             self._storage = loaded["storage"]
@@ -258,6 +253,8 @@ class SharedStore:
         self._loaded = True
 
     async def _save(self) -> bool:
+        if self._load_failed:
+            return False
         next_serial = self._serial + 1
         payload = {
             "v": STORE_VERSION,
@@ -325,6 +322,8 @@ class SharedStore:
         """
         async with self._lock:
             await self._ensure_loaded()
+            if self._load_failed:
+                raise RuntimeError(self._persistence_error)
             now = time.time()
             changed = self._prune_cookies(now)
             set_into = []
@@ -413,6 +412,8 @@ class SharedStore:
     async def seed_snapshot(self) -> tuple:
         async with self._lock:
             await self._ensure_loaded()
+            if self._load_failed:
+                raise RuntimeError(self._persistence_error)
             return self._serial, {origin: dict(entry["items"])
                                   for origin, entry in self._storage.items()}
 

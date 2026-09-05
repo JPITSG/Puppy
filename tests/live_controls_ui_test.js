@@ -114,6 +114,7 @@ function engineCatalog(fast = false) {
   return [{ key: "engine", label: "Engine", installed: true, auth: "ok", allow_custom_model: false,
     supports_fast_mode: true, tool_options: [{ value: "compact" }],
     permission_options: [{ value: "safe", label: "Safe" }],
+    session_defaults: {permission_mode:"safe",model:"model",effort:"high"},
     model_options: [{ value: "model", label: "Model", fast_mode_available: fast,
       effort_options: [{ value: "high", label: "High" }] }],
     upgrade_supported: true, update_available: true, latest_version: "2.0.0", version: "1.0.0" }];

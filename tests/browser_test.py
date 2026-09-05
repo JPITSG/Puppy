@@ -1176,7 +1176,7 @@ def check_node_state_stream_ui(ui_source: str) -> None:
     source = "\n".join(function(name) for name in (
         "clearNodeStateRevisions", "acceptStateSnapshot",
         "backendSupportsStateStream", "nodeStateStreamActive",
-        "legacyStatePollingNeeded"))
+        "statePollingNeeded"))
     script = r"""
 let reloads=0;
 const location={reload(){reloads++;}};
@@ -1184,8 +1184,8 @@ const state={
   runtimeId:"controller-runtime", stateStreamRevisions:{},
   stateStreamRuntime:{7:"remote-a"}, stateStreamReady:{0:true,7:true},
   backends:[
-    {id:7,protocol:1,capabilities:["node-state-stream-v1"]},
-    {id:8,protocol:1,capabilities:[]},
+    {id:7,protocol:2,capabilities:["node-state-stream-v1"]},
+    {id:8,protocol:2,capabilities:[]},
   ],
 };
 const backendConnectionAllowed=()=>true;
@@ -1206,13 +1206,13 @@ const remoteNext=acceptStateSnapshot(7,{type:"sessions",state_topic:"sessions",
   state_revision:6,runtime_id:"remote-a"});
 const remoteRestart=acceptStateSnapshot(7,{type:"sessions",state_topic:"sessions",
   state_revision:1,runtime_id:"remote-b"});
-const withLegacy=legacyStatePollingNeeded();
+const withLegacy=statePollingNeeded();
 state.backends=state.backends.slice(0,1);
-const allLive=legacyStatePollingNeeded();
+const allLive=statePollingNeeded();
 state.stateStreamReady[7]=false;
-const remoteDown=legacyStatePollingNeeded();
+const remoteDown=statePollingNeeded();
 state.stateStreamReady[7]=true;state.stateStreamReady[0]=false;
-const localDown=legacyStatePollingNeeded();
+const localDown=statePollingNeeded();
 const remoteViaDeadController=nodeStateStreamActive(7);
 console.log(JSON.stringify({
   localFirst,localDuplicate,booleanRevision,numericRuntime,wrongLocal,reloads,
@@ -1220,9 +1220,9 @@ console.log(JSON.stringify({
   remoteRuntime:state.stateStreamRuntime[7],remoteSessions:state.stateStreamRevisions["7:sessions"],
   oldEngineRevision:Object.prototype.hasOwnProperty.call(state.stateStreamRevisions,"7:engines"),
   withLegacy,allLive,remoteDown,localDown,remoteViaDeadController,
-  exactCap:backendSupportsStateStream({protocol:1,capabilities:["node-state-stream-v1"]}),
+  exactCap:backendSupportsStateStream({protocol:2,capabilities:["node-state-stream-v1"]}),
   protocolZero:backendSupportsStateStream({protocol:0,capabilities:["node-state-stream-v1"]}),
-  missingCap:backendSupportsStateStream({protocol:1,capabilities:[]}),
+  missingCap:backendSupportsStateStream({protocol:2,capabilities:[]}),
 }));
 """ % source
     proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
@@ -1255,7 +1255,7 @@ console.log(JSON.stringify({
     script = r"""
 const state={stateStreamReady:{0:false},stateStreamRuntime:{0:"local-run"}};
 let localStateStreamTopics=new Set();
-let updatesLegacyRefreshTimer=null;
+let updatesReconnectRefreshTimer=null;
 let pollingStarts=0;
 const startRemotePolling=()=>{pollingStarts++;};
 %s
@@ -1401,7 +1401,7 @@ def check_interrupted_completion(ui_source: str) -> None:
         raise AssertionError("unbalanced " + name)
 
     source = "\n".join(function(name) for name in (
-        "sessionActivityKey", "ingestOneSessionActivity", "reportRemoteCompletion"))
+        "sessionActivityKey", "ingestOneSessionActivity"))
     script = r"""
 const state = {notify: {configured: true, enabled: true}, backends: [
   {id: 8, capabilities: ["completion-events"]},
@@ -1419,7 +1419,7 @@ ingestOneSessionActivity(7,
   {id: 1, status: "idle", completion_status: "interrupted"}, 20, 5000);
 ingestOneSessionActivity(7,
   {id: 2, status: "idle", completion_status: "ok"}, 20, 5000);
-// An older backend has no additive outcome and retains the prior behavior.
+// Even an incomplete observation cannot trigger browser-owned notifications.
 ingestOneSessionActivity(7, {id: 3, status: "idle"}, 20, 5000);
 // A current backend is consumed by the controller and must never double-fire.
 ingestOneSessionActivity(8,
@@ -1430,8 +1430,7 @@ console.log(JSON.stringify({posts, remaining: sessionActivityAnchors.size}));
     assert proc.returncode == 0, proc.stderr[:500]
     result = json.loads(proc.stdout.strip())
     assert result["remaining"] == 0, result
-    assert [call["body"]["sid"] for call in result["posts"]] == [2, 3], result
-    assert all(call["route"] == "notify/fire" for call in result["posts"]), result
+    assert result["posts"] == [], result
     assert "d.active_since, d.server_time, d.completion_status" in ui_source
     assert "d.completion_status);" in ui_source
 
@@ -2347,7 +2346,7 @@ function makeView(id="s:0:42") {
       classList:{toggle(name,on){if(on)queueClasses.add(name);else queueClasses.delete(name);}},
       setAttribute(){},removeAttribute(){},querySelectorAll(){return[];},
     },
-    draftSupported:true,draftReady:true,draftRevision:0,
+    draftReady:true,draftRevision:0,
     draftMaxChars:100000,status:"idle",_forceScroll:false,
     steering:{supported:true,ready:false,turn_id:""},steerPending:null,
     sideQuestion:{supported:true,ready:false,turn_id:""},askPending:null,
@@ -2409,13 +2408,14 @@ first.view.receiveDraft({type:"draft",text:"peer prose",revision:7,updated_at:7,
 const uploadPreserved={count:first.view.composer.attachments.length,
   uploading:first.view.composer.attachments[0].uploading,text:first.view.composer.ta.value};
 
-storage.set("puppy.draft.s:0:43", "local-only text");
-const localOnly=makeView("s:0:43");
-localOnly.view.draftSupported=false;
-localOnly.view.draftReady=false;
-localOnly.view.draftJournal=readLocalDraft("s:0:43");
-localOnly.view.composer.ta.value=localOnly.view.draftJournal.text;
-localOnly.view.initializeDraft(null);
+writeDraftJournal("s:0:43", "pending text", 2);
+const invalidDraft=makeView("s:0:43");
+const beforeInvalidDraft=storage.get("puppy.draft.s:0:43");
+let rejectedDraft=false;
+try { invalidDraft.view.initializeDraft(null); }
+catch(error) { rejectedDraft=/invalid shared draft/.test(error.message); }
+const malformedDraft={rejected:rejectedDraft,ready:invalidDraft.view.draftReady,
+  sent:invalidDraft.sent,unchanged:storage.get("puppy.draft.s:0:43")===beforeInvalidDraft};
 storage.set("puppy.draft.s:0:47", "not a versioned journal");
 const invalidJournal=readDraftJournal("s:0:47");
 
@@ -2496,8 +2496,7 @@ editing.view.queueEditComplete({type:"queue_edit_complete",request_id:
 
 console.log(JSON.stringify({sent:first.sent,pendingJournal,journalCleared,followed,
   whilePending,afterAck,latest:first.view.composer.ta.value,sharedAttachment,uploadPreserved,
-  localOnly:{text:localOnly.view.composer.ta.value,sent:localOnly.sent,
-             caret:localOnly.view.composer.ta.selectionStart},invalidJournal,
+  malformedDraft,invalidJournal,
   stale:{text:stale.view.composer.ta.value,sent:stale.sent,
          journal:storage.has("puppy.draft.s:0:44"),
          caret:stale.view.composer.ta.selectionStart},
@@ -2540,9 +2539,9 @@ console.log(JSON.stringify({sent:first.sent,pendingJournal,journalCleared,follow
         "prose": ""}, result
     assert result["uploadPreserved"] == {
         "count": 1, "uploading": True, "text": "peer prose"}, result
-    assert result["localOnly"]["text"] == "local-only text", result
-    assert result["localOnly"]["sent"] == [] and result["invalidJournal"] is None, result
-    assert result["localOnly"]["caret"] == len("local-only text"), result
+    assert result["malformedDraft"] == {
+        "rejected": True, "ready": False, "sent": [], "unchanged": True}, result
+    assert result["invalidJournal"] is None, result
     assert result["stale"] == {
         "text": "newer server text", "sent": [], "journal": False,
         "caret": len("newer server text")}, result
@@ -3194,7 +3193,7 @@ const attachmentMarkerLine=()=>{throw new Error("unexpected attachment in steeri
 const proto={%s};
 const view=Object.assign(Object.create(proto),{
   tab:{bid:7,sid:42},
-  draftSupported:true,draftReady:true,steering:{supported:true,ready:true,turn_id:"turn-9"},
+  draftReady:true,steering:{supported:true,ready:true,turn_id:"turn-9"},
   steerPending:null,_forceScroll:false,histIdx:3,histDraft:"old",
   updateSteerControl(){controlSyncs++;},resizeComposer(){},
   releaseHistoryAttachments(){},saveDraft(){draftSaves++;},scrollBottom(){},
@@ -3516,15 +3515,15 @@ const payload=(custom,remote,browser,terminal,spawn)=>({custom,remote_workspace:
   spawn:spawn===undefined?"SPAWN DEFAULT":spawn,
   remote_workspace_default:"REMOTE DEFAULT",browser_default:"DEFAULT",
   terminal_default:"TERMINAL DEFAULT",spawn_default:"SPAWN DEFAULT",max_chars:100});
-const legacyPayload=(custom,browser)=>({custom,browser,browser_default:"DEFAULT",max_chars:100});
+const invalidPayload=(custom,browser)=>({custom,browser,browser_default:"DEFAULT",max_chars:100});
 async function api(bid,path,options={}) {
   calls.push({bid,path,method:options.method||"GET",body:options.body||null});
   if(options.method==="PATCH") {
-    if(bid===2) return {system_prompt:legacyPayload(options.body.custom,options.body.browser)};
+    if(bid===2) return {system_prompt:invalidPayload(options.body.custom,options.body.browser)};
     return {system_prompt:payload(options.body.custom,options.body.remote_workspace,
       options.body.browser,options.body.terminal,options.body.spawn)};
   }
-  if(bid===2) return {system_prompt:legacyPayload("LEGACY","LEGACY BROWSER")};
+  if(bid===2) return {system_prompt:invalidPayload("INCOMPLETE","INCOMPLETE BROWSER")};
   return {system_prompt:payload("REMOTE","REMOTE WORKSPACE","REMOTE BROWSER","REMOTE TERMINAL",
     "REMOTE SPAWN")};
 }
@@ -3535,7 +3534,7 @@ __METHOD__
 }
 const view=new TestView();
 const card=view.systemPromptCard([
-  {bid:0,name:"Primary"},{bid:1,name:"Worker node"},{bid:2,name:"Legacy prompts"},
+  {bid:0,name:"Primary"},{bid:1,name:"Worker node"},{bid:2,name:"Malformed prompts"},
   {bid:3,name:"Old backend"}
 ],payload("LOCAL","REMOTE DEFAULT","DEFAULT","TERMINAL DEFAULT","SPAWN DEFAULT"),1);
 const nodeField=card.children[0],select=nodeField.children[1];
@@ -3580,16 +3579,13 @@ const offline={custom:custom.value,remoteWorkspace:remoteWorkspace.value,
 backendAllowed=true;view.systemPromptSync();
 select.value="2";document.activeElement=select;select.onchange();
 await new Promise(resolve=>setTimeout(resolve,0));
-const legacy={custom:custom.value,browser:browser.value,
-  remoteDisabled:remoteWorkspace.disabled,remotePlaceholder:remoteWorkspace.placeholder,
-  terminalDisabled:terminal.disabled,terminalPlaceholder:terminal.placeholder,
-  spawnDisabled:spawn.disabled,spawnPlaceholder:spawn.placeholder,
-  saveDisabled:save.disabled};
-custom.value="LEGACY EDIT";custom.oninput();await save.onclick();
+const invalid={disabled:custom.disabled&&remoteWorkspace.disabled&&browser.disabled&&terminal.disabled&&spawn.disabled,
+  status:status.textContent,saveLabel:save.textContent,saveDisabled:save.disabled};
+await save.onclick();
 select.value="3";document.activeElement=select;select.onchange();
 const unsupported={disabled:custom.disabled&&remoteWorkspace.disabled&&browser.disabled&&terminal.disabled&&spawn.disabled&&save.disabled,
   status:status.textContent};
-console.log(JSON.stringify({before,dirty,resetState,saved,remote,offline,legacy,unsupported,calls}));
+console.log(JSON.stringify({before,dirty,resetState,saved,remote,offline,invalid,unsupported,calls}));
 """.replace("__METHOD__", method).replace("__BACKEND_NOTE__", ui_source[
         ui_source.index("function backendStateNote("):
         ui_source.index("function engineStatusText(")])
@@ -3623,27 +3619,19 @@ console.log(JSON.stringify({before,dirty,resetState,saved,remote,offline,legacy,
         "status": "Backend unavailable · showing last known prompt settings",
         "disabled": True,
     }, result
-    assert result["legacy"] == {
-        "custom": "LEGACY", "browser": "LEGACY BROWSER",
-        "remoteDisabled": True,
-        "remotePlaceholder": "Upgrade this backend to configure remote workspace guidance",
-        "terminalDisabled": True,
-        "terminalPlaceholder": "Upgrade this backend to configure terminal guidance",
-        "spawnDisabled": True,
-        "spawnPlaceholder": "Upgrade this backend to configure spawned agent guidance",
-        "saveDisabled": False,
+    assert result["invalid"] == {
+        "disabled": True, "status": "backend returned invalid system prompt settings",
+        "saveLabel": "Retry", "saveDisabled": False,
     }, result
     assert result["unsupported"] == {
         "disabled": True,
         "status": "Backend upgrade required for system prompt settings"}, result
     assert [call["method"] for call in result["calls"]] == \
-        ["PATCH", "GET", "GET", "PATCH"], result
+        ["PATCH", "GET", "GET", "GET"], result
     assert result["calls"][0]["body"]["remote_workspace"] == "REMOTE DEFAULT", result
     assert result["calls"][0]["body"]["terminal"] == "TERMINAL DEFAULT", result
     assert result["calls"][0]["body"]["spawn"] == "SPAWN DEFAULT", result
-    assert "remote_workspace" not in result["calls"][3]["body"], result
-    assert "terminal" not in result["calls"][3]["body"], result
-    assert "spawn" not in result["calls"][3]["body"], result
+    assert all(call["method"] == "GET" for call in result["calls"] if call["bid"] == 2), result
 
 
 def check_remote_workspace_picker(ui_source: str, css_source: str) -> None:
@@ -3795,6 +3783,9 @@ const custom={allow_custom_model:true,model_options:[],
 const saved={permission_mode:"read-only",model:"known",effort:"high"};
 const current=initialEngineConfig({...exact,session_defaults:saved});
 current.model="changed";
+let missingDefaultsRejected=false;
+try { initialEngineConfig({default_permission:"auto",model_options:[{value:""}]}); }
+catch(error) { missingDefaultsRejected=/engine defaults/.test(error.message); }
 const select={children:[],appendChild(row){this.children.push(row)}};
 globalThis.document={createElement(){return {}}};
 globalThis.refreshChoiceSelect=()=>{};
@@ -3804,7 +3795,7 @@ console.log(JSON.stringify({
   retired:effortOptionsForModel(exact,"retired").map(item=>item.value),
   custom:effortOptionsForModel(custom,"custom-id").map(item=>item.value),
   saved:initialEngineConfig({...exact,session_defaults:saved}),
-  legacy:initialEngineConfig({default_permission:"auto",model_options:[{value:""}]}),
+  missingDefaultsRejected,
   nativeDefault:effortOptionsForModel(exact,"known")[0].label,
   unavailable:select.children[0].disabled && select.value === "retired",
 }));
@@ -3815,12 +3806,12 @@ console.log(JSON.stringify({
     assert json.loads(proc.stdout) == {
         "known": ["", "high"], "retired": [""], "custom": ["", "max"],
         "saved": {"permission_mode": "read-only", "model": "known", "effort": "high"},
-        "legacy": {"permission_mode": "auto", "model": "", "effort": ""},
+        "missingDefaultsRejected": True,
         "nativeDefault": "Engine default", "unavailable": True}
 
 
 def check_timer_settings_ui(ui_source: str, css_source: str) -> None:
-    """The six timer controls include explicit legacy/disconnect fallbacks."""
+    """The six timer controls retain polling for disconnected streams."""
     for label in (
             "Published CLI releases", "Model catalogs",
             "Installed CLI versions and sign-in status",
@@ -4596,26 +4587,25 @@ const engines = {
   claude: {default_permission:"auto"},
   codex: {default_permission:"workspace-write"},
 };
-const engineOf = key => engines[key] || null;
 const session = {engine:"claude", model:"sonnet", effort:"high",
   permission_mode:"auto", fast_mode:false};
-const initial = effectiveQueuedConfig(session, [], engineOf);
-const legacySwitch = {kind:"engine", engine:"codex", model:"gpt-5.6-sol",
-  effort:"max"};
-const legacy = effectiveQueuedConfig(session, [legacySwitch], engineOf);
-const switched = effectiveQueuedConfig(session, [{...legacySwitch,
-  permission_mode:"workspace-write", fast_mode:"on"}], engineOf);
-const picked = effectiveQueuedConfig(session, [{...legacySwitch,
+const initial = effectiveQueuedConfig(session, []);
+const switchRow = {kind:"engine", engine:"codex", model:"gpt-5.6-sol",
+  effort:"max",permission_mode:"workspace-write",fast_mode:"off"};
+const current = effectiveQueuedConfig(session, [switchRow]);
+const switched = effectiveQueuedConfig(session, [{...switchRow,
+  permission_mode:"workspace-write", fast_mode:"on"}]);
+const picked = effectiveQueuedConfig(session, [{...switchRow,
   permission_mode:"workspace-write", fast_mode:"on"}, {kind:"config", engine:"codex",
-  permission_mode:"danger-full-access"}], engineOf);
-const stale = effectiveQueuedConfig(session, [{...legacySwitch,
+  permission_mode:"danger-full-access"}]);
+const stale = effectiveQueuedConfig(session, [{...switchRow,
   permission_mode:"workspace-write", fast_mode:"on"}, {kind:"config", engine:"codex",
   permission_mode:"danger-full-access"}, {kind:"config", engine:"claude",
-  permission_mode:"plan"}], engineOf);
+  permission_mode:"plan"}]);
 const slim = value => ({engine:value.engine, permission:value.permission_mode,
   fast:value.fast_mode, queuedEngine:value.queuedEngine,
   queuedPermission:value.queuedPermission, queuedFast:value.queuedFast});
-console.log(JSON.stringify([initial, legacy, switched, picked, stale].map(slim)));
+console.log(JSON.stringify([initial, current, switched, picked, stale].map(slim)));
 """ % ui_source[start:end]
     proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:700]
@@ -4623,7 +4613,7 @@ console.log(JSON.stringify([initial, legacy, switched, picked, stale].map(slim))
         {"engine": "claude", "permission": "auto",
          "fast": False, "queuedEngine": False, "queuedPermission": False,
          "queuedFast": False},
-        # Compatibility display for an older remote row: target default.
+        # A queued switch carries its captured permission and Fast settings.
         {"engine": "codex", "permission": "workspace-write",
          "fast": False, "queuedEngine": True, "queuedPermission": True,
          "queuedFast": True},
@@ -4948,9 +4938,9 @@ const svg=()=>new MockNode("svg");
 const globeIcon=svg,terminalIcon=svg,plusIcon=svg,refreshIcon=svg,choiceSvg=svg;
 const scrollCaretIntoView=()=>{};
 const state={instance:"controller",backends:[
-  {id:2,name:"build-node.lan",protocol:1,capabilities:["spawn-exec"]},
-  {id:3,name:"OLD",protocol:1,capabilities:[]},
-  {id:5,name:"worker-two",protocol:1,capabilities:["spawn-exec"]},
+  {id:2,name:"build-node.lan",protocol:2,capabilities:["spawn-exec"]},
+  {id:3,name:"OLD",protocol:2,capabilities:[]},
+  {id:5,name:"worker-two",protocol:2,capabilities:["spawn-exec"]},
 ],engines:[
   {key:"claude",label:"Claude Code",installed:true,auth:"ok",version:"2.1.219",
    model_options:[{value:"",label:"Default"},{value:"haiku",label:"Haiku"}],
@@ -5718,6 +5708,34 @@ async def check_shared_store_persistence_health() -> None:
         recovered = await shared.persistence_health()
         assert recovered["ok"] is True and recovered["dirty"] is False, recovered
         assert recovered["last_saved_at"] is not None and path.is_file(), recovered
+
+        current = json.loads(path.read_text())
+        invalid_records = [
+            "not json", {"v": 0}, dict(current, serial="1"),
+            dict(current, extra=True),
+            {key: value for key, value in current.items() if key != "storage"},
+            dict(current, cookies=[{"cookie": cookie}]),
+            dict(current, cookies=[{"cookie": dict(cookie, secure="true"), "seen": 1.0}]),
+            dict(current, storage={"https://health.test": {"items": {}, "ts": None}}),
+        ]
+        for invalid in invalid_records:
+            original = invalid if isinstance(invalid, str) else json.dumps(invalid)
+            path.write_text(original)
+            unreadable = browser_store.SharedStore()
+            health = await unreadable.persistence_health()
+            assert health["ok"] is False and health["dirty"] is False, health
+            for call in (lambda: unreadable.sync({}, {}, {}, {}), unreadable.seed_snapshot):
+                try:
+                    await call()
+                except RuntimeError:
+                    pass
+                else:
+                    raise AssertionError("invalid sign-in storage became an empty store")
+            assert path.read_text() == original, "a rejected store must retain its exact bytes"
+            path.write_text(json.dumps(current))  # deliberate operator repair
+            health = await unreadable.persistence_health()
+            assert health["ok"] is True and health["dirty"] is False, health
+            assert unreadable._cookies == shared._cookies
     finally:
         browser_store.store_path = original_path
         browser_store._save_blocking = original_save
@@ -5820,6 +5838,20 @@ async def main() -> None:
     else:
         raise AssertionError("noncurrent browser catalog was accepted")
     assert catalog_path.read_text(encoding="utf-8") == invalid_catalog
+    catalog_path.unlink()
+    # Reject the retired singleton origin even when its retention has expired.
+    for closed_at in (None, 2.0):
+        invalid_catalog = json.dumps({"version": 1, "ids": {"A1B2": {
+            "created_at": 1.0, "closed_at": closed_at, "origin": "legacy",
+            "owner_session": None}}, "bindings": {}})
+        catalog_path.write_text(invalid_catalog, encoding="utf-8")
+        try:
+            browser._load_catalog()
+        except browser.BrowserError as exc:
+            assert "invalid origin" in str(exc), str(exc)
+        else:
+            raise AssertionError("retired singleton origin was accepted")
+        assert catalog_path.read_text(encoding="utf-8") == invalid_catalog
     catalog_path.unlink()
     # Every handoff keeps the current one-browser/one-session catalog bijective
     # without mutating its input.
@@ -6023,7 +6055,7 @@ async def main() -> None:
             registry = browser.manager()
 
             # A crash between writing the catalog and finishing that removal -
-            # or a browser closed by an older build that kept storage for the
+            # or a cleanup interrupted after closing the browser but before deleting its
             # whole window - is swept at startup, ID still reserved.
             stranded_id = "X4X4" if "X4X4" not in created_ids else "W3W3"
             registry.records[stranded_id] = {
@@ -6400,7 +6432,7 @@ async def main() -> None:
             agent_hub.attach(session_capture)
             session_runner.updates_attach(updates_capture)
             custom_prompt = "Configured system guidance for every turn."
-            policy = browser_agent.AGENT_SELECTION_POLICY + \
+            policy = config.DEFAULT_BROWSER_SYSTEM_PROMPT + \
                 " Keep the shared browser visible while interacting."
             config.set_system_prompts(
                 custom_prompt, config.DEFAULT_REMOTE_WORKSPACE_SYSTEM_PROMPT,

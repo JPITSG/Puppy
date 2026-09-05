@@ -67,6 +67,14 @@ def check_static_contract() -> None:
     assert protocol.TERMINAL_INSTANCES_CAPABILITY not in disabled
     assert protocol.TERMINAL_HANDOFF_CAPABILITY not in disabled
 
+    assert terminal._request_spec({"command": "/bin/bash"})["command"] == "/bin/bash"
+    try:
+        terminal._request_spec({"cmd": "/bin/bash"})
+    except terminal.TerminalError as exc:
+        assert "use command" in str(exc)
+    else:
+        raise AssertionError("retired anonymous-terminal command alias was accepted")
+
     app = build_app()
     routes = {(route.method, route.resource.canonical) for route in app.router.routes()}
     expected = {
@@ -77,7 +85,6 @@ def check_static_contract() -> None:
         ("POST", "/api/terminal/instances/{terminal_id}/binding"),
         ("DELETE", "/api/terminal/instances/{terminal_id}/binding"),
         ("GET", "/api/ws/terminal/{terminal_id}"),
-        ("GET", "/api/ws/term"),
     }
     assert expected <= routes, sorted(routes)
 
@@ -126,8 +133,8 @@ def check_static_contract() -> None:
     script = """
 const state={backends:[
   {id:1,protocol:0,capabilities:[]},
-  {id:2,protocol:1,capabilities:[\"terminal\"]},
-  {id:3,protocol:1,capabilities:[\"terminal-instances\"]}
+  {id:2,protocol:2,capabilities:[\"terminal\"]},
+  {id:3,protocol:2,capabilities:[\"terminal-instances\"]}
 ]};
 %s
 console.log(JSON.stringify([terminalInstancesFor(0),terminalInstancesFor(1),

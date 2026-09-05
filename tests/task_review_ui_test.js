@@ -135,11 +135,6 @@ const lastBody = () => JSON.parse(JSON.stringify(requests.at(-1).body));
   assert.equal(dialog.m.isConnected, false);
   session.task.state = "ready";
 
-  state.backends[0].capabilities = ["session-tasks"];
-  nodes = await open();
-  assert.equal(nodes["#tr-resolve"], undefined, "old nodes are not offered an unsupported option");
-  response = { applied: true }; await nodes["#tr-apply"].onclick();
-  assert.deepEqual(lastBody(), { token: changed.token });
   workspace.tab.bid = 0;
   nodes = await open();
   assert.ok(nodes["#tr-resolve"], "local and remote capability lists both work");
@@ -148,5 +143,5 @@ const lastBody = () => JSON.parse(JSON.stringify(requests.at(-1).body));
   await context.modalReviewTask(workspace, session);
   assert.equal(dialog.nodes["#tr-apply"].disabled, true);
   assert.equal(dialog.nodes["#tr-resolve"].disabled, true);
-  console.log("PASS: review toggle explanation, defaults, opt-in, duplicate guard, progress, errors, task navigation, empty changes and mixed-version nodes");
+  console.log("PASS: review toggle explanation, defaults, opt-in, duplicate guard, progress, errors, task navigation, empty changes and local/remote nodes");
 })().catch(error => { console.error(error); process.exitCode = 1; });

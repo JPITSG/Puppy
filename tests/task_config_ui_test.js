@@ -1,9 +1,9 @@
 /* Run with node tests/task_config_ui_test.js. No browser or engine required.
    The New task dialog against the fake DOM: Main's captured choices, engine/
    model/effort dependencies, catalog refresh, custom and retired choices,
-   remote and legacy nodes, the retry lifecycle, and the shared prompt box it
+   local and remote nodes, the retry lifecycle, and the shared prompt box it
    hosts - Enter starts the task, attachments ride the prompt as marker lines,
-   cancelling discards what was staged, and an older node gets no attach. */
+   and cancelling discards what was staged. */
 "use strict";
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -220,17 +220,6 @@ const deletes = from => requests.slice(from).filter(r => r.method === "DELETE").
   n["#nt-cancel"].onclick();
   assert.deepEqual(deletes(0), [[7, "sessions/10/upload/1700000000001-b2c3d4e5f6"]]);
   assert.equal(Composer.live.size, 0);
-  state.backends[0].capabilities = capabilities.filter(key => key !== "session-task-attachments");
-  n = await open();
-  assert.equal(n[".attach-add"].disabled, true);
-  assert.equal(n[".attach-add"].getAttribute("aria-label"), "Upgrade this backend to attach files to tasks");
-  const before = fetches.length;
-  paste(n["#nt-prompt"]);
-  assert.equal(fetches.length, before);
-  assert.equal(toasts[toasts.length - 1].text, "Upgrade this backend to attach files to tasks");
-  dialog.close();
-  state.backends[0].capabilities = capabilities;
-
   main.session = { ...captured, model: "retired" };
   n = await open();
   assert.equal(n["#nt-model"].value, "retired");
@@ -242,13 +231,5 @@ const deletes = from => requests.slice(from).filter(r => r.method === "DELETE").
   assert.equal(requests[0].route, "engines");
   assert.deepEqual(values(n), captured, "late remote catalog preserves Main's selections");
   dialog.close();
-  state.backends[0].capabilities = ["session-tasks"];
-  n = await open();
-  assert.equal(n["#nt-model"], null, "old nodes must not silently ignore editable choices");
-  n["#nt-prompt"].value = "Legacy task";
-  await n["#nt-start"].onclick();
-  assert.equal(Object.hasOwn(requests[requests.length - 1].body, "engine"), false);
-  assert.equal(enginePayloadListeners.size, 0);
-  assert.equal(Composer.live.size, 0);
-  console.log("PASS: task modal inheritance, engine/model dependencies, catalog refresh, custom/retired choices, remote/legacy nodes, retry lifecycle, and its shared prompt box (Enter, attachments, discard on cancel, capability gating)");
+  console.log("PASS: task modal inheritance, engine/model dependencies, catalog refresh, custom/retired choices, local/remote nodes, retry lifecycle, and its shared prompt box (Enter, attachments, discard on cancel)");
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -364,6 +364,23 @@ async def main() -> None:
             lambda: snapshots._validate_database(missing_transport_db),
             "transport state")
         missing_transport_db.unlink()
+        invalid_queue_db = TEST_ROOT / "invalid-queue.db"
+        queue_key = "session_queue.{}".format(directory_id)
+        for key, raw in ((queue_key, '{'), (queue_key, '{"queue":["keep me"]}'),
+                         (queue_key, '{"queue":[],"held":[],"paused":[]}'),
+                         ("session_queue.999999", '{"queue":["keep me"],"held":[],"paused":[]}')):
+            db.backup_to(str(invalid_queue_db))
+            connection = sqlite3.connect(str(invalid_queue_db))
+            connection.execute("INSERT INTO meta(key,value) VALUES(?,?)", (key, raw))
+            connection.commit()
+            connection.close()
+            before = invalid_queue_db.read_bytes()
+            expect_snapshot_error(lambda: snapshots._validate_database(invalid_queue_db),
+                                  "session queue state is not current")
+            assert invalid_queue_db.read_bytes() == before
+        invalid_queue_db.unlink()
+        queue_record = {"queue": ["pending prompt"], "held": ["held prompt"], "paused": [0]}
+        db.meta_set(queue_key, queue_record)
         tab_id = "s:0:{}".format(scratch_id)
         pane_id = "pane:snapshot"
         ui = {
@@ -454,7 +471,7 @@ async def main() -> None:
 
         # Mutate every restored surface and an excluded ordinary project file.
         config.set_value("instance_name", "mutated-instance")
-        db.meta_apply(delete_keys=list(session_records))
+        db.meta_apply(delete_keys=list(session_records) + [queue_key])
         config.set_value("engines.usage_refresh_minutes", 5)
         config.set_engine_defaults("codex", {"permission_mode": "", "model": "", "effort": ""})
         config.set_timers({
@@ -502,6 +519,7 @@ async def main() -> None:
         snapshots.discard_staged(staged)
         assert not handoff_path.exists()
         assert restored["ui"] == ui
+        assert db.meta_get(queue_key) == queue_record
         for key, value in session_records.items():
             assert db.meta_get(key) == value, key
         # An outdated session-state shape is rejected, never filled in.

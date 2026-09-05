@@ -108,19 +108,18 @@ task. Remove a task only when its work is no longer needed; folding keeps its
 conversation, never its working copy. Remove children before deleting their
 parent. Applied changes remain in Main after removing a task.
 
-## Rollback
+## Persistence
 
-The pre-feature code is retained on branch `rollback/before-session-tasks` at
-`e1389ca` (v1.0.434). This feature is landed in one commit so it can be reverted
-without resetting unrelated later commits. There are no changes to existing
-SQL tables or persisted configuration settings. The per-session Tasks toggle
-uses a separate optional `session_tasks_disabled.<sid>` meta ledger: an exact
-`true` marker means off, and no entry means on. **Model sees folded tasks** uses
+Tasks are ordinary sessions grouped by exact-shape `session_task.<sid>` meta
+records. The per-session Tasks toggle uses the `session_tasks_disabled.<sid>`
+meta ledger: an exact `true` marker means off, and no entry means on.
+**Model sees folded tasks** uses
 the same pattern under `session_tasks_digest.<sid>`: an exact `true` marker
 means on, and no entry means off. Startup and snapshot restore reject malformed
-entries; existing task records and config shapes are unchanged. A folded task
-is an ordinary `info` row of Main's transcript (subtype `session_task_archive`)
-and needs no rollback handling: older code shows it as a one-line note.
+entries. A folded task is an ordinary `info` row of Main's transcript (subtype
+`session_task_archive`). These records, preferences and transcript rows are
+included in full backups.
+
 Each task copy also names its review baseline as the Git ref `refs/puppy/base`
 so the engine's own history rewriting can never garbage-collect it.
 Conflict-resolution inputs are preserved at
@@ -128,33 +127,4 @@ Conflict-resolution inputs are preserved at
 review uses the supplied Main snapshot as its baseline; preparation leaves the
 task's working files and index intact for its agent to reconcile. These refs and
 their independent Git objects are included in full backups. The switch is a
-per-request choice, with no new persisted configuration or task-record shape.
-
-For a rollback **preserving work**:
-
-1. Finish/stop active turns, save a full Puppy backup, and separately back up any
-   ordinary project directories you want to protect (full Puppy backups do not
-   include those directories). Keep that backup outside disposable workspaces.
-2. Stop each affected Puppy node gracefully, using the normal idle-gated service
-   procedure. Do this from an operator shell, not a turn hosted by the stopping
-   process. Queued/held messages remain owned by their original sessions.
-3. With the feature code still present, run on each affected node:
-   `PUPPY_DATA=/path/to/node/data /usr/local/bin/python3 -m puppy.session_tasks --detach-for-rollback`.
-   It refuses a live configured listener or running work. It writes a private,
-   fsync'd archive at `data/rollback/session-tasks-<id>.json` (the grouping
-   records plus the ids whose Tasks toggle was off and whose folded-task digest
-   was on), then removes only that grouping metadata and both toggle ledgers in
-   one database transaction. Keep this archive with
-   the backup; it is a manual recovery record, outside full-backup coverage.
-4. Revert the feature commit with `git revert --no-commit <feature-commit>`, set
-   `puppy/__init__.py` to the next patch version, and commit the rollback under
-   the repository's normal version rule. Resolve any later-code conflicts before
-   deploying. Do not reset the branch or restore an old database over newer work.
-5. Deploy/start the reverted build. Former tasks appear as ordinary sessions
-   named `Main name / Task name`. Conversations, queues, native session ids and
-   independent Git working copies remain; project edits already applied remain.
-
-The detach operation is deliberate offline maintenance, never an automatic
-migration. Re-enabling grouping later requires explicitly restoring the archived
-records after checking that their session ids still exist; startup does not infer
-or recreate them. If there are no created tasks, a code revert alone is enough.
+per-request choice and is not persisted.

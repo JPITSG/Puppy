@@ -3,8 +3,7 @@
 Each identified terminal has exactly one PTY reader. Output is fanned out to
 every attached WebSocket viewer and retained in a bounded buffer for the
 turn-scoped terminal MCP bridge. User and agent input pass through one lock so
-individual writes stay intact. The legacy anonymous WebSocket remains for
-older controllers and keeps its original viewer-owned lifetime.
+individual writes stay intact. Every viewer attaches to an explicit terminal ID.
 """
 from __future__ import annotations
 
@@ -200,7 +199,7 @@ class TerminalInstance:
     def __init__(self, terminal_id: str, command: str, cwd: str, cols: int,
                  rows: int, origin: str = "user", owner_session=None):
         self.terminal_id = normalize_terminal_id(terminal_id)
-        if origin not in ("user", "agent", "legacy"):
+        if origin not in ("user", "agent"):
             raise TerminalError("invalid terminal origin")
         self.origin = origin
         self.owner_session = int(owner_session) if owner_session is not None else None
@@ -767,7 +766,9 @@ def manager() -> TerminalRegistry:
 
 
 def _request_spec(source) -> dict:
-    command = source.get("cmd") or source.get("command") or ""
+    if "cmd" in source:
+        raise TerminalError("cmd is unsupported; use command")
+    command = source.get("command") or ""
     cwd = source.get("cwd") or ""
     if not isinstance(command, str) or "\x00" in command or \
             len(command) > MAX_COMMAND:
@@ -884,8 +885,7 @@ async def h_binding_clear(request: web.Request):
     return web.json_response({"ok": True, **_binding_payload(instance)})
 
 
-async def _serve_viewer(request: web.Request, instance: TerminalInstance,
-                        close_after: bool = False) -> web.WebSocketResponse:
+async def _serve_viewer(request: web.Request, instance: TerminalInstance) -> web.WebSocketResponse:
     ws = web.WebSocketResponse(heartbeat=30, max_msg_size=1 << 20)
     await ws.prepare(request)
     live_websockets.track(request, ws)
@@ -921,8 +921,6 @@ async def _serve_viewer(request: web.Request, instance: TerminalInstance,
                 break
     finally:
         instance.detach_viewer(ws)
-        if close_after:
-            await manager().close(instance.terminal_id, "Legacy viewer closed")
         log.info("Terminal %s viewer detached (%s left)",
                  instance.terminal_id, instance.viewer_count())
     return ws
@@ -938,25 +936,6 @@ async def ws_terminal_instance(request: web.Request):
         await ws.close()
         return ws
     return await _serve_viewer(request, instance)
-
-
-async def ws_terminal(request: web.Request) -> web.WebSocketResponse:
-    """Legacy anonymous create-and-own WebSocket used by older controllers."""
-    if request.app.get("puppy_snapshot_busy"):
-        ws = web.WebSocketResponse(heartbeat=30, max_msg_size=1 << 20)
-        await ws.prepare(request)
-        await ws.close(code=1013, message=b"Puppy backup or restore in progress")
-        return ws
-    try:
-        instance = await manager().create(**_request_spec(request.query),
-                                          origin="legacy")
-    except TerminalError as exc:
-        ws = web.WebSocketResponse(heartbeat=30, max_msg_size=1 << 20)
-        await ws.prepare(request)
-        await ws.send_json({"type": "error", "text": str(exc)})
-        await ws.close()
-        return ws
-    return await _serve_viewer(request, instance, close_after=True)
 
 
 async def shutdown() -> None:
@@ -980,7 +959,6 @@ def register(app: web.Application) -> None:
         h_binding_clear)
     app.router.add_get(
         "/api/ws/terminal/{terminal_id:[A-Z0-9]{4}}", ws_terminal_instance)
-    app.router.add_get("/api/ws/term", ws_terminal)
 
     async def on_startup(_app):
         manager()

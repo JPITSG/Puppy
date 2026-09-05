@@ -820,7 +820,7 @@ class Manager:
 
     def __init__(self, browser_id: str, origin: str = "user", owner_session=None):
         self.browser_id = normalize_browser_id(browser_id)
-        if origin not in ("agent", "user", "legacy"):
+        if origin not in ("agent", "user"):
             raise BrowserError("invalid browser origin")
         self.origin = origin
         self.owner_session = int(owner_session) if owner_session is not None else None
@@ -3812,18 +3812,18 @@ def _load_catalog() -> tuple:
         if not math.isfinite(created_at) or created_at <= 0 or \
                 (closed_at is not None and (not math.isfinite(closed_at) or closed_at <= 0)):
             raise BrowserError("managed browser catalog contains an invalid timestamp")
-        if closed_at is not None and closed_at < cutoff:
-            changed = True
-            _catalog_cleanup_ids.add(browser_id)
-            continue
         origin = record["origin"]
-        if origin not in ("agent", "user", "legacy"):
+        if origin not in ("agent", "user"):
             raise BrowserError("managed browser catalog contains an invalid origin")
         owner = record["owner_session"]
         if owner is not None and (type(owner) is not int or owner <= 0):
             raise BrowserError("managed browser catalog contains an invalid owner")
         if closed_at is not None and owner is not None:
             raise BrowserError("closed browser catalog record has an owner")
+        if closed_at is not None and closed_at < cutoff:
+            changed = True
+            _catalog_cleanup_ids.add(browser_id)
+            continue
         records[browser_id] = {
             "created_at": created_at,
             "closed_at": closed_at,
@@ -3933,8 +3933,7 @@ class BrowserRegistry:
         close() discards it once the process is down, but a crash between
         writing the catalog and finishing that removal would strand a profile
         until its ID retention expired. Anything still on disk for a closed ID
-        is swept here, which also collects browsers closed by an older build
-        that kept every profile for the full retention window.
+        is swept here, including storage left by interrupted cleanup.
         """
         for browser_id, record in self.records.items():
             if record.get("closed_at") is None:
@@ -4053,7 +4052,7 @@ class BrowserRegistry:
     async def create(self, origin: str = "user", owner_session=None) -> Manager:
         if not enabled():
             raise BrowserError("The browser is disabled on this backend")
-        if origin not in ("agent", "user", "legacy"):
+        if origin not in ("agent", "user"):
             raise BrowserError("invalid browser origin")
         owner_session = self._normalize_owner(owner_session)
         async with self.lock:
@@ -4198,20 +4197,6 @@ class BrowserRegistry:
                 return await self.create("agent", session_id)
             raise
         return instance
-
-    async def legacy_browser(self) -> Manager:
-        created = False
-        async with self.lock:
-            instance = next((candidate for candidate in self.instances.values()
-                             if candidate.origin == "legacy" and not candidate.closed), None)
-            if instance is None:
-                instance = self._create_locked("legacy")
-                created = True
-        if created:
-            return await self._start_created(instance)
-        await instance.ensure_started()
-        return instance
-
 
 # ---- HTTP + websocket surface (registered by register_execution_api) ----
 
@@ -4358,9 +4343,7 @@ async def ws_browser(request: web.Request):
         await ws.close()
         return ws
     try:
-        requested_id = request.match_info.get("browser_id")
-        m = manager().get(requested_id) if requested_id else \
-            await manager().legacy_browser()
+        m = manager().get(request.match_info["browser_id"])
         await m.attach_viewer(ws)
     except BrowserError as exc:
         try:
@@ -4415,7 +4398,6 @@ def register(app: web.Application) -> None:
         "/api/browser/instances/{browser_id:[A-Z0-9]{4}}/binding", h_binding_clear)
     app.router.add_get(
         "/api/ws/browser/{browser_id:[A-Z0-9]{4}}", ws_browser)
-    app.router.add_get("/api/ws/browser", ws_browser)
 
     async def on_startup(_app):
         manager()  # load ID history and reclaim any browser left by a hard stop

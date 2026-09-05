@@ -180,8 +180,6 @@ async def _engines_response(refresh_usage: bool = True,
         "usage_refresh": usage_refresh.payload(),
         "auto_upgrade": cli_auto_upgrade.payload(),
         "timers": config.timers_payload(),
-        # Retained for older consoles that label anonymous shell tabs.
-        "user": _node_user(),
     }
 
 
@@ -1737,43 +1735,15 @@ async def h_notify_test(request: web.Request):
     return web.json_response(result)
 
 
-async def h_notify_fire(request: web.Request):
-    """Consoles report a remote backend's session going idle. Deduplicated so
-    several open browsers ring once; local sessions fire from the runner and
-    are rejected here to keep that single-source."""
-    body = await request.json()
-    try:
-        bid = int(body.get("bid"))
-        sid = int(body.get("sid"))
-    except (TypeError, ValueError):
-        return web.json_response({"error": "invalid session reference"}, status=400)
-    if bid <= 0:
-        return web.json_response({"error": "local sessions fire on the server"}, status=400)
-    info = notify.clean_info(body.get("info"))
-    # Defense in depth for console-reported remote completions: even if a
-    # client regresses and reports a stopped turn, it must never reach the
-    # configured command or consume the dedupe window for a later real finish.
-    if info.get("status") == "interrupted":
-        return web.json_response({"ok": True, "fired": False})
-    if not notify.active():
-        return web.json_response({"ok": True, "fired": False})
-    be = backends.get_backend(bid)
-    if be is None or backends.backend_supports(
-            bid, protocol.COMPLETION_EVENTS_CAPABILITY) or \
-            not notify.accept_remote_fire(bid, sid):
-        return web.json_response({"ok": True, "fired": False})
-    info["backend"] = be["name"]
-    info["id"] = str(sid)
-    asyncio.ensure_future(notify._fire(info))
-    return web.json_response({"ok": True, "fired": True})
-
-
 def register_execution_api(app: web.Application, include_terminal: bool = True) -> None:
     """Register the API surface consumed through a local or remote session tab.
 
     The full console and the deployable headless backend both call this. Keep
     backend-facing route changes here so the two runtimes cannot silently drift.
     """
+    async def validate_queues(_app):
+        runner.validate_persisted_queues(db.connect())
+    app.on_startup.append(validate_queues)
     cli_releases.register(app)
     cli_auto_upgrade.register(app)
     system_prompts.register(app)
@@ -1869,7 +1839,6 @@ def build_app(runtime_web: dict = None,
     r.add_post("/api/notify", h_notify_set)
     r.add_post("/api/notify/toggle", h_notify_toggle)
     r.add_post("/api/notify/test", h_notify_test)
-    r.add_post("/api/notify/fire", h_notify_fire)
     r.add_get("/api/settings", h_settings_get)
     r.add_patch("/api/settings", h_settings_patch)
     r.add_post("/api/settings/bind/prepare", h_bind_prepare)

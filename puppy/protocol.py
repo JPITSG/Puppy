@@ -1,46 +1,36 @@
 """Wire contract shared by the full console and headless backend nodes.
 
-The application version may move independently on controllers and backends.
-Only bump API_PROTOCOL when an incompatible change makes an older peer unsafe
-or impossible to support; additive fields and capabilities do not require it.
+Controllers and backends must speak the current protocol. Bump API_PROTOCOL
+when removing or changing a wire contract incompatibly; additive fields and
+capabilities do not require it. Capabilities also describe optional services.
 """
 from __future__ import annotations
 
-API_PROTOCOL = 1
-LEGACY_PROTOCOL = 0
-SUPPORTED_BACKEND_PROTOCOLS = (LEGACY_PROTOCOL, API_PROTOCOL)
+API_PROTOCOL = 2
+SUPPORTED_BACKEND_PROTOCOLS = (API_PROTOCOL,)
 
-# The node owns create/reset/delete/reboot-expiry semantics for scratch cwd
-# paths; old protocol-1 nodes simply omit this additive capability.
+# The node owns create/reset/delete/reboot-expiry semantics for scratch paths.
 TEMPORARY_WORKSPACE_CAPABILITY = "temporary-workspaces"
 USAGE_REFRESH_CAPABILITY = "engine-usage-refresh"
 MANUAL_USAGE_REFRESH_CAPABILITY = "engine-usage-refresh-manual"
 FILE_UPLOAD_CAPABILITY = "file-uploads"
-# Covers both engine-version endpoints: the forced installed/latest re-check
-# and the vendor-delegated engine CLI upgrade. They ship together, so one
-# additive capability keeps the controller from offering either to old nodes.
+# Forced installed/latest checks and vendor-delegated engine CLI upgrades.
 ENGINE_UPGRADE_CAPABILITY = "engine-upgrade"
-# Base managed headless-browser surface: status, the node-owned enable toggle,
-# and the legacy screencast/input websocket. Advertising the routes is distinct
-# from availability (a usable binary) and from the node's enable switch - both
-# are reported dynamically by /api/browser/status.
+# Managed-browser status and enable toggle. Availability (a usable binary) and
+# the enable switch are reported dynamically by /api/browser/status.
 BROWSER_CAPABILITY = "browser"
-# Independent four-character browser instances, their create/delete routes,
-# and the ID-scoped screencast websocket. Older browser-capable nodes expose
-# only the legacy singleton websocket and remain usable through that fallback.
+# Independent four-character browser instances, create/delete routes, and
+# the ID-scoped screencast/input WebSocket.
 BROWSER_INSTANCES_CAPABILITY = "browser-instances"
-# Explicitly assigning one named browser to one chat, reporting that binding to
-# viewers, and changing it through the authenticated instance API. Older nodes
-# still accept an ID when an agent names it, but cannot make that relationship
-# visible or user-controlled in the WebUI.
+# Assign one identified browser to a chat, expose its binding to viewers,
+# and change it through the authenticated instance API.
 BROWSER_HANDOFF_CAPABILITY = "browser-handoff"
 # Turn-bound browser file helpers: a chat may place one of its own Puppy upload
 # records into a file input, and inspect downloads belonging to its bound
 # browser. Neither operation accepts an arbitrary caller-supplied path.
 BROWSER_FILE_WORKFLOWS_CAPABILITY = "browser-file-workflows"
-# The node-owned shared sign-in store: POST /api/browser/shared-storage and the
-# additive shared_storage field on /api/browser/status. Older nodes keep their
-# per-browser throwaway profiles and the controller withholds the toggle.
+# Node-owned shared sign-in store: POST /api/browser/shared-storage and the
+# shared_storage field on /api/browser/status.
 BROWSER_SHARED_STORAGE_CAPABILITY = "browser-shared-storage"
 # GET/PATCH of the node's unattended engine-update schedule. The upgrade itself
 # is the engine-upgrade surface; this only decides when the node runs it, so a
@@ -56,55 +46,44 @@ TIMER_SETTINGS_CAPABILITY = "timer-settings"
 # text. Conditional guidance remains turn-scoped: remote-workspace text needs a
 # cross-node mirror, and browser text needs browser tools enabled for the turn.
 SYSTEM_PROMPT_CAPABILITY = "system-prompt"
-# GET on an upload id returns the stored image, so a preview outlives the blob
-# URL a page held. Older nodes store the same files but expose no way to read
-# them back; the controller falls back to the named-file chip there.
+# GET on an upload id returns the stored image, so a preview outlives the
+# blob URL held by the page.
 UPLOAD_PREVIEW_CAPABILITY = "upload-preview"
 # A headless node sends one best-effort ``node_stopping`` event to its update
 # and session WebSockets before graceful shutdown waits for/interrupts turns.
 # Full WebUI runtimes do not advertise this: only the separately managed
 # backend process owns this lifecycle signal.
 SHUTDOWN_NOTICE_CAPABILITY = "shutdown-notice"
-# `/api/ws/updates` is an ordered, revisioned node-state stream.  It sends a
-# full snapshot on every attach and then replaces session, engine, node,
-# browser and terminal topics as their owners change.  A controller may keep
-# one upstream subscription for a capable backend and stop browser-driven
-# polling; older nodes remain on the existing HTTP timers.
+# /api/ws/updates sends ordered, revisioned state: an attach snapshot, then
+# replacements for session, engine, node, browser and terminal topics. Each
+# controller owns one upstream subscription per capable online backend;
+# HTTP polling remains available when that subscription is disconnected.
 NODE_STATE_STREAM_CAPABILITY = "node-state-stream-v1"
-# The existing per-session WebSocket accepts the two active-turn controls and
-# returns a correlated completion frame for each handoff.  The native request
-# id remains the turn-scoped idempotency key; this marker only changes how the
-# browser transports it.  Older nodes retain their authenticated HTTP routes.
+# The session WebSocket accepts active-turn controls with correlated
+# completion frames. Native request ids remain turn-scoped idempotency keys;
+# the authenticated HTTP routes serve request/response callers as well.
 SESSION_CONTROL_WS_CAPABILITY = "session-control-ws-v1"
-# Session snapshots/broadcasts expose paused queue indexes and the session
-# socket accepts ``set_queue_paused``. Older controllers ignore the field;
-# newer controllers hide the control until a remote node advertises support.
+# Session snapshots expose paused queue indexes; the session socket accepts
+# set_queue_paused.
 QUEUE_PAUSE_CAPABILITY = "queue-pause"
-# The session socket can move one still-waiting prompt into the durable shared
-# composer in the same guarded operation that removes it from the queue. Older
-# nodes keep their cancel/pause controls and simply omit the Edit button.
+# Move a waiting prompt into the durable shared composer in the same guarded
+# operation that removes it from the queue.
 QUEUE_EDIT_CAPABILITY = "queue-edit"
 # The switch route queues an engine change behind running/queued work instead
 # of refusing it, and answers with the additive ``queued`` flag. Queue payloads
 # then contain {kind:"engine"} rows beside {kind:"config"} ones.
 QUEUED_ENGINE_SWITCH_CAPABILITY = "queued-engine-switch"
-# Permission choices use the same ordered configuration rows as model/effort,
-# and engine rows carry the target engine's permission default. Older nodes
-# validate permission against the still-live engine and cannot safely accept a
-# target-engine choice while a switch waits, so controllers gate that picker.
+# Permission choices use ordered configuration rows beside model/effort.
+# Engine switch rows carry the captured target permission default.
 QUEUED_PERMISSION_CAPABILITY = "queued-permission-config"
-# The session socket can hold automatic dequeue while a client rearranges the
-# live queue, then atomically accept a revision-guarded permutation. Older
-# nodes keep their ordinary queue and pause controls without draggable rows.
+# Hold automatic dequeue during a live queue drag, then atomically accept
+# a revision-guarded permutation.
 QUEUE_REORDER_CAPABILITY = "queue-reorder"
-# The session snapshot carries a durable, versioned composer draft and the
-# existing session socket accepts and broadcasts draft edits. Older remote
-# nodes keep the console's local-only compatibility path.
+# Durable, versioned shared composer drafts in snapshots and session-socket
+# edits/broadcasts. The browser journal retains unacknowledged edits.
 SESSION_DRAFT_CAPABILITY = "session-drafts"
-# The node exposes an active-turn compare token in session payloads and accepts
-# authenticated POST /api/sessions/{sid}/steer with required expected_turn_id
-# plus turn-scoped idempotency. Older nodes may carry an unadvertised transport
-# preview; controllers must not offer steering without this hardened contract.
+# Authenticated steering requires an expected_turn_id compare token and
+# turn-scoped idempotency. Session payloads expose current readiness.
 ACTIVE_TURN_STEERING_CAPABILITY = "active-turn-steering"
 # Remote-workspace surfaces are two independent additive roles. A provider can
 # lease one local project directory to its controller and serve the streamed
@@ -114,43 +93,31 @@ ACTIVE_TURN_STEERING_CAPABILITY = "active-turn-steering"
 # controller over the channels it already authenticates.
 WORKSPACE_PROVIDER_CAPABILITY = "workspace-provider"
 WORKSPACE_MIRROR_CAPABILITY = "workspace-mirror"
-# A rebuilt mirror advertises a one-use reset marker in its manifest. A
-# capable controller treats the authoritative workspace as the seed and
-# acknowledges the marker only after a clean pull; older controllers are
-# refused before they can mistake an empty rebuilt mirror for deletions.
+# A rebuilt mirror exposes a one-use reset marker in its manifest. The
+# controller seeds it from the authoritative workspace and acknowledges only
+# after a clean pull, preventing an empty mirror from meaning deletions.
 WORKSPACE_MIRROR_RESET_CAPABILITY = "workspace-mirror-reset"
 # One-shot spawned-agent execution: POST /api/spawn starts a single
 # non-interactive engine run in a named directory on this node, and the
 # job routes poll/cancel it. The controller relays a session's cross-node
 # spawn requests here and never offers them to a node without this marker.
 SPAWN_EXEC_CAPABILITY = "spawn-exec"
-# Sliding recognized-progress leases plus PATCH /api/spawn/{job_id}, which lets
-# the owning turn replace either live deadline during a run. Older spawn nodes
-# retain their single fixed timeout and must not be offered limit updates.
+# Sliding recognized-progress limits and PATCH /api/spawn/{job_id} to replace
+# either live deadline during a run.
 SPAWN_LIMITS_CAPABILITY = "spawn-progress-limits"
-# POST /api/spawn honors a controller-chosen job_id and is idempotent for it
-# (the same id answered again returns the job it already started, and a poll
-# or cancel for that id waits behind an in-flight start). A controller
-# registers the relay handle before it transmits, so a start whose answer
-# is lost can still be waited for, cancelled, and reaped; older nodes
-# assign their own ids and an unanswered start there is reported as an error.
+# POST /api/spawn honors a controller-chosen job_id idempotently. Poll/cancel
+# wait behind its in-flight start. The controller registers the relay handle
+# before transmitting, so a lost response still leaves a trackable job.
 SPAWN_CLIENT_IDS_CAPABILITY = "spawn-client-job-ids"
-# Ownership leases for relayed jobs: POST /api/spawn accepts lease_s, any
-# poll or limit change renews it, and POST /api/spawn/renew renews a batch
-# of ids (reporting unknown ones). A job whose controller stops renewing -
-# a crash, a partition - is stopped by the node once the lease lapses
-# instead of running unobserved to its own limits. Nodes without this keep
-# today's behaviour; controllers without it never send lease_s.
+# Relayed starts carry lease_s. Polls, limit updates and POST /api/spawn/renew
+# renew it; a job whose controller stops renewing ends as abandoned once its
+# lease lapses. Turn-owned local jobs have no ownership lease.
 SPAWN_OWNER_LEASE_CAPABILITY = "spawn-owner-lease"
-# GET /api/search: full-history transcript search over this node's own
-# sessions, answered from a node-local rebuildable FTS index. A console fans a
-# query out to itself and to online nodes advertising this and merges results;
-# offline or older nodes simply contribute nothing.
+# GET /api/search searches this node's full transcript history through a
+# rebuildable FTS index. Consoles query online, search-capable nodes only.
 SEARCH_CAPABILITY = "session-search"
-# GET /api/sessions/{sid}/events accepts an after_seq cursor and answers with
-# the events that follow it, oldest first. A console uses it to load a window
-# of history around one event (a search hit) instead of paging back to it
-# from the newest; older nodes can only page backwards from the tail.
+# GET /api/sessions/{sid}/events accepts after_seq and returns subsequent
+# events oldest first, supporting bounded windows around search hits.
 SESSION_EVENT_WINDOW_CAPABILITY = "session-event-window"
 # POST /api/sessions/{sid}/tool runs one engine-native maintenance action:
 # "compact" summarizes the native context in place (queued behind pending work
@@ -170,21 +137,17 @@ SESSION_FAST_MODE_CAPABILITY = "session-fast-mode"
 # agent_notes list naming which of them exist. A console shows the sidebar's
 # notes button and its editor only for nodes that advertise this.
 SESSION_AGENT_NOTES_CAPABILITY = "session-agent-notes"
-# PATCH /api/sessions/{sid} accepts a node-owned pinned flag and the session
-# list keeps every pinned row above the ordinary activity/manual order. The
-# same capability covers the hardened full-order compare contract used by
-# drag-and-drop; older nodes retain their one unpinned order and no pin control.
+# Node-owned pinned flags and session order. Drag-and-drop requires the
+# complete starting order and pin cohort as compare tokens.
 SESSION_PINNING_CAPABILITY = "session-pinning"
 # A node keeps a bounded, durable sequence of authoritative activity-block
 # completions and serves GET /api/completions?after=<seq>. Controllers use it
 # for remote completion commands without relying on an open browser.
 COMPLETION_EVENTS_CAPABILITY = "completion-events"
-# POST /api/sessions/{sid}/ask puts one question to the engine's own model
-# alongside a running turn, without interrupting it or entering its
-# conversation. Session payloads carry the additive side_question readiness
-# object beside steering, and the answer arrives as its own transcript rows.
-# Only engines whose pinned protocol has a native side-question request offer
-# it; older nodes advertise nothing and consoles withhold the control.
+# POST /api/sessions/{sid}/ask puts a question alongside an active turn
+# without changing its conversation. Session payloads expose readiness, and
+# the answer is recorded in separate transcript rows. Offered only by engines
+# with a native side-question channel.
 SIDE_QUESTION_CAPABILITY = "active-turn-side-question"
 
 SESSION_REFERENCES_CAPABILITY = "session-references"
@@ -223,8 +186,7 @@ BASE_CAPABILITIES = (
     "queued-config",
     # engine switches requested while work is pending join the same queue as
     # additive {kind:"engine"} rows and apply in order; config rows also carry
-    # the engine that validated them. Older nodes keep refusing mid-turn
-    # switches with 409, and the console withholds the queued affordance.
+    # the engine that validated them.
     QUEUED_ENGINE_SWITCH_CAPABILITY,
     QUEUED_PERMISSION_CAPABILITY,
     "uploads",
@@ -263,9 +225,8 @@ BASE_CAPABILITIES = (
     SESSION_CONTROL_WS_CAPABILITY,
 )
 TERMINAL_CAPABILITY = "terminal"
-# Identified node-owned PTYs, their create/list/delete routes, and the
-# ID-scoped viewer WebSocket. Older terminal-capable nodes keep the anonymous
-# create-on-connect socket and remain usable without agent collaboration.
+# Identified node-owned PTYs, create/list/delete routes, and the ID-scoped
+# viewer WebSocket.
 TERMINAL_INSTANCES_CAPABILITY = "terminal-instances"
 # Explicitly link one identified terminal to one chat. The linked engine turn
 # receives the private terminal MCP bridge and first-use activity events.
@@ -279,10 +240,9 @@ NOTIFY_EXEC_CAPABILITY = "notify-exec"
 # TLS provides confidentiality and peer identity on the same port.
 TLS_PIN_CAPABILITY = "pinned-tls"
 
-# Signed/staged remote upgrades are additive to protocol 1. A backend advertises
-# this only while its external health-check/rollback launcher is active. The
-# GET descriptor's readiness object is additive: older nodes omit it and still
-# enforce their original POST-time idle gate.
+# Signed/staged remote upgrades are advertised only while the external
+# health-check/rollback launcher is active. The descriptor must include
+# readiness; POST remains the final authority on idle state and races.
 UPGRADE_CAPABILITY = "remote-upgrade"
 UPGRADE_API_PATH = "/api/node/upgrade"
 

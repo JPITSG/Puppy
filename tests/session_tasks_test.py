@@ -833,24 +833,6 @@ async def main():
         assert 'session-tasks' in app['puppy_capabilities']
         assert '/api/sessions/{sid}/tasks/{tid}/{action}' in {r.resource.canonical for r in app.router.routes()}
         await toggle_api(app, parent, aid)
-    # Offline rollback retains all session ids, messages and private files,
-    # and archives the per-session Tasks toggle with the grouping it removes.
-    keep = db.create_session('Toggle kept', 'codex', str(ROOT), '', '', '#e0784f', 'workspace-write')
-    await tasks.set_enabled(keep, False)
-    await tasks.set_digest(parent, True)
-    before = {s['id']: (s['cwd'], db.get_events(s['id'])) for s in db.list_sessions(True)}
-    with patch('socket.create_connection', side_effect=OSError('offline')):
-        archive = tasks.detach_for_rollback()
-    assert archive.stat().st_mode & 0o777 == 0o600
-    archived = json.loads(archive.read_text())
-    assert archived['tasks'] and archived['tasks_disabled'] == [keep] and not tasks.records()
-    assert archived['tasks_digest'] == [parent]
-    assert db.meta_get(tasks.DISABLED_PREFIX + str(keep)) is None and not tasks.disabled_ids()
-    assert db.meta_get(tasks.DIGEST_PREFIX + str(parent)) is None and not tasks.digest_ids()
-    # Archives already folded into Main are ordinary transcript rows and stay.
-    assert tasks.folded(parent, 1) and tasks.folded(parent, 1)[0]['subtype'] == tasks.ARCHIVE_SUBTYPE
-    assert before == {s['id']: (s['cwd'], db.get_events(s['id'])) for s in db.list_sessions(True)}
-    print('PASS: rollback preserves conversations and working copies')
     print('PASS: concurrent independent queues/copies, dirty baselines, context/settings, idempotency, review tokens, compatible apply, atomic conflict rejection, busy ownership, lifecycle and both runtimes')
 
 

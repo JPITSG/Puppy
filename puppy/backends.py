@@ -791,14 +791,16 @@ def reset_auto_upgrade_schedule() -> None:
 
 def _normalize_peer(data: dict) -> dict:
     try:
-        api_protocol = int(data.get("protocol", protocol.LEGACY_PROTOCOL))
-    except (TypeError, ValueError):
+        api_protocol = data["protocol"]
+        if type(api_protocol) is not int:
+            raise ValueError("backend returned an invalid protocol")
+    except (KeyError, TypeError, ValueError):
         raise ValueError("backend returned an invalid protocol")
     if api_protocol not in protocol.SUPPORTED_BACKEND_PROTOCOLS:
         supported = ", ".join(str(v) for v in protocol.SUPPORTED_BACKEND_PROTOCOLS)
         raise ValueError(f"backend protocol {api_protocol} is unsupported (supported: {supported})")
-    role = str(data.get("role") or ("legacy-full" if api_protocol == 0 else "")).strip()
-    if api_protocol > 0 and role not in ("backend", "full"):
+    role = str(data.get("role") or "").strip()
+    if role not in ("backend", "full"):
         raise ValueError(f"remote role '{role or '?'}' is not a Puppy backend")
     caps = data.get("capabilities") or []
     if not isinstance(caps, list) or not all(isinstance(v, str) for v in caps):
@@ -1665,56 +1667,6 @@ async def h_upgrade(request: web.Request):
         return web.json_response(exc.payload(), status=exc.status)
 
 
-async def _legacy_auto_readiness(backend: dict) -> dict:
-    """Conservatively infer idleness for the first upgrade of older nodes.
-
-    Their POST remains authoritative for terminal activity and last-moment
-    races. This check prevents artifact work while a reported session is busy.
-    """
-    payload = None
-    last_error = "backend is unavailable"
-    for index, url in enumerate(_ordered_backend_urls(backend)):
-        target = url.rstrip("/") + "/api/sessions"
-        try:
-            async with client().get(
-                    target, headers={"X-Puppy-Token": backend["token"]},
-                    timeout=aiohttp.ClientTimeout(
-                        total=5, connect=FAILOVER_CONNECT_TIMEOUT,
-                        sock_connect=FAILOVER_CONNECT_TIMEOUT), allow_redirects=False,
-                    ssl=_ssl_pin(backend["tls_fingerprint"])) as response:
-                try:
-                    payload = await response.json()
-                except Exception:
-                    payload = None
-                if response.status == 200 and isinstance(payload, dict) and \
-                        isinstance(payload.get("sessions"), list):
-                    _publish_active_url(backend, url)
-                    break
-                return {
-                    "ready": False, "state": "checking",
-                    "reason": "could not verify legacy backend session activity",
-                }
-        except Exception as exc:
-            last_error = _connection_error(exc)
-            if index + 1 < len(_backend_urls(backend)):
-                continue
-    if not isinstance(payload, dict) or not isinstance(payload.get("sessions"), list):
-        return {
-            "ready": False, "state": "checking",
-            "reason": "could not verify legacy backend idleness: {}".format(
-                last_error),
-        }
-    busy = [item for item in payload["sessions"] if not isinstance(item, dict) or
-            item.get("status") != "idle"]
-    return {
-        "ready": not busy,
-        "state": "ready" if not busy else "busy",
-        "reason": ("legacy backend reports no active sessions" if not busy else
-                   "legacy backend has an active session"),
-        "legacy": True,
-    }
-
-
 def _auto_note_error(backend: dict, message: str) -> None:
     bid = int(backend["id"])
     if _auto_upgrade_last_errors.get(bid) != message:
@@ -1807,7 +1759,8 @@ async def auto_upgrade_cycle(app: web.Application) -> None:
             continue
         readiness = descriptor.get("readiness")
         if not isinstance(readiness, dict):
-            readiness = await _legacy_auto_readiness(backend)
+            readiness = {"ready": False, "state": "blocked",
+                         "reason": "backend returned invalid upgrade readiness"}
         if readiness.get("ready") is not True:
             state = readiness.get("state")
             delay = AUTO_UPGRADE_INTERVAL if state in ("busy", "upgrading", "checking") \

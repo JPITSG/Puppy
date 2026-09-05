@@ -32,10 +32,6 @@ MAX_REQUEST = 64 * 1024
 MAX_RESPONSE = 20 * 1024 * 1024
 REQUEST_TIMEOUT = 65.0
 
-# Backwards-compatible name for callers/tests that need to identify Puppy's
-# shipped default. Runtime turns read the editable setting below instead.
-AGENT_SELECTION_POLICY = config.DEFAULT_BROWSER_SYSTEM_PROMPT
-
 TOOL_INSTRUCTIONS = (
     "Independent Puppy-managed browsers are available on this session's backend. "
     "Browser IDs are four uppercase A-Z/0-9 characters. If the user names an "
@@ -344,7 +340,7 @@ TOOLS = [
         required=["download_ref"], read_only=True),
     _tool(
         "wait",
-        "Compatibility fixed delay. Prefer wait_for for observable page conditions.",
+        "Pause for a bounded fixed delay. Prefer wait_for for observable page conditions.",
         {"milliseconds": {"type": "integer", "minimum": 0, "maximum": 10000,
                           "default": 1000}}, read_only=True),
     _tool(
@@ -484,7 +480,7 @@ async def _dispatch(request: dict) -> dict:
     if not browser.enabled():
         raise BrowserAgentError("the browser is disabled on this backend")
     hub = runner.hub(session_id)
-    if not hub.browser_turn_active(turn_id):
+    if not hub.tool_turn_active(turn_id):
         raise BrowserAgentError("this browser tool belongs to a turn that is no longer running")
     arguments = dict(params)
     requested_id = arguments.pop("browser_id", None)

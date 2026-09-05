@@ -73,7 +73,7 @@ def _parser() -> argparse.ArgumentParser:
     tls_modes.add_argument("--auto-tls", dest="tls_mode", action="store_const", const="auto",
                            help="create and persist a self-signed identity for pinned HTTPS")
     tls_modes.add_argument("--disable-tls", dest="tls_mode", action="store_const",
-                           const="disabled", help="serve cleartext HTTP (legacy mode)")
+                           const="disabled", help="serve cleartext HTTP")
     parser.set_defaults(tls_mode=None)
     parser.add_argument("--tls-cert", help="persist a custom PEM certificate chain for HTTPS")
     parser.add_argument("--tls-key", help="persist its PEM private key")

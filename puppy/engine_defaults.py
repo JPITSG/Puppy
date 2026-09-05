@@ -32,7 +32,7 @@ def validate(driver, choices: dict) -> dict:
 
 def for_session(driver, supplied: dict) -> dict:
     # Omission uses the saved choice; an explicit empty model/effort still
-    # means engine default, including requests from older consoles.
+    # means engine default.
     choices = values(driver)
     choices.update({key: supplied[key] for key in choices if key in supplied})
     return validate(driver, choices)

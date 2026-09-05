@@ -591,6 +591,10 @@ def _validate_database(path: Path):
             db.require_current_schema(connection)
         except db.SchemaMismatchError as exc:
             raise SnapshotError("snapshot database schema is not current") from exc
+        try:
+            runner.validate_persisted_queues(connection)
+        except (ValueError, TypeError) as exc:
+            raise SnapshotError("snapshot session queue state is not current") from exc
         from puppy import session_links
         try:
             session_links.validate_persisted(connection)
@@ -783,7 +787,7 @@ def _prepare_mirrors(candidate_db: Path, temporary: Path,
 
     Mirrors and three-way bases are caches, so archive bytes never seed them.
     The reset marker makes the first capable controller pull from the
-    authoritative workspace and makes an older controller fail closed.
+    authoritative workspace before acknowledging the reset.
     """
     prepared_mirrors = temporary / "prepared-mirrors"
     prepared_base = temporary / "prepared-workspace-base"

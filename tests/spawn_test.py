@@ -149,15 +149,12 @@ class FakeDriver(Driver):
                 "msg": message}
 
 
-def request_for(mode, cwd, timeout_s=60, idle_timeout_s=60,
-                max_runtime_s=None):
-    max_runtime_s = timeout_s if max_runtime_s is None else max_runtime_s
+def request_for(mode, cwd, max_runtime_s=60, idle_timeout_s=60):
     return {"engine": "fake", "model": mode, "effort": "",
             "permission_mode": "standard",
             "prompt": "Answer the question.", "cwd": cwd,
             "idle_timeout_s": idle_timeout_s,
-            "max_runtime_s": max_runtime_s,
-            "timeout_s": max_runtime_s}
+            "max_runtime_s": max_runtime_s}
 
 
 async def wait_done(job, seconds=30.0):
@@ -291,9 +288,8 @@ async def test_validation(cwd):
         spawn_exec.DEFAULT_IDLE_TIMEOUT_S == 600
     assert prepared["max_runtime_s"] == \
         spawn_exec.DEFAULT_MAX_RUNTIME_S == 7200
-    assert prepared["timeout_s"] == prepared["max_runtime_s"]
-    legacy = await spawn_exec.prepare_request(dict(good, timeout_s=300))
-    assert legacy["max_runtime_s"] == legacy["timeout_s"] == 300
+    assert "timeout_s" not in prepared
+    await refused(dict(good, timeout_s=300), "timeout_s is unsupported")
     await refused({}, "requires an engine")
     await refused(dict(good, engine="nope"), "unknown engine")
     await refused(dict(good, effort="ultra"), "does not offer effort")
@@ -302,15 +298,15 @@ async def test_validation(cwd):
     await refused(dict(good, prompt="  "), "non-empty prompt")
     await refused(dict(good, cwd=os.path.join(cwd, "missing")),
                   "does not exist")
-    await refused(dict(good, timeout_s=1), "timeout_s must be between")
-    await refused(dict(good, timeout_s="soon"), "whole number")
+    await refused(dict(good, max_runtime_s=1), "max_runtime_s must be between")
+    await refused(dict(good, max_runtime_s="soon"), "whole number")
     await refused(dict(good, idle_timeout_s=1),
                   "idle_timeout_s must be between")
     await refused(dict(good, max_runtime_s=7201),
                   "max_runtime_s must be between")
     await refused(dict(good, max_runtime_s=300.5), "whole number")
     await refused(dict(good, timeout_s=300, max_runtime_s=600),
-                  "must match")
+                  "timeout_s is unsupported")
     try:
         spawn_exec._validated_limit_update({"jobs": ["0123abcd"]})
     except spawn_exec.SpawnError as exc:
@@ -856,8 +852,7 @@ async def test_relay_start(cwd):
     remote_bid = spawn_exec.resolve_target("build-node.lan")["bid"]
     backends._mark_backend_online(remote_bid)
     capable = [protocol.SPAWN_EXEC_CAPABILITY, protocol.SPAWN_LIMITS_CAPABILITY,
-               protocol.SPAWN_CLIENT_IDS_CAPABILITY]
-    legacy = [protocol.SPAWN_EXEC_CAPABILITY, protocol.SPAWN_LIMITS_CAPABILITY]
+               protocol.SPAWN_CLIENT_IDS_CAPABILITY, protocol.SPAWN_OWNER_LEASE_CAPABILITY]
     set_remote_capabilities(remote_bid, capable)
     sid = db.create_session("relay test", "fake", cwd, "", "", "blue",
                             "standard")
@@ -1080,28 +1075,22 @@ async def test_relay_start(cwd):
         set_remote_capabilities(remote_bid, capable)
         behaviour["POST"] = lambda path, body: running_job(body["job_id"])
         await spawn_exec.start_for_turn(session, "turn-r", params)
-        assert "lease_s" not in calls[-1]["body"]
-        assert mgr.remote[calls[-1]["body"]["job_id"]]["lease"] is False
+        assert calls[-1]["body"]["lease_s"] == spawn_exec.REMOTE_LEASE_S
+        assert mgr.remote[calls[-1]["body"]["job_id"]]["lease"] is True
         mgr.remote.pop(calls[-1]["body"]["job_id"])
 
-        # a node too old for client ids answers with its own id: the handle
-        # follows that id, and an unanswered start there is an error
-        set_remote_capabilities(remote_bid, legacy)
-        behaviour["POST"] = lambda path, body: running_job("0ld0ld01")
-        started = await spawn_exec.start_for_turn(session, "turn-r", params)
-        assert "0ld0ld01" in started["text"]
-        assert "0ld0ld01" in mgr.remote and \
-            calls[-1]["body"]["job_id"] not in mgr.remote
-        mgr.remote.pop("0ld0ld01")
-        behaviour["POST"] = lambda path, body: unreached()
-        before = set(mgr.remote)
+        # A response cannot substitute its own job identity. Keep the issued
+        # handle so turn cleanup still owns the uncertain request.
+        behaviour["POST"] = lambda path, body: running_job("deadbeef")
         try:
             await spawn_exec.start_for_turn(session, "turn-r", params)
         except spawn_exec.SpawnError as exc:
-            assert exc.unreached
+            assert "unexpected" in str(exc)
         else:
-            raise AssertionError("legacy unanswered start reported tracked")
-        assert set(mgr.remote) == before
+            raise AssertionError("accepted a substituted remote job id")
+        issued = calls[-1]["body"]["job_id"]
+        assert issued in mgr.remote and "deadbeef" not in mgr.remote
+        mgr.remote.pop(issued)
     finally:
         spawn_exec._node_request = original_node_request
         set_remote_capabilities(remote_bid, capable)

@@ -21,11 +21,11 @@ import time
 
 from aiohttp import web
 
-from puppy import config, db, uploads, workspaces
+from puppy import db, uploads, workspaces
 
 PREFIX = "session_task."
-# Optional membership ledger, like session_fast_mode: an exact true marker
-# means disabled; absence means enabled. Existing records/shapes are unchanged.
+# Per-session Tasks preference: an exact true marker means disabled;
+# absence means enabled.
 DISABLED_PREFIX = "session_tasks_disabled."
 # Optional per-Main ledger for the per-turn digest of folded tasks: an exact
 # true marker means the digest is on; absence means off, the default.
@@ -784,9 +784,9 @@ async def create(parent_id, args):
             raise TaskError("This session already has 64 tasks")
         if runner._draining:
             raise TaskError("Puppy is shutting down")
-        # Older consoles omit these fields and keep Main's choices. A new
-        # console sends the choices captured when its dialog opened, so a
-        # later edit to Main cannot change the task the user is preparing.
+        # Omitted choices inherit Main. The console sends the choices captured
+        # when its dialog opened, so a later edit to Main cannot change the
+        # task the user is preparing.
         engine = args.get("engine", parent["engine"])
         choices = {field: parent[field] for field in ("model", "effort", "permission_mode")}
         if "engine" in args or any(field in args for field in choices):
@@ -995,81 +995,3 @@ def register(app):
     app.router.add_post(r"/api/sessions/{sid:\d+}/tasks", h_tasks)
     app.router.add_post(r"/api/sessions/{sid:\d+}/tasks/{tid:\d+}/{action:review|apply|remove}", h_tasks)
     app.cleanup_ctx.append(lifecycle)
-
-
-def detach_for_rollback():
-    """Explicit offline maintenance only; never called during startup/restore.
-
-    Preserve every session and workspace, archive the grouping metadata, then
-    remove that feature-specific namespace before the older code is deployed.
-    """
-    import socket
-    from puppy import runner
-    if busy() or any(h.status == "running" or h.queue for h in runner._hubs.values()) or \
-            db.query_one("SELECT id FROM sessions WHERE status='running' LIMIT 1"):
-        raise TaskError("Stop task work and Puppy before preparing rollback")
-    for section in ("web", "backend"):
-        host = config.get(section + ".host", "127.0.0.1")
-        if host in ("0.0.0.0", "::"):
-            host = "127.0.0.1" if host == "0.0.0.0" else "::1"
-        try:
-            connection = socket.create_connection((host, int(config.get(section + ".port", 10888))), timeout=1)
-        except OSError:
-            continue
-        connection.close()
-        raise TaskError("Puppy's configured listener is still accepting connections; stop the node first")
-    validate_persisted(db.connect())
-    values = records()
-    disabled = sorted(disabled_ids())
-    digest = sorted(digest_ids())
-    folder = Path(config.DATA_DIR) / "rollback"
-    if folder.is_symlink():
-        raise TaskError("Rollback folder must not be a symlink")
-    folder.mkdir(mode=0o700, exist_ok=True)
-    import uuid
-    path = folder / ("session-tasks-" + uuid.uuid4().hex + ".json")
-    archive = {"format": 1, "tasks": [{"id": sid, "name": db.get_session(sid)["name"], "record": value}
-                                     for sid, value in values.items()],
-               "tasks_disabled": disabled, "tasks_digest": digest}
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w") as output:
-        json.dump(archive, output, ensure_ascii=False, indent=2)
-        output.flush()
-        os.fsync(output.fileno())
-    folder_fd = os.open(str(folder), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        os.fsync(folder_fd)
-    finally:
-        os.close(folder_fd)
-    # One transaction; no transcript, queue, native id or workspace is removed.
-    conn = db.connect()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        for sid, value in values.items():
-            parent = db.get_session(value["parent"])
-            child = db.get_session(sid)
-            conn.execute("UPDATE sessions SET name=? WHERE id=?",
-                         ((parent["name"] or "Main") + " / " + child["name"], sid))
-            conn.execute("DELETE FROM meta WHERE key=?", (PREFIX + str(sid),))
-        for sid in disabled:
-            conn.execute("DELETE FROM meta WHERE key=?", (DISABLED_PREFIX + str(sid),))
-        for sid in digest:
-            conn.execute("DELETE FROM meta WHERE key=?", (DIGEST_PREFIX + str(sid),))
-        conn.commit()
-    except BaseException:
-        conn.rollback()
-        raise
-    return path
-
-
-if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description="Offline session-task maintenance")
-    parser.add_argument("--detach-for-rollback", action="store_true", required=True,
-                        help="archive grouping and retain tasks as ordinary sessions; node must be stopped")
-    parser.parse_args()
-    config.load()
-    try:
-        print("Task grouping archived to " + str(detach_for_rollback()))
-    except TaskError as exc:
-        parser.exit(1, str(exc) + "\n")

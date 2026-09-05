@@ -2134,7 +2134,8 @@ async def exercise_upgrade_readiness(upgrade_module, runner_module,
         spawned = spawn_exec.SpawnJob({
             "engine": "codex", "model": "", "effort": "",
             "permission_mode": "", "prompt": "relayed work",
-            "cwd": str(temporary)}, ("remote",))
+            "cwd": str(temporary), "idle_timeout_s": 600,
+            "max_runtime_s": 7200}, ("remote",))
         spawned.task = asyncio.get_event_loop().create_future()
         spawn_exec.manager().jobs[spawned.id] = spawned
         try:
@@ -2308,7 +2309,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
             assert response.status == 200
             ping = await response.json()
         assert ping["role"] == "backend"
-        assert ping["protocol"] == 1
+        assert ping["protocol"] == protocol.API_PROTOCOL
         assert ping["version"] == expected_version
         assert "sessions" in ping["capabilities"]
         assert "temporary-workspaces" in ping["capabilities"]
@@ -2730,6 +2731,13 @@ async def exercise_node(url: str, token: str, expected_version: str,
                 break
         assert pin_notice["sessions"][0]["pinned"] is True
         await pin_updates.close()
+        for missing in ("expected_order", "expected_pinned"):
+            body = {"order": [scratch["id"]], "expected_order": [scratch["id"]],
+                    "expected_pinned": [scratch["id"]]}
+            del body[missing]
+            async with http.post(url + "/api/sessions/reorder", headers=good,
+                                 ssl=pinned, json=body) as response:
+                assert response.status == 400, await response.text()
         async with http.post(url + "/api/sessions/reorder", headers=good,
                              ssl=pinned, json={
                                  "order": [scratch["id"], scratch["id"]],
@@ -3110,6 +3118,21 @@ async def reject_bad_signature(url: str, token: str, fingerprint: str = "") -> N
             assert response.status == 403, await response.text()
 
 
+def exercise_current_peer_contract(backends) -> None:
+    current = {"protocol": protocol.API_PROTOCOL, "role": "backend", "capabilities": []}
+    assert backends._normalize_peer(current)["protocol"] == protocol.API_PROTOCOL
+    for invalid in ({"role": "backend"}, {**current, "protocol": None},
+                    {**current, "protocol": str(protocol.API_PROTOCOL)},
+                    {**current, "protocol": True}, {**current, "protocol": 0},
+                    {**current, "protocol": 1}, {**current, "role": "legacy-full"}):
+        try:
+            backends._normalize_peer(invalid)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("accepted an outdated or malformed peer")
+
+
 async def exercise_controller(url: str, token: str, backend_url: str,
                               backend_token: str, backend_fingerprint: str,
                               old_version: str, backend_state_dir: Path) -> None:
@@ -3119,7 +3142,7 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         async with http.get(url + "/api/ping", headers=headers) as response:
             full_ping = await response.json()
             assert response.status == 200
-        assert full_ping["role"] == "full" and full_ping["protocol"] == 1
+        assert full_ping["role"] == "full" and full_ping["protocol"] == protocol.API_PROTOCOL
         assert "terminal" in full_ping["capabilities"]
         assert "terminal-instances" in full_ping["capabilities"]
         assert "terminal-handoff" in full_ping["capabilities"]
@@ -3177,7 +3200,7 @@ async def exercise_controller(url: str, token: str, backend_url: str,
             added = await response.json()
             assert response.status == 200, added
         assert added["remote"]["role"] == "backend"
-        assert added["remote"]["protocol"] == 1
+        assert added["remote"]["protocol"] == protocol.API_PROTOCOL
         assert added["backend"]["id"] == added["id"]
         assert added["backend"]["availability"]["state"] == "online"
         assert "token" not in added["backend"]
@@ -3188,7 +3211,7 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert len(listed) == 1, listed
         stored = listed[0]
         assert stored["name"] == "backend-test-node"
-        assert stored["protocol"] == 1
+        assert stored["protocol"] == protocol.API_PROTOCOL
         assert stored["role"] == "backend"
         assert "sessions" in stored["capabilities"]
         assert "temporary-workspaces" in stored["capabilities"]
@@ -3597,21 +3620,9 @@ async def exercise_controller(url: str, token: str, backend_url: str,
                 break
         await terminal_updates.close()
 
-        # Keep the anonymous create-on-connect socket for older controllers.
-        terminal = await http.ws_connect(
-            url + "/api/ws/term?cmd=/bin/bash&cols=80&rows=24", headers=headers)
-        await terminal.send_bytes(b"echo PUPPY_BACKEND_ROUTE_OK\nexit\n")
-        output = b""
-        deadline = asyncio.get_event_loop().time() + 5
-        while b"PUPPY_BACKEND_ROUTE_OK" not in output and \
-                asyncio.get_event_loop().time() < deadline:
-            message = await terminal.receive(timeout=2)
-            if message.type == aiohttp.WSMsgType.BINARY:
-                output += message.data
-            elif message.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                break
-        assert b"PUPPY_BACKEND_ROUTE_OK" in output, output[-200:]
-        await terminal.close()
+        for retired in ("/api/ws/term", "/api/ws/browser", "/api/notify/fire"):
+            async with http.get(url + retired, headers=headers) as response:
+                assert response.status == 404, retired
 
         # Enabling the controller-owned policy wakes its background worker.
         # The node's live readiness remains authoritative, then the exact same
@@ -4101,30 +4112,6 @@ async def check_notify_placeholders() -> None:
         notify.active, notify._fire = original_active, original_fire
 
 
-async def exercise_interrupted_notify_report(web_module) -> None:
-    """A client cannot route an interrupted remote outcome around the runner
-    guard and into the controller's report endpoint."""
-    class Request:
-        async def json(self):
-            return {"bid": 7, "sid": 11,
-                    "info": {"status": "interrupted", "session": "stopped"}}
-
-    touched = []
-    original_active = web_module.notify.active
-    original_backend = web_module.backends.get_backend
-    try:
-        web_module.notify.active = lambda: touched.append("active") or True
-        web_module.backends.get_backend = \
-            lambda _bid: touched.append("backend") or {"name": "remote"}
-        response = await web_module.h_notify_fire(Request())
-        assert response.status == 200
-        assert json.loads(response.text) == {"ok": True, "fired": False}
-        assert touched == [], touched
-    finally:
-        web_module.notify.active = original_active
-        web_module.backends.get_backend = original_backend
-
-
 def exercise_auth_evidence(root, db) -> None:
     """Local login verbs are optimistic - codex answers "Logged in" from its
     file while the refresh token behind it is revoked. Hard evidence from the
@@ -4289,6 +4276,13 @@ def exercise_session_show_meta(runner, db) -> None:
 async def exercise_queue_persistence(runner, db) -> None:
     """Queued prompts belong to the user: they survive a kill and a restart as
     held items, come back only on an explicit re-send, and never run twice."""
+    def assert_raises(kind, call):
+        try:
+            call()
+        except kind:
+            return
+        raise AssertionError("expected " + kind.__name__)
+
     sid = db.create_session("queue survival", "claude", "/tmp", "", "", "blue", "auto")
     try:
         h = runner.hub(sid)
@@ -4336,32 +4330,44 @@ async def exercise_queue_persistence(runner, db) -> None:
         assert h.discard_held(0, "third") == {"ok": True}
         assert db.meta_get("session_queue.{}".format(sid)) is None
 
-        # Restore accepts only the current item shape: engine rows carry every
-        # target default and tagged config rows come back held with recomputed
-        # cancel identities. Old rows are rejected rather than converted.
+        # Restart preserves current item identities and refuses invalid state
+        # before rewriting any queued work.
         from puppy.drivers import get_driver
-        eng_fields = {
-            "engine": "codex", "model": "gpt-x", "effort": "",
-            "permission_mode": get_driver("codex").default_permission(),
-            "fast_mode": "off",
-        }
-        old_eng_fields = {"engine": "codex", "model": "gpt-x", "effort": ""}
-        tagged_fields = {"model": "claude-x", "engine": "claude"}
-        db.meta_set("session_queue.{}".format(sid), {
-            "queue": [{"kind": "engine", "fields": dict(eng_fields), "key": "stale"}],
-            "held": [{"kind": "config", "fields": dict(tagged_fields), "key": "stale"},
-                     {"kind": "engine", "fields": old_eng_fields, "key": "stale"},
-                     {"kind": "config", "fields": {"model": "untagged"},
-                      "key": "stale"}],
-        })
+        eng_fields = {"engine": "codex", "model": "gpt-x", "effort": "",
+                      "permission_mode": get_driver("codex").default_permission(),
+                      "fast_mode": "off"}
+        fields = {"model": "claude-x", "engine": "claude"}
+        queued = {"kind": "engine", "fields": eng_fields,
+                  "key": runner._queued_engine_key(eng_fields)}
+        held = {"kind": "config", "fields": fields,
+                "key": runner._queued_config_key(fields)}
+        current = {"queue": [queued, "paused prompt"], "held": [held], "paused": [1]}
         runner.drop_hub(sid)
+        db.meta_set("session_queue.{}".format(sid), current)
+        runner.validate_persisted_queues(db.connect())
         h = runner.hub(sid)
-        assert [item["fields"] for item in h.held] == [eng_fields, tagged_fields]
-        assert h.held[0]["key"] == runner._queued_engine_key(eng_fields)
-        assert h.held[1]["key"] == runner._queued_config_key(tagged_fields)
-        assert h.discard_held(1, h.held[1]["key"]) == {"ok": True}
-        assert h.discard_held(0, h.held[0]["key"]) == {"ok": True}
-        assert db.meta_get("session_queue.{}".format(sid)) is None
+        assert h.held == [queued, "paused prompt", held] and not h.queue
+        assert not h.paused_queue
+        assert db.meta_get("session_queue.{}".format(sid)) == {
+            "queue": [], "held": h.held, "paused": []}
+        for invalid in (
+                {"queue": [queued], "held": []},
+                {"queue": [dict(queued, key="stale")], "held": [], "paused": []},
+                {"queue": ["keep", {"kind": "config", "fields": {"model": "old"}}],
+                 "held": [], "paused": []},
+                {"queue": ["keep"], "held": [], "paused": [2]},
+                {"queue": [queued], "held": [], "paused": [0]},
+                {"queue": [], "held": [], "paused": []}):
+            runner.drop_hub(sid)
+            db.meta_set("session_queue.{}".format(sid), invalid)
+            before = db.query_one("SELECT value FROM meta WHERE key=?",
+                                 ("session_queue.{}".format(sid),))["value"]
+            for operation in (lambda: runner.hub(sid),
+                              lambda: runner.validate_persisted_queues(db.connect())):
+                assert_raises(ValueError, operation)
+            assert db.query_one("SELECT value FROM meta WHERE key=?",
+                                ("session_queue.{}".format(sid),))["value"] == before
+        db.meta_del("session_queue.{}".format(sid))
     finally:
         runner.drop_hub(sid)
         db.delete_session(sid)
@@ -4548,9 +4554,10 @@ async def exercise_session_order(runner, db) -> None:
         assert pinned_ids() == [c, b]
         assert_canonical()
 
-        # Even an old or hostile client asking to cross the boundary can only
+        # A client asking to cross the boundary can only
         # reorder within the two authoritative cohorts.
-        db.reorder_sessions([a, b, c])
+        db.reorder_sessions([a, b, c], expected_order=order(),
+                            expected_pinned=pinned_ids())
         assert order() == [b, c, a]
         db.reorder_sessions([c, b, a], expected_order=[b, c, a],
                             expected_pinned=[b, c])
@@ -4582,9 +4589,11 @@ async def exercise_session_order(runner, db) -> None:
         # Syntax failures are 400 at the HTTP layer; stale membership, order,
         # cohort, and pin expectations are conflicts and never write.
         assert_raises(ValueError,
-                      lambda: db.reorder_sessions([b, a, a, c, d, e]))
+                      lambda: db.reorder_sessions([b, a, a, c, d, e],
+                          expected_order=order(), expected_pinned=pinned_ids()))
         assert_raises(db.SessionOrderConflict,
-                      lambda: db.reorder_sessions([b, a, c, d]))
+                      lambda: db.reorder_sessions([b, a, c, d],
+                          expected_order=order(), expected_pinned=pinned_ids()))
         assert_raises(db.SessionOrderConflict, lambda: db.reorder_sessions(
             [b, a, c, d, e], expected_order=[e, b, a, c, d],
             expected_pinned=[b, a, c, d]))
@@ -5596,7 +5605,6 @@ async def main() -> None:
         from puppy.web import build_app
 
         await check_notify_placeholders()
-        await exercise_interrupted_notify_report(puppy_web)
 
         config.load()
         exercise_opencode_driver()
@@ -5609,6 +5617,7 @@ async def main() -> None:
             temp_root / "codex-app-server", runner, db)
         await exercise_claude_background_turn(
             temp_root / "claude-background", runner, db, config)
+        exercise_current_peer_contract(controller_backends)
         exercise_auth_hardening(auth)
         exercise_activity_blocks(runner.SessionHub)
         exercise_health_retry_bound(controller_backends)

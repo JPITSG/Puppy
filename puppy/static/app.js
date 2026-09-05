@@ -1082,12 +1082,9 @@ const QUEUE_ROWS = 5;     // queued messages listed before collapsing to "+N mor
    before the top of the transcript that countdown begins. */
 const LOAD_OLDER_DELAY = 550;
 const LOAD_OLDER_MARGIN = 140;
-/* Jump-to-message reach: a target within this many Load-older pages is paged
-   to, keeping the transcript contiguous; anything further away swaps in a
-   window of history around it. Nodes without the forward cursor can only
-   page back, so they get a generous ceiling instead of a window. */
+/* Nearby jump targets extend the live tail; farther targets load a bounded
+   history window. */
 const JUMP_PAGE_REACH = 2;
-const JUMP_LEGACY_PAGES = 60;
 const JUMP_CONTEXT_BEFORE = 60;
 const JUMP_WINDOW = 160;
 
@@ -1204,13 +1201,6 @@ function readDraftJournal(tabId) {
         submitted: value.submitted === true };
   } catch (_) { /* invalid or incomplete journal */ }
   return null;
-}
-
-/* Nodes without shared-draft support use an intentionally local plain string.
-   It is a separate live protocol mode, not another journal format. */
-function readLocalDraft(tabId) {
-  const raw = lsGet("puppy.draft." + tabId);
-  return raw === null ? null : { text: raw, baseRevision: 0, submitted: false };
 }
 
 function writeDraftJournal(tabId, text, baseRevision, submitted = false) {
@@ -2020,9 +2010,8 @@ function engineDefaultLabels(options) {
 }
 
 function initialEngineConfig(engine) {
-  if (engine && engine.session_defaults) return { ...engine.session_defaults };
-  return { permission_mode: (engine && engine.default_permission) || "",
-    model: (((engine && engine.model_options) || [])[0] || {}).value || "", effort: "" };
+  if (!engine || !engine.session_defaults) throw new Error("Backend returned invalid engine defaults");
+  return { ...engine.session_defaults };
 }
 
 /* One engine card for every picker (New session, New task, Switch engine): a
@@ -2662,30 +2651,17 @@ function ingestOneSessionActivity(bid, session, serverTime, receivedAt) {
   const key = sessionActivityKey(bid, session.id);
   if (session.status !== "running") {
     if (sessionActivityAnchors.has(key)) {
-      const startedAt = sessionActivityAnchors.get(key);
       sessionActivityAnchors.delete(key);
-      if (session.completion_status !== "interrupted")
-        reportRemoteCompletion(bid, session, startedAt, receivedAt);
     }
     return;
   }
 
-  const wasRunning = sessionActivityAnchors.has(key);
   const activeSince = Number(session.active_since);
   const serverNow = Number(serverTime);
   let candidate = null;
   if (Number.isFinite(activeSince) && activeSince > 0 &&
       Number.isFinite(serverNow) && serverNow >= activeSince) {
     candidate = receivedAt - (serverNow - activeSince) * 1000;
-  } else if (Number.isFinite(activeSince) && activeSince > 0 &&
-             !sessionActivityAnchors.has(key)) {
-    /* Compatibility with an additive implementation that supplies the start
-       but not its server clock. This can be skewed, so use it only initially. */
-    candidate = activeSince * 1000;
-  } else if (!sessionActivityAnchors.has(key)) {
-    /* Older backends have no timing fields. Start at first observation; the
-       status remains useful even though the elapsed value is approximate. */
-    candidate = receivedAt;
   }
 
   if (candidate !== null) {
@@ -2707,28 +2683,6 @@ function ingestSessionActivity(bid, sessions, serverTime) {
   for (const key of sessionActivityAnchors.keys()) {
     if (key.startsWith(prefix) && !seen.has(key)) sessionActivityAnchors.delete(key);
   }
-}
-
-/* Older remote nodes need the console-report fallback. Current nodes publish
-   an authoritative durable completion cursor that the controller consumes
-   itself, so browser visibility and browser-computed timing play no role. */
-function reportRemoteCompletion(bid, session, startedAt, now) {
-  if (!bid || !state.notify.configured || !state.notify.enabled) return;
-  const backend = (state.backends || []).find(
-    item => Number(item.id) === Number(bid));
-  if (backend && Array.isArray(backend.capabilities) &&
-      backend.capabilities.includes("completion-events")) return;
-  api(0, "notify/fire", { method: "POST", body: {
-    bid, sid: session.id,
-    info: {
-      session: session.name || `session ${session.id}`,
-      engine: session.engine || "",
-      model: session.model || session.last_model || "",
-      status: "done",
-      duration: String(Math.max(0, Math.round((now - Number(startedAt || now)) / 1000))),
-      cwd: session.cwd || "",
-    },
-  } }).catch(() => { /* the next completion tries again */ });
 }
 
 function reconcileRemoteState() {
@@ -2760,7 +2714,7 @@ function reconcileRemoteState() {
   let becameOnline = false;
   for (const backend of state.backends) {
     const health = controllerBackendHealth(backend);
-    if (!health) continue; // compatibility with controllers predating this field
+    if (!health) { state.remoteOk[backend.id] = false; continue; }
     const bid = Number(backend.id);
     if (!backendSupportsStateStream(backend)) state.stateStreamReady[bid] = false;
     const previous = state.remoteOk[bid];
@@ -2882,15 +2836,14 @@ function controllerBackendHealth(backend) {
   return health;
 }
 
-/* New controllers own reachability discovery. Older controllers have no
-   availability field, so retain the prior browser-probe behavior for them. */
+/* The controller owns reachability discovery for every backend. */
 function backendPoolable(backendOrBid) {
   if (!backendOrBid) return true;
   const backend = typeof backendOrBid === "object" ? backendOrBid :
     state.backends.find(item => Number(item.id) === Number(backendOrBid));
   if (!backend) return false;
   const health = controllerBackendHealth(backend);
-  return !health || health.state === "online";
+  return !!health && health.state === "online";
 }
 
 function backendConnectionAllowed(bid) {
@@ -3146,9 +3099,9 @@ function showAuth(mode, setupCodeRequired) {
   state.authed = false;
   stopRemotePolling();
   state.stateStreamReady[0] = false;
-  if (updatesLegacyRefreshTimer !== null) {
-    clearTimeout(updatesLegacyRefreshTimer);
-    updatesLegacyRefreshTimer = null;
+  if (updatesReconnectRefreshTimer !== null) {
+    clearTimeout(updatesReconnectRefreshTimer);
+    updatesReconnectRefreshTimer = null;
   }
   if (updatesWs) try { updatesWs.close(); } catch (error) {}
   setLocalConnection(false);
@@ -3202,7 +3155,7 @@ $("auth-form").addEventListener("submit", async (ev) => {
 let updatesWs = null;
 let updatesRetry = 800;
 let updatesReconnectTimer = null;
-let updatesLegacyRefreshTimer = null;
+let updatesReconnectRefreshTimer = null;
 let updatesConnectionSequence = 0;
 let updatesHasOpened = false;
 let localStateStreamTopics = new Set();
@@ -3276,9 +3229,9 @@ function noteLocalStateStreamTopic(message) {
   if (state.stateStreamReady[0] ||
       !required.every(topic => localStateStreamTopics.has(topic))) return;
   state.stateStreamReady[0] = true;
-  if (updatesLegacyRefreshTimer !== null) {
-    clearTimeout(updatesLegacyRefreshTimer);
-    updatesLegacyRefreshTimer = null;
+  if (updatesReconnectRefreshTimer !== null) {
+    clearTimeout(updatesReconnectRefreshTimer);
+    updatesReconnectRefreshTimer = null;
   }
   startRemotePolling();
 }
@@ -3545,9 +3498,9 @@ function connectUpdates() {
     updatesRetry = 800;
     setLocalConnection(true);
     if (reconnect) {
-      if (updatesLegacyRefreshTimer !== null) clearTimeout(updatesLegacyRefreshTimer);
-      updatesLegacyRefreshTimer = setTimeout(() => {
-        updatesLegacyRefreshTimer = null;
+      if (updatesReconnectRefreshTimer !== null) clearTimeout(updatesReconnectRefreshTimer);
+      updatesReconnectRefreshTimer = setTimeout(() => {
+        updatesReconnectRefreshTimer = null;
         if (!nodeStateStreamActive(0)) refreshAfterUpdatesReconnect(sequence, ws);
       }, 1500);
     }
@@ -3564,9 +3517,9 @@ function connectUpdates() {
     updatesWs = null;
     state.stateStreamReady[0] = false;
     localStateStreamTopics = new Set();
-    if (updatesLegacyRefreshTimer !== null) {
-      clearTimeout(updatesLegacyRefreshTimer);
-      updatesLegacyRefreshTimer = null;
+    if (updatesReconnectRefreshTimer !== null) {
+      clearTimeout(updatesReconnectRefreshTimer);
+      updatesReconnectRefreshTimer = null;
     }
     setLocalConnection(false);
     if (!state.authed) return;
@@ -3829,9 +3782,8 @@ async function pollRemoteBackend(backend, forceEngines = false, forceSessions = 
            completed a healthy request just after that deadline. */
         reconcileRemoteState();
       } else {
-        state.remoteOk[bid] = false; // older controller compatibility
-        state.remoteErrors[bid] = remoteStoppingMessage(bid) ||
-          failure.message || "Backend unavailable";
+        state.remoteOk[bid] = false;
+        state.remoteErrors[bid] = "Backend returned invalid availability";
       }
       return;
     }
@@ -3932,7 +3884,7 @@ async function pollRemotes(options = {}) {
   ]);
 }
 
-function legacyStatePollingNeeded() {
+function statePollingNeeded() {
   if (!nodeStateStreamActive(0)) return true;
   return state.backends.some(backend => backendConnectionAllowed(backend.id) &&
     (!backendSupportsStateStream(backend) || !nodeStateStreamActive(backend.id)));
@@ -3942,16 +3894,16 @@ function startRemotePolling() {
   const generation = ++remotePollingGeneration;
   if (remotePollTimer !== null) clearTimeout(remotePollTimer);
   remotePollTimer = null;
-  if (!state.authed || !legacyStatePollingNeeded()) return;
+  if (!state.authed || !statePollingNeeded()) return;
   const tick = async () => {
     remotePollTimer = null;
     if (!state.authed || generation !== remotePollingGeneration ||
-        !legacyStatePollingNeeded()) return;
+        !statePollingNeeded()) return;
     try { await pollRemotes({ scheduled: true }); }
     catch (error) { console.warn("remote poll failed", error); }
     finally {
       if (state.authed && generation === remotePollingGeneration &&
-          legacyStatePollingNeeded())
+          statePollingNeeded())
         remotePollTimer = setTimeout(tick, remotePollingTickMilliseconds());
     }
   };
@@ -4132,8 +4084,7 @@ async function enableAddedBackendBrowser(added) {
   if (!bid) return;
   const name = String((added.remote && added.remote.name) || `backend ${bid}`);
   const capabilities = (added.remote && added.remote.capabilities) || [];
-  if (Number(added.remote && added.remote.protocol || 0) !== 0 &&
-      !(Array.isArray(capabilities) && capabilities.includes("browser"))) {
+  if (!(Array.isArray(capabilities) && capabilities.includes("browser"))) {
     toast(`${name}: This backend does not offer a managed browser`, "error", TOAST_LONG);
     return;
   }
@@ -4163,10 +4114,7 @@ function browserHandoffFor(bid) {
 function terminalInstancesFor(bid) {
   if (!bid) return true;
   const backend = state.backends.find(item => item.id === bid);
-  /* Unlike the long-established anonymous terminal socket, identified PTYs
-     are additive. A protocol-0 full node has no capability list, so treating
-     every feature as present would make an older node receive unknown POST and
-     ID-scoped WebSocket routes instead of the compatible legacy connection. */
+  /* Viewers attach to the node-owned registry by terminal ID. */
   return !!backend && Number(backend.protocol || 0) > 0 &&
     Array.isArray(backend.capabilities) &&
     backend.capabilities.includes("terminal-instances");
@@ -4193,8 +4141,8 @@ function terminalHandoffFor(bid) {
 async function openNewBrowser(bid, groupId = null) {
   bid = Number(bid) || 0;
   if (!browserInstancesFor(bid)) {
-    openBrowserTab(bid, "", groupId);
-    return;
+    toast("Managed browsers are unavailable on this backend", "error");
+    return null;
   }
   try {
     const result = await api(bid, "browser/instances", {
@@ -4419,8 +4367,7 @@ document.addEventListener("visibilitychange", () => {
 });
 
 function backendHasCapability(backend, capability) {
-  if (!backend || Number(backend.protocol || 0) === 0) return true; // legacy full nodes
-  return Array.isArray(backend.capabilities) && backend.capabilities.includes(capability);
+  return !!backend && Array.isArray(backend.capabilities) && backend.capabilities.includes(capability);
 }
 
 function backendSupportsShutdownNotice(backend) {
@@ -4429,8 +4376,7 @@ function backendSupportsShutdownNotice(backend) {
 }
 
 function backendSupportsStateStream(backend) {
-  /* Never infer this contract from protocol 0 or another additive feature.
-     A missing marker keeps the established HTTP polling fallback intact. */
+  /* Poll over HTTP until the negotiated stream is live. */
   return !!backend && Number(backend.protocol || 0) > 0 &&
     Array.isArray(backend.capabilities) &&
     backend.capabilities.includes("node-state-stream-v1");
@@ -4489,15 +4435,13 @@ function uploadPreviewUrl(bid, storedPath) {
 function backendSupportsScratch(bid) {
   if (!bid) return true;
   const backend = state.backends.find(b => b.id === bid);
-  // Protocol-0 nodes ignore unknown create fields, so they must not be offered
-  // a scratch choice that would silently become a normal directory session.
+  // Scratch lifecycle belongs to the node that advertises it.
   return !!backend && Number(backend.protocol || 0) > 0 &&
     Array.isArray(backend.capabilities) && backend.capabilities.includes("temporary-workspaces");
 }
 
-/* Remote-workspace roles are two independent additive capabilities: a node
-   can host linked sessions (mirror) and/or share its directories (provider).
-   Never inferred for protocol-0 nodes. */
+/* Independent workspace roles: host linked sessions (mirror) and/or share
+   project directories (provider). */
 function backendSupportsWorkspaceMirror(bid) {
   if (!bid) return true;
   const backend = state.backends.find(b => b.id === bid);
@@ -4529,16 +4473,12 @@ function refreshWorkspaceChips() {
 function backendSupportsUsageRefresh(bid) {
   if (!bid) return true;
   const backend = state.backends.find(b => b.id === bid);
-  /* Unlike the older execution surface, this is a new API route. Never infer
-     it for protocol-0 nodes: an explicit capability keeps Settings from
-     offering a control that the remote cannot accept. */
+  /* The node owns its usage-refresh setting. */
   return !!backend && Array.isArray(backend.capabilities) &&
     backend.capabilities.includes("engine-usage-refresh");
 }
 
-/* Forced version re-checks and engine CLI upgrades ship as one additive route
-   pair, so one capability gates both controls. Never inferred for older nodes:
-   a hidden control is better than a button their router would reject. */
+/* Forced version checks and engine CLI upgrades share one capability. */
 function backendSupportsEngineUpgrade(bid) {
   if (!bid) return true;
   const backend = state.backends.find(item => item.id === bid);
@@ -4621,9 +4561,7 @@ async function resetTimerSettings(targets) {
 function backendSupportsSystemPrompt(bid) {
   if (!bid) return true;
   const backend = state.backends.find(item => item.id === bid);
-  /* This route is new and node-owned. Never infer it for legacy peers: an
-     explicit capability prevents a prompt from appearing saved when that node
-     could not possibly use it. */
+  /* Prompt settings belong to the selected node. */
   return !!backend && Array.isArray(backend.capabilities) &&
     backend.capabilities.includes("system-prompt");
 }
@@ -4644,9 +4582,7 @@ function sessionToolLabel(value) {
   return tool ? tool.label : "Session tool";
 }
 
-/* The node answers POST /api/sessions/{sid}/ask and publishes side-question
-   readiness beside steering. Without the marker the control stays hidden -
-   an older node would 404 the route. */
+/* The node answers side questions and publishes readiness beside steering. */
 function backendSupportsSideQuestions(bid) {
   if (!bid) return true;
   const backend = state.backends.find(item => item.id === bid);
@@ -4657,14 +4593,13 @@ function backendSupportsSideQuestions(bid) {
 function backendSupportsSessionTasks(bid) {
   return nodeHasCapability(bid, "session-tasks");
 }
-/* The node folds a removed task's condensed conversation into Main and offers
-   the per-session digest toggle; older nodes only know the plain delete. */
+/* Fold removed task conversations into Main and control its task digest. */
 function backendSupportsTaskFold(bid) {
   return nodeHasCapability(bid, "session-task-fold");
 }
 
 /* The local node advertises its capabilities on /api/state; a paired backend
-   carries its own list. Legacy nodes advertise nothing and so support none. */
+   carries its own list. */
 function nodeHasCapability(bid, capability) {
   const capabilities = bid ?
     (state.backends.find(item => item.id === bid) || {}).capabilities : state.nodeCapabilities;
@@ -4724,9 +4659,7 @@ function backendSupportsFileUploads(bid) {
 function backendSupportsQueuePause(bid) {
   if (!bid) return true;
   const backend = state.backends.find(item => item.id === bid);
-  /* Pausing adds a session-socket operation. Do not infer it for legacy or
-     older remote nodes: their ordinary message queue remains fully usable,
-     just without a control they cannot honor. */
+  /* Pausing is a node-owned session-socket operation. */
   return !!backend && Array.isArray(backend.capabilities) &&
     backend.capabilities.includes("queue-pause");
 }
@@ -4745,15 +4678,6 @@ function backendSupportsQueueReorder(bid) {
     backend.capabilities.includes("queue-reorder");
 }
 
-function backendSupportsQueuedEngineSwitch(bid) {
-  if (!bid) return true;
-  const backend = state.backends.find(item => item.id === bid);
-  /* Older nodes refuse a mid-turn switch with 409, so the modal keeps its
-     original wording there and the 409 surfaces as the usual error toast. */
-  return !!backend && Array.isArray(backend.capabilities) &&
-    backend.capabilities.includes("queued-engine-switch");
-}
-
 function backendSupportsQueuedPermission(bid) {
   if (!bid) return true;
   const backend = state.backends.find(item => item.id === bid);
@@ -4761,21 +4685,10 @@ function backendSupportsQueuedPermission(bid) {
     backend.capabilities.includes("queued-permission-config");
 }
 
-function backendSupportsSessionDrafts(bid) {
-  if (!bid) return true;
-  const backend = state.backends.find(item => item.id === bid);
-  /* Draft persistence adds messages and snapshot state to the session socket.
-     Never send them to an older remote node based on protocol inference. */
-  return !!backend && Array.isArray(backend.capabilities) &&
-    backend.capabilities.includes("session-drafts");
-}
-
 function backendSupportsActiveSteering(bid) {
   if (!bid) return true;
   const backend = state.backends.find(item => item.id === bid);
-  /* This route was added after the first steering transport preview. Require
-     the hardened capability so an older remote never gets a control whose
-     turn token and idempotency contract it cannot honor. */
+  /* Steering requires the node's turn-token and idempotency contract. */
   return !!backend && Array.isArray(backend.capabilities) &&
     backend.capabilities.includes("active-turn-steering");
 }
@@ -4813,9 +4726,7 @@ function rememberUploadSettings(bid, value) {
 }
 
 function backendSupportsAutoUpgrade(backend) {
-  /* This policy is deliberately narrower than legacy execution inference:
-     only a headless node explicitly advertising the signed upgrade contract
-     may be armed for unattended replacement. */
+  /* Only launcher-managed headless nodes offer signed replacement. */
   return !!backend && backend.role === "backend" &&
     Array.isArray(backend.capabilities) && backend.capabilities.includes("remote-upgrade");
 }
@@ -5033,8 +4944,7 @@ const AGENT_NOTE_READERS = { "AGENTS.md": "Codex and OpenCode", "CLAUDE.md": "Cl
 function backendSupportsSessionPinning(bid) {
   if (!bid) return true;
   const backend = state.backends.find(b => b.id === bid);
-  /* This changes a node-owned ordering contract. Never infer it for a legacy
-     protocol-0 backend whose reorder handler could put pins below plain rows. */
+  /* Session pinning and ordering belong to the node. */
   return !!backend && Array.isArray(backend.capabilities) &&
     backend.capabilities.includes("session-pinning");
 }
@@ -5819,8 +5729,7 @@ function applyUsageRefreshPayload(bid, result) {
    login is a successful sign-in CHECK (the row now says what to fix); only an
    indeterminate probe means that action itself failed. Likewise, one stale
    catalog makes the model-list action a failure even though its last-known-good
-   choices remain usable. Older backends do not need a new response shape: the
-   engine payload already carries every diagnostic this summary needs. */
+   choices remain usable. The engine payload carries all these diagnostics. */
 function engineRefreshFeedback(nodeName, result, requestError = "") {
   const allActions = [
     "version checks", "sign-in checks", "latest-release checks", "model-list refresh",
@@ -6488,7 +6397,7 @@ function activateTab(id, groupId = null) {
 function ensureTabView(tab) {
   let view = state.views[tab.id];
   if (!view) {
-    if (tab.type === "session") view = backendSupportsSessionTasks(tab.bid) ? new SessionWorkspaceView(tab) : new SessionView(tab);
+    if (tab.type === "session") view = new SessionWorkspaceView(tab);
     else if (tab.type === "term") view = new TermView(tab);
     else if (tab.type === "browser") view = new BrowserView(tab);
     else if (tab.type === "search") view = new SearchView(tab);
@@ -7798,7 +7707,7 @@ function closeMenusToggling(anchor) {
    own node, plus explicit new-instance requests. Selecting a row inserts a
    plain-text mention ("@Browser A8AR", "@New terminal") whose meaning the
    engine-side MCP guidance defines, so the shortcut rides the ordinary prompt
-   string and survives engine switches and older nodes unchanged. */
+   string and survives engine switches unchanged. */
 const MENTION_QUERY_MAX = 24;
 
 /* The mention token under a collapsed caret: an "@" opening a word, with the
@@ -8983,10 +8892,10 @@ class Composer {
       .map(item => item.getAsFile()).filter(Boolean);
     if (!files.length) return;
     e.preventDefault();
-    this.uploadFiles(files, true);
+    this.uploadFiles(files);
   }
 
-  uploadFiles(files, fromClipboard = false) {
+  uploadFiles(files) {
     if (this.busy) return;
     const blocked = this.host.uploadsBlocked ? this.host.uploadsBlocked() : "";
     if (blocked) {
@@ -9000,10 +8909,8 @@ class Composer {
       return;
     }
     for (const file of files) {
-      const legacyImage = !arbitraryFiles && fromClipboard &&
-        ATTACHMENT_PREVIEW_TYPES.has(String(file.type || "").toLowerCase());
-      if (!arbitraryFiles && !legacyImage) {
-        toast("Upgrade this backend to attach arbitrary files", "error");
+      if (!arbitraryFiles) {
+        toast("File uploads are unavailable on this backend", "error");
         continue;
       }
       if (policy && file.size > policy.max_file_size_bytes) {
@@ -9011,11 +8918,11 @@ class Composer {
           `${policy.max_file_size_mb} MiB`, "error", TOAST_LONG);
         continue;
       }
-      this.uploadFile(file, legacyImage);
+      this.uploadFile(file);
     }
   }
 
-  async uploadFile(file, legacyImage = false) {
+  async uploadFile(file) {
     const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
     const preview = ATTACHMENT_PREVIEW_TYPES.has(String(file.type || "").toLowerCase());
     const attachment = {
@@ -9043,7 +8950,7 @@ class Composer {
       if (policy) this.uploadPolicy = policy;
       if (!response.ok) throw new Error((result && result.error) || `HTTP ${response.status}`);
       if (!result || typeof result.path !== "string" ||
-          (!legacyImage && typeof result.upload_id !== "string"))
+          typeof result.upload_id !== "string")
         throw new Error("backend returned an invalid upload response");
       if (attachment.removed) {
         if (result.upload_id) this.discardServerUpload(result.upload_id, true);
@@ -9409,11 +9316,8 @@ function filesFromDataTransfer(transfer) {
 }
 
 /* Resolve the configuration at the queue tail in visible order. Engine rows
-   reset every engine-owned choice; the permission fallback keeps a new
-   console accurate against an older node whose switch row predates the
-   additive permission field, while capability gating keeps that fallback
-   read-only. */
-function effectiveQueuedConfig(session, queued, engineOf) {
+   carry every engine-owned choice captured when the switch was requested. */
+function effectiveQueuedConfig(session, queued) {
   const s = session || {};
   const out = {
     engine: s.engine || "", model: s.model || "", effort: s.effort || "",
@@ -9427,9 +9331,7 @@ function effectiveQueuedConfig(session, queued, engineOf) {
       out.engine = item.engine || "";
       out.model = item.model || "";
       out.effort = item.effort || "";
-      const target = engineOf(out.engine) || {};
-      out.permission_mode = Object.prototype.hasOwnProperty.call(item, "permission_mode")
-        ? item.permission_mode || "" : target.default_permission || "";
+      out.permission_mode = item.permission_mode;
       out.fast_mode = item.fast_mode === "on";
       out.queuedEngine = true;
       out.queuedModel = true;
@@ -9441,7 +9343,7 @@ function effectiveQueuedConfig(session, queued, engineOf) {
     /* A row whose validating engine no longer matches its position is an
        orphan the node will skip - reading it here would promise the wrong
        configuration. */
-    if (item.engine && item.engine !== out.engine) continue;
+    if (item.engine !== out.engine) continue;
     if ("model" in item) { out.model = item.model || ""; out.queuedModel = true; }
     if ("effort" in item) { out.effort = item.effort || ""; out.queuedEffort = true; }
     if ("permission_mode" in item) {
@@ -9697,24 +9599,17 @@ function modalRemoveTask(session) {
   });
 }
 /* null when the person cancels; otherwise the removal choice to carry out. */
-async function confirmTaskRemoval(bid, session) {
-  if (backendSupportsTaskFold(bid)) return modalRemoveTask(session);
-  return (await modalConfirm("Remove task?", sessionDeleteMessage(session),
-    { subject: session.name, confirmLabel: "Remove", destructive: true })) ?
-    { fold: false, legacy: true } : null;
+async function confirmTaskRemoval(session) {
+  return modalRemoveTask(session);
 }
 /* Resolves to whether the conversation was folded into Main. */
 async function removeTaskSession(bid, session, choice) {
-  if (choice.legacy || !session.task) {
-    await api(bid, `sessions/${session.id}`, { method: "DELETE" });
-    return false;
-  }
   const result = await api(bid, `sessions/${session.task.parent}/tasks/${session.id}/remove`,
     { method: "POST", body: { fold: !!choice.fold }, timeoutMs: 120000 });
   return !!result.folded;
 }
 async function removeTask(bid, session) {
-  const choice = await confirmTaskRemoval(bid, session);
+  const choice = await confirmTaskRemoval(session);
   if (!choice) return;
   try {
     const folded = await removeTaskSession(bid, session, choice);
@@ -9977,11 +9872,6 @@ class SessionWorkspaceView {
 }
 async function modalNewTask(workspace) {
   const bid = Number(workspace.tab.bid) || 0, sid = workspace.tab.sid;
-  const configurable = nodeHasCapability(bid, "session-task-config");
-  /* Files staged for a task are copied into the task's own storage by the
-     node; an older node would leave them under Main, where the orphan sweep
-     takes them from under the task's transcript, so it gets no attach control. */
-  const attachable = nodeHasCapability(bid, "session-task-attachments");
   const main = workspace.taskViews.get(sid);
   // Read Main even when New task was opened from another task's tab. Capture
   // its visible choices now; session updates must not rewrite this dialog.
@@ -9990,18 +9880,18 @@ async function modalNewTask(workspace) {
   let engine = initial.engine || "", engines = [], preparing = false;
   const { m, close, onClose } = modal(`<h2>New task</h2>
     <p class="modal-copy">The task works in its own chat and copy of Main's project. Review its changes and apply them to Main when it is done.</p>
-    ${configurable ? '<div class="engine-pick" id="nt-engines" role="group" aria-label="Engine"></div>' : ""}
+    <div class="engine-pick" id="nt-engines" role="group" aria-label="Engine"></div>
     <label for="nt-prompt" class="task-composer-lbl">Task</label>
     ${composerBoxHtml({ id: "nt-prompt", rows: 6, placeholder: "Describe the feature or change…",
                         className: "mention-below" })}
     <label>Name <span class="field-optional">(optional, auto from the task)</span><input type="text" id="nt-name" maxlength="80"></label>
-    ${configurable ? `<div class="field-row">
+    <div class="field-row">
       <label>Model<select id="nt-model"></select></label>
       <label>Effort<select id="nt-effort"></select></label>
       <label>Permissions<select id="nt-perm"></select></label>
     </div>
-    <label class="hidden" id="nt-model-custom-wrap">Custom model<input type="text" id="nt-model-custom" placeholder="Model ID" spellcheck="false" maxlength="256"></label>` : ""}
-    <p class="hint">${configurable ? "Starts with Main's selected settings and recent conversation context." : "Uses Main's engine, model, effort and permissions, plus recent conversation context."}</p>
+    <label class="hidden" id="nt-model-custom-wrap">Custom model<input type="text" id="nt-model-custom" placeholder="Model ID" spellcheck="false" maxlength="256"></label>
+    <p class="hint">Starts with Main's selected settings and recent conversation context.</p>
     <p class="hint">Main must be idle to create or apply a task. Local Git projects only; ignored files are not copied.</p>
     <p class="form-error hidden" role="alert"></p>
     <div class="m-btns"><button type="button" class="btn" id="nt-cancel">Cancel</button><button type="button" class="btn btn-pri" id="nt-start">Start task</button></div>`, "new-task-modal");
@@ -10015,7 +9905,6 @@ async function modalNewTask(workspace) {
   const composer = new Composer(m.querySelector(".composer-box"), {
     bid, sid, selfHint: "Main",
     submit: () => start.onclick(),
-    uploadsBlocked: () => attachable ? "" : "Upgrade this backend to attach files to tasks",
   });
   onClose(() => composer.destroy({ discardUploads: !handedOver }));
   const engBox = m.querySelector("#nt-engines"), model = m.querySelector("#nt-model");
@@ -10024,7 +9913,7 @@ async function modalNewTask(workspace) {
   const getModel = () => model.value === "__custom__" ? custom.value.trim() : model.value;
   const choices = () => ({ engine, model: getModel(), effort: effort.value, permission_mode: permission.value });
   const syncBusy = () => {
-    start.disabled = preparing || (configurable && !engines.some(item => item.key === engine));
+    start.disabled = preparing || !engines.some(item => item.key === engine);
     start.textContent = preparing ? "Preparing…" : "Start task";
     m.setAttribute("aria-busy", String(preparing));
     for (const control of m.querySelectorAll("input,textarea,select,#nt-engines button")) {
@@ -10065,32 +9954,30 @@ async function modalNewTask(workspace) {
     }
     renderChoices(selected);
   };
-  if (configurable) {
-    renderEngines(bid ? state.engCache[bid] : state.engines, initial);
-    const syncEffort = () => {
-      const options = effortOptionsForModel(engines.find(item => item.key === engine), getModel());
-      fillEngineChoice(effort, options, options.some(item => item.value === effort.value) ? effort.value : "");
-      customWrap.classList.toggle("hidden", model.value !== "__custom__");
-    };
-    model.onchange = syncEffort;
-    custom.oninput = syncEffort;
-    const listener = (changedBid, loaded) => {
-      if (m.isConnected && changedBid === bid)
-        renderEngines(loaded, { ...choices(), custom: model.value === "__custom__" });
-    };
-    enginePayloadListeners.add(listener);
-    onClose(() => enginePayloadListeners.delete(listener));
-    // Use this node's cached catalog immediately, just as New session does.
-    // Only a missing/unloaded catalog needs an extra request.
-    if (!engines.length || engines.some(info => info.dynamic_model_options && info.model_catalog_loaded !== true)) {
-      api(bid, "engines", { timeoutMs: ENGINE_POLL_TIMEOUT }).then(data => {
-        if (!m.isConnected) return;
-        if (!data || !Array.isArray(data.engines)) throw new Error("Could not load engine choices");
-        rememberEnginePayload(bid, data);
-      }).catch(err => {
-        if (m.isConnected) { error.textContent = err.message; error.classList.remove("hidden"); }
-      });
-    }
+  renderEngines(bid ? state.engCache[bid] : state.engines, initial);
+  const syncEffort = () => {
+    const options = effortOptionsForModel(engines.find(item => item.key === engine), getModel());
+    fillEngineChoice(effort, options, options.some(item => item.value === effort.value) ? effort.value : "");
+    customWrap.classList.toggle("hidden", model.value !== "__custom__");
+  };
+  model.onchange = syncEffort;
+  custom.oninput = syncEffort;
+  const listener = (changedBid, loaded) => {
+    if (m.isConnected && changedBid === bid)
+      renderEngines(loaded, { ...choices(), custom: model.value === "__custom__" });
+  };
+  enginePayloadListeners.add(listener);
+  onClose(() => enginePayloadListeners.delete(listener));
+  // Use this node's cached catalog immediately, just as New session does.
+  // Only a missing/unloaded catalog needs an extra request.
+  if (!engines.length || engines.some(info => info.dynamic_model_options && info.model_catalog_loaded !== true)) {
+    api(bid, "engines", { timeoutMs: ENGINE_POLL_TIMEOUT }).then(data => {
+      if (!m.isConnected) return;
+      if (!data || !Array.isArray(data.engines)) throw new Error("Could not load engine choices");
+      rememberEnginePayload(bid, data);
+    }).catch(err => {
+      if (m.isConnected) { error.textContent = err.message; error.classList.remove("hidden"); }
+    });
   }
   /* One identity for this dialog's lifetime: a retry after a lost answer
      returns the task the node already created instead of a duplicate. */
@@ -10106,7 +9993,7 @@ async function modalNewTask(workspace) {
     const prompt = composer.message();
     if (!prompt) { composer.focus(); return; }
     const body = { name: m.querySelector("#nt-name").value, prompt, request_id: requestId,
-      ...(configurable ? choices() : {}) };
+      ...choices() };
     preparing = true; syncBusy();
     error.classList.add("hidden");
     try {
@@ -10126,7 +10013,6 @@ async function modalNewTask(workspace) {
    refused instead of silently applied. */
 async function modalReviewTask(workspace, session) {
   const task = session.task || {};
-  const canResolve = nodeHasCapability(workspace.tab.bid, "session-task-conflict-resolution");
   const { m, close } = modal(`<h2>Review task</h2>
     <div class="ws-facts task-review-facts"></div>
     <div class="field-lbl task-review-summary-lbl hidden">Summary</div>
@@ -10136,11 +10022,11 @@ async function modalReviewTask(workspace, session) {
     <pre class="task-review-diff hidden"></pre>
     <p class="hint task-review-truncated hidden">The diff preview is shortened.</p>
     <p class="hint task-review-note hidden"></p>
-    ${canResolve ? `<div class="task-review-resolve hidden" id="tr-resolve-wrap">
+    <div class="task-review-resolve hidden" id="tr-resolve-wrap">
       <label class="check"><input type="checkbox" id="tr-resolve" aria-describedby="tr-resolve-note" disabled> Resolve conflicts</label>
       <p class="help task-review-resolve-note" id="tr-resolve-note"><span class="note-para">If Main has conflicting changes, send one follow-up to this task's agent with a fresh copy of Main. It uses the task's history, current settings, permissions and normal model quota to reconcile the changes in its own copy. It may also inspect Main read-only when needed.</span>
         <span class="note-para">You must review and apply again afterward. Applies run one at a time; if another task changes Main again, another resolution may be needed. Off by default for each review.</span></p>
-    </div>` : ""}
+    </div>
     <p class="form-error hidden" role="alert"></p>
     <div class="m-btns"><button type="button" class="btn" id="tr-close">Cancel</button><button type="button" class="btn btn-pri" id="tr-apply" disabled>Apply to Main</button></div>`, "task-review-modal");
   const facts = m.querySelector(".task-review-facts");
@@ -10255,7 +10141,6 @@ class SessionView {
     this.detached = false;    // showing a window of history rather than the live tail
     this.skippedEvents = [];  // live events held while detached
     this.newSinceDetach = 0;
-    this.draftSupported = backendSupportsSessionDrafts(this.tab.bid);
     this.draftMaxChars = DEFAULT_DRAFT_MAX_CHARS;
     this.draftReady = false;      // true after this socket's authoritative snapshot
     this.draftRevision = 0;
@@ -10267,8 +10152,7 @@ class SessionView {
     this.draftPendingText = null;
     this.draftDeferred = null;
     this.draftTouchedBeforeReady = false;
-    this.draftJournal = this.draftSupported ? readDraftJournal(this.tab.id) :
-      readLocalDraft(this.tab.id);
+    this.draftJournal = readDraftJournal(this.tab.id);
     this.nativeComposerChoices = prefersNativeChoices();
     this.browserChipKey = null;   // set of linked-browser bubbles now rendered
     this.terminalChipKey = null;  // set of linked-terminal bubbles now rendered
@@ -10412,9 +10296,8 @@ class SessionView {
       /* re-pin the transcript when the box's height moved it */
       beforeResize: () => this.scroll.scrollHeight - this.scroll.scrollTop - this.scroll.clientHeight < 60,
       afterResize: (pinned) => { if (pinned) this.scroll.scrollTop = this.scroll.scrollHeight; },
-      /* Staged files are private only without a shared draft; with one,
-         another device's later edit may still name them. */
-      privateUploads: () => !this.draftSupported,
+      /* Another device's shared draft may still name these files. */
+      privateUploads: () => false,
     });
 
     // Paint the crash journal immediately; the socket snapshot decides whether
@@ -10723,11 +10606,6 @@ class SessionView {
        edit frame on the socket. */
     if (this.queueEditPending) return this.queueEditPending.text;
     const text = this.draftValue();
-    if (!this.draftSupported) {
-      lsSet("puppy.draft." + this.tab.id, text);
-      if (!this.draftReady) this.draftTouchedBeforeReady = true;
-      return text;
-    }
     writeDraftJournal(this.tab.id, text, this.draftRevision);
     this.draftJournal = {
       text, baseRevision: this.draftRevision, submitted: false,
@@ -10787,15 +10665,9 @@ class SessionView {
   initializeDraft(value) {
     if (!value || typeof value.text !== "string" ||
         !Number.isInteger(value.revision) || value.revision < 0) {
-      this.draftSupported = false;
       this.draftReady = false;
-      if (this.draftJournal) {
-        lsSet("puppy.draft." + this.tab.id, this.draftJournal.text);
-        this.composer.caretToEnd();
-      }
-      return;
+      throw new Error("Backend returned an invalid shared draft");
     }
-    this.draftSupported = true;
     const serverText = value.text;
     const serverRevision = value.revision;
     const journal = readDraftJournal(this.tab.id);
@@ -10918,8 +10790,8 @@ class SessionView {
         if (Number.isInteger(d.draft_max_chars) && d.draft_max_chars > 0)
           this.draftMaxChars = d.draft_max_chars;
         if (d.uploads) rememberUploadSettings(this.tab.bid, d.uploads);   // reaches this box
-        if (Object.prototype.hasOwnProperty.call(d, "draft")) this.initializeDraft(d.draft);
-        else this.initializeDraft(null);  // older remote node: local-only compatibility
+        try { this.initializeDraft(d.draft); }
+        catch (error) { this.setStatus(error.message); return; }
         this.composer.syncUploadButton();
         this.status = d.status;
         noteSessionActivity(this.tab.bid, this.tab.sid, d.status === "running",
@@ -10992,8 +10864,7 @@ class SessionView {
         if (this.session) { this.session.last_model = d.model; this.updateHead(); }
         break;
       case "background_tasks":
-        /* the model answered but its engine still owns background work; the
-           node's text names it (older nodes send the plain status instead) */
+        /* The model answered but its engine still owns background work. */
         if (d.waiting && d.text) this.setStatus(d.text);
         break;
       case "thinking_tokens":
@@ -11057,11 +10928,9 @@ class SessionView {
         }
         break;
       case "turn_done":
-        /* New nodes tell us whether this turn flowed directly into a queued
-           one. On older nodes the pre-pop queue is the closest equivalent. */
+        /* The node reports whether this turn continued into queued work. */
         const queueWaiting = d.queue_waiting === true;
-        const continued = typeof d.continued === "boolean" ?
-          d.continued : this.queued.length > 0;
+        const continued = d.continued === true;
         this.status = continued ? "running" : "idle";
         this.setSteeringState({
           supported: this.steering.supported, ready: false, turn_id: "",
@@ -11545,21 +11414,17 @@ class SessionView {
     if (!Number.isFinite(seq) || seq < 1 || this._jumping) return;
     if (!this.session) { this._pendingJumpSeq = seq; return; }
     this._jumping = true;
-    const windowed = nodeSupportsEventWindow(this.tab.bid);
     try {
       if (!this.inLoadedRange(seq)) {
         const above = this.oldestSeq !== null && seq < this.oldestSeq;
         if (above && this.oldestSeq - seq <= JUMP_PAGE_REACH * 200)
           await this.pageBackTo(seq, JUMP_PAGE_REACH);
-        else if (above && !windowed)
-          await this.pageBackTo(seq, JUMP_LEGACY_PAGES);
-        if (!this.inLoadedRange(seq) && windowed)
+        if (!this.inLoadedRange(seq))
           await this.loadWindowAround(seq);
       }
       const target = this.findEventNode(seq);
       if (!target) {
-        toast(windowed ? "That message is no longer in this transcript" :
-          "This backend needs a Puppy upgrade to jump that far back", "info", TOAST_LONG);
+        toast("That message is no longer in this transcript", "info", TOAST_LONG);
         return;
       }
       target.scrollIntoView({ block: "center" });
@@ -12133,7 +11998,7 @@ class SessionView {
       toast("Steering accepts text only · queue the message to attach files", "error", TOAST_LONG);
       return;
     }
-    if (this.draftSupported && !this.draftReady) {
+    if (!this.draftReady) {
       toast("Draft is still syncing · wait for the session to reconnect", "error");
       return;
     }
@@ -12186,11 +12051,11 @@ class SessionView {
     const wasRunning = this.status === "running";
     const draft = this.draftValue();
     if (this.composer.isEmpty()) return;
-    if (this.draftSupported && !this.draftReady) {
+    if (!this.draftReady) {
       toast("Draft is still syncing · wait for the session to reconnect", "error");
       return;
     }
-    if (this.draftSupported && this.draftReady && draft.length > this.draftMaxChars) {
+    if (this.draftReady && draft.length > this.draftMaxChars) {
       toast(`Draft is too long (${draft.length.toLocaleString()} / ${this.draftMaxChars.toLocaleString()} characters)`,
         "error", TOAST_LONG);
       return;
@@ -12199,7 +12064,7 @@ class SessionView {
     if (blocker) { toast(blocker, "error"); return; }
     if (!this.ws || this.ws.readyState !== 1) { toast("Not connected", "error"); return; }
     const message = { type: "message", text: this.composer.take() };
-    if (this.draftSupported && this.draftReady) {
+    if (this.draftReady) {
       writeDraftJournal(this.tab.id, draft, this.draftRevision, true);
       this.draftJournal = {
         text: draft, baseRevision: this.draftRevision,
@@ -12223,8 +12088,6 @@ class SessionView {
     // message echoes back as a transcript event (even if it was queued)
     this._forceScroll = true;
     this.scrollBottom(true);
-    if (!this.draftSupported || !this.draftReady)
-      lsDel("puppy.draft." + this.tab.id);
     this.status = "running";
     if (!wasRunning) this.setSteeringState({
       supported: this.steering.supported, ready: false, turn_id: "",
@@ -12289,19 +12152,16 @@ class SessionView {
 
   /* A queue entry is a prompt string, or a pending change: an engine switch
      ({kind:"engine"}), or a configuration change tagged with the engine whose
-     catalog validated it (older nodes omit the tag - fall back to the
-     session's engine, which is all they can queue against) */
+     catalog validated it. */
   describeQueuedConfig(item) {
-    const s = this.session || {};
-    const eng = engineInfo(this.tab.bid, item.engine || s.engine);
+    const eng = engineInfo(this.tab.bid, item.engine);
     const parts = [];
     if (item.kind === "tool") return sessionToolLabel(item.tool);
     if (item.kind === "engine") {
       parts.push("Engine → " + ((eng && eng.label) || item.engine || "?"));
       if (item.model) parts.push("Model → " + (modelShorthand(eng, item.model) || item.model));
       if (item.effort) parts.push("Effort → " + (effortShorthand(eng, item.effort) || item.effort));
-      const permission = Object.prototype.hasOwnProperty.call(item, "permission_mode")
-        ? item.permission_mode : (eng && eng.default_permission) || "";
+      const permission = item.permission_mode;
       if (permission)
         parts.push("Permission → " + permissionShorthand(eng, permission));
       if ((eng && eng.supports_fast_mode === true) || item.fast_mode === "on")
@@ -12395,7 +12255,7 @@ class SessionView {
       const { row, ident, cfg } = this.queueRow(item, String(i + 1), false, isPaused);
       row.classList.add("q-live");
       row.dataset.queueIndex = String(i);
-      if (!cfg && this.draftSupported && backendSupportsQueueEdit(this.tab.bid)) {
+      if (!cfg && backendSupportsQueueEdit(this.tab.bid)) {
         const edit = el("button", "q-edit");
         edit.type = "button";
         edit.appendChild(queueEditIcon(12));
@@ -12628,7 +12488,7 @@ class SessionView {
       toast("Not connected", "error");
       return;
     }
-    if (!this.draftSupported || !this.draftReady) {
+    if (!this.draftReady) {
       toast("Draft is still syncing · wait for the session to reconnect", "error");
       return;
     }
@@ -12808,8 +12668,7 @@ class SessionView {
      by every pending change in queue order. The pickers and mini pills speak
      about that future configuration, not just the live session row. */
   effectiveConfig() {
-    return effectiveQueuedConfig(this.session, this.queued,
-      engine => engineInfo(this.tab.bid, engine));
+    return effectiveQueuedConfig(this.session, this.queued);
   }
 
   composerChoiceSpec(kind, native = false) {
@@ -13225,7 +13084,7 @@ class SessionView {
 
   async deleteSession() {
     if (this.session && this.session.task) {
-      const choice = await confirmTaskRemoval(this.tab.bid, this.session);
+      const choice = await confirmTaskRemoval(this.session);
       if (!choice) return;
       try {
         const folded = await removeTaskSession(this.tab.bid, this.session, choice);
@@ -13574,8 +13433,7 @@ class TermView {
     }
     const sequence = ++this.connectionSequence;
     if (this.dataSub) { this.dataSub.dispose(); this.dataSub = null; }
-    const identified = terminalInstancesFor(this.tab.bid);
-    if (identified && !this.tab.terminalId) {
+    if (!this.tab.terminalId) {
       try {
         if (!await this.createInstance(sequence, this.tab.sid)) return;
       } catch (error) {
@@ -13585,12 +13443,7 @@ class TermView {
         return;
       }
     }
-    const params = new URLSearchParams({ cols: this.term.cols, rows: this.term.rows });
-    if (this.tab.cmd) params.set("cmd", this.tab.cmd);
-    if (this.tab.cwd) params.set("cwd", this.tab.cwd);
-    const path = identified ?
-      `ws/terminal/${encodeURIComponent(this.tab.terminalId)}` :
-      "ws/term?" + params.toString();
+    const path = `ws/terminal/${encodeURIComponent(this.tab.terminalId)}`;
     const ws = new WebSocket(wsUrl(this.tab.bid, path));
     ws.binaryType = "arraybuffer";
     this.ws = ws;
@@ -13649,7 +13502,7 @@ class TermView {
       if (sequence !== this.connectionSequence || this.ws !== ws) return;
       this.ws = null;
       if (this.dataSub) { this.dataSub.dispose(); this.dataSub = null; }
-      if (!this.closed) this.showDead(this.nodeEnded || !identified);
+      if (!this.closed) this.showDead(this.nodeEnded);
     };
     ws.onerror = () => { try { ws.close(); } catch (e) {} };
   }
@@ -13683,13 +13536,6 @@ class TermView {
 
   async replaceTerminal(dead) {
     if (this.tab.bid && !backendConnectionAllowed(this.tab.bid)) return;
-    if (!terminalInstancesFor(this.tab.bid)) {
-      this.tab.ended = false;
-      this.nodeEnded = false;
-      saveTabs(); dead.remove(); this.term.reset();
-      this.term.write("\x1b[?25h"); this.connect(); this.term.focus();
-      return;
-    }
     const oldId = String(this.tab.terminalId || "").toUpperCase();
     const owner = Number(this.binding.sessionId) || null;
     const sequence = ++this.connectionSequence;
@@ -14396,8 +14242,8 @@ class BrowserView {
     }
     this.waitingForBackend = false;
     const sequence = ++this.connectionSequence;
-    const path = this.tab.browserId ?
-      `ws/browser/${encodeURIComponent(this.tab.browserId)}` : "ws/browser";
+    if (!this.tab.browserId) { this.showDead("Browser ID is missing", false); return; }
+    const path = `ws/browser/${encodeURIComponent(this.tab.browserId)}`;
     const ws = new WebSocket(wsUrl(this.tab.bid, path));
     ws.binaryType = "arraybuffer";
     this.ws = ws;
@@ -14479,8 +14325,7 @@ class BrowserView {
     this.clearDead();
   }
 
-  /* Node status broadcasts own this flag; the local timer only retires an
-     optimistic Enter that an older node never answers with a status. */
+  /* Node broadcasts own loading; expire optimism if the status is lost. */
   setLoading(on) {
     if (this.loadingTimer !== null) {
       clearTimeout(this.loadingTimer);
@@ -14663,21 +14508,12 @@ function searchRelevanceCompare(a, b) {
     searchGroupNewest(b) - searchGroupNewest(a);
 }
 
-/* Deliberately stricter than backendHasCapability: a legacy node defaulting
-   to true would be offered a route it does not serve. */
+/* Search queries go only to nodes advertising their own history index. */
 function nodeSupportsSearch(bid) {
   if (!bid) return true;   // this console always carries its own index
   const backend = state.backends.find(b => b.id === bid);
   return !!backend && Array.isArray(backend.capabilities) &&
     backend.capabilities.includes("session-search");
-}
-
-/* The forward events cursor (after_seq) behind windowed jumps. */
-function nodeSupportsEventWindow(bid) {
-  if (!bid) return true;
-  const backend = state.backends.find(b => b.id === bid);
-  return !!backend && Array.isArray(backend.capabilities) &&
-    backend.capabilities.includes("session-event-window");
 }
 
 /* Server snippets delimit hits with control markers so highlighting needs no
@@ -15142,14 +14978,14 @@ class SettingsView {
   }
 
   syncEngineUpgrades() {
-    let legacyRunning = false;
+    let pollingRunning = false;
     for (const node of this.engineNodes()) {
       if (!Array.isArray(node.engines)) continue;
       for (const engine of node.engines) {
         const id = `${node.bid}:${engine.key}`;
         const was = this.engineUpgradeState.get(id);
         if (engine.upgrade_state === "running" || this.engineUpgradeStarts.has(id)) {
-          if (!nodeStateStreamActive(node.bid)) legacyRunning = true;
+          if (!nodeStateStreamActive(node.bid)) pollingRunning = true;
           this.engineUpgradeState.set(id, "running");
         } else {
           this.engineUpgradeState.set(id, "idle");
@@ -15157,7 +14993,7 @@ class SettingsView {
         }
       }
     }
-    if (legacyRunning) this.startEngineUpgradePolling();
+    if (pollingRunning) this.startEngineUpgradePolling();
     else this.stopEngineUpgradePolling();
   }
 
@@ -15240,20 +15076,7 @@ class SettingsView {
         reason: (descriptor && descriptor.reason) || "backend does not support remote upgrades",
       };
     }
-    /* Compatibility bridge for the first upgrade of older upgrade-capable
-       nodes. They verify terminals and races authoritatively on POST, but only
-       session activity can be inferred before they gain readiness reporting. */
-    if (!Object.prototype.hasOwnProperty.call(state.remoteSessions, bid)) {
-      return { ready: false, state: "checking", reason: "waiting for backend session status" };
-    }
-    const busy = sessionsFor(bid).some(session => session.status === "running");
-    return {
-      ready: !busy,
-      state: busy ? "busy" : "ready",
-      reason: busy ? "backend has an active session" :
-        "readiness inferred from sessions until this backend is upgraded",
-      legacy: true,
-    };
+    return { ready: false, state: "checking", reason: "backend returned invalid readiness" };
   }
 
   isUpgradeCandidate(record) {
@@ -16254,7 +16077,7 @@ class SettingsView {
       },
       {
         key: "remote_session_seconds", scope: "console", label: "Remote session fallback polling",
-        description: "Fallback cadence for older backends or a temporarily unavailable state stream.",
+        description: "Polling cadence while a backend state stream is unavailable.",
       },
       {
         key: "remote_engine_seconds", scope: "console",
@@ -16665,42 +16488,29 @@ class SettingsView {
 
     const normalized = value => {
       const prompt = value && typeof value === "object" ? value : null;
-      if (!prompt || typeof prompt.custom !== "string" ||
-          typeof prompt.browser !== "string" ||
-          typeof prompt.browser_default !== "string")
+      const fields = ["custom", "browser", "browser_default", "remote_workspace",
+        "remote_workspace_default", "terminal", "terminal_default", "spawn", "spawn_default"];
+      if (!prompt || fields.some(key => typeof prompt[key] !== "string"))
         throw new Error("backend returned invalid system prompt settings");
-      const remoteWorkspaceSupported =
-        typeof prompt.remote_workspace === "string" &&
-        typeof prompt.remote_workspace_default === "string";
-      const terminalSupported =
-        typeof prompt.terminal === "string" &&
-        typeof prompt.terminal_default === "string";
-      const spawnSupported =
-        typeof prompt.spawn === "string" &&
-        typeof prompt.spawn_default === "string";
       const maxChars = Number(prompt.max_chars);
       if (!Number.isInteger(maxChars) || maxChars < 1)
         throw new Error("backend returned an invalid system prompt limit");
       return {
         loaded: true,
         custom: prompt.custom,
-        remoteWorkspace: remoteWorkspaceSupported ? prompt.remote_workspace : "",
+        remoteWorkspace: prompt.remote_workspace,
         browser: prompt.browser,
-        terminal: terminalSupported ? prompt.terminal : "",
-        spawn: spawnSupported ? prompt.spawn : "",
+        terminal: prompt.terminal,
+        spawn: prompt.spawn,
         customDraft: prompt.custom,
-        remoteWorkspaceDraft: remoteWorkspaceSupported ? prompt.remote_workspace : "",
+        remoteWorkspaceDraft: prompt.remote_workspace,
         browserDraft: prompt.browser,
-        terminalDraft: terminalSupported ? prompt.terminal : "",
-        spawnDraft: spawnSupported ? prompt.spawn : "",
-        remoteWorkspaceDefault: remoteWorkspaceSupported ?
-          prompt.remote_workspace_default : "",
+        terminalDraft: prompt.terminal,
+        spawnDraft: prompt.spawn,
+        remoteWorkspaceDefault: prompt.remote_workspace_default,
         browserDefault: prompt.browser_default,
-        terminalDefault: terminalSupported ? prompt.terminal_default : "",
-        spawnDefault: spawnSupported ? prompt.spawn_default : "",
-        remoteWorkspaceSupported,
-        terminalSupported,
-        spawnSupported,
+        terminalDefault: prompt.terminal_default,
+        spawnDefault: prompt.spawn_default,
         maxChars,
         saving: false,
         error: "",
@@ -16721,21 +16531,17 @@ class SettingsView {
     const supported = bid => backendSupportsSystemPrompt(bid);
     const dirty = record => !!record && record.loaded &&
       (record.customDraft !== record.custom || record.browserDraft !== record.browser ||
-       (record.terminalSupported && record.terminalDraft !== record.terminal) ||
-       (record.spawnSupported && record.spawnDraft !== record.spawn) ||
-       (record.remoteWorkspaceSupported &&
-        record.remoteWorkspaceDraft !== record.remoteWorkspace));
+       record.terminalDraft !== record.terminal ||
+       record.spawnDraft !== record.spawn ||
+       record.remoteWorkspaceDraft !== record.remoteWorkspace);
     const stash = () => {
       const record = records.get(activeBid);
       if (!record || !record.loaded || record.saving) return;
       record.customDraft = custom.value;
-      if (record.remoteWorkspaceSupported)
-        record.remoteWorkspaceDraft = remoteText.value;
+      record.remoteWorkspaceDraft = remoteText.value;
       record.browserDraft = browserText.value;
-      if (record.terminalSupported)
-        record.terminalDraft = terminalText.value;
-      if (record.spawnSupported)
-        record.spawnDraft = spawnText.value;
+      record.terminalDraft = terminalText.value;
+      record.spawnDraft = spawnText.value;
       record.saved = false;
     };
     const paint = () => {
@@ -16745,13 +16551,13 @@ class SettingsView {
       const unavailable = !!activeBid && !backendConnectionAllowed(activeBid);
       const editable = canUse && !unavailable && !!record && record.loaded && !record.saving;
       custom.disabled = browserText.disabled = !editable;
-      terminalText.disabled = !editable || !record.terminalSupported;
-      spawnText.disabled = !editable || !record.spawnSupported;
-      remoteText.disabled = !editable || !record.remoteWorkspaceSupported;
-      remoteReset.disabled = !editable || !record.remoteWorkspaceSupported;
+      terminalText.disabled = !editable;
+      spawnText.disabled = !editable;
+      remoteText.disabled = !editable;
+      remoteReset.disabled = !editable;
       browserReset.disabled = !editable;
-      terminalReset.disabled = !editable || !record.terminalSupported;
-      spawnReset.disabled = !editable || !record.spawnSupported;
+      terminalReset.disabled = !editable;
+      spawnReset.disabled = !editable;
       save.disabled = !canUse || unavailable || (!!record && record.saving);
       status.classList.remove("bad", "dirty");
       if (!canUse) {
@@ -16782,17 +16588,14 @@ class SettingsView {
         if (document.activeElement !== custom) custom.value = record.customDraft;
         if (document.activeElement !== remoteText)
           remoteText.value = record.remoteWorkspaceDraft;
-        remoteText.placeholder = record.remoteWorkspaceSupported ? "" :
-          "Upgrade this backend to configure remote workspace guidance";
+        remoteText.placeholder = "";
         if (document.activeElement !== browserText) browserText.value = record.browserDraft;
         if (document.activeElement !== terminalText)
           terminalText.value = record.terminalDraft;
-        terminalText.placeholder = record.terminalSupported ? "" :
-          "Upgrade this backend to configure terminal guidance";
+        terminalText.placeholder = "";
         if (document.activeElement !== spawnText)
           spawnText.value = record.spawnDraft;
-        spawnText.placeholder = record.spawnSupported ? "" :
-          "Upgrade this backend to configure spawned agent guidance";
+        spawnText.placeholder = "";
         save.textContent = record.saving ? "Saving…" : "Save prompt";
         if (unavailable) {
           status.textContent = backendStateNote(backendStatus, true, "prompt settings");
@@ -16877,8 +16680,7 @@ class SettingsView {
       });
     remoteReset.onclick = () => {
       const record = records.get(activeBid);
-      if (!record || !record.loaded || record.saving ||
-          !record.remoteWorkspaceSupported) return;
+      if (!record || !record.loaded || record.saving) return;
       remoteText.value = record.remoteWorkspaceDefault;
       stash();
       paint();
@@ -16894,7 +16696,7 @@ class SettingsView {
     };
     terminalReset.onclick = () => {
       const record = records.get(activeBid);
-      if (!record || !record.loaded || record.saving || !record.terminalSupported) return;
+      if (!record || !record.loaded || record.saving) return;
       terminalText.value = record.terminalDefault;
       stash();
       paint();
@@ -16902,7 +16704,7 @@ class SettingsView {
     };
     spawnReset.onclick = () => {
       const record = records.get(activeBid);
-      if (!record || !record.loaded || record.saving || !record.spawnSupported) return;
+      if (!record || !record.loaded || record.saving) return;
       spawnText.value = record.spawnDefault;
       stash();
       paint();
@@ -16920,12 +16722,9 @@ class SettingsView {
       paint();
       try {
         const body = { custom: record.customDraft, browser: record.browserDraft };
-        if (record.remoteWorkspaceSupported)
-          body.remote_workspace = record.remoteWorkspaceDraft;
-        if (record.terminalSupported)
-          body.terminal = record.terminalDraft;
-        if (record.spawnSupported)
-          body.spawn = record.spawnDraft;
+        body.remote_workspace = record.remoteWorkspaceDraft;
+        body.terminal = record.terminalDraft;
+        body.spawn = record.spawnDraft;
         const result = await api(bid, "system-prompt", {
           method: "PATCH",
           body,
@@ -19049,7 +18848,6 @@ function modalSwitchEngine(view) {
   const s = view.session;
   if (!s) return;
   const engines = view.tab.bid ? (state.engCache[view.tab.bid] || []) : state.engines;
-  const canQueue = backendSupportsQueuedEngineSwitch(view.tab.bid);
   /* what is already heading for the queue tail: a chat view knows its queue,
      the sidebar's lightweight caller does not and falls back to the session */
   const eff = typeof view.effectiveConfig === "function" ? view.effectiveConfig() : null;
@@ -19058,10 +18856,8 @@ function modalSwitchEngine(view) {
     <p class="modal-copy">The session keeps its transcript and working directory. The new engine starts a fresh
     native session seeded with a handoff of the conversation so far. Same-engine reseed is allowed
     (rebuilds context from the transcript).</p>
-    <p class="modal-copy">${canQueue ? `While a turn runs or prompts wait, the switch joins the
-    queue and applies in order; prompts sent before it keep the engine they were written under.` :
-    `Queued prompts remain; pending model and reasoning changes are cleared because they belong
-    to the previous engine configuration.`}</p>
+    <p class="modal-copy">While a turn runs or prompts wait, the switch joins the
+    queue and applies in order; prompts sent before it keep the engine they were written under.</p>
     <form id="se-form">
     <div class="engine-pick" id="se-engines" role="group" aria-label="Engine"></div>
     <div class="m-btns"><button type="button" class="btn" id="se-cancel">Cancel</button><button type="submit" class="btn btn-pri" id="se-go">Switch</button></div>
@@ -19092,10 +18888,7 @@ function modalSwitchEngine(view) {
         toast(`Engine switch to ${pick} queued · applies after the queue`, "ok");
         return;
       }
-      /* older nodes still report how many pending settings they cleared */
-      const cleared = Math.max(0, Number(r.discarded_config_changes) || 0);
-      toast(`Switched to ${pick}` + (cleared
-        ? ` · cleared ${cleared} pending setting change${cleared === 1 ? "" : "s"}` : ""), "ok");
+      toast(`Switched to ${pick}`, "ok");
     } catch (e) { toast(e.message, "error"); }
   };
 }

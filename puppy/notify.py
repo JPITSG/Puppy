@@ -33,7 +33,6 @@ log = logging.getLogger("puppy.notify")
 PLACEHOLDERS = ("backend", "session", "engine", "model", "status", "duration",
                 "duration_hms", "cwd", "id")
 EXEC_TIMEOUT = 30.0
-DEDUPE_SECONDS = 8.0
 MAX_COMMAND = 1000
 COMPLETION_VERSION = 1
 COMPLETION_LOG_KEY = "completion_log"
@@ -42,7 +41,6 @@ REMOTE_CURSOR_PREFIX = "notify_completion_cursor."
 COMPLETION_LOG_LIMIT = 512
 POLL_SECONDS = 2.0
 
-_recent = {}   # (bid, sid) -> monotonic stamp of the last accepted remote fire
 _worker_task = None
 _worker_wake = None
 _poll_inflight = set()
@@ -275,8 +273,7 @@ def clean_info(info) -> dict:
     out = {key: str(info.get(key) or "")[:limits[key]]
            for key in PLACEHOLDERS if info.get(key)}
     # Always derived here from `duration`, never taken from the caller: one
-    # implementation for local completions, console-reported remote ones and
-    # the Test button alike, and older consoles gain it without sending it.
+    # implementation for local/remote completion records and the Test button.
     out.pop("duration_hms", None)
     try:
         out["duration_hms"] = clock(int(float(out["duration"])))
@@ -350,20 +347,6 @@ def session_finished(session: dict, status: str, duration_s: int):
             "id": str(record["session_id"]),
         }))
     return record
-
-
-def accept_remote_fire(bid: int, sid: int) -> bool:
-    """Consoles report remote completions; several may see the same one."""
-    now = time.monotonic()
-    key = (int(bid), int(sid))
-    if now - _recent.get(key, -1e9) < DEDUPE_SECONDS:
-        return False
-    if len(_recent) > 512:
-        cutoff = now - DEDUPE_SECONDS
-        for old in [k for k, ts in _recent.items() if ts < cutoff]:
-            _recent.pop(old, None)
-    _recent[key] = now
-    return True
 
 
 async def _fire(info: dict) -> None:

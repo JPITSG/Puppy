@@ -6,7 +6,7 @@ session switching, interactive permission approvals, multi-backend support and
 built-in web terminals.
 
 Tasks can run concurrently inside one session, with separate conversations and
-review/apply controls. See [session tasks and rollback](docs/session-tasks.md).
+review/apply controls. See [session tasks](docs/session-tasks.md).
 
 ## How it works
 
@@ -131,10 +131,11 @@ python3 backend/build.py
 backend/dist/puppy-backend.pyz serve --help
 ```
 
-See `backend/README.md` for pinned-TLS pairing, legacy network guidance,
+See `backend/README.md` for pinned-TLS pairing, network configuration,
 an optional systemd unit, and the one-time launcher bootstrap needed for remote
 upgrades. The artifact contains no frontend or cookie-login surface and reports
-an independently versioned controller/backend protocol.
+an independently versioned controller/backend protocol. Only the current
+protocol is supported; see [Current contract](docs/current-contract.md).
 
 ## Data & config
 
@@ -176,7 +177,7 @@ The `puppy_session` MCP bridge offers three layers on every supported engine:
 - **References:** discover sessions, search their histories, and read transcript
   pages with exact-message source links. Search pages both across sessions and
   within a session's matches. Long messages have a character continuation cursor.
-  All excludes the originating session; offline or older nodes are reported as
+  All excludes the originating session; unavailable nodes are reported as
   unavailable instead of being silently included in the result.
 - **Communication:** explicitly send a question, task, steering update, or stop.
   A question uses the engine's native side channel when ready; otherwise it
@@ -201,8 +202,7 @@ References authorize reading; cross-session actions require an explicit request.
 The controller brokers access to paired nodes over its existing authenticated,
 TLS-pinned channels. It opens a bounded relay socket so backend-hosted sessions
 can use references selected in the controller's console. Backend nodes never
-receive peer tokens or initiate direct peer connections. Older nodes remain
-usable but cannot offer these new features until upgraded.
+receive peer tokens or initiate direct peer connections.
 
 Reference selections, inbox/outbox receipts, and workflows live in the existing
 SQLite `meta` table and are included in full backups. Their records have exact
