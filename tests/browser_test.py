@@ -4390,11 +4390,12 @@ def check_status_header_activation(ui_source: str, css_source: str) -> None:
 
 
 def check_shared_node_order(ui_source: str, css_source: str) -> None:
-    """The flat sidebar follows the node order the status panel edits."""
+    """Saved node order only breaks ties in the merged sidebar."""
     sidebar = ui_source[
         ui_source.index("function renderSidebar()"):
         ui_source.index("\nfunction sessDot", ui_source.index("function renderSidebar()"))]
     assert "const nodes = sortNodeGroups([{ bid: 0 }]" in sidebar
+    assert "const rows = mergeSidebarRows(nodes.map(node => ({" in sidebar
     assert "wireNodeGroupDrag(" not in sidebar
     assert "disclosureButton(" not in sidebar
     assert ui_source.count("wireNodeGroupDropZone(root);") == 1
@@ -4476,7 +4477,7 @@ console.log(JSON.stringify([
 
 
 def check_node_owned_session_order(ui_source: str, css_source: str) -> None:
-    """The sidebar consumes the node's durable order without a local overlay."""
+    """The sidebar merges durable node orders without a local activity overlay."""
     sidebar = ui_source[
         ui_source.index("function renderSidebar()"):
         ui_source.index("\nfunction sessDot", ui_source.index("function renderSidebar()"))]

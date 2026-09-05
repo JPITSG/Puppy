@@ -215,13 +215,33 @@ prompt the user stopped. Queued work that continues after a stop remains one
 activity block and can still notify when that later work actually finishes.
 
 The order of `GET /api/sessions` (and of every `sessions` broadcast) is the
-node's durable `sort_order`, and it is the order a console renders within
-that node's group. Pinned sessions form a manually ordered block first. The
+node's durable `sort_order`, and the console preserves each node's relative
+order when merging the sidebar across backends. All pinned sessions form a
+manually ordered block first. The
 node moves an ordinary session to the head below that block every time it goes
 from idle to running - the start of an activity block, not a queued
 continuation or a completion - and `POST /api/sessions/reorder` (drag-and-drop
 in the console) edits the same order within each block. Nothing about the order
 lives in the browser, so every console and every reload sees the same list.
+
+Nodes advertising `session-order-recency` include `order_at` on session
+payloads: a durable ordinary-slot timestamp in UTC seconds, or zero for a slot
+that has never been promoted. Consoles merge ordinary node lists by descending
+`order_at`; saved backend order breaks ties and orders the pinned blocks.
+Backend clocks should be synchronized. Idle-to-running advances recency even
+for a session already first on its node; queued continuations and completion
+leave it alone. A task promotes its parent. Manual reorder transfers the
+timestamps with their slots, retaining other backends' intervening positions.
+Pinning clears recency; unpinning assigns a fresh value.
+
+Reorder callers may send `expected_recency`, aligned with `expected_order`,
+to reject a drag overtaken by fresh activity even when the node's ID order
+stayed identical (409). Invalid timestamp vectors return 400. The exact optional
+`session_order_at.<id>` meta records contain positive finite JSON numbers,
+belong only to ordinary sessions, descend in node order, and are covered by
+backup/restore and session deletion. There is no backfill or schema migration.
+Peers without the capability retain their node order with zero recency until
+upgraded; activity across those peers cannot be ordered durably.
 
 ## Transient engine failures
 

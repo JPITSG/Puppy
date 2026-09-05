@@ -501,6 +501,7 @@ def sessions_payload() -> dict:
             "cwd": workspace_sync.public_cwd(s),
             "status": (h.status if h else "idle"), "archived": s["archived"],
             "pinned": bool(s["pinned"]),
+            "order_at": s["order_at"],
             "active_since": (h.active_since if h and h.status == "running" else None),
             "completion_status": (
                 h.last_completion_status if h and h.status == "idle" else

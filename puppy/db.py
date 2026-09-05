@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import sqlite3
 import threading
@@ -251,9 +252,72 @@ def require_current_schema(conn) -> None:
         raise SchemaMismatchError(
             "database schema is not current; update it manually before starting Puppy")
     _require_current_session_fast_state(conn)
+    _session_order_recencies(conn)
 
 
 _SESSION_FAST_PREFIX = "session_fast_mode."
+_SESSION_ORDER_PREFIX = "session_order_at."
+
+
+def _decode_session_order_at(raw) -> float:
+    if raw is None:
+        return 0.0
+    try:
+        value = json.loads(raw)
+        if type(value) not in (int, float):
+            raise ValueError("not a number")
+        value = float(value)
+    except (ValueError, TypeError, OverflowError):
+        value = None
+    if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+        raise SchemaMismatchError("session order recency state is not current")
+    return value
+
+
+def _session_order_recencies(conn) -> dict:
+    """Exact optional ledger: absent means a slot has never been promoted.
+
+    Recency belongs to an ordinary *slot*, so manual reorders transfer its
+    value with the slot. This lets consoles merge backends without undoing
+    their authoritative manual order. No timestamps are inferred/backfilled.
+    """
+    sessions = conn.execute(
+        "SELECT id,sort_order FROM sessions ORDER BY sort_order,id").fetchall()
+    ordinary = {int(row[0]) for row in sessions if int(row[1]) >= 0}
+    values = {}
+    for key, raw in conn.execute(
+            "SELECT key,value FROM meta WHERE key GLOB 'session_order_at.*'"):
+        suffix = str(key)[len(_SESSION_ORDER_PREFIX):]
+        if not suffix.isdigit() or str(int(suffix)) != suffix or int(suffix) not in ordinary:
+            raise SchemaMismatchError("session order recency state is not current")
+        values[int(suffix)] = _decode_session_order_at(raw)
+    previous = math.inf
+    for sid, position in sessions:
+        if position < 0:
+            continue
+        value = values.get(sid, 0.0)
+        if value > previous:
+            raise SchemaMismatchError("session order recencies are out of order")
+        previous = value
+    return values
+
+
+def _write_session_order_at(conn, sid: int, value: float) -> None:
+    key = _SESSION_ORDER_PREFIX + str(sid)
+    if value:
+        conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)",
+                     (key, json.dumps(value)))
+    else:
+        conn.execute("DELETE FROM meta WHERE key=?", (key,))
+
+
+def _next_session_order_at(values: dict) -> float:
+    # Preserve node order even if its wall clock steps backwards.
+    value = max(time.time(), math.nextafter(
+        max(values.values(), default=0.0), math.inf))
+    if not math.isfinite(value):
+        raise SchemaMismatchError("session order recency cannot advance")
+    return value
 
 
 def _require_current_session_fast_state(conn) -> None:
@@ -434,6 +498,7 @@ def session_row_to_dict(row) -> dict:
     if raw_fast not in (None, "true"):
         raise SchemaMismatchError("session Fast-mode state is not current")
     d["fast_mode"] = raw_fast == "true"
+    d["order_at"] = _decode_session_order_at(d.pop("_order_at", None))
     # The sign is deliberately part of the existing order value instead of a
     # new persisted column: old positive rows remain ordinary sessions and
     # the exact database shape stays unchanged.
@@ -443,20 +508,25 @@ def session_row_to_dict(row) -> dict:
 
 def get_session(session_id: int):
     row = query_one(
-        "SELECT sessions.*,fast.value AS _fast_mode FROM sessions "
-        "LEFT JOIN meta AS fast ON fast.key=?||sessions.id WHERE sessions.id=?",
-        (_SESSION_FAST_PREFIX, session_id))
+        "SELECT sessions.*,fast.value AS _fast_mode,recency.value AS _order_at "
+        "FROM sessions "
+        "LEFT JOIN meta AS fast ON fast.key=?||sessions.id "
+        "LEFT JOIN meta AS recency ON recency.key=?||sessions.id WHERE sessions.id=?",
+        (_SESSION_FAST_PREFIX, _SESSION_ORDER_PREFIX, session_id))
     return session_row_to_dict(row) if row else None
 
 
 def list_sessions(include_archived: bool = False) -> list:
     # Negative values are the manually ordered pinned block; non-negative
     # values are the activity/manual order below it.
-    sql = ("SELECT sessions.*,fast.value AS _fast_mode FROM sessions "
-           "LEFT JOIN meta AS fast ON fast.key=?||sessions.id" +
+    sql = ("SELECT sessions.*,fast.value AS _fast_mode,recency.value AS _order_at "
+           "FROM sessions "
+           "LEFT JOIN meta AS fast ON fast.key=?||sessions.id "
+           "LEFT JOIN meta AS recency ON recency.key=?||sessions.id" +
            ("" if include_archived else " WHERE sessions.archived=0") +
            " ORDER BY sessions.sort_order,sessions.id")
-    return [session_row_to_dict(r) for r in query(sql, (_SESSION_FAST_PREFIX,))]
+    return [session_row_to_dict(r) for r in query(
+        sql, (_SESSION_FAST_PREFIX, _SESSION_ORDER_PREFIX))]
 
 
 class SessionOrderConflict(RuntimeError):
@@ -495,7 +565,7 @@ def _validated_session_ids(value, label: str) -> list:
 
 
 def reorder_sessions(ids: list, expected_order,
-                     expected_pinned) -> list:
+                     expected_pinned, expected_recency=None) -> list:
     """Apply one full order without ever allowing a row across the pin edge.
 
     Clients provide the order and pin cohort they began dragging from, so
@@ -506,10 +576,20 @@ def reorder_sessions(ids: list, expected_order,
     requested = _validated_session_ids(ids, "order")
     before = _validated_session_ids(expected_order, "expected_order")
     before_pinned = _validated_session_ids(expected_pinned, "expected_pinned")
+    if expected_recency is not None:
+        try:
+            valid = isinstance(expected_recency, list) and all(
+                type(value) in (int, float) and math.isfinite(value) and value >= 0
+                for value in expected_recency)
+        except OverflowError:
+            valid = False
+        if not valid:
+            raise ValueError("expected_recency must be a list of order timestamps")
     with _lock:
         conn = connect()
         try:
             pinned, unpinned = _session_order_lists(conn)
+            recencies = _session_order_recencies(conn)
             current = pinned + unpinned
             if len(requested) != len(current) or set(requested) != set(current):
                 raise SessionOrderConflict("session list changed on this node")
@@ -517,10 +597,16 @@ def reorder_sessions(ids: list, expected_order,
                 raise SessionOrderConflict("session order changed on this node")
             if before_pinned != pinned:
                 raise SessionOrderConflict("session pins changed on this node")
+            if expected_recency is not None:
+                if expected_recency != [recencies.get(sid, 0.0) for sid in current]:
+                    raise SessionOrderConflict("session activity changed on this node")
             pinned_set = set(pinned)
             next_pinned = [sid for sid in requested if sid in pinned_set]
             next_unpinned = [sid for sid in requested if sid not in pinned_set]
             _write_session_order(conn, next_pinned, next_unpinned)
+            for old, new in zip(unpinned, next_unpinned):
+                if old != new:
+                    _write_session_order_at(conn, new, recencies.get(old, 0.0))
             conn.commit()
             return next_pinned + next_unpinned
         except Exception:
@@ -544,6 +630,7 @@ def set_session_pinned(session_id: int, pinned: bool,
         conn = connect()
         try:
             pinned_ids, unpinned_ids = _session_order_lists(conn)
+            recencies = _session_order_recencies(conn)
             if session_id in pinned_ids:
                 current = True
             elif session_id in unpinned_ids:
@@ -557,9 +644,11 @@ def set_session_pinned(session_id: int, pinned: bool,
             if pinned:
                 unpinned_ids.remove(session_id)
                 pinned_ids.append(session_id)
+                _write_session_order_at(conn, session_id, 0.0)
             else:
                 pinned_ids.remove(session_id)
                 unpinned_ids.insert(0, session_id)
+                _write_session_order_at(conn, session_id, _next_session_order_at(recencies))
             _write_session_order(conn, pinned_ids, unpinned_ids)
             conn.commit()
             return True
@@ -579,12 +668,16 @@ def bump_session_to_top(session_id: int) -> None:
         conn = connect()
         try:
             pinned, unpinned = _session_order_lists(conn)
+            recencies = _session_order_recencies(conn)
             sid = int(session_id)
-            if sid in pinned or sid not in unpinned or unpinned[0] == sid:
+            if sid in pinned or sid not in unpinned:
                 return
             unpinned.remove(sid)
             unpinned.insert(0, sid)
             _write_session_order(conn, pinned, unpinned)
+            # Even a node's first row must overtake other backends on its next
+            # activity block. Completions and queued turns never reach here.
+            _write_session_order_at(conn, sid, _next_session_order_at(recencies))
             conn.commit()
         except Exception:
             conn.rollback()
@@ -783,6 +876,8 @@ def delete_session(session_id: int) -> None:
                          ("session_undo.{}".format(session_id),))
             conn.execute("DELETE FROM meta WHERE key=?",
                          (_SESSION_FAST_PREFIX + str(int(session_id)),))
+            conn.execute("DELETE FROM meta WHERE key=?",
+                         (_SESSION_ORDER_PREFIX + str(int(session_id)),))
             pinned, unpinned = _session_order_lists(conn)
             _write_session_order(conn, pinned, unpinned)
             conn.commit()

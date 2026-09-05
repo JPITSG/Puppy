@@ -278,6 +278,9 @@ async def main() -> None:
         saved_session_order = [row["id"] for row in
                                db.list_sessions(include_archived=True)]
         assert saved_session_order == [linked_id, directory_id, scratch_id]
+        db.bump_session_to_top(scratch_id)
+        saved_recency = db.get_session(scratch_id)["order_at"]
+        assert saved_recency > 0
         saved_completion = notify._record_completion(
             db.get_session(linked_id), "ok", 7)
         db.execute(
@@ -426,6 +429,24 @@ async def main() -> None:
             connection.close()
             expect_snapshot_error(lambda: snapshots._validate_database(invalid_tasks_db), "not current")
         invalid_tasks_db.unlink()
+        invalid_order_db = TEST_ROOT / "invalid-session-order.db"
+        order_key = "session_order_at." + str(scratch_id)
+        for key, value in (
+                (order_key, 'true'), (order_key, '0'), (order_key, '-1'),
+                (order_key, 'NaN'), (order_key, 'Infinity'), (order_key, '{}'),
+                (order_key, '"123"'), (order_key, '1' * 400),
+                ("session_order_at.0" + str(scratch_id), '123'),
+                ("session_order_at.999999", '123'),
+                ("session_order_at." + str(directory_id), '123')):
+            db.backup_to(str(invalid_order_db))
+            connection = sqlite3.connect(str(invalid_order_db))
+            connection.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)", (key, value))
+            connection.commit()
+            connection.close()
+            before = invalid_order_db.read_bytes()
+            expect_snapshot_error(lambda: snapshots._validate_database(invalid_order_db), "not current")
+            assert invalid_order_db.read_bytes() == before
+        invalid_order_db.unlink()
         session_tasks._git(original_scratch, "init", "--quiet")
         session_tasks._git(original_scratch, "add", "-A")
         session_tasks._git(original_scratch, "commit", "-qm", "Task baseline")
@@ -470,6 +491,8 @@ async def main() -> None:
                        for name in names)
 
         # Mutate every restored surface and an excluded ordinary project file.
+        db.bump_session_to_top(scratch_id)
+        assert db.get_session(scratch_id)["order_at"] > saved_recency
         config.set_value("instance_name", "mutated-instance")
         db.meta_apply(delete_keys=list(session_records) + [queue_key])
         config.set_value("engines.usage_refresh_minutes", 5)
@@ -668,6 +691,7 @@ async def main() -> None:
         restored_order = db.list_sessions(include_archived=True)
         assert [row["id"] for row in restored_order] == saved_session_order
         assert [row["pinned"] for row in restored_order] == [True, True, False]
+        assert [row["order_at"] for row in restored_order] == [0, 0, saved_recency]
         assert session_runner.parse_used_config(
             db.get_session(directory_id)["used_config"]) == {"model": "gpt-5.6-sol", "effort": "max"}
         assert db.get_session(directory_id)["fast_mode"] is True

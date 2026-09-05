@@ -560,9 +560,10 @@ function searchIcon(size) {
   return svg;
 }
 
-/* Three slider rails with staggered knobs: the conventional "advanced
+/* Two slider rails with staggered knobs: the conventional "advanced
    filters" mark, drawn like the other stroked chrome icons so it and the
-   magnifier beside it read as one set. */
+   magnifier beside it read as one set. Two rails rather than three because
+   at this size a third crowds the box and the knobs lose their gaps. */
 function tuneIcon(size) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
@@ -573,14 +574,14 @@ function tuneIcon(size) {
   /* each rail leaves a gap under its knob, so the mark needs no background
      fill and stays crisp on any surface it lands on */
   const rails = document.createElementNS(NS, "path");
-  rails.setAttribute("d", "M2.2 4.4h5.3M13 4.4h.8" +
-    "M2.2 8h.5M8.1 8h5.7M2.2 11.6h3.7M11.3 11.6h2.5");
+  rails.setAttribute("d", "M2.2 4.8h4.1M13.6 4.8h.3" +
+    "M2.2 11.2h.3M9.7 11.2h4.2");
   rails.setAttribute("fill", "none");
   rails.setAttribute("stroke", "currentColor");
   rails.setAttribute("stroke-width", "1.4");
   rails.setAttribute("stroke-linecap", "round");
   svg.appendChild(rails);
-  for (const [x, y] of [[10.2, 4.4], [5.4, 8], [8.6, 11.6]]) {
+  for (const [x, y] of [[9.9, 4.8], [6.1, 11.2]]) {
     const knob = document.createElementNS(NS, "circle");
     knob.setAttribute("cx", String(x));
     knob.setAttribute("cy", String(y));
@@ -3984,13 +3985,14 @@ function sessionOrderNodeKey(bid) {
 
 function sessionOrderSnapshot(bid) {
   return sessionsFor(bid).map(session => [
-    Number(session.id), session.pinned === true,
+    Number(session.id), session.pinned === true, sessionOrderRecency(session),
   ]);
 }
 
 function sameSessionOrderSnapshot(left, right) {
   return left.length === right.length && left.every((entry, index) =>
-    entry[0] === right[index][0] && entry[1] === right[index][1]);
+    entry[0] === right[index][0] && entry[1] === right[index][1] &&
+    entry[2] === right[index][2]);
 }
 
 function acceptSessionListPayload(bid, payload) {
@@ -4811,6 +4813,39 @@ function sessionRowRows(bid, s, slots = []) {
   return { r1, r2 };
 }
 
+/* Merge authoritative node lists by their durable slot recency. Each list is
+   already ordered: never sort a backend's rows or infer promotions from status
+   snapshots in this browser. All pins precede all ordinary rows; ties (including
+   nodes without recency support) retain the saved backend order. */
+function mergeSidebarRows(groups) {
+  const pinned = [], ordinary = [];
+  for (const { bid, sessions } of groups) {
+    const rows = [];
+    for (const s of sessions) {
+      if (s.task) continue;
+      (s.pinned === true ? pinned : rows).push({ bid, s });
+    }
+    ordinary.push({ rows, index: 0 });
+  }
+  const merged = [...pinned];
+  while (true) {
+    let next = null, newest = -1;
+    for (const group of ordinary) {
+      const row = group.rows[group.index];
+      if (!row) continue;
+      const stamp = sessionOrderRecency(row.s);
+      if (stamp > newest) { next = group; newest = stamp; }
+    }
+    if (!next) return merged;
+    merged.push(next.rows[next.index++]);
+  }
+}
+
+function sessionOrderRecency(session) {
+  const value = session.order_at;
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
 function renderSidebar() {
   for (const view of Object.values(state.views)) if (view && view.taskViews) view.refreshTasks();
   if (dragSess && dragSess.item && dragSess.item.isConnected) {
@@ -4819,28 +4854,23 @@ function renderSidebar() {
   }
   const root = $("sess-groups");
   wireSessionDropZone(root);
-  /* One flat list across every node - the per-backend blocks live in the
-     status box below. Rows follow that box's saved node order between
-     backends while keeping each backend's own sticky manual order within. */
+  /* Backend order only breaks ties; activity merges across every backend. */
   const nodes = sortNodeGroups([{ bid: 0 }]
     .concat(state.backends.map(b => ({ bid: b.id }))));
-  const rows = [];
-  for (const node of nodes)
-    for (const s of sessionsFor(node.bid)) {
-      if (s.task) continue;
-      if (s.status === "running" &&
-          !sessionActivityAnchors.has(sessionActivityKey(node.bid, s.id)))
-        ingestOneSessionActivity(node.bid, s, null, Date.now());
-      rows.push({ bid: node.bid, s });
-    }
+  const rows = mergeSidebarRows(nodes.map(node => ({
+    bid: node.bid, sessions: sessionsFor(node.bid),
+  })));
+  for (const { bid, s } of rows)
+    if (s.status === "running" &&
+        !sessionActivityAnchors.has(sessionActivityKey(bid, s.id)))
+      ingestOneSessionActivity(bid, s, null, Date.now());
   const availableSessions = new Set(
     rows.map(row => sidebarSessionKey(row.bid, row.s.id)));
   if (state.selectedSession && !availableSessions.has(state.selectedSession))
     state.selectedSession = null;
   const selectedSession = state.selectedSession || focusedSessionKey();
   const filterTerms = state.sessionFilter.toLowerCase().split(/\s+/).filter(Boolean);
-  /* Rows stay in each node's own order: the node moves a session to the
-     front when it starts work, and drag-and-drop edits that same order. */
+  /* Filter after merging so hidden rows retain their authoritative slots. */
   const list = rows
     .filter(row => state.showArchived || !row.s.archived)
     .filter(row => !filterTerms.length || (hay =>
@@ -5547,6 +5577,9 @@ function wireSessionDropZone(root) {
           order: ids,
           expected_order: previousIds,
           expected_pinned: previousPinned,
+          ...(nodeHasCapability(bid, "session-order-recency") ? {
+            expected_recency: context.orderSnapshot.map(entry => entry[2]),
+          } : {}),
         },
       });
       /* Older unpinned-only nodes answer {ok:true}; fetch their resulting

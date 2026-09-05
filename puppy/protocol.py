@@ -141,6 +141,9 @@ SESSION_AGENT_NOTES_CAPABILITY = "session-agent-notes"
 # Node-owned pinned flags and session order. Drag-and-drop requires the
 # complete starting order and pin cohort as compare tokens.
 SESSION_PINNING_CAPABILITY = "session-pinning"
+# Durable ordinary-slot recency for cross-backend sidebar merging, plus the
+# optional expected_recency reorder compare token (aligned with expected_order).
+SESSION_ORDER_RECENCY_CAPABILITY = "session-order-recency"
 # A node keeps a bounded, durable sequence of authoritative activity-block
 # completions and serves GET /api/completions?after=<seq>. Controllers use it
 # for remote completion commands without relying on an open browser.
@@ -221,6 +224,7 @@ BASE_CAPABILITIES = (
     SESSION_FAST_MODE_CAPABILITY,
     SESSION_AGENT_NOTES_CAPABILITY,
     SESSION_PINNING_CAPABILITY,
+    SESSION_ORDER_RECENCY_CAPABILITY,
     COMPLETION_EVENTS_CAPABILITY,
     NODE_STATE_STREAM_CAPABILITY,
     SESSION_CONTROL_WS_CAPABILITY,

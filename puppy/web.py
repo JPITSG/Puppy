@@ -585,7 +585,8 @@ async def h_sessions_reorder(request: web.Request):
     expected_pinned = body.get("expected_pinned") if "expected_pinned" in body else None
     try:
         db.reorder_sessions(ids, expected_order=expected_order,
-                            expected_pinned=expected_pinned)
+                            expected_pinned=expected_pinned,
+                            expected_recency=body.get("expected_recency"))
     except ValueError as exc:
         return web.json_response({"error": str(exc)}, status=400)
     except db.SessionOrderConflict as exc:

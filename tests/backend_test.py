@@ -2339,6 +2339,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "session-fast-mode" in ping["capabilities"]
         assert "session-agent-notes" in ping["capabilities"]
         assert "session-pinning" in ping["capabilities"]
+        assert "session-order-recency" in ping["capabilities"]
         assert "completion-events" in ping["capabilities"]
         assert "workspace-mirror-reset" in ping["capabilities"]
         assert "shutdown-notice" in ping["capabilities"]
@@ -2692,6 +2693,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
                               if row["id"] == scratch["id"])
         assert listed_scratch["status"] == "idle"
         assert listed_scratch["pinned"] is False
+        assert listed_scratch["order_at"] == 0
         assert listed_scratch["active_since"] is None
         assert listed_scratch["steering"] == {
             "supported": True, "ready": False, "turn_id": ""}
@@ -2760,6 +2762,16 @@ async def exercise_node(url: str, token: str, expected_version: str,
             reordered_payload = await response.json()
             assert response.status == 200, reordered_payload
         assert reordered_payload["sessions"][0]["pinned"] is True
+        for recency, status in (([0], 200), ([1], 409), ([True], 400),
+                                ([10 ** 400], 400)):
+            async with http.post(url + "/api/sessions/reorder", headers=good,
+                                 ssl=pinned, json={
+                                     "order": [scratch["id"]],
+                                     "expected_order": [scratch["id"]],
+                                     "expected_pinned": [scratch["id"]],
+                                     "expected_recency": recency,
+                                 }) as response:
+                assert response.status == status, await response.text()
 
         # Model a workspace removed outside Puppy. The transcript/session stays,
         # advertises the missing files, and can be given a fresh private workspace.
@@ -3151,6 +3163,7 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert "queue-edit" in full_ping["capabilities"]
         assert "queue-reorder" in full_ping["capabilities"]
         assert "session-pinning" in full_ping["capabilities"]
+        assert "session-order-recency" in full_ping["capabilities"]
         assert "session-drafts" in full_ping["capabilities"]
         assert "active-turn-steering" in full_ping["capabilities"]
         assert "session-control-ws-v1" in full_ping["capabilities"]
@@ -4491,10 +4504,17 @@ async def exercise_session_order(runner, db) -> None:
         return [s["id"] for s in db.list_sessions(include_archived=True)
                 if s["pinned"]]
 
+    def recencies():
+        return [s["order_at"] for s in db.list_sessions(include_archived=True)]
+
     def assert_canonical():
         count = len(pinned_ids())
         assert numbering() == list(range(-count, 0)) + \
             list(range(1, len(order()) - count + 1)), numbering()
+        values = recencies()
+        assert values[:count] == [0] * count
+        assert values[count:] == sorted(values[count:], reverse=True)
+        db.require_current_schema(db.connect())
 
     def assert_raises(kind, call):
         try:
@@ -4507,6 +4527,7 @@ async def exercise_session_order(runner, db) -> None:
     tasks = []
     try:
         assert order() == [a, b, c]
+        assert recencies() == [0, 0, 0]
         for sid in ids:
             hub = runner.SessionHub(sid)
             runner._hubs[sid] = hub
@@ -4518,10 +4539,13 @@ async def exercise_session_order(runner, db) -> None:
         hubs[c]._start_turn("first prompt")
         tasks.append(hubs[c].turn_task)
         assert order() == [c, a, b], order()
+        first_recency = recencies()
+        assert first_recency[0] > 0 and first_recency[1:] == [0, 0]
         # a queued continuation within the same activity block stays put
         hubs[c]._start_turn("queued prompt")
         tasks.append(hubs[c].turn_task)
         assert order() == [c, a, b], order()
+        assert recencies() == first_recency
         hubs[b]._start_turn("later prompt")
         tasks.append(hubs[b].turn_task)
         assert order() == [b, c, a], order()
@@ -4529,19 +4553,62 @@ async def exercise_session_order(runner, db) -> None:
         hubs[b].status = "idle"
         hubs[b].active_since = None
         assert order() == [b, c, a], order()
+        before_completion = recencies()
+        db.touch_session(b, status="idle", name="renamed")
+        db.add_event(b, "result", {"status": "ok"})
+        assert recencies() == before_completion
         hubs[a]._start_turn("newest prompt")
         tasks.append(hubs[a].turn_task)
         assert order() == [a, b, c], order()
         assert_canonical()
         # a manual drag edits the same order the activations produced
+        slots = recencies()
         db.reorder_sessions([c, a, b], expected_order=[a, b, c],
                             expected_pinned=[])
         assert order() == [c, a, b], order()
+        assert recencies() == slots
+        assert_canonical()
         hubs[a].status = "idle"
         hubs[a].active_since = None
         hubs[a]._start_turn("again")
         tasks.append(hubs[a].turn_task)
         assert order() == [a, c, b], order()
+
+        # Already-first activity must still get a new global position. A
+        # compare token catches this change even though IDs/pins are unchanged.
+        before = recencies()
+        from unittest.mock import patch
+        with patch.object(db.time, "time", return_value=1.0):
+            db.bump_session_to_top(a)
+        assert order() == [a, c, b]
+        assert recencies()[0] > before[0]
+        assert recencies()[1:] == before[1:]
+        assert_raises(db.SessionOrderConflict, lambda: db.reorder_sessions(
+            [c, a, b], expected_order=order(), expected_pinned=[],
+            expected_recency=before))
+        assert order() == [a, c, b]
+        assert_canonical()
+        # Recency is durable, not a runner/browser cache.
+        saved = recencies()
+        with db._lock:
+            db._conn.close()
+            db._conn = None
+        assert recencies() == saved
+        # Invalid persisted recencies fail before any reorder can overwrite
+        # them. An operator must repair the ledger explicitly.
+        key = "session_order_at." + str(c)
+        original = db.meta_get(key)
+        db.meta_set(key, saved[0] + 1)
+        corrupt = recencies()
+        try:
+            assert_raises(db.SchemaMismatchError,
+                          lambda: db.require_current_schema(db.connect()))
+            assert_raises(db.SchemaMismatchError, lambda: db.reorder_sessions(
+                [c, a, b], expected_order=order(), expected_pinned=[]))
+            assert recencies() == corrupt
+            assert order() == [a, c, b]
+        finally:
+            db.meta_set(key, original)
 
         # New pins join below established pins. Repeating the same PATCH is a
         # true no-op, and activity never disturbs their manual priority.
@@ -4550,8 +4617,10 @@ async def exercise_session_order(runner, db) -> None:
         assert db.set_session_pinned(b, True, expected=False) is True
         assert order() == [c, b, a]
         assert db.set_session_pinned(b, True, expected=True) is False
+        pin_recency = recencies()
         db.bump_session_to_top(b)
         assert order() == [c, b, a]
+        assert recencies() == pin_recency
         assert pinned_ids() == [c, b]
         assert_canonical()
 
@@ -4615,11 +4684,13 @@ async def exercise_session_order(runner, db) -> None:
         payload = runner.sessions_payload()["sessions"]
         assert [s["id"] for s in payload] == [d, c, b, a, e]
         assert [s["pinned"] for s in payload] == [True, True, True, True, False]
+        assert [s["order_at"] for s in payload] == recencies()
         await asyncio.gather(*tasks, return_exceptions=True)
     finally:
         for sid in ids:
             runner._hubs.pop(sid, None)
             db.delete_session(sid)
+        assert not db.query("SELECT key FROM meta WHERE key GLOB 'session_order_at.*'")
 
 
 async def exercise_queue_reorder(runner, db) -> None:

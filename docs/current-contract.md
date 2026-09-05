@@ -52,6 +52,9 @@ still contain a value written before that release.
 - Durable completion records drive notifications. Browser-reported completion
   `/api/notify/fire` and its deduplication cache are removed.
 - Session reordering requires both starting-order and pin-cohort compare tokens.
+  `session-order-recency` adds durable `order_at` timestamps for merging the
+  sidebar across backends below all pins, and an optional `expected_recency`
+  compare token for activity that leaves the node's ID order unchanged.
 - Remote spawned jobs always use controller-chosen IDs and ownership leases.
   Use `idle_timeout_s` and `max_runtime_s`; the old `timeout_s` field is rejected.
 - Upgrade readiness and backend availability come from their current owners;
