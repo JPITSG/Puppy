@@ -3382,6 +3382,10 @@ def check_modal_surface(ui_source: str, css_source: str) -> None:
 
     # one body-copy voice: no modal restates it under a private name
     assert ".modal-copy{" in css_source
+    # copy runs to paragraphs inside that voice, and a confirm's subject (a
+    # task or backend name) is a line of its own rather than part of a sentence
+    assert ".modal-copy+.modal-copy{margin-top:-4px}" in css_source
+    assert ".modal-subject{color:var(--txt);font-weight:600;overflow-wrap:anywhere}" in css_source
     assert ".backend-edit-intro{" not in css_source
     assert ".listener-handoff-status{" not in css_source
     for markup in ('<p class="modal-copy">Update its display name',
@@ -3951,7 +3955,7 @@ console.log(JSON.stringify({result,calls}));
 
     # Dismissing either promise-backed dialog via Escape/backdrop must settle it;
     # otherwise the caller can remain disabled forever after a close without a button.
-    confirm_start = ui_source.index("function modalConfirm(")
+    confirm_start = ui_source.index("function modalSubjectHtml(")
     confirm_end = ui_source.index("\n\nfunction modalNotice", confirm_start)
     prompt_start = ui_source.index("function modalPrompt(")
     prompt_end = ui_source.index("\n\n/* Edit a paired backend", prompt_start)
@@ -3978,13 +3982,22 @@ const acceptedPromise=modalConfirm("Title","Copy",{
 const styled=current.html.includes("btn btn-pri") && current.html.includes("Apply fleet");
 current.controls["#mc-yes"].onclick();
 const accepted=await acceptedPromise;
-console.log(JSON.stringify({dismissed,accepted,styled}));
+modalConfirm("Title","Removed for good.\n\nNot touched:\nthe project",{subject:"  Task name  "});
+const paragraphs=current.html.split('<p class="modal-copy">').length-1;
+const subject=current.html.includes('<p class="modal-copy modal-subject">Task name</p><p class="modal-copy">Removed for good.</p>');
+const lineBreak=current.html.includes("Not touched:<br>the project</p>");
+current.dismiss();
+modalConfirm("Title","");
+const emptyCopy=current.html.includes('<p class="modal-copy"></p>') && !current.html.includes("modal-subject");
+current.dismiss();
+console.log(JSON.stringify({dismissed,accepted,styled,paragraphs,subject,lineBreak,emptyCopy}));
 '''
     proc = subprocess.run(["node", "--input-type=module", "-e", with_live_views(script)],
                           capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:700]
     assert json.loads(proc.stdout) == {
-        "dismissed": False, "accepted": True, "styled": True}
+        "dismissed": False, "accepted": True, "styled": True, "paragraphs": 2,
+        "subject": True, "lineBreak": True, "emptyCopy": True}
 
 
 def check_session_provider_marks(css_source: str) -> None:

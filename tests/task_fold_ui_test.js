@@ -52,6 +52,7 @@ const context = vm.createContext({
 });
 vm.runInContext([
   between("const el = ", "/* Close buttons"),
+  between("function modalSubjectHtml(", "function modalConfirm("),
   between("function backendSupportsTaskFold(", "/* \"Enable tasks\""),
   between("/* A removed task's condensed conversation", "/* The sidebar's activity slot"),
   between("/* Removing a task is the moment", "class SessionWorkspaceView {"),
@@ -69,7 +70,10 @@ const node = key => dialog.m.querySelector(key);
   let pending = context.modalRemoveTask(session);
   assert.ok(dialog.m.classList.contains("remove-task-modal"));
   assert.equal(node("#rt-fold").checked, true, "folding is on by default");
-  assert.ok(dialog.m.textContent.includes("Fold me"), "the copy names the task");
+  assert.equal(node(".modal-subject").textContent, "Fold me", "the name is a line of its own");
+  assert.ok(!dialog.m.textContent.includes("Fold me’s"), "the name is not run into the sentence");
+  assert.ok(dialog.m.querySelectorAll(".modal-copy")[1].textContent.startsWith("The task’s private working copy"),
+    "the copy follows the name as its own paragraph");
   assert.equal(document.activeElement, node("#rt-yes"));
   node("#rt-yes").onclick();
   assert.deepEqual(plain(await pending), { fold: true });
@@ -83,6 +87,11 @@ const node = key => dialog.m.querySelector(key);
   assert.equal(await pending, null);
   pending = context.modalRemoveTask(session);
   dialog.close();
+  assert.equal(await pending, null);
+  // An unnamed task has no subject line at all, never an empty one.
+  pending = context.modalRemoveTask({ id: 51, task: { parent: 10 } });
+  assert.equal(node(".modal-subject"), null, "no empty subject line");
+  node("#rt-no").onclick();
   assert.equal(await pending, null);
 
   // A capable node gets the fold route with the chosen flag; a legacy node

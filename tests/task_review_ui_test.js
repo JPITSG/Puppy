@@ -68,6 +68,10 @@ const lastBody = () => JSON.parse(JSON.stringify(requests.at(-1).body));
   assert.match(dialog.m.html, /inspect Main read-only when needed/);
   assert.match(dialog.m.html, /review and apply again/);
   assert.match(dialog.m.html, /one at a time/);
+  assert.match(dialog.m.html, /<span class="note-para">If Main has conflicting changes/, "the note runs to paragraphs");
+  assert.match(dialog.m.html, /<span class="note-para">You must review and apply again/);
+  assert.equal(nodes[".task-review-truncated"].classes.has("hidden"), true, "a full preview has no shortened notice");
+  assert.match(nodes[".task-review-note"].textContent, /^Applying writes/, "the apply note is its own paragraph");
   assert.equal(nodes[".task-review-summary"].textContent, session.task.summary, "summary remains literal text");
   assert.ok(nodes[".task-review-diff"].children.some(line => line.classes.has("add")));
   response = { applied: true };
@@ -76,6 +80,10 @@ const lastBody = () => JSON.parse(JSON.stringify(requests.at(-1).body));
   assert.equal(dialog.m.isConnected, false);
   assert.match(notices[0], /applied to Main/);
   assert.equal(workspace.opened, null);
+
+  nodes = await open({ ...changed, truncated: true });
+  assert.equal(nodes[".task-review-truncated"].classes.has("hidden"), false, "a cut preview says so above the note");
+  assert.match(nodes[".task-review-note"].textContent, /^Applying writes/);
 
   nodes = await open();
   nodes["#tr-resolve"].checked = true;

@@ -1933,14 +1933,16 @@ function sessionLocationTitle(session, bid) {
   return workspaceLocationPath(session);
 }
 
+/* Confirm copy: a blank line starts a new paragraph (modalCopyHtml), so what
+   is removed stands apart from what is lost or left alone. */
 function sessionDeleteMessage(session) {
   if (session && session.task)
     return "The task conversation and its private working copy are removed permanently. Changes already applied to Main are kept.";
   const ws = sessionWorkspace(session);
   if (ws) {
-    return "The transcript and this backend's private synchronized copy are removed permanently." +
-      (session.ws_dirty ? " Changes not yet synced to the project are lost." : "") +
-      ` The project on ${ws.node || "the workspace backend"} is not touched.`;
+    return "The transcript and this backend's private synchronized copy are removed permanently.\n\n" +
+      (session.ws_dirty ? "Changes not yet synced to the project are lost. " : "") +
+      `The project on ${ws.node || "the workspace backend"} is not touched.`;
   }
   return isScratchWorkspace(session)
     ? "The transcript and all files in its scratch workspace are removed permanently."
@@ -9566,11 +9568,15 @@ function tasksIcon(size) {
 /* Removing a task is the moment its conversation would be lost, so the
    confirm offers to fold a condensed copy into Main first. The checkbox is on
    by default and is the whole decision: a failed or stopped task folds the
-   same way. Nodes without the fold route keep the plain delete confirm. */
+   same way. Nodes without the fold route keep the plain delete confirm. The
+   task's name stands on its own line above the copy: an automatic title is a
+   sentence fragment, and run into the explanation it read as one garbled
+   sentence. */
 function modalRemoveTask(session) {
   return new Promise(resolve => {
     const { m, close, onClose } = modal(`<h2>Remove task?</h2>
-      <p class="modal-copy">${esc(session.name || "The task")}’s private working copy is removed permanently. Changes already applied to Main are kept.</p>
+      ${modalSubjectHtml(session.name)}
+      <p class="modal-copy">The task’s private working copy is removed permanently. Changes already applied to Main are kept.</p>
       <label class="check fold-check"><input type="checkbox" id="rt-fold" checked> Keep the conversation in Main as a condensed archive</label>
       <div class="m-btns"><button class="btn" id="rt-no">Cancel</button><button class="btn btn-danger btn-solid" id="rt-yes">Remove</button></div>`,
       "remove-task-modal");
@@ -9594,7 +9600,8 @@ function modalRemoveTask(session) {
 /* null when the person cancels; otherwise the removal choice to carry out. */
 async function confirmTaskRemoval(bid, session) {
   if (backendSupportsTaskFold(bid)) return modalRemoveTask(session);
-  return (await modalConfirm("Remove task?", sessionDeleteMessage(session))) ? { fold: false, legacy: true } : null;
+  return (await modalConfirm("Remove task?", sessionDeleteMessage(session), { subject: session.name })) ?
+    { fold: false, legacy: true } : null;
 }
 /* Resolves to whether the conversation was folded into Main. */
 async function removeTaskSession(bid, session, choice) {
@@ -9711,9 +9718,9 @@ class SessionWorkspaceView {
   renderOverview(tasks) {
     const box = this.overview;
     if (!box) return;
-    // Keep the node's order within each group: active, unmerged, then applied.
+    // Active, unmerged, then applied; newest-created tasks first within each group.
     const rank = s => ["running", "queued"].includes(s.task.state) ? 0 : s.task.state === "applied" ? 2 : 1;
-    tasks = [...tasks].sort((a, b) => rank(a) - rank(b));
+    tasks = [...tasks].sort((a, b) => rank(a) - rank(b) || b.task.created_at - a.task.created_at || b.id - a.id);
     const signature = JSON.stringify(tasks.map(s => [s.id, s.name, s.status, s.color, s.task]));
     if (signature === this.renderedOverview) return;
     this.renderedOverview = signature;
@@ -9737,7 +9744,7 @@ class SessionWorkspaceView {
       const open = el("button", "btn btn-sm", task.needs_approval ? "Open approval" : "Open");
       open.type = "button";
       open.onclick = () => { this.closeTaskOverview(); this.openTask(session.id); };
-      const review = el("button", "btn btn-sm" + (task.state === "ready" ? " btn-pri" : ""), "Review changes");
+      const review = el("button", "btn btn-sm" + (task.state === "ready" ? " btn-pri" : ""), task.state === "applied" ? "View" : "Review changes");
       review.type = "button";
       review.disabled = !taskReviewable(task);
       review.onclick = () => { this.closeTaskOverview(); modalReviewTask(this, session); };
@@ -9888,7 +9895,8 @@ async function modalNewTask(workspace) {
       <label>Permissions<select id="nt-perm"></select></label>
     </div>
     <label class="hidden" id="nt-model-custom-wrap">Custom model<input type="text" id="nt-model-custom" placeholder="Model ID" spellcheck="false" maxlength="256"></label>` : ""}
-    <p class="hint">${configurable ? "Starts with Main’s selected settings and recent conversation context." : "Uses Main’s engine, model, effort and permissions, plus recent conversation context."} Main must be idle to create or apply a task. Local Git projects only; ignored files are not copied.</p>
+    <p class="hint">${configurable ? "Starts with Main’s selected settings and recent conversation context." : "Uses Main’s engine, model, effort and permissions, plus recent conversation context."}</p>
+    <p class="hint">Main must be idle to create or apply a task. Local Git projects only; ignored files are not copied.</p>
     <p class="backend-edit-error hidden" role="alert"></p>
     <div class="m-btns"><button class="btn" id="nt-cancel">Cancel</button><button class="btn btn-pri" id="nt-start">Start task</button></div>`, "new-task-modal");
   const start = m.querySelector("#nt-start");
@@ -10024,12 +10032,14 @@ async function modalReviewTask(workspace, session) {
     <div class="field-lbl">Changed files</div>
     <pre class="task-review-files">Loading changes…</pre>
     <pre class="task-review-diff hidden"></pre>
+    <p class="hint task-review-truncated hidden">The diff preview is shortened.</p>
     <p class="hint task-review-note hidden"></p>
     ${canResolve ? `<label class="be-auto be-auto-add task-review-resolve hidden" id="tr-resolve-wrap">
       <input type="checkbox" id="tr-resolve" aria-labelledby="tr-resolve-label" aria-describedby="tr-resolve-note" disabled>
       <span class="be-auto-track" aria-hidden="true"><span></span></span>
       <span class="be-auto-copy"><span id="tr-resolve-label">Resolve conflicts</span>
-        <small id="tr-resolve-note">If Main has conflicting changes, send one follow-up to this task’s agent with a fresh copy of Main. It uses the task’s history, current settings, permissions and normal model quota to reconcile the changes in its own copy. It may also inspect Main read-only when needed. You must review and apply again afterward. Applies run one at a time; if another task changes Main again, another resolution may be needed. Off by default for each review.</small></span>
+        <small id="tr-resolve-note"><span class="note-para">If Main has conflicting changes, send one follow-up to this task’s agent with a fresh copy of Main. It uses the task’s history, current settings, permissions and normal model quota to reconcile the changes in its own copy. It may also inspect Main read-only when needed.</span>
+          <span class="note-para">You must review and apply again afterward. Applies run one at a time; if another task changes Main again, another resolution may be needed. Off by default for each review.</span></small></span>
     </label>` : ""}
     <p class="backend-edit-error hidden" role="alert"></p>
     <div class="m-btns"><button class="btn" id="tr-close">Close</button><button class="btn btn-pri hidden" id="tr-apply" disabled>Apply to Main</button></div>`, "task-review-modal");
@@ -10068,8 +10078,8 @@ async function modalReviewTask(workspace, session) {
         diff.appendChild(el("span", diffLineClass(line), line + "\n"));
       diff.classList.remove("hidden");
     }
-    note.textContent = (data.truncated ? "The diff preview is shortened. " : "") +
-      "Applying writes these changes into Main’s working files without committing or deploying. Main must be idle; conflicting changes are never overwritten automatically.";
+    if (data.truncated) m.querySelector(".task-review-truncated").classList.remove("hidden");
+    note.textContent = "Applying writes these changes into Main’s working files without committing or deploying. Main must be idle; conflicting changes are never overwritten automatically.";
     note.classList.remove("hidden");
     if (resolve && data.has_changes) {
       resolve.disabled = false; resolveWrap.classList.remove("hidden");
@@ -12826,7 +12836,7 @@ class SessionView {
     if (tool === "undo") {
       const ok = await modalConfirm("Undo last turn",
         "Reverts only the native engine context, so the next prompt continues " +
-        "from before your last turn. That prompt and reply stay visible in " +
+        "from before your last turn.\n\nThat prompt and reply stay visible in " +
         "Puppy's transcript, and files changed by the turn are not reverted.");
       if (!ok) return;
     }
@@ -16158,9 +16168,9 @@ class SettingsView {
             onlineTimerPropagationTargets(nodes, bid) : [];
           if (!targets.length || !(await modalConfirm(
             "Apply to other online backends?",
-            `${savedMessage}. Apply the same value to ${targets.length} other online ` +
+            `${savedMessage}.\n\nApply the same value to ${targets.length} other online ` +
               `backend${targets.length === 1 ? "" : "s"}: ` +
-              `${targets.map(target => target.name).join(", ")}? ` +
+              `${targets.map(target => target.name).join(", ")}?\n\n` +
               "Offline or incompatible backends will be left unchanged.",
             { confirmLabel: "Apply to all", destructive: false }))) {
             if (generation === this.renderGeneration && card.isConnected)
@@ -16210,7 +16220,7 @@ class SettingsView {
       const confirmed = await modalConfirm(
         "Reset timers everywhere?",
         `This will reset all six timer values on ${scope}: ` +
-          `${targets.map(target => target.name).join(", ")}. Each node will use the ` +
+          `${targets.map(target => target.name).join(", ")}.\n\nEach node will use the ` +
           "defaults advertised by its installed Puppy version. Offline or incompatible " +
           "backends will not be changed.",
         { confirmLabel: "Reset all", destructive: false });
@@ -17002,7 +17012,7 @@ class SettingsView {
         `Puppy will first ask this browser to reach ${proposedBind
           ? fmtEndpoint(proposedBind, proposedPort) : "the proposed endpoint"} directly. ` +
         `Only after that succeeds will it save ${fmtListenerEndpoint(proposedListener)} ` +
-        `and queue a graceful restart. ` +
+        `and queue a graceful restart.\n\n` +
         "Active turns are allowed to finish, then this page reconnects automatically."))) return;
       saveButton.disabled = true;
       if (activateButton) activateButton.disabled = true;
@@ -17079,7 +17089,7 @@ class SettingsView {
             : "The active listener already matches this setting; no restart is required.";
           modalNotice("Listener was saved",
             `The browser check and save succeeded, but activation did not complete: ` +
-            `${e.message}. ${activation}`);
+            `${e.message}.\n\n${activation}`);
         } else if (commitAttempted && verified) {
           let current = null;
           try { current = await api(0, "settings", { timeoutMs: 3000 }); } catch (_) { /* uncertain */ }
@@ -17091,20 +17101,20 @@ class SettingsView {
               ? `Restart Puppy to activate ${fmtListenerEndpoint(current.web)}.`
               : "The active listener already matches this setting; no restart is required.";
             modalNotice("Listener was saved",
-              `The save completed even though its response was interrupted. ${activation}`);
+              `The save completed even though its response was interrupted.\n\n${activation}`);
           } else if (current && String(current.web.host) === String(settings.web.host) &&
                      Number(current.web.port) === Number(settings.web.port) &&
                      String(current.web.scheme) === configuredScheme &&
                      String(current.web.https_source) === configuredCertificateSource) {
             modalNotice("Listener was not changed",
-              `${e.message}. Puppy remains configured on ${fmtListenerEndpoint(settings.web)}.`);
+              `${e.message}.\n\nPuppy remains configured on ${fmtListenerEndpoint(settings.web)}.`);
           } else {
             modalNotice("Listener save could not be confirmed",
-              `${e.message}. The current listener remains active. Reload Settings and confirm the ` +
+              `${e.message}.\n\nThe current listener remains active. Reload Settings and confirm the ` +
               "configured listener before restarting Puppy.");
           }
         } else if (endpointProofNeeded) modalNotice("Listener was not changed",
-          `${e.message}. Puppy remains configured on ${fmtListenerEndpoint(settings.web)}.`);
+          `${e.message}.\n\nPuppy remains configured on ${fmtListenerEndpoint(settings.web)}.`);
         else toast(e.message, "error");
       } finally {
         if (saveButton.isConnected) {
@@ -17146,10 +17156,11 @@ class SettingsView {
     const autoSection = el("section", "engine-updates-section");
     autoSection.innerHTML = `<h2>Engine updates</h2>
       <p class="usage-refresh-copy">Let a backend install its own engine CLI updates using the
-        same vendor updater the Update button runs. New npm releases wait at least 10 minutes
-        after this backend first sees them. Each version is then tried once: if an update fails
-        it is not retried until a newer one appears, and a backend with a busy session waits
-        rather than replacing an engine underneath it.</p>`;
+        same vendor updater the Update button runs.</p>
+      <p class="usage-refresh-copy">New npm releases wait at least 10 minutes after this backend
+        first sees them. Each version is then tried once: if an update fails it is not retried
+        until a newer one appears, and a backend with a busy session waits rather than replacing
+        an engine underneath it.</p>`;
     const autoList = el("div", "eau-list");
     const localAuto = this.autoUpgradeRow(settings.instance_name, 0);
     localAuto.update(state.autoUpgrade, "ok", true);
@@ -17178,8 +17189,9 @@ class SettingsView {
     usageCard.innerHTML = `<h2>Usage refresh</h2>
       <p class="usage-refresh-copy">Choose how often each backend asks its installed Codex CLI
         for current account-limit data. Other engines do not provide an account-refresh API
-        here. This read-only check does not start a turn or consume model tokens. Use 0 to
-        disable it.</p>`;
+        here.</p>
+      <p class="usage-refresh-copy">This read-only check does not start a turn or consume model
+        tokens. Use 0 to disable it.</p>`;
     const usageList = el("div", "usage-refresh-list");
     const localUsage = this.usageRefreshRow(settings.instance_name, 0);
     localUsage.update(state.usageRefresh, "ok", true);
@@ -17247,9 +17259,9 @@ class SettingsView {
         environment variables. <span class="mono-inline">{duration}</span> is whole seconds and
         <span class="mono-inline">{duration_hms}</span> the same span as a clock
         (<span class="mono-inline">9:59</span>, <span class="mono-inline">10:00</span>,
-        <span class="mono-inline">1:00:00</span>).
-        The switch and sidebar bell control the same enabled state. With no command, completions
-        do nothing and the bell stays hidden.</p>
+        <span class="mono-inline">1:00:00</span>).</p>
+      <p class="usage-refresh-copy">The switch and sidebar bell control the same enabled state.
+        With no command, completions do nothing and the bell stays hidden.</p>
       <div class="notify-actions">
         <button class="btn btn-pri btn-sm" id="nf-save">Save</button>
         <button class="btn btn-sm" id="nf-test">Test</button>
@@ -17556,7 +17568,7 @@ class SettingsView {
         const rm = el("button", "btn btn-danger btn-sm", "Remove");
         rm.onclick = async () => {
           const addresses = configuredBackendUrls(b).join(", ");
-          if (!(await modalConfirm("Remove backend?", `${b.name} (${addresses})`))) return;
+          if (!(await modalConfirm("Remove backend?", addresses, { subject: b.name }))) return;
           await api(0, `backends/${b.id}`, { method: "DELETE" });
           discardBackendRecord(b.id);
           if (this.inner.isConnected) await this.render();
@@ -17631,9 +17643,9 @@ class SettingsView {
     const c5 = el("div", "card snapshot-card");
     c5.innerHTML = `<h2>Backup &amp; restore</h2>
       <p class="snapshot-copy">A backup restores this instance’s settings, accounts, backend
-        connections, local sessions and transcripts, uploads, scratch workspaces, tabs, and drafts.
-        Remote sessions remain on their registered backends. Ordinary project directories and
-        engine sign-ins/native caches remain on their machines.</p>
+        connections, local sessions and transcripts, uploads, scratch workspaces, tabs, and drafts.</p>
+      <p class="snapshot-copy">Remote sessions remain on their registered backends. Ordinary project
+        directories and engine sign-ins/native caches remain on their machines.</p>
       <p class="snapshot-warning">The archive contains private credentials and API tokens.
         Only import a backup you trust, and store it securely.</p>
       <div class="snapshot-actions">
@@ -17675,7 +17687,7 @@ class SettingsView {
       const file = fileInput.files && fileInput.files[0];
       if (!file) return;
       const confirmed = await modalConfirm("Restore Puppy backup?",
-        `This replaces current Puppy settings and sessions with “${file.name}”. ` +
+        `This replaces current Puppy settings and sessions with “${file.name}”.\n\n` +
         "Running turns, queued messages, and terminals must be stopped first.");
       if (!confirmed) { fileInput.value = ""; return; }
       exportButton.disabled = true;
@@ -17740,13 +17752,35 @@ function modal(html, className = "") {
   return { m, close, onClose };
 }
 
+/* ---- modal copy ----
+   The thing a confirm is about (a task or backend name) stands on its own
+   line above the copy, never run into the sentence that explains what
+   happens: an automatic title is a sentence fragment. Body copy is one or
+   more paragraphs - a blank line in the text starts a new <p>, a single
+   newline breaks a line - so what happens, what is not touched and what must
+   be done first do not read as one condensed run. Every plain modal (confirm,
+   notice, prompt) renders its text through these, so a caller only writes
+   the text. */
+function modalSubjectHtml(subject) {
+  const name = String(subject == null ? "" : subject).trim();
+  return name ? `<p class="modal-copy modal-subject">${esc(name)}</p>` : "";
+}
+
+function modalCopyHtml(text) {
+  const paragraphs = String(text == null ? "" : text).split(/\n\s*\n/)
+    .map(part => part.trim()).filter(Boolean);
+  if (!paragraphs.length) return '<p class="modal-copy"></p>';
+  return paragraphs.map(part =>
+    `<p class="modal-copy">${part.split("\n").map(line => esc(line)).join("<br>")}</p>`).join("");
+}
+
 function modalConfirm(title, text, options = {}) {
   return new Promise((resolve) => {
     const confirmLabel = typeof options.confirmLabel === "string" ?
       options.confirmLabel : "Confirm";
     const destructive = options.destructive !== false;
     const actionClass = destructive ? "btn-danger btn-solid" : "btn-pri";
-    const { m, close, onClose } = modal(`<h2>${esc(title)}</h2><p class="modal-copy">${esc(text || "")}</p>
+    const { m, close, onClose } = modal(`<h2>${esc(title)}</h2>${modalSubjectHtml(options.subject)}${modalCopyHtml(text)}
       <div class="m-btns"><button class="btn" id="mc-no">Cancel</button><button class="btn ${actionClass}" id="mc-yes">${esc(confirmLabel)}</button></div>`);
     let settled = false;
     const finish = value => {
@@ -17767,7 +17801,7 @@ function modalConfirm(title, text, options = {}) {
 
 function modalNotice(title, text) {
   const { m, close } = modal(`<h2>${esc(title)}</h2>
-    <p class="modal-copy">${esc(text || "")}</p>
+    ${modalCopyHtml(text)}
     <div class="m-btns"><button class="btn btn-pri" id="mn-ok">OK</button></div>`);
   m.querySelector("#mn-ok").onclick = close;
 }
@@ -17775,7 +17809,7 @@ function modalNotice(title, text) {
 function modalPrompt(title, hint, value) {
   return new Promise((resolve) => {
     const { m, close, onClose } = modal(`<h2>${esc(title)}</h2>
-      ${hint ? `<p class="modal-copy">${esc(hint)}</p>` : ""}
+      ${hint ? modalCopyHtml(hint) : ""}
       <input type="text" id="mp-val">
       <div class="m-btns"><button class="btn" id="mp-no">Cancel</button><button class="btn btn-pri" id="mp-yes">OK</button></div>`);
     const inp = m.querySelector("#mp-val");
@@ -18493,7 +18527,7 @@ function modalWorkspaceLink(bid, session) {
         if (!await modalConfirm("Discard preserved versions",
             `This removes the ${keeps.generations} preserved losing version` +
             `${keeps.generations === 1 ? "" : "s"} of conflicted files ` +
-            `(${fmtBytes(keeps.bytes)}). They are the only copy of those ` +
+            `(${fmtBytes(keeps.bytes)}).\n\nThey are the only copy of those ` +
             `edits; the files in your workspace are not touched.`)) return;
         clear.disabled = true;
         try {
@@ -18651,10 +18685,11 @@ function modalSwitchEngine(view) {
   const { m, close } = modal(`<h2>Switch engine</h2>
     <p class="modal-copy">The session keeps its transcript and working directory. The new engine starts a fresh
     native session seeded with a handoff of the conversation so far. Same-engine reseed is allowed
-    (rebuilds context from the transcript).${canQueue ? ` While a turn runs or prompts wait, the
-    switch joins the queue and applies in order - prompts sent before it keep the engine they
-    were written under.` : ` Queued prompts remain; pending model and reasoning changes are
-    cleared because they belong to the previous engine configuration.`}</p>
+    (rebuilds context from the transcript).</p>
+    <p class="modal-copy">${canQueue ? `While a turn runs or prompts wait, the switch joins the
+    queue and applies in order - prompts sent before it keep the engine they were written under.` :
+    `Queued prompts remain; pending model and reasoning changes are cleared because they belong
+    to the previous engine configuration.`}</p>
     <div class="engine-pick" id="se-engines"></div>
     <div class="m-btns"><button class="btn" id="se-cancel">Cancel</button><button class="btn btn-pri" id="se-go">Switch</button></div>`);
   const box = m.querySelector("#se-engines");

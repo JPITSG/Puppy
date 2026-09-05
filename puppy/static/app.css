@@ -1965,6 +1965,10 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 }
 .be-auto-copy{display:flex;flex-direction:column;gap:2px;min-width:0;color:var(--txt2);font-size:11.5px}
 .be-auto-copy small{color:var(--txt3);font:9.5px/1.35 var(--mono);white-space:normal}
+/* a switch note that runs to several paragraphs: what it does, then what is
+   asked of the person afterwards, as separate blocks inside the one <small> */
+.note-para{display:block}
+.note-para+.note-para{margin-top:5px}
 .notify-head{
   display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;
   gap:8px 12px;margin-bottom:12px;
@@ -2063,6 +2067,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   35%{opacity:1;transform:translateY(-2px)}
 }
 .snapshot-copy{max-width:720px;margin:0 0 8px;color:var(--txt2);font-size:12px;line-height:1.55}
+.snapshot-copy+.snapshot-copy{margin-top:-2px}
 .snapshot-warning{margin:0;color:var(--warn);font-size:11px;line-height:1.45}
 .snapshot-actions{display:flex;align-items:center;gap:8px;margin-top:13px;flex-wrap:wrap}
 .engine-updates-section{
@@ -2107,6 +2112,8 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .system-prompt-status.bad{color:var(--err)}
 .system-prompt-textarea:disabled{opacity:.5;cursor:not-allowed}
 .usage-refresh-copy{max-width:720px;margin:0 0 9px;color:var(--txt2);font-size:12px;line-height:1.55}
+/* card copy paragraphs sit 6px apart, inside the 9px step to the rows below */
+.usage-refresh-copy+.usage-refresh-copy{margin-top:-3px}
 
 /* ---------- configurable timers ---------- */
 .timer-card-copy{max-width:720px;margin:0;color:var(--txt2);font-size:12px;line-height:1.55}
@@ -2351,6 +2358,12 @@ html.light .sh-more:hover{background:rgba(15,23,42,.035)}
 /* the copy owns the gap below it, so the button row must not add a second one:
    14px between copy and buttons, the same step the title uses */
 .modal-copy+.m-btns{margin-top:2px}
+/* copy that runs to several paragraphs keeps them closer together (8px) than
+   the 12px step to the next control, so they still read as one body */
+.modal-copy+.modal-copy{margin-top:-4px}
+/* the thing a confirm is about - a task or backend name - on its own line
+   above the copy; a long automatic title wraps rather than overflowing */
+.modal-subject{color:var(--txt);font-weight:600;overflow-wrap:anywhere}
 .engine-defaults-modal #ed-reset{margin-right:auto}
 .engine-pick{display:grid;grid-template-columns:repeat(auto-fit,minmax(90px,1fr));gap:8px;margin-bottom:10px}
 .engine-pick .ep{
