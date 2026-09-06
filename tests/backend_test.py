@@ -5584,6 +5584,8 @@ async def main() -> None:
             "Puppy shared terminal"
         assert "only when the user specifically asks" in \
             terminal_mcp_result["result"]["instructions"]
+        from tests.mcp_startup_test import exercise_mcp_startup
+        exercise_mcp_startup(release_artifact, temp_root / "mcp-driver-startup")
         self_test = json.loads(subprocess.check_output([
             sys.executable, str(release_artifact), "self-test", "--data-dir",
             str(temp_root / "self-test-data"),

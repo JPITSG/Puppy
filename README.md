@@ -236,6 +236,8 @@ persistence contract are in [docs/session-tasks.md](docs/session-tasks.md).
 
 All of this reaches the model through turn-bound MCP bridges Puppy starts for
 each turn, on every engine. Their policy texts live in Settings → System prompt.
+The API-only headless package provides the same bridges without running a web
+UI, including the backend's configured browser, terminal, and spawn policies.
 
 ### Find anything, on any backend
 
@@ -410,6 +412,7 @@ python3 tests/backend_test.py        # headless package, auth, protocol, capabil
 python3 tests/snapshot_test.py       # backup export/import and rollback
 python3 tests/search_test.py         # the search index and query language
 python3 tests/spawn_test.py          # spawned agents against a stub engine
+python3 tests/mcp_startup_test.py     # source/zipapp MCP startup with filtered environments
 python3 tests/workspace_sync_test.py # remote workspace sync and conflicts
 python3 tests/browser_test.py        # managed browsers against a stub Chromium
 python3 tests/cli_upgrade_test.py    # engine CLI updates against a stub updater

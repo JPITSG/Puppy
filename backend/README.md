@@ -509,8 +509,16 @@ and cancels the ones it relayed while its channels are still open - approval
 requests inside a spawned run are auto-denied with an
 explanation, and cross-node spawns exist only on the controller, which relays
 them over its already-authenticated channels - nodes still never contact each
-other, so a session hosted on a backend can spawn only onto its own node. A
-running spawned agent also blocks that engine's CLI upgrade and (including
+other, so a session hosted on a backend can spawn only onto its own node.
+
+The spawn, browser, terminal, and session MCP descriptors explicitly pass the
+node's absolute `PUPPY_DATA` path alongside the package path. This keeps their
+configuration tied to the backend even when an engine filters inherited
+environment variables or runs a bridge in a different working directory.
+The backend remains API-only: these bridges need no web UI or additional
+network listener.
+
+A running spawned agent also blocks that engine's CLI upgrade and (including
 one still tearing down) the backend's own signed self-upgrade, and spawn
 requests are refused while the engine's updater runs. A parallel fan-out
 (spawn `count`, up to 12) is expanded by the bridge into independent jobs -

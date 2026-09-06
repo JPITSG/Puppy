@@ -177,6 +177,8 @@ def turn_mcp(session_id: int, turn_id: str):
         "engine_guidance": policy,
         "env": {
             "PYTHONPATH": _package_search_path(),
+            # MCP clients may filter inherited env; the child also changes cwd.
+            "PUPPY_DATA": os.path.abspath(config.DATA_DIR),
             "PUPPY_TERMINAL_SOCKET": socket_path(),
             "PUPPY_TERMINAL_SESSION_ID": str(int(session_id)),
             "PUPPY_TERMINAL_TURN_ID": str(turn_id),
