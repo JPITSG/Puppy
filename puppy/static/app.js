@@ -9834,10 +9834,12 @@ class SessionWorkspaceView {
     this.taskViews = new Map();
     this.selected = tab.sid;
     this.opened = [];
+    this.hidden = new Set();
     this.seen = {};
     this.overview = null;        // the open Tasks sheet's list, while it is open
     this.taskOverview = null;
-    this.storageKey = `puppy.sessionTasks.${tab.bid}.${tab.sid}`;
+    this.storageKey = lsKey(`puppy.sessionTasks.${tab.bid}.${tab.sid}`);
+    this.hiddenStorageKey = this.storageKey + ".hidden";
     try {
       const saved = JSON.parse(localStorage.getItem(this.storageKey));
       if (saved && saved.format === 1 && Object.keys(saved).sort().join() === "active,format,open,seen" &&
@@ -9849,6 +9851,21 @@ class SessionWorkspaceView {
         this.seen = saved.seen;
       }
     } catch (_) {}
+    // Open tabs remember order and selection; only an explicit close hides a
+    // task. Keep that optional preference separate so an absent tab on a new
+    // device (or a task created while it was away) is never treated as closed.
+    let hidden = null;
+    try { hidden = localStorage.getItem(this.hiddenStorageKey); } catch (_) {}
+    if (hidden !== null) {
+      const ids = JSON.parse(hidden);
+      if (!Array.isArray(ids) || ids.length > 64 ||
+          !ids.every(id => Number.isSafeInteger(id) && id > 0 && id !== tab.sid) ||
+          new Set(ids).size !== ids.length)
+        throw new Error("Invalid saved hidden task tabs");
+      this.hidden = new Set(ids);
+    }
+    this.opened = this.opened.filter(id => !this.hidden.has(id));
+    if (this.hidden.has(this.selected)) this.selected = tab.sid;
     const main = new SessionView(tab);
     this.taskViews.set(tab.sid, main);
     this.body.appendChild(main.root);
@@ -9937,6 +9954,7 @@ class SessionWorkspaceView {
   }
   save() {
     try { localStorage.setItem(this.storageKey, JSON.stringify({format:1, open:this.opened, active:this.selected, seen:this.seen})); } catch (_) {}
+    try { localStorage.setItem(this.hiddenStorageKey, JSON.stringify([...this.hidden])); } catch (_) {}
   }
   ensureTask(task) {
     if (!this.taskViews.has(task.id)) {
@@ -9955,6 +9973,7 @@ class SessionWorkspaceView {
   openTask(sid) {
     const task = this.tasks().find(s => s.id === sid);
     if (!task) return;
+    this.hidden.delete(sid);
     this.ensureTask(task);
     if (!this.opened.includes(sid)) this.opened.push(sid);
     this.select(sid);
@@ -9972,6 +9991,8 @@ class SessionWorkspaceView {
   /* Hiding a tab never touches the conversation: its work, queue and
      approvals continue, and the Tasks sheet reopens it. */
   closeTask(sid, render = true) {
+    if (sid === this.tab.sid) return;
+    this.hidden.add(sid);
     this.opened = this.opened.filter(id => id !== sid);
     const view = this.taskViews.get(sid);
     if (view) view.destroy();
@@ -9988,7 +10009,14 @@ class SessionWorkspaceView {
     // Do not erase restored selection before its node's bootstrap arrives.
     if (main) {
       for (const sid of [...this.opened]) if (!tasks.some(s => s.id === sid)) this.closeTask(sid, false);
+      for (const sid of this.hidden) if (!tasks.some(s => s.id === sid)) this.hidden.delete(sid);
       if (this.selected !== this.tab.sid && !tasks.some(s => s.id === this.selected)) this.selected = this.tab.sid;
+    }
+    // Session snapshots arrive through both streaming and polling. Append
+    // discoveries in creation order without disturbing selection or a saved
+    // drag order, including tasks that already finished on another device.
+    for (const task of [...tasks].sort((a, b) => a.task.created_at - b.task.created_at || a.id - b.id)) {
+      if (!this.hidden.has(task.id) && !this.opened.includes(task.id)) this.opened.push(task.id);
     }
     for (const task of tasks) if (this.opened.includes(task.id)) this.ensureTask(task);
     if (this.taskViews.has(this.selected) && this.root.classList.contains("on")) {

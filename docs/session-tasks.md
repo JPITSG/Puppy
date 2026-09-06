@@ -18,12 +18,18 @@ engine's saved defaults on the selected backend. Adjust any of them
 before starting; these choices apply only to the new task. Switching engines
 loads that engine's saved defaults, and effort choices follow the selected model.
 The task opens in its own inner tab; create another to work on a second
-feature concurrently. Tasks inherit Main's Fast setting when keeping its engine,
+feature concurrently. Every device adds tasks beside Main when it receives the
+session list, including tasks created while that device was away and tasks that
+have already finished. Discovery keeps the selected conversation and appends
+new tabs in creation order after any saved tab order.
+Tasks inherit Main's Fast setting when keeping its engine,
 plus bounded recent conversation excerpts. Each task
 keeps its own conversation, draft, message queue, approvals and Stop control.
 Sending a message targets the selected conversation. Each tab shows the
 conversation's dot (spinning while it works) and the task's state; hiding a tab
-with its close mark never stops the task. Reopen hidden tabs from the **Tasks**
+with its close mark never stops the task. A tab stays visible until explicitly
+hidden on that device or the task is removed; hiding is remembered across reloads
+and does not hide it on other devices. Reopen hidden tabs from the **Tasks**
 sheet, opened by the button beside **+** on the strip. The sidebar lists the parent
 once; while Main is idle its activity slot reports working tasks or an approval
 waiting for input. Task links and search results open the corresponding inner
@@ -136,6 +142,18 @@ means on, and no entry means off. Startup and snapshot restore reject malformed
 entries. A folded task is an ordinary `info` row of Main's transcript (subtype
 `session_task_archive`). These records, preferences and transcript rows are
 included in full backups.
+
+Tab order, selection and last-read result positions keep their exact
+`puppy.sessionTasks.<backend-id>.<parent-id>` browser record. Explicitly hidden
+tabs are a separate optional `puppy.sessionTasks.<backend-id>.<parent-id>.hidden`
+record: an array of at most 64 unique positive task IDs, excluding Main's ID.
+Both keys use the console's mount-path namespace and are included in the backup's
+browser state. An absent hidden record means no tabs were explicitly hidden;
+absence from the saved open-tab order alone does not hide a task. Malformed
+hidden records are rejected by the console and backup validation without
+replacing them. Older saved open-tab lists did not distinguish a hidden task
+from one never discovered on that device, so previously hidden tabs can appear
+once until explicitly closed again.
 
 Each task copy also names its review baseline as the Git ref `refs/puppy/base`
 so the engine's own history rewriting can never garbage-collect it.

@@ -760,7 +760,7 @@ const localStorage = { getItem() { return null; }, setItem() {} };
 const view = Object.create(SessionWorkspaceView.prototype);
 const main = { root: node(), draft: "Keep this draft" };
 Object.assign(view, { tab: { bid: 0, sid: 1 }, root: node(), strip: node(), overviewButton: node(),
-  taskViews: new Map([[1, main]]), opened: [], selected: 1, seen: {}, overview: null, rendered: "" });
+  taskViews: new Map([[1, main]]), opened: [], hidden: new Set(), selected: 1, seen: {}, overview: null, rendered: "" });
 view.refreshTasks();
 const painted = view.strip.children.length;
 building = false;

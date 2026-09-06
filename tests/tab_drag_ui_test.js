@@ -1,5 +1,6 @@
 /* Run with node tests/tab_drag_ui_test.js. Actual workspace/task tab drag
-   handlers and task rendering, with deterministic geometry and no engine. */
+   handlers, task discovery across devices and saved visibility, with
+   deterministic geometry and no engine. */
 "use strict";
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -13,7 +14,7 @@ function between(from, to) {
   return source.slice(start, end);
 }
 
-function harness(bid = 0) {
+function harness(bid = 0, namespace = "") {
   const document = new FakeDocument(), storage = new Map(), frames = [], animations = [];
   const sessions = new Map(), panes = [], toolbars = new Map();
   const state = { layout: {}, tabs: [], views: {}, active: "outer-b", activeGroup: "pane" };
@@ -44,6 +45,7 @@ function harness(bid = 0) {
   const icon = () => document.createElement("svg");
   const context = vm.createContext({
     document, state, SessionView,
+    lsKey: key => namespace + key,
     localStorage: { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value) },
     window: { matchMedia: () => ({ matches: reduced }) },
     requestAnimationFrame: fn => frames.push(fn),
@@ -134,6 +136,96 @@ function over(bar, x = 1000) { return fire(bar, "dragover", { clientX: x, client
 function drop(bar) { return fire(bar, "drop", { clientX: 1000, dataTransfer: {} }); }
 
 for (const bid of [0, 7]) {
+  const desktop = harness(bid), phone = harness(bid);
+  const desktopView = desktop.workspace(1, []), phoneView = phone.workspace(1, []);
+  const task = { id: 2, name: "Created on desktop", status: "running", engine: "codex",
+    task: { parent: 1, state: "running", result_seq: 0 } };
+  desktop.sessions.get(bid).push(task);
+  desktopView.openTask(2);
+  phone.sessions.get(bid).push(structuredClone(task));
+  phoneView.refreshTasks();
+  assert.deepEqual(order(phoneView.strip), [1, 2], "another device discovers new task tabs from session updates");
+  assert.equal(phoneView.selected, 1, "discovery keeps the current conversation selected");
+  for (const taskState of ["queued", "held", "ready", "failed", "stopped", "applied"]) {
+    phone.sessions.get(bid)[1].task.state = taskState;
+    phone.sessions.get(bid)[1].task.result_seq = 10;
+    phoneView.refreshTasks();
+    assert.deepEqual(order(phoneView.strip), [1, 2], "task state changes never hide a tab");
+    assert.equal(taskTab(phoneView, 2).querySelector(".t-state").classList.contains("unread"), true,
+      "discovery does not mark the answer read");
+  }
+  const fresh = harness(bid);
+  fresh.sessions.set(bid, structuredClone(phone.sessions.get(bid)));
+  const freshView = new fresh.context.Workspace(phoneView.tab);
+  assert.deepEqual(order(freshView.strip), [1, 2], "a device with no saved tabs shows existing tasks");
+  const hiddenView = phoneView.taskViews.get(2);
+  taskTab(phoneView, 2).querySelector(".t-close").click();
+  assert.equal(hiddenView.destroyed, true);
+  assert.deepEqual(order(phoneView.strip), [1], "an explicit close hides even an unread task");
+  desktopView.refreshTasks();
+  assert.deepEqual(order(desktopView.strip), [1, 2], "a close is local to its device");
+  phoneView.refreshTasks();
+  assert.deepEqual(order(phoneView.strip), [1], "later session snapshots keep the task hidden");
+  phoneView.destroy();
+  const restored = new phone.context.Workspace(phoneView.tab);
+  assert.deepEqual(order(restored.strip), [1], "explicitly hidden tabs stay hidden after a reload");
+  restored.openTask(2);
+  assert.deepEqual(order(restored.strip), [1, 2], "Open from a sheet or search restores a hidden tab");
+  assert.equal(restored.selected, 2);
+  restored.destroy();
+  const reopened = new phone.context.Workspace(phoneView.tab);
+  assert.deepEqual(order(reopened.strip), [1, 2], "reopening is saved across reloads");
+  assert.equal(reopened.selected, 2);
+  reopened.destroy();
+  desktopView.destroy(); phoneView.destroy(); freshView.destroy();
+}
+
+for (const bid of [0, 7]) {
+  const h = harness(bid), view = h.workspace();
+  view.closeTask(3);
+  view.opened = [4, 2];
+  view.select(4);
+  const savedSessions = h.sessions.get(bid);
+  view.destroy();
+  h.sessions.delete(bid);
+  const restored = new h.context.Workspace(view.tab);
+  assert.deepEqual([...restored.opened], [4, 2], "pending bootstrap preserves saved order");
+  assert.equal(restored.selected, 4, "pending bootstrap preserves selection");
+  assert.deepEqual(JSON.parse(h.storage.get(restored.hiddenStorageKey)), [3]);
+  h.sessions.set(bid, [...savedSessions,
+    { id: 6, task: { parent: 1, state: "failed", created_at: 20 } },
+    { id: 5, task: { parent: 1, state: "ready", created_at: 10 } },
+    { id: 11, task: { parent: 10, state: "running", created_at: 1 } },
+  ]);
+  restored.refreshTasks();
+  assert.deepEqual(order(restored.strip), [1, 4, 2, 5, 6],
+    "tasks created while away append in creation order, within their own Main");
+  assert.equal(restored.selected, 4);
+  const removed = restored.taskViews.get(4);
+  h.sessions.set(bid, h.sessions.get(bid).filter(session => ![3, 4].includes(session.id)));
+  restored.refreshTasks();
+  assert.deepEqual(order(restored.strip), [1, 2, 5, 6], "removed tasks lose their tabs");
+  assert.equal(removed.destroyed, true);
+  assert.equal(restored.selected, 1, "removing the selected task returns to Main");
+  assert.deepEqual([...restored.hidden], [], "removed tasks leave no hidden-tab preference");
+  restored.destroy();
+}
+
+{
+  const h = harness(0, "/demo:"), view = h.workspace();
+  view.closeTask(2);
+  assert.ok(h.storage.has("/demo:puppy.sessionTasks.0.1.hidden"), "hidden preferences use the mount namespace");
+  assert.equal(h.storage.has("puppy.sessionTasks.0.1.hidden"), false);
+  view.destroy();
+  for (const raw of ["null", "{}", "[true]", "[0]", "[1]", "[2,2]", "[2.5]", '"[2]"', "[", JSON.stringify(Array.from({length:65}, (_, i) => i + 2))]) {
+    h.storage.set(view.hiddenStorageKey, raw);
+    const before = [...h.storage];
+    assert.throws(() => new h.context.Workspace(view.tab), /Invalid saved hidden task tabs|JSON/);
+    assert.deepEqual([...h.storage], before, "invalid preferences are rejected without rewriting browser state");
+  }
+}
+
+for (const bid of [0, 7]) {
   const h = harness(bid), view = h.workspace(), outer = h.toolbar("pane", ["outer-a", "outer-b"]);
   view.select(3);
   const active = view.activeView(), sourceTab = taskTab(view, 2);
@@ -219,7 +311,7 @@ for (const bid of [0, 7]) {
   assert.equal(destroyedGhost.isConnected, false);
 }
 
-for (const change of ["remove", "open"]) {
+for (const change of ["remove", "open", "discover"]) {
   const h = harness(), view = h.workspace();
   view.closeTask(4);
   const tab = taskTab(view, 2);
@@ -227,9 +319,13 @@ for (const change of ["remove", "open"]) {
   if (change === "remove") {
     h.sessions.set(0, h.sessions.get(0).filter(session => session.id !== 2));
     view.refreshTasks();
-  } else view.openTask(4);
+  } else if (change === "open") view.openTask(4);
+  else {
+    h.sessions.get(0).push({ id: 5, task: { parent: 1, state: "running" } });
+    view.refreshTasks();
+  }
   drop(view.bar); fire(tab, "dragend");
-  assert.deepEqual([...view.opened], change === "remove" ? [3] : [2, 3, 4],
+  assert.deepEqual([...view.opened], change === "remove" ? [3] : change === "open" ? [2, 3, 4] : [2, 3, 5],
     "stale drops never restore a removed tab or discard a newly opened one");
   assert.equal(h.context.currentDrag(), null);
 }
@@ -255,4 +351,4 @@ for (const change of ["remove", "open"]) {
   assert.equal(destination.pane.active, "outer-b");
   assert.equal(h.document.querySelector(".tab-drop-marker"), null);
 }
-console.log("PASS: shared workspace/task tab dragging, scope, persistence, cancellation, live updates and touch");
+console.log("PASS: task discovery across devices, explicit hiding, reloads, scope, shared tab dragging, live updates and touch");

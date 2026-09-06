@@ -175,6 +175,10 @@ current files, uncommitted changes included. Run several at once on different
 features. New tasks initially select Main's engine and use that backend's saved
 model, effort and permission defaults. Adjust these choices before starting.
 
+- Tasks appear beside Main on every device, including tasks created while a
+  device was away, without switching the selected conversation. They stay there
+  until closed on that device or removed. Closing a tab keeps the task running;
+  reopen it from the **Tasks** sheet.
 - Drag task tabs to reorder them with the same drag card and sliding animation
   as workspace tabs. Main stays first; the order is saved in this browser.
 - The **Tasks** sheet lists every task with its state and latest answer. Tasks
@@ -414,7 +418,7 @@ noted:
 
 ```sh
 node tests/sidebar_ui_test.js        # sidebar ordering, pins, reorders, filtering
-node tests/tab_drag_ui_test.js       # shared workspace and task tab dragging
+node tests/tab_drag_ui_test.js       # task discovery, saved visibility and tab dragging
 node tests/menu_dismiss_ui_test.js   # outside focus/taps, hamburger and menu toggles
 node tests/composer_ui_test.js       # the shared prompt box and its "@" list
 node tests/task_config_ui_test.js    # the New task dialog

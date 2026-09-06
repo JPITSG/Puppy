@@ -155,6 +155,17 @@ def validate_ui_state(value) -> dict:
                     (tabs.get("activeGroup") is not None and
                      not isinstance(tabs.get("activeGroup"), str)):
                 raise SnapshotError("browser tab state is not current")
+        if key.startswith("puppy.sessionTasks.") and key.endswith(".hidden"):
+            match = re.fullmatch(r"puppy\.sessionTasks\.[0-9]+\.([1-9][0-9]*)\.hidden", key)
+            try:
+                hidden = json.loads(item)
+            except Exception as exc:
+                raise SnapshotError("hidden task tab state is invalid") from exc
+            if not match or not isinstance(hidden, list) or len(hidden) > 64 or \
+                    not all(type(sid) is int and 0 < sid <= 9007199254740991 and
+                            sid != int(match.group(1)) for sid in hidden) or \
+                    len(set(hidden)) != len(hidden):
+                raise SnapshotError("hidden task tab state is not current")
         size += len(key.encode("utf-8")) + len(item.encode("utf-8"))
         if size > MAX_UI_BYTES:
             raise SnapshotError("browser state is too large")

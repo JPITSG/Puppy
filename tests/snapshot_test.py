@@ -400,6 +400,10 @@ async def main() -> None:
         pane_id = "pane:snapshot"
         ui = {
             "puppy.theme": "light",
+            "puppy.sessionTasks.0.{}.hidden".format(scratch_id): "[9001,9002]",
+            "puppy.sessionTasks.0.{}".format(scratch_id): json.dumps({
+                "format": 1, "open": [9003], "active": scratch_id, "seen": {},
+            }, separators=(",", ":")),
             "puppy.tabs": json.dumps({
                 "version": 2,
                 "tabs": [{"id": tab_id, "type": "session", "bid": 0,
@@ -418,6 +422,15 @@ async def main() -> None:
             lambda: snapshots.validate_ui_state({
                 "puppy.tabs": json.dumps({"active": tab_id})}),
             "not current")
+        hidden_key = "puppy.sessionTasks.0.{}.hidden".format(scratch_id)
+        for hidden in (None, {}, [True], [0], [-1], [scratch_id], [9001, 9001],
+                       [1.5], [9007199254740992], [[9001]], list(range(9001, 9066))):
+            expect_snapshot_error(
+                lambda: snapshots.validate_ui_state({hidden_key: json.dumps(hidden)}),
+                "hidden task tab state is not current")
+        expect_snapshot_error(
+            lambda: snapshots.validate_ui_state({hidden_key: "["}),
+            "hidden task tab state is invalid")
 
         listener_handoff.create(
             {"puppy_runtime_id": "pre-snapshot-runtime"}, "snapshot-user",
