@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/desktop-dark.png" alt="Puppy console on a desktop: session sidebar, running task tabs, a transcript with tool cards and a typing indicator, and a full-history search pane" width="900">
+  <img src="assets/desktop-dark.png" alt="Puppy console on a desktop: session sidebar, running task tabs, a transcript with tool cards, a compact composer, and a full-history search pane" width="900">
 </p>
 
 <h1 align="center">Puppy 🐾</h1>
@@ -170,6 +170,8 @@ sent from other devices too. Drafts are shared through the session's backend, so
 half-finished prompt on your desktop is on your phone too. On backends with
 typing presence, overlapping edits stay local until you review the drafts or
 send your message; another console's edits never interrupt your typing.
+The status row below the tools appears only for typing activity, a draft conflict,
+or a save/send error; it takes no space when idle.
 
 Ask and Steer accept text only. Text edits and attachments added while their
 send is awaiting acknowledgement remain in the composer for the next message.

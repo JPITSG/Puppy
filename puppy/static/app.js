@@ -8199,7 +8199,10 @@ class Composer {
 
   showPresence(count = 0, conflict = false, enabled = true, error = "", sendError = false) {
     const row = this.box.querySelector(".composer-presence");
-    row.classList.toggle("hidden", !enabled);
+    const hidden = !enabled || (!count && !conflict && !error);
+    const resized = row.classList.contains("hidden") !== hidden;
+    const anchor = resized && this.host.beforeResize ? this.host.beforeResize() : undefined;
+    row.classList.toggle("hidden", hidden);
     row.querySelector(".typing-dots").classList.toggle("hidden", !count);
     const typing = count > 1 ? "Others are typing…" : "Someone else is typing…";
     const text = error ? (sendError ? "Message not sent" : "Draft not saved") : conflict ? (count ? "Typing · your draft is kept here" : "Your draft is kept here") :
@@ -8210,6 +8213,7 @@ class Composer {
     const review = row.querySelector(".composer-draft-review");
     review.textContent = error ? (sendError ? "Retry send" : "Retry save") : "Review drafts";
     review.classList.toggle("hidden", !conflict && !error);
+    if (resized && this.host.afterResize) this.host.afterResize(anchor);
   }
 
   /* ---- the value ---- */

@@ -165,6 +165,26 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
 
   /* Presence belongs to the shared box, never changes the value/caret, and
      releases on blur, backgrounding and destruction. IME owns its preedit. */
+  const resizeEvents = [];
+  const statusBox = makeBox({ beforeResize: () => { resizeEvents.push("before"); return "anchor"; },
+    afterResize: anchor => resizeEvents.push(anchor) });
+  const statusRow = statusBox.composer.box.querySelector(".composer-presence");
+  resizeEvents.length = 0;
+  statusBox.composer.showPresence();
+  assert.ok(statusRow.classList.contains("hidden"), "idle status takes no space");
+  assert.deepEqual(resizeEvents, [], "idle repaint does not resize the host");
+  for (const args of [[1], [0, true], [0, false, true, "Save failed"],
+      [0, false, true, "Send failed", true]]) {
+    statusBox.composer.showPresence(...args);
+    assert.ok(!statusRow.classList.contains("hidden"), "meaningful status stays visible");
+    statusBox.composer.showPresence();
+    assert.ok(statusRow.classList.contains("hidden"), "cleared status collapses");
+  }
+  assert.deepEqual(resizeEvents, Array(8).fill(["before", "anchor"]).flat(),
+    "each visibility change preserves the host scroll anchor");
+  statusBox.composer.showPresence(1, true, false);
+  assert.ok(statusRow.classList.contains("hidden"), "disabled presence stays hidden");
+  statusBox.composer.destroy();
   const presence = [], p = makeBox({ typing: active => presence.push(active) });
   p.ta.focus(); type(p.ta, "Keep my selection");
   p.ta.selectionStart = 2; p.ta.selectionEnd = 7;

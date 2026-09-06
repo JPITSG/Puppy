@@ -122,6 +122,27 @@ async def type_text(instance, text):
 
 
 async def checks(a, b, hub, capture=False):
+    # Measure real layout: an idle status must not reserve a row below tools.
+    for width, height in [(1440, 900), (390, 844)]:
+        await a.call("Emulation.setDeviceMetricsOverride", {"width": width, "height": height,
+                     "deviceScaleFactor": 1, "mobile": width == 390}, session=a.page_session)
+        for args, visible in [("", False), ("1", True), ("0,true", True),
+                              ("0,false,true,'Save failed'", True), ("", False)]:
+            layout = await evaluate(a, """(() => {
+                const c = demoView.composer;
+                c.showPresence(%s);
+                const row = c.box.querySelector('.composer-presence');
+                const tools = c.box.querySelector('.composer-row');
+                return {height:row.getBoundingClientRect().height,
+                    gap:c.box.getBoundingClientRect().bottom-tools.getBoundingClientRect().bottom,
+                    padding:parseFloat(getComputedStyle(c.box).paddingBottom)+parseFloat(getComputedStyle(c.box).borderBottomWidth)};
+            })()""" % args)
+            assert (layout["height"] > 0) == visible, layout
+            if not visible:
+                assert abs(layout["gap"] - layout["padding"]) < 1, layout
+    await a.call("Emulation.setDeviceMetricsOverride", {"width": 1280, "height": 800,
+                 "deviceScaleFactor": 1, "mobile": False}, session=a.page_session)
+    print("PASS: idle composer collapses below tools on desktop and phone; active status remains visible", flush=True)
     # Take the second editor offline, so both edits really begin from the
     # same revision. Reconnect must retain the local fork and reveal it.
     await evaluate(b, "demoView.ws.close(); true")
@@ -132,12 +153,13 @@ async def checks(a, b, hub, capture=False):
     await until(b, "demoView.draftReady && demoView.sharedDraft.conflict")
     assert await evaluate(b, "demoView.composer.text()") == "My private idea"
     # Live input on the private branch still advertises presence, but never
-    # changes the peer's text or its selection or height.
+    # changes the peer's text, selection, or textarea height. The status row
+    # itself appears only while there is something to show.
     await evaluate(a, "demoView.composer.ta.setSelectionRange(6,10); true")
-    before = await evaluate(a, "({text:demoView.composer.text(),start:demoView.composer.ta.selectionStart,end:demoView.composer.ta.selectionEnd,height:demoView.composer.box.getBoundingClientRect().height})")
+    before = await evaluate(a, "({text:demoView.composer.text(),start:demoView.composer.ta.selectionStart,end:demoView.composer.ta.selectionEnd,height:demoView.composer.ta.getBoundingClientRect().height})")
     await type_text(b, " while you work")
     await until(a, "demoView.sharedDraft.count === 1")
-    after = await evaluate(a, "({text:demoView.composer.text(),start:demoView.composer.ta.selectionStart,end:demoView.composer.ta.selectionEnd,height:demoView.composer.box.getBoundingClientRect().height})")
+    after = await evaluate(a, "({text:demoView.composer.text(),start:demoView.composer.ta.selectionStart,end:demoView.composer.ta.selectionEnd,height:demoView.composer.ta.getBoundingClientRect().height})")
     assert before == after, (before, after)
     await b.call("Emulation.setDeviceMetricsOverride", {"width": 390, "height": 844,
                  "deviceScaleFactor": 2, "mobile": True}, session=b.page_session)
@@ -201,7 +223,7 @@ async def screenshots(instance):
         else:
             await evaluate(instance, "closeTab('search'); activateTab('s:0:1'); true")
         for theme in ("dark", "light"):
-            await evaluate(instance, "applyTheme(" + json.dumps(theme) + "); demoView.sharedDraft.count=1; demoView.sharedDraft.paint(); demoView.composer.ta.blur(); demoView.scrollBottom(true); true")
+            await evaluate(instance, "applyTheme(" + json.dumps(theme) + "); demoView.sharedDraft.count=0; demoView.sharedDraft.paint(); demoView.composer.ta.blur(); demoView.scrollBottom(true); true")
             await asyncio.sleep(.3)
             data = await instance.call("Page.captureScreenshot", {"format": "png"}, session=instance.page_session)
             (assets / (name + "-" + theme + ".png")).write_bytes(base64.b64decode(data["data"]))
