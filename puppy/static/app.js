@@ -7280,8 +7280,6 @@ function syncTabsWithSessions() {
   if (!dirty) renderTabs();
 }
 
-/* a click anywhere outside a float dismisses every one of them */
-document.addEventListener("click", () => closeAllMenus(null));
 $("tab-add-menu").addEventListener("click", (e) => {
   const button = e.target.closest && e.target.closest("button[data-act]");
   const act = button && button.dataset.act;
@@ -7858,6 +7856,25 @@ function closeMenusToggling(anchor) {
   return wasOpen;
 }
 
+/* Capture before controls stop propagation or the drawer starts expanding.
+   Pointer presses also cover touch controls that do not take focus; focusin
+   covers Tab and programmatic focus. Keep a float's own trigger inside its
+   boundary so the click handler can still toggle it closed. */
+function dismissMenusOutside(event) {
+  const target = event.target;
+  for (const composer of Composer.live) composer.dismissMentionOutside(target);
+  const within = (menu, anchor) => !!((menu && menu.contains(target)) ||
+    (anchor && anchor.contains(target)));
+  const add = $("tab-add-menu");
+  if (!add.classList.contains("hidden") && within(add, tabAddAnchor)) return;
+  if (openChoiceControl && within(openChoiceControl.menu, openChoiceControl.button)) return;
+  for (const menu of document.querySelectorAll(".menu.dyn,.choice-menu.dyn"))
+    if (within(menu, menu._anchor)) return;
+  closeAllMenus(null);
+}
+for (const kind of ["pointerdown", "focusin", "click"])
+  document.addEventListener(kind, dismissMenusOutside, true);
+
 /* ================= composer @-mentions ================= */
 /* Typing "@" in the chat box offers what the agent's Puppy MCP tools can be
    pointed at: the live managed browsers and shared terminals on the session's
@@ -8077,6 +8094,10 @@ class Composer {
     for (const composer of Composer.live)
       if (composer.ta === element) return composer;
     return null;
+  }
+
+  dismissMentionOutside(target) {
+    if (target !== this.ta && !this.mentionEl.contains(target)) this.hideMention();
   }
 
   /* One keyboard contract for every host. The open mention list owns its

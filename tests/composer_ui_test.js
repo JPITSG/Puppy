@@ -148,6 +148,17 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
   assert.ok(escaped.defaultPrevented && escaped.propagationStopped, "Escape closes the list and nothing else");
   assert.equal(b.composer.mention, null);
   assert.equal(escapes, 1);
+  type(b.ta, "");
+  type(b.ta, "@ab");
+  b.composer.dismissMentionOutside(b.ta);
+  assert.ok(b.composer.mention, "typing retains the mention list");
+  b.composer.dismissMentionOutside(b.box.querySelector(".mention-pop button"));
+  assert.ok(b.composer.mention, "pressing a mention row leaves it available for its click");
+  b.composer.dismissMentionOutside(c.ta);
+  assert.equal(b.composer.mention, null, "another composer dismisses the list");
+  type(b.ta, "@ab");
+  b.composer.dismissMentionOutside(document.createElement("button"));
+  assert.equal(b.composer.mention, null, "touching a control dismisses without requiring blur");
   const m = makeBox({ selfHint: "Main" });
   type(m.ta, "@AB1");
   assert.equal(m.composer.mention.items[0].hint, "Main", "a host names its own session in its own words");

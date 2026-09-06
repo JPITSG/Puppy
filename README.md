@@ -44,7 +44,8 @@ There is no build step, no npm, no daemon besides Puppy itself: Python 3.9+,
 - **Nothing gets lost.** Durable message queues, drafts that follow you between
   devices, full-history search, and one-click backup and restore.
 - **Built for the phone.** A responsive layout, a swipeable sidebar drawer, and
-  light and dark themes.
+  light and dark themes. Menus close when you tap or move focus elsewhere,
+  including when you open the sidebar.
 
 <p align="center">
   <img src="assets/mobile-dark.png" alt="Puppy on a phone in dark mode, showing a transcript with tool cards and the composer" width="270">
@@ -405,6 +406,7 @@ noted:
 ```sh
 node tests/sidebar_ui_test.js        # sidebar ordering, pins, reorders, filtering
 node tests/tab_drag_ui_test.js       # shared workspace and task tab dragging
+node tests/menu_dismiss_ui_test.js   # outside focus/taps, hamburger and menu toggles
 node tests/composer_ui_test.js       # the shared prompt box and its "@" list
 node tests/task_config_ui_test.js    # the New task dialog
 node tests/task_fold_ui_test.js      # task removal and the folded archive card
