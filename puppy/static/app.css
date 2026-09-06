@@ -492,7 +492,7 @@ a{color:var(--acc2)}
 .icon-btn:disabled{opacity:.4;pointer-events:none}
 .field-lbl>.seg{display:flex;width:fit-content;--settings-control-h:var(--field-h)}
 .field-row{display:flex;gap:10px}
-.field-row>*{flex:1}
+.field-row>*{flex:1;min-width:0}
 .check{display:flex;align-items:center;gap:8px;font-size:var(--fs-md);color:var(--txt2);text-transform:none;letter-spacing:0}
 /* One checkbox face for the whole app - the real input in forms and the drawn
    mark in menus. A native checkbox is painted by the browser, not by us: it
@@ -824,6 +824,11 @@ select.choice-native{display:none!important}
   background:var(--float-menu-bg);border:1px solid var(--line2);border-radius:var(--r-md);
   box-shadow:var(--float-menu-shadow);padding:5px;
 }
+.menu.dyn{
+  min-width:min(190px,calc(100vw - 16px));max-width:calc(100vw - 16px);
+  max-height:calc(100dvh - 16px);overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;
+}
+.menu.dyn button{overflow-wrap:anywhere}
 .menu button{
   display:flex;align-items:center;gap:8px;width:100%;min-height:32px;text-align:left;
   background:none;border:none;color:var(--txt);
@@ -1023,6 +1028,7 @@ select.choice-native{display:none!important}
    these to .msg-assistant left the aside card with unindented lists whose
    markers hung outside the card, and no code, table or paragraph rhythm. */
 .md>*+*{margin-top:.6em}
+.md img{max-width:100%;height:auto}
 .md pre{
   background:var(--panel);border:1px solid var(--line);border-radius:var(--r-sm);
   padding:10px 12px;overflow-x:auto;font-family:var(--mono);font-size:var(--fs-md);line-height:1.45;
@@ -1183,7 +1189,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
    unbubbled surface and the uppercase head say "this is a note about the
    work", not "someone said this in the conversation". */
 .aside-card{
-  align-self:stretch;border:1px solid var(--line2);
+  align-self:stretch;border:1px solid var(--line2);overflow-wrap:break-word;
   border-radius:var(--r-md);padding:8px 12px 9px;background:var(--panel2);
 }
 .aside-head{
@@ -1320,6 +1326,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   display:flex;flex-direction:column;gap:6px;align-items:center;
 }
 .composer-box{
+  container:composer / inline-size;
   width:100%;max-width:900px;background:var(--panel2);border:1px solid var(--line2);
   border-radius:var(--r-lg);padding:9px 11px;display:flex;flex-direction:column;gap:8px;
   transition:border-color var(--t-base) var(--ease),box-shadow var(--t-base) var(--ease);position:relative;
@@ -1571,8 +1578,23 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   border:1px solid var(--line2);
   box-shadow:inset 0 1px 0 var(--btn-top),var(--btn-lift);
 }
-.composer-action-icon{display:none;align-items:center;justify-content:center}
+.btn-queue,.btn-steer,.btn-ask{
+  width:var(--live-action-width,auto);min-width:var(--live-action-width,86px);
+  padding:var(--live-action-padding,0 16px var(--label-pb));
+}
+.composer-action-label{display:var(--live-action-label,inline)}
+.composer-action-icon{display:var(--live-action-icon,none);align-items:center;justify-content:center}
 .composer-action-icon svg{display:block}
+/* A desktop split can be as narrow as a phone. Size the running actions to
+   their own composer, and allow another row in exceptionally narrow panes. */
+@container composer (max-width:480px){
+  .composer-row{
+    --live-action-width:32px;--live-action-padding:0;
+    --live-action-label:none;--live-action-icon:flex;
+    flex-wrap:wrap;
+  }
+  .composer-meta-viewport{min-width:min(100%,64px)}
+}
 @media (hover:hover){
   .btn-send:hover,.btn-queue:hover{filter:brightness(1.07);box-shadow:inset 0 1px 0 rgba(255,255,255,.34),0 1px 2px rgba(0,0,0,.25),var(--glow-acc-hi)}
   .btn-steer:hover{filter:brightness(1.07);box-shadow:inset 0 1px 0 rgba(255,255,255,.34),0 1px 2px rgba(0,0,0,.25),0 5px 15px -7px rgba(15,172,121,.85)}
@@ -1671,7 +1693,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 }
 .br-ident-label{color:var(--txt3);margin-right:6px}
 .br-id{font:600 var(--fs-xs)/1 var(--mono);letter-spacing:.08em;color:var(--txt)}
-.br-copy-id{width:27px;height:27px;margin-left:3px;border:0;border-left:1px solid var(--line);
+.br-ident .br-copy-id{width:27px;height:100%;margin-left:3px;border:0;border-left:1px solid var(--line);
   border-radius:0 var(--r-md) var(--r-md) 0;flex:0 0 auto}
 /* The one linking control: a pill twin of .br-ident carrying the linked
    session's own dot and name (or the invitation to link), with a chevron
@@ -2126,7 +2148,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .timer-row-controls input[type=number]::-webkit-inner-spin-button,
 .timer-row-controls input[type=number]::-webkit-outer-spin-button{opacity:1}
 .timer-row-unit{min-width:22px;color:var(--txt3);font-size:var(--fs-xs)}
-.timeout-row .form-error{grid-column:1 / -1;margin:0}
+.timer-row .form-error{grid-column:1 / -1;margin:0}
 
 .usage-refresh-row{
   display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:10px 18px;
@@ -2138,7 +2160,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   font-family:var(--sans);font-size:var(--fs-2xs);font-weight:400;text-transform:uppercase;letter-spacing:.09em;
 }
 .usage-refresh-note{
-  min-width:0;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  min-width:0;margin-top:3px;white-space:normal;overflow-wrap:anywhere;
   color:var(--txt3);
 }
 .usage-refresh-controls{display:flex;align-items:center;justify-content:flex-end;gap:8px;min-width:0}
@@ -2358,10 +2380,15 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .scratch-note{margin-top:0}
 /* linked-workspace sheet */
 .ws-link-modal .ws-facts,.task-review-facts{display:flex;flex-direction:column;gap:6px;margin:10px 0 4px}
+.ws-link-modal .m-btns{flex-wrap:wrap}
+.ws-link-modal .m-btns .btn{
+  max-width:100%;height:auto;min-height:var(--btn-h);padding:8px 15px;
+  white-space:normal;overflow-wrap:anywhere;line-height:1.4;
+}
 .task-review-facts{margin-bottom:6px}
 .ws-fact{display:flex;gap:10px;align-items:baseline;min-width:0}
 .ws-fact .wsf-l{flex:0 0 84px;font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.09em;color:var(--txt3)}
-.ws-fact .wsf-v{flex:1;min-width:0;font:var(--fs-sm) var(--mono);color:var(--txt2);overflow-wrap:anywhere}
+:where(.ws-fact) .wsf-v{flex:1;min-width:0;font:var(--fs-sm) var(--mono);color:var(--txt2);overflow-wrap:anywhere}
 /* the preserved-versions row carries its own discard control */
 .ws-fact .wsf-clear{flex:0 0 auto;height:24px;padding:0 10px var(--label-pb);font-size:var(--fs-xs)}
 .ws-conflict-box{margin-top:12px}
@@ -2518,13 +2545,11 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   /* Enter keeps its established Queue behavior. The three explicit running
      actions remain available as equally sized symbols without squeezing the
      horizontally scrollable metadata lane. */
-  .btn-queue,.btn-steer,.btn-ask{
-    display:inline-flex;width:34px;min-width:34px;height:34px;padding:0;gap:0;
+  .composer-row{
+    --live-action-width:34px;--live-action-padding:0;
+    --live-action-label:none;--live-action-icon:flex;
   }
-  .btn-queue .composer-action-label,.btn-steer .composer-action-label,
-  .btn-ask .composer-action-label{display:none}
-  .btn-queue .composer-action-icon,.btn-steer .composer-action-icon,
-  .btn-ask .composer-action-icon{display:flex}
+  .btn-queue,.btn-steer,.btn-ask{height:34px;gap:0}
   .composer-row .mini{height:26px}
   .icon-btn{width:34px;height:34px}
   .settings-form{grid-template-columns:1fr}
@@ -2577,6 +2602,8 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   .backend-edit-grid .full{grid-column:1}
   .modal .m-btns{gap:8px}
   .modal .m-btns .btn{flex:1 1 0;min-width:0}
+  .modal.ws-link-modal .m-btns{flex-direction:column}
+  .modal.ws-link-modal .m-btns .btn{flex:0 0 auto}
   /* the address keeps its own line; port and protocol share the one below */
   .bind-fields{grid-template-columns:minmax(0,1fr) auto}
   .bind-fields>:first-child{grid-column:1/-1}
@@ -2755,7 +2782,7 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
   flex:1;min-width:0;font-weight:600;color:var(--txt);
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
 }
-.task-card-head .t-state{font-size:var(--fs-2xs);color:var(--txt3);flex-shrink:0;white-space:nowrap}
+:where(.task-card-head) .t-state{font-size:var(--fs-2xs);color:var(--txt3);flex-shrink:0;white-space:nowrap}
 .task-card-summary{
   margin:6px 0 9px;color:var(--txt2);font-size:var(--fs-sm);line-height:1.5;
   white-space:pre-wrap;overflow-wrap:anywhere;
@@ -2793,7 +2820,6 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
 .new-task-modal .task-composer-lbl{margin-bottom:5px}
 .new-task-modal .composer-box{margin-bottom:10px}
 .new-task-modal .composer-box textarea{min-height:130px;max-height:40vh}
-.new-task-modal .field-row>*{min-width:0}
 /* the review sheet: facts in the linked-workspace sheet's voice, then the
    file list and diff on the same surface every other modal gives a
    textarea (the agent-notes editor's mono voice), each scrolling on its own.

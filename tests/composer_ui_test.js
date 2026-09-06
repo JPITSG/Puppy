@@ -125,6 +125,27 @@ function completeUpload(entry, over = {}) {
 const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE").map(c => c.route);
 
 (async () => {
+  /* Finishing a spawn directive leaves task wording to the user and keeps
+     the ordinary mention spacing/caret behavior, including existing prose. */
+  for (const [selection, directive, suffix] of [
+    [{ engine: { key: "codex" } }, "@Spawn an agent using codex", ""],
+    [{ count: 3, node: { name: "Build node" }, engine: { key: "codex" },
+       model: { value: "test-model" }, effort: { value: "high" } },
+     '@Spawn 3 agents on "Build node" using codex test-model at high effort', "\nreview this"],
+  ]) {
+    const spawnBox = makeBox();
+    type(spawnBox.ta, "Please @spawn" + suffix);
+    spawnBox.ta.setSelectionRange(13, 13);
+    spawnBox.composer.mention = { start: 7 };
+    spawnBox.composer.mentionSpawn = selection;
+    spawnBox.composer.spawnFinish();
+    assert.equal(spawnBox.ta.value, "Please " + directive + (suffix || " "));
+    assert.equal(spawnBox.ta.selectionStart, 7 + directive.length + 1);
+    assert.equal(spawnBox.composer.mentionSpawn, null);
+    assert.equal(spawnBox.events.submit, 0);
+    spawnBox.composer.destroy();
+  }
+
   /* markup: one builder for every host, with the host's controls in place */
   const wrap = document.createElement("div");
   wrap.innerHTML = composerBoxHtml({ id: "nt-prompt", placeholder: "Describe…", rows: 6, className: "mention-below",

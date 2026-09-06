@@ -5310,15 +5310,23 @@ function layoutSwatchRow(box) {
 }
 
 /* right-click menu on sidebar sessions - mirrors the open-view ⋮ menu */
-function ctxMenuAt(x, y) {
+function createContextMenu() {
   closeAllMenus(null);
   const menu = el("div", "menu dyn");
   menu.style.position = "fixed";
-  menu.style.left = Math.min(x, window.innerWidth - 220) + "px";
-  menu.style.top = Math.min(y, window.innerHeight - 330) + "px";
+  menu.style.left = "0px";
+  menu.style.top = "0px";
   menu.style.right = "auto"; menu.style.bottom = "auto";
   document.body.appendChild(menu);
   return menu;
+}
+
+/* Measure after all conditional rows exist. CSS bounds oversized menus and
+   gives them their own scroll area before this final viewport placement. */
+function positionContextMenu(menu, x, y) {
+  const edge = 8;
+  menu.style.left = Math.max(edge, Math.min(x, window.innerWidth - menu.offsetWidth - edge)) + "px";
+  menu.style.top = Math.max(edge, Math.min(y, window.innerHeight - menu.offsetHeight - edge)) + "px";
 }
 
 function refreshGroup(bid) {
@@ -5333,7 +5341,7 @@ function sessionContextMenu(ev, bid, s) {
      so no stale gray/reordering state can survive that platform sequence. */
   cancelSessionDrag();
   cancelTabDrag();
-  const menu = ctxMenuAt(ev.clientX, ev.clientY);
+  const menu = createContextMenu();
   const add = (label, fn, danger) => {
     const b = el("button", danger ? "danger" : "", label);
     b.onclick = (e) => { e.stopPropagation(); menu.remove(); fn(); };
@@ -5348,7 +5356,7 @@ function sessionContextMenu(ev, bid, s) {
     if (val !== null) patch({ name: val.trim() });
   });
   add("Dot color", () => {
-    const cm = ctxMenuAt(ev.clientX, ev.clientY);
+    const cm = createContextMenu();
     cm.classList.add("color-menu");
     for (const c of state.sessionColors || []) {
       const b = el("button", "swatch" + (s.color === c ? " sel" : ""));
@@ -5358,6 +5366,7 @@ function sessionContextMenu(ev, bid, s) {
       b.onclick = (e) => { e.stopPropagation(); cm.remove(); patch({ color: c }); };
       cm.appendChild(b);
     }
+    positionContextMenu(cm, ev.clientX, ev.clientY);
   });
   add("Switch engine", () => modalSwitchEngine({
     session: s, tab: { bid, sid: s.id }, updateHead() { refreshGroup(bid); },
@@ -5426,6 +5435,7 @@ function sessionContextMenu(ev, bid, s) {
       toast("Session deleted");
     } catch (e) { toast(e.message, "error"); }
   }, true);
+  positionContextMenu(menu, ev.clientX, ev.clientY);
 }
 
 /* Live sortable layouts. The DOM slot moves during dragover; FLIP animates
@@ -7920,8 +7930,8 @@ function filterMentionItems(items, query) {
   return items.filter(item => item.search.includes(q));
 }
 
-/* The spawn wizard's finished directive. It reads as prose, ends in "to" so
-   the task follows naturally, and stays exactly parseable: the spawn MCP
+/* The spawn wizard's finished directive. It includes only the chosen
+   settings, leaving task wording to the user: the spawn MCP
    guidance defines this shape, omitted parts mean the engine defaults, a
    count above one becomes a parallel fan-out, and a node name with spaces is
    quoted. sel.node is null for the session's own node, whose name the spawn
@@ -7937,7 +7947,6 @@ function spawnMentionInsert(sel) {
   if (sel.model && sel.model.value) parts.push(String(sel.model.value));
   if (sel.effort && sel.effort.value)
     parts.push("at " + String(sel.effort.value) + " effort");
-  parts.push("to");
   return parts.join(" ");
 }
 
@@ -17126,7 +17135,8 @@ class SettingsView {
     const targetBid = spec => spec.scope === "engine" ? activeBid : 0;
 
     const addRow = spec => {
-      const root = el("div", "timer-row");
+      const root = el("form", "timer-row");
+      root.noValidate = true;
       const copy = el("div", "timer-row-copy");
       copy.appendChild(el("div", "timer-row-name", spec.label));
       copy.appendChild(el("div", "timer-row-description", spec.description));
@@ -17137,23 +17147,37 @@ class SettingsView {
       input.inputMode = "numeric";
       const unit = el("span", "timer-row-unit");
       const save = el("button", "btn btn-sm", "Apply");
-      save.type = "button";
+      save.type = "submit";
       controls.appendChild(input);
       controls.appendChild(unit);
       controls.appendChild(save);
       root.appendChild(copy);
       root.appendChild(controls);
       (spec.scope === "engine" ? engineList : consoleList).appendChild(root);
-      const record = { spec, root, input, unit, save, saving: false };
+      const error = el("p", "form-error hidden");
+      error.setAttribute("role", "alert");
+      error.id = `timer-error-${spec.key}`;
+      input.setAttribute("aria-describedby", error.id);
+      root.appendChild(error);
+      const record = { spec, root, input, unit, save, error, saving: false };
+      const setError = message => {
+        error.textContent = message;
+        error.classList.toggle("hidden", !message);
+        input.setAttribute("aria-invalid", String(!!message));
+      };
+      input.oninput = () => setError("");
       rows.push(record);
 
-      save.onclick = async () => {
+      root.onsubmit = async event => {
+        event.preventDefault();
+        if (save.disabled || record.saving) return;
+        setError("");
         const payload = timerPayload(spec);
         const limit = payload && payload.limits && payload.limits[spec.key];
         const value = Number(input.value);
-        if (!limit || !Number.isInteger(value) || value < limit.min || value > limit.max) {
+        if (!input.value.trim() || !limit || !Number.isInteger(value) || value < limit.min || value > limit.max) {
           const range = limit ? `${limit.min} to ${limit.max}` : "the allowed range";
-          toast(`${spec.label} must be a whole number from ${range}`, "error");
+          setError(`${spec.label} must be a whole number from ${range}`);
           input.focus();
           input.select();
           return;
@@ -17198,16 +17222,17 @@ class SettingsView {
             toast(`${savedMessage}${success} · failed: ${failed.join("; ")}`, "error", TOAST_LONG);
           }
         } catch (error) {
+          input.value = String(value);
           if (generation === this.renderGeneration && card.isConnected)
-            toast(`${node ? node.name : "This instance"}: ${error.message}`, "error", TOAST_LONG);
+            setError(`${node ? node.name : "This instance"}: ${error.message}`);
         } finally {
           record.saving = false;
           if (generation === this.renderGeneration && card.isConnected) paint();
         }
       };
       input.onkeydown = event => {
-        if (event.key === "Enter") { event.preventDefault(); save.click(); }
-        else if (event.key === "Escape") {
+        if (event.key === "Escape") {
+          setError("");
           const payload = timerPayload(spec);
           if (payload) input.value = String(payload.values[spec.key]);
           input.blur();
@@ -17306,7 +17331,7 @@ class SettingsView {
         const bid = targetBid(spec);
         const canUse = spec.scope === "console" || backendSupportsTimerSettings(bid);
         const reachable = !bid || backendConnectionAllowed(bid);
-        if (payload && document.activeElement !== input)
+        if (payload && !record.error.textContent && document.activeElement !== input)
           input.value = String(payload.values[spec.key]);
         if (limit) {
           input.min = String(limit.min);
@@ -17328,6 +17353,10 @@ class SettingsView {
     select.onchange = () => {
       activeBid = Number(select.value) || 0;
       this.timerSettingsBid = activeBid;
+      for (const record of rows) {
+        record.error.textContent = ""; record.error.classList.add("hidden");
+        record.input.setAttribute("aria-invalid", "false");
+      }
       paint();
       if (activeBid && !state.remoteTimers[activeBid]) load(activeBid);
     };

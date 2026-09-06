@@ -130,7 +130,8 @@ context is.
 - **Pins, colors, archive, drag-and-drop.** Sessions carry a color, can be
   pinned to the top, archived out of the way, renamed, and reordered by
   dragging. The order belongs to the backend, so every console sees the same
-  list.
+  list. Session context menus stay within the screen and scroll when there
+  are more actions than the available height.
 - **Agent notes.** A mark on every session row shows whether its directory has
   an `AGENTS.md` or `CLAUDE.md`, and opens a small editor for exactly those two
   files.
@@ -159,6 +160,9 @@ you can:
 - **Stop** – interrupt the turn; the engine gets an orderly shutdown and the
   answer so far is kept.
 
+In narrow desktop panes, Ask, Steer and Queue use icons so Stop stays visible.
+The controls wrap onto another row when the pane is too narrow for one line.
+
 Everything typed at an agent goes through one shared prompt box: `Enter` sends,
 `Shift+Enter` or `Ctrl+J` breaks a line, `↑` at the start of the box recalls
 earlier prompts, and `@` opens the mention list (browsers, terminals, sessions,
@@ -179,7 +183,8 @@ send is awaiting acknowledgement remain in the composer for the next message.
 **Attachments** go in with the `+` button, a paste, or a drop from your file
 manager: images, documents, archives, source, anything. Files stream straight to
 the session's backend and stay private under `data/uploads/`. Images preview in
-the transcript.
+the transcript. Images in Markdown replies shrink to fit the available width
+while keeping their proportions; smaller images keep their natural size.
 
 Engines that keep working after answering are handled too: Claude Code's
 background commands, agents and monitors keep their turn alive until they end,
@@ -248,8 +253,10 @@ persistence contract are in [docs/session-tasks.md](docs/session-tasks.md).
 ### Agents that delegate and collaborate
 
 - **Spawned agents.** `@Spawn an agent on build-node using codex at high effort
-  to …` (there is a wizard behind the `@` menu) starts a one-shot,
-  non-interactive engine run on any backend, or up to twelve in parallel; a
+  to …` starts a one-shot,
+  non-interactive engine run on any backend, or up to twelve in parallel. The
+  `@` menu's wizard inserts the selected settings without a trailing “to”,
+  leaving the task wording to you. A
   session hosted on a backend spawns on that backend only. The spawning turn
   waits for the answers and acts on them; jobs die with their turn, renew
   their inactivity timer only on real progress, and use the executing backend's
@@ -354,7 +361,8 @@ synchronizes the two between turns, byte-verified and crash-safe, and never
 lets the backends talk to each other. Edits that diverge on both sides become
 conflicts that keep both versions until you pick a side in the **Linked
 workspace** sheet; the losing bytes are preserved so nothing is silently
-overwritten.
+overwritten. On phones, the sheet stacks its action buttons so the terminal's
+backend name stays readable; long button labels wrap within the button.
 
 ## Settings
 
@@ -375,7 +383,8 @@ overwritten.
   Both commands are included in Backup & restore. See
   [completion alert configuration](docs/completion-alerts.md) for the saved shape.
 - **Timers** – release checks, model catalog and sign-in caching, and the
-  controller's polling and synchronization intervals.
+  controller's polling and synchronization intervals. Validation and save errors
+  appear beneath the affected field; edit it or press Escape to clear the error.
 - **Timeouts** – per backend: maximum agent turn duration (2 hours), spawned-agent
   runtime (2 hours) and inactivity (10 minutes), and unattended terminal and
   browser timeouts (15 minutes each). Values are seconds; **0 means unlimited**.

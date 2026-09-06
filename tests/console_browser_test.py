@@ -121,7 +121,477 @@ async def type_text(instance, text):
     await instance.call("Input.insertText", {"text": text}, session=instance.page_session)
 
 
+async def narrow_composer_checks(instance, capture=False):
+    await instance.call("Emulation.setDeviceMetricsOverride", {
+        "width": 1440, "height": 900, "deviceScaleFactor": 1,
+        "mobile": False}, session=instance.page_session)
+    await evaluate(instance, """openSearchTab(null, 'dashboard');
+        splitTabIntoPane('s:0:1', workspacePaneForTab('search').id, 'left');
+        demoView.status = 'running';
+        demoView.setSteeringState({supported:true, ready:true, turn_id:'layout-test'});
+        demoView.setSideQuestionState({supported:true, ready:true, turn_id:'layout-test'});
+        demoView.updateRunState(); true""")
+    try:
+        for theme in ("dark", "light"):
+            # The reported width, a smaller pane requiring wrapping, then a
+            # wide pane that must regain its text labels without a reload.
+            for ratio in (.27, .15, .7):
+                await evaluate(instance, """applyTheme(%s); state.layout.ratio=%s; renderTabs();
+                    (() => {const split=$('workspace-tree').firstElementChild;
+                        applySplitRatio(state.layout, split.children[0], split.children[2], split.children[1]);})(); true""" %
+                               (json.dumps(theme), ratio))
+                await evaluate(instance, "new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
+                result = await evaluate(instance, """(() => {
+                    const v = demoView, box = v.composer.box.getBoundingClientRect();
+                    const buttons = [v.askBtn, v.steerBtn, v.queueBtn, v.sendBtn];
+                    return {buttons:buttons.map(b => {
+                        const r = b.getBoundingClientRect();
+                        const hit = document.elementFromPoint(r.x+r.width/2, r.y+r.height/2);
+                        return {label:b.getAttribute('aria-label'), width:r.width,
+                            inside:r.left>=box.left && r.right<=box.right &&
+                                r.top>=box.top && r.bottom<=box.bottom,
+                            hittable:!!hit && b.contains(hit)};
+                    }), compact:getComputedStyle(v.askBtn.querySelector('.composer-action-label')).display==='none',
+                    wrapped:v.sendBtn.getBoundingClientRect().top>v.composerMetaViewport.getBoundingClientRect().top};
+                })()""")
+                assert all(b["width"] > 0 and b["inside"] and b["hittable"]
+                           for b in result["buttons"]), (theme, ratio, result)
+                assert result["compact"] == (ratio < .7), result
+                if ratio == .15:
+                    assert result["wrapped"], result
+                if capture and ratio == .27:
+                    shot = await instance.call("Page.captureScreenshot", {"format": "png"},
+                                               session=instance.page_session)
+                    (BASE / "data" / ("composer-narrow-fixed-" + theme + ".png")).write_bytes(
+                        base64.b64decode(shot["data"]))
+    finally:
+        await evaluate(instance, """demoView.status='idle';
+            demoView.setSteeringState({}); demoView.setSideQuestionState({});
+            demoView.updateRunState(); closeTab('search'); applyTheme('dark'); true""")
+    print("PASS: narrow desktop running controls stay visible and clickable, wrap when needed, and regain wide labels in both themes", flush=True)
+
+
+async def context_menu_checks(instance, capture=False):
+    await evaluate(instance, """window.menuTestLinks=state.workspaceLinks;
+        state.workspaceLinks=[{id:999, exec_backend:0, session_id:1,
+            ws_backend:0, ws_name:'Atlas', root:'/home/mira/projects/harbor'}];
+        window.menuTestSession={...demoView.session, has_native:true,
+            workspace:{root:'/home/mira/projects/harbor', node:'Atlas'}}; true""")
+    try:
+        for width, height, name in [(1440, 900, "desktop"), (390, 844, "phone"),
+                                    (390, 360, "short")]:
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width": width, "height": height, "deviceScaleFactor": 1,
+                "mobile": width == 390}, session=instance.page_session)
+            for theme in ("dark", "light"):
+                await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
+                # Let the resize event dismiss old floats before opening this menu.
+                await evaluate(instance, "new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+                result = await evaluate(instance, """(() => {
+                    if (innerWidth<=900) $('app').classList.add('side-open');
+                    sessionContextMenu({preventDefault(){}, stopPropagation(){},
+                        clientX:150, clientY:innerHeight-20}, 0, menuTestSession);
+                    const menu=document.querySelector('.menu.dyn');
+                    const r=menu.getBoundingClientRect();
+                    const buttons=[...menu.querySelectorAll('button')];
+                    const reach=b => {
+                        b.scrollIntoView({block:'nearest'});
+                        const q=b.getBoundingClientRect();
+                        const hit=document.elementFromPoint(q.x+q.width/2,q.y+q.height/2);
+                        return !!hit && b.contains(hit);
+                    };
+                    return {inside:r.left>=8 && r.top>=8 && r.right<=innerWidth-8 && r.bottom<=innerHeight-8,
+                        scrolls:menu.scrollHeight>menu.clientHeight,
+                        first:reach(buttons[0]),
+                        archive:reach(buttons.find(b=>b.textContent==='Archive')),
+                        last:reach(buttons.find(b=>b.textContent==='Delete session'))};
+                })()""")
+                assert result["inside"] and result["first"] and result["archive"] and result["last"], result
+                assert result["scrolls"] == (name == "short"), result
+                if capture:
+                    shot = await instance.call("Page.captureScreenshot", {"format": "png"},
+                                               session=instance.page_session)
+                    (BASE / "data" / ("context-menu-fixed-" + name + "-" + theme + ".png")).write_bytes(
+                        base64.b64decode(shot["data"]))
+                assert await evaluate(instance, """(() => {
+                    const menu=document.querySelector('.menu.dyn');
+                    [...menu.querySelectorAll('button')].find(b=>b.textContent==='Dot color').click();
+                    const picker=document.querySelector('.menu.color-menu');
+                    const r=picker.getBoundingClientRect();
+                    return picker.querySelectorAll('.swatch').length>0 &&
+                        r.left>=8 && r.top>=8 && r.right<=innerWidth-8 && r.bottom<=innerHeight-8;
+                })()""")
+                await evaluate(instance, "closeAllMenus(null); closeDrawer(); true")
+    finally:
+        await evaluate(instance, """closeAllMenus(null); closeDrawer();
+            state.workspaceLinks=menuTestLinks; delete window.menuTestLinks;
+            delete window.menuTestSession; applyTheme('dark'); true""")
+    print("PASS: session menus and color pickers fit desktop, phone and short screens; Archive/Delete remain reachable in both themes", flush=True)
+
+
+async def workspace_footer_checks(instance, capture=False):
+    await evaluate(instance, "window.footerTestLinks=state.workspaceLinks; true")
+    try:
+        for width, height, name in [(1440, 900, "desktop"), (390, 844, "phone"), (320, 640, "narrow")]:
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width": width, "height": height, "deviceScaleFactor": 1,
+                "mobile": width < 900}, session=instance.page_session)
+            for theme in ("dark", "light"):
+                await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
+                for backend in ("Atlas", "Garden laptop", "Garden-" + "workstation" * 8):
+                    await evaluate(instance, """(() => {
+                        const backend=%s;
+                        state.workspaceLinks=[{id:999, exec_backend:0, session_id:1,
+                            ws_backend:0, ws_name:backend, exec_name:'Studio',
+                            root:'/home/mira/projects/harbor', state:'ok', conflicts:[]}];
+                        modalWorkspaceLink(0, {...demoView.session,
+                            workspace:{root:'/home/mira/projects/harbor', node:backend}});
+                    })()""" % json.dumps(backend))
+                    await evaluate(instance, "new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+                    result = await evaluate(instance, """(() => {
+                        const modal=document.querySelector('.ws-link-modal');
+                        const buttons=[...modal.querySelectorAll('.m-btns .btn:not(.hidden)')];
+                        let previous=null;
+                        return modal.scrollWidth<=modal.clientWidth && buttons.length===3 && buttons.every(b=>{
+                            b.scrollIntoView({block:'nearest'});
+                            const r=b.getBoundingClientRect();
+                            const range=document.createRange();range.selectNodeContents(b);
+                            const text=range.getBoundingClientRect();
+                            const hit=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);
+                            const fits=text.left>=r.left+14 && text.right<=r.right-14 &&
+                                text.top>=r.top && text.bottom<=r.bottom && b.contains(hit);
+                            const separated=!previous || r.top>=previous.bottom || r.left>=previous.right;
+                            previous=r;
+                            return fits && separated;
+                        });
+                    })()""")
+                    assert result, (width, theme, backend)
+                    if capture and backend == "Garden laptop":
+                        shot = await instance.call("Page.captureScreenshot", {"format": "png"},
+                                                   session=instance.page_session)
+                        (BASE / "data" / ("workspace-footer-fixed-" + name + "-" + theme + ".png")).write_bytes(
+                            base64.b64decode(shot["data"]))
+                    await evaluate(instance, "document.querySelector('#wsl-close').click(); true")
+    finally:
+        await evaluate(instance, """document.querySelector('#wsl-close')?.click();
+            state.workspaceLinks=footerTestLinks; delete window.footerTestLinks;
+            applyTheme('dark'); true""")
+    print("PASS: linked workspace footer labels fit and actions remain reachable with short and long backend names on desktop and phones in both themes", flush=True)
+
+
+async def new_session_choices_checks(instance, capture=False):
+    await evaluate(instance, "window.savedNativeChoices=prefersNativeChoices; true")
+    try:
+        for width, height, name in [(1440, 900, "desktop"), (390, 844, "phone"), (320, 640, "narrow")]:
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width": width, "height": height, "deviceScaleFactor": 1,
+                "mobile": width < 900}, session=instance.page_session)
+            for native in (False, True):
+                await evaluate(instance, "prefersNativeChoices=()=>%s; true" % json.dumps(native))
+                for theme in ("dark", "light"):
+                    await evaluate(instance, "applyTheme(%s); modalNewSession(0)" % json.dumps(theme))
+                    await until(instance, "document.querySelector('#ns-model').options.length>0 && document.querySelector('#ns-perm').options.length>0")
+                    await evaluate(instance, "new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+                    result = await evaluate(instance, """(() => {
+                        const modal=document.querySelector('.new-session-modal');
+                        const row=modal.querySelector('.field-row');
+                        row.scrollIntoView({block:'nearest'});
+                        const r=row.getBoundingClientRect();
+                        return modal.scrollWidth<=modal.clientWidth && [...row.querySelectorAll('select')].every(s=>{
+                            const b=s._choiceControl?.button || s;
+                            const q=b.getBoundingClientRect();
+                            const hit=document.elementFromPoint(q.x+q.width/2,q.y+q.height/2);
+                            return q.left>=r.left && q.right<=r.right+1 && q.width>0 && b.contains(hit);
+                        });
+                    })()""")
+                    assert result, (width, native, theme)
+                    if capture:
+                        shot = await instance.call("Page.captureScreenshot", {"format": "png"},
+                                                   session=instance.page_session)
+                        mode = "touch" if native else "mouse"
+                        (BASE / "data" / ("new-session-fixed-" + name + "-" + mode + "-" + theme + ".png")).write_bytes(
+                            base64.b64decode(shot["data"]))
+                    if not native:
+                        for field in ("model", "effort", "perm"):
+                            assert await evaluate(instance, """(() => {
+                                const c=document.querySelector('#ns-%s')._choiceControl;
+                                c.button.click();
+                                const r=c.menu.getBoundingClientRect();
+                                const fits=r.left>=8 && r.right<=innerWidth-8 && r.top>=8 && r.bottom<=innerHeight-8;
+                                closeChoiceMenu(true);return fits;
+                            })()""" % field), (width, theme, field)
+                    await evaluate(instance, "document.querySelector('#ns-cancel').click(); true")
+    finally:
+        await evaluate(instance, """document.querySelector('#ns-cancel')?.click();
+            prefersNativeChoices=savedNativeChoices; delete window.savedNativeChoices;
+            applyTheme('dark'); true""")
+    print("PASS: New session model, effort and permission controls fit desktop and narrow windows with mouse and touch choices in both themes", flush=True)
+
+
+async def reply_image_checks(instance, capture=False):
+    await evaluate(instance, r"""(() => {
+        const canvas=document.createElement('canvas');canvas.width=1200;canvas.height=600;
+        const c=canvas.getContext('2d');c.fillStyle='#19364c';c.fillRect(0,0,1200,600);
+        c.fillStyle='#63c8ba';c.fillRect(40,40,1120,520);
+        c.fillStyle='#19364c';c.font='48px sans-serif';c.fillText('Harbor image preview',100,180);
+        c.font='32px sans-serif';c.fillText('1200 × 600 · fits the conversation',100,250);
+        c.fillRect(100,320,280,120);c.fillRect(460,320,280,120);c.fillRect(820,320,280,120);
+        const large=canvas.toDataURL();canvas.width=120;canvas.height=60;
+        c.fillStyle='#63c8ba';c.fillRect(0,0,120,60);
+        window.imageTestNode=demoView.buildEventNode({kind:'assistant',data:{text:
+            'Large image preview\n\n![Harbor preview]('+large+')\n\nSmall images keep their natural size.\n\n![Small preview]('+canvas.toDataURL()+')'}});
+        demoView.inner.appendChild(imageTestNode);
+    })()""")
+    try:
+        await until(instance, "[...imageTestNode.querySelectorAll('img')].length===2 && [...imageTestNode.querySelectorAll('img')].every(i=>i.complete && i.naturalWidth>0)")
+        for width, height, name in [(1440, 900, "desktop"), (390, 844, "phone"), (320, 640, "narrow")]:
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width": width, "height": height, "deviceScaleFactor": 1,
+                "mobile": width < 900}, session=instance.page_session)
+            for theme in ("dark", "light"):
+                await evaluate(instance, "applyTheme(%s); imageTestNode.scrollIntoView({block:'end'}); true" % json.dumps(theme))
+                await evaluate(instance, "new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+                result = await evaluate(instance, """(() => {
+                    const imgs=[...imageTestNode.querySelectorAll('img')];
+                    const box=imageTestNode.querySelector('.md').getBoundingClientRect();
+                    return demoView.scroll.scrollWidth<=demoView.scroll.clientWidth && imgs.every(i=>{
+                        const r=i.getBoundingClientRect();
+                        return r.left>=box.left && r.right<=box.right+1 &&
+                            r.width<=i.naturalWidth && Math.abs(r.width/r.height-2)<.01;
+                    }) && imgs[1].getBoundingClientRect().width===120;
+                })()""")
+                assert result, (width, theme)
+                if capture:
+                    shot = await instance.call("Page.captureScreenshot", {"format": "png"},
+                                               session=instance.page_session)
+                    (BASE / "data" / ("reply-image-fixed-" + name + "-" + theme + ".png")).write_bytes(
+                        base64.b64decode(shot["data"]))
+    finally:
+        await evaluate(instance, "imageTestNode.remove(); delete window.imageTestNode; applyTheme('dark'); true")
+    print("PASS: large reply images fit the transcript without distortion or horizontal overflow; small images retain their natural size in both themes", flush=True)
+
+
+async def side_question_wrap_checks(instance, capture=False):
+    await evaluate(instance, r"""(() => {
+        const hash='0123456789abcdef'.repeat(4);
+        window.wrapTestCard=asideCardNode({question:'Can you check this identifier?\n'+hash});
+        fillAsideAnswer(wrapTestCard,{ok:true,text:'The identifier is:\n\n'+hash});
+        demoView.inner.appendChild(wrapTestCard);
+    })()""")
+    try:
+        for width, height, name in [(1440, 900, "desktop"), (390, 844, "phone"), (320, 640, "narrow")]:
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width": width, "height": height, "deviceScaleFactor": 1,
+                "mobile": width < 900}, session=instance.page_session)
+            # Wait for the sidebar resize transition before taking evidence.
+            await asyncio.sleep(.35)
+            for theme in ("dark", "light"):
+                await evaluate(instance, "applyTheme(%s); wrapTestCard.scrollIntoView({block:'end'}); true" % json.dumps(theme))
+                await evaluate(instance, "new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+                result = await evaluate(instance, """(() => {
+                    const card=wrapTestCard.getBoundingClientRect();
+                    const nodes=[wrapTestCard,...wrapTestCard.querySelectorAll('.aside-q,.aside-a,.md')];
+                    return demoView.scroll.scrollWidth<=demoView.scroll.clientWidth && nodes.every(n=>n.scrollWidth<=n.clientWidth) &&
+                        [...wrapTestCard.querySelectorAll('.aside-q,.md p')].every(n=>{
+                            const range=document.createRange();range.selectNodeContents(n);
+                            return [...range.getClientRects()].every(r=>r.left>=card.left && r.right<=card.right);
+                        });
+                })()""")
+                assert result, (width, theme)
+                if capture:
+                    shot = await instance.call("Page.captureScreenshot", {"format": "png"},
+                                               session=instance.page_session)
+                    (BASE / "data" / ("side-question-fixed-" + name + "-" + theme + ".png")).write_bytes(
+                        base64.b64decode(shot["data"]))
+    finally:
+        await evaluate(instance, "wrapTestCard.remove(); delete window.wrapTestCard; applyTheme('dark'); true")
+    print("PASS: long identifiers wrap inside side-question questions and answers without horizontal overflow on desktop and phones in both themes", flush=True)
+
+
+async def status_color_checks(instance, capture=False):
+    await evaluate(instance, "window.statusTestLinks=state.workspaceLinks; true")
+    try:
+        for width, height, name in [(1440, 900, "desktop"), (390, 844, "phone")]:
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width": width, "height": height, "deviceScaleFactor": 1,
+                "mobile": width < 900}, session=instance.page_session)
+            await asyncio.sleep(.35)
+            for theme in ("dark", "light"):
+                await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
+                for surface in ("tasks", "review", "workspace"):
+                    if surface == "tasks":
+                        await evaluate(instance, """(() => {
+                            window.statusTestModal=modal('<h2>Tasks</h2><div class="status-test-tasks"></div>');
+                            const preview={overview:statusTestModal.m.querySelector('.status-test-tasks'),tab:{bid:0}};
+                            SessionWorkspaceView.prototype.renderOverview.call(preview,[{
+                                ...demoView.session,id:999,name:'Review dashboard spacing',
+                                task:{state:'running',created_at:1,prompt:'Check the desktop and phone layouts.'}}]);
+                        })()""")
+                        selector = ".status-test-tasks .t-state"
+                        tone = "busy"
+                    elif surface == "review":
+                        await evaluate(instance, """(async () => {
+                            const savedApi=api;
+                            api=async (bid,path,options) => path.endsWith('/tasks/999/review') ?
+                                {files:'',diff:'',has_changes:false} : savedApi(bid,path,options);
+                            try { await modalReviewTask({tab:{bid:0,sid:1}}, {
+                                id:999,name:'Review dashboard spacing',task:{state:'failed'}}); }
+                            finally { api=savedApi; }
+                        })()""")
+                        selector = ".task-review-facts .wsf-v.bad"
+                        tone = "bad"
+                    else:
+                        await evaluate(instance, """state.workspaceLinks=[{id:999,exec_backend:0,session_id:1,
+                            ws_backend:0,ws_name:'Garden laptop',exec_name:'Studio',state:'conflict',
+                            conflicts:[],root:'/home/mira/projects/harbor'}];
+                            modalWorkspaceLink(0,{...demoView.session,
+                                workspace:{root:'/home/mira/projects/harbor',node:'Garden laptop'}}); true""")
+                        selector = ".ws-link-modal .wsf-v.warn"
+                        tone = "warn"
+                    result = await evaluate(instance, """(() => {
+                        const node=document.querySelector(%s);
+                        const original=node.className;
+                        const tones={ok:'--ok',warn:'--warn',bad:'--err',busy:'--acc2'};
+                        const result=Object.entries(tones).every(([tone,token])=>{
+                            node.classList.remove('ok','warn','bad','busy');node.classList.add(tone);
+                            const probe=document.createElement('span');probe.style.color='var('+token+')';node.parentNode.appendChild(probe);
+                            const match=getComputedStyle(node).color===getComputedStyle(probe).color;
+                            probe.remove();return match;
+                        });
+                        node.className=original;return result && node.classList.contains(%s);
+                    })()""" % (json.dumps(selector),json.dumps(tone)))
+                    assert result, (width, theme, surface)
+                    await evaluate(instance, "new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+                    if capture:
+                        shot=await instance.call("Page.captureScreenshot", {"format":"png"},session=instance.page_session)
+                        (BASE / "data" / ("status-colors-fixed-"+surface+"-"+name+"-"+theme+".png")).write_bytes(base64.b64decode(shot["data"]))
+                    await evaluate(instance, """document.querySelector('#tr-close')?.click();
+                        document.querySelector('#wsl-close')?.click();
+                        if(window.statusTestModal){statusTestModal.close();delete window.statusTestModal;} true""")
+    finally:
+        await evaluate(instance, "state.workspaceLinks=statusTestLinks; delete window.statusTestLinks; applyTheme('dark'); true")
+    print("PASS: task, review and workspace statuses use all four shared tone colors on desktop and phone in both themes", flush=True)
+
+
+async def identity_pill_checks(instance, capture=False):
+    await evaluate(instance, """(() => {
+        window.identityPreview=modal('<h2>Browser and terminal IDs</h2><p class="modal-copy">Component comparison · anonymous preview</p>');
+        for(const [label,id] of [['Browser','A7K2'],['Terminal','B8L3']]) {
+            const meta=el('div','br-meta'+(label==='Terminal'?' term-meta':''));
+            const pill=el('div','br-ident');pill.setAttribute('aria-label',label+' identity');
+            pill.append(el('span','br-ident-label',label),el('span','br-id',id));
+            const button=el('button','icon-btn br-copy-id'+(label==='Terminal'?' term-copy-id':''));
+            button.type='button';button.setAttribute('aria-label','Copy '+label+' ID');
+            button.appendChild(copyIcon());pill.appendChild(button);meta.appendChild(pill);
+            identityPreview.m.appendChild(meta);
+        }
+    })()""")
+    try:
+        for width, height, name in [(1440, 900, "desktop"), (390, 844, "phone"), (320, 640, "narrow")]:
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width":width,"height":height,"deviceScaleFactor":1,"mobile":width<900},session=instance.page_session)
+            await asyncio.sleep(.35)
+            for theme in ("dark","light"):
+                await evaluate(instance,"applyTheme(%s); true" % json.dumps(theme))
+                result=await evaluate(instance,"""[...identityPreview.m.querySelectorAll('.br-ident')].every(p=>{
+                    const b=p.querySelector('.br-copy-id'),r=p.getBoundingClientRect(),q=b.getBoundingClientRect();
+                    const icon=b.querySelector('svg').getBoundingClientRect();
+                    const hit=document.elementFromPoint(q.x+q.width/2,q.y+q.height/2);
+                    return r.height===28 && q.width===27 && q.top>=r.top+1 && q.bottom<=r.bottom-1 &&
+                        icon.top>=q.top && icon.bottom<=q.bottom && b.contains(hit);
+                })""")
+                assert result,(width,theme)
+                if capture:
+                    shot=await instance.call("Page.captureScreenshot",{"format":"png"},session=instance.page_session)
+                    (BASE / "data" / ("identity-pills-fixed-"+name+"-"+theme+".png")).write_bytes(base64.b64decode(shot["data"]))
+    finally:
+        await evaluate(instance,"identityPreview.close(); delete window.identityPreview; applyTheme('dark'); true")
+    print("PASS: browser and terminal Copy ID controls fit inside their pills on desktop and phones in both themes",flush=True)
+
+
+async def timer_error_checks(instance, capture=False):
+    await evaluate(instance, """(() => {
+        window.timerPreview=modal('<h2>Settings preview</h2>');
+        window.timerView={renderGeneration:1};
+        timerPreview.m.appendChild(SettingsView.prototype.timerSettingsCard.call(timerView,
+            [{bid:0,name:'Studio'}],state.timers,1));
+    })()""")
+    try:
+        for width,height,name in [(1440,900,"desktop"),(390,844,"phone")]:
+            await instance.call("Emulation.setDeviceMetricsOverride",{"width":width,"height":height,"deviceScaleFactor":1,"mobile":width<900},session=instance.page_session)
+            await asyncio.sleep(.35)
+            for theme in ('dark','light'):
+                await evaluate(instance,"applyTheme(%s); true" % json.dumps(theme))
+                result=await evaluate(instance,"""(async () => {
+                    const row=timerPreview.m.querySelector('.timer-row'), input=row.querySelector('input'),button=row.querySelector('button'),error=row.querySelector('.form-error');
+                    const oldApi=api;let calls=0;
+                    api=async ()=>{calls++;throw new Error('Preview save failure');};
+                    try {
+                        input.value='-1';await row.onsubmit({preventDefault(){}});
+                        if(calls || error.classList.contains('hidden') || !error.textContent.includes('whole number')) return false;
+                        timerView.timerSettingsSync();
+                        if(input.value!=='-1' || error.classList.contains('hidden')) return false;
+                        input.value=input.min;input.dispatchEvent(new Event('input'));
+                        if(!error.classList.contains('hidden')) return false;
+                        await row.onsubmit({preventDefault(){}});
+                        if(calls!==1 || !error.textContent.includes('Preview save failure') || button.disabled) return false;
+                        input.onkeydown({key:'Escape'});
+                        if(!error.classList.contains('hidden')) return false;
+                        input.value='-1';await row.onsubmit({preventDefault(){}});
+                        row.scrollIntoView({block:'center'});
+                        return !document.querySelector('.toast') && input.getAttribute('aria-invalid')==='true';
+                    } finally {api=oldApi;}
+                })()""")
+                assert result,(width,theme)
+                if capture:
+                    shot=await instance.call('Page.captureScreenshot',{'format':'png'},session=instance.page_session)
+                    (BASE/'data'/('timer-errors-fixed-'+name+'-'+theme+'.png')).write_bytes(base64.b64decode(shot['data']))
+    finally:
+        await evaluate(instance,"timerPreview.close(); delete window.timerPreview; delete window.timerView; applyTheme('dark'); true")
+    print('PASS: timer validation and save failures stay inline, persist across repaint, clear on edit/Escape, and never toast',flush=True)
+
+
+async def usage_error_checks(instance, capture=False):
+    await evaluate(instance, """(() => {
+        window.usagePreview=modal('<h2>Usage refresh</h2>');
+        window.usageTestRow=SettingsView.prototype.usageRefreshRow.call({},'Studio',0);
+        usagePreview.m.appendChild(usageTestRow.root);
+    })()""")
+    try:
+        for width,height,name in [(1440,900,'desktop'),(390,844,'phone'),(320,640,'narrow')]:
+            await instance.call('Emulation.setDeviceMetricsOverride',{'width':width,'height':height,'deviceScaleFactor':1,'mobile':width<900},session=instance.page_session)
+            await asyncio.sleep(.35)
+            for theme in ('dark','light'):
+                await evaluate(instance,'applyTheme(%s); true' % json.dumps(theme))
+                for message in ('The account refresh could not finish because the backend is temporarily unavailable. Check its connection and try again.', 'Request failed: '+('0123456789abcdef'*8)):
+                    await evaluate(instance,'usageTestRow.update({enabled:true,minutes:5,last_error:%s}, "ok", true); true' % json.dumps(message))
+                    result=await evaluate(instance,"""(() => {
+                        const note=usageTestRow.root.querySelector('.usage-refresh-note');
+                        const r=note.getBoundingClientRect(),range=document.createRange();range.selectNodeContents(note);
+                        return note.scrollWidth<=note.clientWidth && note.scrollHeight<=note.clientHeight &&
+                            [...range.getClientRects()].every(q=>q.left>=r.left && q.right<=r.right+1 && q.top>=r.top-1 && q.bottom<=r.bottom+1) &&
+                            usagePreview.m.scrollWidth<=usagePreview.m.clientWidth;
+                    })()""")
+                    assert result,(width,theme,message)
+                    if capture and message.startswith('The account'):
+                        shot=await instance.call('Page.captureScreenshot',{'format':'png'},session=instance.page_session)
+                        (BASE/'data'/('usage-error-fixed-'+name+'-'+theme+'.png')).write_bytes(base64.b64decode(shot['data']))
+    finally:
+        await evaluate(instance,"usagePreview.close(); delete window.usagePreview; delete window.usageTestRow; applyTheme('dark'); true")
+    print('PASS: complete usage-refresh errors and long identifiers remain visible without overflow on desktop and phones in both themes',flush=True)
+
+
 async def checks(a, b, hub, capture=False):
+    await narrow_composer_checks(a, capture)
+    await context_menu_checks(a, capture)
+    await workspace_footer_checks(a, capture)
+    await new_session_choices_checks(a, capture)
+    await reply_image_checks(a, capture)
+    await side_question_wrap_checks(a, capture)
+    await status_color_checks(a, capture)
+    await identity_pill_checks(a, capture)
+    await timer_error_checks(a, capture)
+    await usage_error_checks(a, capture)
     # Measure real layout: an idle status must not reserve a row below tools.
     for width, height in [(1440, 900), (390, 844)]:
         await a.call("Emulation.setDeviceMetricsOverride", {"width": width, "height": height,
