@@ -2,7 +2,7 @@
 
 Nodes advertising `engine-defaults` offer authenticated GET/PUT
 `/api/engines/{key}/defaults` and publish `session_defaults`/`factory_defaults` in
-each engine payload. New sessions and requested engine switches use those
+each engine payload. New sessions, tasks and requested engine switches use those
 node-owned choices; existing sessions and queued switches retain theirs. See
 [Engine defaults](../docs/engine-defaults.md) for the exact API and the manual
 config-shape update required before starting this version on an existing node.
@@ -38,9 +38,10 @@ Refusals are 409; the snapshot guard answers 503.
 
 Nodes advertising `session-task-config` accept optional `engine`, `model`,
 `effort` and `permission_mode` fields on `POST /api/sessions/{sid}/tasks`.
-Omitted choices inherit Main; changing the engine uses the target engine's saved
-defaults for omitted fields and resets Fast. Explicit empty model/effort values
-mean engine default. Supplied choices are validated against that node's selected
+Omitting the engine selects Main's engine. Omitted model, effort and permissions
+use the selected engine's saved defaults on this node. Fast follows Main when
+keeping its engine and resets when changing engines. Explicit empty model/effort
+values mean engine default. All choices are validated against that node's selected
 engine and model before allocating a task copy. The first turn uses those
 choices without editing Main.
 
@@ -213,6 +214,11 @@ carry the additive `completion_status`. A controller uses `interrupted` to
 retire its activity timer without firing a configured completion command for a
 prompt the user stopped. Queued work that continues after a stop remains one
 activity block and can still notify when that later work actually finishes.
+The controller selects its configured success command for `ok` and failure
+command for `error`, skipping an empty command. Both use the same selected
+execution backend and the existing authenticated `/api/notify/exec` route.
+Headless nodes share the exact [notification config shape](../docs/completion-alerts.md)
+even though command selection and the enabled switch belong to the controller.
 
 The order of `GET /api/sessions` (and of every `sessions` broadcast) is the
 node's durable `sort_order`, and the console preserves each node's relative

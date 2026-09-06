@@ -231,7 +231,8 @@ async def main() -> None:
                          {"enabled": True, "mode": "at", "at": "04:15"})
         config.set_value("notify.enabled", True)
         config.set_value("notify.backend", 1)
-        config.set_value("notify.command", "printf done: %s {session}")
+        config.set_value("notify.success_command", "printf done: %s {session}")
+        config.set_value("notify.failure_command", "printf failed: %s {session}")
         backend_id = db.execute(
             "INSERT INTO backends(name,url,urls,token,protocol,capabilities,remote_version,role,"
             "tls_fingerprint,auto_upgrade,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
@@ -527,7 +528,8 @@ async def main() -> None:
         config.set_value("engines.auto_upgrade",
                          {"enabled": False, "mode": "now", "at": "03:30"})
         config.set_value("notify.enabled", False)
-        config.set_value("notify.command", "mutated")
+        config.set_value("notify.success_command", "mutated")
+        config.set_value("notify.failure_command", "mutated failure")
         db.execute("DELETE FROM events")
         db.execute("DELETE FROM session_drafts")
         db.execute("DELETE FROM sessions")
@@ -641,6 +643,18 @@ async def main() -> None:
                 pass
             else:
                 raise AssertionError("outdated config shape was accepted")
+        for notify_shape in (
+                {"enabled": True, "backend": 0, "command": "old"},
+                {"enabled": True, "backend": 0, "success_command": "only"},
+                {"enabled": True, "backend": 0, "success_command": "", "failure_command": None}):
+            invalid = config.export_data()
+            invalid["notify"] = notify_shape
+            try:
+                config.normalize_import(invalid)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("invalid notification config was accepted")
         noncanonical = config.export_data()
         noncanonical["web"]["port"] = float(noncanonical["web"]["port"])
         try:
@@ -707,7 +721,8 @@ async def main() -> None:
                         "an invalid {} system prompt was accepted".format(field))
         assert config.get("notify.enabled") is True
         assert config.get("notify.backend") == 1
-        assert config.get("notify.command") == "printf done: %s {session}"
+        assert config.get("notify.success_command") == "printf done: %s {session}"
+        assert config.get("notify.failure_command") == "printf failed: %s {session}"
         assert len(db.list_sessions(include_archived=True)) == 3
         restored_order = db.list_sessions(include_archived=True)
         assert [row["id"] for row in restored_order] == saved_session_order
@@ -796,6 +811,8 @@ async def main() -> None:
 
         # A failed database install must put config and filesystem trees back.
         config.set_value("instance_name", "rollback-current")
+        rollback_notify = config.set_notify({"success_command": "rollback success",
+                                             "failure_command": "rollback failure"})
         rollback_choices = {"permission_mode": "workspace-write", "model": "rollback/model", "effort": "low"}
         config.set_engine_defaults("codex", rollback_choices)
         config.set_value("engines.usage_refresh_minutes", 60)
@@ -827,6 +844,7 @@ async def main() -> None:
             snapshots.discard_staged(staged)
         assert calls["count"] == 2
         assert config.get("instance_name") == "rollback-current"
+        assert config.get("notify") == rollback_notify
         assert config.get("engines.defaults.codex") == rollback_choices
         assert config.get("engines.usage_refresh_minutes") == 60
         assert config.get("timers.completion_sync_seconds") == 9

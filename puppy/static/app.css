@@ -45,6 +45,8 @@
   --toolbar-h:30px;
   /* status dots: session/engine identity, and the small availability marks */
   --dot:9px; --dot-sm:6px;
+  /* Availability marks share brighter fills; text keeps its readable palette. */
+  --dot-ok:#2befac; --dot-bad:#ff7a8e;
   /* hover washes: rows and heads take the soft one, --hov is for controls,
      the strong one is for a glyph sitting on a tinted surface */
   --hov-soft:rgba(255,255,255,.035); --hov-strong:rgba(255,255,255,.12);
@@ -175,8 +177,6 @@ a{color:var(--acc2)}
    drops the 6px it keeps between plain rows. */
 .sess-item:has(+.sess-group-title){margin-bottom:0}
 .gdot{display:block;flex:0 0 var(--dot-sm);width:var(--dot-sm);height:var(--dot-sm);border-radius:50%;background:var(--txt3)}
-.gdot.ok{background:var(--ok)}
-.gdot.bad{background:var(--err)}
 .disclosure-toggle{
   width:18px;height:18px;margin:-4px 0 -4px -3px;padding:0;display:inline-grid;place-items:center;
   flex-shrink:0;border:0;border-radius:var(--btn-r);background:transparent;line-height:0;
@@ -441,9 +441,10 @@ a{color:var(--acc2)}
 }
 .conn-dot{
   width:var(--dot-sm);height:var(--dot-sm);flex:0 0 auto;margin-left:6px;
-  border-radius:50%;background:var(--err);transition:background var(--t-slow) var(--ease);
+  border-radius:50%;transition:background var(--t-slow) var(--ease);
 }
-.conn-dot.ok{background:var(--ok)}
+.gdot.ok,.conn-dot.ok{background:var(--dot-ok)}
+.gdot.bad,.conn-dot{background:var(--dot-bad)}
 .side-backdrop,.drawer-edge{display:none}
 
 /* ---------- buttons & inputs ---------- */
@@ -677,25 +678,23 @@ select.choice-native{display:none!important}
 .tabbar .burger::after,.tab-add-wrap .icon-btn::after{content:"";position:absolute;inset:-8px -6px}
 /* Shared overflow cues for compact horizontal lanes. JS gives each side the
    lesser of the full fade width and the exact content distance still hidden
-   there, so the cue reaches zero on the same frame as its scroll boundary. */
+   there, so the cue reaches zero on the same frame as its scroll boundary.
+   Mask only the scrolling child: a painted overlay would also cover the
+   surrounding chrome, including the tab bar's continuous bottom divider. */
 .edge-scroll-viewport{
   --edge-scroll-fade-size:34px;
   --edge-scroll-left-fade-size:0px;
   --edge-scroll-right-fade-size:0px;
-  --edge-scroll-fade-color:var(--bg);
   position:relative;overflow:hidden;
 }
-.edge-scroll-viewport::before,.edge-scroll-viewport::after{
-  content:"";position:absolute;z-index:4;top:0;bottom:0;
-  pointer-events:none;
-}
-.edge-scroll-viewport::before{
-  left:0;width:var(--edge-scroll-left-fade-size);
-  background:linear-gradient(90deg,var(--edge-scroll-fade-color) 12%,transparent);
-}
-.edge-scroll-viewport::after{
-  right:0;width:var(--edge-scroll-right-fade-size);
-  background:linear-gradient(90deg,transparent,var(--edge-scroll-fade-color) 88%);
+.edge-scroll-viewport>:only-child{
+  --edge-scroll-mask:linear-gradient(90deg,
+    transparent calc(var(--edge-scroll-left-fade-size) * .12),
+    #000 var(--edge-scroll-left-fade-size),
+    #000 calc(100% - var(--edge-scroll-right-fade-size)),
+    transparent calc(100% - var(--edge-scroll-right-fade-size) * .12));
+  -webkit-mask-image:var(--edge-scroll-mask);
+          mask-image:var(--edge-scroll-mask);
 }
 /* Give the strip a definite zero flex basis. In the phone workspace the tree
    deliberately uses max-content sizing so saved split panes can be panned;
@@ -1479,7 +1478,6 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .attach-chip.file .attach-x:active{transform:translateY(-50%) scale(.88);background:var(--hov)}
 .composer-row{display:flex;align-items:center;gap:8px;min-width:0}
 .composer-meta-viewport{
-  --edge-scroll-fade-color:var(--panel2);
   flex:1 1 0;min-width:0;
 }
 .composer-meta-scroll{
@@ -1930,12 +1928,12 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 }
 .card .notify-head h2{margin-bottom:0}
 .notify-toggle{justify-self:end;min-height:22px}
-.notify-fields{display:grid;grid-template-columns:minmax(150px,220px) minmax(0,1fr);gap:0 12px}
+.notify-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 14px}
+.notify-fields input{font-family:var(--mono)}
 @media (max-width:560px){.notify-fields{grid-template-columns:minmax(0,1fr)}}
 .mono-inline{font-family:var(--mono);font-size:var(--fs-xs);text-transform:none;letter-spacing:0}
 .notify-actions{display:flex;align-items:center;justify-content:flex-start;gap:8px;flex-wrap:wrap;margin-top:10px}
-.notify-note{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.notify-note.bad{color:var(--err)}
+.notify-note{min-width:0;overflow-wrap:anywhere}
 .be-security{width:20px;height:20px;display:flex;align-items:center;justify-content:center}
 .be-security svg{display:block}
 .be-security.secure{color:var(--ok)}
@@ -2203,7 +2201,9 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .search-chip-label{min-width:0;overflow:hidden;text-overflow:ellipsis;max-width:150px}
 @media (hover:hover){.search-chip:not(:disabled):hover{color:var(--txt);border-color:var(--line3)}}
 .search-chip.on{color:var(--acc2);border-color:var(--acc-line-soft);background:var(--acc-dim)}
-.search-chip:disabled{opacity:.45;cursor:not-allowed}
+/* Keep an unavailable backend's dot at the same strength as every status mark. */
+.search-chip:disabled{cursor:not-allowed}
+.search-chip:disabled .search-chip-label{opacity:.45}
 /* Changing a segment must not change its intrinsic width. The shared segment
    control bolds its active choice; these filters already have a strong fill
    and colour state, so keep their type weight constant. */
@@ -2333,7 +2333,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .scratch-note{margin-top:0}
 /* linked-workspace sheet */
 .ws-link-modal .ws-facts,.task-review-facts{display:flex;flex-direction:column;gap:6px;margin:10px 0 4px}
-.task-review-facts{margin-bottom:10px}
+.task-review-facts{margin-bottom:6px}
 .ws-fact{display:flex;gap:10px;align-items:baseline;min-width:0}
 .ws-fact .wsf-l{flex:0 0 84px;font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.09em;color:var(--txt3)}
 .ws-fact .wsf-v{flex:1;min-width:0;font:var(--fs-sm) var(--mono);color:var(--txt2);overflow-wrap:anywhere}
@@ -2621,6 +2621,7 @@ html.light{
      tints so small status words remain readable on pale cards and fields. */
   --acc2:#2563c4; --acc-dim:rgba(59,130,224,.13);
   --ok:#077553; --ok-dim:rgba(11,158,113,.10);
+  --dot-ok:#099568; --dot-bad:#e13c56;
   --warn:#9e5203; --warn-dim:rgba(178,98,5,.10);
   --fast-mode:#946f00;
   --focus-ring-soft:rgba(59,130,224,.10); --focus-stage-ring:#a9c7ef;
@@ -2779,6 +2780,8 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
 .task-review-modal{--modal-w:var(--modal-w-wide);display:flex;flex-direction:column}
 .task-review-modal>*{flex:0 0 auto}
 .task-review-modal .field-lbl{margin-bottom:5px}
+.task-review-facts .ws-fact{align-items:flex-start}
+.task-review-facts .field-lbl{flex:0 0 84px;margin-bottom:0}
 .task-review-files,.task-review-diff{
   flex:0 1 auto;margin:0 0 10px;padding:8px 10px;background:var(--panel2);
   border:1px solid var(--line2);border-radius:var(--r-sm);

@@ -1,8 +1,8 @@
 """Prompt-completion notification: run a configured command on a chosen node
 when a session finishes its work.
 
-Controller-owned. The command, target backend and armed state persist in
-config (notify.*) and ride along in Settings backup archives. Every node keeps
+Controller-owned. The success/failure commands, target backend and armed state
+persist in config (notify.*) and ride along in Settings backup archives. Every node keeps
 a bounded, durable completion sequence. The controller consumes each paired
 node's sequence over its authenticated channel, so an open browser is never
 part of delivery. The command itself runs through the shared /api/notify/exec
@@ -33,7 +33,7 @@ log = logging.getLogger("puppy.notify")
 PLACEHOLDERS = ("backend", "session", "engine", "model", "status", "duration",
                 "duration_hms", "cwd", "id")
 EXEC_TIMEOUT = 30.0
-MAX_COMMAND = 1000
+MAX_COMMAND = config.MAX_NOTIFY_COMMAND
 COMPLETION_VERSION = 1
 COMPLETION_LOG_KEY = "completion_log"
 COMPLETION_SESSION_PREFIX = "session_completion."
@@ -226,28 +226,28 @@ def _record_completion(session: dict, status: str, duration_s: int) -> dict:
 
 
 def settings() -> dict:
-    return {
-        "enabled": bool(config.get("notify.enabled", False)),
-        "backend": int(config.get("notify.backend", 0) or 0),
-        "command": str(config.get("notify.command", "") or ""),
-    }
+    return dict(config.get("notify"))
+
+
+def _configured(s: dict) -> bool:
+    return any(s[key].strip() for key in ("success_command", "failure_command"))
 
 
 def configured() -> bool:
-    return bool(settings()["command"].strip())
+    return _configured(settings())
 
 
 def active() -> bool:
     s = settings()
     # Enabled and configured are intentionally independent: the Settings
     # switch may be on before a command is supplied, but that must stay inert.
-    return bool(s["command"].strip()) and s["enabled"]
+    return _configured(s) and s["enabled"]
 
 
 def public_state() -> dict:
     """What the console needs to draw the bell."""
     s = settings()
-    return {"configured": bool(s["command"].strip()), "enabled": s["enabled"]}
+    return {"configured": _configured(s), "enabled": s["enabled"]}
 
 
 def clock(seconds: int) -> str:
@@ -319,13 +319,19 @@ async def run_local(command: str, info: dict) -> dict:
 
 
 async def dispatch(info: dict, override: dict = None) -> dict:
-    """Expand and run the configured (or supplied) command on its target."""
+    """Select the outcome's command, then expand and run it on its target."""
     s = dict(settings())
+    key = {"ok": "success_command", "error": "failure_command"}.get(info.get("status"))
+    if key is None:
+        return {"ok": True, "skipped": True}
+    command = s[key].strip()
     if override:
-        s.update({k: override[k] for k in ("backend", "command") if k in override})
-    command = str(s.get("command") or "").strip()[:MAX_COMMAND]
+        s["backend"] = override.get("backend", s["backend"])
+        command = override.get("command", command).strip()
     if not command:
-        return {"ok": False, "error": "no command configured"}
+        if override is not None:
+            return {"ok": False, "error": "no command configured for this outcome"}
+        return {"ok": True, "skipped": True}
     info = clean_info(info)
     expanded = expand(command, info)
     target = int(s.get("backend") or 0)

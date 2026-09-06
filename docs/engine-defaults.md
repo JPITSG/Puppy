@@ -7,10 +7,12 @@ The editor uses saved values initially; **Use this conversation’s choices** co
 the choices shown for the next prompt, including queued changes. Reset fills the
 engine's original choices. Cancel discards edits; Save defaults persists them.
 
-New sessions prefill from these values. Switching or reseeding an engine captures
-the destination engine's defaults when the request is made, even if the switch
-must wait in the queue. Existing sessions, queued switches and task inheritance
-keep their own choices. A task starts with Main's configuration. Engine-native
+New sessions and tasks prefill from these values. Switching or reseeding an engine
+captures the destination engine's defaults when the request is made, even if the switch
+must wait in the queue. Existing sessions, tasks and queued switches keep their
+own choices. A new task initially selects Main's engine and loads that backend's
+saved model, effort and permissions; changing engines loads its saved defaults.
+The prepared task's choices survive catalog/default refreshes. Engine-native
 defaults remain a separate choice: an empty model or effort lets the engine decide.
 Defaults do not alter the engines' config files or one-shot spawned jobs.
 
@@ -20,10 +22,10 @@ Defaults do not alter the engines' config files or one-shot spawned jobs.
 `{permission_mode, model, effort}` row and returns the same response. It validates
 against the backend's driver catalog and publishes through the engine state topic.
 The ordinary engines payload carries both defaults objects; the console requires
-`session_defaults` when preparing a new session or engine switch.
+`session_defaults` when preparing a new session, task or engine switch.
 
-On session creation, omitted fields use saved defaults; explicit empty model and
-effort fields still mean engine default. Unavailable choices are refused, including
+On session or task creation, omitted choice fields use saved defaults; explicit
+empty model and effort fields still mean engine default. Unavailable choices are refused, including
 a retired saved model or unsupported model/effort combination. They remain visible
 in the editor until the user repairs them. Backup import validates exact shape and
 text independently of live catalogs so an offline engine does not prevent restore.

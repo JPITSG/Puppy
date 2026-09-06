@@ -531,6 +531,7 @@ async def configured_creation_api(client, parent):
         {'value': 'quick', 'label': 'Quick', 'effort_options': [{'value': ''}, {'value': 'low'}]},
     ]
     original = db.get_session(parent)
+    original_defaults = dict(config.get('engines.defaults.codex'))
     before = set(tasks.children(parent))
     fields = ('engine', 'model', 'effort', 'permission_mode')
     chosen = dict(engine='codex', model='precise', effort='high', permission_mode='read-only')
@@ -550,17 +551,25 @@ async def configured_creation_api(client, parent):
                 stack.enter_context(patch.object(driver, 'model_options', return_value=models))
                 stack.enter_context(patch.object(driver, 'allow_custom_model', False))
             stack.enter_context(patch.object(runner.SessionHub, '_start_turn', capture))
-            db.touch_session(parent, **chosen, fast_mode=1)
-            inherited = (await create({'prompt': 'Inherited', 'request_id': 'inherit-config'}))['session']
-            assert started[-1] == chosen and inherited['fast_mode'] is True
-            # Main changes after the browser captured its selections.
-            db.touch_session(parent, model='quick', effort='low', permission_mode='workspace-write')
+            config.set_engine_defaults('codex', {key: chosen[key] for key in fields if key != 'engine'})
+            db.touch_session(parent, engine='codex', model='quick', effort='low',
+                             permission_mode='workspace-write', fast_mode=1)
+            defaulted = (await create({'prompt': 'Saved defaults', 'request_id': 'default-config'}))['session']
+            assert started[-1] == chosen and defaulted['fast_mode'] is True
+            # Defaults change after the browser captured its selections.
+            config.set_engine_defaults('codex', {
+                'model': 'quick', 'effort': 'low', 'permission_mode': 'workspace-write'})
             main_now = db.get_session(parent)
             body = dict(chosen, prompt='Captured choices', request_id='explicit-config')
             explicit = (await create(body))['session']
             assert started[-1] == chosen
             assert (await create(body))['session']['id'] == explicit['id']
             assert len(started) == 2, 'an uncertain retry must not start twice'
+            config.set_engine_defaults('codex', {key: chosen[key] for key in fields if key != 'engine'})
+            await create({'engine': 'codex', 'prompt': 'Same engine', 'request_id': 'same-engine'})
+            assert started[-1] == chosen, 'explicitly selecting Main\'s engine still uses saved defaults'
+            await create({'effort': '', 'prompt': 'Partial choices', 'request_id': 'partial-config'})
+            assert started[-1] == dict(chosen, effort='')
             switched = dict(chosen, engine='claude', permission_mode='bypassPermissions')
             other = (await create(dict(switched, prompt='Other engine', request_id='other-config')))['session']
             assert started[-1] == switched and other['fast_mode'] is False
@@ -578,17 +587,24 @@ async def configured_creation_api(client, parent):
                     data = await create(dict(body, **invalid, request_id='invalid-' + str(index)), 409)
                     assert data['error']
                     allocate.assert_not_called()
+            config.set_engine_defaults('codex', {'model': 'retired', 'effort': 'high',
+                                                'permission_mode': 'read-only'})
+            with patch.object(workspaces, 'create_temporary') as allocate:
+                data = await create({'prompt': 'Invalid saved defaults', 'request_id': 'invalid-defaults'}, 409)
+                assert data['error']
+                allocate.assert_not_called()
             assert all(db.get_session(parent)[key] == main_now[key] for key in fields + ('fast_mode',)), \
                 'task choices must not edit Main'
             tasks.validate_persisted(db.connect())
     finally:
+        config.set_engine_defaults('codex', original_defaults)
         db.touch_session(parent, **{key: original[key] for key in fields}, fast_mode=original['fast_mode'])
         for sid in set(tasks.children(parent)) - before:
             runner.hub(sid).status = 'idle'
             workspaces.remove_temporary(db.get_session(sid))
             runner.drop_hub(sid)
             db.delete_session(sid)
-    print('PASS: task config inheritance, explicit first-turn choices, validation, defaults, Fast reset and retries')
+    print('PASS: task saved defaults, explicit and partial first-turn choices, validation, Fast inheritance/reset and retries')
 
 
 async def attachment_adoption(parent):
@@ -850,7 +866,12 @@ async def main():
 
 
 if __name__ == '__main__':
-    try: asyncio.run(main())
+    try:
+        # Task creation now validates saved defaults even with no supplied
+        # choices. Keep catalog reads quota-free throughout this suite.
+        from puppy.drivers.base import Driver
+        with patch.object(Driver, 'refresh_model_options', AsyncMock()):
+            asyncio.run(main())
     finally:
         for row in db.list_sessions(include_archived=True):
             if workspaces.is_temporary(row): workspaces.remove_temporary(row)

@@ -714,7 +714,7 @@ console.log(JSON.stringify({
     result = json.loads(proc.stdout)
     assert result["labels"] == [
         ["Running", "busy"], ["Queued", "busy"], ["Starting", "busy"], ["Held", "warn"],
-        ["Ready to review", "ok"], ["Applied", ""], ["Stopped", "warn"], ["Failed", "bad"],
+        ["Review", "ok"], ["Applied", ""], ["Stopped", "warn"], ["Failed", "bad"],
         ["odd", ""]], result
     assert result["approval"] == ["Needs approval", "warn"], result
     assert result["reviewable"] == [False, False, False, True, True, True, True], result
@@ -3716,7 +3716,7 @@ console.log(JSON.stringify({first,preserved,local,none,refreshes}));
     assert "Files on node" not in ui_source
     assert "Files on another node" not in ui_source
     assert "(same node)" not in ui_source
-    assert 'aria-label="Backend the command runs on"' in ui_source
+    assert 'aria-label="Backend the commands run on"' in ui_source
     assert '<label>Backend<select id="nb-be">' in ui_source
     assert '"No backend has its browser enabled' in ui_source
     assert ".workspace-pick .wp{padding-left:8px;padding-right:8px}" in css_source

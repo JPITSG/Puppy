@@ -25,6 +25,7 @@ DEFAULT_UPLOAD_LIMIT_MB = 8
 MAX_UPLOAD_LIMIT_MB = 1024
 MAX_SYSTEM_PROMPT_CHARS = 32768
 MAX_MODEL_ID_CHARS = 256
+MAX_NOTIFY_COMMAND = 1000
 
 # Refresh/cache intervals exposed together in Settings. Engine-side values are
 # node-owned; console-side values are only consumed by the full WebUI runtime.
@@ -180,9 +181,10 @@ DEFAULTS = {
     },
     "sessions": {"default_cwd": service_home(), "turn_timeout": 7200,
                  "shutdown_grace": 60},
-    # prompt-completion command: run `command` on backend id `backend` (0 =
-    # this instance) when a session finishes its work; `enabled` is the bell
-    "notify": {"enabled": False, "backend": 0, "command": ""},
+    # Completion commands share a target backend (0 = this instance) and bell.
+    # An empty command disables just that outcome.
+    "notify": {"enabled": False, "backend": 0,
+               "success_command": "", "failure_command": ""},
 }
 
 _lock = threading.Lock()
@@ -262,6 +264,37 @@ def export_data() -> dict:
     load()
     with _lock:
         return copy.deepcopy(_config)
+
+
+def normalize_notify(value) -> dict:
+    if not isinstance(value, dict) or set(value) != set(DEFAULTS["notify"]):
+        raise ValueError("config.notify must contain enabled, backend, success_command, and failure_command")
+    if type(value["enabled"]) is not bool:
+        raise ValueError("notification enabled must be true or false")
+    if type(value["backend"]) is not int or value["backend"] < 0:
+        raise ValueError("invalid notification backend")
+    for key in ("success_command", "failure_command"):
+        command = value[key]
+        if not isinstance(command, str) or len(command) > MAX_NOTIFY_COMMAND or "\x00" in command:
+            raise ValueError("{} must be text of at most {} characters without NUL".format(
+                key, MAX_NOTIFY_COMMAND))
+    return dict(value)
+
+
+def set_notify(patch: dict) -> dict:
+    """Save commands together without overwriting the independent bell state."""
+    if not isinstance(patch, dict) or not patch or set(patch) - set(DEFAULTS["notify"]):
+        raise ValueError("supply known notification settings")
+    cfg = load()
+    with _lock:
+        previous = cfg["notify"]
+        cfg["notify"] = normalize_notify({**previous, **patch})
+        try:
+            _save_locked()
+        except Exception:
+            cfg["notify"] = previous
+            raise
+        return dict(cfg["notify"])
 
 
 def _validate_shape(reference, value, path: str = "config") -> None:
@@ -539,6 +572,7 @@ def normalize_import(data: dict) -> dict:
         raise ValueError("config must be an object")
     _validate_shape(DEFAULTS, data)
     merged = copy.deepcopy(data)
+    merged["notify"] = normalize_notify(merged["notify"])
     for section in ("web", "backend"):
         port = merged.get(section, {}).get("port")
         if not _finite_number(port) or not 1 <= port <= 65535 or port != int(port):

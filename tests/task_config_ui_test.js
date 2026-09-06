@@ -1,5 +1,5 @@
 /* Run with node tests/task_config_ui_test.js. No browser or engine required.
-   The New task dialog against the fake DOM: Main's captured choices, engine/
+   The New task dialog against the fake DOM: saved engine defaults, engine/
    model/effort dependencies, catalog refresh, custom and retired choices,
    local and remote nodes, the retry lifecycle, and the shared prompt box it
    hosts - Enter starts the task, attachments ride the prompt as marker lines,
@@ -30,7 +30,9 @@ const catalog = key => ({ key, label: key, installed: true, auth: "ok", allow_cu
     { value: "quick", label: "Quick", effort_options: options(["", "low"]) }],
   permission_options: options(["safe", "full"]),
   session_defaults: { model: "quick", effort: "low", permission_mode: "safe" } });
-const remote = [catalog("first"), { ...catalog("second"), allow_custom_model: true,
+const remote = [{ ...catalog("first"),
+  session_defaults: { model: "precise", effort: "high", permission_mode: "full" } },
+  { ...catalog("second"), allow_custom_model: true,
   effort_options: options(["", "high"]) }];
 const capabilities = ["session-tasks", "session-task-config", "session-task-attachments", "file-uploads"];
 const state = { engines: [catalog("local")], engCache: { 7: remote },
@@ -38,18 +40,19 @@ const state = { engines: [catalog("local")], engCache: { 7: remote },
   remoteBrowserStatus: {}, browserStatus: null, terminalInstances: {},
   remoteUploadSettings: {}, uploadSettings: null };
 const captured = { engine: "first", model: "precise", effort: "high", permission_mode: "full" };
-const main = { session: { ...captured }, effectiveConfig() { return { ...this.session }; } };
+const mainChoices = { engine: "first", model: "quick", effort: "low", permission_mode: "safe" };
+const main = { session: { ...mainChoices }, effectiveConfig() { return { ...this.session }; } };
 const sessions = [main.session];
 const sessionsFor = () => sessions;
 const workspace = { tab: { bid: 7, sid: 10 }, selected: 99,
   taskViews: new Map([[10, main], [99, { session: { engine: "second" } }]]),
   openTask(id) { this.opened = id; } };
-let dialog, requests = [], fail = false, hold = null;
+let dialog, requests = [], fail = false, hold = null, catalogHold = null;
 const fetches = [], toasts = [];
 const ENGINE_POLL_TIMEOUT = 60000;
 async function api(bid, route, options = {}) {
   requests.push({ bid, route, ...options });
-  if (route === "engines") return { engines: remote };
+  if (route === "engines") { if (catalogHold) await catalogHold; return { engines: remote }; }
   if (options.method === "DELETE") return { ok: true };
   if (hold) await hold;
   if (fail) throw new Error("Reply lost");
@@ -120,13 +123,13 @@ const deletes = from => requests.slice(from).filter(r => r.method === "DELETE").
 
 (async () => {
   let n = await open();
-  assert.deepEqual(values(n), captured, "Main's choices, even from another task tab");
+  assert.deepEqual(values(n), captured, "saved defaults override Main's low effort, even from another task tab");
   assert.equal(requests.length, 0, "a loaded node catalog needs no extra polling");
   assert.equal(document.activeElement, n["#nt-prompt"]);
   assert.ok(n[".composer-box"].classList.contains("mention-below"), "the list opens downward inside a sheet");
   assert.equal(n["label.task-composer-lbl"].getAttribute("for"), "nt-prompt");
   assert.equal(Composer.live.size, 1, "the task box is the shared prompt box");
-  main.session.model = "quick";
+  main.session.model = "retired";
   rememberEnginePayload(7, { engines: remote });
   assert.deepEqual(values(n), captured, "later Main updates must not change the dialog");
   n["#nt-perm"].value = "safe";
@@ -147,7 +150,7 @@ const deletes = from => requests.slice(from).filter(r => r.method === "DELETE").
   selectEngine(n, "second");
   assert.equal(n["#nt-model-custom"].value, "custom/model", "reselecting the current engine keeps edits");
   selectEngine(n, "first");
-  assert.deepEqual(values(n), captured, "returning to Main's engine restores its captured choices");
+  assert.deepEqual(values(n), captured, "returning to Main's engine loads its saved defaults");
   n["#nt-prompt"].value = "A task";
   n["#nt-name"].value = "My task";
   fail = true;
@@ -220,16 +223,51 @@ const deletes = from => requests.slice(from).filter(r => r.method === "DELETE").
   n["#nt-cancel"].onclick();
   assert.deepEqual(deletes(0), [[7, "sessions/10/upload/1700000000001-b2c3d4e5f6"]]);
   assert.equal(Composer.live.size, 0);
-  main.session = { ...captured, model: "retired" };
+  const defaults = remote[0].session_defaults;
+  remote[0].session_defaults = { ...defaults, model: "retired" };
   n = await open();
   assert.equal(n["#nt-model"].value, "retired");
   assert.equal(n["#nt-model"].children[0].disabled, true);
   dialog.close();
-  main.session = { ...captured };
-  delete state.engCache[7]; requests = [];
-  n = await open(); await Promise.resolve();
-  assert.equal(requests[0].route, "engines");
-  assert.deepEqual(values(n), captured, "late remote catalog preserves Main's selections");
+  remote[0].session_defaults = defaults;
+  main.session = { ...mainChoices };
+  n = await open();
+  remote[0].session_defaults = { model: "quick", effort: "low", permission_mode: "safe" };
+  rememberEnginePayload(7, { engines: remote });
+  assert.deepEqual(values(n), captured, "a refresh of saved defaults preserves the prepared task");
+  selectEngine(n, "second");
+  selectEngine(n, "first");
+  assert.deepEqual(values(n), { engine: "first", ...remote[0].session_defaults },
+    "switching back loads the current saved defaults");
   dialog.close();
-  console.log("PASS: task modal inheritance, engine/model dependencies, catalog refresh, custom/retired choices, local/remote nodes, retry lifecycle, and its shared prompt box (Enter, attachments, discard on cancel)");
+  remote[0].session_defaults = { ...defaults, model: "", effort: "" };
+  n = await open();
+  assert.equal(n["#nt-model"].value, "");
+  assert.equal(n["#nt-effort"].value, "", "saved engine-native choices stay empty");
+  dialog.close();
+  remote[0].session_defaults = defaults;
+  delete state.engCache[7]; requests = [];
+  let releaseCatalog;
+  catalogHold = new Promise(resolve => { releaseCatalog = resolve; });
+  n = await open();
+  assert.equal(requests[0].route, "engines");
+  assert.equal(n["#nt-start"].disabled, true, "wait for the saved defaults before allowing submission");
+  assert.equal(n["#nt-model"].disabled, true);
+  assert.equal(n["#nt-effort"].disabled, true);
+  n["#nt-prompt"].value = "Prepared while loading";
+  await n["#nt-start"].onclick();
+  assert.equal(requests.length, 1);
+  releaseCatalog(); await settle(); catalogHold = null;
+  assert.deepEqual(values(n), captured, "late remote catalog initializes from saved defaults");
+  assert.equal(n["#nt-start"].disabled, false);
+  assert.equal(n["#nt-effort"].disabled, false);
+  assert.equal(n["#nt-prompt"].value, "Prepared while loading");
+  dialog.close();
+  workspace.tab.bid = 0;
+  main.session = { ...captured, engine: "local" };
+  n = await open();
+  assert.deepEqual(values(n), { engine: "local", ...state.engines[0].session_defaults },
+    "the primary uses its own defaults, independently of the remote backend");
+  dialog.close();
+  console.log("PASS: task modal engine defaults, engine/model dependencies, catalog refresh and delayed initialization, custom/retired choices, local/remote nodes, retry lifecycle, and its shared prompt box (Enter, attachments, discard on cancel)");
 })().catch(error => { console.error(error); process.exitCode = 1; });

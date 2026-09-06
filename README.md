@@ -44,8 +44,9 @@ There is no build step, no npm, no daemon besides Puppy itself: Python 3.9+,
 - **Nothing gets lost.** Durable message queues, drafts that follow you between
   devices, full-history search, and one-click backup and restore.
 - **Built for the phone.** A responsive layout, a swipeable sidebar drawer, and
-  light and dark themes. Menus close when you tap or move focus elsewhere,
-  including when you open the sidebar.
+  light and dark themes. Overflowing tab and chip strips fade their contents at
+  the edges while surrounding borders stay visible. Menus close when you tap or
+  move focus elsewhere, including when you open the sidebar.
 
 <p align="center">
   <img src="assets/mobile-dark.png" alt="Puppy on a phone in dark mode, showing a transcript with tool cards and the composer" width="270">
@@ -111,7 +112,7 @@ context is.
   them mid-conversation; while work is pending the change waits its turn in
   the queue and applies in order.
 - **Engine defaults per backend.** Save the starting permission, model and
-  effort for each engine; new sessions and engine switches start from them.
+  effort for each engine; new sessions, tasks and engine switches start from them.
 - **Switch engines any time.** A session can move between installed engines.
   The new engine starts a fresh native session seeded with a handoff of the
   conversation so far, in the same working directory.
@@ -171,11 +172,13 @@ Open a session and press **+ Task** beside **Main**. Each task is its own
 conversation with its own engine choice, queue, approvals and Stop control,
 working in an independent Git clone of Main's project that starts from Main's
 current files, uncommitted changes included. Run several at once on different
-features.
+features. New tasks initially select Main's engine and use that backend's saved
+model, effort and permission defaults. Adjust these choices before starting.
 
 - Drag task tabs to reorder them with the same drag card and sliding animation
   as workspace tabs. Main stays first; the order is saved in this browser.
-- The **Tasks** sheet lists every task with its state and latest answer.
+- The **Tasks** sheet lists every task with its state and latest answer. Tasks
+  ready for review show **Review** in the sheet and their tabs.
 - **Review changes** shows the changed files with a coloured diff; **Apply to
   Main** writes that delta into your working tree, refusing overlapping edits
   that would not apply cleanly. Applied tasks can keep going; the next review
@@ -260,8 +263,10 @@ history around it.
   and each of its engines with sign-in state, an orange *Ready* when a newer
   CLI is published, and the remaining weekly quota where the engine reports
   it.
-- **Completion alerts.** Run any command on a chosen backend when a session
-  finishes everything it had queued (play a sound, ping your home automation).
+- **Completion alerts.** Run separate success and failure commands on a chosen
+  backend when a session finishes everything it had queued (play a sound, ping
+  your home automation). Leave either command empty to skip that outcome;
+  stopped turns stay silent. Test either command before saving.
   Placeholders and `PUPPY_*` environment variables carry the session, engine,
   model, status, duration and directory. Arm or silence it with the bell in the
   footer.
@@ -334,7 +339,11 @@ overwritten.
   usage snapshot without starting a model turn (Codex today), with an on-demand
   refresh control.
 - **File uploads** – the per-file attachment limit on each backend.
-- **Completion alert** – the command, the backend it runs on, and a test button.
+- **Completion alerts** – success and failure commands, their shared backend,
+  and a test button for each outcome. The enabled switch and sidebar bell
+  control both commands; tests run the entered draft even while alerts are off.
+  Both commands are included in Backup & restore. See
+  [completion alert configuration](docs/completion-alerts.md) for the saved shape.
 - **Timers** – release checks, model catalog and sign-in caching, and the
   controller's polling and synchronization intervals.
 - **Timeouts** – per backend: maximum agent turn duration (2 hours), spawned-agent

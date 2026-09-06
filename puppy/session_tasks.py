@@ -794,29 +794,23 @@ async def create(parent_id, args):
             raise TaskError("This session already has 64 tasks")
         if runner._draining:
             raise TaskError("Puppy is shutting down")
-        # Omitted choices inherit Main. The console sends the choices captured
-        # when its dialog opened, so a later edit to Main cannot change the
-        # task the user is preparing.
+        # Main supplies only the initial engine. Omitted choices use that
+        # engine's saved defaults; explicit dialog choices stay captured even
+        # if the defaults or Main change while the user prepares the task.
+        from puppy import engine_defaults
+        from puppy.drivers import get_driver
         engine = args.get("engine", parent["engine"])
-        choices = {field: parent[field] for field in ("model", "effort", "permission_mode")}
-        if "engine" in args or any(field in args for field in choices):
-            from puppy import engine_defaults
-            from puppy.drivers import get_driver
-            if not isinstance(engine, str):
-                raise TaskError("Invalid task engine")
-            try:
-                driver = get_driver(engine)
-            except KeyError:
-                raise TaskError("Unknown task engine: " + engine)
-            await driver.refresh_model_options()
-            try:
-                if engine != parent["engine"]:
-                    choices = engine_defaults.for_session(driver, args)
-                else:
-                    choices.update({field: args[field] for field in choices if field in args})
-                    choices = engine_defaults.validate(driver, choices)
-            except ValueError as exc:
-                raise TaskError(str(exc))
+        if not isinstance(engine, str):
+            raise TaskError("Invalid task engine")
+        try:
+            driver = get_driver(engine)
+        except KeyError:
+            raise TaskError("Unknown task engine: " + engine)
+        await driver.refresh_model_options()
+        try:
+            choices = engine_defaults.for_session(driver, args)
+        except ValueError as exc:
+            raise TaskError(str(exc))
         # Refuse a prompt naming a staged file that is already gone before any
         # working copy is allocated; adoption below re-checks every file.
         try:

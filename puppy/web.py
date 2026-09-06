@@ -1735,27 +1735,42 @@ async def h_notify_get(request: web.Request):
 
 async def h_notify_set(request: web.Request):
     body = await request.json()
-    command = str(body.get("command") or "").strip()[:notify.MAX_COMMAND]
-    bid = body.get("backend", 0)
+    if not isinstance(body, dict) or set(body) != {
+            "backend", "success_command", "failure_command"}:
+        return web.json_response({"error": "supply backend, success_command, and failure_command"}, status=400)
     try:
-        bid = int(bid)
-    except (TypeError, ValueError):
-        return web.json_response({"error": "invalid backend"}, status=400)
+        checked = config.normalize_notify({**notify.settings(), **body})
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    bid = checked["backend"]
     if bid and backends.get_backend(bid) is None:
         return web.json_response({"error": "unknown backend"}, status=400)
-    config.set_value("notify.backend", bid)
-    config.set_value("notify.command", command)
+    try:
+        config.set_notify({"backend": bid,
+                           "success_command": checked["success_command"].strip(),
+                           "failure_command": checked["failure_command"].strip()})
+    except OSError:
+        log.exception("could not save notification commands")
+        return web.json_response({"error": "Could not save completion alerts"}, status=500)
     # The switch/bell owns enabled independently. An enabled alert with no
     # command remains inert, and saving a command never undoes a user's choice.
     _notify_broadcast()
     notify.wake_worker()
-    log.info("notify command %s (backend %s)", "configured" if command else "cleared", bid)
+    log.info("notify commands saved (backend %s)", bid)
     return web.json_response({"ok": True, "settings": notify.settings()})
 
 
 async def h_notify_toggle(request: web.Request):
     body = await request.json()
-    config.set_value("notify.enabled", bool(body.get("enabled")))
+    if not isinstance(body, dict) or set(body) != {"enabled"}:
+        return web.json_response({"error": "supply enabled"}, status=400)
+    try:
+        config.set_notify(body)
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    except OSError:
+        log.exception("could not save notification enabled state")
+        return web.json_response({"error": "Could not save completion alerts"}, status=500)
     _notify_broadcast()
     notify.wake_worker()
     return web.json_response({"ok": True, "settings": notify.settings()})
@@ -1765,16 +1780,23 @@ async def h_notify_test(request: web.Request):
     """Run once, now, with the values from the panel (unsaved), so the command
     can be proven before trusting it from another device."""
     body = await request.json()
-    override = {"command": str(body.get("command") or "").strip()[:notify.MAX_COMMAND]}
-    if "backend" in body:
-        try:
-            override["backend"] = int(body.get("backend") or 0)
-        except (TypeError, ValueError):
-            return web.json_response({"error": "invalid backend"}, status=400)
+    if not isinstance(body, dict) or set(body) != {"backend", "command", "status"} or \
+            body["status"] not in ("ok", "error"):
+        return web.json_response({"error": "supply backend, command, and status (ok or error)"}, status=400)
+    try:
+        checked = config.normalize_notify({**notify.settings(),
+            "backend": body["backend"], "success_command": body["command"]})
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    if checked["backend"] and backends.get_backend(checked["backend"]) is None:
+        return web.json_response({"error": "unknown backend"}, status=400)
+    override = {"backend": checked["backend"], "command": body["command"].strip()}
+    if not override["command"]:
+        return web.json_response({"error": "Enter a command for this outcome first"}, status=400)
     result = await notify.dispatch({
         "backend": config.get("instance_name") or "local",
         "session": "test session", "engine": "claude", "model": "test-model",
-        "status": "ok", "duration": "42", "cwd": config.get("sessions.default_cwd", "/"),
+        "status": body["status"], "duration": "42", "cwd": config.get("sessions.default_cwd", "/"),
         "id": "0",
     }, override=override)
     return web.json_response(result)

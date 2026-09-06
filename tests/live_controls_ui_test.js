@@ -260,8 +260,8 @@ function engineCatalog(fast = false) {
   // selected backend when a peer gains the execution capability.
   context.settings = settings;
   context.nfBackend = mount(el("select"));
-  vm.runInContext("(function () {\n" +
-    between("    let notifyNodeSignature =", "    this.inner.appendChild(notifyCard);") +
+  vm.runInContext("(function () { let notifyNodeSignature = ''; const backend = nfBackend;\n" +
+    between("    this.notifyBackendsSync = () => {", "    enhanceChoiceSelect(backend);") +
     "\n}).call(settings);", context);
   let peer = () => context.nfBackend.options.find(option => option.value === "7");
   assert.equal(peer().disabled, true);

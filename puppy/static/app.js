@@ -7503,6 +7503,11 @@ applyTheme(lsGet("puppy.theme") || "dark");
 /* completion-alert bell: appears once a completion command is configured;
    click arms or silences it (the state lives on the server, so it holds
    with every browser closed) */
+function notifyPublicState(settings) {
+  return { configured: [settings.success_command, settings.failure_command]
+    .some(command => !!(command || "").trim()), enabled: !!settings.enabled };
+}
+
 function syncBell() {
   const bell = $("btn-bell");
   if (!bell) return;
@@ -7556,8 +7561,7 @@ $("btn-bell").onclick = async () => {
   const want = !(state.notify && state.notify.enabled);
   try {
     const r = await api(0, "notify/toggle", { method: "POST", body: { enabled: want } });
-    state.notify = { configured: !!(r.settings.command || "").trim(),
-                     enabled: !!r.settings.enabled };
+    state.notify = notifyPublicState(r.settings);
     syncBell();
   } catch (e) { toast(e.message, "error"); }
 };
@@ -9555,7 +9559,7 @@ function workspaceViewFor(bid, sid) {
    ok/bad states plus the warn and busy accents the rest of the console uses. */
 const TASK_STATES = {
   running: ["Running", "busy"], queued: ["Queued", "busy"], pending: ["Starting", "busy"],
-  held: ["Held", "warn"], ready: ["Ready to review", "ok"], applied: ["Applied", ""],
+  held: ["Held", "warn"], ready: ["Review", "ok"], applied: ["Applied", ""],
   stopped: ["Stopped", "warn"], failed: ["Failed", "bad"],
 };
 function taskStateLabel(task) {
@@ -10067,11 +10071,11 @@ class SessionWorkspaceView {
 async function modalNewTask(workspace) {
   const bid = Number(workspace.tab.bid) || 0, sid = workspace.tab.sid;
   const main = workspace.taskViews.get(sid);
-  // Read Main even when New task was opened from another task's tab. Capture
-  // its visible choices now; session updates must not rewrite this dialog.
-  const initial = { ...(main && main.session ? main.effectiveConfig() :
-    sessionsFor(bid).find(session => session.id === sid)) };
-  let engine = initial.engine || "", engines = [], preparing = false;
+  // Main chooses the initial engine even from another task's tab. Its saved
+  // backend defaults supply the choices once that engine's payload arrives.
+  const initial = main && main.session ? main.effectiveConfig() :
+    sessionsFor(bid).find(session => session.id === sid) || {};
+  let engine = initial.engine || "", engines = [], preparing = false, choicesReady = false;
   const { m, close, onClose } = modal(`<h2>New task</h2>
     <p class="modal-copy">The task works in its own chat and copy of Main's project. Review its changes and apply them to Main when it is done.</p>
     <div class="engine-pick" id="nt-engines" role="group" aria-label="Engine"></div>
@@ -10085,7 +10089,7 @@ async function modalNewTask(workspace) {
       <label>Permissions<select id="nt-perm"></select></label>
     </div>
     <label class="hidden" id="nt-model-custom-wrap">Custom model<input type="text" id="nt-model-custom" placeholder="Model ID" spellcheck="false" maxlength="256"></label>
-    <p class="hint">Starts with Main's selected settings and recent conversation context.</p>
+    <p class="hint">Starts with the engine's saved defaults and Main's recent conversation context.</p>
     <p class="hint">Main must be idle to create or apply a task. Local Git projects only; ignored files are not copied.</p>
     <p class="form-error hidden" role="alert"></p>
     <div class="m-btns"><button type="button" class="btn" id="nt-cancel">Cancel</button><button type="button" class="btn btn-pri" id="nt-start">Start task</button></div>`, "new-task-modal");
@@ -10107,16 +10111,19 @@ async function modalNewTask(workspace) {
   const getModel = () => model.value === "__custom__" ? custom.value.trim() : model.value;
   const choices = () => ({ engine, model: getModel(), effort: effort.value, permission_mode: permission.value });
   const syncBusy = () => {
-    start.disabled = preparing || !engines.some(item => item.key === engine);
+    start.disabled = preparing || !choicesReady || !engines.some(item => item.key === engine);
     start.textContent = preparing ? "Preparing…" : "Start task";
     m.setAttribute("aria-busy", String(preparing));
     for (const control of m.querySelectorAll("input,textarea,select,#nt-engines button")) {
-      control.disabled = preparing;
+      control.disabled = preparing || (!choicesReady &&
+        (control.tagName === "SELECT" || control === custom));
       refreshChoiceSelect(control);
     }
     composer.setBusy(preparing);
   };
   const renderChoices = selected => {
+    choicesReady = !!selected;
+    selected = selected || { engine };
     engine = selected.engine;
     const info = engines.find(item => item.key === engine);
     engBox.querySelectorAll(".ep").forEach(card => {
@@ -10141,14 +10148,18 @@ async function modalNewTask(workspace) {
     for (const info of engines) {
       const card = engineCardNode(info);
       card.onclick = () => {
-        if (engine === info.key) return;
-        renderChoices(info.key === initial.engine ? initial : { engine: info.key, ...initialEngineConfig(info) });
+        if (!info.session_defaults || (engine === info.key && choicesReady)) return;
+        renderChoices({ engine: info.key, ...initialEngineConfig(info) });
       };
       engBox.appendChild(card);
     }
+    if (!selected) {
+      const info = engines.find(item => item.key === engine);
+      if (info && info.session_defaults) selected = { engine, ...initialEngineConfig(info) };
+    }
     renderChoices(selected);
   };
-  renderEngines(bid ? state.engCache[bid] : state.engines, initial);
+  renderEngines(bid ? state.engCache[bid] : state.engines);
   const syncEffort = () => {
     const options = effortOptionsForModel(engines.find(item => item.key === engine), getModel());
     fillEngineChoice(effort, options, options.some(item => item.value === effort.value) ? effort.value : "");
@@ -10158,17 +10169,18 @@ async function modalNewTask(workspace) {
   custom.oninput = syncEffort;
   const listener = (changedBid, loaded) => {
     if (m.isConnected && changedBid === bid)
-      renderEngines(loaded, { ...choices(), custom: model.value === "__custom__" });
+      renderEngines(loaded, choicesReady ? { ...choices(), custom: model.value === "__custom__" } : null);
   };
   enginePayloadListeners.add(listener);
   onClose(() => enginePayloadListeners.delete(listener));
   // Use this node's cached catalog immediately, just as New session does.
   // Only a missing/unloaded catalog needs an extra request.
-  if (!engines.length || engines.some(info => info.dynamic_model_options && info.model_catalog_loaded !== true)) {
+  if (!choicesReady || engines.some(info => info.dynamic_model_options && info.model_catalog_loaded !== true)) {
     api(bid, "engines", { timeoutMs: ENGINE_POLL_TIMEOUT }).then(data => {
       if (!m.isConnected) return;
       if (!data || !Array.isArray(data.engines)) throw new Error("Could not load engine choices");
       rememberEnginePayload(bid, data);
+      if (!choicesReady) throw new Error("Could not load engine defaults");
     }).catch(err => {
       if (m.isConnected) { error.textContent = err.message; error.classList.remove("hidden"); }
     });
@@ -10228,7 +10240,7 @@ async function modalReviewTask(workspace, session) {
   const facts = m.querySelector(".task-review-facts");
   const fact = (label, value, cls = "") => {
     const row = el("div", "ws-fact");
-    row.appendChild(el("span", "wsf-l", label));
+    row.appendChild(el("span", "field-lbl", label));
     row.appendChild(el("span", "wsf-v" + (cls ? " " + cls : ""), value));
     facts.appendChild(row);
   };
@@ -17168,6 +17180,185 @@ class SettingsView {
     return card;
   }
 
+  notifySettingsCard(generation) {
+    const card = el("div", "card notify-card");
+    card.innerHTML = `<div class="notify-head">
+        <h2>Completion alerts</h2>
+        <label class="be-auto notify-toggle" id="nf-enabled-wrap">
+          <input type="checkbox" id="nf-enabled">
+          <span class="be-auto-track" aria-hidden="true"><span></span></span>
+          <span class="be-auto-label">Enabled</span>
+        </label>
+      </div>
+      <p class="usage-refresh-copy">When a session finishes its work, including anything queued
+        behind its prompt, run the command for its outcome: play a sound, ping your home
+        automation, anything. Stopped turns do not send an alert.</p>
+      <form>
+        <label>Run on<select id="nf-backend" aria-label="Backend the commands run on"></select></label>
+        <div class="notify-fields">
+          <label>On success<input type="text" id="nf-success" maxlength="1000"
+            autocomplete="off" autocapitalize="off" spellcheck="false"
+            placeholder='e.g. mosquitto_pub -t puppy/done -m {session}'></label>
+          <label>On failure<input type="text" id="nf-failure" maxlength="1000"
+            autocomplete="off" autocapitalize="off" spellcheck="false"
+            placeholder='e.g. mosquitto_pub -t puppy/failed -m {session}'></label>
+        </div>
+        <p class="usage-refresh-copy">Leave either command empty to skip that outcome.
+          Placeholders <span class="mono-inline">{backend} {session} {engine} {model} {status}
+          {duration} {duration_hms} {cwd} {id}</span> are substituted shell-quoted, and the same
+          values arrive as <span class="mono-inline">PUPPY_*</span> environment variables.
+          <span class="mono-inline">{status}</span> is <span class="mono-inline">ok</span> on
+          success or <span class="mono-inline">error</span> on failure.
+          <span class="mono-inline">{duration}</span> is whole seconds and
+          <span class="mono-inline">{duration_hms}</span> the same span as a clock
+          (<span class="mono-inline">9:59</span>, <span class="mono-inline">10:00</span>,
+          <span class="mono-inline">1:00:00</span>).</p>
+        <p class="usage-refresh-copy">The switch and sidebar bell apply immediately; the backend
+          and commands wait for Save. Test runs the entered command even with alerts disabled.
+          With both commands empty, the bell stays hidden.</p>
+        <p class="form-error hidden" role="alert"></p>
+        <div class="notify-actions">
+          <button type="submit" class="btn btn-pri btn-sm" id="nf-save">Save</button>
+          <button type="button" class="btn btn-sm" id="nf-test-success">Test success</button>
+          <button type="button" class="btn btn-sm" id="nf-test-failure">Test failure</button>
+          <button type="button" class="btn btn-sm hidden" id="nf-retry">Retry</button>
+          <span class="notify-note" id="nf-note" role="status" aria-live="polite"></span>
+        </div>
+      </form>`;
+    const form = card.querySelector("form");
+    const backend = card.querySelector("#nf-backend");
+    const success = card.querySelector("#nf-success");
+    const failure = card.querySelector("#nf-failure");
+    const enabled = card.querySelector("#nf-enabled");
+    const note = card.querySelector("#nf-note");
+    const error = card.querySelector(".form-error");
+    const save = card.querySelector("#nf-save");
+    const testSuccess = card.querySelector("#nf-test-success");
+    const testFailure = card.querySelector("#nf-test-failure");
+    const retry = card.querySelector("#nf-retry");
+    let loaded = false, busy = false, saved = null, notifyNodeSignature = "";
+    const current = () => generation === this.renderGeneration && card.isConnected;
+    const snapshot = () => JSON.stringify([backend.value, success.value, failure.value]);
+    const setError = text => {
+      error.textContent = text;
+      error.classList.toggle("hidden", !text);
+    };
+    const paint = () => {
+      form.setAttribute("aria-busy", busy ? "true" : "false");
+      for (const control of [backend, success, failure, save]) control.disabled = busy || !loaded;
+      testSuccess.disabled = busy || !loaded || !success.value.trim();
+      testFailure.disabled = busy || !loaded || !failure.value.trim();
+      retry.disabled = busy;
+      refreshChoiceSelect(backend);
+    };
+    const paintDirty = () => {
+      setError("");
+      const dirty = loaded && snapshot() !== saved;
+      note.textContent = dirty ? "Unsaved changes" : "";
+      note.classList.toggle("dirty", dirty);
+      paint();
+    };
+    this.notifyBackendsSync = () => {
+      const signature = JSON.stringify([backendName(0), state.backends.map(b =>
+        [b.id, b.name, b.capabilities])]);
+      if (signature === notifyNodeSignature) return;
+      notifyNodeSignature = signature;
+      const selected = backend.value || "0";
+      backend.replaceChildren();
+      for (const b of [{ id: 0, name: `${backendName(0)} (local)` }, ...state.backends]) {
+        const option = document.createElement("option");
+        option.value = String(b.id);
+        const capable = !b.id || (b.capabilities || []).includes("notify-exec");
+        option.textContent = b.name + (capable ? "" : " · upgrade to enable");
+        option.disabled = !capable;
+        backend.appendChild(option);
+      }
+      // Retain a saved or drafted target if it is removed while this card is open.
+      if (![...backend.options].some(option => option.value === selected)) {
+        const option = document.createElement("option");
+        option.value = selected;
+        option.textContent = "Unavailable backend";
+        option.disabled = true;
+        backend.appendChild(option);
+      }
+      backend.value = selected;
+      refreshChoiceSelect(backend);
+    };
+    this.notifyBackendsSync();
+    enhanceChoiceSelect(backend);
+    const load = async () => {
+      busy = true; setError(""); note.textContent = "Loading…"; paint();
+      try {
+        const r = await api(0, "notify");
+        if (!current()) return;
+        success.value = r.settings.success_command;
+        failure.value = r.settings.failure_command;
+        backend.value = String(r.settings.backend);
+        // Refresh also installs an unavailable option for a removed saved backend.
+        if (![...backend.options].some(option => option.value === String(r.settings.backend))) {
+          const option = document.createElement("option");
+          option.value = String(r.settings.backend); option.textContent = "Unavailable backend";
+          option.disabled = true; backend.appendChild(option);
+          backend.value = option.value;
+        }
+        saved = snapshot(); loaded = true;
+        retry.classList.add("hidden");
+        state.notify = notifyPublicState(r.settings); syncBell();
+        note.textContent = "";
+      } catch (e) {
+        if (!current()) return;
+        setError(e.message || "Could not load completion alerts");
+        note.textContent = ""; retry.classList.remove("hidden");
+      } finally { busy = false; if (current()) paint(); }
+    };
+    retry.onclick = load;
+    success.oninput = failure.oninput = backend.onchange = paintDirty;
+    enabled.onchange = async () => {
+      if (enabled.dataset.saving === "true") return;
+      const desired = enabled.checked;
+      enabled.dataset.saving = "true"; syncBell(); setError("");
+      try {
+        const r = await api(0, "notify/toggle", { method: "POST", body: { enabled: desired } });
+        if (current()) state.notify = notifyPublicState(r.settings);
+      } catch (e) { if (current()) setError(e.message); }
+      finally { delete enabled.dataset.saving; if (current()) syncBell(); }
+    };
+    form.onsubmit = async event => {
+      event.preventDefault();
+      if (busy || !loaded) return;
+      busy = true; setError(""); note.textContent = "Saving…"; note.classList.remove("dirty"); paint();
+      try {
+        const r = await api(0, "notify", { method: "POST", body: {
+          backend: Number(backend.value), success_command: success.value, failure_command: failure.value,
+        } });
+        if (!current()) return;
+        success.value = r.settings.success_command; failure.value = r.settings.failure_command;
+        saved = snapshot(); state.notify = notifyPublicState(r.settings); syncBell();
+        note.textContent = "Saved";
+      } catch (e) { if (current()) { setError(e.message); note.textContent = "Unsaved changes"; note.classList.add("dirty"); } }
+      finally { busy = false; if (current()) paint(); }
+    };
+    const test = async (status, command, label) => {
+      if (busy || !loaded || !command.trim()) return;
+      busy = true; setError(""); note.textContent = `Testing ${label}…`; note.classList.remove("dirty"); paint();
+      try {
+        const r = await api(0, "notify/test", { method: "POST", body: {
+          backend: Number(backend.value), command, status,
+        } });
+        if (!current()) return;
+        if (!r.ok) throw new Error(r.error || `Exit ${r.rc}` + (r.output ? " · " + r.output.slice(-120) : ""));
+        note.textContent = `Test ${label} succeeded` + (r.output ? " · " + r.output.slice(-120) : "") +
+          (snapshot() !== saved ? " · Unsaved changes" : "");
+      } catch (e) { if (current()) { note.textContent = ""; setError(e.message); } }
+      finally { busy = false; if (current()) paint(); }
+    };
+    testSuccess.onclick = () => test("ok", success.value, "success");
+    testFailure.onclick = () => test("error", failure.value, "failure");
+    paint();
+    Promise.resolve().then(load);
+    return card;
+  }
+
   async render() {
     this.stopUpgradeReadinessPolling();
     const generation = ++this.renderGeneration;
@@ -17677,136 +17868,8 @@ class SettingsView {
     pollRemotes({ forceEngines: true })
       .catch(error => console.warn("settings remote poll failed", error));
 
-    /* completion alert: a command a chosen backend runs when a session finishes */
-    const notifyCard = el("div", "card notify-card");
-    notifyCard.innerHTML = `<div class="notify-head">
-        <h2>Completion alert</h2>
-        <label class="be-auto notify-toggle" id="nf-enabled-wrap">
-          <input type="checkbox" id="nf-enabled">
-          <span class="be-auto-track" aria-hidden="true"><span></span></span>
-          <span class="be-auto-label">Enabled</span>
-        </label>
-      </div>
-      <p class="usage-refresh-copy">When a session finishes its work, including anything queued
-        behind its prompt, run this command on a backend: play a sound, ping your home
-        automation, anything. Arm or silence it any time with the bell in the sidebar footer.</p>
-      <div class="notify-fields">
-        <label>Run on<select id="nf-backend" aria-label="Backend the command runs on"></select></label>
-        <label>Command<input type="text" id="nf-cmd" autocomplete="off" autocapitalize="off"
-          spellcheck="false" placeholder='e.g. mosquitto_pub -t puppy/done -m {session}'></label>
-      </div>
-      <p class="usage-refresh-copy">Placeholders <span class="mono-inline">{backend} {session}
-        {engine} {model} {status} {duration} {duration_hms} {cwd} {id}</span> are substituted
-        shell-quoted, and the same values arrive as <span class="mono-inline">PUPPY_*</span>
-        environment variables. <span class="mono-inline">{duration}</span> is whole seconds and
-        <span class="mono-inline">{duration_hms}</span> the same span as a clock
-        (<span class="mono-inline">9:59</span>, <span class="mono-inline">10:00</span>,
-        <span class="mono-inline">1:00:00</span>).</p>
-      <p class="usage-refresh-copy">The switch and sidebar bell control the same enabled state and
-        apply immediately; the backend and command wait for Save. With no command, completions do
-        nothing and the bell stays hidden.</p>
-      <div class="notify-actions">
-        <button class="btn btn-pri btn-sm" id="nf-save">Save</button>
-        <button class="btn btn-sm" id="nf-test">Test</button>
-        <span class="notify-note" id="nf-note"></span>
-      </div>`;
-    const nfBackend = notifyCard.querySelector("#nf-backend");
-    const nfCmd = notifyCard.querySelector("#nf-cmd");
-    const nfEnabled = notifyCard.querySelector("#nf-enabled");
-    const nfNote = notifyCard.querySelector("#nf-note");
-    let notifyNodeSignature = "";
-    this.notifyBackendsSync = () => {
-      const signature = JSON.stringify([backendName(0), state.backends.map(b =>
-        [b.id, b.name, b.capabilities])]);
-      if (signature === notifyNodeSignature) return;
-      notifyNodeSignature = signature;
-      const selected = nfBackend.value || "0";
-      nfBackend.replaceChildren();
-      const nfLocal = document.createElement("option");
-      nfLocal.value = "0";
-      nfLocal.textContent = `${backendName(0)} (local)`;
-      nfBackend.appendChild(nfLocal);
-      for (const b of state.backends) {
-        const option = document.createElement("option");
-        option.value = String(b.id);
-        const capable = Array.isArray(b.capabilities) && b.capabilities.includes("notify-exec");
-        option.textContent = b.name + (capable ? "" : " · upgrade to enable");
-        option.disabled = !capable;
-        nfBackend.appendChild(option);
-      }
-      nfBackend.value = [...nfBackend.options].some(option => option.value === selected) ? selected : "0";
-      refreshChoiceSelect(nfBackend);
-    };
-    this.notifyBackendsSync();
-    this.inner.appendChild(notifyCard);
+    this.inner.appendChild(this.notifySettingsCard(generation));
     syncBell();
-    enhanceChoiceSelect(nfBackend);
-    const nfNoteSet = (text, bad = false, dirty = false) => {
-      nfNote.textContent = text;
-      nfNote.classList.toggle("bad", !!bad);
-      nfNote.classList.toggle("dirty", !!dirty);
-    };
-    let nfSaved = null;
-    const nfSnapshot = () => `${nfBackend.value}|${nfCmd.value}`;
-    const nfPaintDirty = () => {
-      if (nfSaved === null) return;
-      if (nfSnapshot() !== nfSaved) nfNoteSet("Unsaved changes", false, true);
-      else if (nfNote.classList.contains("dirty")) nfNoteSet("");
-    };
-    nfCmd.addEventListener("input", nfPaintDirty);
-    nfBackend.addEventListener("change", nfPaintDirty);
-    api(0, "notify").then((r) => {
-      nfCmd.value = r.settings.command || "";
-      const have = [...nfBackend.options].some(o => o.value === String(r.settings.backend));
-      nfBackend.value = have ? String(r.settings.backend) : "0";
-      refreshChoiceSelect(nfBackend);
-      nfSaved = nfSnapshot();
-      state.notify = { configured: !!(r.settings.command || "").trim(),
-                       enabled: !!r.settings.enabled };
-      syncBell();
-    }).catch(() => nfNoteSet("Could not load the current setting", true));
-    nfEnabled.onchange = async () => {
-      const desired = nfEnabled.checked;
-      nfEnabled.dataset.saving = "true";
-      syncBell();
-      nfNoteSet("");
-      try {
-        const r = await api(0, "notify/toggle", {
-          method: "POST", body: { enabled: desired },
-        });
-        state.notify = { configured: !!(r.settings.command || "").trim(),
-                         enabled: !!r.settings.enabled };
-      } catch (e) {
-        nfNoteSet(e.message, true);
-      } finally {
-        delete nfEnabled.dataset.saving;
-        syncBell();
-      }
-    };
-    notifyCard.querySelector("#nf-save").onclick = async () => {
-      try {
-        const r = await api(0, "notify", { method: "POST", body: {
-          backend: Number(nfBackend.value || 0), command: nfCmd.value,
-        } });
-        state.notify = { configured: !!(r.settings.command || "").trim(),
-                         enabled: !!r.settings.enabled };
-        syncBell();
-        nfSaved = nfSnapshot();
-        nfNoteSet("Saved");
-        toast(state.notify.configured ? "Completion alert saved" :
-          "Completion alert command cleared", "ok");
-      } catch (e) { nfNoteSet(e.message, true); }
-    };
-    notifyCard.querySelector("#nf-test").onclick = async () => {
-      nfNoteSet("Running…");
-      try {
-        const r = await api(0, "notify/test", { method: "POST", body: {
-          backend: Number(nfBackend.value || 0), command: nfCmd.value,
-        } });
-        if (r.ok) nfNoteSet("OK" + (r.output ? " · " + r.output.slice(-120) : ""));
-        else nfNoteSet(r.error || `Exit ${r.rc}` + (r.output ? " · " + r.output.slice(-120) : ""), true);
-      } catch (e) { nfNoteSet(e.message, true); }
-    };
 
     /* backends */
     const c3 = el("div", "card");
