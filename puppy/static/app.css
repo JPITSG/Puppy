@@ -187,7 +187,7 @@ a{color:var(--acc2)}
 .disclosure-toggle[aria-expanded=false] svg{transform:rotate(-90deg)}
 @media (hover:hover){.disclosure-toggle:hover{background:var(--hov);color:var(--txt)}}
 .disclosure-toggle:active{background:var(--hov);color:var(--txt);transform:scale(.9)}
-.sess-empty{padding:12px 6px 5px;color:var(--txt3);font-size:var(--fs-xs);line-height:1.35}
+.sess-empty{padding:12px 6px 5px;color:var(--txt3);font-size:var(--fs-xs);line-height:1.35;overflow-wrap:anywhere}
 /* Surfaces whose press-and-hold or tap belongs to puppy: the session rows and
    tabs that open a menu, the backend names that toggle, and the remote
    browser screen. Android begins a text selection on the very same gesture, so
@@ -1688,7 +1688,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   padding:2px 8px 4px;color:var(--txt2);font:var(--fs-xs)/1.2 var(--sans);
 }
 .br-ident{
-  display:flex;align-items:center;height:28px;min-width:0;padding-left:9px;
+  display:flex;align-items:center;flex-shrink:0;height:28px;min-width:0;padding-left:9px;
   border:1px solid var(--line);border-radius:var(--r-md);background:var(--panel2);
 }
 .br-ident-label{color:var(--txt3);margin-right:6px}
@@ -2758,6 +2758,7 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
    the same vertical line as the pane's New-tab + directly above it */
 .task-tabbar{min-height:36px;padding:6px 10px 0 8px;z-index:1}
 /* Keep the same face when the shared drag card is attached to body. */
+/* Phones retain the same label space; the strip scrolls to reach more tasks. */
 .tab.task-tab{font-size:var(--fs-sm);padding:5px var(--tab-space);max-width:200px}
 .task-tabbar .tab-add-wrap{margin-top:-6px;gap:2px}
 .task-tabbar .icon-btn.attention{color:var(--warn)}
@@ -2850,4 +2851,3 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
 .task-review-resolve,.task-review-fold{margin:0 0 6px}
 .task-review-resolve-note,.task-review-fold-note{margin:0 0 10px}
 .task-review-resolve-note .note-para+.note-para{margin-top:4px}
-@media (max-width:560px){.tab.task-tab{max-width:150px}}

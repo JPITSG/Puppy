@@ -483,6 +483,9 @@ async def identity_pill_checks(instance, capture=False):
             const button=el('button','icon-btn br-copy-id'+(label==='Terminal'?' term-copy-id':''));
             button.type='button';button.setAttribute('aria-label','Copy '+label+' ID');
             button.appendChild(copyIcon());pill.appendChild(button);meta.appendChild(pill);
+            const owner=el('button','br-owner');
+            owner.appendChild(el('span','br-owner-text','Harbor accessibility and dashboard navigation review'));
+            meta.appendChild(owner);
             identityPreview.m.appendChild(meta);
         }
     })()""")
@@ -496,8 +499,10 @@ async def identity_pill_checks(instance, capture=False):
                 result=await evaluate(instance,"""[...identityPreview.m.querySelectorAll('.br-ident')].every(p=>{
                     const b=p.querySelector('.br-copy-id'),r=p.getBoundingClientRect(),q=b.getBoundingClientRect();
                     const icon=b.querySelector('svg').getBoundingClientRect();
+                    const owner=p.parentElement.querySelector('.br-owner').getBoundingClientRect();
                     const hit=document.elementFromPoint(q.x+q.width/2,q.y+q.height/2);
                     return r.height===28 && q.width===27 && q.top>=r.top+1 && q.bottom<=r.bottom-1 &&
+                        q.left>=r.left+1 && q.right<=r.right-1 && owner.left>=r.right &&
                         icon.top>=q.top && icon.bottom<=q.bottom && b.contains(hit);
                 })""")
                 assert result,(width,theme)

@@ -210,6 +210,8 @@ submission leaves its files available for the backend to finish creating the tas
   as workspace tabs. Main stays first; the order is saved in this browser.
 - Running task tabs animate one, two, then three dots in a fixed-width slot,
   keeping the tab and its contents still. Reduced motion shows three static dots.
+- Phone task tabs keep the desktop label space; swipe the strip horizontally
+  to reach more tasks.
 - The **Tasks** sheet lists every task with its state and latest answer. Tasks
   ready for review show **Review** in the sheet and their tabs.
 - **Review changes** shows the changed files with a coloured diff; **Apply to
