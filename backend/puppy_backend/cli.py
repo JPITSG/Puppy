@@ -66,7 +66,7 @@ def _parser() -> argparse.ArgumentParser:
     upgrades.add_argument("--disable-remote-upgrade", dest="remote_upgrade_enabled",
                           action="store_false", help="disable remote artifact upgrades")
     parser.set_defaults(remote_upgrade_enabled=None)
-    parser.add_argument("--turn-timeout", type=float, help="maximum turn duration in seconds")
+    parser.add_argument("--turn-timeout", type=int, help="maximum turn duration in seconds (0 is unlimited)")
     parser.add_argument("--shutdown-grace", type=float,
                         help="seconds to wait for active turns during shutdown")
     tls_modes = parser.add_mutually_exclusive_group()
@@ -147,9 +147,10 @@ def _configure(args, parser: argparse.ArgumentParser):
     if args.remote_upgrade_enabled is not None:
         config.set_value("backend.remote_upgrade_enabled", bool(args.remote_upgrade_enabled))
     if args.turn_timeout is not None:
-        if args.turn_timeout <= 0:
-            parser.error("--turn-timeout must be positive")
-        config.set_value("sessions.turn_timeout", args.turn_timeout)
+        try:
+            config.set_timeouts({"turn_seconds": args.turn_timeout})
+        except ValueError as exc:
+            parser.error(str(exc))
     if args.shutdown_grace is not None:
         if args.shutdown_grace < 0:
             parser.error("--shutdown-grace cannot be negative")

@@ -464,6 +464,16 @@ spawned-agent layer accompanies the always-offered spawn MCP bridge and keeps
 delegation explicitly user-requested because spawned runs spend real
 subscription quota. Active turns keep the prompt with which they started.
 
+## Timeout settings
+
+Both runtimes expose `GET`/`PATCH /api/timeouts` behind `timeout-settings`.
+This node owns its maximum turn duration, spawned-agent runtime/inactivity,
+and unattended terminal/browser limits. Values are whole seconds; zero is
+unlimited. Defaults are 7200, 7200, 600, 900, and 900 seconds respectively.
+The CLI also accepts `--turn-timeout 0`. Settings initialize new turns/jobs;
+unattended timer changes rearm existing unviewed instances immediately.
+See [the complete contract and required manual config preparation](../docs/timeouts.md).
+
 ## Spawned agents
 
 Every node advertises the additive `spawn-exec` capability: `POST /api/spawn`
@@ -471,9 +481,11 @@ starts one non-interactive engine run (engine, optional model/effort,
 permission mode, prompt, working directory, inactivity limit, absolute runtime)
 after validating the request against that node's installed engines, and
 `GET`/`PATCH`/`DELETE /api/spawn/{job_id}` poll, replace live limits, or cancel
-it. Jobs default to a 600-second sliding silence limit, renewed by positive
-normalized engine progress, and a hard 7200-second ceiling measured from job
-creation. Identical repeating status noise does not renew the lease. The PATCH
+it. Omitted limits use that executing node's Settings → Timeouts values,
+initially a 600-second sliding silence limit, renewed by positive normalized
+engine progress, and a 7200-second runtime measured from job creation.
+Either limit accepts zero for unlimited, behind `timeout-settings`.
+Identical repeating status noise does not renew the lease. The PATCH
 route is advertised as `spawn-progress-limits`. The retired `timeout_s` request
 field is rejected; use `idle_timeout_s` and `max_runtime_s`. `POST
 /api/spawn` also honors a controller-chosen `job_id`, advertised as
@@ -514,8 +526,8 @@ refused rather than resolved to the first match, and the controller keeps
 backend names unique, distinct from its own instance name, and free of the
 reserved local aliases when backends are paired or renamed. Each node
 also caps its total running spawned agents. Limit changes remain
-ownership-checked, stay within 30–7200
-seconds, and are offered to the orchestrating engine only for explicit user
+ownership-checked, accept whole seconds from 0 through 2147483647 (0 is
+unlimited), and are offered to the orchestrating engine only for explicit user
 steering while jobs remain attached to that turn. The console's composer
 offers the request as an "@" mention: a "New spawn" wizard slides through
 agent count, node, engine, model, and effort, then inserts the plain-text

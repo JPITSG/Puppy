@@ -31,9 +31,10 @@ SETUP_CODE_ENV = "PUPPY_SETUP_CODE"
 SETUP_CODE_MIN_CHARS = 16
 SETUP_CODE_MAX_CHARS = 128
 
-PUBLIC_PREFIXES = ("/static/", "/api/settings/bind/verify/",
+PUBLIC_PREFIXES = ("/api/settings/bind/verify/",
                    "/api/settings/bind/handoff/")
-PUBLIC_PATHS = {"/", "/favicon.ico", "/api/auth/status", "/api/auth/login", "/api/auth/setup"}
+PUBLIC_PATHS = {"/", "/favicon.ico", "/api/auth/status", "/api/auth/login", "/api/auth/setup",
+                "/static/auth.css", "/static/auth.js"}
 
 _attempts = {}  # key -> [timestamps]
 _attempts_last_prune = 0.0
@@ -210,11 +211,14 @@ def request_user(request: web.Request):
 async def middleware(request: web.Request, handler):
     path = request.path
     if path in PUBLIC_PATHS or any(path.startswith(p) for p in PUBLIC_PREFIXES):
-        return await handler(request)
+        resp = await handler(request)
+        resp.headers.setdefault("Cache-Control", "no-store")
+        return resp
 
     user = request_user(request)
     if user is None:
-        return web.json_response({"error": "auth required"}, status=401)
+        return web.json_response({"error": "auth required"}, status=401,
+                                 headers={"Cache-Control": "no-store"})
 
     # origin guard for cookie-authed state-changing requests
     if user != "@token" and request.method not in ("GET", "HEAD", "OPTIONS"):
@@ -229,7 +233,7 @@ async def middleware(request: web.Request, handler):
 
     request["user"] = user
     resp = await handler(request)
-    if path.startswith("/api/"):
+    if path.startswith(("/api/", "/static/")):
         resp.headers.setdefault("Cache-Control", "no-store")
     return resp
 
@@ -239,13 +243,15 @@ async def middleware(request: web.Request, handler):
 async def h_status(request: web.Request):
     user = request_user(request)
     needs_setup = not has_users()
-    return web.json_response({
+    payload = {
         "setup_required": needs_setup,
         "setup_code_required": needs_setup and setup_code_required(request),
         "authed": user is not None,
         "username": None if user is None else user,
-        "instance_name": config.get("instance_name"),
-    })
+    }
+    if user is not None:
+        payload["instance_name"] = config.get("instance_name")
+    return web.json_response(payload)
 
 
 async def h_setup(request: web.Request):

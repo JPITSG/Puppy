@@ -106,6 +106,11 @@ class FakeElement {
     return false;
   }
   get firstElementChild() { return this.children[0] || null; }
+  get parentElement() { return this.parentNode instanceof FakeElement ? this.parentNode : null; }
+  get nextSibling() {
+    if (!this.parentNode) return null;
+    return this.parentNode.children[this.parentNode.children.indexOf(this) + 1] || null;
+  }
   get options() { return this.tag === "select" ? this.children : undefined; }
   get textContent() { return this._text + this.children.map(child => child.textContent).join(""); }
   set textContent(value) { this._text = String(value); this.children = []; }
@@ -118,6 +123,25 @@ class FakeElement {
     return child;
   }
   append(...nodes) { nodes.forEach(node => this.appendChild(node)); }
+  insertBefore(child, reference) {
+    if (!reference) return this.appendChild(child);
+    if (child === reference) return child;
+    if (!this.children.includes(reference)) throw new Error("reference is not a child");
+    if (child.parentNode) child.parentNode.removeChild(child);
+    child.parentNode = this;
+    this.children.splice(this.children.indexOf(reference), 0, child);
+    return child;
+  }
+  cloneNode(deep = false) {
+    const clone = this.ownerDocument.createElement(this.tag);
+    for (const [key, value] of Object.entries(this.attributes)) clone.setAttribute(key, value);
+    clone.className = this.className;
+    Object.assign(clone.dataset, this.dataset);
+    Object.assign(clone.style, this.style);
+    clone._text = this._text;
+    if (deep) for (const child of this.children) clone.appendChild(child.cloneNode(true));
+    return clone;
+  }
   replaceChildren(...nodes) {
     for (const child of [...this.children]) this.removeChild(child);
     this._text = "";
@@ -140,13 +164,18 @@ class FakeElement {
   }
   getAttribute(key) {
     if (key === "class") return this.className;
+    if (key.startsWith("data-")) {
+      const name = key.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+      return name in this.dataset ? String(this.dataset[name]) : null;
+    }
     return key in this.attributes ? this.attributes[key] : null;
   }
   removeAttribute(key) {
     delete this.attributes[key];
+    if (key.startsWith("data-")) delete this.dataset[key.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase())];
     if (key === "disabled") this.disabled = false;
   }
-  hasAttribute(key) { return key in this.attributes; }
+  hasAttribute(key) { return this.getAttribute(key) !== null; }
   addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); }
   removeEventListener(type, fn) {
     this.listeners[type] = (this.listeners[type] || []).filter(item => item !== fn);

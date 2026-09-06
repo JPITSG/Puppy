@@ -594,6 +594,9 @@ function tuneIcon(size) {
   return svg;
 }
 
+/* Drawn to sit exactly where xIcon does, so a card or line that swaps one mark
+   for the other does not move: the stroked shape's own top and bottom, round
+   caps included, straddle the middle of the 16-unit box. */
 function checkIcon(size = 13) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
@@ -602,7 +605,7 @@ function checkIcon(size = 13) {
   svg.setAttribute("height", size);
   svg.setAttribute("aria-hidden", "true");
   const path = document.createElementNS(NS, "path");
-  path.setAttribute("d", "M3.5 8.6 6.4 11.5 12.5 5.2");
+  path.setAttribute("d", "M3.5 8.25 6.4 11.15 12.5 4.85");
   path.setAttribute("fill", "none");
   path.setAttribute("stroke", "currentColor");
   path.setAttribute("stroke-width", "1.9");
@@ -2593,6 +2596,7 @@ const state = {
   usageRefresh: null,     // local account-usage refresh metadata
   autoUpgrade: null,      // this instance's engine-update schedule
   timers: null,           // local cache/refresh timer settings
+  timeouts: null,         // local execution/unattended deadlines
   uploadSettings: null,   // local per-file upload policy
   localEngineCheckedAt: 0,
   backends: [],           // remote backends [{id,name,url,urls,active_url}]
@@ -2620,6 +2624,7 @@ const state = {
   remoteUsageRefresh: {}, // bid -> account-usage refresh metadata
   remoteAutoUpgrade: {},  // bid -> unattended engine-update schedule
   remoteTimers: {},       // bid -> cache/refresh timer settings
+  remoteTimeouts: {},     // bid -> execution/unattended deadlines
   remoteUploadSettings: {}, // bid -> remote per-file upload policy
   remoteSystemPrompts: {}, // bid -> last authenticated node prompt settings
   tabs: [],               // [{id,type,bid,sid,browserId,title,cmd}]
@@ -2728,7 +2733,7 @@ function reconcileRemoteState() {
                         state.remoteEngineCheckedAt, state.remoteNodeCheckedAt,
                         state.remoteSessionCheckedAt,
                         state.remoteUsageRefresh, state.remoteAutoUpgrade,
-                        state.remoteTimers, state.remoteUploadSettings,
+                        state.remoteTimers, state.remoteTimeouts, state.remoteUploadSettings,
                         state.remoteSystemPrompts,
                         state.remoteBrowser, state.remoteBrowserStatus,
                         state.terminalInstances, state.stateStreamReady,
@@ -2794,7 +2799,7 @@ function resetRemoteBackendConnection(bid) {
                         state.remoteEngineCheckedAt, state.remoteNodeCheckedAt,
                         state.remoteSessionCheckedAt,
                         state.remoteUsageRefresh, state.remoteAutoUpgrade,
-                        state.remoteTimers, state.remoteUploadSettings,
+                        state.remoteTimers, state.remoteTimeouts, state.remoteUploadSettings,
                         state.remoteSystemPrompts,
                         state.remoteBrowser, state.remoteBrowserStatus,
                         state.terminalInstances, state.stateStreamReady,
@@ -3123,68 +3128,18 @@ function loadTabs() {
 }
 
 /* ================= auth ================= */
-let authMode = "login";
-let authSetupCodeRequired = false;
-function showAuth(mode, setupCodeRequired) {
-  if (mode) authMode = mode;
-  if (authMode !== "setup") authSetupCodeRequired = false;
-  else if (typeof setupCodeRequired === "boolean") {
-    authSetupCodeRequired = setupCodeRequired;
-  }
+function showAuth() {
+  if (state.leavingForAuth) return;
+  state.leavingForAuth = true;
   state.authed = false;
-  stopRemotePolling();
-  state.stateStreamReady[0] = false;
-  if (updatesReconnectRefreshTimer !== null) {
-    clearTimeout(updatesReconnectRefreshTimer);
-    updatesReconnectRefreshTimer = null;
-  }
-  if (updatesWs) try { updatesWs.close(); } catch (error) {}
-  setLocalConnection(false);
-  $("app").classList.add("hidden");
-  $("auth-shell").classList.remove("hidden");
-  const setup = authMode === "setup";
-  $("auth-title").textContent = setup ? "Create admin account" : "Sign in";
-  $("auth-sub").textContent = setup ? (authSetupCodeRequired ?
-    "Enter the bootstrap code from Puppy's startup log, then choose your credentials" :
-    "First run - choose the credentials for this Puppy instance") :
-    "AI coding session manager";
-  $("auth-setup-code-wrap").classList.toggle("hidden", !setup || !authSetupCodeRequired);
-  $("auth-setup-code").required = setup && authSetupCodeRequired;
-  $("auth-pass2-wrap").classList.toggle("hidden", !setup);
-  $("auth-pass").autocomplete = setup ? "new-password" : "current-password";
-  $("auth-submit").textContent = setup ? "Create & enter" : "Sign in";
-  $("auth-err").classList.add("hidden");
+  location.reload();
 }
 async function initAuth() {
   const st = await api(0, "auth/status");
+  if (!st.authed) { showAuth(); return; }
   state.instance = st.instance_name || "puppy";
-  if (st.setup_required) { showAuth("setup", !!st.setup_code_required); return; }
-  if (!st.authed) { showAuth("login"); return; }
   await enterApp();
 }
-$("auth-form").addEventListener("submit", async (ev) => {
-  ev.preventDefault();
-  const user = $("auth-user").value.trim();
-  const pass = $("auth-pass").value;
-  const errBox = $("auth-err");
-  errBox.classList.add("hidden");
-  try {
-    if (authMode === "setup") {
-      if (pass !== $("auth-pass2").value) throw new Error("passwords do not match");
-      await api(0, "auth/setup", { method: "POST", body: {
-        username: user, password: pass, setup_code: $("auth-setup-code").value,
-      } });
-    } else {
-      await api(0, "auth/login", { method: "POST", body: { username: user, password: pass } });
-    }
-    $("auth-pass").value = ""; $("auth-pass2").value = "";
-    $("auth-setup-code").value = "";
-    await enterApp();
-  } catch (e) {
-    errBox.textContent = e.message;
-    errBox.classList.remove("hidden");
-  }
-});
 
 /* ================= boot ================= */
 let updatesWs = null;
@@ -3197,7 +3152,6 @@ let localStateStreamTopics = new Set();
 
 async function enterApp() {
   state.authed = true;
-  $("auth-shell").classList.add("hidden");
   $("app").classList.remove("hidden");
   await refreshState();
   loadTabs();
@@ -3232,6 +3186,7 @@ async function refreshState() {
     usage_refresh: s.usage_refresh || state.usageRefresh,
     auto_upgrade: s.auto_upgrade || state.autoUpgrade,
     timers: s.timers || state.timers,
+    timeouts: s.timeouts || state.timeouts,
   });
   rememberUploadSettings(0, s.uploads);
   state.localEngineCheckedAt = 0;
@@ -4529,6 +4484,13 @@ function backendSupportsTimerSettings(bid) {
     backend.capabilities.includes("timer-settings");
 }
 
+function backendSupportsTimeoutSettings(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(item => item.id === bid);
+  return !!backend && Array.isArray(backend.capabilities) &&
+    backend.capabilities.includes("timeout-settings");
+}
+
 /* Fleet timer actions are deliberately limited to peers whose most recent
    live probe succeeded. A stale cached timer payload is useful for editing
    while a node is down, but it is not proof that a PATCH can reach it now. */
@@ -5780,6 +5742,42 @@ function quotaTitle(e, selected) {
   return parts.join(" · ");
 }
 
+const TIMEOUT_FIELDS = [
+  { key: "turn_seconds", label: "Maximum agent turn duration",
+    description: "Elapsed time for one turn in a chat or task, including approvals and background work." },
+  { key: "spawn_runtime_seconds", label: "Maximum spawned-agent duration",
+    description: "Total runtime from a spawned agent’s creation, even while it makes progress." },
+  { key: "spawn_idle_seconds", label: "Spawned-agent inactivity timeout",
+    description: "Time without recognized engine progress. Meaningful activity restarts this timer." },
+  { key: "terminal_idle_seconds", label: "Terminal unattended timeout",
+    description: "Time without connected viewers before a terminal stops. Agent interaction restarts this timer." },
+  { key: "browser_idle_seconds", label: "Browser unattended timeout",
+    description: "Time without connected viewers before a browser stops. Agent interaction restarts this timer." },
+];
+
+function normalizeTimeoutSettings(payload) {
+  if (!payload || !payload.values || !payload.defaults ||
+      !Number.isSafeInteger(payload.max_seconds) || payload.max_seconds < 1) return null;
+  const values = {}, defaults = {};
+  for (const { key } of TIMEOUT_FIELDS) {
+    for (const source of [payload.values, payload.defaults]) {
+      if (!Number.isInteger(source[key]) || source[key] < 0 || source[key] > payload.max_seconds)
+        return null;
+    }
+    values[key] = payload.values[key];
+    defaults[key] = payload.defaults[key];
+  }
+  return { values, defaults, max_seconds: payload.max_seconds };
+}
+
+function rememberTimeoutSettings(bid, payload) {
+  const normalized = normalizeTimeoutSettings(payload);
+  if (!normalized) return null;
+  if (bid) state.remoteTimeouts[bid] = normalized;
+  else state.timeouts = normalized;
+  return normalized;
+}
+
 function normalizeTimerSettings(payload) {
   if (!payload || typeof payload !== "object" || !payload.values ||
       !payload.defaults || !payload.limits) return null;
@@ -5817,6 +5815,7 @@ function rememberTimerSettings(bid, payload) {
    settings render - and a field wired into only some of them is precisely how
    the update schedule failed to reach a backend's row. */
 function rememberEnginePayload(bid, result) {
+  if (result.timeouts) rememberTimeoutSettings(bid, result.timeouts);
   if (bid) {
     state.engCache[bid] = result.engines;
     if (result.usage_refresh) state.remoteUsageRefresh[bid] = result.usage_refresh;
@@ -6590,6 +6589,12 @@ function cancelTabDrag(item) {
   const context = dragTab;
   dragTab = null;
   cleanupTabDrag(context);
+  if (context.taskWorkspace) {
+    // Rebuild from the saved order on cancellation, or the newly committed
+    // order on drop, including any metadata received while the slot moved.
+    context.taskWorkspace.rendered = "";
+    context.taskWorkspace.refreshTasks();
+  }
   renderTabs(context.pendingFocus || null);
 }
 
@@ -6611,16 +6616,16 @@ function showTabDropMarker(container, index) {
   else container.appendChild(tabDropMarker);
 }
 
-function renderTabNode(t, pane, tabsRoot) {
-  const tab = el("div", "tab" + (pane.active === t.id ? " active" : ""));
+/* Both workspace and task tabs use this exact drag lifecycle and card. The
+   host only supplies the identity and the scope allowed to accept the drop. */
+function wireTabDrag(tab, tabsRoot, identity) {
   tab.draggable = true;
   const blockTouchDrag = guardNativeTouchDrag(tab);
-  tab.dataset.tabId = t.id;
   tab.addEventListener("dragstart", (event) => {
     if (blockTouchDrag(event)) return;
     const dragImage = makeTabDragImage(tab);
     dragTab = {
-      id: t.id, item: tab, container: tabsRoot, sourcePaneId: pane.id,
+      ...identity, item: tab, container: tabsRoot,
       pendingFocus: null, dragImage,
     };
     tabsRoot.classList.add("reordering");
@@ -6638,12 +6643,18 @@ function renderTabNode(t, pane, tabsRoot) {
          over the pane instead, and the strip keeps telling the story: the
          dimmed slot there is the one that moves. */
       try {
-        event.dataTransfer.setData("text/plain", `puppy-tab:${t.id}`);
+        event.dataTransfer.setData("text/plain", `puppy-tab:${identity.id}`);
         event.dataTransfer.setDragImage(dragImage, x, 1);
       } catch (error) {}
     }
   });
   tab.addEventListener("dragend", () => cancelTabDrag(tab));
+}
+
+function renderTabNode(t, pane, tabsRoot) {
+  const tab = el("div", "tab" + (pane.active === t.id ? " active" : ""));
+  tab.dataset.tabId = t.id;
+  wireTabDrag(tab, tabsRoot, { id: t.id, sourcePaneId: pane.id });
 
   let dotCls = "settings", dotColor = "";
   if (t.type === "session") {
@@ -6863,20 +6874,29 @@ function finishTabScrollLayout(focusTabId = null) {
   });
 }
 
-function dropTabOnToolbar(pane, tabsRoot, event) {
-  if (!dragTab) return;
+function validTabReorder(ids, current) {
+  return ids.length === current.length && new Set(ids).size === ids.length &&
+    ids.every(id => current.includes(id));
+}
+
+function dropTabOnToolbar(pane, tabsRoot, event, taskWorkspace = null) {
+  if (!dragTab || (dragTab.taskWorkspace || null) !== taskWorkspace) return;
   acceptReorderDrag(event);
   event.stopPropagation();
   const context = dragTab;
+  if (taskWorkspace) {
+    const ids = reorderChildren(tabsRoot, ".tab[data-task-id]").map(node => Number(node.dataset.sid));
+    if (validTabReorder(ids, taskWorkspace.opened)) taskWorkspace.opened = ids;
+    cancelTabDrag();
+    return;
+  }
   const source = workspacePane(context.sourcePaneId);
   const destination = workspacePane(pane.id);
   if (!source || !destination) { cancelTabDrag(); return; }
 
   if (source.id === destination.id) {
     const ids = reorderChildren(tabsRoot, ".tab").map(node => node.dataset.tabId);
-    const valid = ids.length === destination.tabs.length && new Set(ids).size === ids.length &&
-      ids.every(id => destination.tabs.includes(id));
-    if (!valid) { cancelTabDrag(); return; }
+    if (!validTabReorder(ids, destination.tabs)) { cancelTabDrag(); return; }
     destination.tabs = ids;
   } else {
     const index = tabInsertionIndex(tabsRoot, event.clientX);
@@ -6897,16 +6917,21 @@ function dropTabOnToolbar(pane, tabsRoot, event) {
   renderSidebar();
 }
 
-function wirePaneTabbar(tabbar, tabsRoot, pane) {
+function wireTabbar(tabbar, tabsRoot, pane, taskWorkspace = null) {
+  const accepts = () => dragTab && (dragTab.taskWorkspace || null) === taskWorkspace;
   tabbar.addEventListener("dragenter", event => {
-    if (!dragTab) return;
+    if (!accepts()) return;
     acceptReorderDrag(event);
   });
   tabbar.addEventListener("dragover", event => {
-    if (!dragTab) return;
+    if (!accepts()) return;
     acceptReorderDrag(event);
     event.stopPropagation();
     cleanupSplitPreview();
+    if (taskWorkspace) {
+      moveDragSlot(tabsRoot, dragTab.item, ".tab[data-task-id]", event.clientX, true);
+      return;
+    }
     const source = workspacePane(dragTab.sourcePaneId);
     if (source && source.id === pane.id) {
       if (tabDropMarker) { tabDropMarker.remove(); tabDropMarker = null; }
@@ -6916,7 +6941,7 @@ function wirePaneTabbar(tabbar, tabsRoot, pane) {
       showTabDropMarker(tabsRoot, index);
     }
   });
-  tabbar.addEventListener("drop", event => dropTabOnToolbar(pane, tabsRoot, event));
+  tabbar.addEventListener("drop", event => dropTabOnToolbar(pane, tabsRoot, event, taskWorkspace));
 }
 
 function splitSideForPoint(host, x, y) {
@@ -6972,7 +6997,7 @@ function splitTabIntoPane(tabId, targetPaneId, side) {
 
 function wirePaneDrop(host, pane) {
   host.addEventListener("dragover", event => {
-    if (!dragTab) return;
+    if (!dragTab || dragTab.taskWorkspace) return;
     const source = workspacePane(dragTab.sourcePaneId);
     if (!source || (source.id === pane.id && source.tabs.length < 2)) {
       cleanupSplitPreview();
@@ -6984,7 +7009,7 @@ function wirePaneDrop(host, pane) {
     showSplitPreview(host, splitSideForPoint(host, event.clientX, event.clientY));
   }, true);
   host.addEventListener("drop", event => {
-    if (!dragTab || dragTab.previewHost !== host) return;
+    if (!dragTab || dragTab.taskWorkspace || dragTab.previewHost !== host) return;
     acceptReorderDrag(event);
     event.stopPropagation();
     const context = dragTab;
@@ -7091,7 +7116,7 @@ function renderWorkspacePane(pane) {
   addWrap.appendChild(add);
   tabbar.appendChild(addWrap);
   wireTabScrolling(tabsRoot, pane.id);
-  wirePaneTabbar(tabbar, tabsRoot, pane);
+  wireTabbar(tabbar, tabsRoot, pane);
   root.appendChild(tabbar);
 
   const host = el("div", "views pane-views");
@@ -7458,6 +7483,8 @@ function applyTheme(t) {
   button.setAttribute("aria-label", t === "light" ?
     "Switch to dark mode" : "Switch to light mode");
   lsSet("puppy.theme", t);
+  // Ephemeral tab preference for the separate sign-in document.
+  try { sessionStorage.setItem(location.pathname + ":signin.theme", t); } catch (error) {}
   /* The theme is this browser's own state, so each node has to be told: its
      managed browsers render pages with the matching prefers-color-scheme. */
   const browserNodes = new Map();
@@ -9760,6 +9787,7 @@ class SessionWorkspaceView {
     this.strip = el("div", "tabs task-tabs");
     this.strip.setAttribute("role", "tablist");
     this.strip.setAttribute("aria-label", "Session conversations");
+    wireTabbar(this.bar, this.strip, null, this);
     this.strip.addEventListener("scroll", () => syncHorizontalOverflow(this.strip), { passive: true });
     scroll.appendChild(this.strip);
     const actions = el("div", "tab-add-wrap task-tab-actions");
@@ -9944,6 +9972,10 @@ class SessionWorkspaceView {
     }
     for (const [sid, view] of this.taskViews) view.root.classList.toggle("on", sid === this.selected);
     if (this.overview) this.renderOverview(tasks);
+    // Keep the native drag's source connected while live task updates land.
+    // The drop validates against opened before committing; removed or newly
+    // opened tabs invalidate that permutation just like the outer tab bar.
+    if (dragTab && dragTab.taskWorkspace === this && dragTab.item.isConnected) return;
     const face = s => [s.id, s.name, s.status, s.color, s.engine, s.task];
     const signature = JSON.stringify([this.selected, this.opened, this.seen, main ? face(main) : null, tasks.map(face)]);
     if (signature === this.rendered) return;
@@ -9954,7 +9986,7 @@ class SessionWorkspaceView {
     this.strip.replaceChildren();
     const addTab = (sid, title, session, task = null) => {
       const running = !!session && session.status === "running";
-      const tab = el("div", "tab" + (sid === this.selected ? " active" : "") + (running ? " running" : ""));
+      const tab = el("div", "tab task-tab" + (sid === this.selected ? " active" : "") + (running ? " running" : ""));
       tab.setAttribute("role", "tab");
       tab.setAttribute("aria-selected", String(sid === this.selected));
       tab.tabIndex = sid === this.selected ? 0 : -1;
@@ -9974,6 +10006,8 @@ class SessionWorkspaceView {
         tabs[next].click(); tabs[next].focus();
       };
       if (task) {
+        tab.dataset.taskId = String(sid);
+        wireTabDrag(tab, this.strip, { id: `s:${this.tab.bid}:${sid}`, taskWorkspace: this });
         const unread = task.result_seq > (this.seen[sid] || 0);
         const cls = taskStateClass(task);
         tab.appendChild(el("span", "t-state" + (cls ? " " + cls : "") + (unread ? " unread" : ""), taskStateLabel(task)));
@@ -9998,7 +10032,16 @@ class SessionWorkspaceView {
   onVisibility(visible) { if (visible) this.refreshTasks(); }
   captureScroll() { return [...this.taskViews].map(([sid, view]) => [sid, view.captureScroll()]); }
   restoreScroll(values) { for (const [sid, saved] of values || []) { const view = this.taskViews.get(sid); if (view) view.restoreScroll(saved); } }
-  destroy() { this.closeTaskOverview(); for (const view of this.taskViews.values()) view.destroy(); this.taskViews.clear(); this.root.remove(); }
+  destroy() {
+    if (dragTab && dragTab.taskWorkspace === this) {
+      cleanupTabDrag(dragTab);
+      dragTab = null;
+    }
+    this.closeTaskOverview();
+    for (const view of this.taskViews.values()) view.destroy();
+    this.taskViews.clear();
+    this.root.remove();
+  }
 }
 async function modalNewTask(workspace) {
   const bid = Number(workspace.tab.bid) || 0, sid = workspace.tab.sid;
@@ -15084,6 +15127,7 @@ class SettingsView {
     this.notifyBackendsSync = null;
     this.systemPromptSync = null;
     this.timerSettingsSync = null;
+    this.timeoutSettingsSync = null;
     this.root = el("div", "view settings");
     this.root.innerHTML = `<div class="settings-scroll"><div class="settings-inner"></div></div>`;
     this.inner = this.root.querySelector(".settings-inner");
@@ -15109,6 +15153,7 @@ class SettingsView {
     this.notifyBackendsSync = null;
     this.systemPromptSync = null;
     this.timerSettingsSync = null;
+    this.timeoutSettingsSync = null;
     this.root.remove();
   }
   onShow() { this.render(); }
@@ -15498,6 +15543,7 @@ class SettingsView {
     if (this.notifyBackendsSync) this.notifyBackendsSync();
     if (this.systemPromptSync) this.systemPromptSync();
     if (this.timerSettingsSync) this.timerSettingsSync();
+    if (this.timeoutSettingsSync) this.timeoutSettingsSync();
     this.syncUpgradeButtons();
   }
 
@@ -16213,6 +16259,192 @@ class SettingsView {
     else setNote("Waiting for browser status…", false);
   }
 
+  timeoutSettingsCard(nodes, initialPayload, generation) {
+    const card = el("div", "card timeouts-card");
+    card.innerHTML = `<h2>Timeouts</h2>
+      <p class="timer-card-copy">Set how long work can run on each backend.
+        All values are in seconds. Use 0 for unlimited.</p>
+      <p class="hint">Turn and spawn settings apply to new runs. Unattended timers restart
+        when changed. Spawned agents still stop when their owning turn ends.</p>`;
+    rememberTimeoutSettings(0, initialPayload);
+    let activeBid = nodes.some(node => node.bid === this.timeoutSettingsBid) ? this.timeoutSettingsBid : 0;
+    const records = new Map(), loading = new Set(), loadErrors = new Map();
+    let resetting = false, resetError = "";
+    const field = el("label", "timer-node");
+    field.appendChild(el("span", "timer-node-label", "Backend"));
+    const select = document.createElement("select");
+    select.setAttribute("aria-label", "Backend whose timeouts are being edited");
+    for (const node of nodes) {
+      const option = document.createElement("option");
+      option.value = String(node.bid);
+      option.textContent = node.name;
+      select.appendChild(option);
+    }
+    select.value = String(activeBid);
+    field.appendChild(select);
+    enhanceChoiceSelect(select);
+    const note = el("span", "timer-node-note");
+    note.setAttribute("role", "status");
+    field.appendChild(note);
+    card.appendChild(field);
+    const list = el("div", "timer-list");
+    card.appendChild(list);
+    const current = bid => bid ? state.remoteTimeouts[bid] : state.timeouts;
+    const alive = () => generation === this.renderGeneration && card.isConnected;
+    const nodeName = bid => (nodes.find(node => node.bid === bid) || {}).name || "Backend";
+    const draftFor = key => {
+      const id = `${activeBid}:${key}`;
+      if (!records.has(id)) records.set(id, { value: "", dirty: false, saving: false, error: "" });
+      return records.get(id);
+    };
+    const rows = TIMEOUT_FIELDS.map(spec => {
+      const form = el("form", "timer-row timeout-row");
+      form.noValidate = true;  // Keep validation beside this field in .form-error.
+      const copy = el("div", "timer-row-copy");
+      copy.appendChild(el("div", "timer-row-name", spec.label));
+      copy.appendChild(el("div", "timer-row-description", spec.description));
+      const controls = el("div", "timer-row-controls");
+      const input = document.createElement("input");
+      input.type = "number"; input.min = "0"; input.step = "1";
+      input.required = true; input.inputMode = "numeric";
+      input.setAttribute("aria-label", `${spec.label}, seconds; 0 is unlimited`);
+      controls.appendChild(input);
+      controls.appendChild(el("span", "timer-row-unit", "sec"));
+      const save = el("button", "btn btn-sm", "Apply");
+      save.type = "submit";
+      controls.appendChild(save);
+      form.appendChild(copy); form.appendChild(controls);
+      const error = el("p", "form-error hidden");
+      error.id = `timeout-error-${spec.key}`;
+      error.setAttribute("role", "alert");
+      input.setAttribute("aria-describedby", error.id);
+      form.appendChild(error);
+      list.appendChild(form);
+      input.oninput = () => {
+        const draft = draftFor(spec.key);
+        draft.value = input.value; draft.dirty = true; draft.error = "";
+        paint();
+      };
+      input.onkeydown = event => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          const draft = draftFor(spec.key);
+          draft.dirty = false; draft.error = "";
+          paint();
+        }
+      };
+      form.onsubmit = async event => {
+        event.preventDefault();
+        const bid = activeBid, draft = draftFor(spec.key), payload = current(bid);
+        if (save.disabled || draft.saving || !payload) return;
+        const value = Number(input.value);
+        if (!input.value.trim() || !Number.isInteger(value) || value < 0 || value > payload.max_seconds) {
+          draft.error = `Enter a whole number from 0 to ${payload.max_seconds} seconds`;
+          paint(); return;
+        }
+        draft.value = input.value; draft.dirty = true; draft.saving = true; draft.error = "";
+        paint();
+        try {
+          const result = await api(bid, "timeouts", {
+            method: "PATCH", body: { [spec.key]: value }, timeoutMs: 12000,
+          });
+          if (!rememberTimeoutSettings(bid, result && result.timeouts))
+            throw new Error("Backend returned invalid timeout settings");
+          draft.dirty = false;
+          if (alive()) toast(`${nodeName(bid)}: ${spec.label} set to ${value === 0 ? "unlimited" : value + " seconds"}`, "ok");
+        } catch (failure) {
+          draft.error = failure.message || "Could not save timeout";
+        } finally {
+          draft.saving = false;
+          if (alive()) paint();
+        }
+      };
+      return { spec, form, input, save, error };
+    });
+    const actions = el("div", "timer-actions");
+    const reset = el("button", "btn btn-sm btn-ghost", "Reset to defaults");
+    reset.type = "button";
+    actions.appendChild(reset); card.appendChild(actions);
+    const failure = el("p", "form-error hidden");
+    failure.setAttribute("role", "alert"); card.appendChild(failure);
+
+    const paint = () => {
+      const payload = current(activeBid), supported = backendSupportsTimeoutSettings(activeBid);
+      const availability = activeBid ? remoteAvailability(activeBid) : "ok";
+      const reachable = availability === "ok";
+      note.classList.toggle("bad", !supported || availability === "bad");
+      if (!supported) note.textContent = "Backend upgrade required for timeout settings";
+      else if (!reachable) note.textContent = backendStateNote(availability, !!payload, "timeouts");
+      else if (loading.has(activeBid)) note.textContent = "Loading timeout settings…";
+      else note.textContent = payload ? `Timeouts stored on ${nodeName(activeBid)}` : "Timeout settings unavailable";
+      select.disabled = resetting;
+      refreshChoiceSelect(select);
+      const busy = resetting || [...records.values()].some(record => record.saving);
+      reset.disabled = busy || !supported || !reachable || !payload || loading.has(activeBid);
+      reset.textContent = resetting ? "Resetting…" : "Reset to defaults";
+      failure.textContent = resetError || loadErrors.get(activeBid) || "";
+      failure.classList.toggle("hidden", !failure.textContent);
+      for (const { spec, form, input, save, error } of rows) {
+        const draft = draftFor(spec.key);
+        if (!draft.dirty) draft.value = payload ? String(payload.values[spec.key]) : "";
+        if (input.value !== draft.value) input.value = draft.value;
+        if (payload) input.max = String(payload.max_seconds);
+        const disabled = busy || !supported || !reachable || !payload || loading.has(activeBid);
+        input.disabled = disabled; save.disabled = disabled;
+        save.textContent = draft.saving ? "Saving…" : "Apply";
+        form.setAttribute("aria-busy", String(draft.saving));
+        input.setAttribute("aria-invalid", String(!!draft.error));
+        error.textContent = draft.error; error.classList.toggle("hidden", !draft.error);
+      }
+    };
+    const load = async bid => {
+      if (loading.has(bid) || !backendSupportsTimeoutSettings(bid) || !backendConnectionAllowed(bid)) return;
+      loading.add(bid); loadErrors.delete(bid); paint();
+      try {
+        const result = await api(bid, "timeouts", { timeoutMs: 10000 });
+        if (!rememberTimeoutSettings(bid, result && result.timeouts))
+          throw new Error("Backend returned invalid timeout settings");
+      } catch (error) {
+        loadErrors.set(bid, error.message || "Could not load timeout settings");
+      } finally {
+        loading.delete(bid);
+        if (alive()) paint();
+      }
+    };
+    reset.onclick = async () => {
+      const bid = activeBid;
+      if (reset.disabled) return;
+      resetting = true; resetError = ""; paint();
+      try {
+        const latest = await api(bid, "timeouts", { timeoutMs: 10000 });
+        const payload = normalizeTimeoutSettings(latest && latest.timeouts);
+        if (!payload) throw new Error("Backend returned invalid timeout settings");
+        const result = await api(bid, "timeouts", {
+          method: "PATCH", body: payload.defaults, timeoutMs: 12000,
+        });
+        if (!rememberTimeoutSettings(bid, result && result.timeouts))
+          throw new Error("Backend returned invalid timeout settings");
+        for (const { key } of TIMEOUT_FIELDS) records.delete(`${bid}:${key}`);
+        if (alive()) toast(`${nodeName(bid)}: Timeout defaults restored`, "ok");
+      } catch (error) {
+        resetError = error.message || "Could not reset timeout settings";
+      } finally {
+        resetting = false;
+        if (alive()) paint();
+      }
+    };
+    select.onchange = () => {
+      activeBid = Number(select.value) || 0;
+      this.timeoutSettingsBid = activeBid;
+      resetError = ""; paint();
+      if (!nodeStateStreamActive(activeBid) || !current(activeBid)) load(activeBid);
+    };
+    this.timeoutSettingsSync = paint;
+    paint();
+    if (!current(activeBid)) Promise.resolve().then(() => { if (alive()) load(activeBid); });
+    return card;
+  }
+
   timerSettingsCard(nodes, initialPayload, generation) {
     const card = el("div", "card timers-card");
     card.innerHTML = `<h2>Timers</h2>
@@ -16925,6 +17157,7 @@ class SettingsView {
         usage_refresh: state.usageRefresh,
         auto_upgrade: state.autoUpgrade,
         timers: state.timers,
+        timeouts: state.timeouts,
       }) : api(0, "engines");
       [settings, engines, promptSettings] = await Promise.all([
         api(0, "settings"), liveEngines, api(0, "system-prompt"),
@@ -16959,6 +17192,7 @@ class SettingsView {
     this.notifyBackendsSync = null;
     this.systemPromptSync = null;
     this.timerSettingsSync = null;
+    this.timeoutSettingsSync = null;
 
     /* instance */
     const c1 = el("div", "card");
@@ -17366,6 +17600,8 @@ class SettingsView {
       .concat(state.backends.map(backend => ({ bid: backend.id, name: backend.name })));
     this.inner.appendChild(this.timerSettingsCard(
       promptNodes, settings.timers, generation));
+    this.inner.appendChild(this.timeoutSettingsCard(
+      promptNodes, settings.timeouts, generation));
     this.inner.appendChild(this.systemPromptCard(
       promptNodes, promptSettings.system_prompt, generation));
 
@@ -19099,7 +19335,6 @@ function syncLabelNudge() {
 syncLabelNudge();
 initAuth().catch(e => {
   toast("Failed to reach backend: " + e.message, "error");
-  showAuth("login");
 });
 
 

@@ -47,12 +47,12 @@ def _state_changed() -> None:
 STREAM_LIMIT = 16 * 1024 * 1024
 MAX_PROMPT_CHARS = 120000
 ANSWER_LIMIT = 40000
-# A silent engine gets ten minutes to produce recognized progress. Productive
-# runs may continue for at most two hours from job creation.
+# Factory defaults; each new job captures the executing node’s configured
+# limits. Zero disables that deadline; ownership still ends a job with its turn.
 DEFAULT_IDLE_TIMEOUT_S = 600
 DEFAULT_MAX_RUNTIME_S = 7200
-MIN_TIMEOUT_S = 30
-MAX_TIMEOUT_S = 7200
+MIN_TIMEOUT_S = 0
+MAX_TIMEOUT_S = config.MAX_TIMEOUT_SECONDS
 WAIT_MAX_S = 30
 # One spawn call may fan out into parallel identical runs. The count cap keeps
 # a single directive from starting an unbounded process fleet; the running cap
@@ -73,7 +73,9 @@ SHUTDOWN_GRACE_S = 10.0
 # cancel is retried at this pace; it is dropped once the job cannot possibly
 # be alive any more on the node's own limits.
 ABANDON_RETRY_S = 30.0
-ABANDON_GIVE_UP_S = MAX_TIMEOUT_S + PURGE_AFTER_S
+# After ownership renewal stops, even an unlimited relayed job dies with its
+# lease. Measure this grace from abandonment, never from job creation.
+ABANDON_GIVE_UP_S = 7200 + PURGE_AFTER_S
 # The relay keeps every remote start well inside the bridge's 55 s call
 # deadline: a node that answers late produces an "unconfirmed" start that
 # still carries its id instead of a cancelled relay that names nothing.
@@ -268,12 +270,12 @@ async def prepare_request(body: dict) -> dict:
                          + cwd[:300])
 
     idle_timeout_s = _validated_seconds(
-        body.get("idle_timeout_s", DEFAULT_IDLE_TIMEOUT_S),
+        body.get("idle_timeout_s", config.get("spawn.idle_timeout")),
         "idle_timeout_s")
     if "timeout_s" in body:
         raise SpawnError("timeout_s is unsupported; use max_runtime_s")
     max_runtime_s = _validated_seconds(
-        body.get("max_runtime_s", DEFAULT_MAX_RUNTIME_S), "max_runtime_s")
+        body.get("max_runtime_s", config.get("spawn.max_runtime")), "max_runtime_s")
 
     lease_s = 0
     if body.get("lease_s") is not None:
@@ -334,11 +336,11 @@ class SpawnJob:
 
     @property
     def idle_deadline(self) -> float:
-        return self.last_progress_clock + self.idle_timeout_s
+        return self.last_progress_clock + self.idle_timeout_s if self.idle_timeout_s else float("inf")
 
     @property
     def hard_deadline(self) -> float:
-        return self.created_clock + self.max_runtime_s
+        return self.created_clock + self.max_runtime_s if self.max_runtime_s else float("inf")
 
     @property
     def lease_deadline(self):
@@ -455,20 +457,20 @@ class SpawnJob:
             self._note_progress("protocol exchange", act.get("data"))
 
     def update_limits(self, values: dict) -> None:
-        """Atomically replace either live limit, preserving the two-hour cap."""
+        """Atomically replace either live limit; zero removes that deadline."""
         if not self.running:
             raise SpawnError("spawned agent '{}' already finished".format(
                 self.id), 409)
         now = time.monotonic()
         idle_timeout_s = values.get("idle_timeout_s", self.idle_timeout_s)
         max_runtime_s = values.get("max_runtime_s", self.max_runtime_s)
-        if self.last_progress_clock + idle_timeout_s <= now:
+        if idle_timeout_s and self.last_progress_clock + idle_timeout_s <= now:
             raise SpawnError(
                 "idle_timeout_s would already be expired; last recognized "
                 "progress was {}s ago".format(
                     int(now - self.last_progress_clock)),
                 409)
-        if self.created_clock + max_runtime_s <= now:
+        if max_runtime_s and self.created_clock + max_runtime_s <= now:
             raise SpawnError(
                 "max_runtime_s would already be expired; this job started {}s "
                 "ago".format(int(now - self.created_clock)), 409)
@@ -499,9 +501,9 @@ class SpawnJob:
         }
         if self.running:
             value["idle_remaining_s"] = max(
-                0, int(self.idle_deadline - now))
+                0, int(self.idle_deadline - now)) if self.idle_timeout_s else None
             value["hard_remaining_s"] = max(
-                0, int(self.hard_deadline - now))
+                0, int(self.hard_deadline - now)) if self.max_runtime_s else None
             if self.lease_s:
                 value["lease_s"] = self.lease_s
                 value["lease_remaining_s"] = max(
@@ -904,6 +906,7 @@ class _Manager:
         """Cancel one relay handle whose turn ended. The handle goes only once
         the node acknowledged (or no longer knows) the job; an unreachable
         node keeps it for the sweeper's retry."""
+        handle.setdefault("abandoned_clock", time.monotonic())
         handle["abandoning"] = True
         try:
             if await _remote_abandon(handle, job_id):
@@ -987,9 +990,10 @@ class _Manager:
             if handle.get("abandoning") or \
                     now < float(handle.get("retry_at") or 0.0):
                 continue
-            if now - float(handle.get("registered_clock") or now) > \
-                    ABANDON_GIVE_UP_S:
-                # the node's own limits ended this job long ago
+            expiry_clock = handle.get("abandoned_clock") if handle.get("lease") else handle.get("registered_clock")
+            if now - float(expiry_clock or now) > ABANDON_GIVE_UP_S:
+                # Ownership renewal stopped long enough ago for the node's
+                # lease to lapse; legacy unleased jobs retain their old cap.
                 self.remote.pop(job_id, None)
                 continue
             asyncio.ensure_future(self._abandon_handle(job_id, handle))
@@ -1183,6 +1187,15 @@ def _spawn_channel(bid: int) -> dict:
     return channel
 
 
+def _check_timeout_capability(channel: dict, values: dict) -> None:
+    if protocol.TIMEOUT_SETTINGS_CAPABILITY in (channel.get("capabilities") or []):
+        return
+    if any(name in values and not 30 <= values[name] <= 7200
+           for name in ("idle_timeout_s", "max_runtime_s")):
+        raise SpawnError("node '{}' needs a Puppy backend upgrade for these timeout limits".format(
+            channel.get("name") or "?"), 409)
+
+
 def _limits_channel(bid: int) -> dict:
     channel = _spawn_channel(bid)
     if protocol.SPAWN_LIMITS_CAPABILITY not in \
@@ -1306,6 +1319,16 @@ def _shortened(text, answer_limit, job_id) -> str:
                                               job_id))
 
 
+def _limit_text(job: dict, name: str, remaining: str) -> str:
+    value = job.get(name)
+    if value is None:
+        return "backend default (awaiting confirmation)"
+    if value == 0:
+        return "unlimited"
+    left = job.get(remaining)
+    return "{}s{}".format(value, " ({}s left)".format(int(left)) if left is not None else "")
+
+
 def job_text(job: dict, node_name: str, answer_limit=None) -> str:
     """One shared rendering for local payloads and relayed remote payloads.
     ``answer_limit`` caps the answer text when a combined result has to be
@@ -1324,14 +1347,11 @@ def job_text(job: dict, node_name: str, answer_limit=None) -> str:
     if status == "running":
         lines.append(
             "Status: running for {}s · last recognized progress {}s ago "
-            "({}) · inactivity limit {}s ({}s left) · hard runtime {}s "
-            "from start ({}s left).".format(
+            "({}) · inactivity limit {} · hard runtime {} from start.".format(
                 elapsed, int(job.get("last_progress_age_s") or 0),
                 job.get("last_progress_kind") or "engine output",
-                job.get("idle_timeout_s"),
-                int(job.get("idle_remaining_s") or 0),
-                job.get("max_runtime_s"),
-                int(job.get("hard_remaining_s") or 0)))
+                _limit_text(job, "idle_timeout_s", "idle_remaining_s"),
+                _limit_text(job, "max_runtime_s", "hard_remaining_s")))
         if job.get("wait_note"):
             lines.append("Note: {}".format(job["wait_note"]))
         lines.append("The result is not ready yet. Call wait with jobs "
@@ -1386,15 +1406,13 @@ def jobs_text(entries, answer_limit=None) -> str:
             if payload.get("idle_timeout_s") is not None and \
                     payload.get("max_runtime_s") is not None:
                 lines.append(
-                    "Agent {} on {}: progress {}s ago ({}) · inactivity {}s "
-                    "({}s left) · hard runtime {}s ({}s left).".format(
+                    "Agent {} on {}: progress {}s ago ({}) · inactivity {} "
+                    "· hard runtime {}.".format(
                         payload.get("id"), node_name,
                         int(payload.get("last_progress_age_s") or 0),
                         payload.get("last_progress_kind") or "engine output",
-                        payload.get("idle_timeout_s"),
-                        int(payload.get("idle_remaining_s") or 0),
-                        payload.get("max_runtime_s"),
-                        int(payload.get("hard_remaining_s") or 0)))
+                        _limit_text(payload, "idle_timeout_s", "idle_remaining_s"),
+                        _limit_text(payload, "max_runtime_s", "hard_remaining_s")))
             note = payload.get("wait_note")
             if note:
                 lines.append("Agent {} on {} status note: {}".format(
@@ -1584,7 +1602,6 @@ async def start_for_turn(session: dict, turn_id: str, params: dict) -> dict:
     count = _validated_count(params.get("count"))
     if "timeout_s" in params:
         raise SpawnError("timeout_s is unsupported; use max_runtime_s")
-    max_runtime_s = params.get("max_runtime_s", DEFAULT_MAX_RUNTIME_S)
     body = {
         "engine": str(params.get("engine") or "").strip() or
         str(session.get("engine") or ""),
@@ -1594,13 +1611,15 @@ async def start_for_turn(session: dict, turn_id: str, params: dict) -> dict:
         "prompt": params.get("prompt"),
         "cwd": str(params.get("cwd") or "").strip() or
         _default_cwd(session, target),
-        "idle_timeout_s": params.get(
-            "idle_timeout_s", DEFAULT_IDLE_TIMEOUT_S),
-        "max_runtime_s": max_runtime_s,
     }
+    # Omission means the executing backend's settings, never this controller's.
+    for name in ("idle_timeout_s", "max_runtime_s"):
+        if name in params:
+            body[name] = _validated_seconds(params[name], name)
     initial_wait = _clamp_wait(params.get("wait_s"), default=15)
     if target["bid"]:
         channel = _spawn_channel(target["bid"])
+        _check_timeout_capability(channel, body)
         jobs = await _start_remote_fleet(session, turn_id, target, channel,
                                          body, count, initial_wait)
         return _rendered([(job, target["name"]) for job in jobs])
@@ -1688,6 +1707,7 @@ async def update_limits_for_turn(session: dict, turn_id: str,
     for kind, _job_id, ref in entries:
         if kind == "remote" and ref["bid"] not in channels:
             channels[ref["bid"]] = _limits_channel(ref["bid"])
+            _check_timeout_capability(channels[ref["bid"]], values)
 
     async def apply(kind, job_id, ref):
         if kind == "local":
@@ -1703,10 +1723,11 @@ async def update_limits_for_turn(session: dict, turn_id: str,
     lines = []
     for job, node_name in updated:
         lines.append(
-            "Updated spawned agent {} on {}: inactivity limit {}s; hard "
-            "runtime {}s total from job creation.".format(
-                job.get("id"), node_name, job.get("idle_timeout_s"),
-                job.get("max_runtime_s")))
+            "Updated spawned agent {} on {}: inactivity limit {}; hard "
+            "runtime {} total from job creation.".format(
+                job.get("id"), node_name,
+                _limit_text(job, "idle_timeout_s", "idle_remaining_s"),
+                _limit_text(job, "max_runtime_s", "hard_remaining_s")))
     lines.append("Keep calling wait for every still-running job; changing a "
                  "limit does not detach it from this turn.")
     return {"text": "\n".join(lines)}

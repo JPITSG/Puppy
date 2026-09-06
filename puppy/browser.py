@@ -67,7 +67,6 @@ LOADING_GUARD_SECONDS = 45.0
 MAX_NAV_TASKS = 8
 STORE_SYNC_DELAY = 2.0         # after load/navigation events
 STORE_INPUT_SYNC_DELAY = 4.0   # after raw viewer/agent interaction
-IDLE_STOP_SECONDS = 900        # no viewers this long -> browser exits
 # Chromium needs a usable size before the first viewer arrives. Once one does,
 # its visible pane replaces this default with a bounded, same-aspect viewport.
 DEFAULT_VIEWPORT_W, DEFAULT_VIEWPORT_H = 1280, 800
@@ -429,6 +428,7 @@ async def set_color_scheme(value) -> str:
 
 async def apply_config() -> None:
     """Reconcile live browsers after a snapshot's config/database replacement."""
+    idle_settings_changed()
     if _manager is not None:
         await _manager.clear_session_bindings()
     if not enabled() and _manager is not None:
@@ -450,6 +450,12 @@ async def apply_config() -> None:
 async def shutdown() -> None:
     if _manager is not None:
         await _manager.stop("Puppy is shutting down")
+
+
+def idle_settings_changed() -> None:
+    if _manager is not None:
+        for instance in list(_manager.instances.values()):
+            instance._arm_idle()
 
 
 def manager() -> "BrowserRegistry":
@@ -1881,14 +1887,17 @@ class Manager:
 
     def _arm_idle(self) -> None:
         self._cancel_idle()
+        seconds = config.get("browser.idle_timeout")
+        if not seconds or self.viewers or not self.running:
+            return
 
         async def later():
             try:
-                await asyncio.sleep(IDLE_STOP_SECONDS)
+                await asyncio.sleep(seconds)
             except asyncio.CancelledError:
                 return
             if not self.viewers:
-                await self.stop("No viewers for {} minutes".format(IDLE_STOP_SECONDS // 60))
+                await self.stop("No viewers for {} seconds".format(seconds))
 
         self.idle_task = asyncio.ensure_future(later())
 

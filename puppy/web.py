@@ -28,6 +28,7 @@ from puppy.drivers import base as driver_base
 log = logging.getLogger("puppy.web")
 
 _index_cache = None
+_auth_cache = None
 
 FAVICON_SVG = ("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>"
                "<defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'>"
@@ -64,7 +65,13 @@ async def state_change_guard(request: web.Request, handler):
 # ---- pages ----
 
 async def h_index(request: web.Request):
-    global _index_cache
+    global _index_cache, _auth_cache
+    if auth.request_user(request) is None:
+        if _auth_cache is None:
+            with open(os.path.join(config.STATIC_DIR, "auth.html"),
+                      "r", encoding="utf-8") as f:
+                _auth_cache = f.read()
+        return web.Response(text=_auth_cache, content_type="text/html")
     if _index_cache is None:
         path = os.path.join(config.STATIC_DIR, "index.html")
         with open(path, "r", encoding="utf-8") as f:
@@ -74,6 +81,14 @@ async def h_index(request: web.Request):
 
 
 async def h_favicon(request: web.Request):
+    if auth.request_user(request) is None:
+        return web.Response(text=(
+            "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'>"
+            "<rect width='24' height='24' rx='6' fill='#2e6fc7'/>"
+            "<g fill='none' stroke='white' stroke-width='1.8' stroke-linecap='round'>"
+            "<rect x='6' y='10' width='12' height='10' rx='2'/>"
+            "<path d='M8 10V7a4 4 0 0 1 8 0v3M12 14v2'/></g></svg>"
+        ), content_type="image/svg+xml")
     return web.Response(text=FAVICON_SVG, content_type="image/svg+xml")
 
 
@@ -180,6 +195,7 @@ async def _engines_response(refresh_usage: bool = True,
         "usage_refresh": usage_refresh.payload(),
         "auto_upgrade": cli_auto_upgrade.payload(),
         "timers": config.timers_payload(),
+        "timeouts": config.timeouts_payload(),
     }
 
 
@@ -279,6 +295,7 @@ async def h_state(request: web.Request):
         "usage_refresh": usage_refresh.payload(),
         "auto_upgrade": cli_auto_upgrade.payload(),
         "timers": config.timers_payload(),
+        "timeouts": config.timeouts_payload(),
         "backends": backends.list_backends(),
         "sessions": session_state["sessions"],
         "server_time": session_state["server_time"],
@@ -294,6 +311,7 @@ async def h_state(request: web.Request):
         "usage_refresh": payload["usage_refresh"],
         "auto_upgrade": payload["auto_upgrade"],
         "timers": payload["timers"],
+        "timeouts": payload["timeouts"],
         "user": payload["user"],
     })
     runner.publish_state({"type": "backends", "backends": payload["backends"]})
@@ -315,6 +333,31 @@ async def h_usage_refresh_get(request: web.Request):
 
 async def h_timers_get(_request: web.Request):
     return web.json_response({"timers": config.timers_payload()})
+
+
+async def h_timeouts_get(_request: web.Request):
+    return web.json_response({"timeouts": config.timeouts_payload()})
+
+
+async def h_timeouts_patch(request: web.Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid timeout settings request"}, status=400)
+    before = config.timeout_values()
+    try:
+        after = config.set_timeouts(body)
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    except OSError:
+        log.exception("could not save timeout settings")
+        return web.json_response({"error": "Could not save timeout settings"}, status=500)
+    if after["terminal_idle_seconds"] != before["terminal_idle_seconds"]:
+        terminal.idle_settings_changed()
+    if after["browser_idle_seconds"] != before["browser_idle_seconds"]:
+        browser.idle_settings_changed()
+    state_stream.wake("engines")
+    return web.json_response({"ok": True, "timeouts": config.timeouts_payload()})
 
 
 async def h_timers_patch(request: web.Request):
@@ -1102,6 +1145,7 @@ async def h_settings_get(request: web.Request):
         "uptime_seconds": max(0, int(time.monotonic() - started)),
         "usage_refresh": usage_refresh.payload(),
         "timers": config.timers_payload(),
+        "timeouts": config.timeouts_payload(),
         "uploads": uploads.settings_payload(),
         "version": __version__,
     })
@@ -1757,6 +1801,8 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     r.add_patch("/api/engines/usage-refresh", h_usage_refresh_patch)
     r.add_get("/api/timers", h_timers_get)
     r.add_patch("/api/timers", h_timers_patch)
+    r.add_get("/api/timeouts", h_timeouts_get)
+    r.add_patch("/api/timeouts", h_timeouts_patch)
     r.add_post("/api/engines/refresh", h_engines_refresh)
     r.add_get("/api/engines/auto-upgrade", h_engine_auto_upgrade_get)
     r.add_patch("/api/engines/auto-upgrade", h_engine_auto_upgrade_patch)

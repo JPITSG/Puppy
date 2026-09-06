@@ -9,18 +9,16 @@
   /* one crisp warning mark for engine notices; masking lets the theme own its
      colour while keeping the triangle and exclamation optically centred */
   --alert-triangle:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 1.7 14.4 13.2H1.6Z' fill='none' stroke='black' stroke-width='1.6' stroke-linejoin='round'/%3E%3Cpath d='M8 5.1v4.1' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round'/%3E%3Ccircle cx='8' cy='11.2' r='.8' fill='black'/%3E%3C/svg%3E");
-  --bg:#07080b; --panel:#0e1015; --panel2:#13161e; --panel3:#191d27;
-  --line:rgba(255,255,255,.075); --line2:rgba(255,255,255,.14);
+  --panel:#0e1015;
+  --line:rgba(255,255,255,.075);
   /* Tertiary copy is often only 9-12px. Keep it quieter than --txt2 while
      retaining normal-text contrast on the app's common surfaces. */
-  --txt:#eceef4; --txt2:#a6adbf; --txt3:#7d8599;
-  --acc:#5aa2f5; --acc2:#8cc3ff; --acc-dim:rgba(90,162,245,.14);
+  --txt2:#a6adbf;
+  --acc2:#8cc3ff; --acc-dim:rgba(90,162,245,.14);
   --ok:#22e5a4; --ok-dim:rgba(34,229,164,.12);
   --warn:#ffb64d; --warn-dim:rgba(255,182,77,.12);
   --fast-mode:#ffd24a;
-  --err:#ff6b81; --err-dim:rgba(255,107,129,.12);
   /* State lines keep their hierarchy while following each theme's palette. */
-  --focus-line:rgba(90,162,245,.55); --focus-ring:rgba(90,162,245,.12);
   --focus-ring-soft:rgba(90,162,245,.10); --focus-stage-ring:#284669;
   --browser-frame:#2a2b2d; --terminal-overlay-ink:#c5c9d3;
   --acc-line-soft:rgba(90,162,245,.28); --acc-line:rgba(90,162,245,.58);
@@ -28,18 +26,17 @@
   --ok-line:rgba(34,229,164,.4);
   --warn-line-soft:rgba(255,182,77,.28); --warn-line:rgba(255,182,77,.4);
   --warn-line-hi:rgba(255,182,77,.6);
-  --err-line-soft:rgba(255,107,129,.3); --err-line:rgba(255,107,129,.4);
+  --err-line-soft:rgba(255,107,129,.3);
   --err-line-hi:rgba(255,107,129,.55); --err-ring-soft:rgba(255,107,129,.08);
-  --violet:#9d7bff; --cyan:#4dc6ff;
+  --cyan:#4dc6ff;
   --claude:#e0784f; --codex:#4dd0c4; --opencode:#9d7bff; --term:#22e5a4;
-  --r-xs:4px; --r-sm:8px; --r-md:11px; --r-lg:15px;
+  --r-xs:4px; --r-md:11px;
   /* type scale: every font-size in this sheet is one of these steps */
-  --fs-2xs:10px; --fs-xs:11px; --fs-sm:12px; --fs-md:12.5px; --fs-lg:13px;
-  --fs-xl:13.5px; --fs-2xl:14px; --fs-3xl:16px;
+  --fs-xl:13.5px; --fs-3xl:16px;
   /* motion: three durations on the one curve below */
-  --t-fast:.12s; --t-base:.15s; --t-slow:.25s;
+  --t-fast:.12s; --t-slow:.25s;
   /* layers, from floating chrome up to the tooltip that tops everything */
-  --z-float:100; --z-modal:200; --z-popover:260; --z-auth:300; --z-toast:400;
+  --z-float:100; --z-modal:200; --z-popover:260; --z-toast:400;
   --z-tip:500; --z-drag:600;
   /* dialog widths: plain confirms and forms, editors, and the review sheet */
   --modal-w:480px; --modal-w-editor:640px; --modal-w-wide:820px;
@@ -53,27 +50,12 @@
   --hov-soft:rgba(255,255,255,.035); --hov-strong:rgba(255,255,255,.12);
   --scrollbar-thumb:#242b3a; --stage-bg:#000;
   --prov-anthropic:#d97757; --prov-openai:#10a37f;
-  /* the chevron a native <select> keeps once appearance:none has taken the
-     platform arrow away: touch devices and older pointers see this control,
-     so it draws the same mark the app-owned choice button does */
-  --select-arrow:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.25 6 7.75 9.5 4.25' fill='none' stroke='%237d8599' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   /* Full form fields and dense settings rows are two distinct control tiers. */
-  --field-h:36px; --settings-control-h:30px;
+  --settings-control-h:30px;
   /* button system: one height scale + themeable face/lift tokens so every
      control (btn, icon-btn, send, mini pill) shares the same material */
-  /* --btn-r is the single knob for every button corner: 2px is a hairline
-     softening of the square set, 8-10px is the old rounded one */
-  --btn-h:34px; --btn-h-sm:28px; --btn-r:2px;
-  /* optical label centring; measured from the live font at boot (see
-     syncLabelNudge). 0 = the font's cap band is already square in its line box */
-  --label-pb:0px;
-  --line3:rgba(255,255,255,.24);
-  --btn-face:linear-gradient(180deg,rgba(255,255,255,.07),rgba(255,255,255,.015));
-  --btn-face-hi:linear-gradient(180deg,rgba(255,255,255,.13),rgba(255,255,255,.04));
-  --btn-top:rgba(255,255,255,.07);
-  --btn-lift:0 1px 2px rgba(0,0,0,.35);
+  --btn-h-sm:28px;
   --btn-lift-hi:0 5px 14px -5px rgba(0,0,0,.7);
-  --btn-press:inset 0 2px 5px rgba(0,0,0,.28);
   --hov:rgba(255,255,255,.07); --tab-hov:rgba(255,255,255,.04);
   /* tab selection has two levels: the visible tab in every pane, then the
      globally focused pane. Drag/drop surfaces stay legible over xterm black. */
@@ -91,9 +73,6 @@
   --tip-line:rgba(255,255,255,.17);
   --tip-shadow:0 10px 28px -10px rgba(0,0,0,.8),inset 0 1px 0 rgba(255,255,255,.08);
   --spin-track:rgba(255,255,255,.22);
-  --acc-hi:#5fa5f6; --acc-lo:#2a63c9;
-  --glow-acc:0 2px 8px -5px rgba(58,120,220,.72);
-  --glow-acc-hi:0 5px 15px -7px rgba(58,120,220,.85);
   --ok-hi:#33e2ab; --ok-lo:#0fac79; --ok-ink:#04241a;
   --glow-ok:0 2px 8px -5px rgba(15,172,121,.68);
   --err-hi:#ff7d92; --err-lo:#d94259;
@@ -101,16 +80,8 @@
   --danger-line:rgba(255,107,129,.35); --danger-line-hi:rgba(255,107,129,.55);
   --danger-hov:rgba(255,107,129,.2); --danger-press:rgba(255,107,129,.28);
   --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
-  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,"Helvetica Neue",Arial,sans-serif;
-  --ease:cubic-bezier(.16,1,.3,1);
   --slide-time:.24s;--slide-fade-time:.2s;
   --side-w:256px;
-}
-*{box-sizing:border-box;margin:0;padding:0}
-html,body{height:100%}
-body{
-  background:var(--bg);color:var(--txt);font:var(--fs-2xl)/1.5 var(--sans);
-  -webkit-font-smoothing:antialiased;overflow:hidden;
 }
 body::before{
   content:"";position:fixed;inset:0;pointer-events:none;z-index:0;
@@ -138,7 +109,6 @@ body::after{
     linear-gradient(90deg,transparent 0,transparent var(--side-w,256px),#000 calc(var(--side-w,256px) + 160px));
   mask-composite:intersect;
 }
-.hidden{display:none!important}
 ::-webkit-scrollbar{width:10px;height:10px}
 ::-webkit-scrollbar-thumb{background:var(--scrollbar-thumb);border-radius:var(--r-sm);border:2px solid var(--bg)}
 ::-webkit-scrollbar-track{background:transparent}
@@ -477,54 +447,6 @@ a{color:var(--acc2)}
 .side-backdrop,.drawer-edge{display:none}
 
 /* ---------- buttons & inputs ---------- */
-/* Every button shares one geometry contract: a flex-centered label on a fixed
-   integer height with line-height:1. Padding-derived heights land on fractional
-   line boxes (13px x 1.3 = 16.9px), which is what made labels ride ~1px high
-   off the optical centre; a whole-pixel box centred by flexbox cannot. */
-/* appearance:none is load-bearing, not cosmetic: while a native button keeps
-   its platform look (iOS Safari, older blink), it ignores author colour,
-   background-color and box-shadow even though background-image still paints */
-button{
-  font:inherit;-webkit-appearance:none;appearance:none;
-  -webkit-tap-highlight-color:transparent;
-}
-/* :where() keeps this at zero specificity so any button can restyle freely */
-:where(button,summary,[role=button]):focus-visible{outline:2px solid var(--acc);outline-offset:2px}
-.btn{
-  display:inline-flex;align-items:center;justify-content:center;gap:8px;flex-shrink:0;
-  height:var(--btn-h);padding:0 15px var(--label-pb);border-radius:var(--btn-r);cursor:pointer;user-select:none;
-  font-size:var(--fs-md);font-weight:600;line-height:1;white-space:nowrap;color:var(--txt);
-  background-color:var(--panel3);background-image:var(--btn-face);border:1px solid var(--line2);
-  box-shadow:inset 0 1px 0 var(--btn-top),var(--btn-lift);
-  transition:background var(--t-base) var(--ease),border-color var(--t-base) var(--ease),color var(--t-base) var(--ease),box-shadow var(--t-base) var(--ease),filter var(--t-base) var(--ease);
-}
-/* leading glyph in a label ("＋ New session"): optically sized and balanced */
-.btn .btn-ico{display:inline-flex;line-height:0;opacity:.92}
-.btn .btn-ico svg{display:block}
-@media (hover:hover){
-  /* hover brightens the face - deliberately no lift: a translate on hover
-     makes a dense UI twitch as the pointer crosses it */
-  .btn:hover{
-    background-image:var(--btn-face-hi);border-color:var(--line3);
-    box-shadow:inset 0 1px 0 var(--btn-top),var(--btn-lift);
-  }
-}
-.btn:active{box-shadow:var(--btn-press);filter:brightness(.97)}
-.btn:disabled{opacity:.42;box-shadow:none;filter:none;pointer-events:none}
-.btn-pri{
-  color:#fff;border-color:transparent;
-  background-color:var(--acc-lo);background-image:linear-gradient(180deg,var(--acc-hi),var(--acc-lo));
-  box-shadow:inset 0 1px 0 rgba(255,255,255,.3),0 1px 2px rgba(0,0,0,.25),var(--glow-acc);
-}
-@media (hover:hover){
-  /* the fill has to be restated: .btn:hover's neutral face would otherwise win
-     on specificity and paint over the accent */
-  .btn-pri:hover{
-    background-image:linear-gradient(180deg,var(--acc-hi),var(--acc-lo));filter:brightness(1.07);
-    box-shadow:inset 0 1px 0 rgba(255,255,255,.34),0 1px 2px rgba(0,0,0,.25),var(--glow-acc-hi);
-  }
-}
-.btn-pri:active{filter:brightness(.94);box-shadow:inset 0 2px 6px rgba(4,17,40,.4)}
 .btn-ok{
   color:var(--ok-ink);border-color:transparent;
   background-color:var(--ok-lo);background-image:linear-gradient(180deg,var(--ok-hi),var(--ok-lo));
@@ -556,7 +478,6 @@ button{
 .btn-ghost{background:none;color:var(--txt2);box-shadow:none}
 @media (hover:hover){.btn-ghost:hover{background:var(--hov);color:var(--txt);box-shadow:none}}
 .btn-ghost:active{background:var(--hov);box-shadow:var(--btn-press)}
-.btn-wide{width:100%;height:var(--field-h)}
 .btn-sm{height:var(--btn-h-sm);padding:0 11px var(--label-pb);font-size:var(--fs-sm);border-radius:var(--btn-r);gap:6px}
 .icon-btn{
   display:inline-grid;place-items:center;flex-shrink:0;padding:0;
@@ -568,30 +489,6 @@ button{
 @media (hover:hover){.icon-btn:hover{background:var(--hov);border-color:var(--line);color:var(--txt)}}
 .icon-btn:active{transform:scale(.92);background:var(--hov);color:var(--txt)}
 .icon-btn:disabled{opacity:.4;pointer-events:none}
-input[type=text],input[type=password],input[type=number],input[type=time],select,textarea{
-  font:inherit;font-size:var(--fs-lg);color:var(--txt);background:var(--panel2);
-  -webkit-appearance:none;appearance:none;
-  border:1px solid var(--line2);border-radius:var(--r-sm);width:100%;
-  outline:none;transition:border-color var(--t-base) var(--ease),box-shadow var(--t-base) var(--ease);
-}
-input[type=text],input[type=password],input[type=number],input[type=time],select{
-  height:var(--field-h);padding:0 10px;line-height:1.2;
-}
-textarea{padding:8px 10px}
-/* a native select shows the app's chevron where the platform arrow was */
-select{
-  padding-right:30px;background-image:var(--select-arrow);background-repeat:no-repeat;
-  background-position:right 10px center;background-size:12px 12px;
-}
-select:disabled{opacity:.45;cursor:not-allowed}
-input[type=text]:focus,input[type=password]:focus,input[type=number]:focus,
-input[type=time]:focus,select:focus,textarea:focus{
-  border-color:var(--focus-line);box-shadow:0 0 0 3px var(--focus-ring);
-}
-label,.field-lbl{display:block;font-size:var(--fs-xs);text-transform:uppercase;letter-spacing:.08em;color:var(--txt3);margin-bottom:10px}
-/* every control a label can wrap, or the odd one out sits tighter to its
-   caption than the rest of the form does */
-label input,label select,label textarea,.field-lbl>.seg{margin-top:5px;text-transform:none;letter-spacing:0}
 .field-lbl>.seg{display:flex;width:fit-content;--settings-control-h:var(--field-h)}
 .field-row{display:flex;gap:10px}
 .field-row>*{flex:1}
@@ -1222,6 +1119,13 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 /* the pending/ok/failed mark: drawn like every other glyph, on the card's
    own row height */
 .tool-head .t-state{font-size:var(--fs-2xs);flex-shrink:0;display:inline-flex;align-items:center}
+/* One optical line for the head. Flex centring lands a glyph box on the middle
+   of the line box, which carries the font's ascent and descent padding and so
+   sits a pixel below the band the eye reads as the line: the midpoint between
+   the baseline and the cap height. Lift the caret, the tool glyph and the state
+   mark onto that cap midline together, so the row keeps one horizon and the
+   check or cross meets the same band the result line's mark uses. */
+.tool-head .t-caret,.tool-head .t-ico,.tool-head .t-state{position:relative;top:-1px}
 .tool-head .t-state .spinner{width:10px;height:10px;border:2px solid var(--acc-dim);border-top-color:var(--acc);border-radius:50%;animation:spin .8s linear infinite;animation-delay:var(--prompt-spin-delay,0ms)}
 .tool-head .t-state svg{display:block}
 /* One status voice. A state word or a fact value takes its tone from these
@@ -1300,7 +1204,9 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .aside-err{font-size:var(--fs-md);color:var(--err);font-family:var(--mono);white-space:pre-wrap}
 .aside-note{margin-top:6px;font-size:var(--fs-sm);color:var(--warn);font-family:var(--mono)}
 .result-line{align-self:flex-end;font-size:var(--fs-xs);color:var(--txt3);font-family:var(--mono);padding:0 4px}
-.result-line svg{vertical-align:-2px}
+/* The mark hangs 3px below the baseline so its 13px box is centred on the cap
+   band (7px at --fs-xs), the same horizon the tool head's marks take. */
+.result-line svg{vertical-align:-3px}
 .result-line .ok{color:var(--ok)}
 .result-line .bad{color:var(--err)}
 
@@ -2159,6 +2065,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 
 /* ---------- configurable timers ---------- */
 .timer-card-copy{margin-bottom:0}
+.timer-card-copy+.hint{margin-top:6px}
 .timer-section{min-width:0;margin-top:15px;padding-top:15px;border-top:1px solid var(--line)}
 .timer-section-head h3{
   margin:0;color:var(--txt);font-family:var(--sans);font-size:var(--fs-lg);font-weight:600;
@@ -2196,6 +2103,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .timer-row-controls input[type=number]::-webkit-inner-spin-button,
 .timer-row-controls input[type=number]::-webkit-outer-spin-button{opacity:1}
 .timer-row-unit{min-width:22px;color:var(--txt3);font-size:var(--fs-xs)}
+.timeout-row .form-error{grid-column:1 / -1;margin:0}
 
 .usage-refresh-row{
   display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:10px 18px;
@@ -2464,30 +2372,6 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .new-session-color{margin-top:8px}
 .open-session-list{max-height:50vh;overflow-y:auto;margin-top:10px}
 
-/* ---------- auth ---------- */
-.auth-shell{
-  position:fixed;inset:0;display:flex;align-items:center;justify-content:center;z-index:var(--z-auth);
-  background:var(--bg);padding:16px;
-}
-.auth-shell::before{
-  content:"";position:absolute;inset:0;pointer-events:none;
-  background:radial-gradient(600px 420px at 50% 20%,rgba(90,162,245,.14),transparent 65%);
-}
-.auth-card{
-  position:relative;width:100%;max-width:400px;background:var(--panel2);
-  border:1px solid var(--line2);border-radius:var(--r-lg);padding:28px;
-  box-shadow:0 30px 90px -30px rgba(0,0,0,.9);text-align:center;
-}
-.auth-brand .brand-mark{width:52px;height:52px;font-size:26px;border-radius:var(--r-lg);margin:0 auto 14px;display:flex}
-.auth-kicker{font-size:var(--fs-2xs);letter-spacing:.22em;color:var(--acc);margin-bottom:6px}
-.auth-card h1{font-size:19px;margin-bottom:4px}
-.auth-sub{font-size:var(--fs-sm);color:var(--txt3);margin-bottom:18px}
-.auth-card form{text-align:left}
-.auth-err{
-  background:var(--err-dim);border:1px solid var(--err-line);color:var(--err);
-  border-radius:var(--r-sm);font-size:var(--fs-sm);padding:8px 10px;margin-bottom:12px;
-}
-
 /* ---------- toasts ---------- */
 .toasts{position:fixed;right:14px;bottom:14px;display:flex;flex-direction:column;gap:8px;z-index:var(--z-toast);max-width:min(384px,90vw)}
 .toast{
@@ -2730,17 +2614,15 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 /* ---------- light theme ---------- */
 html.light{
   color-scheme:light;
-  --bg:#f3f5f9; --panel:#ffffff; --panel2:#eaeef5; --panel3:#dfe5ee;
-  --line:rgba(15,23,42,.10); --line2:rgba(15,23,42,.18);
-  --txt:#1b2434; --txt2:#48536b; --txt3:#606c82;
+  --panel:#ffffff;
+  --line:rgba(15,23,42,.10);
+  --txt2:#48536b;
   /* Text-bearing colors are deliberately darker than their soft decorative
      tints so small status words remain readable on pale cards and fields. */
-  --acc:#2b69bd; --acc2:#2563c4; --acc-dim:rgba(59,130,224,.13);
+  --acc2:#2563c4; --acc-dim:rgba(59,130,224,.13);
   --ok:#077553; --ok-dim:rgba(11,158,113,.10);
   --warn:#9e5203; --warn-dim:rgba(178,98,5,.10);
   --fast-mode:#946f00;
-  --err:#b52640; --err-dim:rgba(214,69,93,.10);
-  --focus-line:rgba(59,130,224,.55); --focus-ring:rgba(59,130,224,.12);
   --focus-ring-soft:rgba(59,130,224,.10); --focus-stage-ring:#a9c7ef;
   --browser-frame:#cacdd4;
   --acc-line-soft:rgba(59,130,224,.28); --acc-line:rgba(59,130,224,.58);
@@ -2748,29 +2630,19 @@ html.light{
   --ok-line:rgba(11,158,113,.4);
   --warn-line-soft:rgba(178,98,5,.28); --warn-line:rgba(178,98,5,.4);
   --warn-line-hi:rgba(178,98,5,.6);
-  --err-line-soft:rgba(214,69,93,.3); --err-line:rgba(214,69,93,.4);
+  --err-line-soft:rgba(214,69,93,.3);
   --err-line-hi:rgba(214,69,93,.55); --err-ring-soft:rgba(214,69,93,.08);
-  --violet:#7c5bd6; --cyan:#0e8bc4;
+  --cyan:#0e8bc4;
   /* buttons: opaque white face, ink-tinted lift, deeper accents so white
      label text keeps its contrast on the primary/send fills */
-  --line3:rgba(15,23,42,.3);
-  --btn-face:linear-gradient(180deg,#fff,#eff3f9);
-  --btn-face-hi:linear-gradient(180deg,#fff,#e5ebf5);
-  --btn-top:rgba(255,255,255,.9);
-  --btn-lift:0 1px 2px rgba(15,23,42,.10);
   --btn-lift-hi:0 5px 14px -6px rgba(15,23,42,.35);
-  --btn-press:inset 0 2px 5px rgba(15,23,42,.14);
   --hov:rgba(15,23,42,.06); --tab-hov:rgba(15,23,42,.045);
   --hov-soft:rgba(15,23,42,.035); --hov-strong:rgba(15,23,42,.09);
   --scrollbar-thumb:#c0c9d8;
-  --select-arrow:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.25 6 7.75 9.5 4.25' fill='none' stroke='%23606c82' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   --tab-active-bg:rgba(15,23,42,.075);
   --tab-active-focus-bg:rgba(59,130,224,.17);
   --tab-drag-bg:#ffffff;
   --spin-track:rgba(15,23,42,.2);
-  --acc-hi:#4a8ce9; --acc-lo:#2159bd;
-  --glow-acc:0 2px 8px -5px rgba(33,89,189,.42);
-  --glow-acc-hi:0 5px 15px -7px rgba(33,89,189,.55);
   --ok-hi:#22d69f; --ok-lo:#0a9b6e; --ok-ink:#03251b;
   --glow-ok:0 2px 8px -5px rgba(10,155,110,.38);
   --err-hi:#f4687f; --err-lo:#cf3850;
@@ -2832,12 +2704,13 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
 /* the right padding matches the outer bar's 10px so the strip's + sits on
    the same vertical line as the pane's New-tab + directly above it */
 .task-tabbar{min-height:36px;padding:6px 10px 0 8px;z-index:1}
-.task-tabbar .tab{font-size:var(--fs-sm);padding:5px var(--tab-space);max-width:200px}
+/* Keep the same face when the shared drag card is attached to body. */
+.tab.task-tab{font-size:var(--fs-sm);padding:5px var(--tab-space);max-width:200px}
 .task-tabbar .tab-add-wrap{margin-top:-6px;gap:2px}
 .task-tabbar .icon-btn.attention{color:var(--warn)}
-.task-tabbar .t-state{font-size:var(--fs-2xs);color:var(--txt3);flex-shrink:0;white-space:nowrap}
+.task-tab .t-state{font-size:var(--fs-2xs);color:var(--txt3);flex-shrink:0;white-space:nowrap}
 /* an answer nobody has looked at yet */
-.task-tabbar .t-state.unread::before{
+.task-tab .t-state.unread::before{
   content:"";display:inline-block;width:5px;height:5px;border-radius:50%;
   background:var(--acc);margin-right:5px;vertical-align:1px;
 }
@@ -2923,4 +2796,4 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
 .task-review-resolve,.task-review-fold{margin:0 0 6px}
 .task-review-resolve-note,.task-review-fold-note{margin:0 0 10px}
 .task-review-resolve-note .note-para+.note-para{margin-top:4px}
-@media (max-width:560px){.task-tabbar .tab{max-width:150px}}
+@media (max-width:560px){.tab.task-tab{max-width:150px}}

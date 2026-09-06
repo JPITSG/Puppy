@@ -29,6 +29,13 @@ once; while Main is idle its activity slot reports working tasks or an approval
 waiting for input. Task links and search results open the corresponding inner
 conversation.
 
+Drag task tabs to reorder them beside Main, using the workspace tabs' same drag
+card and sliding animation. Main stays first. Reordering keeps the selected
+conversation and saves the open-tab order in this browser across reloads;
+reopened hidden tasks join the end. Tasks stay within their own session strip
+and do not create workspace splits. Touch keeps the same horizontal swipe
+behavior as workspace tabs.
+
 The **Tasks** sheet lists every task with its state, latest answer and the
 **Open**, **Review changes** and **Remove** actions, without scrolling Main's
 chat. Review stays visible but disabled while a task or its queue is working and

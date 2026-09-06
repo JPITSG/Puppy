@@ -1264,6 +1264,8 @@ finish()
         return json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
 
     try:
+        # Unlimited must run normally, including background wake-ups.
+        config.set_timeouts({"turn_seconds": 0})
         # an ordinary turn establishes the native session
         assert hub.send_message("plain fake turn") == {"queued": False}
         await finish_turn("plain fake turn")
@@ -3477,6 +3479,21 @@ async def exercise_controller(url: str, token: str, backend_url: str,
             assert response.status == 200, proxied_engines
         assert isinstance(proxied_engines["engines"], list)
         assert proxied_engines["timers"]["values"]["model_catalog_minutes"] == 9
+        assert proxied_engines["timeouts"]["defaults"] == {
+            "turn_seconds": 7200, "spawn_runtime_seconds": 7200,
+            "spawn_idle_seconds": 600, "terminal_idle_seconds": 900,
+            "browser_idle_seconds": 900}
+        async with http.patch(url + f"/api/b/{stored['id']}/timeouts", headers=headers,
+                              json={"browser_idle_seconds": 0}) as response:
+            timeout_result = await response.json()
+            assert response.status == 200, timeout_result
+        assert timeout_result["timeouts"]["values"]["browser_idle_seconds"] == 0
+        async with http.get(url + f"/api/b/{stored['id']}/timeouts", headers=headers) as response:
+            assert (await response.json())["timeouts"]["values"]["browser_idle_seconds"] == 0
+        async with http.patch(url + f"/api/b/{stored['id']}/timeouts", headers=headers,
+                              json={"browser_idle_seconds": 900}) as response:
+            assert response.status == 200
+
         async with http.patch(url + f"/api/b/{stored['id']}/timers", headers=headers,
                               json={"cli_status_minutes": 11}) as response:
             proxied_timers = await response.json()

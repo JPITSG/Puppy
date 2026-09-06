@@ -241,8 +241,8 @@ async def check_terminal_lifecycle(session_id: int, other_session_id: int) -> No
     hub.attach(session_capture)
     runner.updates_attach(updates_capture)
     try:
-        old_idle = terminal.IDLE_STOP_SECONDS
-        terminal.IDLE_STOP_SECONDS = 0.05
+        old_idle = config.get("terminal.idle_timeout")
+        config.set_timeouts({"terminal_idle_seconds": 1})
         try:
             unviewed = await registry.create(
                 command="/bin/bash --noprofile --norc", cwd=str(TEST_ROOT))
@@ -250,7 +250,7 @@ async def check_terminal_lifecycle(session_id: int, other_session_id: int) -> No
             assert "No viewers" in unviewed.ended_reason
             await registry.close(unviewed.terminal_id, "idle test complete")
         finally:
-            terminal.IDLE_STOP_SECONDS = old_idle
+            config.set_timeouts({"terminal_idle_seconds": old_idle})
 
         instance = await registry.create(
             command="/bin/bash --noprofile --norc", cwd=str(TEST_ROOT),

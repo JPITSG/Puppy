@@ -118,6 +118,7 @@ async def exercise_http(archive_ui: dict, session_id: int, project: Path) -> Non
             config.set_value("engines.usage_refresh_minutes", 60)
             config.set_engine_defaults("codex", {"permission_mode": "", "model": "", "effort": ""})
             config.set_timers({"remote_session_seconds": 30})
+            config.set_timeouts(config.TIMEOUT_DEFAULTS)
             config.set_value("uploads.max_file_size_mb", 2)
             db.meta_set(RELEASE_OBSERVATION_KEY, {
                 "source": "npm:@openai/codex", "version": "changed",
@@ -150,6 +151,11 @@ async def exercise_http(archive_ui: dict, session_id: int, project: Path) -> Non
             assert config.get("engines.defaults.codex") == {
                 "permission_mode": "read-only", "model": "saved/model", "effort": "high"}
             assert config.get("timers.remote_session_seconds") == 17
+            assert config.timeout_values() == {
+                "turn_seconds": 0, "spawn_runtime_seconds": 14400,
+                "spawn_idle_seconds": 0, "terminal_idle_seconds": 1800,
+                "browser_idle_seconds": 0,
+            }
             assert config.get("engines.opencode") is None
             assert config.get("uploads.max_file_size_mb") == 19
             assert notify.completion_events(0)["stream_id"] != archived_stream
@@ -198,6 +204,11 @@ async def main() -> None:
                 "permission_mode": "read-only" if key == "codex" else "auto",
                 "model": "saved/model", "effort": "high"})
         saved_engine_defaults = config.get("engines.defaults").copy()
+        saved_timeouts = config.set_timeouts({
+            "turn_seconds": 0, "spawn_runtime_seconds": 14400,
+            "spawn_idle_seconds": 0, "terminal_idle_seconds": 1800,
+            "browser_idle_seconds": 0,
+        })
         config.set_timers({
             "cli_release_minutes": 240,
             "model_catalog_minutes": 7,
@@ -560,6 +571,7 @@ async def main() -> None:
         assert config.get("sessions.default_cwd") == str(project)
         assert config.get("engines.usage_refresh_minutes") == 30
         assert config.get("engines.defaults") == saved_engine_defaults
+        assert config.timeout_values() == saved_timeouts
         assert config.timer_values() == {
             "cli_release_minutes": 240,
             "model_catalog_minutes": 7,
@@ -597,6 +609,12 @@ async def main() -> None:
         previous_spawn_prompt_shape["system_prompt"].pop("spawn", None)
         missing_cwd = config.export_data()
         missing_cwd["sessions"].pop("default_cwd", None)
+        missing_spawn = config.export_data()
+        missing_spawn.pop("spawn")
+        missing_browser_idle = config.export_data()
+        missing_browser_idle["browser"].pop("idle_timeout")
+        missing_terminal_idle = config.export_data()
+        missing_terminal_idle["terminal"].pop("idle_timeout")
         missing_timers = config.export_data()
         missing_timers.pop("timers", None)
         previous_timer_shape = config.export_data()
@@ -614,6 +632,7 @@ async def main() -> None:
                         previous_terminal_prompt_shape,
                         previous_spawn_prompt_shape,
                         missing_cwd, missing_timers, previous_timer_shape,
+                        missing_spawn, missing_browser_idle, missing_terminal_idle,
                         unknown_selection, missing_engine_defaults,
                         partial_engine_defaults, mistyped_engine_defaults):
             try:
@@ -654,6 +673,7 @@ async def main() -> None:
         try:
             config.normalize_import(dict(config.export_data(),
                                          browser={"enabled": True,
+                                                  "idle_timeout": 900,
                                                   "color_scheme": "neon",
                                                   "shared_storage": False}))
         except ValueError as exc:
@@ -664,6 +684,7 @@ async def main() -> None:
         try:
             config.normalize_import(dict(config.export_data(),
                                          browser={"enabled": True,
+                                                  "idle_timeout": 900,
                                                   "color_scheme": "dark",
                                                   "shared_storage": "yes"}))
         except ValueError as exc:

@@ -43,6 +43,9 @@ ENGINE_DEFAULTS_CAPABILITY = "engine-defaults"
 # carries controller-only synchronization intervals; remote consoles expose
 # those only for their own controller, never as if a headless node used them.
 TIMER_SETTINGS_CAPABILITY = "timer-settings"
+# Node-owned execution/unattended deadlines, including zero = unlimited for
+# turn/spawn limits. Spawn calls with omitted limits use the executing node.
+TIMEOUT_SETTINGS_CAPABILITY = "timeout-settings"
 # GET/PATCH of node-owned custom, remote-workspace, and browser system-prompt
 # text. Conditional guidance remains turn-scoped: remote-workspace text needs a
 # cross-node mirror, and browser text needs browser tools enabled for the turn.
@@ -210,6 +213,7 @@ BASE_CAPABILITIES = (
     ENGINE_AUTO_UPGRADE_CAPABILITY,
     ENGINE_DEFAULTS_CAPABILITY,
     TIMER_SETTINGS_CAPABILITY,
+    TIMEOUT_SETTINGS_CAPABILITY,
     SYSTEM_PROMPT_CAPABILITY,
     WORKSPACE_PROVIDER_CAPABILITY,
     WORKSPACE_MIRROR_CAPABILITY,

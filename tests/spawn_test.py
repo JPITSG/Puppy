@@ -18,13 +18,12 @@ import asyncio
 import json
 import os
 import sys
-import tempfile
 import time
 
-TEST_ROOT = tempfile.mkdtemp(prefix="puppy-spawn-test-")
-os.environ["PUPPY_DATA"] = os.path.join(TEST_ROOT, "data")
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from tests.scratch import private_root
+TEST_ROOT = str(private_root("spawn-"))
+os.environ["PUPPY_DATA"] = os.path.join(TEST_ROOT, "data")
 
 from puppy import backends, config, db, drivers, protocol, runner, \
     spawn_agent, spawn_exec  # noqa: E402
@@ -298,15 +297,26 @@ async def test_validation(cwd):
     await refused(dict(good, prompt="  "), "non-empty prompt")
     await refused(dict(good, cwd=os.path.join(cwd, "missing")),
                   "does not exist")
-    await refused(dict(good, max_runtime_s=1), "max_runtime_s must be between")
+    await refused(dict(good, max_runtime_s=-1), "max_runtime_s must be between")
     await refused(dict(good, max_runtime_s="soon"), "whole number")
-    await refused(dict(good, idle_timeout_s=1),
+    await refused(dict(good, idle_timeout_s=-1),
                   "idle_timeout_s must be between")
-    await refused(dict(good, max_runtime_s=7201),
+    await refused(dict(good, max_runtime_s=spawn_exec.MAX_TIMEOUT_S + 1),
                   "max_runtime_s must be between")
     await refused(dict(good, max_runtime_s=300.5), "whole number")
     await refused(dict(good, timeout_s=300, max_runtime_s=600),
                   "timeout_s is unsupported")
+    original = config.timeout_values()
+    try:
+        config.set_timeouts({"spawn_runtime_seconds": 21600, "spawn_idle_seconds": 0})
+        inherited = await spawn_exec.prepare_request(good)
+        assert inherited["max_runtime_s"] == 21600 and inherited["idle_timeout_s"] == 0
+        explicit = await spawn_exec.prepare_request(dict(good, max_runtime_s=0, idle_timeout_s=1))
+        assert explicit["max_runtime_s"] == 0 and explicit["idle_timeout_s"] == 1
+        config.set_timeouts({"spawn_runtime_seconds": 3600})
+        assert inherited["max_runtime_s"] == 21600
+    finally:
+        config.set_timeouts(original)
     try:
         spawn_exec._validated_limit_update({"jobs": ["0123abcd"]})
     except spawn_exec.SpawnError as exc:
@@ -792,6 +802,24 @@ async def test_turn_end_reaping(cwd):
         await mgr._sweep_once()
         assert "ab12cd36" not in mgr.remote and calls == []
 
+        # A long unlimited relay cannot be forgotten as soon as its turn ends:
+        # the lease can only expire after its LAST renewal, not job creation.
+        behaviour["DELETE"] = lambda path, body: unreached()
+        long_job = spawn_exec._register_remote(
+            session, "turn-e", {"bid": remote_bid, "name": "BUILD-NODE.LAN"},
+            "ab12cd37", lease=True)
+        long_job["registered_clock"] -= 100000
+        await spawn_exec.end_turn(sid, "turn-e")
+        assert long_job["abandoned_clock"] > time.monotonic() - 5
+        long_job["retry_at"] = 0
+        await mgr._sweep_once()
+        assert mgr.remote.get("ab12cd37") is long_job
+        await asyncio.sleep(0.05)
+        long_job["abandoned_clock"] -= spawn_exec.ABANDON_GIVE_UP_S + 1
+        long_job["retry_at"] = 0
+        await mgr._sweep_once()
+        assert "ab12cd37" not in mgr.remote
+
         # shutdown: local jobs killed and relayed ones cancelled (concurrently,
         # bounded) before the handles are forgotten
         behaviour["DELETE"] = lambda path, body: {"ok": True}
@@ -872,6 +900,7 @@ async def test_relay_start(cwd):
         started = await spawn_exec.start_for_turn(session, "turn-r", params)
         post = calls[-1]
         assert post["method"] == "POST" and post["body"]["job_id"]
+        assert "idle_timeout_s" not in post["body"] and "max_runtime_s" not in post["body"]
         assert post["body"]["wait_s"] == spawn_exec.REMOTE_START_WAIT_S
         assert post["timeout_s"] <= 45, post["timeout_s"]
         confirmed_id = post["body"]["job_id"]
@@ -1243,7 +1272,7 @@ async def test_http_routes(cwd):
         assert changed["job"]["idle_timeout_s"] == 1200
         assert changed["job"]["max_runtime_s"] == 5400
         response = await client.patch(
-            "/api/spawn/{}".format(live_id), json={"max_runtime_s": 7201})
+            "/api/spawn/{}".format(live_id), json={"max_runtime_s": spawn_exec.MAX_TIMEOUT_S + 1})
         assert response.status == 400
         response = await client.delete("/api/spawn/{}".format(live_id))
         assert response.status == 200
@@ -1387,6 +1416,43 @@ async def test_http_routes(cwd):
     print("spawn HTTP routes ok")
 
 
+async def test_unlimited(cwd):
+    job = spawn_exec.manager().start_job(
+        request_for("hang", cwd, idle_timeout_s=0, max_runtime_s=0), ("remote",))
+    # Advance ages far past the former two-hour cap without extending a wait.
+    job.created_clock -= 100000
+    job.last_progress_clock -= 100000
+    await asyncio.sleep(0.2)
+    assert job.running and job.proc is not None
+    payload = job.payload()
+    assert payload["idle_remaining_s"] is None and payload["hard_remaining_s"] is None
+    json.dumps(payload, allow_nan=False)
+    assert "inactivity limit unlimited" in spawn_exec.job_text(payload, "Demo")
+    assert "hard runtime unlimited" in spawn_exec.jobs_text([(payload, "Demo"), (payload, "Peer")])
+    job.update_limits({"max_runtime_s": 200000})
+    assert job.hard_deadline > time.monotonic()
+    job.update_limits({"max_runtime_s": 0, "idle_timeout_s": 0})
+    assert job.deadline == float("inf")
+    job.lease_s = 5
+    job.lease_clock = time.monotonic() - 6
+    assert job.expiry()[0] == "abandoned"  # unlimited does not abandon ownership
+    job.lease_s = 0
+    await spawn_exec.manager().cancel(job, "test stop")
+    assert job.status == "cancelled"
+    for idle, runtime, needle in ((0, 1, "hard runtime"), (1, 0, "no recognized")):
+        job = spawn_exec.manager().start_job(
+            request_for("hang", cwd, idle_timeout_s=idle, max_runtime_s=runtime), ("remote",))
+        await wait_done(job, seconds=5)
+        assert job.status == "timeout" and needle in job.error
+    # Turning an already waiting unlimited job back into a finite one wakes it.
+    job = spawn_exec.manager().start_job(
+        request_for("hang", cwd, idle_timeout_s=0, max_runtime_s=0), ("remote",))
+    await asyncio.sleep(0.1)
+    job.update_limits({"idle_timeout_s": 1})
+    await wait_done(job, seconds=5)
+    assert job.status == "timeout"
+
+
 async def main():
     config.load()
     db.connect()
@@ -1397,6 +1463,7 @@ async def main():
     os.makedirs(cwd, exist_ok=True)
     try:
         await test_one_shot_paths(cwd)
+        await test_unlimited(cwd)
         await test_validation(cwd)
         await test_turn_dispatch(cwd)
         await test_parallel(cwd)

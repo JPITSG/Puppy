@@ -57,6 +57,9 @@ still contain a value written before that release.
   compare token for activity that leaves the node's ID order unchanged.
 - Remote spawned jobs always use controller-chosen IDs and ownership leases.
   Use `idle_timeout_s` and `max_runtime_s`; the old `timeout_s` field is rejected.
+  With `timeout-settings`, omitted limits use the executing node's settings;
+  zero removes a deadline and positive limits may exceed two hours. Older
+  peers retain their advertised spawn contract. Ownership leases still apply.
 - Upgrade readiness and backend availability come from their current owners;
   missing fields are not inferred from session lists or browser polls.
 - The console requires shared drafts, upload IDs, engine defaults, complete

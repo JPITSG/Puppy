@@ -40,7 +40,6 @@ MAX_RAW_OUTPUT = 2 * 1024 * 1024
 MAX_AGENT_TEXT = 64 * 1024
 MAX_COMMAND = 16 * 1024
 MAX_CWD = 4096
-IDLE_STOP_SECONDS = 15 * 60
 
 _CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _OSC_RE = re.compile(r"\x1b\].*?(?:\x07|\x1b\\)", re.S)
@@ -244,15 +243,17 @@ class TerminalInstance:
 
     def _arm_idle(self) -> None:
         self._cancel_idle()
+        seconds = config.get("terminal.idle_timeout")
+        if not seconds or self.viewers or not self.running:
+            return
 
         async def later():
             try:
-                await asyncio.sleep(IDLE_STOP_SECONDS)
+                await asyncio.sleep(seconds)
             except asyncio.CancelledError:
                 return
             if not self.viewers and self.running:
-                await self.stop("No viewers for {} minutes".format(
-                    IDLE_STOP_SECONDS // 60))
+                await self.stop("No viewers for {} seconds".format(seconds))
 
         self.idle_task = asyncio.ensure_future(later())
 
@@ -756,6 +757,12 @@ class TerminalRegistry:
             await asyncio.gather(
                 *(instance.stop(reason) for instance in instances),
                 return_exceptions=True)
+
+
+def idle_settings_changed() -> None:
+    if _manager is not None:
+        for instance in list(_manager.instances.values()):
+            instance._arm_idle()
 
 
 def manager() -> TerminalRegistry:

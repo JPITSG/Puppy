@@ -2923,7 +2923,7 @@ class SessionHub:
             self._publish_steering_state(session)
 
             timeout = float(config.get("sessions.turn_timeout", 7200))
-            deadline = time.time() + timeout
+            deadline = time.time() + timeout if timeout else float("inf")
             # The model's answer once it paused on background work. It becomes
             # the turn's result if the engine leaves before waking the model.
             pending_result = None

@@ -680,7 +680,7 @@ console.log(JSON.stringify([oldLocal,backendSupportsSessionTasks(0),backendSuppo
 def check_task_config_ui() -> None:
     for name in ("composer_ui_test.js", "task_config_ui_test.js",
                  "task_menu_ui_test.js", "task_review_ui_test.js",
-                 "task_fold_ui_test.js", "live_controls_ui_test.js"):
+                 "task_fold_ui_test.js", "live_controls_ui_test.js", "tab_drag_ui_test.js"):
         proc = subprocess.run(["node", str(BASE / "tests" / name)],
                               capture_output=True, text=True)
         assert proc.returncode == 0, proc.stderr
@@ -736,6 +736,7 @@ def check_session_task_visibility(ui_source: str) -> None:
 const assert = require("assert");
 let session = { id: 1, tasks_enabled: true, status: "idle", color: "#abc", engine: "codex" };
 let building = true;
+const dragTab = null;
 const classes = () => {
   const values = new Set();
   return { contains: v => values.has(v), add: v => values.add(v), remove: v => values.delete(v),
@@ -4037,11 +4038,12 @@ def check_sidebar_icon_alignment(css_source: str) -> None:
 def check_ui_contrast_palette(ui_source: str, css_source: str) -> None:
     """Small readable copy keeps AA contrast on every common app surface."""
     def palette(marker: str) -> dict:
-        start = css_source.index(marker) + len(marker)
-        end = css_source.index("\n}", start)
-        return dict(re.findall(
-            r"--([a-z0-9-]+)\s*:\s*(#[0-9a-fA-F]{6})",
-            css_source[start:end]))
+        colors = {}
+        # Shared forms and the console contribute to the same theme.
+        for block in re.findall(re.escape(marker) + r"(.*?)\n\}", css_source, re.S):
+            colors.update(re.findall(
+                r"--([a-z0-9-]+)\s*:\s*(#[0-9a-fA-F]{6})", block))
+        return colors
 
     def luminance(value: str) -> float:
         channels = [int(value[index:index + 2], 16) / 255
@@ -4165,7 +4167,7 @@ console.log(JSON.stringify([0, 5, 61, 3599, 3600, 3661, 36000]
     dot_end = ui_source.index("\nconst PROVIDERS", dot_start)
     assert 'if (running) syncPromptSpinnerPhase(dot);' in \
         ui_source[dot_start:dot_end]
-    tab_start = ui_source.index("function renderTabNode(")
+    tab_start = ui_source.index("function wireTabDrag(")
     tab_end = ui_source.index("\nfunction syncHorizontalOverflow", tab_start)
     assert 'if (tab.classList.contains("running")) syncPromptSpinnerPhase(tdot);' \
         in ui_source[tab_start:tab_end]
@@ -5177,8 +5179,8 @@ run().catch(e=>{console.error(e&&e.stack||e);process.exit(1);});
     assert "passing those values verbatim" in spawn_agent.TOOL_INSTRUCTIONS
     assert '"@Spawn 10 agents ..."' in spawn_agent.TOOL_INSTRUCTIONS
     assert "Wait until every agent has finished" in spawn_agent.TOOL_INSTRUCTIONS
-    assert "silent for 600 seconds" in spawn_agent.TOOL_INSTRUCTIONS
-    assert "7200-second safety cap" in spawn_agent.TOOL_INSTRUCTIONS
+    assert "Settings > Timeouts" in spawn_agent.TOOL_INSTRUCTIONS
+    assert "Zero means unlimited" in spawn_agent.TOOL_INSTRUCTIONS
     assert "user sends steering" in spawn_agent.TOOL_INSTRUCTIONS
     spawn_tools = {tool["name"]: tool for tool in spawn_agent.TOOLS}
     assert '"@Spawn an agent ... to ..." mention' in \
@@ -5186,8 +5188,10 @@ run().catch(e=>{console.error(e&&e.stack||e);process.exit(1);});
     count_schema = spawn_tools["spawn"]["inputSchema"]["properties"]["count"]
     assert count_schema["minimum"] == 1 and count_schema["maximum"] == 12
     spawn_limits = spawn_tools["spawn"]["inputSchema"]["properties"]
-    assert spawn_limits["idle_timeout_s"]["default"] == 600
-    assert spawn_limits["max_runtime_s"]["default"] == 7200
+    assert spawn_limits["idle_timeout_s"]["minimum"] == 0
+    assert "default" not in spawn_limits["idle_timeout_s"]
+    assert spawn_limits["max_runtime_s"]["minimum"] == 0
+    assert "default" not in spawn_limits["max_runtime_s"]
     assert "timeout_s" not in spawn_limits
     wait_schema = spawn_tools["wait"]["inputSchema"]
     assert wait_schema["properties"]["jobs"]["type"] == "array"
@@ -7070,11 +7074,16 @@ async def main() -> None:
                 agent_hub.status = "idle"
 
             ui_source = (BASE / "puppy" / "static" / "app.js").read_text()
-            css_source = (BASE / "puppy" / "static" / "app.css").read_text()
+            css_source = "\n".join((BASE / "puppy" / "static" / name).read_text()
+                                   for name in ("auth.css", "app.css"))
             index_source = (BASE / "puppy" / "static" / "index.html").read_text()
-            assert 'id="auth-setup-code-wrap" class="hidden"' in index_source
-            assert 'showAuth("setup", !!st.setup_code_required)' in ui_source
-            assert 'setup_code: $("auth-setup-code").value' in ui_source
+            auth_html = (BASE / "puppy" / "static" / "auth.html").read_text()
+            auth_js = (BASE / "puppy" / "static" / "auth.js").read_text()
+            assert 'id="auth-setup-code-wrap" class="hidden"' in auth_html
+            assert 'status.setup_code_required' in auth_js
+            assert 'body.setup_code = field("auth-setup-code").value' in auth_js
+            assert 'id="auth-form"' not in index_source
+            assert '/static/auth.css?v=__V__' in index_source
             check_free_identifiers(ui_source)
             check_static_template_styles(ui_source)
             check_server_clock_format(ui_source)
@@ -7140,7 +7149,8 @@ async def main() -> None:
             # one checkbox face app-wide: a native checkbox is painted by the
             # browser, ignores the theme and differs per platform, so the form
             # input and the drawn menu mark share one rule and one tick path
-            css_source = (BASE / "puppy" / "static" / "app.css").read_text()
+            css_source = "\n".join((BASE / "puppy" / "static" / name).read_text()
+                                   for name in ("auth.css", "app.css"))
             assert ".check input[type=checkbox],\n.menu-check-mark{" in css_source
             assert "-webkit-appearance:none;appearance:none" in css_source
             assert css_source.count("--check-tick:url(") == 1

@@ -48,6 +48,24 @@ TIMER_LIMITS = {
     "completion_sync_seconds": (1, 5 * 60),
 }
 
+# Settings presents these together; each value remains owned by its runtime
+# section. Zero disables that deadline. Keep seconds on the wire and disk.
+MAX_TIMEOUT_SECONDS = 2 ** 31 - 1
+TIMEOUT_PATHS = {
+    "turn_seconds": "sessions.turn_timeout",
+    "spawn_runtime_seconds": "spawn.max_runtime",
+    "spawn_idle_seconds": "spawn.idle_timeout",
+    "terminal_idle_seconds": "terminal.idle_timeout",
+    "browser_idle_seconds": "browser.idle_timeout",
+}
+TIMEOUT_DEFAULTS = {
+    "turn_seconds": 7200,
+    "spawn_runtime_seconds": 7200,
+    "spawn_idle_seconds": 600,
+    "terminal_idle_seconds": 900,
+    "browser_idle_seconds": 900,
+}
+
 # This is model-visible only for turns where the node-owned managed browser is
 # enabled and available.  Keep the default beside the persisted setting rather
 # than in browser_agent.py so Settings, backup validation, and both runtimes all
@@ -141,13 +159,15 @@ DEFAULTS = {
     },
     "timers": dict(TIMER_DEFAULTS),
     "uploads": {"max_file_size_mb": DEFAULT_UPLOAD_LIMIT_MB},
-    "terminal": {"command": "/bin/bash -l"},
+    "terminal": {"command": "/bin/bash -l", "idle_timeout": 900},
+    "spawn": {"max_runtime": 7200, "idle_timeout": 600},
     # node-owned managed headless browser; enabling requires the availability
     # probe (binary + version) to pass at toggle time. color_scheme is the
     # prefers-color-scheme its pages render with, synced from the WebUI theme.
     # shared_storage merges every browser on this node into one persistent
     # cookie/localStorage store so sign-ins outlive individual browsers.
-    "browser": {"enabled": False, "color_scheme": "dark", "shared_storage": False},
+    "browser": {"enabled": False, "color_scheme": "dark", "shared_storage": False,
+                "idle_timeout": 900},
     # The custom text is added to every engine turn on this node. Conditional
     # fields are independently editable instructions added only while a turn
     # uses the corresponding cross-node workspace, browser, or terminal tools.
@@ -348,6 +368,45 @@ def normalize_usage_refresh_minutes(value) -> int:
     return minutes
 
 
+def normalize_timeout(value, name: str) -> int:
+    if not _finite_number(value) or not 0 <= value <= MAX_TIMEOUT_SECONDS or value != int(value):
+        raise ValueError("{} must be a whole number of seconds between 0 and {} (0 is unlimited)".format(
+            name, MAX_TIMEOUT_SECONDS))
+    return int(value)
+
+
+def timeout_values() -> dict:
+    return {name: get(path) for name, path in TIMEOUT_PATHS.items()}
+
+
+def timeouts_payload() -> dict:
+    return {"values": timeout_values(), "defaults": dict(TIMEOUT_DEFAULTS),
+            "max_seconds": MAX_TIMEOUT_SECONDS}
+
+
+def set_timeouts(patch: dict) -> dict:
+    """Validate a partial node update, persisting all fields atomically."""
+    if not isinstance(patch, dict) or not patch or set(patch) - set(TIMEOUT_PATHS):
+        raise ValueError("supply one or more known timeout settings")
+    normalized = {name: normalize_timeout(value, name) for name, value in patch.items()}
+    cfg = load()
+    with _lock:
+        previous = {}
+        for name, value in normalized.items():
+            section, key = TIMEOUT_PATHS[name].split(".")
+            previous[name] = cfg[section][key]
+            cfg[section][key] = value
+        try:
+            _save_locked()
+        except Exception:
+            for name, value in previous.items():
+                section, key = TIMEOUT_PATHS[name].split(".")
+                cfg[section][key] = value
+            raise
+        return {name: cfg[section][key] for name, path in TIMEOUT_PATHS.items()
+                for section, key in [path.split(".")]}
+
+
 def normalize_timers(value) -> dict:
     """Validate the complete, canonical timer map used by config and the API."""
     if not isinstance(value, dict):
@@ -485,12 +544,12 @@ def normalize_import(data: dict) -> dict:
         if not _finite_number(port) or not 1 <= port <= 65535 or port != int(port):
             raise ValueError("config.{}.port must be between 1 and 65535".format(section))
         merged[section]["port"] = int(port)
-    for key, allow_zero in (("turn_timeout", False), ("shutdown_grace", True)):
-        value = merged.get("sessions", {}).get(key)
-        if not _finite_number(value) or abs(value) > 1e308 or \
-                (value < 0 if allow_zero else value <= 0):
-            raise ValueError("config.sessions.{} must be {}".format(
-                key, "non-negative" if allow_zero else "positive"))
+    grace = merged["sessions"]["shutdown_grace"]
+    if not _finite_number(grace) or not 0 <= grace <= 1e308:
+        raise ValueError("config.sessions.shutdown_grace must be non-negative")
+    for path in TIMEOUT_PATHS.values():
+        section, key = path.split(".")
+        merged[section][key] = normalize_timeout(merged[section][key], "config." + path)
     merged["engines"]["usage_refresh_minutes"] = normalize_usage_refresh_minutes(
         merged.get("engines", {}).get("usage_refresh_minutes"))
     merged["engines"]["auto_upgrade"] = normalize_engine_auto_upgrade(
