@@ -859,6 +859,7 @@ const view = Object.assign(Object.create(proto), {
   syncLiveStatus() { this.liveText = this.visibleStatusText(); },
   syncHeadOverflow() {},
   updateSteerControl() {},
+  updateApprovalControl() {},
 });
 const headerText=()=>view.statusEl.children.map(child=>child.textContent).join(" ");
 const take = () => ({header: headerText(), live: view.liveText,
@@ -1554,11 +1555,11 @@ console.log(JSON.stringify([
     assert ui_source.count('promptStatusLabel(text, "think-label")') == 2
     assert "this.statusText || thinkingLabel(0), \"think-label\"" in ui_source
     assert ".prompt-status-label::after{" in css_source
-    assert '0%,32%{content:"."}' in css_source
-    assert '33%,65%{content:".."}' in css_source
-    assert '66%,100%{content:"..."}' in css_source
-    assert "display:inline-block;width:3ch;text-align:left" in css_source
-    assert "prefers-reduced-motion:reduce){.prompt-status-label::after" in css_source
+    assert '0%,32%{clip-path:inset(0 66.6667% 0 0)}' in css_source
+    assert '33%,65%{clip-path:inset(0 33.3333% 0 0)}' in css_source
+    assert '66%,100%{clip-path:inset(0 0 0 0)}' in css_source
+    assert 'content:"...";display:inline-block;text-align:left' in css_source
+    assert 'prefers-reduced-motion:reduce){.prompt-status-label::after{content:"...";animation:none}' in css_source
 
     # Rebuilt prompt rings start on one document-wide phase. At 950ms and
     # 1750ms (one full cycle later), replacement nodes therefore receive the
@@ -2363,10 +2364,11 @@ function makeView(id="s:0:42") {
   view.composer=Object.assign(Object.create(Composer.prototype), {
     host:{bid:0,sid:42,privateUploads:()=>false}, closed:false,busy:false,
     ta:{value:"",selectionStart:0,selectionEnd:0,readOnly:false,focused:false,
-      focus(){this.focused=true;},
+      focus(){this.focused=true;},removeAttribute(){},
       setSelectionRange(start,end){this.selectionStart=start;this.selectionEnd=end;}},
-    attachments:[],histAttach:null,histIdx:null,histDraft:"",sentThumbs:new Map(),
-    history:[],renderAttachments(){},resize(){},hideMention(){},
+    attachments:[],histAttach:null,histDraft:"",sentThumbs:new Map(),
+    history:null,attachStrip:{querySelectorAll(){return[];}},
+    renderAttachments(){},resize(){},hideMention(){},
     discardServerUpload(){},syncUploadButton(){},
   });
   return {view,sent,queueClasses};
@@ -3195,12 +3197,12 @@ const proto={%s};
 const view=Object.assign(Object.create(proto),{
   tab:{bid:7,sid:42},
   draftReady:true,steering:{supported:true,ready:true,turn_id:"turn-9"},
-  steerPending:null,_forceScroll:false,histIdx:3,histDraft:"old",
+  steerPending:null,_forceScroll:false,
   updateSteerControl(){controlSyncs++;},resizeComposer(){},
   releaseHistoryAttachments(){},saveDraft(){draftSaves++;},scrollBottom(){},
 });
 view.composer=Object.assign(Object.create(Composer.prototype), {
-  host:{bid:7,sid:42},ta:{value:"  updated direction  "},attachments:[],
+  host:{bid:7,sid:42},ta:{value:"  updated direction  ",removeAttribute(){}},attachments:[],
   histAttach:null,resize(){},renderAttachments(){},hideMention(){},
 });
 await view.steer();
@@ -4873,7 +4875,7 @@ console.log(JSON.stringify({
         in ui_source
     assert 'document.removeEventListener("selectionchange", this._onSelectionChange);' \
         in ui_source
-    assert 'this.ta.addEventListener("blur", () => this.hideMention());' in ui_source
+    assert 'this.ta.addEventListener("blur", () => { this.hideMention(); this.stopTyping(); });' in ui_source
     # completion inserts through the ordinary edit path and keeps focus on rows
     apply_start = ui_source.index("  applyMention(item) {")
     apply_method = ui_source[apply_start:
@@ -4998,7 +5000,7 @@ class MockTa {
 }
 class View {
   constructor(bid){this.host={bid,sid:9,selfHint:"this session"};this.mention=null;this.mentionDismissedAt=-1;
-    this.mentionSpawn=null;this.mentionRowEls=[];this.histIdx=null;
+    this.mentionSpawn=null;this.mentionRowEls=[];this.history=null;
     this.mentionData={at:Date.now(),browsers:null,terminals:null,promise:null};
     this.mentionEl=new MockNode("div");
     Object.defineProperty(this.mentionEl,"textContent",{

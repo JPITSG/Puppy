@@ -1222,8 +1222,8 @@ function saveStringSet(key, values) {
   try { lsSet(key, JSON.stringify([...values])); } catch (_) { /* storage is optional */ }
 }
 
-/* Server-side drafts are authoritative. This versioned local record is only a
-   crash journal between a browser edit and its server acknowledgement. */
+/* Server-side drafts are shared. The existing versioned browser journal keeps
+   unacknowledged edits and conflicting local versions until they are reviewed. */
 const DRAFT_JOURNAL_VERSION = 1;
 const DEFAULT_DRAFT_MAX_CHARS = 256 * 1024;
 function readDraftJournal(tabId) {
@@ -8001,6 +8001,13 @@ function composerBoxHtml({ id = "", placeholder = "", rows = 1, className = "",
       </div>${actions}
     </div>
     <input class="hidden attach-input" type="file" multiple>
+    <div class="composer-presence hidden">
+      <svg class="typing-dots hidden" viewBox="0 0 24 12" aria-hidden="true">
+        <circle cx="4" cy="6" r="2"/><circle cx="12" cy="6" r="2"/><circle cx="20" cy="6" r="2"/>
+      </svg>
+      <span class="composer-presence-text" role="status" aria-live="polite" aria-atomic="true"></span>
+      <button type="button" class="composer-draft-review hidden">Review drafts</button>
+    </div>
   </div>`;
 }
 
@@ -8010,13 +8017,16 @@ class Composer {
     this.host = Object.assign({ selfHint: "this session", privateUploads: () => true }, host);
     this.closed = false;
     this.busy = false;                // a host transaction holds the box read-only
+    this.locallyEdited = false;
+    this.composing = false;
+    this.typingTimer = null;
+    this.typingAt = 0;
     this.ta = box.querySelector("textarea");
     this.mentionEl = box.querySelector(".mention-pop");
     this.attachStrip = box.querySelector(".attach-strip");
     this.attachButton = box.querySelector(".attach-add");
     this.fileInput = box.querySelector(".attach-input");
-    this.history = [];        // sent messages, oldest first (shell-style recall)
-    this.histIdx = null;
+    this.history = null;      // one cursor-paged walk through stored prompts
     this.histDraft = "";
     this.attachments = [];    // staged server files represented by marker lines
     this.histAttach = null;   // staged attachments parked while history recall is active
@@ -8074,16 +8084,30 @@ class Composer {
     this._lastTaH = 0;
 
     this.ta.addEventListener("input", () => {
-      this.histIdx = null;   // manual edits exit history mode
+      this.stopHistory();   // manual edits exit history mode
       this.releaseHistoryAttachments();
       this.resize();
       this.notify(true);
       this.updateMention();
     });
     this.ta.addEventListener("keydown", (e) => this.keydown(e));
+    this.ta.addEventListener("compositionstart", () => {
+      this.composing = true;
+      this.stopHistory();
+      this.releaseHistoryAttachments();
+      this.pulseTyping();
+    });
+    this.ta.addEventListener("compositionend", () => { this.composing = false; });
     /* Rows keep the box focused via pointerdown preventDefault, so any real
        blur means the user left it and the list goes with them. */
-    this.ta.addEventListener("blur", () => this.hideMention());
+    this.ta.addEventListener("blur", () => { this.hideMention(); this.stopTyping(); });
+    this._onTypingVisibility = () => {
+      if (document.visibilityState === "hidden") this.stopTyping();
+    };
+    document.addEventListener("visibilitychange", this._onTypingVisibility);
+    this.box.querySelector(".composer-draft-review").onclick = () => {
+      if (this.host.reviewDraft) this.host.reviewDraft();
+    };
     /* Arrow keys and clicks move the caret without an input event; the mention
        list follows the caret, so it listens to the document-level selection. */
     this._onSelectionChange = () => {
@@ -8109,6 +8133,7 @@ class Composer {
      list and nothing else. */
   keydown(e) {
     if (e.isComposing) return;
+    if (this.busy || this.closed) return;
     if (this.mentionKeydown(e)) return;
     if (e.key === "Escape") {
       if (this.host.escape) this.host.escape(e);
@@ -8121,29 +8146,13 @@ class Composer {
     const ta = this.ta;
     const atStart = ta.selectionStart === 0 && ta.selectionEnd === 0;
     const atEnd = ta.selectionStart === ta.value.length && ta.selectionEnd === ta.value.length;
-    if (e.key === "ArrowUp" && atStart && this.history.length) {
-      if (this.histIdx === null) {
-        this.histIdx = this.history.length;
-        this.histDraft = ta.value;
-        this.histAttach = this.attachments;   // parked, not discarded
-      }
-      if (this.histIdx > 0) {
-        e.preventDefault();
-        this.histIdx--;
-        this.recall(this.history[this.histIdx]);
-      }
-    } else if (e.key === "ArrowDown" && atEnd && this.histIdx !== null) {
+    if (e.key === "ArrowUp" && atStart) {
       e.preventDefault();
-      this.histIdx++;
-      if (this.histIdx >= this.history.length) {
-        this.attachments = this.histAttach || [];
-        this.histAttach = null;
-        this.renderAttachments();
-        this.set(this.histDraft);
-        this.histIdx = null;
-      } else {
-        this.recall(this.history[this.histIdx]);
-      }
+      this.moveHistory(1);
+    } else if (e.key === "ArrowDown" && this.history &&
+               (atEnd || this.history.loading)) {
+      e.preventDefault();
+      this.moveHistory(-1);
     }
   }
 
@@ -8160,8 +8169,47 @@ class Composer {
   }
 
   notify(edited) {
+    if (edited) { this.locallyEdited = true; this.pulseTyping(); }
     if (edited && this.host.edited) this.host.edited();
     if (this.host.updated) this.host.updated();
+  }
+
+  protectsDraft() {
+    return this.composing || ((this.locallyEdited || !!this.history) && document.activeElement === this.ta) ||
+      this.attachments.some(a => a.uploading);
+  }
+
+  pulseTyping() {
+    if (!this.host.typing || this.closed || document.visibilityState === "hidden" ||
+        document.activeElement !== this.ta) return;
+    const now = Date.now();
+    if (!this.typingTimer || now - this.typingAt >= 1500) {
+      if (this.host.typing(true) === false) return;
+      this.typingAt = now;
+    }
+    clearTimeout(this.typingTimer);
+    this.typingTimer = setTimeout(() => this.stopTyping(), 3000);
+  }
+
+  stopTyping() {
+    if (this.typingTimer && this.host.typing) this.host.typing(false);
+    clearTimeout(this.typingTimer);
+    this.typingTimer = null;
+  }
+
+  showPresence(count = 0, conflict = false, enabled = true, error = "", sendError = false) {
+    const row = this.box.querySelector(".composer-presence");
+    row.classList.toggle("hidden", !enabled);
+    row.querySelector(".typing-dots").classList.toggle("hidden", !count);
+    const typing = count > 1 ? "Others are typing…" : "Someone else is typing…";
+    const text = error ? (sendError ? "Message not sent" : "Draft not saved") : conflict ? (count ? "Typing · your draft is kept here" : "Your draft is kept here") :
+      (count ? typing : "");
+    const label = row.querySelector(".composer-presence-text");
+    if (label.textContent !== text) label.textContent = text;
+    label.title = error;
+    const review = row.querySelector(".composer-draft-review");
+    review.textContent = error ? (sendError ? "Retry send" : "Retry save") : "Review drafts";
+    review.classList.toggle("hidden", !conflict && !error);
   }
 
   /* ---- the value ---- */
@@ -8196,6 +8244,9 @@ class Composer {
      for recall, everything else the box created is released. Persisting the
      emptied value is the host's decision (a send has its own draft frame). */
   take() {
+    this.stopHistory();
+    this.stopTyping();
+    this.locallyEdited = false;
     const message = this.message();
     this.attachments.forEach(a => this.retireSentAttachment(a));
     this.attachments = [];
@@ -8203,13 +8254,24 @@ class Composer {
     this.ta.value = "";
     this.hideMention();
     this.resize();
-    this.histIdx = null;
     this.histDraft = "";
     this.releaseHistoryAttachments();
     return message;
   }
 
-  set(v) {
+  /* Ask/Steer acknowledge text only. A file added while that handoff was in
+     flight is a new draft edit, even before its upload has a marker path. */
+  clearSentText(text) {
+    if (this.composing || this.text() !== text || this.attachments.length) return false;
+    this.take();
+    return true;
+  }
+
+  set(v, fromHistory = false) {
+    if (!fromHistory) {
+      this.stopHistory();
+      this.releaseHistoryAttachments();
+    }
     this.ta.value = v;
     this.ta.selectionStart = this.ta.selectionEnd = v.length;
     this.resize();
@@ -8217,12 +8279,105 @@ class Composer {
     this.notify(true);
   }
 
-  setHistory(list) {
-    this.history = list;
-    this.histIdx = null;
+  /* Each walk starts at the backend's current tail, independent of the
+     transcript window and socket reconnects. Once walking, the before cursor
+     keeps newly arriving messages from shifting the user's position. */
+  moveHistory(step) {
+    if (!this.history) {
+      if (step < 0) return;
+      this.histDraft = this.ta.value;
+      this.histAttach = this.attachments;   // parked, not discarded
+      this.history = { entries: [], index: -1, shown: -1, before: null,
+        done: false, loading: false, controller: null };
+      this.hideMention();
+    }
+    const walk = this.history;
+    walk.index += step;
+    if (walk.index < 0) {
+      this.restoreHistoryDraft();
+    } else if (walk.index < walk.entries.length) {
+      walk.shown = walk.index;
+      this.recall(walk.entries[walk.index]);
+    } else if (!walk.loading) {
+      this.loadHistory(walk);
+    }
   }
 
-  rememberSent(text) { this.history.push(text); }
+  stopHistory() {
+    const walk = this.history;
+    this.history = null;
+    if (walk && walk.controller) walk.controller.abort();
+    this.ta.removeAttribute("aria-busy");
+  }
+
+  restoreHistoryDraft() {
+    this.stopHistory();
+    this.attachments = this.histAttach || [];
+    this.histAttach = null;
+    this.renderAttachments(false);
+    this.set(this.histDraft);
+    this.histDraft = "";
+  }
+
+  async loadHistory(walk) {
+    walk.loading = true;
+    this.ta.setAttribute("aria-busy", "true");
+    try {
+      while (this.history === walk && walk.index >= walk.entries.length && !walk.done) {
+        if (this.host.bid && !backendConnectionAllowed(this.host.bid))
+          throw new Error("Backend unavailable");
+        const backend = state.backends.find(b => b.id === Number(this.host.bid));
+        const filtered = !this.host.bid || backendHasCapability(backend, "session-prompt-history");
+        const limit = filtered ? 50 : 200;
+        const cursor = walk.before === null ? "" : `&before_seq=${walk.before}`;
+        walk.controller = new AbortController();
+        const timeout = setTimeout(() => walk.controller.abort(), 15000);
+        let page;
+        try {
+          page = await api(this.host.bid,
+            `sessions/${this.host.sid}/events?limit=${limit}${filtered ? "&kind=user" : ""}${cursor}`,
+            { signal: walk.controller.signal, cache: "no-store" });
+        } finally { clearTimeout(timeout); }
+        if (this.history !== walk) return;
+        /* Refuse a broken cursor instead of repeating a page forever. The
+           unfiltered fallback also advances over pages with no prompts. */
+        const events = page && page.events;
+        let previous = 0;
+        if (!Array.isArray(events) || events.some(ev => {
+          if (!ev || !Number.isSafeInteger(ev.seq) || ev.seq <= previous ||
+              (walk.before !== null && ev.seq >= walk.before)) return true;
+          previous = ev.seq;
+          return false;
+        })) throw new Error("Invalid prompt history page");
+        const prompts = events.filter(ev => ev.kind === "user" && ev.data &&
+          typeof ev.data.text === "string" && ev.data.text.length).map(ev => ev.data.text);
+        walk.entries.push(...prompts.reverse());
+        if (events.length) walk.before = events[0].seq;
+        walk.done = events.length < limit || walk.before === 1;
+      }
+      if (this.history !== walk) return;
+      if (!walk.entries.length) {
+        this.restoreHistoryDraft();
+      } else {
+        walk.index = Math.min(walk.index, walk.entries.length - 1);
+        if (walk.shown !== walk.index) {
+          walk.shown = walk.index;
+          this.recall(walk.entries[walk.index]);
+        }
+      }
+    } catch (error) {
+      if (this.history !== walk) return;
+      /* Keep the last displayed entry and cursor so Up retries a failed page.
+         Nothing arriving late may replace a subsequent edit, send or draft. */
+      walk.index = walk.shown;
+      if (walk.shown < 0) this.restoreHistoryDraft();
+      toast(`${backendName(this.host.bid)}: Could not load earlier prompts · ${error.message} · Press Up to retry`,
+        "error", TOAST_LONG);
+    } finally {
+      walk.loading = false;
+      if (this.history === walk) this.ta.removeAttribute("aria-busy");
+    }
+  }
 
   /* The preview this page still holds for a sent image, else "". */
   sentPreview(path) { return this.sentThumbs.get(path) || ""; }
@@ -8238,11 +8393,18 @@ class Composer {
   }
 
   /* A host transaction that will replace the whole value (a queued-message
-     edit, a task being prepared) holds the box: read-only text, no new files. */
+     edit, a task being prepared) holds the box: read-only text and files. */
   setBusy(busy) {
     this.busy = !!busy;
+    if (this.busy) {
+      this.stopHistory();
+      this.releaseHistoryAttachments();
+    }
     this.ta.readOnly = this.busy;
     this.syncUploadButton();
+    this.attachStrip.querySelectorAll(".attach-x").forEach(button => {
+      button.disabled = this.busy;
+    });
   }
 
   /* with field-sizing the browser autosizes natively; otherwise measure on the
@@ -8304,10 +8466,13 @@ class Composer {
      host says they belong to nobody else (a cancelled dialog), never for a
      view whose durable draft still names them. */
   destroy({ discardUploads = false } = {}) {
+    this.stopTyping();
     this.closed = true;
+    this.stopHistory();
     Composer.live.delete(this);
     this.clearFileDropTarget();
     document.removeEventListener("selectionchange", this._onSelectionChange);
+    document.removeEventListener("visibilitychange", this._onTypingVisibility);
     this.hideMention();
     const staged = new Set([...(this.histAttach || []), ...this.attachments]);
     this.histAttach = null;
@@ -8327,6 +8492,10 @@ class Composer {
      uploads still in flight. An explicit queue edit replaces those too.
      Matching local image blobs are reused; everything else is released. */
   replace(text, caretAtEnd = false, replaceUploading = false) {
+    // An unchanged shared-draft snapshot on reconnect must not end a walk.
+    if (this.history && !replaceUploading && text === this.value()) return;
+    this.stopHistory();
+    this.locallyEdited = false;
     const restored = splitAttachmentMarkers(text);
     const sources = [...(this.histAttach || []), ...this.attachments];
     const byPath = new Map();
@@ -8360,7 +8529,6 @@ class Composer {
       source.url = "";
     }
     this.histAttach = null;
-    this.histIdx = null;
     this.histDraft = "";
     this.attachments = restored.attachments.concat(uploading);
 
@@ -8399,8 +8567,8 @@ class Composer {
       if (url) attachment.url = url;   // owned by sentThumbs, never revoked here
     }
     this.attachments = recalled.attachments;   // the parked list keeps its own array
-    this.renderAttachments();
-    this.set(recalled.text);
+    this.renderAttachments(false);
+    this.set(recalled.text, true);
   }
 
   /* History mode ended without walking back to the draft, so release the local
@@ -8471,7 +8639,7 @@ class Composer {
     /* History recall parks the caret at the end of restored text; a recalled
        "@…" tail must not steal the arrow keys mid-walk. Typing exits history
        mode first, so the list is back for every real keystroke. */
-    if (this.histIdx !== null) { this.hideMention(); return; }
+    if (this.history) { this.hideMention(); return; }
     if (this.mentionDismissedAt === ctx.start) { this.hideMention(); return; }
     this.mentionDismissedAt = -1;
     let items;
@@ -9105,6 +9273,8 @@ class Composer {
   }
 
   async uploadFile(file) {
+    this.stopHistory();
+    this.releaseHistoryAttachments();
     const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
     const preview = ATTACHMENT_PREVIEW_TYPES.has(String(file.type || "").toLowerCase());
     const attachment = {
@@ -9180,9 +9350,8 @@ class Composer {
     this.attachments = this.attachments.filter(item => item !== attachment);
     this.renderAttachments();
     /* Only a host whose staged files belong to this box alone may delete
-       the bytes: a shared draft is a full-document last-writer-wins stream,
-       and another browser may already have sent a later edit which still
-       contains this marker. Session deletion cleans such private staged
+       the bytes: another browser may still hold a local draft or have sent
+       a later edit which contains this marker. Session deletion cleans staged
        bytes otherwise. */
     if (attachment.uploadId && this.host.privateUploads())
       this.discardServerUpload(attachment.uploadId, quiet);
@@ -9199,7 +9368,13 @@ class Composer {
       x.type = "button";
       x.appendChild(xIcon(12));
       x.setAttribute("aria-label", "Remove attachment");
-      x.onclick = () => this.removeAttachment(a);
+      x.disabled = this.busy;
+      x.onclick = () => {
+        if (this.busy) return;
+        this.stopHistory();
+        this.releaseHistoryAttachments();
+        this.removeAttachment(a);
+      };
       chip.appendChild(x);
       this.attachStrip.appendChild(chip);
     }
@@ -9980,6 +10155,7 @@ class SessionWorkspaceView {
   }
   select(sid) {
     const old = this.activeView();
+    if (old.composer) old.composer.stopTyping();
     old.restoreScroll(old.captureScroll());
     this.selected = sid;
     this.refreshTasks();
@@ -10063,7 +10239,11 @@ class SessionWorkspaceView {
         wireTabDrag(tab, this.strip, { id: `s:${this.tab.bid}:${sid}`, taskWorkspace: this });
         const unread = task.result_seq > (this.seen[sid] || 0);
         const cls = taskStateClass(task);
-        tab.appendChild(el("span", "t-state" + (cls ? " " + cls : "") + (unread ? " unread" : ""), taskStateLabel(task)));
+        const statusClass = "t-state" + (cls ? " " + cls : "") + (unread ? " unread" : "");
+        const statusLabel = taskStateLabel(task);
+        tab.appendChild(task.state === "running" && !task.needs_approval
+          ? promptStatusLabel(statusLabel, statusClass)
+          : el("span", statusClass, statusLabel));
         const close = el("button", "t-close");
         close.type = "button";
         close.setAttribute("aria-label", `Hide ${title}`);
@@ -10082,7 +10262,11 @@ class SessionWorkspaceView {
     this.save();
   }
   onShow(focus = true) { this.refreshTasks(); this.activeView().onShow(focus); }
-  onVisibility(visible) { if (visible) this.refreshTasks(); }
+  onVisibility(visible) {
+    if (visible) this.refreshTasks();
+    else for (const view of this.taskViews.values())
+      if (view.composer) view.composer.stopTyping();
+  }
   captureScroll() { return [...this.taskViews].map(([sid, view]) => [sid, view.captureScroll()]); }
   restoreScroll(values) { for (const [sid, saved] of values || []) { const view = this.taskViews.get(sid); if (view) view.restoreScroll(saved); } }
   destroy() {
@@ -10127,12 +10311,16 @@ async function modalNewTask(workspace) {
      and dropped files, Enter to start and Shift+Enter for a new line - hosted
      here with Main as the session it speaks for. Escape is left to the
      dialog once no list is open. */
-  let handedOver = false;   // the node took the staged files with the task
+  /* After submission the node may still be adopting the files, including
+     after a lost reply. Closing must leave those bytes for the node's task
+     cleanup (or orphan sweep), never race it with a staged-file DELETE. */
+  let submitted = false;
   const composer = new Composer(m.querySelector(".composer-box"), {
     bid, sid, selfHint: "Main",
     submit: () => start.onclick(),
+    privateUploads: () => !submitted,
   });
-  onClose(() => composer.destroy({ discardUploads: !handedOver }));
+  onClose(() => composer.destroy({ discardUploads: !submitted }));
   const engBox = m.querySelector("#nt-engines"), model = m.querySelector("#nt-model");
   const effort = m.querySelector("#nt-effort"), permission = m.querySelector("#nt-perm");
   const custom = m.querySelector("#nt-model-custom"), customWrap = m.querySelector("#nt-model-custom-wrap");
@@ -10231,10 +10419,10 @@ async function modalNewTask(workspace) {
     preparing = true; syncBusy();
     error.classList.add("hidden");
     try {
+      submitted = true;
       const data = await api(bid, `sessions/${sid}/tasks`, { method: "POST", timeoutMs: 180000, body });
       const list = sessionsFor(bid);
       if (!list.some(s => s.id === data.session.id)) list.push(data.session);
-      handedOver = true;
       close(); workspace.openTask(data.session.id); renderSidebar();
     } catch (err) { error.textContent = err.message; error.classList.remove("hidden"); }
     finally { preparing = false; if (m.isConnected) syncBusy(); }
@@ -10249,7 +10437,6 @@ async function modalReviewTask(workspace, session) {
   const task = session.task || {};
   const { m, close } = modal(`<h2>Review task</h2>
     <div class="ws-facts task-review-facts"></div>
-    <div class="field-lbl">Changed files</div>
     <pre class="task-review-files">Loading changes…</pre>
     <pre class="task-review-diff hidden"></pre>
     <p class="hint task-review-truncated hidden">The diff preview is shortened.</p>
@@ -10358,6 +10545,273 @@ async function modalReviewTask(workspace, session) {
   } catch (err) { files.textContent = ""; fail(err.message); }
 }
 
+/* Negotiated shared-draft editor. Full values stay bounded to one outstanding
+   write; a compare failure forks locally instead of replaying over a peer.
+   Presence never carries text and never manipulates the textarea. */
+class SharedDraft {
+  constructor(view) {
+    this.view = view;
+    this.server = { text: "", revision: 0 };
+    this.base = 0;
+    this.flight = null;
+    this.conflict = false;
+    this.sent = 0;
+    this.lastOwnRevision = -1;
+    this.count = 0;
+    this.error = "";
+    this.sendError = false;
+    this.clearingSent = false;
+    this.reviewOpen = false;
+  }
+
+  paint() {
+    this.view.composer.showPresence(this.count, this.conflict, true, this.error, this.sendError);
+  }
+
+  typing(active) {
+    const v = this.view;
+    if (v.draftReady && v.ws && v.ws.readyState === WebSocket.OPEN && v.ws.bufferedAmount < 65536) {
+      v.ws.send(JSON.stringify({ type: "typing", active }));
+      return true;
+    }
+    return false;
+  }
+
+  disconnect() {
+    this.flight = null;
+    this.sent = 0;
+    this.clearingSent = false;
+    this.count = 0;
+    this.view.composer.stopTyping();
+    this.paint();
+  }
+
+  journal(text, submitted = false) {
+    const v = this.view;
+    // A pending send compares against what the server held when Send was
+    // pressed, even when the local variant forked several revisions earlier.
+    const baseRevision = submitted ? this.server.revision : this.base;
+    writeDraftJournal(v.tab.id, text, baseRevision, submitted);
+    v.draftJournal = { text, baseRevision, submitted };
+  }
+
+  adopt(value, replaceUploading = false) {
+    this.base = value.revision;
+    this.conflict = false;
+    if (this.view.draftValue() !== value.text || replaceUploading)
+      this.view.composer.replace(value.text, false, replaceUploading);
+    this.view.clearDraftJournal();
+    this.paint();
+  }
+
+  initialize(value) {
+    const v = this.view, journal = readDraftJournal(v.tab.id);
+    this.server = value;
+    this.flight = null;
+    this.sent = 0;
+    this.lastOwnRevision = -1;
+    this.error = "";
+    this.sendError = false;
+    this.clearingSent = false;
+    v.draftRevision = value.revision;
+    v.draftReady = true;
+    const touched = v.draftTouchedBeforeReady || v.composer.protectsDraft();
+    v.draftTouchedBeforeReady = false;
+    if ((touched || (journal && (!journal.submitted || value.revision <= journal.baseRevision))) &&
+        (touched ? v.draftValue() : journal.text) !== value.text) {
+      if (!touched) v.composer.replace(journal.text, true);
+      this.base = journal ? journal.baseRevision : this.base;
+      this.conflict = !!(journal && journal.submitted) || this.base !== value.revision;
+      this.save();
+    } else {
+      this.adopt(value);
+    }
+    this.paint();
+  }
+
+  save() {
+    const v = this.view, text = v.draftValue();
+    if (v.queueEditPending) return v.queueEditPending.text;
+    this.error = "";
+    this.paint();
+    this.journal(text);
+    if (!v.draftReady) v.draftTouchedBeforeReady = true;
+    else this.flush();
+    return text;
+  }
+
+  flush() {
+    const v = this.view;
+    if (this.conflict || this.flight || this.sent || v.queueEditPending || !v.draftReady) return;
+    if (!v.ws || v.ws.readyState !== WebSocket.OPEN) {
+      v.draftReady = false;
+      v.draftTouchedBeforeReady = true;
+      return;
+    }
+    const text = v.draftValue();
+    if (text === this.server.text) { v.clearDraftJournal(); return; }
+    const seq = ++v.draftClientSeq;
+    this.flight = { seq, text, clearAfterSend: !!this.clearingSent };
+    this.clearingSent = false;
+    v.ws.send(JSON.stringify({ type: "draft", text, expected_revision: this.base,
+      client_id: v.draftClientId, client_seq: seq }));
+  }
+
+  keepLocal() {
+    this.conflict = true;
+    this.journal(this.view.draftValue());
+    this.paint();
+  }
+
+  receive(value) {
+    const v = this.view;
+    if (!v.draftReady) return;
+    const own = value.client_id === v.draftClientId;
+    const ack = own && this.flight && value.client_seq === this.flight.seq;
+    const clearedSend = ack && this.flight.clearAfterSend;
+    if (ack) this.flight = null;
+    if (value.revision >= this.server.revision) {
+      this.server = value;
+      v.draftRevision = value.revision;
+    }
+    if (v.queueEditPending) { v.draftDeferred = this.server; return; }
+    if (own && value.type !== "draft_conflict" && value.consumed === undefined)
+      this.lastOwnRevision = value.revision;
+
+    if (own && value.client_seq === this.sent) {
+      this.sent = 0;
+      if (v.draftValue() === this.submittedText && !v.composer.composing &&
+          !v.composer.sendBlocker()) v.composer.take();
+      // A send may have overtaken coalesced typing. Clear its last saved
+      // prefix with a guarded write, but never a peer's replacement.
+      const ownPrefix = value.consumed === false && this.lastOwnRevision === value.revision;
+      if (value.consumed || ownPrefix) {
+        this.base = this.server.revision;
+        this.conflict = false;
+        this.clearingSent = ownPrefix && v.composer.isEmpty();
+        this.save();
+      } else if (v.composer.isEmpty() && !v.composer.protectsDraft()) {
+        this.adopt(this.server);
+      } else {
+        this.keepLocal();
+      }
+      this.paint();
+      return;
+    }
+    if (this.sent) return; // echoes for edits before Send cannot revive them
+    if (value.revision < this.server.revision) { this.flush(); return; }
+    if (value.type === "draft_conflict" && clearedSend &&
+        v.composer.isEmpty() && !v.composer.protectsDraft()) {
+      this.adopt(this.server);
+      return;
+    }
+    if (own && value.type !== "draft_conflict") {
+      if (!this.conflict) {
+        this.base = value.revision;
+        if (v.draftValue() === value.text) v.clearDraftJournal();
+        else { this.journal(v.draftValue()); this.flush(); }
+      }
+      return;
+    }
+    if (v.draftValue() === this.server.text && !v.composer.composing) {
+      this.adopt(this.server);
+    } else if (this.conflict || this.flight || ack || v.composer.protectsDraft() ||
+               (v.draftJournal && !v.draftJournal.submitted)) {
+      this.keepLocal();
+    } else {
+      this.adopt(this.server);
+    }
+  }
+
+  prepareSend(message, draft) {
+    const v = this.view;
+    // Guarded sends retain the box until acknowledgement. An earlier history
+    // read must already be cancelled while that acknowledgement is pending.
+    v.composer.stopHistory();
+    v.composer.releaseHistoryAttachments();
+    this.sent = ++v.draftClientSeq;
+    this.submittedText = draft;
+    this.sendWasRunning = v.status === "running";
+    this.conflict = false;
+    this.error = "";
+    this.sendError = false;
+    v.composer.stopTyping();
+    this.journal(draft, true);
+    Object.assign(message, { draft, draft_client_id: v.draftClientId,
+      draft_client_seq: this.sent, draft_guarded: true });
+    this.paint();
+  }
+
+  sendFailed(value) {
+    if (!this.sent || value.client_seq !== this.sent) return;
+    const v = this.view;
+    this.sent = 0;
+    if (value.accepted && v.draftValue() === this.submittedText && !v.composer.composing &&
+        !v.composer.sendBlocker())
+      v.composer.take();
+    if (value.accepted && (this.lastOwnRevision === this.server.revision ||
+        this.server.text === this.submittedText)) this.base = this.server.revision;
+    this.conflict = this.base !== this.server.revision && v.draftValue() !== this.server.text;
+    this.journal(v.draftValue());
+    this.error = String(value.error || "Could not send message");
+    this.sendError = !value.accepted;
+    if (!value.accepted) {
+      v.status = this.sendWasRunning ? "running" : "idle";
+      v.updateRunState();
+      v.setStatus(this.error);
+    }
+    this.paint();
+  }
+
+  review() {
+    const v = this.view;
+    if (this.error) {
+      if (this.sendError) v.submit();
+      else this.save();
+      return;
+    }
+    if (!this.conflict || this.reviewOpen) return;
+    this.reviewOpen = true;
+    const shared = this.server, local = v.draftValue();
+    const { m, close, onClose } = modal(`<form class="draft-review-form">
+      <h2>Two drafts</h2>
+      <p class="modal-copy">Another console changed this draft. Your text has been kept here. Copy anything you want to combine before choosing a version.</p>
+      <label>Your draft<textarea class="draft-local" rows="5" readonly></textarea></label>
+      <label>Shared draft<textarea class="draft-shared" rows="5" readonly></textarea></label>
+      <div class="form-error hidden" role="alert"></div>
+      <div class="m-btns">
+        <button type="button" class="btn draft-cancel">Keep editing</button>
+        <button type="button" class="btn draft-use-shared">Use shared draft</button>
+        <button type="submit" class="btn btn-pri">Share my draft</button>
+      </div></form>`, "draft-review-modal");
+    m.querySelector(".draft-local").value = local;
+    m.querySelector(".draft-shared").value = shared.text;
+    onClose(() => { this.reviewOpen = false; });
+    m.querySelector(".draft-cancel").onclick = close;
+    const choose = useShared => {
+      const error = m.querySelector(".form-error");
+      if (!v.draftReady || this.flight || this.sent || v.queueEditPending ||
+          this.server.revision !== shared.revision || v.draftValue() !== local) {
+        error.textContent = "The draft changed or is reconnecting. Close this review and open it again for the latest versions.";
+        error.classList.remove("hidden");
+        return;
+      }
+      this.base = shared.revision;
+      this.conflict = false;
+      if (useShared) this.adopt(shared, true);
+      else {
+        v.composer.locallyEdited = true;
+        this.save(); // another change in flight still fails the server compare
+      }
+      this.paint();
+      close();
+    };
+    m.querySelector(".draft-use-shared").onclick = () => choose(true);
+    m.querySelector("form").onsubmit = e => { e.preventDefault(); choose(false); };
+    m.querySelector(".draft-cancel").focus();
+  }
+}
+
 class SessionView {
   constructor(tab) {
     this.tab = tab;
@@ -10367,6 +10821,8 @@ class SessionView {
     this.steerPending = null;
     this.sideQuestion = { supported: false, ready: false, turn_id: "" };
     this.askPending = null;
+    this.approvalRequest = null;
+    this.approvalPending = false;
     this.controlRequests = new Map(); // active-turn socket handoffs awaiting correlated replies
     /* Question cards awaiting their answer, by request id - the answer is its
        own event and folds into the card it belongs to, exactly as a tool
@@ -10553,6 +11009,8 @@ class SessionView {
         this.interrupt();
       },
       edited: () => this.saveDraft(),
+      typing: active => this.sharedDraft ? this.sharedDraft.typing(active) : false,
+      reviewDraft: () => { if (this.sharedDraft) this.sharedDraft.review(); },
       updated: () => this.updateSteerControl(),
       /* re-pin the transcript when the box's height moved it */
       beforeResize: () => this.scroll.scrollHeight - this.scroll.scrollTop - this.scroll.clientHeight < 60,
@@ -10652,6 +11110,7 @@ class SessionView {
       this.draftReady = false;
       this.draftInFlightSeq = 0;
       this.draftPendingText = null;
+      if (this.sharedDraft) this.sharedDraft.disconnect();
       this.rejectControlRequests("Connection lost before the backend confirmed the request");
       this.cancelQueueEdit("Connection lost before the queued message could be edited");
       this.cancelQueueDrag(null, false);
@@ -10804,6 +11263,7 @@ class SessionView {
     this.sendBtn.disabled = stopping || unavailable;
     this.queueBtn.disabled = stopping || unavailable;
     this.updateSteerControl();
+    this.updateApprovalControl();
     this.renderStatus();
   }
 
@@ -10861,6 +11321,7 @@ class SessionView {
   }
 
   saveDraft() {
+    if (this.sharedDraft) return this.sharedDraft.save();
     /* A queued-message edit is an explicit full-composer replacement. Upload
        completion and other asynchronous paints may call saveDraft while its
        backend transaction is in flight; none may put the old value behind the
@@ -10929,6 +11390,7 @@ class SessionView {
       this.draftReady = false;
       throw new Error("Backend returned an invalid shared draft");
     }
+    if (this.sharedDraft) { this.sharedDraft.initialize(value); return; }
     const serverText = value.text;
     const serverRevision = value.revision;
     const journal = readDraftJournal(this.tab.id);
@@ -10970,6 +11432,7 @@ class SessionView {
   receiveDraft(value) {
     if (!value || typeof value.text !== "string" ||
         !Number.isInteger(value.revision) || value.revision < 0) return;
+    if (this.sharedDraft) { this.sharedDraft.receive(value); return; }
     // Once a local save found the socket closed, only the next locked snapshot
     // may reconcile it. A final buffered frame from the dying socket must not
     // erase that unsent crash journal.
@@ -11046,6 +11509,15 @@ class SessionView {
     switch (d.type) {
       case "snapshot":
         this.session = d.session;
+        if (d.draft_presence && d.draft_presence.version === 1) {
+          if (!this.sharedDraft) this.sharedDraft = new SharedDraft(this);
+          this.sharedDraft.count = Number.isInteger(d.draft_presence.count) ? Math.max(0, d.draft_presence.count) : 0;
+        } else if (this.sharedDraft) {
+          this.draftReady = false;
+          this.sharedDraft.disconnect();
+          this.setStatus("This backend no longer supports protected draft syncing");
+          return;
+        }
         this.setSteeringState(d.steering);
         this.setSideQuestionState(d.side_question);
         if (Number.isInteger(d.draft_max_chars) && d.draft_max_chars > 0)
@@ -11068,8 +11540,6 @@ class SessionView {
             attached: true, mayHaveOlder: d.events.length >= 200 });
           this.mergeSkipped();
         }
-        this.composer.setHistory(d.events.filter(ev => ev.kind === "user")
-          .map(ev => (ev.data && ev.data.text) || "").filter(Boolean));
         this.renderQueue(d.queued || [], d.held || [], d.paused || [],
           d.queue_revision);
         // before updateHead: pickers read the queue
@@ -11088,7 +11558,25 @@ class SessionView {
         }
         break;
       case "draft":
+      case "draft_conflict":
         this.receiveDraft(d);
+        break;
+      case "typing":
+        if (this.sharedDraft && Number.isInteger(d.count) && d.count >= 0) {
+          this.sharedDraft.count = d.count;
+          this.sharedDraft.paint();
+        }
+        break;
+      case "draft_error":
+        if (this.sharedDraft && this.sharedDraft.flight &&
+            this.sharedDraft.flight.seq === d.client_seq) {
+          this.sharedDraft.flight = null;
+          this.sharedDraft.error = String(d.error || "Could not save draft");
+          this.sharedDraft.paint();
+        }
+        break;
+      case "draft_send_error":
+        if (this.sharedDraft) this.sharedDraft.sendFailed(d);
         break;
       case "event": {
         if (this.detached) {
@@ -11099,8 +11587,6 @@ class SessionView {
           this.skippedEvents.push(d.event);
           if (this.skippedEvents.length > 2000) this.skippedEvents.shift();
           this.newSinceDetach++;
-          if (d.event.kind === "user" && d.event.data && d.event.data.text)
-            this.composer.rememberSent(d.event.data.text);
           this.syncTailPill();
           break;
         }
@@ -11108,7 +11594,6 @@ class SessionView {
         this.clearLive();
         this.renderEvent(d.event, true, follow);
         if (d.event.kind === "user") {
-          if (d.event.data && d.event.data.text) this.composer.rememberSent(d.event.data.text);
           if (this._forceScroll) { this._forceScroll = false; this.scrollBottom(true); }
         }
         this.syncLiveStatus();
@@ -11138,7 +11623,8 @@ class SessionView {
         this.showApproval(d.req);
         break;
       case "approval_resolved":
-        this.hideApproval();
+        if (this.approvalRequest && this.approvalRequest.request_id === d.request_id)
+          this.hideApproval();
         break;
       case "steering_state":
         this.setSteeringState(d.steering);
@@ -11216,6 +11702,10 @@ class SessionView {
           toast(`${d.engine}: rate limit ${d.info.status}`, "error");
         break;
       case "toast":
+        /* Session sockets report command refusals as an uncorrelated
+           toast. Keep the approval visible and permit a retry after one. */
+        this.approvalPending = false;
+        this.updateApprovalControl();
         toast(d.text, d.level || "info");
         break;
       case "browser_activity":
@@ -11501,10 +11991,7 @@ class SessionView {
     }
     /* The reply only acknowledges the handoff; the answer arrives over the
        session socket as its own rows, which is what releases the control. */
-    if (this.composer.text() === composerText) {
-      this.composer.take();
-      this.saveDraft();
-    }
+    if (this.composer.clearSentText(composerText)) this.saveDraft();
     this.updateAskControl();
     this.scrollBottom(true);
   }
@@ -11561,6 +12048,8 @@ class SessionView {
     const reconnecting = !!value;
     if (this.reconnecting === reconnecting) return;
     this.reconnecting = reconnecting;
+    if (reconnecting) this.approvalPending = false;
+    this.updateApprovalControl();
     this.root.classList.toggle("transport-lost", reconnecting);
     this.renderStatus();
     this.updateSteerControl();
@@ -12302,15 +12791,13 @@ class SessionView {
        successful transport handoff, so another steer may follow while its
        later accepted/rejected status remains visible through the socket. */
     if (this.steerPending === request) this.steerPending = null;
-    if (this.composer.text() === composerText) {
-      this.composer.take();
-      this.saveDraft();
-    }
+    if (this.composer.clearSentText(composerText)) this.saveDraft();
     this.updateSteerControl();
     this.scrollBottom(true);
   }
 
   submit() {
+    if (this.sharedDraft && this.sharedDraft.sent) return;
     const wasRunning = this.status === "running";
     const draft = this.draftValue();
     if (this.composer.isEmpty()) return;
@@ -12326,8 +12813,9 @@ class SessionView {
     const blocker = this.composer.sendBlocker();
     if (blocker) { toast(blocker, "error"); return; }
     if (!this.ws || this.ws.readyState !== 1) { toast("Not connected", "error"); return; }
-    const message = { type: "message", text: this.composer.take() };
-    if (this.draftReady) {
+    const message = { type: "message", text: this.sharedDraft ? this.composer.message() : this.composer.take() };
+    if (this.sharedDraft) this.sharedDraft.prepareSend(message, draft);
+    else if (this.draftReady) {
       writeDraftJournal(this.tab.id, draft, this.draftRevision, true);
       this.draftJournal = {
         text: draft, baseRevision: this.draftRevision,
@@ -12368,7 +12856,22 @@ class SessionView {
   }
 
   /* ---- approvals ---- */
+  approvalBlocked() {
+    return !this.ws || this.ws.readyState !== 1 || this.reconnecting ||
+      !!remoteStoppingMessage(this.tab.bid) ||
+      (!!this.tab.bid && !backendConnectionAllowed(this.tab.bid));
+  }
+  updateApprovalControl() {
+    if (!this.approvalEl) return;
+    this.approvalEl.setAttribute("aria-busy", String(!!this.approvalPending));
+    const disabled = !!this.approvalPending || this.approvalBlocked();
+    this.approvalEl.querySelectorAll(".ap-btns button").forEach(button => {
+      button.disabled = disabled;
+    });
+  }
   showApproval(req) {
+    this.approvalRequest = req;
+    this.approvalPending = false;
     this.approvalEl.classList.remove("hidden");
     this.approvalEl.innerHTML = "";
     this.approvalEl.appendChild(el("div", "ap-title", `⚠ Approval: ${req.display_name || req.tool_name}` +
@@ -12397,20 +12900,35 @@ class SessionView {
       }
     }
     this.approvalEl.appendChild(btns);
+    this.updateApprovalControl();
     this.scrollBottom(true);
   }
   hideApproval() {
+    this.approvalRequest = null;
+    this.approvalPending = false;
+    this.approvalEl.removeAttribute("aria-busy");
     this.approvalEl.classList.add("hidden");
     this.approvalEl.innerHTML = "";
   }
   respondApproval(req, behavior, updated_permissions) {
-    if (this.ws && this.ws.readyState === 1) {
+    if (!this.approvalRequest || this.approvalRequest.request_id !== req.request_id ||
+        this.approvalPending) return;
+    if (this.approvalBlocked()) {
+      this.updateApprovalControl();
+      return;
+    }
+    try {
       this.ws.send(JSON.stringify({
         type: "approval_response", request_id: req.request_id,
         behavior, updated_permissions: updated_permissions || undefined,
       }));
+      /* send() queues bytes locally. Only approval_resolved (or the next
+         attach snapshot) proves the backend handled this request. */
+      this.approvalPending = true;
+    } catch (error) {
+      toast(`${backendName(this.tab.bid)}: Approval response could not be sent · try again after reconnecting`, "error", TOAST_LONG);
     }
-    this.hideApproval();
+    this.updateApprovalControl();
   }
 
   /* A queue entry is a prompt string, or a pending change: an engine switch
@@ -12736,9 +13254,10 @@ class SessionView {
     this.syncQueueEditBusy();
     if (preserveDraft && !this.closed) {
       const text = this.draftValue();
-      writeDraftJournal(this.tab.id, text, this.draftRevision);
+      const baseRevision = this.sharedDraft ? this.sharedDraft.base : this.draftRevision;
+      writeDraftJournal(this.tab.id, text, baseRevision);
       this.draftJournal = {
-        text, baseRevision: this.draftRevision, submitted: false,
+        text, baseRevision, submitted: false,
       };
       if (!this.draftReady) this.draftTouchedBeforeReady = true;
     }
@@ -12800,6 +13319,14 @@ class SessionView {
       this.saveDraft();
       toast("Backend returned an invalid edited draft", "error", TOAST_LONG);
       return;
+    }
+    if (this.sharedDraft) {
+      const latest = this.draftDeferred && this.draftDeferred.revision > draft.revision ? this.draftDeferred : draft;
+      this.sharedDraft.base = latest.revision;
+      this.sharedDraft.conflict = false;
+      this.sharedDraft.flight = null;
+      this.sharedDraft.server = latest;
+      this.sharedDraft.paint();
     }
     /* A different device may have authored a later revision after this click.
        Otherwise make this explicit replacement stronger than ordinary shared
@@ -17902,7 +18429,7 @@ class SettingsView {
     /* backends */
     const c3 = el("div", "card");
     c3.innerHTML = `<h2>Backends</h2><div id="be-list"></div>
-      <div class="settings-form backend-add-form">
+      <form class="settings-form backend-add-form">
         <label>Name <span class="field-optional">(optional)</span><input type="text" id="be-name"></label>
         <div class="backend-url-field"><span class="backend-url-caption">URLs</span>
           <div class="backend-url-editor" id="be-urls"></div>
@@ -17929,8 +18456,8 @@ class SettingsView {
             <small>Enabled once the backend is added, if that backend supports one</small></span>
         </label>
         <p class="form-error full hidden" role="alert"></p>
-        <div class="full"><button class="btn btn-pri btn-sm" id="be-add">Add backend</button></div>
-      </div>`;
+        <div class="full"><button type="submit" class="btn btn-pri btn-sm" id="be-add">Add backend</button></div>
+      </form>`;
     const addUrlEditor = backendUrlEditor(c3.querySelector("#be-urls"));
     const beList = c3.querySelector("#be-list");
     const renderBes = () => {
@@ -18125,13 +18652,28 @@ class SettingsView {
           if (this.inner.isConnected) await this.render();
         };
         const rm = el("button", "btn btn-danger btn-sm", "Remove");
+        let removing = false;
         rm.onclick = async () => {
-          const addresses = configuredBackendUrls(b).join(", ");
-          if (!(await modalConfirm("Remove backend?", addresses,
-              { subject: b.name, confirmLabel: "Remove", destructive: true }))) return;
-          await api(0, `backends/${b.id}`, { method: "DELETE" });
-          discardBackendRecord(b.id);
-          if (this.inner.isConnected) await this.render();
+          if (removing) return;
+          removing = true;
+          let removed = false;
+          try {
+            const addresses = configuredBackendUrls(b).join(", ");
+            if (!(await modalConfirm("Remove backend?", addresses,
+                { subject: b.name, confirmLabel: "Remove", destructive: true }))) return;
+            rm.disabled = true;
+            rm.textContent = "Removing…";
+            await api(0, `backends/${b.id}`, { method: "DELETE" });
+            removed = true;
+            discardBackendRecord(b.id);
+            if (this.inner.isConnected) await this.render();
+          } catch (error) {
+            const message = removed ? "Backend removed · Could not refresh settings" : "Could not remove backend";
+            toast(`${b.name}: ${message} · ${error.message}`, "error", TOAST_LONG);
+          } finally {
+            removing = false;
+            if (rm.isConnected) { rm.disabled = false; rm.textContent = "Remove"; }
+          }
         };
         actions.appendChild(edit); actions.appendChild(test);
         actions.appendChild(upgrade); actions.appendChild(rm);
@@ -18143,15 +18685,19 @@ class SettingsView {
     renderBes();
     this.syncUpgradeButtons();
     const addButton = c3.querySelector("#be-add");
+    const addForm = c3.querySelector(".backend-add-form");
     const addError = c3.querySelector(".backend-add-form .form-error");
     const setAddError = text => {
       addError.textContent = text || "";
       addError.classList.toggle("hidden", !text);
     };
-    addButton.onclick = async () => {
+    addForm.onsubmit = async event => {
+      event.preventDefault();
+      if (addButton.disabled) return;
       setAddError("");
       addButton.disabled = true;
       addButton.textContent = "Adding…";
+      addForm.setAttribute("aria-busy", "true");
       try {
         let paired = {};
         const raw = c3.querySelector("#be-pairing").value.trim();
@@ -18191,6 +18737,7 @@ class SettingsView {
       } catch (e) {
         setAddError(e.message);
       } finally {
+        addForm.removeAttribute("aria-busy");
         if (addButton.isConnected) { addButton.disabled = false; addButton.textContent = "Add backend"; }
       }
     };

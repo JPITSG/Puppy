@@ -821,25 +821,31 @@ def add_event(session_id: int, kind: str, data: dict) -> dict:
 
 
 def get_events(session_id: int, before_seq=None, limit: int = 200,
-               after_seq=None) -> list:
+               after_seq=None, kind=None) -> list:
     """Return up to ``limit`` events in ascending seq order.
 
     Without a cursor these are the newest events; ``before_seq`` pages back
     from there, and ``after_seq`` pages forward, which lets a console load a
-    window of history around one event rather than paging back to it.
+    window of history around one event rather than paging back to it. An
+    optional kind filter applies before the limit, so prompt recall can page
+    through a whole session without transferring its tool output.
     """
+    where = ["session_id=?"]
+    args = [session_id]
+    if kind is not None:
+        where.append("kind=?")
+        args.append(kind)
     if after_seq is not None:
-        rows = query("SELECT seq,kind,payload,created_at FROM events WHERE session_id=? AND seq>? ORDER BY seq ASC LIMIT ?",
-                     (session_id, after_seq, limit))
-        ordered = rows
+        where.append("seq>?")
+        args.append(after_seq)
     elif before_seq is not None:
-        rows = query("SELECT seq,kind,payload,created_at FROM events WHERE session_id=? AND seq<? ORDER BY seq DESC LIMIT ?",
-                     (session_id, before_seq, limit))
-        ordered = reversed(rows)
-    else:
-        rows = query("SELECT seq,kind,payload,created_at FROM events WHERE session_id=? ORDER BY seq DESC LIMIT ?",
-                     (session_id, limit))
-        ordered = reversed(rows)
+        where.append("seq<?")
+        args.append(before_seq)
+    direction = "ASC" if after_seq is not None else "DESC"
+    rows = query("SELECT seq,kind,payload,created_at FROM events WHERE " +
+                 " AND ".join(where) + " ORDER BY seq " + direction + " LIMIT ?",
+                 tuple(args + [limit]))
+    ordered = rows if after_seq is not None else reversed(rows)
     out = []
     for r in ordered:
         try:

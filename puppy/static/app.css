@@ -956,15 +956,17 @@ select.choice-native{display:none!important}
 /* the text carries the truncation: a bare text node in a flex row cannot */
 .chat-status .status-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .prompt-status-label::after{
-  content:".";display:inline-block;width:3ch;text-align:left;letter-spacing:normal;
+  /* Keep all three glyphs in layout and reveal only their ink. This reserves
+     exactly their width, including in the task tabs' proportional font. */
+  content:"...";display:inline-block;text-align:left;letter-spacing:normal;
   animation:prompt-status-dots 1.2s steps(1,end) infinite;
 }
 @keyframes prompt-status-dots{
-  0%,32%{content:"."}
-  33%,65%{content:".."}
-  66%,100%{content:"..."}
+  0%,32%{clip-path:inset(0 66.6667% 0 0)}
+  33%,65%{clip-path:inset(0 33.3333% 0 0)}
+  66%,100%{clip-path:inset(0 0 0 0)}
 }
-@media (prefers-reduced-motion:reduce){.prompt-status-label::after{content:"..."}}
+@media (prefers-reduced-motion:reduce){.prompt-status-label::after{content:"...";animation:none}}
 .chat-status .spinner{
   flex:0 0 auto;width:10px;height:10px;border:2px solid var(--acc-dim);
   border-top-color:var(--acc);border-radius:50%;animation:spin .8s linear infinite;
@@ -1350,6 +1352,26 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
      field-sizing, so a host that wants a taller box restyles only these. */
   min-height:24px;max-height:224px;font-size:var(--fs-xl);line-height:20px;
 }
+.composer-presence{
+  display:flex;align-items:center;gap:6px;min-height:var(--btn-h-sm);
+  color:var(--txt3);font-size:var(--fs-xs);padding:0 3px;
+}
+.composer-presence-text{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.composer-draft-review{
+  flex-shrink:0;border:0;background:none;color:var(--acc);cursor:pointer;
+  font:inherit;min-height:var(--btn-h-sm);padding:0 5px;border-radius:var(--btn-r);
+}
+.composer-draft-review:hover{background:var(--hov)}
+.typing-dots{width:24px;height:12px;flex-shrink:0;fill:currentColor;color:var(--txt2)}
+.typing-dots circle{animation:typing-pulse calc(var(--t-slow) * 4) var(--ease) infinite}
+.typing-dots circle:nth-child(2){animation-delay:var(--t-base)}
+.typing-dots circle:nth-child(3){animation-delay:calc(var(--t-base) * 2)}
+@keyframes typing-pulse{0%,60%,100%{opacity:.35}30%{opacity:1}}
+@media (prefers-reduced-motion:reduce){.typing-dots circle{animation:none;opacity:.7}}
+.draft-review-modal{--modal-w:var(--modal-w-editor)}
+.draft-review-form textarea{margin-top:6px;resize:vertical;font-family:var(--sans);font-weight:400;letter-spacing:normal;text-transform:none}
+.draft-review-form .m-btns{flex-wrap:wrap}
+.modal .draft-review-form .m-btns .btn{min-width:max-content}
 /* ---------- composer @-mentions ---------- */
 /* Floats from the composer's top edge, aligned to its border box so the list
    reads as the input's own extension rather than a detached menu. */
@@ -1476,6 +1498,8 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 }
 @media (hover:hover){.attach-chip.file .attach-x:hover{background:var(--hov);color:var(--txt)}}
 .attach-chip.file .attach-x:active{transform:translateY(-50%) scale(.88);background:var(--hov)}
+/* Match the shared button's disabled wash without moving the chip or icon. */
+.attach-chip .attach-x:disabled{opacity:.42;pointer-events:none}
 .composer-row{display:flex;align-items:center;gap:8px;min-width:0}
 .composer-meta-viewport{
   flex:1 1 0;min-width:0;
@@ -1985,6 +2009,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   background:var(--err-dim);color:var(--err);font-size:var(--fs-sm);line-height:1.4;
 }
 .settings-form{display:grid;grid-template-columns:1fr 1fr;gap:0 14px;margin-top:8px}
+.settings-form>.form-error{margin-bottom:10px}
 .settings-form.backend-add-form{margin-top:12px}
 .settings-form .full{grid-column:1/-1}
 .bind-fields{display:grid;grid-template-columns:minmax(0,1fr) 132px auto;gap:0 14px;min-width:0}

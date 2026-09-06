@@ -208,7 +208,13 @@ const deletes = from => requests.slice(from).filter(r => r.method === "DELETE").
   completeUpload(fetches[0], "1700000000000-a1b2c3d4e5");
   await settle();
   assert.ok(n[".attach-chip.image"]);
-  await n["#nt-start"].onclick();
+  hold = new Promise(resolve => { release = resolve; });
+  const attachedTask = n["#nt-start"].onclick();
+  assert.equal(n[".attach-x"].disabled, true, "task preparation locks attachment removal");
+  n[".attach-x"].onclick();
+  assert.ok(n[".attach-chip.image"], "the submitted attachment stays visible");
+  assert.deepEqual(deletes(0), [], "a stale removal click cannot race adoption");
+  release(); await attachedTask; hold = null;
   assert.equal(requests[0].body.prompt, "Build this\n\n[image attached: /srv/data/uploads/10/" +
     "1700000000000-a1b2c3d4e5/shot.png — view it with your image/file tools]");
   assert.deepEqual(deletes(0), [], "the node adopted the file; nothing to discard");
@@ -269,5 +275,29 @@ const deletes = from => requests.slice(from).filter(r => r.method === "DELETE").
   assert.deepEqual(values(n), { engine: "local", ...state.engines[0].session_defaults },
     "the primary uses its own defaults, independently of the remote backend");
   dialog.close();
+
+  /* Dismissal during preparation, or after an uncertain response, cannot
+     delete bytes the node may still be copying into the submitted task. */
+  for (const uncertain of [false, true]) {
+    requests = [];
+    n = await open(); n["#nt-prompt"].value = "Use this attachment";
+    paste(n["#nt-prompt"]);
+    completeUpload(fetches[fetches.length - 1], "1700000000099-b2c3d4e5f6");
+    await settle();
+    hold = new Promise(resolve => { release = resolve; }); fail = uncertain;
+    const creating = n["#nt-start"].onclick();
+    if (uncertain) {
+      release(); await creating;
+      assert.equal(n[".attach-x"].disabled, false, "an unsuccessful dialog becomes editable again");
+      n[".attach-x"].onclick();
+      assert.equal(n[".attach-chip"], null);
+      assert.deepEqual(deletes(0), [], "editing after a lost reply cannot race a late adoption either");
+    }
+    dialog.close();
+    assert.deepEqual(deletes(0), [], "closing a submitted dialog leaves adoption safe");
+    if (!uncertain) { release(); await creating; }
+    hold = null; fail = false;
+    assert.equal(Composer.live.size, 0);
+  }
   console.log("PASS: task modal engine defaults, engine/model dependencies, catalog refresh and delayed initialization, custom/retired choices, local/remote nodes, retry lifecycle, and its shared prompt box (Enter, attachments, discard on cancel)");
 })().catch(error => { console.error(error); process.exitCode = 1; });

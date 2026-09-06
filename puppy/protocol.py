@@ -86,6 +86,7 @@ QUEUE_REORDER_CAPABILITY = "queue-reorder"
 # Durable, versioned shared composer drafts in snapshots and session-socket
 # edits/broadcasts. The browser journal retains unacknowledged edits.
 SESSION_DRAFT_CAPABILITY = "session-drafts"
+SESSION_DRAFT_PRESENCE_CAPABILITY = "session-draft-presence"
 # Authenticated steering requires an expected_turn_id compare token and
 # turn-scoped idempotency. Session payloads expose current readiness.
 ACTIVE_TURN_STEERING_CAPABILITY = "active-turn-steering"
@@ -123,6 +124,9 @@ SEARCH_CAPABILITY = "session-search"
 # GET /api/sessions/{sid}/events accepts after_seq and returns subsequent
 # events oldest first, supporting bounded windows around search hits.
 SESSION_EVENT_WINDOW_CAPABILITY = "session-event-window"
+# GET /api/sessions/{sid}/events accepts kind=user, filtering before its limit
+# for cursor-paged composer recall across the session's entire stored history.
+SESSION_PROMPT_HISTORY_CAPABILITY = "session-prompt-history"
 # POST /api/sessions/{sid}/tool runs one engine-native maintenance action:
 # "compact" summarizes the native context in place (queued behind pending work
 # as an additive runnable {kind:"tool"} row) and "undo" drops the last prompt
@@ -186,6 +190,7 @@ BASE_CAPABILITIES = (
     QUEUE_EDIT_CAPABILITY,
     QUEUE_REORDER_CAPABILITY,
     SESSION_DRAFT_CAPABILITY,
+    SESSION_DRAFT_PRESENCE_CAPABILITY,
     ACTIVE_TURN_STEERING_CAPABILITY,
     SIDE_QUESTION_CAPABILITY,
     # model/effort changes made while work is pending hold their place in the
@@ -224,6 +229,7 @@ BASE_CAPABILITIES = (
     SPAWN_OWNER_LEASE_CAPABILITY,
     SEARCH_CAPABILITY,
     SESSION_EVENT_WINDOW_CAPABILITY,
+    SESSION_PROMPT_HISTORY_CAPABILITY,
     SESSION_TOOLS_CAPABILITY,
     SESSION_FAST_MODE_CAPABILITY,
     SESSION_AGENT_NOTES_CAPABILITY,

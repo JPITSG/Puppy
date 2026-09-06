@@ -79,6 +79,7 @@ function harness(bid = 0, namespace = "") {
   vm.runInContext([
     'let dragTab = null, tabDropMarker = null;',
     between("const el = ", "/* Close buttons"),
+    between("function promptStatusBase(", "/* Claude exposes a streaming thinking block"),
     between("function guardNativeTouchDrag(", "/* A compact backend label"),
     between("const SLIDE_MOTION_MS =", "/* Sticky manual ordering"),
     between("function makeTabDragImage(", "function syncHorizontalOverflow("),
@@ -146,11 +147,24 @@ for (const bid of [0, 7]) {
   phoneView.refreshTasks();
   assert.deepEqual(order(phoneView.strip), [1, 2], "another device discovers new task tabs from session updates");
   assert.equal(phoneView.selected, 1, "discovery keeps the current conversation selected");
+  const runningLabel = taskTab(phoneView, 2).querySelector(".t-state");
+  assert.ok(runningLabel.classList.contains("prompt-status-label"));
+  assert.equal(runningLabel.getAttribute("aria-label"), "Running", "animation keeps the accessible status stable");
+  phone.sessions.get(bid)[1].task.needs_approval = true;
+  phoneView.refreshTasks();
+  assert.equal(taskTab(phoneView, 2).querySelector(".t-state").textContent, "Needs approval");
+  assert.equal(taskTab(phoneView, 2).querySelector(".prompt-status-label"), null,
+    "a running task waiting for approval does not animate its status");
+  phone.sessions.get(bid)[1].task.needs_approval = false;
+  phoneView.refreshTasks();
+  assert.ok(taskTab(phoneView, 2).querySelector(".prompt-status-label"), "the animation returns after approval");
   for (const taskState of ["queued", "held", "ready", "failed", "stopped", "applied"]) {
     phone.sessions.get(bid)[1].task.state = taskState;
     phone.sessions.get(bid)[1].task.result_seq = 10;
     phoneView.refreshTasks();
     assert.deepEqual(order(phoneView.strip), [1, 2], "task state changes never hide a tab");
+    assert.equal(taskTab(phoneView, 2).querySelector(".prompt-status-label"), null,
+      "only the running status animates");
     assert.equal(taskTab(phoneView, 2).querySelector(".t-state").classList.contains("unread"), true,
       "discovery does not mark the answer read");
   }

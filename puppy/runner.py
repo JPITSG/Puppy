@@ -692,6 +692,8 @@ async def _safe_send(ws, payload, pool=None) -> None:
 # How long every background task may be gone without the engine waking the
 # model before the wait is ended anyway (the CLI normally continues at once).
 BACKGROUND_WAKE_GRACE = 60.0
+TYPING_LEASE_SECONDS = 6.0
+_UNSET_DRAFT_REVISION = object()
 
 
 def _background_wait_text(tasks) -> str:
@@ -784,6 +786,9 @@ class SessionHub:
         # Draft mutations from several session sockets are serialized through
         # one lock so every watcher observes the same revision order.
         self._draft_lock = asyncio.Lock()
+        # Typing is a socket-owned, expiring hint, never session history or
+        # durable state. A missing stop frame cannot leave a ghost typist.
+        self._typists = {}
         # Remote-workspace barrier state. While _ws_phase is set, the turn is
         # holding for the controller to reconcile the mirror; the grant route
         # (or the in-process hook for local sessions) releases it. _ws_map
@@ -813,13 +818,17 @@ class SessionHub:
         async with self._draft_lock:
             self.attach(ws)
             try:
-                await ws.send_json(self.snapshot())
+                snapshot = self.snapshot()
+                snapshot["draft_presence"] = {"version": 1,
+                                              "count": len(self._typists)}
+                await ws.send_json(snapshot)
             except Exception:
                 self.detach(ws)
                 raise
 
     def detach(self, ws) -> None:
         self.watchers.discard(ws)
+        self.typing(ws, False)
         context = self._queue_reorder
         if context is not None and context[0] is ws:
             self._release_queue_reorder(ws, context[1])
@@ -828,6 +837,23 @@ class SessionHub:
     def broadcast(self, payload: dict) -> None:
         for ws in list(self.watchers):
             asyncio.ensure_future(_safe_send(ws, payload, self.watchers))
+
+    def typing(self, ws, active) -> None:
+        """Renew a six-second lease; fan out only start/stop edges."""
+        if type(active) is not bool:
+            return
+        previous = self._typists.pop(ws, None)
+        if previous is not None:
+            previous.cancel()
+        if active and ws in self.watchers:
+            self._typists[ws] = asyncio.get_running_loop().call_later(
+                TYPING_LEASE_SECONDS, self.typing, ws, False)
+        if bool(previous) == (ws in self._typists):
+            return
+        for viewer in list(self.watchers):
+            payload = {"type": "typing",
+                       "count": len(self._typists) - int(viewer in self._typists)}
+            asyncio.ensure_future(_safe_send(viewer, payload, self.watchers))
 
     async def _broadcast_draft(self, payload: dict) -> None:
         """Write one ordered draft frame to every attached viewer."""
@@ -855,17 +881,29 @@ class SessionHub:
             payload["consumed"] = bool(consumed)
         return payload
 
-    async def update_draft(self, text, client_id="", client_seq=0) -> dict:
+    async def update_draft(self, text, client_id="", client_seq=0,
+                           expected_revision=_UNSET_DRAFT_REVISION, recipient=None) -> dict:
         """Persist and fan out one full composer value in a total order."""
         if not isinstance(text, str):
             return {"error": "draft text must be text"}
         if len(text) > db.MAX_DRAFT_CHARS:
             return {"error": "draft cannot exceed {} characters".format(
                 db.MAX_DRAFT_CHARS)}
+        if expected_revision is not _UNSET_DRAFT_REVISION and (
+                type(expected_revision) is not int or expected_revision < 0):
+            return {"error": "expected draft revision must be a non-negative integer"}
         async with self._draft_lock:
             if db.get_session(self.id) is None:
                 return {"error": "session gone"}
             try:
+                current = db.get_session_draft(self.id)
+                if expected_revision is not _UNSET_DRAFT_REVISION and \
+                        current["revision"] != expected_revision:
+                    payload = {**self._draft_payload(current, client_id, client_seq),
+                               "type": "draft_conflict"}
+                    if recipient is not None:
+                        await _safe_send(recipient, payload, self.watchers)
+                    return payload
                 _, current = db.set_session_draft(self.id, text)
             except Exception:
                 log.exception("could not persist draft for session %s", self.id)

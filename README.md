@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/desktop-dark.png" alt="Puppy console on a desktop: session sidebar, a Claude Code transcript with tool cards and a side question, and a full-history search pane" width="900">
+  <img src="assets/desktop-dark.png" alt="Puppy console on a desktop: session sidebar, running task tabs, a transcript with tool cards and a typing indicator, and a full-history search pane" width="900">
 </p>
 
 <h1 align="center">Puppy 🐾</h1>
@@ -43,6 +43,14 @@ There is no build step, no npm, no daemon besides Puppy itself: Python 3.9+,
   delegate one-shot jobs or talk to other sessions across the fleet.
 - **Nothing gets lost.** Durable message queues, drafts that follow you between
   devices, full-history search, and one-click backup and restore.
+- **Type together without losing your place.** On backends with typing presence,
+  the chat shows when another console is typing. Concurrent edits keep your
+  text, caret, and attachments in place; **Review drafts** lets you compare
+  your local version with the shared one, keep editing, use the shared draft,
+  or share yours. A conflicting local draft survives reloads in that browser's
+  draft journal. Sending it submits your version and preserves a different
+  shared draft. The indicator stops after a pause or disconnect and respects
+  reduced motion.
 - **Built for the phone.** A responsive layout, a swipeable sidebar drawer, and
   light and dark themes. Overflowing tab and chip strips fade their contents at
   the edges while surrounding borders stay visible. Menus close when you tap or
@@ -53,7 +61,7 @@ There is no build step, no npm, no daemon besides Puppy itself: Python 3.9+,
   &nbsp;&nbsp;
   <img src="assets/mobile-light.png" alt="Puppy on a phone in light mode, showing the same transcript" width="270">
   &nbsp;&nbsp;
-  <img src="assets/mobile-dark-sidebar.png" alt="Puppy on a phone with the session drawer open, listing sessions from two backends and the engine status footer" width="270">
+  <img src="assets/mobile-dark-sidebar.png" alt="Puppy on a phone with the session drawer open, listing demo projects and the engine status footer" width="270">
 </p>
 
 ## Quick start
@@ -145,16 +153,26 @@ you can:
   re-send explicitly).
 - **Approve or deny** – engine permission requests appear as cards with the
   proposed action, plus the engine's own suggestions such as *Always allow* or
-  allow-and-switch-mode.
+  allow-and-switch-mode. Cards stay visible until the backend confirms the
+  response; their controls are disabled while reconnecting or awaiting
+  confirmation.
 - **Stop** – interrupt the turn; the engine gets an orderly shutdown and the
   answer so far is kept.
 
 Everything typed at an agent goes through one shared prompt box: `Enter` sends,
 `Shift+Enter` or `Ctrl+J` breaks a line, `↑` at the start of the box recalls
 earlier prompts, and `@` opens the mention list (browsers, terminals, sessions,
-a new spawn). Drafts are shared: what you type is written through to the
-session's backend and streamed to every open console, so the half-finished
-prompt on your desktop is on your phone too.
+a new spawn). Recall reads the session's stored prompts, loading older pages as
+needed with no history limit, all the way back to its first prompt, on any
+device. `↓` at the end walks forward again and restores your unsent draft and
+attachments after the newest prompt. Each new recall walk picks up prompts
+sent from other devices too. Drafts are shared through the session's backend, so the
+half-finished prompt on your desktop is on your phone too. On backends with
+typing presence, overlapping edits stay local until you review the drafts or
+send your message; another console's edits never interrupt your typing.
+
+Ask and Steer accept text only. Text edits and attachments added while their
+send is awaiting acknowledgement remain in the composer for the next message.
 
 **Attachments** go in with the `+` button, a paste, or a drop from your file
 manager: images, documents, archives, source, anything. Files stream straight to
@@ -174,6 +192,8 @@ working in an independent Git clone of Main's project that starts from Main's
 current files, uncommitted changes included. Run several at once on different
 features. New tasks initially select Main's engine and use that backend's saved
 model, effort and permission defaults. Adjust these choices before starting.
+Attachments are locked while the task is preparing. Closing the dialog after
+submission leaves its files available for the backend to finish creating the task.
 
 - Tasks appear beside Main on every device, including tasks created while a
   device was away, without switching the selected conversation. They stay there
@@ -181,6 +201,8 @@ model, effort and permission defaults. Adjust these choices before starting.
   reopen it from the **Tasks** sheet.
 - Drag task tabs to reorder them with the same drag card and sliding animation
   as workspace tabs. Main stays first; the order is saved in this browser.
+- Running task tabs animate one, two, then three dots in a fixed-width slot,
+  keeping the tab and its contents still. Reduced motion shows three static dots.
 - The **Tasks** sheet lists every task with its state and latest answer. Tasks
   ready for review show **Review** in the sheet and their tabs.
 - **Review changes** shows the changed files with a coloured diff; **Apply to
@@ -284,9 +306,11 @@ history around it.
 Puppy's console is a **controller**. Any number of other machines can be paired
 as **backends** from Settings → Backends, either full Puppy instances or the
 API-only headless package, by pasting a pairing block or entering a URL and
-API token. Your browser only ever talks to the controller, which
-proxies HTTP and WebSocket traffic to the backends it authenticates with their
-API tokens and pinned TLS certificates.
+API token. Enter in an Add backend text field submits the form. Failed adds
+keep their inline error and entered values; failed removals keep the backend
+and show a named error so you can retry. Your browser only ever talks to the
+controller, which proxies HTTP and WebSocket traffic to the backends it
+authenticates with their API tokens and pinned TLS certificates.
 
 - Sessions on a backend appear in the same sidebar, merged with local ones by
   activity, and open in the same tabs.
@@ -421,6 +445,7 @@ node tests/sidebar_ui_test.js        # sidebar ordering, pins, reorders, filteri
 node tests/tab_drag_ui_test.js       # task discovery, saved visibility and tab dragging
 node tests/menu_dismiss_ui_test.js   # outside focus/taps, hamburger and menu toggles
 node tests/composer_ui_test.js       # the shared prompt box and its "@" list
+node tests/backend_settings_ui_test.js # backend forms, removal errors and retry
 node tests/task_config_ui_test.js    # the New task dialog
 node tests/task_fold_ui_test.js      # task removal and the folded archive card
 python3 tests/backend_test.py        # headless package, auth, protocol, capabilities

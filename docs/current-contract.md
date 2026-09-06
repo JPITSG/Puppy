@@ -66,6 +66,10 @@ still contain a value written before that release.
   system-prompt settings, current queued choices, and task configuration,
   attachments, conflict resolution, and conversation folding. Search jumps use
   the forward event cursor. Session elapsed time requires server timing fields.
+- `session-draft-presence` adds expiring, anonymous typing hints to the existing
+  session socket and optional revision comparisons for shared-draft writes.
+  Conflicts retain the local editor and its existing journal until reviewed;
+  no draft, config, database or backup format changes are needed.
 - Internal browser bridge aliases and the obsolete engines-response `user`
   alias are removed.
 

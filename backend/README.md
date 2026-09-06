@@ -691,6 +691,43 @@ Draft-only files are retained until an unambiguous lifecycle boundary instead
 of being eagerly deleted while another console may still have an update in
 flight.
 
+Prompt recall uses the same stored transcript on every device. The additive
+`session-prompt-history` capability enables `GET
+/api/sessions/{sid}/events?kind=user`: the filter applies before `limit`
+(1–500, default 200), with the ordinary exclusive `before_seq` / `after_seq`
+cursors and ascending event order. There is no total history cap or separate
+recall store. The console fetches prompts on demand; older peers use unfiltered
+event pages until upgraded. Queued prompts enter recall when they start and
+become transcript rows; folded task archives are not prompts in Main.
+
+The additive `session-draft-presence` capability adds `draft_presence:
+{version:1,count:N}` to the socket's initial snapshot. Clients send
+`{type:"typing",active:true|false}` over that same authenticated session socket;
+viewers receive `{type:"typing",count:N}` excluding their own socket. Presence
+is per conversation (including tasks), anonymous, memory-only, and removed on
+disconnect or six seconds without renewal. The console throttles renewals to
+one per 1.5 seconds of input and sends stop after three seconds without input,
+on blur, hiding the page/conversation, and Send. It adds no polling or engine
+work.
+
+On this capability, a `draft` write includes the integer `expected_revision`.
+The hub checks it inside the same lock as persistence and ordered broadcast;
+a stale writer receives a private `draft_conflict` with the current draft and
+its request identity, without changing the shared value. A focused local edit,
+IME composition, pending upload, or unacknowledged edit is never replaced by
+a peer. Divergent drafts remain in the existing browser journal until the
+user reviews the two versions or sends their own. Review writes compare the
+revision actually shown. There is no automatic text merge or persisted-shape
+change; backups retain their existing draft coverage. Older clients keep
+the original wire contract, and older backends do not offer presence.
+
+Negotiated draft failures use correlated `draft_error` replies. Messages sent
+with `draft_guarded:true` receive `draft_send_error` on refusal (or with
+`accepted:true` if the prompt was accepted but clearing its draft failed).
+The console keeps the editor until acknowledgement, exposes inline retry, and
+leaves edits made during that wait intact. A send never consumes a different
+peer draft; a coalesced saved prefix is cleared afterwards by a guarded write.
+
 ## Session search
 
 Every node advertises the additive `session-search` capability: `GET

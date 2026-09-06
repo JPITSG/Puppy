@@ -70,6 +70,7 @@ const context = vm.createContext({
   provSpec: key => ({ className: key, text: key }), sessDot: () => el("span"), choiceSvg: () => el("svg"), refreshIcon: () => el("svg"),
   refreshEngineVersions: bid => requests.push({ bid, route: "engines/refresh" }),
   esc: text => String(text), layoutSwatchRow() {},
+  linkifyInto: (node, text) => { node.textContent = text; },
   window: { addEventListener() {}, removeEventListener() {} }, wireDirectoryPicker() {},
   renderSidebar: () => { sidebarUpdates++; }, syncTabsWithSessions: () => { tabUpdates++; },
   acceptStateSnapshot: () => true, noteLocalStateStreamTopic() {}, ingestSessionActivity() {},
@@ -315,5 +316,58 @@ function engineCatalog(fast = false) {
   assert.equal(backend.value, "7");
   dialog.close(); assert.equal(nodeStateListeners.size, 0); assert.equal(enginePayloadListeners.size, 0);
   update();
+
+  /* Permission cards stay until the backend confirms. Disconnects disable
+     every choice without pretending that an unanswered request was handled. */
+  const approval = Object.create(SessionView.prototype), sent = [];
+  Object.assign(approval, { tab: { bid: 0, sid: 1 }, root: mount(el("div")),
+    approvalEl: mount(el("div", "approval hidden")), reconnecting: false,
+    scrollBottom() {}, renderStatus() {}, updateSteerControl() {},
+    ws: { readyState: 1, send: text => sent.push(JSON.parse(text)) },
+  });
+  const req = { request_id: "permission-1", tool_name: "Read", input: { file_path: "/demo/notes.txt" },
+    suggestions: [{ type: "setMode", mode: "safe" }, { type: "allowAlways", label: "Always allow" }] };
+  const choices = () => approval.approvalEl.querySelectorAll(".ap-btns button");
+  const visible = () => !approval.approvalEl.classList.contains("hidden");
+  approval.showApproval(req);
+  assert.equal(choices().length, 4);
+  for (const disconnected of [null, { readyState: 0 }, { readyState: 2 }, { readyState: 3 }]) {
+    approval.ws = disconnected;
+    for (const choice of choices()) choice.onclick(); // socket closed before onclose arrives
+    assert.equal(sent.length, 0);
+    assert.ok(visible());
+    approval.setReconnecting(true);
+    assert.ok(choices().every(choice => choice.disabled), "all suggestions disable together");
+  }
+  approval.ws = { readyState: 1, send: text => sent.push(JSON.parse(text)) };
+  approval.setReconnecting(false);
+  assert.ok(choices().every(choice => !choice.disabled));
+  choices()[2].onclick();
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].updated_permissions, [req.suggestions[0]]);
+  assert.ok(visible(), "WebSocket.send does not prove backend acceptance");
+  assert.equal(approval.approvalEl.getAttribute("aria-busy"), "true");
+  for (const choice of choices()) choice.onclick();
+  assert.equal(sent.length, 1, "only one response while confirmation is pending");
+  approval.handle({ type: "approval_resolved", request_id: "older-request" });
+  assert.ok(visible(), "an old acknowledgement cannot dismiss the current permission");
+  approval.handle({ type: "toast", level: "error", text: "backup or restore in progress" });
+  assert.ok(visible());
+  assert.ok(choices().every(choice => !choice.disabled), "a legacy refusal permits retry");
+  choices()[1].onclick();
+  assert.equal(sent[1].behavior, "deny");
+  approval.ws = null; approval.setReconnecting(true);
+  assert.ok(visible(), "disconnect before confirmation preserves the request");
+  approval.ws = { readyState: 1, send: () => { throw new Error("socket closed"); } };
+  approval.setReconnecting(false);
+  approval.showApproval(req); // pending_approval from the next attach snapshot
+  choices()[0].onclick();
+  assert.ok(visible());
+  assert.match(notices[notices.length - 1][0], /^Main: Approval response could not be sent/);
+  approval.ws.send = text => sent.push(JSON.parse(text));
+  choices()[0].onclick();
+  approval.handle({ type: "approval_resolved", request_id: req.request_id });
+  assert.equal(visible(), false);
+  assert.equal(approval.approvalRequest, null);
   console.log("PASS: live composer menus, search recovery, local engine readiness, browser toggles, session links and New session choices");
 })().catch(error => { console.error(error); process.exitCode = 1; });

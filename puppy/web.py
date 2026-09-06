@@ -1052,6 +1052,9 @@ async def h_session_tool(request: web.Request):
 
 async def h_session_events(request: web.Request):
     s = _session_or_404(request)
+    kind = request.query.get("kind")
+    if kind is not None and kind != "user":
+        return web.json_response({"error": "event kind must be user"}, status=400)
     before = request.query.get("before_seq")
     after = request.query.get("after_seq")
     try:
@@ -1072,7 +1075,7 @@ async def h_session_events(request: web.Request):
     if after_seq is not None and after_seq < 0:
         return web.json_response({"error": "event cursor cannot be negative"}, status=400)
     events = db.get_events(s["id"], before_seq=before_seq, limit=limit,
-                           after_seq=after_seq)
+                           after_seq=after_seq, kind=kind)
     return web.json_response({"events": events})
 
 
@@ -1502,6 +1505,19 @@ async def h_snapshot_import(request: web.Request):
 
 # ---- websockets ----
 
+async def _session_write_error(ws, data, message, accepted=False):
+    """Correlate negotiated draft failures so the editor can retain/retry it."""
+    if data.get("type") == "draft" and "expected_revision" in data:
+        await ws.send_json({"type": "draft_error", "error": message,
+                            "client_seq": data.get("client_seq")})
+    elif data.get("type") == "message" and data.get("draft_guarded") is True:
+        await ws.send_json({"type": "draft_send_error", "error": message,
+                            "accepted": accepted,
+                            "client_seq": data.get("draft_client_seq")})
+    else:
+        await ws.send_json({"type": "toast", "level": "error", "text": message})
+
+
 async def ws_session(request: web.Request):
     s = _session_or_404(request)
     ws = web.WebSocketResponse(heartbeat=30, max_msg_size=1 << 22)
@@ -1527,6 +1543,9 @@ async def ws_session(request: web.Request):
                                     "text": "session message must be an object"})
                 continue
             t = data.get("type")
+            if t == "typing":
+                h.typing(ws, data.get("active"))
+                continue
             if request.app.get("puppy_snapshot_busy"):
                 if t in ("steer", "ask"):
                     await ws.send_json({
@@ -1535,10 +1554,7 @@ async def ws_session(request: web.Request):
                         "error": "backup or restore in progress",
                     })
                 else:
-                    await ws.send_json({
-                        "type": "toast", "level": "error",
-                        "text": "backup or restore in progress",
-                    })
+                    await _session_write_error(ws, data, "backup or restore in progress")
                 continue
             if request.app.get("puppy_upgrade_draining") or \
                     request.app.get("puppy_shutdown_draining"):
@@ -1552,10 +1568,7 @@ async def ws_session(request: web.Request):
                         "error": message,
                     })
                 else:
-                    await ws.send_json({
-                        "type": "toast", "level": "error",
-                        "text": message,
-                    })
+                    await _session_write_error(ws, data, message)
                 continue
             if t == "approval_response":
                 await h.approval_response(
@@ -1567,37 +1580,30 @@ async def ws_session(request: web.Request):
                 text = data.get("text", "")
                 supplied_draft = data.get("draft")
                 if "draft" in data and not isinstance(supplied_draft, str):
-                    await ws.send_json({
-                        "type": "toast", "level": "error",
-                        "text": "draft text must be text",
-                    })
+                    await _session_write_error(ws, data, "draft text must be text")
                     continue
                 if isinstance(supplied_draft, str) and \
                         len(supplied_draft) > db.MAX_DRAFT_CHARS:
-                    await ws.send_json({
-                        "type": "toast", "level": "error",
-                        "text": "draft cannot exceed {} characters".format(
-                            db.MAX_DRAFT_CHARS),
-                    })
+                    await _session_write_error(ws, data, "draft cannot exceed {} characters".format(db.MAX_DRAFT_CHARS))
                     continue
                 res = h.send_message(text) if isinstance(text, str) else \
                     {"error": "message text must be text"}
                 if "error" in res:
-                    await ws.send_json({"type": "toast", "level": "error", "text": res["error"]})
+                    await _session_write_error(ws, data, res["error"])
                 elif isinstance(supplied_draft, str):
                     draft_result = await h.consume_draft(
                         supplied_draft, data.get("draft_client_id", ""),
                         data.get("draft_client_seq", 0), recipient=ws)
                     if "error" in draft_result:
-                        await ws.send_json({"type": "toast", "level": "error",
-                                            "text": draft_result["error"]})
+                        await _session_write_error(ws, data, draft_result["error"], accepted=True)
             elif t == "draft":
                 draft_result = await h.update_draft(
                     data.get("text"), data.get("client_id", ""),
-                    data.get("client_seq", 0))
+                    data.get("client_seq", 0),
+                    recipient=ws, **({"expected_revision": data["expected_revision"]}
+                                     if "expected_revision" in data else {}))
                 if "error" in draft_result:
-                    await ws.send_json({"type": "toast", "level": "error",
-                                        "text": draft_result["error"]})
+                    await _session_write_error(ws, data, draft_result["error"])
             elif t in ("steer", "ask"):
                 if t == "steer":
                     res, _status = await _session_steer(s, data)
