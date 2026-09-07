@@ -556,9 +556,11 @@ unlimited), and are offered to the orchestrating engine only for explicit user
 steering while jobs remain attached to that turn. The console's composer
 offers the request as an "@" mention: a "New spawn" wizard slides through
 agent count, node, engine, model, and effort, then inserts the plain-text
-directive `@Spawn <an agent|N agents> on <node> using <engine> [<model>]
-[at <effort> effort] to
-<task>`, whose exact meaning the spawn MCP guidance defines for the engine.
+directive `@Spawn <an agent|N agents> [on <node>] using <engine> [<model>]
+[at <effort> effort]`. No “to” separator is required: the spawn MCP guidance
+tells the engine to take the task from the surrounding user request, before
+or after the directive. The sent-message token also accepts optional “to”
+or “and” wording.
 
 An attached console reads and edits these fields through authenticated
 `GET/PATCH /api/system-prompt`. Nodes advertise the additive `system-prompt`

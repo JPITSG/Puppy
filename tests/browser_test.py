@@ -721,7 +721,7 @@ console.log(JSON.stringify({
     assert result["activity"] == [
         None, None, None, {"cls": "active-time", "text": "1 task"},
         {"cls": "attention", "text": "1 needs input"}], result
-    assert result["title"] == "3 tasks: 2 running, 1 needs input", result
+    assert result["title"] == "3 tasks · 2 running, 1 needs input", result
     assert result["diff"] == [
         "meta", "meta", "meta", "meta", "hunk", "del", "add", "", "meta"], result
 
@@ -1830,7 +1830,9 @@ console.log(JSON.stringify({before,after,connected}));
             "padding-left:12px") in css_source
     assert (".be-url-track{\n  position:relative;display:grid;flex:0 1 auto;" in
             css_source)
-    assert (".be-url-layer{\n  position:static;grid-area:1/1;" in css_source)
+    assert (".be-url-layer{\n  position:absolute;inset:0;" in css_source)
+    assert ('.be-url-track[data-front="1"] .be-url-layer:last-child'
+            '{position:relative;opacity:1}' in css_source)
     assert "display:block;flex:1 1 auto" not in css_source
     assert '.be-url-version:not(:empty){margin-left:1ch}' in css_source
     assert '.be-url-version:not(:empty)::before{content:"·";margin-right:1ch}' \
@@ -4901,7 +4903,7 @@ console.log(JSON.stringify({
     assert "Browser [A-Z0-9]{4}|Terminal [A-Z0-9]{4}|New browser|New terminal" \
         in ui_source
     # The sent-message token regex recognises every spawn directive variant,
-    # but leaves its final " to" task separator as ordinary prose.
+    # leaving optional task connectors as ordinary prose.
     re_start = ui_source.index("const MENTION_TOKEN_RE")
     re_source = ui_source[re_start:ui_source.index("\nfunction decorateMentionsInto", re_start)]
     token_script = r"""
@@ -5189,8 +5191,9 @@ run().catch(e=>{console.error(e&&e.stack||e);process.exit(1);});
     assert '"@Terminal A8AR" mention' in terminal_tools["type"][
         "inputSchema"]["properties"]["terminal_id"]["description"]
     assert '"@New terminal" mention' in terminal_tools["new_terminal"]["description"]
-    assert '"@Spawn an agent on build-node.lan using codex at max effort ' \
-        'to <task>"' in spawn_agent.TOOL_INSTRUCTIONS
+    assert '"@Spawn an agent on build-node.lan using codex at max effort"' \
+        in spawn_agent.TOOL_INSTRUCTIONS
+    assert 'No "to" separator is required' in spawn_agent.TOOL_INSTRUCTIONS
     assert "passing those values verbatim" in spawn_agent.TOOL_INSTRUCTIONS
     assert '"@Spawn 10 agents ..."' in spawn_agent.TOOL_INSTRUCTIONS
     assert "Wait until every agent has finished" in spawn_agent.TOOL_INSTRUCTIONS
@@ -5198,8 +5201,9 @@ run().catch(e=>{console.error(e&&e.stack||e);process.exit(1);});
     assert "Zero means unlimited" in spawn_agent.TOOL_INSTRUCTIONS
     assert "user sends steering" in spawn_agent.TOOL_INSTRUCTIONS
     spawn_tools = {tool["name"]: tool for tool in spawn_agent.TOOLS}
-    assert '"@Spawn an agent ... to ..." mention' in \
+    assert '"@Spawn an agent ..." mention' in \
         spawn_tools["spawn"]["description"]
+    assert 'no "to" separator is required' in spawn_tools["spawn"]["description"]
     count_schema = spawn_tools["spawn"]["inputSchema"]["properties"]["count"]
     assert count_schema["minimum"] == 1 and count_schema["maximum"] == 12
     spawn_limits = spawn_tools["spawn"]["inputSchema"]["properties"]

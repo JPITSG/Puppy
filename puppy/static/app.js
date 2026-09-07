@@ -2356,10 +2356,11 @@ function linkifyInto(node, text) {
 /* A sent chat-box mention - inserted by the composer's @ shortcut, or typed by
    hand in the same shape - renders as a token, confirming which Puppy browser,
    terminal, or spawn target the message pointed the agent at. A spawn token
-   stops before its "to" task separator; that separator and the surrounding
-   prose keep their ordinary rendering and linkification. */
+   covers its settings without requiring any task separator. Common prose
+   connectors are not model ids; punctuation and newlines end settings.
+   Surrounding prose keeps its ordinary rendering and linkification. */
 const MENTION_TOKEN_RE =
-  /(^|[\s([{'"])(@(?:Session-[\w\p{L}\p{N}-]+-[A-Z0-9]{4}|Session (?:[a-f0-9]{32}:)?(?:all|[a-f0-9]{32}\/[1-9][0-9]*)|Browser [A-Z0-9]{4}|Terminal [A-Z0-9]{4}|New browser|New terminal|Spawn (?:an agent|[0-9]{1,2} agents)(?: on (?:"[^"\n]{1,80}"|\S+))? using \S+(?: \S+)?(?: at \S+ effort)?(?= to(?=$|[\s.,;:!?)\]}'"]))))(?=$|[\s.,;:!?)\]}'"])/gu;
+  /(^|[\s([{'"])(@(?:Session-[\w\p{L}\p{N}-]+-[A-Z0-9]{4}|Session (?:[a-f0-9]{32}:)?(?:all|[a-f0-9]{32}\/[1-9][0-9]*)|Browser [A-Z0-9]{4}|Terminal [A-Z0-9]{4}|New browser|New terminal|Spawn (?:an agent|[0-9]{1,2} agents)(?: on (?:"[^"\n]{1,80}"|\S+))? using (?!(?:to|and|at)\b)[\w-]+(?: (?!(?:to|and|at|then|for|with)\b)[\w](?:[\w./:+-]*[\w/+-])?)?(?: at [\w-]+ effort)?))(?=$|[\s.,;:!?)\]}'"])/gu;
 function decorateMentionsInto(node, text) {
   text = String(text == null ? "" : text);
   MENTION_TOKEN_RE.lastIndex = 0;
@@ -4173,8 +4174,8 @@ function activeBackendUrl(backend) {
   return active && urls.includes(active) ? active : (urls[0] || "");
 }
 
-/* A disconnected node has no authoritative active address. Keep both layers
-   in the same measured box and cross-fade their text so the row never shifts;
+/* A disconnected node has no authoritative active address. Cross-fade its
+   URLs with the visible layer sizing the box so the version follows its text;
    a successful proxy request supplies active_url and collapses it to one. */
 function syncBackendLocation(root, backend) {
   if (root._backendUrlTimer) clearTimeout(root._backendUrlTimer);
@@ -6248,6 +6249,7 @@ function renderFootEngines() {
         activity.setAttribute("aria-label", activity.title);
         activity.innerHTML = '<svg viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="4.5" opacity=".3"/><path d="M6 1.5a4.5 4.5 0 0 1 4.5 4.5"/></svg>';
         st.appendChild(activity);
+        st.appendChild(el("span", "st-sep", " · "));
       }
       const word = el("span", "st-word " + (healthy ? "ok" : "bad"),
         engineStatusText(e));
@@ -10056,7 +10058,7 @@ function taskActivityTitle(activity) {
   if (activity.running) parts.push(`${activity.running} running`);
   if (activity.approval) parts.push(`${activity.approval} need${activity.approval === 1 ? "s" : ""} input`);
   if (activity.ready) parts.push(`${activity.ready} ready to review`);
-  return `${activity.total} task${activity.total === 1 ? "" : "s"}` + (parts.length ? ": " + parts.join(", ") : "");
+  return `${activity.total} task${activity.total === 1 ? "" : "s"}` + (parts.length ? " · " + parts.join(", ") : "");
 }
 /* One unified-diff line's role, for the review sheet's colouring. */
 function diffLineClass(line) {
@@ -19748,7 +19750,17 @@ async function modalNewSession(groupId = null) {
 
   const colorBox = m.querySelector("#ns-colors");
   const palette = state.sessionColors || [];
-  let nsColor = palette[Math.floor(Math.random() * palette.length)] || "";
+  const colorCounts = new Map(palette.map(color => [color, 0]));
+  for (const backend of beOpts) {
+    const sessions = backend.id ? state.remoteSessions[backend.id] || [] : state.sessions;
+    for (const session of sessions) {
+      if (colorCounts.has(session.color))
+        colorCounts.set(session.color, colorCounts.get(session.color) + 1);
+    }
+  }
+  const leastUsedCount = Math.min(...colorCounts.values());
+  const leastUsedColors = palette.filter(color => colorCounts.get(color) === leastUsedCount);
+  let nsColor = leastUsedColors[Math.floor(Math.random() * leastUsedColors.length)] || "";
   const renderColors = () => {
     colorBox.innerHTML = "";
     for (const c of palette) {

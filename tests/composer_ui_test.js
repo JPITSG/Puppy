@@ -81,6 +81,7 @@ const context = vm.createContext({
   browserEnabledFor: () => true,
   backendHasCapability: (backend, capability) => !!backend && backend.capabilities.includes(capability),
   spawnExecFor: () => false,
+  linkifyInto: (node, text) => { node.appendChild(document.createTextNode(text)); return node; },
   findSessionMeta: (bid, sid) => ({ name: "Session " + sid }),
   backendName: bid => bid ? "node " + bid : "this node",
   browserInstancesFor: () => true, terminalInstancesFor: () => true,
@@ -89,7 +90,7 @@ const context = vm.createContext({
 });
 vm.runInContext([
   between("const el = ", "/* Close buttons"),
-  between("const MENTION_TOKEN_RE", "function decorateMentionsInto"),
+  between("const MENTION_TOKEN_RE", "/* ================= tooltips ================= */"),
   between("const CARET_MIRROR_STYLES", "/* ctrl+j ->"),
   between("const MENTION_QUERY_MAX", "/* ================= Composer ================="),
   between("/* ================= Composer =================", "/* ================= SessionView ================="),
@@ -128,10 +129,26 @@ function completeUpload(entry, over = {}) {
 const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE").map(c => c.route);
 
 (async () => {
+  // The reported sentence renders one settings token and preserves its prose.
+  const sentence = "when you have a final list, confer with " +
+    "@Spawn an agent using codex gpt-6-astra at high effort and have them verify your findings.";
+  context.mentionSample = sentence;
+  const rendered = vm.runInContext('decorateMentionsInto(document.createElement("div"), mentionSample)', context);
+  assert.equal(rendered.querySelectorAll(".mention-token").length, 1);
+  assert.equal(rendered.querySelector(".mention-token").textContent,
+    "@Spawn an agent using codex gpt-6-astra at high effort");
+  assert.equal(rendered.textContent, sentence);
+
   /* Finishing a spawn directive leaves task wording to the user and keeps
      the ordinary mention spacing/caret behavior, including existing prose. */
   for (const [selection, directive, suffix] of [
     [{ engine: { key: "codex" } }, "@Spawn an agent using codex", ""],
+    [{ engine: { key: "claude" }, model: { value: "haiku" } },
+     "@Spawn an agent using claude haiku", ""],
+    [{ engine: { key: "codex" }, effort: { value: "high" } },
+     "@Spawn an agent using codex at high effort", ""],
+    [{ engine: { key: "opencode" }, model: { value: "provider/model.v2:free" } },
+     "@Spawn an agent using opencode provider/model.v2:free", ""],
     [{ count: 3, node: { name: "Build node" }, engine: { key: "codex" },
        model: { value: "test-model" }, effort: { value: "high" } },
      '@Spawn 3 agents on "Build node" using codex test-model at high effort', "\nreview this"],
@@ -143,6 +160,13 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
     spawnBox.composer.mentionSpawn = selection;
     spawnBox.composer.spawnFinish();
     assert.equal(spawnBox.ta.value, "Please " + directive + (suffix || " "));
+    for (const ending of ["", " and have them verify your findings.",
+        " to verify your findings.", "\nReview this.", ": review this.", ".", ", please."]) {
+      context.mentionSample = "Confer with " + directive + ending;
+      assert.equal(vm.runInContext(
+        "MENTION_TOKEN_RE.lastIndex=0; MENTION_TOKEN_RE.exec(mentionSample)[2]", context),
+        directive, "spawn settings stay highlighted independently of task wording");
+    }
     assert.equal(spawnBox.ta.selectionStart, 7 + directive.length + 1);
     assert.equal(spawnBox.composer.mentionSpawn, null);
     assert.equal(spawnBox.events.submit, 0);

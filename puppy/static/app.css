@@ -428,7 +428,7 @@ a{color:var(--acc2)}
 .foot-ico{width:24px;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-left:-8px}
 .foot-eng .st{margin-left:auto;font-size:var(--fs-2xs);font-family:var(--mono);color:var(--txt3)}
 .foot-eng .st.has-activity{display:inline-flex;align-items:center;white-space:pre}
-.foot-engine-activity{display:inline-flex;flex:none;width:10px;height:10px;margin-right:4px;color:var(--ok)}
+.foot-engine-activity{display:inline-flex;flex:none;width:10px;height:10px;color:var(--ok)}
 .foot-engine-activity svg{
   width:100%;height:100%;fill:none;stroke:currentColor;stroke-width:1.5;
   animation:spin var(--engine-spin-duration) linear infinite;
@@ -1936,18 +1936,17 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   color:var(--txt3);font-family:var(--mono);font-size:var(--fs-sm);
 }
 /* The address and version are one compact phrase everywhere this shared node
-   appears. Its two URL layers occupy one grid cell, so disconnected addresses
-   can cross-fade without a flex track consuming the row's spare width and
-   pushing the version away. The widest configured URL keeps the row stable. */
+   appears. Only the visible URL sizes the track; the outgoing cross-fade
+   layer is an overlay so a longer alternate cannot push the version away. */
 .be-url-track{
   position:relative;display:grid;flex:0 1 auto;min-width:0;height:1.35em;overflow:hidden;
 }
 .be-url-layer{
-  position:static;grid-area:1/1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  position:absolute;inset:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
   opacity:0;transition:opacity var(--t-slow) var(--ease);
 }
 .be-url-track[data-front="0"] .be-url-layer:first-child,
-.be-url-track[data-front="1"] .be-url-layer:last-child{opacity:1}
+.be-url-track[data-front="1"] .be-url-layer:last-child{position:relative;opacity:1}
 .be-url-version{flex:0 0 auto}
 /* Flex-item boundary whitespace collapses, which visually glued the middle
    dot to the URL. Make both spaces part of layout, not text formatting. */

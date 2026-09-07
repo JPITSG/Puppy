@@ -129,8 +129,10 @@ context is.
   and reply from the engine's memory without touching your files.
 - **Pins, colors, archive, drag-and-drop.** Sessions carry a color, can be
   pinned to the top, archived out of the way, renamed, and reordered by
-  dragging. The order belongs to the backend, so every console sees the same
-  list. Session context menus stay within the screen and scroll when there
+  dragging. New session preselects a least-used color across the console's
+  known sessions on all backends, including archived sessions, breaking ties
+  randomly; you can choose another color. The order belongs to the backend,
+  so every console sees the same list. Session context menus stay within the screen and scroll when there
   are more actions than the available height.
 - **Agent notes.** A mark on every session row shows whether its directory has
   an `AGENTS.md` or `CLAUDE.md`, and opens a small editor for exactly those two
@@ -278,10 +280,12 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
 ### Agents that delegate and collaborate
 
 - **Spawned agents.** `@Spawn an agent on build-node using codex at high effort
-  to …` starts a one-shot,
+  and review the changes` starts a one-shot,
   non-interactive engine run on any backend, or up to twelve in parallel. The
   `@` menu's wizard inserts the selected settings without a trailing “to”,
-  leaving the task wording to you. A
+  leaving the task wording to you. Sent directives render as blue mention
+  tokens with or without “to”; the agent takes the task from your surrounding
+  request. A
   session hosted on a backend spawns on that backend only. The spawning turn
   waits for the answers and acts on them; jobs die with their turn, renew
   their inactivity timer only on real progress, and use the executing backend's
@@ -368,6 +372,9 @@ keep their inline error and entered values; failed removals keep the backend
 and show a named error so you can retry. Your browser only ever talks to the
 controller, which proxies HTTP and WebSocket traffic to the backends it
 authenticates with their API tokens and pinned TLS certificates.
+
+In Engines and Settings → Backends, disconnected backends cycle through their
+configured URLs; the version follows the displayed address with consistent spacing.
 
 - Sessions on a backend appear in the same sidebar, merged with local ones by
   activity, and open in the same tabs.

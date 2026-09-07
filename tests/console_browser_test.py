@@ -891,6 +891,9 @@ async def engine_activity_checks(instance):
             const word=row.querySelector('.st-word');
             if (!icon) {
                 const status=row.querySelector('.st');
+                if (status.firstElementChild !== word) {
+                    throw new Error('Idle engine status must start with its status word');
+                }
                 if (status.className !== 'st' || getComputedStyle(status).display !== 'block' ||
                     getComputedStyle(status).whiteSpace !== 'normal') {
                     throw new Error('Idle engine status must retain its original layout');
@@ -898,13 +901,19 @@ async def engine_activity_checks(instance):
                 return null;
             }
             const a=icon.getBoundingClientRect(), b=word.getBoundingClientRect();
+            const separator=icon.nextElementSibling;
+            if (!separator.classList.contains('st-sep') || separator.textContent !== ' · ' ||
+                separator.nextElementSibling !== word) {
+                throw new Error('Active engine status must separate spinner and word with a middle dot');
+            }
             const css=getComputedStyle(icon.querySelector('svg'));
             const probe=document.createElement('span');
             probe.style.color='var(--ok)'; row.appendChild(probe);
             const green=getComputedStyle(icon).color===getComputedStyle(probe).color;
             probe.remove();
             return {label:icon.getAttribute('aria-label'), width:a.width,height:a.height,
-                gap:b.left-a.right, centered:Math.abs((a.top+a.height/2)-(b.top+b.height/2))<1,
+                gap:b.left-a.right, separatorWidth:separator.getBoundingClientRect().width,
+                centered:Math.abs((a.top+a.height/2)-(b.top+b.height/2))<1,
                 green, word:word.textContent,
                 warning:word.classList.contains('warn'), animation:css.animationName,
                 duration:css.animationDuration};
@@ -932,7 +941,7 @@ async def engine_activity_checks(instance):
     for entry, model in [(local, "demo-a"), (remote, "demo-c")]:
         assert entry["label"] == "In use · " + model, result
         assert entry["width"] == entry["height"] == 10, result
-        assert entry["gap"] == 4 and entry["centered"] and entry["green"], result
+        assert entry["gap"] == entry["separatorWidth"] > 0 and entry["centered"] and entry["green"], result
         assert entry["word"] == "Ready" and entry["warning"], result
         assert entry["animation"] == "spin" and entry["duration"] == "0.8s", result
     assert result["stopped"][:3] == [None, None, None], result
