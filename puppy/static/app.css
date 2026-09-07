@@ -2090,6 +2090,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 }
 .copy+.copy,.snapshot-copy+.snapshot-copy,.usage-refresh-copy+.usage-refresh-copy,
 .modal-copy+.modal-copy{margin-top:-4px}
+.help+.modal-copy{margin-top:12px}
 .snapshot-warning{margin:0;color:var(--warn);font-size:var(--fs-xs);line-height:1.45}
 .snapshot-actions{display:flex;align-items:center;gap:8px;margin-top:13px;flex-wrap:wrap}
 .engine-updates-section{
