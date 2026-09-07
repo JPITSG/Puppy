@@ -455,9 +455,9 @@ class _Viewer:
     """
 
     __slots__ = ("ws", "active", "queue", "queued_bytes", "texts", "wake",
-                 "closed", "needs_full", "task")
+                 "closed", "needs_full", "task", "settle", "full", "full_top")
 
-    def __init__(self, ws):
+    def __init__(self, ws, settle):
         self.ws = ws
         self.active = True
         self.queue = collections.deque()
@@ -466,7 +466,17 @@ class _Viewer:
         self.wake = asyncio.Event()
         self.closed = False
         self.needs_full = True
+        self.settle = settle
+        self.full = None
+        self.full_top = 0
         self.task = asyncio.ensure_future(self._run())
+
+    def invalidate(self) -> None:
+        self.queue.clear()
+        self.queued_bytes = 0
+        self.full = None
+        self.needs_full = True
+        self.wake.set()
 
     def send_json(self, payload: dict) -> None:
         if len(self.texts) < MAX_TEXT_BACKLOG:
@@ -475,30 +485,51 @@ class _Viewer:
 
     def send_frame(self, data: bytes) -> None:
         if not self.active or self.closed:
-            self.needs_full = True
+            self.invalidate()
+            return
+        if self.needs_full:
             return
         if self.queued_bytes + len(data) > MAX_VIEWER_BYTES:
-            self.queue.clear()
-            self.queued_bytes = 0
-            self.needs_full = True
+            self.invalidate()
             return
         self.queue.append(data)
         self.queued_bytes += len(data)
         self.wake.set()
 
     def idle(self) -> bool:
-        return not self.queue
+        return not self.queue and self.full is None
 
     async def _run(self) -> None:
         try:
             while not self.closed:
                 await self.wake.wait()
                 self.wake.clear()
-                while self.texts:
-                    await self.ws.send_str(self.texts.popleft())
-                while self.queue:
-                    frame = self.queue.popleft()
-                    self.queued_bytes -= len(frame)
+                while not self.closed:
+                    while self.texts:
+                        await self.ws.send_str(self.texts.popleft())
+                    if not self.active:
+                        break
+                    if self.needs_full:
+                        self.settle(self)
+                    if self.full is not None:
+                        width, height, pixels = self.full
+                        stride = width * 4
+                        top = self.full_top
+                        rows = min(height - top, max(1, FULL_BAND_BYTES // stride))
+                        frame = _FRAME_HEAD.pack(
+                            FRAME_PIXELS, 0, 0, top, width, rows) + \
+                            pixels[top * stride:(top + rows) * stride]
+                        self.full_top += rows
+                        if self.full_top == height:
+                            self.full = None
+                        # Do not retain the snapshot through a blocked send once
+                        # a resize, pause or overflow has invalidated it.
+                        del pixels
+                    elif self.queue:
+                        frame = self.queue.popleft()
+                        self.queued_bytes -= len(frame)
+                    else:
+                        break
                     await self.ws.send_bytes(frame)
         except asyncio.CancelledError:
             raise
@@ -509,6 +540,7 @@ class _Viewer:
         self.closed = True
         self.queue.clear()
         self.queued_bytes = 0
+        self.full = None
         self.task.cancel()
 
 
@@ -766,7 +798,7 @@ class VncInstance:
         self.height = height
         self.frame = bytearray(b"\xff" * (width * height * 4))
         for viewer in self.viewers.values():
-            viewer.needs_full = True
+            viewer.invalidate()
 
     async def _close_socket(self) -> None:
         writer, self.writer = self.writer, None
@@ -819,7 +851,7 @@ class VncInstance:
     async def attach_viewer(self, ws) -> None:
         await self.ensure_started()
         self._cancel_idle()
-        viewer = _Viewer(ws)
+        viewer = _Viewer(ws, self._settle)
         self.viewers[ws] = viewer
         viewer.send_json(self.status_payload())
         self._settle(viewer)
@@ -840,9 +872,7 @@ class VncInstance:
             return
         viewer.active = bool(active)
         if not viewer.active:
-            viewer.queue.clear()
-            viewer.queued_bytes = 0
-            viewer.needs_full = True
+            viewer.invalidate()
             return
         self._settle(viewer)
         # A pane that just became visible must not wait for the next remote
@@ -850,18 +880,20 @@ class VncInstance:
         self._request_update(True)
 
     def _settle(self, viewer) -> None:
-        """Send one complete picture, in bands, to a viewer that needs it."""
+        """Freeze a complete picture; the writer sends one band per drain.
+
+        Full pictures can exceed the delta backlog limit. Queueing all their
+        bands at once would discard the top of a large screen on every retry.
+        Later deltas queue behind this snapshot, preserving CopyRect order.
+        """
         if not viewer.active or not self.width or not self.frame:
             return
         viewer.needs_full = False
-        stride = self.width * 4
-        rows = max(1, min(self.height, FULL_BAND_BYTES // stride))
-        for top in range(0, self.height, rows):
-            height = min(rows, self.height - top)
-            viewer.send_frame(_FRAME_HEAD.pack(
-                FRAME_PIXELS, 0, 0, top, self.width, height) +
-                bytes(memoryview(self.frame)[top * stride:
-                                             (top + height) * stride]))
+        viewer.queue.clear()
+        viewer.queued_bytes = 0
+        viewer.full = (self.width, self.height, bytes(self.frame))
+        viewer.full_top = 0
+        viewer.wake.set()
 
     def _publish(self, rects: list) -> None:
         for viewer in self.viewers.values():

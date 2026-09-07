@@ -779,6 +779,125 @@ async def check_viewer_frames() -> None:
     print("  viewer frames ok")
 
 
+async def check_large_viewer_refresh() -> None:
+    """Full pictures exceed the delta budget; blocked writers must still recover."""
+    class GatedSocket(ViewerSocket):
+        def __init__(self):
+            super().__init__()
+            self.gate = asyncio.Event()
+            self.started = asyncio.Event()
+            self.events = []
+
+        async def send_str(self, payload):
+            self.events.append("text")
+            await super().send_str(payload)
+
+        async def send_bytes(self, payload):
+            self.started.set()
+            await self.gate.wait()
+            self.events.append("pixels")
+            await super().send_bytes(payload)
+
+    instance = vnc.VncInstance("BIG1", "screen.example", 5900)
+    instance._resize(1080, 2400)
+    original = b"".join(rgba((y % 256, 50, 70)) * instance.width
+                        for y in range(instance.height))
+    assert len(original) > vnc.MAX_VIEWER_BYTES
+    instance.frame[:] = original
+    socket = GatedSocket()
+    viewer = vnc._Viewer(socket, instance._settle)
+    instance.viewers[socket] = viewer
+
+    def picture(frames, width, height):
+        result = bytearray(width * height * 4)
+        for payload in frames:
+            item = decode_frame(payload)
+            row = item["w"] * 4
+            pixels = item.get("pixels")
+            if item["kind"] == vnc.FRAME_COPY:
+                pixels = b"".join(
+                    result[((item["sy"] + y) * width + item["sx"]) * 4:
+                           ((item["sy"] + y) * width + item["sx"]) * 4 + row]
+                    for y in range(item["h"]))
+            for y in range(item["h"]):
+                start = ((item["y"] + y) * width + item["x"]) * 4
+                result[start:start + row] = pixels[y * row:(y + 1) * row]
+        return bytes(result)
+
+    async def drain():
+        socket.gate.set()
+        await wait_for(lambda: viewer.idle() and not viewer.needs_full,
+                       label="complete large picture")
+        await asyncio.sleep(0)
+
+    try:
+        instance._settle(viewer)
+        await socket.started.wait()
+        # A delta arriving during a blocked refresh must follow the frozen
+        # picture, including when it changes a band not sent yet.
+        patch = rgba((1, 2, 3))
+        instance._blit(patch, 0, 2399, 1, 1)
+        delta = vnc._FRAME_HEAD.pack(vnc.FRAME_PIXELS, 0, 0, 2399, 1, 1) + patch
+        instance._copy_rect(1, 2399, 1, 1, 0, 2399)
+        copied = vnc._FRAME_HEAD.pack(vnc.FRAME_COPY, 0, 1, 2399, 1, 1) + \
+            vnc._FRAME_COPY_TAIL.pack(0, 2399)
+        instance._publish([delta, copied])
+        await drain()
+        assert picture(socket.frames[:-2], 1080, 2400) == original
+        assert socket.frames[-2:] == [delta, copied]
+        assert picture(socket.frames, 1080, 2400) == bytes(instance.frame)
+
+        # Overflow while a send is blocked must recover even if the server
+        # sends no more updates. Deltas after the loss must not run alone.
+        socket.frames.clear()
+        socket.gate.clear()
+        socket.started.clear()
+        instance._settle(viewer)
+        await socket.started.wait()
+        instance.frame[:] = rgba((80, 90, 100)) * (1080 * 2400)
+        viewer.send_frame(b"x" * (vnc.MAX_VIEWER_BYTES + 1))
+        viewer.send_frame(delta)
+        assert viewer.needs_full and not viewer.queue
+        await drain()
+        assert picture(socket.frames, 1080, 2400) == bytes(instance.frame)
+        assert not viewer.queue and viewer.queued_bytes == 0
+
+        # Resize behind a blocked old band: discard all remaining old pixels,
+        # send the size before any new bands, and recover without new damage.
+        socket.frames.clear()
+        socket.events.clear()
+        socket.gate.clear()
+        socket.started.clear()
+        instance._settle(viewer)
+        await socket.started.wait()
+        instance._resize(4, 3)
+        instance.frame[:] = rgba((9, 8, 7)) * 12
+        instance._broadcast_json({"type": "size", "width": 4, "height": 3})
+        await drain()
+        assert len(socket.frames) == 2
+        assert socket.events == ["pixels", "text", "pixels"]
+        assert picture(socket.frames[1:], 4, 3) == bytes(instance.frame)
+        assert socket.messages("size")[-1]["width"] == 4
+
+        # Hiding drops a pending snapshot as well as queued deltas.
+        socket.gate.clear()
+        socket.started.clear()
+        instance._settle(viewer)
+        await socket.started.wait()
+        instance.set_viewer_active(socket, False)
+        assert viewer.full is None and not viewer.queue
+        socket.gate.set()
+        await asyncio.sleep(0)
+        socket.frames.clear()
+        instance.set_viewer_active(socket, True)
+        await drain()
+        assert picture(socket.frames, 4, 3) == bytes(instance.frame)
+    finally:
+        viewer.close()
+        await asyncio.gather(viewer.task, return_exceptions=True)
+    print("  large refresh, blocked writer recovery, resize and pause ok")
+
+
 async def check_streaming_pause() -> None:
     """With nobody watching, the node stops asking the server for frames."""
     server = await StubVncServer(width=8, height=4).start()
@@ -1114,6 +1233,7 @@ async def main() -> None:
         await check_encodings()
         await check_hostile_updates()
         await check_viewer_frames()
+        await check_large_viewer_refresh()
         await check_streaming_pause()
         await check_input()
         await check_lifecycle()

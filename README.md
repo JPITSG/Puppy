@@ -298,7 +298,9 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
   RRE, CopyRect and Raw encodings plus desktop resize, decodes the screen on
   the backend, and sends your browser only the rectangles that changed, as raw
   pixels the canvas can paint without decoding anything. A rectangle the server
-  merely moved carries no pixels at all. With the tab hidden, in a background
+  merely moved carries no pixels at all. Full-screen refreshes stream in bands
+  so large screens remain complete even when they exceed the viewer's delta
+  queue limit. With the tab hidden, in a background
   window, or with no viewer attached, Puppy stops asking the server for frames
   altogether; the connection is dropped entirely after the unattended timeout,
   and reopening the tab dials again. Every connection has a four-character ID,

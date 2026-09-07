@@ -61,7 +61,12 @@ Nobody watching means nobody paying. With every viewer inactive - a hidden
 pane, a backgrounded window, or no viewer at all - the node stops issuing
 `FramebufferUpdateRequest`s entirely, so an unwatched connection costs one idle
 socket. A viewer that returns is settled with the whole screen in bands, and so
-is one whose backlog had to be dropped.
+is one whose backlog had to be dropped. A refresh freezes one complete picture
+and the socket writer sends its bands progressively, outside the 8 MiB delta
+queue budget. Later deltas follow the frozen picture. Overflow discards pending
+pixels and wakes the writer to take a fresh picture after the in-flight send
+drains, even if the server sends no further damage. Resize and viewer inactivity
+also discard pending pixels so an older picture cannot overwrite the new one.
 
 ## Lifecycle
 
