@@ -388,6 +388,12 @@ history around it.
   reset. Other accounts and model-specific allowances stay separate; engine
   readiness and upgrade status remain per backend. See [shared usage](docs/shared-usage.md)
   for identity requirements and freshness rules.
+- **Notices that stay readable.** Confirmations, warnings and failures appear
+  as one line in the bottom-right corner, coloured by outcome and worded the
+  same way wherever they came from. The same notice arriving again counts up on
+  the row it already occupies (*2 ×*, *3 ×*) and restarts its timer instead of
+  stacking copies; anything naming a next step stays up longer. On touch, hold
+  a notice to keep it or swipe it right to dismiss it.
 - **Completion alerts.** Run separate success and failure commands on a chosen
   backend when a session finishes everything it had queued (play a sound, ping
   your home automation). Leave either command empty to skip that outcome;
@@ -565,6 +571,7 @@ node tests/composer_ui_test.js       # the shared prompt box and its "@" list
 node tests/backend_settings_ui_test.js # backend forms, removal errors and retry
 node tests/task_config_ui_test.js    # the New task dialog
 node tests/task_fold_ui_test.js      # task removal and the folded archive card
+node tests/toast_ui_test.js          # notice grammar, tones, lives and folded repeats
 python3 tests/backend_test.py        # headless package, auth, protocol, capabilities
 python3 tests/snapshot_test.py       # backup export/import and rollback
 python3 tests/search_test.py         # the search index and query language

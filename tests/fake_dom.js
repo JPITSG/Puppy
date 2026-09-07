@@ -69,7 +69,13 @@ class FakeElement {
     this.parentNode = null;
     this.attributes = {};
     this.dataset = {};
+    /* CSS properties as the app sets them, plus the two methods it clears them
+       with; the pair stays non-enumerable so a clone still copies values only */
     this.style = {};
+    Object.defineProperties(this.style, {
+      removeProperty: { value(name) { delete this[name]; } },
+      setProperty: { value(name, value) { this[name] = String(value); } },
+    });
     this.listeners = {};
     this._classes = new Set();
     this._text = "";

@@ -1858,6 +1858,7 @@ console.log(JSON.stringify({before,after,connected}));
 const ENGINE_REFRESH_TIMEOUT=1234;
 const ENGINE_REFRESH_RESULT_MS=3200;
 const TOAST_LONG=7000;
+const TOAST_SHORT=4200;
 let shouldFail=true,synced=0,applied=0;const calls=[],toasts=[];
 const syncRemoteStateViews=()=>{synced++;};
 const api=async(bid,path,options)=>{calls.push({bid,path,options});
@@ -1951,19 +1952,19 @@ console.log(JSON.stringify({failedDuring,failedAfter,failedRestored,goodDuring,g
         {"bid": 7, "path": "engines/refresh",
          "options": {"method": "POST", "timeoutMs": 1234}},
     ], refreshed
-    assert refreshed["toasts"][0]["kind"] == "error", refreshed
-    assert "Failed: version checks, sign-in checks, latest-release checks, model-list refresh" \
-        in refreshed["toasts"][0]["text"], refreshed
-    assert refreshed["toasts"][1]["kind"] == "ok", refreshed
-    assert ("Succeeded: version checks, sign-in checks, latest-release checks, " +
-            "model-list refresh") in refreshed["toasts"][1]["text"], refreshed
-    assert refreshed["partial"]["ok"] is False, refreshed
-    assert "Succeeded: version checks, sign-in checks" in refreshed["partial"]["text"], \
+    assert refreshed["toasts"][0]["kind"] == "bad", refreshed
+    assert refreshed["toasts"][0]["text"] == \
+        "Worker node: Could not refresh engines · nothing was checked · still unavailable", \
         refreshed
-    assert "Failed: latest-release checks (First: registry timed out)" in \
-        refreshed["partial"]["text"], refreshed
-    assert "model-list refresh (First: catalog timed out)" in \
-        refreshed["partial"]["text"], refreshed
+    assert refreshed["toasts"][1]["kind"] == "ok", refreshed
+    assert refreshed["toasts"][1]["text"] == ("Worker node: Engine refresh finished · " +
+        "checked versions, sign-in, latest releases, model lists"), refreshed
+    assert refreshed["toasts"][1]["ms"] == 4200, refreshed
+    assert refreshed["partial"]["ok"] is False, refreshed
+    assert refreshed["partial"]["text"] == (
+        "Worker node: Engine refresh finished with errors · checked versions, sign-in · " +
+        "could not check latest releases (First: registry timed out), " +
+        "model lists (First: catalog timed out)"), refreshed
 
 
 def check_drawer_drag(ui_source: str) -> None:
@@ -3859,7 +3860,8 @@ def check_timer_settings_ui(ui_source: str, css_source: str) -> None:
     assert "body: { ...current.defaults }" in ui_source
     assert "if (localUpdated) startRemotePolling();" in ui_source
     assert "Promise.allSettled(targets.map" in ui_source
-    assert 'failed: ${failed.join("; ")}' in ui_source
+    assert 'not updated on ${failed.join(", ")}' in ui_source
+    assert 'not reset on ${failed.join(", ")}' in ui_source
     assert 'Math.min(timerMilliseconds("remote_session_seconds"),' in ui_source
     assert 'timerMilliseconds("remote_engine_seconds")' in ui_source
     assert "state.remoteSessionCheckedAt" in ui_source
@@ -3941,8 +3943,8 @@ console.log(JSON.stringify({result,calls}));
     result = json.loads(proc.stdout)
     assert result["result"] == {
         "updated": ["Good"],
-        "failed": ["Malformed: backend returned invalid timer settings",
-                   "Gone: offline during save"],
+        "failed": ["Malformed (backend returned invalid timer settings)",
+                   "Gone (offline during save)"],
     }
     assert [call["bid"] for call in result["calls"]] == [1, 2, 3]
     assert all(call["path"] == "timers" and
@@ -3976,8 +3978,8 @@ console.log(JSON.stringify({result,calls}));
     result = json.loads(proc.stdout)
     assert result["result"] == {
         "updated": ["Local", "Different"],
-        "failed": ["Gone: offline during reset",
-                   "Malformed: backend returned invalid timer settings"],
+        "failed": ["Gone (offline during reset)",
+                   "Malformed (backend returned invalid timer settings)"],
         "localUpdated": True,
     }
     patch_calls = [call for call in result["calls"]
@@ -4400,13 +4402,20 @@ console.log(JSON.stringify({mouse:mouse.stats,vertical:vertical.stats,left:left.
     toast_start = ui_source.index("function toast(")
     toast_end = ui_source.index("\n/* Clipboard", toast_start)
     toast_source = ui_source[toast_start:toast_end]
-    assert "wireToastSwipe(t, remove, pauseRemoval, resumeRemoval);" in toast_source
+    assert "wireToastSwipe(node, remove," in toast_source
+    # a folded repeat renews the same deadline the swipe pauses and resumes
+    assert "liveToasts.get(key)" in toast_source and "live.repeat(ms)" in toast_source
     css_start = css_source.index(".toast{")
     css_end = css_source.index("@keyframes toast-in", css_start)
     toast_css = css_source[css_start:css_end]
     assert "touch-action:pan-y pinch-zoom;" in toast_css
     assert ".toast.toast-swiping{" in toast_css
     assert ".toast.toast-swipe-dismissing{" in toast_css
+    # the notice surface takes the console's one tone vocabulary, never "err"
+    for tone in ("ok", "warn", "bad", "busy"):
+        assert ".toast." + tone + "{border-left-color:" in toast_css
+    assert ".toast.err{" not in css_source
+    assert ".toast-count{" in toast_css
 
 
 def check_status_header_activation(ui_source: str, css_source: str) -> None:
@@ -5641,7 +5650,7 @@ def check_browser_loading_ui(ui_source: str, css_source: str) -> None:
     assert view_source.index("this.setLoading(true);") < \
         view_source.index('this.send({ type: "navigate", url: target });')
     assert "if (d.terminal === true) {" in view_source
-    assert 'toast(d.text || "Browser error", "error", TOAST_LONG);' in view_source
+    assert 'toast(d.text || "The browser reported an error", "bad", TOAST_LONG);' in view_source
     script = r"""
 const timers=new Map();let nextTimer=0;
 const setTimeout=(fn,delay)=>{const id=++nextTimer;timers.set(id,{fn,delay});return id;};
@@ -5681,7 +5690,7 @@ def check_shared_storage_settings_ui(ui_source: str, css_source: str) -> None:
     assert "st.shared_storage === true" in ui_source
     assert 'typeof st.shared_storage === "boolean"' in ui_source
     assert "st.shared_storage_health" in ui_source
-    assert "persistence failed" in ui_source
+    assert "the store could not be written" in ui_source
     assert "non-partitioned cookies" in ui_source
     assert "IndexedDB, sessionStorage, or service workers" in ui_source
     assert "backend-local store is excluded from backups" in ui_source

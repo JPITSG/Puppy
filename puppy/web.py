@@ -1549,7 +1549,7 @@ async def _session_write_error(ws, data, message, accepted=False):
                             "accepted": accepted,
                             "client_seq": data.get("draft_client_seq")})
     else:
-        await ws.send_json({"type": "toast", "level": "error", "text": message})
+        await ws.send_json({"type": "toast", "level": "bad", "text": message})
 
 
 async def ws_session(request: web.Request):
@@ -1573,7 +1573,7 @@ async def ws_session(request: web.Request):
             except Exception:
                 continue
             if not isinstance(data, dict):
-                await ws.send_json({"type": "toast", "level": "error",
+                await ws.send_json({"type": "toast", "level": "bad",
                                     "text": "session message must be an object"})
                 continue
             t = data.get("type")
@@ -1655,7 +1655,7 @@ async def ws_session(request: web.Request):
                     idx = -1
                 res = h.unqueue(idx, data.get("text") or "")
                 if "error" in res:
-                    await ws.send_json({"type": "toast", "level": "error", "text": res["error"]})
+                    await ws.send_json({"type": "toast", "level": "bad", "text": res["error"]})
             elif t == "edit_queue":
                 try:
                     idx = int(data.get("index", -1))
@@ -1678,7 +1678,7 @@ async def ws_session(request: web.Request):
                 else:
                     res = h.set_queue_paused(idx, data.get("text") or "", paused)
                 if "error" in res:
-                    await ws.send_json({"type": "toast", "level": "error", "text": res["error"]})
+                    await ws.send_json({"type": "toast", "level": "bad", "text": res["error"]})
             elif t == "begin_queue_reorder":
                 request_id = str(data.get("request_id") or "")[:80]
                 res = h.begin_queue_reorder(
@@ -1707,7 +1707,7 @@ async def ws_session(request: web.Request):
                 op = h.requeue_held if t == "requeue_held" else h.discard_held
                 res = op(idx, data.get("text") or "")
                 if "error" in res:
-                    await ws.send_json({"type": "toast", "level": "error", "text": res["error"]})
+                    await ws.send_json({"type": "toast", "level": "bad", "text": res["error"]})
             elif t == "interrupt":
                 await h.interrupt(clear_queue=data.get("clear_queue") is True)
     finally:

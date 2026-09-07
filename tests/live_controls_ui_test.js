@@ -244,11 +244,11 @@ function engineCatalog(fast = false) {
     input.checked = false;
     await input.onchange();
     assert.equal(input.disabled, false); assert.equal(input.checked, true);
-    assert.deepEqual(notices.at(-1), [`${bid ? "Peer" : "Main"}: Toggle refused`, "error", context.TOAST_LONG]);
+    assert.deepEqual(notices.at(-1), [`${bid ? "Peer" : "Main"}: Toggle refused`, "bad", context.TOAST_LONG]);
     shared.input.checked = false;
     await shared.input.onchange();
     assert.equal(shared.input.disabled, false); assert.equal(shared.input.checked, true);
-    assert.deepEqual(notices.at(-1), [`${bid ? "Peer" : "Main"}: Toggle refused`, "error", context.TOAST_LONG]);
+    assert.deepEqual(notices.at(-1), [`${bid ? "Peer" : "Main"}: Toggle refused`, "bad", context.TOAST_LONG]);
     failure = "";
     if (bid) {
       state.remoteOk[bid] = false; update();

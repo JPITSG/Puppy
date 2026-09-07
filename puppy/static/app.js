@@ -956,29 +956,104 @@ function wireToastSwipe(target, dismiss, pause, resume) {
   target.addEventListener("pointercancel", event => finish(event, true));
 }
 
-/* Two toast lives: the default for a plain confirmation, TOAST_LONG for
+/* Two toast lives: TOAST_SHORT for a plain confirmation, TOAST_LONG for
    anything that names a next step or an error worth reading twice. */
+const TOAST_SHORT = 4200;
 const TOAST_LONG = 7000;
-function toast(text, level = "info", ms = 4200) {
-  const t = el("div", "toast " + (level === "error" ? "err" : level === "ok" ? "ok" : ""), text);
-  $("toasts").appendChild(t);
-  const deadline = Date.now() + ms;
-  let removalTimer = null;
+
+/* One grammar for every notice, whichever surface raised it:
+
+     [<Subject>: ]<What happened>[ · <detail>][ · <next step>]
+
+   The subject is a backend or an identified surface ("Browser A8AR"), so ": "
+   only ever follows it and " · " is the only separator between clauses; the
+   opening clause is a capitalised sentence and the ones after it stay lower
+   case; failures read "Could not <verb> …"; nothing ends in a full stop.
+   Half of these lines are backend prose this console never wrote, so
+   toastText is the one place that holds them all to that shape. */
+function toastText(value) {
+  let text = String(value == null ? "" : value)
+    .replace(/\s+/g, " ").replace(/\s*·\s*/g, " · ").trim()
+    .replace(/\s*·$/, "");
+  if (text.endsWith(".") && !text.endsWith("..")) text = text.slice(0, -1);
+  /* Only a plain opening word is capitalised: a leading path, file name or
+     command keeps the spelling the reader has to type back. */
+  const sentence = part => part.replace(/^[a-z]{2,}(?=[\s,]|$)/,
+    word => word.charAt(0).toUpperCase() + word.slice(1));
+  const subject = /^([^:·\/]{1,48}): (\S.*)$/.exec(text);
+  return subject ? `${subject[1]}: ${sentence(subject[2])}` : sentence(text);
+}
+
+/* The console's one tone vocabulary: ok for a request that completed, busy
+   for work that has only started, warn for an outcome with a caveat, bad for
+   something that did not happen, and a plain notice for everything else.
+   Backends (and older peers) still say "error"; an unrecognised word reads as
+   a plain notice rather than painting a class nothing styles. */
+const TOAST_TONES = ["info", "ok", "warn", "bad", "busy"];
+function toastTone(tone) {
+  const word = String(tone == null ? "" : tone).trim().toLowerCase();
+  if (word === "error" || word === "err") return "bad";
+  return TOAST_TONES.includes(word) ? word : "info";
+}
+
+/* Identical notices fold instead of stacking: the second one turns the live
+   toast into "2 × …" where it already sits, bumps the count so the repeat is
+   visible, and renews its life. A burst of the same failure therefore costs
+   one line of screen instead of burying everything else. */
+const liveToasts = new Map();
+
+function toast(text, tone = "info", ms = TOAST_SHORT) {
+  const body = toastText(text);
+  if (!body) return;
+  const level = toastTone(tone);
+  const key = level + "\u0000" + body;
+  const live = liveToasts.get(key);
+  if (live) { live.repeat(ms); return; }
+
+  const node = el("div", "toast " + level);
+  const count = el("span", "toast-count");
+  const label = el("span", "toast-text", body);
+  node.appendChild(label);
+  $("toasts").appendChild(node);
+
+  let seen = 1, timer = null, deadline = 0, held = false;
+  const clearTimer = () => {
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
+  };
   const remove = () => {
-    if (removalTimer !== null) clearTimeout(removalTimer);
-    removalTimer = null;
-    t.remove();
+    clearTimer();
+    if (liveToasts.get(key) === record) liveToasts.delete(key);
+    node.remove();
   };
-  const pauseRemoval = () => {
-    if (removalTimer !== null) clearTimeout(removalTimer);
-    removalTimer = null;
+  /* One deadline the toast never loses: a repeat may extend it, a held toast
+     keeps it while the finger is down, and nothing may shorten it. */
+  const arm = life => {
+    deadline = Math.max(deadline, Date.now() + life);
+    clearTimer();
+    if (!held) timer = setTimeout(remove, Math.max(0, deadline - Date.now()));
   };
-  const resumeRemoval = () => {
-    if (!t.isConnected) return;
-    removalTimer = setTimeout(remove, Math.max(800, deadline - Date.now()));
+  const record = {
+    repeat(life) {
+      seen += 1;
+      count.textContent = `${seen} ×`;
+      if (!count.parentNode) node.insertBefore(count, label);
+      count.classList.remove("toast-bump");
+      void count.offsetWidth;              // replay the bump on every repeat
+      count.classList.add("toast-bump");
+      arm(life);
+    },
   };
-  wireToastSwipe(t, remove, pauseRemoval, resumeRemoval);
-  removalTimer = setTimeout(remove, ms);
+  wireToastSwipe(node, remove,
+    () => { held = true; clearTimer(); },
+    () => {
+      held = false;
+      if (!node.isConnected) return;
+      deadline = Math.max(deadline, Date.now() + 800);   // stay legible once released
+      arm(0);
+    });
+  liveToasts.set(key, record);
+  arm(ms);
 }
 
 /* Clipboard.writeText is unavailable on some plain-HTTP deployments. Keep one
@@ -1008,8 +1083,8 @@ async function writeClipboardText(text) {
 }
 
 async function copyWithToast(text, message = "Copied") {
-  try { await writeClipboardText(text); toast(message); return true; }
-  catch (e) { toast("Copy failed", "error"); return false; }
+  try { await writeClipboardText(text); toast(message, "ok"); return true; }
+  catch (e) { toast("Could not copy to the clipboard", "bad"); return false; }
 }
 
 /* Every copy button behaves the same way: the copy glyph, success shown in
@@ -1037,7 +1112,7 @@ function wireCopyButton(button, text, label) {
         button.replaceChildren(copyIcon());
         button.setAttribute("aria-label", label);
       }, 1400);
-    } catch (error) { toast("Copy failed", "error"); }
+    } catch (error) { toast("Could not copy to the clipboard", "bad"); }
   };
   return button;
 }
@@ -2341,7 +2416,7 @@ function decorateCodeBlocks(root) {
           button.replaceChildren(copyIcon());
           button.setAttribute("aria-label", "Copy code");
         }, 1400);
-      } catch (err) { toast("Copy failed", "error"); }
+      } catch (err) { toast("Could not copy to the clipboard", "bad"); }
     };
     wrap.appendChild(button);
   });
@@ -4091,7 +4166,7 @@ async function setSessionPinned(bid, session, pinned) {
       throw new Error("backend returned an invalid sessions response");
   } catch (error) {
     try { await refreshSessionList(bid); } catch (refreshError) {}
-    toast(error.message, "error");
+    toast(error.message, "bad");
   } finally {
     sessionOrderPending.delete(nodeKey);
     renderSidebar();
@@ -4194,7 +4269,7 @@ async function enableAddedBackendBrowser(added) {
   const name = String((added.remote && added.remote.name) || `backend ${bid}`);
   const capabilities = (added.remote && added.remote.capabilities) || [];
   if (!(Array.isArray(capabilities) && capabilities.includes("browser"))) {
-    toast(`${name}: This backend does not offer a managed browser`, "error", TOAST_LONG);
+    toast(`${name}: This backend does not offer a managed browser`, "bad", TOAST_LONG);
     return;
   }
   try {
@@ -4203,7 +4278,7 @@ async function enableAddedBackendBrowser(added) {
     state.remoteBrowser[bid] = { enabled: !!result.enabled };
     toast(`${name}: Browser enabled`, "ok");
   } catch (error) {
-    toast(`${name}: Browser not enabled · ${error.message}`, "error", TOAST_LONG);
+    toast(`${name}: Browser not enabled · ${error.message}`, "bad", TOAST_LONG);
   }
 }
 
@@ -4250,7 +4325,7 @@ function terminalHandoffFor(bid) {
 async function openNewBrowser(bid, groupId = null) {
   bid = Number(bid) || 0;
   if (!browserInstancesFor(bid)) {
-    toast("Managed browsers are unavailable on this backend", "error");
+    toast("Managed browsers are unavailable on this backend", "bad");
     return null;
   }
   try {
@@ -4263,7 +4338,7 @@ async function openNewBrowser(bid, groupId = null) {
     openBrowserTab(bid, browserId, groupId);
   } catch (error) {
     toast(`${backendName(bid)}: ${error.message || "Could not open browser"}`,
-      "error", TOAST_LONG);
+      "bad", TOAST_LONG);
   }
 }
 
@@ -4593,7 +4668,7 @@ function modalMoveWorkspace(bid, session) {
       if (view) { view.session = result.session; view.updateHead(); }
       refreshGroup(bid);
       close();
-      toast(`${backendName(bid)}: Project moved to ${result.session.cwd}`);
+      toast(`${backendName(bid)}: Project moved to ${result.session.cwd}`, "ok");
     } catch (failure) {
       error.textContent = failure.message;
       error.classList.remove("hidden");
@@ -4696,8 +4771,8 @@ async function propagateTimerSetting(targets, key, value) {
   const failed = [];
   outcomes.forEach((outcome, index) => {
     if (outcome.status === "fulfilled") updated.push(targets[index].name);
-    else failed.push(`${targets[index].name}: ${outcome.reason && outcome.reason.message ?
-      outcome.reason.message : "update failed"}`);
+    else failed.push(`${targets[index].name} (${outcome.reason && outcome.reason.message ?
+      outcome.reason.message : "update failed"})`);
   });
   return { updated, failed };
 }
@@ -4725,8 +4800,8 @@ async function resetTimerSettings(targets) {
       updated.push(targets[index].name);
       if (!(Number(targets[index].bid) || 0)) localUpdated = true;
     } else {
-      failed.push(`${targets[index].name}: ${outcome.reason && outcome.reason.message ?
-        outcome.reason.message : "reset failed"}`);
+      failed.push(`${targets[index].name} (${outcome.reason && outcome.reason.message ?
+        outcome.reason.message : "reset failed"})`);
     }
   });
   return { updated, failed, localUpdated };
@@ -4796,7 +4871,7 @@ function appendSessionTasksToggle(menu, bid, session) {
       if (view) { view.session = result.session; view.updateHead(); }
       renderSidebar();
       if (bid) refreshGroup(bid);
-    } catch (error) { toast(error.message, "error"); }
+    } catch (error) { toast(error.message, "bad"); }
   };
   menu.appendChild(menuCheckRow("Enable tasks", enabled, () => patch({ tasks_enabled: !enabled })));
   /* Off by default: every folded task would otherwise ride along on every
@@ -5525,7 +5600,7 @@ function sessionContextMenu(ev, bid, s) {
   };
   const patch = async (body) => {
     try { await api(bid, `sessions/${s.id}`, { method: "PATCH", body }); refreshGroup(bid); }
-    catch (e) { toast(e.message, "error"); }
+    catch (e) { toast(e.message, "bad"); }
   };
   add("Rename", async () => {
     const val = await modalPrompt("Rename session", "", s.name || "", { confirmLabel: "Rename" });
@@ -5576,7 +5651,7 @@ function sessionContextMenu(ev, bid, s) {
     try {
       const r = await api(bid, `sessions/${s.id}`);
       await copyWithToast(r.session.native_session_id || "");
-    } catch (e) { toast(e.message, "error"); }
+    } catch (e) { toast(e.message, "bad"); }
   });
   if (canMoveScratch(bid, s))
     add("Move to directory", () => modalMoveWorkspace(bid, s));
@@ -5592,8 +5667,9 @@ function sessionContextMenu(ev, bid, s) {
     try {
       await api(bid, `sessions/${s.id}/workspace/reset`, { method: "POST" });
       refreshGroup(bid);
-      toast(s.workspace_missing ? "Scratch workspace recreated" : "Scratch workspace reset");
-    } catch (e) { toast(e.message, "error"); }
+      toast(s.workspace_missing ? "Scratch workspace recreated" : "Scratch workspace reset",
+        "ok");
+    } catch (e) { toast(e.message, "bad"); }
   });
   menu.appendChild(el("div", "menu-sep"));
   add(s.archived ? "Unarchive" : "Archive", () => patch({ archived: !s.archived }));
@@ -5610,8 +5686,8 @@ function sessionContextMenu(ev, bid, s) {
       else await api(bid, `sessions/${s.id}`, { method: "DELETE" });
       closeTab(`s:${bid}:${s.id}`);
       refreshGroup(bid);
-      toast("Session deleted");
-    } catch (e) { toast(e.message, "error"); }
+      toast("Session deleted", "ok");
+    } catch (e) { toast(e.message, "bad"); }
   }, true);
   positionContextMenu(menu, ev.clientX, ev.clientY);
 }
@@ -5787,7 +5863,7 @@ function wireSessionDropZone(root) {
     if (!sameSessionOrderSnapshot(
         context.orderSnapshot, sessionOrderSnapshot(bid))) {
       renderSidebar();
-      toast("Session order changed while you were dragging · try again", "error");
+      toast("Session order changed while you were dragging · try again", "bad", TOAST_LONG);
       return;
     }
     const all = sessionsFor(bid);
@@ -5833,7 +5909,7 @@ function wireSessionDropZone(root) {
       if (!acceptSessionListPayload(bid, payload)) await refreshSessionList(bid);
     } catch (error) {
       try { await refreshSessionList(bid); } catch (refreshError) {}
-      toast(error.message, "error");
+      toast(error.message, "bad");
     } finally {
       sessionOrderPending.delete(context.nodeKey);
       renderSidebar();
@@ -6109,13 +6185,10 @@ function applyUsageRefreshPayload(bid, result) {
    catalog makes the model-list action a failure even though its last-known-good
    choices remain usable. The engine payload carries all these diagnostics. */
 function engineRefreshFeedback(nodeName, result, requestError = "") {
-  const allActions = [
-    "version checks", "sign-in checks", "latest-release checks", "model-list refresh",
-  ];
   if (requestError) {
     return {
       ok: false,
-      text: `${nodeName}: refresh failed · Failed: ${allActions.join(", ")} · ${requestError}`,
+      text: `${nodeName}: Could not refresh engines · nothing was checked · ${requestError}`,
     };
   }
 
@@ -6125,29 +6198,29 @@ function engineRefreshFeedback(nodeName, result, requestError = "") {
   const describe = (engine, fallback) =>
     `${engine.label || engine.key || "Engine"}: ${fallback}`;
   const record = (action, issues) => {
-    if (issues.length) failed.push(`${action} (${issues.join("; ")})`);
+    if (issues.length) failed.push(`${action} (${issues.join(", ")})`);
     else succeeded.push(action);
   };
 
-  record("version checks", engines.filter(engine => engine && engine.installed &&
+  record("versions", engines.filter(engine => engine && engine.installed &&
     !String(engine.version || "").trim()).map(engine =>
       describe(engine, "version command returned no version")));
-  record("sign-in checks", engines.filter(engine => engine && engine.installed &&
+  record("sign-in", engines.filter(engine => engine && engine.installed &&
     !engine.availability_only && engine.auth === "unknown").map(engine =>
       describe(engine, engine.detail || "sign-in status was indeterminate")));
-  record("latest-release checks", engines.filter(engine => engine && engine.installed &&
+  record("latest releases", engines.filter(engine => engine && engine.installed &&
     engine.latest_check_error).map(engine =>
       describe(engine, engine.latest_check_error)));
-  record("model-list refresh", engines.filter(engine => engine && engine.installed &&
+  record("model lists", engines.filter(engine => engine && engine.installed &&
     engine.dynamic_model_options && (engine.model_catalog_error ||
       engine.model_catalog_note || engine.model_catalog_loaded === false)).map(engine =>
       describe(engine, engine.model_catalog_error || engine.model_catalog_note ||
         "model list was not checked")));
 
   const ok = failed.length === 0;
-  const parts = [`${nodeName}: refresh ${ok ? "succeeded" : "completed with errors"}`];
-  if (succeeded.length) parts.push(`Succeeded: ${succeeded.join(", ")}`);
-  if (failed.length) parts.push(`Failed: ${failed.join(" · ")}`);
+  const parts = [`${nodeName}: Engine refresh finished${ok ? "" : " with errors"}`];
+  if (succeeded.length) parts.push(`checked ${succeeded.join(", ")}`);
+  if (failed.length) parts.push(`could not check ${failed.join(", ")}`);
   return { ok, text: parts.join(" · ") };
 }
 
@@ -6190,10 +6263,12 @@ async function refreshEngineVersions(bid, button, nodeName) {
       { method: "POST", timeoutMs: ENGINE_REFRESH_TIMEOUT });
     applyEnginesPayload(bid, result);
     feedback = engineRefreshFeedback(nodeName, result);
-    toast(feedback.text, feedback.ok ? "ok" : "error", feedback.ok ? 5500 : 9000);
+    /* A refresh that ran but reported problems is a caveat, not a failure. */
+    toast(feedback.text, feedback.ok ? "ok" : "warn",
+      feedback.ok ? TOAST_SHORT : TOAST_LONG);
   } catch (error) {
     feedback = engineRefreshFeedback(nodeName, null, error.message || "request failed");
-    toast(feedback.text, "error", TOAST_LONG);
+    toast(feedback.text, "bad", TOAST_LONG);
   } finally {
     if (button.isConnected) {
       button.disabled = false;
@@ -6785,8 +6860,8 @@ function closeTab(id) {
     api(closing.bid || 0, `browser/instances/${encodeURIComponent(closing.browserId)}`,
       { method: "DELETE" }).catch(error => {
         if (error.status !== 404)
-          toast(`Browser ${closing.browserId} may still be running: ${error.message}`,
-            "error", TOAST_LONG);
+          toast(`Browser ${closing.browserId} may still be running · ${error.message}`,
+            "warn", TOAST_LONG);
       });
   }
   if (closing.type === "term" && closing.terminalId &&
@@ -6795,16 +6870,16 @@ function closeTab(id) {
       `terminal/instances/${encodeURIComponent(closing.terminalId)}`,
       { method: "DELETE" }).catch(error => {
         if (error.status !== 404)
-          toast(`Terminal ${closing.terminalId} may still be running: ${error.message}`,
-            "error", TOAST_LONG);
+          toast(`Terminal ${closing.terminalId} may still be running · ${error.message}`,
+            "warn", TOAST_LONG);
       });
   }
   if (closing.type === "vnc" && closing.vncId) {
     api(closing.bid || 0, `vnc/instances/${encodeURIComponent(closing.vncId)}`,
       { method: "DELETE" }).catch(error => {
         if (error.status !== 404)
-          toast(`VNC ${closing.vncId} may still be connected: ${error.message}`,
-            "error", TOAST_LONG);
+          toast(`VNC ${closing.vncId} may still be connected · ${error.message}`,
+            "warn", TOAST_LONG);
       });
   }
   const pane = removeTabFromPane(id);
@@ -7918,7 +7993,7 @@ async function signOut() {
   try {
     await api(0, "auth/logout", { method: "POST" });
     location.reload();
-  } catch (e) { toast(e.message, "error"); }
+  } catch (e) { toast(e.message, "bad"); }
 }
 const logoutButton = $("btn-logout");
 if (logoutButton) {
@@ -7932,7 +8007,7 @@ $("btn-bell").onclick = async () => {
     const r = await api(0, "notify/toggle", { method: "POST", body: { enabled: want } });
     state.notify = notifyPublicState(r.settings);
     syncBell();
-  } catch (e) { toast(e.message, "error"); }
+  } catch (e) { toast(e.message, "bad"); }
 };
 
 function drawerLayout() {
@@ -8751,7 +8826,7 @@ class Composer {
       walk.index = walk.shown;
       if (walk.shown < 0) this.restoreHistoryDraft();
       toast(`${backendName(this.host.bid)}: Could not load earlier prompts · ${error.message} · Press Up to retry`,
-        "error", TOAST_LONG);
+        "bad", TOAST_LONG);
     } finally {
       walk.loading = false;
       if (this.history === walk) this.ta.removeAttribute("aria-busy");
@@ -9686,7 +9761,7 @@ class Composer {
     const dropped = filesFromDataTransfer(event.dataTransfer);
     this.clearFileDropTarget();
     if (dropped.directories)
-      toast("Folders cannot be attached · drop individual files instead", "error", TOAST_LONG);
+      toast("Folders cannot be attached · drop individual files instead", "bad", TOAST_LONG);
     if (dropped.files.length) this.uploadFiles(dropped.files);
   }
 
@@ -9703,23 +9778,23 @@ class Composer {
     if (this.busy) return;
     const blocked = this.host.uploadsBlocked ? this.host.uploadsBlocked() : "";
     if (blocked) {
-      toast(blocked, "error");
+      toast(blocked, "bad", TOAST_LONG);
       return;
     }
     const arbitraryFiles = backendSupportsFileUploads(this.host.bid);
     const policy = this.uploadPolicy || uploadSettingsFor(this.host.bid);
     if (policy && !policy.enabled) {
-      toast("File uploads are disabled on this backend", "error");
+      toast("File uploads are disabled on this backend", "bad");
       return;
     }
     for (const file of files) {
       if (!arbitraryFiles) {
-        toast("File uploads are unavailable on this backend", "error");
+        toast("File uploads are unavailable on this backend", "bad");
         continue;
       }
       if (policy && file.size > policy.max_file_size_bytes) {
         toast(`${file.name || "file"} is ${fmtBytes(file.size)} · maximum is ` +
-          `${policy.max_file_size_mb} MiB`, "error", TOAST_LONG);
+          `${policy.max_file_size_mb} MiB`, "bad", TOAST_LONG);
         continue;
       }
       this.uploadFile(file);
@@ -9778,7 +9853,8 @@ class Composer {
         const wasAborted = !!(controller && controller.signal.aborted);
         this.removeAttachment(attachment, true);
         if (!wasAborted)
-          toast(`File upload failed: ${error.message}`, "error", TOAST_LONG);
+          toast(`Could not upload ${attachment.name || "the file"} · ${error.message}`,
+            "bad", TOAST_LONG);
       }
     }
   }
@@ -9788,7 +9864,7 @@ class Composer {
     api(this.host.bid, `sessions/${this.host.sid}/upload/${uploadId}`, {
       method: "DELETE", keepalive: true, timeoutMs: 10000,
     }).catch(error => {
-      if (!quiet) toast(`Could not discard upload: ${error.message}`, "error");
+      if (!quiet) toast(`Could not discard upload · ${error.message}`, "bad");
     });
   }
 
@@ -10424,10 +10500,10 @@ async function removeTask(bid, session) {
   if (!choice) return;
   try {
     const folded = await removeTaskSession(bid, session, choice);
-    toast(folded ? "Task folded into Main" : "Task removed");
+    toast(folded ? "Task folded into Main" : "Task removed", "ok");
     await refreshSessionList(bid);
     renderSidebar();
-  } catch (error) { toast(error.message, "error"); }
+  } catch (error) { toast(error.message, "bad"); }
 }
 class SessionWorkspaceView {
   constructor(tab) {
@@ -10863,7 +10939,7 @@ async function modalNewTask(workspace) {
   start.onclick = async () => {
     if (start.disabled) return;
     const blocker = composer.sendBlocker();
-    if (blocker) { toast(blocker, "error"); return; }
+    if (blocker) { toast(blocker, "bad", TOAST_LONG); return; }
     /* the prompt is the box's message: prose above its attachment markers,
        exactly what a send from the chat would carry */
     const prompt = composer.message();
@@ -10986,14 +11062,15 @@ async function modalReviewTask(workspace, session) {
         toast(`${backendName(workspace.tab.bid)}: Task applied and folded into Main`, "ok");
       } else if (result.resolving) {
         workspace.openTask(session.id);
-        toast("Conflict resolution started in the task · review its changes when it finishes", "ok", TOAST_LONG);
+        toast("Conflict resolution started in the task · review its changes when it finishes",
+          "busy", TOAST_LONG);
       } else {
         toast(data.has_changes ? "Task changes applied to Main" : "Task marked as reviewed", "ok");
       }
       try {
         await refreshSessionList(workspace.tab.bid); renderSidebar();
       } catch (err) {
-        toast(`${backendName(workspace.tab.bid)}: ${err.message}`, "error", TOAST_LONG);
+        toast(`${backendName(workspace.tab.bid)}: ${err.message}`, "bad", TOAST_LONG);
       }
     };
   } catch (err) { files.textContent = ""; fail(err.message); }
@@ -12103,7 +12180,7 @@ class SessionView {
           this.updateSteerControl();
         }
         if (d.status === "rejected")
-          toast(d.error || "Steering was not accepted", "error", TOAST_LONG);
+          toast(d.error || "Steering was not accepted", "bad", TOAST_LONG);
         break;
       case "queued":
         this.renderQueue(d.queued || [], d.held || [], d.paused || [],
@@ -12126,7 +12203,7 @@ class SessionView {
           this.queuePendingRequest = "";
           this.renderQueue(this.queued, this.held, this.pausedQueue,
             this.queueRevision);
-          toast(d.text || "Queue reorder cancelled", "error");
+          toast(d.text || "Queue reorder cancelled", "bad");
         }
         break;
       case "turn_done":
@@ -12152,10 +12229,13 @@ class SessionView {
         this.updateHead();
         syncSessionBrowserChips();
         break;
-      case "rate_limit":
+      case "rate_limit": {
+        const engine = engineInfo(this.tab.bid, d.engine);
         if (d.info && d.info.status && d.info.status !== "allowed")
-          toast(`${d.engine}: rate limit ${d.info.status}`, "error");
+          toast(`${(engine && engine.label) || d.engine}: Rate limit ${d.info.status}`,
+            "warn");
         break;
+      }
       case "toast":
         /* Session sockets report command refusals as an uncorrelated
            toast. Keep the approval visible and permit a retry after one. */
@@ -12412,11 +12492,11 @@ class SessionView {
     const question = composerText.trim();
     if (!question) return;
     if (this.composer.attachments.length) {
-      toast("A side question is text only · queue the message to attach files", "error", TOAST_LONG);
+      toast("A side question is text only · queue the message to attach files", "bad", TOAST_LONG);
       return;
     }
     if (!this.sideQuestion.ready || !this.sideQuestion.turn_id) {
-      toast("The active turn cannot take a question", "error");
+      toast("The active turn cannot take a question", "bad");
       return;
     }
     if (this.askPending) return;
@@ -12444,7 +12524,7 @@ class SessionView {
       if (this.askPending === request) this.askPending = null;
       this._forceScroll = false;
       this.updateAskControl();
-      toast(error.message || "The question could not be sent", "error", TOAST_LONG);
+      toast(error.message || "The question could not be sent", "bad", TOAST_LONG);
       return;
     }
     /* The reply only acknowledges the handoff; the answer arrives over the
@@ -12575,7 +12655,7 @@ class SessionView {
         this.scroll.scrollTop = top + (this.scroll.scrollHeight - beforeHeight);
         if (evs.length < 200) { stop(); btn.remove(); return; }
       } catch (e) {
-        toast(e.message, "error");
+        toast(e.message, "bad");
       } finally {
         loading = false;
         if (btn.isConnected) {
@@ -12643,7 +12723,7 @@ class SessionView {
         if (target.isConnected) target.classList.remove("search-flash");
       }, 2400);
     } catch (error) {
-      toast(error.message, "error");
+      toast(error.message, "bad");
     } finally {
       this._jumping = false;
     }
@@ -12748,7 +12828,7 @@ class SessionView {
         this.inner.insertBefore(frag, btn);
         if (evs.length < 200) { stop(); btn.remove(); this.attachToTail(); }
       } catch (e) {
-        toast(e.message, "error");
+        toast(e.message, "bad");
       } finally {
         loading = false;
         if (btn.isConnected) {
@@ -12798,7 +12878,7 @@ class SessionView {
       this.syncLiveStatus();
       this.scrollBottom(true);
     } catch (e) {
-      toast(e.message, "error");
+      toast(e.message, "bad");
     } finally {
       this._returning = false;
       if (this.tailButton) this.tailButton.disabled = false;
@@ -13205,15 +13285,16 @@ class SessionView {
     const text = composerText.trim();
     if (!text) return;
     if (this.composer.attachments.length) {
-      toast("Steering accepts text only · queue the message to attach files", "error", TOAST_LONG);
+      toast("Steering accepts text only · queue the message to attach files", "bad", TOAST_LONG);
       return;
     }
     if (!this.draftReady) {
-      toast("Draft is still syncing · wait for the session to reconnect", "error");
+      toast("Draft is still syncing · wait for the session to reconnect",
+        "bad", TOAST_LONG);
       return;
     }
     if (!this.steering.ready || !this.steering.turn_id) {
-      toast("The active turn is not ready for steering", "error");
+      toast("The active turn is not ready for steering", "bad");
       return;
     }
     if (this.steerPending) return;
@@ -13241,7 +13322,7 @@ class SessionView {
       if (this.steerPending === request) this.steerPending = null;
       this._forceScroll = false;
       this.updateSteerControl();
-      toast(error.message || "Steering could not be sent", "error", TOAST_LONG);
+      toast(error.message || "Steering could not be sent", "bad", TOAST_LONG);
       return;
     }
     /* A native acknowledgement can arrive over the session socket before the
@@ -13260,17 +13341,21 @@ class SessionView {
     const draft = this.draftValue();
     if (this.composer.isEmpty()) return;
     if (!this.draftReady) {
-      toast("Draft is still syncing · wait for the session to reconnect", "error");
+      toast("Draft is still syncing · wait for the session to reconnect",
+        "bad", TOAST_LONG);
       return;
     }
     if (this.draftReady && draft.length > this.draftMaxChars) {
       toast(`Draft is too long (${draft.length.toLocaleString()} / ${this.draftMaxChars.toLocaleString()} characters)`,
-        "error", TOAST_LONG);
+        "bad", TOAST_LONG);
       return;
     }
     const blocker = this.composer.sendBlocker();
-    if (blocker) { toast(blocker, "error"); return; }
-    if (!this.ws || this.ws.readyState !== 1) { toast("Not connected", "error"); return; }
+    if (blocker) { toast(blocker, "bad", TOAST_LONG); return; }
+    if (!this.ws || this.ws.readyState !== 1) {
+      toast("Not connected · wait for the session to reconnect", "bad", TOAST_LONG);
+      return;
+    }
     const message = { type: "message", text: this.sharedDraft ? this.composer.message() : this.composer.take() };
     if (this.sharedDraft) this.sharedDraft.prepareSend(message, draft);
     else if (this.draftReady) {
@@ -13384,7 +13469,7 @@ class SessionView {
          attach snapshot) proves the backend handled this request. */
       this.approvalPending = true;
     } catch (error) {
-      toast(`${backendName(this.tab.bid)}: Approval response could not be sent · try again after reconnecting`, "error", TOAST_LONG);
+      toast(`${backendName(this.tab.bid)}: Approval response could not be sent · try again after reconnecting`, "bad", TOAST_LONG);
     }
     this.updateApprovalControl();
   }
@@ -13674,7 +13759,7 @@ class SessionView {
     this.cancelQueueDrag(null, false);
     if (this.queuePendingRequest === message.request_id)
       this.queuePendingRequest = "";
-    toast(message.error || "Queue changed before it could be reordered", "error");
+    toast(message.error || "Queue changed before it could be reordered", "bad");
   }
 
   queueReorderComplete(message) {
@@ -13685,7 +13770,7 @@ class SessionView {
     if (Array.isArray(message.queued))
       this.renderQueue(message.queued, message.held || [], message.paused || [],
         message.queue_revision);
-    if (message.error) toast(message.error, "error");
+    if (message.error) toast(message.error, "bad");
     if (message.started) {
       this.status = "running";
       this.updateRunState();
@@ -13719,17 +13804,18 @@ class SessionView {
       };
       if (!this.draftReady) this.draftTouchedBeforeReady = true;
     }
-    if (message) toast(message, "error", TOAST_LONG);
+    if (message) toast(message, "bad", TOAST_LONG);
   }
 
   editQueued(index, text) {
     if (this.queueEditPending) return;
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      toast("Not connected", "error");
+      toast("Not connected · wait for the session to reconnect", "bad", TOAST_LONG);
       return;
     }
     if (!this.draftReady) {
-      toast("Draft is still syncing · wait for the session to reconnect", "error");
+      toast("Draft is still syncing · wait for the session to reconnect",
+        "bad", TOAST_LONG);
       return;
     }
     const requestId = `${Date.now().toString(36)}-edit-${++this.queueEditSeq}`;
@@ -13768,14 +13854,14 @@ class SessionView {
       /* The server rejected the queue identity, so restore the composer value
          whose pending transmission the explicit replacement superseded. */
       this.saveDraft();
-      toast(message.error, "error", TOAST_LONG);
+      toast(message.error, "bad", TOAST_LONG);
       return;
     }
     const draft = message.draft;
     if (!draft || typeof draft.text !== "string" ||
         !Number.isInteger(draft.revision) || draft.revision < 0) {
       this.saveDraft();
-      toast("Backend returned an invalid edited draft", "error", TOAST_LONG);
+      toast("Backend returned an invalid edited draft", "bad", TOAST_LONG);
       return;
     }
     if (this.sharedDraft) {
@@ -13812,15 +13898,24 @@ class SessionView {
   }
 
   unqueue(index, text) {
-    if (!this.ws || this.ws.readyState !== 1) { toast("Not connected", "error"); return; }
+    if (!this.ws || this.ws.readyState !== 1) {
+      toast("Not connected · wait for the session to reconnect", "bad", TOAST_LONG);
+      return;
+    }
     this.ws.send(JSON.stringify({ type: "unqueue", index, text }));
   }
   setQueuePaused(index, text, paused) {
-    if (!this.ws || this.ws.readyState !== 1) { toast("Not connected", "error"); return; }
+    if (!this.ws || this.ws.readyState !== 1) {
+      toast("Not connected · wait for the session to reconnect", "bad", TOAST_LONG);
+      return;
+    }
     this.ws.send(JSON.stringify({ type: "set_queue_paused", index, text, paused }));
   }
   heldOp(type, index, text) {
-    if (!this.ws || this.ws.readyState !== 1) { toast("Not connected", "error"); return; }
+    if (!this.ws || this.ws.readyState !== 1) {
+      toast("Not connected · wait for the session to reconnect", "bad", TOAST_LONG);
+      return;
+    }
     this.ws.send(JSON.stringify({ type, index, text }));
   }
   /* mask a row's tail only when its line overruns the box */
@@ -14072,14 +14167,15 @@ class SessionView {
       /* the undone prompt comes back to the composer for editing, never on
          top of something already being written */
       if (r.restore_text && !this.composer.text().trim()) this.composer.set(r.restore_text);
-    } catch (e) { toast(e.message, "error"); }
+    } catch (e) { toast(e.message, "bad"); }
   }
 
   showPermMenu(anchor) {
     if (!this.session) return;
     const spec = this.composerChoiceSpec("perm");
     if (spec.disabled) {
-      toast("Upgrade this backend to change permission before its queued engine switch", "error");
+      toast("Upgrade this backend to change permission before its queued engine switch",
+        "bad", TOAST_LONG);
       return;
     }
     this.optionMenu(anchor, spec.options, spec.selected,
@@ -14090,7 +14186,8 @@ class SessionView {
   async applyPermissionChoice(value) {
     const eff = this.effectiveConfig();
     if (eff.queuedEngine && !backendSupportsQueuedPermission(this.tab.bid)) {
-      toast("Upgrade this backend to change permission before its queued engine switch", "error");
+      toast("Upgrade this backend to change permission before its queued engine switch",
+        "bad", TOAST_LONG);
       return;
     }
     await this.patchSession({ permission_mode: value });
@@ -14101,7 +14198,7 @@ class SessionView {
       const r = await api(this.tab.bid, `sessions/${this.tab.sid}`, { method: "PATCH", body });
       this.session = r.session; this.updateHead();
       return r;
-    } catch (e) { toast(e.message, "error"); return null; }
+    } catch (e) { toast(e.message, "bad"); return null; }
   }
 
   choiceMenuSpec(kind) {
@@ -14321,15 +14418,15 @@ class SessionView {
     try {
       const r = await api(this.tab.bid, `sessions/${this.tab.sid}`, { method: "PATCH", body: { name: val.trim() } });
       this.session = r.session; this.updateHead(); renderSidebar();
-    } catch (e) { toast(e.message, "error"); }
+    } catch (e) { toast(e.message, "bad"); }
   }
 
   async archive() {
     try {
       const r = await api(this.tab.bid, `sessions/${this.tab.sid}`,
         { method: "PATCH", body: { archived: !(this.session && this.session.archived) } });
-      this.session = r.session; renderSidebar(); toast(this.session.archived ? "Archived" : "Unarchived");
-    } catch (e) { toast(e.message, "error"); }
+      this.session = r.session; renderSidebar(); toast(this.session.archived ? "Session archived" : "Session unarchived", "ok");
+    } catch (e) { toast(e.message, "bad"); }
   }
 
   async deleteSession() {
@@ -14340,8 +14437,8 @@ class SessionView {
         const folded = await removeTaskSession(this.tab.bid, this.session, choice);
         closeTab(this.tab.id);
         if (this.tab.bid) refreshGroup(this.tab.bid);
-        toast(folded ? "Task folded into Main" : "Task removed");
-      } catch (e) { toast(e.message, "error"); }
+        toast(folded ? "Task folded into Main" : "Task removed", "ok");
+      } catch (e) { toast(e.message, "bad"); }
       return;
     }
     const ok = await modalConfirm("Delete session?", sessionDeleteMessage(this.session),
@@ -14351,8 +14448,8 @@ class SessionView {
       await api(this.tab.bid, `sessions/${this.tab.sid}`, { method: "DELETE" });
       closeTab(this.tab.id);
       if (this.tab.bid) refreshGroup(this.tab.bid);
-      toast("Session deleted");
-    } catch (e) { toast(e.message, "error"); }
+      toast("Session deleted", "ok");
+    } catch (e) { toast(e.message, "bad"); }
   }
 
   async resetWorkspace() {
@@ -14370,8 +14467,8 @@ class SessionView {
       this.session = r.session;
       this.updateHead();
       if (this.tab.bid) refreshGroup(this.tab.bid);
-      toast(wasMissing ? "Scratch workspace recreated" : "Scratch workspace reset");
-    } catch (e) { toast(e.message, "error"); }
+      toast(wasMissing ? "Scratch workspace recreated" : "Scratch workspace reset", "ok");
+    } catch (e) { toast(e.message, "bad"); }
   }
 }
 
@@ -14527,7 +14624,7 @@ class TermView {
         `Terminal ${terminalId} unlinked`, "ok");
     } catch (error) {
       this.linkBusy = "";
-      toast(`Terminal ${terminalId}: ${error.message}`, "error", TOAST_LONG);
+      toast(`Terminal ${terminalId}: ${error.message}`, "bad", TOAST_LONG);
     } finally {
       this.renderBinding();
     }
@@ -14730,8 +14827,8 @@ class TermView {
           }
           if (data.replay_truncated && !this.replayWarned) {
             this.replayWarned = true;
-            toast(`Terminal ${terminalId}: earlier output was omitted from reconnect replay`,
-              "error", TOAST_LONG);
+            toast(`Terminal ${terminalId}: Earlier output was omitted from the reconnect replay`,
+              "warn", TOAST_LONG);
           }
           if (data.running === false) {
             this.nodeEnded = true;
@@ -14773,7 +14870,7 @@ class TermView {
     writeClipboardText(text).catch(() => {
       if (this.copyWarned) return;                         // once per terminal, not per drag
       this.copyWarned = true;
-      toast("Copy failed", "error");
+      toast("Could not copy to the clipboard", "bad");
     });
   }
   async pasteClipboard() {
@@ -14786,7 +14883,7 @@ class TermView {
     } catch (e) {
       if (this.pasteWarned) return;
       this.pasteWarned = true;
-      toast("Clipboard paste was blocked · use Shift+right-click for the browser menu", "error", TOAST_LONG);
+      toast("Clipboard paste was blocked · use Shift+right-click for the browser menu", "bad", TOAST_LONG);
     }
   }
 
@@ -15187,7 +15284,7 @@ class BrowserView {
         `Browser ${browserId} unlinked`, "ok");
     } catch (error) {
       this.linkBusy = "";
-      toast(`Browser ${browserId}: ${error.message}`, "error", TOAST_LONG);
+      toast(`Browser ${browserId}: ${error.message}`, "bad", TOAST_LONG);
     } finally {
       this.renderBinding();
     }
@@ -15648,8 +15745,8 @@ class BrowserView {
       } else if (d.type === "cursor") {
         this.receiveCursor(d);
       } else if (d.type === "dialog") {
-        toast(`Page ${d.kind || "dialog"} ${d.action}: ${d.message || ""}`.trim(),
-          "info", TOAST_LONG);
+        toast(`Page ${d.kind || "dialog"} ${d.action}` +
+          (d.message ? ` · ${d.message}` : ""), "info", TOAST_LONG);
       } else if (d.type === "error") {
         /* Only a terminal verdict ends this pane; a transient failure (a
            refused navigation, a slow screencast call) is a toast, not a
@@ -15659,7 +15756,7 @@ class BrowserView {
           this.showDead(d.text || "Browser unavailable", true);
         } else {
           this.setLoading(false);
-          toast(d.text || "Browser error", "error", TOAST_LONG);
+          toast(d.text || "The browser reported an error", "bad", TOAST_LONG);
         }
       } else if (d.type === "gone") {
         this.terminalGone = true;
@@ -16434,13 +16531,14 @@ class VncView {
         this.showDead(message.text || "VNC unavailable", true);
       } else {
         /* A refused action (view only, an unknown key) is worth saying once.
-           Saying the same refusal again is not. */
-        const text = message.text || "VNC error";
+           Saying the same refusal again is not: the notice surface would fold
+           the repeat into a count and keep renewing its life. */
+        const text = message.text || "The remote screen reported an error";
         if (text !== this.lastErrorText ||
             Date.now() - this.lastErrorAt > VNC_ERROR_REPEAT_MS) {
           this.lastErrorText = text;
           this.lastErrorAt = Date.now();
-          toast(text, "error", TOAST_LONG);
+          toast(text, "bad", TOAST_LONG);
         }
       }
     }
@@ -17036,7 +17134,7 @@ class SearchView {
         more.remove();
       }
     } catch (error) {
-      toast(error.message, "error");
+      toast(error.message, "bad");
       if (more.isConnected) {
         more.disabled = false;
         more.textContent = `Show all matches`;
@@ -17160,7 +17258,7 @@ class SettingsView {
       return;
     }
     if (!result.ok) {
-      toast(`${nodeName}: ${engine.label} update failed`, "error", TOAST_LONG);
+      toast(`${nodeName}: Could not update ${engine.label}`, "bad", TOAST_LONG);
       modalNotice(`${engine.label} update failed`,
         `${nodeName}: ${result.error || "the updater reported a failure"}` +
         (result.output ? `\n\n${result.output}` : ""));
@@ -17579,9 +17677,9 @@ class SettingsView {
         { method: "POST", timeoutMs: 30000 });
       accepted = true;
       applyEnginesPayload(bid, result);
-      toast(`${nodeName}: updating ${e2.label}…`, "info");
+      toast(`${nodeName}: Updating ${e2.label}…`, "busy");
     } catch (error) {
-      toast(`${nodeName}: ${error.message}`, "error", TOAST_LONG);
+      toast(`${nodeName}: ${error.message}`, "bad", TOAST_LONG);
     } finally {
       this.engineUpgradeStarts.delete(id);
       /* A successful updater can finish before its POST response is painted.
@@ -17815,7 +17913,7 @@ class SettingsView {
         if (bid) state.remoteAutoUpgrade[bid] = current;
         else state.autoUpgrade = current;
       } catch (error) {
-        toast(`${name}: ${error.message}`, "error", TOAST_LONG);
+        toast(`${name}: ${error.message}`, "bad", TOAST_LONG);
       } finally {
         saving = false;
         paint();
@@ -17828,7 +17926,7 @@ class SettingsView {
     time.onchange = () => {
       const parsed = parseClockSetting(time.value);
       if (!parsed) {
-        toast(`${name}: Enter a time like ${clockSettingExample()}`, "error");
+        toast(`${name}: Enter a time like ${clockSettingExample()}`, "bad", TOAST_LONG);
         time.value = fmtClockSetting((current && current.at) || "03:30");
         time.focus();
         time.select();
@@ -17915,13 +18013,14 @@ class SettingsView {
     };
     save.onclick = async () => {
       if (!interval.value.trim()) {
-        toast("Enter a refresh interval in minutes", "error");
+        toast(`${name}: Enter a refresh interval in minutes`, "bad", TOAST_LONG);
         interval.focus();
         return;
       }
       const minutes = Number(interval.value);
       if (!Number.isInteger(minutes) || minutes < 0 || minutes > 1440) {
-        toast("Refresh interval must be 0 or a whole number from 1 to 1440", "error");
+        toast(`${name}: Refresh interval must be 0 or a whole number from 1 to 1440`,
+          "bad", TOAST_LONG);
         interval.focus();
         return;
       }
@@ -17934,11 +18033,11 @@ class SettingsView {
         });
         applyUsageRefreshPayload(bid, result);
         current = result.usage_refresh;
-        const suffix = result.usage_refresh.last_error ? " · refresh failed" : "";
-        toast(`${name}: Usage refresh saved${suffix}`,
-          result.usage_refresh.last_error ? "error" : "ok", TOAST_LONG);
+        const failed = !!result.usage_refresh.last_error;
+        toast(`${name}: Usage refresh saved${failed ? " · the refresh itself failed" : ""}`,
+          failed ? "warn" : "ok", TOAST_LONG);
       } catch (error) {
-        toast(`${name}: ${error.message}`, "error", TOAST_LONG);
+        toast(`${name}: ${error.message}`, "bad", TOAST_LONG);
       } finally {
         saving = false;
         save.textContent = "Apply";
@@ -18026,13 +18125,14 @@ class SettingsView {
     };
     save.onclick = async () => {
       if (!limit.value.trim()) {
-        toast("Enter a maximum file size in MiB", "error");
+        toast(`${name}: Enter a maximum file size in MiB`, "bad", TOAST_LONG);
         limit.focus();
         return;
       }
       const megabytes = Number(limit.value);
       if (!Number.isInteger(megabytes) || megabytes < 0 || megabytes > 1024) {
-        toast("Maximum file size must be a whole number from 0 to 1024 MiB", "error");
+        toast(`${name}: Maximum file size must be a whole number from 0 to 1024 MiB`,
+          "bad", TOAST_LONG);
         limit.focus();
         return;
       }
@@ -18049,7 +18149,7 @@ class SettingsView {
         current = policy;
         toast(`${name}: File uploads ${policy.enabled ? `limited to ${megabytes} MiB` : "disabled"}`, "ok");
       } catch (error) {
-        toast(`${name}: ${error.message}`, "error", TOAST_LONG);
+        toast(`${name}: ${error.message}`, "bad", TOAST_LONG);
       } finally {
         saving = false;
         save.textContent = "Apply";
@@ -18118,7 +18218,7 @@ class SettingsView {
       if (root) {
         root.classList.toggle("disabled", input.disabled);
         root.onclick = !st.available && !st.enabled && !browserRecord.saving ?
-          () => toast(`${name}: ${st.reason || "No usable browser"}`, "error", TOAST_LONG) : null;
+          () => toast(`${name}: ${st.reason || "No usable browser"}`, "bad", TOAST_LONG) : null;
       }
       if (shared) {
         if (!browserRecord.sharedSaving) shared.input.checked = st.shared_storage === true;
@@ -18153,7 +18253,7 @@ class SettingsView {
       } catch (error) {
         input.checked = !desired;
         setNote(error.message, true);
-        toast(`${name}: ${error.message}`, "error", TOAST_LONG);
+        toast(`${name}: ${error.message}`, "bad", TOAST_LONG);
       } finally {
         browserRecord.saving = false;
         if (browserRecord.status) apply(browserRecord.status);
@@ -18172,10 +18272,11 @@ class SettingsView {
           result.shared_storage_health.ok === false;
         toast(`${name}: Shared cookies & storage ${
           result.shared_storage ? "enabled" : "disabled"}${failed ?
-          " · persistence failed" : ""}`, failed ? "error" : "ok");
+          " · the store could not be written" : ""}`, failed ? "warn" : "ok",
+          failed ? TOAST_LONG : TOAST_SHORT);
       } catch (error) {
         shared.input.checked = !desired;
-        toast(`${name}: ${error.message}`, "error", TOAST_LONG);
+        toast(`${name}: ${error.message}`, "bad", TOAST_LONG);
       } finally {
         browserRecord.sharedSaving = false;
         if (browserRecord.status) apply(browserRecord.status);
@@ -18570,7 +18671,8 @@ class SettingsView {
             toast(`${savedMessage} · also updated ${updated.join(", ")}`, "ok", TOAST_LONG);
           } else {
             const success = updated.length ? ` · also updated ${updated.join(", ")}` : "";
-            toast(`${savedMessage}${success} · failed: ${failed.join("; ")}`, "error", TOAST_LONG);
+            toast(`${savedMessage}${success} · not updated on ${failed.join(", ")}`,
+              "warn", TOAST_LONG);
           }
         } catch (error) {
           input.value = String(value);
@@ -18621,13 +18723,15 @@ class SettingsView {
         if (!failed.length) {
           toast(`Timer defaults restored on ${updated.join(", ")}`, "ok", TOAST_LONG);
         } else {
-          const prefix = updated.length ?
-            `Timer defaults restored on ${updated.join(", ")} · ` : "Timer reset ";
-          toast(`${prefix}failed: ${failed.join("; ")}`, "error", TOAST_LONG);
+          const restored = updated.length ?
+            `Timer defaults restored on ${updated.join(", ")}` :
+            "Could not restore timer defaults anywhere";
+          toast(`${restored} · not reset on ${failed.join(", ")}`,
+            updated.length ? "warn" : "bad", TOAST_LONG);
         }
       } catch (error) {
         if (generation === this.renderGeneration && card.isConnected)
-          toast(`Timer reset failed: ${error.message}`, "error", TOAST_LONG);
+          toast(`Could not reset timers · ${error.message}`, "bad", TOAST_LONG);
       } finally {
         resetting = false;
         if (generation === this.renderGeneration && card.isConnected) paint();
@@ -19148,7 +19252,7 @@ class SettingsView {
         record.saving = false;
         record.error = error.message || "Could not save prompt settings";
         records.set(bid, record);
-        toast(`${node ? node.name : "Backend"}: ${record.error}`, "error", TOAST_LONG);
+        toast(`${node ? node.name : "Backend"}: ${record.error}`, "bad", TOAST_LONG);
       }
       if (bid === activeBid) paint();
     };
@@ -19584,7 +19688,7 @@ class SettingsView {
       const proposedPort = Number(proposedPortText);
       if (!proposedPortText || !Number.isInteger(proposedPort) ||
           proposedPort < 1 || proposedPort > 65535) {
-        toast("Bind port must be a whole number between 1 and 65535", "error");
+        toast("Bind port must be a whole number between 1 and 65535", "bad", TOAST_LONG);
         portInput.focus();
         return;
       }
@@ -19592,19 +19696,22 @@ class SettingsView {
       const privateKeyPath = c1.querySelector("#set-tls-key").value.trim();
       if (selectedCertificateSource === "custom" && selectedScheme === "https" &&
           Boolean(certificatePath) !== Boolean(privateKeyPath)) {
-        toast("Certificate chain and private key paths are required together", "error");
+        toast("Certificate chain and private key paths are required together",
+          "bad", TOAST_LONG);
         c1.querySelector(certificatePath ? "#set-tls-key" : "#set-tls-cert").focus();
         return;
       }
       if (selectedScheme === "https" && selectedCertificateSource === "custom" &&
           !customIdentity.available && !certificatePath) {
-        toast("Choose the certificate chain and private key files on this server", "error");
+        toast("Choose the certificate chain and private key files on this server",
+          "bad", TOAST_LONG);
         c1.querySelector("#set-tls-cert").focus();
         return;
       }
       if (selectedScheme === "https" && selectedCertificateSource === "auto" &&
           !autoIdentity.available && !settings.web.openssl_available) {
-        toast("Self-signed HTTPS generation needs openssl on this server", "error");
+        toast("Self-signed HTTPS generation needs openssl on this server",
+          "bad", TOAST_LONG);
         return;
       }
       const bindChanged = proposedBind !== String(settings.web.host || "") ||
@@ -19732,7 +19839,7 @@ class SettingsView {
           }
         } else if (endpointProofNeeded) modalNotice("Listener was not changed",
           `${e.message}.\n\nPuppy remains configured on ${fmtListenerEndpoint(settings.web)}.`);
-        else toast(e.message, "error");
+        else toast(e.message, "bad");
       } finally {
         if (saveButton.isConnected) {
           saveButton.disabled = false;
@@ -19937,7 +20044,7 @@ class SettingsView {
             const current = state.backends.find(item => item.id === b.id);
             if (current) current.auto_upgrade = previous;
             b.auto_upgrade = previous;
-            toast(`${b.name}: ${error.message}`, "error", TOAST_LONG);
+            toast(`${b.name}: ${error.message}`, "bad", TOAST_LONG);
           } finally {
             autoRecord.saving = false;
             this.syncBackendAutoToggles();
@@ -20035,17 +20142,18 @@ class SettingsView {
             if (r.ok) {
               state.remoteOk[b.id] = true;
               delete state.remoteErrors[b.id];
-              toast(`${b.name}: OK (${r.remote && r.remote.version})`, "ok");
+              toast(`${b.name}: Reachable · version ${(r.remote && r.remote.version) || "unknown"}`,
+                "ok");
             } else {
               const message = r.error || "HTTP " + r.status;
               state.remoteOk[b.id] = false;
               state.remoteErrors[b.id] = message;
               syncRemoteStateViews();
-              toast(`${b.name}: ${message}`, "error");
+              toast(`${b.name}: ${message}`, "bad");
             }
             if (this.inner.isConnected) await this.render();
           } catch (e) {
-            toast(e.message, "error");
+            toast(e.message, "bad");
           } finally {
             if (test.isConnected) test.textContent = "Test";
           }
@@ -20097,7 +20205,7 @@ class SettingsView {
             if (this.inner.isConnected) await this.render();
           } catch (error) {
             const message = removed ? "Backend removed · Could not refresh settings" : "Could not remove backend";
-            toast(`${b.name}: ${message} · ${error.message}`, "error", TOAST_LONG);
+            toast(`${b.name}: ${message} · ${error.message}`, "bad", TOAST_LONG);
           } finally {
             removing = false;
             if (rm.isConnected) { rm.disabled = false; rm.textContent = "Remove"; }
@@ -20183,7 +20291,7 @@ class SettingsView {
           old: c4.querySelector("#pw-old").value, new: c4.querySelector("#pw-new").value } });
         toast("Password changed", "ok");
         c4.querySelector("#pw-old").value = c4.querySelector("#pw-new").value = "";
-      } catch (e) { toast(e.message, "error"); }
+      } catch (e) { toast(e.message, "bad"); }
     };
     this.inner.appendChild(c4);
 
@@ -20229,7 +20337,7 @@ class SettingsView {
         link.remove();
         toast(`Backup ready · ${prepared.sessions} sessions · ${fmtBytes(prepared.size)}`, "ok");
       } catch (error) {
-        toast(error.message, "error", TOAST_LONG);
+        toast(error.message, "bad", TOAST_LONG);
       } finally {
         if (exportButton.isConnected) {
           exportButton.disabled = false;
@@ -20261,7 +20369,7 @@ class SettingsView {
         restoreBrowserState(result.ui || {});
         location.reload();
       } catch (error) {
-        toast(error.message, "error", TOAST_LONG);
+        toast(error.message, "bad", TOAST_LONG);
         if (importButton.isConnected) {
           exportButton.disabled = false;
           importButton.disabled = false;
@@ -20538,7 +20646,7 @@ function modalEditBackend(backend, onSaved) {
         setBusy(false);
         setError(caught.message || "Backend could not be updated");
       } else {
-        toast(caught.message || "Backend could not be updated", "error", TOAST_LONG);
+        toast(caught.message || "Backend could not be updated", "bad", TOAST_LONG);
       }
     }
   };
@@ -20688,7 +20796,7 @@ function modalEngineDefaults(bid, key, conversationChoices = null) {
       toast(`${backendName(bid)}: ${name} defaults saved`, "ok");
     } catch (err) {
       if (m.isConnected) setError(err.message || "Defaults could not be saved");
-      else toast(err.message || "Defaults could not be saved", "error");
+      else toast(err.message || "Defaults could not be saved", "bad");
     } finally {
       if (m.isConnected) setBusy(false);
     }
@@ -21062,7 +21170,8 @@ async function modalNewSession(groupId = null) {
         }, timeoutMs: 120000 });
         close();
         if (r.same_node)
-          toast("Both backends resolve to the same machine · using the directory directly");
+          toast("Both backends resolve to the same machine · using the directory directly",
+            "warn", TOAST_LONG);
         if (r.bid) await pollRemotes();
         openSessionTab(r.bid || 0, r.session.id, r.session, groupId);
         return;
@@ -21077,7 +21186,7 @@ async function modalNewSession(groupId = null) {
       openSessionTab(bid, r.session.id, r.session, groupId);
     } catch (e) {
       if (m.isConnected) { setBusy(false); setError(e.message); }
-      else toast(e.message, "error");
+      else toast(e.message, "bad");
     }
   };
 }
@@ -21199,7 +21308,7 @@ function modalWorkspaceLink(bid, session) {
           const r = await api(0, `workspaces/${live.id}/keeps`, { method: "DELETE" });
           keeps = (r && r.keeps) || null;
           toast("Preserved versions discarded", "ok");
-        } catch (e) { toast(e.message, "error"); }
+        } catch (e) { toast(e.message, "bad"); }
         if (m.isConnected) render();
       };
       fact("Preserved", `${keeps.generations} version` +
@@ -21266,12 +21375,12 @@ function modalWorkspaceLink(bid, session) {
         state.workspaceLinks = state.workspaceLinks.map(
           l => l.id === r.link.id ? r.link : l);
       }
-      if (r && r.clean) toast("Workspace synced");
+      if (r && r.clean) toast("Workspace synced", "ok");
       else if (r && r.conflicts) toast(
         `${r.conflicts} workspace conflict${r.conflicts === 1 ? "" : "s"} need a decision`,
-        "error");
-      else toast("Workspace sync is still pending", "error");
-    } catch (e) { toast(e.message, "error"); }
+        "warn", TOAST_LONG);
+      else toast("Workspace sync is still pending", "warn");
+    } catch (e) { toast(e.message, "bad"); }
     syncBtn.disabled = false;
     render();
     refreshWorkspaceChips();
@@ -21285,8 +21394,8 @@ function modalWorkspaceLink(bid, session) {
       await api(0, `workspaces/${link.id}/resolve`,
         { method: "POST", body: { choices } });
       for (const key of Object.keys(choices)) delete choices[key];
-      toast("Resolving conflicts…");
-    } catch (e) { toast(e.message, "error"); }
+      toast("Resolving conflicts…", "busy");
+    } catch (e) { toast(e.message, "bad"); }
     applyBtn.disabled = false;
     render();
   };
@@ -21318,7 +21427,7 @@ function openBrowserFromMenu(groupId = null) {
     .concat(state.backends)
     .filter(node => browserEnabledFor(node.id));
   if (!nodes.length) {
-    toast("No backend has its browser enabled · see Settings", "error", TOAST_LONG);
+    toast("No backend has its browser enabled · see Settings", "bad", TOAST_LONG);
     openSettingsTab(groupId);
     return;
   }
@@ -21562,12 +21671,14 @@ function modalSwitchEngine(view) {
       view.session = r.session;
       view.updateHead();
       close();
+      const chosen = engineInfo(view.tab.bid, pick);
+      const label = (chosen && chosen.label) || pick;
       if (r.queued) {
-        toast(`Engine switch to ${pick} queued · applies after the queue`, "ok");
+        toast(`Engine switch to ${label} queued · applies after the queue`, "ok");
         return;
       }
-      toast(`Switched to ${pick}`, "ok");
-    } catch (e) { toast(e.message, "error"); }
+      toast(`Switched to ${label}`, "ok");
+    } catch (e) { toast(e.message, "bad"); }
   };
 }
 
@@ -21617,7 +21728,7 @@ function syncLabelNudge() {
 /* ================= go ================= */
 syncLabelNudge();
 initAuth().catch(e => {
-  toast("Failed to reach backend: " + e.message, "error");
+  toast(`Could not reach the backend · ${e.message}`, "bad", TOAST_LONG);
 });
 
 
@@ -21630,7 +21741,7 @@ async function openSessionReference(ref, seq = 0) {
     openSessionTab(row.bid, row.id, payload.session);
     const view = sessionViewFor(row.bid, row.id);
     if (seq > 0 && view) view.jumpToSeq(seq);
-  } catch (error) { toast(error.message, "error"); }
+  } catch (error) { toast(error.message, "bad"); }
 }
 
 document.addEventListener("click", event => {

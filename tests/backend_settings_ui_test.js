@@ -108,7 +108,7 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
   assert.equal(requests.length, 1, "a pending removal cannot be duplicated");
   release(); await removing; hold = null;
   assert.deepEqual(removed, [], "a failed DELETE retains the backend record");
-  assert.deepEqual(notices[0], ["Demo backend: Could not remove backend · network error", "error", 7000]);
+  assert.deepEqual(notices[0], ["Demo backend: Could not remove backend · network error", "bad", 7000]);
   assert.equal(remove.disabled, false); assert.equal(remove.textContent, "Remove");
   failure = ""; await remove.onclick();
   assert.equal(requests.length, 2); assert.deepEqual(removed, [7]);

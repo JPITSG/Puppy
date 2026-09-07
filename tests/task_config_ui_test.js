@@ -83,7 +83,7 @@ const context = vm.createContext({
   fetch: (url, init) => new Promise(resolve => fetches.push({ url, init, resolve })),
   refreshChoiceSelect, provSpec, renderSidebar, enginePayloadListeners, state, sessionsFor, modal, api,
   rememberEnginePayload, ENGINE_POLL_TIMEOUT,
-  toast: (text, level) => toasts.push({ text, level }),
+  toast: (text, level) => toasts.push({ text, level }), TOAST_LONG: 7000,
   esc: text => String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"),
   apiPath: (bid, route) => (bid ? `/api/b/${bid}/` : "/api/") + route,
   fmtBytes: value => value + " B",

@@ -2483,11 +2483,19 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .toast{
   background:var(--panel2);border:1px solid var(--line2);border-left:3px solid var(--acc);
   border-radius:var(--r-md);padding:10px 14px;font-size:var(--fs-md);
-  box-shadow:0 14px 40px -14px rgba(0,0,0,.9);animation:toast-in .25s var(--ease);
+  display:flex;align-items:baseline;gap:7px;
+  box-shadow:0 14px 40px -14px rgba(0,0,0,.9);animation:toast-in var(--t-slow) var(--ease);
   touch-action:pan-y pinch-zoom;
 }
-.toast.err{border-left-color:var(--err)}
+/* the one status tone vocabulary, as everywhere else in the console */
 .toast.ok{border-left-color:var(--ok)}
+.toast.warn{border-left-color:var(--warn)}
+.toast.bad{border-left-color:var(--err)}
+.toast.busy{border-left-color:var(--acc2)}
+/* how many times a folded notice arrived; present only from the second one */
+.toast-count{flex:none;color:var(--txt2);font-variant-numeric:tabular-nums}
+.toast-count.toast-bump{animation:toast-bump var(--t-base) var(--ease)}
+@keyframes toast-bump{from{transform:scale(1.4);color:var(--acc2)}to{transform:none}}
 .toast.toast-touch{animation:none}
 .toast.toast-swiping{transition:none;user-select:none;will-change:transform,opacity}
 .toast.toast-swipe-settling{
