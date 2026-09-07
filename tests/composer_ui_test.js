@@ -104,7 +104,7 @@ function makeBox(host = {}, options = {}) {
   document.body.appendChild(wrap);
   const box = wrap.querySelector(".composer-box");
   const events = { submit: 0, edited: 0, updated: 0 };
-  const composer = new Composer(box, { bid: 0, sid: 10,
+  const composer = new Composer(box, { bid: 0, sid: 10, promptHistory: true,
     submit: () => events.submit++, edited: () => events.edited++, updated: () => events.updated++, ...host });
   return { wrap, box, composer, events, ta: composer.ta };
 }
@@ -472,6 +472,22 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
 
   /* shell-style recall comes from the node, even on a fresh box */
   storedEvents = [promptEvent(1, "first"), promptEvent(2, "second")];
+  const taskBox = makeBox({ promptHistory: undefined });
+  for (const draft of ["", "A new task\nwith details"]) {
+    type(taskBox.ta, draft);
+    for (const position of [0, draft.length]) {
+      taskBox.ta.setSelectionRange(position, position);
+      for (const arrow of ["ArrowUp", "ArrowDown"]) {
+        const before = calls.api.length;
+        assert.equal(key(taskBox.ta, arrow).defaultPrevented, false);
+        await settle();
+        assert.equal(taskBox.ta.value, draft);
+        assert.equal(taskBox.composer.history, null);
+        assert.equal(calls.api.length, before, "task arrows never read session history");
+      }
+    }
+  }
+  taskBox.composer.destroy();
   b.ta.selectionStart = b.ta.selectionEnd = 0;
   key(b.ta, "ArrowUp");
   await settle();

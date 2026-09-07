@@ -129,6 +129,13 @@ const deletes = from => requests.slice(from).filter(r => r.method === "DELETE").
   assert.ok(n[".composer-box"].classList.contains("mention-below"), "the list opens downward inside a sheet");
   assert.equal(n["label.task-composer-lbl"].getAttribute("for"), "nt-prompt");
   assert.equal(Composer.live.size, 1, "the task box is the shared prompt box");
+  for (const arrow of ["ArrowUp", "ArrowDown"]) {
+    const event = fire(n["#nt-prompt"], "keydown", { key: arrow });
+    assert.equal(event.defaultPrevented, false, "task arrows keep native caret behavior");
+    await settle();
+    assert.equal(n["#nt-prompt"].value, "");
+    assert.equal(requests.length, 0, "New task must not request Main's prompt history");
+  }
   main.session.model = "retired";
   rememberEnginePayload(7, { engines: remote });
   assert.deepEqual(values(n), captured, "later Main updates must not change the dialog");

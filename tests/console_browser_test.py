@@ -29,8 +29,15 @@ from puppy.drivers import all_drivers
 
 
 async def engines(*args, **kwargs):
+    observed = time.time()
     return [{**webui._engine_choices(driver), "installed": True, "auth": "ok",
              "version": "", "model_catalog_loaded": True,
+             **({"usage_monitor": {"version": 1,
+                 "provider": "demo-" + driver.key, "account": "a" * 64,
+                 "bucket": "week", "window_minutes": 10080,
+                 "sample": {"used_percent": 31 if driver.key == "claude" else 74,
+                            "observed_at": observed, "resets_at": observed + 86400}}}
+                if driver.key in ("claude", "codex") else {}),
              "model_options": [{"value": "", "label": "Default",
                                 "effort_options": [{"value": "", "label": "Default"}]}]}
             for driver in all_drivers()]
@@ -709,6 +716,38 @@ async def screenshots(instance):
     print("PASS: regenerated five console screenshots with invented demo data", flush=True)
 
 
+async def quota_checks(instance):
+    result = await evaluate(instance, """(() => {
+        const saved = {engines: state.engines, backends: state.backends,
+                       engCache: state.engCache, remoteOk: state.remoteOk};
+        const now=Date.now()/1000;
+        const make=(used, at) => ({key:'codex', label:'Codex', installed:true,
+            auth:'ok', update_available:false, usage_monitor:{version:1,
+            provider:'quota-test', account:'b'.repeat(64), bucket:'codex',
+            window_minutes:10080, sample:used===null?null:{used_percent:used,
+            observed_at:at, resets_at:now+3600}}});
+        try {
+            state.engines=[make(20,now-50)];
+            state.backends=[{id:999,name:'Workshop',capabilities:['account-quota-v1']}];
+            state.engCache={999:[make(44,now-10)]}; state.remoteOk={999:true};
+            renderFootEngines();
+            const shared=[...document.querySelectorAll('.st-quota')].map(e=>e.textContent);
+            const titles=[...document.querySelectorAll('.st-quota')].map(e=>e.title);
+            state.engCache[999][0].usage_monitor.account='c'.repeat(64);
+            state.engCache[999][0].usage_monitor.sample=null;
+            renderFootEngines();
+            const after=[...document.querySelectorAll('.st-quota')].map(e=>e.textContent);
+            return {shared,titles,after};
+        } finally {
+            Object.assign(state,saved); sharedQuotaObservations.clear(); renderFootEngines();
+        }
+    })()""")
+    assert result["shared"] == ["56% wk", "56% wk"], result
+    assert all("reading from Workshop" in title for title in result["titles"]), result
+    assert result["after"] == ["56% wk"], result
+    print("PASS: real footer shares only matching accounts and retains the newest observation", flush=True)
+
+
 async def main(args):
     instances = []
     server = None
@@ -728,6 +767,7 @@ async def main(args):
             instances = [browser.Manager("TSTA"), browser.Manager("TSTB")]
             for instance in instances:
                 await open_console(instance, url, sid)
+            await quota_checks(instances[0])
             await checks(*instances, runner.hub(sid), args.screenshots)
             if args.screenshots:
                 await screenshots(instances[0])

@@ -24,6 +24,7 @@ that can override the ordinary setting.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import math
@@ -32,7 +33,7 @@ import re
 import shutil
 import time
 
-from puppy import __version__
+from puppy import __version__, quota
 from puppy.drivers import base as driver_base
 from puppy.drivers.base import Driver, ToolUnavailable, tool_name
 from puppy.user_paths import service_home
@@ -120,6 +121,34 @@ def _with_runtime_guidance(prompt: str, system_prompt: str, browser_mcp,
 
 def _codex_home() -> str:
     return os.environ.get("CODEX_HOME") or os.path.join(service_home(), ".codex")
+
+
+def _quota_identity():
+    """Only the selected ChatGPT account AND user identify a quota owner.
+
+    The CLI's local ID-token claims are identity metadata, not an authentication
+    decision. Neither token bytes nor raw account IDs leave this function.
+    Keyring/external/API-key logins without this proof stay independent.
+    """
+    if os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENAI_BASE_URL"):
+        return None
+    auth = quota.read_object(os.path.join(_codex_home(), "auth.json"))
+    if auth.get("auth_mode") != "chatgpt" or auth.get("OPENAI_API_KEY"):
+        return None
+    tokens = auth.get("tokens")
+    if not isinstance(tokens, dict):
+        return None
+    try:
+        encoded = tokens["id_token"].split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
+        owner = claims["https://api.openai.com/auth"]
+        if claims.get("iss") != "https://auth.openai.com" or \
+                owner.get("chatgpt_account_id") != tokens.get("account_id"):
+            return None
+        return quota.account_key("openai-chatgpt", tokens.get("account_id"),
+                                 owner.get("chatgpt_user_id"))
+    except (KeyError, IndexError, TypeError, ValueError, AttributeError):
+        return None
 
 
 def _effort_label(value: str) -> str:
@@ -419,6 +448,8 @@ async def _read_account_rate_limits(binary: str, timeout: float = 12.0) -> dict:
         buckets = result.get("rateLimitsByLimitId")
         if isinstance(buckets, dict):
             snapshot = buckets.get("codex")
+            if isinstance(snapshot, dict) and "limitId" not in snapshot:
+                snapshot = {**snapshot, "limitId": "codex"}
             if not isinstance(snapshot, dict):
                 snapshot = next((item for item in buckets.values()
                                  if isinstance(item, dict) and
@@ -769,13 +800,33 @@ class CodexDriver(Driver):
             any(option.get("service_tiers") for option in state.options)
 
     def _extra_status(self):
-        return {"quota": _weekly_quota()}
+        return {"quota": _weekly_quota(),
+                "usage_monitor": self._quota_monitor().payload(_quota_identity())}
+
+    def _quota_monitor(self):
+        if not hasattr(self, "_account_quota"):
+            self._account_quota = quota.Monitor("openai-chatgpt", "codex")
+        return self._account_quota
+
+    def _observe_quota(self, limits, identity, observed_at=None):
+        # A weekly duration alone does not identify a bucket (e.g. a separate
+        # model allowance can also be weekly). Only explicit Codex limits join.
+        if not isinstance(limits, dict) or limits.get("limitId", limits.get("limit_id")) != "codex":
+            return
+        week = _weekly_from_rl(limits)
+        if week:
+            self._quota_monitor().observe(_quota_identity(), identity,
+                quota.weekly_sample(week["weekly_used_percent"],
+                                    week["resets_at"], observed_at))
 
     async def refresh_usage(self):
         if not shutil.which(self.binary):
             return None
+        identity = _quota_identity()
+        observed_at = time.time()
         snapshot = await _read_account_rate_limits(self.binary)
         now = time.time()
+        self._observe_quota(snapshot, identity, observed_at)
         quota = _weekly_from_rl(snapshot)
         _quota_cache.update(
             ts=now, quota=_quota_with_meta(quota, now, "account"),
@@ -842,6 +893,7 @@ class CodexDriver(Driver):
     def turn_context(self, session, first_turn, prompt, pinned_id, browser_mcp=None,
                      system_prompt="", terminal_mcp=None, spawn_mcp=None, session_mcp=None, tool=None):
         return {
+            "quota_identity": _quota_identity(),
             "tool": tool_name(tool),
             "tool_params": dict(tool) if isinstance(tool, dict) else {},
             "phase": "initialize",
@@ -1305,6 +1357,7 @@ class CodexDriver(Driver):
         if method == "account/rateLimits/updated":
             limits = params.get("rateLimits")
             if isinstance(limits, dict):
+                self._observe_quota(limits, ctx.get("quota_identity"))
                 _cache_live_quota(limits)
                 return [{"a": "rate_limit", "info": limits}]
             return []

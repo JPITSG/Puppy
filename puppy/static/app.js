@@ -5712,6 +5712,64 @@ function weeklyQuotaLeft(sample) {
     Math.max(0, Math.min(100, 100 - sample.usedPercent));
 }
 
+/* A single observation per verified account and exact allowance, projected
+   onto every matching row. Never merge whole engine objects: health, model
+   choices and upgrade status belong to the individual backend. */
+const sharedQuotaObservations = new Map();
+
+function sharedWeeklyQuotas(groups, now = Date.now() / 1000, newest = new Map()) {
+  const selected = new Map(), members = new Map();
+  for (const [key, sample] of newest) {
+    if (sample.resetsAt <= now || sample.asOf > now + 60) newest.delete(key);
+  }
+  const finite = value => typeof value === "number" && Number.isFinite(value);
+  for (const group of groups) {
+    if (group.offline) continue;
+    for (const engine of group.engines || []) {
+      if (!Object.prototype.hasOwnProperty.call(engine, "usage_monitor")) {
+        selected.set(engine, weeklyQuotaSample(engine, now));
+        continue;
+      }
+      selected.set(engine, null);
+      const monitor = engine.usage_monitor;
+      if (!monitor || monitor.version !== 1 || monitor.window_minutes !== 10080 ||
+          typeof monitor.provider !== "string" || !monitor.provider || monitor.provider.length > 80 ||
+          typeof monitor.bucket !== "string" || !monitor.bucket || monitor.bucket.length > 120) continue;
+      const raw = monitor.sample;
+      let sample = null;
+      if (raw && finite(raw.used_percent) && raw.used_percent >= 0 &&
+          finite(raw.observed_at) && raw.observed_at > 0 && raw.observed_at <= now + 60 &&
+          (raw.resets_at === null || (finite(raw.resets_at) && raw.resets_at > now))) {
+        sample = {usedPercent: raw.used_percent, resetsAt: raw.resets_at,
+          asOf: raw.observed_at, source: "quota", label: "week", reportedBy: group.name};
+        selected.set(engine, sample);
+      }
+      // Missing identity, unknown resets and old nodes can provide a local
+      // figure but cannot contribute a shared observation.
+      if (!group.sharedUsage || engine.auth !== "ok" || !engine.installed ||
+          typeof monitor.account !== "string" || !/^[a-f0-9]{64}$/.test(monitor.account)) continue;
+      const key = JSON.stringify([monitor.provider, monitor.account,
+                                  monitor.bucket, monitor.window_minutes]);
+      members.set(engine, key);
+      if (!sample || !finite(sample.resetsAt)) continue;
+      const previous = newest.get(key);
+      if (!previous || sample.asOf > previous.asOf ||
+          (sample.asOf === previous.asOf && sample.usedPercent > previous.usedPercent))
+        newest.set(key, sample);
+    }
+  }
+  for (const [engine, key] of members) {
+    if (newest.has(key)) selected.set(engine, newest.get(key));
+  }
+  // Bound account churn in a long-lived console; only expired/oldest cached
+  // observations are removed, never persisted or written into node records.
+  if (newest.size > 1024) {
+    const oldest = [...newest].sort((a, b) => a[1].asOf - b[1].asOf);
+    for (const [key] of oldest.slice(0, newest.size - 1024)) newest.delete(key);
+  }
+  return selected;
+}
+
 /* One line of provenance for the quota pill: the selected week, related Claude
    windows, and when the figure was captured. Claude moves it on a turn; Codex
    moves it on an account read, so the observation's age matters. */
@@ -5749,6 +5807,7 @@ function quotaTitle(e, selected) {
   }
   const asOf = clock(selected.asOf);
   if (asOf) parts.push(`reported ${asOf}`);
+  if (selected.reportedBy) parts.push(`reading from ${selected.reportedBy}`);
   return parts.join(" · ");
 }
 
@@ -6083,6 +6142,11 @@ function renderFootEngines() {
       terminal: backendHasCapability(b, "terminal"),
       engines: Object.prototype.hasOwnProperty.call(state.engCache, b.id) ? state.engCache[b.id] : null,
     })));
+  for (const group of groups) {
+    group.offline = !!group.bid && state.remoteOk[group.bid] === false;
+    group.sharedUsage = nodeHasCapability(group.bid, "account-quota-v1");
+  }
+  const quotas = sharedWeeklyQuotas(groups, Date.now() / 1000, sharedQuotaObservations);
   sortNodeGroups(groups);
   wireNodeGroupDropZone(root);
   for (const g of groups) {
@@ -6154,7 +6218,7 @@ function renderFootEngines() {
       ico.appendChild(el("span", `engine-dot ${e.key}`));
       row.appendChild(ico);
       row.appendChild(document.createTextNode(e.label));
-      const quotaSample = weeklyQuotaSample(e);
+      const quotaSample = quotas.get(e) || null;
       const pct = weeklyQuotaLeft(quotaSample);
       const healthy = engineReady(e);
       /* Two independent signals in one line, so each gets its own element: the
@@ -7978,6 +8042,7 @@ function spawnEffortOptionsFor(engine, modelOption) {
                        terminals lead the "@" list
      selfHint          the "@" list's tag on that session's own instances
                        (default "this session")
+     promptHistory     opt in to Up/Down recall for session chats (default off)
      submit()          Enter, and the host's own send control
      escape(event)     Escape with no list open (optional; the event otherwise
                        propagates, so a dialog's Escape still closes it)
@@ -8151,7 +8216,7 @@ class Composer {
     /* Ctrl/Cmd+C has no shortcut here: it falls through to the modifier
        guard below so textarea selection and native clipboard copy work. */
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); this.host.submit(); return; }
-    if (e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return;
+    if (e.shiftKey || e.ctrlKey || e.altKey || e.metaKey || !this.host.promptHistory) return;
     const ta = this.ta;
     const atStart = ta.selectionStart === 0 && ta.selectionEnd === 0;
     const atEnd = ta.selectionStart === ta.value.length && ta.selectionEnd === ta.value.length;
@@ -8296,6 +8361,7 @@ class Composer {
      transcript window and socket reconnects. Once walking, the before cursor
      keeps newly arriving messages from shifting the user's position. */
   moveHistory(step) {
+    if (!this.host.promptHistory) return;
     if (!this.history) {
       if (step < 0) return;
       this.histDraft = this.ta.value;
@@ -11012,6 +11078,7 @@ class SessionView {
     this.composer = new Composer(root.querySelector(".composer-box"), {
       bid: Number(this.tab.bid) || 0,
       sid: this.tab.sid,
+      promptHistory: true,
       submit: () => this.submit(),
       /* Escape with no list open interrupts the turn; it is consumed here so
          nothing above the view reads it as its own. */

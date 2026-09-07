@@ -149,6 +149,11 @@ async def main() -> None:
                 assert status["quota"] and \
                     status["quota"]["weekly_used_percent"] == 42.0, status
                 assert status["quota"]["source"] == "account", status
+                monitor = status["usage_monitor"]
+                assert monitor["version"] == 1 and monitor["bucket"] == "codex"
+                assert monitor["account"] is None  # fake CLI has no login identity
+                assert monitor["sample"]["used_percent"] == 42.0
+                assert monitor["sample"]["resets_at"] == 2000001000
                 assert payload["usage_refresh"]["minutes"] == 15
                 assert payload["usage_refresh"]["last_success_at"] is not None
 

@@ -40,6 +40,7 @@ import json
 import os
 import re
 
+from puppy import quota
 from puppy.drivers import base as driver_base
 from puppy.drivers.base import Driver, ToolUnavailable, stringify_content
 from puppy.user_paths import service_home
@@ -47,6 +48,39 @@ from puppy.user_paths import service_home
 
 USAGE_KEYS = ("input_tokens", "output_tokens", "cache_read_input_tokens",
               "cache_creation_input_tokens")
+
+
+def _quota_account():
+    """Read only the CLI's non-secret OAuth account metadata.
+
+    Auth status / the turn's initialize reply must separately prove that this
+    stored account is the active first-party subscription, not an API provider.
+    """
+    if any(os.environ.get(key) for key in (
+            "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+            "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+            "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+            "CLAUDE_CODE_USE_FOUNDRY")):
+        return {}
+    root = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(service_home(), ".claude")
+    if not os.path.exists(os.path.join(root, ".credentials.json")):
+        return {}
+    path = os.path.join(root, ".config.json")
+    if not os.path.exists(path):
+        path = os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or service_home(),
+                            ".claude.json")
+    account = quota.read_object(path).get("oauthAccount")
+    if not isinstance(account, dict):
+        return {}
+    key = quota.account_key("anthropic-subscription", account.get("accountUuid"),
+                            account.get("organizationUuid"))
+    if not key:
+        return {}
+    return {"key": key, "email": account.get("emailAddress"),
+            "organization": account.get("organizationName"),
+            "org_id": account.get("organizationUuid")}
+
+
 _TASK_ENDED = ("completed", "failed", "killed", "stopped")
 # Our request ids travel on the wire, so they are namespaced rather than
 # trusted to be distinct from the CLI's own.
@@ -469,6 +503,8 @@ class ClaudeDriver(Driver):
         # FIFO identities needed to correlate later replays without putting a
         # Puppy request id into model-visible text.
         return {
+            "quota_account": _quota_account(),
+            "quota_identity": None,
             "initial_prompt": self._turn_text(prompt, tool),
             "initial_user_replayed": False,
             "pending_steers": [],
@@ -780,6 +816,18 @@ class ClaudeDriver(Driver):
                 # the control channel answered: side questions can ride it
                 ctx["control_ready"] = resp.get("subtype") == "success"
                 if ctx["control_ready"] and isinstance(resp.get("response"), dict):
+                    account = resp["response"].get("account")
+                    expected = ctx.get("quota_account") or {}
+                    if isinstance(account, dict) and expected.get("key") and \
+                            account.get("apiProvider") == "firstParty" and \
+                            account.get("subscriptionType") and \
+                            not account.get("apiKeySource") and \
+                            account.get("tokenSource") in (None, "claude.ai") and \
+                            account.get("email") == expected.get("email") and \
+                            account.get("organization") == expected.get("organization") and \
+                            expected == _quota_account():
+                        ctx["quota_identity"] = expected["key"]
+                        self._quota_login = expected["key"]
                     try:
                         options = parse_model_catalog(resp["response"].get("models"))
                         ctx["model_options"] = options
@@ -828,7 +876,17 @@ class ClaudeDriver(Driver):
             return [{"a": "approval_cancel", "request_id": ev.get("request_id", "")}]
 
         if t == "rate_limit_event":
-            return [{"a": "rate_limit", "info": ev.get("rate_limit_info") or {}}]
+            info = ev.get("rate_limit_info") or {}
+            if isinstance(info, dict):
+                windows = info.get("unifiedWindows")
+                week = windows.get("seven_day") if isinstance(windows, dict) else None
+                if not isinstance(week, dict) and info.get("rateLimitType") == "seven_day":
+                    week = info
+                if isinstance(week, dict) and quota.finite(week.get("utilization")):
+                    self._quota_monitor().observe(self._quota_identity(),
+                        ctx.get("quota_identity"), quota.weekly_sample(
+                            week["utilization"] * 100, week.get("resetsAt")))
+            return [{"a": "rate_limit", "info": info}]
 
         if t == "result":
             usage = ev.get("usage") if isinstance(ev.get("usage"), dict) else {}
@@ -890,6 +948,18 @@ class ClaudeDriver(Driver):
         home = service_home()
         return [os.path.join(home, ".claude", ".credentials.json")]
 
+    def _quota_identity(self):
+        key = _quota_account().get("key")
+        return key if key == getattr(self, "_quota_login", None) else None
+
+    def _quota_monitor(self):
+        if not hasattr(self, "_account_quota"):
+            self._account_quota = quota.Monitor("anthropic-subscription", "seven_day")
+        return self._account_quota
+
+    def _extra_status(self):
+        return {"usage_monitor": self._quota_monitor().payload(self._quota_identity())}
+
     async def _auth_status(self):
         """`claude auth status --json` is the CLI's own verdict ({"loggedIn":
         bool}), which stays true when a credentials file exists but the login
@@ -897,7 +967,9 @@ class ClaudeDriver(Driver):
         treated as authoritative; any other outcome (older CLI without the
         verb, changed output) falls back to the credentials-file heuristic, so
         a wording change can never flip a working login to "missing"."""
+        expected = _quota_account()
         rc, out = await self._run_probe([self.binary, "auth", "status", "--json"])
+        self._quota_login = None
         verdict = None
         try:
             data = json.loads(out[out.index("{"):out.rindex("}") + 1])
@@ -907,6 +979,12 @@ class ClaudeDriver(Driver):
             pass
         if verdict is not None:
             if verdict["loggedIn"]:
+                if verdict.get("authMethod") == "claude.ai" and \
+                        verdict.get("apiProvider") == "firstParty" and \
+                        expected.get("key") and expected == _quota_account() and \
+                        verdict.get("orgId") == expected.get("org_id") and \
+                        verdict.get("email") == expected.get("email"):
+                    self._quota_login = expected["key"]
                 bits = [str(verdict.get(k)) for k in ("authMethod", "subscriptionType")
                         if verdict.get(k) and verdict.get(k) != "none"]
                 return {"auth": "ok",

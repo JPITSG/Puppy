@@ -164,9 +164,10 @@ In narrow desktop panes, Ask, Steer and Queue use icons so Stop stays visible.
 The controls wrap onto another row when the pane is too narrow for one line.
 
 Everything typed at an agent goes through one shared prompt box: `Enter` sends,
-`Shift+Enter` or `Ctrl+J` breaks a line, `↑` at the start of the box recalls
-earlier prompts, and `@` opens the mention list (browsers, terminals, sessions,
-a new spawn). Recall reads the session's stored prompts, loading older pages as
+`Shift+Enter` or `Ctrl+J` breaks a line, and `@` opens the mention list (browsers,
+terminals, sessions, a new spawn). In session chats, `↑` at the start of the box
+recalls earlier prompts. The New task box keeps normal Up/Down caret movement
+and does not recall Main's prompts. Recall reads the session's stored prompts, loading older pages as
 needed with no history limit, all the way back to its first prompt, on any
 device. `↓` at the end walks forward again and restores your unsent draft and
 attachments after the newest prompt. Each new recall walk picks up prompts
@@ -299,7 +300,12 @@ history around it.
   a waiting approval. The footer lists every backend with its Puppy version
   and each of its engines with sign-in state, an orange *Ready* when a newer
   CLI is published, and the remaining weekly quota where the engine reports
-  it.
+  it. Claude and Codex entries with verified matching provider, user,
+  account/workspace and quota bucket share the newest percentage across
+  connected backends. The tooltip identifies the reading's backend, time and
+  reset. Other accounts and model-specific allowances stay separate; engine
+  readiness and upgrade status remain per backend. See [shared usage](docs/shared-usage.md)
+  for identity requirements and freshness rules.
 - **Completion alerts.** Run separate success and failure commands on a chosen
   backend when a session finishes everything it had queued (play a sound, ping
   your home automation). Leave either command empty to skip that outcome;
@@ -377,7 +383,10 @@ backend name stays readable; long button labels wrap within the button.
   updates** schedule for unattended updates that tries each new version once.
 - **Usage refresh** – how often each backend refreshes its read-only account
   usage snapshot without starting a model turn (Codex today), with an on-demand
-  refresh control.
+  refresh control. Claude supplies fresh percentages during turns. Account-bound
+  readings are kept in memory: after a restart, a fresh reading from that backend
+  or a verified matching peer is needed. Unidentified historical readings are
+  never assigned to the current login.
 - **File uploads** – the per-file attachment limit on each backend.
 - **Completion alerts** – success and failure commands, their shared backend,
   and a test button for each outcome. The enabled switch and sidebar bell
