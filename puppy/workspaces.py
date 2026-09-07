@@ -7,6 +7,7 @@ private workspace namespace, never an ordinary project directory.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from pathlib import Path
@@ -182,6 +183,85 @@ def reset_session(session: dict) -> dict:
         discard_created(new_path)
         raise WorkspaceError("session disappeared while resetting its workspace")
     return updated
+
+
+def _copy_to_directory(source: Path, destination: Path) -> None:
+    """Reserve an unused destination; leave the original intact until DB commit."""
+    destination.mkdir(mode=0o700)  # Exclusive: never merge with existing files.
+    try:
+        shutil.copytree(str(source), str(destination), symlinks=True, dirs_exist_ok=True)
+    except BaseException:
+        shutil.rmtree(str(destination))
+        raise
+
+
+async def move_session(sid: int, destination) -> dict:
+    """Promote a scratch project, including across filesystems, without changing
+    any persisted shape. Task operation ownership also gates turns and backups.
+    A crash during copying leaves the original authoritative; after DB commit
+    orphan cleanup can safely reclaim that original.
+    """
+    from puppy import runner, session_tasks
+    if not isinstance(destination, str) or not destination.strip() or "\0" in destination:
+        raise WorkspaceError("Choose an absolute destination path")
+    target = Path(destination).expanduser()
+    if not target.is_absolute():
+        raise WorkspaceError("Choose an absolute destination path")
+    target = target.parent.resolve() / target.name
+    data = Path(config.DATA_DIR).resolve()
+    if target == data or data in target.parents or target in data.parents:
+        raise WorkspaceError("Choose a destination outside Puppy's data directory")
+    if not target.parent.is_dir():
+        raise WorkspaceError("The destination's parent directory must already exist")
+
+    async def move_locked():
+        if runner._draining:
+            raise WorkspaceError("Puppy is shutting down; retry after the restart")
+        session = db.get_session(sid)
+        if session is None or not is_temporary(session):
+            raise WorkspaceError("This session does not use a scratch workspace")
+        if session_tasks.record(sid) or session_tasks.children(sid):
+            raise WorkspaceError("Remove this session's tasks first; task copies cannot be moved")
+        hub = runner.hub(sid)
+        if hub.status == "running" or hub.queue or hub.held:
+            raise WorkspaceError("Finish or stop the turn and clear queued and held work before moving")
+        source = _managed_path(session["cwd"])
+        if not _owned_directory(source):
+            raise WorkspaceError("The scratch workspace is missing or is not owned by this service")
+        async with session_tasks.workspace_operation(str(source)):
+            async with session_tasks.workspace_operation(str(target)):
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, _copy_to_directory, source, target)
+                try:
+                    db.touch_session(sid, cwd=str(target), workspace_kind=KIND_DIRECTORY,
+                                     native_session_id="", last_model="")
+                except Exception:
+                    await loop.run_in_executor(None, shutil.rmtree, str(target))
+                    raise
+                # Commit precedes reclamation: failed cleanup must never undo a
+                # successful move or expose this ordinary directory to cleanup.
+                try:
+                    await loop.run_in_executor(None, _remove_path, str(source))
+                except WorkspaceError as exc:
+                    log.warning("moved scratch workspace retained for cleanup: %s", exc)
+                updated = db.get_session(sid)
+                event = db.add_event(sid, "info", {
+                    "subtype": "workspace_move",
+                    "text": "Project moved from {} to {}. The next turn starts fresh engine "
+                            "context with a transcript handoff.".format(source, target),
+                })
+                hub.broadcast({"type": "event", "event": event})
+                hub.broadcast({"type": "session_meta", "session": runner.session_payload(updated)})
+                runner.broadcast_sessions()
+                return updated
+
+    async def move():
+        # Share the parent lock with task creation: no child may capture the
+        # old path while catalog discovery or a project copy is in flight.
+        async with session_tasks.session_operation(sid):
+            return await move_locked()
+
+    return await session_tasks.durable_workspace_operation(move(), sid)
 
 
 def ensure_session(session: dict) -> tuple:

@@ -722,7 +722,32 @@ async def session_mention_checks(instance):
     print("PASS: typed session-name prefixes, short insertion and clickable transcript references", flush=True)
 
 
+async def workspace_move_checks(instance, capture=False):
+    await evaluate(instance, "modalMoveWorkspace(0, {id: 999, name: 'Harbor sketch', workspace_kind: 'temporary'}); true")
+    try:
+        for width, height, name in [(1440, 900, 'desktop'), (390, 844, 'phone'), (320, 640, 'narrow')]:
+            await instance.call('Emulation.setDeviceMetricsOverride', {
+                'width': width, 'height': height, 'deviceScaleFactor': 2 if width < 900 else 1,
+                'mobile': width < 900}, session=instance.page_session)
+            for theme in ('dark', 'light'):
+                await evaluate(instance, "applyTheme(%s); document.querySelector('#move-cwd').value='/home/mira/projects/harbor'; document.querySelector('#move-cwd').blur(); true" % json.dumps(theme))
+                await asyncio.sleep(.2)
+                assert await evaluate(instance, """(() => {
+                    const m=document.querySelector('.modal'), go=m.querySelector('#move-go');
+                    const r=m.getBoundingClientRect(), b=go.getBoundingClientRect();
+                    return m.scrollWidth<=m.clientWidth && r.left>=0 && r.right<=innerWidth &&
+                        b.left>=r.left && b.right<=r.right && go.form!==null;
+                })()"""), (width, theme)
+                if capture:
+                    shot=await instance.call('Page.captureScreenshot', {'format':'png'}, session=instance.page_session)
+                    (BASE/'data'/('workspace-move-'+name+'-'+theme+'.png')).write_bytes(base64.b64decode(shot['data']))
+    finally:
+        await evaluate(instance, "document.querySelector('#move-cancel').click(); applyTheme('dark'); true")
+    print('PASS: scratch move dialog fits desktop and phones in both themes', flush=True)
+
+
 async def checks(a, b, hub, capture=False):
+    await workspace_move_checks(a, capture)
     await session_mention_checks(a)
     await pane_resize_checks(a)
     await narrow_composer_checks(a, capture)

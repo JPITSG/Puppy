@@ -12,6 +12,7 @@ SUPPORTED_BACKEND_PROTOCOLS = (API_PROTOCOL,)
 # The node owns scratch creation, reset, deletion and missing-workspace recovery.
 # The wire name describes the session-owned lifecycle, not OS-temp storage.
 TEMPORARY_WORKSPACE_CAPABILITY = "temporary-workspaces"
+WORKSPACE_MOVE_CAPABILITY = "workspace-move"
 USAGE_REFRESH_CAPABILITY = "engine-usage-refresh"
 MANUAL_USAGE_REFRESH_CAPABILITY = "engine-usage-refresh-manual"
 SHARED_USAGE_CAPABILITY = "account-quota-v1"
@@ -210,6 +211,7 @@ BASE_CAPABILITIES = (
     "filesystem",
     "engine-switch",
     TEMPORARY_WORKSPACE_CAPABILITY,
+    WORKSPACE_MOVE_CAPABILITY,
     USAGE_REFRESH_CAPABILITY,
     MANUAL_USAGE_REFRESH_CAPABILITY,
     SHARED_USAGE_CAPABILITY,

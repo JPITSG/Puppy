@@ -4444,6 +4444,70 @@ function backendSupportsScratch(bid) {
     Array.isArray(backend.capabilities) && backend.capabilities.includes("temporary-workspaces");
 }
 
+function canMoveScratch(bid, session) {
+  return isScratchWorkspace(session) && !session.task && !session.workspace_missing &&
+    (!bid || backendHasCapability(state.backends.find(b => b.id === bid), "workspace-move"));
+}
+
+function modalMoveWorkspace(bid, session) {
+  const { m, close } = modal(`<h2>Move to directory</h2>
+    <p class="modal-copy">Give this scratch project a permanent home on ${esc(backendName(bid))}.
+      Your files and conversation stay together. Deleting the session will keep the project.</p>
+    <form>
+      <label>Destination directory<input id="move-cwd" type="text" spellcheck="false"
+        placeholder="/path/to/project" aria-describedby="move-help" required></label>
+      <div class="dirpick hidden"></div>
+      <p class="help" id="move-help">Browse to a parent folder, then type a new folder name.
+        The destination must not exist.</p>
+      <p class="modal-copy">Finish the current turn, clear queued and held work, and remove any tasks first.
+        The next turn starts fresh engine context with a handoff of this conversation.
+        Reopen any terminals after moving.</p>
+      <p class="form-error hidden" role="alert"></p>
+      <div class="m-btns"><button type="button" class="btn" id="move-cancel">Cancel</button>
+        <button type="submit" class="btn btn-pri" id="move-go">Move project</button></div>
+    </form>`);
+  const form = m.querySelector("form"), input = m.querySelector("#move-cwd");
+  const error = m.querySelector(".form-error"), go = m.querySelector("#move-go");
+  form.noValidate = true;
+  let busy = false;
+  wireDirectoryPicker(input, m.querySelector(".dirpick"), () => bid);
+  m.querySelector("#move-cancel").onclick = close;
+  form.onsubmit = async event => {
+    event.preventDefault();
+    if (busy) return;
+    if (!input.value.trim()) {
+      error.textContent = "Choose a destination directory";
+      error.classList.remove("hidden");
+      input.focus();
+      return;
+    }
+    error.classList.add("hidden");
+    busy = true;
+    form.setAttribute("aria-busy", "true");
+    form.querySelectorAll("input,button").forEach(control => control.disabled = true);
+    go.textContent = "Moving…";
+    try {
+      const result = await api(bid, `sessions/${session.id}/workspace/move`, {
+        method: "POST", body: { destination: input.value.trim() },
+      });
+      const view = sessionViewFor(bid, session.id);
+      if (view) { view.session = result.session; view.updateHead(); }
+      refreshGroup(bid);
+      close();
+      toast(`${backendName(bid)}: Project moved to ${result.session.cwd}`);
+    } catch (failure) {
+      error.textContent = failure.message;
+      error.classList.remove("hidden");
+    } finally {
+      busy = false;
+      form.setAttribute("aria-busy", "false");
+      form.querySelectorAll("input,button").forEach(control => control.disabled = false);
+      go.textContent = "Move project";
+    }
+  };
+  input.focus();
+}
+
 /* Independent workspace roles: host linked sessions (mirror) and/or share
    project directories (provider). */
 function backendSupportsWorkspaceMirror(bid) {
@@ -5415,6 +5479,8 @@ function sessionContextMenu(ev, bid, s) {
       await copyWithToast(r.session.native_session_id || "");
     } catch (e) { toast(e.message, "error"); }
   });
+  if (canMoveScratch(bid, s))
+    add("Move to directory", () => modalMoveWorkspace(bid, s));
   if (isScratchWorkspace(s)) add(s.workspace_missing ? "Recreate scratch workspace" :
     "Reset scratch workspace", async () => {
     const ok = await modalConfirm(
@@ -13584,6 +13650,8 @@ class SessionView {
       () => copyWithToast(sessionWs ? sessionWs.root : this.session.cwd));
     if (this.session && this.session.native_session_id)
       add("Copy native session id", () => copyWithToast(this.session.native_session_id));
+    if (canMoveScratch(this.tab.bid, this.session))
+      add("Move to directory", () => modalMoveWorkspace(this.tab.bid, this.session));
     if (isScratchWorkspace(this.session) && !this.session.task)
       add(this.session.workspace_missing ? "Recreate scratch workspace" :
         "Reset scratch workspace", () => this.resetWorkspace());

@@ -886,6 +886,22 @@ async def h_session_workspace_reset(request: web.Request):
     return web.json_response({"ok": True, "session": runner.session_payload(updated)})
 
 
+async def h_session_workspace_move(request: web.Request):
+    s = _session_or_404(request)
+    from puppy import session_tasks
+    try:
+        body = await request.json()
+    except (ValueError, UnicodeError):
+        return web.json_response({"error": "Expected a destination path"}, status=400)
+    if not isinstance(body, dict) or set(body) != {"destination"}:
+        return web.json_response({"error": "Expected a destination path"}, status=400)
+    try:
+        updated = await workspaces.move_session(s["id"], body["destination"])
+    except (workspaces.WorkspaceError, session_tasks.TaskError, OSError, shutil.Error) as exc:
+        return web.json_response({"error": str(exc)}, status=409)
+    return web.json_response({"ok": True, "session": runner.session_payload(updated)})
+
+
 async def h_session_message(request: web.Request):
     s = _session_or_404(request)
     try:
@@ -1856,6 +1872,7 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     r.add_patch("/api/sessions/{sid:\\d+}", h_session_patch)
     r.add_delete("/api/sessions/{sid:\\d+}", h_session_delete)
     r.add_post("/api/sessions/{sid:\\d+}/workspace/reset", h_session_workspace_reset)
+    r.add_post("/api/sessions/{sid:\\d+}/workspace/move", h_session_workspace_move)
     r.add_post("/api/sessions/{sid:\\d+}/message", h_session_message)
     r.add_post("/api/sessions/{sid:\\d+}/steer", h_session_steer)
     r.add_post("/api/sessions/{sid:\\d+}/ask", h_session_ask)

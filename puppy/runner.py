@@ -2779,6 +2779,7 @@ class SessionHub:
         try:
             session = db.get_session(self.id)
             await session_tasks.wait_for_workspace(session, self)
+            session = db.get_session(self.id)  # A workspace move may have finished while waiting.
             descriptor = workspace_sync.session_workspace(session)
             self._ws_map = ((session["cwd"],
                              str(descriptor.get("root") or session["cwd"]))

@@ -76,3 +76,9 @@ still contain a value written before that release.
 This cleanup preserves transaction rollback, interrupted-operation recovery,
 offline retry, historical transcript rendering, and external engine/Chromium
 capability handling. Those remain part of normal operation.
+
+Scratch promotion is additive `workspace-move`: both execution runtimes serve
+`POST /api/sessions/{sid}/workspace/move` with exactly `{destination: string}`
+and return `{ok: true, session}`. See the [backend contract](../backend/README.md).
+No persisted shape changes: the existing session changes from `temporary` to
+`directory`; the transcript records a `workspace_move` info event.

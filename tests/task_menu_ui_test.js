@@ -26,6 +26,7 @@ const context = vm.createContext({
 });
 vm.runInContext([
   between("const el = ", "/* Close buttons"),
+  between("function canMoveScratch(", "function modalMoveWorkspace("),
   between("function workspaceViewFor(", "/* A removed task's condensed conversation"),
   between("class SessionView {", "/* ================= TermView"),
   'globalThis.SessionView = SessionView;',

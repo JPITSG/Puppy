@@ -20,6 +20,17 @@ is node-owned, survives restarts and travels in full-WebUI backups. Deleting a
 session or resetting its scratch workspace is refused with 409 only while that
 session's own tasks exist or a task copy, review or apply is using its files.
 
+Nodes advertising `workspace-move` accept authenticated
+`POST /api/sessions/{sid}/workspace/move` with `{"destination":"/absolute/new/folder"}`.
+The destination must not exist, its parent must exist, and it must be outside
+Puppy’s data directory. Only idle scratch sessions with no queued/held work or
+child tasks can move; task copies cannot move. Files (including Git and symlinks)
+are copied before the session becomes a directory session and the scratch copy
+is reclaimed. The transcript is kept, native context is cleared for a handoff
+on the next turn, and `session_meta` plus session-list updates publish the new
+path. Moves share task-operation guards and shutdown draining. Permanent
+project files are outside snapshot coverage and survive session deletion.
+
 Nodes advertising `session-task-fold` accept
 `POST /api/sessions/{sid}/tasks/{tid}/remove` with `{"fold": true|false}`
 (default true). With `fold` on, the node appends one `info` event of subtype

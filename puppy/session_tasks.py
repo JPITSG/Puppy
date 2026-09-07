@@ -410,7 +410,7 @@ async def remove(parent_id, sid, fold):
     failure leaves the task in place beside its archive, and a retry finds that
     archive instead of writing a second one."""
     from puppy import runner, web
-    async with _locks.setdefault(parent_id, asyncio.Lock()):
+    async with session_operation(parent_id):
         value = record(sid)
         if value is None or value["parent"] != parent_id:
             raise TaskError("Task does not belong to this session")
@@ -501,7 +501,8 @@ def _idle_project(root, exclude=0):
 
 
 @asynccontextmanager
-async def _apply_operation(root):
+async def workspace_operation(root):
+    """Own project files during task applies and scratch promotion."""
     # Different Main sessions can name the same repository. Serialize by its
     # real root as well as parent id, and check idleness AFTER waiting. Each
     # apply (or conflict snapshot) then sees all previously applied tasks.
@@ -521,7 +522,7 @@ async def wait_for_workspace(session, hub):
         raise TaskError("Task working copy is missing. Its conversation is kept; create a new task to resume the work.")
     while _root_busy(session):
         if hub.interrupted:
-            raise TaskError("Stopped while waiting for the task workspace operation")
+            raise TaskError("Stopped while waiting for the workspace operation")
         await asyncio.sleep(.1)
 
 
@@ -547,7 +548,7 @@ def delete_blocker(session):
     if children(session["id"]):
         return "Remove this session's tasks before deleting it"
     if session["id"] in busy_sessions() or _root_busy(session):
-        return "A task copy, review or apply is using this session's files; try again when it finishes"
+        return "A workspace operation is using this session's files; try again when it finishes"
     return None
 
 
@@ -558,7 +559,7 @@ def reset_blocker(session):
     if children(session["id"]):
         return "Remove this session's tasks before resetting its workspace"
     if session["id"] in busy_sessions() or _root_busy(session):
-        return "A task copy, review or apply is using this session's files; try again when it finishes"
+        return "A workspace operation is using this session's files; try again when it finishes"
     return None
 
 
@@ -780,7 +781,10 @@ async def create(parent_id, args):
     # As written in Main's dialog: its attachment marker lines name files staged
     # under Main, which the task adopts into its own storage below.
     original = prompt.strip()
-    async with _locks.setdefault(parent_id, asyncio.Lock()):
+    async with session_operation(parent_id):
+        parent = db.get_session(parent_id)
+        if parent is None or record(parent_id):
+            raise TaskError("Create tasks from a main session")
         if not enabled(parent_id):
             raise TaskError("Tasks are disabled for this session; enable Tasks before creating one")
         for tid, value in records().items():
@@ -879,7 +883,7 @@ async def review(parent_id, sid, expected=None, resolve_conflicts=False):
     from puppy import runner, workspace_sync
     if type(resolve_conflicts) is not bool:
         raise TaskError("resolve_conflicts must be true or false")
-    async with _locks.setdefault(parent_id, asyncio.Lock()):
+    async with session_operation(parent_id):
         value = record(sid)
         if value is None or value["parent"] != parent_id:
             raise TaskError("Task does not belong to this session")
@@ -901,7 +905,7 @@ async def review(parent_id, sid, expected=None, resolve_conflicts=False):
                 if expected != token:
                     raise TaskError("Task changes have changed; review them again")
                 root = await asyncio.to_thread(_repo, parent)
-                async with _apply_operation(root):
+                async with workspace_operation(root):
                     _review_idle(hub)
                     if patch:
                         try:
@@ -933,10 +937,16 @@ async def review(parent_id, sid, expected=None, resolve_conflicts=False):
             _busy_roots.discard(task_root)
 
 
-async def _durable(operation, sid):
+def session_operation(sid):
+    """Serialize task lifecycle changes and moves of their parent workspace."""
+    return _locks.setdefault(sid, asyncio.Lock())
+
+
+async def durable_workspace_operation(operation, sid):
+    """Retain operation ownership through disconnected callers and shutdown."""
     if len(_operations) >= 16:
         operation.close()
-        raise TaskError("Too many task workspace operations; try again shortly")
+        raise TaskError("Too many workspace operations; try again shortly")
     task = asyncio.create_task(operation)
     _operations.add(task)
     _operation_sessions[task] = sid
@@ -971,16 +981,16 @@ async def h_tasks(request):
                 fold = args.get("fold", True)
                 if type(fold) is not bool:
                     raise TaskError("fold must be true or false")
-                return web.json_response(await _durable(remove(sid, int(request.match_info["tid"]), fold), sid))
+                return web.json_response(await durable_workspace_operation(remove(sid, int(request.match_info["tid"]), fold), sid))
             expected = args.get("token") if operation == "apply" else None
             if operation == "apply" and (not isinstance(expected, str) or not re.fullmatch(r"[a-f0-9]{64}", expected)):
                 raise TaskError("Review the task before applying it")
             resolve_conflicts = args.get("resolve_conflicts", False)
             if type(resolve_conflicts) is not bool:
                 raise TaskError("resolve_conflicts must be true or false")
-            return web.json_response(await _durable(review(sid, int(request.match_info["tid"]),
+            return web.json_response(await durable_workspace_operation(review(sid, int(request.match_info["tid"]),
                                                            expected, resolve_conflicts), sid))
-        return web.json_response({"session": await _durable(create(sid, args), sid)})
+        return web.json_response({"session": await durable_workspace_operation(create(sid, args), sid)})
     except (TaskError, OSError, subprocess.SubprocessError) as exc:
         return web.json_response({"error": str(exc)}, status=409)
 

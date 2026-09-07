@@ -112,6 +112,14 @@ context is.
   start it in a private disposable **Scratch** workspace with no folder to
   choose, or work on a project that lives on another backend
   (see [Remote workspaces](#remote-workspaces)).
+- **Keep a scratch project.** Choose **Move to directory** in the session menu
+  to move its files into a new folder on the same backend, including on another
+  filesystem. Choose an existing parent outside Puppy's data directory and a
+  destination that does not exist. The session must be idle with no queued or
+  held work and no tasks. The conversation stays; the next turn starts fresh
+  engine context with a transcript handoff. Reopen terminals after moving.
+  Deleting the session then leaves the project files intact. Permanent project
+  directories are outside Puppy's backup coverage.
 - **Model, effort and permissions per session.** Each engine's model catalog
   and per-model effort levels are discovered from the CLI itself, never
   hard-coded. Claude offers its aliases and effort levels, Codex its models
