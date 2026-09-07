@@ -69,8 +69,15 @@ async def exercise_http(archive_ui: dict, session_id: int, project: Path) -> Non
     headers = {"X-Puppy-Token": token}
     try:
         async with aiohttp.ClientSession() as http:
+            async with http.get(url + "/api/snapshot/storage", allow_redirects=False) as response:
+                assert response.status in (401, 302), response.status
             busy_hub = session_runner.hub(session_id)
             busy_hub.queue.append("wait until after the backup")
+            async with http.get(url + "/api/snapshot/storage", headers=headers) as response:
+                usage = await response.json()
+                assert response.status == 200, usage
+                assert usage["bytes"] > 0, usage
+                assert response.headers["Cache-Control"] == "no-store"
             async with http.post(url + "/api/snapshot/export", headers=headers,
                                  json={"ui": archive_ui}) as response:
                 blocked = await response.json()
@@ -274,6 +281,24 @@ async def main() -> None:
         nested.mkdir()
         (nested / "file.txt").write_text("scratch contents", encoding="utf-8")
         os.symlink("nested/file.txt", str(original_scratch / "safe-link"))
+
+        # Current storage includes managed data but never follows a workspace
+        # link into a project, or sweeps unrelated private caches/exports.
+        before_storage = snapshots.storage_usage()["bytes"]
+        (nested / "storage-test").write_bytes(b"x" * 1234)
+        assert snapshots.storage_usage()["bytes"] == before_storage + 1234
+        (nested / "storage-test").unlink()
+        excluded = Path(config.DATA_DIR) / "browser"
+        excluded.mkdir(exist_ok=True)
+        (excluded / "storage-test").write_bytes(b"x" * 4321)
+        project_file.write_bytes(b"x" * 5678)
+        assert snapshots.storage_usage()["bytes"] == before_storage
+        escape = original_scratch / "external-storage-link"
+        escape.symlink_to(project, target_is_directory=True)
+        assert snapshots.storage_usage()["bytes"] == before_storage + escape.lstat().st_size
+        escape.unlink()
+        (excluded / "storage-test").unlink()
+        project_file.write_text("before export", encoding="utf-8")
 
         mirror_uid = workspace_sync.new_mirror_uid()
         mirror_cwd = workspace_sync.allocate_mirror(mirror_uid, project.name)

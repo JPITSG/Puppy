@@ -245,6 +245,14 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
   keys, wait for output), and the shipped guidance tells the model to use it
   only when you ask, with `@Terminal A8AR` or `@New terminal`. You both see and
   type in one screen. Ordinary shell work still uses the engine's own tools.
+  Input resumes on PTY write readiness; ready output is combined into bounded
+  bursts without a batching timer. Resizing signals the foreground application
+  only when the grid changes. Each viewer's pending output queue is capped at
+  4 MiB or 512 messages; a viewer that falls behind is disconnected without
+  blocking other viewers or the terminal. Agent snapshots render only the
+  requested tail after stripping terminal escapes, keeping large scrollback
+  reads from needlessly processing every old line. See the
+  [terminal latency audit](docs/terminal-latency.md) for measurements and limits.
 - **Managed browsers.** Enable Browser on a backend that has Chromium and Puppy
   runs isolated headless instances, each with a four-character ID and its own
   profile. You get a live view in a tab with an address bar, back and reload
@@ -254,8 +262,11 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
   custom cursor images use their declared keyword fallback. Cross-process
   frames, native widgets and drag feedback may differ from a local browser;
   unavailable lookups fall back to the default pointer. A pill beside the session link
-  shows stream width × height in pixels and frames received by your viewer per
-  second (FPS); a static page can read zero. The agent gets a high-level
+  shows stream width × height in pixels and frames presented by your viewer
+  per second (FPS); a static page can read zero. Each replacement image loads
+  off-screen before it is swapped into view, keeping only the newest waiting
+  frame if loading falls behind. Pointer and scroll gestures start immediately,
+  with subsequent events coalesced each display frame. The agent gets a high-level
   toolset for the same browser: navigate, snapshot the accessibility tree,
   click, type, hover, press, scroll, select, check, screenshot, switch pages,
   read console messages and network failures, upload one of the session's own
@@ -322,9 +333,11 @@ history around it.
   while its agent works, the backend it runs on when idle, and task activity or
   a waiting approval. The footer lists every backend with its Puppy version
   and each of its engines with sign-in state, an orange *Ready* when a newer
-  CLI is published, and the remaining weekly quota where the engine reports
-  it. Claude and Codex entries with verified matching provider, user,
-  account/workspace and quota bucket share the newest percentage across
+  CLI is published, a green spinner beside the status while a session or task
+  uses that engine on that backend (hover to see its models), and the remaining
+  weekly quota where the engine reports it. Claude and Codex entries with
+  verified matching provider, user, account/workspace and quota bucket share
+  the newest percentage across
   connected backends. The tooltip identifies the reading's backend, time and
   reset. Other accounts and model-specific allowances stay separate; engine
   readiness and upgrade status remain per backend. See [shared usage](docs/shared-usage.md)
@@ -340,6 +353,10 @@ history around it.
   registrations, sessions and transcripts, uploads, scratch workspaces, task
   copies, tabs and drafts. Import validates the whole archive first, only runs
   while the instance is idle, and rolls back if the install fails.
+  The card measures approximate uncompressed file storage for this instance's
+  backup-covered data when Settings opens, including the database's live sidecars.
+  It excludes remote data, ordinary projects, caches, logs, exported archives,
+  and browser-local tabs and drafts; the compressed download size will differ.
 
 ## Multi-machine
 
@@ -502,9 +519,20 @@ python3 tests/workspace_sync_test.py # remote workspace sync and conflicts
 python3 tests/browser_test.py        # managed browsers against a stub Chromium
 python3 tests/browser_cursor_test.py # bounded, private cursor reads and input latency
 node tests/browser_cursor_ui_test.js # cursor refresh, stale replies and viewer lifecycle
+node tests/browser_frames_ui_test.js # bounded image loading, stale frames and resource cleanup
+node tests/browser_input_ui_test.js  # immediate gesture starts and bounded trailing input
 python3 tests/cli_upgrade_test.py    # engine CLI updates against a stub updater
 python3 tests/session_links_test.py  # session references, requests, workflows
 ```
+
+`python3 tests/console_browser_test.py` exercises the console with real host
+Chromium. `python3 tests/browser_performance_test.py` measures the embedded
+browser's decoded frame cadence and input response at desktop and phone sizes,
+using real Chromium and local test pages; it writes results under `data/`.
+Its optional `--external-url` scrolls a public page and requires network access.
+`tests/browser_performance_compare_test.py` compares two console profiles
+watching the same page; see the [measurement method and results](docs/browser-performance.md).
+These suites do not invoke an engine or spend subscription quota.
 
 `tests/integration_test.py` and `tests/side_question_test.py` drive real engines
 and spend a little subscription quota; run them deliberately. The remaining

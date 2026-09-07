@@ -1,0 +1,2502 @@
+{
+  "baseline_version": "1.0.474",
+  "baseline_app_blob": "2acdf7f91f262139868d2070c3c25bb475cd0549",
+  "cpu": "AMD Ryzen 7 PRO 8845HS",
+  "method": "Two real console profiles watch one managed browser, receive identical source frames, and use shared native input timestamps. The input-origin viewer alternates by repeat. Three repeats per workload and viewport; summary uses medians of per-run FPS/p50/p95, and summed gap counts.",
+  "summary": [
+    {
+      "console_width": 1440,
+      "scenario": "dashboard",
+      "before": {
+        "distinct_frame_fps": 53.79,
+        "gaps_over_50ms_total": 1,
+        "frame_age": {
+          "p50_ms": 36,
+          "p95_ms": 37
+        },
+        "frame_interval": {
+          "p50_ms": 17,
+          "p95_ms": 33
+        },
+        "key_to_image": {
+          "p50_ms": 41,
+          "p95_ms": 47
+        },
+        "pointer_to_image": {
+          "p50_ms": 52,
+          "p95_ms": 53
+        },
+        "wheel_to_scroll": {
+          "p50_ms": null,
+          "p95_ms": null
+        }
+      },
+      "after": {
+        "distinct_frame_fps": 58.46,
+        "gaps_over_50ms_total": 0,
+        "frame_age": {
+          "p50_ms": 36,
+          "p95_ms": 37
+        },
+        "frame_interval": {
+          "p50_ms": 17,
+          "p95_ms": 19
+        },
+        "key_to_image": {
+          "p50_ms": 41,
+          "p95_ms": 43
+        },
+        "pointer_to_image": {
+          "p50_ms": 52,
+          "p95_ms": 53
+        },
+        "wheel_to_scroll": {
+          "p50_ms": null,
+          "p95_ms": null
+        }
+      },
+      "matched_frame_delay_after_minus_before": {
+        "p50_ms": 0,
+        "p95_ms": 1
+      }
+    },
+    {
+      "console_width": 1440,
+      "scenario": "article",
+      "before": {
+        "distinct_frame_fps": 38.35,
+        "gaps_over_50ms_total": 52,
+        "frame_age": {
+          "p50_ms": 53,
+          "p95_ms": 54
+        },
+        "frame_interval": {
+          "p50_ms": 17,
+          "p95_ms": 51
+        },
+        "key_to_image": {
+          "p50_ms": null,
+          "p95_ms": null
+        },
+        "pointer_to_image": {
+          "p50_ms": 70,
+          "p95_ms": 120
+        },
+        "wheel_to_scroll": {
+          "p50_ms": 104,
+          "p95_ms": 153
+        }
+      },
+      "after": {
+        "distinct_frame_fps": 54.78,
+        "gaps_over_50ms_total": 0,
+        "frame_age": {
+          "p50_ms": 54,
+          "p95_ms": 55
+        },
+        "frame_interval": {
+          "p50_ms": 17,
+          "p95_ms": 33
+        },
+        "key_to_image": {
+          "p50_ms": null,
+          "p95_ms": null
+        },
+        "pointer_to_image": {
+          "p50_ms": 71,
+          "p95_ms": 72
+        },
+        "wheel_to_scroll": {
+          "p50_ms": 104,
+          "p95_ms": 106
+        }
+      },
+      "matched_frame_delay_after_minus_before": {
+        "p50_ms": 0,
+        "p95_ms": 2
+      }
+    },
+    {
+      "console_width": 1440,
+      "scenario": "reference",
+      "before": {
+        "distinct_frame_fps": 39.92,
+        "gaps_over_50ms_total": 39,
+        "frame_age": {
+          "p50_ms": 54,
+          "p95_ms": 76
+        },
+        "frame_interval": {
+          "p50_ms": 17,
+          "p95_ms": 50
+        },
+        "key_to_image": {
+          "p50_ms": null,
+          "p95_ms": null
+        },
+        "pointer_to_image": {
+          "p50_ms": 71,
+          "p95_ms": 153
+        },
+        "wheel_to_scroll": {
+          "p50_ms": 119,
+          "p95_ms": 153
+        }
+      },
+      "after": {
+        "distinct_frame_fps": 48.28,
+        "gaps_over_50ms_total": 3,
+        "frame_age": {
+          "p50_ms": 69,
+          "p95_ms": 88
+        },
+        "frame_interval": {
+          "p50_ms": 17,
+          "p95_ms": 34
+        },
+        "key_to_image": {
+          "p50_ms": null,
+          "p95_ms": null
+        },
+        "pointer_to_image": {
+          "p50_ms": 86,
+          "p95_ms": 132
+        },
+        "wheel_to_scroll": {
+          "p50_ms": 120,
+          "p95_ms": 157
+        }
+      },
+      "matched_frame_delay_after_minus_before": {
+        "p50_ms": 0,
+        "p95_ms": 16
+      }
+    },
+    {
+      "console_width": 390,
+      "scenario": "dashboard",
+      "before": {
+        "distinct_frame_fps": 57.68,
+        "gaps_over_50ms_total": 3,
+        "frame_age": {
+          "p50_ms": 34,
+          "p95_ms": 35
+        },
+        "frame_interval": {
+          "p50_ms": 17,
+          "p95_ms": 18
+        },
+        "key_to_image": {
+          "p50_ms": 40,
+          "p95_ms": 46
+        },
+        "pointer_to_image": {
+          "p50_ms": 51,
+          "p95_ms": 53
+        },
+        "wheel_to_scroll": {
+          "p50_ms": null,
+          "p95_ms": null
+        }
+      },
+      "after": {
+        "distinct_frame_fps": 57.68,
+        "gaps_over_50ms_total": 3,
+        "frame_age": {
+          "p50_ms": 35,
+          "p95_ms": 35
+        },
+        "frame_interval": {
+          "p50_ms": 17,
+          "p95_ms": 18
+        },
+        "key_to_image": {
+          "p50_ms": 40,
+          "p95_ms": 43
+        },
+        "pointer_to_image": {
+          "p50_ms": 51,
+          "p95_ms": 53
+        },
+        "wheel_to_scroll": {
+          "p50_ms": null,
+          "p95_ms": null
+        }
+      },
+      "matched_frame_delay_after_minus_before": {
+        "p50_ms": 0,
+        "p95_ms": 1
+      }
+    },
+    {
+      "console_width": 390,
+      "scenario": "article",
+      "before": {
+        "distinct_frame_fps": 60.0,
+        "gaps_over_50ms_total": 0,
+        "frame_age": {
+          "p50_ms": 35,
+          "p95_ms": 36
+        },
+        "frame_interval": {
+          "p50_ms": 17,
+          "p95_ms": 18
+        },
+        "key_to_image": {
+          "p50_ms": null,
+          "p95_ms": null
+        },
+        "pointer_to_image": {
+          "p50_ms": 51,
+          "p95_ms": 52
+        },
+        "wheel_to_scroll": {
+          "p50_ms": 85,
+          "p95_ms": 86
+        }
+      },
+      "after": {
+        "distinct_frame_fps": 60.0,
+        "gaps_over_50ms_total": 0,
+        "frame_age": {
+          "p50_ms": 35,
+          "p95_ms": 36
+        },
+        "frame_interval": {
+          "p50_ms": 17,
+          "p95_ms": 18
+        },
+        "key_to_image": {
+          "p50_ms": null,
+          "p95_ms": null
+        },
+        "pointer_to_image": {
+          "p50_ms": 51,
+          "p95_ms": 52
+        },
+        "wheel_to_scroll": {
+          "p50_ms": 85,
+          "p95_ms": 86
+        }
+      },
+      "matched_frame_delay_after_minus_before": {
+        "p50_ms": 0,
+        "p95_ms": 1
+      }
+    },
+    {
+      "console_width": 390,
+      "scenario": "reference",
+      "before": {
+        "distinct_frame_fps": 59.86,
+        "gaps_over_50ms_total": 1,
+        "frame_age": {
+          "p50_ms": 35,
+          "p95_ms": 36
+        },
+        "frame_interval": {
+          "p50_ms": 17,
+          "p95_ms": 18
+        },
+        "key_to_image": {
+          "p50_ms": null,
+          "p95_ms": null
+        },
+        "pointer_to_image": {
+          "p50_ms": 51,
+          "p95_ms": 52
+        },
+        "wheel_to_scroll": {
+          "p50_ms": 84,
+          "p95_ms": 102
+        }
+      },
+      "after": {
+        "distinct_frame_fps": 59.87,
+        "gaps_over_50ms_total": 0,
+        "frame_age": {
+          "p50_ms": 35,
+          "p95_ms": 36
+        },
+        "frame_interval": {
+          "p50_ms": 17,
+          "p95_ms": 18
+        },
+        "key_to_image": {
+          "p50_ms": null,
+          "p95_ms": null
+        },
+        "pointer_to_image": {
+          "p50_ms": 52,
+          "p95_ms": 55
+        },
+        "wheel_to_scroll": {
+          "p50_ms": 85,
+          "p95_ms": 101
+        }
+      },
+      "matched_frame_delay_after_minus_before": {
+        "p50_ms": 0,
+        "p95_ms": 1
+      }
+    }
+  ],
+  "measurements": [
+    {
+      "browser": {
+        "protocolVersion": "1.3",
+        "product": "Chrome/152.0.7977.75",
+        "revision": "@4999cc1efed37c4d91dc4ce6ec4b0a50e2a9a8cb",
+        "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/152.0.0.0 Safari/537.36",
+        "jsVersion": "15.2.124.19"
+      },
+      "external_url": null,
+      "viewer_sha256": {
+        "before": "e03ef42a58cdf6a340559a529b227406727575f84285d426be691c2bbc25ae32",
+        "after": "4d93a262ce3d03eab107b752fe9315d46f84d66b8c28af1462b3b9aa03453296"
+      },
+      "results": [
+        {
+          "repeat": 1,
+          "scenario": "dashboard",
+          "console": [
+            1440,
+            900
+          ],
+          "input_viewer": "before",
+          "before": {
+            "display_fps": 53.79,
+            "frame_age": {
+              "n": 347,
+              "p50_ms": 36,
+              "p95_ms": 37
+            },
+            "frame_interval": {
+              "n": 346,
+              "p50_ms": 17,
+              "p95_ms": 33
+            },
+            "gaps_over_50ms": 1,
+            "frame_flow": {
+              "received": 389,
+              "captured": 0,
+              "forwarded": 778,
+              "dropped_surface": 0,
+              "dropped_decode": 0,
+              "dropped_inactive": 0,
+              "dropped_backpressure": 0,
+              "dropped": 0,
+              "seconds": 6.475,
+              "receive_hz": 60.078,
+              "forward_hz": 120.157
+            },
+            "duration_seconds": 6.47,
+            "key_to_image": {
+              "n": 37,
+              "p50_ms": 41,
+              "p95_ms": 58
+            },
+            "key_sent": 37,
+            "wheel_to_image": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            },
+            "wheel_sent": 0,
+            "pointer_to_image": {
+              "n": 37,
+              "p50_ms": 53,
+              "p95_ms": 53
+            },
+            "pointer_sent": 37,
+            "scrolled_pixels": 0,
+            "wheel_to_scroll": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            }
+          },
+          "after": {
+            "display_fps": 58.61,
+            "frame_age": {
+              "n": 379,
+              "p50_ms": 36,
+              "p95_ms": 38
+            },
+            "frame_interval": {
+              "n": 378,
+              "p50_ms": 17,
+              "p95_ms": 19
+            },
+            "gaps_over_50ms": 0,
+            "frame_flow": {
+              "received": 389,
+              "captured": 0,
+              "forwarded": 778,
+              "dropped_surface": 0,
+              "dropped_decode": 0,
+              "dropped_inactive": 0,
+              "dropped_backpressure": 0,
+              "dropped": 0,
+              "seconds": 6.475,
+              "receive_hz": 60.074,
+              "forward_hz": 120.148
+            },
+            "duration_seconds": 6.48,
+            "key_to_image": {
+              "n": 37,
+              "p50_ms": 42,
+              "p95_ms": 58
+            },
+            "key_sent": 37,
+            "wheel_to_image": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            },
+            "wheel_sent": 0,
+            "pointer_to_image": {
+              "n": 37,
+              "p50_ms": 53,
+              "p95_ms": 54
+            },
+            "pointer_sent": 37,
+            "scrolled_pixels": 0,
+            "wheel_to_scroll": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            }
+          },
+          "matched_frame_delay_after_minus_before": {
+            "n": 341,
+            "p50_ms": 1,
+            "p95_ms": 2
+          }
+        },
+        {
+          "repeat": 1,
+          "scenario": "article",
+          "console": [
+            1440,
+            900
+          ],
+          "input_viewer": "before",
+          "before": {
+            "display_fps": 38.35,
+            "frame_age": {
+              "n": 295,
+              "p50_ms": 53,
+              "p95_ms": 54
+            },
+            "frame_interval": {
+              "n": 294,
+              "p50_ms": 17,
+              "p95_ms": 51
+            },
+            "gaps_over_50ms": 16,
+            "frame_flow": {
+              "received": 463,
+              "captured": 0,
+              "forwarded": 924,
+              "dropped_surface": 0,
+              "dropped_decode": 0,
+              "dropped_inactive": 0,
+              "dropped_backpressure": 0,
+              "dropped": 0,
+              "seconds": 7.703,
+              "receive_hz": 60.108,
+              "forward_hz": 119.957
+            },
+            "duration_seconds": 7.7,
+            "key_to_image": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            },
+            "key_sent": 0,
+            "wheel_to_image": {
+              "n": 37,
+              "p50_ms": 103,
+              "p95_ms": 153
+            },
+            "wheel_sent": 37,
+            "pointer_to_image": {
+              "n": 37,
+              "p50_ms": 70,
+              "p95_ms": 120
+            },
+            "pointer_sent": 37,
+            "scrolled_pixels": 1776,
+            "wheel_to_scroll": {
+              "n": 37,
+              "p50_ms": 103,
+              "p95_ms": 153
+            }
+          },
+          "after": {
+            "display_fps": 54.78,
+            "frame_age": {
+              "n": 421,
+              "p50_ms": 54,
+              "p95_ms": 55
+            },
+            "frame_interval": {
+              "n": 420,
+              "p50_ms": 17,
+              "p95_ms": 34
+            },
+            "gaps_over_50ms": 0,
+            "frame_flow": {
+              "received": 463,
+              "captured": 0,
+              "forwarded": 924,
+              "dropped_surface": 0,
+              "dropped_decode": 0,
+              "dropped_inactive": 0,
+              "dropped_backpressure": 0,
+              "dropped": 0,
+              "seconds": 7.703,
+              "receive_hz": 60.105,
+              "forward_hz": 119.95
+            },
+            "duration_seconds": 7.7,
+            "key_to_image": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            },
+            "key_sent": 0,
+            "wheel_to_image": {
+              "n": 37,
+              "p50_ms": 104,
+              "p95_ms": 106
+            },
+            "wheel_sent": 37,
+            "pointer_to_image": {
+              "n": 37,
+              "p50_ms": 71,
+              "p95_ms": 72
+            },
+            "pointer_sent": 37,
+            "scrolled_pixels": 1776,
+            "wheel_to_scroll": {
+              "n": 37,
+              "p50_ms": 104,
+              "p95_ms": 106
+            }
+          },
+          "matched_frame_delay_after_minus_before": {
+            "n": 291,
+            "p50_ms": 1,
+            "p95_ms": 2
+          }
+        },
+        {
+          "repeat": 1,
+          "scenario": "dashboard",
+          "console": [
+            390,
+            844
+          ],
+          "input_viewer": "before",
+          "before": {
+            "display_fps": 57.68,
+            "frame_age": {
+              "n": 374,
+              "p50_ms": 35,
+              "p95_ms": 35
+            },
+            "frame_interval": {
+              "n": 373,
+              "p50_ms": 17,
+              "p95_ms": 18
+            },
+            "gaps_over_50ms": 1,
+            "frame_flow": {
+              "received": 374,
+              "captured": 0,
+              "forwarded": 748,
+              "dropped_surface": 0,
+              "dropped_decode": 0,
+              "dropped_inactive": 0,
+              "dropped_backpressure": 0,
+              "dropped": 0,
+              "seconds": 6.481,
+              "receive_hz": 57.709,
+              "forward_hz": 115.417
+            },
+            "duration_seconds": 6.48,
+            "key_to_image": {
+              "n": 37,
+              "p50_ms": 40,
+              "p95_ms": 42
+            },
+            "key_sent": 37,
+            "wheel_to_image": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            },
+            "wheel_sent": 0,
+            "pointer_to_image": {
+              "n": 37,
+              "p50_ms": 51,
+              "p95_ms": 53
+            },
+            "pointer_sent": 37,
+            "scrolled_pixels": 0,
+            "wheel_to_scroll": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            }
+          },
+          "after": {
+            "display_fps": 57.68,
+            "frame_age": {
+              "n": 374,
+              "p50_ms": 35,
+              "p95_ms": 36
+            },
+            "frame_interval": {
+              "n": 373,
+              "p50_ms": 17,
+              "p95_ms": 18
+            },
+            "gaps_over_50ms": 1,
+            "frame_flow": {
+              "received": 374,
+              "captured": 0,
+              "forwarded": 748,
+              "dropped_surface": 0,
+              "dropped_decode": 0,
+              "dropped_inactive": 0,
+              "dropped_backpressure": 0,
+              "dropped": 0,
+              "seconds": 6.481,
+              "receive_hz": 57.705,
+              "forward_hz": 115.41
+            },
+            "duration_seconds": 6.48,
+            "key_to_image": {
+              "n": 37,
+              "p50_ms": 40,
+              "p95_ms": 42
+            },
+            "key_sent": 37,
+            "wheel_to_image": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            },
+            "wheel_sent": 0,
+            "pointer_to_image": {
+              "n": 37,
+              "p50_ms": 52,
+              "p95_ms": 56
+            },
+            "pointer_sent": 37,
+            "scrolled_pixels": 0,
+            "wheel_to_scroll": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            }
+          },
+          "matched_frame_delay_after_minus_before": {
+            "n": 374,
+            "p50_ms": 0,
+            "p95_ms": 1
+          }
+        },
+        {
+          "repeat": 1,
+          "scenario": "article",
+          "console": [
+            390,
+            844
+          ],
+          "input_viewer": "before",
+          "before": {
+            "display_fps": 60.0,
+            "frame_age": {
+              "n": 462,
+              "p50_ms": 35,
+              "p95_ms": 36
+            },
+            "frame_interval": {
+              "n": 461,
+              "p50_ms": 17,
+              "p95_ms": 18
+            },
+            "gaps_over_50ms": 0,
+            "frame_flow": {
+              "received": 462,
+              "captured": 0,
+              "forwarded": 924,
+              "dropped_surface": 0,
+              "dropped_decode": 0,
+              "dropped_inactive": 0,
+              "dropped_backpressure": 0,
+              "dropped": 0,
+              "seconds": 7.699,
+              "receive_hz": 60.006,
+              "forward_hz": 120.012
+            },
+            "duration_seconds": 7.7,
+            "key_to_image": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            },
+            "key_sent": 0,
+            "wheel_to_image": {
+              "n": 37,
+              "p50_ms": 85,
+              "p95_ms": 86
+            },
+            "wheel_sent": 37,
+            "pointer_to_image": {
+              "n": 37,
+              "p50_ms": 51,
+              "p95_ms": 52
+            },
+            "pointer_sent": 37,
+            "scrolled_pixels": 1776,
+            "wheel_to_scroll": {
+              "n": 37,
+              "p50_ms": 85,
+              "p95_ms": 86
+            }
+          },
+          "after": {
+            "display_fps": 60.0,
+            "frame_age": {
+              "n": 462,
+              "p50_ms": 35,
+              "p95_ms": 36
+            },
+            "frame_interval": {
+              "n": 461,
+              "p50_ms": 17,
+              "p95_ms": 18
+            },
+            "gaps_over_50ms": 0,
+            "frame_flow": {
+              "received": 462,
+              "captured": 0,
+              "forwarded": 924,
+              "dropped_surface": 0,
+              "dropped_decode": 0,
+              "dropped_inactive": 0,
+              "dropped_backpressure": 0,
+              "dropped": 0,
+              "seconds": 7.7,
+              "receive_hz": 60.0,
+              "forward_hz": 120.001
+            },
+            "duration_seconds": 7.7,
+            "key_to_image": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            },
+            "key_sent": 0,
+            "wheel_to_image": {
+              "n": 37,
+              "p50_ms": 85,
+              "p95_ms": 86
+            },
+            "wheel_sent": 37,
+            "pointer_to_image": {
+              "n": 37,
+              "p50_ms": 52,
+              "p95_ms": 53
+            },
+            "pointer_sent": 37,
+            "scrolled_pixels": 1776,
+            "wheel_to_scroll": {
+              "n": 37,
+              "p50_ms": 85,
+              "p95_ms": 86
+            }
+          },
+          "matched_frame_delay_after_minus_before": {
+            "n": 462,
+            "p50_ms": 0,
+            "p95_ms": 1
+          }
+        },
+        {
+          "repeat": 2,
+          "scenario": "dashboard",
+          "console": [
+            1440,
+            900
+          ],
+          "input_viewer": "after",
+          "before": {
+            "display_fps": 59.07,
+            "frame_age": {
+              "n": 382,
+              "p50_ms": 36,
+              "p95_ms": 37
+            },
+            "frame_interval": {
+              "n": 381,
+              "p50_ms": 17,
+              "p95_ms": 18
+            },
+            "gaps_over_50ms": 0,
+            "frame_flow": {
+              "received": 389,
+              "captured": 0,
+              "forwarded": 778,
+              "dropped_surface": 0,
+              "dropped_decode": 0,
+              "dropped_inactive": 0,
+              "dropped_backpressure": 0,
+              "dropped": 0,
+              "seconds": 6.477,
+              "receive_hz": 60.063,
+              "forward_hz": 120.126
+            },
+            "duration_seconds": 6.48,
+            "key_to_image": {
+              "n": 37,
+              "p50_ms": 41,
+              "p95_ms": 47
+            },
+            "key_sent": 37,
+            "wheel_to_image": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            },
+            "wheel_sent": 0,
+            "pointer_to_image": {
+              "n": 37,
+              "p50_ms": 52,
+              "p95_ms": 54
+            },
+            "pointer_sent": 37,
+            "scrolled_pixels": 0,
+            "wheel_to_scroll": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            }
+          },
+          "after": {
+            "display_fps": 54.24,
+            "frame_age": {
+              "n": 350,
+              "p50_ms": 36,
+              "p95_ms": 37
+            },
+            "frame_interval": {
+              "n": 349,
+              "p50_ms": 17,
+              "p95_ms": 34
+            },
+            "gaps_over_50ms": 0,
+            "frame_flow": {
+              "received": 389,
+              "captured": 0,
+              "forwarded": 778,
+              "dropped_surface": 0,
+              "dropped_decode": 0,
+              "dropped_inactive": 0,
+              "dropped_backpressure": 0,
+              "dropped": 0,
+              "seconds": 6.477,
+              "receive_hz": 60.058,
+              "forward_hz": 120.116
+            },
+            "duration_seconds": 6.48,
+            "key_to_image": {
+              "n": 37,
+              "p50_ms": 41,
+              "p95_ms": 43
+            },
+            "key_sent": 37,
+            "wheel_to_image": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            },
+            "wheel_sent": 0,
+            "pointer_to_image": {
+              "n": 37,
+              "p50_ms": 52,
+              "p95_ms": 53
+            },
+            "pointer_sent": 37,
+            "scrolled_pixels": 0,
+            "wheel_to_scroll": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            }
+          },
+          "matched_frame_delay_after_minus_before": {
+            "n": 347,
+            "p50_ms": 0,
+            "p95_ms": 1
+          }
+        },
+        {
+          "repeat": 2,
+          "scenario": "article",
+          "console": [
+            1440,
+            900
+          ],
+          "input_viewer": "after",
+          "before": {
+            "display_fps": 34.44,
+            "frame_age": {
+              "n": 265,
+              "p50_ms": 70,
+              "p95_ms": 71
+            },
+            "frame_interval": {
+              "n": 264,
+              "p50_ms": 18,
+              "p95_ms": 67
+            },
+            "gaps_over_50ms": 21,
+            "frame_flow": {
+              "received": 463,
+              "captured": 0,
+              "forwarded": 924,
+              "dropped_surface": 0,
+              "dropped_decode": 0,
+              "dropped_inactive": 0,
+              "dropped_backpressure": 0,
+              "dropped": 0,
+              "seconds": 7.721,
+              "receive_hz": 59.967,
+              "forward_hz": 119.674
+            },
+            "duration_seconds": 7.72,
+            "key_to_image": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            },
+            "key_sent": 0,
+            "wheel_to_image": {
+              "n": 37,
+              "p50_ms": 120,
+              "p95_ms": 170
+            },
+            "wheel_sent": 37,
+            "pointer_to_image": {
+              "n": 37,
+              "p50_ms": 86,
+              "p95_ms": 136
+            },
+            "pointer_sent": 37,
+            "scrolled_pixels": 1776,
+            "wheel_to_scroll": {
+              "n": 37,
+              "p50_ms": 120,
+              "p95_ms": 170
+            }
+          },
+          "after": {
+            "display_fps": 53.12,
+            "frame_age": {
+              "n": 410,
+              "p50_ms": 70,
+              "p95_ms": 71
+            },
+            "frame_interval": {
+              "n": 409,
+              "p50_ms": 17,
+              "p95_ms": 33
+            },
+            "gaps_over_50ms": 0,
+            "frame_flow": {
+              "received": 463,
+              "captured": 0,
+              "forwarded": 924,
+              "dropped_surface": 0,
+              "dropped_decode": 0,
+              "dropped_inactive": 0,
+              "dropped_backpressure": 0,
+              "dropped": 0,
+              "seconds": 7.721,
+              "receive_hz": 59.963,
+              "forward_hz": 119.667
+            },
+            "duration_seconds": 7.72,
+            "key_to_image": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            },
+            "key_sent": 0,
+            "wheel_to_image": {
+              "n": 37,
+              "p50_ms": 120,
+              "p95_ms": 122
+            },
+            "wheel_sent": 37,
+            "pointer_to_image": {
+              "n": 37,
+              "p50_ms": 86,
+              "p95_ms": 88
+            },
+            "pointer_sent": 37,
+            "scrolled_pixels": 1776,
+            "wheel_to_scroll": {
+              "n": 37,
+              "p50_ms": 120,
+              "p95_ms": 122
+            }
+          },
+          "matched_frame_delay_after_minus_before": {
+            "n": 259,
+            "p50_ms": 0,
+            "p95_ms": 17
+          }
+        },
+        {
+          "repeat": 2,
+          "scenario": "dashboard",
+          "console": [
+            390,
+            844
+          ],
+          "input_viewer": "after",
+          "before": {
+            "display_fps": 57.68,
+            "frame_age": {
+              "n": 374,
+              "p50_ms": 34,
+              "p95_ms": 35
+            },
+            "frame_interval": {
+              "n": 373,
+              "p50_ms": 17,
+              "p95_ms": 18
+            },
+            "gaps_over_50ms": 1,
+            "frame_flow": {
+              "received": 375,
+              "captured": 0,
+              "forwarded": 750,
+              "dropped_surface": 0,
+              "dropped_decode": 0,
+              "dropped_inactive": 0,
+              "dropped_backpressure": 0,
+              "dropped": 0,
+              "seconds": 6.492,
+              "receive_hz": 57.762,
+              "forward_hz": 115.524
+            },
+            "duration_seconds": 6.49,
+            "key_to_image": {
+              "n": 37,
+              "p50_ms": 39,
+              "p95_ms": 46
+            },
+            "key_sent": 37,
+            "wheel_to_image": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            },
+            "wheel_sent": 0,
+            "pointer_to_image": {
+              "n": 37,
+              "p50_ms": 51,
+              "p95_ms": 52
+            },
+            "pointer_sent": 37,
+            "scrolled_pixels": 0,
+            "wheel_to_scroll": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            }
+          },
+          "after": {
+            "display_fps": 57.67,
+            "frame_age": {
+              "n": 373,
+              "p50_ms": 35,
+              "p95_ms": 35
+            },
+            "frame_interval": {
+              "n": 372,
+              "p50_ms": 17,
+              "p95_ms": 18
+            },
+            "gaps_over_50ms": 1,
+            "frame_flow": {
+              "received": 375,
+              "captured": 0,
+              "forwarded": 750,
+              "dropped_surface": 0,
+              "dropped_decode": 0,
+              "dropped_inactive": 0,
+              "dropped_backpressure": 0,
+              "dropped": 0,
+              "seconds": 6.493,
+              "receive_hz": 57.758,
+              "forward_hz": 115.516
+            },
+            "duration_seconds": 6.49,
+            "key_to_image": {
+              "n": 37,
+              "p50_ms": 40,
+              "p95_ms": 47
+            },
+            "key_sent": 37,
+            "wheel_to_image": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            },
+            "wheel_sent": 0,
+            "pointer_to_image": {
+              "n": 37,
+              "p50_ms": 51,
+              "p95_ms": 52
+            },
+            "pointer_sent": 37,
+            "scrolled_pixels": 0,
+            "wheel_to_scroll": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            }
+          },
+          "matched_frame_delay_after_minus_before": {
+            "n": 373,
+            "p50_ms": 0,
+            "p95_ms": 1
+          }
+        },
+        {
+          "repeat": 2,
+          "scenario": "article",
+          "console": [
+            390,
+            844
+          ],
+          "input_viewer": "after",
+          "before": {
+            "display_fps": 60.0,
+            "frame_age": {
+              "n": 462,
+              "p50_ms": 35,
+              "p95_ms": 35
+            },
+            "frame_interval": {
+              "n": 461,
+              "p50_ms": 17,
+              "p95_ms": 18
+            },
+            "gaps_over_50ms": 0,
+            "frame_flow": {
+              "received": 463,
+              "captured": 0,
+              "forwarded": 926,
+              "dropped_surface": 0,
+              "dropped_decode": 0,
+              "dropped_inactive": 0,
+              "dropped_backpressure": 0,
+              "dropped": 0,
+              "seconds": 7.71,
+              "receive_hz": 60.049,
+              "forward_hz": 120.099
+            },
+            "duration_seconds": 7.71,
+            "key_to_image": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            },
+            "key_sent": 0,
+            "wheel_to_image": {
+              "n": 37,
+              "p50_ms": 85,
+              "p95_ms": 85
+            },
+            "wheel_sent": 37,
+            "pointer_to_image": {
+              "n": 37,
+              "p50_ms": 51,
+              "p95_ms": 51
+            },
+            "pointer_sent": 37,
+            "scrolled_pixels": 1776,
+            "wheel_to_scroll": {
+              "n": 37,
+              "p50_ms": 85,
+              "p95_ms": 85
+            }
+          },
+          "after": {
+            "display_fps": 60.0,
+            "frame_age": {
+              "n": 462,
+              "p50_ms": 35,
+              "p95_ms": 35
+            },
+            "frame_interval": {
+              "n": 461,
+              "p50_ms": 17,
+              "p95_ms": 18
+            },
+            "gaps_over_50ms": 0,
+            "frame_flow": {
+              "received": 463,
+              "captured": 0,
+              "forwarded": 926,
+              "dropped_surface": 0,
+              "dropped_decode": 0,
+              "dropped_inactive": 0,
+              "dropped_backpressure": 0,
+              "dropped": 0,
+              "seconds": 7.711,
+              "receive_hz": 60.043,
+              "forward_hz": 120.087
+            },
+            "duration_seconds": 7.71,
+            "key_to_image": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            },
+            "key_sent": 0,
+            "wheel_to_image": {
+              "n": 37,
+              "p50_ms": 85,
+              "p95_ms": 86
+            },
+            "wheel_sent": 37,
+            "pointer_to_image": {
+              "n": 37,
+              "p50_ms": 51,
+              "p95_ms": 51
+            },
+            "pointer_sent": 37,
+            "scrolled_pixels": 1776,
+            "wheel_to_scroll": {
+              "n": 37,
+              "p50_ms": 85,
+              "p95_ms": 86
+            }
+          },
+          "matched_frame_delay_after_minus_before": {
+            "n": 462,
+            "p50_ms": 0,
+            "p95_ms": 1
+          }
+        },
+        {
+          "repeat": 3,
+          "scenario": "dashboard",
+          "console": [
+            1440,
+            900
+          ],
+          "input_viewer": "before",
+          "before": {
+            "display_fps": 53.0,
+            "frame_age": {
+              "n": 342,
+              "p50_ms": 19,
+              "p95_ms": 20
+            },
+            "frame_interval": {
+              "n": 341,
+              "p50_ms": 17,
+              "p95_ms": 33
+            },
+            "gaps_over_50ms": 0,
+            "frame_flow": {
+              "received": 389,
+              "captured": 0,
+              "forwarded": 776,
+              "dropped_surface": 0,
+              "dropped_decode": 0,
+              "dropped_inactive": 0,
+              "dropped_backpressure": 0,
+              "dropped": 0,
+              "seconds": 6.475,
+              "receive_hz": 60.077,
+              "forward_hz": 119.845
+            },
+            "duration_seconds": 6.48,
+            "key_to_image": {
+              "n": 37,
+              "p50_ms": 24,
+              "p95_ms": 26
+            },
+            "key_sent": 37,
+            "wheel_to_image": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            },
+            "wheel_sent": 0,
+            "pointer_to_image": {
+              "n": 37,
+              "p50_ms": 36,
+              "p95_ms": 37
+            },
+            "pointer_sent": 37,
+            "scrolled_pixels": 0,
+            "wheel_to_scroll": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            }
+          },
+          "after": {
+            "display_fps": 58.46,
+            "frame_age": {
+              "n": 378,
+              "p50_ms": 19,
+              "p95_ms": 20
+            },
+            "frame_interval": {
+              "n": 377,
+              "p50_ms": 17,
+              "p95_ms": 18
+            },
+            "gaps_over_50ms": 0,
+            "frame_flow": {
+              "received": 389,
+              "captured": 0,
+              "forwarded": 776,
+              "dropped_surface": 0,
+              "dropped_decode": 0,
+              "dropped_inactive": 0,
+              "dropped_backpressure": 0,
+              "dropped": 0,
+              "seconds": 6.476,
+              "receive_hz": 60.072,
+              "forward_hz": 119.836
+            },
+            "duration_seconds": 6.48,
+            "key_to_image": {
+              "n": 37,
+              "p50_ms": 24,
+              "p95_ms": 25
+            },
+            "key_sent": 37,
+            "wheel_to_image": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            },
+            "wheel_sent": 0,
+            "pointer_to_image": {
+              "n": 37,
+              "p50_ms": 36,
+              "p95_ms": 37
+            },
+            "pointer_sent": 37,
+            "scrolled_pixels": 0,
+            "wheel_to_scroll": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            }
+          },
+          "matched_frame_delay_after_minus_before": {
+            "n": 337,
+            "p50_ms": 0,
+            "p95_ms": 1
+          }
+        },
+        {
+          "repeat": 3,
+          "scenario": "article",
+          "console": [
+            1440,
+            900
+          ],
+          "input_viewer": "before",
+          "before": {
+            "display_fps": 42.17,
+            "frame_age": {
+              "n": 325,
+              "p50_ms": 53,
+              "p95_ms": 54
+            },
+            "frame_interval": {
+              "n": 324,
+              "p50_ms": 17,
+              "p95_ms": 50
+            },
+            "gaps_over_50ms": 15,
+            "frame_flow": {
+              "received": 462,
+              "captured": 0,
+              "forwarded": 924,
+              "dropped_surface": 0,
+              "dropped_decode": 0,
+              "dropped_inactive": 0,
+              "dropped_backpressure": 0,
+              "dropped": 0,
+              "seconds": 7.701,
+              "receive_hz": 59.994,
+              "forward_hz": 119.987
+            },
+            "duration_seconds": 7.7,
+            "key_to_image": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            },
+            "key_sent": 0,
+            "wheel_to_image": {
+              "n": 37,
+              "p50_ms": 104,
+              "p95_ms": 138
+            },
+            "wheel_sent": 37,
+            "pointer_to_image": {
+              "n": 37,
+              "p50_ms": 70,
+              "p95_ms": 86
+            },
+            "pointer_sent": 37,
+            "scrolled_pixels": 1776,
+            "wheel_to_scroll": {
+              "n": 37,
+              "p50_ms": 104,
+              "p95_ms": 138
+            }
+          },
+          "after": {
+            "display_fps": 56.36,
+            "frame_age": {
+              "n": 434,
+              "p50_ms": 53,
+              "p95_ms": 55
+            },
+            "frame_interval": {
+              "n": 433,
+              "p50_ms": 17,
+              "p95_ms": 33
+            },
+            "gaps_over_50ms": 0,
+            "frame_flow": {
+              "received": 462,
+              "captured": 0,
+              "forwarded": 924,
+              "dropped_surface": 0,
+              "dropped_decode": 0,
+              "dropped_inactive": 0,
+              "dropped_backpressure": 0,
+              "dropped": 0,
+              "seconds": 7.701,
+              "receive_hz": 59.989,
+              "forward_hz": 119.979
+            },
+            "duration_seconds": 7.7,
+            "key_to_image": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            },
+            "key_sent": 0,
+            "wheel_to_image": {
+              "n": 37,
+              "p50_ms": 103,
+              "p95_ms": 104
+            },
+            "wheel_sent": 37,
+            "pointer_to_image": {
+              "n": 37,
+              "p50_ms": 70,
+              "p95_ms": 71
+            },
+            "pointer_sent": 37,
+            "scrolled_pixels": 1776,
+            "wheel_to_scroll": {
+              "n": 37,
+              "p50_ms": 103,
+              "p95_ms": 104
+            }
+          },
+          "matched_frame_delay_after_minus_before": {
+            "n": 323,
+            "p50_ms": 0,
+            "p95_ms": 2
+          }
+        },
+        {
+          "repeat": 3,
+          "scenario": "dashboard",
+          "console": [
+            390,
+            844
+          ],
+          "input_viewer": "before",
+          "before": {
+            "display_fps": 58.49,
+            "frame_age": {
+              "n": 378,
+              "p50_ms": 34,
+              "p95_ms": 35
+            },
+            "frame_interval": {
+              "n": 377,
+              "p50_ms": 17,
+              "p95_ms": 18
+            },
+            "gaps_over_50ms": 1,
+            "frame_flow": {
+              "received": 378,
+              "captured": 0,
+              "forwarded": 756,
+              "dropped_surface": 0,
+              "dropped_decode": 0,
+              "dropped_inactive": 0,
+              "dropped_backpressure": 0,
+              "dropped": 0,
+              "seconds": 6.471,
+              "receive_hz": 58.412,
+              "forward_hz": 116.823
+            },
+            "duration_seconds": 6.47,
+            "key_to_image": {
+              "n": 37,
+              "p50_ms": 40,
+              "p95_ms": 47
+            },
+            "key_sent": 37,
+            "wheel_to_image": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            },
+            "wheel_sent": 0,
+            "pointer_to_image": {
+              "n": 37,
+              "p50_ms": 51,
+              "p95_ms": 53
+            },
+            "pointer_sent": 37,
+            "scrolled_pixels": 0,
+            "wheel_to_scroll": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            }
+          },
+          "after": {
+            "display_fps": 58.47,
+            "frame_age": {
+              "n": 378,
+              "p50_ms": 34,
+              "p95_ms": 35
+            },
+            "frame_interval": {
+              "n": 377,
+              "p50_ms": 17,
+              "p95_ms": 18
+            },
+            "gaps_over_50ms": 1,
+            "frame_flow": {
+              "received": 378,
+              "captured": 0,
+              "forwarded": 756,
+              "dropped_surface": 0,
+              "dropped_decode": 0,
+              "dropped_inactive": 0,
+              "dropped_backpressure": 0,
+              "dropped": 0,
+              "seconds": 6.472,
+              "receive_hz": 58.406,
+              "forward_hz": 116.812
+            },
+            "duration_seconds": 6.47,
+            "key_to_image": {
+              "n": 37,
+              "p50_ms": 40,
+              "p95_ms": 43
+            },
+            "key_sent": 37,
+            "wheel_to_image": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            },
+            "wheel_sent": 0,
+            "pointer_to_image": {
+              "n": 37,
+              "p50_ms": 51,
+              "p95_ms": 53
+            },
+            "pointer_sent": 37,
+            "scrolled_pixels": 0,
+            "wheel_to_scroll": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            }
+          },
+          "matched_frame_delay_after_minus_before": {
+            "n": 378,
+            "p50_ms": 0,
+            "p95_ms": 1
+          }
+        },
+        {
+          "repeat": 3,
+          "scenario": "article",
+          "console": [
+            390,
+            844
+          ],
+          "input_viewer": "before",
+          "before": {
+            "display_fps": 59.61,
+            "frame_age": {
+              "n": 459,
+              "p50_ms": 35,
+              "p95_ms": 36
+            },
+            "frame_interval": {
+              "n": 458,
+              "p50_ms": 17,
+              "p95_ms": 18
+            },
+            "gaps_over_50ms": 0,
+            "frame_flow": {
+              "received": 462,
+              "captured": 0,
+              "forwarded": 926,
+              "dropped_surface": 0,
+              "dropped_decode": 0,
+              "dropped_inactive": 0,
+              "dropped_backpressure": 0,
+              "dropped": 0,
+              "seconds": 7.708,
+              "receive_hz": 59.941,
+              "forward_hz": 120.141
+            },
+            "duration_seconds": 7.71,
+            "key_to_image": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            },
+            "key_sent": 0,
+            "wheel_to_image": {
+              "n": 37,
+              "p50_ms": 85,
+              "p95_ms": 88
+            },
+            "wheel_sent": 37,
+            "pointer_to_image": {
+              "n": 37,
+              "p50_ms": 51,
+              "p95_ms": 52
+            },
+            "pointer_sent": 37,
+            "scrolled_pixels": 1776,
+            "wheel_to_scroll": {
+              "n": 37,
+              "p50_ms": 85,
+              "p95_ms": 88
+            }
+          },
+          "after": {
+            "display_fps": 59.74,
+            "frame_age": {
+              "n": 460,
+              "p50_ms": 35,
+              "p95_ms": 36
+            },
+            "frame_interval": {
+              "n": 459,
+              "p50_ms": 17,
+              "p95_ms": 18
+            },
+            "gaps_over_50ms": 0,
+            "frame_flow": {
+              "received": 462,
+              "captured": 0,
+              "forwarded": 926,
+              "dropped_surface": 0,
+              "dropped_decode": 0,
+              "dropped_inactive": 0,
+              "dropped_backpressure": 0,
+              "dropped": 0,
+              "seconds": 7.708,
+              "receive_hz": 59.935,
+              "forward_hz": 120.129
+            },
+            "duration_seconds": 7.71,
+            "key_to_image": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            },
+            "key_sent": 0,
+            "wheel_to_image": {
+              "n": 37,
+              "p50_ms": 85,
+              "p95_ms": 86
+            },
+            "wheel_sent": 37,
+            "pointer_to_image": {
+              "n": 37,
+              "p50_ms": 51,
+              "p95_ms": 52
+            },
+            "pointer_sent": 37,
+            "scrolled_pixels": 1776,
+            "wheel_to_scroll": {
+              "n": 37,
+              "p50_ms": 85,
+              "p95_ms": 86
+            }
+          },
+          "matched_frame_delay_after_minus_before": {
+            "n": 459,
+            "p50_ms": 0,
+            "p95_ms": 1
+          }
+        }
+      ]
+    },
+    {
+      "browser": {
+        "protocolVersion": "1.3",
+        "product": "Chrome/152.0.7977.75",
+        "revision": "@4999cc1efed37c4d91dc4ce6ec4b0a50e2a9a8cb",
+        "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/152.0.0.0 Safari/537.36",
+        "jsVersion": "15.2.124.19"
+      },
+      "external_url": "https://en.wikipedia.org/wiki/Web_browser",
+      "viewer_sha256": {
+        "before": "e03ef42a58cdf6a340559a529b227406727575f84285d426be691c2bbc25ae32",
+        "after": "4d93a262ce3d03eab107b752fe9315d46f84d66b8c28af1462b3b9aa03453296"
+      },
+      "results": [
+        {
+          "repeat": 1,
+          "scenario": "reference",
+          "console": [
+            1440,
+            900
+          ],
+          "input_viewer": "before",
+          "before": {
+            "display_fps": 39.66,
+            "frame_age": {
+              "n": 315,
+              "p50_ms": 70,
+              "p95_ms": 101
+            },
+            "frame_interval": {
+              "n": 314,
+              "p50_ms": 18,
+              "p95_ms": 50
+            },
+            "gaps_over_50ms": 15,
+            "frame_flow": {
+              "received": 473,
+              "captured": 0,
+              "forwarded": 929,
+              "dropped_surface": 0,
+              "dropped_decode": 0,
+              "dropped_inactive": 0,
+              "dropped_backpressure": 15,
+              "dropped": 15,
+              "seconds": 7.959,
+              "receive_hz": 59.428,
+              "forward_hz": 116.721
+            },
+            "duration_seconds": 7.96,
+            "key_to_image": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            },
+            "key_sent": 0,
+            "wheel_to_image": {
+              "n": 37,
+              "p50_ms": 122,
+              "p95_ms": 186
+            },
+            "wheel_sent": 37,
+            "pointer_to_image": {
+              "n": 37,
+              "p50_ms": 86,
+              "p95_ms": 168
+            },
+            "pointer_sent": 37,
+            "scrolled_pixels": 1776,
+            "wheel_to_scroll": {
+              "n": 37,
+              "p50_ms": 123,
+              "p95_ms": 206
+            }
+          },
+          "after": {
+            "display_fps": 48.28,
+            "frame_age": {
+              "n": 384,
+              "p50_ms": 71,
+              "p95_ms": 106
+            },
+            "frame_interval": {
+              "n": 383,
+              "p50_ms": 17,
+              "p95_ms": 34
+            },
+            "gaps_over_50ms": 2,
+            "frame_flow": {
+              "received": 473,
+              "captured": 0,
+              "forwarded": 929,
+              "dropped_surface": 0,
+              "dropped_decode": 0,
+              "dropped_inactive": 0,
+              "dropped_backpressure": 15,
+              "dropped": 15,
+              "seconds": 7.96,
+              "receive_hz": 59.424,
+              "forward_hz": 116.713
+            },
+            "duration_seconds": 7.96,
+            "key_to_image": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            },
+            "key_sent": 0,
+            "wheel_to_image": {
+              "n": 37,
+              "p50_ms": 121,
+              "p95_ms": 171
+            },
+            "wheel_sent": 37,
+            "pointer_to_image": {
+              "n": 37,
+              "p50_ms": 87,
+              "p95_ms": 174
+            },
+            "pointer_sent": 37,
+            "scrolled_pixels": 1776,
+            "wheel_to_scroll": {
+              "n": 37,
+              "p50_ms": 121,
+              "p95_ms": 173
+            }
+          },
+          "matched_frame_delay_after_minus_before": {
+            "n": 290,
+            "p50_ms": 1,
+            "p95_ms": 16
+          }
+        },
+        {
+          "repeat": 1,
+          "scenario": "reference",
+          "console": [
+            390,
+            844
+          ],
+          "input_viewer": "before",
+          "before": {
+            "display_fps": 58.32,
+            "frame_age": {
+              "n": 450,
+              "p50_ms": 35,
+              "p95_ms": 36
+            },
+            "frame_interval": {
+              "n": 449,
+              "p50_ms": 17,
+              "p95_ms": 18
+            },
+            "gaps_over_50ms": 1,
+            "frame_flow": {
+              "received": 463,
+              "captured": 0,
+              "forwarded": 926,
+              "dropped_surface": 0,
+              "dropped_decode": 0,
+              "dropped_inactive": 0,
+              "dropped_backpressure": 0,
+              "dropped": 0,
+              "seconds": 7.722,
+              "receive_hz": 59.957,
+              "forward_hz": 119.914
+            },
+            "duration_seconds": 7.72,
+            "key_to_image": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            },
+            "key_sent": 0,
+            "wheel_to_image": {
+              "n": 37,
+              "p50_ms": 84,
+              "p95_ms": 86
+            },
+            "wheel_sent": 37,
+            "pointer_to_image": {
+              "n": 37,
+              "p50_ms": 51,
+              "p95_ms": 52
+            },
+            "pointer_sent": 37,
+            "scrolled_pixels": 1776,
+            "wheel_to_scroll": {
+              "n": 37,
+              "p50_ms": 84,
+              "p95_ms": 118
+            }
+          },
+          "after": {
+            "display_fps": 58.72,
+            "frame_age": {
+              "n": 453,
+              "p50_ms": 35,
+              "p95_ms": 36
+            },
+            "frame_interval": {
+              "n": 452,
+              "p50_ms": 17,
+              "p95_ms": 18
+            },
+            "gaps_over_50ms": 0,
+            "frame_flow": {
+              "received": 463,
+              "captured": 0,
+              "forwarded": 926,
+              "dropped_surface": 0,
+              "dropped_decode": 0,
+              "dropped_inactive": 0,
+              "dropped_backpressure": 0,
+              "dropped": 0,
+              "seconds": 7.723,
+              "receive_hz": 59.951,
+              "forward_hz": 119.902
+            },
+            "duration_seconds": 7.72,
+            "key_to_image": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            },
+            "key_sent": 0,
+            "wheel_to_image": {
+              "n": 37,
+              "p50_ms": 85,
+              "p95_ms": 88
+            },
+            "wheel_sent": 37,
+            "pointer_to_image": {
+              "n": 37,
+              "p50_ms": 52,
+              "p95_ms": 55
+            },
+            "pointer_sent": 37,
+            "scrolled_pixels": 1776,
+            "wheel_to_scroll": {
+              "n": 37,
+              "p50_ms": 85,
+              "p95_ms": 101
+            }
+          },
+          "matched_frame_delay_after_minus_before": {
+            "n": 446,
+            "p50_ms": 1,
+            "p95_ms": 1
+          }
+        },
+        {
+          "repeat": 2,
+          "scenario": "reference",
+          "console": [
+            1440,
+            900
+          ],
+          "input_viewer": "after",
+          "before": {
+            "display_fps": 40.84,
+            "frame_age": {
+              "n": 323,
+              "p50_ms": 54,
+              "p95_ms": 76
+            },
+            "frame_interval": {
+              "n": 322,
+              "p50_ms": 17,
+              "p95_ms": 50
+            },
+            "gaps_over_50ms": 11,
+            "frame_flow": {
+              "received": 475,
+              "captured": 0,
+              "forwarded": 949,
+              "dropped_surface": 0,
+              "dropped_decode": 0,
+              "dropped_inactive": 0,
+              "dropped_backpressure": 1,
+              "dropped": 1,
+              "seconds": 7.909,
+              "receive_hz": 60.055,
+              "forward_hz": 119.984
+            },
+            "duration_seconds": 7.91,
+            "key_to_image": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            },
+            "key_sent": 0,
+            "wheel_to_image": {
+              "n": 37,
+              "p50_ms": 114,
+              "p95_ms": 138
+            },
+            "wheel_sent": 37,
+            "pointer_to_image": {
+              "n": 37,
+              "p50_ms": 70,
+              "p95_ms": 153
+            },
+            "pointer_sent": 37,
+            "scrolled_pixels": 1776,
+            "wheel_to_scroll": {
+              "n": 37,
+              "p50_ms": 114,
+              "p95_ms": 138
+            }
+          },
+          "after": {
+            "display_fps": 48.36,
+            "frame_age": {
+              "n": 383,
+              "p50_ms": 69,
+              "p95_ms": 88
+            },
+            "frame_interval": {
+              "n": 382,
+              "p50_ms": 17,
+              "p95_ms": 34
+            },
+            "gaps_over_50ms": 1,
+            "frame_flow": {
+              "received": 475,
+              "captured": 0,
+              "forwarded": 949,
+              "dropped_surface": 0,
+              "dropped_decode": 0,
+              "dropped_inactive": 0,
+              "dropped_backpressure": 1,
+              "dropped": 1,
+              "seconds": 7.91,
+              "receive_hz": 60.051,
+              "forward_hz": 119.975
+            },
+            "duration_seconds": 7.91,
+            "key_to_image": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            },
+            "key_sent": 0,
+            "wheel_to_image": {
+              "n": 37,
+              "p50_ms": 115,
+              "p95_ms": 157
+            },
+            "wheel_sent": 37,
+            "pointer_to_image": {
+              "n": 37,
+              "p50_ms": 71,
+              "p95_ms": 132
+            },
+            "pointer_sent": 37,
+            "scrolled_pixels": 1776,
+            "wheel_to_scroll": {
+              "n": 37,
+              "p50_ms": 115,
+              "p95_ms": 157
+            }
+          },
+          "matched_frame_delay_after_minus_before": {
+            "n": 309,
+            "p50_ms": 0,
+            "p95_ms": 17
+          }
+        },
+        {
+          "repeat": 2,
+          "scenario": "reference",
+          "console": [
+            390,
+            844
+          ],
+          "input_viewer": "after",
+          "before": {
+            "display_fps": 59.86,
+            "frame_age": {
+              "n": 461,
+              "p50_ms": 35,
+              "p95_ms": 36
+            },
+            "frame_interval": {
+              "n": 460,
+              "p50_ms": 17,
+              "p95_ms": 18
+            },
+            "gaps_over_50ms": 0,
+            "frame_flow": {
+              "received": 462,
+              "captured": 0,
+              "forwarded": 926,
+              "dropped_surface": 0,
+              "dropped_decode": 0,
+              "dropped_inactive": 0,
+              "dropped_backpressure": 0,
+              "dropped": 0,
+              "seconds": 7.707,
+              "receive_hz": 59.943,
+              "forward_hz": 120.145
+            },
+            "duration_seconds": 7.71,
+            "key_to_image": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            },
+            "key_sent": 0,
+            "wheel_to_image": {
+              "n": 37,
+              "p50_ms": 84,
+              "p95_ms": 85
+            },
+            "wheel_sent": 37,
+            "pointer_to_image": {
+              "n": 37,
+              "p50_ms": 51,
+              "p95_ms": 52
+            },
+            "pointer_sent": 37,
+            "scrolled_pixels": 1776,
+            "wheel_to_scroll": {
+              "n": 37,
+              "p50_ms": 84,
+              "p95_ms": 85
+            }
+          },
+          "after": {
+            "display_fps": 59.87,
+            "frame_age": {
+              "n": 461,
+              "p50_ms": 35,
+              "p95_ms": 36
+            },
+            "frame_interval": {
+              "n": 460,
+              "p50_ms": 16,
+              "p95_ms": 18
+            },
+            "gaps_over_50ms": 0,
+            "frame_flow": {
+              "received": 462,
+              "captured": 0,
+              "forwarded": 926,
+              "dropped_surface": 0,
+              "dropped_decode": 0,
+              "dropped_inactive": 0,
+              "dropped_backpressure": 0,
+              "dropped": 0,
+              "seconds": 7.708,
+              "receive_hz": 59.937,
+              "forward_hz": 120.134
+            },
+            "duration_seconds": 7.71,
+            "key_to_image": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            },
+            "key_sent": 0,
+            "wheel_to_image": {
+              "n": 37,
+              "p50_ms": 84,
+              "p95_ms": 85
+            },
+            "wheel_sent": 37,
+            "pointer_to_image": {
+              "n": 37,
+              "p50_ms": 51,
+              "p95_ms": 52
+            },
+            "pointer_sent": 37,
+            "scrolled_pixels": 1776,
+            "wheel_to_scroll": {
+              "n": 37,
+              "p50_ms": 84,
+              "p95_ms": 85
+            }
+          },
+          "matched_frame_delay_after_minus_before": {
+            "n": 461,
+            "p50_ms": 0,
+            "p95_ms": 1
+          }
+        },
+        {
+          "repeat": 3,
+          "scenario": "reference",
+          "console": [
+            1440,
+            900
+          ],
+          "input_viewer": "before",
+          "before": {
+            "display_fps": 39.92,
+            "frame_age": {
+              "n": 307,
+              "p50_ms": 53,
+              "p95_ms": 70
+            },
+            "frame_interval": {
+              "n": 306,
+              "p50_ms": 17,
+              "p95_ms": 50
+            },
+            "gaps_over_50ms": 13,
+            "frame_flow": {
+              "received": 463,
+              "captured": 0,
+              "forwarded": 924,
+              "dropped_surface": 0,
+              "dropped_decode": 0,
+              "dropped_inactive": 0,
+              "dropped_backpressure": 0,
+              "dropped": 0,
+              "seconds": 7.709,
+              "receive_hz": 60.061,
+              "forward_hz": 119.863
+            },
+            "duration_seconds": 7.71,
+            "key_to_image": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            },
+            "key_sent": 0,
+            "wheel_to_image": {
+              "n": 37,
+              "p50_ms": 119,
+              "p95_ms": 153
+            },
+            "wheel_sent": 37,
+            "pointer_to_image": {
+              "n": 37,
+              "p50_ms": 71,
+              "p95_ms": 103
+            },
+            "pointer_sent": 37,
+            "scrolled_pixels": 1776,
+            "wheel_to_scroll": {
+              "n": 37,
+              "p50_ms": 119,
+              "p95_ms": 153
+            }
+          },
+          "after": {
+            "display_fps": 45.93,
+            "frame_age": {
+              "n": 354,
+              "p50_ms": 53,
+              "p95_ms": 71
+            },
+            "frame_interval": {
+              "n": 353,
+              "p50_ms": 17,
+              "p95_ms": 34
+            },
+            "gaps_over_50ms": 0,
+            "frame_flow": {
+              "received": 463,
+              "captured": 0,
+              "forwarded": 924,
+              "dropped_surface": 0,
+              "dropped_decode": 0,
+              "dropped_inactive": 0,
+              "dropped_backpressure": 0,
+              "dropped": 0,
+              "seconds": 7.71,
+              "receive_hz": 60.055,
+              "forward_hz": 119.851
+            },
+            "duration_seconds": 7.71,
+            "key_to_image": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            },
+            "key_sent": 0,
+            "wheel_to_image": {
+              "n": 37,
+              "p50_ms": 120,
+              "p95_ms": 121
+            },
+            "wheel_sent": 37,
+            "pointer_to_image": {
+              "n": 37,
+              "p50_ms": 86,
+              "p95_ms": 89
+            },
+            "pointer_sent": 37,
+            "scrolled_pixels": 1776,
+            "wheel_to_scroll": {
+              "n": 37,
+              "p50_ms": 120,
+              "p95_ms": 121
+            }
+          },
+          "matched_frame_delay_after_minus_before": {
+            "n": 286,
+            "p50_ms": 0,
+            "p95_ms": 16
+          }
+        },
+        {
+          "repeat": 3,
+          "scenario": "reference",
+          "console": [
+            390,
+            844
+          ],
+          "input_viewer": "before",
+          "before": {
+            "display_fps": 59.86,
+            "frame_age": {
+              "n": 461,
+              "p50_ms": 51,
+              "p95_ms": 52
+            },
+            "frame_interval": {
+              "n": 460,
+              "p50_ms": 17,
+              "p95_ms": 18
+            },
+            "gaps_over_50ms": 0,
+            "frame_flow": {
+              "received": 462,
+              "captured": 0,
+              "forwarded": 924,
+              "dropped_surface": 0,
+              "dropped_decode": 0,
+              "dropped_inactive": 0,
+              "dropped_backpressure": 0,
+              "dropped": 0,
+              "seconds": 7.705,
+              "receive_hz": 59.959,
+              "forward_hz": 119.917
+            },
+            "duration_seconds": 7.71,
+            "key_to_image": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            },
+            "key_sent": 0,
+            "wheel_to_image": {
+              "n": 37,
+              "p50_ms": 101,
+              "p95_ms": 102
+            },
+            "wheel_sent": 37,
+            "pointer_to_image": {
+              "n": 37,
+              "p50_ms": 68,
+              "p95_ms": 69
+            },
+            "pointer_sent": 37,
+            "scrolled_pixels": 1776,
+            "wheel_to_scroll": {
+              "n": 37,
+              "p50_ms": 101,
+              "p95_ms": 102
+            }
+          },
+          "after": {
+            "display_fps": 59.99,
+            "frame_age": {
+              "n": 462,
+              "p50_ms": 51,
+              "p95_ms": 52
+            },
+            "frame_interval": {
+              "n": 461,
+              "p50_ms": 17,
+              "p95_ms": 18
+            },
+            "gaps_over_50ms": 0,
+            "frame_flow": {
+              "received": 462,
+              "captured": 0,
+              "forwarded": 924,
+              "dropped_surface": 0,
+              "dropped_decode": 0,
+              "dropped_inactive": 0,
+              "dropped_backpressure": 0,
+              "dropped": 0,
+              "seconds": 7.706,
+              "receive_hz": 59.953,
+              "forward_hz": 119.905
+            },
+            "duration_seconds": 7.71,
+            "key_to_image": {
+              "n": 0,
+              "p50_ms": null,
+              "p95_ms": null
+            },
+            "key_sent": 0,
+            "wheel_to_image": {
+              "n": 37,
+              "p50_ms": 101,
+              "p95_ms": 103
+            },
+            "wheel_sent": 37,
+            "pointer_to_image": {
+              "n": 37,
+              "p50_ms": 68,
+              "p95_ms": 69
+            },
+            "pointer_sent": 37,
+            "scrolled_pixels": 1776,
+            "wheel_to_scroll": {
+              "n": 37,
+              "p50_ms": 101,
+              "p95_ms": 103
+            }
+          },
+          "matched_frame_delay_after_minus_before": {
+            "n": 461,
+            "p50_ms": 0,
+            "p95_ms": 1
+          }
+        }
+      ]
+    }
+  ]
+}

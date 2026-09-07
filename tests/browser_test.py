@@ -2246,10 +2246,13 @@ console.log(JSON.stringify({beforeFlush,sent,activitySent,viewportQueues,
     proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:1000]
     result = json.loads(proc.stdout)
-    assert result["beforeFlush"] == 0, result
+    assert result["beforeFlush"] == 1, result
     assert result["sent"] == [{
+        "type": "wheel", "nx": 0.1, "ny": 0.2,
+        "dx": 2, "dy": 3, "modifiers": 0,
+    }, {
         "type": "wheel", "nx": 0.4, "ny": 0.5,
-        "dx": 9, "dy": 2, "modifiers": 8,
+        "dx": 7, "dy": -1, "modifiers": 8,
     }], result
     assert result["activitySent"] == [
         {"type": "viewer_active", "active": True},

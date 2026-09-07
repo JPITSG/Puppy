@@ -40,6 +40,12 @@ MAX_RAW_OUTPUT = 2 * 1024 * 1024
 MAX_AGENT_TEXT = 64 * 1024
 MAX_COMMAND = 16 * 1024
 MAX_CWD = 4096
+# Drain a ready PTY in bounded bursts. There is no timer or wait to fill this:
+# a keystroke echo leaves as soon as read() says nothing else is ready.
+OUTPUT_READ_BUDGET = 64 * 1024
+# Allow a complete reconnect replay plus live output, without letting larger
+# batched frames multiply the old frame-count-only queue's memory footprint.
+MAX_VIEWER_OUTPUT = 2 * MAX_RAW_OUTPUT
 
 _CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _OSC_RE = re.compile(r"\x1b\].*?(?:\x07|\x1b\\)", re.S)
@@ -97,40 +103,43 @@ def _plain_terminal_text(raw: bytes, max_chars: int, max_lines: int) -> str:
     text = _CSI_RE.sub("", text)
     text = _ESC_RE.sub("", text)
     text = _CONTROL_RE.sub("", text)
-    lines = [[]]
-    cursor = 0
-    for char in text:
-        if char == "\n":
-            lines.append([])
-            cursor = 0
+    # Newlines reset the cursor, so earlier lines cannot affect the requested
+    # tail. Strip escape sequences first: an OSC payload can contain newlines.
+    sources = text.split("\n")
+    if max_lines > 0:
+        sources = sources[-max_lines:]
+    rendered = []
+    for source in sources:
+        # A final CR changes only the cursor, not the displayed line. Ordinary
+        # LF/CRLF output (including very long lines) needs no per-character work.
+        source = source.rstrip("\r")
+        if not any(control in source for control in ("\r", "\b", "\t")):
+            rendered.append(source.rstrip())
             continue
-        if char == "\r":
-            cursor = 0
-            continue
-        if char == "\b":
-            cursor = max(0, cursor - 1)
-            continue
-        if char == "\t":
-            spaces = 8 - (cursor % 8)
-            for _ in range(spaces):
-                line = lines[-1]
-                if cursor < len(line):
-                    line[cursor] = " "
-                else:
-                    line.append(" ")
-                cursor += 1
-            continue
-        line = lines[-1]
-        if cursor < len(line):
-            line[cursor] = char
-        else:
-            if cursor > len(line):
-                line.extend(" " for _ in range(cursor - len(line)))
-            line.append(char)
-        cursor += 1
-    rendered = ["".join(line).rstrip() for line in lines]
-    if max_lines > 0 and len(rendered) > max_lines:
-        rendered = rendered[-max_lines:]
+        line = []
+        cursor = 0
+        for char in source:
+            if char == "\r":
+                cursor = 0
+                continue
+            if char == "\b":
+                cursor = max(0, cursor - 1)
+                continue
+            if char == "\t":
+                spaces = 8 - (cursor % 8)
+                for _ in range(spaces):
+                    if cursor < len(line):
+                        line[cursor] = " "
+                    else:
+                        line.append(" ")
+                    cursor += 1
+                continue
+            if cursor < len(line):
+                line[cursor] = char
+            else:
+                line.append(char)
+            cursor += 1
+        rendered.append("".join(line).rstrip())
     result = "\n".join(rendered).rstrip()
     if len(result) > max_chars:
         result = result[-max_chars:]
@@ -143,6 +152,7 @@ class _Viewer:
     def __init__(self, ws):
         self.ws = ws
         self.queue = asyncio.Queue(maxsize=512)
+        self.queued_bytes = 0
         self.closed = False
         self.task = asyncio.ensure_future(self._run())
 
@@ -150,9 +160,13 @@ class _Viewer:
         if self.closed:
             return
         try:
+            size = len(item[1]) if item is not None and item[0] == "bytes" else 0
+            if self.queued_bytes + size > MAX_VIEWER_OUTPUT:
+                raise asyncio.QueueFull
             self.queue.put_nowait(item)
+            self.queued_bytes += size
         except asyncio.QueueFull:
-            self.closed = True
+            self.cancel()
             asyncio.ensure_future(self.ws.close(
                 code=1011, message=b"terminal viewer could not keep up"))
 
@@ -166,8 +180,6 @@ class _Viewer:
         self._put(None)
 
     def cancel(self) -> None:
-        if self.closed:
-            return
         self.closed = True
         self.task.cancel()
 
@@ -179,6 +191,7 @@ class _Viewer:
                     break
                 kind, payload = item
                 if kind == "bytes":
+                    self.queued_bytes -= len(payload)
                     await self.ws.send_bytes(payload)
                 else:
                     await self.ws.send_json(payload)
@@ -214,6 +227,7 @@ class TerminalInstance:
         self.ended_reason = ""
         self.viewers = {}
         self.input_lock = asyncio.Lock()
+        self.write_ready = None
         self.lifecycle_lock = asyncio.Lock()
         self.raw_chunks = collections.deque()
         self.raw_size = 0
@@ -332,14 +346,24 @@ class TerminalInstance:
     def _on_readable(self) -> None:
         if not self.running or self.master is None:
             return
-        try:
-            data = os.read(self.master, 65536)
-        except (BlockingIOError, InterruptedError):
-            return
-        except OSError:
-            data = b""
-        if data:
-            self._append_output(data)
+        chunks = []
+        size = 0
+        ended = False
+        while size < OUTPUT_READ_BUDGET:
+            try:
+                data = os.read(self.master, OUTPUT_READ_BUDGET - size)
+            except (BlockingIOError, InterruptedError):
+                break
+            except OSError:
+                data = b""
+            if not data:
+                ended = True
+                break
+            chunks.append(data)
+            size += len(data)
+        if chunks:
+            self._append_output(b"".join(chunks))
+        if not ended:
             return
         try:
             asyncio.get_event_loop().remove_reader(self.master)
@@ -414,6 +438,44 @@ class TerminalInstance:
             except asyncio.TimeoutError:
                 pass
 
+    async def _wait_writable(self, deadline: float) -> None:
+        loop = asyncio.get_running_loop()
+        master = self.master
+        if master is None or not self.running:
+            raise TerminalError("Terminal {} has ended".format(self.terminal_id))
+        ready = loop.create_future()
+        self.write_ready = ready
+
+        def writable():
+            if not ready.done():
+                ready.set_result(None)
+
+        try:
+            loop.add_writer(master, writable)
+            await asyncio.wait_for(ready, max(0, deadline - time.monotonic()))
+        except asyncio.TimeoutError:
+            raise TerminalError("terminal input timed out")
+        finally:
+            # Closing the PTY already removed the watcher. Its fd may now
+            # belong to an unrelated resource, so never remove it again.
+            if self.master == master:
+                loop.remove_writer(master)
+            self.write_ready = None
+
+    def _close_master(self) -> None:
+        master, self.master = self.master, None
+        if master is None:
+            return
+        loop = asyncio.get_running_loop()
+        loop.remove_reader(master)
+        loop.remove_writer(master)
+        if self.write_ready is not None and not self.write_ready.done():
+            self.write_ready.set_result(None)
+        try:
+            os.close(master)
+        except OSError:
+            pass
+
     async def write(self, data: bytes, source: str = "user") -> None:
         if not isinstance(data, (bytes, bytearray)) or not data:
             return
@@ -426,17 +488,18 @@ class TerminalInstance:
                 "type": "agent_input", "terminal_id": self.terminal_id})
         async with self.input_lock:
             offset = 0
+            pending = memoryview(data)
             deadline = time.monotonic() + 5.0
             while offset < len(data):
                 if not self.running or self.master is None:
                     raise TerminalError("Terminal {} has ended".format(
                         self.terminal_id))
                 try:
-                    written = os.write(self.master, data[offset:])
+                    written = os.write(self.master, pending[offset:])
                 except (BlockingIOError, InterruptedError):
                     if time.monotonic() >= deadline:
                         raise TerminalError("terminal input timed out")
-                    await asyncio.sleep(0.01)
+                    await self._wait_writable(deadline)
                     continue
                 except OSError:
                     raise TerminalError("Terminal {} has ended".format(
@@ -446,14 +509,15 @@ class TerminalInstance:
                 offset += written
 
     async def resize(self, cols: int, rows: int) -> None:
-        self.cols = _bounded_int(cols, 80, 10, 500)
-        self.rows = _bounded_int(rows, 24, 4, 300)
+        cols = _bounded_int(cols, 80, 10, 500)
+        rows = _bounded_int(rows, 24, 4, 300)
+        if (cols, rows) == (self.cols, self.rows):
+            return
+        self.cols, self.rows = cols, rows
         if self.running and self.master is not None:
+            # TIOCSWINSZ signals the foreground process group itself. A second
+            # SIGWINCH to the shell pid can cause an unnecessary TUI redraw.
             _set_winsize(self.master, self.cols, self.rows)
-            try:
-                os.kill(self.pid, signal.SIGWINCH)
-            except (ProcessLookupError, TypeError):
-                pass
 
     def _broadcast_json(self, payload: dict) -> None:
         for viewer in list(self.viewers.values()):
@@ -503,16 +567,7 @@ class TerminalInstance:
         self.running = False
         self.ended_reason = reason
         self._cancel_idle()
-        master, self.master = self.master, None
-        if master is not None:
-            try:
-                asyncio.get_event_loop().remove_reader(master)
-            except Exception:
-                pass
-            try:
-                os.close(master)
-            except OSError:
-                pass
+        self._close_master()
         _active_terminals = max(0, _active_terminals - 1)
         _state_changed()
         self._wake_output_waiters()
@@ -527,16 +582,7 @@ class TerminalInstance:
         async with self.lifecycle_lock:
             if not self.running:
                 return
-            master, self.master = self.master, None
-            if master is not None:
-                try:
-                    asyncio.get_event_loop().remove_reader(master)
-                except Exception:
-                    pass
-                try:
-                    os.close(master)
-                except OSError:
-                    pass
+            self._close_master()
             await _reap(self.pid)
             self._finish(reason)
 

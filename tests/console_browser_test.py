@@ -11,6 +11,7 @@ import base64
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import sys
 import time
@@ -23,7 +24,7 @@ ROOT = private_root("console-")
 os.environ["PUPPY_DATA"] = str(ROOT / "data")
 
 from aiohttp import web
-from puppy import auth, browser, config, db, runner, search, session_tasks, session_aliases
+from puppy import auth, browser, config, db, runner, search, session_tasks, session_aliases, terminal
 from puppy import web as webui
 from puppy.drivers import all_drivers
 
@@ -878,6 +879,128 @@ async def quota_checks(instance):
     print("PASS: real footer shares only matching accounts and retains the newest observation", flush=True)
 
 
+async def engine_activity_checks(instance):
+    result = await evaluate(instance, """(() => {
+        const saved = {engines:state.engines, backends:state.backends,
+            engCache:state.engCache, remoteOk:state.remoteOk,
+            sessions:state.sessions, remoteSessions:state.remoteSessions,
+            sessionFilter:state.sessionFilter};
+        const engine = key => ({key,label:key,installed:true,auth:'ok',update_available:true});
+        const read = () => [...document.querySelectorAll('.foot-eng')].map(row => {
+            const icon=row.querySelector('.foot-engine-activity');
+            const word=row.querySelector('.st-word');
+            if (!icon) {
+                const status=row.querySelector('.st');
+                if (status.className !== 'st' || getComputedStyle(status).display !== 'block' ||
+                    getComputedStyle(status).whiteSpace !== 'normal') {
+                    throw new Error('Idle engine status must retain its original layout');
+                }
+                return null;
+            }
+            const a=icon.getBoundingClientRect(), b=word.getBoundingClientRect();
+            const css=getComputedStyle(icon.querySelector('svg'));
+            const probe=document.createElement('span');
+            probe.style.color='var(--ok)'; row.appendChild(probe);
+            const green=getComputedStyle(icon).color===getComputedStyle(probe).color;
+            probe.remove();
+            return {label:icon.getAttribute('aria-label'), width:a.width,height:a.height,
+                gap:b.left-a.right, centered:Math.abs((a.top+a.height/2)-(b.top+b.height/2))<1,
+                green, word:word.textContent,
+                warning:word.classList.contains('warn'), animation:css.animationName,
+                duration:css.animationDuration};
+        });
+        try {
+            state.engines=[engine('claude'),engine('codex')];
+            state.backends=[{id:999,name:'Workshop',capabilities:[]}];
+            state.engCache={999:[engine('claude'),engine('codex')]};
+            state.remoteOk={999:true};
+            state.sessions=[{id:1,engine:'claude',model:'demo-a',status:'running',task:{parent:2}},
+                {id:2,engine:'codex',model:'demo-b',status:'idle',queue:['waiting']}];
+            state.remoteSessions={999:[{id:1,engine:'codex',model:'demo-c',status:'running'}]};
+            state.sessionFilter='no matching sessions';
+            renderFootEngines();
+            const active=read();
+            state.sessions[0].status='idle'; renderFootEngines();
+            const stopped=read();
+            state.remoteOk[999]=false; renderFootEngines();
+            const offline=read();
+            return {active,stopped,offline};
+        } finally { Object.assign(state,saved); renderFootEngines(); }
+    })()""")
+    local, idle, other_idle, remote = result["active"]
+    assert idle is None and other_idle is None, result
+    for entry, model in [(local, "demo-a"), (remote, "demo-c")]:
+        assert entry["label"] == "In use · " + model, result
+        assert entry["width"] == entry["height"] == 10, result
+        assert entry["gap"] == 4 and entry["centered"] and entry["green"], result
+        assert entry["word"] == "Ready" and entry["warning"], result
+        assert entry["animation"] == "spin" and entry["duration"] == "0.8s", result
+    assert result["stopped"][:3] == [None, None, None], result
+    assert result["stopped"][3] is not None, result
+    assert result["offline"] == [None, None], result
+    print("PASS: footer activity scopes running tasks to backend/engine, ignores queued/filtered rows, clears on stop/offline, and aligns a 10px spinner before Ready", flush=True)
+
+
+async def terminal_io_checks(console):
+    """Real input -> PTY -> xterm parsing/rendering, including resize delivery."""
+    command = shlex.join([sys.executable, str(BASE / "tests/terminal_latency_bench.py"),
+                          "--child", "--screen"])
+    tab_id = terminal_id = ""
+    try:
+        tab_id = await evaluate(console, "openTermTab(0, %s, null, %s).id" %
+                                (json.dumps(command), json.dumps(str(ROOT))))
+        await evaluate(console, "window.ioView=state.views[%s]; true" % json.dumps(tab_id))
+        await until(console, "!!ioView.term && !!ioView.dataSub")
+        await evaluate(console, """window.ioText = () => {
+            const b=ioView.term.buffer.active, lines=[];
+            for (let i=Math.max(0,b.length-50);i<b.length;i++)
+                lines.push(b.getLine(i).translateToString(true));
+            return lines.join('\\n');
+        }; true""")
+        await until(console, "ioText().includes('ready')")
+        terminal_id = await evaluate(console, "ioView.tab.terminalId")
+        await evaluate(console, "ioView.term.focus(); true")
+        await console.call("Input.insertText", {"text": "p"}, session=console.page_session)
+        await until(console, "ioText().trimEnd().endsWith('p')")
+        # Fractional container changes within one cell must not emit resize
+        # messages. A grid change must still reach the foreground PTY process.
+        await evaluate(console, """window.ioResizes=[];
+            const send=ioView.ws.send.bind(ioView.ws);
+            ioView.ws.send=data=>{if(typeof data==='string' && JSON.parse(data).type==='resize')
+                ioResizes.push(JSON.parse(data)); send(data);};
+            window.ioWidth=ioView.mount.getBoundingClientRect().width;
+            ioView.mount.style.width=(ioWidth-.01)+'px'; true""")
+        await evaluate(console, "new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))")
+        assert await evaluate(console, "ioResizes.length") == 0
+        await evaluate(console, "ioView.mount.style.width=(ioWidth-80)+'px'; true")
+        await until(console, "ioResizes.length===1 && ioText().includes('RESIZE '+ioView.term.cols+'x'+ioView.term.rows)")
+        # Exercise the retained xterm parser, including UTF-8 split over PTY
+        # reads and a burst much larger than the server's single-callback cap.
+        await evaluate(console, """window.ioStart=performance.now(); window.ioFinished=null;
+            window.ioRendered=false;
+            window.ioParsed=ioView.term.onWriteParsed(()=>{
+                if(ioText().includes('BURST DONE: café € 終')) ioFinished=performance.now()-ioStart;
+            });
+            window.ioRender=ioView.term.onRender(()=>{
+                if(ioText().includes('BURST DONE: café € 終')) ioRendered=true;
+            }); ioView.term.focus(); true""")
+        await console.call("Input.insertText", {"text": "b"}, session=console.page_session)
+        await until(console, "ioFinished!==null && ioRendered")
+        elapsed = await evaluate(console, "ioFinished")
+        await evaluate(console, "ioParsed.dispose(); ioRender.dispose(); true")
+        # Input remains usable after the burst; there was no output loss or
+        # parser overflow. Closing the tab disposes the resize subscription.
+        await console.call("Input.insertText", {"text": "p"}, session=console.page_session)
+        await until(console, "ioText().trimEnd().endsWith('p')")
+        print("PASS: real terminal input, 3.6 MB burst parsed/rendered (%.1f ms), Unicode and foreground resize" % elapsed,
+              flush=True)
+    finally:
+        if tab_id:
+            await evaluate(console, "closeTab(%s); true" % json.dumps(tab_id))
+        if terminal_id:
+            await terminal.manager().close(terminal_id, "test finished")
+
+
 async def browser_cursor_checks(console):
     """Actual CDP hit testing -> authenticated viewer socket -> image cursor."""
     page = await browser.manager().create()
@@ -925,11 +1048,41 @@ async def browser_cursor_checks(console):
                             (330, "cell"), (380, "help"), (425, "text"),
                             (480, "default")]:
             await hover(30, y, expected)
+        await hover(30, 80, "text")
+        point = await evaluate(console, """(() => {const r=cursorView.screen.getBoundingClientRect();
+            return {x:r.left+r.width*30/%s,y:r.top+r.height*80/%s};})()""" %
+            (page.viewport["width"], page.viewport["height"]))
+        for kind in ("mousePressed", "mouseReleased"):
+            await console.call("Input.dispatchMouseEvent", {
+                "type": kind, **point, "button": "left", "clickCount": 1},
+                session=console.page_session)
+        for kind in ("keyDown", "keyUp"):
+            await console.call("Input.dispatchKeyEvent", {
+                "type": kind, "key": "z", "code": "KeyZ", "text": "z" if kind == "keyDown" else ""},
+                session=console.page_session)
+        await until(page, "document.querySelector('input').value.includes('z')")
+        print("PASS: native click and typing traverse the embedded viewer into the real page input", flush=True)
         await hover(30, 180, "grab")
         # No mouse movement or visual change: CSS cursor alone must refresh.
         await evaluate(page, "document.querySelector('#dynamic').style.cursor='wait'; true")
         await until(console, "cursorView.screen.style.cursor === 'wait'")
         await hover(30, 25, "zoom-in")
+        await until(console, "cursorView.screen.tagName === 'IMG' && cursorView.screen.naturalWidth === cursorView.frameW && cursorView.screen.naturalHeight === cursorView.frameH")
+        await evaluate(console, "cursorView.onVisibility(false);true")
+        await evaluate(page, """(() => {const cover=document.createElement('div');
+          cover.style.cssText='position:fixed;inset:0;background:rgb(19,93,171)';
+          document.body.appendChild(cover);return true;})()""")
+        assert await evaluate(console, "cursorView.fpsFrames === 0")
+        await evaluate(console, "cursorView.onVisibility(true);true")
+        await until(console, """(() => {
+          const canvas=document.createElement('canvas');canvas.width=canvas.height=1;
+          const ctx=canvas.getContext('2d');
+          ctx.drawImage(cursorView.screen,20,20,1,1,0,0,1,1);
+          const p=ctx.getImageData(0,0,1,1).data;
+          return Math.abs(p[0]-19)<5 && Math.abs(p[1]-93)<5 && Math.abs(p[2]-171)<5;
+        })()""")
+        print("PASS: real decoded image dimensions, hidden-viewer draw suppression and fresh pixels on resume", flush=True)
+        await hover(31, 25, "default")
         await page.call("Page.navigate", {"url":"about:blank"}, session=page.page_session)
         await until(console, "cursorView.screen.style.cursor === 'default'")
         await console.call("Input.dispatchMouseEvent", {"type":"mouseMoved", "x":1,"y":1},
@@ -965,14 +1118,17 @@ async def main(args):
             for instance in instances:
                 await open_console(instance, url, sid)
             await quota_checks(instances[0])
+            await engine_activity_checks(instances[0])
             await checks(*instances, runner.hub(sid), args.screenshots)
             await browser_cursor_checks(instances[0])
+            await terminal_io_checks(instances[0])
             if args.screenshots:
                 await screenshots(instances[0])
     finally:
         for instance in instances:
             await instance.stop("test finished")
         await browser.shutdown()
+        await terminal.shutdown()
         if server:
             await server.cleanup()
         shutil.rmtree(ROOT)

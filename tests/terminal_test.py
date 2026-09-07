@@ -9,6 +9,8 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import time
+from unittest.mock import AsyncMock, patch
 
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
@@ -55,6 +57,199 @@ async def wait_for(predicate, timeout=4.0):
             return value
         await asyncio.sleep(0.02)
     raise AssertionError("timed out waiting for terminal condition")
+
+
+async def check_output_drain() -> None:
+    instance = terminal.TerminalInstance("T1ST", "/bin/sh", str(TEST_ROOT), 80, 24)
+    instance.running = True
+    # No reader is registered: these tests invoke one readiness callback.
+    read_fd, write_fd = os.pipe()
+    instance.master = read_fd
+    viewer = TerminalViewer()
+    await instance.attach_viewer(viewer)
+    try:
+        parts = [b"\x1b[31m", b"split utf8: \xe2", b"\x82\xac\x1b[0m\r\n"]
+        event = instance.output_event
+        with patch.object(terminal.os, "read", side_effect=parts + [BlockingIOError()]):
+            instance._on_readable()
+        assert instance._raw_since()[0] == b"".join(parts)
+        assert len(instance.raw_chunks) == 1
+        assert event.is_set()
+        # A permanently readable producer must yield after the byte budget.
+        with patch.object(terminal.os, "read", side_effect=lambda fd, size: b"x" * min(size, 4095)):
+            before = instance.output_sequence
+            instance._on_readable()
+        assert instance.output_sequence - before == terminal.OUTPUT_READ_BUDGET
+        # EOF following data must retain/send that data before ending.
+        with patch.object(terminal.os, "read", side_effect=[b"last output", OSError()]), \
+                patch.object(instance, "_natural_end", new_callable=AsyncMock) as end:
+            instance._on_readable()
+            await instance.end_task
+            end.assert_awaited_once()
+        await wait_for(lambda: viewer.bytes.endswith(b"last output"))
+        assert bytes(viewer.bytes) == instance._raw_since()[0]
+    finally:
+        instance.detach_viewer(viewer)
+        instance.running = False
+        instance._cancel_idle()
+        instance._close_master()
+        os.close(write_fd)
+
+
+def check_transcript_tail() -> None:
+    render = terminal._plain_terminal_text
+    for raw, expected in [
+            (b"abc\rZ", "Zbc"), (b"abc\b\bZ", "aZc"),
+            (b"abc\r\tZ", "        Z"), (b"a\tZ", "a       Z"),
+            (b"abc\r\r", "abc"), (b"abc   \r\n\r\n", "abc"),
+            (b"\x1b[31mred\x1b[0m\r\nnext", "red\nnext"),
+            (b"a\x1b]0;hidden\nOSC\x07b\nlast", "ab\nlast"),
+            (b"one\n\bX\n\tY", "one\nX\n        Y"),
+            ("café € 終\r\n".encode(), "café € 終"),
+            (b"\xff\r\n", "\ufffd")]:
+        assert render(raw, 1000, 100) == expected, raw
+    assert render(b"old\rchanged\nabc\bZ\nlast", 1000, 2) == "abZ\nlast"
+    assert render(b"old\nline\n\n", 1000, 2) == ""
+    assert render(b"old\nline\nlast", 5, 2) == "\nlast"
+    assert render(b"old\nline\nlast", 1000, 0) == "old\nline\nlast"
+    # Discarded output can contain cursor controls and multiline OSC strings;
+    # neither may change the retained lines or their limit.
+    prefix = (b"old\rchanged\b!\t\n" * 100000) + b"\x1b]0;hidden\nOSC\x07"
+    assert render(prefix + b"tail\r\nlast", 1000, 2) == "tail\nlast"
+    assert render(b"x" * terminal.MAX_RAW_OUTPUT + b"tail\r", 4, 200) == "tail"
+
+
+async def check_input_readiness() -> None:
+    loop = asyncio.get_running_loop()
+    instance = terminal.TerminalInstance("T1ST", "/bin/sh", str(TEST_ROOT), 80, 24)
+    instance.running = True
+    read_fd, write_fd = os.pipe()
+    os.set_blocking(read_fd, False)
+    os.set_blocking(write_fd, False)
+    instance.master = write_fd
+    received = bytearray()
+
+    def drain():
+        try:
+            while True:
+                part = os.read(read_fd, 65536)
+                if not part:
+                    return
+                received.extend(part)
+        except BlockingIOError:
+            pass
+
+    tasks = []
+    try:
+        # Force partial writes and EAGAIN, then let the descriptor wake the
+        # sender. Input cannot use a retry sleep, interleave writes or lose bytes.
+        first, second = b"a" * 131072, b"b" * 131072
+        with patch.object(terminal.asyncio, "sleep", side_effect=AssertionError("input polled")):
+            tasks = [asyncio.create_task(instance.write(first)),
+                     asyncio.create_task(instance.write(second))]
+            loop.call_later(.005, loop.add_reader, read_fd, drain)
+            await asyncio.wait_for(asyncio.gather(*tasks), 2)
+        drain()
+        assert received == first + second
+        assert instance.write_ready is None and not instance.input_lock.locked()
+        loop.remove_reader(read_fd)
+        # Fill the pipe so timeout/cancel/close each meet a blocked writer.
+        while True:
+            try:
+                os.write(write_fd, b"x" * 4096)
+            except BlockingIOError:
+                break
+        try:
+            await instance._wait_writable(time.monotonic() + .005)
+        except terminal.TerminalError as exc:
+            assert "timed out" in str(exc)
+        else:
+            raise AssertionError("blocked input had no timeout")
+        assert instance.write_ready is None
+        for close in (False, True):
+            task = asyncio.create_task(instance.write(b"blocked"))
+            tasks.append(task)
+            await wait_for(lambda: instance.write_ready is not None)
+            with patch.object(loop, "remove_writer", wraps=loop.remove_writer) as removed:
+                if close:
+                    instance._close_master()
+                else:
+                    task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    assert not close
+                except terminal.TerminalError as exc:
+                    assert close and "has ended" in str(exc)
+                else:
+                    raise AssertionError("blocked input incorrectly succeeded")
+                # Closing must remove the watcher once, before fd reuse; the
+                # waiting task must not remove a new owner's watcher afterwards.
+                removed.assert_called_once_with(write_fd)
+            assert instance.write_ready is None and not instance.input_lock.locked()
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        loop.remove_reader(read_fd)
+        instance._close_master()
+        os.close(read_fd)
+
+
+async def check_resize_deduplication() -> None:
+    instance = terminal.TerminalInstance("T1ST", "/bin/sh", str(TEST_ROOT), 80, 24)
+    instance.running, instance.master, instance.pid = True, 123, 456
+    with patch.object(terminal, "_set_winsize") as resize, \
+            patch.object(terminal.os, "kill") as kill:
+        await instance.resize(80, 24)
+        resize.assert_not_called()
+        await instance.resize(100, 30)
+        resize.assert_called_once_with(123, 100, 30)
+        await instance.resize("100", "30")
+        resize.assert_called_once()
+        await instance.resize(999, 999)
+        await instance.resize(1000, 1000)
+        assert resize.call_count == 2
+        assert (instance.cols, instance.rows) == (500, 300)
+        kill.assert_not_called()
+
+
+async def check_slow_viewer() -> None:
+    class SlowSocket(TerminalViewer):
+        async def send_bytes(self, payload):
+            await asyncio.Event().wait()
+
+    instance = terminal.TerminalInstance("T1ST", "/bin/sh", str(TEST_ROOT), 80, 24)
+    fast, slow, replay = TerminalViewer(), SlowSocket(), TerminalViewer()
+    instance.viewers = {fast: terminal._Viewer(fast), slow: terminal._Viewer(slow)}
+    sender = instance.viewers[slow]
+    try:
+        block = b"x" * terminal.OUTPUT_READ_BUDGET
+        for _ in range(terminal.MAX_VIEWER_OUTPUT // len(block) + 2):
+            instance._append_output(block)
+            await asyncio.sleep(0)
+        await wait_for(lambda: slow.closed and sender.task.done())
+        assert sender.queued_bytes <= terminal.MAX_VIEWER_OUTPUT
+        assert not fast.closed
+        assert len(fast.bytes) == instance.output_sequence
+        # A complete retained replay still fits the byte budget and precedes
+        # live output on a newly attached viewer.
+        instance.running = True
+        raw, _ = instance._raw_since()
+        await instance.attach_viewer(replay)
+        instance._append_output(b"live after replay")
+        await wait_for(lambda: replay.bytes.endswith(b"live after replay"))
+        assert bytes(replay.bytes) == raw + b"live after replay"
+        assert replay.messages[0]["replay_truncated"] is True
+        assert [item["type"] for item in replay.messages[:2]] == ["status", "binding"]
+        # Detach also cancels a sender which has already marked itself closed.
+        sender.cancel()
+    finally:
+        instance.running = False
+        instance.detach_viewer(fast)
+        instance.detach_viewer(slow)
+        instance.detach_viewer(replay)
 
 
 def check_static_contract() -> None:
@@ -394,6 +589,11 @@ async def main() -> None:
         check_static_contract()
         check_mcp_protocol()
         check_driver_wiring(session_id)
+        check_transcript_tail()
+        await check_output_drain()
+        await check_input_readiness()
+        await check_resize_deduplication()
+        await check_slow_viewer()
         await check_terminal_lifecycle(session_id, other_session_id)
         print("terminal tests passed")
     finally:

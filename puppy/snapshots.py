@@ -50,6 +50,51 @@ class SnapshotError(RuntimeError):
     pass
 
 
+def storage_usage() -> dict:
+    """Approximate live file bytes in the backup scope, without making an archive.
+
+    Include SQLite sidecars in current storage. Never follow links, read file
+    contents, or sweep unrelated data (browser profiles, logs, mirrors, exports).
+    Active writes may change the total while it is being measured.
+    """
+    root = Path(config.DATA_DIR).resolve()
+    paths = [Path(config.CONFIG_PATH), Path(config.DB_PATH)]
+    paths.extend(Path(config.DB_PATH + suffix) for suffix in ("-wal", "-shm"))
+    paths.extend(root / name for name in ("uploads", "tls", "workspace/keeps"))
+    paths.extend(Path(session["cwd"]) for session in db.list_sessions(include_archived=True)
+                 if workspaces.is_temporary(session) and workspaces.is_available(session))
+    total = 0
+    deadline = time.monotonic() + 10
+
+    def size(path, dir_fd=None):
+        if time.monotonic() > deadline:
+            raise SnapshotError("storage measurement timed out")
+        try:
+            info = os.stat(path, dir_fd=dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return 0
+        return info.st_size if stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) else 0
+
+    def failed(exc):
+        if not isinstance(exc, FileNotFoundError):
+            raise exc
+
+    for path in set(paths):
+        total += size(path)
+        try:
+            if not stat.S_ISDIR(path.lstat().st_mode):
+                continue
+        except FileNotFoundError:
+            continue
+        # fwalk checks the opened directory's identity and does not follow
+        # symlinks, including a root replaced by a symlink during this scan.
+        for _directory, dirs, files, fd in os.fwalk(path, follow_symlinks=False,
+                                                  onerror=failed):
+            for name in dirs + files:
+                total += size(name, fd)
+    return {"bytes": total}
+
+
 def work_root() -> Path:
     global _last_work_cleanup
     root = Path(config.DATA_DIR).resolve() / "snapshots"

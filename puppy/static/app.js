@@ -6237,6 +6237,18 @@ function renderFootEngines() {
          engine's own health, and what is left of the weekly allowance. Sharing
          a colour would let a low quota make a working engine look broken. */
       const st = el("span", "st");
+      const running = sessionsFor(g.bid).filter(s => s.engine === e.key && s.status === "running");
+      if (running.length) {
+        st.classList.add("has-activity");
+        const activity = syncPromptSpinnerPhase(el("span", "foot-engine-activity"));
+        activity.style.setProperty("--engine-spin-duration", `${PROMPT_SPIN_MS}ms`);
+        const models = [...new Set(running.map(s => s.model || "Default"))];
+        activity.title = `In use · ${models.join(", ")}`;
+        activity.setAttribute("role", "img");
+        activity.setAttribute("aria-label", activity.title);
+        activity.innerHTML = '<svg viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="4.5" opacity=".3"/><path d="M6 1.5a4.5 4.5 0 0 1 4.5 4.5"/></svg>';
+        st.appendChild(activity);
+      }
       const word = el("span", "st-word " + (healthy ? "ok" : "bad"),
         engineStatusText(e));
       // ready, but the CLI is behind its latest release
@@ -14128,7 +14140,12 @@ class TermView {
   onShow(focus = true) {
     this.renderBinding();
     if (!this.started) { this.started = true; this.start(); }
-    else if (this.fit) setTimeout(() => this.fit.fit(), 30);
+    else if (this.fit) setTimeout(() => {
+      if (this.closed) return;
+      this.fit.fit();
+      // Another viewer may have resized the shared PTY while this tab was hidden.
+      this.sendResize();
+    }, 30);
     if (focus && this.term && !this.isDead()) this.term.focus();
   }
   isDead() { return !!this.root.querySelector(".term-dead"); }
@@ -14298,6 +14315,7 @@ class TermView {
     this.fit = new FitAddon.FitAddon();
     this.term.loadAddon(this.fit);
     this.term.open(this.mount);
+    this.resizeSub = this.term.onResize(() => this.sendResize());
     this.ownerBtn.onclick = e => {
       e.stopPropagation(); this.showLinkMenu(this.ownerBtn);
     };
@@ -14336,7 +14354,6 @@ class TermView {
     this.resizeObs = new ResizeObserver(() => {
       if (!this.fit) return;
       try { this.fit.fit(); } catch (e) {}
-      this.sendResize();
     });
     this.resizeObs.observe(this.mount);
   }
@@ -14572,6 +14589,7 @@ class TermView {
     this.stopMetadataScrolling();
     if (this.ws) try { this.ws.close(); } catch (e) {}
     if (this.dataSub) { this.dataSub.dispose(); this.dataSub = null; }
+    if (this.resizeSub) { this.resizeSub.dispose(); this.resizeSub = null; }
     if (this.term) this.term.dispose();
     this.root.remove();
   }
@@ -14595,13 +14613,16 @@ class BrowserView {
     this.reconnectDelay = 1000;
     this.frameW = 1280;
     this.frameH = 800;
-    this.frameUrl = null;
+    this.pendingFrame = null;
+    this.preparingFrame = false;
+    this.frameEpoch = 0;
     this.fpsTimer = null;
     this.fpsFrames = 0;
     this.urlFocused = false;
     this.lastUrl = "";
     this.loadingTimer = null;
     this.moveQueued = null;
+    this.moveFrame = null;
     this.cursorSupported = false;
     this.cursorPoint = null;
     this.cursorPending = null;
@@ -14658,7 +14679,7 @@ class BrowserView {
           <span class="br-owner-text">Checking session link…</span>
           <span class="br-owner-arrow hidden"></span>
         </button>
-        <span class="br-stats" title="Stream width × height in pixels · frames received per second, updated once a second">
+        <span class="br-stats" title="Stream width × height in pixels · frames presented per second, updated once a second">
           <span class="br-size">— × —</span><span aria-hidden="true">·</span><span class="br-fps">— FPS</span>
         </span>
       </div></div>
@@ -14733,6 +14754,8 @@ class BrowserView {
     } else {
       this.clearReconnect();
       this.resetCursor();
+      this.resetFrames();
+      this.resetContinuousInput();
     }
   }
   isDead() { return !!this.root.querySelector(".br-dead"); }
@@ -14971,6 +14994,13 @@ class BrowserView {
     this.ws.send(JSON.stringify(payload));
   }
   queueWheel(payload) {
+    // Start a gesture immediately. Only subsequent events in the same frame
+    // need collapsing; delaying the first adds a refresh interval to input.
+    if (this.wheelFrame === null) {
+      this.sendContinuous(payload);
+      this.wheelFrame = requestAnimationFrame(() => this.flushWheel());
+      return;
+    }
     if (this.wheelQueued) {
       this.wheelQueued.dx += payload.dx;
       this.wheelQueued.dy += payload.dy;
@@ -14980,13 +15010,36 @@ class BrowserView {
     } else {
       this.wheelQueued = payload;
     }
-    if (this.wheelFrame !== null) return;
-    this.wheelFrame = requestAnimationFrame(() => {
-      this.wheelFrame = null;
-      const queued = this.wheelQueued;
-      this.wheelQueued = null;
-      if (queued && !this.closed) this.sendContinuous(queued);
+  }
+  flushWheel() {
+    this.wheelFrame = null;
+    const queued = this.wheelQueued;
+    this.wheelQueued = null;
+    if (queued && !this.closed) this.queueWheel(queued);
+  }
+  queueMove(payload) {
+    if (this.moveFrame !== null) { this.moveQueued = payload; return; }
+    this.sendContinuous(payload);
+    this.queueCursor(0);
+    this.moveFrame = requestAnimationFrame(() => {
+      this.moveFrame = null;
+      const queued = this.moveQueued;
+      this.moveQueued = null;
+      if (queued && !this.closed) this.queueMove(queued);
     });
+  }
+  flushMove() {
+    if (this.moveFrame !== null) cancelAnimationFrame(this.moveFrame);
+    this.moveFrame = null;
+    const queued = this.moveQueued;
+    this.moveQueued = null;
+    if (queued) this.sendContinuous(queued);
+  }
+  resetContinuousInput() {
+    if (this.moveFrame != null) cancelAnimationFrame(this.moveFrame);
+    if (this.wheelFrame != null) cancelAnimationFrame(this.wheelFrame);
+    this.moveFrame = this.wheelFrame = null;
+    this.moveQueued = this.wheelQueued = null;
   }
   static modifiers(e) {
     return (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0);
@@ -15068,6 +15121,7 @@ class BrowserView {
     const mouse = (kind, e) => {
       const p = this.point(e.clientX, e.clientY);
       if (!p) return;
+      this.flushMove(); // a pending drag position must precede button release
       this.send({ type: "mouse", kind, ...p, button: buttons[e.button] || "left",
         clickCount: Math.max(1, Math.min(3, e.detail || 1)),
         modifiers: BrowserView.modifiers(e) });
@@ -15079,7 +15133,7 @@ class BrowserView {
       mouse("down", e);
     });
     this.stage.addEventListener("mouseup", e => { if (!this.isDead()) mouse("up", e); });
-    /* rAF-collapsed pointer moves: only the newest position matters */
+    /* Immediate first movement, then only the newest position each frame. */
     this.stage.addEventListener("mousemove", e => {
       if (this.isDead()) return;
       const p = this.point(e.clientX, e.clientY);
@@ -15087,17 +15141,8 @@ class BrowserView {
       if (e.target === this.screen) {
         this.cursorPoint = p;
       } else this.resetCursor();
-      const idle = this.moveQueued === null;
-      this.moveQueued = { type: "mouse", kind: "move", ...p, button: "none",
-        clickCount: 0, modifiers: BrowserView.modifiers(e) };
-      if (idle) requestAnimationFrame(() => {
-        const queued = this.moveQueued;
-        this.moveQueued = null;
-        if (queued && !this.closed) {
-          this.sendContinuous(queued);
-          this.queueCursor(0);
-        }
-      });
+      this.queueMove({ type: "mouse", kind: "move", ...p, button: "none",
+        clickCount: 0, modifiers: BrowserView.modifiers(e) });
     });
     this.stage.addEventListener("mouseleave", () => {
       this.moveQueued = null;
@@ -15258,6 +15303,8 @@ class BrowserView {
     }
     this.waitingForBackend = false;
     const sequence = ++this.connectionSequence;
+    this.resetFrames();
+    this.resetContinuousInput();
     this.resetCursor();
     this.cursorSupported = false;
     if (!this.tab.browserId) { this.showDead("Browser ID is missing", false); return; }
@@ -15362,14 +15409,67 @@ class BrowserView {
   }
 
   showFrame(buffer) {
-    this.recordFrame();
-    const previous = this.frameUrl;
-    this.frameUrl = URL.createObjectURL(new Blob([buffer], { type: "image/jpeg" }));
-    this.screen.src = this.frameUrl;
-    this.screen.classList.add("live");
-    if (previous) URL.revokeObjectURL(previous);
-    this.terminalGone = false;
-    this.clearDead();
+    if (this.closed || !this.viewerActive) return;
+    // One image load and one newest waiting frame. Changing an <img>'s src on
+    // every arrival can postpone its decode/paint and discard useful frames.
+    this.pendingFrame = buffer;
+    if (!this.preparingFrame) this.presentFrames();
+  }
+
+  resetFrames() {
+    this.pendingFrame = null;
+    this.frameEpoch = (this.frameEpoch || 0) + 1;
+  }
+
+  async prepareFrame(buffer) {
+    const blob = new Blob([buffer], { type: "image/jpeg" });
+    // Keep the current image visible until its replacement has loaded.
+    // The loaded element retains its pixels after its object URL is revoked.
+    const url = URL.createObjectURL(blob), image = new Image();
+    try {
+      await new Promise((resolve, reject) => {
+        image.onload = resolve;
+        image.onerror = reject;
+        image.src = url;
+      });
+      return { image, release: () => URL.revokeObjectURL(url) };
+    } catch (error) {
+      URL.revokeObjectURL(url);
+      throw error;
+    }
+  }
+
+  async presentFrames() {
+    this.preparingFrame = true;
+    try {
+      while (this.pendingFrame !== null && this.viewerActive && !this.closed) {
+        const buffer = this.pendingFrame, epoch = this.frameEpoch;
+        this.pendingFrame = null;
+        let prepared = null;
+        try {
+          prepared = await this.prepareFrame(buffer);
+          if (epoch !== this.frameEpoch || !this.viewerActive || this.closed) continue;
+          const image = prepared.image;
+          image.className = this.screen.className;
+          image.style.cursor = this.screen.style.cursor;
+          image.draggable = false;
+          image.alt = "";
+          this.screen.replaceWith(image);
+          this.screen = image;
+          this.screen.classList.add("live");
+          this.recordFrame();
+          this.terminalGone = false;
+          this.clearDead();
+        } catch (error) {
+          // A corrupt frame must leave the last good picture and allow the
+          // next frame through, without an unhandled image-load rejection.
+        } finally {
+          if (prepared) prepared.release();
+        }
+      }
+    } finally {
+      this.preparingFrame = false;
+    }
   }
 
   /* Node broadcasts own loading; expire optimism if the status is lost. */
@@ -15407,6 +15507,8 @@ class BrowserView {
 
   showDead(message, ended = false) {
     this.resetFps();
+    this.resetFrames();
+    this.resetContinuousInput();
     this.resetCursor();
     if (ended) this.markGone(true);
     this.setLoading(false);
@@ -15490,6 +15592,8 @@ class BrowserView {
 
   destroy() {
     this.closed = true;
+    this.resetFrames();
+    this.resetContinuousInput();
     this.resetFps();
     this.stopMetadataScrolling();
     this.resetCursor();
@@ -15501,14 +15605,8 @@ class BrowserView {
       clearTimeout(this.viewportTimer);
       this.viewportTimer = null;
     }
-    if (this.wheelFrame !== null) {
-      cancelAnimationFrame(this.wheelFrame);
-      this.wheelFrame = null;
-      this.wheelQueued = null;
-    }
     if (this.ws) { try { this.ws.close(); } catch (e) {} }
     this.ws = null;
-    if (this.frameUrl) { URL.revokeObjectURL(this.frameUrl); this.frameUrl = null; }
     /* the link menu sits on <body>, so closing this view does not take it */
     for (const menu of document.querySelectorAll(".menu.dyn"))
       if (menu._ownerView === this.root) menu.remove();
@@ -19052,6 +19150,7 @@ class SettingsView {
         connections, local sessions and transcripts, uploads, scratch workspaces, tabs, and drafts.</p>
       <p class="snapshot-copy">Remote sessions remain on their registered backends. Ordinary project
         directories and engine sign-ins/native caches remain on their machines.</p>
+      <p class="snapshot-copy" id="snapshot-storage" role="status">Stored data: measuring…</p>
       <p class="snapshot-warning">The archive contains private credentials and API tokens.
         Only import a backup you trust, and store it securely.</p>
       <div class="snapshot-actions">
@@ -19063,6 +19162,13 @@ class SettingsView {
     const exportButton = c5.querySelector("#snapshot-export");
     const importButton = c5.querySelector("#snapshot-import");
     const fileInput = c5.querySelector("#snapshot-file");
+    const storageLine = c5.querySelector("#snapshot-storage");
+    api(0, "snapshot/storage").then(usage => {
+      storageLine.textContent = `Stored data: approximately ${fmtBytes(usage.bytes)} on this instance ` +
+        "(uncompressed, excluding remote data and caches).";
+    }).catch(() => {
+      storageLine.textContent = "Stored data: unavailable. Reopen Settings to try again.";
+    });
     exportButton.onclick = async () => {
       exportButton.disabled = true;
       importButton.disabled = true;

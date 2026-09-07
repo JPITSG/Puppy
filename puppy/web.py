@@ -1329,6 +1329,16 @@ def _snapshot_conflict(app: web.Application):
     return ""
 
 
+async def h_snapshot_storage(request: web.Request):
+    try:
+        usage = await asyncio.get_running_loop().run_in_executor(None, snapshots.storage_usage)
+        return web.json_response(usage, headers={"Cache-Control": "no-store"})
+    except (OSError, snapshots.SnapshotError):
+        log.warning("backup storage measurement failed", exc_info=True)
+        return web.json_response({"error": "Storage usage is unavailable"}, status=503,
+                                 headers={"Cache-Control": "no-store"})
+
+
 async def h_snapshot_export(request: web.Request):
     try:
         body = await request.json()
@@ -1925,6 +1935,7 @@ def build_app(runtime_web: dict = None,
                 "{token:[A-Za-z0-9_-]+}/ready", h_bind_handoff_ready)
     r.add_get(listener_handoff.HANDOFF_PREFIX +
               "{token:[A-Za-z0-9_-]+}", h_bind_handoff_claim)
+    r.add_get("/api/snapshot/storage", h_snapshot_storage)
     r.add_post("/api/snapshot/export", h_snapshot_export)
     r.add_get("/api/snapshot/download/{token:[A-Za-z0-9_-]+}", h_snapshot_download)
     r.add_post("/api/snapshot/import", h_snapshot_import)
