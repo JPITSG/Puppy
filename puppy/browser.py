@@ -46,7 +46,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from aiohttp import WSMsgType, web
 
-from puppy import browser_store, config, live_websockets
+from puppy import browser_cursor, browser_store, config, live_websockets
 
 log = logging.getLogger("puppy.browser")
 
@@ -692,6 +692,14 @@ class _Viewer:
         self.wake = asyncio.Event()
         self.closed = False
         self.task = asyncio.ensure_future(self._run())
+        self.cursor_task = None
+        self.cursor_request = None
+
+    def cancel_cursor(self) -> None:
+        self.cursor_request = None
+        if self.cursor_task is not None:
+            self.cursor_task.cancel()
+            self.cursor_task = None
 
     def send_json(self, payload: dict) -> None:
         if len(self.texts) < MAX_TEXT_BACKLOG:
@@ -724,6 +732,7 @@ class _Viewer:
             pass
 
     def close(self) -> bool:
+        self.cancel_cursor()
         dropped = self.frame is not None
         self.frame = None
         self.closed = True
@@ -853,6 +862,7 @@ class Manager:
         self.targets = {}            # targetId -> targetInfo
         self.page_target = ""
         self.page_session = ""
+        self.cursor_epoch = 0
         self.applied_color_scheme = None
         self.screencasting = False
         self.viewport_repair_task = None
@@ -1113,6 +1123,8 @@ class Manager:
 
     async def _teardown(self) -> None:
         self.running = False
+        for viewer in self.viewers.values():
+            viewer.cancel_cursor()
         self._cancel_idle()
         if self.viewport_repair_task is not None:
             self.viewport_repair_task.cancel()
@@ -1355,6 +1367,7 @@ class Manager:
                 self._set_loading(False)
             return
         if method == "Page.frameNavigated" and event_session == self.page_session:
+            self.cursor_epoch += 1
             frame = params.get("frame") or {}
             if frame.get("id") and not frame.get("parentId"):
                 self.main_frame = str(frame["id"])
@@ -1544,6 +1557,7 @@ class Manager:
                 return
             self.page_target = target_id
             self.page_session = session
+            self.cursor_epoch += 1
             self.applied_color_scheme = None
             self.agent_domain_session = ""
             self.agent_refs = {}
@@ -1907,7 +1921,8 @@ class Manager:
         viewer = _Viewer(ws, self._frame_forwarded)
         self.viewers[ws] = viewer
         _state_changed()
-        viewer.send_json({"type": "status", "running": True, **self.nav})
+        viewer.send_json({"type": "status", "running": True,
+                          "cursor_supported": True, **self.nav})
         viewer.send_json(_binding_payload(self))
         viewer.send_json({"type": "frame_meta", **self.frame_meta})
         try:
@@ -1924,6 +1939,8 @@ class Manager:
             viewer.frame = None
             self._record_frame_flow(dropped_inactive=1)
         viewer.active = bool(active)
+        if not viewer.active:
+            viewer.cancel_cursor()
         if viewer.active:
             try:
                 await self._start_screencast()
@@ -1954,6 +1971,8 @@ class Manager:
                 await self.set_viewer_active(viewer_ws, data["active"])
         elif kind == "mouse":
             self._dispatch_mouse(data)
+        elif kind == "cursor":
+            self._request_cursor(data, viewer_ws)
         elif kind == "wheel":
             self._dispatch_wheel(data)
         elif kind == "key":
@@ -2011,6 +2030,48 @@ class Manager:
         ny = min(1.0, max(0.0, float(data.get("ny") or 0.0)))
         return (round(nx * self.viewport["width"], 2),
                 round(ny * self.viewport["height"], 2))
+
+    def _request_cursor(self, data: dict, viewer_ws) -> None:
+        """Cursor reads never wait inside the input loop or fan out on moves."""
+        viewer = self.viewers.get(viewer_ws)
+        if viewer is None or not viewer.active or not self.page_session:
+            return
+        request_id = data.get("id")
+        if type(request_id) is not int or not 0 < request_id <= 2 ** 53 - 1:
+            return
+        if any(type(data.get(key)) not in (int, float) or
+               not math.isfinite(data[key]) or not 0 <= data[key] <= 1
+               for key in ("nx", "ny")):
+            return
+        viewer.cursor_request = (request_id, *self._point(data))
+        if viewer.cursor_task is not None:
+            return
+
+        async def probe():
+            try:
+                while viewer.cursor_request is not None and viewer.active and self.running:
+                    request = viewer.cursor_request
+                    request_id, x, y = request
+                    session = self.page_session
+                    epoch = self.cursor_epoch
+                    try:
+                        value = await asyncio.wait_for(browser_cursor.read_cursor(
+                            self.call, self._fire, session, x, y,
+                            "puppy-cursor-{}-{}".format(id(viewer), request_id)), 0.75)
+                    except (BrowserError, asyncio.TimeoutError, KeyError, TypeError, ValueError):
+                        value = "default"
+                    if viewer.cursor_request == request:
+                        viewer.cursor_request = None
+                        viewer.send_json({"type": "cursor", "id": request_id,
+                                          "value": value if session == self.page_session and
+                                          epoch == self.cursor_epoch else "default"})
+                    # Bound a noisy client as well as the normal viewer cadence.
+                    await asyncio.sleep(0.1)
+            finally:
+                if viewer.cursor_task is asyncio.current_task():
+                    viewer.cursor_task = None
+
+        viewer.cursor_task = asyncio.ensure_future(probe())
 
     @staticmethod
     def _modifiers(data: dict) -> int:

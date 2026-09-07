@@ -500,7 +500,24 @@ async def main() -> None:
         expect_snapshot_error(lambda: snapshots._validate_database(invalid_tasks_db), "not current")
         invalid_tasks_db.unlink()
         session_records = completed_records(db.node_uuid(), directory_id, scratch_id)
+        session_records.update({
+            "session_alias.A7K2": {"format": 1, "ref": db.node_uuid() + "/" + str(directory_id)},
+            # Retired and remote identities are reservations, too.
+            "session_alias.OLD1": {"format": 1, "ref": "e" * 32 + "/99999"},
+            "session_alias.ALL1": {"format": 1, "ref": "all"},
+        })
         db.meta_apply(session_records)
+        for value in ({"format": 0, "ref": "all"}, {"format": 1, "ref": "bad"},
+                      {"format": 1, "ref": "all", "extra": True}, {"format": 1, "ref": "all"}):
+            db.backup_to(str(invalid_tasks_db))
+            connection = sqlite3.connect(str(invalid_tasks_db))
+            connection.execute("INSERT INTO meta(key,value) VALUES(?,?)", ("session_alias.BAD1", json.dumps(value)))
+            connection.commit()
+            connection.close()
+            before = invalid_tasks_db.read_bytes()
+            expect_snapshot_error(lambda: snapshots._validate_database(invalid_tasks_db), "not current")
+            assert invalid_tasks_db.read_bytes() == before
+            invalid_tasks_db.unlink()
         direct_archive = snapshots.create_archive(ui)
         await session_tasks.set_enabled(linked_id, True)
         archive_path = Path(direct_archive["path"])

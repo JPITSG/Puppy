@@ -16,7 +16,7 @@ import uuid
 
 from aiohttp import web, WSMsgType, ClientTimeout
 
-from puppy import backends, config, db, runner, search
+from puppy import backends, config, db, runner, search, session_aliases
 
 log = logging.getLogger("puppy.session_links")
 CAPABILITY = "session-references"
@@ -95,16 +95,21 @@ def validate_scope(value):
     return value
 
 
-def prepare_turn(sid, turn_id, text):
+async def prepare_turn(sid, turn_id, text):
+    short = list(session_aliases.MENTION_RE.finditer(text or ""))
     matches = list(MENTION_RE.finditer(text or ""))
     key = "session_references.{}".format(sid)
     scope = load_record(key)
-    if matches:
+    if matches or short:
         controllers = {m[1].lower() for m in matches if m[1]}
         if len(controllers) > 1:
             raise SessionLinkError("reference sessions through one console at a time")
         if controllers:
             controller = next(iter(controllers))
+        elif short and (_app is None or _app.get("puppy_role") == "full"):
+            controller = db.node_uuid()
+        elif short and _app and _app.get("puppy_role") == "backend" and len(_relays) > 1:
+            raise SessionLinkError("several consoles are connected; short session IDs are ambiguous, use an explicit UUID reference")
         elif scope is not None:
             controller = validate_scope(scope)["controller"]
         elif _app and _app.get("puppy_role") == "backend" and _relays:
@@ -114,6 +119,20 @@ def prepare_turn(sid, turn_id, text):
         else:
             controller = db.node_uuid()
         refs = list(dict.fromkeys(m[2].lower() for m in matches))
+        if short:
+            codes = list(dict.fromkeys(m[2].upper() for m in short))
+            if controller == db.node_uuid():
+                refs.extend(session_aliases.resolve(codes))
+            else:
+                # Resolve on the selecting controller, never against this
+                # backend's independent namespace. No scope is persisted on failure.
+                resolved = await _controller_call(sid, turn_id, controller, "resolve",
+                    {"codes": codes}, {"format": 1, "controller": controller, "refs": ["all"]})
+                resolved = validate_scope(resolved)
+                if resolved["controller"] != controller:
+                    raise SessionLinkError("wrong reference controller")
+                refs.extend(resolved["refs"])
+        refs = list(dict.fromkeys(refs))
         scope = {"format": 1, "controller": controller,
                  "refs": ["all"] if "all" in refs else refs}
         validate_scope(scope)
@@ -294,7 +313,12 @@ async def _load_catalog():
                 continue
             seen.add(item["ref"])
             sessions.append(dict(item, bid=bid, node_name=name))
-    return {"controller": db.node_uuid(), "sessions": sessions, "unavailable": unavailable}
+    aliases = session_aliases.allocate(["all"] + [row["ref"] for row in sessions])
+    for row in sessions:
+        row["short_id"] = aliases[row["ref"]]
+        row["mention"] = session_aliases.mention(row["title"], row["short_id"])
+    return {"controller": db.node_uuid(), "sessions": sessions, "unavailable": unavailable,
+            "all_mention": session_aliases.mention("All", aliases["all"])}
 
 
 def invalidate_catalog(_sid=None):
@@ -326,6 +350,9 @@ async def broker(source, method, args, scope=None):
     """One controller's view of its fleet, also used by remote-origin calls."""
     if not isinstance(args, dict):
         raise SessionLinkError("tool arguments must be an object")
+    if method == "resolve":
+        return {"format": 1, "controller": db.node_uuid(),
+                "refs": session_aliases.resolve(args.get("codes"))}
     if method in ("send", "wait", "cancel", "requests"):
         from puppy import session_actions
         operation = session_actions.operate(source, method, args, scope)
@@ -343,7 +370,7 @@ async def broker(source, method, args, scope=None):
         offset = integer(args.get("offset", 0), "offset")
         limit = integer(args.get("limit", 100), "limit", 1, 200)
         rows = [s for s in available.values() if query in
-                (s["title"] + " " + s["cwd"] + " " + s["node_name"]).lower()]
+                (s["title"] + " " + s["cwd"] + " " + s["node_name"] + " " + s["mention"]).lower()]
         return {"controller": data["controller"], "sessions": rows[offset:offset + limit],
                 "total": len(rows), "next_offset": offset + limit if offset + limit < len(rows) else None,
                 "unavailable": data["unavailable"]}
@@ -385,6 +412,10 @@ async def broker(source, method, args, scope=None):
 async def dispatch(sid, turn_id, method, args):
     scope = _scopes.get((sid, turn_id))
     controller = (scope or {}).get("controller", db.node_uuid())
+    return await _controller_call(sid, turn_id, controller, method, args, scope)
+
+
+async def _controller_call(sid, turn_id, controller, method, args, scope):
     if controller == db.node_uuid():
         return await broker(reference(sid), method, args, scope)
     ws = _relays.get(controller)
@@ -412,7 +443,17 @@ async def h_node(request):
 
 
 async def h_catalog(request):
-    return web.json_response(await catalog(force=True))
+    try:
+        return web.json_response(await catalog(force=True))
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=409)
+
+
+async def h_resolve(request):
+    try:
+        return web.json_response({"refs": session_aliases.resolve([request.query.get("code", "")])})
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
 
 
 async def h_action(request):
@@ -521,6 +562,7 @@ async def _relay_worker():
 
 
 def validate_persisted(connection):
+    session_aliases.reservations(connection)
     for row in connection.execute("SELECT value FROM meta WHERE key GLOB 'session_references.*'"):
         validate_scope(json.loads(row[0]))
     from puppy import session_actions
@@ -575,6 +617,7 @@ async def _lifecycle(app):
 def register(app):
     app.router.add_post("/api/session-links/node", h_node)
     app.router.add_get("/api/session-links/catalog", h_catalog)
+    app.router.add_get("/api/session-links/resolve", h_resolve)
     app.router.add_post("/api/session-links/action", h_action)
     app.router.add_get("/api/ws/session-links", h_relay)
     app.cleanup_ctx.append(_lifecycle)

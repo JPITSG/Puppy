@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real console, two isolated browsers, and reproducible anonymous screenshots.
+"""Real console profiles, embedded browser input, and anonymous screenshots.
 
 Uses host Chromium through Puppy's debugging-pipe driver; no dependencies,
 engine turns, or external services. --screenshots refreshes assets/; --serve
@@ -23,7 +23,7 @@ ROOT = private_root("console-")
 os.environ["PUPPY_DATA"] = str(ROOT / "data")
 
 from aiohttp import web
-from puppy import auth, browser, config, db, runner, search, session_tasks
+from puppy import auth, browser, config, db, runner, search, session_tasks, session_aliases
 from puppy import web as webui
 from puppy.drivers import all_drivers
 
@@ -55,6 +55,7 @@ async def fixture():
                                   ("API cleanup", "claude", "atlas"),
                                   ("Weekend notes", "codex", "notes")]:
         db.create_session(name, engine, "/home/mira/projects/" + folder, "", "", "", "default")
+    db.meta_set(session_aliases.PREFIX + "A7K2", {"format": 1, "ref": db.node_uuid() + "/2"})
     db.bump_session_to_top(sid)
     # Real task rows keep the shared task-strip renderer in every preview.
     # Only their status is simulated; no engine or project operation runs.
@@ -69,7 +70,7 @@ async def fixture():
         runner.hub(tid).status = "running"
         db.touch_session(tid, status="running")
     events = [
-        ("user", {"text": "Make the dashboard easier to scan on a phone. Keep the activity feed and simplify the cards."}),
+        ("user", {"text": "Make the dashboard easier to scan on a phone. Keep the activity feed and simplify the cards. Use @Session-Release-checklist-A7K2 for context."}),
         ("assistant", {"text": "I’ll check the card layout and navigation first, then test the narrow-screen view."}),
         ("tool_use", {"tool_use_id": "demo-read", "tool": "Read", "input": {"file_path": "/home/mira/projects/harbor/src/dashboard.css"}}),
         ("tool_result", {"tool_use_id": "demo-read", "content": "Dashboard layout and shared card styles"}),
@@ -593,7 +594,116 @@ async def usage_error_checks(instance, capture=False):
     print('PASS: complete usage-refresh errors and long identifiers remain visible without overflow on desktop and phones in both themes',flush=True)
 
 
+async def pane_size_checks(instance, capture=False):
+    await instance.call("Emulation.setDeviceMetricsOverride", {
+        "width": 1440, "height": 900, "deviceScaleFactor": 1,
+        "mobile": False}, session=instance.page_session)
+    await evaluate(instance, """openSearchTab(null, 'dashboard');
+        splitTabIntoPane('search', workspacePaneForTab('s:0:1').id, 'right');
+        openSessionTab(0, 2, state.sessions.find(s=>s.id===2));
+        splitTabIntoPane('s:0:2', workspacePaneForTab('search').id, 'bottom'); true""")
+    await until(instance, "state.views['s:0:2'].activeView().draftReady")
+    await evaluate(instance, "new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))")
+
+    async def mouse(kind, x, y):
+        await instance.call("Input.dispatchMouseEvent", {
+            "type": kind, "x": x, "y": y, "button": "left",
+            "buttons": 0 if kind == "mouseReleased" else 1,
+            "clickCount": 1}, session=instance.page_session)
+
+    async def verify(count):
+        await until(instance, """(() => {
+            const badges=[...document.querySelectorAll('.pane-size-badge')];
+            return badges.length===%s && badges.every(b => {
+                const p=b.parentElement.getBoundingClientRect(), r=b.getBoundingClientRect();
+                const s=getComputedStyle(b);
+                return b.textContent===`${Math.round(p.width)} × ${Math.round(p.height)}` &&
+                    r.left===p.left && r.top===p.top && r.right<=p.right &&
+                    s.borderRadius==='0px' && s.pointerEvents==='none' &&
+                    s.backgroundColor.startsWith('rgba(') &&
+                    document.elementFromPoint(r.left+2,r.top+2)!==b;
+            });
+        })()""" % count)
+
+    try:
+        for theme in ("dark", "light"):
+            await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
+            for axis, count in (("row", 3), ("column", 2)):
+                point = await evaluate(instance, """(() => {
+                    window.sizeDivider=document.querySelector('.workspace-split.%s > .splitter');
+                    const r=sizeDivider.getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2};
+                })()""" % axis)
+                x, y = point["x"], point["y"]
+                await mouse("mousePressed", x, y)
+                await verify(count)
+                before = await evaluate(instance, "[...document.querySelectorAll('.pane-size-badge')].map(b=>b.textContent)")
+                x += 45 if axis == "row" else 0
+                y += 45 if axis == "column" else 0
+                await mouse("mouseMoved", x, y)
+                await verify(count)
+                after = await evaluate(instance, "[...document.querySelectorAll('.pane-size-badge')].map(b=>b.textContent)")
+                assert before != after, (axis, before, after)
+                if capture and axis == "row":
+                    shot = await instance.call("Page.captureScreenshot", {"format": "png"}, session=instance.page_session)
+                    (BASE / "data" / ("pane-size-" + theme + ".png")).write_bytes(base64.b64decode(shot["data"]))
+                await mouse("mouseReleased", x, y)
+                await verify(0)
+                # Cancellation, capture loss and leaving the window all clean up.
+                for event in ("pointercancel", "lostpointercapture", "blur"):
+                    await mouse("mousePressed", x, y)
+                    await verify(count)
+                    await evaluate(instance, """%s.dispatchEvent(new Event(%s)); true""" %
+                                   ("window" if event == "blur" else "sizeDivider", json.dumps(event)))
+                    await verify(0)
+                    await mouse("mouseReleased", x, y)
+                await evaluate(instance, "sizeDivider.dispatchEvent(new KeyboardEvent('keydown',{key:%s})); true" %
+                               json.dumps("ArrowLeft" if axis == "row" else "ArrowUp"))
+                await verify(count)
+                await until(instance, "!document.querySelector('.pane-size-badge')")
+                await evaluate(instance, "sizeDivider.dispatchEvent(new MouseEvent('dblclick')); true")
+                await verify(count)
+                await until(instance, "!document.querySelector('.pane-size-badge')")
+        await evaluate(instance, "sizeDivider.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowUp'})); closeTab('s:0:2'); true")
+        await verify(0)
+    finally:
+        await evaluate(instance, "closeTab('s:0:2'); closeTab('search'); applyTheme('dark'); delete window.sizeDivider; true")
+    print("PASS: pane dimensions track real nested horizontal/vertical resizing in both themes; release, cancellation, capture loss, blur, keyboard, reset and rebuild cleanup", flush=True)
+
+
+async def session_mention_checks(instance):
+    await evaluate(instance, "demoView.composer.set('', true); demoView.composer.ta.focus(); true")
+    await type_text(instance, "@Session-P")
+    await until(instance, "demoView.composer.mentionSession?.data?.sessions.length > 0")
+    found = await evaluate(instance, "demoView.composer.mention.items.filter(i=>i.kind==='session-select').map(i=>i.label)")
+    assert found == ["Phone navigation"], found
+    await type_text(instance, "ho")
+    found = await evaluate(instance, "demoView.composer.mention.items.filter(i=>i.kind==='session-select').map(i=>i.label)")
+    assert found == ["Phone navigation"], found
+    await evaluate(instance, """(() => {
+        const c=demoView.composer;
+        c.applyMention(c.mention.items.find(i=>i.kind==='session-select'));
+        c.applyMention(c.mention.items.find(i=>i.kind==='session-insert'));
+    })()""")
+    value = await evaluate(instance, "demoView.composer.ta.value")
+    import re
+    assert re.fullmatch(r"@Session-Phone-navigation-[A-Z0-9]{4} ", value), value
+    await evaluate(instance, "demoView.composer.set('', true); demoView.composer.hideMention(); true")
+    # Rendered links resolve the alias through the real HTTP endpoint.
+    await evaluate(instance, """(() => {
+        const node=document.createElement('div');
+        decorateMentionsInto(node,'@Session-Release-checklist-A7K2');
+        window.shortMentionTest=node.firstChild;
+    })()""")
+    assert await evaluate(instance, "shortMentionTest.getAttribute('role')") == "link"
+    await evaluate(instance, "shortMentionTest.onclick()")
+    await until(instance, "!!state.views['s:0:2']")
+    await evaluate(instance, "closeTab('s:0:2'); activateTab('s:0:1'); delete window.shortMentionTest; true")
+    print("PASS: typed session-name prefixes, short insertion and clickable transcript references", flush=True)
+
+
 async def checks(a, b, hub, capture=False):
+    await session_mention_checks(a)
+    await pane_size_checks(a, capture)
     await narrow_composer_checks(a, capture)
     await context_menu_checks(a, capture)
     await workspace_footer_checks(a, capture)
@@ -748,6 +858,70 @@ async def quota_checks(instance):
     print("PASS: real footer shares only matching accounts and retains the newest observation", flush=True)
 
 
+async def browser_cursor_checks(console):
+    """Actual CDP hit testing -> authenticated viewer socket -> image cursor."""
+    page = await browser.manager().create()
+    tab_id = ""
+    try:
+        await evaluate(console, "openBrowserTab(0, %s); true" % json.dumps(page.browser_id))
+        await until(console, "Object.values(state.views).some(v => v instanceof BrowserView && v.cursorSupported)")
+        await evaluate(console, "window.cursorView=Object.values(state.views).find(v => v instanceof BrowserView); true")
+        tab_id = await evaluate(console, "cursorView.tab.id")
+        await until(console, "cursorView.screen.classList.contains('live')")
+        html = """<!doctype html><style>
+          body {margin:0} .box {position:absolute;left:20px;width:180px;height:35px}
+          #link:hover {cursor:zoom-in}
+        </style>
+        <a class=box id=link style="top:20px" href="#">Link</a>
+        <input class=box style="top:70px" value="Text field">
+        <div class=box style="top:120px;cursor:ew-resize">Resize</div>
+        <div class=box id=dynamic style="top:170px;cursor:grab">Drag</div>
+        <div class=box style="top:220px;cursor:url(data:image/png;base64,AA==),crosshair">Image fallback</div>
+        <div class=box style="top:270px;cursor:none">Hidden cursor</div>
+        <div class=box id=shadow style="top:320px"></div>
+        <iframe class=box style="top:370px;border:0" srcdoc="<style>body{margin:0;cursor:help}</style>Frame"></iframe>
+        <div class=box style="top:420px">Selectable text</div>
+        <button class=box style="top:470px" disabled>Disabled</button>
+        <div class=box style="top:520px;cursor:default">Default</div>
+        <script>document.querySelector('#shadow').attachShadow({mode:'closed'}).innerHTML =
+          '<div style="height:35px;cursor:cell">Closed shadow root</div>';</script>"""
+        tree = await page.call("Page.getFrameTree", session=page.page_session)
+        await page.call("Page.setDocumentContent", {
+            "frameId": tree["frameTree"]["frame"]["id"], "html": html}, session=page.page_session)
+        await until(page, "document.querySelector('iframe').contentDocument.body?.textContent === 'Frame'")
+
+        async def hover(x, y, expected):
+            # Map viewport CSS pixels onto the actual streamed image, also
+            # exercising letterboxing and the input relay's normalized points.
+            point = await evaluate(console, """(() => {const r=cursorView.screen.getBoundingClientRect();
+                return {x:r.left+r.width*%s/%s, y:r.top+r.height*%s/%s};})()""" %
+                (x, page.viewport["width"], y, page.viewport["height"]))
+            await console.call("Input.dispatchMouseEvent", {"type":"mouseMoved", **point},
+                               session=console.page_session)
+            await until(console, "cursorView.screen.style.cursor === %s" % json.dumps(expected))
+
+        for y, expected in [(25, "zoom-in"), (80, "text"), (130, "ew-resize"),
+                            (180, "grab"), (230, "crosshair"), (280, "none"),
+                            (330, "cell"), (380, "help"), (425, "text"),
+                            (480, "default")]:
+            await hover(30, y, expected)
+        await hover(30, 180, "grab")
+        # No mouse movement or visual change: CSS cursor alone must refresh.
+        await evaluate(page, "document.querySelector('#dynamic').style.cursor='wait'; true")
+        await until(console, "cursorView.screen.style.cursor === 'wait'")
+        await hover(30, 25, "zoom-in")
+        await page.call("Page.navigate", {"url":"about:blank"}, session=page.page_session)
+        await until(console, "cursorView.screen.style.cursor === 'default'")
+        await console.call("Input.dispatchMouseEvent", {"type":"mouseMoved", "x":1,"y":1},
+                           session=console.page_session)
+        await until(console, "cursorView.cursorPoint === null && cursorView.cursorTimer === null && cursorView.screen.style.cursor === ''")
+        print("PASS: real embedded cursor hover CSS, inputs, resize, image fallback, none, closed shadow DOM, iframe, text, disabled controls, stationary changes, navigation and leave", flush=True)
+    finally:
+        if tab_id:
+            await evaluate(console, "closeTab(%s); true" % json.dumps(tab_id))
+        await browser.manager().close(page.browser_id, "Cursor test finished")
+
+
 async def main(args):
     instances = []
     server = None
@@ -764,16 +938,21 @@ async def main(args):
                 await asyncio.Event().wait()
                 return
             config.set_value("browser.enabled", True)
+            # Sweep the registry before launching the two standalone viewer
+            # profiles; they deliberately have no persistent catalog entries.
+            browser.manager()
             instances = [browser.Manager("TSTA"), browser.Manager("TSTB")]
             for instance in instances:
                 await open_console(instance, url, sid)
             await quota_checks(instances[0])
             await checks(*instances, runner.hub(sid), args.screenshots)
+            await browser_cursor_checks(instances[0])
             if args.screenshots:
                 await screenshots(instances[0])
     finally:
         for instance in instances:
             await instance.stop("test finished")
+        await browser.shutdown()
         if server:
             await server.cleanup()
         shutil.rmtree(ROOT)

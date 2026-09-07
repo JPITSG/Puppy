@@ -84,6 +84,7 @@ function harness(bid = 0, namespace = "") {
     between("const SLIDE_MOTION_MS =", "/* Sticky manual ordering"),
     between("function makeTabDragImage(", "function syncHorizontalOverflow("),
     between("function validTabReorder(", "function applySplitRatio("),
+    between("let finishPaneResize =", "function showTabAddMenu("),
     between("function renderTabs(", 'document.addEventListener("dragover", event =>'),
     between("const TASK_STATES =", "/* A removed task's condensed conversation"),
     between("class SessionWorkspaceView {", "async function modalNewTask("),

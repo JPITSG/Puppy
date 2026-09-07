@@ -2359,7 +2359,7 @@ function linkifyInto(node, text) {
    stops before its "to" task separator; that separator and the surrounding
    prose keep their ordinary rendering and linkification. */
 const MENTION_TOKEN_RE =
-  /(^|[\s([{'"])(@(?:Session (?:[a-f0-9]{32}:)?(?:all|[a-f0-9]{32}\/[1-9][0-9]*)|Browser [A-Z0-9]{4}|Terminal [A-Z0-9]{4}|New browser|New terminal|Spawn (?:an agent|[0-9]{1,2} agents)(?: on (?:"[^"\n]{1,80}"|\S+))? using \S+(?: \S+)?(?: at \S+ effort)?(?= to(?=$|[\s.,;:!?)\]}'"]))))(?=$|[\s.,;:!?)\]}'"])/g;
+  /(^|[\s([{'"])(@(?:Session-[\w\p{L}\p{N}-]+-[A-Z0-9]{4}|Session (?:[a-f0-9]{32}:)?(?:all|[a-f0-9]{32}\/[1-9][0-9]*)|Browser [A-Z0-9]{4}|Terminal [A-Z0-9]{4}|New browser|New terminal|Spawn (?:an agent|[0-9]{1,2} agents)(?: on (?:"[^"\n]{1,80}"|\S+))? using \S+(?: \S+)?(?: at \S+ effort)?(?= to(?=$|[\s.,;:!?)\]}'"]))))(?=$|[\s.,;:!?)\]}'"])/gu;
 function decorateMentionsInto(node, text) {
   text = String(text == null ? "" : text);
   MENTION_TOKEN_RE.lastIndex = 0;
@@ -2369,6 +2369,18 @@ function decorateMentionsInto(node, text) {
     if (start > last) linkifyInto(node, text.slice(last, start));
     const token = el("span", "mention-token", m[2]);
     const session = /^@Session (?:[a-f0-9]{32}:)?([a-f0-9]{32}\/[1-9][0-9]*|all)$/.exec(m[2]);
+    const short = /^@Session-[\w\p{L}\p{N}-]+-([A-Z0-9]{4})$/iu.exec(m[2]);
+    if (short) {
+      token.tabIndex = 0;
+      token.setAttribute("role", "link");
+      token.onclick = async () => {
+        try {
+          const data = await api(0, `session-links/resolve?code=${short[1].toUpperCase()}`);
+          if (data.refs[0] !== "all") await openSessionReference(data.refs[0]);
+        } catch (error) { toast(`${backendName(0)}: ${error.message}`, "bad", TOAST_LONG); }
+      };
+      token.onkeydown = e => { if (e.key === "Enter") token.click(); };
+    }
     if (session) {
       const target = session[1] === "all" ? null : state.sessions
         .concat(...Object.values(state.remoteSessions || {})).find(row => row.session_ref === session[1]);
@@ -7103,6 +7115,44 @@ function applySplitRatio(split, first, second, divider) {
   divider.setAttribute("aria-valuenow", String(Math.round(split.ratio * 100)));
 }
 
+let finishPaneResize = null;
+const PANE_SIZE_FEEDBACK_MS = 800;
+
+function showPaneSizes(root, onFinish = () => {}, brief = false) {
+  if (finishPaneResize) finishPaneResize();
+  // Observe leaf panes, including nested splits, so these are actual CSS pixel
+  // dimensions after layout/minimum sizes, not estimates from the split ratio.
+  const badges = Array.from(root.querySelectorAll(".workspace-pane"), pane => {
+    const badge = el("div", "pane-size-badge");
+    badge.setAttribute("aria-hidden", "true");
+    pane.appendChild(badge);
+    return { pane, badge };
+  });
+  const paint = () => {
+    for (const { pane, badge } of badges) {
+      const { width, height } = pane.getBoundingClientRect();
+      badge.textContent = `${Math.round(width)} × ${Math.round(height)}`;
+    }
+  };
+  const observer = new ResizeObserver(paint);
+  for (const { pane } of badges) observer.observe(pane);
+  paint();
+  let timer = null;
+  const finish = () => {
+    if (finishPaneResize !== finish) return;
+    finishPaneResize = null;
+    clearTimeout(timer);
+    observer.disconnect();
+    for (const { badge } of badges) badge.remove();
+    window.removeEventListener("blur", finish);
+    onFinish();
+  };
+  finishPaneResize = finish;
+  window.addEventListener("blur", finish);
+  if (brief) timer = setTimeout(finish, PANE_SIZE_FEEDBACK_MS);
+  return finish;
+}
+
 function wireSplitter(split, root, first, second, divider) {
   const setRatio = value => {
     split.ratio = Math.max(.1, Math.min(.9, value));
@@ -7112,8 +7162,6 @@ function wireSplitter(split, root, first, second, divider) {
     if (event.button !== 0) return;
     event.preventDefault();
     event.stopPropagation();
-    divider.classList.add("active");
-    divider.setPointerCapture(event.pointerId);
     const move = moveEvent => {
       const rect = root.getBoundingClientRect();
       const dividerSize = split.axis === "row" ? divider.offsetWidth : divider.offsetHeight;
@@ -7122,20 +7170,26 @@ function wireSplitter(split, root, first, second, divider) {
       const minimum = Math.min(.45, 80 / total);
       setRatio(Math.max(minimum, Math.min(1 - minimum, (point - dividerSize / 2) / total)));
     };
-    const finish = () => {
+    const finish = showPaneSizes(root, () => {
       divider.classList.remove("active");
       divider.removeEventListener("pointermove", move);
       divider.removeEventListener("pointerup", finish);
       divider.removeEventListener("pointercancel", finish);
+      divider.removeEventListener("lostpointercapture", finish);
+      if (divider.hasPointerCapture(event.pointerId)) divider.releasePointerCapture(event.pointerId);
       saveTabs();
       window.dispatchEvent(new Event("resize"));
-    };
+    });
+    divider.classList.add("active");
+    divider.setPointerCapture(event.pointerId);
     divider.addEventListener("pointermove", move);
     divider.addEventListener("pointerup", finish);
     divider.addEventListener("pointercancel", finish);
+    divider.addEventListener("lostpointercapture", finish);
   });
   divider.addEventListener("dblclick", () => {
     setRatio(.5); saveTabs(); window.dispatchEvent(new Event("resize"));
+    showPaneSizes(root, undefined, true);
   });
   divider.addEventListener("keydown", event => {
     const decrease = split.axis === "row" ? event.key === "ArrowLeft" : event.key === "ArrowUp";
@@ -7144,6 +7198,7 @@ function wireSplitter(split, root, first, second, divider) {
     event.preventDefault();
     setRatio(split.ratio + (increase ? 1 : -1) * (event.shiftKey ? .1 : .02));
     saveTabs(); window.dispatchEvent(new Event("resize"));
+    showPaneSizes(root, undefined, true);
   });
   applySplitRatio(split, first, second, divider);
 }
@@ -7273,6 +7328,7 @@ function renderTabs(focusTabId = null) {
     return;
   }
   const tree = $("workspace-tree");
+  if (finishPaneResize) finishPaneResize();
   const hint = $("empty-hint");
   hint.remove();
   /* Detaching a node discards its scroll offset outright - unlike display:none,
@@ -7971,7 +8027,7 @@ function composerMentionContext(value, selStart, selEnd) {
   if (selStart !== selEnd) return null;
   const text = String(value == null ? "" : value);
   const caret = Math.max(0, Math.min(text.length, Number(selStart) || 0));
-  const from = Math.max(0, caret - MENTION_QUERY_MAX - 1);
+  const from = Math.max(0, caret - 100);
   for (let i = caret - 1; i >= from; i--) {
     const ch = text[i];
     if (ch === "\n") return null;
@@ -7979,6 +8035,11 @@ function composerMentionContext(value, selStart, selEnd) {
     const before = i > 0 ? text[i - 1] : "";
     if (before && !/[\s([{'"]/.test(before)) return null;   // user@host, a@b.c
     const query = text.slice(i + 1, caret);
+    if (/^session-/i.test(query)) {
+      if (!/^session-[\w\p{L}\p{N}-]*$/iu.test(query)) return null;
+      return { start: i, query };
+    }
+    if (query.length > MENTION_QUERY_MAX) return null;
     if (query.startsWith(" ")) return null;
     if (query.split(" ").length > 2) return null;
     return { start: i, query };
@@ -8704,12 +8765,6 @@ class Composer {
   updateMention() {
     let ctx = composerMentionContext(
       this.ta.value, this.ta.selectionStart, this.ta.selectionEnd);
-    if (this.mentionSession && this.mention && this.ta.selectionStart === this.ta.selectionEnd) {
-      const start = this.mention.start;
-      const query = this.ta.value.slice(start + 1, this.ta.selectionStart);
-      if (this.ta.value[start] === "@" && this.ta.selectionStart > start &&
-          !query.includes("\n") && query.length <= 400) ctx = {start, query};
-    }
     if (!ctx) {
       this.mentionDismissedAt = -1;   // left the token; dismissal is spent
       this.hideMention();
@@ -8721,6 +8776,21 @@ class Composer {
     if (this.history) { this.hideMention(); return; }
     if (this.mentionDismissedAt === ctx.start) { this.hideMention(); return; }
     this.mentionDismissedAt = -1;
+    if (this.mentionSession && !/^session(?:-|$)/i.test(ctx.query)) this.mentionSession = null;
+    const sessionData = this.mentionSession && this.mentionSession.data;
+    if (sessionData && [sessionData.all_mention, ...sessionData.sessions.map(row => row.mention)]
+        .some(mention => mention.toLowerCase() === "@" + ctx.query.toLowerCase())) {
+      // A fully typed reference is complete: Enter sends, as with Browser/Terminal.
+      this.hideMention();
+      this.mentionDismissedAt = ctx.start;
+      return;
+    }
+    if (!this.mentionSession && !this.mentionSpawn && /^session(?:-|$)/i.test(ctx.query) &&
+        this.mentionCandidates().some(item => item.kind === "session-picker")) {
+      this.mention = {start: ctx.start, query: ctx.query, items: [], sel: 0};
+      this.beginSessionMention(true);
+      return;
+    }
     let items;
     if (this.mentionSession) {
       items = this.sessionMentionItems(ctx.query);
@@ -8739,7 +8809,7 @@ class Composer {
     if (!items.length) { this.hideMention(); return; }
     const previous = this.mention && this.mention.items[this.mention.sel];
     const kept = previous ? items.findIndex(item =>
-      item.kind === previous.kind && item.label === previous.label) : -1;
+      item.kind === previous.kind && item.label === previous.label && item.ref === previous.ref) : -1;
     this.mention = { start: ctx.start, query: ctx.query, items, sel: kept >= 0 ? kept : 0 };
     this.renderMention();
     if (!this.mentionSpawn && !this.mentionSession) this.refreshMentionInstances();
@@ -8788,6 +8858,8 @@ class Composer {
       if (item.kind === "spawn-back" || item.kind === "spawn-step") {
         ico.classList.add("mention-chev", item.kind === "spawn-back" ? "left" : "right");
         ico.appendChild(choiceSvg("arrow"));
+      } else if (item.kind === "session-select" && this.mentionSession.selected.has(item.ref)) {
+        ico.appendChild(choiceSvg("check"));
       } else if (item.kind === "spawn-retry") {
         ico.appendChild(refreshIcon(11));
       } else if (item.kind !== "spawn-wait") {
@@ -8848,7 +8920,8 @@ class Composer {
       const wizard = this.mentionSession;
       const refs = item.kind === "session-all" ? ["all"] : [...wizard.selected];
       this.mentionSession = null;
-      this.applyMention({insert: refs.map(ref => `@Session ${wizard.data.controller}:${ref}`).join(" ")});
+      this.applyMention({insert: refs.map(ref => ref === "all" ? wizard.data.all_mention :
+        wizard.data.sessions.find(row => row.ref === ref).mention).join(" ")});
       return;
     }
     if (item.kind === "new-spawn") { this.spawnMentionBegin(); return; }
@@ -8896,7 +8969,7 @@ class Composer {
       push("browser", `Browser ${inst.id}`, hintFor(inst.session_id), `@Browser ${inst.id}`);
     for (const inst of this.knownMentionInstances("terminal", withTerminal))
       push("terminal", `Terminal ${inst.id}`, hintFor(inst.session_id), `@Terminal ${inst.id}`);
-    if (!bid || backendHasCapability(backend, "session-references"))
+    if (!bid || backendHasCapability(backend, "session-short-references"))
       items.push({kind: "session-picker", label: "Session", hint: "reference one, several, or all",
         search: "session sessions", insert: ""});
     if (withBrowser) push("new-browser", "New browser", "another isolated browser", "@New browser");
@@ -8913,10 +8986,16 @@ class Composer {
      never has to be remembered. Single-choice parts are skipped, typing
      filters the current part, and Escape/Backspace slide back. */
 
-  async beginSessionMention() {
+  async beginSessionMention(keepQuery = false) {
     const wizard = {selected: new Set(), data: null, error: ""};
     this.mentionSession = wizard;
-    this.spawnResetQuery();
+    if (!keepQuery) {
+      const start = this.mention.start, end = this.ta.selectionStart;
+      this.ta.value = this.ta.value.slice(0, start) + "@Session-" + this.ta.value.slice(end);
+      this.ta.setSelectionRange(start + 9, start + 9);
+      this.ta.focus();
+      this.ta.dispatchEvent(new Event("input", {bubbles: true}));
+    } else this.updateMention();
     try { wizard.data = await api(0, "session-links/catalog"); }
     catch (error) { wizard.error = error.message; }
     if (this.mentionSession === wizard) this.updateMention();
@@ -8930,15 +9009,18 @@ class Composer {
     else if (!wizard.data) add("session-wait", "Loading sessions…");
     else {
       if (wizard.selected.size) add("session-insert", `Insert ${wizard.selected.size} selected`);
-      const q = query.toLowerCase();
-      if (!q || "all sessions".includes(q))
+      const q = query.replace(/^session-?/i, "").normalize("NFKC").toLowerCase();
+      if (!q || "all".startsWith(q))
         add("session-all", "All sessions", "includes archived sessions across nodes");
       for (const row of wizard.data.sessions) {
         if (row.bid === (this.host.bid || 0) && row.id === this.host.sid) continue;
-        if (q && !`${row.title} ${row.node_name} ${row.cwd}`.toLowerCase().includes(q)) continue;
-        add("session-select", `${wizard.selected.has(row.ref) ? "✓ " : ""}${row.title}`,
-          `${row.node_name} · ${row.archived ? "archived" : row.status} · ${row.cwd}`, row.ref);
+        const name = row.mention.slice(9, -5).toLowerCase();
+        if (q && !name.startsWith(q)) continue;
+        add("session-select", row.title,
+          `${row.node_name} · ${row.short_id} · ${row.archived ? "archived" : row.status} · ${row.cwd}`, row.ref);
       }
+      if (q && !items.some(item => item.kind === "session-select" || item.kind === "session-all"))
+        add("session-wait", "No matching sessions");
       for (const row of wizard.data.unavailable || [])
         add("session-wait", `${row.node}: unavailable`, row.error);
     }
@@ -14522,10 +14604,17 @@ class BrowserView {
     this.frameW = 1280;
     this.frameH = 800;
     this.frameUrl = null;
+    this.fpsTimer = null;
+    this.fpsFrames = 0;
     this.urlFocused = false;
     this.lastUrl = "";
     this.loadingTimer = null;
     this.moveQueued = null;
+    this.cursorSupported = false;
+    this.cursorPoint = null;
+    this.cursorPending = null;
+    this.cursorSerial = 0;
+    this.cursorTimer = null;
     this.wheelQueued = null;
     this.wheelFrame = null;
     this.lastViewport = "";
@@ -14577,6 +14666,9 @@ class BrowserView {
           <span class="br-owner-text">Checking session link…</span>
           <span class="br-owner-arrow hidden"></span>
         </button>
+        <span class="br-stats" title="Stream width × height in pixels · frames received per second, updated once a second">
+          <span class="br-size">— × —</span><span aria-hidden="true">·</span><span class="br-fps">— FPS</span>
+        </span>
       </div>
       <div class="br-type hidden">
         <input class="br-ime" type="text" autocomplete="off" autocapitalize="none"
@@ -14601,6 +14693,8 @@ class BrowserView {
     this.urlInput = this.root.querySelector(".br-url");
     this.kbdBtn = this.root.querySelector(".br-kbd");
     this.meta = this.root.querySelector(".br-meta");
+    this.fpsText = this.root.querySelector(".br-fps");
+    this.sizeText = this.root.querySelector(".br-size");
     this.idText = this.root.querySelector(".br-id");
     this.copyIdBtn = wireCopyButton(this.root.querySelector(".br-copy-id"),
       () => String(this.tab.browserId || "").toUpperCase(), "Copy Browser ID");
@@ -14635,6 +14729,7 @@ class BrowserView {
     const active = this.visible && document.visibilityState !== "hidden";
     if (this.viewerActive === active) return;
     this.viewerActive = active;
+    this.resetFps();
     this.send({ type: "viewer_active", active });
     if (active) {
       this.queueViewport();
@@ -14642,9 +14737,57 @@ class BrowserView {
         this.clearReconnect();
         this.scheduleReconnect(0);
       }
-    } else this.clearReconnect();
+    } else {
+      this.clearReconnect();
+      this.resetCursor();
+    }
   }
   isDead() { return !!this.root.querySelector(".br-dead"); }
+
+  resetCursor(clearPoint = true) {
+    if (this.cursorTimer != null) clearTimeout(this.cursorTimer);
+    this.cursorTimer = null;
+    this.cursorPending = null;
+    if (clearPoint) this.cursorPoint = null;
+    if (this.screen) this.screen.style.cursor = "";
+  }
+
+  queueCursor(delay = 120) {
+    if (!this.cursorPoint || !this.cursorSupported || !this.viewerActive || this.closed ||
+        this.cursorPending || this.cursorTimer !== null) return;
+    this.cursorTimer = setTimeout(() => {
+      this.cursorTimer = null;
+      if (!this.cursorPoint || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+      if (this.ws.bufferedAmount > 256 * 1024) { this.queueCursor(); return; }
+      const request = { type: "cursor", id: ++this.cursorSerial, ...this.cursorPoint };
+      this.cursorPending = request;
+      this.send(request);
+      this.cursorTimer = setTimeout(() => {
+        this.resetCursor(false);
+        this.queueCursor();
+      }, 1200);
+    }, delay);
+  }
+
+  receiveCursor(data) {
+    const pending = this.cursorPending, point = this.cursorPoint;
+    if (!pending || data.id !== pending.id) return;
+    clearTimeout(this.cursorTimer);
+    this.cursorTimer = null;
+    this.cursorPending = null;
+    if (point && point.nx === pending.nx && point.ny === pending.ny) {
+      /* Only keywords cross into console CSS. Never load a site's cursor URL
+         with the viewer's own network access or credentials. */
+      const keywords = "default none context-menu help pointer progress wait cell crosshair text " +
+        "vertical-text alias copy move no-drop not-allowed grab grabbing all-scroll col-resize " +
+        "row-resize n-resize e-resize s-resize w-resize ne-resize nw-resize se-resize sw-resize " +
+        "ew-resize ns-resize nesw-resize nwse-resize zoom-in zoom-out";
+      this.screen.style.cursor = keywords.split(" ").includes(data.value) ? data.value : "default";
+    }
+    // Refresh even a stationary pointer: scrolling and page scripts can change
+    // the hit target/style without any new mousemove or screencast frame.
+    this.queueCursor();
+  }
 
   applyBinding(payload) {
     const sessionId = Number(payload && payload.session_id) || null;
@@ -14948,14 +15091,24 @@ class BrowserView {
       if (this.isDead()) return;
       const p = this.point(e.clientX, e.clientY);
       if (!p) return;
+      if (e.target === this.screen) {
+        this.cursorPoint = p;
+      } else this.resetCursor();
       const idle = this.moveQueued === null;
       this.moveQueued = { type: "mouse", kind: "move", ...p, button: "none",
         clickCount: 0, modifiers: BrowserView.modifiers(e) };
       if (idle) requestAnimationFrame(() => {
         const queued = this.moveQueued;
         this.moveQueued = null;
-        if (queued && !this.closed) this.sendContinuous(queued);
+        if (queued && !this.closed) {
+          this.sendContinuous(queued);
+          this.queueCursor(0);
+        }
       });
+    });
+    this.stage.addEventListener("mouseleave", () => {
+      this.moveQueued = null;
+      this.resetCursor();
     });
     this.stage.addEventListener("contextmenu", e => e.preventDefault());
     this.stage.addEventListener("wheel", e => {
@@ -15112,6 +15265,8 @@ class BrowserView {
     }
     this.waitingForBackend = false;
     const sequence = ++this.connectionSequence;
+    this.resetCursor();
+    this.cursorSupported = false;
     if (!this.tab.browserId) { this.showDead("Browser ID is missing", false); return; }
     const path = `ws/browser/${encodeURIComponent(this.tab.browserId)}`;
     const ws = new WebSocket(wsUrl(this.tab.bid, path));
@@ -15139,6 +15294,8 @@ class BrowserView {
       let d = null;
       try { d = JSON.parse(ev.data); } catch (error) { return; }
       if (d.type === "status") {
+        if (d.cursor_supported === true) this.cursorSupported = true;
+        this.queueCursor();
         this.terminalGone = false;
         this.lastUrl = d.url || "";
         if (!this.urlFocused)
@@ -15149,8 +15306,11 @@ class BrowserView {
       } else if (d.type === "frame_meta") {
         this.frameW = Number(d.width) || this.frameW;
         this.frameH = Number(d.height) || this.frameH;
+        this.sizeText.textContent = `${this.frameW} × ${this.frameH}`;
       } else if (d.type === "binding") {
         this.applyBinding(d);
+      } else if (d.type === "cursor") {
+        this.receiveCursor(d);
       } else if (d.type === "dialog") {
         toast(`Page ${d.kind || "dialog"} ${d.action}: ${d.message || ""}`.trim(),
           "info", TOAST_LONG);
@@ -15185,7 +15345,31 @@ class BrowserView {
     ws.onerror = () => { try { ws.close(); } catch (e) {} };
   }
 
+  resetFps() {
+    if (this.fpsTimer !== null) clearInterval(this.fpsTimer);
+    this.fpsTimer = null;
+    this.fpsFrames = 0;
+    this.fpsText.textContent = "— FPS";
+  }
+
+  recordFrame() {
+    if (this.closed || !this.viewerActive) return;
+    if (this.fpsTimer === null) {
+      this.fpsSince = performance.now();
+      this.fpsTimer = setInterval(() => {
+        const now = performance.now();
+        const elapsed = now - this.fpsSince;
+        if (elapsed <= 0) return;
+        this.fpsText.textContent = `${(this.fpsFrames * 1000 / elapsed).toFixed(1)} FPS`;
+        this.fpsFrames = 0;
+        this.fpsSince = now;
+      }, 1000);
+    }
+    this.fpsFrames++;
+  }
+
   showFrame(buffer) {
+    this.recordFrame();
     const previous = this.frameUrl;
     this.frameUrl = URL.createObjectURL(new Blob([buffer], { type: "image/jpeg" }));
     this.screen.src = this.frameUrl;
@@ -15197,6 +15381,10 @@ class BrowserView {
 
   /* Node broadcasts own loading; expire optimism if the status is lost. */
   setLoading(on) {
+    if (on) {
+      this.resetCursor(false);
+      this.queueCursor();
+    }
     if (this.loadingTimer !== null) {
       clearTimeout(this.loadingTimer);
       this.loadingTimer = null;
@@ -15225,6 +15413,8 @@ class BrowserView {
   }
 
   showDead(message, ended = false) {
+    this.resetFps();
+    this.resetCursor();
     if (ended) this.markGone(true);
     this.setLoading(false);
     let dead = this.root.querySelector(".br-dead");
@@ -15307,6 +15497,8 @@ class BrowserView {
 
   destroy() {
     this.closed = true;
+    this.resetFps();
+    this.resetCursor();
     this.connectionSequence++;
     this.clearReconnect();
     document.removeEventListener("visibilitychange", this.visibilityHandler);

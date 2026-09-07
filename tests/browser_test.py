@@ -2187,6 +2187,7 @@ const activitySent=[];
 let viewportQueues=0,reconnectRequests=0;
 const activity=Object.assign(Object.create(BrowserView.prototype),{
   visible:true,viewerActive:null,closed:false,terminalGone:false,ws:null,
+  resetFps(){},
   send:value=>activitySent.push(value),
   queueViewport:()=>{viewportQueues++;},
   scheduleReconnect:delay=>{reconnectRequests++;activity.reconnectRequested=delay;},
@@ -2709,7 +2710,10 @@ def check_browser_handoff_ui(ui_source: str, css_source: str) -> None:
     assert view.index('class="br-bar"') < view.index('class="br-meta"') < \
         view.index('class="br-stage"')
     assert 'aria-label="Copy Browser ID"' in view
-    assert ' title=' not in view and ".title =" not in view and "data-tip" not in view
+    # The stream statistics have help; the session-link pill is self-labelled.
+    owner_start = view.index('class="br-owner"')
+    owner = view[owner_start:view.index('</button>', owner_start)]
+    assert ' title=' not in owner and ".title =" not in view and "data-tip" not in view
     # one pill, four state pieces: glyph, session dot, text, picker chevron
     assert 'aria-haspopup="menu"' in view
     assert 'class="sess-dot br-owner-dot hidden"' in view
@@ -2745,7 +2749,7 @@ def check_browser_handoff_ui(ui_source: str, css_source: str) -> None:
     assert ".br-type{display:flex;align-items:center;gap:6px;flex:0 0 auto;" \
         "padding:2px 8px 4px}" in css_source
     assert ".br-stage{\n  flex:1;min-height:0;margin:2px 8px 8px;" in css_source
-    assert ".br-copy-id{width:27px;height:27px;" in css_source
+    assert ".br-ident .br-copy-id{width:27px;height:100%;" in css_source
     assert ".br-owner-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}" \
         in css_source
     # pill twin of .br-ident; the strip stays one row on every viewport
@@ -3157,15 +3161,14 @@ def check_active_turn_steering_ui(ui_source: str, css_source: str) -> None:
             'appendChild(steerActionIcon());') in ui_source
     assert ('this.queueBtn.querySelector(".composer-action-icon").' +
             'appendChild(queueActionIcon());') in ui_source
-    assert ".composer-action-icon{display:none;align-items:center;justify-content:center}" \
-        in css_source
+    assert ".composer-action-icon{display:var(--live-action-icon,none);align-items:center;justify-content:center}" in css_source
     assert ".composer-action-icon svg{display:block}" in css_source
-    assert ("display:inline-flex;width:34px;min-width:34px;height:34px;" +
-            "padding:0;gap:0;") in css_source
-    assert (".btn-queue .composer-action-label,.btn-steer .composer-action-label,\n" +
-            "  .btn-ask .composer-action-label{display:none}") in css_source
-    assert (".btn-queue .composer-action-icon,.btn-steer .composer-action-icon,\n" +
-            "  .btn-ask .composer-action-icon{display:flex}") in css_source
+    assert ".composer-action-label{display:var(--live-action-label,inline)}" in css_source
+    assert "@container composer (max-width:480px)" in css_source
+    assert "--live-action-width:32px;--live-action-padding:0;" in css_source
+    assert "--live-action-width:34px;--live-action-padding:0;" in css_source
+    assert "--live-action-label:none;--live-action-icon:flex;" in css_source
+    assert ".btn-queue,.btn-steer,.btn-ask{height:34px;gap:0}" in css_source
 
     start = ui_source.index("\n  async steer()") + 1
     brace = ui_source.index("{", start)
@@ -3311,7 +3314,7 @@ def check_side_question_ui(ui_source: str, css_source: str) -> None:
     assert "this.askBtn.onclick = () => this.ask();" in ui_source
     assert ".btn-ask{" in css_source
     assert ".btn-queue,.btn-steer,.btn-ask{" in css_source
-    assert ".btn-ask .composer-action-icon{display:flex}" in css_source
+    assert "--live-action-label:none;--live-action-icon:flex;" in css_source
 
     # one sync point: the two live turn-input controls answer to the same
     # conditions, so steering's updater drives this one too
@@ -4852,13 +4855,13 @@ console.log(JSON.stringify({
     assert result["spawnRow"] == ["New spawn"], result
     assert result["none"] == [], result
     assert result["directiveFull"] == \
-        "@Spawn an agent on build-node.lan using codex gpt-5.6-sol at max effort to", result
+        "@Spawn an agent on build-node.lan using codex gpt-5.6-sol at max effort", result
     assert result["directiveQuoted"] == \
-        '@Spawn an agent on "Build node west" using codex at low effort to', result
+        '@Spawn an agent on "Build node west" using codex at low effort', result
     assert result["directiveLocal"] == \
-        "@Spawn an agent using claude haiku to", result
+        "@Spawn an agent using claude haiku", result
     assert result["directiveFleet"] == \
-        "@Spawn 10 agents on build-node.lan using codex to", result
+        "@Spawn 10 agents on build-node.lan using codex", result
     assert result["effortsShared"] == ["", "low", "max"], result
     assert result["effortsOwn"] == ["", "high"], result
 
@@ -4897,7 +4900,7 @@ console.log(JSON.stringify({
     # The sent-message token regex recognises every spawn directive variant,
     # but leaves its final " to" task separator as ordinary prose.
     re_start = ui_source.index("const MENTION_TOKEN_RE")
-    re_source = ui_source[re_start:ui_source.index("/g;", re_start) + 3]
+    re_source = ui_source[re_start:ui_source.index("\nfunction decorateMentionsInto", re_start)]
     token_script = r"""
 %s
 const token = text => {
@@ -4912,6 +4915,10 @@ console.log(JSON.stringify({
   modelOnly: token("@Spawn an agent using claude haiku to summarize"),
   fleet: token("@Spawn 10 agents on build-node.lan using codex to hunt bugs"),
   browser: token("see @Browser AB12 now"),
+  session: token("see @Session-Project-plan-A7K2 now"),
+  unicodeSession: token("@Session-Żółć-東京-A7K2"),
+  longCode: token("@Session-Project-ABCDE"),
+  partialSession: token("@Session-P"),
   prose: token("we will spawn an agent later"),
   incomplete: token("@Spawn an agent using to nothing"),
 }));
@@ -4929,6 +4936,9 @@ console.log(JSON.stringify({
     assert tokens["fleet"] == \
         "@Spawn 10 agents on build-node.lan using codex", tokens
     assert tokens["browser"] == "@Browser AB12", tokens
+    assert tokens["session"] == "@Session-Project-plan-A7K2", tokens
+    assert tokens["unicodeSession"] == "@Session-Żółć-東京-A7K2", tokens
+    assert tokens["longCode"] is None and tokens["partialSession"] is None, tokens
     assert tokens["prose"] is None, tokens
     assert tokens["incomplete"] is None, tokens
 
@@ -5076,21 +5086,21 @@ async function run(){
   streamed.type("@");
   out.streamedBackspace=streamed.labels();
   const controller="b".repeat(32), peer="a".repeat(32);
-  apiResult={controller,unavailable:[],sessions:[
-    {bid:0,id:9,ref:controller+"/9",title:"Origin",node_name:"local",cwd:"/project",status:"idle"},
-    {bid:0,id:10,ref:controller+"/10",title:"API decisions",node_name:"local",cwd:"/project",status:"idle"},
-    {bid:2,id:11,ref:peer+"/11",title:"Frontend layout notes",node_name:"NAS",cwd:"/ui",archived:true}
+  apiResult={controller,all_mention:"@Session-All-ALL1",unavailable:[],sessions:[
+    {bid:0,id:9,ref:controller+"/9",title:"Origin",short_id:"ORI1",mention:"@Session-Origin-ORI1",node_name:"local",cwd:"/project",status:"idle"},
+    {bid:0,id:10,ref:controller+"/10",title:"API decisions",short_id:"API1",mention:"@Session-API-decisions-API1",node_name:"local",cwd:"/project",status:"idle"},
+    {bid:2,id:11,ref:peer+"/11",title:"Frontend layout notes",short_id:"FRN1",mention:"@Session-Frontend-layout-notes-FRN1",node_name:"NAS",cwd:"/ui",archived:true}
   ]};
   const selected=new View(0);
-  selected.type("@session"); selected.pick("Session");
+  selected.type("@Session-");
   await Promise.resolve();await Promise.resolve();
   out.sessionChoices=selected.labels();
-  selected.type("@api"); out.sessionFiltered=selected.labels();
+  selected.type("@Session-api"); out.sessionFiltered=selected.labels();
   selected.pick("API decisions");
-  selected.type("@Frontend layout notes"); selected.pick("Frontend layout notes");
+  selected.type("@Session-Frontend-layout-notes"); selected.pick("Frontend layout notes");
   selected.pick("Insert 2 selected");
   out.sessionsInserted=selected.ta.value;
-  selected.type("@session");selected.pick("Session");
+  selected.type("@Session-");
   await Promise.resolve();await Promise.resolve();
   selected.pick("All sessions");out.allSessionsInserted=selected.ta.value;
   console.log(JSON.stringify(out));
@@ -5113,7 +5123,7 @@ run().catch(e=>{console.error(e&&e.stack||e);process.exit(1);});
     assert flow["modelStep"] == [["Default", "GPT-5.6 Sol", "Back"], "model"], flow
     assert flow["effortStep"] == [["Default", "Max", "Back"], "effort"], flow
     assert flow["inserted"] == [
-        "@Spawn 3 agents on build-node.lan using codex gpt-5.6-sol at max effort to ",
+        "@Spawn 3 agents on build-node.lan using codex gpt-5.6-sol at max effort ",
         None, None], flow
     assert flow["backToNode"] == "node", flow
     assert flow["backToCount"] == "count", flow
@@ -5121,14 +5131,14 @@ run().catch(e=>{console.error(e&&e.stack||e);process.exit(1);});
     assert flow["remoteFlat"] == ["New spawn"], flow
     assert flow["remoteCount"] == "count", flow
     assert flow["remoteEngine"] == [["Solo", "Back"], "engine"], flow
-    assert flow["remoteInserted"] == ["@Spawn an agent using solo to ", None], flow
+    assert flow["remoteInserted"] == ["@Spawn an agent using solo ", None], flow
     assert flow["streamedOpen"] == ["Session", "New terminal", "New spawn"], flow
     assert flow["streamedBackspace"] == ["Session", "New terminal", "New spawn"], flow
 
     assert flow["sessionChoices"] == ["All sessions", "API decisions", "Frontend layout notes", "Back"], flow
     assert flow["sessionFiltered"] == ["API decisions", "Back"], flow
-    assert flow["sessionsInserted"] == "@Session {}:{}/10 @Session {}:{}/11 ".format("b"*32, "b"*32, "b"*32, "a"*32), flow
-    assert flow["allSessionsInserted"] == "@Session {}:all ".format("b"*32), flow
+    assert flow["sessionsInserted"] == "@Session-API-decisions-API1 @Session-Frontend-layout-notes-FRN1 ", flow
+    assert flow["allSessionsInserted"] == "@Session-All-ALL1 ", flow
 
     # The "New spawn" wizard: capability-gated row, parts slide instead of
     # inserting, Escape/Backspace go back, and only the finished directive

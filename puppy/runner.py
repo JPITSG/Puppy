@@ -2901,7 +2901,7 @@ class SessionHub:
             terminal_mcp = None if tool else terminal_agent.turn_mcp(self.id, pinned)
             spawn_mcp = None if tool else spawn_agent.turn_mcp(self.id, pinned)
             if not tool:
-                session_links.prepare_turn(self.id, pinned, text)
+                await session_links.prepare_turn(self.id, pinned, text)
                 from puppy import session_actions
                 session_actions.turn_started(self.id, text, pinned, user_seq)
             session_mcp = None if tool else session_agent.turn_mcp(self.id, pinned)

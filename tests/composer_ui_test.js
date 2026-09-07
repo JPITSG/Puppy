@@ -23,6 +23,7 @@ let reviewDialog;
 let blobs = 0;
 let controlHold = null;
 let historyRead = null;
+let sessionCatalog = null;
 let storedEvents = [];
 const promptEvent = (seq, text) => ({ seq, kind: "user", data: { text } });
 function historyPage(route) {
@@ -48,6 +49,7 @@ const context = vm.createContext({
   fetch: (url, init) => new Promise(resolve => calls.fetch.push({ url, init, resolve })),
   api: async (bid, route, options = {}) => {
     calls.api.push({ bid, route, ...options });
+    if (route === "session-links/catalog") return await sessionCatalog;
     if (/\/events\?/.test(route))
       return historyRead ? historyRead(bid, route, options) : historyPage(route);
     if (controlHold && /\/(ask|steer)$/.test(route)) await controlHold;
@@ -87,6 +89,7 @@ const context = vm.createContext({
 });
 vm.runInContext([
   between("const el = ", "/* Close buttons"),
+  between("const MENTION_TOKEN_RE", "function decorateMentionsInto"),
   between("const CARET_MIRROR_STYLES", "/* ctrl+j ->"),
   between("const MENTION_QUERY_MAX", "/* ================= Composer ================="),
   between("/* ================= Composer =================", "/* ================= SessionView ================="),
@@ -419,6 +422,75 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
   assert.equal(m.composer.mention, null, "a refreshed catalog drops instances that are gone");
   type(m.ta, "@ef");
   assert.deepEqual(Array.from(m.composer.mention.items.map(item => item.label)), ["Browser EF56"]);
+
+  for (const text of ["@Session-Project-plan-A7K2", "@Session-Żółć-東京-A7K2"]) {
+    context.mentionSample = text;
+    assert.equal(vm.runInContext("MENTION_TOKEN_RE.lastIndex=0; MENTION_TOKEN_RE.exec(mentionSample)[2]", context), text);
+  }
+  for (const text of ["@Session-P", "@Session-Project-ABCDE"]) {
+    context.mentionSample = text;
+    assert.equal(vm.runInContext("MENTION_TOKEN_RE.lastIndex=0; MENTION_TOKEN_RE.exec(mentionSample)", context), null);
+  }
+
+  /* Session typing opens the same picker in both composer hosts. A name
+     prefix never matches a backend/folder or a word in the middle of a name. */
+  const catalog = {controller: "a".repeat(32), all_mention: "@Session-All-ALL1", sessions: [
+    {ref: "self", id: 10, bid: 0, title: "Private origin", mention: "@Session-Private-origin-SELF", short_id: "SELF"},
+    {ref: "p1", id: 11, bid: 0, title: "Project plan", mention: "@Session-Project-plan-A7K2", short_id: "A7K2", node_name: "Studio", cwd: "/work", status: "idle"},
+    {ref: "p2", id: 11, bid: 2, title: "Project plan", mention: "@Session-Project-plan-9QMX", short_id: "9QMX", node_name: "NAS", cwd: "/work", status: "idle", archived: true},
+    {ref: "p3", id: 12, bid: 0, title: "Phone layout", mention: "@Session-Phone-layout-PH01", short_id: "PH01", node_name: "Studio", cwd: "/work", status: "idle"},
+    {ref: "other", id: 13, bid: 0, title: "Fix project", mention: "@Session-Fix-project-FIX1", short_id: "FIX1", node_name: "Project", cwd: "/Project", status: "idle"},
+  ], unavailable: [{node: "Offline", error: "unreachable"}]};
+  sessionCatalog = catalog;
+  for (const host of [{}, {promptHistory: false, selfHint: "Main"}]) {
+    const box = makeBox(host);
+    type(box.ta, "Compare @Session-P");
+    await settle();
+    const refs = () => Array.from(box.composer.mention.items.filter(i => i.kind === "session-select").map(i => i.ref));
+    assert.deepEqual(refs(), ["p1", "p2", "p3"]);
+    assert.ok(box.composer.mention.items.some(i => i.label === "Offline: unavailable"));
+    type(box.ta, "Compare @Session-pRoj");
+    assert.deepEqual(refs(), ["p1", "p2"]);
+    key(box.ta, "Enter"); // select the first duplicate
+    assert.equal(box.composer.mentionSession.selected.has("p1"), true);
+    box.composer.selectMention(box.composer.mention.items.findIndex(i => i.ref === "p2"));
+    key(box.ta, "Enter");
+    assert.equal(box.composer.mention.items[box.composer.mention.sel].ref, "p2",
+      "duplicate titles preserve the selected identity while toggling");
+    box.composer.applyMention(box.composer.mention.items.find(i => i.kind === "session-insert"));
+    assert.equal(box.ta.value, "Compare @Session-Project-plan-A7K2 @Session-Project-plan-9QMX ");
+    assert.equal(box.composer.mention, null);
+    assert.equal(box.events.submit, 0);
+    type(box.ta, "@Session-Z"); await settle();
+    assert.deepEqual(refs(), []);
+    assert.ok(box.composer.mention.items.some(i => i.label === "No matching sessions"));
+    type(box.ta, "@Session-Pho");
+    assert.deepEqual(refs(), ["p3"], "backspacing from no results keeps the wizard alive");
+    key(box.ta, "Escape");
+    box.composer.updateMention();
+    assert.equal(box.composer.mention, null, "Escape dismisses this token");
+    type(box.ta, ""); type(box.ta, "@Session-All"); await settle();
+    box.composer.applyMention(box.composer.mention.items.find(i => i.kind === "session-all"));
+    assert.equal(box.ta.value, "@Session-All-ALL1 ");
+    type(box.ta, "@Session-Project-plan-A7K2"); await settle();
+    assert.equal(box.composer.mention, null, "a fully typed mention lets Enter send");
+    key(box.ta, "Enter");
+    assert.equal(box.events.submit, 1);
+    type(box.ta, "@Session-P"); await settle();
+    type(box.ta, "@Sess");
+    assert.equal(box.composer.mentionSession, null, "backspacing the prefix restores the flat picker");
+    box.composer.destroy();
+  }
+  const delayed = makeBox();
+  let deliverCatalog;
+  sessionCatalog = new Promise(resolve => { deliverCatalog = resolve; });
+  type(delayed.ta, "@Session-P");
+  assert.equal(delayed.composer.mention.items[0].label, "Loading sessions…");
+  type(delayed.ta, "@Session-Pho");
+  deliverCatalog(catalog); await settle();
+  assert.equal(delayed.composer.mention.items[0].ref, "p3", "late results use the latest typed prefix");
+  delayed.composer.destroy();
+  sessionCatalog = catalog;
 
   /* paste -> upload -> chip -> marker line */
   type(b.ta, "A task");

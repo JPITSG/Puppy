@@ -22,8 +22,11 @@ REQUEST_TIMEOUT = 45.0
 TOOL_INSTRUCTIONS = (
     "Puppy session tools reference other conversations using stable node/session ids. "
     "Use them when the user references sessions, including @Session mentions. "
-    "A mention is @Session <controller UUID>:<node UUID>/<session number>, or "
-    "@Session <controller UUID>:all. Pass only the node UUID/session number as refs. "
+    "A mention is @Session-NAME-XXXX, where XXXX is a permanent four-character "
+    "alphanumeric ID allocated by the selecting controller; NAME is only a label. "
+    "Mentions are resolved before the turn; omitted refs reuse that selection. "
+    "Use sessions to discover each mention's short_id and stable ref, and pass "
+    "only the returned node UUID/session number as refs. Older UUID mentions also work. "
     "The selected sessions are your reference boundary; omitted refs reuse that selection. "
     "sessions discovers titles, folders, nodes and ids. search finds relevant excerpts; "
     "Search pages across sessions with session_offset and within matches with offset. "

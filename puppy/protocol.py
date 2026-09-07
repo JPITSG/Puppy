@@ -24,6 +24,8 @@ BROWSER_CAPABILITY = "browser"
 # Independent four-character browser instances, create/delete routes, and
 # the ID-scoped screencast/input WebSocket.
 BROWSER_INSTANCES_CAPABILITY = "browser-instances"
+# Per-viewer, correlated CSS cursor hints over the identified browser socket.
+BROWSER_CURSOR_CAPABILITY = "browser-cursor"
 # Assign one identified browser to a chat, expose its binding to viewers,
 # and change it through the authenticated instance API.
 BROWSER_HANDOFF_CAPABILITY = "browser-handoff"
@@ -181,6 +183,7 @@ BASE_CAPABILITIES = (
     # PATCH controls whether Main's turns are told about folded tasks.
     "session-task-fold",
     SESSION_REFERENCES_CAPABILITY,
+    "session-short-references",
     "session-communication",
     "session-coordination",
     "sessions",
@@ -213,6 +216,7 @@ BASE_CAPABILITIES = (
     ENGINE_UPGRADE_CAPABILITY,
     BROWSER_CAPABILITY,
     BROWSER_INSTANCES_CAPABILITY,
+    BROWSER_CURSOR_CAPABILITY,
     BROWSER_HANDOFF_CAPABILITY,
     BROWSER_FILE_WORKFLOWS_CAPABILITY,
     BROWSER_SHARED_STORAGE_CAPABILITY,

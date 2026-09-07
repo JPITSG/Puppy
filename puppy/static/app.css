@@ -66,6 +66,7 @@
   --tab-drag-bg:#151a24;
   --split-preview-bg:rgba(48,128,224,.38);
   --split-preview-line:rgba(132,197,255,.96);
+  --pane-size-bg:rgba(16,19,26,.78);
   /* one elevated material for select popups, context menus and tab menus */
   --float-menu-bg:var(--panel); --float-menu-hover:var(--acc-dim);
   --float-menu-shadow:0 18px 42px -14px rgba(0,0,0,.78),inset 0 1px 0 var(--btn-top);
@@ -575,6 +576,14 @@ select.choice-native{display:none!important}
 .workspace-node{min-width:0;min-height:0;overflow:hidden}
 .workspace-pane{
   display:flex;flex-direction:column;position:relative;background:transparent;
+}
+.pane-size-badge{
+  position:absolute;top:0;left:0;z-index:var(--z-float);pointer-events:none;
+  padding:5px 8px;border:1px solid var(--acc-line-soft);border-top:0;border-left:0;
+  border-radius:0;background:var(--pane-size-bg);color:var(--txt);
+  backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+  font-size:var(--fs-sm);font-weight:600;font-variant-numeric:tabular-nums;
+  line-height:1.4;white-space:nowrap;user-select:none;
 }
 .workspace-split{display:flex;min-width:0;min-height:0;overflow:hidden}
 .workspace-split.row{flex-direction:row}
@@ -1691,6 +1700,13 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   display:flex;align-items:center;flex-shrink:0;height:28px;min-width:0;padding-left:9px;
   border:1px solid var(--line);border-radius:var(--r-md);background:var(--panel2);
 }
+.browser .br-meta{flex-wrap:wrap}
+.br-stats{
+  display:flex;align-items:center;gap:6px;flex:0 0 auto;height:28px;padding:0 9px;
+  border:1px solid var(--line);border-radius:var(--r-md);background:var(--panel2);
+  color:var(--txt3);white-space:nowrap;font-variant-numeric:tabular-nums;
+}
+.br-fps{min-width:7ch;text-align:right}
 .br-ident-label{color:var(--txt3);margin-right:6px}
 .br-id{font:600 var(--fs-xs)/1 var(--mono);letter-spacing:.08em;color:var(--txt)}
 .br-ident .br-copy-id{width:27px;height:100%;margin-left:3px;border:0;border-left:1px solid var(--line);
@@ -1698,8 +1714,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 /* The one linking control: a pill twin of .br-ident carrying the linked
    session's own dot and name (or the invitation to link), with a chevron
    promising the session picker. Sized like the ident pill so the strip reads
-   as one family and stays a single row on every viewport - phones spend no
-   extra row on it, which the stage gets back. */
+   as one family. Browser statistics may wrap below on narrow panes. */
 .br-owner{
   display:flex;align-items:center;gap:8px;height:28px;min-width:0;max-width:440px;
   padding:0 8px 0 9px;border:1px solid var(--line);border-radius:var(--r-md);
@@ -2695,6 +2710,7 @@ html.light{
   --tab-active-bg:rgba(15,23,42,.075);
   --tab-active-focus-bg:rgba(59,130,224,.17);
   --tab-drag-bg:#ffffff;
+  --pane-size-bg:rgba(250,252,255,.80);
   --spin-track:rgba(15,23,42,.2);
   --ok-hi:#22d69f; --ok-lo:#0a9b6e; --ok-ink:#03251b;
   --glow-ok:0 2px 8px -5px rgba(10,155,110,.38);

@@ -19,7 +19,7 @@ from tests.scratch import private_root
 ROOT = private_root("session-links-")
 os.environ["PUPPY_DATA"] = str(ROOT / "data")
 from puppy import config, db, runner, search, session_agent, session_links as links
-from puppy import session_actions as actions, session_coordination as coordination
+from puppy import session_actions as actions, session_coordination as coordination, session_aliases as aliases
 
 
 def session(name):
@@ -44,7 +44,7 @@ async def references():
     db.add_event(b, "tool_result", {"content": long})
     search.reconcile()
     ref = links.reference(b)
-    links.prepare_turn(a, "turn", "@Session {}:{} compare this".format(db.node_uuid(), ref))
+    await links.prepare_turn(a, "turn", "@Session {}:{} compare this".format(db.node_uuid(), ref))
     got = await links.dispatch(a, "turn", "search", {"query": "expiry"})
     assert got["selected"] == 1, got
     assert got["results"][0]["results"][0]["sid"] == b
@@ -61,9 +61,9 @@ async def references():
     db.touch_session(b, name="Renamed")
     assert (await links.dispatch(a, "turn", "read", {"refs": [ref]}))["results"][0]["session"]["title"] == "Renamed"
     links.end_turn(a, "turn")
-    links.prepare_turn(a, "later", "What about that decision?")
+    await links.prepare_turn(a, "later", "What about that decision?")
     assert links._scopes[(a, "later")]["refs"] == [ref]
-    links.prepare_turn(a, "all", "@session all find expiry")
+    await links.prepare_turn(a, "all", "@session all find expiry")
     got = await links.dispatch(a, "all", "search", {"query": "expiry"})
     assert got["selected"] == 2 and got["results"][0]["searched"] == 2
     paged = await links.dispatch(a, "all", "search", {"query": "expiry", "session_limit": 1})
@@ -76,6 +76,79 @@ async def references():
     await rejected(session_agent._dispatch({"session_id": a, "turn_id": "ended", "method": "read", "params": {}}), "no longer running")
     print("references, scope, pagination, archived, rename and ownership OK")
     return a, b, c
+
+
+async def short_references():
+    a, b, c = [session(name) for name in ("Short origin", "Project plan", "Project plan")]
+    rb, rc = links.reference(b), links.reference(c)
+    with patch.object(aliases, "_random_code", side_effect=["A7K2", "A7K2", "9QMX"]):
+        codes = aliases.allocate([rb, rc])
+    assert codes == {rb: "A7K2", rc: "9QMX"}
+    # Concurrent callers reserve the same identity once, including other nodes.
+    peer_ref = "e" * 32 + "/9"
+    results = await asyncio.gather(*(asyncio.to_thread(aliases.allocate, [peer_ref]) for _ in range(8)))
+    assert all(result == results[0] for result in results)
+    assert results[0][peer_ref] not in codes.values()
+    data = await links.catalog(force=True)
+    row = next(row for row in data["sessions"] if row["ref"] == rb)
+    assert row["mention"] == "@Session-Project-plan-A7K2"
+    await links.prepare_turn(a, "short", row["mention"].lower())
+    assert links._scopes[(a, "short")]["refs"] == [rb]
+    db.touch_session(b, name="Renamed project")
+    await links.prepare_turn(a, "rename", row["mention"])
+    assert links._scopes[(a, "rename")]["refs"] == [rb]
+    assert aliases.allocate([rb])[rb] == "A7K2"
+    await links.prepare_turn(a, "several", row["mention"] + " @Session-Whatever-9QMX")
+    assert links._scopes[(a, "several")]["refs"] == [rb, rc]
+    await rejected(links.prepare_turn(a, "unknown", "@Session-Missing-ZZZZ"), "unknown session ID")
+    assert (a, "unknown") not in links._scopes
+    assert links.load_record("session_references." + str(a))["refs"] == [rb, rc]
+    await links.prepare_turn(a, "short-all", data["all_mention"])
+    assert links._scopes[(a, "short-all")]["refs"] == ["all"]
+    assert aliases.mention(" Żółć / 東京 & plan ", "A7K2") == "@Session-Żółć-東京-plan-A7K2"
+    assert aliases.mention("***", "A7K2") == "@Session-Session-A7K2"
+    # A restart reads the same durable allocation; deletion never frees its code.
+    db.delete_session(b)
+    assert aliases.resolve(["a7k2"]) == [rb]
+    with patch.object(aliases, "_random_code", return_value="A7K2"):
+        assert aliases.allocate(["d" * 32 + "/1"])["d" * 32 + "/1"] != "A7K2"
+    with patch.object(aliases, "CAPACITY", len(aliases.reservations(db.connect()))):
+        try:
+            aliases.allocate(["d" * 32 + "/2"])
+        except ValueError as exc:
+            assert "reserved" in str(exc)
+        else:
+            raise AssertionError("exhaustion must fail")
+    # A backend resolves aliases on its controller through the authenticated relay.
+    remote_origin = session("Remote origin")
+    controller = "f" * 32
+    class Relay:
+        closed = False
+        async def send_json(self, message):
+            assert message["method"] == "resolve" and message["params"] == {"codes": ["A7K2"]}
+            assert message["sid"] == remote_origin and message["turn_id"] == "relayed"
+            links._pending[message["id"]][1].set_result({"format": 1, "controller": controller, "refs": [peer_ref]})
+    with patch.object(links, "_app", {"puppy_role": "backend"}), patch.dict(links._relays, {controller: Relay()}, clear=True):
+        await links.prepare_turn(remote_origin, "relayed", "@Session-Project-A7K2")
+    assert links._scopes[(remote_origin, "relayed")] == {"format": 1, "controller": controller, "refs": [peer_ref]}
+    other_origin = session("Ambiguous origin")
+    with patch.object(links, "_app", {"puppy_role": "backend"}), patch.dict(links._relays, {controller: Relay(), "c" * 32: Relay()}, clear=True):
+        await rejected(links.prepare_turn(other_origin, "ambiguous", "@Session-Project-A7K2"), "several consoles")
+        await rejected(links.prepare_turn(remote_origin, "ambiguous-again", "@Session-Project-A7K2"), "several consoles")
+    # Invalid persisted rows are rejected without repair, including duplicate refs.
+    bad_key = aliases.PREFIX + "ZZZZ"
+    for raw in ('{}', '{"format":true,"ref":"all"}', json.dumps({"format": 1, "ref": rb})):
+        db.execute("INSERT INTO meta(key,value) VALUES(?,?)", (bad_key, raw))
+        try:
+            links.validate_persisted(db.connect())
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid registry accepted")
+        assert db.query_one("SELECT value FROM meta WHERE key=?", (bad_key,))["value"] == raw
+        db.execute("DELETE FROM meta WHERE key=?", (bad_key,))
+    links.validate_persisted(db.connect())
+    print("short IDs: collision/concurrency, names, rename, deletion, exhaustion, relay and exact persistence OK")
 
 
 class ControlledSession:
@@ -302,6 +375,7 @@ async def fleet_and_drivers():
 async def main():
     config.ensure_dirs()
     await references()
+    await short_references()
     await communication()
     await workflows()
     await fleet_and_drivers()

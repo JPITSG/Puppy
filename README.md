@@ -243,8 +243,15 @@ persistence contract are in [docs/session-tasks.md](docs/session-tasks.md).
   type in one screen. Ordinary shell work still uses the engine's own tools.
 - **Managed browsers.** Enable Browser on a backend that has Chromium and Puppy
   runs isolated headless instances, each with a four-character ID and its own
-  profile. You get a live view in a tab with an address bar, back, forward and
-  reload, and full mouse and keyboard input. The agent gets a high-level
+  profile. You get a live view in a tab with an address bar, back and reload
+  controls, and full mouse and keyboard input. The pointer follows the page's
+  standard CSS cursor on a best-effort basis, including links, text fields and
+  resize cursors. It refreshes while hovering even if the mouse is still;
+  custom cursor images use their declared keyword fallback. Cross-process
+  frames, native widgets and drag feedback may differ from a local browser;
+  unavailable lookups fall back to the default pointer. A pill beside the session link
+  shows stream width × height in pixels and frames received by your viewer per
+  second (FPS); a static page can read zero. The agent gets a high-level
   toolset for the same browser: navigate, snapshot the accessibility tree,
   click, type, hover, press, scroll, select, check, screenshot, switch pages,
   read console messages and network failures, upload one of the session's own
@@ -265,8 +272,19 @@ persistence contract are in [docs/session-tasks.md](docs/session-tasks.md).
   their inactivity timer only on real progress, and use the executing backend's
   timeout settings unless a limit is explicitly supplied. Defaults are ten
   minutes without progress and two hours total; either can be set to unlimited.
-- **Session references.** `@session` selects one, several or all sessions,
-  including archived ones. The agent can then read their transcripts, search
+- **Session references.** Type `@Session-` to select one, several or all
+  sessions, including archived ones. The picker follows your typing:
+  `@Session-P` lists names starting with P (case-insensitive). It inserts
+  readable links such as `@Session-Project-plan-A7K2`; spaces and punctuation
+  in names become hyphens. Each four-character uppercase letter/digit ID is
+  permanently reserved by the controller across its backends, survives renames
+  and restarts, and stays reserved after deletion. The name is only a label;
+  the ID determines the target. All sessions has its own `@Session-All-XXXX`
+  link. IDs are unique within one controller, not across independent controllers.
+  Remote execution requires the backend's `session-short-references` capability.
+  A backend connected to several controllers requires an explicit UUID reference
+  to avoid ambiguous short IDs; older UUID mentions still work. Alias reservations are included in backups.
+  The agent can then read their transcripts, search
   their histories with exact-message links, and, when you ask, send them a
   question, a task, a steering instruction or a stop.
 - **Coordination.** Ask for a plan and the agent can build a finite workflow of
@@ -294,7 +312,10 @@ history around it.
 
 - **Tabs and splits.** Sessions, terminals, browsers and search open as tabs;
   drag a tab to the edge of a pane to split the workspace. Tab layout is
-  remembered per browser.
+  remembered per browser. While dragging a divider, each affected pane shows
+  its live width × height in CSS pixels in a translucent, square-cornered badge
+  attached to its top-left edge. Arrow-key resizing and double-clicking a
+  divider to reset it also show the dimensions briefly.
 - **Status at a glance.** Every session row shows a spinner and a running clock
   while its agent works, the backend it runs on when idle, and task activity or
   a waiting approval. The footer lists every backend with its Puppy version
@@ -477,6 +498,8 @@ python3 tests/spawn_test.py          # spawned agents against a stub engine
 python3 tests/mcp_startup_test.py     # source/zipapp MCP startup with filtered environments
 python3 tests/workspace_sync_test.py # remote workspace sync and conflicts
 python3 tests/browser_test.py        # managed browsers against a stub Chromium
+python3 tests/browser_cursor_test.py # bounded, private cursor reads and input latency
+node tests/browser_cursor_ui_test.js # cursor refresh, stale replies and viewer lifecycle
 python3 tests/cli_upgrade_test.py    # engine CLI updates against a stub updater
 python3 tests/session_links_test.py  # session references, requests, workflows
 ```

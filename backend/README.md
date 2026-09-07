@@ -424,6 +424,17 @@ but receive no frames, and Chromium's screencast pauses when no viewer is
 active. Reactivation starts the stream and sends an explicit fresh frame. A
 newly attached viewer defaults to active.
 
+The additive `browser-cursor` capability supplies best-effort standard CSS
+cursor hints. The initial viewer status includes `cursor_supported: true`;
+only then does the console send `{type:"cursor", id, nx, ny}` on that socket
+(positive safe integer id, normalized coordinates). Replies are
+`{type:"cursor", id, value}` to the requesting viewer only. Reads are bounded,
+coalesced per viewer, and never block input; inactive/disconnected viewers
+cancel their reads. The console refreshes only while hovering, rejects stale
+replies, and accepts only standard cursor keywords. Custom images use their
+keyword fallback; cross-process frames, native widgets and drag feedback are
+best effort. This is transient state, with no configuration or snapshot change.
+
 Each entry in the Browser status `instances` array includes ephemeral
 `frame_flow` counters and rates for screencast frames received, screenshots
 captured, frames actually written to viewers, and drops caused by a stale
