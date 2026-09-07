@@ -2097,7 +2097,7 @@ def check_responsive_drawer_chrome(css_source: str) -> None:
 def check_browser_viewport(ui_source: str) -> None:
     """Run the real BrowserView sizing methods without constructing its DOM."""
     start = ui_source.index("class BrowserView {")
-    end = ui_source.index("/* ================= SettingsView", start)
+    end = ui_source.index("\n/* ================= ", start)
     browser_view = ui_source[start:end]
     script = r"""
 const WebSocket={OPEN:1};
@@ -2142,7 +2142,7 @@ console.log(JSON.stringify({sent,cleared,timers:timers.size,delay:queued.delay})
 def check_browser_transport_controls(ui_source: str) -> None:
     """Exercise wheel collapse, viewer activity, and reconnect backoff."""
     start = ui_source.index("class BrowserView {")
-    end = ui_source.index("/* ================= SettingsView", start)
+    end = ui_source.index("\n/* ================= ", start)
     browser_view = ui_source[start:end]
     script = r"""
 const sockets=[];
@@ -2710,7 +2710,7 @@ def check_browser_handoff_ui(ui_source: str, css_source: str) -> None:
     pill names the linked session (dot + name) and opens a session picker, so
     nothing depends on which chat happens to be selected elsewhere."""
     start = ui_source.index("class BrowserView {")
-    end = ui_source.index("/* ================= SettingsView", start)
+    end = ui_source.index("\n/* ================= ", start)
     view = ui_source[start:end]
     assert view.index('class="br-bar"') < view.index('class="br-meta edge-scroll-viewport"') < \
         view.index('class="br-stage"')
@@ -5613,7 +5613,7 @@ def check_browser_loading_ui(ui_source: str, css_source: str) -> None:
     """The bar acknowledges a navigation instantly, node statuses own the
     loading flag, and a transient error is a toast, not the dead overlay."""
     start = ui_source.index("class BrowserView {")
-    end = ui_source.index("/* ================= SettingsView", start)
+    end = ui_source.index("\n/* ================= ", start)
     view_source = ui_source[start:end]
     assert "this.setLoading(d.loading === true);" in view_source
     assert 'this.send({ type: "navigate", url: target });' in view_source

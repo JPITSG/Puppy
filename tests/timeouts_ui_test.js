@@ -23,8 +23,8 @@ const context = vm.createContext({ document, state, console, Number, Map, Set, P
 });
 vm.runInContext(between("const TIMEOUT_FIELDS =", "function normalizeTimerSettings"), context);
 vm.runInContext(`class View { ${between("  timeoutSettingsCard(", "  timerSettingsCard(")} }; this.View = View;`, context);
-const keys = ["turn_seconds", "spawn_runtime_seconds", "spawn_idle_seconds", "terminal_idle_seconds", "browser_idle_seconds"];
-const defaults = Object.fromEntries(keys.map((key, index) => [key, [7200, 7200, 600, 900, 900][index]]));
+const keys = ["turn_seconds", "spawn_runtime_seconds", "spawn_idle_seconds", "terminal_idle_seconds", "browser_idle_seconds", "vnc_idle_seconds"];
+const defaults = Object.fromEntries(keys.map((key, index) => [key, [7200, 7200, 600, 900, 900, 900][index]]));
 const payload = (values = defaults) => ({ values: { ...values }, defaults: { ...defaults }, max_seconds: 2147483647 });
 const tick = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
 const submit = form => form.onsubmit(new FakeEvent("submit"));
@@ -36,9 +36,9 @@ const submit = form => form.onsubmit(new FakeEvent("submit"));
     { bid: 2, name: "Offline" }, { bid: 3, name: "Older" }], payload(), 1);
   document.body.appendChild(card);
   const forms = card.querySelectorAll("form");
-  assert.equal(forms.length, 5);
+  assert.equal(forms.length, keys.length);
   const inputs = forms.map(form => form.querySelector("input"));
-  assert.deepEqual(inputs.map(input => input.value), ["7200", "7200", "600", "900", "900"]);
+  assert.deepEqual(inputs.map(input => input.value), ["7200", "7200", "600", "900", "900", "900"]);
   for (const input of inputs) {
     assert.equal(input.min, "0"); assert.equal(input.step, "1");
     assert.match(input.getAttribute("aria-label"), /0 is unlimited/);

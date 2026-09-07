@@ -785,8 +785,11 @@ select.choice-native{display:none!important}
 .tab .t-dot.search{
   width:12px;height:12px;border-radius:0;background:none;color:var(--txt3);
 }
+.tab .t-dot.vnc{
+  width:12px;height:12px;border-radius:0;background:none;color:var(--txt3);
+}
 .tab .t-dot.term svg,.tab .t-dot.settings svg,.tab .t-dot.browser svg,
-.tab .t-dot.search svg{display:block}
+.tab .t-dot.search svg,.tab .t-dot.vnc svg{display:block}
 .tab .t-title{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto;min-width:0}
 .tab .t-close{
   border:none;background:none;color:var(--txt3);cursor:pointer;font-size:var(--fs-2xl);line-height:1;
@@ -1799,6 +1802,36 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 }
 .br-type .br-ime::placeholder{color:var(--txt3)}
 .br-kbd.on{color:var(--acc);background:var(--acc-dim)}
+
+/* ---------- VNC tab ---------- */
+/* Deliberately thin: the pane reuses .br-bar, .br-meta, .br-ident, .br-stats,
+   .br-stage, .br-screen, .br-type and .term-dead unchanged, so a remote screen
+   and a managed browser are the same object to the eye. What is added here is
+   only what a VNC connection has and a browser does not: a fixed target
+   instead of an editable address, and a connection-state pill. */
+.vnc-target{
+  flex:1 1 60px;min-width:0;height:var(--toolbar-h);padding:0 10px;
+  display:flex;align-items:center;
+  background:var(--panel2);border:1px solid var(--line);border-radius:var(--r-md);
+  color:var(--txt2);font:var(--fs-sm)/1 var(--mono);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.vnc-cad{flex:0 0 auto;height:var(--toolbar-h);font-family:var(--mono);font-size:var(--fs-2xs)}
+.vnc-state{gap:7px}
+/* The dot wears the same four state tones the words beside it already carry. */
+.vnc-dot{flex:0 0 auto}
+.vnc-dot.ok{color:var(--ok)}
+.vnc-dot.warn{color:var(--warn)}
+.vnc-dot.bad{color:var(--err)}
+.vnc-dot.busy{color:var(--acc2)}
+.vnc-fps{min-width:7ch;text-align:right}
+/* Nothing this pane sends can reach the server, so the surface says so by
+   not offering a text cursor over a screen that cannot be typed into. */
+.view.vnc.view-only .br-stage{cursor:default}
+/* The dialog's one two-column row: a port is never as wide as a host. */
+.vnc-target-fields{display:flex;gap:10px;align-items:flex-start}
+.vnc-target-fields label:first-child{flex:1 1 auto;min-width:0}
+.vnc-target-fields label:last-child{flex:0 0 92px}
 
 /* ---------- settings view ---------- */
 .settings-scroll{flex:1;overflow-y:auto;padding:20px 18px}

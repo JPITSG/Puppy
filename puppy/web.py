@@ -19,7 +19,7 @@ from puppy import (__version__, agent_notes, auth, backends, bind_verify, browse
                    cli_upgrade, config, db, engine_defaults, host_metrics, listener_handoff, notify,
                    live_websockets, localization, protocol, runner, search, snapshots,
                    spawn_exec,
-                   state_stream, system_prompts, terminal, uploads,
+                   state_stream, system_prompts, terminal, uploads, vnc,
                    usage_refresh, workspace_links, workspace_sync, workspaces)
 from puppy import web_tls
 from puppy.drivers import all_drivers, get_driver
@@ -242,6 +242,9 @@ async def _state_stream_snapshots(app: web.Application, topics,
             app.get("puppy_capabilities", ()):
         payloads.append({"type": "terminal_instances",
                          "instances": terminal.manager().instance_payloads()})
+    if includes("vnc_instances"):
+        payloads.append({"type": "vnc_instances",
+                         "instances": vnc.manager().instance_payloads()})
     return payloads
 
 
@@ -356,6 +359,8 @@ async def h_timeouts_patch(request: web.Request):
         terminal.idle_settings_changed()
     if after["browser_idle_seconds"] != before["browser_idle_seconds"]:
         browser.idle_settings_changed()
+    if after["vnc_idle_seconds"] != before["vnc_idle_seconds"]:
+        vnc.idle_settings_changed()
     state_stream.wake("engines")
     return web.json_response({"ok": True, "timeouts": config.timeouts_payload()})
 
@@ -1505,6 +1510,9 @@ async def h_snapshot_import(request: web.Request):
             await terminal.manager().stop("Puppy state was restored")
         except Exception as exc:
             log.warning("restored state but could not clear shared terminals: %s", exc)
+        # VNC connections carry no restorable state, but their unattended
+        # timers must follow the restored setting rather than the old one.
+        vnc.idle_settings_changed()
         try:
             await backends.close_client()
         except Exception as exc:
@@ -1889,6 +1897,7 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
         terminal.register(app)
         r.add_post("/api/notify/exec", h_notify_exec)
     browser.register(app)
+    vnc.register(app)
     uploads.register(app)
     workspace_sync.register(app)
     spawn_exec.register(app)
@@ -1901,7 +1910,7 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     state_stream.register(
         app, _state_stream_snapshots, _state_stream_interval,
         snapshot_topics=("engines", "node", "browser_status",
-                         "terminal_instances"),
+                         "terminal_instances", "vnc_instances"),
         periodic_topics=("engines", "node", "browser_status"))
 
 

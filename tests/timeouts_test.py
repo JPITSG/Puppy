@@ -92,7 +92,8 @@ async def api_contract(factory):
         with patch.object(browser, "idle_settings_changed") as b, patch.object(terminal, "idle_settings_changed") as t:
             response = await client.patch("/api/timeouts", headers=headers, json={
                 "turn_seconds": 0, "spawn_runtime_seconds": 21600,
-                "spawn_idle_seconds": 0, "browser_idle_seconds": 0, "terminal_idle_seconds": 0})
+                "spawn_idle_seconds": 0, "browser_idle_seconds": 0, "terminal_idle_seconds": 0,
+                "vnc_idle_seconds": 0})
             assert response.status == 200, await response.text()
             assert b.call_count == t.call_count == 1
         response = await client.patch("/api/timeouts", headers=headers, json={"spawn_runtime_seconds": -1})

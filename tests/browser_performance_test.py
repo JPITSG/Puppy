@@ -227,7 +227,7 @@ async def main(args):
             for label, path in paths:
                 source = path.read_text()
                 start = source.index("class BrowserView {")
-                end = source.index("/* ================= SettingsView", start)
+                end = source.index("\n/* ================= ", start)
                 sources[label] = source[start:end]
             output = {"label":args.label,"external_url":args.external_url,
                       "viewer_sha256":{k:hashlib.sha256(v.encode()).hexdigest() for k,v in sources.items()},

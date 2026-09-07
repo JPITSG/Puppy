@@ -535,6 +535,24 @@ function globeIcon(size) {
   return svg;
 }
 
+/* A screen on a stand: the one drawn mark for a remote desktop, sized and
+   stroked like the terminal and globe it shares every menu and tab with. */
+function vncIcon(size) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "1.4");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  svg.setAttribute("aria-hidden", "true");
+  svg.innerHTML = '<rect x="1.4" y="2.4" width="13.2" height="9" rx="1.4"/>' +
+    '<path d="M6.4 13.6h3.2M8 11.4v2.2"/>';
+  return svg;
+}
+
 function searchIcon(size) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
@@ -2626,6 +2644,7 @@ const state = {
   remoteBrowser: {},      // bid -> {enabled} from that node's ping metadata
   remoteBrowserStatus: {}, // bid -> full managed-browser status
   terminalInstances: {},  // bid (including 0) -> identified PTY catalog
+  vncInstances: {},       // bid (including 0) -> identified VNC catalog
   stateStreamReady: {},   // bid (including 0) -> authoritative stream attached
   stateStreamRuntime: {}, // bid -> the node process epoch behind that stream
   stateStreamRevisions: {}, // "bid:topic" -> latest accepted node revision
@@ -2749,7 +2768,8 @@ function reconcileRemoteState() {
                         state.remoteTimers, state.remoteTimeouts, state.remoteUploadSettings,
                         state.remoteSystemPrompts,
                         state.remoteBrowser, state.remoteBrowserStatus,
-                        state.terminalInstances, state.stateStreamReady,
+                        state.terminalInstances, state.vncInstances,
+                        state.stateStreamReady,
                         state.stateStreamRuntime, state.remoteNodeUpgrade,
                         remotePollSequence]) {
     if (!bucket) continue;
@@ -2815,7 +2835,8 @@ function resetRemoteBackendConnection(bid) {
                         state.remoteTimers, state.remoteTimeouts, state.remoteUploadSettings,
                         state.remoteSystemPrompts,
                         state.remoteBrowser, state.remoteBrowserStatus,
-                        state.terminalInstances, state.stateStreamReady,
+                        state.terminalInstances, state.vncInstances,
+                        state.stateStreamReady,
                         state.stateStreamRuntime, state.remoteNodeUpgrade]) {
     if (!bucket) continue;
     delete bucket[bid];
@@ -3088,7 +3109,8 @@ function saveTabs() {
       version: 2,
       tabs: state.tabs.map(t => ({
         id: t.id, type: t.type, bid: t.bid, sid: t.sid, title: t.title,
-        browserId: t.browserId, terminalId: t.terminalId,
+        browserId: t.browserId, terminalId: t.terminalId, vncId: t.vncId,
+        vncHost: t.vncHost, vncPort: t.vncPort, vncLabel: t.vncLabel,
         cmd: t.cmd, cwd: t.cwd, ended: t.ended === true,
       })),
       active: state.active,
@@ -3105,7 +3127,7 @@ function storedTabs(value) {
   for (const item of value) {
     if (!item || typeof item !== "object" || typeof item.id !== "string" ||
         !item.id || item.id.length > 512 || seen.has(item.id) ||
-        !["session", "term", "browser", "settings", "search"].includes(item.type)) continue;
+        !["session", "term", "browser", "vnc", "settings", "search"].includes(item.type)) continue;
     const tab = { id: item.id, type: item.type };
     if (typeof item.bid === "number" && Number.isFinite(item.bid)) tab.bid = item.bid;
     if (typeof item.sid === "number" && Number.isFinite(item.sid)) tab.sid = item.sid;
@@ -3115,6 +3137,17 @@ function storedTabs(value) {
     if (item.type === "term" && typeof item.terminalId === "string" &&
         /^[A-Z0-9]{4}$/.test(item.terminalId.toUpperCase()))
       tab.terminalId = item.terminalId.toUpperCase();
+    /* A VNC tab without its ID has nothing to reconnect to: the node owns the
+       connection and never re-dials a target the browser merely remembers. */
+    if (item.type === "vnc") {
+      if (typeof item.vncId !== "string" ||
+          !/^[A-Z0-9]{4}$/.test(item.vncId.toUpperCase())) continue;
+      tab.vncId = item.vncId.toUpperCase();
+      if (typeof item.vncHost === "string") tab.vncHost = item.vncHost.slice(0, 255);
+      if (typeof item.vncPort === "number" && Number.isFinite(item.vncPort))
+        tab.vncPort = item.vncPort;
+      if (typeof item.vncLabel === "string") tab.vncLabel = item.vncLabel.slice(0, 120);
+    }
     if (typeof item.title === "string") tab.title = item.title.slice(0, 1000);
     if (typeof item.cmd === "string") tab.cmd = item.cmd.slice(0, 10000);
     if (typeof item.cwd === "string") tab.cwd = item.cwd.slice(0, 4096);
@@ -3301,6 +3334,17 @@ function applyTerminalInstancesSnapshot(bid, payload) {
   syncRemoteStateViews();
 }
 
+/* The catalog only names which connections still exist on that node: the
+   picture, the size and the connection state all ride each viewer's own
+   socket, exactly as a terminal's output does. */
+function applyVncInstancesSnapshot(bid, payload) {
+  if (!payload || !Array.isArray(payload.instances)) return;
+  bid = Number(bid) || 0;
+  state.vncInstances[bid] = payload.instances;
+  syncVncTabs(bid);
+  syncRemoteStateViews();
+}
+
 function applyNodeSnapshot(bid, payload, markReachable = true) {
   bid = Number(bid) || 0;
   if (!payload || payload.ok !== true) return;
@@ -3345,7 +3389,8 @@ function applyNodeStateSnapshot(bid, message) {
       Array.isArray(message.capabilities)) ||
     (message.type === "browser_status" && typeof message.enabled === "boolean" &&
       Array.isArray(message.instances)) ||
-    (message.type === "terminal_instances" && Array.isArray(message.instances));
+    (message.type === "terminal_instances" && Array.isArray(message.instances)) ||
+    (message.type === "vnc_instances" && Array.isArray(message.instances));
   if (!valid) return;
   bid = Number(bid) || 0;
   const accepted = acceptStateSnapshot(bid, message);
@@ -3376,6 +3421,8 @@ function applyNodeStateSnapshot(bid, message) {
     applyBrowserStatusSnapshot(bid, message);
   } else if (message.type === "terminal_instances") {
     applyTerminalInstancesSnapshot(bid, message);
+  } else if (message.type === "vnc_instances") {
+    applyVncInstancesSnapshot(bid, message);
   }
 }
 
@@ -3409,7 +3456,7 @@ function applyRemoteStreamState(message) {
 function handleUpdatesMessage(d) {
   if (!d || typeof d !== "object") return;
   const nodeTopic = ["sessions", "engines", "node", "browser_status",
-                     "terminal_instances"].includes(d.type);
+                     "terminal_instances", "vnc_instances"].includes(d.type);
   if (nodeTopic) {
     applyNodeStateSnapshot(0, d);
     return;
@@ -4073,6 +4120,59 @@ function browserTabTitle(tabOrBid, browserId = "") {
   return id ? `Browser ${id} @ ${backendName(bid)}` : `Browser @ ${backendName(bid)}`;
 }
 
+function vncTabTitle(tabOrBid, vncId = "") {
+  const tab = tabOrBid && typeof tabOrBid === "object" ? tabOrBid : null;
+  const bid = tab ? (tab.bid || 0) : (Number(tabOrBid) || 0);
+  const id = String(tab ? (tab.vncId || "") : vncId).toUpperCase();
+  const target = tab ? vncTargetLabel(tab) : "";
+  if (target) return `${target} @ ${backendName(bid)}`;
+  return id ? `VNC ${id} @ ${backendName(bid)}` : `VNC @ ${backendName(bid)}`;
+}
+
+/* What the user typed, not what the node resolved: a tab has to stay
+   recognisable while the connection is down. */
+function vncTargetLabel(tab) {
+  if (!tab) return "";
+  if (tab.vncLabel) return String(tab.vncLabel);
+  if (!tab.vncHost) return "";
+  const host = String(tab.vncHost);
+  const port = Number(tab.vncPort) || 0;
+  return port && port !== 5900 ? `${host}:${port}` : host;
+}
+
+function vncInstancesFor(bid) {
+  const instances = state.vncInstances[Number(bid) || 0];
+  return Array.isArray(instances) ? instances : null;
+}
+
+/* Every node that serves the execution API serves VNC too - there is no
+   binary to find and nothing to switch on - so this is purely "is this peer
+   new enough to have the routes". */
+function vncEnabledFor(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(item => item.id === bid);
+  return !!backend && backendHasCapability(backend, "vnc-instances");
+}
+
+/* A connection the node no longer lists is gone: mark its tab so the view
+   stops trying to reconnect into a 404 and offers Close instead. */
+function syncVncTabs(bid) {
+  const instances = vncInstancesFor(bid);
+  if (!instances) return;
+  const live = new Set(instances.map(item => String(item.id || "").toUpperCase()));
+  let changed = false;
+  for (const tab of state.tabs) {
+    if (tab.type !== "vnc" || (tab.bid || 0) !== (Number(bid) || 0) || !tab.vncId) continue;
+    const gone = !live.has(String(tab.vncId).toUpperCase());
+    if (tab.vncGone === gone) continue;
+    tab.vncGone = gone;
+    changed = true;
+    const view = state.views[tab.id];
+    if (view && typeof view.applyCatalog === "function") view.applyCatalog();
+  }
+  if (changed) renderTabs();
+}
+
 function browserEnabledFor(bid) {
   if (!bid) return !!(state.browser && state.browser.enabled);
   const backend = state.backends.find(item => item.id === bid);
@@ -4451,17 +4551,11 @@ function canMoveScratch(bid, session) {
 
 function modalMoveWorkspace(bid, session) {
   const { m, close } = modal(`<h2>Move to directory</h2>
-    <p class="modal-copy">Give this scratch project a permanent home on ${esc(backendName(bid))}.
-      Your files and conversation stay together. Deleting the session will keep the project.</p>
+    <p class="modal-copy">Move this scratch project's files to a permanent directory on ${esc(backendName(bid))}.</p>
     <form>
       <label>Destination directory<input id="move-cwd" type="text" spellcheck="false"
-        placeholder="/path/to/project" aria-describedby="move-help" required></label>
+        placeholder="/path/to/project" required></label>
       <div class="dirpick hidden"></div>
-      <p class="help" id="move-help">Browse to a parent folder, then type a new folder name.
-        The destination must not exist.</p>
-      <p class="modal-copy">Finish the current turn, clear queued and held work, and remove any tasks first.
-        The next turn starts fresh engine context with a handoff of this conversation.
-        Reopen any terminals after moving.</p>
       <p class="form-error hidden" role="alert"></p>
       <div class="m-btns"><button type="button" class="btn" id="move-cancel">Cancel</button>
         <button type="submit" class="btn btn-pri" id="move-go">Move project</button></div>
@@ -5901,6 +5995,8 @@ const TIMEOUT_FIELDS = [
     description: "Time without connected viewers before a terminal stops. Agent interaction restarts this timer." },
   { key: "browser_idle_seconds", label: "Browser unattended timeout",
     description: "Time without connected viewers before a browser stops. Agent interaction restarts this timer." },
+  { key: "vnc_idle_seconds", label: "VNC unattended timeout",
+    description: "Time without connected viewers before a VNC connection is dropped. Reopening its tab dials again." },
 ];
 
 function normalizeTimeoutSettings(payload) {
@@ -6528,6 +6624,34 @@ function openBrowserTab(bid, browserId = "", groupId = null, options = {}) {
   return tab;
 }
 
+/* VNC IDs are node-scoped like Browser and Terminal IDs, so reopening one
+   reuses its screen. The host/port carried on the tab are only its label and
+   its restore identity; the node owns the connection itself. */
+function openVncTab(bid, vncId, groupId = null, options = {}) {
+  bid = Number(bid) || 0;
+  vncId = String(vncId || "").toUpperCase();
+  if (!/^[A-Z0-9]{4}$/.test(vncId)) return null;
+  const id = `v:${bid}:${vncId}`;
+  let tab = state.tabs.find(item => item.id === id);
+  if (!tab) {
+    tab = { id, type: "vnc", bid, vncId };
+    if (options.host) tab.vncHost = String(options.host).slice(0, 255);
+    if (options.port) tab.vncPort = Number(options.port) || 0;
+    if (options.label) tab.vncLabel = String(options.label).slice(0, 120);
+    tab.title = vncTabTitle(tab);
+    state.tabs.push(tab);
+    if (options.afterTabId) putTabAfter(id, options.afterTabId, groupId);
+    else putTabInPane(id, groupId);
+  }
+  if (options.activate === false) {
+    syncTabOrderFromLayout();
+    renderTabs();
+  } else {
+    activateTab(id);
+  }
+  return tab;
+}
+
 /* Every open chat re-reads which of its browsers are still live, and visible
    browsers re-read their linked session's name and colour for the link pill.
    Cheap: both lists are tiny and each view updates only its own controls. */
@@ -6643,6 +6767,14 @@ function closeTab(id) {
             "error", TOAST_LONG);
       });
   }
+  if (closing.type === "vnc" && closing.vncId) {
+    api(closing.bid || 0, `vnc/instances/${encodeURIComponent(closing.vncId)}`,
+      { method: "DELETE" }).catch(error => {
+        if (error.status !== 404)
+          toast(`VNC ${closing.vncId} may still be connected: ${error.message}`,
+            "error", TOAST_LONG);
+      });
+  }
   const pane = removeTabFromPane(id);
   state.tabs.splice(idx, 1);
   const v = state.views[id];
@@ -6695,6 +6827,7 @@ function ensureTabView(tab) {
     if (tab.type === "session") view = new SessionWorkspaceView(tab);
     else if (tab.type === "term") view = new TermView(tab);
     else if (tab.type === "browser") view = new BrowserView(tab);
+    else if (tab.type === "vnc") view = new VncView(tab);
     else if (tab.type === "search") view = new SearchView(tab);
     else view = new SettingsView(tab);
     state.views[tab.id] = view;
@@ -6831,6 +6964,7 @@ function renderTabNode(t, pane, tabsRoot) {
     if (meta) t.title = meta.name || `Session ${t.sid}`;
   } else if (t.type === "term") dotCls = "term";
   else if (t.type === "browser") dotCls = "browser";
+  else if (t.type === "vnc") dotCls = "vnc";
   else if (t.type === "search") dotCls = "search";
   const tdot = el("span", "t-dot " + dotCls);
   if (dotColor) tdot.style.color = dotColor;
@@ -6839,10 +6973,12 @@ function renderTabNode(t, pane, tabsRoot) {
   else if (t.type === "search") tdot.appendChild(searchIcon(12));
   else if (t.type === "term") tdot.appendChild(terminalIcon(12));
   else if (t.type === "browser") tdot.appendChild(globeIcon(12));
+  else if (t.type === "vnc") tdot.appendChild(vncIcon(12));
   tab.appendChild(tdot);
   tab.appendChild(el("span", "t-title",
     (t.type === "term") ? terminalTabTitle(t) :
-    (t.type === "browser") ? browserTabTitle(t) : (t.title || "tab")));
+    (t.type === "browser") ? browserTabTitle(t) :
+    (t.type === "vnc") ? vncTabTitle(t) : (t.title || "tab")));
   if (t.type === "session") {
     suppressContextGestureActivation(tab);
     tab.addEventListener("contextmenu", (event) => {
@@ -7491,6 +7627,7 @@ $("tab-add-menu").addEventListener("click", (e) => {
   else if (act === "open-session") modalOpenSession(groupId);
   else if (act === "new-terminal") modalNewTerminal(groupId);
   else if (act === "new-browser") openBrowserFromMenu(groupId);
+  else if (act === "new-vnc") modalNewVnc(groupId);
   else if (act === "search") openSearchTab(groupId);
 });
 $("btn-new-session").onclick = () => { modalNewSession(state.activeGroup); closeDrawer(); };
@@ -15684,6 +15821,669 @@ class BrowserView {
   }
 }
 
+/* ================= VncView ================= */
+/* A remote screen, presented exactly like the managed browser: the same
+   toolbar, the same identity/stats strip, the same stage and dead-state
+   overlay. What differs is entirely under the surface - the node decodes RFB
+   and sends damage rectangles, so this paints them straight into a canvas
+   with putImageData and never runs a decoder of its own. */
+class VncView {
+  constructor(tab) {
+    this.tab = tab;
+    this.closed = false;
+    this.started = false;
+    this.visible = false;
+    this.viewerActive = null;
+    this.connectionSequence = 0;
+    this.waitingForBackend = false;
+    this.vncGone = tab.vncGone === true;
+    this.reconnectTimer = null;
+    this.reconnectDelay = 1000;
+    this.frameW = 0;
+    this.frameH = 0;
+    this.fpsTimer = null;
+    this.fpsFrames = 0;
+    this.fpsSince = 0;
+    this.pointerQueued = null;
+    this.pointerFrame = null;
+    this.wheelQueued = null;
+    this.wheelFrame = null;
+    this.viewOnly = false;
+    this.connected = false;
+    this.status = null;
+    this.visibilityHandler = () => this.syncViewerActivity();
+    this.root = el("div", "view vnc");
+    this.root.innerHTML = `
+      <div class="br-bar">
+        <button class="icon-btn vnc-refresh" type="button"
+          aria-label="Redraw the whole screen"></button>
+        <span class="vnc-target" aria-label="VNC server"></span>
+        <button class="btn btn-sm vnc-cad" type="button"
+          title="Send Control+Alt+Delete to the remote machine">Ctrl+Alt+Del</button>
+        <button class="icon-btn br-kbd vnc-kbd" type="button"
+          aria-label="Type into the remote screen"
+          aria-pressed="false" aria-expanded="false">
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor"
+            stroke-width="1.15" stroke-linecap="round" aria-hidden="true">
+            <rect x="1.5" y="4" width="13" height="8.5" rx="1.5"/>
+            <path d="M4 6.75h.01M7 6.75h.01M10 6.75h.01M12.2 6.75h.01M4 9h.01M7 9h.01
+              M10 9h.01M12.2 9h.01M5 11h6"/></svg>
+        </button>
+      </div>
+      <div class="br-meta edge-scroll-viewport"><div class="br-meta-scroll">
+        <div class="br-ident" aria-label="VNC identity">
+          <span class="br-ident-label">VNC</span>
+          <span class="br-id vnc-id"></span>
+          <button class="icon-btn br-copy-id vnc-copy-id" type="button"
+            aria-label="Copy VNC ID"></button>
+        </div>
+        <span class="br-stats vnc-state">
+          <span class="sess-dot vnc-dot busy"></span>
+          <span class="state-word vnc-state-text busy">Connecting…</span>
+        </span>
+        <span class="br-stats" title="Screen width × height in pixels · screen updates presented per second, updated once a second">
+          <span class="vnc-size">— × —</span><span aria-hidden="true">·</span><span class="vnc-fps">— FPS</span>
+        </span>
+      </div></div>
+      <div class="br-type hidden">
+        <input class="br-ime" type="text" autocomplete="off" autocapitalize="none"
+          autocorrect="off" spellcheck="false" enterkeyhint="enter"
+          placeholder="Type here - keys go to the remote screen"
+          aria-label="Send typing and keys to the remote screen">
+        <button class="btn btn-sm br-type-bksp" type="button" aria-label="Backspace">
+          <svg viewBox="0 0 22 16" width="17" height="13" fill="none" stroke="currentColor"
+            stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M20.2 2.4H7.6L1.6 8l6 5.6h12.6z"/>
+            <path d="M10.9 5.9l5.2 4.2M16.1 5.9l-5.2 4.2"/></svg>
+        </button>
+        <button class="btn btn-sm br-type-enter" type="button">Enter</button>
+      </div>
+      <div class="br-stage" tabindex="0" role="application" aria-label="Remote screen">
+        <canvas class="br-screen vnc-screen" width="0" height="0"></canvas>
+      </div>`;
+    this.refreshBtn = this.root.querySelector(".vnc-refresh");
+    this.refreshBtn.appendChild(refreshIcon(14));
+    this.targetText = this.root.querySelector(".vnc-target");
+    this.cadBtn = this.root.querySelector(".vnc-cad");
+    this.kbdBtn = this.root.querySelector(".vnc-kbd");
+    this.meta = this.root.querySelector(".br-meta");
+    this.stopMetadataScrolling = wireMetadataScrolling(this.meta);
+    this.idText = this.root.querySelector(".vnc-id");
+    this.copyIdBtn = wireCopyButton(this.root.querySelector(".vnc-copy-id"),
+      () => String(this.tab.vncId || "").toUpperCase(), "Copy VNC ID");
+    this.stateDot = this.root.querySelector(".vnc-dot");
+    this.stateText = this.root.querySelector(".vnc-state-text");
+    this.sizeText = this.root.querySelector(".vnc-size");
+    this.fpsText = this.root.querySelector(".vnc-fps");
+    this.typeRow = this.root.querySelector(".br-type");
+    this.ime = this.root.querySelector(".br-ime");
+    this.stage = this.root.querySelector(".br-stage");
+    this.canvas = this.root.querySelector(".vnc-screen");
+    /* alpha:false lets the compositor skip a blend the framebuffer never
+       needs; desynchronized gives the paint a shorter path to the screen.
+       Damage arrives already opaque, so nothing depends on the alpha byte. */
+    this.ctx = this.canvas.getContext("2d",
+      { alpha: false, desynchronized: true });
+    this.renderIdentity();
+  }
+
+  onShow(focus = true) {
+    this.visible = true;
+    if (!this.started) { this.started = true; this.start(); }
+    else if (!this.ws) this.scheduleReconnect(0);
+    this.syncViewerActivity();
+    if (focus && !this.isDead()) this.stage.focus({ preventScroll: true });
+  }
+  onVisibility(visible) {
+    this.visible = !!visible;
+    this.syncViewerActivity();
+  }
+  /* One rule for "is anyone actually looking": a hidden pane or a background
+     document must not make the node keep asking the server for frames. */
+  syncViewerActivity() {
+    const active = this.visible && !this.closed &&
+      document.visibilityState !== "hidden";
+    if (this.viewerActive === active) return;
+    this.viewerActive = active;
+    if (!active) {
+      this.resetFps();
+      this.resetContinuousInput();
+      this.send({ type: "release_keys" });
+    }
+    this.send({ type: "viewer_active", active });
+    if (active && !this.ws && this.visible) this.scheduleReconnect(0);
+  }
+  isDead() { return !!this.root.querySelector(".vnc-dead"); }
+
+  applyCatalog() {
+    this.vncGone = this.tab.vncGone === true;
+    this.renderIdentity();
+    if (this.vncGone) this.showDead("VNC connection closed", true);
+  }
+
+  renderIdentity() {
+    const id = String(this.tab.vncId || "").toUpperCase();
+    this.idText.textContent = id || "—";
+    const status = this.status || {};
+    const target = vncTargetLabel(this.tab) ||
+      (status.host ? (status.port && status.port !== 5900 ?
+        `${status.host}:${status.port}` : status.host) : "");
+    this.targetText.textContent = status.name && status.name !== target ?
+      `${target} · ${status.name}` : target;
+    this.targetText.title = this.targetText.textContent;
+    const viewOnly = this.viewOnly;
+    this.cadBtn.classList.toggle("hidden", viewOnly);
+    this.kbdBtn.classList.toggle("hidden", viewOnly);
+    /* One tone vocabulary, the same four words the rest of the console uses. */
+    let text = "Connecting…", tone = "busy";
+    if (this.vncGone) { text = "Closed"; tone = "bad"; }
+    else if (this.connected) {
+      text = viewOnly ? "Connected · view only" : "Connected";
+      tone = viewOnly ? "warn" : "ok";
+    } else if (this.isDead()) { text = "Disconnected"; tone = "bad"; }
+    this.stateText.textContent = text;
+    this.stateText.className = `state-word vnc-state-text ${tone}`;
+    this.stateDot.className = `sess-dot vnc-dot ${tone}`;
+    this.root.classList.toggle("view-only", viewOnly);
+  }
+
+  send(payload) {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN)
+      this.ws.send(JSON.stringify(payload));
+  }
+  sendContinuous(payload) {
+    if (!this.viewerActive || !this.ws || this.ws.readyState !== WebSocket.OPEN ||
+        this.ws.bufferedAmount > 256 * 1024) return;
+    this.ws.send(JSON.stringify(payload));
+  }
+  /* Send the first movement of a gesture at once, then only the newest
+     position each frame: a remote pointer needs the latest place, not every
+     place it passed through. */
+  queuePointer(payload) {
+    if (this.pointerFrame !== null) { this.pointerQueued = payload; return; }
+    this.sendContinuous(payload);
+    this.pointerFrame = requestAnimationFrame(() => {
+      this.pointerFrame = null;
+      const queued = this.pointerQueued;
+      this.pointerQueued = null;
+      if (queued && !this.closed) this.queuePointer(queued);
+    });
+  }
+  flushPointer() {
+    if (this.pointerFrame !== null) cancelAnimationFrame(this.pointerFrame);
+    this.pointerFrame = null;
+    const queued = this.pointerQueued;
+    this.pointerQueued = null;
+    if (queued) this.sendContinuous(queued);
+  }
+  queueWheel(payload) {
+    if (this.wheelFrame === null) {
+      this.sendContinuous(payload);
+      this.wheelFrame = requestAnimationFrame(() => {
+        this.wheelFrame = null;
+        const queued = this.wheelQueued;
+        this.wheelQueued = null;
+        if (queued && !this.closed) this.queueWheel(queued);
+      });
+      return;
+    }
+    if (this.wheelQueued) {
+      this.wheelQueued.dx += payload.dx;
+      this.wheelQueued.dy += payload.dy;
+      this.wheelQueued.nx = payload.nx;
+      this.wheelQueued.ny = payload.ny;
+    } else {
+      this.wheelQueued = payload;
+    }
+  }
+  resetContinuousInput() {
+    if (this.pointerFrame !== null) cancelAnimationFrame(this.pointerFrame);
+    if (this.wheelFrame !== null) cancelAnimationFrame(this.wheelFrame);
+    this.pointerFrame = this.wheelFrame = null;
+    this.pointerQueued = this.wheelQueued = null;
+  }
+  /* DOM buttons are left/right/middle as bits 1/2/4; RFB counts them
+     left/middle/right as bits 1/2/4. Only the middle and right swap. */
+  static mask(buttons) {
+    const held = Number(buttons) || 0;
+    return (held & 1) | ((held & 4) ? 2 : 0) | ((held & 2) ? 4 : 0);
+  }
+  point(clientX, clientY) {
+    const rect = this.canvas.getBoundingClientRect();
+    if (!rect.width || !rect.height) return null;
+    return {
+      nx: Math.min(1, Math.max(0, (clientX - rect.left) / rect.width)),
+      ny: Math.min(1, Math.max(0, (clientY - rect.top) / rect.height)),
+    };
+  }
+  sendKey(key, code = "") {
+    this.send({ type: "key", kind: "down", key, code });
+    this.send({ type: "key", kind: "up", key, code });
+  }
+  showTyping(on) {
+    this.typeRow.classList.toggle("hidden", !on);
+    this.kbdBtn.classList.toggle("on", !!on);
+    this.kbdBtn.setAttribute("aria-pressed", on ? "true" : "false");
+    this.kbdBtn.setAttribute("aria-expanded", on ? "true" : "false");
+    if (on) {
+      this.ime.value = "";
+      this.ime.focus();     // synchronous inside the click: raises the keyboard
+    } else if (!this.isDead()) {
+      this.stage.focus({ preventScroll: true });
+    }
+  }
+
+  start() {
+    const pointer = event => {
+      if (this.isDead() || this.viewOnly) return null;
+      const at = this.point(event.clientX, event.clientY);
+      if (!at) return null;
+      return { type: "pointer", ...at, mask: VncView.mask(event.buttons) };
+    };
+    this.stage.addEventListener("mousedown", event => {
+      event.preventDefault();
+      this.stage.focus({ preventScroll: true });
+      const payload = pointer(event);
+      if (!payload) return;
+      this.flushPointer();
+      this.send(payload);
+    });
+    this.stage.addEventListener("mouseup", event => {
+      const payload = pointer(event);
+      if (!payload) return;
+      // A drag's final position must reach the server before the release.
+      this.flushPointer();
+      this.send(payload);
+    });
+    this.stage.addEventListener("mousemove", event => {
+      const payload = pointer(event);
+      if (payload) this.queuePointer(payload);
+    });
+    this.stage.addEventListener("mouseleave", () => { this.pointerQueued = null; });
+    this.stage.addEventListener("contextmenu", event => event.preventDefault());
+    this.stage.addEventListener("wheel", event => {
+      if (this.isDead() || this.viewOnly) return;
+      event.preventDefault();
+      const at = this.point(event.clientX, event.clientY);
+      if (!at) return;
+      const scale = event.deltaMode === 1 ? 16 : 1;
+      this.queueWheel({ type: "wheel", ...at,
+        dx: event.deltaX * scale, dy: event.deltaY * scale });
+    }, { passive: false });
+
+    /* touch: drag scrolls, a short still tap clicks - the same contract the
+       managed browser's stage offers, so one gesture habit covers both */
+    let touch = null;
+    this.stage.addEventListener("touchstart", event => {
+      if (this.isDead() || this.viewOnly || event.touches.length !== 1) {
+        touch = null;
+        return;
+      }
+      const point = event.touches[0];
+      touch = { x: point.clientX, y: point.clientY, sx: point.clientX,
+        sy: point.clientY, at: Date.now(), moved: false };
+      event.preventDefault();
+    }, { passive: false });
+    this.stage.addEventListener("touchmove", event => {
+      if (!touch || event.touches.length !== 1) return;
+      event.preventDefault();
+      const point = event.touches[0];
+      const dx = point.clientX - touch.x, dy = point.clientY - touch.y;
+      touch.x = point.clientX;
+      touch.y = point.clientY;
+      if (Math.abs(point.clientX - touch.sx) + Math.abs(point.clientY - touch.sy) > 9)
+        touch.moved = true;
+      const at = this.point(point.clientX, point.clientY);
+      if (at && touch.moved)
+        this.queueWheel({ type: "wheel", ...at, dx: -dx, dy: -dy });
+    }, { passive: false });
+    this.stage.addEventListener("touchend", event => {
+      const gesture = touch;
+      touch = null;
+      if (!gesture || gesture.moved || Date.now() - gesture.at > 600) return;
+      event.preventDefault();
+      const at = this.point(gesture.x, gesture.y);
+      if (!at) return;
+      this.send({ type: "pointer", ...at, mask: 0 });
+      this.send({ type: "pointer", ...at, mask: 1 });
+      this.send({ type: "pointer", ...at, mask: 0 });
+    }, { passive: false });
+
+    const key = (kind, event) => {
+      if (this.isDead() || this.viewOnly) return;
+      /* the local clipboard reaches the remote machine through paste */
+      if (kind === "down" && (event.ctrlKey || event.metaKey) &&
+          event.key.toLowerCase() === "v") return;
+      event.preventDefault();
+      event.stopPropagation();
+      this.send({ type: "key", kind, key: event.key, code: event.code });
+    };
+    this.stage.addEventListener("keydown", event => key("down", event));
+    this.stage.addEventListener("keyup", event => key("up", event));
+    /* A modifier held when focus leaves would otherwise stay held on the
+       remote machine, where nothing can lift it again. */
+    this.stage.addEventListener("blur", () => this.send({ type: "release_keys" }));
+    this.stage.addEventListener("paste", event => {
+      const text = event.clipboardData && event.clipboardData.getData("text");
+      if (!text || this.viewOnly) return;
+      event.preventDefault();
+      this.send({ type: "text", text });
+    });
+
+    this.kbdBtn.onclick = () =>
+      this.showTyping(this.typeRow.classList.contains("hidden"));
+    this.typeRow.querySelector(".br-type-bksp").onclick = () => {
+      this.sendKey("Backspace");
+      this.ime.focus();
+    };
+    this.typeRow.querySelector(".br-type-enter").onclick = () => {
+      this.sendKey("Enter");
+      this.ime.focus();
+    };
+    this.ime.addEventListener("input", () => {
+      const value = this.ime.value;
+      this.ime.value = "";
+      if (value) this.send({ type: "text", text: value });
+    });
+    this.ime.addEventListener("keydown", event => {
+      event.stopPropagation();   // never let the app's global shortcuts see this
+      if (event.key === "Escape") {
+        event.preventDefault();
+        this.showTyping(false);
+        return;
+      }
+      // The same list of keys a soft keyboard cannot express as inserted text
+      // that the managed browser's relay uses: one list, both remote surfaces.
+      if (!BrowserView.RELAY_KEYS[event.key]) return;
+      event.preventDefault();
+      this.sendKey(event.key);
+    });
+    this.cadBtn.onclick = () => {
+      this.send({ type: "cad" });
+      this.stage.focus({ preventScroll: true });
+    };
+    this.refreshBtn.onclick = () => {
+      this.send({ type: "refresh" });
+      this.stage.focus({ preventScroll: true });
+    };
+    document.addEventListener("visibilitychange", this.visibilityHandler);
+    this.connect();
+  }
+
+  clearReconnect() {
+    if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+  }
+  scheduleReconnect(delay = null) {
+    if (this.closed || this.vncGone || !this.visible ||
+        document.visibilityState === "hidden" || this.ws ||
+        (this.tab.bid && !backendConnectionAllowed(this.tab.bid))) return;
+    if (this.reconnectTimer !== null) return;
+    const wait = delay === null ? this.reconnectDelay : Math.max(0, delay);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.closed || this.vncGone || !this.visible || this.ws ||
+          document.visibilityState === "hidden" ||
+          (this.tab.bid && !backendConnectionAllowed(this.tab.bid))) return;
+      this.connect();
+    }, wait);
+    if (delay === null) this.reconnectDelay = Math.min(15000, this.reconnectDelay * 2);
+  }
+
+  connect() {
+    if (this.closed || this.ws) return;
+    this.clearReconnect();
+    if (this.tab.bid && !backendConnectionAllowed(this.tab.bid)) {
+      this.waitingForBackend = true;
+      this.showDead(remoteStoppingMessage(this.tab.bid) || "Backend unavailable", false);
+      this.syncRemoteState();
+      return;
+    }
+    this.waitingForBackend = false;
+    if (!this.tab.vncId) { this.showDead("VNC ID is missing", true); return; }
+    const sequence = ++this.connectionSequence;
+    this.resetContinuousInput();
+    const path = `ws/vnc/${encodeURIComponent(this.tab.vncId)}`;
+    const ws = new WebSocket(wsUrl(this.tab.bid, path));
+    ws.binaryType = "arraybuffer";
+    this.ws = ws;
+    ws.onopen = () => {
+      if (this.closed || sequence !== this.connectionSequence || this.ws !== ws) {
+        try { ws.close(); } catch (error) {}
+        return;
+      }
+      noteRemoteSocketReachable(this.tab.bid);
+      this.reconnectDelay = 1000;
+      this.viewerActive = null;
+      this.syncViewerActivity();
+    };
+    ws.onmessage = event => {
+      if (sequence !== this.connectionSequence || this.ws !== ws) return;
+      noteRemoteSocketReachable(this.tab.bid);
+      const stopping = remoteStoppingMessage(this.tab.bid);
+      if (stopping) { this.showDead(stopping, true); return; }
+      if (typeof event.data !== "string") { this.applyFrame(event.data); return; }
+      let message = null;
+      try { message = JSON.parse(event.data); } catch (error) { return; }
+      this.handleMessage(message);
+    };
+    ws.onclose = () => {
+      if (sequence !== this.connectionSequence || this.ws !== ws) return;
+      this.ws = null;
+      this.connected = false;
+      if (this.closed) return;
+      const stopping = remoteStoppingMessage(this.tab.bid);
+      if (stopping) this.showDead(stopping, true);
+      else if (!this.vncGone) {
+        this.showDead("Connection closed", false);
+        this.scheduleReconnect();
+      }
+    };
+    ws.onerror = () => { try { ws.close(); } catch (error) {} };
+  }
+
+  handleMessage(message) {
+    if (!message || typeof message !== "object") return;
+    if (message.type === "status") {
+      this.status = message;
+      this.viewOnly = message.view_only === true;
+      this.connected = message.connected === true;
+      this.vncGone = false;
+      if (!this.tab.vncHost && message.host) {
+        this.tab.vncHost = message.host;
+        this.tab.vncPort = message.port;
+        this.tab.title = vncTabTitle(this.tab);
+        renderTabs();
+        saveTabs();
+      }
+      this.setSize(message.width, message.height);
+      this.clearDead();
+      this.renderIdentity();
+    } else if (message.type === "size") {
+      this.setSize(message.width, message.height);
+    } else if (message.type === "gone") {
+      /* The remote session ended but the identity survives, so offer the same
+         Reconnect the browser and terminal panes offer. */
+      this.connected = false;
+      this.showDead(message.reason || "VNC connection closed", false);
+    } else if (message.type === "error") {
+      if (message.terminal === true) {
+        this.vncGone = true;
+        this.showDead(message.text || "VNC unavailable", true);
+      } else {
+        toast(message.text || "VNC error", "error", TOAST_LONG);
+      }
+    }
+  }
+
+  setSize(width, height) {
+    width = Number(width) || 0;
+    height = Number(height) || 0;
+    if (width < 1 || height < 1) return;
+    this.sizeText.textContent = `${width} × ${height}`;
+    if (this.frameW === width && this.frameH === height) return;
+    this.frameW = width;
+    this.frameH = height;
+    // Assigning either dimension resets the canvas; the node answers a size
+    // change with the whole screen, so nothing is lost.
+    this.canvas.width = width;
+    this.canvas.height = height;
+    this.canvas.classList.add("live");
+  }
+
+  /* One damage rectangle. Pixels are already RGBA in the exact order
+     ImageData wants, so the payload is wrapped, not copied or converted; a
+     CopyRect carries no pixels at all and moves them inside the canvas. */
+  applyFrame(buffer) {
+    if (this.closed || !this.viewerActive || !(buffer instanceof ArrayBuffer)) return;
+    if (buffer.byteLength < 10) return;
+    const head = new DataView(buffer);
+    const kind = head.getUint8(0);
+    const x = head.getUint16(2, true), y = head.getUint16(4, true);
+    const width = head.getUint16(6, true), height = head.getUint16(8, true);
+    if (!width || !height) return;
+    try {
+      if (kind === 2) {
+        if (buffer.byteLength < 14) return;
+        this.ctx.drawImage(this.canvas, head.getUint16(10, true),
+          head.getUint16(12, true), width, height, x, y, width, height);
+      } else if (kind === 1) {
+        const length = width * height * 4;
+        if (buffer.byteLength < 10 + length) return;
+        this.ctx.putImageData(new ImageData(
+          new Uint8ClampedArray(buffer, 10, length), width, height), x, y);
+      } else return;
+    } catch (error) {
+      return;   // a rectangle outside the canvas cannot end the connection
+    }
+    this.connected = true;
+    this.recordFrame();
+    if (this.isDead()) { this.clearDead(); this.renderIdentity(); }
+  }
+
+  resetFps() {
+    if (this.fpsTimer !== null) clearInterval(this.fpsTimer);
+    this.fpsTimer = null;
+    this.fpsFrames = 0;
+    this.fpsText.textContent = "— FPS";
+  }
+  recordFrame() {
+    if (this.closed || !this.viewerActive) return;
+    if (this.fpsTimer === null) {
+      this.fpsSince = performance.now();
+      this.fpsTimer = setInterval(() => {
+        const now = performance.now();
+        const elapsed = now - this.fpsSince;
+        if (elapsed <= 0) return;
+        this.fpsText.textContent =
+          `${(this.fpsFrames * 1000 / elapsed).toFixed(1)} FPS`;
+        this.fpsFrames = 0;
+        this.fpsSince = now;
+      }, 1000);
+    }
+    this.fpsFrames++;
+  }
+
+  clearDead() {
+    const dead = this.root.querySelector(".vnc-dead");
+    if (dead) dead.remove();
+  }
+
+  showDead(message, ended = false) {
+    this.resetFps();
+    this.resetContinuousInput();
+    if (ended) this.vncGone = true;
+    this.connected = false;
+    this.renderIdentity();
+    let dead = this.root.querySelector(".vnc-dead");
+    if (dead) {
+      dead.querySelector(".term-dead-message").textContent = message;
+      return;
+    }
+    dead = el("div", "term-dead vnc-dead");
+    dead.appendChild(el("div", "term-dead-message", message));
+    const actions = el("div", "term-dead-actions");
+    const again = el("button", "btn btn-pri", "Reconnect");
+    again.type = "button";
+    again.onclick = () => {
+      this.vncGone = false;
+      this.reconnectDelay = 1000;
+      this.clearReconnect();
+      this.clearDead();
+      this.renderIdentity();
+      if (this.ws) {
+        const ws = this.ws;
+        this.ws = null;
+        this.connectionSequence++;
+        try { ws.close(); } catch (error) {}
+      }
+      this.connect();
+      this.stage.focus({ preventScroll: true });
+    };
+    const close = el("button", "btn", "Close");
+    close.type = "button";
+    close.onclick = () => closeTab(this.tab.id);
+    actions.appendChild(again);
+    actions.appendChild(close);
+    dead.appendChild(actions);
+    this.stage.appendChild(dead);
+  }
+
+  handleNodeStopping(message) {
+    this.showDead(message, true);
+    this.syncRemoteState();
+  }
+  clearNodeStopping() {
+    const dead = this.root.querySelector(".vnc-dead");
+    if (!dead) return;
+    const reconnect = dead.querySelector(".btn-pri");
+    reconnect.textContent = "Reconnect";
+    reconnect.disabled = false;
+  }
+
+  syncRemoteState() {
+    const stopping = remoteStoppingMessage(this.tab.bid);
+    const unavailable = !!this.tab.bid && !backendConnectionAllowed(this.tab.bid);
+    if (unavailable) {
+      this.waitingForBackend = true;
+      if (this.ws) {
+        const ws = this.ws;
+        this.ws = null;
+        this.connectionSequence++;
+        try { ws.close(); } catch (error) {}
+      }
+      this.showDead(stopping || "Backend unavailable", !!stopping);
+    } else if (this.waitingForBackend) {
+      this.waitingForBackend = false;
+      this.vncGone = this.tab.vncGone === true;
+      this.clearDead();
+      this.connect();
+      return;
+    } else if (stopping) {
+      this.showDead(stopping, true);
+    }
+    const reconnect = this.root.querySelector(".vnc-dead .btn-pri");
+    if (reconnect) {
+      reconnect.textContent = unavailable ? "Waiting for backend…" : "Reconnect";
+      reconnect.disabled = unavailable;
+    }
+    this.renderIdentity();
+  }
+
+  destroy() {
+    this.closed = true;
+    this.resetContinuousInput();
+    this.resetFps();
+    this.stopMetadataScrolling();
+    this.connectionSequence++;
+    this.clearReconnect();
+    document.removeEventListener("visibilitychange", this.visibilityHandler);
+    if (this.ws) { try { this.ws.close(); } catch (error) {} }
+    this.ws = null;
+    this.root.remove();
+  }
+}
+
 /* ================= SettingsView ================= */
 /* ================= search view ================= */
 /* Full-history search. Each node indexes only its own transcripts, so the tab
@@ -20367,6 +21167,90 @@ function openBrowserFromMenu(groupId = null) {
     openNewBrowser(bid, groupId);
   };
   m.querySelector("#nb-go").focus();
+}
+
+/* new VNC connection */
+/* Unlike Browser and Terminal, opening this needs a round trip: the node has
+   to reach the server and get through its handshake before there is anything
+   to show. So the dialog stays up, busy, until the connection exists, and a
+   refusal lands inline beside the field that caused it. */
+function modalNewVnc(groupId = null) {
+  const nodes = [{ id: 0, name: backendName(0) }]
+    .concat(state.backends.filter(node => vncEnabledFor(node.id)));
+  const { m, close } = modal(`<h2>New VNC connection</h2>
+    <p class="modal-copy">Puppy connects from the chosen backend to a VNC server over TCP and
+      decodes its screen here. The password is used only for this connection's challenge and is
+      never written to disk.</p>
+    <form id="nv-form">
+      <label>Backend<select id="nv-be">${nodes.map(node =>
+        `<option value="${node.id}">${esc(node.name)}</option>`).join("")}</select></label>
+      <div class="vnc-target-fields">
+        <label>Host<input type="text" id="nv-host" placeholder="192.168.1.10 or host.example"
+          autocomplete="off" autocapitalize="off" spellcheck="false" required></label>
+        <label>Port<input type="text" id="nv-port" inputmode="numeric" value="5900"
+          autocomplete="off" spellcheck="false"></label>
+      </div>
+      <p class="hint">A display number works too: <code>1</code> means port 5901. Enclose an IPv6
+        address in brackets.</p>
+      <label>Password <span class="field-optional">(optional)</span><input type="password"
+        id="nv-pass" autocomplete="off"></label>
+      <label>Name <span class="field-optional">(optional)</span><input type="text" id="nv-label"
+        placeholder="What this screen is" autocomplete="off"></label>
+      <label class="check"><input type="checkbox" id="nv-view"> View only, send no input</label>
+      <p class="form-error hidden" role="alert"></p>
+      <div class="m-btns"><button type="button" class="btn" id="nv-cancel">Cancel</button>
+      <button type="submit" class="btn btn-pri" id="nv-go">Connect</button></div>
+    </form>`);
+  const form = m.querySelector("#nv-form");
+  const host = m.querySelector("#nv-host"), port = m.querySelector("#nv-port");
+  const error = m.querySelector(".form-error"), go = m.querySelector("#nv-go");
+  form.noValidate = true;
+  let busy = false;
+  m.querySelector("#nv-cancel").onclick = close;
+  form.onsubmit = async event => {
+    event.preventDefault();
+    if (busy) return;
+    if (!host.value.trim()) {
+      error.textContent = "Enter the VNC server's host name or address";
+      error.classList.remove("hidden");
+      host.focus();
+      return;
+    }
+    const bid = parseInt(m.querySelector("#nv-be").value, 10) || 0;
+    const label = m.querySelector("#nv-label").value.trim();
+    error.classList.add("hidden");
+    busy = true;
+    form.setAttribute("aria-busy", "true");
+    form.querySelectorAll("input,button,select").forEach(control => control.disabled = true);
+    go.textContent = "Connecting…";
+    try {
+      const result = await api(bid, "vnc/instances", {
+        method: "POST", timeoutMs: 30000,
+        body: {
+          host: host.value.trim(),
+          port: port.value.trim(),
+          password: m.querySelector("#nv-pass").value,
+          view_only: m.querySelector("#nv-view").checked,
+          label,
+        },
+      });
+      close();
+      openVncTab(bid, result.vnc.id, groupId, {
+        host: result.vnc.host, port: result.vnc.port, label: result.vnc.label,
+      });
+      toast(`${backendName(bid)}: Connected to ${result.vnc.host}`, "ok");
+    } catch (failure) {
+      error.textContent = failure.message;
+      error.classList.remove("hidden");
+      host.focus();
+    } finally {
+      busy = false;
+      form.setAttribute("aria-busy", "false");
+      form.querySelectorAll("input,button,select").forEach(control => control.disabled = false);
+      go.textContent = "Connect";
+    }
+  };
+  host.focus();
 }
 
 /* switch engine */

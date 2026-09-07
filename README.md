@@ -242,9 +242,9 @@ Tasks need a Git repository. Limits: 64 tasks per session, 50,000 files or
 512 MiB of initial working files, 16 MiB per review. Details and the exact
 persistence contract are in [docs/session-tasks.md](docs/session-tasks.md).
 
-### Terminals and browsers, shared with the agent
+### Terminals, browsers and remote screens
 
-Browser and terminal identity and session-link rows stay on one line. When
+Browser, terminal and VNC identity and session-link rows stay on one line. When
 space is tight, their edges fade and you can scroll sideways with touch, a
 trackpad, or the mouse wheel, just like the chat chips and tab bar.
 
@@ -284,6 +284,25 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
   appears as a tab beside the chat without stealing focus, pages follow your
   light or dark theme, and an optional shared sign-in store carries cookies
   across all of a backend's browsers.
+- **Remote screens over VNC.** *New VNC connection* dials any VNC server from
+  the chosen backend and shows its screen in a tab that looks and behaves like
+  the browser tab: the same toolbar, the same identity and statistics pills,
+  the same stage, the same mouse, keyboard, wheel and touch handling. Give it a
+  host and either a port or a bare display number (`1` means 5901); IPv6 goes
+  in brackets. A password, when the server asks for one, is used for that
+  connection's challenge and is never written to disk. *View only* watches
+  without sending anything, and a Ctrl+Alt+Del button and a typing row (for
+  phones, and for keys a soft keyboard cannot express) sit beside the address.
+  Puppy is the VNC client itself - no viewer, proxy, gateway or extra package
+  is installed. It speaks RFB 3.3 through 3.8 with the ZRLE, Hextile, Zlib,
+  RRE, CopyRect and Raw encodings plus desktop resize, decodes the screen on
+  the backend, and sends your browser only the rectangles that changed, as raw
+  pixels the canvas can paint without decoding anything. A rectangle the server
+  merely moved carries no pixels at all. With the tab hidden, in a background
+  window, or with no viewer attached, Puppy stops asking the server for frames
+  altogether; the connection is dropped entirely after the unattended timeout,
+  and reopening the tab dials again. Every connection has a four-character ID,
+  and closing its tab closes it.
 
 ### Agents that delegate and collaborate
 
@@ -452,12 +471,12 @@ backend name stays readable; long button labels wrap within the button.
   controller's polling and synchronization intervals. Validation and save errors
   appear beneath the affected field; edit it or press Escape to clear the error.
 - **Timeouts** – per backend: maximum agent turn duration (2 hours), spawned-agent
-  runtime (2 hours) and inactivity (10 minutes), and unattended terminal and
-  browser timeouts (15 minutes each). Values are seconds; **0 means unlimited**.
+  runtime (2 hours) and inactivity (10 minutes), and unattended terminal, browser
+  and VNC timeouts (15 minutes each). Values are seconds; **0 means unlimited**.
   Turn and spawn settings initialize new runs; changing an unattended timeout
   restarts that timer immediately. Agent interaction renews unattended timers.
   Spawned agents still stop with their owning turn. Each field has an Apply
-  control, and Reset to defaults restores the selected backend's five defaults.
+  control, and Reset to defaults restores the selected backend's six defaults.
 - **System prompt** – a custom text added to every turn on that backend, and the
   conditional guidance for remote workspaces, browsers, terminals and spawned
   agents, each with a reset to Puppy's default.
@@ -509,6 +528,12 @@ documented in [Timeout settings](docs/timeouts.md).
   the controller relays everything over channels it already authenticates.
   Managed browsers are reachable only through Puppy's private debugging pipe,
   never a DevTools port.
+- **VNC passwords are never stored.** A connection's password lives only in the
+  backend process that dialled the server, for as long as that connection
+  exists; it is absent from `config.json`, the database and backup archives.
+  RFB's own challenge is legacy DES over at most eight characters and its
+  screen traffic is unencrypted, so treat a VNC server the way VNC itself does:
+  reach it over a trusted network or a tunnel, not the open internet.
 - **Clocks follow the server.** Times in the console use the Puppy process's
   locale hour cycle, not the browser's.
 
@@ -532,6 +557,8 @@ python3 tests/spawn_test.py          # spawned agents against a stub engine
 python3 tests/mcp_startup_test.py     # source/zipapp MCP startup with filtered environments
 python3 tests/workspace_sync_test.py # remote workspace sync and conflicts
 python3 tests/browser_test.py        # managed browsers against a stub Chromium
+python3 tests/vnc_test.py            # the VNC client against a stub RFB server
+node tests/vnc_ui_test.js            # damage painting, button mapping and input coalescing
 python3 tests/browser_cursor_test.py # bounded, private cursor reads and input latency
 node tests/browser_cursor_ui_test.js # cursor refresh, stale replies and viewer lifecycle
 node tests/browser_frames_ui_test.js # bounded image loading, stale frames and resource cleanup

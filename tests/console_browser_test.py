@@ -2,8 +2,9 @@
 """Real console profiles, embedded browser input, and anonymous screenshots.
 
 Uses host Chromium through Puppy's debugging-pipe driver; no dependencies,
-engine turns, or external services. --screenshots refreshes assets/; --serve
-keeps the demo open for interactive review (mira / preview-password).
+engine turns, or external services. --screenshots refreshes assets/ - the five
+console captures and the four Timeouts panel previews docs/timeouts.md links -
+and --serve keeps the demo open for interactive review (mira / preview-password).
 """
 import argparse
 import asyncio
@@ -869,7 +870,31 @@ async def screenshots(instance):
     await asyncio.sleep(.3)
     data = await instance.call("Page.captureScreenshot", {"format": "png"}, session=instance.page_session)
     (assets / "mobile-dark-sidebar.png").write_bytes(base64.b64decode(data["data"]))
-    print("PASS: regenerated five console screenshots with invented demo data", flush=True)
+
+    # The Timeouts panel previews linked from docs/timeouts.md come from this
+    # same invented world, so adding or renaming a field cannot leave them
+    # showing a card the console no longer has.
+    await evaluate(instance, "$('app').classList.remove('side-open'); "
+                             "closeTab('search'); openSettingsTab(null); true")
+    await until(instance, "!!document.querySelector('.timeouts-card .timer-row')")
+    for width, height, scale, name in [(1440, 900, 1, "desktop"), (390, 844, 2, "mobile")]:
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": width, "height": height, "deviceScaleFactor": scale,
+            "mobile": name == "mobile"}, session=instance.page_session)
+        for theme in ("dark", "light"):
+            # The card fits a desktop pane whole; a phone can only ever show
+            # part of it, so frame it from its heading down.
+            block = "start" if name == "mobile" else "center"
+            await evaluate(instance, "applyTheme(" + json.dumps(theme) + "); "
+                           "document.querySelector('.timeouts-card')"
+                           ".scrollIntoView({block:" + json.dumps(block) + "}); true")
+            await asyncio.sleep(.3)
+            data = await instance.call("Page.captureScreenshot", {"format": "png"},
+                                       session=instance.page_session)
+            (assets / ("timeouts-" + name + "-" + theme + ".png")).write_bytes(
+                base64.b64decode(data["data"]))
+    print("PASS: regenerated nine console screenshots with invented demo data",
+          flush=True)
 
 
 async def quota_checks(instance):

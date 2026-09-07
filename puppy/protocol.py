@@ -165,6 +165,13 @@ COMPLETION_EVENTS_CAPABILITY = "completion-events"
 # with a native side-question channel.
 SIDE_QUESTION_CAPABILITY = "active-turn-side-question"
 
+# Node-owned VNC client connections: the instance list/create/delete routes
+# and the ID-scoped viewer WebSocket that carries decoded damage rectangles
+# and viewer input. Nothing is installed or probed - a node either serves
+# these routes or does not advertise them.
+VNC_CAPABILITY = "vnc"
+VNC_INSTANCES_CAPABILITY = "vnc-instances"
+
 SESSION_REFERENCES_CAPABILITY = "session-references"
 
 BASE_CAPABILITIES = (
@@ -222,6 +229,8 @@ BASE_CAPABILITIES = (
     BROWSER_HANDOFF_CAPABILITY,
     BROWSER_FILE_WORKFLOWS_CAPABILITY,
     BROWSER_SHARED_STORAGE_CAPABILITY,
+    VNC_CAPABILITY,
+    VNC_INSTANCES_CAPABILITY,
     UPLOAD_PREVIEW_CAPABILITY,
     ENGINE_AUTO_UPGRADE_CAPABILITY,
     ENGINE_DEFAULTS_CAPABILITY,

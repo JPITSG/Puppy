@@ -3482,7 +3482,7 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert proxied_engines["timeouts"]["defaults"] == {
             "turn_seconds": 7200, "spawn_runtime_seconds": 7200,
             "spawn_idle_seconds": 600, "terminal_idle_seconds": 900,
-            "browser_idle_seconds": 900}
+            "browser_idle_seconds": 900, "vnc_idle_seconds": 900}
         async with http.patch(url + f"/api/b/{stored['id']}/timeouts", headers=headers,
                               json={"browser_idle_seconds": 0}) as response:
             timeout_result = await response.json()

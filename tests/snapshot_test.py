@@ -161,7 +161,7 @@ async def exercise_http(archive_ui: dict, session_id: int, project: Path) -> Non
             assert config.timeout_values() == {
                 "turn_seconds": 0, "spawn_runtime_seconds": 14400,
                 "spawn_idle_seconds": 0, "terminal_idle_seconds": 1800,
-                "browser_idle_seconds": 0,
+                "browser_idle_seconds": 0, "vnc_idle_seconds": 1200,
             }
             assert config.get("engines.opencode") is None
             assert config.get("uploads.max_file_size_mb") == 19
@@ -214,7 +214,7 @@ async def main() -> None:
         saved_timeouts = config.set_timeouts({
             "turn_seconds": 0, "spawn_runtime_seconds": 14400,
             "spawn_idle_seconds": 0, "terminal_idle_seconds": 1800,
-            "browser_idle_seconds": 0,
+            "browser_idle_seconds": 0, "vnc_idle_seconds": 1200,
         })
         config.set_timers({
             "cli_release_minutes": 240,

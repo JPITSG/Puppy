@@ -41,7 +41,7 @@ async def main(args):
                 await b.open_console(c, url, sid)
                 source = path.read_text()
                 start = source.index('class BrowserView {')
-                end = source.index('/* ================= SettingsView', start)
+                end = source.index('\n/* ================= ', start)
                 await b.evaluate(c, 'BrowserView = ' + source[start:end] + ';true')
                 hashes[('before', 'after')[i]] = hashlib.sha256(source[start:end].encode()).hexdigest()
             output = {'browser': await consoles[0].call('Browser.getVersion'), 'external_url': args.external_url, 'viewer_sha256': hashes, 'results': results}

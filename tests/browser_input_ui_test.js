@@ -4,7 +4,7 @@ const fs = require('fs');
 const vm = require('vm');
 const source = fs.readFileSync('puppy/static/app.js', 'utf8');
 const start = source.indexOf('class BrowserView {');
-const end = source.indexOf('/* ================= SettingsView', start);
+const end = source.indexOf('\n/* ================= ', start);
 const frames = new Map(), sent = [];
 let serial = 0;
 const context = vm.createContext({

@@ -58,6 +58,7 @@ TIMEOUT_PATHS = {
     "spawn_idle_seconds": "spawn.idle_timeout",
     "terminal_idle_seconds": "terminal.idle_timeout",
     "browser_idle_seconds": "browser.idle_timeout",
+    "vnc_idle_seconds": "vnc.idle_timeout",
 }
 TIMEOUT_DEFAULTS = {
     "turn_seconds": 7200,
@@ -65,6 +66,7 @@ TIMEOUT_DEFAULTS = {
     "spawn_idle_seconds": 600,
     "terminal_idle_seconds": 900,
     "browser_idle_seconds": 900,
+    "vnc_idle_seconds": 900,
 }
 
 # This is model-visible only for turns where the node-owned managed browser is
@@ -169,6 +171,10 @@ DEFAULTS = {
     # cookie/localStorage store so sign-ins outlive individual browsers.
     "browser": {"enabled": False, "color_scheme": "dark", "shared_storage": False,
                 "idle_timeout": 900},
+    # Node-owned VNC client connections. There is no enable switch and nothing
+    # to probe: the client is this process dialling a TCP socket, so the only
+    # setting is how long an unwatched connection is held open.
+    "vnc": {"idle_timeout": 900},
     # The custom text is added to every engine turn on this node. Conditional
     # fields are independently editable instructions added only while a turn
     # uses the corresponding cross-node workspace, browser, or terminal tools.
