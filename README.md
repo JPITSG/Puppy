@@ -304,7 +304,19 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
   window, or with no viewer attached, Puppy stops asking the server for frames
   altogether; the connection is dropped entirely after the unattended timeout,
   and reopening the tab dials again. Every connection has a four-character ID,
-  and closing its tab closes it.
+  and closing its tab closes it. A server that goes away is reported in the pane
+  itself, with the reason and a *Reconnect* button; Puppy redials a few times,
+  with a growing pause, and then waits for you rather than filling the screen
+  with notifications.
+  The agent gets the same screen as a toolset: look at it, move, click or tap,
+  drag or swipe, scroll, type, press keys and shortcuts, wait for the picture to
+  settle, and connect or disconnect. Screenshots are PNGs Puppy builds from the
+  decoded framebuffer itself, and every coordinate is a remote screen pixel, so
+  the agent works the machine the way you would. `@VNC A8AR` in the chat box
+  points it at an open connection and `@VNC 192.168.1.10:5900 password` at a
+  server to dial; the `@` menu's *New VNC connection* wizard builds either for
+  you. A screen the agent touches opens as a tab beside the chat, so you can
+  watch it work and take over at any moment.
 
 ### Agents that delegate and collaborate
 
@@ -345,7 +357,8 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
 All of this reaches the model through turn-bound MCP bridges Puppy starts for
 each turn, on every engine. Their policy texts live in Settings → System prompt.
 The API-only headless package provides the same bridges without running a web
-UI, including the backend's configured browser, terminal, and spawn policies.
+UI, including the backend's configured browser, terminal, remote screen, and
+spawn policies.
 
 ### Find anything, on any backend
 
@@ -480,8 +493,8 @@ backend name stays readable; long button labels wrap within the button.
   Spawned agents still stop with their owning turn. Each field has an Apply
   control, and Reset to defaults restores the selected backend's six defaults.
 - **System prompt** – a custom text added to every turn on that backend, and the
-  conditional guidance for remote workspaces, browsers, terminals and spawned
-  agents, each with a reset to Puppy's default.
+  conditional guidance for remote workspaces, browsers, terminals, remote
+  screens and spawned agents, each with a reset to Puppy's default.
 - **Backends** – add, edit, test, upgrade and auto-upgrade paired machines.
 - **Security** – change your password.
 - **Backup & restore** – export and import the full-instance archive.
@@ -559,8 +572,8 @@ python3 tests/spawn_test.py          # spawned agents against a stub engine
 python3 tests/mcp_startup_test.py     # source/zipapp MCP startup with filtered environments
 python3 tests/workspace_sync_test.py # remote workspace sync and conflicts
 python3 tests/browser_test.py        # managed browsers against a stub Chromium
-python3 tests/vnc_test.py            # the VNC client against a stub RFB server
-node tests/vnc_ui_test.js            # damage painting, button mapping and input coalescing
+python3 tests/vnc_test.py            # the VNC client and its agent tools against a stub RFB server
+node tests/vnc_ui_test.js            # damage painting, button mapping, input coalescing, quiet reconnection
 python3 tests/browser_cursor_test.py # bounded, private cursor reads and input latency
 node tests/browser_cursor_ui_test.js # cursor refresh, stale replies and viewer lifecycle
 node tests/browser_frames_ui_test.js # bounded image loading, stale frames and resource cleanup

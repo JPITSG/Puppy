@@ -64,7 +64,7 @@ Other temporary files and runtime storage already use explicit destinations:
 | Agent-note atomic replacement | Temporary file beside the destination note, following a note symlink to its target directory | [agent_notes.py](../puppy/agent_notes.py) |
 | Database, configuration, logs and attachments | `puppy.db`, `config.json`, `puppy.log`, `uploads/` under `<data>` | [config.py](../puppy/config.py), [uploads.py](../puppy/uploads.py) |
 | Browser profiles, HOME, downloads, logs, PID files, catalog and shared sign-in state | `<data>/browser/` | [browser.py](../puppy/browser.py), [browser_store.py](../puppy/browser_store.py) |
-| Agent bridge sockets | `<data>/{browser,terminal,spawn,session}/agent.sock` | [Browser](../puppy/browser_agent.py), [terminal](../puppy/terminal_agent.py), [spawn](../puppy/spawn_agent.py), [session](../puppy/session_agent.py) |
+| Agent bridge sockets | `<data>/{browser,terminal,vnc,spawn,session}/agent.sock` | [Browser](../puppy/browser_agent.py), [terminal](../puppy/terminal_agent.py), [VNC](../puppy/vnc_agent.py), [spawn](../puppy/spawn_agent.py), [session](../puppy/session_agent.py) |
 | Search, remote mirrors, leases and conflict storage | `<data>/search/`, `mirrors/`, `workspace_leases/`, `workspace/` | [search.py](../puppy/search.py), [workspace_sync.py](../puppy/workspace_sync.py), [workspace_links.py](../puppy/workspace_links.py) |
 | Task review index and Git objects | Inside the managed task's `.git/` directory | [session_tasks.py](../puppy/session_tasks.py) |
 | Atomic `.tmp` writes | Beside their destination config, catalog, TLS identity, handoff/upgrade record or build output | `.tmp` is a filename suffix, not a reference to `/tmp`. |

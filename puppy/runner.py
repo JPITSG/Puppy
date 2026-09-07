@@ -14,7 +14,8 @@ import time
 import uuid
 
 from puppy import (agent_notes, browser_agent, config, db, handoff, notify, spawn_agent,
-                   system_prompts, terminal_agent, session_agent, session_links, uploads, workspace_sync,
+                   system_prompts, terminal_agent, vnc_agent,
+                   session_agent, session_links, uploads, workspace_sync,
                    workspaces, session_tasks)
 from puppy.drivers import get_driver
 from puppy.drivers import base as driver_base
@@ -778,6 +779,7 @@ class SessionHub:
         self._active_turn_id = ""
         self._browser_activity_announced = set()
         self._terminal_activity_announced = set()
+        self._vnc_activity_announced = set()
         # The active prompt normally becomes a durable user event at the start
         # of _run_turn.  Keep it visible to attachment reference checks until
         # the turn closes so cancelling a duplicate queued marker cannot race
@@ -970,6 +972,19 @@ class SessionHub:
         self._terminal_activity_announced.add(terminal_id)
         payload = {"type": "terminal_activity", "turn_id": turn_id,
                    "terminal_id": terminal_id}
+        self.broadcast(payload)
+        broadcast_update({**payload, "session_id": self.id})
+        return True
+
+    def vnc_activity(self, turn_id: str, vnc_id: str) -> bool:
+        """Authorize and announce one remote screen used by this turn."""
+        if not self.tool_turn_active(turn_id):
+            return False
+        if vnc_id in self._vnc_activity_announced:
+            return True
+        self._vnc_activity_announced.add(vnc_id)
+        payload = {"type": "vnc_activity", "turn_id": turn_id,
+                   "vnc_id": vnc_id}
         self.broadcast(payload)
         broadcast_update({**payload, "session_id": self.id})
         return True
@@ -2896,10 +2911,12 @@ class SessionHub:
             self._active_turn_id = pinned
             self._browser_activity_announced = set()
             self._terminal_activity_announced = set()
+            self._vnc_activity_announced = set()
             # a tool turn addresses the native conversation alone: no agent
             # bridges and no guidance, so nothing can steer or extend it
             browser_mcp = None if tool else browser_agent.turn_mcp(self.id, pinned)
             terminal_mcp = None if tool else terminal_agent.turn_mcp(self.id, pinned)
+            vnc_mcp = None if tool else vnc_agent.turn_mcp(self.id, pinned)
             spawn_mcp = None if tool else spawn_agent.turn_mcp(self.id, pinned)
             if not tool:
                 await session_links.prepare_turn(self.id, pinned, text)
@@ -2913,7 +2930,8 @@ class SessionHub:
                 if task_context:
                     system_prompt_text += "\n\n" + task_context
             driver_kwargs = {"browser_mcp": browser_mcp, "terminal_mcp": terminal_mcp,
-                             "spawn_mcp": spawn_mcp, "system_prompt": system_prompt_text}
+                             "vnc_mcp": vnc_mcp, "spawn_mcp": spawn_mcp,
+                             "system_prompt": system_prompt_text}
             if session_mcp:
                 driver_kwargs["session_mcp"] = session_mcp
             if tool:
@@ -3244,6 +3262,7 @@ class SessionHub:
             self._active_turn_id = ""
             self._browser_activity_announced = set()
             self._terminal_activity_announced = set()
+            self._vnc_activity_announced = set()
             if self.pending_approval is not None:
                 rid = self.pending_approval.get("request_id", "")
                 self.pending_approval = None

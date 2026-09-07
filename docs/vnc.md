@@ -88,10 +88,50 @@ handshake and a malformed update all end that one connection with a reason the
 pane shows; nothing else on the node is affected, and a VNC connection never
 blocks a turn, a backup or a node upgrade.
 
+## Agent tools
+
+The same connection is what an engine turn works with. `puppy/vnc_agent.py` is
+the turn-bound stdio MCP bridge every driver receives, behind a mode-0600,
+same-uid Unix socket into the running node: `screens`, `connect`, `screenshot`,
+`move`, `click`, `drag`, `scroll`, `type`, `press`, `wait` and `disconnect`.
+Nothing in it speaks RFB - each tool is one high-level action on a connection
+the node already owns, so there is no second path to the server.
+
+An agent has no viewer, so it turns the update loop by hand: `sync()` issues one
+request and waits for the answer, and a server that sends nothing means the
+framebuffer is already current. `settle()` repeats that until the picture is
+quiet, which is what `wait` and the pause before every screenshot use.
+
+A screenshot is a PNG built from the framebuffer with `zlib` and nothing else.
+The rows are strided out as whole 32-bit pixels through one `memoryview` cast,
+their pad byte is dropped in a single C-level pass, and the result is deflated:
+no image library, and no per-pixel Python, exactly like the decoders. A screen
+larger than `max_dimension` (1920 by default, so 1080p is 1:1) is reduced by a
+whole factor, and the result states the screen size, the image size and the
+factor, because every coordinate an action takes is a remote screen pixel.
+
+The chat box inserts `@VNC A8AR` for an open connection and
+`@VNC host:port password` for one to dial; `vnc_agent.TOOL_INSTRUCTIONS` and
+`modalVncShortcut` in `app.js` are the two halves of that wording and must stay
+in lockstep. Each screen first touched in a turn broadcasts one ephemeral
+`vnc_activity` event, so its tab appears beside the chat without taking focus,
+and the node remembers which screen a session's tools mean until it is closed.
+The editable policy sent with every turn is Settings → System prompt → Remote
+screen guidance (`system_prompt.vnc`).
+
 ## Refusals
 
 Validation refuses rather than corrects: an unreachable host, a wrong password,
 a server that requires a security type Puppy does not implement, a screen size
 outside 1..8192, a rectangle outside the screen, a copy from outside the
 screen, an encoding that was never requested, an invalid ZRLE tile, and an
-unknown server message all end the connection with a named reason.
+unknown server message all end the connection with a named reason. The console
+says so in the pane itself, with the reason and a Reconnect button, rather than
+as a toast: a screen that is switched off would otherwise repeat one for every
+redial. Automatic redials back off and stop after five, and reopening the tab or
+pressing Reconnect starts that budget again.
+
+An agent tool refuses the same way: an unknown key, a button that is not
+left/middle/right, a coordinate that is not a number, a view-only connection
+asked for input, or an unbound session asking for a screen it never named are
+all answered with what was wrong and what can be named instead.

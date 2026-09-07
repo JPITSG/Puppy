@@ -22,6 +22,10 @@ class ImageData {
     this.height = height;
   }
 }
+const toasts = [];
+const timers = new Map();
+let timerSerial = 0;
+let now = 1000;
 const context = vm.createContext({
   WebSocket: { OPEN: 1 },
   ImageData,
@@ -29,6 +33,17 @@ const context = vm.createContext({
   requestAnimationFrame(fn) { const id = ++serial; frames.set(id, fn); return id; },
   cancelAnimationFrame(id) { frames.delete(id); },
   vncTargetLabel: tab => tab.vncLabel || tab.vncHost || '',
+  /* The pane's own surroundings: the toast channel it must not flood, the
+     redial budget, and a clock and timer queue this test drives by hand. */
+  toast: (text, level, hold) => toasts.push({ text, level, hold }),
+  TOAST_LONG: 9000,
+  VNC_REDIALS: 5,
+  VNC_ERROR_REPEAT_MS: 10000,
+  Date: { now: () => now },
+  document: { visibilityState: 'visible' },
+  setTimeout(fn, wait) { const id = ++timerSerial; timers.set(id, { fn, wait }); return id; },
+  clearTimeout(id) { timers.delete(id); },
+  backendConnectionAllowed: () => true,
 });
 vm.runInContext(source.slice(start, end) + ';this.View = VncView;', context);
 const View = context.View;
@@ -256,5 +271,60 @@ ending.handleMessage({ type: 'error', text: 'VNC ZZZZ is closed or unknown',
 assert.equal(dead.ended, true, 'a terminal error retires the pane');
 assert.equal(ending.vncGone, true);
 
+/* ---- a screen that is switched off -------------------------------------- */
+/* The complaint this pane exists to avoid: an unreachable server turning into
+   a stream of toasts, one per redial, for as long as the tab is open. */
+const dropped = [];
+const off = makeView({
+  showDead(message, ended) { dropped.push({ message, ended: !!ended }); },
+  resetFps() {}, resetContinuousInput() {}, renderIdentity() {}, setSize() {},
+  clearDead() {}, isDead: () => dropped.length > 0,
+  visible: true, closed: false, ws: null, lastErrorText: '', lastErrorAt: 0,
+  reconnectTimer: null, reconnectAttempts: 0, reconnectDelay: 1000,
+});
+toasts.length = 0;
+off.handleMessage({ type: 'gone', dial: true,
+  reason: 'Could not reach 192.168.1.10:5900: Connection refused' });
+assert.equal(toasts.length, 0, 'a failed dial is reported in the pane, not a toast');
+assert.deepEqual(dropped.at(-1), {
+  message: 'Could not reach 192.168.1.10:5900: Connection refused', ended: false });
+assert.equal(off.vncGone, false, 'the identity survives an unreachable server');
+assert.equal(off.reconnectDelay, 4000,
+  'a refused dial waits longer than a dropped socket before trying again');
+off.reconnectDelay = 1000;
+
+/* Redials back off and stop; the pane keeps its reason and its button. */
+const waits = [];
+for (let attempt = 0; attempt < 12; attempt++) {
+  off.scheduleReconnect();
+  const timer = [...timers.values()].pop();
+  if (!timer) break;
+  waits.push(timer.wait);
+  timers.clear();
+  off.reconnectTimer = null;
+}
+assert.deepEqual(waits, [1000, 2000, 4000, 8000, 16000],
+  'five redials, each waiting longer, then the pane stops asking');
+assert.equal(timers.size, 0, 'no further redial is queued');
+off.resetReconnect();
+off.scheduleReconnect();
+assert.equal(timers.size, 1, 'Reconnect and reopening the tab restore the budget');
+timers.clear();
+off.reconnectTimer = null;
+
+/* A refused action still says so once, and stops repeating itself. */
+toasts.length = 0;
+off.handleMessage({ type: 'error', text: 'VNC AB12 is view only' });
+off.handleMessage({ type: 'error', text: 'VNC AB12 is view only' });
+assert.equal(toasts.length, 1, 'the same refusal is not repeated');
+now += 11000;
+off.handleMessage({ type: 'error', text: 'VNC AB12 is view only' });
+assert.equal(toasts.length, 2, 'a later refusal is worth saying again');
+off.handleMessage({ type: 'error', text: 'VNC ZZZZ is closed or unknown',
+  terminal: true });
+assert.equal(toasts.length, 2, 'a terminal error retires the pane instead');
+assert.equal(dropped.at(-1).ended, true);
+
 console.log('PASS: button mapping, damage painting, malformed-frame rejection, ' +
-  'resize, gesture coalescing, tone vocabulary and status handling');
+  'resize, gesture coalescing, tone vocabulary, status handling and ' +
+  'quiet bounded reconnection');

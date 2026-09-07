@@ -43,6 +43,12 @@ still contain a value written before that release.
   recovery, and closed IDs still retain their reuse protection.
 - Tasks retain their durable relationships and isolated copies. The feature's
   detach-for-rollback command and rollback-only instructions are removed.
+- `config.system_prompt` contains exactly `custom`, `remote_workspace`,
+  `browser`, `terminal`, `vnc`, and `spawn`. A `config.json` written before the
+  remote-screen policy must have `system_prompt.vnc` added by hand before that
+  node starts - any string, or Puppy's `DEFAULT_VNC_SYSTEM_PROMPT`. Startup and
+  backup validation reject the earlier shape instead of filling it in, and a
+  backup archive exported before this change is refused for the same reason.
 
 ## Runtime APIs and console
 
@@ -63,9 +69,10 @@ still contain a value written before that release.
 - Upgrade readiness and backend availability come from their current owners;
   missing fields are not inferred from session lists or browser polls.
 - The console requires shared drafts, upload IDs, engine defaults, complete
-  system-prompt settings, current queued choices, and task configuration,
-  attachments, conflict resolution, and conversation folding. Search jumps use
-  the forward event cursor. Session elapsed time requires server timing fields.
+  system-prompt settings including the remote-screen policy, current queued
+  choices, and task configuration, attachments, conflict resolution, and
+  conversation folding. Search jumps use the forward event cursor. Session
+  elapsed time requires server timing fields.
 - `session-draft-presence` adds expiring, anonymous typing hints to the existing
   session socket and optional revision comparisons for shared-draft writes.
   Conflicts retain the local editor and its existing journal until reviewed;

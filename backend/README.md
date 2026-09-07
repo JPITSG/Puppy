@@ -482,15 +482,22 @@ the engines' native credential stores.
 ## System prompts
 
 Each node stores its own custom prompt plus conditional remote-workspace,
-Browser, Terminal, and spawned-agent guidance. The custom layer is added to
-every new model turn the node starts. The Browser layer is added only when
-Browser is enabled and the turn receives managed-browser tools. The Terminal
-layer is added only when the node offers shared-terminal tools, and its
+Browser, Terminal, remote-screen, and spawned-agent guidance. The custom layer
+is added to every new model turn the node starts. The Browser layer is added
+only when Browser is enabled and the turn receives managed-browser tools. The
+Terminal layer is added only when the node offers shared-terminal tools, and its
 shipped policy tells models to use those tools only after an explicit user
 request; ordinary shell work continues through the engine's normal tools. The
+remote-screen layer accompanies the VNC MCP bridge every execution node offers
+and keeps the tools to screens the user actually named. The
 spawned-agent layer accompanies the always-offered spawn MCP bridge and keeps
 delegation explicitly user-requested because spawned runs spend real
 subscription quota. Active turns keep the prompt with which they started.
+
+`config.system_prompt` holds exactly `custom`, `remote_workspace`, `browser`,
+`terminal`, `vnc`, and `spawn`. A `config.json` written before the remote-screen
+policy must have `system_prompt.vnc` added by hand before that node starts;
+startup and backup validation reject the earlier shape rather than filling it in.
 
 ## Timeout settings
 
@@ -539,8 +546,8 @@ explanation, and cross-node spawns exist only on the controller, which relays
 them over its already-authenticated channels - nodes still never contact each
 other, so a session hosted on a backend can spawn only onto its own node.
 
-The spawn, browser, terminal, and session MCP descriptors explicitly pass the
-node's absolute `PUPPY_DATA` path alongside the package path. This keeps their
+The spawn, browser, terminal, VNC, and session MCP descriptors explicitly pass
+the node's absolute `PUPPY_DATA` path alongside the package path. This keeps their
 configuration tied to the backend even when an engine filters inherited
 environment variables or runs a bridge in a different working directory.
 The backend remains API-only: these bridges need no web UI or additional
@@ -599,6 +606,29 @@ taking focus. The bridge rejects calls after the originating turn ends, and an
 unviewed terminal is stopped after its idle grace period. PTYs, replay buffers,
 and links are memory-only: a node restart or full state restore closes and
 forgets them rather than placing terminal contents in a backup.
+
+## Remote screens
+
+Every execution node is its own VNC client: `GET`/`POST /api/vnc/instances`,
+`DELETE /api/vnc/instances/{id}` and the ID-scoped viewer socket
+`GET /api/ws/vnc/{id}` sit behind the additive `vnc` and `vnc-instances`
+capabilities, and the catalog rides the node state stream as `vnc_instances`.
+Connections are memory-only with four-character IDs: a restart or a full state
+restore forgets them rather than putting a remote screen in a backup, and a
+password lives only in the process that dialled the server. `vnc.idle_timeout`
+drops an unwatched connection while keeping its identity, so reattaching
+redials. A VNC connection never blocks a turn, a backup or a node upgrade.
+
+Every engine turn on such a node also receives a private stdio MCP server,
+backed by a mode-0600, same-uid Unix socket, that offers the screens the node
+already holds: list, connect, screenshot, move, click, drag or swipe, scroll,
+type, press and disconnect, plus a wait that returns once the picture settles.
+Screenshots are PNGs the node builds from the decoded framebuffer with `zlib`
+alone - no image library is installed - and every coordinate is a remote screen
+pixel. The bridge never exposes RFB itself, initialization alone connects
+nothing, the first real tool call in a turn emits an identified activity event
+so the controller inserts that VNC tab beside the chat without taking focus,
+and calls after the originating turn ends are rejected.
 
 ## Durable message queues
 

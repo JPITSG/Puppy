@@ -103,12 +103,12 @@ class FakeDriver(Driver):
 
     def build_cmd(self, session, first_turn, prompt, pinned_id,
                   browser_mcp=None, system_prompt="", terminal_mcp=None,
-                  spawn_mcp=None):
+                  vnc_mcp=None, spawn_mcp=None):
         return [sys.executable, STUB_PATH]
 
     def build_env(self, session, first_turn, prompt, pinned_id,
                   browser_mcp=None, system_prompt="", terminal_mcp=None,
-                  spawn_mcp=None):
+                  vnc_mcp=None, spawn_mcp=None):
         return {"STUB_MODE": session.get("model") or "ok"}
 
     def initial_stdin(self, session, prompt):

@@ -104,6 +104,21 @@ DEFAULT_TERMINAL_SYSTEM_PROMPT = (
     "destructive commands unless the user's request clearly authorizes them."
 )
 
+# This is model-visible only when the node has the VNC bridge, which is every
+# node that serves the execution API. A remote screen is somebody else's
+# machine, so the default keeps the tools to what the user actually asked for.
+DEFAULT_VNC_SYSTEM_PROMPT = (
+    "When the Puppy VNC tools are available, use them only when the user asks "
+    "you to look at or work on a remote screen, or names a VNC ID. They drive "
+    "another machine's mouse and keyboard through Puppy's own VNC client: "
+    "there is no shell, no file access and no undo, so look before you act and "
+    "verify afterwards with a fresh screenshot. Do not connect to a server the "
+    "user has not named, keep passwords out of the conversation, and leave "
+    "anything unrelated to the request alone. The user watches the same screen "
+    "and may be using it, so avoid destructive actions, sign-outs and reboots "
+    "unless the request clearly authorizes them."
+)
+
 # This is model-visible on every turn because the spawn bridge is always
 # offered, so the default keeps the tools firmly opt-in: spawning another
 # engine burns real subscription quota and must stay an explicit user request.
@@ -177,12 +192,14 @@ DEFAULTS = {
     "vnc": {"idle_timeout": 900},
     # The custom text is added to every engine turn on this node. Conditional
     # fields are independently editable instructions added only while a turn
-    # uses the corresponding cross-node workspace, browser, or terminal tools.
+    # uses the corresponding cross-node workspace, browser, terminal, remote
+    # screen, or spawn tools.
     "system_prompt": {
         "custom": "",
         "remote_workspace": DEFAULT_REMOTE_WORKSPACE_SYSTEM_PROMPT,
         "browser": DEFAULT_BROWSER_SYSTEM_PROMPT,
         "terminal": DEFAULT_TERMINAL_SYSTEM_PROMPT,
+        "vnc": DEFAULT_VNC_SYSTEM_PROMPT,
         "spawn": DEFAULT_SPAWN_SYSTEM_PROMPT,
     },
     "sessions": {"default_cwd": service_home(), "turn_timeout": 7200,
@@ -548,13 +565,14 @@ def normalize_system_prompt(value, path: str) -> str:
 
 
 def set_system_prompts(custom: str, remote_workspace: str, browser: str,
-                       terminal: str, spawn: str) -> None:
+                       terminal: str, vnc: str, spawn: str) -> None:
     """Validate and persist the node's prompt fields in one atomic write."""
     custom = normalize_system_prompt(custom, "custom system prompt")
     remote_workspace = normalize_system_prompt(
         remote_workspace, "remote workspace system prompt")
     browser = normalize_system_prompt(browser, "browser system prompt")
     terminal = normalize_system_prompt(terminal, "terminal system prompt")
+    vnc = normalize_system_prompt(vnc, "VNC system prompt")
     spawn = normalize_system_prompt(spawn, "spawn system prompt")
     cfg = load()
     with _lock:
@@ -564,6 +582,7 @@ def set_system_prompts(custom: str, remote_workspace: str, browser: str,
             "remote_workspace": remote_workspace,
             "browser": browser,
             "terminal": terminal,
+            "vnc": vnc,
             "spawn": spawn,
         }
         try:
@@ -611,6 +630,9 @@ def normalize_import(data: dict) -> dict:
     merged["system_prompt"]["terminal"] = normalize_system_prompt(
         merged.get("system_prompt", {}).get("terminal"),
         "config.system_prompt.terminal")
+    merged["system_prompt"]["vnc"] = normalize_system_prompt(
+        merged.get("system_prompt", {}).get("vnc"),
+        "config.system_prompt.vnc")
     merged["system_prompt"]["spawn"] = normalize_system_prompt(
         merged.get("system_prompt", {}).get("spawn"),
         "config.system_prompt.spawn")

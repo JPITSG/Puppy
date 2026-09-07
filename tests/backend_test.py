@@ -5555,6 +5555,7 @@ async def main() -> None:
         assert any(name.startswith("puppy/drivers/") for name in names)
         assert "puppy/browser_agent.py" in names
         assert "puppy/terminal_agent.py" in names
+        assert "puppy/vnc_agent.py" in names
         for name in ("session_agent", "session_links", "session_actions", "session_coordination"):
             assert "puppy/{}.py".format(name) in names
         assert "LICENSE" in names
@@ -5584,6 +5585,13 @@ async def main() -> None:
             "Puppy shared terminal"
         assert "only when the user specifically asks" in \
             terminal_mcp_result["result"]["instructions"]
+        vnc_mcp_output = subprocess.check_output(
+            [sys.executable, "-m", "puppy.vnc_agent"], input=mcp_init,
+            env=mcp_env, cwd=str(temp_root), text=True, timeout=5)
+        vnc_mcp_result = json.loads(vnc_mcp_output.strip())
+        assert vnc_mcp_result["result"]["serverInfo"]["name"] == \
+            "Puppy remote screen"
+        assert '"@VNC A8AR"' in vnc_mcp_result["result"]["instructions"]
         from tests.mcp_startup_test import exercise_mcp_startup
         exercise_mcp_startup(release_artifact, temp_root / "mcp-driver-startup")
         self_test = json.loads(subprocess.check_output([
@@ -5596,6 +5604,8 @@ async def main() -> None:
         assert "/api/session-links/action" in self_test["routes"]
         assert "/api/ws/session-links" in self_test["routes"]
         assert "/api/ws/terminal/{terminal_id}" in self_test["routes"]
+        assert "/api/vnc/instances" in self_test["routes"]
+        assert "/api/ws/vnc/{vnc_id}" in self_test["routes"]
 
         # Configuration alone is insufficient: a directly launched zipapp must
         # keep remote upgrades disabled because no external rollback exists.

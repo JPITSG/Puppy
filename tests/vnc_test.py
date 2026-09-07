@@ -29,8 +29,25 @@ os.environ["PUPPY_DATA"] = str(TEST_ROOT / "data")
 import aiohttp  # noqa: E402
 from aiohttp import web as aioweb  # noqa: E402
 
-from puppy import config, db, protocol, vnc  # noqa: E402
+from puppy import (config, db, protocol, runner, system_prompts, vnc,  # noqa: E402
+                   vnc_agent)
+from puppy.drivers.claude import ClaudeDriver  # noqa: E402
+from puppy.drivers.codex import CodexDriver  # noqa: E402
+from puppy.drivers.opencode import OpenCodeDriver  # noqa: E402
 from puppy.web import build_app  # noqa: E402
+
+
+class CaptureSocket:
+    """A stand-in for the console sockets the runner announces tabs on."""
+
+    def __init__(self):
+        self.messages = []
+
+    async def send_json(self, payload):
+        self.messages.append(payload)
+
+    async def send_str(self, payload):
+        self.messages.append(json.loads(payload))
 
 
 # --------------------------------------------------------------------------
@@ -1180,6 +1197,356 @@ async def check_http_surface() -> None:
     print("  HTTP surface ok")
 
 
+def png_pixels(image: bytes) -> tuple:
+    """Decode our own PNG the long way round, to prove it is a real one."""
+    assert image[:8] == b"\x89PNG\r\n\x1a\n", image[:8]
+    offset = 8
+    header = None
+    data = b""
+    while offset < len(image):
+        length = struct.unpack(">I", image[offset:offset + 4])[0]
+        tag = image[offset + 4:offset + 8]
+        body = image[offset + 8:offset + 8 + length]
+        crc = struct.unpack(">I", image[offset + 8 + length:offset + 12 + length])[0]
+        assert crc == zlib.crc32(tag + body) & 0xFFFFFFFF, tag
+        if tag == b"IHDR":
+            header = struct.unpack(">IIBBBBB", body)
+        elif tag == b"IDAT":
+            data += body
+        offset += 12 + length
+    assert header is not None and header[2] == 8 and header[3] == 2, header
+    width, height = header[0], header[1]
+    raw = zlib.decompress(data)
+    stride = width * 3
+    rows = []
+    for index in range(height):
+        line = raw[index * (stride + 1):(index + 1) * (stride + 1)]
+        assert line[0] == 0, "this encoder never predicts"
+        rows.append(line[1:])
+    return width, height, rows
+
+
+async def check_agent_screenshot() -> None:
+    """The picture an engine turn gets, without a viewer or an image library."""
+    server = await StubVncServer(width=4, height=3).start()
+    instance = await connected_instance(server)
+    # Four wide is enough to see a strided reduction keep the right columns.
+    colours = [(10, 20, 30), (40, 50, 60), (70, 80, 90), (100, 110, 120)]
+    server.queue(update(rect(0, 0, 4, 3, vnc.ENC_RAW,
+                             raw_payload(colours * 3))))
+    await wait_for(lambda: instance.frame_seq >= 1, label="first update")
+
+    shot = instance.screenshot()
+    assert (shot["step"], shot["out_width"], shot["out_height"]) == (1, 4, 3), shot
+    width, height, rows = png_pixels(shot["png"])
+    assert (width, height) == (4, 3)
+    assert rows[0] == b"".join(bytes(colour) for colour in colours), rows[0]
+
+    # A screen larger than the requested image is reduced by a whole factor,
+    # and every reported number describes what the caller actually received.
+    small = instance.screenshot(max_dimension=vnc.AGENT_MIN_DIMENSION)
+    assert small["step"] == 1, small          # 4x3 is already small enough
+    reduced = instance.screenshot(max_dimension=2)   # clamped to the minimum
+    assert reduced["step"] == 1, reduced
+    frame, screen_width, _screen_height = instance.frame_snapshot()
+    forced = vnc._rgb_rows(frame, screen_width, 0, 0, 4, 3, 2)
+    assert len(forced) == 2 and len(forced[0]) == 6, forced
+    assert forced[0] == bytes(colours[0]) + bytes(colours[2]), forced[0]
+
+    # One self-consistent view: a size that no longer matches the buffer is
+    # refused rather than encoded, so a resize cannot tear a worker's picture.
+    instance.width = 9
+    try:
+        instance.screenshot()
+    except vnc.VncError as exc:
+        assert "not been received" in str(exc), exc
+    else:
+        raise AssertionError("a mismatched framebuffer was captured")
+    instance.width = 4
+
+    region = instance.screenshot(region={"x": 1, "y": 1, "width": 2, "height": 2})
+    assert (region["x"], region["y"], region["width"], region["height"]) == \
+        (1, 1, 2, 2), region
+    width, height, rows = png_pixels(region["png"])
+    assert (width, height) == (2, 2)
+    assert rows[0] == bytes(colours[1]) + bytes(colours[2]), rows[0]
+    # A region outside the screen is clamped onto it rather than refused.
+    clamped = instance.screenshot(region={"x": 3, "y": 2, "width": 900,
+                                          "height": 900})
+    assert (clamped["width"], clamped["height"]) == (1, 1), clamped
+
+    # With no viewer the update loop is parked, so the agent turns it by hand.
+    before = len(server.requests)
+    assert await instance.sync(timeout=0.3) is False, "an idle screen is current"
+    assert len(server.requests) > before, "the agent must drive the request"
+    server.queue(update(rect(0, 0, 4, 3, vnc.ENC_RAW, raw_payload(colours * 3))))
+    assert await instance.sync(timeout=2.0) is True
+    assert await instance.settle(quiet_ms=100, timeout_ms=1500) is True
+
+    await instance.close("test")
+    await server.stop()
+    print("  agent screenshot ok")
+
+
+async def check_agent_input() -> None:
+    """Everything a person does with a mouse and keyboard, as RFB messages."""
+    server = await StubVncServer(width=101, height=51).start()
+    instance = await connected_instance(server)
+    server.pointer_events.clear()
+
+    assert await instance.agent_move(50, 25) == (50, 25)
+    assert await instance.agent_move(-5, 9999) == (0, 50), "coordinates clamp"
+    await wait_for(lambda: len(server.pointer_events) >= 2, label="pointer moves")
+    assert server.pointer_events[:2] == [(0, 50, 25), (0, 0, 50)]
+
+    server.pointer_events.clear()
+    await instance.agent_click(10, 12)
+    await wait_for(lambda: len(server.pointer_events) >= 3, label="click")
+    assert server.pointer_events[:3] == [(0, 10, 12), (1, 10, 12), (0, 10, 12)]
+
+    server.pointer_events.clear()
+    server.key_events.clear()
+    await instance.agent_click(10, 12, button="right", count=2,
+                               modifiers=["Control"])
+    await wait_for(lambda: len(server.pointer_events) >= 5, label="double click")
+    assert server.pointer_events[:5] == [
+        (0, 10, 12), (4, 10, 12), (0, 10, 12), (4, 10, 12), (0, 10, 12)]
+    assert server.key_events[:1] == [(True, 0xFFE3)]
+    assert server.key_events[-1] == (False, 0xFFE3), "a held modifier is released"
+
+    # A drag really travels: press, intermediate positions, release.
+    server.pointer_events.clear()
+    await instance.agent_drag(0, 0, 100, 50, steps=4, duration_ms=0)
+    await wait_for(lambda: len(server.pointer_events) >= 7, label="drag")
+    assert server.pointer_events[0] == (0, 0, 0)
+    assert server.pointer_events[1] == (1, 0, 0), "the button goes down first"
+    assert [item[0] for item in server.pointer_events[2:6]] == [1, 1, 1, 1]
+    assert server.pointer_events[5] == (1, 100, 50)
+    assert server.pointer_events[6] == (0, 100, 50), "and up at the end"
+
+    server.pointer_events.clear()
+    await instance.agent_scroll(5, 6, direction="up", clicks=2)
+    await wait_for(lambda: len(server.pointer_events) >= 4, label="scroll")
+    assert server.pointer_events[:4] == [
+        (1 << 3, 5, 6), (0, 5, 6), (1 << 3, 5, 6), (0, 5, 6)]
+
+    server.key_events.clear()
+    assert await instance.agent_type("hi\n") == 3
+    await wait_for(lambda: len(server.key_events) >= 6, label="typed text")
+    assert server.key_events[:6] == [
+        (True, ord("h")), (False, ord("h")), (True, ord("i")), (False, ord("i")),
+        (True, 0xFF0D), (False, 0xFF0D)]
+
+    server.key_events.clear()
+    assert await instance.agent_press("Delete", modifiers=["Control", "alt"]) == \
+        "Control+Alt+Delete"
+    await wait_for(lambda: len(server.key_events) >= 4, label="shortcut")
+    assert server.key_events[:4] == [
+        (True, 0xFFE3), (True, 0xFFE9), (True, 0xFFFF), (False, 0xFFFF)]
+    assert server.key_events[-2:] == [(False, 0xFFE9), (False, 0xFFE3)]
+
+    server.key_events.clear()
+    assert await instance.agent_press("space") == "Space"
+    await wait_for(lambda: len(server.key_events) >= 2, label="space")
+    assert server.key_events[:2] == [(True, 32), (False, 32)]
+
+    server.key_events.clear()
+    assert await instance.agent_press("esc") == "Escape"
+    assert await instance.agent_press("f5") == "F5"
+    assert await instance.agent_press("a", count=2) == "a"
+    await wait_for(lambda: len(server.key_events) >= 8, label="named keys")
+    assert server.key_events[:2] == [(True, 0xFF1B), (False, 0xFF1B)]
+    assert server.key_events[2:4] == [(True, 0xFFC2), (False, 0xFFC2)]
+    assert server.key_events[4:8] == [(True, ord("a")), (False, ord("a"))] * 2
+
+    # Refusals name the mistake instead of guessing at it.
+    for call, expected in (
+            (instance.agent_press("Hyperspace"), "unknown key"),
+            (instance.agent_press("a", modifiers=["Enter"]), "not a modifier"),
+            (instance.agent_click(1, 1, button="thumb"), "button must be"),
+            (instance.agent_click(1, 1, count=99), "click count"),
+            (instance.agent_click(1, 1, count=2.5), "whole number"),
+            (instance.agent_click(1, 1, count=float("inf")), "whole number"),
+            (instance.agent_scroll(1, 1, direction="sideways"), "direction"),
+            (instance.agent_move("x", 1), "coordinates must be numbers"),
+            (instance.agent_type(""), "supply the text")):
+        try:
+            await call
+        except vnc.VncError as exc:
+            assert expected in str(exc), (expected, exc)
+        else:
+            raise AssertionError("a bad {} was accepted".format(expected))
+
+    await instance.close("test")
+
+    # View only refuses the whole agent surface, exactly like a viewer's input.
+    instance = await connected_instance(server, view_only=True)
+    server.pointer_events.clear()
+    server.key_events.clear()
+    for call in (instance.agent_click(1, 1), instance.agent_move(1, 1),
+                 instance.agent_drag(1, 1, 2, 2), instance.agent_scroll(1, 1),
+                 instance.agent_type("no"), instance.agent_press("Enter")):
+        try:
+            await call
+        except vnc.VncError as exc:
+            assert "view only" in str(exc), exc
+        else:
+            raise AssertionError("view only accepted agent input")
+    await asyncio.sleep(0.1)
+    assert not server.pointer_events and not server.key_events
+    await instance.close("test")
+    await server.stop()
+    print("  agent input ok")
+
+
+async def check_agent_bridge(session_id: int) -> None:
+    """The turn-bound MCP bridge: identity, selection, tabs and refusals."""
+    server = await StubVncServer(width=8, height=4).start()
+    registry = vnc.VncRegistry()
+    old_manager = vnc._manager
+    vnc._manager = registry
+    session_capture = CaptureSocket()
+    updates_capture = CaptureSocket()
+    hub = runner.hub(session_id)
+    hub.status = "running"
+    hub._active_turn_id = "vnc-turn"
+    hub._vnc_activity_announced = set()
+    hub.attach(session_capture)
+    runner.updates_attach(updates_capture)
+    try:
+        assert vnc_agent.turn_mcp(session_id, "vnc-turn") is None
+        vnc_agent._server = object()
+        try:
+            descriptor = vnc_agent.turn_mcp(session_id, "vnc-turn")
+        finally:
+            vnc_agent._server = None
+        assert descriptor["name"] == "puppy_vnc"
+        assert descriptor["args"] == ["-m", "puppy.vnc_agent"]
+        assert descriptor["env"]["PUPPY_VNC_SESSION_ID"] == str(session_id)
+        assert descriptor["engine_guidance"] == system_prompts.vnc_prompt()
+
+        call = lambda method, **params: vnc_agent._dispatch({
+            "session_id": session_id, "turn_id": "vnc-turn",
+            "method": method, "params": params})
+
+        empty = await call("screens")
+        assert "no VNC connection open" in empty["text"], empty
+        try:
+            await call("screenshot")
+        except vnc_agent.VncAgentError as exc:
+            assert "no remote screen is selected" in str(exc), exc
+        else:
+            raise AssertionError("an unbound session was given a screen")
+
+        opened = await call("connect", host="127.0.0.1", port=server.port,
+                            password="", label="Lab")
+        vnc_id = opened["text"].split(" ")[1]
+        assert vnc.VNC_ID_RE.fullmatch(vnc_id), opened["text"]
+        assert registry.bindings[session_id] == vnc_id
+        assert opened["image"]["mime_type"] == "image/png"
+        assert "Image is the whole 8x4 screen at 1:1." in opened["text"], opened
+        assert "Lab" in opened["text"]
+
+        listed = await call("screens")
+        assert "this chat's current screen" in listed["text"], listed
+
+        # The tab appears beside the chat exactly once for the turn.
+        await wait_for(lambda: any(item.get("type") == "vnc_activity"
+                                   for item in session_capture.messages))
+        await wait_for(lambda: any(item.get("type") == "vnc_activity"
+                                   for item in updates_capture.messages))
+        assert [item["vnc_id"] for item in session_capture.messages
+                if item.get("type") == "vnc_activity"] == [vnc_id]
+
+        moved = await call("click", x=3, y=2)
+        assert "Left click at 3,2." in moved["text"], moved
+        assert "image" not in moved, "a picture is only sent when asked for"
+        pictured = await call("press", key="Enter", screenshot=True)
+        assert "Pressed Enter." in pictured["text"] and pictured["image"]
+        waited = await call("wait", quiet_ms=50, timeout_ms=800)
+        assert "unchanged" in waited["text"], waited
+
+        # An explicit ID selects; an unknown one is refused, not invented.
+        assert (await call("screenshot", vnc_id=vnc_id))["image"]
+        try:
+            await call("screenshot", vnc_id="ZZZZ")
+        except vnc_agent.VncAgentError as exc:
+            assert "closed or unknown" in str(exc), exc
+        else:
+            raise AssertionError("an unknown VNC ID was accepted")
+
+        # A turn that is no longer running owns no tools.
+        hub._active_turn_id = "another-turn"
+        try:
+            await call("screenshot")
+        except vnc_agent.VncAgentError as exc:
+            assert "no longer running" in str(exc), exc
+        else:
+            raise AssertionError("a stale turn kept its VNC tools")
+        hub._active_turn_id = "vnc-turn"
+
+        closed = await call("disconnect", vnc_id=vnc_id)
+        assert "Closed VNC {}".format(vnc_id) in closed["text"], closed
+        assert registry.instance_payloads() == []
+        assert session_id not in registry.bindings, "a closed screen is unbound"
+    finally:
+        hub.status = "idle"
+        hub._active_turn_id = ""
+        hub.detach(session_capture)
+        runner.updates_detach(updates_capture)
+        await registry.stop("test cleanup")
+        vnc._manager = old_manager
+        await server.stop()
+    print("  agent bridge ok")
+
+
+def check_agent_contract() -> None:
+    """The wording and shape the console and the engine both depend on."""
+    names = {tool["name"] for tool in vnc_agent.TOOLS}
+    assert names == {"screens", "connect", "screenshot", "move", "click", "drag",
+                     "scroll", "type", "press", "wait", "disconnect"}, names
+    for tool in vnc_agent.TOOLS:
+        assert tool["inputSchema"]["additionalProperties"] is False, tool["name"]
+        assert tool["description"] and tool["annotations"], tool["name"]
+    # The mention wording is one contract shared with app.js.
+    assert '"@VNC A8AR"' in vnc_agent.TOOL_INSTRUCTIONS
+    assert '"@VNC host:port password"' in vnc_agent.TOOL_INSTRUCTIONS
+    policy = "Node VNC policy."
+    config.set_system_prompts(
+        config.get("system_prompt.custom"),
+        config.get("system_prompt.remote_workspace"),
+        config.get("system_prompt.browser"),
+        config.get("system_prompt.terminal"), policy,
+        config.get("system_prompt.spawn"))
+    try:
+        assert vnc_agent.instructions() == \
+            policy + " " + vnc_agent.TOOL_INSTRUCTIONS
+        session = {"cwd": str(TEST_ROOT)}
+        vnc_agent._server = object()
+        descriptor = vnc_agent.turn_mcp(1, "contract")
+        vnc_agent._server = None
+        claude = ClaudeDriver().build_cmd(session, True, "hi", "pin",
+                                          vnc_mcp=descriptor)
+        servers = json.loads(claude[claude.index("--mcp-config") + 1])
+        assert set(servers["mcpServers"]) == {"puppy_vnc"}, servers
+        assert claude[claude.index("--append-system-prompt") + 1] == policy
+        codex = CodexDriver().turn_context(session, True, "hi", "pin",
+                                           vnc_mcp=descriptor)
+        assert "<puppy_vnc_policy>" in codex["prompt"] and policy in codex["prompt"]
+        opencode = OpenCodeDriver().turn_context(session, True, "hi", "pin",
+                                                 vnc_mcp=descriptor)
+        assert [item["name"] for item in opencode["mcp_servers"]] == ["puppy_vnc"]
+    finally:
+        config.set_system_prompts(
+            config.get("system_prompt.custom"),
+            config.get("system_prompt.remote_workspace"),
+            config.get("system_prompt.browser"),
+            config.get("system_prompt.terminal"),
+            config.DEFAULT_VNC_SYSTEM_PROMPT,
+            config.get("system_prompt.spawn"))
+    print("  agent contract ok")
+
+
 def check_config_shape() -> None:
     exported = config.export_data()
     assert exported["vnc"] == {"idle_timeout": 900}, exported["vnc"]
@@ -1192,6 +1559,15 @@ def check_config_shape() -> None:
         assert "vnc" in str(exc), exc
     else:
         raise AssertionError("a config without the VNC section was accepted")
+    assert exported["system_prompt"]["vnc"] == config.DEFAULT_VNC_SYSTEM_PROMPT
+    outdated = config.export_data()
+    outdated["system_prompt"].pop("vnc")
+    try:
+        config.normalize_import(outdated)
+    except ValueError as exc:
+        assert "vnc" in str(exc), exc
+    else:
+        raise AssertionError("a config without the VNC prompt was accepted")
     assert protocol.VNC_CAPABILITY in protocol.BASE_CAPABILITIES
     assert protocol.VNC_INSTANCES_CAPABILITY in \
         protocol.execution_capabilities(include_terminal=False)
@@ -1206,6 +1582,13 @@ def check_static_contract() -> None:
     assert 'data-act="new-vnc"' in index
     assert "class VncView" in app_js
     assert "function modalNewVnc" in app_js
+    # The composer's half of the mention contract vnc_agent.TOOL_INSTRUCTIONS
+    # describes: existing screens by ID, and the wizard that builds a target.
+    assert "`@VNC ${inst.id}`" in app_js
+    assert "function modalVncShortcut" in app_js
+    assert "function vncShortcutText" in app_js
+    assert "handleVncActivity" in app_js and "vnc_activity" in app_js
+    assert "system-prompt-vnc" in app_js and "vncDefault" in app_js
     assert "ws/vnc/${encodeURIComponent(this.tab.vncId)}" in app_js
     assert "vnc/instances" in app_js
     # The two frame kinds the node sends, and nothing else to decode them with.
@@ -1238,6 +1621,12 @@ async def main() -> None:
         await check_input()
         await check_lifecycle()
         await check_http_surface()
+        check_agent_contract()
+        await check_agent_screenshot()
+        await check_agent_input()
+        await check_agent_bridge(db.create_session(
+            "vnc agent", "codex", str(TEST_ROOT), "", "", "#7aa2f7",
+            "danger-full-access"))
         print("vnc tests passed")
     finally:
         if db._conn is not None:

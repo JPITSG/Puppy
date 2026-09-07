@@ -2378,7 +2378,7 @@ function linkifyInto(node, text) {
    connectors are not model ids; punctuation and newlines end settings.
    Surrounding prose keeps its ordinary rendering and linkification. */
 const MENTION_TOKEN_RE =
-  /(^|[\s([{'"])(@(?:Session-[\w\p{L}\p{N}-]+-[A-Z0-9]{4}|Session (?:[a-f0-9]{32}:)?(?:all|[a-f0-9]{32}\/[1-9][0-9]*)|Browser [A-Z0-9]{4}|Terminal [A-Z0-9]{4}|New browser|New terminal|Spawn (?:an agent|[0-9]{1,2} agents)(?: on (?:"[^"\n]{1,80}"|\S+))? using (?!(?:to|and|at)\b)[\w-]+(?: (?!(?:to|and|at|then|for|with)\b)[\w](?:[\w./:+-]*[\w/+-])?)?(?: at [\w-]+ effort)?))(?=$|[\s.,;:!?)\]}'"])/gu;
+  /(^|[\s([{'"])(@(?:Session-[\w\p{L}\p{N}-]+-[A-Z0-9]{4}|Session (?:[a-f0-9]{32}:)?(?:all|[a-f0-9]{32}\/[1-9][0-9]*)|Browser [A-Z0-9]{4}|Terminal [A-Z0-9]{4}|New browser|New terminal|VNC (?:[A-Z0-9]{4}|[\w.\[\]:-]{1,255}(?: (?:"[^"\n]{1,255}"|(?!(?:to|and|then|so|for|with|please|at|but|or)\b)\S{1,255}))?)|Spawn (?:an agent|[0-9]{1,2} agents)(?: on (?:"[^"\n]{1,80}"|\S+))? using (?!(?:to|and|at)\b)[\w-]+(?: (?!(?:to|and|at|then|for|with)\b)[\w](?:[\w./:+-]*[\w/+-])?)?(?: at [\w-]+ effort)?))(?=$|[\s.,;:!?)\]}'"])/gu;
 function decorateMentionsInto(node, text) {
   text = String(text == null ? "" : text);
   MENTION_TOKEN_RE.lastIndex = 0;
@@ -3302,9 +3302,11 @@ function acceptStateSnapshot(bid, message) {
 function syncInstanceCatalogIntoComposers(bid, kind, instances) {
   for (const composer of Composer.live) {
     if (Number(composer.host.bid || 0) !== Number(bid || 0)) continue;
+    /* VNC screens are read straight from the streamed catalog, so this only
+       repaints an open list; browsers and terminals also cache their fetch. */
     if (kind === "browser") composer.mentionData.browsers = instances;
-    else composer.mentionData.terminals = instances;
-    composer.mentionData.at = Date.now();
+    else if (kind === "terminal") composer.mentionData.terminals = instances;
+    if (kind !== "vnc") composer.mentionData.at = Date.now();
     if (composer.mention && !composer.closed) composer.updateMention();
   }
   syncSessionBrowserChips();
@@ -3342,6 +3344,7 @@ function applyVncInstancesSnapshot(bid, payload) {
   bid = Number(bid) || 0;
   state.vncInstances[bid] = payload.instances;
   syncVncTabs(bid);
+  syncInstanceCatalogIntoComposers(bid, "vnc", payload.instances);
   syncRemoteStateViews();
 }
 
@@ -3500,6 +3503,8 @@ function handleUpdatesMessage(d) {
     handleBrowserActivity(0, d.session_id, d.turn_id, d.browser_id);
   } else if (d.type === "terminal_activity") {
     handleTerminalActivity(0, d.session_id, d.turn_id, d.terminal_id);
+  } else if (d.type === "vnc_activity") {
+    handleVncActivity(0, d.session_id, d.turn_id, d.vnc_id);
   } else if (d.type === "workspace_links" && Array.isArray(d.links)) {
     state.workspaceLinks = d.links;
     renderSidebar();
@@ -6503,6 +6508,7 @@ let tabScrollLayoutFrame = null;
 let pendingTabScrollFocus = null;
 const browserActivityTurns = new Map();
 const terminalActivityTurns = new Map();
+const vncActivityTurns = new Map();
 
 function findSessionMeta(bid, sid) {
   return sessionsFor(bid).find(s => s.id === sid);
@@ -6711,6 +6717,32 @@ function handleTerminalActivity(bid, sid, turnId, terminalId = "") {
   const sessionPane = workspacePaneForTab(sessionTabId);
   openTermTab(bid, "", sessionPane ? sessionPane.id : null, "", terminalId,
     { activate: false, afterTabId: sessionTabId, sid });
+}
+
+/* A remote screen the model first touched in a turn: the same background
+   insertion Browser and Terminal use, so the user can watch it work without
+   the chat losing focus. */
+function handleVncActivity(bid, sid, turnId, vncId = "") {
+  bid = Number(bid) || 0;
+  sid = Number(sid) || 0;
+  const token = String(turnId || "");
+  vncId = String(vncId || "").toUpperCase();
+  if (!sid || !token || !/^[A-Z0-9]{4}$/.test(vncId)) return;
+  const key = `${bid}:${token}:${vncId}`;
+  if (vncActivityTurns.has(key)) return;
+  vncActivityTurns.set(key, Date.now());
+  while (vncActivityTurns.size > 128)
+    vncActivityTurns.delete(vncActivityTurns.keys().next().value);
+  const owner = liveViews().find(view => view && view.tab && view.tab.type === "session" &&
+    view.tab.bid === bid && view.tab.sid === sid);
+  const parent = owner && owner.session && owner.session.task ? owner.session.task.parent : sid;
+  const sessionTabId = `s:${bid}:${parent}`;
+  const sessionPane = workspacePaneForTab(sessionTabId);
+  const known = (vncInstancesFor(bid) || []).find(item =>
+    String(item.id || "").toUpperCase() === vncId) || {};
+  openVncTab(bid, vncId, sessionPane ? sessionPane.id : null,
+    { activate: false, afterTabId: sessionTabId,
+      host: known.host, port: known.port, label: known.label });
 }
 
 function openSettingsTab(groupId = null) {
@@ -9071,7 +9103,8 @@ class Composer {
         ico.appendChild(refreshIcon(11));
       } else if (item.kind !== "spawn-wait") {
         ico.appendChild(item.kind === "browser" ? globeIcon(12) :
-          item.kind === "terminal" ? terminalIcon(12) : plusIcon(11));
+          item.kind === "terminal" ? terminalIcon(12) :
+          item.kind === "vnc" ? vncIcon(12) : plusIcon(11));
       }
       row.appendChild(ico);
       row.appendChild(el("span", "mention-label", item.label));
@@ -9131,6 +9164,7 @@ class Composer {
         wizard.data.sessions.find(row => row.ref === ref).mention).join(" ")});
       return;
     }
+    if (item.kind === "new-vnc") { this.vncMentionBegin(); return; }
     if (item.kind === "new-spawn") { this.spawnMentionBegin(); return; }
     if (item.kind === "spawn-back") { this.spawnStepBack(); return; }
     if (item.kind === "spawn-step") { this.spawnStepChoose(item); return; }
@@ -9138,18 +9172,40 @@ class Composer {
     if (item.kind === "spawn-wait") return;
     const m = this.mention;
     if (!m) return;
-    const ta = this.ta;
-    const end = ta.selectionStart;
-    const rest = ta.value.slice(end);
-    const pad = rest.startsWith(" ") || rest.startsWith("\n") ? "" : " ";
-    ta.value = ta.value.slice(0, m.start) + item.insert + pad + rest;
-    const caret = m.start + item.insert.length + 1;
-    ta.setSelectionRange(caret, caret);
+    const token = { start: m.start, end: this.ta.selectionStart };
     this.mentionDismissedAt = -1;
     this.hideMention();
+    this.insertMentionText(token, item.insert);
+  }
+
+  /* Replace one remembered token span with finished mention text. A wizard
+     that runs in a dialog cannot re-derive the token when it returns, so the
+     span is captured before the popup closes. */
+  insertMentionText(token, insert) {
+    const ta = this.ta;
+    const start = Math.max(0, Math.min(token.start, ta.value.length));
+    const end = Math.max(start, Math.min(token.end, ta.value.length));
+    const rest = ta.value.slice(end);
+    const pad = rest.startsWith(" ") || rest.startsWith("\n") ? "" : " ";
+    ta.value = ta.value.slice(0, start) + insert + pad + rest;
+    const caret = start + insert.length + 1;
+    ta.setSelectionRange(caret, caret);
     ta.focus();
     ta.dispatchEvent(new Event("input", { bubbles: true }));
     scrollCaretIntoView(ta);
+  }
+
+  /* The "New VNC connection" row: a remote screen needs a host, a port and
+     sometimes a password, which is a form rather than a list of choices. The
+     dialog builds the exact directive and hands it back here. */
+  vncMentionBegin() {
+    const m = this.mention;
+    if (!m) return;
+    const token = { start: m.start, end: this.ta.selectionStart };
+    this.mentionDismissedAt = -1;
+    this.hideMention();
+    modalVncShortcut(this.host.bid || 0, this.knownVncScreens(true),
+      insert => this.insertMentionText(token, insert));
   }
 
   /* What "@" can point the agent at on this session's node: live instances
@@ -9162,6 +9218,7 @@ class Composer {
     const backend = bid ? state.backends.find(b => b.id === bid) : null;
     const withBrowser = browserEnabledFor(bid);
     const withTerminal = !bid || backendHasCapability(backend, "terminal");
+    const withVnc = vncEnabledFor(bid);
     const items = [];
     const push = (kind, label, hint, insert) =>
       items.push({ kind, label, hint, insert, search: label.toLowerCase() });
@@ -9176,11 +9233,15 @@ class Composer {
       push("browser", `Browser ${inst.id}`, hintFor(inst.session_id), `@Browser ${inst.id}`);
     for (const inst of this.knownMentionInstances("terminal", withTerminal))
       push("terminal", `Terminal ${inst.id}`, hintFor(inst.session_id), `@Terminal ${inst.id}`);
+    for (const inst of this.knownVncScreens(withVnc))
+      push("vnc", `VNC ${inst.id}`, inst.hint, `@VNC ${inst.id}`);
     if (!bid || backendHasCapability(backend, "session-short-references"))
       items.push({kind: "session-picker", label: "Session", hint: "reference one, several, or all",
         search: "session sessions", insert: ""});
     if (withBrowser) push("new-browser", "New browser", "another isolated browser", "@New browser");
     if (withTerminal) push("new-terminal", "New terminal", "another shared terminal", "@New terminal");
+    if (withVnc)
+      push("new-vnc", "New VNC connection", "a remote screen by host", "");
     if (spawnExecFor(bid))
       push("new-spawn", "New spawn", "delegate a one-shot agent", "");
     return items;
@@ -9492,6 +9553,31 @@ class Composer {
     const instances = [...known.values()];
     return instances.filter(inst => inst.session_id === this.host.sid)
       .concat(instances.filter(inst => inst.session_id !== this.host.sid));
+  }
+
+  /* The remote screens this node holds. Unlike browsers and terminals the
+     catalog is never fetched here: it rides the state stream, and open tabs
+     fill in for a console that has not received it yet. */
+  knownVncScreens(allowed) {
+    if (!allowed) return [];
+    const bid = this.host.bid || 0;
+    const known = new Map();
+    for (const inst of vncInstancesFor(bid) || []) {
+      const id = String(inst && inst.id || "").toUpperCase();
+      if (!/^[A-Z0-9]{4}$/.test(id)) continue;
+      const port = Number(inst.port) || 0;
+      known.set(id, { id, hint: [
+        port && port !== 5900 ? `${inst.host}:${port}` : String(inst.host || ""),
+        String(inst.label || ""),
+      ].filter(Boolean).join(" · ") });
+    }
+    for (const tab of state.tabs) {
+      if (tab.type !== "vnc" || (tab.bid || 0) !== bid || tab.vncGone === true) continue;
+      const id = String(tab.vncId || "").toUpperCase();
+      if (!/^[A-Z0-9]{4}$/.test(id) || known.has(id)) continue;
+      known.set(id, { id, hint: vncTargetLabel(tab) });
+    }
+    return [...known.values()];
   }
 
   /* One coalesced, briefly cached snapshot of the node's live instances: the
@@ -12082,6 +12168,9 @@ class SessionView {
         break;
       case "terminal_activity":
         handleTerminalActivity(this.tab.bid, this.tab.sid, d.turn_id, d.terminal_id);
+        break;
+      case "vnc_activity":
+        handleVncActivity(this.tab.bid, this.tab.sid, d.turn_id, d.vnc_id);
         break;
     }
     const runningKinds = { user: 1, assistant: 1, thinking: 1, tool_use: 1, tool_result: 1 };
@@ -15822,6 +15911,11 @@ class BrowserView {
 }
 
 /* ================= VncView ================= */
+/* Automatic redials after the console's socket to the node drops, and how
+   long the same refused action stays quiet. A remote screen that is off must
+   cost one line in the pane, not a stream of toasts. */
+const VNC_REDIALS = 5;
+const VNC_ERROR_REPEAT_MS = 10000;
 /* A remote screen, presented exactly like the managed browser: the same
    toolbar, the same identity/stats strip, the same stage and dead-state
    overlay. What differs is entirely under the surface - the node decodes RFB
@@ -15839,6 +15933,13 @@ class VncView {
     this.vncGone = tab.vncGone === true;
     this.reconnectTimer = null;
     this.reconnectDelay = 1000;
+    /* A remote screen that is simply switched off must not become a stream of
+       toasts. The pane itself is where a connection problem is reported, and
+       the automatic redials stop after a few tries so the node is not asked
+       to dial an unreachable host on a timer forever. */
+    this.reconnectAttempts = 0;
+    this.lastErrorText = "";
+    this.lastErrorAt = 0;
     this.frameW = 0;
     this.frameH = 0;
     this.fpsTimer = null;
@@ -15930,7 +16031,7 @@ class VncView {
   onShow(focus = true) {
     this.visible = true;
     if (!this.started) { this.started = true; this.start(); }
-    else if (!this.ws) this.scheduleReconnect(0);
+    else if (!this.ws) { this.resetReconnect(); this.scheduleReconnect(0); }
     this.syncViewerActivity();
     if (focus && !this.isDead()) this.stage.focus({ preventScroll: true });
   }
@@ -16214,11 +16315,15 @@ class VncView {
     if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
   }
+  /* Automatic redials cover a blip, not an absence: after VNC_REDIALS the pane
+     parks on its last reason with the Reconnect button, which is also what
+     returning to the tab or pressing Reconnect resets. */
   scheduleReconnect(delay = null) {
     if (this.closed || this.vncGone || !this.visible ||
         document.visibilityState === "hidden" || this.ws ||
         (this.tab.bid && !backendConnectionAllowed(this.tab.bid))) return;
     if (this.reconnectTimer !== null) return;
+    if (delay === null && this.reconnectAttempts >= VNC_REDIALS) return;
     const wait = delay === null ? this.reconnectDelay : Math.max(0, delay);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
@@ -16227,7 +16332,15 @@ class VncView {
           (this.tab.bid && !backendConnectionAllowed(this.tab.bid))) return;
       this.connect();
     }, wait);
-    if (delay === null) this.reconnectDelay = Math.min(15000, this.reconnectDelay * 2);
+    if (delay === null) {
+      this.reconnectAttempts++;
+      this.reconnectDelay = Math.min(30000, this.reconnectDelay * 2);
+    }
+  }
+  resetReconnect() {
+    this.reconnectAttempts = 0;
+    this.reconnectDelay = 1000;
+    this.clearReconnect();
   }
 
   connect() {
@@ -16253,6 +16366,7 @@ class VncView {
         return;
       }
       noteRemoteSocketReachable(this.tab.bid);
+      this.reconnectAttempts = 0;
       this.reconnectDelay = 1000;
       this.viewerActive = null;
       this.syncViewerActivity();
@@ -16275,7 +16389,9 @@ class VncView {
       const stopping = remoteStoppingMessage(this.tab.bid);
       if (stopping) this.showDead(stopping, true);
       else if (!this.vncGone) {
-        this.showDead("Connection closed", false);
+        /* The node already named the reason it could not reach the server;
+           only an unexplained close needs wording of its own. */
+        this.showDead(this.isDead() ? "" : "Connection closed", false);
         this.scheduleReconnect();
       }
     };
@@ -16303,15 +16419,29 @@ class VncView {
       this.setSize(message.width, message.height);
     } else if (message.type === "gone") {
       /* The remote session ended but the identity survives, so offer the same
-         Reconnect the browser and terminal panes offer. */
+         Reconnect the browser and terminal panes offer. A server the node
+         could not reach says so here too: the pane is the one place a
+         connection problem is reported, never a toast every redial repeats. */
       this.connected = false;
+      /* A failed dial is not a blip: the node did reach out and was refused,
+         so the next automatic attempt waits longer than a dropped socket. */
+      if (message.dial === true && this.reconnectDelay < 4000)
+        this.reconnectDelay = 4000;
       this.showDead(message.reason || "VNC connection closed", false);
     } else if (message.type === "error") {
       if (message.terminal === true) {
         this.vncGone = true;
         this.showDead(message.text || "VNC unavailable", true);
       } else {
-        toast(message.text || "VNC error", "error", TOAST_LONG);
+        /* A refused action (view only, an unknown key) is worth saying once.
+           Saying the same refusal again is not. */
+        const text = message.text || "VNC error";
+        if (text !== this.lastErrorText ||
+            Date.now() - this.lastErrorAt > VNC_ERROR_REPEAT_MS) {
+          this.lastErrorText = text;
+          this.lastErrorAt = Date.now();
+          toast(text, "error", TOAST_LONG);
+        }
       }
     }
   }
@@ -16397,18 +16527,18 @@ class VncView {
     this.renderIdentity();
     let dead = this.root.querySelector(".vnc-dead");
     if (dead) {
-      dead.querySelector(".term-dead-message").textContent = message;
+      if (message) dead.querySelector(".term-dead-message").textContent = message;
       return;
     }
     dead = el("div", "term-dead vnc-dead");
-    dead.appendChild(el("div", "term-dead-message", message));
+    dead.appendChild(el("div", "term-dead-message",
+      message || "VNC connection closed"));
     const actions = el("div", "term-dead-actions");
     const again = el("button", "btn btn-pri", "Reconnect");
     again.type = "button";
     again.onclick = () => {
       this.vncGone = false;
-      this.reconnectDelay = 1000;
-      this.clearReconnect();
+      this.resetReconnect();
       this.clearDead();
       this.renderIdentity();
       if (this.ws) {
@@ -18683,6 +18813,27 @@ class SettingsView {
     terminalSection.appendChild(terminalText);
     card.appendChild(terminalSection);
 
+    const vncSection = el("section", "system-prompt-section system-prompt-vnc");
+    const vncHead = el("div", "system-prompt-section-head");
+    const vncCopy = el("div", "system-prompt-section-copy");
+    vncCopy.appendChild(el("h3", "", "Remote screen guidance"));
+    const vncNote = el("p", "",
+      "Sent to every model turn on this backend; it governs how the agent works " +
+      "the screens Puppy is connected to over VNC.");
+    vncCopy.appendChild(vncNote);
+    const vncReset = el("button", "btn btn-sm btn-ghost system-prompt-reset",
+      "Reset to default");
+    vncReset.type = "button";
+    vncHead.appendChild(vncCopy);
+    vncHead.appendChild(vncReset);
+    const vncText = document.createElement("textarea");
+    vncText.className = "system-prompt-textarea config-textarea";
+    vncText.rows = 3;
+    vncText.setAttribute("aria-label", "Remote screen system prompt");
+    vncSection.appendChild(vncHead);
+    vncSection.appendChild(vncText);
+    card.appendChild(vncSection);
+
     const spawnSection = el("section", "system-prompt-section system-prompt-spawn");
     const spawnHead = el("div", "system-prompt-section-head");
     const spawnCopy = el("div", "system-prompt-section-copy");
@@ -18722,7 +18873,8 @@ class SettingsView {
     const normalized = value => {
       const prompt = value && typeof value === "object" ? value : null;
       const fields = ["custom", "browser", "browser_default", "remote_workspace",
-        "remote_workspace_default", "terminal", "terminal_default", "spawn", "spawn_default"];
+        "remote_workspace_default", "terminal", "terminal_default",
+        "vnc", "vnc_default", "spawn", "spawn_default"];
       if (!prompt || fields.some(key => typeof prompt[key] !== "string"))
         throw new Error("backend returned invalid system prompt settings");
       const maxChars = Number(prompt.max_chars);
@@ -18734,15 +18886,18 @@ class SettingsView {
         remoteWorkspace: prompt.remote_workspace,
         browser: prompt.browser,
         terminal: prompt.terminal,
+        vnc: prompt.vnc,
         spawn: prompt.spawn,
         customDraft: prompt.custom,
         remoteWorkspaceDraft: prompt.remote_workspace,
         browserDraft: prompt.browser,
         terminalDraft: prompt.terminal,
+        vncDraft: prompt.vnc,
         spawnDraft: prompt.spawn,
         remoteWorkspaceDefault: prompt.remote_workspace_default,
         browserDefault: prompt.browser_default,
         terminalDefault: prompt.terminal_default,
+        vncDefault: prompt.vnc_default,
         spawnDefault: prompt.spawn_default,
         maxChars,
         saving: false,
@@ -18765,6 +18920,7 @@ class SettingsView {
     const dirty = record => !!record && record.loaded &&
       (record.customDraft !== record.custom || record.browserDraft !== record.browser ||
        record.terminalDraft !== record.terminal ||
+       record.vncDraft !== record.vnc ||
        record.spawnDraft !== record.spawn ||
        record.remoteWorkspaceDraft !== record.remoteWorkspace);
     const stash = () => {
@@ -18774,6 +18930,7 @@ class SettingsView {
       record.remoteWorkspaceDraft = remoteText.value;
       record.browserDraft = browserText.value;
       record.terminalDraft = terminalText.value;
+      record.vncDraft = vncText.value;
       record.spawnDraft = spawnText.value;
       record.saved = false;
     };
@@ -18785,39 +18942,43 @@ class SettingsView {
       const editable = canUse && !unavailable && !!record && record.loaded && !record.saving;
       custom.disabled = browserText.disabled = !editable;
       terminalText.disabled = !editable;
+      vncText.disabled = !editable;
       spawnText.disabled = !editable;
       remoteText.disabled = !editable;
       remoteReset.disabled = !editable;
       browserReset.disabled = !editable;
       terminalReset.disabled = !editable;
+      vncReset.disabled = !editable;
       spawnReset.disabled = !editable;
       save.disabled = !canUse || unavailable || (!!record && record.saving);
       status.classList.remove("bad", "dirty");
       if (!canUse) {
         custom.value = remoteText.value = browserText.value =
-          terminalText.value = spawnText.value = "";
+          terminalText.value = vncText.value = spawnText.value = "";
         custom.removeAttribute("maxlength");
         remoteText.removeAttribute("maxlength");
         browserText.removeAttribute("maxlength");
         terminalText.removeAttribute("maxlength");
+        vncText.removeAttribute("maxlength");
         spawnText.removeAttribute("maxlength");
         save.disabled = true;
         status.textContent = "Backend upgrade required for system prompt settings";
       } else if (!record || record.loading) {
         custom.value = remoteText.value = browserText.value =
-          terminalText.value = spawnText.value = "";
+          terminalText.value = vncText.value = spawnText.value = "";
         save.disabled = true;
         status.textContent = "Loading prompt…";
       } else if (!record.loaded) {
         custom.value = remoteText.value = browserText.value =
-          terminalText.value = spawnText.value = "";
+          terminalText.value = vncText.value = spawnText.value = "";
         save.disabled = false;
         save.textContent = "Retry";
         status.textContent = record.error || "Prompt settings unavailable";
         status.classList.add("bad");
       } else {
         custom.maxLength = remoteText.maxLength = browserText.maxLength =
-          terminalText.maxLength = spawnText.maxLength = record.maxChars;
+          terminalText.maxLength = vncText.maxLength = spawnText.maxLength =
+            record.maxChars;
         if (document.activeElement !== custom) custom.value = record.customDraft;
         if (document.activeElement !== remoteText)
           remoteText.value = record.remoteWorkspaceDraft;
@@ -18826,6 +18987,8 @@ class SettingsView {
         if (document.activeElement !== terminalText)
           terminalText.value = record.terminalDraft;
         terminalText.placeholder = "";
+        if (document.activeElement !== vncText) vncText.value = record.vncDraft;
+        vncText.placeholder = "";
         if (document.activeElement !== spawnText)
           spawnText.value = record.spawnDraft;
         spawnText.placeholder = "";
@@ -18902,9 +19065,11 @@ class SettingsView {
     remoteText.oninput = edited;
     browserText.oninput = edited;
     terminalText.oninput = edited;
+    vncText.oninput = edited;
     spawnText.oninput = edited;
     /* the multi-line editor contract: Ctrl/Cmd+Enter saves, as in agent notes */
-    for (const area of [custom, remoteText, browserText, terminalText, spawnText])
+    for (const area of [custom, remoteText, browserText, terminalText, vncText,
+                        spawnText])
       area.addEventListener("keydown", event => {
         if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !save.disabled) {
           event.preventDefault();
@@ -18935,6 +19100,14 @@ class SettingsView {
       paint();
       terminalText.focus();
     };
+    vncReset.onclick = () => {
+      const record = records.get(activeBid);
+      if (!record || !record.loaded || record.saving) return;
+      vncText.value = record.vncDefault;
+      stash();
+      paint();
+      vncText.focus();
+    };
     spawnReset.onclick = () => {
       const record = records.get(activeBid);
       if (!record || !record.loaded || record.saving) return;
@@ -18957,6 +19130,7 @@ class SettingsView {
         const body = { custom: record.customDraft, browser: record.browserDraft };
         body.remote_workspace = record.remoteWorkspaceDraft;
         body.terminal = record.terminalDraft;
+        body.vnc = record.vncDraft;
         body.spawn = record.spawnDraft;
         const result = await api(bid, "system-prompt", {
           method: "PATCH",
@@ -21251,6 +21425,100 @@ function modalNewVnc(groupId = null) {
     }
   };
   host.focus();
+}
+
+/* the "@VNC" shortcut wizard */
+/* The composer's own VNC row. Unlike Browser and Terminal, a remote screen
+   cannot be named by an ID alone until one exists, so this builds the exact
+   directive the agent's VNC guidance defines: an open connection by ID, or a
+   host, port and password it should dial. Nothing is connected here - the
+   agent does that with the tool, so its tab appears beside the chat. */
+function vncShortcutText(target, password) {
+  const value = String(password == null ? "" : password);
+  if (!value) return `@VNC ${target}`;
+  return `@VNC ${target} ${/\s/.test(value) ? `"${value}"` : value}`;
+}
+
+function modalVncShortcut(bid, screens, onInsert) {
+  const rows = Array.isArray(screens) ? screens : [];
+  const { m, close } = modal(`<h2>VNC shortcut</h2>
+    <p class="modal-copy">Point the agent at a remote screen. The shortcut goes into your
+      message; the agent connects from ${esc(backendName(bid))}, works the screen with its
+      mouse and keyboard, and its tab opens beside this chat.</p>
+    <form id="vs-form">
+      ${rows.length ? `<label>Screen<select id="vs-pick">
+        <option value="">New connection…</option>
+        ${rows.map(row => `<option value="${esc(row.id)}">VNC ${esc(row.id)}${
+          row.hint ? " · " + esc(row.hint) : ""}</option>`).join("")}
+      </select></label>` : ""}
+      <div id="vs-target">
+        <div class="vnc-target-fields">
+          <label>Host<input type="text" id="vs-host" placeholder="192.168.1.10 or host.example"
+            autocomplete="off" autocapitalize="off" spellcheck="false"></label>
+          <label>Port<input type="text" id="vs-port" inputmode="numeric" value="5900"
+            autocomplete="off" spellcheck="false"></label>
+        </div>
+        <p class="hint">A display number works too: <code>1</code> means port 5901. Enclose an IPv6
+          address in brackets.</p>
+        <label>Password <span class="field-optional">(optional)</span><input type="password"
+          id="vs-pass" autocomplete="off"></label>
+        <p class="hint">The shortcut is part of your message, so a password typed here is stored
+          in this conversation. Leave it out and open the connection yourself if that matters.</p>
+      </div>
+      <p class="hint">Inserts <code id="vs-preview">@VNC</code></p>
+      <p class="form-error hidden" role="alert"></p>
+      <div class="m-btns"><button type="button" class="btn" id="vs-cancel">Cancel</button>
+      <button type="submit" class="btn btn-pri" id="vs-go">Insert</button></div>
+    </form>`);
+  const form = m.querySelector("#vs-form");
+  const pick = m.querySelector("#vs-pick");
+  const fields = m.querySelector("#vs-target");
+  const host = m.querySelector("#vs-host"), port = m.querySelector("#vs-port");
+  const pass = m.querySelector("#vs-pass"), preview = m.querySelector("#vs-preview");
+  const error = m.querySelector(".form-error");
+  form.noValidate = true;
+  /* One reading of the fields, so the preview and the insert can never
+     disagree about what the message will say. */
+  const build = () => {
+    if (pick && pick.value) return { text: `@VNC ${pick.value}` };
+    const name = host.value.trim();
+    if (!name) return { error: "Enter the VNC server's host name or address", at: host };
+    if (/\s/.test(name)) return { error: "A host name cannot contain a space", at: host };
+    const number = port.value.trim();
+    if (number && !/^\d{1,5}$/.test(number))
+      return { error: "Port must be a whole number, or a display number below 100", at: port };
+    const secret = pass.value;
+    if (/["\n]/.test(secret))
+      return { error: "A password with a quotation mark cannot go in a shortcut · " +
+        "use New VNC connection instead", at: pass };
+    const target = !number || number === "5900" ? name : `${name}:${number}`;
+    return { text: vncShortcutText(target, secret) };
+  };
+  const paint = () => {
+    if (pick) fields.classList.toggle("hidden", !!pick.value);
+    const built = build();
+    preview.textContent = built.text || "@VNC …";
+    error.classList.add("hidden");
+  };
+  /* Choosing "New connection…" moves on to the field that now matters;
+     picking a screen leaves the focus on the control that made the choice. */
+  if (pick) pick.onchange = () => { paint(); if (!pick.value) host.focus(); };
+  for (const field of [host, port, pass]) field.oninput = paint;
+  m.querySelector("#vs-cancel").onclick = close;
+  form.onsubmit = event => {
+    event.preventDefault();
+    const built = build();
+    if (!built.text) {
+      error.textContent = built.error;
+      error.classList.remove("hidden");
+      if (built.at) built.at.focus();
+      return;
+    }
+    close();
+    onInsert(built.text);
+  };
+  paint();
+  (pick && rows.length ? pick : host).focus();
 }
 
 /* switch engine */

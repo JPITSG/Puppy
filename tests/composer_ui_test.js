@@ -17,7 +17,7 @@ const between = (from, to) => {
 };
 
 const document = new FakeDocument();
-const calls = { api: [], fetch: [], toasts: [] };
+const calls = { api: [], fetch: [], toasts: [], vncWizard: [] };
 const storage = new Map();
 let reviewDialog;
 let blobs = 0;
@@ -36,6 +36,7 @@ function historyPage(route) {
 const state = {
   backends: [], tabs: [], engCache: {}, engines: [], views: {}, active: "",
   remoteBrowserStatus: {}, remoteUploadSettings: {}, terminalInstances: { 0: [{ id: "T1T1", session_id: 10 }] },
+  vncInstances: { 0: [{ id: "V9V9", host: "192.168.1.10", port: 5901, label: "Kiosk" }] },
   browserStatus: { enabled: true, instances: [
     { id: "AB12", session_id: 10, running: true }, { id: "CD34", session_id: 11, running: true }] },
   uploadSettings: { enabled: true, max_file_size_mb: 32, max_file_size_bytes: 32 * 1024 * 1024 },
@@ -79,6 +80,14 @@ const context = vm.createContext({
     return reviewDialog;
   },
   browserEnabledFor: () => true,
+  vncEnabledFor: () => true,
+  vncInstancesFor: bid => state.vncInstances[bid] || null,
+  vncTargetLabel: tab => tab.vncLabel || tab.vncHost || "",
+  vncIcon: icon,
+  modalVncShortcut: (bid, screens, onInsert) => {
+    calls.vncWizard.push({ bid, screens });
+    onInsert("@VNC 192.168.1.20:5900 secret");
+  },
   backendHasCapability: (backend, capability) => !!backend && backend.capabilities.includes(capability),
   spawnExecFor: () => false,
   linkifyInto: (node, text) => { node.appendChild(document.createTextNode(text)); return node; },
@@ -98,6 +107,7 @@ vm.runInContext([
   between("const DRAFT_JOURNAL_VERSION", "function snapshotBrowserState"),
   between("class SharedDraft {", "class SessionView {"),
   between("class SessionView {", "/* ================= TermView"),
+  between("function vncShortcutText(", "function modalVncShortcut("),
 ].join("\n"), context);
 const { Composer, composerBoxHtml, SessionView, SharedDraft } = vm.runInContext(
   "({ Composer, composerBoxHtml, SessionView, SharedDraft })", context);
@@ -419,7 +429,10 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
   assert.equal(b.events.submit, 1, "completing a mention is not a send");
   type(b.ta, "@");
   assert.deepEqual(Array.from(b.composer.mention.items.map(item => item.label)),
-    ["Browser AB12", "Browser CD34", "Terminal T1T1", "Session", "New browser", "New terminal"]);
+    ["Browser AB12", "Browser CD34", "Terminal T1T1", "VNC V9V9", "Session",
+     "New browser", "New terminal", "New VNC connection"]);
+  assert.equal(b.composer.mention.items[3].hint, "192.168.1.10:5901 · Kiosk",
+    "a live screen names the server it is watching");
   assert.equal(b.composer.mention.items[1].hint, "Session 11");
   key(b.ta, "ArrowDown");
   assert.equal(b.composer.mention.sel, 1);
@@ -446,6 +459,49 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
   assert.equal(m.composer.mention, null, "a refreshed catalog drops instances that are gone");
   type(m.ta, "@ef");
   assert.deepEqual(Array.from(m.composer.mention.items.map(item => item.label)), ["Browser EF56"]);
+
+  /* A remote screen is referenced like a browser or a terminal, and the
+     wizard row hands back a finished directive rather than inserting a
+     half-typed one: the same contract vnc_agent.TOOL_INSTRUCTIONS states. */
+  type(b.ta, "look at @vnc");
+  assert.deepEqual(Array.from(b.composer.mention.items.map(item => item.label)),
+    ["VNC V9V9", "New VNC connection"]);
+  b.composer.applyMention(b.composer.mention.items[0]);
+  assert.equal(b.ta.value, "look at @VNC V9V9 ");
+  type(b.ta, "look at @vnc");
+  calls.vncWizard.length = 0;
+  b.composer.applyMention(b.composer.mention.items[1]);
+  assert.equal(calls.vncWizard.length, 1, "the row opens the shortcut wizard");
+  assert.deepEqual(Array.from(calls.vncWizard[0].screens, row => row.id), ["V9V9"],
+    "the wizard is offered the screens that already exist");
+  assert.equal(b.ta.value, "look at @VNC 192.168.1.20:5900 secret ",
+    "the finished directive replaces the token the row was chosen from");
+  assert.equal(b.composer.mention, null);
+  for (const text of ["@VNC A8AR", "@VNC 192.168.1.1:5900 pwd",
+                      '@VNC 10.0.0.4 "two words"']) {
+    context.mentionSample = text;
+    assert.equal(vm.runInContext(
+      "MENTION_TOKEN_RE.lastIndex=0; MENTION_TOKEN_RE.exec(mentionSample)[2]",
+      context), text);
+  }
+  /* The wizard's own wording, round-tripped through the token regex: what
+     it builds must be exactly what a sent message renders as one mention. */
+  const shortcut = vm.runInContext("vncShortcutText", context);
+  assert.equal(shortcut("192.168.1.10", ""), "@VNC 192.168.1.10");
+  assert.equal(shortcut("192.168.1.10:5901", "pwd"), "@VNC 192.168.1.10:5901 pwd");
+  assert.equal(shortcut("host.lan", "two words"), '@VNC host.lan "two words"');
+  for (const built of [shortcut("10.0.0.4", ""), shortcut("10.0.0.4:5905", "s3cret"),
+                       shortcut("[fe80::1]:5901", "two words")]) {
+    context.mentionSample = built;
+    assert.equal(vm.runInContext(
+      "MENTION_TOKEN_RE.lastIndex=0; MENTION_TOKEN_RE.exec(mentionSample)[2]",
+      context), built, built);
+  }
+  context.mentionSample = "@VNC host.lan and then wait";
+  assert.equal(vm.runInContext(
+    "MENTION_TOKEN_RE.lastIndex=0; MENTION_TOKEN_RE.exec(mentionSample)[2]",
+    context), "@VNC host.lan", "prose after a target is not a password");
+  type(b.ta, "");
 
   for (const text of ["@Session-Project-plan-A7K2", "@Session-Żółć-東京-A7K2"]) {
     context.mentionSample = text;

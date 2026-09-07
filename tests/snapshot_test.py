@@ -233,6 +233,7 @@ async def main() -> None:
             "Remember that this project is stored on another node.",
             "Use the shared browser before standalone automation.",
             "Use the shared terminal only when explicitly requested.",
+            "Work remote screens only when asked to.",
             "Spawn delegate agents only on an explicit request.")
         config.set_value("engines.auto_upgrade",
                          {"enabled": True, "mode": "at", "at": "04:15"})
@@ -579,7 +580,7 @@ async def main() -> None:
         config.set_system_prompts(
             "mutated custom prompt", "mutated remote prompt",
             "mutated browser prompt", "mutated terminal prompt",
-            "mutated spawn prompt")
+            "mutated VNC prompt", "mutated spawn prompt")
         config.set_value("engines.auto_upgrade",
                          {"enabled": False, "mode": "now", "at": "03:30"})
         config.set_value("notify.enabled", False)
@@ -654,6 +655,8 @@ async def main() -> None:
             "Use the shared browser before standalone automation."
         assert config.get("system_prompt.terminal") == \
             "Use the shared terminal only when explicitly requested."
+        assert config.get("system_prompt.vnc") == \
+            "Work remote screens only when asked to."
         assert config.get("system_prompt.spawn") == \
             "Spawn delegate agents only on an explicit request."
         missing_prompts = config.export_data()
@@ -662,6 +665,8 @@ async def main() -> None:
         previous_prompt_shape["system_prompt"].pop("remote_workspace", None)
         previous_terminal_prompt_shape = config.export_data()
         previous_terminal_prompt_shape["system_prompt"].pop("terminal", None)
+        previous_vnc_prompt_shape = config.export_data()
+        previous_vnc_prompt_shape["system_prompt"].pop("vnc", None)
         previous_spawn_prompt_shape = config.export_data()
         previous_spawn_prompt_shape["system_prompt"].pop("spawn", None)
         missing_cwd = config.export_data()
@@ -687,6 +692,7 @@ async def main() -> None:
             "models": ["provider/model-a", "second/model-b"]}
         for invalid in (missing_prompts, previous_prompt_shape,
                         previous_terminal_prompt_shape,
+                        previous_vnc_prompt_shape,
                         previous_spawn_prompt_shape,
                         missing_cwd, missing_timers, previous_timer_shape,
                         missing_spawn, missing_browser_idle, missing_terminal_idle,
@@ -761,7 +767,7 @@ async def main() -> None:
         else:
             raise AssertionError("an invalid shared storage setting was accepted")
         for field in ("custom", "remote_workspace", "browser", "terminal",
-                      "spawn"):
+                      "vnc", "spawn"):
             for invalid_prompt in (
                     None, "x" * (config.MAX_SYSTEM_PROMPT_CHARS + 1), "bad\x00text"):
                 prompts = dict(config.export_data()["system_prompt"])

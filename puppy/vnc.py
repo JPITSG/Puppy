@@ -97,6 +97,17 @@ ENC_LAST_RECT = -224
 CLIENT_ENCODINGS = (ENC_ZRLE, ENC_HEXTILE, ENC_ZLIB, ENC_RRE, ENC_COPYRECT,
                     ENC_RAW, ENC_DESKTOP_SIZE, ENC_LAST_RECT)
 
+# The agent surface. An engine turn drives the same connection the console
+# does, so its bounds live beside the viewer's rather than in the bridge.
+AGENT_SYNC_TIMEOUT = 1.5          # a silent server means "nothing changed"
+AGENT_IMAGE_DIMENSION = 1920      # a 1080p screen is answered at 1:1
+AGENT_MIN_DIMENSION = 160
+AGENT_IMAGE_BYTES = 6 << 20       # beyond this the picture is halved again
+AGENT_MAX_CLICKS = 5
+AGENT_MAX_STEPS = 64
+AGENT_MAX_WHEEL = 50
+AGENT_MAX_GESTURE_MS = 5000
+
 SEC_NONE = 1
 SEC_VNC_AUTH = 2
 
@@ -276,6 +287,151 @@ def char_keysym(char: str) -> int:
     point = ord(char)
     # Latin-1 is its own keysym range; everything else uses the Unicode block.
     return point if point < 256 else 0x01000000 + point
+
+
+# What an agent may name. Everything here resolves through the same keysym
+# table the console's key events use; the aliases only spell the names a model
+# writes down ("Esc", "Ctrl", "Super") for keys that already exist.
+_AGENT_KEY_ALIASES = {
+    "esc": "Escape", "return": "Enter", "del": "Delete", "ins": "Insert",
+    "space": " ", "spacebar": " ", "ctrl": "Control", "control": "Control",
+    "cmd": "Meta", "command": "Meta", "super": "Meta", "win": "Meta",
+    "windows": "Meta", "option": "Alt", "menu": "ContextMenu",
+    "up": "ArrowUp", "down": "ArrowDown", "left": "ArrowLeft",
+    "right": "ArrowRight", "pgup": "PageUp", "pgdn": "PageDown",
+    "pageup": "PageUp", "pagedown": "PageDown", "backspace": "Backspace",
+    "tab": "Tab", "enter": "Enter", "escape": "Escape", "delete": "Delete",
+    "insert": "Insert", "home": "Home", "end": "End", "alt": "Alt",
+    "shift": "Shift", "meta": "Meta", "capslock": "CapsLock",
+    "numlock": "NumLock", "scrolllock": "ScrollLock", "pause": "Pause",
+    "printscreen": "PrintScreen", "print": "PrintScreen",
+    "contextmenu": "ContextMenu", "altgraph": "AltGraph", "altgr": "AltGraph",
+}
+_AGENT_MODIFIER_NAMES = {
+    0xFFE1: "Shift", 0xFFE3: "Control", 0xFFE9: "Alt", 0xFFEB: "Meta",
+    0xFE03: "AltGraph",
+}
+_AGENT_BUTTON_BITS = {"left": 1, "middle": 2, "right": 4}
+_AGENT_WHEEL_BITS = {"up": 1 << 3, "down": 1 << 4, "left": 1 << 5,
+                     "right": 1 << 6}
+
+
+def agent_keysym(key) -> tuple:
+    """Resolve one agent-named key to its keysym and canonical spelling."""
+    name = str(key or "").strip()
+    if not name:
+        raise VncError("supply a key to press")
+    canonical = _AGENT_KEY_ALIASES.get(name.lower(), name)
+    if len(canonical) > 1:
+        canonical = canonical[0].upper() + canonical[1:]
+        for known in _KEYSYMS:
+            if known.lower() == canonical.lower():
+                canonical = known
+                break
+    keysym = keysym_for(canonical)
+    if not keysym:
+        raise VncError(
+            "unknown key: {} (name one key, and put Control, Alt, Shift or "
+            "Meta in modifiers)".format(name[:40]))
+    return keysym, "Space" if canonical == " " else canonical
+
+
+def _agent_modifiers(values) -> list:
+    if values is None:
+        return []
+    if not isinstance(values, (list, tuple)):
+        raise VncError("modifiers must be a list")
+    held = []
+    for value in values:
+        keysym, _name = agent_keysym(value)
+        if keysym not in _AGENT_MODIFIER_NAMES:
+            raise VncError(
+                "{} is not a modifier; use Control, Shift, Alt or Meta".format(
+                    str(value)[:40]))
+        if keysym not in held:
+            held.append(keysym)
+    return held
+
+
+def _agent_button(button) -> int:
+    bit = _AGENT_BUTTON_BITS.get(str(button or "left").lower())
+    if bit is None:
+        raise VncError("button must be left, middle or right")
+    return bit
+
+
+def _agent_count(value, limit: int, label: str) -> int:
+    if value is None:
+        return 1
+    try:
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or \
+                value != value or int(value) != value:
+            raise ValueError
+    except (ValueError, OverflowError):        # NaN, infinity, 2.5
+        raise VncError("{} must be a whole number".format(label))
+    if not 1 <= int(value) <= limit:
+        raise VncError("{} must be between 1 and {}".format(label, limit))
+    return int(value)
+
+
+def _agent_region(region, screen_width: int, screen_height: int) -> tuple:
+    """Clamp a requested rectangle onto the screen rather than refusing it."""
+    if region is None:
+        return 0, 0, screen_width, screen_height
+    if not isinstance(region, dict):
+        raise VncError("region must be an object")
+    unknown = set(region) - {"x", "y", "width", "height"}
+    if unknown:
+        raise VncError("unknown region field: " + sorted(unknown)[0])
+    values = {}
+    for key in ("x", "y", "width", "height"):
+        value = region.get(key)
+        if value is None:
+            values[key] = None
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)) \
+                or value != value or value in (float("inf"), float("-inf")):
+            raise VncError("region.{} must be a whole number".format(key))
+        values[key] = int(value)
+    x = min(max(values["x"] or 0, 0), screen_width - 1)
+    y = min(max(values["y"] or 0, 0), screen_height - 1)
+    width = screen_width - x if values["width"] is None else values["width"]
+    height = screen_height - y if values["height"] is None else values["height"]
+    return (x, y, min(max(width, 1), screen_width - x),
+            min(max(height, 1), screen_height - y))
+
+
+def _rgb_rows(frame, stride: int, x: int, y: int, width: int, height: int,
+              step: int) -> list:
+    """Strided RGB rows: whole pixels through a cast view, alpha dropped."""
+    pixels = memoryview(frame).cast("B").cast("I")
+    rows = []
+    for row_y in range(y, y + height, step):
+        base = row_y * stride
+        row = bytearray(pixels[base + x:base + x + width:step].tobytes())
+        del row[3::4]
+        rows.append(bytes(row))
+    return rows
+
+
+def _png_chunk(tag: bytes, data: bytes) -> bytes:
+    return (struct.pack(">I", len(data)) + tag + data +
+            struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
+
+
+def _png(rows: list, width: int, height: int) -> bytes:
+    """A truecolour PNG from finished RGB rows - zlib is the whole encoder."""
+    if not rows or width < 1 or height < 1:
+        raise VncError("there is nothing to capture")
+    raw = bytearray()
+    for row in rows:
+        raw += b"\x00"          # filter 0: this codec adds no prediction
+        raw += row
+    return (b"\x89PNG\r\n\x1a\n" +
+            _png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height,
+                                            8, 2, 0, 0, 0)) +
+            _png_chunk(b"IDAT", zlib.compress(bytes(raw), 6)) +
+            _png_chunk(b"IEND", b""))
 
 
 # --------------------------------------------------------------------------
@@ -582,6 +738,11 @@ class VncInstance:
         self.wheel_x = 0.0
         self.wheel_y = 0.0
         self.pressed = set()
+        # An agent has no viewer, so it drives the update loop by hand: the
+        # sequence counts applied updates and the event wakes whoever waits
+        # for the next one.
+        self.frame_seq = 0
+        self.frame_wake = asyncio.Event()
 
     # ---- catalog ----
 
@@ -915,13 +1076,17 @@ class VncInstance:
 
     # ---- update loop ----
 
-    def _request_update(self, full: bool = False) -> None:
-        """Ask for the next frame, unless one is already in flight."""
+    def _request_update(self, full: bool = False, force: bool = False) -> None:
+        """Ask for the next frame, unless one is already in flight.
+
+        ``force`` is the agent's path: its tools have no viewer, so the loop
+        that normally sleeps while nobody watches has to be turned by hand.
+        """
         if not self.connected or self.writer is None:
             return
-        if self.update_pending and not full:
+        if self.update_pending and not full and not force:
             return
-        if not full and not self._streaming():
+        if not full and not force and not self._streaming():
             return
         try:
             self.writer.write(struct.pack(
@@ -1025,6 +1190,10 @@ class VncInstance:
             rects.append(_FRAME_HEAD.pack(
                 FRAME_PIXELS, 0, x, y, width, height) + bytes(buf))
         self.update_pending = False
+        if rects or resized:
+            self.frame_seq += 1
+            self.frame_wake.set()
+            self.frame_wake.clear()
         if rects:
             # Many small rectangles cost more in headers and per-frame work
             # than one clean cut out of the freshly updated framebuffer.
@@ -1425,6 +1594,217 @@ class VncInstance:
             self._key(keysym, False)
         self.pressed.clear()
 
+    # ---- agent surface ----
+    # An engine turn has no viewer: it asks for one picture, acts, and asks
+    # again. So every tool below turns the same update loop the console's
+    # sockets turn, and never introduces a second way to reach the server.
+
+    def touch(self) -> None:
+        """Agent attention counts: restart the unattended timer."""
+        if self.connected and not self.viewers:
+            self._arm_idle()
+
+    async def sync(self, timeout: float = AGENT_SYNC_TIMEOUT,
+                   full: bool = False) -> bool:
+        """Request the next update by hand and wait for it to be applied.
+
+        Nothing arriving is an answer too: an incremental request the server
+        does not answer means the framebuffer already holds the current
+        screen, so a timeout here is success, not a failure.
+        """
+        if not self.connected or self.writer is None:
+            raise VncError("VNC {} is not connected".format(self.vnc_id))
+        seq = self.frame_seq
+        self._request_update(full=full or not seq, force=True)
+        await self._drain()
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + max(0.0, float(timeout))
+        while self.connected and self.frame_seq == seq:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return False
+            try:
+                await asyncio.wait_for(self.frame_wake.wait(), remaining)
+            except asyncio.TimeoutError:
+                return False
+        return self.frame_seq != seq
+
+    async def settle(self, quiet_ms: int = 400, timeout_ms: int = 4000) -> bool:
+        """Wait until the screen stops changing, or the budget runs out."""
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + max(0, int(timeout_ms)) / 1000.0
+        quiet = max(0, int(quiet_ms)) / 1000.0
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return False
+            if not await self.sync(min(quiet, remaining) or 0.01):
+                return True
+
+    def frame_snapshot(self) -> tuple:
+        """One self-consistent view of the framebuffer and its size.
+
+        The reader loop replaces the whole buffer on a desktop resize, so the
+        three values are re-read until they agree; a caller then holds a
+        picture that cannot change size under it, even in a worker thread.
+        """
+        for _attempt in range(4):
+            frame, width, height = self.frame, self.width, self.height
+            if width and height and len(frame) == width * height * 4:
+                return frame, width, height
+        raise VncError("the remote screen has not been received yet")
+
+    def screenshot(self, region=None, max_dimension: int = AGENT_IMAGE_DIMENSION):
+        """Encode the framebuffer, or one region of it, as a PNG.
+
+        No image library is involved and no pixel is touched from Python: the
+        rows are strided out of the framebuffer as whole 32-bit pixels, their
+        pad byte is dropped in one C-level pass, and zlib does the rest. Only
+        the snapshot above is taken from this instance, so the deflate itself
+        is safe to run off the event loop.
+        """
+        frame, screen_width, screen_height = self.frame_snapshot()
+        x, y, width, height = _agent_region(region, screen_width, screen_height)
+        try:
+            limit = int(max_dimension)
+        except (TypeError, ValueError):
+            raise VncError("max_dimension must be a whole number")
+        limit = min(MAX_DIMENSION, max(AGENT_MIN_DIMENSION, limit))
+        step = 1
+        while max(width, height) // step > limit:
+            step += 1
+        while True:
+            rows = _rgb_rows(frame, screen_width, x, y, width, height, step)
+            out_width = len(rows[0]) // 3 if rows else 0
+            image = _png(rows, out_width, len(rows))
+            # A photographic desktop can defeat any single guess at a useful
+            # size. Halving again is cheaper than failing the whole tool call.
+            if len(image) <= AGENT_IMAGE_BYTES or step >= 8:
+                break
+            step += 1
+        return {"png": image, "x": x, "y": y, "width": width, "height": height,
+                "out_width": out_width, "out_height": len(rows), "step": step,
+                "screen_width": screen_width, "screen_height": screen_height}
+
+    # ---- agent input ----
+
+    def _agent_writable(self) -> None:
+        if not self.connected or self.writer is None:
+            raise VncError("VNC {} is not connected".format(self.vnc_id))
+        if self.view_only:
+            raise VncError(
+                "VNC {} is view only, so it accepts no input".format(self.vnc_id))
+
+    def _agent_point(self, x, y) -> tuple:
+        if not self.width or not self.height:
+            raise VncError("the remote screen size is not known yet")
+        try:
+            px, py = int(round(float(x))), int(round(float(y)))
+        except (TypeError, ValueError, OverflowError):
+            raise VncError("pointer coordinates must be numbers of screen pixels")
+        return (min(max(px, 0), self.width - 1),
+                min(max(py, 0), self.height - 1))
+
+    async def agent_move(self, x, y) -> tuple:
+        self._agent_writable()
+        point = self._agent_point(x, y)
+        self._pointer(point[0], point[1], self.buttons)
+        await self._drain()
+        return point
+
+    async def agent_click(self, x, y, button: str = "left", count: int = 1,
+                          modifiers=None) -> tuple:
+        """Move, then press and release: a click, a tap, or a double click."""
+        self._agent_writable()
+        bit = _agent_button(button)
+        count = _agent_count(count, AGENT_MAX_CLICKS, "click count")
+        point = self._agent_point(x, y)
+        held = _agent_modifiers(modifiers)
+        # _pointer records what is now held, so the button state to return to
+        # is read once, before the press changes it.
+        base = self.buttons
+        for keysym in held:
+            self._key(keysym, True)
+        self._pointer(point[0], point[1], base)
+        for _ in range(count):
+            self._pointer(point[0], point[1], base | bit)
+            self._pointer(point[0], point[1], base)
+        for keysym in reversed(held):
+            self._key(keysym, False)
+        await self._drain()
+        return point
+
+    async def agent_drag(self, x, y, to_x, to_y, button: str = "left",
+                         steps: int = 12, duration_ms: int = 250) -> tuple:
+        """Press, travel and release: a drag, a swipe, or a selection.
+
+        The intermediate positions are what makes this a gesture rather than a
+        teleport: a touch desktop measures the swipe, and a desktop toolkit
+        needs to see the pointer move while the button is down.
+        """
+        self._agent_writable()
+        bit = _agent_button(button)
+        start = self._agent_point(x, y)
+        end = self._agent_point(to_x, to_y)
+        steps = _agent_count(steps, AGENT_MAX_STEPS, "steps")
+        duration = min(max(int(duration_ms or 0), 0), AGENT_MAX_GESTURE_MS)
+        base = self.buttons
+        self._pointer(start[0], start[1], base)
+        self._pointer(start[0], start[1], base | bit)
+        await self._drain()
+        pause = (duration / 1000.0) / steps
+        for index in range(1, steps + 1):
+            if pause:
+                await asyncio.sleep(pause)
+            self._agent_writable()
+            self._pointer(
+                start[0] + (end[0] - start[0]) * index // steps,
+                start[1] + (end[1] - start[1]) * index // steps,
+                base | bit)
+            await self._drain()
+        self._pointer(end[0], end[1], base)
+        await self._drain()
+        return start + end
+
+    async def agent_scroll(self, x, y, direction: str = "down",
+                           clicks: int = 3) -> tuple:
+        """RFB has no scroll axis: a wheel notch is a button 4-7 tap."""
+        self._agent_writable()
+        bit = _AGENT_WHEEL_BITS.get(str(direction or "").lower())
+        if bit is None:
+            raise VncError("scroll direction must be up, down, left or right")
+        clicks = _agent_count(clicks, AGENT_MAX_WHEEL, "clicks")
+        point = self._agent_point(x, y)
+        self.pointer = point
+        for _ in range(clicks):
+            self.writer.write(struct.pack(">BBHH", 5, self.buttons | bit,
+                                          point[0], point[1]))
+            self.writer.write(struct.pack(">BBHH", 5, self.buttons,
+                                          point[0], point[1]))
+        await self._drain()
+        return point
+
+    async def agent_type(self, text: str) -> int:
+        self._agent_writable()
+        text = _bounded_text(text, MAX_TEXT, "text")
+        if not text:
+            raise VncError("supply the text to type")
+        await self.handle_client({"type": "text", "text": text})
+        return len(text)
+
+    async def agent_press(self, key: str, modifiers=None, count: int = 1) -> str:
+        self._agent_writable()
+        keysym, name = agent_keysym(key)
+        count = _agent_count(count, AGENT_MAX_CLICKS, "count")
+        held = _agent_modifiers(modifiers)
+        for held_sym in held:
+            self._key(held_sym, True)
+        for _ in range(count):
+            self._tap(keysym)
+        for held_sym in reversed(held):
+            self._key(held_sym, False)
+        await self._drain()
+        return "+".join([_AGENT_MODIFIER_NAMES[sym] for sym in held] + [name])
 
 _WHEEL_STEP = 53.0        # one notch of a typical browser wheel event
 _MAX_WHEEL_STEPS = 24
@@ -1446,6 +1826,9 @@ class VncRegistry:
     def __init__(self):
         self.instances = {}
         self.lock = asyncio.Lock()
+        # Which screen an agent means when it names none: the last one that
+        # session connected to or acted on. In memory, like the connections.
+        self.bindings = {}
 
     def _new_id(self) -> str:
         while True:
@@ -1479,6 +1862,9 @@ class VncRegistry:
         vnc_id = normalize_vnc_id(vnc_id)
         async with self.lock:
             instance = self.instances.pop(vnc_id, None)
+            for session_id in [key for key, value in self.bindings.items()
+                               if value == vnc_id]:
+                self.bindings.pop(session_id, None)
         if instance is None or instance.closed:
             return False
         await instance.close(reason)
@@ -1487,6 +1873,47 @@ class VncRegistry:
 
     def instance_payloads(self) -> list:
         return [instance.payload() for instance in self.instances.values()]
+
+    # ---- agent bindings ----
+
+    def bind(self, session_id: int, vnc_id: str) -> None:
+        """Remember which screen a session's agent tools mean by default."""
+        session_id = int(session_id)
+        if session_id > 0 and vnc_id in self.instances:
+            self.bindings[session_id] = vnc_id
+
+    async def agent_screen(self, session_id: int, requested_id=None) -> VncInstance:
+        """The screen one agent tool call addresses, dialled if it dropped.
+
+        An explicit ID always wins. Without one there is nothing to invent - a
+        VNC connection needs a host and a password nobody but the user has - so
+        an unbound session is told what it can name instead.
+        """
+        session_id = int(session_id)
+        if requested_id:
+            instance = self.get(requested_id)
+        else:
+            bound = self.bindings.get(session_id)
+            instance = self.instances.get(bound) if bound else None
+            if instance is None or instance.closed:
+                self.bindings.pop(session_id, None)
+                raise VncError(
+                    "no remote screen is selected for this chat. " +
+                    (self.agent_choices() or
+                     "Ask the user for a host, then use connect."))
+        await instance.ensure_started()
+        self.bind(session_id, instance.vnc_id)
+        instance.touch()
+        return instance
+
+    def agent_choices(self) -> str:
+        live = [instance for instance in self.instances.values()
+                if not instance.closed]
+        if not live:
+            return ""
+        return "Open connections on this backend: {}.".format(", ".join(
+            "{} ({}:{})".format(item.vnc_id, item.host, item.port)
+            for item in live))
 
     async def stop(self, reason: str) -> None:
         async with self.lock:
@@ -1592,8 +2019,12 @@ async def ws_vnc(request: web.Request):
     try:
         await instance.attach_viewer(ws)
     except VncError as exc:
+        # The identity survives a server that cannot be reached, so this is
+        # the same "gone" the pane already shows with a Reconnect button -
+        # never an error toast, which a reconnecting pane would repeat.
         try:
-            await ws.send_json({"type": "error", "text": str(exc)})
+            await ws.send_json({"type": "gone", "reason": str(exc),
+                                "dial": True})
         except Exception:
             pass
         await ws.close()
@@ -1641,8 +2072,12 @@ def register(app: web.Application) -> None:
 
     async def on_startup(_app):
         manager()
+        from puppy import vnc_agent
+        await vnc_agent.start(_app)
 
     async def on_cleanup(_app):
+        from puppy import vnc_agent
+        await vnc_agent.stop(_app)
         await shutdown()
 
     app.on_startup.append(on_startup)
