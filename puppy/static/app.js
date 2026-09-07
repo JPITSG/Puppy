@@ -6795,15 +6795,15 @@ function syncHorizontalOverflow(scroller, viewport = scroller && scroller.parent
   viewport.style.setProperty("--edge-scroll-right-fade-size", right + "px");
 }
 
-/* The horizontal strips (the tab bar, the chat head's chips, the composer's
-   chips) are swiped sideways on a touch screen. A mouse has no swipe, so a
+/* The horizontal strips (tabs, chat/composer chips and browser/terminal
+   metadata) are swiped sideways on a touch screen. A mouse has no swipe, so a
    vertical wheel turn over one of them moves it sideways instead of scrolling
    the page - the cursor stays as it is and nothing has to be grabbed. It takes
    only what the strip can actually move, so at either end the wheel falls
    through to whatever scrolls behind it, and a trackpad's own sideways delta
    is left to the browser. Every strip that gets the touch-swipe treatment
    (overflow-x:auto with touch-action:pan-x) must be listed here too. */
-const WHEEL_SWIPE_STRIPS = [".tabs", ".chat-meta-scroll", ".composer-meta-scroll"];
+const WHEEL_SWIPE_STRIPS = [".tabs", ".chat-meta-scroll", ".composer-meta-scroll", ".br-meta-scroll"];
 const wheelSwipeAnimations = new WeakMap();
 
 function stopWheelSwipe(strip) {
@@ -6860,7 +6860,12 @@ function smoothWheelSwipe(strip, delta, maximum) {
     const elapsed = state.lastAt === null ? 16 :
       Math.max(0, Math.min(32, at - state.lastAt));
     state.lastAt = at;
-    strip.scrollLeft += distance * (1 - Math.exp(-elapsed / 75));
+    /* Some browsers round scrollLeft to whole CSS pixels. Keep the final
+       steps large enough to move, otherwise easing can stall before the edge
+       forever with its fade still showing. */
+    const stepSize = Math.min(Math.abs(distance),
+      Math.max(1, Math.abs(distance) * (1 - Math.exp(-elapsed / 75))));
+    strip.scrollLeft += Math.sign(distance) * stepSize;
     state.frame = requestAnimationFrame(step);
   };
   state.frame = requestAnimationFrame(step);
@@ -6896,6 +6901,23 @@ document.addEventListener("pointerdown", event => {
 function syncAllTabOverflow() {
   document.querySelectorAll(".tab-scroll > .tabs").forEach(scroller =>
     syncHorizontalOverflow(scroller));
+}
+
+/* Browser and terminal pills keep their intrinsic widths. Watch both the lane
+   and its pills so pane resizing, session names and live stats refresh the
+   same edge cues, including when a hidden view becomes visible again. */
+function wireMetadataScrolling(meta) {
+  const strip = meta.querySelector(".br-meta-scroll");
+  const sync = () => syncHorizontalOverflow(strip, meta);
+  const observer = new ResizeObserver(sync);
+  observer.observe(strip);
+  for (const pill of strip.children) observer.observe(pill);
+  strip.addEventListener("scroll", sync, { passive: true });
+  return () => {
+    observer.disconnect();
+    strip.removeEventListener("scroll", sync);
+    stopWheelSwipe(strip);
+  };
 }
 
 function wireTabScrolling(tabsRoot, paneId) {
@@ -7116,42 +7138,6 @@ function applySplitRatio(split, first, second, divider) {
 }
 
 let finishPaneResize = null;
-const PANE_SIZE_FEEDBACK_MS = 800;
-
-function showPaneSizes(root, onFinish = () => {}, brief = false) {
-  if (finishPaneResize) finishPaneResize();
-  // Observe leaf panes, including nested splits, so these are actual CSS pixel
-  // dimensions after layout/minimum sizes, not estimates from the split ratio.
-  const badges = Array.from(root.querySelectorAll(".workspace-pane"), pane => {
-    const badge = el("div", "pane-size-badge");
-    badge.setAttribute("aria-hidden", "true");
-    pane.appendChild(badge);
-    return { pane, badge };
-  });
-  const paint = () => {
-    for (const { pane, badge } of badges) {
-      const { width, height } = pane.getBoundingClientRect();
-      badge.textContent = `${Math.round(width)} × ${Math.round(height)}`;
-    }
-  };
-  const observer = new ResizeObserver(paint);
-  for (const { pane } of badges) observer.observe(pane);
-  paint();
-  let timer = null;
-  const finish = () => {
-    if (finishPaneResize !== finish) return;
-    finishPaneResize = null;
-    clearTimeout(timer);
-    observer.disconnect();
-    for (const { badge } of badges) badge.remove();
-    window.removeEventListener("blur", finish);
-    onFinish();
-  };
-  finishPaneResize = finish;
-  window.addEventListener("blur", finish);
-  if (brief) timer = setTimeout(finish, PANE_SIZE_FEEDBACK_MS);
-  return finish;
-}
 
 function wireSplitter(split, root, first, second, divider) {
   const setRatio = value => {
@@ -7162,6 +7148,7 @@ function wireSplitter(split, root, first, second, divider) {
     if (event.button !== 0) return;
     event.preventDefault();
     event.stopPropagation();
+    if (finishPaneResize) finishPaneResize();
     const move = moveEvent => {
       const rect = root.getBoundingClientRect();
       const dividerSize = split.axis === "row" ? divider.offsetWidth : divider.offsetHeight;
@@ -7170,7 +7157,10 @@ function wireSplitter(split, root, first, second, divider) {
       const minimum = Math.min(.45, 80 / total);
       setRatio(Math.max(minimum, Math.min(1 - minimum, (point - dividerSize / 2) / total)));
     };
-    const finish = showPaneSizes(root, () => {
+    const finish = () => {
+      if (finishPaneResize !== finish) return;
+      finishPaneResize = null;
+      window.removeEventListener("blur", finish);
       divider.classList.remove("active");
       divider.removeEventListener("pointermove", move);
       divider.removeEventListener("pointerup", finish);
@@ -7179,7 +7169,9 @@ function wireSplitter(split, root, first, second, divider) {
       if (divider.hasPointerCapture(event.pointerId)) divider.releasePointerCapture(event.pointerId);
       saveTabs();
       window.dispatchEvent(new Event("resize"));
-    });
+    };
+    finishPaneResize = finish;
+    window.addEventListener("blur", finish);
     divider.classList.add("active");
     divider.setPointerCapture(event.pointerId);
     divider.addEventListener("pointermove", move);
@@ -7189,7 +7181,6 @@ function wireSplitter(split, root, first, second, divider) {
   });
   divider.addEventListener("dblclick", () => {
     setRatio(.5); saveTabs(); window.dispatchEvent(new Event("resize"));
-    showPaneSizes(root, undefined, true);
   });
   divider.addEventListener("keydown", event => {
     const decrease = split.axis === "row" ? event.key === "ArrowLeft" : event.key === "ArrowUp";
@@ -7198,7 +7189,6 @@ function wireSplitter(split, root, first, second, divider) {
     event.preventDefault();
     setRatio(split.ratio + (increase ? 1 : -1) * (event.shiftKey ? .1 : .02));
     saveTabs(); window.dispatchEvent(new Event("resize"));
-    showPaneSizes(root, undefined, true);
   });
   applySplitRatio(split, first, second, divider);
 }
@@ -14088,7 +14078,7 @@ class TermView {
     this.linkBusy = "";
     this.nodeEnded = tab.ended === true;
     this.root = el("div", "view term");
-    this.root.innerHTML = `<div class="br-meta term-meta hidden">
+    this.root.innerHTML = `<div class="br-meta term-meta edge-scroll-viewport hidden"><div class="br-meta-scroll">
         <div class="br-ident" aria-label="Terminal identity">
           <span class="br-ident-label">Terminal</span>
           <span class="br-id term-id"></span>
@@ -14108,7 +14098,7 @@ class TermView {
           <span class="br-owner-text">Checking session link…</span>
           <span class="br-owner-arrow hidden"></span>
         </button>
-      </div>
+      </div></div>
       <div class="term-wrap"><div class="term-host">
         <div class="term-mount"></div>
       </div></div>`;
@@ -14122,6 +14112,7 @@ class TermView {
        measures is exactly the box the terminal fills. */
     this.mount = this.root.querySelector(".term-mount");
     this.meta = this.root.querySelector(".term-meta");
+    this.stopMetadataScrolling = wireMetadataScrolling(this.meta);
     this.idText = this.root.querySelector(".term-id");
     this.copyIdBtn = wireCopyButton(this.root.querySelector(".term-copy-id"),
       () => String(this.tab.terminalId || "").toUpperCase(), "Copy Terminal ID");
@@ -14578,6 +14569,7 @@ class TermView {
     if (this.onSelectUp) document.removeEventListener("mouseup", this.onSelectUp);
     if (this.onContextMenu) this.host.removeEventListener("contextmenu", this.onContextMenu);
     clearTimeout(this.agentActiveTimer);
+    this.stopMetadataScrolling();
     if (this.ws) try { this.ws.close(); } catch (e) {}
     if (this.dataSub) { this.dataSub.dispose(); this.dataSub = null; }
     if (this.term) this.term.dispose();
@@ -14647,7 +14639,7 @@ class BrowserView {
               M10 9h.01M12.2 9h.01M5 11h6"/></svg>
         </button>
       </div>
-      <div class="br-meta">
+      <div class="br-meta edge-scroll-viewport"><div class="br-meta-scroll">
         <div class="br-ident" aria-label="Browser identity">
           <span class="br-ident-label">Browser</span>
           <span class="br-id"></span>
@@ -14669,7 +14661,7 @@ class BrowserView {
         <span class="br-stats" title="Stream width × height in pixels · frames received per second, updated once a second">
           <span class="br-size">— × —</span><span aria-hidden="true">·</span><span class="br-fps">— FPS</span>
         </span>
-      </div>
+      </div></div>
       <div class="br-type hidden">
         <input class="br-ime" type="text" autocomplete="off" autocapitalize="none"
           autocorrect="off" spellcheck="false" enterkeyhint="enter"
@@ -14693,6 +14685,7 @@ class BrowserView {
     this.urlInput = this.root.querySelector(".br-url");
     this.kbdBtn = this.root.querySelector(".br-kbd");
     this.meta = this.root.querySelector(".br-meta");
+    this.stopMetadataScrolling = wireMetadataScrolling(this.meta);
     this.fpsText = this.root.querySelector(".br-fps");
     this.sizeText = this.root.querySelector(".br-size");
     this.idText = this.root.querySelector(".br-id");
@@ -15498,6 +15491,7 @@ class BrowserView {
   destroy() {
     this.closed = true;
     this.resetFps();
+    this.stopMetadataScrolling();
     this.resetCursor();
     this.connectionSequence++;
     this.clearReconnect();

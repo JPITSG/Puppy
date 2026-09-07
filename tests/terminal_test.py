@@ -91,7 +91,7 @@ def check_static_contract() -> None:
     ui = (BASE / "puppy" / "static" / "app.js").read_text(encoding="utf-8")
     css = (BASE / "puppy" / "static" / "app.css").read_text(encoding="utf-8")
     assert "`Terminal ${id} @ ${backendName(bid)}`" in ui
-    assert 'class="br-meta term-meta hidden"' in ui
+    assert 'class="br-meta term-meta edge-scroll-viewport hidden"' in ui
     assert 'aria-label="Terminal identity"' in ui
     assert 'aria-label="Copy Terminal ID"' in ui
     assert '"Terminal guidance"' in ui

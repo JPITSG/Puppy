@@ -234,6 +234,10 @@ persistence contract are in [docs/session-tasks.md](docs/session-tasks.md).
 
 ### Terminals and browsers, shared with the agent
 
+Browser and terminal identity and session-link rows stay on one line. When
+space is tight, their edges fade and you can scroll sideways with touch, a
+trackpad, or the mouse wheel, just like the chat chips and tab bar.
+
 - **Shared terminals.** Open a terminal tab on any backend (xterm.js over a
   node-owned PTY, your configured shell command). Every terminal has a
   four-character ID and can be linked to one chat. Turns on a terminal-enabled
@@ -312,10 +316,8 @@ history around it.
 
 - **Tabs and splits.** Sessions, terminals, browsers and search open as tabs;
   drag a tab to the edge of a pane to split the workspace. Tab layout is
-  remembered per browser. While dragging a divider, each affected pane shows
-  its live width × height in CSS pixels in a translucent, square-cornered badge
-  attached to its top-left edge. Arrow-key resizing and double-clicking a
-  divider to reset it also show the dimensions briefly.
+  remembered per browser. Drag a divider or use its arrow keys to resize panes;
+  double-click a divider to reset it.
 - **Status at a glance.** Every session row shows a spinner and a running clock
   while its agent works, the backend it runs on when idle, and task activity or
   a waiting approval. The footer lists every backend with its Puppy version

@@ -483,18 +483,22 @@ async def status_color_checks(instance, capture=False):
 
 async def identity_pill_checks(instance, capture=False):
     await evaluate(instance, """(() => {
+        window.identityStops=[];
         window.identityPreview=modal('<h2>Browser and terminal IDs</h2><p class="modal-copy">Component comparison · anonymous preview</p>');
         for(const [label,id] of [['Browser','A7K2'],['Terminal','B8L3']]) {
-            const meta=el('div','br-meta'+(label==='Terminal'?' term-meta':''));
+            const meta=el('div','br-meta edge-scroll-viewport'+(label==='Terminal'?' term-meta':''));
+            const strip=el('div','br-meta-scroll');meta.appendChild(strip);
             const pill=el('div','br-ident');pill.setAttribute('aria-label',label+' identity');
             pill.append(el('span','br-ident-label',label),el('span','br-id',id));
             const button=el('button','icon-btn br-copy-id'+(label==='Terminal'?' term-copy-id':''));
             button.type='button';button.setAttribute('aria-label','Copy '+label+' ID');
-            button.appendChild(copyIcon());pill.appendChild(button);meta.appendChild(pill);
+            button.appendChild(copyIcon());pill.appendChild(button);strip.appendChild(pill);
             const owner=el('button','br-owner');
-            owner.appendChild(el('span','br-owner-text','Harbor accessibility and dashboard navigation review'));
-            meta.appendChild(owner);
+            owner.appendChild(el('span','br-owner-text','Harbor accessibility and dashboard navigation review for the autumn release'));
+            strip.appendChild(owner);
+            if(label==='Browser') strip.appendChild(el('span','br-stats','813 × 961 · 60.0 FPS'));
             identityPreview.m.appendChild(meta);
+            identityStops.push(wireMetadataScrolling(meta));
         }
     })()""")
     try:
@@ -514,12 +518,41 @@ async def identity_pill_checks(instance, capture=False):
                         icon.top>=q.top && icon.bottom<=q.bottom && b.contains(hit);
                 })""")
                 assert result,(width,theme)
+                # Check actual layout and the document wheel hook together:
+                # overflow stays one row, fades follow scrolling to both ends.
+                assert await evaluate(instance, """[...identityPreview.m.querySelectorAll('.br-meta-scroll')].every(s=>{
+                    const v=s.parentElement, css=getComputedStyle(s), top=s.firstElementChild.getBoundingClientRect().top;
+                    const e=new WheelEvent('wheel',{deltaY:10000,bubbles:true,cancelable:true});
+                    const fits=[...s.children].every(p=>Math.abs(p.getBoundingClientRect().top-top)<1);
+                    const faded=parseFloat(v.style.getPropertyValue('--edge-scroll-right-fade-size'))>0;
+                    s.dispatchEvent(e);
+                    return fits && faded && e.defaultPrevented && css.overflowX==='auto' &&
+                        css.touchAction.includes('pan-x') && css.maskImage.includes('linear-gradient');
+                })"""), (width,theme)
+                await until(instance, """[...identityPreview.m.querySelectorAll('.br-meta-scroll')].every(s=>
+                    Math.abs(s.scrollLeft-(s.scrollWidth-s.clientWidth))<1 &&
+                    parseFloat(s.parentElement.style.getPropertyValue('--edge-scroll-right-fade-size'))===0)""")
+                assert await evaluate(instance, """[...identityPreview.m.querySelectorAll('.br-meta-scroll')].every(s=>{
+                    const e=new WheelEvent('wheel',{deltaY:100,bubbles:true,cancelable:true});s.dispatchEvent(e);
+                    const left=parseFloat(s.parentElement.style.getPropertyValue('--edge-scroll-left-fade-size'))>0;
+                    s.dispatchEvent(new WheelEvent('wheel',{deltaY:-10000,bubbles:true,cancelable:true}));
+                    return left && !e.defaultPrevented;
+                })"""), (width,theme)
+                await until(instance, """[...identityPreview.m.querySelectorAll('.br-meta-scroll')].every(s=>s.scrollLeft===0 &&
+                    parseFloat(s.parentElement.style.getPropertyValue('--edge-scroll-left-fade-size'))===0)""")
                 if capture:
                     shot=await instance.call("Page.captureScreenshot",{"format":"png"},session=instance.page_session)
                     (BASE / "data" / ("identity-pills-fixed-"+name+"-"+theme+".png")).write_bytes(base64.b64decode(shot["data"]))
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width":1440,"height":900,"deviceScaleFactor":1,"mobile":False},session=instance.page_session)
+        await evaluate(instance,"identityPreview.m.querySelectorAll('.br-owner-text').forEach(p=>p.textContent='Harbor'); true")
+        await until(instance,"""[...identityPreview.m.querySelectorAll('.br-meta-scroll')].every(s=>s.scrollWidth===s.clientWidth &&
+            parseFloat(s.parentElement.style.getPropertyValue('--edge-scroll-right-fade-size'))===0)""")
+        await evaluate(instance,"identityPreview.m.querySelector('.br-stats').textContent='Stream dimensions and frame rate '.repeat(8); true")
+        await until(instance,"parseFloat(identityPreview.m.querySelector('.br-meta').style.getPropertyValue('--edge-scroll-right-fade-size'))>0")
     finally:
-        await evaluate(instance,"identityPreview.close(); delete window.identityPreview; applyTheme('dark'); true")
-    print("PASS: browser and terminal Copy ID controls fit inside their pills on desktop and phones in both themes",flush=True)
+        await evaluate(instance,"identityStops.forEach(stop=>stop()); delete window.identityStops; identityPreview.close(); delete window.identityPreview; applyTheme('dark'); true")
+    print("PASS: browser and terminal identity rows stay single-line with working wheel scrolling, boundary fades and Copy ID controls on desktop and phones in both themes",flush=True)
 
 
 async def timer_error_checks(instance, capture=False):
@@ -594,7 +627,7 @@ async def usage_error_checks(instance, capture=False):
     print('PASS: complete usage-refresh errors and long identifiers remain visible without overflow on desktop and phones in both themes',flush=True)
 
 
-async def pane_size_checks(instance, capture=False):
+async def pane_resize_checks(instance):
     await instance.call("Emulation.setDeviceMetricsOverride", {
         "width": 1440, "height": 900, "deviceScaleFactor": 1,
         "mobile": False}, session=instance.page_session)
@@ -611,63 +644,50 @@ async def pane_size_checks(instance, capture=False):
             "buttons": 0 if kind == "mouseReleased" else 1,
             "clickCount": 1}, session=instance.page_session)
 
-    async def verify(count):
-        await until(instance, """(() => {
-            const badges=[...document.querySelectorAll('.pane-size-badge')];
-            return badges.length===%s && badges.every(b => {
-                const p=b.parentElement.getBoundingClientRect(), r=b.getBoundingClientRect();
-                const s=getComputedStyle(b);
-                return b.textContent===`${Math.round(p.width)} × ${Math.round(p.height)}` &&
-                    r.left===p.left && r.top===p.top && r.right<=p.right &&
-                    s.borderRadius==='0px' && s.pointerEvents==='none' &&
-                    s.backgroundColor.startsWith('rgba(') &&
-                    document.elementFromPoint(r.left+2,r.top+2)!==b;
-            });
-        })()""" % count)
+    async def verify(active=False):
+        await until(instance, "!document.querySelector('.pane-size-badge') && "
+                    "sizeDivider.classList.contains('active') === %s" % json.dumps(active))
+
+    dimensions = "[...document.querySelectorAll('.workspace-pane')].map(p=>{const r=p.getBoundingClientRect(); return [r.width,r.height]})"
 
     try:
         for theme in ("dark", "light"):
             await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
-            for axis, count in (("row", 3), ("column", 2)):
+            for axis in ("row", "column"):
                 point = await evaluate(instance, """(() => {
                     window.sizeDivider=document.querySelector('.workspace-split.%s > .splitter');
                     const r=sizeDivider.getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2};
                 })()""" % axis)
                 x, y = point["x"], point["y"]
                 await mouse("mousePressed", x, y)
-                await verify(count)
-                before = await evaluate(instance, "[...document.querySelectorAll('.pane-size-badge')].map(b=>b.textContent)")
+                await verify(True)
+                before = await evaluate(instance, dimensions)
                 x += 45 if axis == "row" else 0
                 y += 45 if axis == "column" else 0
                 await mouse("mouseMoved", x, y)
-                await verify(count)
-                after = await evaluate(instance, "[...document.querySelectorAll('.pane-size-badge')].map(b=>b.textContent)")
+                await verify(True)
+                after = await evaluate(instance, dimensions)
                 assert before != after, (axis, before, after)
-                if capture and axis == "row":
-                    shot = await instance.call("Page.captureScreenshot", {"format": "png"}, session=instance.page_session)
-                    (BASE / "data" / ("pane-size-" + theme + ".png")).write_bytes(base64.b64decode(shot["data"]))
                 await mouse("mouseReleased", x, y)
-                await verify(0)
+                await verify()
                 # Cancellation, capture loss and leaving the window all clean up.
                 for event in ("pointercancel", "lostpointercapture", "blur"):
                     await mouse("mousePressed", x, y)
-                    await verify(count)
+                    await verify(True)
                     await evaluate(instance, """%s.dispatchEvent(new Event(%s)); true""" %
                                    ("window" if event == "blur" else "sizeDivider", json.dumps(event)))
-                    await verify(0)
+                    await verify()
                     await mouse("mouseReleased", x, y)
                 await evaluate(instance, "sizeDivider.dispatchEvent(new KeyboardEvent('keydown',{key:%s})); true" %
                                json.dumps("ArrowLeft" if axis == "row" else "ArrowUp"))
-                await verify(count)
-                await until(instance, "!document.querySelector('.pane-size-badge')")
+                await verify()
                 await evaluate(instance, "sizeDivider.dispatchEvent(new MouseEvent('dblclick')); true")
-                await verify(count)
-                await until(instance, "!document.querySelector('.pane-size-badge')")
+                await verify()
         await evaluate(instance, "sizeDivider.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowUp'})); closeTab('s:0:2'); true")
-        await verify(0)
+        await verify()
     finally:
         await evaluate(instance, "closeTab('s:0:2'); closeTab('search'); applyTheme('dark'); delete window.sizeDivider; true")
-    print("PASS: pane dimensions track real nested horizontal/vertical resizing in both themes; release, cancellation, capture loss, blur, keyboard, reset and rebuild cleanup", flush=True)
+    print("PASS: nested horizontal/vertical resizing without size badges in both themes; release, cancellation, capture loss, blur, keyboard, reset and rebuild cleanup", flush=True)
 
 
 async def session_mention_checks(instance):
@@ -703,7 +723,7 @@ async def session_mention_checks(instance):
 
 async def checks(a, b, hub, capture=False):
     await session_mention_checks(a)
-    await pane_size_checks(a, capture)
+    await pane_resize_checks(a)
     await narrow_composer_checks(a, capture)
     await context_menu_checks(a, capture)
     await workspace_footer_checks(a, capture)

@@ -2707,7 +2707,7 @@ def check_browser_handoff_ui(ui_source: str, css_source: str) -> None:
     start = ui_source.index("class BrowserView {")
     end = ui_source.index("/* ================= SettingsView", start)
     view = ui_source[start:end]
-    assert view.index('class="br-bar"') < view.index('class="br-meta"') < \
+    assert view.index('class="br-bar"') < view.index('class="br-meta edge-scroll-viewport"') < \
         view.index('class="br-stage"')
     assert 'aria-label="Copy Browser ID"' in view
     # The stream statistics have help; the session-link pill is self-labelled.
@@ -5259,13 +5259,15 @@ console.log(JSON.stringify([
     end = ui_source.index("\nfunction syncAllTabOverflow", start)
     source = ui_source[start:end]
     script = r"""
-let reduced = false;
+let reduced = false, quantized = false;
 const listeners = {};
 class Element {
   constructor() {
     this.scrollLeft = 0; this.scrollWidth = 500; this.clientWidth = 100;
     this.isConnected = true;
   }
+  get scrollLeft() { return this._scrollLeft; }
+  set scrollLeft(value) { this._scrollLeft = quantized ? Math.round(value) : value; }
   closest(selector) { return selector.includes(".tabs") ? this : null; }
 }
 const document = {addEventListener(kind, fn, options) {
@@ -5339,7 +5341,13 @@ const reducedEvent = wheel({deltaY:100});
 const reducedResult = {prevented:reducedEvent.prevented, frames:frames.size,
   left:strip.scrollLeft};
 
-console.log(JSON.stringify({selectors:WHEEL_SWIPE_STRIPS, passive:listeners.wheel.options.passive,
+reduced = false; quantized = true; strip.scrollLeft = 0;
+wheel({deltaY:10000}); settle();
+const quantizedRight = strip.scrollLeft;
+wheel({deltaY:-10000}); settle();
+const quantizedLeft = strip.scrollLeft;
+
+console.log(JSON.stringify({quantizedRight, quantizedLeft, selectors:WHEEL_SWIPE_STRIPS, passive:listeners.wheel.options.passive,
   pointerPassive:listeners.pointerdown.options.passive,
   first:first.prevented, second:second.prevented, queued, eased, frameCount, accumulated,
   horizontalResult, atRight:atRight.prevented, atLeft:atLeft.prevented,
@@ -5349,8 +5357,9 @@ console.log(JSON.stringify({selectors:WHEEL_SWIPE_STRIPS, passive:listeners.whee
     proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:1000]
     result = json.loads(proc.stdout.strip())
+    assert result["quantizedRight"] == 400 and result["quantizedLeft"] == 0, result
     assert result["selectors"] == [
-        ".tabs", ".chat-meta-scroll", ".composer-meta-scroll"], result
+        ".tabs", ".chat-meta-scroll", ".composer-meta-scroll", ".br-meta-scroll"], result
     assert result["passive"] is False and result["pointerPassive"] is True, result
     assert result["first"] and result["second"], result
     assert result["queued"] == {"left": 0, "frames": 1}, result
