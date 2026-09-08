@@ -317,6 +317,38 @@ const settle = async () => { for (let i = 0; i < 8; i++) await new Promise(r => 
   setSpellPref("check", true);
   assert.deepEqual(painted(b.box), ["teh", "jumpd"], "and on brings them straight back");
 
+  /* An edit moves the words the marks sit under: ctrl+j puts every line
+     after it one line down, and the box grows under them. The marks go with
+     the text in the same tick, without waiting for the next scan. */
+  const follow = makeBox();
+  type(follow.composer, "teh quick brown jumpd ");
+  follow.composer.spellDraw(true);
+  assert.deepEqual(painted(follow.box), ["teh", "jumpd"]);
+  follow.ta.selectionStart = follow.ta.selectionEnd = 9;
+  follow.composer.newline();          // no spellDraw(true): the scan is still pending
+  assert.equal(layerText(follow.box), "teh quick\n brown jumpd \n",
+    "the layer re-wraps with the text at once");
+  assert.deepEqual(painted(follow.box), ["teh", "jumpd"], "and the marks come along");
+  assert.deepEqual([...follow.composer.spellMarks].map(mark => [mark.start, mark.end]),
+    [[0, 3], [17, 22]], "at the offsets the newline left them at");
+  // The word an edit runs through is nobody's typo until it is scanned again.
+  follow.ta.value = "teh quick\n brown jmpd ";
+  follow.ta.selectionStart = follow.ta.selectionEnd = 21;
+  fire(follow.ta, "input", { inputType: "deleteContentBackward" });
+  assert.deepEqual(painted(follow.box), ["teh"], "the word being edited drops its mark");
+  follow.ta.blur();                   // the fingers leave it; now it is a typo
+  follow.composer.spellDraw(true);
+  assert.deepEqual(painted(follow.box), ["teh", "jmpd"], "and the scan brings it back");
+  // An edit that leaves nothing marked takes the layer with it.
+  follow.ta.value = "teh quick";
+  follow.ta.selectionStart = follow.ta.selectionEnd = 9;
+  fire(follow.ta, "input", { inputType: "deleteContentBackward" });
+  assert.deepEqual(painted(follow.box), ["teh"], "what the edit did not touch stays");
+  follow.ta.value = "quick";
+  follow.ta.selectionStart = follow.ta.selectionEnd = 0;
+  fire(follow.ta, "input", { inputType: "deleteContentBackward" });
+  assert.equal(follow.box.querySelector(".spell-layer"), null);
+
   // The word under the typist's fingers is unfinished, not misspelled: its
   // mark waits for the word to end, or for the caret to leave it.
   const held = makeBox();
@@ -395,6 +427,66 @@ const settle = async () => { for (let i = 0; i < 8; i++) await new Promise(r => 
   type(e.composer, " ");
   assert.equal(e.ta.value, "teh ", "a word the writer restored is left alone");
   assert.deepEqual(painted(e.box), [], "but a refused word is not marked either");
+
+  /* Backspace, straight after a correction, is the phone keyboard's gesture:
+     the word Puppy typed goes back to the one that was typed, the space that
+     finished it stays, and this box leaves that word alone from then on. */
+  const back = makeBox();
+  back.ta.focus();
+  type(back.composer, "teh");
+  type(back.composer, " ");
+  assert.equal(back.ta.value, "the ");
+  const undoKey = new FakeEvent("keydown", { key: "Backspace" });
+  back.ta.dispatchEvent(undoKey);
+  assert.equal(undoKey.defaultPrevented, true, "backspace is the revert, not a deletion");
+  assert.equal(back.ta.value, "teh ", "exactly what was typed, space and all");
+  assert.equal(back.ta.selectionStart, 4, "ready to carry on typing");
+  assert.ok(back.composer.spellRefused.has("teh"));
+  assert.equal(back.composer.spellFix, null, "there is nothing left to take back");
+  assert.deepEqual(painted(back.box), ["teh"],
+    "a kept word is still one the dictionary does not know");
+  // and finishing it again does not start the fight over
+  type(back.composer, "teh");
+  type(back.composer, " ");
+  assert.equal(back.ta.value, "teh teh ", "the word it was told to keep is left alone");
+  // the next backspace is an ordinary backspace again
+  const second = new FakeEvent("keydown", { key: "Backspace" });
+  back.ta.dispatchEvent(second);
+  assert.equal(second.defaultPrevented, false);
+  assert.equal(back.ta.value, "teh teh ");
+
+  /* It is armed only while the correction is still the last thing that
+     happened: one more keystroke, or the caret moving, and backspace deletes
+     a character like it always did. */
+  const late = makeBox();
+  late.ta.focus();
+  type(late.composer, "adn");
+  type(late.composer, " ");
+  assert.equal(late.ta.value, "and ");
+  type(late.composer, "x");
+  const typedOn = new FakeEvent("keydown", { key: "Backspace" });
+  late.ta.dispatchEvent(typedOn);
+  assert.equal(typedOn.defaultPrevented, false, "typing on disarms the gesture");
+  assert.equal(late.ta.value, "and x");
+  const moved = makeBox();
+  moved.ta.focus();
+  type(moved.composer, "adn");
+  type(moved.composer, " ");
+  assert.equal(moved.ta.value, "and ");
+  moved.ta.selectionStart = moved.ta.selectionEnd = 0;
+  const elsewhere = new FakeEvent("keydown", { key: "Backspace" });
+  moved.ta.dispatchEvent(elsewhere);
+  assert.equal(elsewhere.defaultPrevented, false, "a caret that moved disarms it too");
+  assert.equal(moved.ta.value, "and ");
+  // a modified backspace (delete the word before the caret) is never taken
+  const held2 = makeBox();
+  held2.ta.focus();
+  type(held2.composer, "adn");
+  type(held2.composer, " ");
+  const withCtrl = new FakeEvent("keydown", { key: "Backspace", ctrlKey: true });
+  held2.ta.dispatchEvent(withCtrl);
+  assert.equal(withCtrl.defaultPrevented, false);
+  assert.equal(held2.ta.value, "and ");
 
   // A paste is not typing, however it ends.
   const paste = makeBox();

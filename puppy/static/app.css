@@ -1263,8 +1263,15 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   overflow:hidden;font-size:var(--fs-md);
 }
 .tool-card.err{border-color:var(--err-line)}
+/* Whole-pixel row. The head's own 12.5px type on the body's 1.5 multiplier gives
+   an 18.75px line, so the card stood 34.75px tall: its box edges snapped to a
+   different sub-pixel phase in every card while the glyphs inside snapped to
+   whole device pixels, and the same marks then read up to a pixel off centre in
+   one card and true in the next. An integer line keeps every head 32px, every
+   card 34px, and every mark the same whole-pixel distance from both edges. */
 .tool-head{
   display:flex;align-items:center;gap:8px;padding:7px 11px;cursor:pointer;user-select:none;color:var(--txt2);
+  line-height:18px;
 }
 @media (hover:hover){.tool-head:hover{background:var(--hov-soft)}}
 .tool-head .t-caret{
@@ -1277,14 +1284,18 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .tool-head .t-name{font-weight:600;color:var(--txt);flex-shrink:0}
 .tool-head .t-sum{font-family:var(--mono);font-size:var(--fs-sm);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;color:var(--txt3)}
 /* the pending/ok/failed mark: drawn like every other glyph, on the card's
-   own row height */
-.tool-head .t-state{font-size:var(--fs-2xs);flex-shrink:0;display:inline-flex;align-items:center}
+   own row height. line-height:1 so a state WORD (the folded task's outcome)
+   is an even box too, and centres on the same whole pixel as a drawn mark. */
+.tool-head .t-state{font-size:var(--fs-2xs);flex-shrink:0;display:inline-flex;align-items:center;line-height:1;white-space:nowrap}
 /* One optical line for the head. Flex centring lands a glyph box on the middle
    of the line box, which carries the font's ascent and descent padding and so
    sits a pixel below the band the eye reads as the line: the midpoint between
    the baseline and the cap height. Lift the caret, the tool glyph and the state
    mark onto that cap midline together, so the row keeps one horizon and the
-   check or cross meets the same band the result line's mark uses. */
+   check or cross meets the same band the result line's mark uses.
+   Every box on this row is an even height inside the even line, so each one
+   centres on a whole pixel rather than a half: an odd glyph would round its own
+   way per card and break the horizon the shim exists to keep. */
 .tool-head .t-caret,.tool-head .t-ico,.tool-head .t-state{position:relative;top:-1px}
 .tool-head .t-state .spinner{width:10px;height:10px;border:2px solid var(--acc-dim);border-top-color:var(--acc);border-radius:50%;animation:spin .8s linear infinite;animation-delay:var(--prompt-spin-delay,0ms)}
 .tool-head .t-state svg{display:block}

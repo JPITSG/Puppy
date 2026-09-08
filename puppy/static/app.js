@@ -9784,6 +9784,30 @@ function spellMisspellings(text) {
   return found;
 }
 
+/* The marks already on the screen, at the offsets one edit leaves them at.
+   The run the edit actually touched is dropped - what those letters spell now
+   is the next scan's answer, and the word under the caret carries no mark
+   while it is being typed anyway - and everything after it slides by the
+   length the text gained or lost. */
+function spellMarksAfterEdit(marks, before, after) {
+  const shared = Math.min(before.length, after.length);
+  let head = 0;
+  while (head < shared && before.charCodeAt(head) === after.charCodeAt(head)) head++;
+  let tail = 0;
+  while (tail < shared - head &&
+         before.charCodeAt(before.length - 1 - tail) === after.charCodeAt(after.length - 1 - tail))
+    tail++;
+  const cut = before.length - tail;          // where the replaced run ends, in the old text
+  const delta = after.length - before.length;
+  const moved = [];
+  for (const mark of marks) {
+    if (mark.end <= head) moved.push(mark);
+    else if (mark.start >= cut)
+      moved.push({ ...mark, start: mark.start + delta, end: mark.end + delta });
+  }
+  return moved;
+}
+
 /* ---- corrections ---- */
 
 /* Every word one edit away from this one, mapped to what that edit costs. */
@@ -10042,11 +10066,13 @@ class Composer {
     this.toolsButton.onclick = (e) => { e.stopPropagation(); this.showTools(e.currentTarget); };
     /* ---- spelling ---- */
     this.spellLayer = null;       // the marks painted under the text
+    this.spellText = "";          // the text those marks were painted over
+    this.spellMarks = [];         // and the marks themselves, at its offsets
     this.spellTimer = null;
     this.spellObserver = null;
     this.spellEditing = false;    // a correction is being applied through this box
-    this.spellFix = null;         // the last autocorrection, while it can still be undone
-    this.spellRefused = new Set();// words this box was told, by an undo, to leave alone
+    this.spellFix = null;         // the last autocorrection, while backspace can take it back
+    this.spellRefused = new Set();// words this box was told, by a restore, to leave alone
     this.spellTypingAt = null;    // the caret after the last keystroke, while it stays there
     this.spellHeld = false;       // the last paint withheld the mark on the word being typed
     this.ta.addEventListener("scroll", () => this.spellSync(), { passive: true });
@@ -10142,6 +10168,9 @@ class Composer {
     if (e.isComposing) return;
     if (this.busy || this.closed) return;
     if (this.mentionKeydown(e)) return;
+    /* Backspace takes back the correction Puppy just typed, and nothing else:
+       any other moment it is an ordinary backspace. */
+    if (e.key === "Backspace" && this.spellRevert(e)) { e.preventDefault(); return; }
     if (e.key === "Escape") {
       if (this.host.escape) this.host.escape(e);
       return;
@@ -10172,7 +10201,7 @@ class Composer {
     ta.value = ta.value.slice(0, s) + "\n" + ta.value.slice(en);
     ta.selectionStart = ta.selectionEnd = s + 1;
     ta.dispatchEvent(new Event("input", { bubbles: true }));   // resizes first
-    scrollCaretIntoView(ta);
+    this.revealCaret();
   }
 
   notify(edited) {
@@ -10255,6 +10284,9 @@ class Composer {
     if (!spellPrefs.check) { this.spellClear(); return; }
     if (!spellDictionary.data) { this.spellClear(); loadSpellDictionary(); return; }
     if (now) { this.spellPaint(); return; }
+    /* The marks already on the screen belong to words that just moved: carry
+       them there now, so nothing waits for the scan to catch up. */
+    this.spellFollow();
     this.spellTimer = setTimeout(() => {
       this.spellTimer = null;
       this.spellPaint();
@@ -10262,6 +10294,8 @@ class Composer {
   }
 
   spellClear() {
+    this.spellText = "";
+    this.spellMarks = [];
     if (!this.spellLayer) return;
     if (this.spellObserver) { this.spellObserver.disconnect(); this.spellObserver = null; }
     this.spellLayer.remove();
@@ -10288,6 +10322,12 @@ class Composer {
       return !typing;
     });
     if (!marks.length) { this.spellClear(); return; }
+    this.spellRender(text, marks);
+  }
+
+  /* Lay these marks over this text, and remember both: the next edit moves
+     them itself rather than leaving them where the words used to be. */
+  spellRender(text, marks) {
     const layer = this.spellLayer || this.spellLayerNode();
     const parts = [];
     let at = 0;
@@ -10300,7 +10340,24 @@ class Composer {
        textarea's, exactly as the autosize mirror does */
     parts.push(document.createTextNode(text.slice(at) + "\n"));
     layer.replaceChildren(...parts);
+    this.spellText = text;
+    this.spellMarks = marks;
     this.spellSync();
+  }
+
+  /* An edit moves the words the marks are under before anything is scanned
+     again: a ctrl+j puts every following line one line down, and the box
+     grows under them. Waiting for the scan would leave the squiggles behind
+     for as long as the typing takes to settle, so the marks that survive the
+     edit are carried to their new offsets and painted straight away - which
+     is the whole cost of a keystroke, since no word is looked up. */
+  spellFollow() {
+    if (!this.spellLayer) return;
+    const text = this.ta.value;
+    if (text === this.spellText) return;
+    const marks = spellMarksAfterEdit(this.spellMarks, this.spellText, text);
+    if (!marks.length) { this.spellClear(); return; }
+    this.spellRender(text, marks);
   }
 
   spellLayerNode() {
@@ -10412,8 +10469,30 @@ class Composer {
     if (!fix) return false;
     if (spellSkipRegions(text).some(span => span[0] < caret - 1 && span[1] > start))
       return false;
-    this.spellFix = { start, from: word, to: fix };
-    this.replaceRange(start, caret - 1, fix, caret + fix.length - word.length);
+    this.spellFix = { start, from: word, to: fix, at: caret + fix.length - word.length };
+    this.replaceRange(start, caret - 1, fix, this.spellFix.at);
+    return true;
+  }
+
+  /* Backspace, straight after a correction: the word Puppy typed goes back to
+     the one that was typed, and this box leaves it alone for the rest of the
+     message. It is the phone keyboard's own gesture, and it is armed only
+     while the correction is still the last thing that happened - the text
+     Puppy wrote is still where it wrote it and the caret has not moved since,
+     so one more keystroke, one arrow key or one click and backspace deletes a
+     character again. The space that finished the word stays: what comes back
+     is exactly what was typed, ready to carry on from. */
+  spellRevert(event) {
+    if (event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return false;
+    const fix = this.spellFix;
+    if (!fix || this.busy || this.closed || this.composing || this.history) return false;
+    const ta = this.ta;
+    if (ta.selectionStart !== ta.selectionEnd || ta.selectionStart !== fix.at) return false;
+    if (ta.value.slice(fix.start, fix.start + fix.to.length) !== fix.to) return false;
+    if (!this.replaceRange(fix.start, fix.start + fix.to.length, fix.from,
+        fix.at + fix.from.length - fix.to.length)) return false;
+    this.spellFix = null;
+    this.spellRefused.add(fix.from.toLowerCase());
     return true;
   }
 
@@ -10544,7 +10623,7 @@ class Composer {
     this.set(prefix + draft);
     this.focus();
     this.ta.setSelectionRange(prefix.length, this.ta.value.length);
-    scrollCaretIntoView(this.ta);
+    this.revealCaret();
   }
 
   set(v, fromHistory = false) {
@@ -10558,7 +10637,7 @@ class Composer {
     this.spellFix = null;
     this.spellTypingAt = null;    // recalled text is finished text
     this.spellDraw();
-    scrollCaretIntoView(this.ta);   // recalling a long entry lands on its end
+    this.revealCaret();             // recalling a long entry lands on its end
     this.notify(true);
   }
 
@@ -10671,9 +10750,17 @@ class Composer {
     try { this.ta.setSelectionRange(end, end); } catch (_) {}
   }
 
-  focus(revealCaret = false) {
+  focus(reveal = false) {
     this.ta.focus();
-    if (revealCaret) scrollCaretIntoView(this.ta);
+    if (reveal) this.revealCaret();
+  }
+
+  /* Bring the caret back into view after an edit made from script, and take
+     the marks with it: a scroll set from script only reports itself on the
+     next frame, which is a frame of squiggles left where the text was. */
+  revealCaret() {
+    scrollCaretIntoView(this.ta);
+    this.spellSync();
   }
 
   /* A host transaction that will replace the whole value (a queued-message
@@ -11103,7 +11190,7 @@ class Composer {
     ta.setSelectionRange(caret, caret);
     ta.focus();
     ta.dispatchEvent(new Event("input", { bubbles: true }));
-    scrollCaretIntoView(ta);
+    this.revealCaret();
   }
 
   /* The "New VNC connection" row: a remote screen needs a host, a port and
@@ -11809,10 +11896,13 @@ function toolIconNode(tool) {
   return toolsIcon(12);
 }
 /* The card's state mark: the shared ring while the tool runs, then the same
-   check or cross every other status in the app draws. */
+   check or cross every other status in the app draws. Drawn at the caret's and
+   the tool glyph's own 12px: an even glyph in the head's even line centres on a
+   whole pixel, so the mark keeps the row's horizon in every card instead of
+   rounding its own way in some of them (the ring is 10px, even likewise). */
 function toolStateInto(stateEl, completed, isError) {
   stateEl.className = "t-state " + (completed ? (isError ? "bad" : "ok") : "busy");
-  stateEl.replaceChildren(completed ? (isError ? xIcon(11) : checkIcon(11)) : promptSpinnerNode());
+  stateEl.replaceChildren(completed ? (isError ? xIcon(12) : checkIcon(12)) : promptSpinnerNode());
   stateEl.setAttribute("aria-label", completed ? (isError ? "failed" : "done") : "running");
   return stateEl;
 }

@@ -214,16 +214,18 @@ dialog's — carries two switches:
   acronyms, versions, `@` mentions and attachment markers are never checked.
   Right-click (or long-press on Android) a marked word for suggestions, or
   **Add to dictionary** to keep the word in this browser for good; clicking
-  anywhere else closes the list.
+  anywhere else closes the list. The underlines move with your text the moment
+  it re-wraps, so a `Ctrl+J` that pushes a line down takes them with it.
 - **Autocorrect** (off by default) fixes a clear typo as you finish the word,
   and is unavailable while spell check is off. It is deliberately timid: it
   only replaces a word it does not know, only with a common word one edit away
   (a transposed, doubled or missing letter, a lost apostrophe), only when that
   candidate stands clear of the runner-up, and never by capitalising a word
   for you. Rare and formed words are offered in the suggestion list but are
-  never typed for you. `Ctrl+Z` takes a correction straight back, and a word
-  you restore is left alone for the rest of that message. Pasted text is never
-  rewritten.
+  never typed for you. **Backspace** straight after a correction takes it back
+  — the word you typed returns, the space that finished it stays, and that
+  word is left alone for the rest of the message — and `Ctrl+Z` takes one back
+  too. Pasted text is never rewritten.
 
 The dictionary is fetched once per console, only when a prompt box with spell
 check on is on screen, and both switches are remembered per browser. The word

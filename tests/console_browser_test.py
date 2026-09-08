@@ -1023,6 +1023,50 @@ async def spell_check_checks(instance, capture=False):
                                        session=instance.page_session)
             (BASE / "data" / "spell-marks.png").write_bytes(base64.b64decode(shot["data"]))
 
+        # A ctrl+j moves every line after it down and grows the box under it.
+        # The marks go with their words in the same tick: the debounced scan is
+        # taken away first, so nothing but the edit itself can have moved them.
+        await evaluate(instance, """(() => {
+            const c = demoView.composer, ta = c.ta;
+            c.set('Teh quick brown fox jumpd over the lazy dog.');
+            c.spellDraw(true);
+            const layer = c.box.querySelector('.spell-layer');
+            const top = ta.getBoundingClientRect().top;
+            window.__before = [...layer.querySelectorAll('.sp-bad')]
+                .map(node => node.getBoundingClientRect().top - top + ta.scrollTop);
+            c.spellPaint = () => {};       // the scan is out of the picture
+            ta.focus();
+            ta.setSelectionRange(3, 3);
+            return true;
+        })()""")
+        for phase in ("rawKeyDown", "keyUp"):
+            await instance.call("Input.dispatchKeyEvent", {"type": phase, "modifiers": 2,
+                "key": "j", "code": "KeyJ", "windowsVirtualKeyCode": 74},
+                session=instance.page_session)
+        broke = await evaluate(instance, """(() => {
+            const c = demoView.composer, ta = c.ta;
+            const layer = c.box.querySelector('.spell-layer');
+            const box = ta.getBoundingClientRect(), mine = layer.getBoundingClientRect();
+            const marks = [...layer.querySelectorAll('.sp-bad')];
+            const now = marks.map(node =>
+                node.getBoundingClientRect().top - box.top + ta.scrollTop);
+            const line = parseFloat(getComputedStyle(ta).lineHeight);
+            const was = window.__before;
+            return {value: ta.value, words: marks.map(node => node.textContent),
+                text: layer.textContent,
+                aligned: Math.abs(box.x - mine.x) < .5 && Math.abs(box.y - mine.y) < .5 &&
+                    Math.abs(box.width - mine.width) < .5 &&
+                    Math.abs(box.height - mine.height) < .5,
+                wraps: ta.scrollHeight === layer.scrollHeight,
+                stayed: Math.abs(now[0] - was[0]) < 1,
+                shifted: Math.abs((now[1] - was[1]) - line) < 1};
+        })()""")
+        assert broke["value"] == "Teh\n quick brown fox jumpd over the lazy dog.", broke
+        assert broke["words"] == ["Teh", "jumpd"] and broke["text"].startswith("Teh\n"), broke
+        assert broke["aligned"] and broke["wraps"], broke
+        assert broke["stayed"] and broke["shifted"], broke
+        await evaluate(instance, "delete demoView.composer.spellPaint; true")
+
         # A word still being typed is not marked; the space that ends it, or the
         # caret leaving it, is what earns the underline.
         await evaluate(instance, "demoView.composer.set(''); demoView.composer.ta.focus(); true")
@@ -1058,6 +1102,33 @@ async def spell_check_checks(instance, capture=False):
                 session=instance.page_session)
         await until(instance, "demoView.composer.ta.value.startsWith('teh')")
         assert await evaluate(instance, "demoView.composer.spellRefused.has('teh')")
+        # And the phone keyboard's gesture: backspace, straight after a
+        # correction typed on a real keyboard, gives the typed word back.
+        await evaluate(instance, "demoView.composer.spellRefused.clear(); "
+                                 "demoView.composer.set(''); demoView.composer.ta.focus(); true")
+        for event in keys:
+            await instance.call("Input.dispatchKeyEvent", {**event}, session=instance.page_session)
+            await instance.call("Input.dispatchKeyEvent",
+                {"type": "keyUp", "key": event["key"],
+                 "windowsVirtualKeyCode": event["windowsVirtualKeyCode"]},
+                session=instance.page_session)
+        await until(instance, "demoView.composer.ta.value === 'the '")
+        for phase in ("rawKeyDown", "keyUp"):
+            await instance.call("Input.dispatchKeyEvent", {"type": phase, "key": "Backspace",
+                "code": "Backspace", "windowsVirtualKeyCode": 8},
+                session=instance.page_session)
+        await until(instance, "demoView.composer.ta.value === 'teh '")
+        assert await evaluate(instance, "demoView.composer.ta.selectionStart === 4"), \
+            "the caret carries on where the typist left it"
+        assert await evaluate(instance, "demoView.composer.spellRefused.has('teh')")
+        await until(instance, "demoView.composer.box.querySelector('.sp-bad')?.textContent === 'teh'")
+        # a second backspace is an ordinary backspace again
+        for phase in ("rawKeyDown", "keyUp"):
+            await instance.call("Input.dispatchKeyEvent", {"type": phase, "key": "Backspace",
+                "code": "Backspace", "windowsVirtualKeyCode": 8},
+                session=instance.page_session)
+        await until(instance, "demoView.composer.ta.value === 'teh'")
+
         # The word the writer restored is neither corrected nor marked again.
         await evaluate(instance, """(() => { const c = demoView.composer;
             c.set(''); c.ta.value = 'teh'; c.ta.selectionStart = c.ta.selectionEnd = 3;
@@ -1138,7 +1209,8 @@ async def spell_check_checks(instance, capture=False):
             setSpellPref('correct', false); demoView.composer.spellRefused.clear();
             demoView.composer.set(''); true""")
     print("PASS: bundled dictionary served compressed, marks aligned with the text it "
-          "underlines, autocorrect typed and undone, suggestion and tools menus", flush=True)
+          "underlines, autocorrect typed and taken back by undo and by backspace, "
+          "suggestion and tools menus", flush=True)
 
 
 async def checks(a, b, hub, capture=False):

@@ -142,6 +142,18 @@ browser's own undo stack takes one back with `Ctrl+Z`, and the ordinary input
 path resizes the box and saves the draft. A word the writer restores is added
 to that box's refusal set and left alone until the message is sent.
 
+The gesture that restores one is the phone keyboard's: **backspace**, straight
+after the correction. `Composer.spellRevert` puts the typed word back where
+Puppy wrote over it, keeps the space or full stop that finished it, and leaves
+the caret ready to carry on, so one keystroke returns exactly what was typed.
+It is armed only while the correction is still the last thing that happened -
+the text Puppy wrote is still at its offset and the caret has not moved since -
+so a further keystroke, an arrow key, a click or a modifier gives backspace
+straight back to the browser, and the next backspace after a revert deletes a
+character like any other. A word restored this way still carries its underline:
+keeping a word Puppy does not know is not the same as telling it the word is
+spelled right, which is what **Add to dictionary** is for.
+
 ## The marks
 
 A textarea cannot carry marks, and a contenteditable box would cost the
@@ -152,8 +164,11 @@ letters are transparent and only the wavy underline under a marked word shows
 through the transparent field above. `Composer.spellSync` writes those metrics
 after every paint, on every textarea scroll, and from a `ResizeObserver`, so a
 box that grows or a window that changes width keeps its marks over their words.
-`tests/console_browser_test.py` asserts the two boxes and their scroll heights
-match to the pixel in real Chromium.
+A scroll made from script - the caret brought back into view after `Ctrl+J` or
+a recalled prompt - reports itself only on the next frame, so
+`Composer.revealCaret` writes those metrics itself instead of leaving the marks
+a frame behind. `tests/console_browser_test.py` asserts the two boxes and their
+scroll heights match to the pixel in real Chromium.
 
 The word still under the typist's fingers is unfinished, not misspelled, so it
 carries no mark until it ends. After a keystroke (typed or deleted, never a
@@ -162,8 +177,19 @@ the box has focus and the caret has not moved, the mark on the word the caret
 sits in or at the end of is withheld. The space or punctuation that ends the
 word paints it at once, and so does the caret leaving the word by arrow key,
 click or touch (the document's `selectionchange`, the field's `keyup` and
-`pointerup`) or the box losing focus. Paints are still debounced by
+`pointerup`) or the box losing focus. The scan is still debounced by
 `SPELL_DRAW_DELAY` behind the typing.
+
+The marks are not. An edit moves the words they sit under before anything is
+scanned again - `Ctrl+J` puts every line after it one line down, and the box
+grows under them - so `Composer.spellFollow` carries the marks already on the
+screen to their new offsets and repaints in the same tick, ahead of the scan.
+`spellMarksAfterEdit` compares the text the marks were painted over with the
+text now in the box: what lies before the change keeps its offsets, what lies
+after it slides by the length the text gained or lost, and whatever the edit
+itself ran through is dropped, because what those letters spell now is the next
+scan's answer. No word is looked up, so a keystroke pays only for the layout it
+already changed.
 
 The suggestion menu is the console's ordinary choice menu opened at the
 pointer (`openChoiceMenu` with `at`): it takes the arrow keys without a focus

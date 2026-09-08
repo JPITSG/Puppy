@@ -5073,6 +5073,7 @@ class View {
   pick(label){const item=this.mention.items.find(i=>i.label===label);
     if(!item)throw new Error("no row "+label+" in "+JSON.stringify(this.labels()));
     this.applyMention(item);}
+  revealCaret(){}
 %s
 }
 const out={};
