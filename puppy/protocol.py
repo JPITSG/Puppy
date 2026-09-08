@@ -177,6 +177,10 @@ VNC_CONNECT_CANCEL_CAPABILITY = "vnc-connect-cancel"
 SESSION_REFERENCES_CAPABILITY = "session-references"
 
 BASE_CAPABILITIES = (
+    "operation-cancel-v1",
+    "side-question-cancel",
+    "engine-upgrade-cancel",
+    "browser-navigation-stop",
     # Apply may start one conflict-resolution prompt in the task, for re-review.
     "session-task-conflict-resolution",
     "session-tasks",

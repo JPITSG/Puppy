@@ -84,6 +84,8 @@ const context = vm.createContext({
 });
 vm.runInContext([
   between("function engineInfo(", "const headWord ="),
+  between("/* Under the anchor, or at a point when one was given. */",
+          "/* ================= composer @-mentions"),
   between("function liveViews()", "/* The wrapper that owns"),
   between("function applyNodeStateSnapshot(", "function applyRemoteStreamState("),
   between("function syncRemoteStateViews()", "function remoteStoppingMessage("),
@@ -102,6 +104,14 @@ const { SessionView, TermView, BrowserView, SearchView, SettingsView } = context
 const update = () => context.syncRemoteStateViews();
 const button = (root, label) => root.querySelectorAll("button").find(node => node.textContent === label);
 const mount = node => { document.body.appendChild(node); return node; };
+/* The prompt box owns the tools menu and appends the spelling switches to it;
+   this stands in for it as a host, so a session's own rows and their live
+   refresh are exercised exactly as the box would open them. */
+const toolsMenu = (view, anchor) => {
+  const spec = () => ({ ...view.toolsMenuSpec(), current: "", footers: [] });
+  return context.openChoiceMenu(anchor, { ...spec(), actions: true, live: spec,
+    onPick: value => view.runSessionTool(value), ownerView: view.root });
+};
 function sessionView(bid = 0) {
   const view = Object.create(SessionView.prototype);
   Object.assign(view, { tab: { bid, sid: 1 }, session: { engine: "engine", model: "model" }, root: mount(el("div")) });
@@ -125,15 +135,14 @@ function engineCatalog(fast = false) {
   const view = sessionView();
   state.views.chat = view;
   const anchor = mount(el("button"));
-  view.showToolsMenu(anchor);
-  const menu = view.composerMenu;
+  const menu = toolsMenu(view, anchor);
   assert.equal(button(menu, "Undo last turn").disabled, true);
   assert.equal(button(menu, "Fast mode").disabled, true);
   button(menu, "Compact context").focus();
   state.engines[0].tool_options.push({ value: "undo" });
   state.engines[0].model_options[0].fast_mode_available = true;
   update();
-  assert.equal(view.composerMenu, menu);
+  assert.ok(menu.isConnected, "a live refresh redraws the open menu in place");
   assert.equal(button(menu, "Undo last turn").disabled, false);
   assert.equal(button(menu, "Fast mode").disabled, false);
   assert.equal(document.activeElement, button(menu, "Compact context"), "live refresh preserves keyboard focus");
@@ -143,30 +152,28 @@ function engineCatalog(fast = false) {
   assert.equal(button(menu, "Fast mode").getAttribute("aria-checked"), "true");
   button(menu, "Fast mode").click();
   assert.equal(fast, false, "toggle acts on the latest setting");
-  view.showModelMenu(anchor);
-  const models = view.composerMenu;
+  const models = view.showModelMenu(anchor);
   state.engines[0].model_options.push({ value: "new", label: "New model" }); update();
   assert.ok(button(models, "New model"));
   let model;
   view.applyModelChoice = value => { model = value; };
   button(models, "New model").click(); assert.equal(model, "new");
-  view.showToolsMenu(anchor);
+  const withdrawn = toolsMenu(view, anchor);
   state.engines[0].tool_options = []; update();
-  assert.equal(button(view.composerMenu, "Compact context").disabled, true, "withdrawn actions disable live");
-  view.composerMenu.remove();
+  assert.equal(button(withdrawn, "Compact context").disabled, true, "withdrawn actions disable live");
+  withdrawn.remove();
   view.tab.bid = 7; state.engCache[7] = state.engines;
   view.session.permission_mode = "safe";
-  view.showPermMenu(anchor);
+  const perm = view.showPermMenu(anchor);
   view.session.queuedEngine = true; update();
-  assert.equal(button(view.composerMenu, "Safe").disabled, true);
+  assert.equal(button(perm, "Safe").disabled, true);
   state.backends[0].capabilities.push("queued-permission-config"); update();
-  assert.equal(button(view.composerMenu, "Safe").disabled, false);
-  view.showToolsMenu(anchor);
-  const toolMenu = view.composerMenu;
+  assert.equal(button(perm, "Safe").disabled, false);
+  const toolMenu = toolsMenu(view, anchor);
   toolMenu.focus();
   toolMenu.onkeydown(new FakeEvent("keydown", { key: "ArrowDown" }));
   assert.equal(document.activeElement, button(toolMenu, "Fast mode"), "keyboard skips actions disabled by live state");
-  view.composerMenu.remove(); delete state.views.chat;
+  toolMenu.remove(); delete state.views.chat;
 
   const composer = new context.UploadComposer();
   composer.host = { bid: 7 }; composer.attachButton = mount(el("button"));

@@ -340,6 +340,8 @@ while True:
                 emit_frame = (1280, 657, STALE_FRAME)
             elif url == "http://stub.invalid/no-frame":
                 emit_frame = None
+        elif method == "Page.stopLoading":
+            record("loading-stops.jsonl", {"pid": os.getpid()})
         elif method in ("Page.reload", "Page.navigateToHistoryEntry"):
             emit_lifecycle = True
             emit_frame = (viewport_width, viewport_height, FRAME)
@@ -1948,9 +1950,9 @@ console.log(JSON.stringify({failedDuring,failedAfter,failedRestored,goodDuring,g
     }, refreshed
     assert refreshed["calls"] == [
         {"bid": 7, "path": "engines/refresh",
-         "options": {"method": "POST", "timeoutMs": 1234}},
+         "options": {"method": "POST", "timeoutMs": 1234, "operation": "Refreshing engines"}},
         {"bid": 7, "path": "engines/refresh",
-         "options": {"method": "POST", "timeoutMs": 1234}},
+         "options": {"method": "POST", "timeoutMs": 1234, "operation": "Refreshing engines"}},
     ], refreshed
     assert refreshed["toasts"][0]["kind"] == "bad", refreshed
     assert refreshed["toasts"][0]["text"] == \
@@ -2369,13 +2371,14 @@ function makeView(id="s:0:42") {
     updateSteerControl(){},
   });
   view.composer=Object.assign(Object.create(Composer.prototype), {
+    spellRefused:new Set(),
     host:{bid:0,sid:42,privateUploads:()=>false}, closed:false,busy:false,
     ta:{value:"",selectionStart:0,selectionEnd:0,readOnly:false,focused:false,
       focus(){this.focused=true;},removeAttribute(){},
       setSelectionRange(start,end){this.selectionStart=start;this.selectionEnd=end;}},
     attachments:[],histAttach:null,histDraft:"",sentThumbs:new Map(),
     history:null,attachStrip:{querySelectorAll(){return[];}},
-    renderAttachments(){},resize(){},hideMention(){},
+    renderAttachments(){},resize(){},hideMention(){},spellDraw(){},
     discardServerUpload(){},syncUploadButton(){},
   });
   return {view,sent,queueClasses};
@@ -3211,8 +3214,9 @@ const view=Object.assign(Object.create(proto),{
   releaseHistoryAttachments(){},saveDraft(){draftSaves++;},scrollBottom(){},
 });
 view.composer=Object.assign(Object.create(Composer.prototype), {
+    spellRefused:new Set(),
   host:{bid:7,sid:42},ta:{value:"  updated direction  ",removeAttribute(){}},attachments:[],
-  histAttach:null,resize(){},renderAttachments(){},hideMention(){},
+  histAttach:null,resize(){},renderAttachments(){},hideMention(){},spellDraw(){},
 });
 await view.steer();
 const sent={calls,toasts,draftSaves,controlSyncs,text:view.composer.ta.value,
@@ -3795,7 +3799,6 @@ def check_dynamic_model_catalog_ui(ui_source: str) -> None:
     assert "select.dataset.engineChoicesDirty = \"true\";" in ui_source
     assert "select.dataset.engineChoiceBusy = \"true\";" in ui_source
     assert ("this.syncNativeComposerChoices();\n"
-            "    this.syncToolsButton();\n"
             "    this.syncFastIndicator();\n"
             "    this.syncComposerMeta();") in ui_source
     assert "Re-check engine versions, sign-in and model lists" in ui_source
@@ -4693,7 +4696,7 @@ def check_fast_mode_indicator(ui_source: str, css_source: str) -> None:
     template_end = ui_source.index('${composerChoice("model"', template_start)
     template = ui_source[template_start:template_end]
     assert template.index('class="mini attach-add"') < \
-        template.index('class="mini tools-open hidden"') < \
+        template.index('class="mini tools-open"') < \
         template.index('class="mini fast-indicator hidden"') < \
         template.index('${composerChoice("perm"')
     assert 'class="mini fast-indicator hidden" role="img"' in template
@@ -4708,7 +4711,7 @@ def check_fast_mode_indicator(ui_source: str, css_source: str) -> None:
     assert 'p.setAttribute("fill", "currentColor")' in icon
 
     method_start = ui_source.index("  syncFastIndicator() {")
-    method_end = ui_source.index("\n\n  showToolsMenu(", method_start)
+    method_end = ui_source.index("\n  }", method_start) + len("\n  }")
     method = ui_source[method_start:method_end]
     assert "backendSupportsFastMode(this.tab.bid)" in method
     assert "eng.supports_fast_mode === true" in method
@@ -4814,7 +4817,7 @@ def check_composer_mentions(ui_source: str, css_source: str) -> None:
     the popup owns Escape ahead of the interrupt path, and both MCP agents
     define the inserted mention forms for the engine."""
     start = ui_source.index("\nconst MENTION_QUERY_MAX")
-    end = ui_source.index("\n/* ================= SessionView")
+    end = ui_source.index("\n/* ================= spell check")
     helpers = ui_source[start:end]
     script = r"""
 %s
@@ -7366,6 +7369,14 @@ async def main() -> None:
                               t.get("loading") is True and
                               t.get("url") == "http://stub.invalid/slow-nav"), None),
                 message="optimistic loading status")
+            # Stop remains usable while that commit hangs, and drains its task.
+            await nav_ws.send_json({"type": "stop_loading"})
+            await wait_for(lambda: any(row["pid"] == nav_pid for row in read_lines("loading-stops.jsonl")),
+                           message="Page.stopLoading sent")
+            nav_instance = browser.manager().get(nav_id)
+            await wait_for(lambda: not nav_instance.nav_action_tasks and not nav_instance.nav["loading"],
+                           message="cancelled navigation settled")
+            assert nav_instance.running
             # a real navigation settles the flag through main-frame lifecycle
             await nav_ws.send_json({"type": "navigate",
                                     "url": "http://ok.example.test/done"})

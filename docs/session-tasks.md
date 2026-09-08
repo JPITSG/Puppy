@@ -17,6 +17,11 @@ if another task tab is selected. Model, effort and permissions start with that
 engine's saved defaults on the selected backend. Adjust any of them
 before starting; these choices apply only to the new task. Switching engines
 loads that engine's saved defaults, and effort choices follow the selected model.
+Preparation, review and the checks before applying can be cancelled through
+the shared progress dialog on backends advertising `operation-cancel-v1`.
+Cancellation waits for copy/Git cleanup and never starts a task prompt. Once
+applying files or dispatching conflict resolution begins, that step must finish;
+a running task has its own Stop control.
 The task opens in its own inner tab; create another to work on a second
 feature concurrently. Every device adds tasks beside Main when it receives the
 session list, including tasks created while that device was away and tasks that

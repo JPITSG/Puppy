@@ -75,6 +75,9 @@ function modal(html) {
   return dialog;
 }
 const icon = () => document.createElement("svg");
+/* the spelling switches belong to spellcheck_ui_test.js; this dialog check
+   runs with them off */
+const storage = new Map([["puppy.spellcheck", "0"]]);
 const context = vm.createContext({
   document, window: { CSS: { supports: () => true } }, CSS: { supports: () => true },
   Event: FakeEvent, console, crypto: require("node:crypto").webcrypto,
@@ -88,7 +91,9 @@ const context = vm.createContext({
   apiPath: (bid, route) => (bid ? `/api/b/${bid}/` : "/api/") + route,
   fmtBytes: value => value + " B",
   plusIcon: icon, xIcon: icon, attachmentFileIcon: icon, globeIcon: icon, terminalIcon: icon,
-  choiceSvg: icon, refreshIcon: icon,
+  choiceSvg: icon, refreshIcon: icon, toolsIcon: icon,
+  lsGet: key => storage.has(key) ? storage.get(key) : null,
+  lsSet: (key, value) => storage.set(key, value),
   uploadSettingsFor: () => null, rememberUploadSettings: () => null,
   backendSupportsFileUploads: () => true, backendConnectionAllowed: () => true,
   nodeStateStreamActive: () => true, browserEnabledFor: () => false,

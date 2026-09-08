@@ -46,6 +46,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 from aiohttp import WSMsgType, web
 
+from puppy import operations
+
 from puppy import browser_cursor, browser_store, config, live_websockets
 
 log = logging.getLogger("puppy.browser")
@@ -293,15 +295,25 @@ def sandbox_mode() -> str:
 
 
 async def _run_version(binary: str) -> str:
+    proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
             binary, "--version",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True)
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=VERSION_TIMEOUT)
         return out.decode(errors="replace").strip().splitlines()[0] if out else ""
     except Exception as exc:
         log.warning("browser version probe failed for %s: %s", binary, exc)
         return ""
+    finally:
+        if proc is not None:
+            # A timed-out or cancelled wrapper may leave its child alive.
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            await proc.wait()
 
 
 async def probe(force: bool = False) -> dict:
@@ -979,8 +991,7 @@ class Manager:
             profile = self._subdir("profile")
             home = self._subdir("home")
             downloads = self._subdir("downloads")
-            await asyncio.get_event_loop().run_in_executor(
-                None, _kill_stale_instance, profile, self.pidfile)
+            await operations.to_thread(_kill_stale_instance, profile, self.pidfile)
             argv = launch_argv(st["binary"], profile, os.geteuid() == 0)
             env = dict(os.environ)
             env["HOME"] = home
@@ -2001,6 +2012,12 @@ class Manager:
             if self.page_session:
                 self._set_loading(True)
                 self._fire("Page.reload", session=self.page_session)
+        elif kind == "stop_loading":
+            for task in list(self.nav_action_tasks):
+                task.cancel()
+            if self.page_session:
+                self._fire("Page.stopLoading", session=self.page_session)
+            self._set_loading(False)
         elif kind == "viewport":
             size = _normalize_viewport(data.get("width"), data.get("height"))
             if size is not None:
@@ -4113,9 +4130,10 @@ class BrowserRegistry:
 
     async def _start_created(self, instance: Manager) -> Manager:
         try:
-            await instance.ensure_started()
-        except Exception:
-            await self.close(instance.browser_id, "Browser launch failed")
+            await operations.wait(instance.ensure_started())
+            operations.checkpoint()
+        except BaseException:
+            await self.close(instance.browser_id, "Browser launch failed", wait_storage=True)
             raise
         return instance
 
@@ -4125,7 +4143,7 @@ class BrowserRegistry:
         if origin not in ("agent", "user"):
             raise BrowserError("invalid browser origin")
         owner_session = self._normalize_owner(owner_session)
-        async with self.lock:
+        async with operations.lock(self.lock):
             instance = self._create_locked(origin, owner_session)
         instance = await self._start_created(instance)
         _state_changed()
@@ -4138,7 +4156,7 @@ class BrowserRegistry:
             raise BrowserError("Browser {} is closed or unknown".format(browser_id))
         return instance
 
-    async def close(self, browser_id, reason: str = "Closed by user") -> bool:
+    async def close(self, browser_id, reason: str = "Closed by user", *, wait_storage=False) -> bool:
         browser_id = normalize_browser_id(browser_id)
         async with self.lock:
             instance = self.instances.get(browser_id)
@@ -4163,9 +4181,12 @@ class BrowserRegistry:
         # a few bytes - not the profile, which is tens of megabytes of cache,
         # service workers and site data. Storage therefore goes as soon as its
         # process is down; _prune remains the backstop for anything missed.
-        self._schedule_blocking(
-            "discard storage for closed Browser {}".format(browser_id),
-            _safe_remove_instance_storage, browser_id)
+        if wait_storage:
+            await operations.to_thread(_safe_remove_instance_storage, browser_id)
+        else:
+            self._schedule_blocking(
+                "discard storage for closed Browser {}".format(browser_id),
+                _safe_remove_instance_storage, browser_id)
         _state_changed()
         return True
 
@@ -4317,11 +4338,13 @@ async def h_shared_storage(request: web.Request):
     return web.json_response({"ok": True, **payload})
 
 
+@operations.cancellable
 async def h_create(request: web.Request):
     if request.app.get("puppy_snapshot_busy"):
         return web.json_response({"error": "Puppy backup or restore in progress"}, status=503)
     try:
         instance = await manager().create("user")
+        operations.commit()
     except BrowserError as exc:
         return web.json_response({"error": str(exc)}, status=409)
     return web.json_response({

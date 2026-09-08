@@ -4,26 +4,61 @@ const field = id => document.getElementById(id);
 let setup = false;
 let ready = false;
 let submitting = false;
+let activeRequest = null;
 
 function showError(error) {
+  if (error.cancelled) return;
   field("auth-err").textContent = error.message;
   field("auth-err").classList.remove("hidden");
 }
 
 async function request(action, body) {
-  const response = await fetch("/api/auth/" + action, {
-    method: body ? "POST" : "GET",
-    credentials: "same-origin",
-    cache: "no-store",
-    headers: body ? { "Content-Type": "application/json" } : {},
-    ...(body ? { body: JSON.stringify(body) } : {}),
-  });
-  let data;
-  try { data = await response.json(); }
-  catch (error) { throw new Error("Unable to connect. Please try again"); }
-  if (!response.ok) throw new Error(data.error || "Unable to sign in");
-  return data;
+  const controller = new AbortController();
+  activeRequest = controller;
+  field("auth-cancel").classList.remove("hidden");
+  const timeout = setTimeout(() => controller.abort(), 30000);
+  try {
+    const response = await fetch("/api/auth/" + action, {
+      method: body ? "POST" : "GET", signal: controller.signal,
+      credentials: "same-origin", cache: "no-store",
+      headers: body ? { "Content-Type": "application/json" } : {},
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+    let data;
+    try { data = await response.json(); }
+    catch (error) { throw new Error("Unable to connect. Please try again"); }
+    if (controller.signal.aborted) throw new Error("Request stopped");
+    if (!response.ok) throw new Error(data.error || "Unable to sign in");
+    return data;
+  } catch (error) {
+    if (controller.signal.aborted) {
+      error.cancelled = controller.userCancelled === true;
+      if (!error.cancelled) error.message = "Connection timed out. Please try again";
+      // A submitted account request may have finished. Re-check login/setup
+      // state on the next attempt instead of repeating account creation.
+      ready = false;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+    if (activeRequest === controller) {
+      activeRequest = null;
+      field("auth-cancel").classList.add("hidden");
+    }
+  }
 }
+
+field("auth-cancel").onclick = () => {
+  if (!activeRequest) return;
+  activeRequest.userCancelled = true;
+  activeRequest.abort();
+};
+field("auth-form").addEventListener("keydown", event => {
+  if (event.key === "Escape" && activeRequest) {
+    event.preventDefault();
+    field("auth-cancel").onclick();
+  }
+});
 
 async function initialize() {
   const status = await request("status");

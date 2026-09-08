@@ -1232,8 +1232,11 @@ class SessionHub:
             self._proc_ready and proc is not None and proc.returncode is None and \
             proc.stdin is not None and not proc.stdin.is_closing() and \
             bool(driver.side_question_ready(session, self._driver_ctx))
+        pending = next((record["request_id"] for record in self._side_questions.values()
+                        if record.get("status") == "pending" and
+                        record.get("generation") == self._turn_generation), "")
         return {"supported": supported, "ready": bool(ready),
-                "turn_id": turn_id}
+                "turn_id": turn_id, "pending_request_id": pending}
 
     def _side_question_history(self) -> list:
         """This turn's answered exchanges, oldest first.
@@ -1274,7 +1277,7 @@ class SessionHub:
 
     def _settle_side_question(self, record: dict, ok: bool, text: str = "",
                               synthetic: bool = False, fallback_model: str = "",
-                              fallback_notice: str = "", error: str = "") -> None:
+                              fallback_notice: str = "", error: str = "", cancelled: bool = False) -> None:
         """Resolve one question exactly once and persist its answer.
 
         The answer is its own transcript row rather than an edit of the
@@ -1301,6 +1304,7 @@ class SessionHub:
             "fallback_model": str(fallback_model or "") if ok else "",
             "fallback_notice": record["fallback_notice"],
             "error": record["error"],
+            **({"cancelled": True} if cancelled else {}),
         })
         self._publish_steering_state()
 
@@ -1336,6 +1340,37 @@ class SessionHub:
         for record in list(self._side_questions.values()):
             if record.get("status") == "pending":
                 self._settle_side_question(record, ok=False, error=reason)
+
+    async def cancel_question(self, request_id: str, expected_turn_id: str) -> dict:
+        """Withdraw exactly one question, leaving its parent turn untouched."""
+        if not isinstance(request_id, str) or not valid_steer_request_id(request_id) or \
+                not isinstance(expected_turn_id, str) or not expected_turn_id:
+            return {"error": "a valid question and expected turn id are required"}
+        async with self._stdin_lock:
+            record = self._side_questions.get(request_id)
+            if record is None or record.get("turn_id") != expected_turn_id:
+                return {"error": "that question does not belong to this turn"}
+            if record.get("status") != "pending":
+                return {"ok": True, "status": record["status"]}
+            if self._active_turn_id != expected_turn_id or \
+                    record.get("generation") != self._turn_generation:
+                return {"error": "the active turn changed"}
+            session = db.get_session(self.id)
+            driver = get_driver(session["engine"])
+            payload = driver.side_question_cancel_payload(session, self._driver_ctx, request_id)
+            proc = self.proc
+            if not isinstance(payload, dict) or proc is None or proc.stdin is None or \
+                    proc.stdin.is_closing():
+                return {"error": "the engine cannot cancel this question"}
+            try:
+                proc.stdin.write((json.dumps(payload) + "\n").encode())
+                await asyncio.wait_for(proc.stdin.drain(), timeout=5)
+            except (asyncio.TimeoutError, BrokenPipeError, ConnectionError, OSError, RuntimeError):
+                return {"error": "could not send the question cancellation; retry"}
+            if record.get("status") != "pending":
+                return {"ok": True, "status": record["status"]}
+            self._settle_side_question(record, ok=False, error="Question cancelled", cancelled=True)
+            return {"ok": True, "status": "cancelled"}
 
     async def ask(self, question: str, request_id: str = "",
                   expected_turn_id: str = "") -> dict:

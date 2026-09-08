@@ -26,7 +26,7 @@ TEST_ROOT = private_root("cli-upgrade-")
 os.environ["PUPPY_DATA"] = str(TEST_ROOT / "data")
 
 from puppy import auth, cli_auto_upgrade, cli_releases, cli_upgrade  # noqa: E402
-from puppy import config, db, drivers  # noqa: E402
+from puppy import config, db, drivers, engine_defaults  # noqa: E402
 from puppy import runner as session_runner  # noqa: E402
 from puppy.drivers import base as driver_base  # noqa: E402
 from puppy.drivers.base import Driver  # noqa: E402
@@ -571,6 +571,8 @@ async def main() -> None:
             "stub": StubDriver(), "bare": BareDriver(), "other": OtherStubDriver(),
         }
         config.load()
+        # Synthetic drivers have no entries in the production defaults map.
+        engine_defaults.values = engine_defaults.factory
         db.connect()
         auth.create_user("upgrade-user", "secret123")
         # Keep the registry out of it: this test must never touch the network.

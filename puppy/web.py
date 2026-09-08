@@ -16,7 +16,7 @@ from aiohttp import WSMsgType, web
 
 from puppy import (__version__, agent_notes, auth, backends, bind_verify, browser,
                    cli_auto_upgrade, cli_releases,
-                   cli_upgrade, config, db, engine_defaults, host_metrics, listener_handoff, notify,
+                   cli_upgrade, config, db, engine_defaults, host_metrics, listener_handoff, notify, operations,
                    live_websockets, localization, protocol, runner, search, snapshots,
                    spawn_exec,
                    state_stream, system_prompts, terminal, uploads, vnc,
@@ -43,7 +43,7 @@ FAVICON_SVG = ("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>"
 @web.middleware
 async def state_change_guard(request: web.Request, handler):
     """Freeze mutations while a consistent snapshot is built or installed."""
-    snapshot_path = request.path.startswith("/api/snapshot/")
+    snapshot_path = request.path.startswith(("/api/snapshot/", "/api/operations/"))
     busy = request.app.get("puppy_snapshot_busy")
     websocket = request.headers.get("Upgrade", "").lower() == "websocket"
     mutating = request.method not in ("GET", "HEAD", "OPTIONS")
@@ -392,14 +392,16 @@ async def h_timers_patch(request: web.Request):
     return web.json_response({"ok": True, "timers": config.timers_payload()})
 
 
+@operations.cancellable
 async def h_usage_refresh_post(request: web.Request):
-    await usage_refresh.maybe_refresh(force=True)
+    await operations.wait(usage_refresh.maybe_refresh(force=True))
     payload = await _engines_response(
         refresh_usage=False, refresh_models=False)
     _publish_engines(payload)
     return web.json_response(payload)
 
 
+@operations.cancellable
 async def h_engines_refresh(request: web.Request):
     """Force installed-version, sign-in, release, and model-catalog checks.
 
@@ -409,11 +411,11 @@ async def h_engines_refresh(request: web.Request):
     driver_base.invalidate_status()
     dynamic = [driver for driver in drivers
                if driver.dynamic_model_options and driver.resolved_binary()]
-    results = await asyncio.gather(
+    results = await operations.wait(asyncio.gather(
         cli_releases.refresh_if_due(drivers, force=True),
         *(driver.status() for driver in drivers),
         *(driver.refresh_model_options(force=True) for driver in dynamic),
-        return_exceptions=True)
+        return_exceptions=True))
     for result in results:
         if isinstance(result, BaseException):
             log.warning("manual engine refresh component failed: %s", result)
@@ -469,6 +471,7 @@ async def h_engine_auto_upgrade_patch(request: web.Request):
     return web.json_response({"ok": True, "auto_upgrade": cli_auto_upgrade.payload()})
 
 
+@operations.cancellable
 async def h_engine_upgrade(request: web.Request):
     """Start this node's own vendor updater for one engine CLI.
 
@@ -499,6 +502,19 @@ async def h_engine_upgrade(request: web.Request):
         refresh_usage=False, refresh_models=False)
     _publish_engines(payload)
     return web.json_response({"ok": True, **payload})
+
+
+async def h_engine_upgrade_cancel(request: web.Request):
+    try:
+        driver = get_driver(request.match_info["key"])
+        body = await request.json()
+        cli_upgrade.cancel(driver, body.get("started_at") if isinstance(body, dict) else None)
+    except KeyError:
+        return web.json_response({"error": "unknown engine"}, status=404)
+    except (ValueError, RuntimeError) as exc:
+        return web.json_response({"error": str(exc)}, status=409)
+    state_stream.wake("engines")
+    return web.json_response({"ok": True, **cli_upgrade.state(driver)})
 
 
 async def h_usage_refresh_patch(request: web.Request):
@@ -535,6 +551,7 @@ async def h_sessions_list(request: web.Request):
     return web.json_response(runner.sessions_payload())
 
 
+@operations.cancellable
 async def h_session_create(request: web.Request):
     body = await request.json()
     if not isinstance(body, dict):
@@ -544,7 +561,8 @@ async def h_session_create(request: web.Request):
         driver = get_driver(engine)
     except KeyError:
         return web.json_response({"error": f"unknown engine '{engine}'"}, status=400)
-    await driver.refresh_model_options()
+    await operations.wait(driver.refresh_model_options())
+    operations.commit()
     try:
         choices = engine_defaults.for_session(driver, body)
     except ValueError as exc:
@@ -891,6 +909,7 @@ async def h_session_workspace_reset(request: web.Request):
     return web.json_response({"ok": True, "session": runner.session_payload(updated)})
 
 
+@operations.cancellable
 async def h_session_workspace_move(request: web.Request):
     s = _session_or_404(request)
     from puppy import session_tasks
@@ -1000,6 +1019,19 @@ async def h_session_ask(request: web.Request):
         return web.json_response({"error": "invalid question request"}, status=400)
     res, status = await _session_ask(s, body)
     return web.json_response(res, status=status)
+
+
+async def h_session_ask_cancel(request: web.Request):
+    session = _session_or_404(request)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid cancellation request"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "invalid cancellation request"}, status=400)
+    result = await runner.hub(session["id"]).cancel_question(
+        body.get("request_id"), body.get("expected_turn_id"))
+    return web.json_response(result, status=409 if "error" in result else 200)
 
 
 async def h_session_interrupt(request: web.Request):
@@ -1196,6 +1228,7 @@ async def h_settings_patch(request: web.Request):
     return await h_settings_get(request)
 
 
+@operations.cancellable
 async def h_bind_prepare(request: web.Request):
     try:
         body = await request.json()
@@ -1220,6 +1253,21 @@ async def h_bind_prepare(request: web.Request):
             private_key_path=body.get("private_key_path")))
     except bind_verify.BindVerificationError as exc:
         return web.json_response({"error": str(exc)}, status=exc.status)
+
+
+async def h_bind_prepare_cancel(request: web.Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid verification cancellation"}, status=400)
+    token = body.get("token") if isinstance(body, dict) else None
+    if not isinstance(token, str):
+        return web.json_response({"error": "verification token is required"}, status=400)
+    entry = bind_verify._entries(request.app).get(token)
+    if entry is not None and entry.get("user") != str(request["user"]):
+        return web.json_response({"error": "verification belongs to another user"}, status=403)
+    bind_verify._discard(request.app, token)
+    return web.json_response({"ok": True})
 
 
 async def h_bind_commit(request: web.Request):
@@ -1360,6 +1408,7 @@ async def h_snapshot_storage(request: web.Request):
                                  headers={"Cache-Control": "no-store"})
 
 
+@operations.cancellable
 async def h_snapshot_export(request: web.Request):
     try:
         body = await request.json()
@@ -1379,7 +1428,7 @@ async def h_snapshot_export(request: web.Request):
     result = None
     try:
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(None, snapshots.create_archive, ui_state)
+        result = await operations.to_thread(snapshots.create_archive, ui_state)
         blocked = snapshots.blockers()
         if blocked:
             snapshots.discard_export(result)
@@ -1387,6 +1436,8 @@ async def h_snapshot_export(request: web.Request):
             return web.json_response(
                 {"error": "backup could not obtain an idle snapshot: " + "; ".join(blocked)},
                 status=409)
+        operations.checkpoint()
+        operations.commit()
         token = snapshots.register_export(result, str(request["user"]))
         loop.call_later(snapshots.EXPORT_TTL, snapshots.expire_export, token)
         return web.json_response({
@@ -1394,6 +1445,10 @@ async def h_snapshot_export(request: web.Request):
             "filename": result["filename"], "size": result["size"],
             "sessions": result["sessions"],
         })
+    except operations.Cancelled:
+        if result:
+            snapshots.discard_export(result)
+        raise
     except (snapshots.SnapshotError, ValueError) as exc:
         if result:
             snapshots.discard_export(result)
@@ -1437,6 +1492,7 @@ async def h_snapshot_download(request: web.Request):
         snapshots.discard_export(item)
 
 
+@operations.cancellable
 async def h_snapshot_import(request: web.Request):
     conflict = _snapshot_conflict(request.app)
     if conflict:
@@ -1458,7 +1514,11 @@ async def h_snapshot_import(request: web.Request):
     restored_state = False
     try:
         with os.fdopen(descriptor, "wb") as output:
-            async for chunk in request.content.iter_chunked(1024 * 1024):
+            while True:
+                chunk = await operations.wait(request.content.read(1024 * 1024))
+                if not chunk:
+                    break
+                operations.checkpoint()
                 size += len(chunk)
                 if size > snapshots.MAX_ARCHIVE_BYTES:
                     return web.json_response(
@@ -1468,7 +1528,7 @@ async def h_snapshot_import(request: web.Request):
             return web.json_response({"error": "snapshot archive is empty"}, status=400)
 
         loop = asyncio.get_running_loop()
-        staged = await loop.run_in_executor(None, snapshots.stage_import, upload_name)
+        staged = await operations.to_thread(snapshots.stage_import, upload_name)
         conflict = _snapshot_conflict(request.app)
         if conflict:
             return web.json_response({"error": conflict}, status=409)
@@ -1485,6 +1545,7 @@ async def h_snapshot_import(request: web.Request):
             detail = "another state change is in progress" if request.app.get(
                 "puppy_mutations") else "; ".join(blocked)
             return web.json_response({"error": detail}, status=409)
+        operations.commit()
         await runner.detach_for_restore()
         await backends.close_proxy_websockets()
         await bind_verify.close_all(request.app)
@@ -1731,6 +1792,7 @@ async def ws_updates(request: web.Request):
 
 # ---- app assembly ----
 
+@operations.cancellable
 async def h_notify_exec(request: web.Request):
     """Shared surface: run one completion command on this node. Registered only
     alongside the terminal - a node built without a shell surface stays without
@@ -1816,6 +1878,7 @@ async def h_notify_toggle(request: web.Request):
     return web.json_response({"ok": True, "settings": notify.settings()})
 
 
+@operations.cancellable
 async def h_notify_test(request: web.Request):
     """Run once, now, with the values from the panel (unsaved), so the command
     can be proven before trusting it from another device."""
@@ -1851,6 +1914,7 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     async def validate_queues(_app):
         runner.validate_persisted_queues(db.connect())
     app.on_startup.append(validate_queues)
+    operations.register(app)
     cli_releases.register(app)
     cli_auto_upgrade.register(app)
     system_prompts.register(app)
@@ -1871,6 +1935,7 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     r.add_get("/api/engines/{key:[A-Za-z0-9_-]{1,32}}/defaults", h_engine_defaults)
     r.add_put("/api/engines/{key:[A-Za-z0-9_-]{1,32}}/defaults", h_engine_defaults)
     r.add_post("/api/engines/{key:[A-Za-z0-9_-]{1,32}}/upgrade", h_engine_upgrade)
+    r.add_delete("/api/engines/{key:[A-Za-z0-9_-]{1,32}}/upgrade", h_engine_upgrade_cancel)
 
     r.add_get("/api/sessions", h_sessions_list)
     r.add_get("/api/completions", h_completions)
@@ -1884,6 +1949,7 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     r.add_post("/api/sessions/{sid:\\d+}/message", h_session_message)
     r.add_post("/api/sessions/{sid:\\d+}/steer", h_session_steer)
     r.add_post("/api/sessions/{sid:\\d+}/ask", h_session_ask)
+    r.add_delete("/api/sessions/{sid:\\d+}/ask", h_session_ask_cancel)
     r.add_post("/api/sessions/{sid:\\d+}/interrupt", h_session_interrupt)
     r.add_post("/api/sessions/{sid:\\d+}/switch", h_session_switch)
     r.add_post("/api/sessions/{sid:\\d+}/tool", h_session_tool)
@@ -1953,6 +2019,7 @@ def build_app(runtime_web: dict = None,
     r.add_get("/api/settings", h_settings_get)
     r.add_patch("/api/settings", h_settings_patch)
     r.add_post("/api/settings/bind/prepare", h_bind_prepare)
+    r.add_delete("/api/settings/bind/prepare", h_bind_prepare_cancel)
     r.add_route("*", "/api/settings/bind/verify/{token:[A-Za-z0-9_-]+}",
                 bind_verify.h_probe)
     r.add_post("/api/settings/bind/commit", h_bind_commit)

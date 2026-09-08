@@ -157,7 +157,8 @@ you can:
 - **Ask** – put a side question to Claude Code beside its turn. The answer comes
   from a tool-less fork of the live conversation, so the engine's own work never
   sees the exchange. Follow-ups thread; the card sits in the transcript next to
-  the work it was about.
+  the work it was about. While it answers, **Cancel question** withdraws only
+  that question and leaves the main turn running (requires `side-question-cancel`).
 - **Queue** – line up the next prompts. The queue is written to the backend on
   every change, can be paused, reordered by dragging, edited back into the
   composer, and survives restarts (a restart parks it as *held* work you
@@ -195,6 +196,33 @@ or a save/send error; it takes no space when idle.
 Ask and Steer accept text only. Text edits and attachments added while their
 send is awaiting acknowledgement remain in the composer for the next message.
 
+**Spell check** is Puppy's own, not the browser's. Every prompt box turns the
+browser's checker and its autocorrection off, so a phone, a desktop and a kiosk
+all behave the same and the words Puppy knows are the words that shipped with
+it: a 128,000-word English dictionary built from
+[SCOWL](http://wordlist.aspell.net/) and bundled in the repository. Nothing you
+type is sent anywhere to be checked, and no dictionary is downloaded from the
+internet. The tools button in every prompt box — the chat's and the New task
+dialog's — carries two switches:
+
+- **Spell check** (on by default) underlines what it does not know. Code
+  fences, inline code, paths, URLs, identifiers, acronyms, versions, `@`
+  mentions and attachment markers are never checked. Right-click (or long-press
+  on Android) a marked word for suggestions, or **Add to dictionary** to keep
+  the word in this browser for good.
+- **Autocorrect** (off by default) fixes a clear typo as you finish the word,
+  and is unavailable while spell check is off. It is deliberately timid: it
+  only replaces a word it does not know, only with a common word one edit away,
+  only when that candidate stands clear of the runner-up, and never by
+  capitalising a word for you. `Ctrl+Z` takes a correction straight back, and a
+  word you restore is left alone for the rest of that message. Pasted text is
+  never rewritten.
+
+The dictionary is fetched once per console, only when a prompt box with spell
+check on is on screen, and both switches are remembered per browser. The word
+list, its build script and the rules behind every correction are described in
+[docs/spellcheck.md](docs/spellcheck.md).
+
 **Attachments** go in with the `+` button, a paste, or a drop from your file
 manager: images, documents, archives, source, anything. Files stream straight to
 the session's backend and stay private under `data/uploads/`. Images preview in
@@ -214,8 +242,11 @@ working in an independent Git clone of Main's project that starts from Main's
 current files, uncommitted changes included. Run several at once on different
 features. New tasks initially select Main's engine and use that backend's saved
 model, effort and permission defaults. Adjust these choices before starting.
-Attachments are locked while the task is preparing. Closing the dialog after
-submission leaves its files available for the backend to finish creating the task.
+Attachments are locked while the task is preparing. On backends advertising
+`operation-cancel-v1`, **Cancel**, Escape and clicking outside the progress dialog
+stop preparation and clean up the task copy and staged attachments before any
+agent starts. An older backend may finish after the dialog closes; a late reply
+does not reopen its tab. Once started, use the task's **Stop** control.
 
 - Tasks appear beside Main on every device, including tasks created while a
   device was away, without switching the selected conversation. They stay there
@@ -270,7 +301,9 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
 - **Managed browsers.** Enable Browser on a backend that has Chromium and Puppy
   runs isolated headless instances, each with a four-character ID and its own
   profile. You get a live view in a tab with an address bar, back and reload
-  controls, and full mouse and keyboard input. The pointer follows the page's
+  controls, and full mouse and keyboard input. Browser launch can be cancelled;
+  reload becomes **Stop loading** during navigation on backends advertising
+  `browser-navigation-stop`. The pointer follows the page's
   standard CSS cursor on a best-effort basis, including links, text fields and
   resize cursors. It refreshes while hovering even if the mouse is still;
   custom cursor images use their declared keyword fallback. Cross-process
@@ -415,18 +448,34 @@ history around it.
 - **Completion alerts.** Run separate success and failure commands on a chosen
   backend when a session finishes everything it had queued (play a sound, ping
   your home automation). Leave either command empty to skip that outcome;
-  stopped turns stay silent. Test either command before saving.
+  stopped turns stay silent. Test either command before saving; **Cancel** stops
+  a running test and its child processes on capable backends. Effects already
+  completed by the command remain.
   Placeholders and `PUPPY_*` environment variables carry the session, engine,
   model, status, duration and directory. Arm or silence it with the bell in the
   footer.
 - **Backup and restore.** Export one `.tar.gz` with settings, accounts, backend
   registrations, sessions and transcripts, uploads, scratch workspaces, task
   copies, tabs and drafts. Import validates the whole archive first, only runs
-  while the instance is idle, and rolls back if the install fails.
+  while the instance is idle, and rolls back if the install fails. **Cancel**
+  stops export preparation or import upload/validation and removes staging.
+  Once restore starts replacing live state, it finishes or rolls back safely;
+  the progress dialog then offers **Close**.
   The card measures approximate uncompressed file storage for this instance's
   backup-covered data when Settings opens, including the database's live sidecars.
   It excludes remote data, ordinary projects, caches, logs, exported archives,
   and browser-local tabs and drafts; the compressed download size will differ.
+
+Long operations use a shared progress dialog with **Cancel** during preparation,
+including task review/apply, scratch moves, backend add/edit/test, engine refresh,
+listener verification and workspace sync. It appears only once the work has run
+for five seconds, so anything that answers sooner never interrupts. Saves, file
+applies, remote-session creation and backend upgrade handoffs finish safely once
+their commit begins.
+**Stop update** can stop a running engine CLI updater and keeps its output and
+version recheck. These backend controls are negotiated; older peers retain their
+existing behavior. Search has **Cancel**, and sign-in has **Stop waiting** while a
+request is pending. See [cancellation behavior and audit](docs/cancellation.md).
 
 ## Multi-machine
 
@@ -588,8 +637,11 @@ node tests/menu_dismiss_ui_test.js   # outside focus/taps, hamburger and menu to
 node tests/composer_ui_test.js       # the shared prompt box and its "@" list
 node tests/backend_settings_ui_test.js # backend forms, removal errors and retry
 node tests/task_config_ui_test.js    # the New task dialog
+node tests/operation_ui_test.js      # cancellation, commit races and cleanup feedback
+python3 tests/operations_test.py     # cancellation/rollback on both runtimes
 node tests/task_fold_ui_test.js      # task removal and the folded archive card
 node tests/toast_ui_test.js          # notice grammar, tones, lives and folded repeats
+node tests/spellcheck_ui_test.js     # the bundled dictionary, its marks and autocorrect
 python3 tests/backend_test.py        # headless package, auth, protocol, capabilities
 python3 tests/snapshot_test.py       # backup export/import and rollback
 python3 tests/search_test.py         # the search index and query language

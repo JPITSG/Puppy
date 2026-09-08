@@ -355,16 +355,26 @@ def execute(sql: str, args=()) -> int:
         return rowid
 
 
-def backup_to(path: str) -> None:
-    """Write a transactionally consistent, standalone SQLite snapshot."""
+def backup_to(path: str, progress=None) -> None:
+    """Write a consistent SQLite snapshot without blocking the event loop's DB reads.
+
+    SQLite owns the snapshot transaction. A separate source connection lets
+    cookie authentication and Cancel proceed while the backup worker copies.
+    """
     with _lock:
+        connect()
+        source = sqlite3.connect(config.DB_PATH)
+    try:
         destination = sqlite3.connect(path)
         try:
-            connect().backup(destination)
+            source.backup(destination, pages=256,
+                          progress=(lambda *_: progress()) if progress else None)
             destination.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             destination.commit()
         finally:
             destination.close()
+    finally:
+        source.close()
     os.chmod(path, 0o600)
 
 

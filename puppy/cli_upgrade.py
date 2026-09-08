@@ -27,7 +27,7 @@ import signal
 import time
 from typing import Dict, List, Optional
 
-from puppy import cli_releases
+from puppy import cli_releases, operations
 
 log = logging.getLogger("puppy.cli_upgrade")
 
@@ -107,7 +107,18 @@ def state(driver) -> dict:
         "upgrade_state": "running" if key in _preparing or
         record.get("state") == "running" else "idle",
         "upgrade_result": record.get("result"),
+        "upgrade_started_at": record.get("started_at"),
+        "upgrade_stopping": bool(record.get("state") == "running" and
+                                 record.get("stop") and record["stop"].is_set()),
     }
+
+
+def cancel(driver, started_at):
+    record = _runs.get(str(driver.key)) or {}
+    if record.get("state") != "running" or record.get("started_at") != started_at or \
+            type(started_at) not in (int, float):
+        raise RuntimeError("This update has already finished or changed; refresh its status")
+    record["stop"].set()
 
 
 def _stabilization_error(driver, stability: dict) -> str:
@@ -220,19 +231,24 @@ class UpdaterFailure(RuntimeError):
 
 
 async def _end_group(proc) -> None:
-    for sig in (signal.SIGINT, signal.SIGKILL):
-        try:
-            os.killpg(proc.pid, sig)
-        except Exception:
-            break
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=5)
-            break
-        except asyncio.TimeoutError:
-            continue
+    try:
+        os.killpg(proc.pid, signal.SIGINT)
+    except ProcessLookupError:
+        pass
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=5)
+    except asyncio.TimeoutError:
+        pass
+    # A wrapper exiting is not proof its children exited. Always finish the
+    # group, including children that ignored INT or kept output pipes open.
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    await proc.wait()
 
 
-async def _spawn(argv: List[str]) -> tuple:
+async def _spawn(argv: List[str], stop=None) -> tuple:
     """Run the updater and return (exit_code, combined output).
 
     Output is streamed so a run puppy has to end still reports what the
@@ -271,6 +287,9 @@ async def _spawn(argv: List[str]) -> tuple:
     try:
         while True:
             now = time.monotonic()
+            if stop is not None and stop.is_set():
+                failure = "update stopped by user"
+                break
             if now - started >= TIMEOUT_SECONDS:
                 failure = "updater timed out after {} minutes".format(
                     TIMEOUT_SECONDS // 60)
@@ -279,7 +298,7 @@ async def _spawn(argv: List[str]) -> tuple:
                 read_task = asyncio.ensure_future(proc.stdout.read(4096))
             done, _pending = await asyncio.wait(
                 {read_task},
-                timeout=max(0.05, min(SAMPLE_INTERVAL,
+                timeout=max(0.05, min(0.25, SAMPLE_INTERVAL,
                                       TIMEOUT_SECONDS - (now - started))))
             now = time.monotonic()
             if read_task in done:
@@ -310,9 +329,13 @@ async def _spawn(argv: List[str]) -> tuple:
                         " while holding {} open socket(s)".format(sockets)
                         if sockets else ""))
                 break
+    except asyncio.CancelledError:
+        await _end_group(proc)
+        raise
     finally:
         if read_task is not None and not read_task.done():
             read_task.cancel()
+            await asyncio.gather(read_task, return_exceptions=True)
     if eof:
         # every holder of its output is gone or has let go; the exit should
         # follow at once, and one that never comes is a failure of its own
@@ -335,7 +358,7 @@ async def _run(driver, argv: List[str], from_version: str, token) -> None:
     output = ""
     error = ""
     try:
-        exit_code, output = await _spawn(argv)
+        exit_code, output = await _spawn(argv, (_runs.get(key) or {}).get("stop"))
         if exit_code != 0:
             error = _last_line(output) or "updater exited with status {}".format(exit_code)
     except asyncio.CancelledError:
@@ -422,7 +445,7 @@ async def start(driver) -> dict:
         pass
     try:
         if cli_releases.npm_based(driver):
-            if not await cli_releases.refresh_before_upgrade(driver):
+            if not await operations.wait(cli_releases.refresh_before_upgrade(driver)):
                 raise RuntimeError(
                     "could not verify the latest npm release; no update was started")
             stability = cli_releases.release_stability(driver)
@@ -432,16 +455,18 @@ async def start(driver) -> dict:
         # when a damaged installation cannot answer --version. Registry age is
         # the safety prerequisite; the local version probe remains advisory.
         try:
-            status = await driver.status()
+            status = await operations.wait(driver.status())
             from_version = str(status.get("version") or "")
         except Exception:
             from_version = ""
+        operations.commit()
         record = _runs.setdefault(key, {})
         token = object()
         record["state"] = "running"
         record["started_at"] = time.time()
         record["result"] = None
         record["token"] = token
+        record["stop"] = asyncio.Event()
         record.pop("task", None)
         task = asyncio.ensure_future(_run(driver, argv, from_version, token))
         record["task"] = task

@@ -99,7 +99,7 @@ const node = key => dialog.m.querySelector(key);
   assert.deepEqual(plain(await choice), { fold: true });
   assert.equal(await context.removeTaskSession(7, session, { fold: true }), true);
   assert.deepEqual(plain(requests.at(-1)), { bid: 7, route: "sessions/10/tasks/50/remove", method: "POST",
-    body: { fold: true }, timeoutMs: 120000 });
+    body: { fold: true }, timeoutMs: 120000, operation: "Removing task" });
   apiReply = { folded: false };
   assert.equal(await context.removeTaskSession(7, session, { fold: false }), false);
   assert.deepEqual(plain(requests.at(-1).body), { fold: false });

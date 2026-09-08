@@ -29,6 +29,8 @@ import time
 import aiohttp
 from aiohttp import WSMsgType, web
 
+from puppy import operations
+
 from puppy import backends, config, db, protocol, runner, workspace_sync
 
 log = logging.getLogger("puppy.wslinks")
@@ -624,7 +626,7 @@ async def _keepalive(exec_channel: dict, session_id: int) -> None:
 
 async def run_reconcile(link_id: int) -> dict:
     """One full three-way reconcile of a link; serialized per link."""
-    async with _lock_for(link_id):
+    async with operations.lock(_lock_for(link_id)):
         link = get_link(link_id)
         if link is None:
             return {"ok": False, "error": "workspace link is gone"}
@@ -644,15 +646,16 @@ async def run_reconcile(link_id: int) -> dict:
         _active_reconciles.add(int(link_id))
         try:
             try:
-                workspace_manifest = await _fetch_manifest(ws_channel, ws_prefix)
+                workspace_manifest = await operations.wait(_fetch_manifest(ws_channel, ws_prefix))
             except NodeError as exc:
                 if exc.status != 404:
                     raise
+                operations.commit()  # Replacing a provider lease is a remote mutation.
                 lease_id = await _recover_lease(link, ws_channel)
                 ws_prefix = "workspace/leases/{}".format(lease_id)
-                workspace_manifest = await _fetch_manifest(ws_channel, ws_prefix)
-            mirror_manifest = await _fetch_manifest(
-                exec_channel, mirror_prefix, accept_reset=True)
+                workspace_manifest = await operations.wait(_fetch_manifest(ws_channel, ws_prefix))
+            mirror_manifest = await operations.wait(_fetch_manifest(
+                exec_channel, mirror_prefix, accept_reset=True))
             reset_id = mirror_manifest.get("reset_id")
             base = {} if reset_id else _load_base(link["uid"])
             plan = (workspace_sync.plan_authoritative_pull(
@@ -661,6 +664,7 @@ async def run_reconcile(link_id: int) -> dict:
                     base, workspace_manifest["entries"],
                     mirror_manifest["entries"]))
 
+            operations.commit()
             resolutions = link["resolutions"]
             unresolved = []
             used = set()
@@ -776,6 +780,10 @@ async def run_reconcile(link_id: int) -> dict:
                     "pulled": pulled, "pushed": pushed,
                     "retry": len(failed), **(
                         {"error": failure_error} if failed else {})}
+        except operations.Cancelled:
+            _update_link(link_id, state=link["state"])
+            _broadcast_links()
+            raise
         except (NodeError, workspace_sync.SyncError) as exc:
             message = str(exc)
             _update_link(link_id, state="error", last_error=message[:500])
@@ -1036,11 +1044,12 @@ async def create_linked_session(body: dict) -> dict:
         if body.get(key) is not None:
             session_fields[key] = body.get(key)
 
+    exec_ping = await operations.wait(_request_json(exec_channel, "GET", "ping"))
+    ws_ping = await operations.wait(_request_json(ws_channel, "GET", "ping"))
+    operations.commit()
     if body.get("mkdir"):
         await _request_json(ws_channel, "POST", "fs/mkdir", {"path": root})
 
-    exec_ping = await _request_json(exec_channel, "GET", "ping")
-    ws_ping = await _request_json(ws_channel, "GET", "ping")
     same_node = exec_bid == ws_bid or (
         exec_ping.get("node_uuid") and
         exec_ping.get("node_uuid") == ws_ping.get("node_uuid"))
@@ -1140,6 +1149,7 @@ async def h_list(request: web.Request):
     return web.json_response({"links": public_links()})
 
 
+@operations.cancellable
 async def h_create_session(request: web.Request):
     try:
         body = await request.json()
@@ -1153,6 +1163,7 @@ async def h_create_session(request: web.Request):
         return _error_response(exc)
 
 
+@operations.cancellable
 async def h_sync(request: web.Request):
     link = get_link(int(request.match_info["lid"]))
     if link is None:

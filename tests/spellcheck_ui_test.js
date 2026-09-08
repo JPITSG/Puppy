@@ -1,0 +1,420 @@
+/* Run with node tests/spellcheck_ui_test.js. No browser, engine, network or
+   quota: the bundled dictionary is read straight off disk and the shared
+   prompt box runs against the fake DOM.
+
+   Three things are checked here. The asset itself (its exact header, its
+   declared count, its sorted order, and that the gzip sibling every browser
+   is served is the same file). The checker (what it knows, what it refuses to
+   look at, what it suggests, and what it will and will not correct on its
+   own). And the box (the browser's checker switched off, the two switches in
+   its tools menu, the marks painted under the text, autocorrect finishing a
+   word, and every rule about when it must keep its hands off). */
+"use strict";
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const zlib = require("node:zlib");
+const vm = require("node:vm");
+const path = require("node:path");
+const { FakeDocument, FakeEvent, fire } = require("./fake_dom.js");
+const root = path.join(__dirname, "..");
+const source = fs.readFileSync(path.join(root, "puppy/static/app.js"), "utf8");
+const between = (from, to) => {
+  const start = source.indexOf(from), end = source.indexOf(to, start);
+  if (start < 0 || end < 0) throw new Error("slice not found: " + from);
+  return source.slice(start, end);
+};
+
+/* ---------- the bundled asset ---------- */
+
+const dictPath = path.join(root, "puppy/static/dict/en.txt");
+const dictText = fs.readFileSync(dictPath, "utf8");
+const lines = dictText.split("\n");
+assert.equal(lines[0], "#puppy-dictionary 1 en");
+const head = lines.findIndex(line => line.startsWith("#words "));
+assert.ok(head > 0, "the asset declares its word count");
+const declared = Number(lines[head].slice(7));
+const words = lines.slice(head + 1);
+assert.equal(words[words.length - 1], "", "the body ends in a newline");
+words.pop();
+assert.equal(words.length, declared, "declared count matches the body");
+assert.ok(declared > 100000, "a real dictionary, not a stub");
+{
+  let previous = "";
+  let ranked = 0;
+  for (const line of words) {
+    const tab = line.indexOf("\t");
+    const word = tab < 0 ? line : line.slice(0, tab);
+    if (tab >= 0) {
+      assert.match(line.slice(tab + 1), /^[0-4]$/, "rank digit on " + line);
+      ranked++;
+    }
+    assert.doesNotMatch(word, /[\s.\-/\\0-9]/, "a token the console could meet: " + word);
+    assert.ok(word > previous, "sorted by code point: " + previous + " then " + word);
+    previous = word;
+  }
+  assert.ok(ranked > 20000 && ranked < declared, "some words are common, not all");
+}
+/* Every browser is served the gzip sibling, so it must be this same file. */
+const gz = zlib.gunzipSync(fs.readFileSync(dictPath + ".gz")).toString("utf8");
+assert.equal(gz, dictText, "en.txt.gz is en.txt");
+assert.ok(fs.existsSync(path.join(root, "puppy/static/dict/COPYRIGHT")),
+  "the word list ships with its licence");
+
+/* ---------- the checker ---------- */
+
+const document = new FakeDocument();
+const storage = new Map();
+const calls = { toasts: [], menus: [], edited: 0 };
+let dictionaryReply = async () => ({ ok: true, text: async () => dictText });
+const icon = () => document.createElement("svg");
+const context = vm.createContext({
+  document, window: { CSS: { supports: () => true }, innerWidth: 1200, innerHeight: 800 },
+  CSS: { supports: () => true }, Event: FakeEvent, console, Int32Array, Number, Math, Date, Set, Map,
+  URL: { createObjectURL: () => "blob:fake", revokeObjectURL: () => {} },
+  AbortController, setTimeout, clearTimeout, getComputedStyle: () => ({}),
+  fetch: (url, init) => dictionaryReply(url, init),
+  api: async () => ({}),
+  toast: (text, tone) => calls.toasts.push({ text, tone }), TOAST_LONG: 7000,
+  esc: text => String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"),
+  apiPath: (bid, route) => (bid ? `/api/b/${bid}/` : "/api/") + route,
+  fmtBytes: value => value + " B",
+  plusIcon: icon, xIcon: icon, attachmentFileIcon: icon, globeIcon: icon, terminalIcon: icon,
+  choiceSvg: icon, refreshIcon: icon, queueEditIcon: icon, toolsIcon: icon,
+  lsGet: key => storage.has(key) ? storage.get(key) : null,
+  lsSet: (key, value) => storage.set(key, value), lsDel: key => storage.delete(key),
+  linkifyInto: (node, text) => { node.appendChild(document.createTextNode(text)); return node; },
+  uploadSettingsFor: () => null, rememberUploadSettings: () => null,
+  backendSupportsFileUploads: () => true, backendConnectionAllowed: () => true,
+  nodeStateStreamActive: () => true, browserEnabledFor: () => false, vncEnabledFor: () => false,
+  backendHasCapability: () => false, spawnExecFor: () => false,
+  findSessionMeta: () => null, backendName: () => "this node",
+  browserInstancesFor: () => null, terminalInstancesFor: () => null, uploadPreviewUrl: () => "",
+  state: { backends: [], tabs: [], sessions: [], engCache: {}, engines: [], views: {}, active: "",
+    remoteBrowserStatus: {}, remoteUploadSettings: {}, terminalInstances: {}, vncInstances: {},
+    browserStatus: { enabled: false, instances: [] }, uploadSettings: { enabled: false } },
+  /* the menu itself is choice-menu machinery with its own checks; here we
+     only care which rows a box offers and what picking one does */
+  openChoiceMenu: (anchor, options) => { calls.menus.push({ anchor, ...options }); return null; },
+  syncOpenChoiceMenus: () => { calls.synced = (calls.synced || 0) + 1; },
+});
+vm.runInContext([
+  between("const el = ", "/* Close buttons"),
+  between("function storedStringSet(", "/* Server-side drafts are shared."),
+  between("const MENTION_TOKEN_RE", "/* ================= tooltips ================= */"),
+  between("const CARET_MIRROR_STYLES", "/* ctrl+j ->"),
+  between("const MENTION_QUERY_MAX", "/* ================= Composer ================="),
+  between("/* ================= Composer =================", "/* ================= SessionView ================="),
+  between("const ATTACHMENT_PREVIEW_TYPES", "/* Resolve the configuration at the queue tail"),
+].join("\n"), context);
+const {
+  Composer, composerBoxHtml, spellPrefs, setSpellPref, spellMenuChecks, spellDictionary,
+  parseSpellDictionary, loadSpellDictionary, spellWordKnown, spellMisspellings,
+  spellSuggestions, spellAutocorrection, spellRememberWord,
+} = vm.runInContext(`({ Composer, composerBoxHtml, spellPrefs, setSpellPref, spellMenuChecks,
+  spellDictionary, parseSpellDictionary, loadSpellDictionary, spellWordKnown, spellMisspellings,
+  spellSuggestions, spellAutocorrection, spellRememberWord })`, context);
+
+// A file that is not exactly the shipped shape is refused, never repaired.
+assert.equal(parseSpellDictionary("#puppy-dictionary 2 en\n#words 1\nthe\n"), null);
+assert.equal(parseSpellDictionary("#puppy-dictionary 1 en\n#words 2\nthe\n"), null);
+assert.equal(parseSpellDictionary("#puppy-dictionary 1 en\n#words 1\nthe"), null);
+assert.equal(parseSpellDictionary("#words 1\nthe\n"), null);
+assert.ok(parseSpellDictionary("#puppy-dictionary 1 en\n#words 2\nthe\t0\nzebra\n"));
+
+/* values cross the VM boundary, so compare plain node-side arrays */
+const marks = text => [...spellMisspellings(text)].map(mark => mark.word);
+const settle = async () => { for (let i = 0; i < 8; i++) await new Promise(r => setImmediate(r)); };
+
+(async () => {
+  // Nothing is misspelled while the dictionary is still on its way.
+  assert.deepEqual(marks("teh recieve"), []);
+  assert.equal(spellWordKnown("teh"), true);
+  await loadSpellDictionary();
+  assert.ok(spellDictionary.data, "the bundled dictionary loaded");
+  assert.deepEqual(calls.toasts, []);
+
+  // Words, their possessives, their cases, and the app's own supplement.
+  for (const word of ["the", "receive", "separate", "definitely", "occurrence", "Puppy's",
+                      "agents'", "London", "london", "USA", "usa", "colour", "color",
+                      "organise", "organize", "don't", "café", "cafe", "facade",
+                      "backend", "repo", "async",
+                      "workflow", "ok", "Alice", "spellcheck"])
+    assert.equal(spellWordKnown(word), true, word + " is a word");
+  for (const word of ["teh", "recieve", "seperate", "definately", "occurence", "Teh",
+                      "thsi", "kittn", "backedn"])
+    assert.equal(spellWordKnown(word), false, word + " is not");
+
+  // What is prose and what is not. Code, paths, versions, identifiers,
+  // acronyms, attachment markers and "@" directives are never anyone's typo.
+  assert.deepEqual(marks("Please chekc this sentance"), ["chekc", "sentance"]);
+  assert.deepEqual(marks("run `npm instal foo` now"), []);
+  assert.deepEqual(marks("```\nteh broekn code\n```\nand teh prose"), ["teh"]);
+  assert.deepEqual(marks("```\nunclosed teh fence"), []);
+  assert.deepEqual(marks("see puppy/static/app.js and /etc/scripts/pupy"), []);
+  assert.deepEqual(marks("the file app.js and dict.txt"), []);
+  assert.deepEqual(marks("call esc(value) and spellDraw twice"), []);
+  assert.deepEqual(marks("VNC RFB ACP MCP are fine"), []);
+  assert.deepEqual(marks("visit https://exampel.com/thigns today"), []);
+  assert.deepEqual(marks("mail someone@exampel.com now"), []);
+  assert.deepEqual(marks("@Browser A8AR open teh page"), ["teh"]);
+  assert.deepEqual(marks("@Spawn an agent using codex at high effort"), []);
+  assert.deepEqual(marks("[image attached: /srv/data/uploads/10/x/shot.png — view it with your image/file tools]"), []);
+  assert.deepEqual(marks("a well-knwon problem"), ["knwon"]);
+  assert.deepEqual(marks("costs $5 and 12:30 and v1.2.3"), []);
+  assert.deepEqual(marks("A sentence ending in teh."), ["teh"]);
+  assert.deepEqual(marks("x".repeat(30000) + " teh"), [], "a huge draft is left alone");
+
+  // Suggestions: ranked, cased like the typo, and reachable past one edit.
+  assert.equal(spellSuggestions("teh")[0].word, "the");
+  assert.equal(spellSuggestions("Teh")[0].word, "The");
+  assert.equal(spellSuggestions("recieve")[0].word, "receive");
+  assert.equal(spellSuggestions("seperate")[0].word, "separate");
+  assert.equal(spellSuggestions("definately")[0].word, "definitely");
+  assert.equal(spellSuggestions("alicce")[0].word, "Alice");
+  assert.ok([...spellSuggestions("occurence")].some(item => item.word === "occurrence"));
+  assert.ok([...spellSuggestions("seperatly")].some(item => item.word === "separately"),
+    "a two-edit typo still finds its word");
+  assert.ok(spellSuggestions("teh").length <= 6);
+
+  // Autocorrect is deliberately timid: one clear candidate, a common word,
+  // and a margin over the runner-up. Everything else stays as typed.
+  assert.equal(spellAutocorrection("teh"), "the");
+  assert.equal(spellAutocorrection("adn"), "and");
+  assert.equal(spellAutocorrection("hte"), "the");
+  assert.equal(spellAutocorrection("dont"), "don't");
+  assert.equal(spellAutocorrection("recieve"), "receive");
+  assert.equal(spellAutocorrection("Teh"), "The");
+  assert.equal(spellAutocorrection("the"), "", "a word it knows is left alone");
+  assert.equal(spellAutocorrection("ther"), "", "an ambiguous typo is the writer's");
+  assert.equal(spellAutocorrection("ot"), "", "two letters say too little");
+  assert.equal(spellAutocorrection("zzzqqq"), "", "nothing close enough");
+
+  /* ---------- the prompt box ---------- */
+
+  const makeBox = (host = {}) => {
+    const wrap = document.createElement("div");
+    wrap.innerHTML = composerBoxHtml({ placeholder: "Type…" });
+    document.body.appendChild(wrap);
+    const box = wrap.querySelector(".composer-box");
+    const composer = new Composer(box, { bid: 0, sid: 10, submit: () => {},
+      edited: () => calls.edited++, ...host });
+    return { box, composer, ta: composer.ta };
+  };
+  /* typing, as the browser reports it: the value, the caret, then input */
+  const type = (composer, text, inputType = "insertText") => {
+    const ta = composer.ta;
+    ta.value += text;
+    ta.selectionStart = ta.selectionEnd = ta.value.length;
+    fire(ta, "input", { inputType, data: text });
+  };
+  const painted = box => [...box.querySelectorAll(".spell-layer .sp-bad")].map(node => node.textContent);
+  const layerText = box => {
+    const layer = box.querySelector(".spell-layer");
+    return layer ? layer.textContent : null;
+  };
+
+  // (a) the browser's own checker is off in every box, on every platform.
+  const first = makeBox();
+  assert.equal(first.ta.getAttribute("spellcheck"), "false");
+  assert.equal(first.ta.getAttribute("autocorrect"), "off");
+  assert.equal(first.ta.getAttribute("autocapitalize"), null,
+    "sentence capitalisation on phones is left alone");
+
+  // (b) every box has the tools button, with both switches in its menu.
+  assert.ok(first.box.querySelector(".tools-open"), "a box without a host still has tools");
+  spellPrefs.check = true;
+  spellPrefs.correct = false;
+  fire(first.box.querySelector(".tools-open"), "click");
+  let menu = calls.menus.pop();
+  assert.equal(menu.actions, true);
+  assert.deepEqual([...menu.opts], []);
+  assert.deepEqual([...menu.checks].map(row => [row.label, row.on, !!row.disabled]),
+    [["Spell check", true, false], ["Autocorrect", false, false]]);
+
+  // a host's own rows come first, above the spelling switches
+  const hosted = makeBox({ tools: () => ({ opts: [{ value: "compact", label: "Compact" }],
+    checks: [{ label: "Fast mode", on: false, onToggle: () => {} }] }),
+    runTool: value => { calls.ranTool = value; } });
+  fire(hosted.box.querySelector(".tools-open"), "click");
+  menu = calls.menus.pop();
+  assert.deepEqual([...menu.opts].map(o => o.value), ["compact"]);
+  assert.deepEqual([...menu.checks].map(row => row.label),
+    ["Fast mode", "Spell check", "Autocorrect"]);
+  menu.onPick("compact");
+  assert.equal(calls.ranTool, "compact");
+
+  // (e) autocorrect is unavailable, and unchecked, while spell check is off.
+  setSpellPref("check", false);
+  assert.equal(spellPrefs.check, false);
+  let rows = spellMenuChecks();
+  assert.equal(rows[1].disabled, true);
+  assert.equal(rows[1].on, false);
+  assert.equal(storage.get("puppy.spellcheck"), "0");
+  // asking for autocorrect turns the checker it needs back on
+  setSpellPref("correct", true);
+  assert.deepEqual([spellPrefs.check, spellPrefs.correct], [true, true]);
+  assert.equal(spellMenuChecks()[1].disabled, false);
+  // and switching the checker off takes autocorrect with it, for good
+  setSpellPref("check", false);
+  assert.deepEqual([spellPrefs.check, spellPrefs.correct], [false, false]);
+  assert.equal(storage.get("puppy.autocorrect"), "0");
+
+  // Marks: only the misspelled words, and only while the switch is on.
+  setSpellPref("check", true);
+  const b = makeBox();
+  type(b.composer, "teh quick brown fox");
+  b.composer.spellDraw(true);
+  assert.deepEqual(painted(b.box), ["teh"]);
+  assert.equal(layerText(b.box), "teh quick brown fox\n", "the layer mirrors the text");
+  type(b.composer, " jumpd");
+  b.composer.spellDraw(true);
+  assert.deepEqual(painted(b.box), ["teh", "jumpd"]);
+  setSpellPref("check", false);
+  assert.equal(b.box.querySelector(".spell-layer"), null, "off means no marks at all");
+  setSpellPref("check", true);
+  assert.deepEqual(painted(b.box), ["teh", "jumpd"], "and on brings them straight back");
+
+  // Autocorrect finishes a word, and only when the switch is on.
+  const c = makeBox();
+  type(c.composer, "teh");
+  assert.equal(c.ta.value, "teh", "still being typed");
+  type(c.composer, " ");
+  assert.equal(c.ta.value, "teh ", "with autocorrect off nothing moves");
+  setSpellPref("correct", true);
+  const d = makeBox();
+  type(d.composer, "teh");
+  type(d.composer, " ");
+  assert.equal(d.ta.value, "the ");
+  assert.equal(d.ta.selectionStart, 4, "the caret stays where the typist left it");
+  assert.ok(calls.edited > 0, "a correction is a draft edit like any other");
+  type(d.composer, "dont");
+  type(d.composer, ".");
+  assert.equal(d.ta.value, "the don't.");
+  type(d.composer, " brown fox");
+  assert.equal(d.ta.value, "the don't. brown fox", "a word still being typed is untouched");
+
+  // The word came back: this box stops correcting it.
+  const e = makeBox();
+  type(e.composer, "teh");
+  type(e.composer, " ");
+  assert.equal(e.ta.value, "the ");
+  e.ta.value = "teh ";                     // ctrl+z, or simply retyped
+  e.ta.selectionStart = e.ta.selectionEnd = 4;
+  fire(e.ta, "input", { inputType: "historyUndo" });
+  assert.ok(e.composer.spellRefused.has("teh"));
+  e.ta.value = "teh"; e.ta.selectionStart = e.ta.selectionEnd = 3;
+  type(e.composer, " ");
+  assert.equal(e.ta.value, "teh ", "a word the writer restored is left alone");
+  assert.deepEqual(painted(e.box), [], "but a refused word is not marked either");
+
+  // A paste is not typing, however it ends.
+  const paste = makeBox();
+  paste.ta.value = "teh "; paste.ta.selectionStart = paste.ta.selectionEnd = 4;
+  fire(paste.ta, "input", { inputType: "insertFromPaste", data: "teh " });
+  assert.equal(paste.ta.value, "teh ", "pasted prose is marked, never rewritten");
+  paste.composer.spellDraw(true);
+  assert.deepEqual(painted(paste.box), ["teh"]);
+
+  // Deleting never corrects, an IME composition never corrects, a busy box
+  // never corrects, and neither do mentions or code.
+  const f = makeBox();
+  type(f.composer, "teh");
+  f.ta.value = "teh "; f.ta.selectionStart = f.ta.selectionEnd = 4;
+  fire(f.ta, "input", { inputType: "deleteContentBackward" });
+  assert.equal(f.ta.value, "teh ");
+  f.composer.composing = true;
+  type(f.composer, "adn ");
+  assert.equal(f.ta.value, "teh adn ", "mid-composition text is never rewritten");
+  f.composer.composing = false;
+  f.composer.setBusy(true);
+  type(f.composer, "adn ");
+  assert.equal(f.ta.value, "teh adn adn ");
+  f.composer.setBusy(false);
+  const g = makeBox();
+  type(g.composer, "`teh`");
+  type(g.composer, " ");
+  assert.equal(g.ta.value, "`teh` ", "code is not prose");
+  type(g.composer, "@Browser A8AR");
+  type(g.composer, " ");
+  assert.equal(g.ta.value, "`teh` @Browser A8AR ", "a directive is not prose");
+
+  // A draft arriving from another device is marked, never corrected.
+  const h = makeBox();
+  h.composer.replace("teh shared draft");
+  assert.equal(h.ta.value, "teh shared draft");
+  h.composer.spellDraw(true);
+  assert.deepEqual(painted(h.box), ["teh"]);
+  // and recalling a sent prompt behaves the same way
+  h.composer.set("adn recalled");
+  assert.equal(h.ta.value, "adn recalled");
+
+  // The suggestion menu, and the personal dictionary behind it.
+  const i = makeBox();
+  type(i.composer, "a kittn here");
+  i.composer.spellDraw(true);
+  i.ta.selectionStart = i.ta.selectionEnd = 4;
+  const menuEvent = new FakeEvent("contextmenu", { clientX: 40, clientY: 60 });
+  i.ta.dispatchEvent(menuEvent);
+  assert.equal(menuEvent.defaultPrevented, true, "the browser's own menu steps aside");
+  const suggestions = calls.menus.pop();
+  assert.equal(suggestions.label, "Spelling of kittn");
+  assert.deepEqual([suggestions.at.x, suggestions.at.y], [40, 60]);
+  assert.ok([...suggestions.opts].some(option => option.value === "kitten"));
+  assert.equal(suggestions.footers[0].label, "Add to dictionary");
+  suggestions.onPick("kitten");
+  assert.equal(i.ta.value, "a kitten here");
+  assert.deepEqual(painted(i.box), []);
+  // a right-click on ordinary text leaves the browser's menu alone
+  i.ta.selectionStart = i.ta.selectionEnd = 1;
+  const plain = new FakeEvent("contextmenu", { clientX: 10, clientY: 10 });
+  i.ta.dispatchEvent(plain);
+  assert.equal(plain.defaultPrevented, false);
+  assert.equal(calls.menus.length, 0);
+  // "Add to dictionary" is this browser's own list, and it takes effect at once
+  const j = makeBox();
+  type(j.composer, "our zorbium works");
+  j.composer.spellDraw(true);
+  assert.deepEqual(painted(j.box), ["zorbium"]);
+  spellRememberWord("Zorbium");
+  assert.deepEqual(JSON.parse(storage.get("puppy.dictionary")), ["zorbium"]);
+  assert.deepEqual(painted(j.box), []);
+
+  // Leaving the box takes its marks with it.
+  const k = makeBox();
+  type(k.composer, "teh");
+  k.composer.spellDraw(true);
+  assert.equal(painted(k.box).length, 1);
+  k.composer.destroy();
+  assert.equal(k.box.querySelector(".spell-layer"), null);
+  // and sending empties them without leaving a stale layer behind
+  const l = makeBox();
+  type(l.composer, "teh end");
+  l.composer.spellDraw(true);
+  assert.equal(painted(l.box).length, 1);
+  l.composer.take();
+  assert.equal(l.box.querySelector(".spell-layer"), null);
+
+  // A dictionary that cannot be read says so once and leaves the box usable.
+  const failing = vm.createContext(Object.assign({}, context));
+  spellDictionary.data = null;
+  spellDictionary.error = "";
+  spellDictionary.failedAt = 0;
+  dictionaryReply = async () => ({ ok: false, status: 404 });
+  await loadSpellDictionary();
+  assert.equal(spellDictionary.data, null);
+  assert.equal(calls.toasts.length, 1);
+  assert.match(calls.toasts[0].text, /^Could not load the spelling dictionary · HTTP 404$/);
+  assert.equal(calls.toasts[0].tone, "bad");
+  assert.match(spellMenuChecks()[0].hint, /^Could not load the bundled dictionary/);
+  const m = makeBox();
+  type(m.composer, "teh end ");
+  assert.equal(m.ta.value, "teh end ", "no dictionary, no corrections and no marks");
+  assert.equal(m.box.querySelector(".spell-layer"), null);
+  // a failure is not retried on every keystroke
+  assert.equal(loadSpellDictionary(), null);
+  void failing;
+
+  await settle();
+  console.log("PASS: bundled dictionary shape, what the checker knows and skips, " +
+    "suggestions and timid autocorrection, and the prompt box's switches, marks and menus");
+})().catch(error => { console.error(error); process.exit(1); });

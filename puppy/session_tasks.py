@@ -21,7 +21,7 @@ import time
 
 from aiohttp import web
 
-from puppy import db, uploads, workspaces
+from puppy import db, operations, uploads, workspaces
 
 PREFIX = "session_task."
 # Per-session Tasks preference: an exact true marker means disabled;
@@ -314,6 +314,7 @@ def _entries(sid):
     behind with the deleted session."""
     entries, turns, cursor = [], 0, 0
     while True:
+        operations.checkpoint()
         rows = db.get_events(sid, after_seq=cursor, limit=500)
         for row in rows:
             cursor = row["seq"]
@@ -433,14 +434,16 @@ async def remove(parent_id, sid, fold):
                     unapplied = ""
                     if workspaces.is_available(task):
                         try:
-                            unapplied = (await asyncio.to_thread(_changes, task, value))[2].strip()
+                            unapplied = (await operations.to_thread(_changes, task, value))[2].strip()
                         except (TaskError, OSError, subprocess.SubprocessError):
                             unapplied = ""
                     hub = runner._hubs.get(sid)
                     if hub is not None and hub.status == "running":
                         raise TaskError("The task started working; stop it before removing it")
-                    payload = _archive(parent_id, sid, value, task, unapplied)
+                    payload = await operations.to_thread(_archive, parent_id, sid, value, task, unapplied)
+                    operations.commit()
                     seq = runner.hub(parent_id)._emit("info", payload)["seq"]
+            operations.commit()
             removed = await web.remove_session(task)
         finally:
             _busy_roots.discard(task_root)
@@ -461,7 +464,7 @@ def finished(sid, status, user_seq):
 
 def _git(cwd, *args, data=None, timeout=60, env=None):
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0", **(env or {}))
-    result = subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "commit.gpgSign=false",
+    result = operations.run_process(["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "commit.gpgSign=false",
                              "-c", "user.name=Puppy", "-c", "user.email=puppy@localhost", *args],
                             cwd=cwd, env=env, input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
     if result.returncode:
@@ -506,7 +509,7 @@ async def workspace_operation(root):
     # Different Main sessions can name the same repository. Serialize by its
     # real root as well as parent id, and check idleness AFTER waiting. Each
     # apply (or conflict snapshot) then sees all previously applied tasks.
-    async with _project_locks.setdefault(root, asyncio.Lock()):
+    async with operations.lock(_project_locks.setdefault(root, asyncio.Lock())):
         _idle_project(root)
         if root in _busy_roots:
             raise TaskError("The project is preparing or applying another task")
@@ -591,6 +594,7 @@ def _copy_project(root, destination):
     from puppy.workspace_sync import _RootWalker, validate_relpath
     walker = _RootWalker(root)
     for rel in paths:
+        operations.checkpoint()
         validate_relpath(rel)
         if rel.split("/")[0] == ".git":
             raise TaskError("Invalid project path")
@@ -629,7 +633,7 @@ def _copy_project(root, destination):
                     raise TaskError("Project working files exceed the 512 MiB task-copy limit")
                 source_fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
                 with os.fdopen(source_fd, "rb") as source, target.open("wb") as output:
-                    shutil.copyfileobj(source, output, 256 * 1024)
+                    operations.copyfileobj(source, output)
                     after = os.fstat(source.fileno())
                 if (info.st_ino, info.st_size, info.st_mtime_ns) != (after.st_ino, after.st_size, after.st_mtime_ns):
                     raise TaskError("The project changed while preparing the task; please retry")
@@ -718,7 +722,7 @@ async def _resolve_conflicts(root, task, value, tree, token, conflict):
         raise TaskError("Puppy is shutting down; retry after the restart")
     hub = runner.hub(task["id"])
     _review_idle(hub)
-    main, refs = await asyncio.to_thread(_resolution_snapshot, root, task, value, tree, token)
+    main, refs = await operations.to_thread(_resolution_snapshot, root, task, value, tree, token)
     prompt = (
         "Resolve conflicts for this task's Apply to Main attempt. The user enabled Resolve conflicts; "
         "the apply failed and no task changes were written to Main. Continue in this task's existing "
@@ -747,7 +751,8 @@ async def _resolve_conflicts(root, task, value, tree, token, conflict):
         "Puppy will check Main again then in case another task has been applied meanwhile.\n\n"
         "Git diagnostic (reference only):\n{1}"
     ).format(refs, str(conflict), json.dumps(root, ensure_ascii=False))
-    await asyncio.to_thread(_git, task["cwd"], "update-ref", "refs/puppy/base", main)
+    operations.commit()
+    await operations.to_thread(_git, task["cwd"], "update-ref", "refs/puppy/base", main)
     try:
         # A message or shutdown may have arrived while the snapshot was being
         # copied. Do not queue an unexpected resolution behind that work.
@@ -760,7 +765,7 @@ async def _resolve_conflicts(root, task, value, tree, token, conflict):
             raise TaskError(result["error"])
     except BaseException:
         _save(task["id"], value)
-        await asyncio.to_thread(_git, task["cwd"], "update-ref", "refs/puppy/base", value["base"])
+        await operations.to_thread(_git, task["cwd"], "update-ref", "refs/puppy/base", value["base"])
         raise
     runner.hub(value["parent"])._emit("info", {"subtype": "session_task", "task_id": task["id"],
         "text": "Conflict resolution started in task: " + task["name"] + ". Review its updated changes before applying."})
@@ -810,7 +815,7 @@ async def create(parent_id, args):
             driver = get_driver(engine)
         except KeyError:
             raise TaskError("Unknown task engine: " + engine)
-        await driver.refresh_model_options()
+        await operations.wait(driver.refresh_model_options())
         try:
             choices = engine_defaults.for_session(driver, args)
         except ValueError as exc:
@@ -821,7 +826,7 @@ async def create(parent_id, args):
             uploads.verify_attachments(parent_id, original)
         except uploads.AttachmentError as exc:
             raise TaskError(str(exc))
-        root = await asyncio.to_thread(_repo, parent)
+        root = await operations.to_thread(_repo, parent)
         _idle_project(root)
         if root in _busy_roots:
             raise TaskError("The project is preparing or applying another task")
@@ -829,7 +834,7 @@ async def create(parent_id, args):
         path, sid = "", None
         try:
             path = workspaces.create_temporary()
-            base = await asyncio.to_thread(_copy_project, root, path)
+            base = await operations.to_thread(_copy_project, root, path)
             rows = db.get_events(parent_id, limit=40)
             context = "\n\n".join("{}: {}".format(row["kind"], row["data"].get("text", ""))
                                     for row in rows if row["kind"] in ("user", "assistant"))[-22000:]
@@ -845,11 +850,12 @@ async def create(parent_id, args):
             # on, so they are copied into its own private storage - its
             # lifecycle, previews and deletion - before the first turn exists.
             try:
-                prompt = await asyncio.to_thread(uploads.adopt_attachments, parent_id, sid, original)
+                prompt = await operations.to_thread(uploads.adopt_attachments, parent_id, sid, original)
             except uploads.AttachmentError as exc:
                 raise TaskError(str(exc))
             if len(prompt) > db.MAX_DRAFT_CHARS:
                 raise TaskError("The task prompt is too long")
+            operations.commit()
             _save(sid, {"format": 1, "parent": parent_id, "request_id": key, "prompt": prompt,
                         "context": context, "base": base, "created_at": time.time(), "outcome": "pending",
                         "summary": "", "completed_at": 0, "applied_at": 0, "result_seq": 0})
@@ -896,7 +902,7 @@ async def review(parent_id, sid, expected=None, resolve_conflicts=False):
             raise TaskError("Task workspace is busy")
         _busy_roots.add(task_root)
         try:
-            patch, tree, files = await asyncio.to_thread(_changes, task, value)
+            patch, tree, files = await operations.to_thread(_changes, task, value)
             # Bind the token to both inputs, including an advanced resolution
             # baseline. A lost reply or second console cannot start the same
             # resolution again, even when its old diff happens to recur.
@@ -904,12 +910,12 @@ async def review(parent_id, sid, expected=None, resolve_conflicts=False):
             if expected is not None:
                 if expected != token:
                     raise TaskError("Task changes have changed; review them again")
-                root = await asyncio.to_thread(_repo, parent)
+                root = await operations.to_thread(_repo, parent)
                 async with workspace_operation(root):
                     _review_idle(hub)
                     if patch:
                         try:
-                            await asyncio.to_thread(_git, root, "apply", "--check", "--binary", "-", data=patch)
+                            await operations.to_thread(_git, root, "apply", "--check", "--binary", "-", data=patch)
                         except GitError as exc:
                             # Only a conflicting check starts an agent. Stale
                             # reviews, busy sessions, invalid patches and I/O
@@ -917,10 +923,12 @@ async def review(parent_id, sid, expected=None, resolve_conflicts=False):
                             if not resolve_conflicts or exc.returncode != 1:
                                 raise
                             return await _resolve_conflicts(root, task, value, tree, token, exc)
-                        await asyncio.to_thread(_git, root, "apply", "--binary", "-", data=patch)
+                        operations.commit()
+                        await operations.to_thread(_git, root, "apply", "--binary", "-", data=patch)
+                    operations.commit()
                     # The applied tree becomes the next baseline; naming it keeps
                     # it out of the copy's garbage collection.
-                    await asyncio.to_thread(_git, task["cwd"], "update-ref", "refs/puppy/base", tree)
+                    await operations.to_thread(_git, task["cwd"], "update-ref", "refs/puppy/base", tree)
                     value.update(base=tree, applied_at=time.time())
                     _save(sid, value)
                     if workspace_sync.session_workspace(parent):
@@ -939,7 +947,7 @@ async def review(parent_id, sid, expected=None, resolve_conflicts=False):
 
 def session_operation(sid):
     """Serialize task lifecycle changes and moves of their parent workspace."""
-    return _locks.setdefault(sid, asyncio.Lock())
+    return operations.lock(_locks.setdefault(sid, asyncio.Lock()))
 
 
 async def durable_workspace_operation(operation, sid):
@@ -959,6 +967,7 @@ async def durable_workspace_operation(operation, sid):
     return await asyncio.shield(task)
 
 
+@operations.cancellable
 async def h_tasks(request):
     from puppy import runner
     sid = int(request.match_info["sid"])

@@ -89,3 +89,9 @@ Scratch promotion is additive `workspace-move`: both execution runtimes serve
 and return `{ok: true, session}`. See the [backend contract](../backend/README.md).
 No persisted shape changes: the existing session changes from `temporary` to
 `directory`; the transcript records a `workspace_move` info event.
+
+Cancellation is additive: `operation-cancel-v1` covers audited preparation
+requests and authenticated operation controls; `engine-upgrade-cancel`,
+`side-question-cancel` and `browser-navigation-stop` cover their native running
+operations. See [the cancellation contract](cancellation.md). Existing persisted
+shapes are unchanged; a commit boundary is never presented as rolled back.

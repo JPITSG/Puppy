@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 
 from aiohttp import web
 
-from puppy import config, listener_handoff, web_tls
+from puppy import config, listener_handoff, operations, web_tls
 
 VERIFY_TTL = 60
 VERIFY_PREFIX = "/api/settings/bind/verify/"
@@ -305,7 +305,7 @@ async def prepare(app: web.Application, user: str, bind_ip, origin: str,
         parsed_ip, origin_host, connected_host) if parsed_ip.is_unspecified else host
     try:
         current_transport = web_tls.load_state()
-        transport = web_tls.prepare_change(
+        transport = await operations.to_thread(web_tls.prepare_change,
             target_scheme if target_scheme is not None else current_transport["scheme"],
             https_source if https_source is not None else
             current_transport["https_source"],
@@ -357,6 +357,11 @@ async def prepare(app: web.Application, user: str, bind_ip, origin: str,
         _discard(app, token)
         raise
 
+    try:
+        operations.checkpoint()
+    except operations.Cancelled:
+        _discard(app, token)
+        raise
     entry["timer"] = asyncio.get_running_loop().call_later(
         VERIFY_TTL, _expire, app, token)
     base_url = scheme + "://" + _authority(probe_host, port)

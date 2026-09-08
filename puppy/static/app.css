@@ -1214,7 +1214,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .aside-card.pending .aside-state{color:var(--acc2)}
 .aside-card.bad{border-color:var(--err-line-soft)}
 .aside-card.bad .aside-state{color:var(--err)}
-.aside-card.synthetic .aside-state{color:var(--warn)}
+.aside-card.synthetic .aside-state,.aside-card.warn .aside-state{color:var(--warn)}
 .aside-q{margin-top:5px;font-size:var(--fs-lg);color:var(--txt2);white-space:pre-wrap}
 .aside-a{position:relative;margin-top:8px;padding-top:8px;border-top:1px solid var(--line)}
 .aside-copy{top:5px;right:0}
@@ -1369,6 +1369,22 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
      min/max-height are read back by Composer.resize for browsers without
      field-sizing, so a host that wants a taller box restyles only these. */
   min-height:24px;max-height:224px;font-size:var(--fs-xl);line-height:20px;
+  /* positioned, so it paints over the spelling layer that precedes it and
+     shows through it; no z-index needed, DOM order decides */
+  position:relative;
+}
+/* Puppy's own spelling marks. A textarea cannot carry them, so the same text
+   is laid out again underneath it in the same font, wrapped the same way and
+   scrolled together (Composer.spellSync writes the metrics): the letters are
+   transparent, so only the underline under a marked word is ever seen. */
+.composer-box .spell-layer{
+  position:absolute;pointer-events:none;overflow:hidden;
+  box-sizing:border-box;white-space:pre-wrap;overflow-wrap:break-word;
+  color:transparent;border:none;background:none;
+}
+.composer-box .spell-layer .sp-bad{
+  text-decoration:underline wavy var(--err-line-hi);
+  text-decoration-skip-ink:none;text-underline-offset:2px;
 }
 .composer-presence{
   display:flex;align-items:center;gap:6px;min-height:var(--btn-h-sm);

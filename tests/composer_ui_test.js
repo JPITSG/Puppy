@@ -18,7 +18,9 @@ const between = (from, to) => {
 
 const document = new FakeDocument();
 const calls = { api: [], fetch: [], toasts: [], vncWizard: [] };
-const storage = new Map();
+/* the spelling switches are exercised in spellcheck_ui_test.js; this
+   check runs with them off, as a box that was told to stay quiet */
+const storage = new Map([["puppy.spellcheck", "0"]]);
 let reviewDialog;
 let blobs = 0;
 let controlHold = null;
@@ -64,7 +66,7 @@ const context = vm.createContext({
   esc: text => String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"),
   fmtBytes: value => value + " B",
   plusIcon: icon, xIcon: icon, attachmentFileIcon: icon, globeIcon: icon, terminalIcon: icon,
-  choiceSvg: icon, refreshIcon: icon, queueEditIcon: icon,
+  choiceSvg: icon, refreshIcon: icon, queueEditIcon: icon, toolsIcon: icon,
   uploadSettingsFor: bid => bid ? state.remoteUploadSettings[bid] || null : state.uploadSettings,
   rememberUploadSettings: () => null,
   backendSupportsFileUploads: () => true,

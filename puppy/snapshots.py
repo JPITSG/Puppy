@@ -23,7 +23,7 @@ import threading
 import time
 from typing import Dict, List
 
-from puppy import (__version__, config, db, listener_handoff, runner, terminal,
+from puppy import (__version__, config, db, listener_handoff, operations, runner, terminal,
                    upgrade_contract, uploads, web_tls, workspace_sync,
                    workspaces)
 
@@ -250,6 +250,7 @@ def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         while True:
+            operations.checkpoint()
             chunk = handle.read(1024 * 1024)
             if not chunk:
                 break
@@ -303,6 +304,7 @@ def _copy_source_tree(source: Path, destination: Path, namespace: str,
 
     stack = [(source, PurePosixPath(namespace))]
     while stack:
+        operations.checkpoint()
         directory, relative_dir = stack.pop()
         try:
             with os.scandir(str(directory)) as children:
@@ -348,10 +350,11 @@ def _copy_source_tree(source: Path, destination: Path, namespace: str,
             raise
         except OSError as exc:
             raise SnapshotError("cannot inspect {}: {}".format(relative_dir, exc)) from exc
-    shutil.copytree(str(source), str(destination), symlinks=True)
+    shutil.copytree(str(source), str(destination), symlinks=True, copy_function=operations.copy2)
 
 
 def _tar_filter(info: tarfile.TarInfo) -> tarfile.TarInfo:
+    operations.checkpoint()
     info.uid = 0
     info.gid = 0
     info.uname = ""
@@ -375,7 +378,7 @@ def create_archive(ui_state: dict) -> dict:
         (stage / "keeps").mkdir(mode=0o700)
         source_budget = {"members": 0, "bytes": 0}
 
-        db.backup_to(str(stage / "puppy.db"))
+        db.backup_to(str(stage / "puppy.db"), progress=operations.checkpoint)
         _validate_database(stage / "puppy.db")
         cfg = config.export_data()
         (stage / "config.json").write_text(
@@ -434,12 +437,14 @@ def create_archive(ui_state: dict) -> dict:
         if 1 + sum(1 for _path in stage.rglob("*")) > MAX_MEMBERS:
             raise SnapshotError("snapshot contains too many entries")
 
-        with tarfile.open(str(archive_tmp), "w:gz", compresslevel=6) as archive:
-            archive.add(str(stage), arcname=ARCHIVE_ROOT, recursive=True,
-                        filter=_tar_filter)
+        with archive_tmp.open("wb") as raw:
+            with tarfile.open(fileobj=operations.CheckedIO(raw), mode="w:gz", compresslevel=6) as archive:
+                archive.add(str(stage), arcname=ARCHIVE_ROOT, recursive=True,
+                            filter=_tar_filter)
         size = archive_tmp.stat().st_size
         if size > MAX_ARCHIVE_BYTES:
             raise SnapshotError("snapshot archive exceeds the 512 MiB limit")
+        operations.checkpoint()
         os.replace(str(archive_tmp), str(archive_path))
         archive_path.chmod(0o600)
         stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(manifest["created_at"]))
@@ -449,7 +454,7 @@ def create_archive(ui_state: dict) -> dict:
             "size": size,
             "sessions": len(sessions),
         }
-    except Exception:
+    except BaseException:
         for path in (archive_tmp, archive_path):
             try:
                 path.unlink()
@@ -525,13 +530,18 @@ def _member_relative(name: str) -> PurePosixPath:
 
 
 def _extract_archive(archive_path: Path, destination: Path) -> Path:
+    raw = archive_path.open("rb")
     try:
-        archive = tarfile.open(str(archive_path), "r:gz")
-    except (tarfile.TarError, OSError) as exc:
-        raise SnapshotError("invalid tar.gz snapshot") from exc
-    with archive:
+        archive = tarfile.open(fileobj=operations.CheckedIO(raw), mode="r:gz")
+    except BaseException as exc:
+        raw.close()
+        if isinstance(exc, (tarfile.TarError, OSError)):
+            raise SnapshotError("invalid tar.gz snapshot") from exc
+        raise
+    with raw, archive:
         members = []
         for member in archive:
+            operations.checkpoint()
             members.append(member)
             if len(members) > MAX_MEMBERS:
                 raise SnapshotError("snapshot contains too many entries")
@@ -576,6 +586,7 @@ def _extract_archive(archive_path: Path, destination: Path) -> Path:
         root.mkdir(mode=0o700, parents=True)
         directory_modes = []
         for member, relative, kind in validated:
+            operations.checkpoint()
             if relative == PurePosixPath("."):
                 if kind != "dir":
                     raise SnapshotError("snapshot root is not a directory")
@@ -592,6 +603,7 @@ def _extract_archive(archive_path: Path, destination: Path) -> Path:
                 with source, target.open("xb") as output:
                     remaining = member.size
                     while remaining:
+                        operations.checkpoint()
                         chunk = source.read(min(1024 * 1024, remaining))
                         if not chunk:
                             raise SnapshotError("snapshot file ended unexpectedly")
@@ -601,6 +613,7 @@ def _extract_archive(archive_path: Path, destination: Path) -> Path:
                         raise SnapshotError("snapshot file exceeds its declared size")
                 target.chmod(member.mode & 0o777)
         for member, relative, kind in validated:
+            operations.checkpoint()
             if kind != "link":
                 continue
             target = root.joinpath(*relative.parts)
@@ -786,7 +799,7 @@ def _prepare_scratch(candidate_db: Path, root: Path, manifest: dict) -> List[str
             created.append(new_path)
             if sid in saved:
                 shutil.copytree(str(scratch_root / sid), new_path,
-                                symlinks=True, dirs_exist_ok=True)
+                                symlinks=True, dirs_exist_ok=True, copy_function=operations.copy2)
                 Path(new_path).chmod(0o700)
             else:
                 workspaces.discard_created(new_path)
@@ -804,7 +817,7 @@ def _prepare_scratch(candidate_db: Path, root: Path, manifest: dict) -> List[str
         connection.execute("UPDATE sessions SET status='idle'")
         connection.commit()
         return created
-    except Exception:
+    except BaseException:
         connection.rollback()
         for path in created:
             workspaces.discard_created(path)
@@ -941,7 +954,7 @@ def stage_import(archive_path: str) -> dict:
             "prepared_mirrors": prepared_workspace["mirrors"],
             "prepared_workspace_base": prepared_workspace["base"],
         }
-    except Exception:
+    except BaseException:
         for path in created_scratch:
             workspaces.discard_created(path)
         shutil.rmtree(str(temporary), ignore_errors=True)

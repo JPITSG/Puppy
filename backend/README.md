@@ -992,3 +992,22 @@ is reported explicitly; completed prerequisites alone release dependent steps.
 State is stored under exact-format `session_references.*`, `session_inbox.*`,
 `session_outbox.*`, and `session_workflow.*` meta namespaces, included in snapshots
 without automatic migrations. See the main README for tool behavior and limits.
+
+### Cancellable console operations
+
+Both runtimes advertise `operation-cancel-v1`. Audited requests accept a fresh
+`X-Puppy-Operation` identity and expose authenticated
+`GET`/`DELETE /api/operations/{id}`. Cancellation stops preparation and drains
+cleanup before releasing ownership; an atomic commit refuses cancellation.
+The controller forwards the header and cancellation through its ordinary
+pinned, authenticated proxy. No persisted state changes are involved.
+
+`engine-upgrade-cancel` adds `DELETE /api/engines/{key}/upgrade` with the exact
+observed `{started_at}` from `upgrade_started_at`; `upgrade_stopping` reports
+accepted stops. The updater's process group is ended, output retained and the
+installed version rechecked. `side-question-cancel` adds
+`DELETE /api/sessions/{sid}/ask` with `request_id` and `expected_turn_id`, and
+readiness exposes `pending_request_id`. It withdraws only that native side
+question. `browser-navigation-stop` accepts `{type:"stop_loading"}` on the
+browser viewer socket. See [cancellation behavior](../docs/cancellation.md) for
+supported phases, compatibility and tests.

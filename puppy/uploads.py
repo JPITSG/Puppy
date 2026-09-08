@@ -17,7 +17,7 @@ from urllib.parse import unquote
 
 from aiohttp import web
 
-from puppy import config, db
+from puppy import config, db, operations
 
 log = logging.getLogger("puppy.uploads")
 
@@ -411,10 +411,10 @@ def adopt_attachments(source_id: int, target_id: int, text: str) -> str:
             target = destination / source.name
             with source.open("rb") as reader, target.open("xb") as writer:
                 os.chmod(str(target), 0o600)
-                shutil.copyfileobj(reader, writer, STREAM_CHUNK_BYTES)
+                operations.copyfileobj(reader, writer, STREAM_CHUNK_BYTES)
                 writer.flush()
                 os.fsync(writer.fileno())
-    except AttachmentError:
+    except (AttachmentError, operations.Cancelled):
         for directory in copied:
             shutil.rmtree(str(directory), ignore_errors=True)
         raise

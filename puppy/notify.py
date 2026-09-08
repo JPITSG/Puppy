@@ -23,9 +23,10 @@ import math
 import os
 import secrets
 import shlex
+import signal
 import time
 
-from puppy import config, db, protocol, workspace_sync
+from puppy import config, db, operations, protocol, workspace_sync
 
 log = logging.getLogger("puppy.notify")
 
@@ -306,13 +307,15 @@ async def run_local(command: str, info: dict) -> dict:
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
     try:
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=EXEC_TIMEOUT)
-    except asyncio.TimeoutError:
+        out, _ = await operations.wait(asyncio.wait_for(proc.communicate(), timeout=EXEC_TIMEOUT))
+    except (asyncio.TimeoutError, operations.Cancelled, asyncio.CancelledError) as exc:
         try:
-            proc.kill()
+            os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
         await proc.wait()
+        if not isinstance(exc, asyncio.TimeoutError):
+            raise
         return {"ok": False, "error": "command timed out after %ds" % int(EXEC_TIMEOUT)}
     return {"ok": proc.returncode == 0, "rc": proc.returncode,
             "output": (out or b"").decode(errors="replace")[-1000:].strip()}

@@ -19,7 +19,7 @@ from urllib.parse import urlsplit
 import aiohttp
 from aiohttp import WSMsgType, web
 
-from puppy import (__version__, config, db, live_websockets, protocol, runner,
+from puppy import (__version__, operations, config, db, live_websockets, protocol, runner,
                    tls, upgrade_contract)
 
 log = logging.getLogger("puppy.backends")
@@ -814,6 +814,46 @@ def _normalize_peer(data: dict) -> dict:
 
 
 async def notify_exec(bid: int, command: str, info: dict) -> dict:
+    be = get_backend(bid)
+    if not operations.active() or not be:
+        return await _notify_exec(bid, command, info)
+    if operations.CAPABILITY not in _backend_capabilities(be):
+        # An older node cannot revoke a submitted shell command.
+        operations.commit()
+        return await _notify_exec(bid, command, info)
+    identity = secrets.token_hex(24)
+    task = asyncio.create_task(_notify_exec(bid, command, info, identity))
+    try:
+        return await operations.wait(asyncio.shield(task))
+    except (operations.Cancelled, asyncio.CancelledError):
+        error = None
+        for url in _ordered_backend_urls(be):
+            try:
+                async with client().delete(
+                        url + "/api/operations/" + identity,
+                        headers={"X-Puppy-Token": be["token"]},
+                        timeout=aiohttp.ClientTimeout(total=10), allow_redirects=False,
+                        ssl=_ssl_pin(be.get("tls_fingerprint") or "")) as response:
+                    if response.status != 200:
+                        raise RuntimeError("backend refused cancellation")
+                error = None
+                break
+            except Exception as exc:
+                error = exc
+        if error is not None:
+            raise RuntimeError("Could not confirm cancellation on the command backend") from error
+        result = await task
+        if not result.get("cancelled") and not result.get("ok"):
+            raise RuntimeError("Command backend did not confirm cancellation: " +
+                               str(result.get("error") or "request failed"))
+        raise
+    finally:
+        # The remote command has a fixed bound even if cancellation loses its
+        # reply; never leave an unobserved controller request behind.
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def _notify_exec(bid: int, command: str, info: dict, operation_id="") -> dict:
     """Run an expanded completion command on a paired backend. Same transport
     rules as every other backend call: token auth, no redirects, pinned TLS."""
     be = get_backend(bid)
@@ -828,7 +868,8 @@ async def notify_exec(bid: int, command: str, info: dict) -> dict:
             async with client().post(
                     url + "/api/notify/exec",
                     json={"command": command, "info": info},
-                    headers={"X-Puppy-Token": be["token"]},
+                    headers={"X-Puppy-Token": be["token"],
+                             **({operations.HEADER: operation_id} if operation_id else {})},
                     timeout=aiohttp.ClientTimeout(
                         total=45, connect=FAILOVER_CONNECT_TIMEOUT,
                         sock_connect=FAILOVER_CONNECT_TIMEOUT),
@@ -840,6 +881,10 @@ async def notify_exec(bid: int, command: str, info: dict) -> dict:
                             "error": "%s cannot run commands (upgrade it, or its shell "
                                      "surface is disabled)" % be["name"]}
                 if response.status != 200:
+                    if operation_id and response.status == 409:
+                        data = await response.json()
+                        if isinstance(data, dict) and data.get("cancelled") is True:
+                            return {"ok": False, "cancelled": True}
                     return {"ok": False,
                             "error": "%s returned %s" % (be["name"], response.status)}
                 data = await response.json()
@@ -1186,14 +1231,14 @@ def _build_upgrade_payload() -> tuple:
     with tempfile.TemporaryDirectory(prefix="build-", dir=str(work_root)) as temporary:
         temp_dir = Path(temporary)
         artifact = temp_dir / "puppy-backend.pyz"
-        built = subprocess.run(
+        built = operations.run_process(
             [sys.executable, str(build_script), "--output", str(artifact)],
             cwd=str(root), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, timeout=60)
         if built.returncode != 0:
             raise RuntimeError("backend build failed: " + built.stdout[-800:].strip())
         smoke_data = temp_dir / "smoke-data"
-        checked = subprocess.run(
+        checked = operations.run_process(
             [sys.executable, str(artifact), "self-test", "--data-dir", str(smoke_data)],
             cwd=str(root), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, timeout=30)
@@ -1276,6 +1321,7 @@ async def h_list(request: web.Request):
     return web.json_response({"backends": list_backends()})
 
 
+@operations.cancellable
 async def h_add(request: web.Request):
     try:
         body = await request.json()
@@ -1300,7 +1346,7 @@ async def h_add(request: web.Request):
         return web.json_response({"error": str(exc)}, status=400)
     if not token:
         return web.json_response({"error": "API token is required"}, status=400)
-    result = await probe_backend_urls(urls, token, tls_fingerprint)
+    result = await operations.wait(probe_backend_urls(urls, token, tls_fingerprint))
     if not result["ok"]:
         return web.json_response({"error": result.get("error", "backend test failed"),
                                   "status": result.get("status"),
@@ -1319,6 +1365,7 @@ async def h_add(request: web.Request):
             "error": "automatic upgrades require an upgrade-capable headless backend"
         }, status=409)
     api_protocol, capabilities, remote_version, role = _metadata(remote)
+    operations.commit()
     bid = db.execute(
         "INSERT INTO backends(name,url,urls,token,protocol,capabilities,remote_version,role,"
         "tls_fingerprint,auto_upgrade,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
@@ -1338,6 +1385,7 @@ async def h_add(request: web.Request):
                               "backend": added_backend})
 
 
+@operations.cancellable
 async def h_patch(request: web.Request):
     bid = int(request.match_info["bid"])
     backend = get_backend(bid)
@@ -1401,7 +1449,7 @@ async def h_patch(request: web.Request):
         if active_url in probe_urls:
             probe_urls.remove(active_url)
             probe_urls.insert(0, active_url)
-        result = await probe_backend_urls(probe_urls, token, tls_fingerprint)
+        result = await operations.wait(probe_backend_urls(probe_urls, token, tls_fingerprint))
         if not result["ok"]:
             return web.json_response({
                 "error": result.get("error", "backend test failed"),
@@ -1436,6 +1484,7 @@ async def h_patch(request: web.Request):
         capabilities = str(backend.get("capabilities") or "[]")
         remote_version = str(backend.get("remote_version") or "")
         role = str(backend.get("role") or "")
+    operations.commit()
     db.execute(
         "UPDATE backends SET name=?,url=?,urls=?,token=?,protocol=?,capabilities=?,"
         "remote_version=?,role=?,tls_fingerprint=?,auto_upgrade=? WHERE id=?",
@@ -1492,12 +1541,13 @@ async def h_delete(request: web.Request):
     return web.json_response({"ok": True})
 
 
+@operations.cancellable
 async def h_test(request: web.Request):
     bid = int(request.match_info["bid"])
     be = get_backend(bid)
     if be is None:
         return web.json_response({"error": "unknown backend"}, status=404)
-    result = await probe_configured_backend(be)
+    result = await operations.wait(probe_configured_backend(be))
     changed = bool(result.get("active_changed"))
     if result["ok"]:
         changed = _store_metadata(bid, result["remote"]) or changed
@@ -1541,7 +1591,7 @@ async def upgrade_backend(bid: int, remote_hint=None) -> dict:
     try:
         remote = remote_hint
         if remote is None:
-            current = await probe_configured_backend(be)
+            current = await operations.wait(probe_configured_backend(be))
             if not current["ok"]:
                 _mark_backend_offline(
                     bid, current.get("error", "backend is unavailable"))
@@ -1571,7 +1621,7 @@ async def upgrade_backend(bid: int, remote_hint=None) -> dict:
 
         loop = asyncio.get_running_loop()
         try:
-            payload, manifest = await loop.run_in_executor(None, _build_upgrade_payload)
+            payload, manifest = await operations.to_thread(_build_upgrade_payload)
         except Exception as exc:
             log.exception("backend release build failed")
             raise BackendUpgradeError(str(exc), 500) from exc
@@ -1581,6 +1631,7 @@ async def upgrade_backend(bid: int, remote_hint=None) -> dict:
             upgrade_contract.MANIFEST_HEADER: upgrade_contract.encode_manifest(manifest),
             upgrade_contract.SIGNATURE_HEADER: upgrade_contract.sign(be["token"], manifest, payload),
         }
+        operations.commit()
         urls = _ordered_backend_urls(be)
         for index, url in enumerate(urls):
             target = url.rstrip("/") + protocol.UPGRADE_API_PATH
@@ -1657,6 +1708,7 @@ async def upgrade_backend(bid: int, remote_hint=None) -> dict:
         _broadcast_backends()
 
 
+@operations.cancellable
 async def h_upgrade(request: web.Request):
     try:
         bid = int(request.match_info["bid"])

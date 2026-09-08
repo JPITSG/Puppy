@@ -15,7 +15,7 @@ import shutil
 import stat
 import tempfile
 
-from puppy import config, db
+from puppy import config, db, operations
 
 log = logging.getLogger("puppy.workspaces")
 
@@ -189,7 +189,7 @@ def _copy_to_directory(source: Path, destination: Path) -> None:
     """Reserve an unused destination; leave the original intact until DB commit."""
     destination.mkdir(mode=0o700)  # Exclusive: never merge with existing files.
     try:
-        shutil.copytree(str(source), str(destination), symlinks=True, dirs_exist_ok=True)
+        shutil.copytree(str(source), str(destination), symlinks=True, dirs_exist_ok=True, copy_function=operations.copy2)
     except BaseException:
         shutil.rmtree(str(destination))
         raise
@@ -231,11 +231,12 @@ async def move_session(sid: int, destination) -> dict:
         async with session_tasks.workspace_operation(str(source)):
             async with session_tasks.workspace_operation(str(target)):
                 loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, _copy_to_directory, source, target)
+                await operations.to_thread(_copy_to_directory, source, target)
                 try:
+                    operations.commit()
                     db.touch_session(sid, cwd=str(target), workspace_kind=KIND_DIRECTORY,
                                      native_session_id="", last_model="")
-                except Exception:
+                except BaseException:
                     await loop.run_in_executor(None, shutil.rmtree, str(target))
                     raise
                 # Commit precedes reclamation: failed cleanup must never undo a

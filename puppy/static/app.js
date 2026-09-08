@@ -2247,17 +2247,40 @@ function apiPath(bid, path) {
   return bid ? `/api/b/${bid}/${path}` : `/api/${path}`;
 }
 async function api(bid, path, opts = {}) {
+  if (opts.readOperation) {
+    const { readOperation, ...request } = opts;
+    return browserReadRequest(readOperation, signal => api(bid, path, { ...request, signal }));
+  }
+  if (opts.operation) {
+    const { operation, cancelClose, ...request } = opts;
+    const backend = state.backends.find(item => item.id === Number(bid));
+    if (!bid || backendHasCapability(backend, "operation-cancel-v1"))
+      return operationRequest(bid, path, request, operation, cancelClose);
+    return api(bid, path, request);
+  }
   const o = { headers: {}, ...opts };
+  const noAuthRedirect = o.noAuthRedirect === true;
+  delete o.noAuthRedirect;
   const timeoutMs = Math.max(0, Number(o.timeoutMs) || 0);
   delete o.timeoutMs;
   let timeout = null;
-  let controller = null;
-  if (timeoutMs && !o.signal && typeof AbortController !== "undefined") {
+  let controller = null, externalAbort = null;
+  const externalSignal = o.signal;
+  if (timeoutMs && typeof AbortController !== "undefined") {
     controller = new AbortController();
+    const external = o.signal;
+    if (external) {
+      if (external.aborted) controller.abort();
+      else {
+        externalAbort = () => controller.abort();
+        external.addEventListener("abort", externalAbort, { once: true });
+      }
+    }
     o.signal = controller.signal;
     timeout = setTimeout(() => controller.abort(), timeoutMs);
   }
-  if (o.body !== undefined && typeof o.body !== "string") {
+  if (o.body !== undefined && typeof o.body !== "string" &&
+      !(typeof Blob !== "undefined" && o.body instanceof Blob)) {
     o.body = JSON.stringify(o.body);
     o.headers["Content-Type"] = "application/json";
   }
@@ -2266,26 +2289,157 @@ async function api(bid, path, opts = {}) {
     try {
       r = await fetch(apiPath(bid, path), o);
     } catch (e) {
+      if (opts.signal && opts.signal.aborted) throw Object.assign(new Error("Request cancelled"), { cancelled: true });
       if (controller && controller.signal.aborted) throw new Error("request timed out");
       throw new Error("network error");
     }
     /* A proxied backend can reject its controller token with 401 while this
        browser's local session remains perfectly valid. Only a local 401 means
        the WebUI itself must return to the sign-in screen. */
-    if (r.status === 401 && !bid) { showAuth(); throw new Error("auth required"); }
+    if (r.status === 401 && !bid) {
+      if (!noAuthRedirect) showAuth();
+      throw new Error("auth required");
+    }
     let data = null;
-    try { data = await r.json(); } catch (e) { /* non-json */ }
+    try { data = await r.json(); } catch (e) {
+      if (o.signal && o.signal.aborted) {
+        if (opts.signal && opts.signal.aborted)
+          throw Object.assign(new Error("Request cancelled"), { cancelled: true });
+        throw new Error("request timed out");
+      }
+    }
     if (!r.ok) {
       const error = new Error((data && data.error) || `HTTP ${r.status}`);
       error.status = r.status;
       error.data = data;
+      error.cancelled = !!(data && data.cancelled);
       throw error;
     }
     return data;
   } finally {
     if (timeout !== null) clearTimeout(timeout);
+    if (externalAbort) externalSignal.removeEventListener("abort", externalAbort);
   }
 }
+/* Nothing a progress dialog offers is worth showing for work that is over
+   before it is read: a Cancel-only surface waits out CANCEL_DIALOG_DELAY and
+   is built only if the request is still running, so a quick operation never
+   flashes one. `build` wires the dialog up at that moment; closing earlier
+   simply drops the appointment. */
+const CANCEL_DIALOG_DELAY = 5000;
+function deferredDialog(build) {
+  let dialog = null;
+  const timer = setTimeout(() => { dialog = build(); }, CANCEL_DIALOG_DELAY);
+  return { close: () => {
+    clearTimeout(timer);
+    if (dialog) { dialog.close(); dialog = null; }
+  } };
+}
+
+/* Read-only browser checks can abort their own HTTP wait immediately. */
+async function browserReadRequest(title, run) {
+  const controller = new AbortController();
+  const dialog = deferredDialog(() => {
+    const record = modal(`<h2>${esc(title)}</h2>
+      <p class="modal-copy">Waiting for a response…</p>
+      <div class="m-btns"><button type="button" class="btn read-cancel">Cancel</button></div>`);
+    const cancel = () => { controller.abort(); dialog.close(); };
+    const button = record.m.querySelector(".read-cancel");
+    button.onclick = cancel; record.onDismiss(cancel); button.focus();
+    return record;
+  });
+  try {
+    const result = await run(controller.signal);
+    if (controller.signal.aborted) throw new Error("Request cancelled");
+    return result;
+  } catch (error) {
+    if (controller.signal.aborted) error.cancelled = true;
+    throw error;
+  } finally { dialog.close(); }
+}
+
+/* One progress dialog for audited backend operations. Cancel is a separate
+   authenticated request: aborting fetch alone does not stop a server or a
+   worker thread. A commit changes the action to Close, never claims rollback.
+   The dialog is deferred like every other cancel surface, so its state is read
+   from the moment it opens rather than from the moment the request started. */
+async function operationRequest(bid, path, opts, title, cancelClose) {
+  const identity = newDraftClientId();
+  const controlPath = `operations/${encodeURIComponent(identity)}`;
+  let done = false, finishing = false, cancelling = false, cancelAccepted = false, poll = null;
+  let m = null, button = null, note = null, errorLine = null, close = null;
+  const live = () => !done && m !== null && m.isConnected;
+  const paint = value => {
+    if (!live()) return;
+    if (value.state === "finishing" || value.state === "finished") {
+      finishing = true;
+      button.disabled = false;
+      button.textContent = "Close";
+      note.textContent = "Finishing · this step can no longer be cancelled";
+    } else if (value.state === "cancelling") {
+      cancelAccepted = true;
+      button.disabled = true;
+      note.textContent = "Cancelling · waiting for cleanup…";
+    }
+  };
+  const cancel = async () => {
+    if (done || cancelling || cancelAccepted) return;
+    if (finishing) { close(); return; }
+    cancelling = true; button.disabled = true;
+    errorLine.classList.add("hidden");
+    try { paint(await api(bid, controlPath, { method: "DELETE", timeoutMs: 10000, noAuthRedirect: true })); }
+    catch (error) {
+      if (live()) {
+        errorLine.textContent = `Could not cancel · ${error.message} · try again`;
+        errorLine.classList.remove("hidden");
+        button.disabled = false;
+      }
+    } finally { cancelling = false; }
+  };
+  const check = async () => {
+    if (!live()) return;
+    try { paint(await api(bid, controlPath, { timeoutMs: 5000, noAuthRedirect: true })); }
+    catch (_) { /* The operation response and explicit Cancel report failures. */ }
+    if (live() && !finishing) poll = setTimeout(check, 1000);
+  };
+  const dialog = deferredDialog(() => {
+    const record = modal(`<h2>${esc(title)}</h2>
+      <p class="modal-copy" role="status">Working…</p>
+      <p class="hint">Cancel stops preparation and cleans up temporary work. Once changes are being saved, that step finishes safely.</p>
+      <p class="form-error hidden" role="alert"></p>
+      <div class="m-btns"><button type="button" class="btn operation-cancel">Cancel</button></div>`);
+    m = record.m; close = record.close;
+    button = m.querySelector(".operation-cancel");
+    note = m.querySelector(".modal-copy");
+    errorLine = m.querySelector(".form-error");
+    button.onclick = cancel;
+    record.onDismiss(cancel);
+    button.focus();
+    /* it opens into an operation already under way, so read the state now */
+    check();
+    return record;
+  });
+  try {
+    return await api(bid, path, { ...opts,
+      headers: { ...(opts.headers || {}), "X-Puppy-Operation": identity } });
+  } catch (error) {
+    if (error.cancelled) {
+      error.cancelled = true;
+      if (cancelClose) cancelClose();
+    } else if (!error.status) {
+      // A lost reply is not proof the operation stopped. Ask the owner to
+      // cancel preparation; it will refuse if an atomic commit has begun.
+      try { await api(bid, controlPath, { method: "DELETE", timeoutMs: 10000, noAuthRedirect: true }); }
+      catch (_) { error.message += " · cancellation could not be confirmed"; }
+    }
+    throw error;
+  } finally {
+    done = true;
+    if (poll !== null) clearTimeout(poll);
+    dialog.close();
+  }
+}
+
 function wsUrl(bid, path) {
   const proto = location.protocol === "https:" ? "wss://" : "ws://";
   return proto + location.host + apiPath(bid, path);
@@ -4343,13 +4497,13 @@ async function openNewBrowser(bid, groupId = null) {
   }
   try {
     const result = await api(bid, "browser/instances", {
-      method: "POST", body: {}, timeoutMs: 45000,
+      method: "POST", body: {}, timeoutMs: 45000, operation: "Opening browser",
     });
     const browserId = String(result && result.browser && result.browser.id || "").toUpperCase();
     if (!/^[A-Z0-9]{4}$/.test(browserId))
       throw new Error("backend returned an invalid browser ID");
     openBrowserTab(bid, browserId, groupId);
-  } catch (error) {
+  } catch (error) { if (error.cancelled) return;
     toast(`${backendName(bid)}: ${error.message || "Could not open browser"}`,
       "bad", TOAST_LONG);
   }
@@ -4676,6 +4830,7 @@ function modalMoveWorkspace(bid, session) {
     try {
       const result = await api(bid, `sessions/${session.id}/workspace/move`, {
         method: "POST", body: { destination: input.value.trim() },
+        operation: "Moving scratch workspace", cancelClose: close, timeoutMs: 180000,
       });
       const view = sessionViewFor(bid, session.id);
       if (view) { view.session = result.session; view.updateHead(); }
@@ -4683,6 +4838,7 @@ function modalMoveWorkspace(bid, session) {
       close();
       toast(`${backendName(bid)}: Project moved to ${result.session.cwd}`, "ok");
     } catch (failure) {
+      if (failure.cancelled) return;
       error.textContent = failure.message;
       error.classList.remove("hidden");
     } finally {
@@ -6273,13 +6429,14 @@ async function refreshEngineVersions(bid, button, nodeName) {
   let feedback = null;
   try {
     const result = await api(bid, "engines/refresh",
-      { method: "POST", timeoutMs: ENGINE_REFRESH_TIMEOUT });
+      { method: "POST", timeoutMs: ENGINE_REFRESH_TIMEOUT, operation: "Refreshing engines" });
     applyEnginesPayload(bid, result);
     feedback = engineRefreshFeedback(nodeName, result);
     /* A refresh that ran but reported problems is a caveat, not a failure. */
     toast(feedback.text, feedback.ok ? "ok" : "warn",
       feedback.ok ? TOAST_SHORT : TOAST_LONG);
   } catch (error) {
+    if (error.cancelled) return;
     feedback = engineRefreshFeedback(nodeName, null, error.message || "request failed");
     toast(feedback.text, "bad", TOAST_LONG);
   } finally {
@@ -8336,6 +8493,205 @@ function dismissMenusOutside(event) {
 for (const kind of ["pointerdown", "focusin", "click"])
   document.addEventListener(kind, dismissMenusOutside, true);
 
+/* Under the anchor, or at a point when one was given. */
+function placeChoiceMenu(menu, anchor, at) {
+  if (!at) { positionChoiceMenu({ menu, button: anchor }); return; }
+  menu.style.visibility = "hidden";
+  menu.style.position = "fixed";
+  menu.style.right = "auto";
+  menu.style.bottom = "auto";
+  menu.style.left = "0px";
+  menu.style.top = "0px";
+  const edge = 8, gap = 4;
+  const width = menu.offsetWidth, height = menu.offsetHeight;
+  const left = Math.max(edge, Math.min(at.x, window.innerWidth - width - edge));
+  let top = at.y + gap;
+  if (top + height > window.innerHeight - edge)
+    top = Math.max(edge, at.y - height - gap);
+  menu.style.left = Math.round(left) + "px";
+  menu.style.top = Math.round(top) + "px";
+  menu.style.visibility = "visible";
+}
+
+/* An open menu re-reads its own live spec: a payload that lands while the
+   list is up (a model catalog, an engine's tools) redraws it in place. */
+function syncOpenChoiceMenus() {
+  for (const menu of document.querySelectorAll(".choice-menu.dyn"))
+    if (typeof menu.sync === "function") menu.sync();
+}
+
+/* A choice menu opens on its current value: highlighted, focused, checked.
+   An action menu ({actions: true}) has no current value, so nothing is
+   highlighted until the pointer or the arrow keys reach a row. `at` opens the
+   menu at a point (a right-click) instead of under its anchor, which still
+   owns the menu's label, its toggle and where focus returns.
+   Every host opens its menus through here: the composer's own tools list and
+   the session's choices are one implementation, not two that drift. */
+function openChoiceMenu(anchor, { opts = [], current = "", onPick = () => {},
+  actions = false, checks = [], footers = [], live = null,
+  ownerView = null, at = null, label = "" } = {}) {
+  if (closeAllMenus(anchor)) return null;
+  const menu = el("div", "choice-menu composer-choice-menu dyn");
+  menu._ownerView = ownerView;
+  menu._anchor = anchor;
+  menu.setAttribute("role", footers.length ? "group" : actions ? "menu" : "listbox");
+  menu.setAttribute("aria-label", label ||
+    anchor.getAttribute("aria-label") || tips.text(anchor) || "Choices");
+  menu.style.visibility = "hidden";
+  anchor.setAttribute("aria-haspopup", actions ? "menu" : "listbox");
+  anchor.setAttribute("aria-expanded", "true");
+  let list = menu;
+  const rows = [];
+  const dismiss = (returnFocus = false) => {
+    menu.remove();
+    anchor.setAttribute("aria-expanded", "false");
+    if (returnFocus && anchor.isConnected) anchor.focus();
+  };
+  const highlight = (index) => rows.forEach((row, i) => row.classList.toggle("active", i === index));
+  /* where the highlight belongs with no pointer on the menu: the row the keys
+     are on, else the current value - the state the menu opened in */
+  const resting = () => {
+    const focused = rows.indexOf(document.activeElement);
+    if (focused >= 0) return focused;
+    if (actions) return -1;
+    const selectedAt = rows.findIndex(row => row.classList.contains("selected"));
+    return selectedAt >= 0 ? selectedAt : 0;
+  };
+  let signature = "";
+  menu.sync = () => {
+    if (live) {
+      const spec = live();
+      opts = spec.opts; current = spec.current;
+      checks = spec.checks || []; footers = spec.footers || [];
+    }
+    const next = JSON.stringify([opts, current, checks, footers.map(item => item.label)]);
+    if (signature === next) return;
+    signature = next;
+    const focused = rows.indexOf(document.activeElement);
+    const focusKey = focused < 0 ? null : rows[focused]._choiceKey;
+    const scrollTop = menu.scrollTop;
+    menu.replaceChildren();
+    menu.setAttribute("role", footers.length ? "group" : actions ? "menu" : "listbox");
+    list = footers.length ? el("div") : menu;
+    if (list !== menu) {
+      list.setAttribute("role", actions ? "menu" : "listbox");
+      list.setAttribute("aria-label", menu.getAttribute("aria-label"));
+      menu.appendChild(list);
+    }
+    rows.length = 0;
+    opts.forEach((o, index) => {
+      const selected = !actions && current === o.value;
+      const row = choiceOptionNode(o.label, selected);
+      row._choiceKey = "option:" + o.value;
+      if (actions) {
+        row.setAttribute("role", "menuitem");
+        row.removeAttribute("aria-selected");
+      }
+      if (o.hint) row.title = o.hint;
+      row.disabled = !!o.disabled;
+      row.tabIndex = selected ? 0 : -1;
+      row.onmouseenter = () => highlight(index);
+      row.onfocus = row.onmouseenter;
+      row.onclick = (event) => {
+        event.stopPropagation();
+        if (o.disabled) return;
+        dismiss(true);
+        onPick(o.value);
+      };
+      rows.push(row);
+      list.appendChild(row);
+    });
+    if (checks.length && rows.length)
+      menu.appendChild(el("div", "menu-sep"));
+    checks.forEach((item) => {
+      const index = rows.length;
+      const row = menuCheckRow(item.label, !!item.on, () => {});
+      row._choiceKey = "check:" + item.label;
+      row.classList.add("choice-option");
+      if (item.hint) row.title = item.hint;
+      row.disabled = !!item.disabled;
+      row.tabIndex = -1;
+      row.onmouseenter = () => highlight(index);
+      row.onfocus = row.onmouseenter;
+      row.onclick = (event) => {
+        event.stopPropagation();
+        if (item.disabled) return;
+        dismiss(true);
+        item.onToggle();
+      };
+      rows.push(row);
+      menu.appendChild(row);
+    });
+    if (footers.length && rows.length) menu.appendChild(el("div", "menu-sep"));
+    footers.forEach(item => {
+      const index = rows.length;
+      const row = el("button", "choice-option", item.label);
+      row._choiceKey = "footer:" + item.label;
+      row.type = "button";
+      row.tabIndex = -1;
+      row.onmouseenter = () => highlight(index);
+      row.onfocus = row.onmouseenter;
+      row.onclick = event => {
+        event.stopPropagation();
+        dismiss(true);
+        item.run();
+      };
+      rows.push(row);
+      menu.appendChild(row);
+    });
+    if (!rows.length) menu.appendChild(el("span", "choice-empty", "No choices available"));
+    highlight(resting());
+    if (menu.isConnected) {
+      placeChoiceMenu(menu, anchor, at);
+      if (focusKey !== null) {
+        const target = rows.find(row => row._choiceKey === focusKey && !row.disabled);
+        menu.tabIndex = -1;
+        (target || menu).focus({ preventScroll: true });
+      }
+      menu.scrollTop = scrollTop;
+    }
+  };
+  menu.sync();
+  menu.onkeydown = (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      dismiss(true);
+      return;
+    }
+    if (event.key === "Tab") {
+      dismiss();
+      return;
+    }
+    const enabled = rows.filter(row => !row.disabled);
+    if (!enabled.length) return;
+    const at = enabled.indexOf(document.activeElement);
+    let next = null;
+    if (event.key === "ArrowDown") next = at < 0 ? 0 : (at + 1) % enabled.length;
+    else if (event.key === "ArrowUp")
+      next = at < 0 ? enabled.length - 1 : (at - 1 + enabled.length) % enabled.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = enabled.length - 1;
+    if (next !== null) {
+      event.preventDefault();
+      rows.forEach(row => { row.tabIndex = row === enabled[next] ? 0 : -1; });
+      enabled[next].focus();
+    }
+  };
+  /* the pointer takes its highlight with it when it goes */
+  menu.onmouseleave = () => highlight(resting());
+  menu.onclick = (event) => event.stopPropagation();
+  document.body.appendChild(menu);
+  const openAt = resting();
+  highlight(openAt);
+  if (actions || !rows.length) menu.tabIndex = -1;   // the keys land on the menu
+  requestAnimationFrame(() => {
+    if (!menu.isConnected) return;
+    placeChoiceMenu(menu, anchor, at);
+    (rows[openAt] || menu).focus({ preventScroll: true });
+  });
+  return menu;
+}
+
 /* ================= composer @-mentions ================= */
 /* Typing "@" in the chat box offers what the agent's Puppy MCP tools can be
    pointed at: the live managed browsers and shared terminals on the session's
@@ -8413,6 +8769,470 @@ function spawnEffortOptionsFor(engine, modelOption) {
   return options.filter(option => option && typeof option.value === "string");
 }
 
+/* ================= spell check ================= */
+/* Puppy checks its own spelling. Every prompt box switches the browser's
+   checker off (spellcheck="false", autocorrect="off"), so one console reads
+   the same on a desktop, a phone and a kiosk, and the words it knows are the
+   words shipped with this release rather than whatever dictionary the
+   visiting browser happens to own. Nothing here reaches the network beyond
+   one authenticated fetch of the bundled asset, and nothing typed at an agent
+   is ever sent anywhere to be checked.
+
+   The dictionary is `puppy/static/dict/en.txt`, generated from a pinned SCOWL
+   release by `tools/build_dictionary.py` and checked in beside the code. Its
+   shape is exact and versioned - a header, a declared count, one sorted word
+   per line with an optional rank digit - and a file that does not match is
+   refused rather than repaired: the checker simply stays off. It is fetched
+   once per console, lazily, the first time a prompt box with spell check on
+   exists, so a console that never types pays nothing for it.
+
+   The word list lives in the browser as the file's own text plus an index of
+   line starts, and every question is a binary search over it: 128k words cost
+   about 1.5 MB and no per-word JS object. A rank digit marks the words common
+   enough to be offered first and to be corrected INTO; an unranked word is
+   still spelled correctly, it is just never something Puppy will type for
+   you.
+
+   Two independent switches, both per browser and both in every prompt box's
+   tools menu:
+     spell check   underlines what it does not know
+     autocorrect   replaces a clear single-candidate typo as you finish the
+                   word; forced off and unavailable while spell check is off,
+                   because a correction you cannot see marked is not a
+                   correction you can trust. */
+
+const SPELL_DICTIONARY_URL = "/static/dict/en.txt";
+const SPELL_DICTIONARY_HEAD = "#puppy-dictionary 1 en";
+const SPELL_PREF_CHECK = "puppy.spellcheck";
+const SPELL_PREF_CORRECT = "puppy.autocorrect";
+const SPELL_PERSONAL_KEY = "puppy.dictionary";
+const SPELL_MAX_CHARS = 20000;      // a longer draft is left alone entirely
+const SPELL_DRAW_DELAY = 140;       // typing settles before the marks move
+const SPELL_RETRY_MS = 60000;       // a failed dictionary fetch may be retried
+const SPELL_SUGGESTIONS = 6;
+const SPELL_RANK_RARE = 5;          // a known word carrying no rank digit
+/* What each way of being wrong costs. A transposition and a missing
+   apostrophe are the typist's fault rather than the speller's, so they win
+   against a substitution that would produce a different word entirely. */
+const SPELL_COST = { swap: 0, apostrophe: 0, sub: 1, ins: 1, del: 1, far: 2 };
+/* Rank breaks ties between candidates the same distance away; it is kept
+   small enough that a rarer word one edit off still beats a common word two
+   edits off, which is how a name survives beside everyday prose. */
+const SPELL_RANK_COST = 0.15;
+const SPELL_CORRECT_MARGIN = 0.9;   // an autocorrection must beat the next best by this
+const SPELL_EDIT_LETTERS = "abcdefghijklmnopqrstuvwxyz";
+/* Letters, the accented Latin ones a dictionary word may carry, and the
+   apostrophes that hold a contraction or a possessive together. */
+const SPELL_LETTER = "A-Za-z\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u024F";
+const SPELL_WORD_SOURCE =
+  "[" + SPELL_LETTER + "]+(?:['\u2019][" + SPELL_LETTER + "]+)*['\u2019]?";
+const SPELL_WORD_RE = new RegExp(SPELL_WORD_SOURCE, "g");
+const SPELL_WORD_TAIL_RE = new RegExp(SPELL_WORD_SOURCE + "$");
+/* Finishing a word: the keystroke that can trigger an autocorrection. */
+const SPELL_BOUNDARY_RE = /[\s.,;:!?)\]}"…]/;
+/* The edits a person makes with the keyboard. A paste or a drop is not one. */
+const SPELL_TYPED_INPUT = new Set(["insertText", "insertLineBreak", "insertParagraph"]);
+/* A neighbour that makes the run around a word code, a path or an address
+   rather than prose. Sentence punctuation is deliberately absent: a full stop
+   ends most sentences and must not silence the word before it. */
+const SPELL_CODE_BEFORE_RE = /[0-9_@#$%&/\\+=<>|^{}[\]:.]/;
+const SPELL_CODE_AFTER_RE = /[0-9_@#$%&/\\+=<>|^{}[\](]/;
+
+/* Per browser, like the theme. Exact values, no repair: anything that is not
+   the stored shape reads as the default. */
+const spellPrefs = {
+  check: lsGet(SPELL_PREF_CHECK) !== "0",      // on unless it was switched off
+  correct: lsGet(SPELL_PREF_CORRECT) === "1",  // off unless it was switched on
+};
+
+/* Autocorrect cannot outlive the checker it depends on: switching spell check
+   off switches it off too, and leaves it off until it is asked for again. */
+function setSpellPref(key, on) {
+  spellPrefs[key] = !!on;
+  if (key === "check" && !on) spellPrefs.correct = false;
+  if (key === "correct" && on) spellPrefs.check = true;
+  try {
+    lsSet(SPELL_PREF_CHECK, spellPrefs.check ? "1" : "0");
+    lsSet(SPELL_PREF_CORRECT, spellPrefs.correct ? "1" : "0");
+  } catch (_) { /* storage is optional */ }
+  for (const composer of Composer.live) composer.syncSpell();
+}
+
+/* The two rows every prompt box's tools menu carries. */
+function spellMenuChecks() {
+  const loading = !spellDictionary.data && !!spellDictionary.loading;
+  return [{
+    label: "Spell check", on: spellPrefs.check,
+    hint: spellDictionary.error && spellPrefs.check ?
+      "Could not load the bundled dictionary · " + spellDictionary.error :
+      loading ? "Loading the bundled dictionary…" :
+      "Underline words Puppy's own dictionary does not know",
+    onToggle: () => setSpellPref("check", !spellPrefs.check),
+  }, {
+    label: "Autocorrect", on: spellPrefs.check && spellPrefs.correct,
+    disabled: !spellPrefs.check,
+    hint: spellPrefs.check ? "Fix a clear typo as you finish the word" :
+      "Turn spell check on to use autocorrect",
+    onToggle: () => setSpellPref("correct", !spellPrefs.correct),
+  }];
+}
+
+/* ---- the bundled dictionary ---- */
+
+const spellDictionary = { data: null, loading: null, error: "", failedAt: 0 };
+
+/* The asset exactly as generated, or null. A count that does not match its
+   lines, a missing header, a truncated body: all the same answer. */
+function parseSpellDictionary(text) {
+  if (typeof text !== "string" || !text.startsWith(SPELL_DICTIONARY_HEAD + "\n")) return null;
+  const marker = text.indexOf("\n#words ");
+  if (marker < 0) return null;
+  const eol = text.indexOf("\n", marker + 1);
+  if (eol < 0) return null;
+  const count = Number(text.slice(marker + 8, eol));
+  if (!Number.isSafeInteger(count) || count < 1) return null;
+  const body = text.slice(eol + 1);
+  const starts = new Int32Array(count + 1);
+  let lines = 0, from = 0;
+  while (from < body.length) {
+    if (lines >= count) return null;
+    const nl = body.indexOf("\n", from);
+    if (nl < 0) return null;               // a body that does not end in a newline
+    starts[lines++] = from;
+    from = nl + 1;
+  }
+  if (lines !== count) return null;
+  starts[count] = body.length;
+  return { body, starts, count };
+}
+
+/* One fetch per console, shared by every box, retried no faster than
+   SPELL_RETRY_MS after a failure. */
+function loadSpellDictionary() {
+  if (spellDictionary.data) return spellDictionary.loading;
+  if (spellDictionary.loading) return spellDictionary.loading;
+  if (spellDictionary.error && Date.now() - spellDictionary.failedAt < SPELL_RETRY_MS)
+    return null;
+  spellDictionary.loading = (async () => {
+    try {
+      const response = await fetch(SPELL_DICTIONARY_URL, { credentials: "same-origin" });
+      if (!response.ok) throw new Error("HTTP " + response.status);
+      const parsed = parseSpellDictionary(await response.text());
+      if (!parsed) throw new Error("Unreadable dictionary file");
+      spellDictionary.data = parsed;
+      spellDictionary.error = "";
+    } catch (error) {
+      spellDictionary.error = (error && error.message) || "unavailable";
+      spellDictionary.failedAt = Date.now();
+      /* One notice for the console, not one per box - an identical repeat
+         folds into it - and the menu row keeps the reason afterwards. */
+      toast("Could not load the spelling dictionary · " + spellDictionary.error, "bad");
+    } finally {
+      spellDictionary.loading = null;
+      for (const composer of Composer.live) composer.syncSpell();
+      syncOpenChoiceMenus();   // a tools menu open through the wait says so
+    }
+  })();
+  return spellDictionary.loading;
+}
+
+/* The rank of an exact entry, SPELL_RANK_RARE for a known unranked word,
+   or -1. A binary search over the file's own bytes: no per-word object, and
+   the rank rides along with the answer. */
+function spellEntryRank(word) {
+  const dict = spellDictionary.data;
+  if (!dict || !word) return -1;
+  const { body, starts, count } = dict;
+  let lo = 0, hi = count - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const start = starts[mid];
+    const end = starts[mid + 1] - 1;      // the line without its newline
+    let stop = end, rank = SPELL_RANK_RARE;
+    if (body.charCodeAt(end - 2) === 9) { // "word\tN"
+      stop = end - 2;
+      const digit = body.charCodeAt(end - 1) - 48;
+      if (digit >= 0 && digit < SPELL_RANK_RARE) rank = digit;
+    }
+    const line = body.slice(start, stop);
+    if (line === word) return rank;
+    if (line < word) lo = mid + 1; else hi = mid - 1;
+  }
+  return -1;
+}
+
+/* The dictionary's own spelling of a word typed in any case, with its rank,
+   or null. "london" finds London and "usa" finds USA, because a chat box is
+   not a copy desk; "Teh" finds nothing, because that is a typo either way. */
+function spellLookup(word) {
+  if (!word) return null;
+  const forms = [word];
+  const lower = word.toLowerCase();
+  if (lower !== word) forms.push(lower);
+  const capital = lower.charAt(0).toUpperCase() + lower.slice(1);
+  if (!forms.includes(capital)) forms.push(capital);
+  const upper = word.toUpperCase();
+  if (!forms.includes(upper)) forms.push(upper);
+  for (const form of forms) {
+    const rank = spellEntryRank(form);
+    if (rank >= 0) return { word: form, rank };
+  }
+  return null;
+}
+
+let spellPersonalCache = null;
+function spellPersonalWords() {
+  if (!spellPersonalCache) spellPersonalCache = storedStringSet(SPELL_PERSONAL_KEY);
+  return spellPersonalCache;
+}
+
+/* "Add to dictionary": this browser's own list, kept beside the bundled one
+   and never sent anywhere. */
+function spellRememberWord(word) {
+  const value = String(word || "").toLowerCase();
+  if (!value) return;
+  const words = spellPersonalWords();
+  words.add(value);
+  saveStringSet(SPELL_PERSONAL_KEY, words);
+  for (const composer of Composer.live) composer.spellDraw(true);
+}
+
+/* Is this token spelled? A possessive or a plural possessive is checked on
+   its stem, so "Puppy's" and "the agents'" pass on the words they are made
+   of. With no dictionary loaded nothing is misspelled. */
+function spellWordKnown(word) {
+  if (!spellDictionary.data) return true;
+  if (spellPersonalWords().has(word.toLowerCase())) return true;
+  if (spellLookup(word)) return true;
+  const stem = word.replace(/['’]s$/i, "").replace(/['’]$/, "");
+  return stem !== word && stem.length > 1 && !!spellLookup(stem);
+}
+
+/* ---- what counts as prose ---- */
+
+/* The runs of a prompt that are not English: fenced and inline code, the
+   attachment marker lines the box writes for itself, and the "@" mentions and
+   directives whose wording belongs to an engine's MCP guidance rather than to
+   the language. Returned sorted and merged, so a scan can walk them beside
+   the words. */
+function spellSkipRegions(text) {
+  const skip = [];
+  let fenceAt = -1, fenceMark = "";
+  for (let at = 0; at <= text.length;) {
+    let end = text.indexOf("\n", at);
+    if (end < 0) end = text.length;
+    const line = text.slice(at, end);
+    const fence = /^\s*(`{3,}|~{3,})/.exec(line);
+    if (fenceAt >= 0) {
+      if (fence && fence[1][0] === fenceMark[0]) { skip.push([fenceAt, end]); fenceAt = -1; }
+    } else if (fence) {
+      fenceAt = at;
+      fenceMark = fence[1];
+    } else if (parseAttachmentMarker(line)) {
+      skip.push([at, end]);
+    }
+    at = end + 1;
+  }
+  if (fenceAt >= 0) skip.push([fenceAt, text.length]);   // an open fence runs to the end
+  const inline = /`[^`\n]+`/g;
+  let match;
+  while ((match = inline.exec(text)))
+    skip.push([match.index, match.index + match[0].length]);
+  MENTION_TOKEN_RE.lastIndex = 0;
+  while ((match = MENTION_TOKEN_RE.exec(text))) {
+    const start = match.index + match[1].length;
+    skip.push([start, start + match[2].length]);
+  }
+  skip.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const merged = [];
+  for (const span of skip) {
+    const last = merged[merged.length - 1];
+    if (last && span[0] <= last[1]) last[1] = Math.max(last[1], span[1]);
+    else merged.push([span[0], span[1]]);
+  }
+  return merged;
+}
+
+/* A token is prose when its neighbours are prose. An identifier, a path, a
+   version, a call and a dotted file name all reach a word through a character
+   no sentence puts there, and an acronym or a camelCase name is a word this
+   dictionary was never going to know. */
+function spellProseToken(text, start, end, word) {
+  if (word.length < 2) return false;
+  if (word === word.toUpperCase() && word !== word.toLowerCase()) return false;
+  if (/[a-zß-ɏ][A-Z]/.test(word)) return false;     // camelCase
+  const before = start > 0 ? text[start - 1] : "";
+  const after = end < text.length ? text[end] : "";
+  if (before && SPELL_CODE_BEFORE_RE.test(before)) return false;
+  if (after && SPELL_CODE_AFTER_RE.test(after)) return false;
+  /* "app.js" and "12:30" are not two words; "done." and "note:" are one. */
+  if ((after === "." || after === ":") && /[0-9A-Za-z]/.test(text[end + 1] || "")) return false;
+  return true;
+}
+
+/* Every prose word of a prompt, in order. */
+function spellScanWords(text, visit) {
+  const regions = spellSkipRegions(text);
+  let region = 0;
+  SPELL_WORD_RE.lastIndex = 0;
+  let match;
+  while ((match = SPELL_WORD_RE.exec(text))) {
+    const start = match.index, end = start + match[0].length;
+    while (region < regions.length && regions[region][1] <= start) region++;
+    if (region < regions.length && regions[region][0] < end) continue;
+    if (spellProseToken(text, start, end, match[0])) visit(start, end, match[0]);
+  }
+}
+
+/* [{start, end, word}] for everything the dictionary does not know. */
+function spellMisspellings(text) {
+  const found = [];
+  if (!spellDictionary.data || typeof text !== "string" ||
+      !text || text.length > SPELL_MAX_CHARS) return found;
+  spellScanWords(text, (start, end, word) => {
+    if (!spellWordKnown(word)) found.push({ start, end, word });
+  });
+  return found;
+}
+
+/* ---- corrections ---- */
+
+/* Every word one edit away from this one, mapped to what that edit costs. */
+function spellNeighbours(word) {
+  const out = new Map();
+  const note = (candidate, cost) => {
+    if (!candidate || candidate === word) return;
+    const seen = out.get(candidate);
+    if (seen === undefined || seen > cost) out.set(candidate, cost);
+  };
+  for (let i = 0; i < word.length; i++) {
+    note(word.slice(0, i) + word.slice(i + 1), SPELL_COST.del);
+    if (i + 1 < word.length)
+      note(word.slice(0, i) + word[i + 1] + word[i] + word.slice(i + 2), SPELL_COST.swap);
+    for (const letter of SPELL_EDIT_LETTERS) {
+      if (letter !== word[i]) note(word.slice(0, i) + letter + word.slice(i + 1), SPELL_COST.sub);
+      note(word.slice(0, i) + letter + word.slice(i), SPELL_COST.ins);
+    }
+    if (i > 0) note(word.slice(0, i) + "'" + word.slice(i), SPELL_COST.apostrophe);
+  }
+  for (const letter of SPELL_EDIT_LETTERS) note(word + letter, SPELL_COST.ins);
+  return out;
+}
+
+/* Levenshtein with transpositions, abandoned as soon as it passes `max`.
+   The three rows are reused across calls: the suggestion scan runs this tens
+   of thousands of times and must not allocate on every one. */
+const SPELL_DP_ROWS = [new Int32Array(64), new Int32Array(64), new Int32Array(64)];
+function spellDistance(a, b, max) {
+  const la = a.length, lb = b.length;
+  if (Math.abs(la - lb) > max) return max + 1;
+  if (lb + 1 > SPELL_DP_ROWS[0].length) return max + 1;   // longer than any word here
+  let previous = SPELL_DP_ROWS[0], current = SPELL_DP_ROWS[1], before = SPELL_DP_ROWS[2];
+  for (let j = 0; j <= lb; j++) previous[j] = j;
+  for (let i = 1; i <= la; i++) {
+    current[0] = i;
+    let best = current[0];
+    for (let j = 1; j <= lb; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      let value = Math.min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + cost);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1])
+        value = Math.min(value, before[j - 2] + 1);
+      current[j] = value;
+      if (value < best) best = value;
+    }
+    if (best > max) return max + 1;
+    const spare = before;
+    before = previous;
+    previous = current;
+    current = spare;
+  }
+  return previous[lb];
+}
+
+/* A second pass for a word no single edit reaches: the ranked words only,
+   filtered on length before anything is copied out of the blob. Only the
+   suggestion list pays for this, never a keystroke. */
+function spellScanClose(word, found) {
+  const dict = spellDictionary.data;
+  if (!dict || word.length < 4) return;
+  const { body, starts, count } = dict;
+  const lower = code => (code >= 65 && code <= 90 ? code + 32 : code);
+  const first = word.charCodeAt(0), second = word.charCodeAt(1);
+  for (let i = 0; i < count; i++) {
+    const start = starts[i], end = starts[i + 1] - 1;
+    if (body.charCodeAt(end - 2) !== 9) continue;      // ranked words only
+    const stop = end - 2;
+    const size = stop - start;
+    if (size < word.length - 2 || size > word.length + 2) continue;
+    /* Two edits cannot leave both of the first two letters elsewhere. Read
+       them straight out of the blob, so the vast majority of the dictionary
+       costs two character reads and nothing is copied or compared. */
+    const head = lower(body.charCodeAt(start));
+    if (head !== first && head !== second && lower(body.charCodeAt(start + 1)) !== first)
+      continue;
+    const form = body.slice(start, stop);
+    const candidate = form.toLowerCase();
+    if (found.has(candidate)) continue;
+    if (spellDistance(word, candidate, 2) > 2) continue;
+    const rank = body.charCodeAt(end - 1) - 48;
+    found.set(candidate, {
+      word: form,
+      score: SPELL_COST.far + SPELL_RANK_COST * (rank >= 0 && rank < SPELL_RANK_RARE ?
+        rank : SPELL_RANK_RARE),
+    });
+  }
+}
+
+/* The correction dressed as the word it replaces: a capitalised typo keeps
+   its capital, and a name keeps the dictionary's own. */
+function spellMatchCase(typed, form) {
+  if (/^[A-Z]/.test(typed) && !/^[A-Z]/.test(form))
+    return form.charAt(0).toUpperCase() + form.slice(1);
+  return form;
+}
+
+/* Ranked candidates for a misspelling, best first. */
+function spellSuggestions(word, limit = SPELL_SUGGESTIONS) {
+  if (!spellDictionary.data || !word) return [];
+  const lower = word.toLowerCase();
+  const found = new Map();
+  for (const [candidate, cost] of spellNeighbours(lower)) {
+    const entry = spellLookup(candidate);
+    if (!entry) continue;
+    found.set(candidate, { word: entry.word, score: cost + SPELL_RANK_COST * entry.rank });
+  }
+  if (found.size < limit) spellScanClose(lower, found);
+  return [...found.values()]
+    .map(entry => ({ word: spellMatchCase(word, entry.word), score: entry.score }))
+    .filter(entry => entry.word !== word)
+    .sort((a, b) => a.score - b.score || (a.word < b.word ? -1 : 1))
+    .slice(0, limit);
+}
+
+/* What autocorrect would type, or "". It only ever replaces a word with a
+   RANKED one, and only when a single candidate stands clear of the next: an
+   ambiguous typo is the writer's to resolve, not the console's. */
+function spellAutocorrection(word) {
+  if (!spellDictionary.data || word.length < 3 || spellWordKnown(word)) return "";
+  const lower = word.toLowerCase();
+  const scored = [];
+  const opensLower = word.charAt(0) === word.charAt(0).toLowerCase();
+  for (const [candidate, cost] of spellNeighbours(lower)) {
+    const entry = spellLookup(candidate);
+    if (!entry || entry.rank >= SPELL_RANK_RARE) continue;
+    /* It cannot know you meant the name: autocorrect never capitalises a
+       word for you, so "adn" becomes "and" rather than "Dan". */
+    if (opensLower && entry.word.charAt(0) !== entry.word.charAt(0).toLowerCase()) continue;
+    const shown = spellMatchCase(word, entry.word);
+    if (shown === word) continue;
+    scored.push({ word: shown, score: cost + SPELL_RANK_COST * entry.rank });
+  }
+  if (!scored.length) return "";
+  scored.sort((a, b) => a.score - b.score || (a.word < b.word ? -1 : 1));
+  if (scored.length > 1 && scored[1].score - scored[0].score < SPELL_CORRECT_MARGIN) return "";
+  return scored[0].word;
+}
+
 /* ================= Composer ================= */
 /* The prompt box: the one implementation of everything a place to type at an
    agent needs - the textarea and its autosize, the "@" mention list with its
@@ -8441,6 +9261,12 @@ function spawnEffortOptionsFor(engine, modelOption) {
      beforeResize() / afterResize(token)
                        bracket a height change so the host can keep its own
                        scroll position (optional)
+     tools()           {opts, checks} this host adds to the box's own tools
+                       menu, above the spelling switches every box carries
+                       (optional)
+     runTool(value)    one of those opts was picked (optional)
+     menuOwner()       the view element a menu opened here belongs to, so a
+                       rebuilt workspace takes it down (optional)
      uploadsBlocked()  a reason files cannot be attached through this host
                        beyond the node's own upload policy, or "" (optional)
      privateUploads()  whether staged server files belong to this box alone,
@@ -8452,12 +9278,15 @@ function composerBoxHtml({ id = "", placeholder = "", rows = 1, className = "",
   return `<div class="composer-box${className ? " " + esc(className) : ""}">
     <div class="mention-pop hidden" role="listbox"
       aria-label="Mention a Puppy session, browser, terminal, or spawn"></div>
-    <textarea rows="${Number(rows) || 1}"${id ? ` id="${esc(id)}"` : ""} placeholder="${esc(placeholder)}"></textarea>
+    <textarea rows="${Number(rows) || 1}"${id ? ` id="${esc(id)}"` : ""} placeholder="${esc(placeholder)}"
+      spellcheck="false" autocorrect="off"></textarea>
     <div class="attach-strip hidden"></div>
     <div class="composer-row">
       <div class="composer-meta-viewport edge-scroll-viewport">
         <div class="composer-meta-scroll">
           <button type="button" class="mini attach-add" aria-label="Attach files">
+            <span aria-hidden="true"></span></button>
+          <button type="button" class="mini tools-open" aria-label="Tools">
             <span aria-hidden="true"></span></button>${controls}
         </div>
       </div>${actions}
@@ -8515,6 +9344,18 @@ class Composer {
        untouched. A blur would otherwise take the list down mid-pick. */
     this.mentionEl.addEventListener("pointerdown", (e) => e.preventDefault());
     this.attachButton.firstElementChild.appendChild(plusIcon(12));
+    this.toolsButton = box.querySelector(".tools-open");
+    this.toolsButton.firstElementChild.appendChild(toolsIcon(12));
+    this.toolsButton.onclick = (e) => { e.stopPropagation(); this.showTools(e.currentTarget); };
+    /* ---- spelling ---- */
+    this.spellLayer = null;       // the marks painted under the text
+    this.spellTimer = null;
+    this.spellObserver = null;
+    this.spellEditing = false;    // a correction is being applied through this box
+    this.spellFix = null;         // the last autocorrection, while it can still be undone
+    this.spellRefused = new Set();// words this box was told, by an undo, to leave alone
+    this.ta.addEventListener("scroll", () => this.spellSync(), { passive: true });
+    this.ta.addEventListener("contextmenu", (e) => this.spellContextMenu(e));
     this.ta.addEventListener("paste", (e) => this.handlePaste(e));
     box.addEventListener("dragenter", (e) => this.handleFileDragEnter(e));
     box.addEventListener("dragover", (e) => this.handleFileDragOver(e));
@@ -8545,12 +9386,13 @@ class Composer {
     }
     this._lastTaH = 0;
 
-    this.ta.addEventListener("input", () => {
+    this.ta.addEventListener("input", (event) => {
       this.stopHistory();   // manual edits exit history mode
       this.releaseHistoryAttachments();
       this.resize();
       this.notify(true);
       this.updateMention();
+      this.spellInput(event);
     });
     this.ta.addEventListener("keydown", (e) => this.keydown(e));
     this.ta.addEventListener("compositionstart", () => {
@@ -8577,6 +9419,10 @@ class Composer {
     };
     document.addEventListener("selectionchange", this._onSelectionChange);
     Composer.live.add(this);
+    /* A box existing is what fetches the dictionary: a console that never
+       opens one never pays for it, and one that does has it before the first
+       word is finished. */
+    this.spellDraw();
   }
 
   /* The box whose textarea is `element`, or null. */
@@ -8678,6 +9524,223 @@ class Composer {
     if (resized && this.host.afterResize) this.host.afterResize(anchor);
   }
 
+  /* ---- tools and spelling ---- */
+
+  /* Every box has the same tools button: what its host contributes first
+     (a session's engine tools, its Fast mode), then the spelling switches
+     every box carries. One menu implementation, so a box in a dialog and a
+     box in a chat behave identically. */
+  showTools(anchor) {
+    const spec = () => {
+      const own = (this.host.tools && this.host.tools()) || {};
+      return { opts: own.opts || [], current: "", footers: [],
+               checks: [...(own.checks || []), ...spellMenuChecks()] };
+    };
+    return openChoiceMenu(anchor, { ...spec(), actions: true, live: spec,
+      label: "Tools",
+      onPick: (value) => { if (this.host.runTool) this.host.runTool(value); },
+      ownerView: this.host.menuOwner ? this.host.menuOwner() : null });
+  }
+
+  /* A switch moved, or the dictionary arrived. */
+  syncSpell() {
+    if (!this.closed) this.spellDraw(true);
+  }
+
+  /* Repaint the marks, after the typing settles unless asked for now. The
+     dictionary is fetched the first time a box with spell check on would have
+     used it, so a console that never types never pays for it. */
+  spellDraw(now = false) {
+    if (this.spellTimer) { clearTimeout(this.spellTimer); this.spellTimer = null; }
+    if (this.closed) return;
+    if (!spellPrefs.check) { this.spellClear(); return; }
+    if (!spellDictionary.data) { this.spellClear(); loadSpellDictionary(); return; }
+    if (now) { this.spellPaint(); return; }
+    this.spellTimer = setTimeout(() => {
+      this.spellTimer = null;
+      this.spellPaint();
+    }, SPELL_DRAW_DELAY);
+  }
+
+  spellClear() {
+    if (!this.spellLayer) return;
+    if (this.spellObserver) { this.spellObserver.disconnect(); this.spellObserver = null; }
+    this.spellLayer.remove();
+    this.spellLayer = null;
+  }
+
+  /* The marks are painted on their own layer under the text: the same font,
+     the same wrapping, the same scroll offset and transparent letters, so all
+     that shows through the transparent textarea above it is the underline.
+     A textarea cannot carry marks itself, and a contenteditable box would
+     cost the browser's own caret, undo and IME behaviour. */
+  spellPaint() {
+    const text = this.ta.value;
+    const marks = spellMisspellings(text);
+    if (!marks.length) { this.spellClear(); return; }
+    const layer = this.spellLayer || this.spellLayerNode();
+    const parts = [];
+    let at = 0;
+    for (const mark of marks) {
+      if (mark.start > at) parts.push(document.createTextNode(text.slice(at, mark.start)));
+      parts.push(el("span", "sp-bad", text.slice(mark.start, mark.end)));
+      at = mark.end;
+    }
+    /* the trailing newline keeps a final empty line wrapping like the
+       textarea's, exactly as the autosize mirror does */
+    parts.push(document.createTextNode(text.slice(at) + "\n"));
+    layer.replaceChildren(...parts);
+    this.spellSync();
+  }
+
+  spellLayerNode() {
+    const layer = el("div", "spell-layer");
+    layer.setAttribute("aria-hidden", "true");   // the textarea still carries the text
+    this.box.insertBefore(layer, this.ta);
+    this.spellLayer = layer;
+    /* A box that changes width re-wraps its text without any input event, so
+       the layer follows the element rather than the keystrokes. */
+    if (typeof ResizeObserver === "function") {
+      this.spellObserver = new ResizeObserver(() => this.spellSync());
+      this.spellObserver.observe(this.ta);
+    }
+    return layer;
+  }
+
+  spellSync() {
+    const layer = this.spellLayer;
+    if (!layer || !this.ta.isConnected) return;
+    const ta = this.ta;
+    const cs = getComputedStyle(ta);
+    for (const prop of CARET_MIRROR_STYLES) layer.style[prop] = cs[prop];
+    layer.style.left = ta.offsetLeft + "px";
+    layer.style.top = ta.offsetTop + "px";
+    layer.style.width = ta.offsetWidth + "px";
+    layer.style.height = ta.offsetHeight + "px";
+    layer.scrollTop = ta.scrollTop;
+    layer.scrollLeft = ta.scrollLeft;
+  }
+
+  /* A local edit: notice an undone correction, offer one of our own, repaint.
+     Text arriving any other way - a peer's shared draft, a recalled prompt, a
+     queued message brought back for editing - is marked but never corrected:
+     autocorrect only ever finishes a word the person at this keyboard is in
+     the middle of typing. */
+  spellInput(event) {
+    if (this.closed) return;
+    if (!this.spellEditing) {
+      this.spellNoteUndo();
+      if (spellPrefs.check && spellPrefs.correct && spellDictionary.data)
+        this.spellCorrect(event);
+    }
+    this.spellDraw();
+  }
+
+  /* The original came back (ctrl+z, or retyped): the writer meant that word,
+     so this box stops correcting it. */
+  spellNoteUndo() {
+    const fix = this.spellFix;
+    if (!fix) return;
+    const value = this.ta.value;
+    if (value.slice(fix.start, fix.start + fix.from.length) === fix.from) {
+      this.spellRefused.add(fix.from.toLowerCase());
+      this.spellFix = null;
+    } else if (value.slice(fix.start, fix.start + fix.to.length) !== fix.to) {
+      this.spellFix = null;                  // the text moved on; nothing to undo
+    }
+  }
+
+  /* Finishing a word (a space, a newline, a full stop) is the only moment a
+     correction may happen, and only on the word that just ended. */
+  spellCorrect(event) {
+    if (this.busy || this.composing || this.history) return false;
+    /* Typing, and only typing: a paste, a drop, a deletion and the browser's
+       own replacements all arrive here and all leave the text alone. */
+    const type = event && event.inputType;
+    if (type && !SPELL_TYPED_INPUT.has(String(type))) return false;
+    const data = event && typeof event.data === "string" ? event.data : "";
+    if (data.length > 1 || (data && !SPELL_BOUNDARY_RE.test(data))) return false;
+    const ta = this.ta;
+    if (ta.selectionStart !== ta.selectionEnd) return false;
+    const caret = ta.selectionStart;
+    const text = ta.value;
+    if (caret < 2 || !SPELL_BOUNDARY_RE.test(text.charAt(caret - 1))) return false;
+    const match = SPELL_WORD_TAIL_RE.exec(text.slice(0, caret - 1));
+    if (!match) return false;
+    const word = match[0];
+    const start = caret - 1 - word.length;
+    if (this.spellRefused.has(word.toLowerCase())) return false;
+    if (!spellProseToken(text, start, caret - 1, word)) return false;
+    /* The word first, the surrounding regions only if it is worth correcting:
+       a word the dictionary knows costs one search, not a scan of the draft. */
+    const fix = spellAutocorrection(word);
+    if (!fix) return false;
+    if (spellSkipRegions(text).some(span => span[0] < caret - 1 && span[1] > start))
+      return false;
+    this.spellFix = { start, from: word, to: fix };
+    this.replaceRange(start, caret - 1, fix, caret + fix.length - word.length);
+    return true;
+  }
+
+  /* Replace a run of this box's text as if it had been typed: the browser
+     keeps its own undo stack, so ctrl+z takes a correction straight back, and
+     the ordinary input path resizes the box and persists the draft. */
+  replaceRange(start, end, replacement, caret) {
+    if (this.busy || this.closed) return false;
+    const ta = this.ta;
+    const before = ta.value;
+    this.spellEditing = true;
+    let done = false;
+    try {
+      ta.focus();
+      ta.setSelectionRange(start, end);
+      done = typeof document.execCommand === "function" &&
+        document.execCommand("insertText", false, replacement) && ta.value !== before;
+    } catch (_) { done = false; }
+    if (!done) {
+      ta.value = before.slice(0, start) + replacement + before.slice(end);
+      ta.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    this.spellEditing = false;
+    const at = Math.max(0, Math.min(ta.value.length, Number(caret) || 0));
+    try { ta.setSelectionRange(at, at); } catch (_) {}
+    this.spellDraw(true);
+    return true;
+  }
+
+  /* Right-click (and Android's long press) on a marked word: what Puppy would
+     type instead, and a way to say the word was right all along. Anywhere
+     else in the box the browser's own menu is left alone. */
+  spellContextMenu(event) {
+    if (this.closed || this.busy || !spellPrefs.check || !spellDictionary.data) return;
+    const ta = this.ta;
+    const caret = Math.min(ta.selectionStart, ta.selectionEnd);
+    const hit = spellMisspellings(ta.value)
+      .find(mark => caret >= mark.start && caret <= mark.end);
+    if (!hit) return;
+    event.preventDefault();
+    const suggestions = spellSuggestions(hit.word);
+    openChoiceMenu(ta, {
+      actions: true,
+      label: `Spelling of ${hit.word}`,
+      opts: suggestions.length ?
+        suggestions.map(item => ({ value: item.word, label: item.word })) :
+        [{ value: "", label: "No suggestions", disabled: true }],
+      onPick: (value) => this.spellReplaceWord(hit, value),
+      footers: [{ label: "Add to dictionary", run: () => spellRememberWord(hit.word) }],
+      at: event.clientX > 0 || event.clientY > 0 ?
+        { x: event.clientX, y: event.clientY } : null,
+      ownerView: this.host.menuOwner ? this.host.menuOwner() : null,
+    });
+  }
+
+  spellReplaceWord(hit, replacement) {
+    if (!replacement || this.closed || this.busy) return;
+    if (this.ta.value.slice(hit.start, hit.end) !== hit.word) return;  // the text moved on
+    this.spellFix = null;
+    this.replaceRange(hit.start, hit.end, replacement, hit.start + replacement.length);
+  }
+
   /* ---- the value ---- */
   text() { return this.ta.value; }
 
@@ -8720,6 +9783,9 @@ class Composer {
     this.ta.value = "";
     this.hideMention();
     this.resize();
+    this.spellFix = null;
+    this.spellRefused.clear();   // a new message starts with no refusals
+    this.spellDraw(true);
     this.histDraft = "";
     this.releaseHistoryAttachments();
     return message;
@@ -8753,6 +9819,8 @@ class Composer {
     this.ta.value = v;
     this.ta.selectionStart = this.ta.selectionEnd = v.length;
     this.resize();
+    this.spellFix = null;
+    this.spellDraw();
     scrollCaretIntoView(this.ta);   // recalling a long entry lands on its end
     this.notify(true);
   }
@@ -8947,6 +10015,8 @@ class Composer {
   destroy({ discardUploads = false } = {}) {
     this.stopTyping();
     this.closed = true;
+    if (this.spellTimer) { clearTimeout(this.spellTimer); this.spellTimer = null; }
+    this.spellClear();
     this.stopHistory();
     Composer.live.delete(this);
     this.clearFileDropTarget();
@@ -9034,6 +10104,9 @@ class Composer {
     } catch (_) {}
     this.renderAttachments(false);
     this.resize();
+    /* A peer's draft is marked like any other text; it is never corrected. */
+    this.spellFix = null;
+    this.spellDraw();
   }
 
   /* Recall a sent message: its attachment markers become chips again, and the
@@ -10058,9 +11131,9 @@ function fillAsideAnswer(card, d) {
        message carries its copy control. */
     if (d.text) body.appendChild(asideAnswerCopyButton(d.text));
   } else {
-    card.classList.add("bad");
-    if (state) state.textContent = "unanswered";
-    body.appendChild(el("div", "aside-err",
+    card.classList.add(d.cancelled ? "warn" : "bad");
+    if (state) state.textContent = d.cancelled ? "cancelled" : "unanswered";
+    body.appendChild(el("div", d.cancelled ? "aside-note" : "aside-err",
       d.error || "The question was not answered"));
   }
   card.appendChild(body);
@@ -10517,7 +11590,7 @@ async function confirmTaskRemoval(session) {
 /* Resolves to whether the conversation was folded into Main. */
 async function removeTaskSession(bid, session, choice) {
   const result = await api(bid, `sessions/${session.task.parent}/tasks/${session.id}/remove`,
-    { method: "POST", body: { fold: !!choice.fold }, timeoutMs: 120000 });
+    { method: "POST", body: { fold: !!choice.fold }, timeoutMs: 120000, operation: "Removing task" });
   return !!result.folded;
 }
 async function removeTask(bid, session) {
@@ -10528,7 +11601,7 @@ async function removeTask(bid, session) {
     toast(folded ? "Task folded into Main" : "Task removed", "ok");
     await refreshSessionList(bid);
     renderSidebar();
-  } catch (error) { toast(error.message, "bad"); }
+  } catch (error) { if (!error.cancelled) toast(error.message, "bad"); }
 }
 class SessionWorkspaceView {
   constructor(tab) {
@@ -10870,6 +11943,7 @@ async function modalNewTask(workspace) {
      after a lost reply. Closing must leave those bytes for the node's task
      cleanup (or orphan sweep), never race it with a staged-file DELETE. */
   let submitted = false;
+  const cancelCreation = () => { submitted = false; close(); };
   const composer = new Composer(m.querySelector(".composer-box"), {
     bid, sid, selfHint: "Main",
     submit: () => start.onclick(),
@@ -10975,11 +12049,12 @@ async function modalNewTask(workspace) {
     error.classList.add("hidden");
     try {
       submitted = true;
-      const data = await api(bid, `sessions/${sid}/tasks`, { method: "POST", timeoutMs: 180000, body });
+      const data = await api(bid, `sessions/${sid}/tasks`, { method: "POST", timeoutMs: 180000, body, operation: "Preparing task", cancelClose: cancelCreation });
       const list = sessionsFor(bid);
       if (!list.some(s => s.id === data.session.id)) list.push(data.session);
+      if (!m.isConnected) { renderSidebar(); return; }
       close(); workspace.openTask(data.session.id); renderSidebar();
-    } catch (err) { error.textContent = err.message; error.classList.remove("hidden"); }
+    } catch (err) { if (err.cancelled) return; error.textContent = err.message; error.classList.remove("hidden"); }
     finally { preparing = false; if (m.isConnected) syncBusy(); }
   };
 }
@@ -11026,7 +12101,7 @@ async function modalReviewTask(workspace, session) {
   m.querySelector("#tr-close").onclick = close;
   try {
     const base = `sessions/${workspace.tab.sid}/tasks/${session.id}`;
-    const data = await api(workspace.tab.bid, base + "/review", { method: "POST", body: {}, timeoutMs: 120000 });
+    const data = await api(workspace.tab.bid, base + "/review", { method: "POST", body: {}, timeoutMs: 120000, operation: "Preparing task review", cancelClose: close });
     if (!m.isConnected) return;
     const list = String(data.files || "").trim();
     const count = list ? list.split("\n").length : 0;
@@ -11062,14 +12137,14 @@ async function modalReviewTask(workspace, session) {
       let result;
       try {
         result = applied ? { applied: true } : await api(workspace.tab.bid, base + "/apply", { method: "POST",
-          body: { token: data.token, ...(resolve && data.has_changes ? { resolve_conflicts: resolve.checked } : {}) }, timeoutMs: 180000 });
+          body: { token: data.token, ...(resolve && data.has_changes ? { resolve_conflicts: resolve.checked } : {}) }, timeoutMs: 180000, operation: "Applying task" });
         if (result.applied && !result.resolving && foldAfterApply) {
           applied = true;
           apply.textContent = "Folding…";
           await removeTaskSession(workspace.tab.bid, session, { fold: true });
         }
       } catch (err) {
-        fail(applied ? `Applied to Main, but the task could not be folded: ${err.message}` : err.message);
+        if (!err.cancelled) fail(applied ? `Applied to Main, but the task could not be folded: ${err.message}` : err.message);
         apply.disabled = false;
         apply.textContent = applied ? "Retry folding" : data.has_changes ? "Apply to Main" : "Mark as reviewed";
         if (!applied) {
@@ -11094,11 +12169,11 @@ async function modalReviewTask(workspace, session) {
       }
       try {
         await refreshSessionList(workspace.tab.bid); renderSidebar();
-      } catch (err) {
+      } catch (err) { if (err.cancelled) return;
         toast(`${backendName(workspace.tab.bid)}: ${err.message}`, "bad", TOAST_LONG);
       }
     };
-  } catch (err) { files.textContent = ""; fail(err.message); }
+  } catch (err) { if (err.cancelled) return; files.textContent = ""; fail(err.message); }
 }
 
 /* Negotiated shared-draft editor. Full values stay bounded to one outstanding
@@ -11470,8 +12545,6 @@ class SessionView {
           placeholder: "Message the agent…",
           /* this session's own controls, after the shared + button */
           controls: `
-                <button type="button" class="mini tools-open hidden" aria-label="Session tools">
-                  <span aria-hidden="true"></span></button>
                 <span class="mini fast-indicator hidden" role="img"
                   aria-label="Fast mode is on" title="Fast mode is on">
                   <span aria-hidden="true"></span></span>
@@ -11540,12 +12613,8 @@ class SessionView {
     this.statusEl = root.querySelector(".chat-status");
     this.approvalEl = root.querySelector(".approval");
     this.queueEl = root.querySelector(".queue-strip");
-    this.toolsButton = root.querySelector(".tools-open");
-    this.toolsButton.firstElementChild.appendChild(toolsIcon(12));
-    this.toolsButton.onclick = (e) => { e.stopPropagation(); this.showToolsMenu(e.currentTarget); };
     this.fastIndicator = root.querySelector(".fast-indicator");
     this.fastIndicator.firstElementChild.appendChild(fastModeIcon(12));
-    this.syncToolsButton();
     this.syncFastIndicator();
     this.headMeta.addEventListener("scroll", () => this.syncHeadOverflow(), { passive: true });
     this.composerMeta.addEventListener("scroll", () => this.syncComposerOverflow(), { passive: true });
@@ -11569,6 +12638,10 @@ class SessionView {
       typing: active => this.sharedDraft ? this.sharedDraft.typing(active) : false,
       reviewDraft: () => { if (this.sharedDraft) this.sharedDraft.review(); },
       updated: () => this.updateSteerControl(),
+      /* this session's rows in the box's own tools menu */
+      tools: () => this.toolsMenuSpec(),
+      runTool: (tool) => this.runSessionTool(tool),
+      menuOwner: () => this.root,
       /* re-pin the transcript when the box's height moved it */
       beforeResize: () => this.scroll.scrollHeight - this.scroll.scrollTop - this.scroll.clientHeight < 60,
       afterResize: (pinned) => { if (pinned) this.scroll.scrollTop = this.scroll.scrollHeight; },
@@ -11797,7 +12870,6 @@ class SessionView {
 
   syncRemoteState() {
     this.syncNativeComposerChoices();
-    this.syncToolsButton();
     this.syncFastIndicator();
     this.syncComposerMeta();
     this.composer.syncUploadButton();
@@ -12422,7 +13494,6 @@ class SessionView {
     setMini("effort", "Reasoning effort", eff.effort || "auto", eff.queuedEffort);
     this.syncSwitchLines();   // the newest divider tracks the live selection
     this.syncNativeComposerChoices();
-    this.syncToolsButton();
     this.syncFastIndicator();
     this.syncComposerMeta();
     this.syncHeadOverflow();
@@ -12485,6 +13556,7 @@ class SessionView {
       supported,
       ready: supported && stateValue.ready === true && !!turnId,
       turn_id: turnId,
+      pending_request_id: typeof stateValue.pending_request_id === "string" ? stateValue.pending_request_id : "",
     };
     this.updateAskControl();
   }
@@ -12498,6 +13570,21 @@ class SessionView {
     const stopping = !!remoteStoppingMessage(this.tab.bid);
     const unavailable = !!this.tab.bid && !backendConnectionAllowed(this.tab.bid);
     const hasAttachments = this.composer.attachments.length > 0;
+    const backend = state.backends.find(item => item.id === Number(this.tab.bid));
+    const canCancel = !!this.sideQuestion.pending_request_id &&
+      (!this.tab.bid || backendHasCapability(backend, "side-question-cancel"));
+    const actionText = this.askBtn.querySelector(".composer-action-label");
+    if (actionText) actionText.textContent = canCancel ? "Cancel question" : "Ask";
+    const actionIcon = this.askBtn.querySelector(".composer-action-icon");
+    if (actionIcon && this.askCancelFace !== canCancel) {
+      actionIcon.replaceChildren(canCancel ? xIcon(18) : askActionIcon());
+      this.askCancelFace = canCancel;
+    }
+    if (canCancel) {
+      this.askBtn.disabled = !!this.askCancelling || this.reconnecting || stopping || unavailable;
+      this.askBtn.setAttribute("aria-label", "Cancel the side question · keep the main turn running");
+      return;
+    }
     this.askBtn.disabled = !running || !supported || !this.sideQuestion.ready ||
       !!this.askPending || this.reconnecting || stopping || unavailable ||
       hasAttachments;
@@ -12508,11 +13595,32 @@ class SessionView {
     this.askBtn.setAttribute("aria-label", label);
   }
 
+  async cancelQuestion() {
+    if (this.askCancelling) return;
+    const requestId = this.sideQuestion.pending_request_id;
+    const turnId = this.sideQuestion.turn_id;
+    if (!requestId || !turnId) return;
+    this.askCancelling = true;
+    this.updateAskControl();
+    try {
+      await api(this.tab.bid, `sessions/${this.tab.sid}/ask`, {
+        method: "DELETE", timeoutMs: 10000,
+        body: { request_id: requestId, expected_turn_id: turnId },
+      });
+    } catch (error) {
+      toast(`Could not cancel side question · ${error.message}`, "bad", TOAST_LONG);
+    } finally {
+      this.askCancelling = false;
+      this.updateAskControl();
+    }
+  }
+
   /* Put the composer's text to the model alongside the running turn. The
      engine answers it from a tool-less fork of the same context: the turn is
      not paused, not steered, and never sees the exchange. Follow-ups need no
      separate control - the node threads this turn's answered pairs. */
   async ask() {
+    if (this.sideQuestion.pending_request_id) return this.cancelQuestion();
     const composerText = this.composer.text();
     const question = composerText.trim();
     if (!question) return;
@@ -13081,6 +14189,10 @@ class SessionView {
         return n;
       }
       case "side_question_result": {
+        if (this.sideQuestion && this.sideQuestion.pending_request_id === d.request_id) {
+          this.sideQuestion.pending_request_id = "";
+          this.updateAskControl();
+        }
         if (this.askPending && this.askPending.requestId === d.request_id) {
           this.askPending = null;
           this.updateAskControl();
@@ -14078,7 +15190,7 @@ class SessionView {
   }
 
   syncNativeComposerChoices(forceKind = "") {
-    if (this.composerMenu && this.composerMenu.isConnected) this.composerMenu.sync();
+    syncOpenChoiceMenus();
     if (!this.nativeComposerChoices || !this.composerNativeSelects || !this.session) return;
     for (const kind of ["perm", "model", "effort"]) {
       const select = this.composerNativeSelects[kind];
@@ -14109,14 +15221,6 @@ class SessionView {
     }
   }
 
-  /* the trigger exists wherever the node can run tools; which rows are live
-     follows the engine the NEXT prompt will use */
-  syncToolsButton() {
-    if (!this.toolsButton) return;
-    this.toolsButton.classList.toggle("hidden",
-      !backendSupportsSessionTools(this.tab.bid) && !backendSupportsFastMode(this.tab.bid));
-  }
-
   /* The composer describes the NEXT prompt, so a queued on/off change is
      reflected immediately. Feature metadata, rather than an engine/model
      name, is the durable boundary; an unsupported engine can never light it. */
@@ -14136,14 +15240,11 @@ class SessionView {
     this.fastIndicator.removeAttribute("data-tip");
   }
 
-  showToolsMenu(anchor) {
-    if (!this.session) return;
-    const spec = this.toolsMenuSpec();
-    this.optionMenu(anchor, spec.opts, spec.current, value => this.runSessionTool(value),
-      { actions: true, checks: spec.checks, live: () => this.toolsMenuSpec() });
-  }
-
+  /* What this session adds to its prompt box's tools menu: the engine's own
+     maintenance actions, then Fast mode. Which rows are live follows the
+     engine the NEXT prompt will use. */
   toolsMenuSpec() {
+    if (!this.session) return { opts: [], checks: [] };
     const eff = this.effectiveConfig();
     const eng = engineInfo(this.tab.bid, eff.engine || this.session.engine);
     const offered = new Map(((eng && eng.tool_options) || []).map(o => [o.value, o]));
@@ -14166,7 +15267,7 @@ class SessionView {
           `Not available for ${(modelOption && modelOption.label) || "this model"}`,
         onToggle: () => this.setFastMode(!this.effectiveConfig().fast_mode),
       }] : [];
-    return { opts: options, current: "", checks };
+    return { opts: options, checks };
   }
 
   async setFastMode(enabled) {
@@ -14196,14 +15297,14 @@ class SessionView {
   }
 
   showPermMenu(anchor) {
-    if (!this.session) return;
+    if (!this.session) return null;
     const spec = this.composerChoiceSpec("perm");
     if (spec.disabled) {
       toast("Upgrade this backend to change permission before its queued engine switch",
         "bad", TOAST_LONG);
-      return;
+      return null;
     }
-    this.optionMenu(anchor, spec.options, spec.selected,
+    return this.optionMenu(anchor, spec.options, spec.selected,
       (value) => this.applyPermissionChoice(value),
       { footers: this.engineDefaultsActions(), live: () => this.choiceMenuSpec("perm") });
   }
@@ -14233,178 +15334,17 @@ class SessionView {
       checks: [], footers: this.engineDefaultsActions() };
   }
 
-  /* A choice menu opens on its current value: highlighted, focused, checked.
-     An action menu ({actions: true}) has no current value, so nothing is
-     highlighted until the pointer or the arrow keys reach a row. */
-  optionMenu(anchor, opts, current, onPick,
-      { actions = false, checks = [], footers = [], live = null } = {}) {
-    if (closeAllMenus(anchor)) return null;
-    const menu = el("div", "choice-menu composer-choice-menu dyn");
-    this.composerMenu = menu;
-    menu._ownerView = this.root;
-    menu._anchor = anchor;
-    menu.setAttribute("role", footers.length ? "group" : actions ? "menu" : "listbox");
-    menu.setAttribute("aria-label",
-      anchor.getAttribute("aria-label") || tips.text(anchor) || "Choices");
-    menu.style.visibility = "hidden";
-    anchor.setAttribute("aria-haspopup", actions ? "menu" : "listbox");
-    anchor.setAttribute("aria-expanded", "true");
-    let list = menu;
-    const rows = [];
-    const dismiss = (returnFocus = false) => {
-      menu.remove();
-      anchor.setAttribute("aria-expanded", "false");
-      if (returnFocus && anchor.isConnected) anchor.focus();
-    };
-    const highlight = (index) => rows.forEach((row, i) => row.classList.toggle("active", i === index));
-    /* where the highlight belongs with no pointer on the menu: the row the keys
-       are on, else the current value - the state the menu opened in */
-    const resting = () => {
-      const focused = rows.indexOf(document.activeElement);
-      if (focused >= 0) return focused;
-      if (actions) return -1;
-      const selectedAt = rows.findIndex(row => row.classList.contains("selected"));
-      return selectedAt >= 0 ? selectedAt : 0;
-    };
-    let signature = "";
-    menu.sync = () => {
-      if (live) {
-        const spec = live();
-        opts = spec.opts; current = spec.current;
-        checks = spec.checks || []; footers = spec.footers || [];
-      }
-      const next = JSON.stringify([opts, current, checks, footers.map(item => item.label)]);
-      if (signature === next) return;
-      signature = next;
-      const focused = rows.indexOf(document.activeElement);
-      const focusKey = focused < 0 ? null : rows[focused]._choiceKey;
-      const scrollTop = menu.scrollTop;
-      menu.replaceChildren();
-      menu.setAttribute("role", footers.length ? "group" : actions ? "menu" : "listbox");
-      list = footers.length ? el("div") : menu;
-      if (list !== menu) {
-        list.setAttribute("role", actions ? "menu" : "listbox");
-        list.setAttribute("aria-label", menu.getAttribute("aria-label"));
-        menu.appendChild(list);
-      }
-      rows.length = 0;
-      opts.forEach((o, index) => {
-        const selected = !actions && current === o.value;
-        const row = choiceOptionNode(o.label, selected);
-        row._choiceKey = "option:" + o.value;
-        if (actions) {
-          row.setAttribute("role", "menuitem");
-          row.removeAttribute("aria-selected");
-        }
-        if (o.hint) row.title = o.hint;
-        row.disabled = !!o.disabled;
-        row.tabIndex = selected ? 0 : -1;
-        row.onmouseenter = () => highlight(index);
-        row.onfocus = row.onmouseenter;
-        row.onclick = (event) => {
-          event.stopPropagation();
-          if (o.disabled) return;
-          dismiss(true);
-          onPick(o.value);
-        };
-        rows.push(row);
-        list.appendChild(row);
-      });
-      if (checks.length && rows.length)
-        menu.appendChild(el("div", "menu-sep"));
-      checks.forEach((item) => {
-        const index = rows.length;
-        const row = menuCheckRow(item.label, !!item.on, () => {});
-        row._choiceKey = "check:" + item.label;
-        row.classList.add("choice-option");
-        if (item.hint) row.title = item.hint;
-        row.disabled = !!item.disabled;
-        row.tabIndex = -1;
-        row.onmouseenter = () => highlight(index);
-        row.onfocus = row.onmouseenter;
-        row.onclick = (event) => {
-          event.stopPropagation();
-          if (item.disabled) return;
-          dismiss(true);
-          item.onToggle();
-        };
-        rows.push(row);
-        menu.appendChild(row);
-      });
-      if (footers.length && rows.length) menu.appendChild(el("div", "menu-sep"));
-      footers.forEach(item => {
-        const index = rows.length;
-        const row = el("button", "choice-option", item.label);
-        row._choiceKey = "footer:" + item.label;
-        row.type = "button";
-        row.tabIndex = -1;
-        row.onmouseenter = () => highlight(index);
-        row.onfocus = row.onmouseenter;
-        row.onclick = event => {
-          event.stopPropagation();
-          dismiss(true);
-          item.run();
-        };
-        rows.push(row);
-        menu.appendChild(row);
-      });
-      if (!rows.length) menu.appendChild(el("span", "choice-empty", "No choices available"));
-      highlight(resting());
-      if (menu.isConnected) {
-        positionChoiceMenu({ menu, button: anchor });
-        if (focusKey !== null) {
-          const target = rows.find(row => row._choiceKey === focusKey && !row.disabled);
-          menu.tabIndex = -1;
-          (target || menu).focus({ preventScroll: true });
-        }
-        menu.scrollTop = scrollTop;
-      }
-    };
-    menu.sync();
-    menu.onkeydown = (event) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        dismiss(true);
-        return;
-      }
-      if (event.key === "Tab") {
-        dismiss();
-        return;
-      }
-      const enabled = rows.filter(row => !row.disabled);
-      if (!enabled.length) return;
-      const at = enabled.indexOf(document.activeElement);
-      let next = null;
-      if (event.key === "ArrowDown") next = at < 0 ? 0 : (at + 1) % enabled.length;
-      else if (event.key === "ArrowUp")
-        next = at < 0 ? enabled.length - 1 : (at - 1 + enabled.length) % enabled.length;
-      else if (event.key === "Home") next = 0;
-      else if (event.key === "End") next = enabled.length - 1;
-      if (next !== null) {
-        event.preventDefault();
-        rows.forEach(row => { row.tabIndex = row === enabled[next] ? 0 : -1; });
-        enabled[next].focus();
-      }
-    };
-    /* the pointer takes its highlight with it when it goes */
-    menu.onmouseleave = () => highlight(resting());
-    menu.onclick = (event) => event.stopPropagation();
-    document.body.appendChild(menu);
-    const openAt = resting();
-    highlight(openAt);
-    if (actions || !rows.length) menu.tabIndex = -1;   // the keys land on the menu
-    requestAnimationFrame(() => {
-      if (!menu.isConnected) return;
-      positionChoiceMenu({ menu, button: anchor });
-      (rows[openAt] || menu).focus({ preventScroll: true });
-    });
-    return menu;
+  /* This view's own menus: the shared implementation, told which view owns
+     them so a rebuilt workspace can take them down with it. */
+  optionMenu(anchor, opts, current, onPick, options = {}) {
+    return openChoiceMenu(anchor, { ...options, opts, current, onPick,
+                                    ownerView: this.root });
   }
 
   showModelMenu(anchor) {
-    if (!this.session) return;
+    if (!this.session) return null;
     const spec = this.composerChoiceSpec("model");
-    this.optionMenu(anchor, spec.options, spec.selected, (value) => this.applyModelChoice(value),
+    return this.optionMenu(anchor, spec.options, spec.selected, (value) => this.applyModelChoice(value),
       { footers: this.engineDefaultsActions(), live: () => this.choiceMenuSpec("model") });
   }
 
@@ -14428,10 +15368,10 @@ class SessionView {
   }
 
   showEffortMenu(anchor) {
-    if (!this.session) return;
+    if (!this.session) return null;
     const spec = this.composerChoiceSpec("effort");
-    if (!spec.options.length) { toast("Engine has no effort levels", "info"); return; }
-    this.optionMenu(anchor, spec.options, spec.selected,
+    if (!spec.options.length) { toast("Engine has no effort levels", "info"); return null; }
+    return this.optionMenu(anchor, spec.options, spec.selected,
       (value) => this.patchSession({ effort: value }),
       { footers: this.engineDefaultsActions(), live: () => this.choiceMenuSpec("effort") });
   }
@@ -15684,8 +16624,13 @@ class BrowserView {
     });
     this.backBtn.onclick = () => this.send({ type: "back" });
     this.reloadBtn.onclick = () => {
-      this.setLoading(true);
-      this.send({ type: "reload" });
+      if (this.canStopLoading()) {
+        this.send({ type: "stop_loading" });
+        this.setLoading(false);
+      } else {
+        this.setLoading(true);
+        this.send({ type: "reload" });
+      }
     };
     document.addEventListener("visibilitychange", this.visibilityHandler);
     this.connect();
@@ -15893,6 +16838,12 @@ class BrowserView {
     }
   }
 
+  canStopLoading() {
+    const backend = state.backends.find(item => item.id === Number(this.tab.bid));
+    return this.root.classList.contains("loading") &&
+      (!this.tab.bid || backendHasCapability(backend, "browser-navigation-stop"));
+  }
+
   /* Node broadcasts own loading; expire optimism if the status is lost. */
   setLoading(on) {
     if (on) {
@@ -15904,10 +16855,15 @@ class BrowserView {
       this.loadingTimer = null;
     }
     this.root.classList.toggle("loading", !!on);
+    if (this.reloadBtn) {
+      const stop = this.canStopLoading();
+      this.reloadBtn.replaceChildren(stop ? xIcon(14) : refreshIcon(14));
+      this.reloadBtn.setAttribute("aria-label", stop ? "Stop loading" : "Reload");
+    }
     if (on) {
       this.loadingTimer = setTimeout(() => {
         this.loadingTimer = null;
-        this.root.classList.remove("loading");
+        this.setLoading(false);
       }, 20000);
     }
   }
@@ -16832,6 +17788,7 @@ class SearchView {
   constructor(tab) {
     this.tab = tab;
     this.searchSequence = 0;
+    this.searchController = null;
     this.excludedNodes = new Set();
     this.focusedOnce = false;
     this.lastCore = null;      // the filters the visible results were run with
@@ -16877,8 +17834,9 @@ class SearchView {
     this.orderBox = this.root.querySelector(".search-order");
     this.statusBox = this.root.querySelector(".search-status");
     this.resultsBox = this.root.querySelector(".search-results");
-    this.goButton.onclick = () => this.runSearch();
+    this.goButton.onclick = () => this.searchController ? this.cancelSearch() : this.runSearch();
     this.input.addEventListener("keydown", event => {
+      if (event.key === "Escape" && this.searchController) { event.preventDefault(); this.cancelSearch(); }
       if (event.key === "Enter") { event.preventDefault(); this.runSearch(); }
     });
     this.renderKindChips();
@@ -16887,7 +17845,7 @@ class SearchView {
   }
 
   destroy() {
-    this.searchSequence++;
+    this.cancelSearch();
     this.root.remove();
   }
 
@@ -17030,12 +17988,21 @@ class SearchView {
     return core;
   }
 
+  cancelSearch() {
+    this.searchSequence++;
+    if (this.searchController) this.searchController.abort();
+    this.searchController = null;
+    this.goButton.textContent = "Search";
+    this.setStatus("Search cancelled");
+  }
+
   async runSearch() {
     const query = this.input.value.trim();
     if (!query) {
       this.input.focus();
       return;
     }
+    if (this.searchController) this.cancelSearch();
     const sequence = ++this.searchSequence;
     const catalog = this.nodesCatalog();
     const targets = catalog.filter(node => node.on);
@@ -17044,6 +18011,8 @@ class SearchView {
       this.setStatus("No online backends are selected to search");
       return;
     }
+    const controller = this.searchController = new AbortController();
+    this.goButton.textContent = "Cancel";
     const core = this.coreParams(query);
     this.lastCore = core;
     this.resultsBox.replaceChildren();
@@ -17052,9 +18021,11 @@ class SearchView {
     const params = new URLSearchParams({ ...core,
       per: String(SEARCH_PER_SESSION), sessions: String(SEARCH_MAX_SESSIONS) });
     const settled = await Promise.allSettled(targets.map(node =>
-      api(node.bid, `search?${params}`, { timeoutMs: SEARCH_TIMEOUT })
+      api(node.bid, `search?${params}`, { timeoutMs: SEARCH_TIMEOUT, signal: controller.signal })
         .then(data => ({ node, data }))));
     if (sequence !== this.searchSequence || !this.root.isConnected) return;
+    this.searchController = null;
+    this.goButton.textContent = "Search";
     const groups = [];
     const failures = [];
     let total = 0;
@@ -17168,7 +18139,7 @@ class SearchView {
       offset: String(offset) });
     try {
       const data = await api(bid, `search?${params}`,
-        { timeoutMs: SEARCH_TIMEOUT });
+        { timeoutMs: SEARCH_TIMEOUT, signal: controller.signal });
       if (!more.isConnected) return;
       if (!offset) list.replaceChildren();
       for (const match of data.matches || [])
@@ -17695,8 +18666,24 @@ class SettingsView {
     };
     const target = e2.latest_version ? `v${e2.latest_version}` : "the latest version";
     if (upgrading) {
-      set("Updating…", true, "update is running");
+      const backend = state.backends.find(item => item.id === Number(bid));
+      const stoppable = !bid || backendHasCapability(backend, "engine-upgrade-cancel");
+      set(e2.upgrade_stopping ? "Stopping…" : stoppable ? "Stop update" : "Updating…",
+        !stoppable || e2.upgrade_stopping || !e2.upgrade_started_at, "stop this running update");
       button.classList.add("busy");
+      if (stoppable) button.onclick = async () => {
+        button.disabled = true;
+        try {
+          await api(bid, `engines/${encodeURIComponent(e2.key)}/upgrade`, {
+            method: "DELETE", body: { started_at: e2.upgrade_started_at }, timeoutMs: 10000,
+          });
+          button.textContent = "Stopping…";
+          toast(`${nodeName}: Stopping ${e2.label} update`, "busy");
+        } catch (error) {
+          button.disabled = false;
+          toast(`${nodeName}: Could not stop update · ${error.message}`, "bad", TOAST_LONG);
+        }
+      };
     } else if (starting) {
       set("Starting…", true, "update is starting");
       button.classList.add("busy");
@@ -17722,12 +18709,12 @@ class SettingsView {
     let accepted = false;
     try {
       const result = await api(bid, `engines/${encodeURIComponent(e2.key)}/upgrade`,
-        { method: "POST", timeoutMs: 30000 });
+        { method: "POST", timeoutMs: 30000, operation: "Preparing engine update" });
       accepted = true;
       applyEnginesPayload(bid, result);
       toast(`${nodeName}: Updating ${e2.label}…`, "busy");
     } catch (error) {
-      toast(`${nodeName}: ${error.message}`, "bad", TOAST_LONG);
+      if (!error.cancelled) toast(`${nodeName}: ${error.message}`, "bad", TOAST_LONG);
     } finally {
       this.engineUpgradeStarts.delete(id);
       /* A successful updater can finish before its POST response is painted.
@@ -19477,14 +20464,14 @@ class SettingsView {
       if (busy || !loaded || !command.trim()) return;
       busy = true; setError(""); note.textContent = `Testing ${label}…`; note.classList.remove("dirty"); paint();
       try {
-        const r = await api(0, "notify/test", { method: "POST", body: {
+        const r = await api(0, "notify/test", { method: "POST", operation: "Testing completion command", body: {
           backend: Number(backend.value), command, status,
         } });
         if (!current()) return;
         if (!r.ok) throw new Error(r.error || `Exit ${r.rc}` + (r.output ? " · " + r.output.slice(-120) : ""));
         note.textContent = `Test ${label} succeeded` + (r.output ? " · " + r.output.slice(-120) : "") +
           (snapshot() !== saved ? " · Unsaved changes" : "");
-      } catch (e) { if (current()) { note.textContent = ""; setError(e.message); } }
+      } catch (e) { if (current()) { note.textContent = ""; if (!e.cancelled) setError(e.message); } }
       finally { busy = false; if (current()) paint(); }
     };
     testSuccess.onclick = () => test("ok", success.value, "success");
@@ -19795,7 +20782,7 @@ class SettingsView {
       try {
         if (endpointProofNeeded) {
           const prepared = await api(0, "settings/bind/prepare", {
-            method: "POST", body: {
+            method: "POST", operation: "Preparing listener verification", body: {
               host: proposedBind, port: proposedPort, origin: location.origin,
               scheme: selectedScheme, https_source: selectedCertificateSource,
               certificate_path: selectedScheme === "https" &&
@@ -19804,26 +20791,34 @@ class SettingsView {
                 selectedCertificateSource === "custom" ? privateKeyPath : "",
             },
           });
-          const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
-          const timer = controller ? setTimeout(() => controller.abort(), 8000) : null;
-          let proofResponse;
           try {
-            proofResponse = await fetch(prepared.verify_url, {
-              method: "GET", mode: "cors", credentials: "omit", cache: "no-store",
-              redirect: "error", referrerPolicy: "no-referrer",
-              ...(controller ? { signal: controller.signal } : {}),
+            await browserReadRequest("Verifying listener", async signal => {
+              const controller = new AbortController();
+              const abort = () => controller.abort();
+              signal.addEventListener("abort", abort, { once: true });
+              const timer = setTimeout(abort, 8000);
+              try {
+                const response = await fetch(prepared.verify_url, {
+                  method: "GET", mode: "cors", credentials: "omit", cache: "no-store",
+                  redirect: "error", referrerPolicy: "no-referrer", signal: controller.signal,
+                });
+                const proof = await response.json();
+                if (!response.ok || !proof || proof.ok !== true || proof.token !== prepared.token)
+                  throw new Error("the proposed address did not return Puppy's verification proof");
+              } catch (error) {
+                if (signal.aborted) throw error;
+                throw new Error(controller.signal.aborted ? "the direct browser check timed out" :
+                  "this browser could not verify the proposed IP and port");
+              } finally {
+                clearTimeout(timer);
+                signal.removeEventListener("abort", abort);
+              }
             });
           } catch (error) {
-            throw new Error(controller && controller.signal.aborted
-              ? "the direct browser check timed out"
-              : "this browser could not reach the proposed IP and port");
-          } finally {
-            if (timer !== null) clearTimeout(timer);
+            try { await api(0, "settings/bind/prepare", { method: "DELETE", body: { token: prepared.token }, timeoutMs: 10000 }); }
+            catch (_) { /* The one-use verifier also expires on its short lease. */ }
+            throw error;
           }
-          let proof = null;
-          try { proof = await proofResponse.json(); } catch (_) { /* checked below */ }
-          if (!proofResponse.ok || !proof || proof.ok !== true || proof.token !== prepared.token)
-            throw new Error("the proposed address did not return Puppy's verification proof");
           verified = prepared;
         }
         await api(0, "settings", { method: "PATCH", body: {
@@ -19854,6 +20849,7 @@ class SettingsView {
         await this.render();
         toast("Instance settings saved", "ok");
       } catch (e) {
+        if (e.cancelled) return;
         if (bindCommit) {
           const activation = bindCommit.restart_required
             ? `Automatic restart was not queued. Return to Settings and use Verify & restart ` +
@@ -19887,7 +20883,7 @@ class SettingsView {
           }
         } else if (endpointProofNeeded) modalNotice("Listener was not changed",
           `${e.message}.\n\nPuppy remains configured on ${fmtListenerEndpoint(settings.web)}.`);
-        else toast(e.message, "bad");
+        else if (!e.cancelled) toast(e.message, "bad");
       } finally {
         if (saveButton.isConnected) {
           saveButton.disabled = false;
@@ -20185,7 +21181,7 @@ class SettingsView {
         test.onclick = async () => {
           test.textContent = "…";
           try {
-            const r = await api(0, `backends/${b.id}/test`, { method: "POST" });
+            const r = await api(0, `backends/${b.id}/test`, { method: "POST", operation: "Testing backend" });
             installBackendRecord(r.backend);
             if (r.ok) {
               state.remoteOk[b.id] = true;
@@ -20201,7 +21197,7 @@ class SettingsView {
             }
             if (this.inner.isConnected) await this.render();
           } catch (e) {
-            toast(e.message, "bad");
+            if (!e.cancelled) toast(e.message, "bad");
           } finally {
             if (test.isConnected) test.textContent = "Test";
           }
@@ -20216,7 +21212,7 @@ class SettingsView {
           this.syncUpgradeButtons();
           let result;
           try {
-            result = await api(0, `backends/${b.id}/upgrade`, { method: "POST" });
+            result = await api(0, `backends/${b.id}/upgrade`, { method: "POST", operation: "Preparing backend upgrade" });
           } catch (e) {
             this.upgradesInProgress.delete(b.id);
             const rejected = this.normalizeReportedReadiness(
@@ -20227,7 +21223,7 @@ class SettingsView {
               delete state.remoteErrors[b.id];
             }
             this.syncUpgradeButtons();
-            modalNotice("Upgrade rejected", `${b.name}: ${e.message}`);
+            if (!e.cancelled) modalNotice("Upgrade rejected", `${b.name}: ${e.message}`);
             return;
           }
           this.upgradesInProgress.delete(b.id);
@@ -20298,7 +21294,7 @@ class SettingsView {
         const wantBrowser = c3.querySelector("#be-browser").checked;
         const urls = pairingBackendUrls(paired, addUrlEditor.values());
         if (!urls.length) throw new Error("at least one backend URL is required");
-        const added = await api(0, "backends", { method: "POST", body: {
+        const added = await api(0, "backends", { method: "POST", operation: "Adding backend", body: {
           name: pairingValue("#be-name", "name"),
           urls,
           token: pairingValue("#be-token", "token"),
@@ -20319,7 +21315,7 @@ class SettingsView {
         if (wantBrowser) await enableAddedBackendBrowser(added);
         if (this.inner.isConnected) await this.render();
       } catch (e) {
-        setAddError(e.message);
+        if (!e.cancelled) setAddError(e.message);
       } finally {
         addForm.removeAttribute("aria-busy");
         if (addButton.isConnected) { addButton.disabled = false; addButton.textContent = "Add backend"; }
@@ -20339,7 +21335,7 @@ class SettingsView {
           old: c4.querySelector("#pw-old").value, new: c4.querySelector("#pw-new").value } });
         toast("Password changed", "ok");
         c4.querySelector("#pw-old").value = c4.querySelector("#pw-new").value = "";
-      } catch (e) { toast(e.message, "bad"); }
+      } catch (e) { if (!e.cancelled) toast(e.message, "bad"); }
     };
     this.inner.appendChild(c4);
 
@@ -20375,7 +21371,7 @@ class SettingsView {
       exportButton.textContent = "Preparing…";
       try {
         const prepared = await api(0, "snapshot/export", {
-          method: "POST", body: { ui: snapshotBrowserState() },
+          method: "POST", body: { ui: snapshotBrowserState() }, operation: "Preparing backup",
         });
         const link = el("a");
         link.href = prepared.download;
@@ -20385,7 +21381,7 @@ class SettingsView {
         link.remove();
         toast(`Backup ready · ${prepared.sessions} sessions · ${fmtBytes(prepared.size)}`, "ok");
       } catch (error) {
-        toast(error.message, "bad", TOAST_LONG);
+        if (!error.cancelled) toast(error.message, "bad", TOAST_LONG);
       } finally {
         if (exportButton.isConnected) {
           exportButton.disabled = false;
@@ -20407,17 +21403,14 @@ class SettingsView {
       importButton.disabled = true;
       importButton.textContent = "Restoring…";
       try {
-        const response = await fetch(apiPath(0, "snapshot/import"), {
+        const result = await api(0, "snapshot/import", {
           method: "POST", body: file, headers: { "Content-Type": "application/gzip" },
+          operation: "Restoring backup",
         });
-        let result = null;
-        try { result = await response.json(); } catch (_) { /* handled below */ }
-        if (response.status === 401) { showAuth(); throw new Error("auth required"); }
-        if (!response.ok) throw new Error((result && result.error) || `HTTP ${response.status}`);
         restoreBrowserState(result.ui || {});
         location.reload();
       } catch (error) {
-        toast(error.message, "bad", TOAST_LONG);
+        if (!error.cancelled) toast(error.message, "bad", TOAST_LONG);
         if (importButton.isConnected) {
           exportButton.disabled = false;
           importButton.disabled = false;
@@ -20453,7 +21446,9 @@ function modal(html, className = "") {
   const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   let closed = false;
   const closeListeners = new Set();
-  const record = { m, close: null };
+  let dismissHandler = null;
+  const dismiss = () => dismissHandler ? dismissHandler() : close();
+  const record = { m, close: dismiss };
   const close = () => {
     if (closed) return;
     closed = true;
@@ -20473,14 +21468,13 @@ function modal(html, className = "") {
       try { opener.focus({ preventScroll: true }); } catch (error) { /* not focusable any more */ }
     }
   };
-  record.close = close;
   modalStack.push(record);
   const onClose = listener => {
     if (closed) listener();
     else closeListeners.add(listener);
   };
-  back.addEventListener("mousedown", (e) => { if (e.target === back) close(); });
-  return { m, close, onClose };
+  back.addEventListener("mousedown", (e) => { if (e.target === back) dismiss(); });
+  return { m, close, onClose, onDismiss: handler => { dismissHandler = handler; } };
 }
 document.addEventListener("keydown", (e) => {
   const top = modalStack[modalStack.length - 1];
@@ -20685,15 +21679,15 @@ function modalEditBackend(backend, onSaved) {
       if (!body.urls.length) throw new Error("at least one backend URL is required");
       setBusy(true);
       const result = await api(0, `backends/${backend.id}`, {
-        method: "PATCH", body, timeoutMs: 45000,
+        method: "PATCH", operation: "Saving backend", body, timeoutMs: 45000,
       });
       close();
       if (typeof onSaved === "function") await onSaved(result);
     } catch (caught) {
       if (m.isConnected) {
         setBusy(false);
-        setError(caught.message || "Backend could not be updated");
-      } else {
+        if (!caught.cancelled) setError(caught.message || "Backend could not be updated");
+      } else if (!caught.cancelled) {
         toast(caught.message || "Backend could not be updated", "bad", TOAST_LONG);
       }
     }
@@ -21079,7 +22073,7 @@ async function modalNewSession(groupId = null) {
         }
         loaded = state.engCache[bid];
       }
-    } catch (e) {
+    } catch (e) { if (e.cancelled) return;
       if (sequence !== engineLoadSequence || parseInt(beSel.value, 10) !== bid) return;
       setError(`Backend unavailable · ${e.message}`);
       if (bid) {
@@ -21186,14 +22180,16 @@ async function modalNewSession(groupId = null) {
   syncNodes();
   beSel.onchange = () => { syncWorkspaceSupport(); loadEngines(); };
   syncWorkspaceSupport();
+  m.querySelector("#ns-cancel").onclick = close;
+  form.onsubmit = event => event.preventDefault();
   await loadEngines();
+  if (!m.isConnected) return;
 
   /* directory browser follows the backend whose filesystem holds the files:
      the execution backend normally, the workspace backend for a remote link */
   wireDirectoryPicker(cwdInp, dirBox, () => workspaceKind === "remote" ?
     parseInt(wsbeSel.value, 10) : parseInt(beSel.value, 10));
 
-  m.querySelector("#ns-cancel").onclick = close;
   form.onsubmit = async event => {
     event.preventDefault();
     const bid = parseInt(beSel.value, 10);
@@ -21210,7 +22206,7 @@ async function modalNewSession(groupId = null) {
         const workspaceBackend = parseInt(wsbeSel.value, 10);
         if (!Number.isInteger(workspaceBackend))
           throw new Error("No other backend is available for this remote workspace");
-        const r = await api(0, "workspaces/sessions", { method: "POST", body: {
+        const r = await api(0, "workspaces/sessions", { method: "POST", operation: "Preparing remote session", cancelClose: close, body: {
           ...shared, backend: bid,
           workspace_backend: workspaceBackend,
           root: cwdInp.value.trim(),
@@ -21224,7 +22220,7 @@ async function modalNewSession(groupId = null) {
         openSessionTab(r.bid || 0, r.session.id, r.session, groupId);
         return;
       }
-      const r = await api(bid, "sessions", { method: "POST", body: {
+      const r = await api(bid, "sessions", { method: "POST", operation: "Starting session", cancelClose: close, body: {
         ...shared, workspace_kind: workspaceKind,
         cwd: workspaceKind === "directory" ? cwdInp.value.trim() : "",
         mkdir: workspaceKind === "directory" && m.querySelector("#ns-mkdir").checked,
@@ -21232,7 +22228,7 @@ async function modalNewSession(groupId = null) {
       close();
       if (bid) await pollRemotes();
       openSessionTab(bid, r.session.id, r.session, groupId);
-    } catch (e) {
+    } catch (e) { if (e.cancelled) return;
       if (m.isConnected) { setBusy(false); setError(e.message); }
       else toast(e.message, "bad");
     }
@@ -21418,7 +22414,7 @@ function modalWorkspaceLink(bid, session) {
     syncBtn.disabled = true;
     try {
       const r = await api(0, `workspaces/${link.id}/sync`,
-        { method: "POST", timeoutMs: 180000 });
+        { method: "POST", operation: "Synchronizing workspace", timeoutMs: 180000 });
       if (r && r.link) {
         state.workspaceLinks = state.workspaceLinks.map(
           l => l.id === r.link.id ? r.link : l);
@@ -21428,7 +22424,7 @@ function modalWorkspaceLink(bid, session) {
         `${r.conflicts} workspace conflict${r.conflicts === 1 ? "" : "s"} need a decision`,
         "warn", TOAST_LONG);
       else toast("Workspace sync is still pending", "warn");
-    } catch (e) { toast(e.message, "bad"); }
+    } catch (e) { if (!e.cancelled) toast(e.message, "bad"); }
     syncBtn.disabled = false;
     render();
     refreshWorkspaceChips();

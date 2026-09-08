@@ -17,7 +17,7 @@ async function start(status) {
   let reloads = 0;
   let respond = async () => reply(status);
   vm.runInNewContext(source, {
-    document, location: { reload: () => { reloads++; } },
+    document, AbortController, setTimeout, clearTimeout, location: { reload: () => { reloads++; } },
     fetch: async (url, options) => { calls.push({ url, options }); return respond(); },
   });
   await tick();
@@ -76,6 +76,21 @@ async function start(status) {
     assert.equal(setup.reloads(), 1);
     assert.equal(setup.field("setup-code").value, "");
   }
+  const cancelled = await start({ authed: false, setup_required: false });
+  cancelled.field("user").value = "demo";
+  cancelled.field("pass").value = "keep-this-draft";
+  let lateReply;
+  cancelled.respond(() => new Promise(resolve => { lateReply = resolve; }));
+  cancelled.submit();
+  assert.equal(cancelled.field("cancel").classList.contains("hidden"), false);
+  cancelled.field("cancel").onclick();
+  lateReply(reply({ ok: true }));
+  await tick();
+  assert.equal(cancelled.reloads(), 0, "a late sign-in result cannot override Stop waiting");
+  assert.equal(cancelled.field("pass").value, "keep-this-draft");
+  assert.equal(cancelled.field("submit").disabled, false);
+  assert.equal(cancelled.field("err").classList.contains("hidden"), true);
+
   const already = await start({ authed: true });
   assert.equal(already.reloads(), 1);
 

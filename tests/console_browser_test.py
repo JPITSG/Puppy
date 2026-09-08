@@ -584,6 +584,57 @@ async def vnc_connection_checks(instance):
     print("PASS: VNC Connect stays cancellable by button, Escape and backdrop on desktop and phone", flush=True)
 
 
+async def operation_cancellation_checks(instance):
+    await evaluate(instance, """(() => {
+        window.cancelOriginalFetch=fetch;
+        fetch=(url,opts={}) => {
+            if (url==='/api/cancel-fixture')
+                return new Promise(resolve => {window.cancelFinish=() => resolve(new Response(
+                    JSON.stringify({error:'Operation cancelled',cancelled:true}),{status:409}));});
+            if (url.startsWith('/api/operations/')) {
+                if(opts.method!=='DELETE')
+                    return Promise.resolve(new Response(JSON.stringify({state:'running'})));
+                window.cancelSent=true;
+                return Promise.resolve(new Response(JSON.stringify({state:'cancelling'})));
+            }
+            return cancelOriginalFetch(url,opts);
+        };
+    })()""")
+    try:
+        for width, height in [(1440, 900), (390, 844)]:
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width":width,"height":height,"deviceScaleFactor":1,"mobile":width==390},
+                session=instance.page_session)
+            for theme in ("dark", "light"):
+                await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
+                for dismiss in ["document.querySelector('.operation-cancel').click()",
+                                "document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))",
+                                "document.querySelector('.operation-cancel').closest('.modal-backdrop').dispatchEvent(new MouseEvent('mousedown',{bubbles:true}))"]:
+                    assert await evaluate(instance, """(() => {
+                        window.cancelSent=false; window.cancelOutcome=false;
+                        api(0,'cancel-fixture',{method:'POST',operation:'Preparing task'}).catch(
+                            error => {window.cancelOutcome=error.cancelled;});
+                        return !document.querySelector('.operation-cancel');
+                    })()"""), (width, theme, "the dialog waits out its delay before interrupting")
+                    await until(instance, "!!document.querySelector('.operation-cancel')")
+                    assert await evaluate(instance, """(() => {
+                        const button=document.querySelector('.operation-cancel'), r=button.getBoundingClientRect();
+                        return !button.disabled && document.activeElement===button && r.width>0 &&
+                            r.bottom<=innerHeight && document.documentElement.scrollWidth<=innerWidth;
+                    })()"""), (width, theme, "Cancel must be focused, visible and reachable")
+                    await evaluate(instance, dismiss + "; true")
+                    await until(instance, "cancelSent && document.querySelector('.operation-cancel').disabled")
+                    assert await evaluate(instance, "!cancelOutcome && document.querySelector('.modal-copy').textContent.includes('waiting for cleanup')")
+                    await evaluate(instance, "cancelFinish(); true")
+                    await until(instance, "cancelOutcome && !document.querySelector('.operation-cancel')")
+    finally:
+        await evaluate(instance, "fetch=cancelOriginalFetch; delete window.cancelOriginalFetch; applyTheme('dark'); true")
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width":1440,"height":900,"deviceScaleFactor":1,"mobile":False},
+            session=instance.page_session)
+    print("PASS: deferred progress dialog, then Cancel, Escape and backdrop stay visible through cleanup on desktop and phone in both themes", flush=True)
+
+
 async def identity_pill_checks(instance, capture=False):
     await evaluate(instance, """(() => {
         window.identityStops=[];
@@ -886,8 +937,158 @@ async def message_reuse_checks(instance):
     print("PASS: message reuse is hidden until hover, sits left of Copy, focuses the composer and selects only the previous draft", flush=True)
 
 
+async def spell_check_checks(instance, capture=False):
+    """The bundled dictionary, the marks and autocorrect in a real browser."""
+    await instance.call("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 900,
+        "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
+    keys = [{"type": "keyDown", "text": ch, "unmodifiedText": ch,
+             "key": ch, "windowsVirtualKeyCode": ord(ch.upper())} for ch in "teh "]
+    try:
+        # The console's own boxes never hand their text to the browser's checker.
+        assert await evaluate(instance, """(() => {
+            const ta = demoView.composer.ta;
+            return ta.getAttribute('spellcheck') === 'false' &&
+                ta.getAttribute('autocorrect') === 'off' && ta.spellcheck === false;
+        })()""")
+        await evaluate(instance, "setSpellPref('check', true); true")
+        await until(instance, "!!spellDictionary.data")
+        # It came over the wire as the gzip sibling aiohttp serves beside it.
+        transfer = await evaluate(instance, """(() => {
+            const entry = performance.getEntriesByType('resource')
+                .find(item => item.name.endsWith('/static/dict/en.txt'));
+            return entry ? {encoded: entry.encodedBodySize, decoded: entry.decodedBodySize} : null;
+        })()""")
+        assert transfer and transfer["decoded"] > 1000000, transfer
+        assert transfer["encoded"] * 2 < transfer["decoded"], transfer
+
+        # The marks are laid out exactly where the words are: same box, same
+        # metrics, same wrapping, same scroll.
+        layout = await evaluate(instance, """(() => {
+            const c = demoView.composer, ta = c.ta;
+            c.set('Teh quick brown fox jumpd over the lazy dog. '.repeat(60) + 'sentance');
+            c.spellDraw(true);
+            const layer = c.box.querySelector('.spell-layer');
+            ta.scrollTop = 0;
+            ta.dispatchEvent(new Event('scroll'));
+            const marks = [...layer.querySelectorAll('.sp-bad')];
+            const box = ta.getBoundingClientRect(), mine = layer.getBoundingClientRect();
+            const ts = getComputedStyle(ta), ls = getComputedStyle(layer);
+            const same = ['fontFamily','fontSize','lineHeight','letterSpacing','paddingTop',
+                          'paddingLeft','paddingRight','paddingBottom']
+                .every(prop => ts[prop] === ls[prop]);
+            const first = marks[0].getBoundingClientRect();
+            const last = marks[marks.length - 1].getBoundingClientRect();
+            ta.scrollTop = 40;
+            ta.dispatchEvent(new Event('scroll'));
+            return {words: marks.map(node => node.textContent), same,
+                aligned: Math.abs(box.x - mine.x) < .5 && Math.abs(box.y - mine.y) < .5 &&
+                    Math.abs(box.width - mine.width) < .5 && Math.abs(box.height - mine.height) < .5,
+                inside: first.width > 0 && first.height > 0 &&
+                    first.top >= box.top - .5 && first.left >= box.left - .5 &&
+                    first.bottom <= box.bottom + .5,
+                /* the same text, wrapped into the same lines, to the pixel */
+                wraps: ta.scrollHeight === layer.scrollHeight && ta.scrollHeight > ta.clientHeight,
+                lines: last.top > first.top + 4,
+                decoration: ls.textDecorationLine === 'none' &&
+                    getComputedStyle(marks[0]).textDecorationLine.includes('underline') &&
+                    getComputedStyle(marks[0]).textDecorationStyle === 'wavy',
+                hidden: ls.color === 'rgba(0, 0, 0, 0)',
+                /* the field paints over the layer: positioned, and after it */
+                under: layer.nextElementSibling === ta && ts.position === 'relative',
+                scrolled: ta.scrollTop > 0 && layer.scrollTop === ta.scrollTop,
+                clipped: ls.overflow === 'hidden'};
+        })()""")
+        assert layout["words"][:2] == ["Teh", "jumpd"] and "sentance" in layout["words"], layout
+        assert layout["same"] and layout["aligned"] and layout["inside"], layout
+        assert layout["wraps"] and layout["lines"], layout
+        assert layout["decoration"] and layout["hidden"] and layout["under"], layout
+        assert layout["scrolled"] and layout["clipped"], layout
+        if capture:
+            shot = await instance.call("Page.captureScreenshot", {"format": "png"},
+                                       session=instance.page_session)
+            (BASE / "data" / "spell-marks.png").write_bytes(base64.b64decode(shot["data"]))
+
+        # Autocorrect, typed on a real keyboard, and taken back by a real undo.
+        await evaluate(instance, "setSpellPref('correct', true); demoView.composer.set(''); "
+                                 "demoView.composer.ta.focus(); true")
+        for event in keys:
+            await instance.call("Input.dispatchKeyEvent", {**event}, session=instance.page_session)
+            await instance.call("Input.dispatchKeyEvent",
+                {"type": "keyUp", "key": event["key"],
+                 "windowsVirtualKeyCode": event["windowsVirtualKeyCode"]},
+                session=instance.page_session)
+        await until(instance, "demoView.composer.ta.value === 'the '")
+        assert await evaluate(instance, "demoView.composer.ta.selectionStart === 4")
+        for phase in ("rawKeyDown", "keyUp"):
+            await instance.call("Input.dispatchKeyEvent", {"type": phase, "modifiers": 2,
+                "key": "z", "code": "KeyZ", "windowsVirtualKeyCode": 90},
+                session=instance.page_session)
+        await until(instance, "demoView.composer.ta.value.startsWith('teh')")
+        assert await evaluate(instance, "demoView.composer.spellRefused.has('teh')")
+        # The word the writer restored is neither corrected nor marked again.
+        await evaluate(instance, """(() => { const c = demoView.composer;
+            c.set(''); c.ta.value = 'teh'; c.ta.selectionStart = c.ta.selectionEnd = 3;
+            c.ta.dispatchEvent(new InputEvent('input', {inputType:'insertText', data:'h'}));
+            c.ta.value = 'teh '; c.ta.selectionStart = c.ta.selectionEnd = 4;
+            c.ta.dispatchEvent(new InputEvent('input', {inputType:'insertText', data:' '}));
+            return true; })()""")
+        assert await evaluate(instance, "demoView.composer.ta.value === 'teh '")
+
+        # The suggestion menu on a marked word, and the tools menu behind the
+        # two switches, are ordinary console menus.
+        await evaluate(instance, """(() => {
+            const c = demoView.composer, ta = c.ta;
+            c.set('a kittn here'); c.spellDraw(true);
+            ta.selectionStart = ta.selectionEnd = 4;
+            const spot = c.box.querySelector('.sp-bad').getBoundingClientRect();
+            ta.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true,
+                clientX: spot.x + spot.width / 2, clientY: spot.bottom}));
+            return true;
+        })()""")
+        # the menu takes its place on the next frame, like every other float
+        await evaluate(instance, "new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
+        menu = await evaluate(instance, """(() => {
+            const open = document.querySelector('.choice-menu.dyn');
+            if (!open) return null;
+            const rect = open.getBoundingClientRect();
+            const rows = [...open.querySelectorAll('.choice-option')].map(row => row.textContent);
+            return {rows, fits: rect.left >= 8 && rect.top >= 8 &&
+                rect.right <= innerWidth - 8 && rect.bottom <= innerHeight - 8};
+        })()""")
+        assert menu and menu["fits"], menu
+        assert "kitten" in menu["rows"] and "Add to dictionary" in menu["rows"], menu
+        picked = await evaluate(instance, """(() => {
+            const rows = [...document.querySelectorAll('.choice-menu.dyn .choice-option')];
+            rows.find(row => row.textContent === 'kitten').click();
+            return demoView.composer.ta.value;
+        })()""")
+        assert picked == "a kitten here", picked
+        tools = await evaluate(instance, """(() => {
+            closeAllMenus(null);
+            setSpellPref('check', false);
+            demoView.composer.box.querySelector('.tools-open').click();
+            const menu = document.querySelector('.choice-menu.dyn');
+            const rows = [...menu.querySelectorAll('.menu-check')].map(row => [
+                row.querySelector('.menu-check-label').textContent,
+                row.getAttribute('aria-checked'), row.disabled]);
+            const marks = demoView.composer.box.querySelector('.spell-layer');
+            closeAllMenus(null);
+            return {rows, marks: !!marks};
+        })()""")
+        assert tools["rows"][-2:] == [["Spell check", "false", False],
+                                      ["Autocorrect", "false", True]], tools
+        assert not tools["marks"], "switching the checker off clears the marks"
+    finally:
+        await evaluate(instance, """closeAllMenus(null); setSpellPref('check', true);
+            setSpellPref('correct', false); demoView.composer.spellRefused.clear();
+            demoView.composer.set(''); true""")
+    print("PASS: bundled dictionary served compressed, marks aligned with the text it "
+          "underlines, autocorrect typed and undone, suggestion and tools menus", flush=True)
+
+
 async def checks(a, b, hub, capture=False):
     await message_reuse_checks(a)
+    await spell_check_checks(a, capture)
     await workspace_move_checks(a, capture)
     await session_mention_checks(a)
     await pane_resize_checks(a)
@@ -901,6 +1102,7 @@ async def checks(a, b, hub, capture=False):
     await identity_pill_checks(a, capture)
     await vnc_throughput_checks(a, capture)
     await vnc_connection_checks(a)
+    await operation_cancellation_checks(a)
     await timer_error_checks(a, capture)
     await usage_error_checks(a, capture)
     # Measure real layout: an idle status must not reserve a row below tools.
