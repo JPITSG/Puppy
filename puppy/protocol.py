@@ -171,6 +171,8 @@ SIDE_QUESTION_CAPABILITY = "active-turn-side-question"
 # these routes or does not advertise them.
 VNC_CAPABILITY = "vnc"
 VNC_INSTANCES_CAPABILITY = "vnc-instances"
+# Create request IDs and DELETE /api/vnc/connect/{request_id} abort pending dials.
+VNC_CONNECT_CANCEL_CAPABILITY = "vnc-connect-cancel"
 
 SESSION_REFERENCES_CAPABILITY = "session-references"
 
@@ -231,6 +233,7 @@ BASE_CAPABILITIES = (
     BROWSER_SHARED_STORAGE_CAPABILITY,
     VNC_CAPABILITY,
     VNC_INSTANCES_CAPABILITY,
+    VNC_CONNECT_CANCEL_CAPABILITY,
     UPLOAD_PREVIEW_CAPABILITY,
     ENGINE_AUTO_UPGRADE_CAPABILITY,
     ENGINE_DEFAULTS_CAPABILITY,

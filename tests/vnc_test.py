@@ -37,6 +37,7 @@ from puppy.drivers.claude import ClaudeDriver  # noqa: E402
 from puppy.drivers.codex import CodexDriver  # noqa: E402
 from puppy.drivers.opencode import OpenCodeDriver  # noqa: E402
 from puppy.web import build_app  # noqa: E402
+from backend.puppy_backend.app import build_app as backend_app  # noqa: E402
 
 
 class CaptureSocket:
@@ -875,6 +876,7 @@ async def check_large_viewer_refresh() -> None:
             await super().send_bytes(payload)
 
     instance = vnc.VncInstance("BIG1", "screen.example", 5900)
+    instance.connected = True  # synthetic live framebuffer, no RFB socket
     instance._resize(1080, 2400)
     original = b"".join(rgba((y % 256, 50, 70)) * instance.width
                         for y in range(instance.height))
@@ -908,7 +910,7 @@ async def check_large_viewer_refresh() -> None:
 
     try:
         instance._settle(viewer)
-        await socket.started.wait()
+        await asyncio.wait_for(socket.started.wait(), 2)
         # A delta arriving during a blocked refresh must follow the frozen
         # picture, including when it changes a band not sent yet.
         patch = rgba((1, 2, 3))
@@ -929,7 +931,7 @@ async def check_large_viewer_refresh() -> None:
         socket.gate.clear()
         socket.started.clear()
         instance._settle(viewer)
-        await socket.started.wait()
+        await asyncio.wait_for(socket.started.wait(), 2)
         instance.frame[:] = rgba((80, 90, 100)) * (1080 * 2400)
         viewer.send_frame(b"x" * (vnc.MAX_VIEWER_BYTES + 1))
         viewer.send_frame(delta)
@@ -1167,9 +1169,158 @@ async def check_lifecycle() -> None:
     print("  lifecycle ok")
 
 
-async def check_http_surface() -> None:
+async def check_ended_session() -> None:
     server = await StubVncServer(width=8, height=4).start()
-    app = build_app()
+    instance = vnc.VncInstance("END1", "127.0.0.1", server.port)
+    viewer = ViewerSocket()
+    try:
+        await instance.attach_viewer(viewer)
+        await wait_for(lambda: viewer.frames, label="initial viewer frame")
+        viewer.frames.clear()
+        server.writer.close()
+        await server.writer.wait_closed()
+        await wait_for(lambda: viewer.messages("gone"), label="remote disconnect notice")
+        await asyncio.sleep(0.02)
+        assert not instance.connected and instance.writer is None
+        assert "closed the connection" in instance.payload()["error"]
+        assert not viewer.frames, "an ended session must not send a cached full frame after gone"
+        # Neither returning to a hidden viewer nor an overflow recovery can
+        # publish a stale snapshot after the server has closed the connection.
+        instance.set_viewer_active(viewer, False)
+        instance.set_viewer_active(viewer, True)
+        await asyncio.sleep(0.02)
+        assert not viewer.frames, "resume cannot settle a disconnected framebuffer"
+    finally:
+        await instance.close()
+        await server.stop()
+    # A full status backlog cannot swallow the disconnect notice either.
+    instance = vnc.VncInstance("END2", "screen.example", 5900)
+    instance.connected = True
+    socket = ViewerSocket()
+    viewer = vnc._Viewer(socket, instance._settle)
+    instance.viewers[socket] = viewer
+    try:
+        for _ in range(vnc.MAX_TEXT_BACKLOG):
+            viewer.send_json({"type": "status", "connected": True})
+        await instance.disconnect("Server closed")
+        await wait_for(lambda: socket.messages("gone"), label="disconnect with full notice queue")
+        assert not socket.messages("status"), "queued live statuses are obsolete after disconnect"
+    finally:
+        await instance.close()
+    print("  remote disconnect is authoritative ok")
+
+
+async def check_cancelled_dial() -> None:
+    registry = vnc.VncRegistry()
+    entered, cancelled = asyncio.Event(), asyncio.Event()
+
+    async def slow_dial(*args):
+        entered.set()
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled.set()
+
+    with patch.object(asyncio, "open_connection", slow_dial):
+        task = asyncio.ensure_future(registry.create(
+            "screen.example", request_id="fixture-cancel-dial"))
+        await asyncio.wait_for(entered.wait(), 1)
+        await asyncio.wait_for(registry.cancel_create("fixture-cancel-dial"), 1)
+        assert task.cancelled() and cancelled.is_set()
+        assert not registry.instances
+        assert registry.connect_requests["fixture-cancel-dial"]["task"] is None
+
+        # Closing an ID (or shutting down) also cancels an in-flight dial.
+        entered.clear()
+        task = asyncio.ensure_future(registry.create("screen.example"))
+        await asyncio.wait_for(entered.wait(), 1)
+        instance = next(iter(registry.instances.values()))
+        await asyncio.wait_for(registry.close(instance.vnc_id), 1)
+        assert task.cancelled() and instance.closed and not registry.instances
+
+    # The cancellation ledger is bounded, and expiry frees old records.
+    registry = vnc.VncRegistry()
+    with patch.object(vnc, "MAX_CONNECT_REQUESTS", 2):
+        await registry.cancel_create("fixture-cancel-one")
+        await registry.cancel_create("fixture-cancel-two")
+        await registry.cancel_create("fixture-cancel-one")  # idempotent even at capacity
+        try:
+            await registry.cancel_create("fixture-cancel-three")
+        except vnc.VncError:
+            pass
+        else:
+            raise AssertionError("unbounded connection request ledger")
+        for attempt in registry.connect_requests.values():
+            attempt["expires"] = 0
+        await registry.cancel_create("fixture-cancel-three")
+        assert len(registry.connect_requests) == 1
+    print("  dial cancellation and bounded ledger ok")
+
+
+async def check_http_cancellation(http, url, headers, server) -> None:
+    path = url + "/api/vnc/connect/"
+    token = "fixture-cancel-before"
+    async with http.delete(path + token) as response:
+        assert response.status == 401, "anonymous cancellation must be refused"
+    async with http.delete(path + "bad", headers=headers) as response:
+        assert response.status == 400
+    async with http.delete(path + token, headers=headers) as response:
+        assert response.status == 200
+    connections = server.connections
+    async with http.post(url + "/api/vnc/instances", headers=headers, json={
+            "host": "127.0.0.1", "port": server.port, "request_id": token}) as response:
+        assert response.status == 502
+        assert "cancelled" in (await response.json())["error"]
+    assert server.connections == connections, "Cancel arriving first must prevent the dial"
+
+    # No greeting: reproduce a modal waiting for a server that never completes
+    # its handshake. Cancellation must close its TCP socket immediately.
+    entered, closed = asyncio.Event(), asyncio.Event()
+    async def stall(reader, writer):
+        entered.set()
+        try:
+            assert await reader.read() == b""
+            closed.set()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+    stalled = await asyncio.start_server(stall, "127.0.0.1", 0)
+    port = stalled.sockets[0].getsockname()[1]
+    token = "fixture-cancel-handshake"
+    pending = asyncio.ensure_future(http.post(url + "/api/vnc/instances", headers=headers,
+        json={"host": "127.0.0.1", "port": port, "request_id": token}))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        async with http.delete(path + token, headers=headers) as response:
+            assert response.status == 200
+        response = await asyncio.wait_for(pending, 2)
+        assert response.status == 409, await response.text()
+        await response.read()
+        await asyncio.wait_for(closed.wait(), 2)
+        assert not vnc.manager().instances, "cancelled handshakes leave no catalog entry"
+    finally:
+        pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+        stalled.close()
+        await stalled.wait_closed()
+
+    # The same token also reclaims a success whose reply raced Cancel or was
+    # lost in flight. Repeated cancellation stays harmless.
+    token = "fixture-cancel-success"
+    async with http.post(url + "/api/vnc/instances", headers=headers, json={
+            "host": "127.0.0.1", "port": server.port, "request_id": token}) as response:
+        assert response.status == 201, await response.text()
+        instance = vnc.manager().get((await response.json())["vnc"]["id"])
+    assert instance.connected
+    for _ in range(2):
+        async with http.delete(path + token, headers=headers) as response:
+            assert response.status == 200
+    assert not instance.connected and instance.closed and not vnc.manager().instances
+
+
+async def check_http_surface(app_factory=build_app) -> None:
+    server = await StubVncServer(width=8, height=4).start()
+    app = app_factory()
     runner = aioweb.AppRunner(app)
     await runner.setup()
     site = aioweb.TCPSite(runner, "127.0.0.1", 0)
@@ -1183,6 +1334,7 @@ async def check_http_surface() -> None:
                 ping = await response.json()
                 assert "vnc" in ping["capabilities"], ping
                 assert "vnc-instances" in ping["capabilities"], ping
+                assert "vnc-connect-cancel" in ping["capabilities"], ping
 
             async with http.get(url + "/api/timeouts", headers=headers) as response:
                 timeouts = (await response.json())["timeouts"]
@@ -1195,7 +1347,9 @@ async def check_http_surface() -> None:
 
             for bad in ({"host": ""}, {"host": "a b"}, {"host": "x", "port": 0.5},
                         {"host": "x", "port": "nope"},
-                        {"host": "x", "view_only": "yes"}):
+                        {"host": "x", "view_only": "yes"},
+                        {"host": "x", "request_id": "bad"},
+                        {"host": "x", "request_id": None}):
                 async with http.post(url + "/api/vnc/instances", headers=headers,
                                      json=bad) as response:
                     assert response.status == 400, (bad, response.status)
@@ -1250,10 +1404,11 @@ async def check_http_surface() -> None:
             # Unauthenticated callers see nothing.
             async with http.get(url + "/api/vnc/instances") as response:
                 assert response.status == 401, response.status
+            await check_http_cancellation(http, url, headers, server)
     finally:
         await runner.cleanup()
         await server.stop()
-    print("  HTTP surface ok")
+    print("  HTTP surface ok ({})".format(app_factory.__module__))
 
 
 def png_pixels(image: bytes) -> tuple:
@@ -1680,7 +1835,10 @@ async def main() -> None:
         await check_streaming_pause()
         await check_input()
         await check_lifecycle()
+        await check_ended_session()
+        await check_cancelled_dial()
         await check_http_surface()
+        await check_http_surface(backend_app)
         check_agent_contract()
         await check_agent_screenshot()
         await check_agent_input()

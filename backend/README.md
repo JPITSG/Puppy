@@ -623,6 +623,13 @@ restore forgets them rather than putting a remote screen in a backup, and a
 password lives only in the process that dialled the server. `vnc.idle_timeout`
 drops an unwatched connection while keeping its identity, so reattaching
 redials. A VNC connection never blocks a turn, a backup or a node upgrade.
+The additive `vnc-connect-cancel` capability accepts a `request_id` on the create
+POST and `DELETE /api/vnc/connect/{request_id}` to abort its dial or handshake,
+including cancellation arriving before the POST or after a successful reply.
+These bounded, short-lived request records stay in memory. Disconnect discards
+queued and cached frames before notifying viewers, so a stopped server cannot
+appear connected again because of stale pixels. See the
+[lifecycle contract](../docs/vnc.md#lifecycle).
 
 Every engine turn on such a node also receives a private stdio MCP server,
 backed by a mode-0600, same-uid Unix socket, that offers the screens the node

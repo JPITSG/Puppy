@@ -297,7 +297,11 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
   host and either a port or a bare display number (`1` means 5901); IPv6 goes
   in brackets. A password, when the server asks for one, is used for that
   connection's challenge and is never written to disk. *View only* watches
-  without sending anything, and a Ctrl+Alt+Del button and a typing row (for
+  without sending input. *Cancel*, Escape and clicking outside the connection
+  dialog remain available while connecting; cancellation aborts the dial on
+  backends advertising `vnc-connect-cancel`. Older backends finish their attempt
+  and any successful late connection is closed without opening a tab.
+  A Ctrl+Alt+Del button and a typing row (for
   phones, and for keys a soft keyboard cannot express) sit beside the address.
   Beside the dimensions and FPS, a throughput pill shows incoming VNC traffic
   at the backend in B/s, KiB/s or MiB/s, refreshed once a second (zero when
@@ -320,7 +324,8 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
   and closing its tab closes it. A server that goes away is reported in the pane
   itself, with the reason and a *Reconnect* button; Puppy redials a few times,
   with a growing pause, and then waits for you rather than filling the screen
-  with notifications.
+  with notifications. Cached frames cannot change a disconnected pane back to
+  *Connected*; that requires a successful reconnection status from the backend.
   The agent gets the same screen as a toolset: look at it, move, click or tap,
   drag or swipe, scroll, type, press keys and shortcuts, wait for the picture to
   settle, and connect or disconnect. Screenshots are PNGs Puppy builds from the

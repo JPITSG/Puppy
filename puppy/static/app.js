@@ -16495,8 +16495,6 @@ class VncView {
         return;
       }
       noteRemoteSocketReachable(this.tab.bid);
-      this.reconnectAttempts = 0;
-      this.reconnectDelay = 1000;
       this.viewerActive = null;
       this.syncViewerActivity();
     };
@@ -16543,6 +16541,7 @@ class VncView {
       this.viewOnly = message.view_only === true;
       this.connected = message.connected === true;
       this.vncGone = false;
+      if (this.connected) this.resetReconnect();
       if (!this.tab.vncHost && message.host) {
         this.tab.vncHost = message.host;
         this.tab.vncPort = message.port;
@@ -16551,8 +16550,10 @@ class VncView {
         saveTabs();
       }
       this.setSize(message.width, message.height);
-      this.clearDead();
-      this.renderIdentity();
+      if (this.connected) {
+        this.clearDead();
+        this.renderIdentity();
+      } else this.showDead(message.error || "VNC connection closed", false);
     } else if (message.type === "size") {
       this.setSize(message.width, message.height);
     } else if (message.type === "gone") {
@@ -16566,6 +16567,8 @@ class VncView {
       if (message.dial === true && this.reconnectDelay < 4000)
         this.reconnectDelay = 4000;
       this.showDead(message.reason || "VNC connection closed", false);
+      // End this viewer socket too; reconnect must obtain a fresh status.
+      if (this.ws) { try { this.ws.close(); } catch (error) {} }
     } else if (message.type === "error") {
       if (message.terminal === true) {
         this.vncGone = true;
@@ -16604,7 +16607,8 @@ class VncView {
      ImageData wants, so the payload is wrapped, not copied or converted; a
      CopyRect carries no pixels at all and moves them inside the canvas. */
   applyFrame(buffer) {
-    if (this.closed || !this.viewerActive || !(buffer instanceof ArrayBuffer)) return;
+    if (this.closed || !this.connected || !this.viewerActive ||
+        !(buffer instanceof ArrayBuffer)) return;
     if (buffer.byteLength < 10) return;
     const head = new DataView(buffer);
     const kind = head.getUint8(0);
@@ -16625,9 +16629,7 @@ class VncView {
     } catch (error) {
       return;   // a rectangle outside the canvas cannot end the connection
     }
-    this.connected = true;
     this.recordFrame();
-    if (this.isDead()) { this.clearDead(); this.renderIdentity(); }
   }
 
   resetFps() {
@@ -16667,10 +16669,10 @@ class VncView {
     this.resetContinuousInput();
     if (ended) this.vncGone = true;
     this.connected = false;
-    this.renderIdentity();
     let dead = this.root.querySelector(".vnc-dead");
     if (dead) {
       if (message) dead.querySelector(".term-dead-message").textContent = message;
+      this.renderIdentity();
       return;
     }
     dead = el("div", "term-dead vnc-dead");
@@ -16700,6 +16702,7 @@ class VncView {
     actions.appendChild(close);
     dead.appendChild(actions);
     this.stage.appendChild(dead);
+    this.renderIdentity();
   }
 
   handleNodeStopping(message) {
@@ -21505,7 +21508,7 @@ function openBrowserFromMenu(groupId = null) {
 function modalNewVnc(groupId = null) {
   const nodes = [{ id: 0, name: backendName(0) }]
     .concat(state.backends.filter(node => vncEnabledFor(node.id)));
-  const { m, close } = modal(`<h2>New VNC connection</h2>
+  const { m, close, onClose } = modal(`<h2>New VNC connection</h2>
     <p class="modal-copy">Puppy connects from the chosen backend to a VNC server over TCP and
       decodes its screen here. The password is used only for this connection's challenge and is
       never written to disk.</p>
@@ -21534,10 +21537,32 @@ function modalNewVnc(groupId = null) {
   const error = m.querySelector(".form-error"), go = m.querySelector("#nv-go");
   form.noValidate = true;
   let busy = false;
+  let dismissed = false, attempt = null;
+  const cancelAttempt = async current => {
+    if (!current || current.accepted) return;
+    if (current.cancelling) return current.cancelling;
+    const path = current.requestId ? `vnc/connect/${encodeURIComponent(current.requestId)}` :
+      current.vncId ? `vnc/instances/${encodeURIComponent(current.vncId)}` : "";
+    if (!path) return; // An older backend's late reply is reclaimed below.
+    current.cancelling = api(current.bid, path, { method: "DELETE", timeoutMs: 10000 })
+      .catch(failure => {
+        if (!current.requestId && failure.status === 404) return;
+        current.cancelling = null;
+        throw failure;
+      });
+    return current.cancelling;
+  };
+  onClose(() => {
+    dismissed = true;
+    cancelAttempt(attempt).catch(failure => {
+      toast(`${backendName(attempt.bid)}: Could not cancel VNC connection · ${failure.message} · check the open connections`,
+        "bad", TOAST_LONG);
+    });
+  });
   m.querySelector("#nv-cancel").onclick = close;
   form.onsubmit = async event => {
     event.preventDefault();
-    if (busy) return;
+    if (busy || dismissed) return;
     if (!host.value.trim()) {
       error.textContent = "Enter the VNC server's host name or address";
       error.classList.remove("hidden");
@@ -21545,16 +21570,23 @@ function modalNewVnc(groupId = null) {
       return;
     }
     const bid = parseInt(m.querySelector("#nv-be").value, 10) || 0;
+    const backend = state.backends.find(item => item.id === bid);
+    const canCancel = !bid || backendHasCapability(backend, "vnc-connect-cancel");
+    const current = attempt = { bid, requestId: canCancel ? newDraftClientId() : "",
+      vncId: "", accepted: false, cancelling: null };
     const label = m.querySelector("#nv-label").value.trim();
     error.classList.add("hidden");
     busy = true;
     form.setAttribute("aria-busy", "true");
-    form.querySelectorAll("input,button,select").forEach(control => control.disabled = true);
+    form.querySelectorAll("input,button,select").forEach(control => {
+      control.disabled = control.id !== "nv-cancel";
+    });
     go.textContent = "Connecting…";
     try {
       const result = await api(bid, "vnc/instances", {
-        method: "POST", timeoutMs: 30000,
+        method: "POST", timeoutMs: 45000,
         body: {
+          ...(current.requestId ? { request_id: current.requestId } : {}),
           host: host.value.trim(),
           port: port.value.trim(),
           password: m.querySelector("#nv-pass").value,
@@ -21562,20 +21594,36 @@ function modalNewVnc(groupId = null) {
           label,
         },
       });
+      current.vncId = result.vnc.id;
+      if (dismissed) {
+        // Also covers an old backend and a successful reply racing Cancel.
+        await cancelAttempt(current);
+        return;
+      }
+      current.accepted = true;
       close();
       openVncTab(bid, result.vnc.id, groupId, {
         host: result.vnc.host, port: result.vnc.port, label: result.vnc.label,
       });
       toast(`${backendName(bid)}: Connected to ${result.vnc.host}`, "ok");
     } catch (failure) {
+      if (dismissed) {
+        if (current.vncId) toast(`${backendName(bid)}: Could not close cancelled VNC connection · ${failure.message} · check the open connections`,
+          "bad", TOAST_LONG);
+        return;
+      }
       error.textContent = failure.message;
       error.classList.remove("hidden");
-      host.focus();
+      try { await cancelAttempt(current); }
+      catch (cleanup) { error.textContent += ` · Could not cancel connection: ${cleanup.message}`; }
     } finally {
       busy = false;
-      form.setAttribute("aria-busy", "false");
-      form.querySelectorAll("input,button,select").forEach(control => control.disabled = false);
-      go.textContent = "Connect";
+      if (!dismissed) {
+        form.setAttribute("aria-busy", "false");
+        form.querySelectorAll("input,button,select").forEach(control => control.disabled = false);
+        go.textContent = "Connect";
+        host.focus();
+      }
     }
   };
   host.focus();

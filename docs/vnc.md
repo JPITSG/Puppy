@@ -89,6 +89,24 @@ like browsers and terminals. `GET`/`POST /api/vnc/instances`,
 them identically, behind the additive `vnc` and `vnc-instances` capabilities.
 The catalog rides the node state stream as the `vnc_instances` topic.
 
+With the additive `vnc-connect-cancel` capability, the create POST accepts an
+optional `request_id` (16–80 ASCII letters, digits, underscores or hyphens).
+`DELETE /api/vnc/connect/{request_id}` cancels that attempt during TCP dial or
+handshake and closes any connection whose successful reply raced cancellation.
+It also records cancellation arriving before the POST, so request ordering
+cannot start a dial the user already cancelled. IDs are single-use within the
+retention window; retries use a fresh ID. Records are memory-only, contain no
+passwords, and expire 120 seconds after completion (pruned on new requests),
+with a cap of 512 records; pending attempts are never evicted. Repeated DELETEs
+are harmless. Both runtimes authenticate the route through the execution API.
+
+The connection modal keeps Cancel enabled; its close hook also handles Escape
+and the backdrop. Dismissed attempts cannot open tabs or show success notices.
+Older backends use the existing create route, with a successful late reply
+reclaimed through instance DELETE. Failed or timed-out creates also request
+cancellation on capable nodes. The console allows 45 seconds for the create
+request, covering the 15-second dial and 20-second handshake bounds.
+
 A connection's password is held only by the process that dialled the server and
 only while the instance exists. It is never persisted, never returned by any
 route, and never part of a backup.
@@ -99,6 +117,15 @@ again. Closing the tab closes the connection. A dropped socket, a refused
 handshake and a malformed update all end that one connection with a reason the
 pane shows; nothing else on the node is affected, and a VNC connection never
 blocks a turn, a backup or a node upgrade.
+
+Disconnect invalidates queued damage and cached full-screen snapshots before
+the `gone` notice. A disconnected instance never settles a viewer from its
+cached framebuffer. The console likewise ignores damage until a successful
+`status` says the server is connected, so bytes already in flight cannot erase
+the reason or restore a Connected pill. The first disconnect paints the
+Disconnected pill immediately. A `gone` closes that viewer socket; automatic
+redials retain their budget until an RFB connection succeeds, rather than
+resetting it whenever the viewer WebSocket opens.
 
 ## Agent tools
 

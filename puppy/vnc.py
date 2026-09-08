@@ -60,6 +60,11 @@ MAX_PASSWORD = 256
 MAX_TEXT = 4096
 CONNECT_TIMEOUT = 15.0
 HANDSHAKE_TIMEOUT = 20.0
+# Cancellation survives a POST/DELETE crossing in flight, including a lost
+# successful reply. These short-lived records never retain connection passwords.
+CONNECT_REQUEST_TTL = 120.0
+MAX_CONNECT_REQUESTS = 512
+_CONNECT_REQUEST_ID = re.compile(r"^[A-Za-z0-9_-]{16,80}$")
 # A server that announces something outside this is either broken or hostile.
 MAX_DIMENSION = 8192
 
@@ -759,6 +764,7 @@ class VncInstance:
         self.task = None
         self.idle_task = None
         self.start_lock = asyncio.Lock()
+        self.start_task = None
         self.inflate_zlib = None
         self.inflate_zrle = None
         self.update_pending = False
@@ -827,42 +833,52 @@ class VncInstance:
         if self.closed:
             raise VncError("VNC {} is closed".format(self.vnc_id))
         async with self.start_lock:
-            if self.connected or self.closed:
+            if self.closed:
+                raise VncError("VNC {} is closed".format(self.vnc_id))
+            if self.connected:
                 return
-            self.error = ""
+            self.start_task = asyncio.current_task()
             try:
-                self.reader, self.writer = await asyncio.wait_for(
-                    asyncio.open_connection(self.host, self.port),
-                    CONNECT_TIMEOUT)
-            except asyncio.TimeoutError:
-                self.error = "Could not reach {}:{} within {:.0f}s".format(
-                    self.host, self.port, CONNECT_TIMEOUT)
-                raise VncError(self.error)
-            except OSError as exc:
-                self.error = "Could not reach {}:{}: {}".format(
-                    self.host, self.port, exc.strerror or exc)
-                raise VncError(self.error)
-            self.stream = _Stream(self.reader)
-            try:
-                await asyncio.wait_for(self._handshake(), HANDSHAKE_TIMEOUT)
-            except asyncio.TimeoutError:
+                await self._connect()
+            except BaseException:
                 await self._close_socket()
-                self.error = "The VNC server did not complete its handshake"
-                raise VncError(self.error)
-            except VncError as exc:
-                await self._close_socket()
-                self.error = str(exc)
                 raise
-            except (OSError, asyncio.IncompleteReadError) as exc:
-                await self._close_socket()
-                self.error = "VNC handshake failed: {}".format(exc)
-                raise VncError(self.error)
-            self.connected = True
-            self.task = asyncio.ensure_future(self._run())
-            log.info("VNC %s connected to %s:%s (%sx%s, %s)", self.vnc_id,
-                     self.host, self.port, self.width, self.height,
-                     self.name or "unnamed")
+            finally:
+                self.start_task = None
         _state_changed()
+
+    async def _connect(self) -> None:
+        """The dial owned by start_task, so closing also cancels a handshake."""
+        self.error = ""
+        try:
+            self.reader, self.writer = await asyncio.wait_for(
+                asyncio.open_connection(self.host, self.port),
+                CONNECT_TIMEOUT)
+        except asyncio.TimeoutError:
+            self.error = "Could not reach {}:{} within {:.0f}s".format(
+                self.host, self.port, CONNECT_TIMEOUT)
+            raise VncError(self.error)
+        except OSError as exc:
+            self.error = "Could not reach {}:{}: {}".format(
+                self.host, self.port, exc.strerror or exc)
+            raise VncError(self.error)
+        self.stream = _Stream(self.reader)
+        try:
+            await asyncio.wait_for(self._handshake(), HANDSHAKE_TIMEOUT)
+        except asyncio.TimeoutError:
+            self.error = "The VNC server did not complete its handshake"
+            raise VncError(self.error)
+        except VncError as exc:
+            self.error = str(exc)
+            raise
+        except (OSError, asyncio.IncompleteReadError) as exc:
+            self.error = "VNC handshake failed: {}".format(exc)
+            raise VncError(self.error)
+        self.connected = True
+        self.task = asyncio.ensure_future(self._run())
+        log.info("VNC %s connected to %s:%s (%sx%s, %s)", self.vnc_id,
+                 self.host, self.port, self.width, self.height,
+                 self.name or "unnamed")
 
     async def _handshake(self) -> None:
         stream = self.stream
@@ -1021,13 +1037,20 @@ class VncInstance:
         self.buttons = 0
         self.pressed.clear()
         for viewer in self.viewers.values():
-            viewer.needs_full = True
+            # Discard cached damage before the terminal notice. The sender
+            # must never settle an ended session with its last framebuffer.
+            viewer.invalidate()
+            viewer.texts.clear()  # the disconnect must not lose a full notice queue
             viewer.send_json({"type": "gone", "reason": reason})
         log.info("VNC %s disconnected: %s", self.vnc_id, reason)
         _state_changed()
 
     async def close(self, reason: str = "Closed") -> None:
         self.closed = True
+        starting = self.start_task
+        if starting is not None and starting is not asyncio.current_task():
+            starting.cancel()
+            await asyncio.gather(starting, return_exceptions=True)
         await self.disconnect(reason)
         for viewer in list(self.viewers.values()):
             viewer.close()
@@ -1077,7 +1100,7 @@ class VncInstance:
         bands at once would discard the top of a large screen on every retry.
         Later deltas queue behind this snapshot, preserving CopyRect order.
         """
-        if not viewer.active or not self.width or not self.frame:
+        if not self.connected or not viewer.active or not self.width or not self.frame:
             return
         viewer.needs_full = False
         viewer.queue.clear()
@@ -1856,6 +1879,7 @@ class VncRegistry:
     def __init__(self):
         self.instances = {}
         self.lock = asyncio.Lock()
+        self.connect_requests = {}
         # Which screen an agent means when it names none: the last one that
         # session connected to or acted on. In memory, like the connections.
         self.bindings = {}
@@ -1868,18 +1892,65 @@ class VncRegistry:
 
     async def create(self, host: str, port: int = DEFAULT_PORT,
                      password: str = "", view_only: bool = False,
-                     label: str = "", origin: str = "user") -> VncInstance:
-        async with self.lock:
-            instance = VncInstance(self._new_id(), host, port, password,
-                                   view_only, label, origin)
-            self.instances[instance.vnc_id] = instance
+                     label: str = "", origin: str = "user",
+                     request_id: str = "") -> VncInstance:
+        attempt = None
+        if request_id:
+            self._prune_connect_requests()
+            if request_id in self.connect_requests:
+                raise VncError("VNC connection request was cancelled or already used")
+            attempt = {"task": asyncio.current_task(), "id": None,
+                       "expires": time.monotonic() + CONNECT_REQUEST_TTL,
+                       "cancelled": False}
+            self.connect_requests[request_id] = attempt
+        instance = None
         try:
-            await instance.ensure_started()
-        except VncError:
             async with self.lock:
+                instance = VncInstance(self._new_id(), host, port, password,
+                                       view_only, label, origin)
+                self.instances[instance.vnc_id] = instance
+                if attempt is not None:
+                    attempt["id"] = instance.vnc_id
+                    attempt["created_at"] = instance.created_at
+            await instance.ensure_started()
+            instance.touch()
+        except BaseException:
+            if instance is not None:
                 self.instances.pop(instance.vnc_id, None)
+                await instance.close("Connection cancelled or failed")
+                _state_changed()
             raise
+        finally:
+            if attempt is not None:
+                attempt["task"] = None
+                attempt["expires"] = time.monotonic() + CONNECT_REQUEST_TTL
         return instance
+
+    def _prune_connect_requests(self) -> None:
+        now = time.monotonic()
+        for key, attempt in list(self.connect_requests.items()):
+            if attempt["task"] is None and attempt["expires"] <= now:
+                del self.connect_requests[key]
+        if len(self.connect_requests) >= MAX_CONNECT_REQUESTS:
+            raise VncError("Too many recent VNC connection requests; try again shortly")
+
+    async def cancel_create(self, request_id: str) -> None:
+        attempt = self.connect_requests.get(request_id)
+        if attempt is None:
+            self._prune_connect_requests()
+            attempt = {"task": None, "id": None, "cancelled": True,
+                       "expires": time.monotonic() + CONNECT_REQUEST_TTL}
+            self.connect_requests[request_id] = attempt
+        already_cancelled = attempt["cancelled"]
+        attempt["cancelled"] = True
+        task = attempt["task"]
+        if task is not None:
+            if not already_cancelled:
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        instance = self.instances.get(attempt["id"])
+        if instance is not None and instance.created_at == attempt.get("created_at"):
+            await self.close(attempt["id"], "Connection cancelled")
 
     def get(self, vnc_id) -> VncInstance:
         vnc_id = normalize_vnc_id(vnc_id)
@@ -1952,6 +2023,7 @@ class VncRegistry:
         if instances:
             await asyncio.gather(*(instance.close(reason) for instance in instances),
                                  return_exceptions=True)
+        self.connect_requests.clear()
 
 
 def idle_settings_changed() -> None:
@@ -1995,6 +2067,12 @@ async def h_instances(request: web.Request):
     return web.json_response({"instances": manager().instance_payloads()})
 
 
+def _connect_request_id(value) -> str:
+    if not isinstance(value, str) or not _CONNECT_REQUEST_ID.fullmatch(value):
+        raise VncError("invalid VNC connection request ID")
+    return value
+
+
 async def h_create(request: web.Request):
     if request.app.get("puppy_snapshot_busy"):
         return web.json_response(
@@ -2005,14 +2083,31 @@ async def h_create(request: web.Request):
         return web.json_response({"error": "invalid VNC request"}, status=400)
     try:
         spec = _request_spec(body)
+        request_id = (_connect_request_id(body["request_id"])
+                      if "request_id" in body else "")
     except VncError as exc:
         return web.json_response({"error": str(exc)}, status=400)
     try:
-        instance = await manager().create(**spec, origin="user")
+        instance = await manager().create(**spec, origin="user",
+                                          request_id=request_id)
+    except asyncio.CancelledError:
+        attempt = manager().connect_requests.get(request_id)
+        if attempt is None or not attempt["cancelled"]:
+            raise
+        return web.json_response({"error": "VNC connection cancelled"}, status=409)
     except VncError as exc:
         return web.json_response({"error": str(exc)}, status=502)
     _state_changed()
     return web.json_response({"ok": True, "vnc": instance.payload()}, status=201)
+
+
+async def h_cancel_connect(request: web.Request):
+    try:
+        request_id = _connect_request_id(request.match_info.get("request_id"))
+        await manager().cancel_create(request_id)
+    except VncError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    return web.json_response({"ok": True})
 
 
 async def h_close(request: web.Request):
@@ -2097,6 +2192,7 @@ async def shutdown() -> None:
 def register(app: web.Application) -> None:
     app.router.add_get("/api/vnc/instances", h_instances)
     app.router.add_post("/api/vnc/instances", h_create)
+    app.router.add_delete("/api/vnc/connect/{request_id}", h_cancel_connect)
     app.router.add_delete("/api/vnc/instances/{vnc_id:[A-Z0-9]{4}}", h_close)
     app.router.add_get("/api/ws/vnc/{vnc_id:[A-Z0-9]{4}}", ws_vnc)
 

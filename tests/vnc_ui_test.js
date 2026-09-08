@@ -5,6 +5,9 @@
 const assert = require('assert');
 const fs = require('fs');
 const vm = require('vm');
+const { FakeDocument } = require('./fake_dom.js');
+const document = new FakeDocument();
+document.visibilityState = 'visible';
 
 const source = fs.readFileSync('puppy/static/app.js', 'utf8');
 const start = source.indexOf('class VncView {');
@@ -44,7 +47,7 @@ const context = vm.createContext({
   performance: { now: () => now },
   setInterval(fn) { const id = ++timerSerial; intervals.set(id, fn); return id; },
   clearInterval(id) { intervals.delete(id); },
-  document: { visibilityState: 'visible' },
+  document,
   setTimeout(fn, wait) { const id = ++timerSerial; timers.set(id, { fn, wait }); return id; },
   clearTimeout(id) { timers.delete(id); },
   backendConnectionAllowed: () => true,
@@ -134,7 +137,7 @@ function copyFrame(x, y, w, h, sx, sy) {
   return buffer;
 }
 
-const view = makeView();
+const view = makeView({ connected: true });
 painted.length = 0;
 view.applyFrame(pixelFrame(3, 5, 2, 4));
 assert.equal(painted.length, 1);
@@ -143,7 +146,7 @@ assert.deepEqual([painted[0].x, painted[0].y], [3, 5], 'damage lands at its orig
 assert.equal(painted[0].image.width, 2);
 assert.equal(painted[0].image.height, 4);
 assert.equal(painted[0].image.data.length, 2 * 4 * 4, 'payload is wrapped, not copied');
-assert.equal(view.connected, true, 'a painted rectangle proves the connection');
+assert.equal(view.connected, true);
 
 view.applyFrame(copyFrame(8, 2, 6, 6, 0, 0));
 assert.deepEqual(painted.at(-1), { op: 'copy', sx: 0, sy: 0, sw: 6, sh: 6,
@@ -388,3 +391,145 @@ assert.equal(dropped.at(-1).ended, true);
 console.log('PASS: button mapping, damage painting, malformed-frame rejection, ' +
   'resize, gesture coalescing, tone vocabulary, throughput, status handling and ' +
   'quiet bounded reconnection');
+
+/* Disconnect is authoritative, even if cached damage was already in flight. */
+context.el = (tag, cls = '', text = '') => {
+  const node = document.createElement(tag);
+  node.className = cls; node.textContent = text;
+  return node;
+};
+const stage = document.createElement('div');
+const ended = makeView({ root: stage, stage, connected: true,
+  isDead: View.prototype.isDead, resetContinuousInput() {},
+  ws: { close() {} },
+});
+ended.handleMessage({ type: 'gone', reason: 'The VNC server closed the connection' });
+assert.equal(ended.stateText.textContent, 'Disconnected', 'first disconnect renders after its overlay exists');
+const paintedBeforeEnd = painted.length;
+ended.applyFrame(pixelFrame(0, 0, 2, 2));
+ended.applyFrame(copyFrame(0, 0, 2, 2, 2, 2));
+assert.equal(ended.connected, false, 'late damage cannot resurrect a disconnected server');
+assert.equal(painted.length, paintedBeforeEnd, 'late pixels and copies are ignored');
+assert.ok(ended.isDead(), 'the disconnect reason and Reconnect button stay visible');
+ended.handleMessage({ type: 'status', connected: false, error: 'Connection ended' });
+assert.equal(ended.stateText.textContent, 'Disconnected', 'a disconnected status cannot clear the reason');
+ended.handleMessage({ type: 'status', connected: true, width: 10, height: 10 });
+assert.equal(ended.isDead(), false, 'only a successful status clears the disconnect');
+ended.applyFrame(pixelFrame(0, 0, 2, 2));
+assert.equal(painted.length, paintedBeforeEnd + 1);
+
+/* A viewer WebSocket can open even when every RFB dial fails. Exercise the
+   real socket callbacks so that opening it cannot replenish the dial budget. */
+context.noteRemoteSocketReachable = () => {};
+context.remoteStoppingMessage = () => '';
+context.wsUrl = () => 'ws://fixture/vnc/AB12';
+context.WebSocket = class {
+  static OPEN = 1;
+  constructor() { this.readyState = 1; }
+  close() { this.readyState = 3; this.onclose(); }
+};
+const retry = makeView({ ws: null, visible: true, connectionSequence: 0,
+  reconnectTimer: null, reconnectAttempts: 0, reconnectDelay: 1000,
+  syncViewerActivity() {}, resetContinuousInput() {},
+  showDead() { this.dead = true; }, isDead() { return !!this.dead; },
+});
+timers.clear();
+for (let i = 0; i <= 5; i++) {
+  retry.connect();
+  retry.ws.onopen();
+  retry.ws.onmessage({ data: JSON.stringify({ type: 'gone', dial: true, reason: 'Refused' }) });
+  if (i < 5) assert.equal(timers.size, 1);
+  else assert.equal(timers.size, 0, 'five failed RFB redials exhaust the budget');
+  timers.clear(); retry.reconnectTimer = null;
+}
+
+/* The connection form uses the same close hook for Cancel, Escape and the
+   backdrop; none can leave a late success opening a tab behind the user. */
+let dialog, requests = [], opened = [], notices = [], pendingPosts = [], nextId = 0;
+context.state = { backends: [{ id: 7, capabilities: ['vnc-instances', 'vnc-connect-cancel'] },
+  { id: 8, capabilities: ['vnc-instances'] }] };
+context.backendName = bid => `Backend ${bid}`;
+context.backendHasCapability = (backend, cap) => !!backend?.capabilities.includes(cap);
+context.vncEnabledFor = () => true;
+context.esc = value => String(value);
+context.newDraftClientId = () => `fixture-request-${++nextId}`;
+context.openVncTab = (...args) => opened.push(args);
+context.toast = text => notices.push(text);
+context.modal = html => {
+  const m = document.createElement('div'); m.innerHTML = html;
+  document.body.appendChild(m);
+  const listeners = [];
+  const close = () => {
+    if (!m.isConnected) return;
+    m.remove(); listeners.forEach(fn => fn());
+  };
+  dialog = { m, close };
+  return { m, close, onClose: fn => listeners.push(fn) };
+};
+context.api = (bid, path, options) => {
+  requests.push({ bid, path, ...options });
+  if (options.method === 'POST') return new Promise((resolve, reject) => pendingPosts.push({ resolve, reject }));
+  return Promise.resolve({ ok: true });
+};
+vm.runInContext(source.slice(source.indexOf('function modalNewVnc('),
+  source.indexOf('/* the "@VNC" shortcut wizard */')), context);
+const nv = id => dialog.m.querySelector(`#nv-${id}`);
+function connectForm(bid = 0) {
+  requests = []; opened = []; notices = []; pendingPosts = [];
+  context.modalNewVnc('fixture-group');
+  nv('host').value = 'screen.example'; nv('be').value = String(bid);
+  return nv('form').onsubmit({ preventDefault() {} });
+}
+const result = { vnc: { id: 'AB12', host: 'screen.example', port: 5900, label: '' } };
+(async () => {
+  for (const bid of [0, 7, 8]) {
+    for (const dismiss of [() => nv('cancel').onclick(), () => dialog.close()]) {
+      const work = connectForm(bid);
+      assert.equal(nv('cancel').disabled, false, 'Cancel remains active during a dial');
+      assert.equal(nv('go').disabled, true);
+      assert.equal(nv('host').disabled, true);
+      await nv('form').onsubmit({ preventDefault() {} });
+      assert.equal(pendingPosts.length, 1, 'double submission does not create two connections');
+      dismiss();
+      assert.equal(dialog.m.isConnected, false);
+      if (bid !== 8) {
+        assert.equal(requests[1].path, `vnc/connect/${requests[0].body.request_id}`);
+        assert.equal(requests[1].bid, bid, 'cancellation goes to the dialling backend');
+      } else assert.equal(requests.length, 1, 'an older peer receives no unknown route');
+      pendingPosts[0].resolve(result);
+      await work;
+      assert.equal(opened.length, 0, 'a cancelled late success opens no tab');
+      assert.equal(notices.length, 0, 'a cancelled late success shows no success toast');
+      assert.equal(requests.at(-1).path, bid === 8 ? 'vnc/instances/AB12' :
+        `vnc/connect/${requests[0].body.request_id}`, 'the late connection is reclaimed');
+    }
+  }
+  let work = connectForm();
+  nv('cancel').onclick();
+  pendingPosts[0].reject(new Error('VNC connection cancelled'));
+  await work;
+  assert.equal(notices.length, 0, 'expected cancellation is quiet');
+
+  work = connectForm();
+  pendingPosts[0].resolve(result);
+  await work;
+  assert.equal(opened.length, 1);
+  assert.equal(requests.length, 1, 'successful close does not cancel the new connection');
+  assert.equal(notices.length, 1);
+
+  work = connectForm();
+  pendingPosts[0].reject(new Error('request timed out'));
+  await work;
+  assert.ok(dialog.m.isConnected);
+  assert.equal(nv('go').disabled, false, 'a failed dial permits a retry');
+  assert.equal(nv('cancel').disabled, false);
+  assert.ok(dialog.m.querySelector('.form-error').textContent.includes('request timed out'));
+  assert.equal(requests[1].method, 'DELETE', 'a timed out request is reclaimed too');
+  const firstId = requests[0].body.request_id;
+  work = nv('form').onsubmit({ preventDefault() {} });
+  assert.notEqual(requests.at(-1).body.request_id, firstId, 'retry gets a new cancellation identity');
+  pendingPosts[1].resolve(result);
+  await work;
+  assert.equal(opened.length, 1);
+  console.log('vnc disconnect and connection-modal tests passed');
+})().catch(error => { console.error(error); process.exitCode = 1; });

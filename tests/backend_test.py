@@ -5605,6 +5605,7 @@ async def main() -> None:
         assert "/api/ws/session-links" in self_test["routes"]
         assert "/api/ws/terminal/{terminal_id}" in self_test["routes"]
         assert "/api/vnc/instances" in self_test["routes"]
+        assert "/api/vnc/connect/{request_id}" in self_test["routes"]
         assert "/api/ws/vnc/{vnc_id}" in self_test["routes"]
 
         # Configuration alone is insufficient: a directly launched zipapp must

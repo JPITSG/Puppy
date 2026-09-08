@@ -523,12 +523,65 @@ async def vnc_throughput_checks(instance, capture=False):
                                                session=instance.page_session)
                     (BASE / "data" / ("vnc-throughput-" + name + "-" + theme + ".png")).write_bytes(
                         base64.b64decode(shot["data"]))
+        assert await evaluate(instance, """(() => {
+            vncDemo.handleMessage({type:'gone',reason:'The VNC server closed the connection'});
+            const frame=new ArrayBuffer(14), head=new DataView(frame);
+            head.setUint8(0,1); head.setUint16(6,1,true); head.setUint16(8,1,true);
+            vncDemo.applyFrame(frame);
+            return !vncDemo.connected && vncDemo.stateText.textContent==='Disconnected' &&
+                vncDemo.isDead() && getComputedStyle(vncDemo.throughputText).display==='none';
+        })()"""), "late pixels must not erase a visible disconnect"
     finally:
         await evaluate(instance, "vncDemo.destroy(); vncPreview.close(); applyTheme('dark'); true")
         await instance.call("Emulation.setDeviceMetricsOverride", {
             "width":1440,"height":900,"deviceScaleFactor":1,"mobile":False},
                             session=instance.page_session)
     print("PASS: VNC throughput pill beside dimensions/FPS on desktop and phone in both themes", flush=True)
+
+
+async def vnc_connection_checks(instance):
+    await evaluate(instance, """(() => {
+        window.vncOriginalApi=api;
+        window.vncRequests=[];
+        api=(bid,path,opts={}) => {
+            if(path==='vnc/instances' && opts.method==='POST') {
+                vncRequests.push({bid,path,opts});
+                return new Promise((resolve,reject) => {window.vncRejectConnect=reject;});
+            }
+            if(path.startsWith('vnc/connect/') && opts.method==='DELETE') {
+                vncRequests.push({bid,path,opts});
+                vncRejectConnect(new Error('VNC connection cancelled'));
+                return Promise.resolve({ok:true});
+            }
+            return vncOriginalApi(bid,path,opts);
+        };
+    })()""")
+    try:
+        for width, height in [(1440, 900), (390, 844)]:
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width":width,"height":height,"deviceScaleFactor":1,"mobile":width==390},
+                session=instance.page_session)
+            for dismiss in ["document.querySelector('#nv-cancel').click()",
+                            "document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))",
+                            "document.querySelector('#nv-form').closest('.modal-backdrop').dispatchEvent(new MouseEvent('mousedown',{bubbles:true}))"]:
+                assert await evaluate(instance, """(() => {
+                    vncRequests.length=0; modalNewVnc();
+                    document.querySelector('#nv-host').value='screen.example';
+                    document.querySelector('#nv-form').requestSubmit();
+                    const cancel=document.querySelector('#nv-cancel');
+                    const r=cancel.getBoundingClientRect();
+                    return !cancel.disabled && document.querySelector('#nv-go').disabled &&
+                        r.width>0 && r.height>0 && r.bottom<=innerHeight;
+                })()"""), (width, "Cancel must stay enabled and visible")
+                await evaluate(instance, dismiss + "; true")
+                await until(instance, "!document.querySelector('#nv-form') && vncRequests.length===2")
+                assert await evaluate(instance, "vncRequests[1].path==='vnc/connect/'+vncRequests[0].opts.body.request_id")
+    finally:
+        await evaluate(instance, "api=vncOriginalApi; delete window.vncOriginalApi; true")
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width":1440,"height":900,"deviceScaleFactor":1,"mobile":False},
+            session=instance.page_session)
+    print("PASS: VNC Connect stays cancellable by button, Escape and backdrop on desktop and phone", flush=True)
 
 
 async def identity_pill_checks(instance, capture=False):
@@ -847,6 +900,7 @@ async def checks(a, b, hub, capture=False):
     await status_color_checks(a, capture)
     await identity_pill_checks(a, capture)
     await vnc_throughput_checks(a, capture)
+    await vnc_connection_checks(a)
     await timer_error_checks(a, capture)
     await usage_error_checks(a, capture)
     # Measure real layout: an idle status must not reserve a row below tools.
