@@ -519,12 +519,13 @@ class _Stream:
     has already consumed the server's last byte for this update.
     """
 
-    __slots__ = ("reader", "buf", "pos")
+    __slots__ = ("reader", "buf", "pos", "received_bytes")
 
     def __init__(self, reader):
         self.reader = reader
         self.buf = bytearray()
         self.pos = 0
+        self.received_bytes = 0
 
     async def need(self, count: int) -> None:
         if len(self.buf) - self.pos >= count:
@@ -536,6 +537,7 @@ class _Stream:
             data = await self.reader.read(max(READ_CHUNK, count - len(self.buf)))
             if not data:
                 raise _Closed("the VNC server closed the connection")
+            self.received_bytes += len(data)
             self.buf += data
 
     async def read(self, count: int) -> bytes:
@@ -611,9 +613,10 @@ class _Viewer:
     """
 
     __slots__ = ("ws", "active", "queue", "queued_bytes", "texts", "wake",
-                 "closed", "needs_full", "task", "settle", "full", "full_top")
+                 "closed", "needs_full", "task", "settle", "full", "full_top",
+                 "traffic_source", "traffic_sample")
 
-    def __init__(self, ws, settle):
+    def __init__(self, ws, settle, traffic_source=None):
         self.ws = ws
         self.active = True
         self.queue = collections.deque()
@@ -625,7 +628,26 @@ class _Viewer:
         self.settle = settle
         self.full = None
         self.full_top = 0
+        self.traffic_source = traffic_source
+        self.traffic_sample = None
         self.task = asyncio.ensure_future(self._run())
+
+    def sample_traffic(self) -> None:
+        # Count the server's encoded RFB bytes, not the much larger decoded
+        # RGBA rectangles sent to a viewer. Sample even on a quiet screen.
+        stream = self.traffic_source() if self.traffic_source else None
+        if not self.active or stream is None:
+            self.traffic_sample = None
+            return
+        now = time.monotonic()
+        previous = self.traffic_sample
+        if previous is not None and previous[0] is stream:
+            elapsed = now - previous[2]
+            if elapsed < 1:
+                return
+            self.send_json({"type": "throughput", "bytes_per_second":
+                            (stream.received_bytes - previous[1]) / elapsed})
+        self.traffic_sample = (stream, stream.received_bytes, now)
 
     def invalidate(self) -> None:
         self.queue.clear()
@@ -658,9 +680,16 @@ class _Viewer:
     async def _run(self) -> None:
         try:
             while not self.closed:
-                await self.wake.wait()
+                if self.active and self.traffic_source:
+                    try:
+                        await asyncio.wait_for(self.wake.wait(), 1)
+                    except asyncio.TimeoutError:
+                        pass
+                else:
+                    await self.wake.wait()
                 self.wake.clear()
                 while not self.closed:
+                    self.sample_traffic()
                     while self.texts:
                         await self.ws.send_str(self.texts.popleft())
                     if not self.active:
@@ -1012,7 +1041,7 @@ class VncInstance:
     async def attach_viewer(self, ws) -> None:
         await self.ensure_started()
         self._cancel_idle()
-        viewer = _Viewer(ws, self._settle)
+        viewer = _Viewer(ws, self._settle, lambda: self.stream)
         self.viewers[ws] = viewer
         viewer.send_json(self.status_payload())
         self._settle(viewer)
@@ -1032,6 +1061,7 @@ class VncInstance:
         if viewer is None or viewer.active == bool(active):
             return
         viewer.active = bool(active)
+        viewer.traffic_sample = None
         if not viewer.active:
             viewer.invalidate()
             return

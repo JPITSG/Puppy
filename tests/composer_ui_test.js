@@ -64,7 +64,7 @@ const context = vm.createContext({
   esc: text => String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"),
   fmtBytes: value => value + " B",
   plusIcon: icon, xIcon: icon, attachmentFileIcon: icon, globeIcon: icon, terminalIcon: icon,
-  choiceSvg: icon, refreshIcon: icon,
+  choiceSvg: icon, refreshIcon: icon, queueEditIcon: icon,
   uploadSettingsFor: bid => bid ? state.remoteUploadSettings[bid] || null : state.uploadSettings,
   rememberUploadSettings: () => null,
   backendSupportsFileUploads: () => true,
@@ -99,6 +99,7 @@ const context = vm.createContext({
 });
 vm.runInContext([
   between("const el = ", "/* Close buttons"),
+  between("function userMessageReuseButton", "function userMessageCopyButton"),
   between("const MENTION_TOKEN_RE", "/* ================= tooltips ================= */"),
   between("const CARET_MIRROR_STYLES", "/* ctrl+j ->"),
   between("const MENTION_QUERY_MAX", "/* ================= Composer ================="),
@@ -139,6 +140,28 @@ function completeUpload(entry, over = {}) {
 const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE").map(c => c.route);
 
 (async () => {
+  // Transcript reuse focuses the composer and selects only the previous draft.
+  for (const draft of ["", "existing draft", "  spaced\nmultiline 🐾  "]) {
+    const b = makeBox();
+    type(b.ta, draft);
+    context.reuseComposer = b.composer;
+    const button = vm.runInContext('userMessageReuseButton("Earlier\\nmessage", reuseComposer)', context);
+    assert.equal(button.getAttribute("aria-label"), "Reuse message");
+    fire(button, "click");
+    const prefix = "Earlier\nmessage" + (draft ? "\n\n" : "");
+    assert.equal(b.ta.value, prefix + draft);
+    assert.equal(b.ta.selectionStart, prefix.length);
+    assert.equal(b.ta.selectionEnd, b.ta.value.length);
+    assert.equal(document.activeElement, b.ta);
+    assert.equal(b.events.submit, 0);
+    assert.ok(b.composer.locallyEdited);
+    b.composer.setBusy(true);
+    b.composer.prepend("Blocked");
+    assert.equal(b.ta.value, prefix + draft);
+    b.composer.destroy();
+    b.composer.prepend("Closed");
+    assert.equal(b.ta.value, prefix + draft);
+  }
   // The reported sentence renders one settings token and preserves its prose.
   const sentence = "when you have a final list, confer with " +
     "@Spawn an agent using codex gpt-6-astra at high effort and have them verify your findings.";
@@ -938,5 +961,14 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
       }
       box.composer.destroy();
     }
+  {
+    const b = makeBox();
+    paste(b.ta);
+    const attachment = b.composer.attachments[0];
+    b.composer.prepend("Reuse while uploading");
+    assert.equal(b.composer.attachments[0], attachment);
+    assert.equal(attachment.uploading, true);
+    b.composer.destroy();
+  }
   console.log("PASS: shared prompt box keys, mentions, attachments, full stored recall across devices, paging/retry/cancellation, shared replacement, host gating and release paths");
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -24,6 +24,7 @@ class ImageData {
 }
 const toasts = [];
 const timers = new Map();
+const intervals = new Map();
 let timerSerial = 0;
 let now = 1000;
 const context = vm.createContext({
@@ -40,13 +41,21 @@ const context = vm.createContext({
   VNC_REDIALS: 5,
   VNC_ERROR_REPEAT_MS: 10000,
   Date: { now: () => now },
+  performance: { now: () => now },
+  setInterval(fn) { const id = ++timerSerial; intervals.set(id, fn); return id; },
+  clearInterval(id) { intervals.delete(id); },
   document: { visibilityState: 'visible' },
   setTimeout(fn, wait) { const id = ++timerSerial; timers.set(id, { fn, wait }); return id; },
   clearTimeout(id) { timers.delete(id); },
   backendConnectionAllowed: () => true,
 });
 vm.runInContext(source.slice(start, end) + ';this.View = VncView;', context);
+vm.runInContext(source.slice(source.indexOf('function fmtBytes('),
+  source.indexOf('function fmtEndpoint(')), context);
 const View = context.View;
+const browserStart = source.indexOf('class BrowserView {');
+const browserEnd = source.indexOf('\n/* ================= ', browserStart);
+vm.runInContext(source.slice(browserStart, browserEnd) + ';this.BrowserView = BrowserView;', context);
 
 function tick() {
   const tasks = [...frames.values()];
@@ -72,13 +81,14 @@ function makeView(overrides = {}) {
   const view = Object.create(View.prototype);
   const nodes = {};
   for (const name of ['idText', 'targetText', 'cadBtn', 'kbdBtn', 'stateText',
-                      'stateDot', 'sizeText', 'root', 'canvas'])
+                      'stateDot', 'sizeText', 'fpsText', 'frameStats', 'throughputText', 'root', 'canvas'])
     nodes[name] = wire(element());
   const sent = [];
   Object.assign(view, nodes, {
     tab: { id: 'v:0:AB12', bid: 0, vncId: 'AB12', vncHost: 'desk.example' },
     closed: false, viewerActive: true, viewOnly: false, connected: false,
     vncGone: false, status: null, frameW: 0, frameH: 0,
+    fpsTimer: null, fpsFrames: 0,
     pointerFrame: null, pointerQueued: null,
     wheelFrame: null, wheelQueued: null,
     ws: { readyState: 1, bufferedAmount: 0, send: text => sent.push(JSON.parse(text)) },
@@ -257,6 +267,56 @@ assert.equal(live.deadCleared, true);
 live.handleMessage({ type: 'size', width: 800, height: 600 });
 assert.equal(live.frameH, 600, 'a remote resize retargets the canvas');
 
+/* Throughput is the backend's encoded byte rate, independent of painted FPS. */
+for (const [rate, expected] of [[0, '0 B/s'], [42.3, '42 B/s'],
+  [1536, '1.5 KiB/s'], [2 * 1024 ** 2, '2.0 MiB/s'],
+  [3 * 1024 ** 3, '3.0 GiB/s']]) {
+  live.handleMessage({ type: 'throughput', bytes_per_second: rate });
+  assert.equal(live.throughputText.textContent, expected);
+  assert.ok(!live.throughputText.classes.has('hidden'), 'zero is a valid visible rate');
+}
+for (const rate of [-1, Infinity, NaN, '123', null, undefined]) {
+  live.handleMessage({ type: 'throughput', bytes_per_second: rate });
+  assert.equal(live.throughputText.textContent, '3.0 GiB/s');
+}
+live.resetFps();
+assert.equal(live.throughputText.textContent, '');
+assert.ok(live.throughputText.classes.has('hidden'));
+for (const flags of [{ viewerActive: false }, { closed: true }, { connected: false }]) {
+  const unavailable = makeView({ connected: true, ...flags });
+  unavailable.resetFps();
+  unavailable.handleMessage({ type: 'throughput', bytes_per_second: 123 });
+  assert.equal(unavailable.throughputText.textContent, '',
+    'late telemetry must not restore a hidden or disconnected reading');
+  assert.ok(unavailable.throughputText.classes.has('hidden'));
+}
+
+/* Both frame-stat pills wait for dimensions AND a measured FPS, including zero. */
+for (const Pane of [View, context.BrowserView]) {
+  const stats = makeView();
+  Pane.prototype.resetFps.call(stats);
+  assert.ok(stats.frameStats.classes.has('hidden'));
+  Pane.prototype.recordFrame.call(stats);
+  now += 1000;
+  intervals.get(stats.fpsTimer)();
+  assert.ok(stats.frameStats.classes.has('hidden'), 'FPS alone is not a complete reading');
+  stats.frameW = 1280; stats.frameH = 800;
+  now += 1000;
+  intervals.get(stats.fpsTimer)();
+  assert.equal(stats.fpsText.textContent, '0.0 FPS');
+  assert.ok(!stats.frameStats.classes.has('hidden'), 'zero FPS stays visible');
+  Pane.prototype.resetFps.call(stats);
+  assert.ok(stats.frameStats.classes.has('hidden'), 'pause/disconnect hides the whole pill');
+  assert.equal(stats.fpsText.textContent, '');
+  assert.equal(intervals.size, 0);
+  Pane.prototype.recordFrame.call(stats);
+  assert.ok(stats.frameStats.classes.has('hidden'), 'resume waits for a fresh sample');
+  now += 1000;
+  intervals.get(stats.fpsTimer)();
+  assert.ok(!stats.frameStats.classes.has('hidden'));
+  Pane.prototype.resetFps.call(stats);
+}
+
 let dead = null;
 const ending = makeView({
   showDead(message, ended) { dead = { message, ended }; },
@@ -326,5 +386,5 @@ assert.equal(toasts.length, 2, 'a terminal error retires the pane instead');
 assert.equal(dropped.at(-1).ended, true);
 
 console.log('PASS: button mapping, damage painting, malformed-frame rejection, ' +
-  'resize, gesture coalescing, tone vocabulary, status handling and ' +
+  'resize, gesture coalescing, tone vocabulary, throughput, status handling and ' +
   'quiet bounded reconnection');

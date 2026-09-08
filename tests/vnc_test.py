@@ -17,6 +17,8 @@ import shutil
 import struct
 import sys
 import zlib
+from types import SimpleNamespace
+from unittest.mock import patch
 
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
@@ -722,6 +724,61 @@ async def check_hostile_updates() -> None:
     print("  hostile updates ok")
 
 
+async def check_throughput() -> None:
+    reader = asyncio.StreamReader()
+    stream = vnc._Stream(reader)
+    encoded = zlib.compress(b"x" * 4096)
+    reader.feed_data(encoded)
+    await stream.read(1)
+    assert stream.received_bytes == len(encoded), "count socket read-ahead once"
+    await stream.read(len(encoded) - 1)
+    assert stream.received_bytes == len(encoded), "buffer slices add no traffic"
+
+    socket = ViewerSocket()
+    current = [stream]
+    viewer = vnc._Viewer(socket, lambda watcher: None, lambda: current[0])
+    try:
+        def sample(now):
+            with patch.object(vnc, "time", SimpleNamespace(monotonic=lambda: now)):
+                viewer.sample_traffic()
+
+        def latest():
+            return json.loads(viewer.texts[-1])["bytes_per_second"]
+
+        sample(10)
+        reader.feed_data(encoded)
+        await stream.read(len(encoded))
+        sample(10.5)
+        assert not viewer.texts, "no more than one sample per second"
+        sample(12)
+        assert latest() == len(encoded) / 2, "encoded bytes / actual elapsed time"
+        sample(13)
+        assert latest() == 0, "quiet streams return to zero"
+        viewer.active = False
+        sample(14)
+        assert viewer.traffic_sample is None
+        count = len(viewer.texts)
+        stream.received_bytes += 1000
+        viewer.active = True
+        sample(20)
+        assert len(viewer.texts) == count, "resume starts a fresh baseline"
+        sample(21)
+        assert latest() == 0, "hidden traffic is not attributed to resume"
+        current[0] = vnc._Stream(asyncio.StreamReader())
+        sample(22)
+        assert latest() == 0, "redial resets rather than reporting negative bytes"
+        current[0].received_bytes = 400
+        sample(24)
+        assert latest() == 200
+        current[0] = None
+        sample(25)
+        assert viewer.traffic_sample is None
+    finally:
+        viewer.close()
+        await asyncio.gather(viewer.task, return_exceptions=True)
+    print("  encoded throughput, quiet intervals and resume/redial baselines ok")
+
+
 async def check_viewer_frames() -> None:
     server = await StubVncServer(width=8, height=4).start()
     instance = await connected_instance(server)
@@ -733,6 +790,8 @@ async def check_viewer_frames() -> None:
     assert first["kind"] == vnc.FRAME_PIXELS and first["x"] == 0 and \
         first["y"] == 0 and first["w"] == 8 and first["h"] == 4, first
     assert viewer.messages("status")[0]["width"] == 8
+    await wait_for(lambda: viewer.messages("throughput"), label="quiet throughput")
+    assert viewer.messages("throughput")[-1]["bytes_per_second"] == 0
 
     # Damage carries only its own rectangle.
     viewer.frames.clear()
@@ -1615,6 +1674,7 @@ async def main() -> None:
         await check_handshakes()
         await check_encodings()
         await check_hostile_updates()
+        await check_throughput()
         await check_viewer_frames()
         await check_large_viewer_refresh()
         await check_streaming_pause()

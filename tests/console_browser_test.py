@@ -483,6 +483,54 @@ async def status_color_checks(instance, capture=False):
     print("PASS: task, review and workspace statuses use all four shared tone colors on desktop and phone in both themes", flush=True)
 
 
+async def vnc_throughput_checks(instance, capture=False):
+    await evaluate(instance, """(() => {
+        window.vncPreview = modal('<h2>Remote screen · demo</h2>');
+        vncPreview.m.style.setProperty('--modal-w', 'var(--modal-w-wide)');
+        window.vncDemo = new VncView({bid:0, vncId:'A8AR', vncHost:'desk.example'});
+        vncDemo.root.classList.add('on');
+        vncDemo.root.style.position='relative';
+        vncDemo.root.style.height='280px';
+        vncPreview.m.appendChild(vncDemo.root);
+        if (getComputedStyle(vncDemo.frameStats).display!=='none' ||
+            getComputedStyle(vncDemo.throughputText).display!=='none')
+            throw new Error('Unavailable VNC statistics must be hidden');
+        vncDemo.connected=true; vncDemo.viewerActive=true;
+        vncDemo.renderIdentity(); vncDemo.setSize(1280,800);
+        vncDemo.recordFrame();
+        vncDemo.handleMessage({type:'throughput',bytes_per_second:1572864});
+    })()""")
+    try:
+        await until(instance, "!vncDemo.frameStats.classList.contains('hidden')")
+        for width, height, name in [(1440, 900, "desktop"), (390, 844, "phone")]:
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width": width, "height": height, "deviceScaleFactor": 1,
+                "mobile": name == "phone"}, session=instance.page_session)
+            for theme in ("dark", "light"):
+                await evaluate(instance, "applyTheme(%s); vncDemo.throughputText.scrollIntoView({block:'nearest',inline:'end'}); true" % json.dumps(theme))
+                await asyncio.sleep(.25)
+                assert await evaluate(instance, """(() => {
+                    const p=vncDemo.throughputText, r=p.getBoundingClientRect();
+                    const stats=p.previousElementSibling, s=stats.getBoundingClientRect();
+                    const viewport=vncDemo.meta.getBoundingClientRect();
+                    return p.textContent==='1.5 MiB/s' && stats.contains(vncDemo.fpsText) &&
+                        r.height===s.height && r.top===s.top && r.left>s.right &&
+                        r.right<=viewport.right && r.left>=viewport.left &&
+                        document.documentElement.scrollWidth<=innerWidth;
+                })()"""), (width, theme)
+                if capture:
+                    shot = await instance.call("Page.captureScreenshot", {"format":"png"},
+                                               session=instance.page_session)
+                    (BASE / "data" / ("vnc-throughput-" + name + "-" + theme + ".png")).write_bytes(
+                        base64.b64decode(shot["data"]))
+    finally:
+        await evaluate(instance, "vncDemo.destroy(); vncPreview.close(); applyTheme('dark'); true")
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width":1440,"height":900,"deviceScaleFactor":1,"mobile":False},
+                            session=instance.page_session)
+    print("PASS: VNC throughput pill beside dimensions/FPS on desktop and phone in both themes", flush=True)
+
+
 async def identity_pill_checks(instance, capture=False):
     await evaluate(instance, """(() => {
         window.identityStops=[];
@@ -747,7 +795,46 @@ async def workspace_move_checks(instance, capture=False):
     print('PASS: scratch move dialog fits desktop and phones in both themes', flush=True)
 
 
+async def message_reuse_checks(instance):
+    await instance.call("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 900,
+        "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
+    # Pipe-driven headless Chromium reports hover:none. Enable the desktop
+    # media branch in the fixture while exercising its actual :hover rules.
+    await evaluate(instance, """window.reuseHoverRules=[...document.styleSheets].flatMap(s=>[...s.cssRules])
+        .filter(r=>r.media && r.conditionText==='(hover: hover)');
+        reuseHoverRules.forEach(r=>r.media.mediaText='all');
+        window.reuseNode=demoView.buildEventNode({kind:'user',data:{text:'Earlier message'}});
+        demoView.inner.appendChild(reuseNode); reuseNode.scrollIntoView({block:"center",behavior:"instant"}); true""")
+    try:
+        await instance.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 0, "y": 0}, session=instance.page_session)
+        await asyncio.sleep(.3)
+        layout = await evaluate(instance, """(() => {
+            const reuse=reuseNode.querySelector('.user-reuse'), copy=reuseNode.querySelector('.user-copy');
+            const r=reuse.getBoundingClientRect(), c=copy.getBoundingClientRect();
+            return {hidden:getComputedStyle(reuse).opacity==='0', left:r.right<c.left,
+                x:r.x+r.width/2,y:r.y+r.height/2};
+        })()""")
+        assert layout["hidden"] and layout["left"], layout
+        assert await evaluate(instance, "document.elementFromPoint(%s,%s)===reuseNode.querySelector('.user-reuse') || reuseNode.querySelector('.user-reuse').contains(document.elementFromPoint(%s,%s))" % (layout["x"], layout["y"], layout["x"], layout["y"])), layout
+        await instance.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": layout["x"], "y": layout["y"]}, session=instance.page_session)
+        await until(instance, "getComputedStyle(reuseNode.querySelector('.user-reuse')).opacity==='1'")
+        for draft in ("", "Existing draft\nsecond line"):
+            result = await evaluate(instance, """(() => {
+                const c=demoView.composer; c.set(%s);
+                reuseNode.querySelector('.user-reuse').click();
+                return {text:c.ta.value, start:c.ta.selectionStart, end:c.ta.selectionEnd,
+                    focused:document.activeElement===c.ta};
+            })()""" % json.dumps(draft))
+            prefix = "Earlier message" + ("\n\n" if draft else "")
+            assert result == {"text": prefix + draft, "start": len(prefix),
+                              "end": len(prefix + draft), "focused": True}, result
+    finally:
+        await evaluate(instance, "reuseNode.remove(); delete window.reuseNode; reuseHoverRules.forEach(r=>r.media.mediaText='(hover: hover)'); delete window.reuseHoverRules; demoView.composer.set(''); true")
+    print("PASS: message reuse is hidden until hover, sits left of Copy, focuses the composer and selects only the previous draft", flush=True)
+
+
 async def checks(a, b, hub, capture=False):
+    await message_reuse_checks(a)
     await workspace_move_checks(a, capture)
     await session_mention_checks(a)
     await pane_resize_checks(a)
@@ -759,6 +846,7 @@ async def checks(a, b, hub, capture=False):
     await side_question_wrap_checks(a, capture)
     await status_color_checks(a, capture)
     await identity_pill_checks(a, capture)
+    await vnc_throughput_checks(a, capture)
     await timer_error_checks(a, capture)
     await usage_error_checks(a, capture)
     # Measure real layout: an idle status must not reserve a row below tools.

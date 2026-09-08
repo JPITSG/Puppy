@@ -3349,8 +3349,8 @@ def check_side_question_ui(ui_source: str, css_source: str) -> None:
     assert 'return hoverCopyButton(text, "aside-copy", "Copy answer");' in ui_source
     assert 'return hoverCopyButton(text, "user-copy", "Copy message");' in ui_source
     assert "if (d.text) body.appendChild(asideAnswerCopyButton(d.text));" in ui_source
-    assert ".code-copy,.user-copy,.aside-copy{" in css_source
-    assert ".user-copy,.aside-copy{opacity:0}" in css_source
+    assert ".code-copy,.user-reuse,.user-copy,.aside-copy{" in css_source
+    assert ".user-reuse,.user-copy,.aside-copy{opacity:0}" in css_source
     assert ".aside-copy{top:5px;right:0}" in css_source
     aside_start = css_source.index("\n.aside-a{") + 1
     assert "position:relative" in css_source[
@@ -4126,7 +4126,7 @@ def check_compact_control_alignment(ui_source: str, css_source: str) -> None:
     assert css_source.count(".burger{display:inline-grid}") == 2
 
     for selector in (".disclosure-toggle{", ".foot-node-act{", ".tab .t-close{",
-                     ".code-copy,.user-copy,.aside-copy{", ".queue-strip .q-x{",
+                     ".code-copy,.user-reuse,.user-copy,.aside-copy{", ".queue-strip .q-x{",
                      ".queue-strip .q-edit{", ".queue-strip .q-pause{",
                      ".queue-strip .q-resend{", ".attach-chip .attach-x{",
                      ".engine-node-refresh{"):
@@ -7262,11 +7262,11 @@ async def main() -> None:
             # Sent user prose has an overlaid square copy control. Its absolute
             # positioning cannot reflow the bubble, and attachment markers are
             # stripped before both rendering and copying.
-            assert "if (text) n.appendChild(userMessageCopyButton(text));" in ui_source
-            assert ".code-copy,.user-copy,.aside-copy{" in css_source
+            assert "if (text) n.append(userMessageReuseButton(text, this.composer), userMessageCopyButton(text));" in ui_source
+            assert ".code-copy,.user-reuse,.user-copy,.aside-copy{" in css_source
             assert "position:absolute;z-index:1;top:6px;right:6px;width:27px;height:27px;" in css_source
-            assert ".user-copy,.aside-copy{opacity:0}" in css_source
-            assert ".code-copy:hover,.user-copy:hover,.aside-copy:hover{" in css_source
+            assert ".user-reuse,.user-copy,.aside-copy{opacity:0}" in css_source
+            assert ".code-copy:hover,.user-reuse:hover,.user-copy:hover,.aside-copy:hover{" in css_source
             # Complete status lines use one click; later desktop double-click
             # events cannot undo the first activation.
             assert "wireDisclosureSurface(name, disclosure);" not in ui_source

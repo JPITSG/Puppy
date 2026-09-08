@@ -57,6 +57,18 @@ node: `viewer_active`, `pointer`, `wheel`, `key`, `text`, `cad`, `refresh` and
 has to know the framebuffer's size; the node maps them onto the pixel grid and
 clamps them.
 
+Active viewers also receive an additive `throughput` JSON message with
+`bytes_per_second`, sampled about once a second using a monotonic clock.
+This counts incoming RFB bytes read from the server before decompression,
+including RFB headers but excluding TCP/IP overhead and the separate viewer
+WebSocket traffic. The sender reports zero during quiet intervals, resets its
+baseline on resume or redial, and sends no periodic samples to inactive viewers.
+The console displays this rate in a pill beside dimensions and FPS, using
+B/s, KiB/s, MiB/s or GiB/s. Each pill stays hidden until its readings are
+available, and hides again when the viewer is hidden or disconnected. Valid
+zero readings remain visible. Older backends that do not send the additive
+message leave the throughput pill hidden.
+
 Nobody watching means nobody paying. With every viewer inactive - a hidden
 pane, a backgrounded window, or no viewer at all - the node stops issuing
 `FramebufferUpdateRequest`s entirely, so an unwatched connection costs one idle

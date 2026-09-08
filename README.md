@@ -181,7 +181,11 @@ and does not recall Main's prompts. Recall reads the session's stored prompts, l
 needed with no history limit, all the way back to its first prompt, on any
 device. `↓` at the end walks forward again and restores your unsent draft and
 attachments after the newest prompt. Each new recall walk picks up prompts
-sent from other devices too. Drafts are shared through the session's backend, so the
+sent from other devices too. Each sent text message also has a hidden **Reuse message**
+button to the left of Copy, revealed on hover or keyboard focus. It prepends the
+message text to the chat box with a blank line before any existing text, selects
+that existing text, and focuses the box. Staged attachments stay in place.
+Drafts are shared through the session's backend, so the
 half-finished prompt on your desktop is on your phone too. On backends with
 typing presence, overlapping edits stay local until you review the drafts or
 send your message; another console's edits never interrupt your typing.
@@ -273,7 +277,9 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
   frames, native widgets and drag feedback may differ from a local browser;
   unavailable lookups fall back to the default pointer. A pill beside the session link
   shows stream width × height in pixels and frames presented by your viewer
-  per second (FPS); a static page can read zero. Each replacement image loads
+  per second (FPS); a static page can read zero. The pill stays hidden until
+  dimensions and an FPS sample are available, and hides again when the viewer
+  is paused or disconnected. Each replacement image loads
   off-screen before it is swapped into view, keeping only the newest waiting
   frame if loading falls behind. Pointer and scroll gestures start immediately,
   with subsequent events coalesced each display frame. The agent gets a high-level
@@ -293,6 +299,13 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
   connection's challenge and is never written to disk. *View only* watches
   without sending anything, and a Ctrl+Alt+Del button and a typing row (for
   phones, and for keys a soft keyboard cannot express) sit beside the address.
+  Beside the dimensions and FPS, a throughput pill shows incoming VNC traffic
+  at the backend in B/s, KiB/s or MiB/s, refreshed once a second (zero when
+  quiet). It measures the encoded stream before decoding, excluding TCP/IP
+  overhead and the separate stream from the backend to your console.
+  The dimensions/FPS and throughput pills stay hidden until their readings
+  are available, and hide again when paused or disconnected; valid zero
+  readings remain visible.
   Puppy is the VNC client itself - no viewer, proxy, gateway or extra package
   is installed. It speaks RFB 3.3 through 3.8 with the ZRLE, Hextile, Zlib,
   RRE, CopyRect and Raw encodings plus desktop resize, decodes the screen on

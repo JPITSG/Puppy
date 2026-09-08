@@ -11,6 +11,11 @@ This directory contains the separately deployable, API-only Puppy runtime. It
 shares the console's database, runner and engine drivers at build time, but the
 resulting artifact exposes no web GUI, cookie login, settings, or backend proxy.
 
+VNC viewer sockets include an additive `throughput` message about once a second
+for active viewers. Its `bytes_per_second` is incoming encoded RFB traffic at
+this backend, excluding TCP/IP overhead and the viewer WebSocket stream. See
+[VNC viewer protocol](../docs/vnc.md#viewer-protocol).
+
 Nodes advertising `session-tasks-toggle` accept a boolean `tasks_enabled` as a
 standalone `PATCH /api/sessions/{sid}` update and publish it on session payloads.
 Tasks default to enabled. Disabling requires a Main session with no child task

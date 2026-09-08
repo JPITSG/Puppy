@@ -1124,6 +1124,19 @@ function hoverCopyButton(text, className, label) {
   return wireCopyButton(el("button", className), text, label);
 }
 
+function userMessageReuseButton(text, composer) {
+  const button = el("button", "user-reuse");
+  button.type = "button";
+  button.setAttribute("aria-label", "Reuse message");
+  button.appendChild(queueEditIcon(14));
+  button.onclick = event => {
+    event.preventDefault();
+    event.stopPropagation();
+    composer.prepend(text);
+  };
+  return button;
+}
+
 function userMessageCopyButton(text) {
   return hoverCopyButton(text, "user-copy", "Copy message");
 }
@@ -8720,6 +8733,18 @@ class Composer {
     return true;
   }
 
+  /* Reuse transcript prose without disturbing staged files or sending it. */
+  prepend(text) {
+    if (this.closed || this.busy || this.composing || !text) return;
+    const draft = this.ta.value;
+    const prefix = text + (draft ? "\n\n" : "");
+    this.hideMention();
+    this.set(prefix + draft);
+    this.focus();
+    this.ta.setSelectionRange(prefix.length, this.ta.value.length);
+    scrollCaretIntoView(this.ta);
+  }
+
   set(v, fromHistory = false) {
     if (!fromHistory) {
       this.stopHistory();
@@ -13005,7 +13030,7 @@ class SessionView {
         /* Absolute positioning keeps this control out of the prose and
            attachment layout; copy exactly what the bubble visibly says, not
            the private marker lines used to send its attachments. */
-        if (text) n.appendChild(userMessageCopyButton(text));
+        if (text) n.append(userMessageReuseButton(text, this.composer), userMessageCopyButton(text));
         return n;
       }
       case "assistant": {
@@ -15072,8 +15097,8 @@ class BrowserView {
           <span class="br-owner-text">Checking session link…</span>
           <span class="br-owner-arrow hidden"></span>
         </button>
-        <span class="br-stats" title="Stream width × height in pixels · frames presented per second, updated once a second">
-          <span class="br-size">— × —</span><span aria-hidden="true">·</span><span class="br-fps">— FPS</span>
+        <span class="br-stats br-frame-stats hidden" title="Stream width × height in pixels · frames presented per second, updated once a second">
+          <span class="br-size"></span><span aria-hidden="true">·</span><span class="br-fps"></span>
         </span>
       </div></div>
       <div class="br-type hidden">
@@ -15101,6 +15126,7 @@ class BrowserView {
     this.meta = this.root.querySelector(".br-meta");
     this.stopMetadataScrolling = wireMetadataScrolling(this.meta);
     this.fpsText = this.root.querySelector(".br-fps");
+    this.frameStats = this.root.querySelector(".br-frame-stats");
     this.sizeText = this.root.querySelector(".br-size");
     this.idText = this.root.querySelector(".br-id");
     this.copyIdBtn = wireCopyButton(this.root.querySelector(".br-copy-id"),
@@ -15782,7 +15808,8 @@ class BrowserView {
     if (this.fpsTimer !== null) clearInterval(this.fpsTimer);
     this.fpsTimer = null;
     this.fpsFrames = 0;
-    this.fpsText.textContent = "— FPS";
+    this.fpsText.textContent = "";
+    this.frameStats.classList.add("hidden");
   }
 
   recordFrame() {
@@ -15794,6 +15821,7 @@ class BrowserView {
         const elapsed = now - this.fpsSince;
         if (elapsed <= 0) return;
         this.fpsText.textContent = `${(this.fpsFrames * 1000 / elapsed).toFixed(1)} FPS`;
+        this.frameStats.classList.toggle("hidden", !(this.frameW > 0 && this.frameH > 0));
         this.fpsFrames = 0;
         this.fpsSince = now;
       }, 1000);
@@ -16079,9 +16107,11 @@ class VncView {
           <span class="sess-dot vnc-dot busy"></span>
           <span class="state-word vnc-state-text busy">Connecting…</span>
         </span>
-        <span class="br-stats" title="Screen width × height in pixels · screen updates presented per second, updated once a second">
-          <span class="vnc-size">— × —</span><span aria-hidden="true">·</span><span class="vnc-fps">— FPS</span>
+        <span class="br-stats br-frame-stats hidden" title="Screen width × height in pixels · screen updates presented per second, updated once a second">
+          <span class="vnc-size"></span><span aria-hidden="true">·</span><span class="vnc-fps"></span>
         </span>
+        <span class="br-stats vnc-throughput hidden" aria-label="Incoming VNC throughput"
+          title="VNC traffic received by the backend before decoding, updated once a second · excludes TCP/IP overhead and the stream from backend to console"></span>
       </div></div>
       <div class="br-type hidden">
         <input class="br-ime" type="text" autocomplete="off" autocapitalize="none"
@@ -16113,6 +16143,8 @@ class VncView {
     this.stateText = this.root.querySelector(".vnc-state-text");
     this.sizeText = this.root.querySelector(".vnc-size");
     this.fpsText = this.root.querySelector(".vnc-fps");
+    this.frameStats = this.root.querySelector(".br-frame-stats");
+    this.throughputText = this.root.querySelector(".vnc-throughput");
     this.typeRow = this.root.querySelector(".br-type");
     this.ime = this.root.querySelector(".br-ime");
     this.stage = this.root.querySelector(".br-stage");
@@ -16497,6 +16529,15 @@ class VncView {
 
   handleMessage(message) {
     if (!message || typeof message !== "object") return;
+    if (message.type === "throughput") {
+      const rate = message.bytes_per_second;
+      if (!this.closed && this.viewerActive && this.connected &&
+          typeof rate === "number" && Number.isFinite(rate) && rate >= 0) {
+        this.throughputText.textContent = `${fmtBytes(Math.round(rate))}/s`;
+        this.throughputText.classList.remove("hidden");
+      }
+      return;
+    }
     if (message.type === "status") {
       this.status = message;
       this.viewOnly = message.view_only === true;
@@ -16593,7 +16634,10 @@ class VncView {
     if (this.fpsTimer !== null) clearInterval(this.fpsTimer);
     this.fpsTimer = null;
     this.fpsFrames = 0;
-    this.fpsText.textContent = "— FPS";
+    this.fpsText.textContent = "";
+    this.frameStats.classList.add("hidden");
+    this.throughputText.textContent = "";
+    this.throughputText.classList.add("hidden");
   }
   recordFrame() {
     if (this.closed || !this.viewerActive) return;
@@ -16605,6 +16649,7 @@ class VncView {
         if (elapsed <= 0) return;
         this.fpsText.textContent =
           `${(this.fpsFrames * 1000 / elapsed).toFixed(1)} FPS`;
+        this.frameStats.classList.toggle("hidden", !(this.frameW > 0 && this.frameH > 0));
         this.fpsFrames = 0;
         this.fpsSince = now;
       }, 1000);
