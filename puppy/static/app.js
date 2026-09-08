@@ -6848,6 +6848,7 @@ const HOST_LIVE_SAMPLES = 400;
 const HOST_PINGS = 40;
 const HOST_CHART_H = 48;
 const HOST_SPARK_H = 13;
+const HOST_SPARK_HEADROOM = 1.15;
 /* A break in the line rather than a straight run across it: a node that was
    away for a minute did not sit at that load while it was gone. */
 const HOST_GAP_FACTOR = 4;
@@ -7057,14 +7058,18 @@ function hostChart(series, options = {}) {
   const to = Number(options.to) || 0;
   const from = Number(options.from) || 0;
   for (const points of hostChartSegments(series, from, to, options.max || 100)) {
-    const line = points.map(([x, y], index) =>
-      `${index ? "L" : "M"}${x.toFixed(2)} ${y.toFixed(2)}`).join("");
+    const run = points.map(([x, y]) => `L${x.toFixed(2)} ${y.toFixed(2)}`).join("");
+    const line = `M${run.slice(1)}`;
     if (points.length > 1) {
+      /* One closed shape: up from the floor to the first sample, along the
+         line, back down to the floor. The line must join it with "L", never
+         its own "M" - a second subpath would close on the first sample and
+         fill a wedge across the chart instead of the ground under the line. */
       const area = document.createElementNS(SVG_NS, "path");
       area.setAttribute("class", "host-chart-area");
       area.setAttribute("fill", `url(#${id})`);
       area.setAttribute("d",
-        `M${points[0][0].toFixed(2)} 100${line}L${points[points.length - 1][0].toFixed(2)} 100Z`);
+        `M${points[0][0].toFixed(2)} 100${run}L${points[points.length - 1][0].toFixed(2)} 100Z`);
       svg.appendChild(area);
     }
     const path = document.createElementNS(SVG_NS, "path");
@@ -7073,6 +7078,13 @@ function hostChart(series, options = {}) {
       `${line}L${(points[0][0] + .4).toFixed(2)} ${points[0][1].toFixed(2)}`);
     path.setAttribute("vector-effect", "non-scaling-stroke");
     svg.appendChild(path);
+  }
+  if (options.floor) {   // the ground the fill fades into, drawn last so it stays crisp
+    const floor = document.createElementNS(SVG_NS, "path");
+    floor.setAttribute("class", "host-chart-floor");
+    floor.setAttribute("d", "M0 100H100");
+    floor.setAttribute("vector-effect", "non-scaling-stroke");
+    svg.appendChild(floor);
   }
   return svg;
 }
@@ -7206,11 +7218,18 @@ function hostLatencyRow(row) {
   line.appendChild(name);
   const series = hostPanel.pings.get(row.id) || [];
   if (series.length > 1) {
+    /* A measurement exists only while someone is watching, so the sparkline
+       is the last measurements side by side rather than a clock: a spell
+       with the tab hidden is not a gap in the link, and an unbroken line on
+       its floor is what a steady link should look like. Its ceiling is the
+       peak with a little headroom, so a 1 ms link still has a visible shape
+       and one slow round trip reads as the spike it was. */
     const values = series.map(([, value]) => value);
-    const to = series[series.length - 1][0];
-    line.appendChild(hostChart(series, {
-      from: Math.min(series[0][0], to - 30), to, height: HOST_SPARK_H, grid: false,
-      cls: "spark", max: Math.max(20, ...values),
+    const evenly = values.map((value, index) => [index, value]);
+    evenly.gap = Infinity;
+    line.appendChild(hostChart(evenly, {
+      from: 0, to: evenly.length - 1, height: HOST_SPARK_H, grid: false, floor: true,
+      cls: "spark", max: (Math.max(...values) * HOST_SPARK_HEADROOM) || 1,
     }));
   }
   const value = el("span", "host-ping-ms" + (row.ok === true ? "" : " bad"),

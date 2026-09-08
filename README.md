@@ -451,18 +451,20 @@ history around it.
   hour - the instance's own chart keeps moving with its live reading - beside
   its cores, load, memory and uptime. Where backends are paired, the instance
   times the round trip to each of them itself and keeps a sparkline of the last
-  measurements. Only reachable nodes appear: an unavailable backend is left out
-  of the box entirely - no chart, no round trip, no processes - rather than
-  being probed, and with none of them reachable the round-trip section goes
-  with them. Under that, every node lists the processes Puppy is running there
-  as a tree drawn with real branches, a corner closing each last child: the
-  engines, their turn-bound agent bridges, managed browsers and terminals, each
-  with its CPU share and memory, folded where a row repeats (*agent bridges
-  ×5*) and trimmed with a *+n more* where a branch is too wide or too deep to
-  read. The box slides in under the engine stats and slides shut again the way
-  the sidebar's other panels do, the engine stats giving up their height in the
-  same motion. Nothing is polled until the box is open, and nothing is stored:
-  close it and the node keeps only the reading in the corner.
+  measurements side by side, scaled to their own peak so one slow round trip
+  reads as the spike it was. Only reachable nodes appear: an unavailable
+  backend is left out of the box entirely - no chart, no round trip, no
+  processes - rather than being probed, and with none of them reachable the
+  round-trip section goes with them. Under that, every node lists the
+  processes Puppy is running there as a tree drawn with real branches, a
+  corner closing each last child: the engines, their turn-bound agent bridges,
+  managed browsers and terminals, each with its CPU share and memory, folded
+  where a row repeats (*agent bridges ×5*) and trimmed with a *+n more* where
+  a branch is too wide or too deep to read. The box slides in under the engine
+  stats and slides shut again the way the sidebar's other panels do, the
+  engine stats giving up their height in the same motion. Nothing is polled
+  until the box is open, and nothing is stored: close it and the node keeps
+  only the reading in the corner.
 - **Notices that stay readable.** Confirmations, warnings and failures appear
   as one line in the bottom-right corner, coloured by outcome and worded the
   same way wherever they came from. The same notice arriving again counts up on

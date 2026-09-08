@@ -516,7 +516,10 @@ a{color:var(--acc2)}
 }
 .host-chart-area{stroke:none}
 .host-chart-grid{fill:none;stroke:var(--line2);stroke-width:1;stroke-dasharray:2 3}
-.host-chart.spark{flex:0 0 46px;width:46px;margin-left:auto;color:var(--ok)}
+.host-chart-floor{fill:none;stroke:var(--line2);stroke-width:1}
+/* The sparkline has no well of its own, so its floor and a line lying on it
+   may spill their stroke's other half rather than being cut at the edge. */
+.host-chart.spark{flex:0 0 46px;width:46px;margin-left:auto;color:var(--ok);overflow:visible}
 .host-chart-empty{
   padding:12px 8px;font-size:var(--fs-2xs);color:var(--txt3);text-align:center;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;

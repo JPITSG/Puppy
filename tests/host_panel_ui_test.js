@@ -190,14 +190,22 @@ function charting() {
   const line = svg.querySelector(".host-chart-line");
   assert.equal(line.getAttribute("vector-effect"), "non-scaling-stroke");
   assert.equal(line.getAttribute("d"), "M0.00 100.00L50.00 50.00L100.00 0.00");
+  // the fill is one closed shape under the line: floor, up to the first
+  // sample, along the line, back to the floor - never a second subpath, which
+  // would close on the first sample and fill a wedge across the chart
   const area = svg.querySelector(".host-chart-area");
-  assert.ok(area.getAttribute("d").startsWith("M0.00 100"));
-  assert.ok(area.getAttribute("d").endsWith("L100.00 100Z"));
+  assert.equal(area.getAttribute("d"),
+    "M0.00 100L0.00 100.00L50.00 50.00L100.00 0.00L100.00 100Z");
+  assert.ok(!area.getAttribute("d").slice(1).includes("M"));
   assert.ok(svg.querySelector(".host-chart-grid"));
   assert.equal(svg.querySelectorAll(".host-chart-grid").length, 1);
-  // the sparkline keeps its ink but drops the mid-line and the fill well
-  const spark = context.hostChart(series, { from: 0, to: 6, height: 13, grid: false, cls: "spark" });
+  assert.equal(svg.querySelectorAll(".host-chart-floor").length, 0);
+  // the sparkline keeps its ink but drops the mid-line and the fill well,
+  // and draws the floor its line lies on
+  const spark = context.hostChart(series,
+    { from: 0, to: 6, height: 13, grid: false, floor: true, cls: "spark" });
   assert.equal(spark.querySelectorAll(".host-chart-grid").length, 0);
+  assert.equal(spark.querySelector(".host-chart-floor").getAttribute("d"), "M0 100H100");
   assert.ok(spark.className.includes("spark"));
 }
 
@@ -315,10 +323,20 @@ async function backends() {
   const empties = rows(app.panel(), "host-empty").map(text);
   assert.ok(!empties.includes("Backend unavailable"), empties.join("|"));
   assert.ok(empties.includes("This backend does not report host activity"), empties.join("|"));
-  // a second measurement builds each backend's sparkline
-  app.hostPanel.pings.set(2, [[500, 12.4], [504, 15.2]]);
+  // a second measurement builds each backend's sparkline: the measurements
+  // side by side (a spell with the tab hidden is not a gap in the link),
+  // one unbroken line scaled to its own peak with headroom, on a floor
+  app.hostPanel.pings.set(2, [[500, 12.4], [504, 15.2], [900, 4.0], [904, 15.2]]);
   context.renderHostPanel();
-  assert.ok(rows(app.panel(), "host-ping")[0].querySelector(".host-chart.spark"));
+  const spark = rows(app.panel(), "host-ping")[0].querySelector(".host-chart.spark");
+  assert.ok(spark);
+  assert.equal(spark.querySelectorAll(".host-chart-line").length, 1);
+  const peak = (100 - 100 / 1.15).toFixed(2);
+  assert.equal(spark.querySelector(".host-chart-line").getAttribute("d"),
+    `M0.00 ${(100 - (12.4 / (15.2 * 1.15)) * 100).toFixed(2)}L33.33 ${peak}` +
+    `L66.67 ${(100 - (4 / (15.2 * 1.15)) * 100).toFixed(2)}L100.00 ${peak}`);
+  assert.ok(spark.querySelector(".host-chart-area"));
+  assert.ok(spark.querySelector(".host-chart-floor"));
   // three reachable nodes, each with one chart block and one process block
   assert.equal(rows(app.panel(), "host-node").length, 6);
   // a failed read keeps the tree that node last served rather than blanking it
