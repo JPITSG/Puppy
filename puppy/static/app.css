@@ -237,10 +237,8 @@ a{color:var(--acc2)}
   max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
 }
 .sess-dot{width:var(--dot);height:var(--dot);border-radius:50%;flex-shrink:0;color:var(--txt3);background:currentColor}
-/* dot (9px) and prov icon (11px) share a column: pad the dot so centres align.
-   The name font's visible band sits 1px below its line-box centre at this size;
-   nudge only the dot's paint (not the row or its baseline) to meet it. */
-.si-row .sess-dot{margin:0 1px;position:relative;top:1px}
+/* Dot (9px) and provider icon (11px) share a column. The row centres both. */
+.si-row .sess-dot{margin:0 1px}
 /* a running session spins instead of pulsing: same shape as the header status
    spinner, same size as the idle dot, drawn in the session's own colour.
    border-box keeps the outer size, so only the fill turns into a ring. */
@@ -418,10 +416,6 @@ a{color:var(--acc2)}
 }
 .foot-engine-group+.foot-engine-group{border-top:1px solid var(--line);margin-top:3px;padding-top:7px}
 .foot-engine-head{display:flex;align-items:center;gap:6px;min-width:0;color:var(--txt3);cursor:pointer;}
-/* Uppercase 9px node labels paint a pixel above their centred line box. Keep
-   the header hit target fixed and lift only the non-interactive status mark;
-   compact button ink stays centred in its hover box. */
-.foot-engine-head>.foot-ico{position:relative;top:-1px}
 .foot-engine-group.dragging{opacity:.28}
 .foot-engines.reordering .foot-engine-group{will-change:transform}
 .foot-engine-name{
@@ -645,7 +639,7 @@ a{color:var(--acc2)}
 .btn-ghost{background:none;color:var(--txt2);box-shadow:none}
 @media (hover:hover){.btn-ghost:hover{background:var(--hov);color:var(--txt);box-shadow:none}}
 .btn-ghost:active{background:var(--hov);box-shadow:var(--btn-press)}
-.btn-sm{height:var(--btn-h-sm);padding:0 11px var(--label-pb);font-size:var(--fs-sm);border-radius:var(--btn-r);gap:6px}
+.btn-sm{height:var(--btn-h-sm);padding:0 11px;font-size:var(--fs-sm);border-radius:var(--btn-r);gap:6px}
 .icon-btn{
   display:inline-grid;place-items:center;flex-shrink:0;padding:0;
   width:32px;height:32px;border-radius:var(--btn-r);cursor:pointer;user-select:none;
@@ -1280,40 +1274,31 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   overflow:hidden;font-size:var(--fs-md);
 }
 .tool-card.err{border-color:var(--err-line)}
-/* Whole-pixel row. The head's own 12.5px type on the body's 1.5 multiplier gives
-   an 18.75px line, so the card stood 34.75px tall: its box edges snapped to a
-   different sub-pixel phase in every card while the glyphs inside snapped to
-   whole device pixels, and the same marks then read up to a pixel off centre in
-   one card and true in the next. An integer line keeps every head 32px, every
-   card 34px, and every mark the same whole-pixel distance from both edges. */
+/* One center for the caret, tool, label and state. Symmetric padding and an
+   explicit line height keep the row stable; font-specific offsets would move
+   the icons away from that center in every tool and folded-task card. */
 .tool-head{
   display:flex;align-items:center;gap:8px;padding:7px 11px;cursor:pointer;user-select:none;color:var(--txt2);
   line-height:18px;
 }
 @media (hover:hover){.tool-head:hover{background:var(--hov-soft)}}
 .tool-head .t-caret{
-  width:12px;height:12px;display:grid;place-items:center;color:var(--txt3);flex-shrink:0;
+  /* The closed chevron's right edge is 7.75 + half its 1.4 stroke.
+     End its slot at that painted edge, so the shared gap starts there rather
+     than after the SVG's unused right padding. */
+  width:8.45px;height:12px;display:flex;align-items:center;color:var(--txt3);flex-shrink:0;
 }
-.tool-head .t-caret svg{display:block;transform:rotate(-90deg);transition:transform var(--t-base) var(--ease)}
-.tool-card.open .t-caret svg{transform:rotate(0)}
+.tool-head .t-caret svg{display:block;flex:none;transform:rotate(-90deg);transition:transform var(--t-base) var(--ease)}
+/* The down chevron ends at 9.5 instead of 7.75. Keep that same right edge
+   when opening, without moving the tool icon or the label column. */
+.tool-card.open .t-caret svg{transform:translateX(-1.75px) rotate(0)}
 .tool-head .t-ico{font-size:var(--fs-sm);flex-shrink:0;width:18px;display:inline-flex;align-items:center;justify-content:center;color:var(--txt3)}
 .tool-head .t-ico svg,.ta-tool .t-ico svg{display:block}
 .tool-head .t-name{font-weight:600;color:var(--txt);flex-shrink:0}
 .tool-head .t-sum{font-family:var(--mono);font-size:var(--fs-sm);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;color:var(--txt3)}
-/* the pending/ok/failed mark: drawn like every other glyph, on the card's
-   own row height. line-height:1 so a state WORD (the folded task's outcome)
-   is an even box too, and centres on the same whole pixel as a drawn mark. */
+/* State words and drawn marks share the head's center without contributing
+   an inline SVG baseline or inheriting a different line height. */
 .tool-head .t-state{font-size:var(--fs-2xs);flex-shrink:0;display:inline-flex;align-items:center;line-height:1;white-space:nowrap}
-/* One optical line for the head. Flex centring lands a glyph box on the middle
-   of the line box, which carries the font's ascent and descent padding and so
-   sits a pixel below the band the eye reads as the line: the midpoint between
-   the baseline and the cap height. Lift the caret, the tool glyph and the state
-   mark onto that cap midline together, so the row keeps one horizon and the
-   check or cross meets the same band the result line's mark uses.
-   Every box on this row is an even height inside the even line, so each one
-   centres on a whole pixel rather than a half: an odd glyph would round its own
-   way per card and break the horizon the shim exists to keep. */
-.tool-head .t-caret,.tool-head .t-ico,.tool-head .t-state{position:relative;top:-1px}
 .tool-head .t-state .spinner{width:10px;height:10px;border:2px solid var(--acc-dim);border-top-color:var(--acc);border-radius:50%;animation:spin .8s linear infinite;animation-delay:var(--prompt-spin-delay,0ms)}
 .tool-head .t-state svg{display:block}
 /* One status voice. A state word or a fact value takes its tone from these
@@ -1398,10 +1383,9 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .aside-a .md{font-size:var(--fs-xl)}
 .aside-err{font-size:var(--fs-md);color:var(--err);font-family:var(--mono);white-space:pre-wrap}
 .aside-note{margin-top:6px;font-size:var(--fs-sm);color:var(--warn);font-family:var(--mono)}
-.result-line{align-self:flex-end;font-size:var(--fs-xs);color:var(--txt3);font-family:var(--mono);padding:0 4px}
-/* The mark hangs 3px below the baseline so its 13px box is centred on the cap
-   band (7px at --fs-xs), the same horizon the tool head's marks take. */
-.result-line svg{vertical-align:-3px}
+.result-line{align-self:flex-end;display:flex;align-items:center;gap:.5ch;font-size:var(--fs-xs);color:var(--txt3);font-family:var(--mono);padding:0 4px}
+.result-line>span{flex:none}
+.result-line svg{display:block}
 .result-line .ok{color:var(--ok)}
 .result-line .bad{color:var(--err)}
 
@@ -1764,7 +1748,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .composer-row .mini.fast-indicator:active{transform:none;background:none}
 .btn-send,.btn-queue,.btn-steer,.btn-ask{
   display:inline-flex;align-items:center;justify-content:center;gap:8px;flex-shrink:0;
-  height:32px;min-width:86px;padding:0 16px var(--label-pb);border:none;border-radius:var(--btn-r);
+  height:32px;min-width:86px;padding:0 16px;border:none;border-radius:var(--btn-r);
   font-size:var(--fs-lg);font-weight:600;line-height:1;letter-spacing:.01em;cursor:pointer;user-select:none;
   color:#fff;
   background-color:var(--acc-lo);background-image:linear-gradient(180deg,var(--acc-hi),var(--acc-lo));
@@ -1784,7 +1768,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 }
 .btn-queue,.btn-steer,.btn-ask{
   width:var(--live-action-width,auto);min-width:var(--live-action-width,86px);
-  padding:var(--live-action-padding,0 16px var(--label-pb));
+  padding:var(--live-action-padding,0 16px);
 }
 .composer-action-label{display:var(--live-action-label,inline)}
 .composer-action-icon{display:var(--live-action-icon,none);align-items:center;justify-content:center}
@@ -2638,7 +2622,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .ws-fact .wsf-l{flex:0 0 84px;font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.09em;color:var(--txt3)}
 :where(.ws-fact) .wsf-v{flex:1;min-width:0;font:var(--fs-sm) var(--mono);color:var(--txt2);overflow-wrap:anywhere}
 /* the preserved-versions row carries its own discard control */
-.ws-fact .wsf-clear{flex:0 0 auto;height:24px;padding:0 10px var(--label-pb);font-size:var(--fs-xs)}
+.ws-fact .wsf-clear{flex:0 0 auto;height:24px;padding:0 10px;font-size:var(--fs-xs)}
 .ws-conflict-box{margin-top:12px}
 .ws-conflict-hint{margin:4px 0 0}
 .wsc-row{
@@ -2794,8 +2778,8 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   .chip{max-width:160px}
   /* comfortable touch targets - the tabbar/footer icon buttons keep their
      own tighter sizing, which is set after .icon-btn in the cascade */
-  .btn{height:36px;padding:0 16px var(--label-pb)}
-  .btn-sm{height:30px;padding:0 12px var(--label-pb)}
+  .btn{height:36px;padding:0 16px}
+  .btn-sm{height:30px;padding:0 12px}
   .btn-send{height:34px}
   .btn-send.stop{width:34px;min-width:34px}
   /* Enter keeps its established Queue behavior. The three explicit running

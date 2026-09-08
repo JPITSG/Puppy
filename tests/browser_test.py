@@ -4064,11 +4064,12 @@ def check_sidebar_icon_alignment(css_source: str) -> None:
     """Text-adjacent marks may be optical; button ink stays box-centred."""
     assert ".sess-group-title{" in css_source
     assert ".si-row{display:flex;align-items:center;" in css_source
-    assert ".si-row .sess-dot{margin:0 1px;position:relative;top:1px}" in css_source
+    # The row centres its own marks: no per-element optical offset.
+    assert ".si-row .sess-dot{margin:0 1px}" in css_source
     assert "font-variant-numeric:tabular-nums;\n  position:relative;top:1px;" in css_source
     assert ".foot-engine-head{display:flex;align-items:center;" in css_source
     assert ".foot-eng{display:flex;align-items:center;" in css_source
-    assert ".foot-engine-head>.foot-ico{position:relative;top:-1px}" in css_source
+    assert ".foot-engine-head>.foot-ico{" not in css_source
     assert ".foot-engine-head>.disclosure-toggle svg" not in css_source
     disclosure = css_source[css_source.index(".disclosure-toggle{"):
                             css_source.index(".sess-empty{", css_source.index(

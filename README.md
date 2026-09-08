@@ -106,7 +106,9 @@ engine's own native session by id, and records everything the engine says as a
 normalized transcript: prompts, replies, thinking, tool calls with their results,
 side questions, engine switches and a result line for every turn with elapsed
 time, tokens in and out, and, when the engine reports it, how full the model's
-context is.
+context is. Tool cards and folded-task headers share a vertically centered row
+for their carets, icons and status marks, with equal spacing from the chevron to
+the tool icon and from the icon to its label.
 
 - **Three workspaces to choose from.** Point a session at a project directory,
   start it in a private disposable **Scratch** workspace with no folder to

@@ -1281,6 +1281,97 @@ async def spell_check_checks(instance, capture=False):
           "suggestion and tools menus", flush=True)
 
 
+async def icon_alignment_checks(instance):
+    """Measure rendered centers: font baselines and optical shims can look
+    plausible in one screenshot but move the same icon in another row."""
+    await evaluate(instance, """(() => {
+        window.iconProbe=el('div');
+        demoView.inner.appendChild(iconProbe);
+        const names=[...Object.keys(TOOL_ICON_DRAWERS),'custom_tool','exec_command',
+            'apply_patch','view_image','collab_agent'];
+        for(const tool of names) for(const status of ['running','done','failed']) {
+            const card=toolCardNode({tool,input:{command:'Check the dashboard layout'},
+                is_error:status==='failed'},status!=='running');
+            card.dataset.probe=tool+' '+status;
+            iconProbe.appendChild(card);
+        }
+        iconProbe.appendChild(taskArchiveNode({name:'Layout review',outcome:'applied',
+            turns:2,folded_at:1,entries:[]},1,0));
+        return true;
+    })()""")
+    try:
+        for width, height in [(1440, 900), (390, 844)]:
+            for scale in (1, 2):
+                await instance.call("Emulation.setDeviceMetricsOverride", {
+                    "width": width, "height": height, "deviceScaleFactor": scale,
+                    "mobile": width == 390}, session=instance.page_session)
+                for theme in ("dark", "light"):
+                    await evaluate(instance, "applyTheme(" + json.dumps(theme) + "); true")
+                    for opened in (False, True):
+                        await evaluate(instance, """(() => {
+                            for(const card of iconProbe.children)
+                                card.classList.toggle('open',""" + json.dumps(opened) + """);
+                            return true;
+                        })()""")
+                        await asyncio.sleep(.22)  # disclosure rotation has settled
+                        result = await evaluate(instance, """(() => {
+                            const failures=[]; let checked=0;
+                            const center=n=>{const r=n.getBoundingClientRect();return r.top+r.height/2;};
+                            const check=(mark,row,label)=>{
+                                if(!mark || !row || !mark.getBoundingClientRect().height) return;
+                                checked++;
+                                const delta=center(mark)-center(row);
+                                if(Math.abs(delta)>.05) failures.push({label,delta});
+                            };
+                            for(const head of iconProbe.querySelectorAll('.tool-head')) {
+                                const name=head.parentNode.dataset.probe||'folded task';
+                                for(const selector of ['.t-caret svg','.t-ico svg','.t-state'])
+                                    check(head.querySelector(selector),head,name+' '+selector);
+                                check(head.querySelector('.t-state svg, .t-state .spinner'),head,name+' status mark');
+                                // Compare the visible chevron edge, including its stroke,
+                                // with the icon's symmetric slot padding and the label.
+                                // Equal flex gaps alone miss the arrow's empty SVG padding.
+                                const arrow=head.querySelector('.t-caret svg');
+                                const box=arrow.getBBox(), matrix=arrow.getScreenCTM();
+                                const right=Math.max(...[box.x,box.x+box.width].flatMap(x=>
+                                    [box.y,box.y+box.height].map(y=>new DOMPoint(x,y).matrixTransform(matrix).x)));
+                                const stroke=parseFloat(getComputedStyle(arrow.firstElementChild).strokeWidth);
+                                const edge=right+stroke/2*Math.hypot(matrix.a,matrix.c);
+                                const icon=head.querySelector('.t-ico svg').getBoundingClientRect();
+                                const label=head.querySelector('.t-name').getBoundingClientRect();
+                                const before=icon.left-edge, after=label.left-icon.right;
+                                if(Math.abs(before-after)>.05)
+                                    failures.push({label:name+' horizontal spacing',before,after});
+                            }
+                            const pairs=[
+                                ['.btn .btn-ico svg','.btn'], ['.icon-btn>svg','.icon-btn'],
+                                ['.disclosure-toggle svg','.disclosure-toggle'],
+                                ['.side-search-btn svg','.side-search-btn'],
+                                ['.si-pin svg','.si-pin'], ['.si-notes svg','.si-notes'],
+                                ['.t-close svg','.t-close'], ['.tab .t-dot svg','.t-dot'],
+                                ['.composer-row .mini svg','.mini'],
+                                ['.foot-node-act svg','.foot-node-act'],
+                                ['.foot-engine-head>.foot-ico','.foot-engine-head'],
+                                ['.si-row>.sess-dot','.si-row'],
+                                ['.result-line svg','.result-line'],
+                            ];
+                            for(const [selector,parent] of pairs)
+                                for(const mark of document.querySelectorAll(selector))
+                                    check(mark,mark.closest(parent),selector);
+                            return {checked,failures};
+                        })()""")
+                        assert result["checked"] >= 200, result
+                        assert not result["failures"], (width, scale, theme, opened, result)
+    finally:
+        await evaluate(instance, "iconProbe.remove(); delete window.iconProbe; applyTheme('dark'); true")
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": 1440, "height": 900, "deviceScaleFactor": 1,
+            "mobile": False}, session=instance.page_session)
+    print("PASS: tool, task, result, sidebar, tab and control icons share their row's "
+          "vertical center; tool/task headers have equal spacing around the icon "
+          "in both themes, desktop/phone, at 1x/2x", flush=True)
+
+
 async def background_task_checks(instance, capture=False):
     await evaluate(instance, """(async () => {
         window.backgroundSavedEvents=(await api(demoView.tab.bid,
@@ -1391,6 +1482,7 @@ async def background_task_checks(instance, capture=False):
 
 
 async def checks(a, b, hub, capture=False):
+    await icon_alignment_checks(a)
     await background_task_checks(a, capture)
     await message_reuse_checks(a)
     await spell_check_checks(a, capture)
