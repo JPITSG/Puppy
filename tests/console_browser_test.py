@@ -1675,6 +1675,35 @@ async def host_panel_checks(instance, capture=False):
         })()""")
         assert abs(spacing["above"] - 4) < 0.6, spacing
         assert abs(spacing["below"] - 8) < 0.6, spacing
+        # Every leading dot in the footer stands in one column, the box's as
+        # much as the backend and engine rows above it: whatever the dot's
+        # size, its centre is the same distance from the sidebar's edge as the
+        # text after it is from the dot - the same air on either side.
+        column = await evaluate(instance, """(() => {
+            const edge=document.getElementById('side').getBoundingClientRect().left;
+            const ink=node=>{const range=document.createRange();range.selectNode(node);
+                return range.getBoundingClientRect();};
+            const label=row=>[...row.childNodes].find(n=>n.nodeType===3);
+            const measure=(row, dot, text)=>{
+                const d=row.querySelector(dot).getBoundingClientRect();
+                const t=(typeof text==='string' ? row.querySelector(text)
+                    .getBoundingClientRect() : ink(text(row)));
+                return {before:d.left-edge, mid:d.left+d.width/2-edge, after:t.left-d.right};
+            };
+            return {
+                backend:measure(document.querySelector('.foot-engine-head'),
+                                '.gdot', '.foot-engine-name'),
+                engine:measure(document.querySelector('.foot-eng'),
+                               '.engine-dot', label),
+                node:measure(document.querySelector('.host-node-head'),
+                             '.gdot', '.host-node-name'),
+                process:measure(document.querySelector('.host-proc'),
+                                '.host-proc-dot', '.host-proc-name'),
+            };
+        })()""")
+        for row in column.values():
+            assert abs(row["before"] - row["after"]) < 0.6, column
+            assert abs(row["mid"] - column["backend"]["mid"]) < 0.6, column
         # A known series, drawn: the line spans the well, the peak reaches its
         # top and the trough its floor, and the stroke keeps its width despite
         # the box being stretched to the sidebar's width.
@@ -1717,14 +1746,21 @@ async def host_panel_checks(instance, capture=False):
             renderHostPanel();
             const rows=[...document.querySelectorAll('.host-proc')];
             const cells=r=>[...r.querySelectorAll('.host-rail')];
-            const lead=r=>Math.round([...r.children]
-                .find(k=>!k.classList.contains('host-proc-rails'))
-                .getBoundingClientRect().left);
+            const lead=r=>Math.round((r.querySelector('.host-proc-dot') ||
+                r.querySelector('.host-proc-more-label')).getBoundingClientRect().left);
+            /* the bar of a row's own level, which must stand in the column
+               its parent's dot stands in rather than beside it */
+            const bar=r=>{const c=cells(r).pop().getBoundingClientRect();
+                return Math.round(c.left+c.width/2);};
             const shape=r=>cells(r).map(c=>c.className.includes('line')?'|':
                 c.className.includes('tee')?'T':c.className.includes('end')?'L':'.').join('');
             const last=r=>cells(r).pop().getBoundingClientRect();
             return {lefts:rows.map(lead), shapes:rows.map(shape),
                     labels:rows.map(r=>r.textContent),
+                    bars:rows.slice(1).map(bar),
+                    dots:rows.map(r=>{const d=r.querySelector('.host-proc-dot');
+                        return d ? Math.round(d.getBoundingClientRect().left+
+                            d.getBoundingClientRect().width/2) : null;}),
                     column:Math.abs(last(rows[2]).left-last(rows[3]).left),
                     stretched:rows.slice(1).every(r=>
                         Math.abs(last(r).height-r.getBoundingClientRect().height)<.5),
@@ -1732,6 +1768,11 @@ async def host_panel_checks(instance, capture=False):
         })()""")
         assert layout["lefts"][0] < layout["lefts"][1] < layout["lefts"][2], layout
         assert layout["lefts"][3] == layout["lefts"][2], layout
+        # The tree hangs from that same column: the first level's bar stands in
+        # the root's own dot rather than beside it, and one level's cells keep
+        # sharing a column below that.
+        assert layout["bars"][0] == layout["dots"][0], layout
+        assert layout["bars"][1] == layout["bars"][2], layout
         assert layout["shapes"] == ["", "L", ".T", ".L"], layout
         assert layout["column"] < 0.5 and layout["stretched"], layout
         assert "×5" in layout["labels"][2] and layout["labels"][3] == "+2 more", layout

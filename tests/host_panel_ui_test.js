@@ -108,6 +108,10 @@ function consoleFor(options = {}) {
       return typeof answer === "function" ? answer() : answer;
     },
   });
+  /* The box borrows the footer's shared dot column, so bring the real helper
+     in beside the slice rather than stubbing the column it draws. */
+  vm.runInContext(between("/* The footer's one dot column.",
+                          "function renderFootEngines()"), context);
   vm.runInContext(
     between("/* ================= host activity ================= */",
             '\n$("host-cpu").onclick'), context);
@@ -122,6 +126,14 @@ function consoleFor(options = {}) {
 
 const rows = (node, cls) => node.querySelectorAll(`.${cls}`);
 const text = node => (node ? node.textContent : "");
+/* Every leading dot in the box stands in the footer's own column, the one
+   the backend and engine rows above the box are built with, so a row reads
+   as [cell][dot centred in it][name] whatever the dot's size. */
+const inDotColumn = (row, dot) => {
+  const lead = row.children[0];
+  return !!lead && lead.className === "foot-ico" &&
+    lead.children.length === 1 && lead.children[0].classList.contains(dot);
+};
 /* A row's rails read as a shape: "|" a level that still has rows below it,
    "." one that is finished, "T" this row's tee and "L" its closing corner. */
 const railShape = row => row.querySelectorAll(".host-rail").map(rail =>
@@ -260,6 +272,13 @@ async function processTree() {
   const tree = rows(app.panel(), "host-proc");
   assert.equal(tree.length, 4);                 // root, engine, folded bridges, +2 more
   assert.equal(text(rows(app.panel(), "host-proc-name")[0]), "python3 -m puppy");
+  /* The root has no rails, so its dot takes the same column as the node head
+     above it and as the backends above the box; every deeper row leads with
+     its rails instead and is indented past that column. */
+  assert.ok(inDotColumn(rows(app.panel(), "host-node-head")[1], "gdot"));
+  assert.ok(inDotColumn(tree[0], "host-proc-dot"));
+  for (const row of tree.slice(1))
+    assert.equal(row.children[0].className, "host-proc-rails");
   /* One rail cell per level: the root has none, a last child ends in a corner
      and a row with siblings still to come in a tee, and a level that is done
      leaves a blank column rather than a bar running past its last row. */
@@ -315,6 +334,7 @@ async function backends() {
   assert.equal(text(pings[0].querySelector(".host-ping-name")), "nas");
   assert.equal(text(pings[0].querySelector(".host-ping-ms")), "12.4 ms");
   assert.ok(pings[0].querySelector(".gdot.ok"));
+  assert.ok(inDotColumn(pings[0], "gdot"));
   assert.equal(text(pings[1].querySelector(".host-ping-name")), "old");
   assert.equal(text(pings[1].querySelector(".host-ping-ms")), "failed");
   assert.equal(rows(app.panel(), "host-node-name").map(text)

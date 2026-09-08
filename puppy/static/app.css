@@ -45,6 +45,11 @@
   --toolbar-h:30px;
   /* status dots: session/engine identity, and the small availability marks */
   --dot:9px; --dot-sm:6px;
+  /* The sidebar footer's one dot column: a cell pulled left of the content
+     edge so whatever stands in it is centred between the sidebar's own edge
+     and the text that follows the cell - the same air on both sides of every
+     leading dot, whatever that dot's size. */
+  --foot-ico:24px; --foot-ico-pull:8px;
   /* Availability marks share brighter fills; text keeps its readable palette. */
   --dot-ok:#2befac; --dot-bad:#ff7a8e;
   /* hover washes: rows and heads take the soft one, --hov is for controls,
@@ -438,8 +443,13 @@ a{color:var(--acc2)}
 .foot-node-act:active{background:var(--hov);color:var(--txt);transform:scale(.9)}
 .foot-engine-empty{padding-left:22px;color:var(--txt3);font-size:var(--fs-2xs)}
 .foot-eng{display:flex;align-items:center;gap:6px;min-width:0;font-size:var(--fs-xs);color:var(--txt2)}
-/* -8px pulls the icon column left so the dots' visual inset matches the 14px right inset */
-.foot-ico{width:24px;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-left:-8px}
+/* The footer's one dot column, shared by the backend heads, the engine rows
+   and the host box below them: the pull puts its centre 18px from the
+   sidebar's edge, exactly half of where the text after it starts. */
+.foot-ico{
+  width:var(--foot-ico);display:flex;align-items:center;justify-content:center;
+  flex-shrink:0;margin-left:calc(-1 * var(--foot-ico-pull));
+}
 .foot-eng .st{margin-left:auto;font-size:var(--fs-2xs);font-family:var(--mono);color:var(--txt3)}
 .foot-eng .st.has-activity{display:inline-flex;align-items:center;white-space:pre}
 .foot-engine-activity{display:inline-flex;flex:none;width:10px;height:10px;color:var(--ok)}
@@ -534,7 +544,7 @@ a{color:var(--acc2)}
 .host-fact{flex:1 1 0;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .host-fact.mid{text-align:center}
 .host-fact.end{text-align:right}
-.host-empty{padding-left:12px;font-size:var(--fs-2xs);color:var(--txt3)}
+.host-empty{padding-left:22px;font-size:var(--fs-2xs);color:var(--txt3)}
 .host-ping{display:flex;align-items:center;gap:6px;min-width:0}
 .host-ping-name{
   min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
@@ -553,10 +563,15 @@ a{color:var(--acc2)}
    up the column without a canvas. */
 .host-tree{display:flex;flex-direction:column;min-width:0;--rail-w:10px}
 .host-proc{
-  display:flex;align-items:center;gap:5px;min-width:0;min-height:16px;
+  display:flex;align-items:center;gap:6px;min-width:0;min-height:16px;
   font-size:var(--fs-2xs);color:var(--txt2);
 }
-.host-proc-rails{flex:0 0 auto;align-self:stretch;display:flex}
+/* The rails start half a cell left of the dot column, so the first level's
+   bar hangs from the root's own dot rather than beside it. */
+.host-proc-rails{
+  flex:0 0 auto;align-self:stretch;display:flex;
+  margin-left:calc(var(--foot-ico) / 2 - var(--foot-ico-pull) - var(--rail-w) / 2);
+}
 .host-rail{flex:0 0 var(--rail-w);position:relative}
 .host-rail.line::before,.host-rail.tee::before,.host-rail.end::before{
   content:"";position:absolute;top:0;bottom:0;

@@ -6703,6 +6703,16 @@ function wireNodeGroupDropZone(root) {
   });
 }
 
+/* The footer's one dot column. A backend's health, an engine's colour and a
+   host row's kind are all leading marks of different sizes, so each is
+   centred in the same cell rather than laid against the edge: the air on
+   either side of the dot stays equal and every name starts in one column. */
+function footIcon(mark) {
+  const ico = el("span", "foot-ico");
+  ico.appendChild(mark);
+  return ico;
+}
+
 function renderFootEngines() {
   const root = $("foot-engines");
   if (dragNode && dragNode.item && dragNode.item.isConnected &&
@@ -6730,13 +6740,11 @@ function renderFootEngines() {
     const body = el("div", "foot-engine-body");
     {
       const head = el("div", "foot-engine-head");
-      const ico = el("span", "foot-ico");
       const status = g.bid === 0 ? "ok" : remoteAvailability(g.bid);
       const dot = el("span", "gdot " + status);
       dot.setAttribute("role", "img");
       dot.setAttribute("aria-label", g.bid ? remoteAvailabilityTitle(g.bid) : "available");
-      ico.appendChild(dot);
-      head.appendChild(ico);
+      head.appendChild(footIcon(dot));
       const name = el("span", "foot-engine-name", g.name);
       const key = g.bid ? `remote:${g.bid}` : "local";
       const disclosure = disclosureButton(`${g.name} engine status`, body,
@@ -6790,9 +6798,7 @@ function renderFootEngines() {
       body.appendChild(el("div", "foot-engine-empty", "No engines installed"));
     } else for (const e of g.engines) {
       const row = el("div", "foot-eng");
-      const ico = el("span", "foot-ico");
-      ico.appendChild(el("span", `engine-dot ${e.key}`));
-      row.appendChild(ico);
+      row.appendChild(footIcon(el("span", `engine-dot ${e.key}`)));
       row.appendChild(document.createTextNode(e.label));
       const quotaSample = quotas.get(e) || null;
       const pct = weeklyQuotaLeft(quotaSample);
@@ -7133,7 +7139,7 @@ function hostNodeDot(node) {
   const dot = el("span", `gdot ${node.bid ? remoteAvailability(node.bid) : "ok"}`);
   dot.setAttribute("role", "img");
   dot.setAttribute("aria-label", node.bid ? remoteAvailabilityTitle(node.bid) : "available");
-  return dot;
+  return footIcon(dot);
 }
 
 function hostSection(title, note) {
@@ -7212,7 +7218,7 @@ function hostLatencyRow(row) {
   const line = el("div", "host-ping");
   const dot = el("span", `gdot ${row.ok === true ? "ok" : "warn"}`);
   dot.setAttribute("role", "img");
-  line.appendChild(dot);
+  line.appendChild(footIcon(dot));
   const name = el("span", "host-ping-name", row.name || `backend ${row.id}`);
   name.title = row.url || row.name || "";
   line.appendChild(name);
@@ -7270,8 +7276,14 @@ function hostProcessRails(rails, last) {
 
 function hostProcessRow(process, rails, last) {
   const row = el("div", "host-proc");
-  if (last !== null) row.appendChild(hostProcessRails(rails, last));
-  row.appendChild(el("span", `host-proc-dot k-${process.kind || "proc"}`));
+  /* The root of a node's tree has no rails, so its dot takes the same column
+     as the node's own head above it; a row with rails is indented past it. */
+  const dot = el("span", `host-proc-dot k-${process.kind || "proc"}`);
+  if (last === null) row.appendChild(footIcon(dot));
+  else {
+    row.appendChild(hostProcessRails(rails, last));
+    row.appendChild(dot);
+  }
   const name = el("span", "host-proc-name", process.label || "?");
   row.appendChild(name);
   if (process.count > 1) row.appendChild(el("span", "host-proc-count", `×${process.count}`));
