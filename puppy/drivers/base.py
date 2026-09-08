@@ -65,6 +65,10 @@ Actions returned by parse_line() (consumed by the runner):
     {"a": "background_tasks", "tasks": [...]}        live engine background tasks as
                                                      {id, type, description}; REPLACE
                                                      semantics, ambient work excluded
+                                                     (also drives the header count).
+                                                     Only emit a complete live set
+                                                     from native task evidence, never
+                                                     infer it from tool calls/text.
     {"a": "turn_pause", "data": {...}, "tasks": [...]}
                                                      the model answered but the engine
                                                      keeps running background tasks that

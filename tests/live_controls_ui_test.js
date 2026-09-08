@@ -419,6 +419,7 @@ function engineCatalog(fast = false) {
   Object.assign(approval, { tab: { bid: 0, sid: 1 }, root: mount(el("div")),
     approvalEl: mount(el("div", "approval hidden")), reconnecting: false,
     scrollBottom() {}, renderStatus() {}, updateSteerControl() {},
+    setBackgroundTasks(value) { assert.equal(value, null); },
     ws: { readyState: 1, send: text => sent.push(JSON.parse(text)) },
   });
   const req = { request_id: "permission-1", tool_name: "Read", input: { file_path: "/demo/notes.txt" },

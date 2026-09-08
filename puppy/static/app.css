@@ -1074,8 +1074,8 @@ select.choice-native{display:none!important}
    useful header state. This also prevents a newly opened offline session from
    showing the constructor's placeholder engine/location pills. */
 .chat.transport-lost .chat-meta-scroll>.chip{display:none}
-/* Every pill is durable session metadata, so each keeps its full intrinsic
-   width. The lane already scrolls horizontally at tight widths; inheriting the
+/* Every pill keeps its full intrinsic width. The lane already scrolls
+   horizontally at tight widths; inheriting the
    generic chip cap would instead cut paths and other values inside a pill. */
 .chat-meta-scroll .chip{max-width:none}
 /* Hidden per session: the whole strip goes, ⋮ included, which is the point of
@@ -1090,13 +1090,17 @@ select.choice-native{display:none!important}
 /* a queued engine switch: same voice as the pending configuration minis */
 .chip.eng.pending .eng-label{font-style:italic;color:var(--acc2)}
 .chip.cwd.warn{color:var(--warn);border-color:var(--warn-line);background:var(--warn-dim)}
-/* the one chip that is a control: a live browser this session launched */
+/* Live session activity shares one blue pill, including the count-only
+   background-task indicator. Only browser/terminal pills are controls. */
+.chip.browser,.chip.terminal,.chip.background-tasks{
+  color:var(--acc2);background:var(--acc-dim);border-color:var(--acc-line-soft);
+}
+.chip.browser svg,.chip.terminal svg,.chip.background-tasks svg{flex-shrink:0;opacity:.85}
+.chip.background-tasks{font-family:var(--sans)}
 .chip.browser,.chip.terminal{
-  gap:6px;cursor:pointer;color:var(--acc2);background:var(--acc-dim);
-  border-color:var(--acc-line-soft);-webkit-appearance:none;appearance:none;
+  cursor:pointer;-webkit-appearance:none;appearance:none;
   transition:border-color var(--t-base) var(--ease),color var(--t-base) var(--ease),transform var(--t-fast) var(--ease);
 }
-.chip.browser svg,.chip.terminal svg{flex-shrink:0;opacity:.85}
 @media (hover:hover){
   .chip.browser:hover,.chip.terminal:hover{border-color:var(--focus-line);color:var(--txt)}
   .chip.browser:hover svg,.chip.terminal:hover svg{opacity:1}
@@ -1770,7 +1774,19 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   width:var(--live-action-width,auto);min-width:var(--live-action-width,86px);
   padding:var(--live-action-padding,0 16px);
 }
-.composer-action-label{display:var(--live-action-label,inline)}
+.composer-action-label{display:var(--live-action-label,block);text-box:trim-both cap alphabetic}
+.btn-send .composer-action-label{display:block}
+.composer-enter-action{position:relative;display:inline-flex;flex-shrink:0}
+.composer-enter-action:has(>.hidden){display:none}
+/* A 12px mark with a separate 24px target: choosing Enter never presses the
+   action underneath. Keep the native checkbox keyboard and focus behavior. */
+.composer-enter-choice{
+  display:var(--live-action-choice,flex);
+  position:absolute;top:-3px;right:-3px;width:24px;height:24px;
+  justify-content:center;cursor:pointer;
+}
+.composer-enter-choice input[type=checkbox]{width:12px;height:12px;border-color:var(--txt3)}
+.composer-enter-choice input[type=checkbox]:checked::after{width:10px;height:10px}
 .composer-action-icon{display:var(--live-action-icon,none);align-items:center;justify-content:center}
 .composer-action-icon svg{display:block}
 /* A desktop split can be as narrow as a phone. Size the running actions to
@@ -1778,7 +1794,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 @container composer (max-width:480px){
   .composer-row{
     --live-action-width:32px;--live-action-padding:0;
-    --live-action-label:none;--live-action-icon:flex;
+    --live-action-label:none;--live-action-icon:flex;--live-action-choice:none;
     flex-wrap:wrap;
   }
   .composer-meta-viewport{min-width:min(100%,64px)}
@@ -2782,12 +2798,12 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   .btn-sm{height:30px;padding:0 12px}
   .btn-send{height:34px}
   .btn-send.stop{width:34px;min-width:34px}
-  /* Enter keeps its established Queue behavior. The three explicit running
+  /* Enter keeps its chosen action. The three explicit running
      actions remain available as equally sized symbols without squeezing the
      horizontally scrollable metadata lane. */
   .composer-row{
     --live-action-width:34px;--live-action-padding:0;
-    --live-action-label:none;--live-action-icon:flex;
+    --live-action-label:none;--live-action-icon:flex;--live-action-choice:none;
   }
   .btn-queue,.btn-steer,.btn-ask{height:34px;gap:0}
   .composer-row .mini{height:26px}

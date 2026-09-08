@@ -3311,6 +3311,9 @@ class SessionHub:
             self._fail_side_questions("the turn ended before the engine answered")
             self._bg_wait_since = None
             self._bg_tasks = []
+            # The engine no longer owns tasks. Clear the live indicator now:
+            # post-turn workspace/spawn cleanup can delay turn_done.
+            self._publish_background()
             self.stderr_tail = ""
             self._publish_steering_state(session)
             # A failed turn is fresh evidence about the engine (auth revoked,

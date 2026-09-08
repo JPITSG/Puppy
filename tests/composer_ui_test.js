@@ -142,6 +142,52 @@ function completeUpload(entry, over = {}) {
 const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE").map(c => c.route);
 
 (async () => {
+  // Enter choices belong to the shared box; action clicks stay independent.
+  {
+    let steered = 0, queued = 0;
+    const actions = '<button data-enter-action="steer">Steer</button>' +
+      '<button data-enter-action="queue">Queue</button>';
+    const host = { enterActions: { steer: () => steered++, queue: () => queued++ } };
+    const a = makeBox(host, { actions }), b = makeBox(host, { actions });
+    const [steer, queue] = a.composer.enterActions;
+    assert.equal(queue.input.checked, true);
+    assert.equal(steer.input.checked, false);
+    assert.equal(steer.button.contains(steer.input), false, "no nested interactive controls");
+    key(a.ta, "Enter");
+    assert.equal(queued, 1);
+    fire(steer.input, "change");
+    assert.equal(steered, 0, "choosing never sends");
+    assert.equal(steer.input.checked, true);
+    assert.equal(queue.input.checked, false);
+    assert.equal(b.composer.enterActions[0].input.checked, true, "other open chats stay in sync");
+    fire(steer.input, "change");
+    assert.equal(steer.input.checked, true, "the only choice cannot be unchecked");
+    key(a.ta, "Enter");
+    assert.equal(steered, 1);
+    key(a.ta, "Enter", { shiftKey: true });
+    key(a.ta, "Enter", { isComposing: true });
+    assert.equal(steered, 1);
+    steer.button.disabled = true;
+    key(a.ta, "Enter");
+    assert.equal(steered, 1);
+    assert.equal(queued, 1, "disabled steering never queues instead");
+    steer.button.classList.add("hidden");
+    key(a.ta, "Enter");
+    assert.equal(queued, 2, "an engine without steering queues");
+    assert.equal(queue.input.checked, true, "the check reflects that fallback");
+    queue.button.classList.add("hidden");
+    key(a.ta, "Enter");
+    assert.equal(a.events.submit, 1, "idle Enter sends normally");
+    const c = makeBox(host, { actions });
+    assert.equal(c.composer.enterActions[0].input.checked, true, "new boxes remember the preference");
+    storage.set("puppy.composer.enter-action", "invalid");
+    key(c.ta, "Enter");
+    assert.equal(steered, 1);
+    assert.equal(queued, 2);
+    assert.equal(storage.get("puppy.composer.enter-action"), "invalid", "bad data is not rewritten");
+    storage.delete("puppy.composer.enter-action");
+    for (const box of [a, b, c]) { box.composer.destroy(); box.wrap.remove(); }
+  }
   // Transcript reuse focuses the composer and selects only the previous draft.
   for (const draft of ["", "existing draft", "  spaced\nmultiline 🐾  "]) {
     const b = makeBox();

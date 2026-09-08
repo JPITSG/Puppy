@@ -178,8 +178,16 @@ you can:
 
 In narrow desktop panes, Ask, Steer and Queue use icons so Stop stays visible.
 The controls wrap onto another row when the pane is too narrow for one line.
+When their text labels are visible, the small checkboxes at the top right of
+**Steer** and **Queue** choose what `Enter` does during a turn. Only one is
+selected; Queue is the default, and the choice is remembered in this browser.
+Selecting a checkbox never sends
+the draft. If Steer is disabled, Enter waits; if the engine does not offer
+Steer, Enter queues. When idle, Enter sends normally. Compact icon buttons
+hide the checkboxes and keep the saved Enter choice.
 
-Everything typed at an agent goes through one shared prompt box: `Enter` sends,
+Everything typed at an agent goes through one shared prompt box: `Enter` sends
+(using the chosen action during a running turn),
 `Shift+Enter` or `Ctrl+J` breaks a line, and `@` opens the mention list (browsers,
 terminals, sessions, a new spawn). In session chats, `↑` at the start of the box
 recalls earlier prompts. The New task box keeps normal Up/Down caret movement
@@ -250,6 +258,14 @@ to the originating tool card when the native tool ID and card are available.
 Updates remain visible with the card collapsed; those without a matching card
 stand on their own. Transient engine failures (such as an OAuth refresh lock)
 retry on their own with a back-off note in the transcript.
+
+A blue pill in the session header shows the live background-task count (for
+example, **2 tasks**), including while the model is still working. It disappears
+at zero, on disconnect and when the turn ends; reconnecting restores the current
+list. Only engine-reported background work counts, excluding internal
+housekeeping. This indicator is currently available for Claude Code. Codex and
+OpenCode do not yet supply a reliable complete background-task list through
+Puppy's integrations, so they show no counter.
 
 Interruptions, background waits and engine-reported model notices use the same
 cards. Headings are green for success, blue for active work or waiting, amber

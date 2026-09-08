@@ -1,5 +1,5 @@
-/* Run with node tests/background_task_ui_test.js. Native background-task
-   endings in the real transcript renderer, with no browser or engine. */
+/* Run with node tests/background_task_ui_test.js. Live counts and native
+   background-task endings, with no browser or engine. */
 "use strict";
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -106,3 +106,110 @@ assert.equal(safe.inner.querySelector(".task-update-label").textContent, "Backgr
 assert.equal(safe.inner.querySelector(".task-update-text").textContent, unknown.data.text);
 assert.equal(safe.inner.querySelector("img"), null, "engine text is not markup");
 console.log("PASS: background-task labels, exact native tool association, visible folded updates, independent history, late results and search targets");
+
+// Exercise the real socket dispatcher and lifecycle methods as well as the
+// pill renderer: a history rebuild must never masquerade as live task state.
+Object.assign(context, {
+  tasksIcon: icon, globeIcon: icon, terminalIcon: icon,
+  remoteStoppingMessage: () => "", noteSessionActivity() {},
+  syncSessionBrowserChips() {}, state: {tabs: []},
+});
+vm.runInContext([
+  "class HeaderView {",
+  between("  handle(d) {", "  /* A browser this session launched"),
+  between("  syncBrowserChips() {", "  syncWorkspaceChip() {"),
+  between("  updateRunState() {", "  setSteeringState(value) {"),
+  between("  setReconnecting(value) {", "  setStatus(text) {"),
+  "} globalThis.HeaderView = HeaderView;",
+].join("\n"), context);
+function header(sid = 1, bid = 0) {
+  const v = new context.HeaderView();
+  v.tab = {sid, bid};
+  v.session = {engine: "claude"};
+  v.status = "running";
+  v.root = document.createElement("div");
+  v.root.innerHTML = '<div class="chat-meta-scroll"><span class="chip eng"></span>' +
+    '<span class="chip cwd"></span><span class="chat-status"></span></div>';
+  v.sendBtn = document.createElement("button");
+  v.queueBtn = document.createElement("button");
+  v.composer = {syncUploadButton() {}};
+  v.steering = v.sideQuestion = {};
+  v.scrollBottom = v.syncHeadOverflow = v.updateSteerControl = v.renderStatus =
+    v.updateApprovalControl = v.setSteeringState = v.setSideQuestionState =
+    v.initializeDraft = v.rebuildTranscript = v.mergeSkipped = v.renderQueue =
+    v.updateHead = v.syncLiveStatus = v.hideApproval = v.clearLive =
+    v.renderEvent = v.syncTailPill = () => {};
+  v.setStatus = text => { v.statusText = text; };
+  v.skippedEvents = [];
+  v.atBottom = () => false;
+  return v;
+}
+const live = (...ids) => ({tasks: ids.map(id => ({id, type: "future-kind"}))});
+const chip = v => v.root.querySelector(".chip.background-tasks");
+const snapshot = (background_tasks, engine = "claude", status = "running") => ({
+  type: "snapshot", session: {engine}, status, events: [], background_tasks,
+});
+const a = header(), b = header(2, 7);
+a.handle(snapshot(live("a", "b")));
+assert.equal(chip(a).textContent, "2 tasks", "attach restores the live count before any new event");
+assert.equal(chip(a).getAttribute("aria-label"), "2 background tasks running");
+assert.equal(chip(a).tagName, "SPAN", "the count does not promise a dialog or action");
+assert.equal(chip(b), null, "each conversation/backend owns its own count");
+const stable = chip(a);
+a.handle({type: "background_tasks", ...live("a", "a", "b"), waiting: true, text: "Waiting"});
+assert.equal(chip(a), stable, "repeats update in place without duplicates or focus changes");
+assert.equal(chip(a).textContent, "2 tasks", "native identities deduplicate the set");
+assert.equal(a.statusText, "Waiting", "the existing waiting status still works");
+a.detached = true;
+a.handle({type: "background_tasks", ...live("b"), waiting: false});
+assert.equal(chip(a).textContent, "1 task", "live updates work while reading old history");
+a.handle({type: "event", event: notice("completed", "b")});
+assert.equal(chip(a).textContent, "1 task", "transcript endings cannot change the live list");
+a.detached = false;
+a.handle({type: "background_tasks", ...live()});
+assert.equal(chip(a), null, "empty replacement removes the pill");
+for (const value of [undefined, null, {}, {tasks: {}}, {tasks: "a"},
+  {tasks: [null]}, {tasks: [{id: 4}]}, {tasks: [{id: " "}]},
+  {tasks: [{id: "valid"}, {}]}]) {
+  a.handle(snapshot(live("a")));
+  a.handle(snapshot(value));
+  assert.equal(chip(a), null, "unknown or malformed state hides the count");
+}
+for (const engine of ["claude", "codex", "opencode"]) {
+  a.handle(snapshot(undefined, engine));
+  assert.equal(chip(a), null, "engine name alone proves no background work");
+  a.handle(snapshot(live(), engine));
+  assert.equal(chip(a), null, "unsupported/idle drivers never show a zero counter");
+}
+a.handle(snapshot(live("a"), "future-engine"));
+assert.equal(chip(a).textContent, "1 task", "normalized evidence needs no engine allowlist");
+a.setReconnecting(true);
+assert.equal(chip(a), null);
+a.setReconnecting(false);
+assert.equal(chip(a), null, "socket open cannot resurrect stale state");
+a.handle(snapshot(live("a", "b")));
+assert.equal(chip(a).textContent, "2 tasks", "fresh snapshot restores after reconnect");
+for (const continued of [false, true]) {
+  a.handle(snapshot(live("a")));
+  a.handle({type: "turn_done", continued});
+  assert.equal(chip(a), null, "completion clears even when queued work continues");
+}
+a.handle(snapshot(live("a")));
+a.handle({type: "session_meta", session: {engine: "opencode"}});
+assert.equal(chip(a), null, "an engine switch cannot retain the previous engine's count");
+a.handle(snapshot(live("a"), "claude", "idle"));
+assert.equal(chip(a), null, "an idle snapshot cannot display old tasks");
+
+// Catalog repaints keep linked controls ahead of the count, without replacing
+// it or letting a second session's browser leak into this session's header.
+a.handle(snapshot(live("a")));
+context.state.tabs = [
+  {type: "browser", browserId: "A123", sid: 1, bid: 0, id: "browser"},
+  {type: "term", terminalId: "B234", sid: 1, bid: 0, id: "term"},
+  {type: "browser", browserId: "C345", sid: 2, bid: 7, id: "other"},
+];
+a.syncBrowserChips(); a.syncTerminalChips();
+const lane = a.root.querySelector(".chat-meta-scroll");
+assert.deepEqual(lane.children.map(n => n.className), [
+  "chip eng", "chip cwd", "chip browser", "chip terminal", "chip background-tasks", "chat-status"]);
+console.log("PASS: background-task pill snapshots, live replacements, deduplication, per-session ownership, unsupported engines, history, reconnects, turn/engine changes and linked controls");

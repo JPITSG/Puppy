@@ -9996,6 +9996,8 @@ function spellAutocorrection(word) {
                        (default "this session")
      promptHistory     opt in to Up/Down recall for session chats (default off)
      submit()          Enter, and the host's own send control
+     enterActions      optional named buttons Enter can invoke instead of
+                       submit; the box owns their exclusive checkbox choice
      escape(event)     Escape with no list open (optional; the event otherwise
                        propagates, so a dialog's Escape still closes it)
      edited()          the value changed through a local edit or recall:
@@ -10057,6 +10059,24 @@ class Composer {
     this.typingTimer = null;
     this.typingAt = 0;
     this.ta = box.querySelector("textarea");
+    this.enterActions = Object.entries(this.host.enterActions || {}).map(([value, run]) => {
+      const button = box.querySelector(`[data-enter-action="${value}"]`);
+      const wrap = el("span", "composer-enter-action");
+      button.parentNode.insertBefore(wrap, button);
+      wrap.appendChild(button);
+      const label = el("label", "check composer-enter-choice");
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.setAttribute("aria-label", `Use ${button.textContent.trim()} on Enter`);
+      label.appendChild(input);
+      wrap.appendChild(label);
+      input.onchange = () => {
+        lsSet("puppy.composer.enter-action", value);
+        for (const composer of Composer.live) composer.syncEnterActions();
+      };
+      return { value, button, input, run };
+    });
+    this.syncEnterActions();
     this.mentionEl = box.querySelector(".mention-pop");
     this.attachStrip = box.querySelector(".attach-strip");
     this.attachButton = box.querySelector(".attach-add");
@@ -10188,6 +10208,27 @@ class Composer {
     if (target !== this.ta && !this.mentionEl.contains(target)) this.hideMention();
   }
 
+  syncEnterActions() {
+    const saved = lsGet("puppy.composer.enter-action");
+    let selected = saved === null ? "queue" : saved;
+    const preferred = this.enterActions.find(action => action.value === selected);
+    if (preferred && preferred.button.classList.contains("hidden")) selected = "queue";
+    for (const action of this.enterActions) action.input.checked = action.value === selected;
+  }
+
+  submitOnEnter() {
+    const visible = this.enterActions.filter(action => !action.button.classList.contains("hidden"));
+    if (!visible.length) { this.host.submit(); return; }
+    this.syncEnterActions();
+    const saved = lsGet("puppy.composer.enter-action");
+    // Refuse an invalid stored choice without rewriting it or sending anything.
+    if (saved !== null && !this.enterActions.some(action => action.value === saved)) return;
+    const action = visible.find(action => action.input.checked) ||
+      visible.find(action => action.value === "queue");
+    // A visible but disabled choice must never silently become another action.
+    if (action && !action.button.disabled) action.run();
+  }
+
   /* One keyboard contract for every host. The open mention list owns its
      navigation keys first - most importantly Escape, which must close the
      list and nothing else. */
@@ -10204,7 +10245,7 @@ class Composer {
     }
     /* Ctrl/Cmd+C has no shortcut here: it falls through to the modifier
        guard below so textarea selection and native clipboard copy work. */
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); this.host.submit(); return; }
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); this.submitOnEnter(); return; }
     if (e.shiftKey || e.ctrlKey || e.altKey || e.metaKey || !this.host.promptHistory) return;
     const ta = this.ta;
     const atStart = ta.selectionStart === 0 && ta.selectionEnd === 0;
@@ -13466,15 +13507,15 @@ class SessionView {
               <span class="composer-action-label">Ask</span>
               <span class="composer-action-icon" aria-hidden="true"></span>
             </button>
-            <button class="btn-steer hidden" type="button" aria-label="Steer the active turn">
+            <button class="btn-steer hidden" data-enter-action="steer" type="button" aria-label="Steer the active turn">
               <span class="composer-action-label">Steer</span>
               <span class="composer-action-icon" aria-hidden="true"></span>
             </button>
-            <button class="btn-queue hidden" type="button" aria-label="Queue for the next turn">
+            <button class="btn-queue hidden" data-enter-action="queue" type="button" aria-label="Queue for the next turn">
               <span class="composer-action-label">Queue</span>
               <span class="composer-action-icon" aria-hidden="true"></span>
             </button>
-            <button class="btn-send" type="button">Send</button>`,
+            <button class="btn-send" type="button"><span class="composer-action-label">Send</span></button>`,
         })}
       </div>`;
     this.root = root;
@@ -13536,6 +13577,7 @@ class SessionView {
       sid: this.tab.sid,
       promptHistory: true,
       submit: () => this.submit(),
+      enterActions: { steer: () => this.steer(), queue: () => this.submit() },
       /* Escape with no list open interrupts the turn; it is consumed here so
          nothing above the view reads it as its own. */
       escape: (e) => {
@@ -13566,9 +13608,7 @@ class SessionView {
     this.sendBtn.onclick = () => this.status === "running" ? this.interrupt() : this.submit();
     this.steerBtn.onclick = () => this.steer();
     this.askBtn.onclick = () => this.ask();
-    /* submit() already queues when a turn is in flight - the same path Enter
-       takes. This just gives that a visible control while the primary button
-       is busy being Stop. */
+    /* The action button always queues; its checkbox only changes Enter. */
     this.queueBtn.onclick = () => this.submit();
     root.querySelector(".menu-btn").onclick = (e) => { e.stopPropagation(); this.showMenu(e.currentTarget); };
     if (this.nativeComposerChoices) {
@@ -14066,6 +14106,7 @@ class SessionView {
         catch (error) { this.setStatus(error.message); return; }
         this.composer.syncUploadButton();
         this.status = d.status;
+        this.setBackgroundTasks(d.background_tasks);
         noteSessionActivity(this.tab.bid, this.tab.sid, d.status === "running",
           d.active_since, d.server_time, d.completion_status);
         this.retry = 800;
@@ -14149,7 +14190,8 @@ class SessionView {
         if (this.session) { this.session.last_model = d.model; this.updateHead(); }
         break;
       case "background_tasks":
-        /* The model answered but its engine still owns background work. */
+        this.setBackgroundTasks(d);
+        /* The list also updates while the model is still working. */
         if (d.waiting && d.text) this.setStatus(d.text);
         break;
       case "thinking_tokens":
@@ -14214,6 +14256,7 @@ class SessionView {
         }
         break;
       case "turn_done":
+        this.setBackgroundTasks(null);
         /* The node reports whether this turn continued into queued work. */
         const queueWaiting = d.queue_waiting === true;
         const continued = d.continued === true;
@@ -14232,6 +14275,8 @@ class SessionView {
           queueWaiting ? "" : d.completion_status);
         break;
       case "session_meta":
+        if (this.session && this.session.engine !== d.session.engine)
+          this.setBackgroundTasks(null);
         this.session = d.session;
         this.updateHead();
         syncSessionBrowserChips();
@@ -14269,6 +14314,38 @@ class SessionView {
     }
   }
 
+  /* Consume only the driver's normalized live set, never transcript text,
+     tool names or a guessed engine allowlist. No list means no counter; new
+     drivers can supply the same contract without adding UI engine branches.
+     Replace semantics and native identities make repeats harmless. */
+  setBackgroundTasks(value) {
+    const tasks = value && value.tasks;
+    const valid = Array.isArray(tasks) && tasks.every(task => task &&
+      typeof task.id === "string" && task.id.trim());
+    const count = valid && this.status === "running" && !this.reconnecting
+      ? new Set(tasks.map(task => task.id)).size : 0;
+    const scroll = this.root.querySelector(".chat-meta-scroll");
+    let chip = scroll.querySelector(".chip.background-tasks");
+    if (!count) {
+      if (chip) { chip.remove(); this.syncHeadOverflow(); }
+      return;
+    }
+    if (!chip) {
+      chip = el("span", "chip background-tasks");
+      chip.appendChild(tasksIcon(11));
+      chip.appendChild(el("span", "chip-text"));
+      scroll.insertBefore(chip, scroll.querySelector(".chat-status"));
+    }
+    const text = `${count} ${count === 1 ? "task" : "tasks"}`;
+    const label = chip.querySelector(".chip-text");
+    if (label.textContent === text) return;
+    label.textContent = text;
+    const description = `${count} background ${count === 1 ? "task" : "tasks"} running`;
+    chip.setAttribute("aria-label", description);
+    chip.title = description;
+    this.syncHeadOverflow();
+  }
+
   /* A browser this session launched lives in its own tab, which can be
      scrolled out of the tabbar or parked in another pane entirely. The header
      says one exists and takes you to it, and stops saying so the moment the
@@ -14282,10 +14359,9 @@ class SessionView {
     this.browserChipKey = key;
     const scroll = this.root.querySelector(".chat-meta-scroll");
     for (const stale of scroll.querySelectorAll(".chip.browser")) stale.remove();
-    /* Browser controls finish the pill group: identity and filesystem location
-       identify the session first, then its live browsers sit immediately before
-       the transient activity text. */
-    const anchor = scroll.querySelector(".chat-status");
+    /* Identity and filesystem location come first, then linked controls,
+       the background-task count and the transient activity text. */
+    const anchor = scroll.querySelector(".chip.background-tasks") || scroll.querySelector(".chat-status");
     for (const t of live) {
       const chip = el("button", "chip browser");
       chip.type = "button";
@@ -14306,7 +14382,7 @@ class SessionView {
     this.terminalChipKey = key;
     const scroll = this.root.querySelector(".chat-meta-scroll");
     for (const stale of scroll.querySelectorAll(".chip.terminal")) stale.remove();
-    const anchor = scroll.querySelector(".chat-status");
+    const anchor = scroll.querySelector(".chip.background-tasks") || scroll.querySelector(".chat-status");
     for (const t of live) {
       const chip = el("button", "chip terminal");
       chip.type = "button";
@@ -14413,9 +14489,10 @@ class SessionView {
 
   updateRunState() {
     const running = this.status === "running";
+    if (!running) this.setBackgroundTasks(null);
     if (running) this.sendBtn.innerHTML =
       '<span class="stop-sq" aria-hidden="true"></span>';
-    else this.sendBtn.textContent = "Send";
+    else this.sendBtn.innerHTML = '<span class="composer-action-label">Send</span>';
     this.sendBtn.setAttribute("aria-label", running ? "Stop" : "Send");
     this.sendBtn.classList.toggle("stop", running);
     /* only while a turn is running: idle, the primary button already says Send.
@@ -14597,6 +14674,7 @@ class SessionView {
     /* Both live turn-input controls answer to the same conditions, so they
        share one sync point rather than a second set of call sites. */
     this.updateAskControl();
+    if (this.composer.syncEnterActions) this.composer.syncEnterActions();
   }
 
   visibleStatusText() {
@@ -14629,6 +14707,7 @@ class SessionView {
     const reconnecting = !!value;
     if (this.reconnecting === reconnecting) return;
     this.reconnecting = reconnecting;
+    if (reconnecting) this.setBackgroundTasks(null);
     if (reconnecting) this.approvalPending = false;
     this.updateApprovalControl();
     this.root.classList.toggle("transport-lost", reconnecting);

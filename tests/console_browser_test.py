@@ -171,12 +171,14 @@ async def narrow_composer_checks(instance, capture=False):
                             inside:r.left>=box.left && r.right<=box.right &&
                                 r.top>=box.top && r.bottom<=box.bottom,
                             hittable:!!hit && b.contains(hit)};
-                    }), compact:getComputedStyle(v.askBtn.querySelector('.composer-action-label')).display==='none',
+                    }), choices:[...v.root.querySelectorAll('.composer-enter-choice')].map(n=>!!n.getBoundingClientRect().width),
+                    compact:getComputedStyle(v.askBtn.querySelector('.composer-action-label')).display==='none',
                     wrapped:v.sendBtn.getBoundingClientRect().top>v.composerMetaViewport.getBoundingClientRect().top};
                 })()""")
                 assert all(b["width"] > 0 and b["inside"] and b["hittable"]
                            for b in result["buttons"]), (theme, ratio, result)
                 assert result["compact"] == (ratio < .7), result
+                assert result["choices"] == [ratio == .7, ratio == .7], result
                 if ratio == .15:
                     assert result["wrapped"], result
                 if capture and ratio == .27:
@@ -189,6 +191,84 @@ async def narrow_composer_checks(instance, capture=False):
             demoView.setSteeringState({}); demoView.setSideQuestionState({});
             demoView.updateRunState(); closeTab('search'); applyTheme('dark'); true""")
     print("PASS: narrow desktop running controls stay visible and clickable, wrap when needed, and regain wide labels in both themes", flush=True)
+
+
+async def composer_enter_checks(instance, capture=False):
+    await evaluate(instance, """window.enterProbe={steer:demoView.steer,submit:demoView.submit,
+        saved:lsGet('puppy.composer.enter-action'),calls:[]};
+        demoView.steer=()=>enterProbe.calls.push('steer');
+        demoView.submit=()=>enterProbe.calls.push('queue');
+        lsDel('puppy.composer.enter-action');
+        demoView.status='running';
+        demoView.setSteeringState({supported:true,ready:true,turn_id:'enter-test'});
+        demoView.updateRunState(); true""")
+    try:
+        for width in (1440, 700, 390):
+            for scale in (1, 2):
+                await instance.call("Emulation.setDeviceMetricsOverride", {
+                    "width": width, "height": 900 if width == 1440 else 844,
+                    "deviceScaleFactor": scale, "mobile": width != 1440},
+                    session=instance.page_session)
+                for theme in ("dark", "light"):
+                    await evaluate(instance, "applyTheme(" + json.dumps(theme) + "); true")
+                    result = await evaluate(instance, """(() => {
+                        const actions=demoView.composer.enterActions;
+                        return actions.map(({button,input})=>{
+                            const b=button.getBoundingClientRect(), r=input.getBoundingClientRect();
+                            const label=button.querySelector('.composer-action-label');
+                            const text=label.getBoundingClientRect();
+                            const hit=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);
+                            const target=input.parentNode.getBoundingClientRect();
+                            return {shown:!!r.width,textShown:!!text.width,hit:hit===input,
+                                target:target.width,mark:r.width,
+                                top:r.top-b.top,right:b.right-r.right,
+                                centered:Math.abs(text.top+text.height/2-b.top-b.height/2)<.1,
+                                trimmed:getComputedStyle(label).textBoxTrim==='trim-both'};
+                        });
+                    })()""")
+                    for row in result:
+                        assert row["shown"] == row["textShown"] == (width == 1440), result
+                        if row["shown"]:
+                            assert row["hit"] and row["target"] >= 24 and row["mark"] == 12, result
+                            assert 0 <= row["top"] <= 4 and 0 <= row["right"] <= 4, result
+                            assert row["centered"] and row["trimmed"], result
+                    if capture and width == 1440 and scale == 2:
+                        clip = await evaluate(instance, """(() => {
+                            const r=demoView.composerRow.getBoundingClientRect();
+                            return {x:r.x,y:r.y-4,width:r.width,height:r.height+8,scale:2};
+                        })()""")
+                        shot = await instance.call("Page.captureScreenshot", {"format": "png", "clip": clip},
+                                                   session=instance.page_session)
+                        (BASE / "data" / ("composer-enter-" + theme + ".png")).write_bytes(base64.b64decode(shot["data"]))
+        # Native click and keyboard events: choosing is not sending, Space
+        # preserves exactly one checkbox, and Enter dispatches the chosen action.
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False},
+            session=instance.page_session)
+        point = await evaluate(instance, """(() => {
+            const input=demoView.composer.enterActions[0].input, r=input.getBoundingClientRect();
+            return {x:r.x+r.width/2,y:r.y+r.height/2};
+        })()""")
+        for kind in ("mousePressed", "mouseReleased"):
+            await instance.call("Input.dispatchMouseEvent", {
+                "type": kind, **point, "button": "left", "clickCount": 1}, session=instance.page_session)
+        assert await evaluate(instance, "enterProbe.calls.length===0 && demoView.composer.enterActions[0].input.checked && !demoView.composer.enterActions[1].input.checked")
+        for kind in ("keyDown", "keyUp"):
+            await instance.call("Input.dispatchKeyEvent", {
+                "type": kind, "key": " ", "code": "Space", "windowsVirtualKeyCode": 32}, session=instance.page_session)
+        assert await evaluate(instance, "enterProbe.calls.length===0 && demoView.composer.enterActions[0].input.checked")
+        await evaluate(instance, "demoView.composer.ta.focus(); true")
+        for kind in ("keyDown", "keyUp"):
+            await instance.call("Input.dispatchKeyEvent", {
+                "type": kind, "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13}, session=instance.page_session)
+        assert await evaluate(instance, "JSON.stringify(enterProbe.calls)==='[\"steer\"]'")
+    finally:
+        await evaluate(instance, """demoView.steer=enterProbe.steer; demoView.submit=enterProbe.submit;
+            if(enterProbe.saved===null) lsDel('puppy.composer.enter-action');
+            else lsSet('puppy.composer.enter-action',enterProbe.saved);
+            demoView.status='idle'; demoView.setSteeringState({}); demoView.updateRunState();
+            delete window.enterProbe; applyTheme('dark'); true""")
+    print("PASS: Enter checkboxes are exclusive, clickable and keyboard usable; hidden on compact buttons; labels centered in both themes at 1x/2x", flush=True)
 
 
 async def context_menu_checks(instance, capture=False):
@@ -1481,7 +1561,72 @@ async def background_task_checks(instance, capture=False):
     print("PASS: background-task updates attach by native ID, remain visible in folded cards, wrap on desktop and phone in both themes, and retain history/search targets", flush=True)
 
 
+async def background_count_checks(a, b, hub):
+    """Real session sockets share replacements and reconnect from snapshots."""
+    task_rows = [{"id": "demo-watch", "type": "local_bash", "description": "Layout watcher"},
+                 {"id": "demo-agent", "type": "local_agent", "description": "Check navigation"}]
+    saved_status = hub.status
+    count = "demoView.root.querySelector('.chip.background-tasks')"
+    try:
+        hub.status = "running"
+        for viewer in list(hub.watchers):
+            await hub.attach_with_snapshot(viewer)
+        for instance in (a, b):
+            await until(instance, "demoView.status === 'running'")
+        hub._set_background_tasks(task_rows)
+        for instance in (a, b):
+            await until(instance, count + "?.textContent === '2 tasks'")
+        # A real disconnect removes old evidence. The reconnect snapshot
+        # restores the count even though no further task update is emitted.
+        await evaluate(b, "demoView.retry=5000; demoView.ws.close(); true")
+        await until(b, "demoView.reconnecting && !" + count)
+        await evaluate(b, "demoView.resumeConnection(); true")
+        await until(b, "!demoView.reconnecting && " + count + "?.textContent === '2 tasks'")
+        for width, height, scale in [(1440, 900, 1), (390, 844, 2)]:
+            await a.call("Emulation.setDeviceMetricsOverride", {
+                "width": width, "height": height, "deviceScaleFactor": scale,
+                "mobile": width == 390}, session=a.page_session)
+            for theme in ("dark", "light"):
+                await evaluate(a, "applyTheme(" + json.dumps(theme) + "); true")
+                layout = await evaluate(a, """(() => {
+                    const chip=demoView.root.querySelector('.chip.background-tasks');
+                    const lane=chip.parentElement;
+                    const reference=el('button','chip browser','Browser DEMO');
+                    lane.insertBefore(reference,chip);
+                    chip.scrollIntoView({block:'nearest',inline:'nearest'});
+                    const style=getComputedStyle(chip), ref=getComputedStyle(reference);
+                    const bounds=chip.getBoundingClientRect(), other=reference.getBoundingClientRect();
+                    const result={sameBlue:style.color===ref.color &&
+                        style.backgroundColor===ref.backgroundColor && style.borderColor===ref.borderColor,
+                        sameSize:bounds.height===other.height && style.borderRadius===ref.borderRadius,
+                        centered:Math.abs(bounds.top-other.top)<.5,
+                        countFits:chip.scrollWidth<=chip.clientWidth,
+                        noPageOverflow:document.documentElement.scrollWidth<=innerWidth,
+                        passive:chip.tagName==='SPAN' && style.cursor!=='pointer',
+                        named:chip.getAttribute('aria-label')==='2 background tasks running',
+                        swipe:getComputedStyle(lane).overflowX==='auto'};
+                    reference.remove(); return result;
+                })()""")
+                assert all(layout.values()), layout
+        hub._set_background_tasks(task_rows[1:])
+        for instance in (a, b):
+            await until(instance, count + "?.textContent === '1 task'")
+        hub._set_background_tasks([])
+        for instance in (a, b):
+            await until(instance, "!" + count)
+    finally:
+        hub._set_background_tasks([])
+        hub.status = saved_status
+        for viewer in list(hub.watchers):
+            await hub.attach_with_snapshot(viewer)
+        for instance in (a, b):
+            await until(instance, "demoView.status === " + json.dumps(saved_status))
+    print("PASS: live background-task counts over two session sockets, reconnect snapshots, "
+          "zero removal and blue pill geometry on desktop/phone in both themes", flush=True)
+
+
 async def checks(a, b, hub, capture=False):
+    await background_count_checks(a, b, hub)
     await icon_alignment_checks(a)
     await background_task_checks(a, capture)
     await message_reuse_checks(a)
@@ -1490,6 +1635,7 @@ async def checks(a, b, hub, capture=False):
     await session_mention_checks(a)
     await pane_resize_checks(a)
     await narrow_composer_checks(a, capture)
+    await composer_enter_checks(a, capture)
     await context_menu_checks(a, capture)
     await workspace_footer_checks(a, capture)
     await new_session_choices_checks(a, capture)
@@ -1594,17 +1740,28 @@ async def checks(a, b, hub, capture=False):
 
 async def screenshots(instance):
     assets = BASE / "assets"
+    # Invented live work demonstrates the count through the real snapshot
+    # contract. It is separate from the completed transcript's earlier task.
+    preview_hub = runner.hub(1)
+    preview_hub.status = "running"
+    preview_hub._set_background_tasks([
+        {"id": "demo-watch", "type": "local_bash", "description": "Layout watcher"},
+        {"id": "demo-agent", "type": "local_agent", "description": "Check navigation"}])
+    for viewer in list(preview_hub.watchers):
+        await preview_hub.attach_with_snapshot(viewer)
+    await until(instance, "demoView.root.querySelector('.chip.background-tasks')?.textContent === '2 tasks'")
     await until(instance, "document.querySelectorAll('.task-tab .prompt-status-label').length === 2")
     for width, height, scale, name in [(1440, 900, 1, "desktop"), (390, 844, 2, "mobile")]:
         await instance.call("Emulation.setDeviceMetricsOverride", {
             "width": width, "height": height, "deviceScaleFactor": scale,
             "mobile": name == "mobile"}, session=instance.page_session)
         if name == "desktop":
-            await evaluate(instance, "openSearchTab(null, 'dashboard'); splitTabIntoPane('search',workspacePaneForTab('s:0:1').id,'right'); renderTabs(); true")
+            await evaluate(instance, "openSearchTab(null, 'dashboard'); splitTabIntoPane('search',workspacePaneForTab('s:0:1').id,'right'); state.layout.ratio=.55; renderTabs(); true")
         else:
             await evaluate(instance, "closeTab('search'); activateTab('s:0:1'); true")
         for theme in ("dark", "light"):
             await evaluate(instance, "applyTheme(" + json.dumps(theme) + "); demoView.sharedDraft.count=0; demoView.sharedDraft.paint(); demoView.composer.ta.blur(); demoView.scrollBottom(true); true")
+            await evaluate(instance, "demoView.root.querySelector('.chip.background-tasks').scrollIntoView({block:'nearest',inline:'nearest'}); true")
             await asyncio.sleep(.3)
             data = await instance.call("Page.captureScreenshot", {"format": "png"}, session=instance.page_session)
             (assets / (name + "-" + theme + ".png")).write_bytes(base64.b64decode(data["data"]))

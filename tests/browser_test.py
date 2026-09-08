@@ -862,6 +862,7 @@ const view = Object.assign(Object.create(proto), {
   syncHeadOverflow() {},
   updateSteerControl() {},
   updateApprovalControl() {},
+  setBackgroundTasks(value) { if (value !== null) throw new Error("must clear task state"); },
 });
 const headerText=()=>view.statusEl.children.map(child=>child.textContent).join(" ");
 const take = () => ({header: headerText(), live: view.liveText,
@@ -3084,11 +3085,12 @@ def check_queue_controls_ui(ui_source: str, css_source: str) -> None:
 
 def check_active_turn_steering_ui(ui_source: str, css_source: str) -> None:
     """Running composers expose responsive steer/queue/stop actions."""
-    steer_markup = ('<button class="btn-steer hidden" type="button" '
+    steer_markup = ('<button class="btn-steer hidden" data-enter-action="steer" type="button" '
                     'aria-label="Steer the active turn">')
-    queue_markup = ('<button class="btn-queue hidden" type="button" '
+    queue_markup = ('<button class="btn-queue hidden" data-enter-action="queue" type="button" '
                     'aria-label="Queue for the next turn">')
-    send_markup = '<button class="btn-send" type="button">Send</button>'
+    send_markup = ('<button class="btn-send" type="button">'
+                   '<span class="composer-action-label">Send</span></button>')
     assert steer_markup in ui_source and queue_markup in ui_source and send_markup in ui_source
     assert ui_source.index(steer_markup) < ui_source.index(queue_markup) < \
         ui_source.index(send_markup)
@@ -3096,7 +3098,7 @@ def check_active_turn_steering_ui(ui_source: str, css_source: str) -> None:
     assert "this.queueBtn.onclick = () => this.submit();" in ui_source
     assert 'if (e.isComposing) return;' in ui_source
     assert 'if (e.key === "Enter" && !e.shiftKey) ' \
-        '{ e.preventDefault(); this.host.submit(); return; }' in ui_source
+        '{ e.preventDefault(); this.submitOnEnter(); return; }' in ui_source
     assert 'submit: () => this.submit(),' in ui_source
     assert 'backend.capabilities.includes("active-turn-steering")' in ui_source
     assert 'backend.capabilities.includes("session-control-ws-v1")' in ui_source
@@ -3172,7 +3174,7 @@ def check_active_turn_steering_ui(ui_source: str, css_source: str) -> None:
             'appendChild(queueActionIcon());') in ui_source
     assert ".composer-action-icon{display:var(--live-action-icon,none);align-items:center;justify-content:center}" in css_source
     assert ".composer-action-icon svg{display:block}" in css_source
-    assert ".composer-action-label{display:var(--live-action-label,inline)}" in css_source
+    assert ".composer-action-label{display:var(--live-action-label,block);text-box:trim-both cap alphabetic}" in css_source
     assert "@container composer (max-width:480px)" in css_source
     assert "--live-action-width:32px;--live-action-padding:0;" in css_source
     assert "--live-action-width:34px;--live-action-padding:0;" in css_source
@@ -3313,7 +3315,7 @@ def check_side_question_ui(ui_source: str, css_source: str) -> None:
     """
     ask_markup = ('<button class="btn-ask hidden" type="button" '
                   'aria-label="Ask a side question">')
-    steer_markup = ('<button class="btn-steer hidden" type="button" '
+    steer_markup = ('<button class="btn-steer hidden" data-enter-action="steer" type="button" '
                     'aria-label="Steer the active turn">')
     assert ask_markup in ui_source
     assert ui_source.index(ask_markup) < ui_source.index(steer_markup)
@@ -4822,7 +4824,7 @@ def check_browser_chip_order(ui_source: str) -> None:
     start = ui_source.index("  syncBrowserChips() {")
     end = ui_source.index("\n  updateHead() {", start)
     method = ui_source[start:end]
-    assert 'const anchor = scroll.querySelector(".chat-status");' in method
+    assert 'scroll.querySelector(".chip.background-tasks") || scroll.querySelector(".chat-status")' in method
     assert 'scroll.insertBefore(chip, anchor);' in method
     assert 'scroll.querySelector(".chip.be")' not in method
 
@@ -5482,7 +5484,6 @@ console.log(JSON.stringify({
     assert "cwd.textContent = workspaceLocationLabel(s, this.tab.bid);" in head
     assert "workspaceLocationTitle(s, this.tab.bid)" in head
     assert 'querySelector(".chip.be")' not in head
-    assert "Every pill is durable session metadata" in css_source
     assert ".chat-meta-scroll .chip{max-width:none}" in css_source
 
 

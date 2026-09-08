@@ -572,6 +572,20 @@ def exercise_side_question_contract() -> None:
     from puppy.drivers.opencode import OpenCodeDriver
     assert CodexDriver().supports_side_questions is False
     assert OpenCodeDriver().supports_side_questions is False
+    # Tool activity and experimental/unknown vendor notifications are not a
+    # complete live background-task list. These drivers must not infer one.
+    for driver in (CodexDriver(), OpenCodeDriver()):
+        task_ctx = driver.turn_context({"cwd": str(BASE)}, True, "check", "task-pin")
+        for event in (
+                {"method": "item/started", "params": {"threadId": "thread", "item": {
+                    "id": "command", "type": "commandExecution", "command": "sleep 10"}}},
+                {"method": "session/update", "params": {"sessionId": "session", "update": {
+                    "sessionUpdate": "tool_call", "toolCallId": "tool", "kind": "execute",
+                    "status": "in_progress", "title": "Background task"}}},
+                {"type": "system", "subtype": "background_tasks_changed", "tasks": [
+                    {"task_id": "task", "task_type": "local_bash"}]}):
+            assert not any(action.get("a") == "background_tasks"
+                           for action in driver.parse_line(json.dumps(event), task_ctx))
     assert protocol.SIDE_QUESTION_CAPABILITY in protocol.BASE_CAPABILITIES
     assert protocol.TIMER_SETTINGS_CAPABILITY in protocol.BASE_CAPABILITIES
     assert protocol.ENGINE_DEFAULTS_CAPABILITY in protocol.BASE_CAPABILITIES
@@ -1392,6 +1406,7 @@ finish()
         assert "--resume" in invocation["argv"]
 
         # an error result never waits on background work
+        capture.messages.clear()
         assert hub.send_message("error with tasks fake turn") == {"queued": False}
         await finish_turn("error with tasks fake turn")
         events = turn_events("error with tasks fake turn")
@@ -1400,6 +1415,18 @@ finish()
         assert events[2]["data"]["ok"] is False
         assert last_invocation()["flags"]["closed_after_error"] is True
         assert hub.last_completion_status == "error"
+
+        # No task ending is emitted on this error path. The runner itself must
+        # publish an empty replacement before turn_done/post-turn cleanup.
+        background = [message for message in capture.messages
+                      if message.get("type") == "background_tasks"]
+        assert background[0]["tasks"]
+        assert background[-1] == {"type": "background_tasks", "tasks": [],
+                                  "waiting": False, "text": ""}
+        assert capture.messages.index(background[-1]) < next(
+            index for index, message in enumerate(capture.messages)
+            if message.get("type") == "turn_done")
+        assert hub.snapshot()["background_tasks"]["tasks"] == []
 
         def invocations_for(prompt):
             rows = [json.loads(line) for line in
