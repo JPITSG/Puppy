@@ -41,16 +41,24 @@ for (const kind of ["pointerdown", "focusin", "click"])
   outside.addEventListener(kind, event => event.stopPropagation());
 let mobile = true;
 const context = vm.createContext({
-  document, Composer: { live: new Set() },
+  document, Composer: { live: new Set() }, Event: FakeEvent,
+  window: { innerHeight: 800 }, setTimeout, clearTimeout,
   $: id => document.getElementById(id),
   drawerLayout: () => mobile,
   setSideCollapsed: on => app.classList.toggle("side-collapsed", on),
-  positionAnchoredMenu() {},
+  /* the real one measures and places; only the rect it reports back matters here */
+  positionAnchoredMenu: (menu, button) =>
+    menu && button && button.isConnected ? button.getBoundingClientRect() : null,
+  prefersNativeChoices: () => false,
+  choiceSvg: () => document.createElement("svg"),
 });
 vm.runInContext([
   "let tabAddAnchor = null, tabAddTargetGroup = null, openChoiceControl = null;",
+  "let choiceMenuSeq = 0;",
   between("const el = ", "/* Close buttons"),
-  between("function closeChoiceMenu(", "function positionAnchoredMenu("),
+  between("function choiceOptionNode(", "function positionAnchoredMenu("),
+  between("function positionChoiceMenu(", "window.addEventListener(\"resize\""),
+  between("/* An open list is placed once", "document.addEventListener(\"keydown\""),
   between("function closeAllMenus(", "/* ================= composer @-mentions"),
   between("function showTabAddMenu(", "function renderWorkspacePane("),
   between("function burgerButton(", "function makeTabDragImage("),
@@ -128,4 +136,122 @@ assert.equal(button.getAttribute("aria-expanded"), "false");
 assert.equal(button.hasAttribute("aria-controls"), false);
 assert.equal(button.hasAttribute("aria-activedescendant"), false);
 assert.equal(document.activeElement, outside);
-console.log("PASS: menu dismissal on outside pointer, focus and click; hamburger; trigger toggles; row actions; choice cleanup");
+context.closeAllMenus(null);
+
+/* ---- an open list only answers to things that concern it ----
+   The enhanced <select> is the console's dropdown everywhere: settings cards,
+   the New session and New task dialogs, the engine pickers. Run the real
+   control and check what may and may not take it away from the user. */
+const host = node("div");
+const select = document.createElement("select");
+select.setAttribute("aria-label", "Model");
+host.appendChild(select);
+select.insertAdjacentElement = (where, item) => {
+  assert.equal(where, "afterend");
+  host.appendChild(item);
+  return item;
+};
+const setOptions = (rows, selectedValue) => {
+  select.replaceChildren();
+  for (const row of rows) {
+    const option = document.createElement("option");
+    option.value = row.value;
+    option.textContent = row.label;
+    option.disabled = !!row.disabled;
+    select.appendChild(option);
+  }
+  select.selectedIndex = rows.findIndex(row => row.value === selectedValue);
+};
+setOptions([
+  { value: "opus", label: "Opus" },
+  { value: "sonnet", label: "Sonnet" },
+  { value: "haiku", label: "Haiku" },
+], "sonnet");
+context.enhanceChoiceSelect(select);
+const choiceWrap = host.querySelector(".choice-control");
+const choiceButton = choiceWrap.querySelector(".choice-button");
+let anchorTop = 100;
+choiceButton.getBoundingClientRect = () =>
+  ({ top: anchorTop, left: 20, right: 120, bottom: anchorTop + 24, width: 100, height: 24 });
+const listOpen = () => {
+  const menu = document.body.children.find(item =>
+    item.classList.contains("choice-menu") && item !== choice);
+  return menu && menu.isConnected ? menu : null;
+};
+const scrolled = () => {
+  for (const fn of capture.scroll || []) fn(new FakeEvent("scroll", { target: document }));
+};
+const rowValues = menu => menu.querySelectorAll(".choice-option").map(row => row.dataset.choiceValue);
+const activeValue = menu => {
+  const row = menu.querySelector(".choice-option.active");
+  return row ? row.dataset.choiceValue : null;
+};
+
+press(choiceButton);
+let list = listOpen();
+assert.ok(list, "the trigger opens its list");
+assert.equal(choiceButton.getAttribute("aria-expanded"), "true");
+assert.equal(activeValue(list), "sonnet", "the list opens on its current value");
+
+/* The bug: a running agent's transcript scrolls on every line it prints, and
+   every one of those scrolls used to close whatever dropdown was open. */
+for (let line = 0; line < 5; line++) scrolled();
+assert.ok(listOpen() === list, "a scroll that does not move the control leaves the list open");
+
+/* A scroll that really does carry the control away still closes it. */
+anchorTop = 40;
+scrolled();
+assert.ok(listOpen() === null, "a scroll that moves the control closes its list");
+assert.equal(choiceButton.getAttribute("aria-expanded"), "false");
+
+press(choiceButton);
+list = listOpen();
+assert.ok(list, "the list reopens");
+const before = rowValues(list);
+/* A repaint that changed nothing about the choices - a card marking itself
+   dirty, a busy flag going down - must not disturb the list being read. */
+for (let paint = 0; paint < 3; paint++) context.refreshChoiceSelect(select);
+assert.ok(listOpen() === list, "an unchanged repaint leaves the list alone");
+assert.deepEqual(rowValues(list), before);
+
+/* Choices that really did change are redrawn in place, keeping the highlight
+   on the value it was on - the same contract the app's other menus keep. */
+setOptions([
+  { value: "fast", label: "Fast" },
+  { value: "opus", label: "Opus" },
+  { value: "sonnet", label: "Sonnet" },
+  { value: "haiku", label: "Haiku" },
+], "sonnet");
+context.refreshChoiceSelect(select);
+assert.ok(listOpen() === list, "a changed catalog redraws the list instead of closing it");
+assert.deepEqual(rowValues(list), ["fast", "opus", "sonnet", "haiku"]);
+assert.equal(activeValue(list), "sonnet", "the highlight stays on the value it was on");
+
+/* Losing the control is still the one thing that closes it. */
+select.disabled = true;
+context.refreshChoiceSelect(select);
+assert.ok(listOpen() === null, "a disabled control closes its list");
+select.disabled = false;
+context.refreshChoiceSelect(select);
+
+press(choiceButton);
+list = listOpen();
+assert.ok(list);
+const changes = [];
+select.addEventListener("change", () => changes.push(select.options[select.selectedIndex].value));
+press(list.querySelectorAll(".choice-option")[3]);
+assert.deepEqual(changes, ["haiku"], "picking a row reports its value once");
+assert.ok(listOpen() === null, "picking a row closes the list");
+assert.ok(document.activeElement === choiceButton, "focus returns to the trigger");
+assert.equal(choiceButton.querySelector(".choice-value").textContent, "Haiku");
+
+/* A trigger a re-render took away leaves nothing to hang from: the next sync
+   pass retires the list rather than leaving it over the page. */
+press(choiceButton);
+assert.ok(listOpen(), "the list reopens once more");
+host.removeChild(choiceWrap);
+context.syncOpenChoiceMenus();
+assert.ok(listOpen() === null, "a list whose trigger was re-rendered away is retired");
+host.appendChild(choiceWrap);
+
+console.log("PASS: menu dismissal on outside pointer, focus and click; hamburger; trigger toggles; row actions; choice cleanup; open lists survive unrelated scrolls and repaints");

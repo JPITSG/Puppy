@@ -199,8 +199,11 @@ send is awaiting acknowledgement remain in the composer for the next message.
 **Spell check** is Puppy's own, not the browser's. Every prompt box turns the
 browser's checker and its autocorrection off, so a phone, a desktop and a kiosk
 all behave the same and the words Puppy knows are the words that shipped with
-it: a 128,000-word English dictionary built from
-[SCOWL](http://wordlist.aspell.net/) and bundled in the repository. Nothing you
+it: a 188,000-word English dictionary built from
+[SCOWL](http://wordlist.aspell.net/) and bundled in the repository. It goes
+past a collected word list where English does: `-able` applies to any verb, so
+the build forms `scrollable`, `draggable` and `resizable` from SCOWL's own
+verbs and inflections, and `un-` over the adjectives they make. Nothing you
 type is sent anywhere to be checked, and no dictionary is downloaded from the
 internet. The tools button in every prompt box — the chat's and the New task
 dialog's — carries two switches:
@@ -217,8 +220,10 @@ dialog's — carries two switches:
   only replaces a word it does not know, only with a common word one edit away
   (a transposed, doubled or missing letter, a lost apostrophe), only when that
   candidate stands clear of the runner-up, and never by capitalising a word
-  for you. `Ctrl+Z` takes a correction straight back, and a word you restore
-  is left alone for the rest of that message. Pasted text is never rewritten.
+  for you. Rare and formed words are offered in the suggestion list but are
+  never typed for you. `Ctrl+Z` takes a correction straight back, and a word
+  you restore is left alone for the rest of that message. Pasted text is never
+  rewritten.
 
 The dictionary is fetched once per console, only when a prompt box with spell
 check on is on screen, and both switches are remembered per browser. The word
@@ -441,6 +446,18 @@ history around it.
   reset. Other accounts and model-specific allowances stay separate; engine
   readiness and upgrade status remain per backend. See [shared usage](docs/shared-usage.md)
   for identity requirements and freshness rules.
+- **Host activity.** The CPU reading in the footer's corner opens a box under
+  the engine stats. Each node draws its own CPU over the last quarter of an
+  hour - the instance's own chart keeps moving with its live reading - beside
+  its cores, load, memory and uptime. Where backends are paired, the instance
+  times the round trip to each of them itself and keeps a sparkline of the last
+  measurements; an unreachable backend says so rather than being probed. Under
+  that, every node lists the processes Puppy is running there as a tree: the
+  engines, their turn-bound agent bridges, managed browsers and terminals, each
+  with its CPU share and memory, folded where a row repeats (*agent bridges
+  ×5*) and trimmed with a *+n more* where a branch is too wide or too deep to
+  read. Nothing is polled until the box is open, and nothing is stored: close
+  it and the node keeps only the reading in the corner.
 - **Notices that stay readable.** Confirmations, warnings and failures appear
   as one line in the bottom-right corner, coloured by outcome and worded the
   same way wherever they came from. The same notice arriving again counts up on
@@ -635,7 +652,7 @@ noted:
 ```sh
 node tests/sidebar_ui_test.js        # sidebar ordering, pins, reorders, filtering
 node tests/tab_drag_ui_test.js       # task discovery, saved visibility and tab dragging
-node tests/menu_dismiss_ui_test.js   # outside focus/taps, hamburger and menu toggles
+node tests/menu_dismiss_ui_test.js   # menu dismissal, toggles and open dropdowns
 node tests/composer_ui_test.js       # the shared prompt box and its "@" list
 node tests/backend_settings_ui_test.js # backend forms, removal errors and retry
 node tests/task_config_ui_test.js    # the New task dialog
@@ -644,6 +661,8 @@ python3 tests/operations_test.py     # cancellation/rollback on both runtimes
 node tests/task_fold_ui_test.js      # task removal and the folded archive card
 node tests/toast_ui_test.js          # notice grammar, tones, lives and folded repeats
 node tests/spellcheck_ui_test.js     # the bundled dictionary, its marks and autocorrect
+node tests/host_panel_ui_test.js     # the host box: charts, latency rows, process tree
+python3 tests/host_metrics_test.py   # CPU history, the process tree and backend latency
 python3 tests/backend_test.py        # headless package, auth, protocol, capabilities
 python3 tests/snapshot_test.py       # backup export/import and rollback
 python3 tests/search_test.py         # the search index and query language

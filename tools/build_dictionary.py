@@ -17,16 +17,22 @@ input writes nothing.
 What lands in the asset:
 
   * the English, American, British and Canadian ``words``, ``upper``,
-    ``contractions`` and ``abbreviations`` lists up to SCOWL size 60 (the
-    size an ordinary desktop spell checker ships), plus ``proper-names`` up
-    to size 50 so ordinary names are not flagged;
+    ``contractions`` and ``abbreviations`` lists up to SCOWL size 70 (the
+    "large" class an aspell/hunspell large dictionary is cut from), plus
+    ``proper-names`` up to size 60 so ordinary names are not flagged;
   * the unaccented spelling of every accented entry ("cafe" beside "café"),
     which is how most people type them and how American English prints them;
-  * a small hand-kept supplement (``SUPPLEMENT`` below) of terms this console
-    is typed at every day that SCOWL predates or omits;
+  * the productive derivations SCOWL cannot list, because they are formed
+    rather than collected: ``-able`` on a verb SCOWL itself inflects, and
+    ``un-`` on the adjective that makes ("scroll" -> "scrollable" ->
+    "unscrollable"). See ``derive`` below for the evidence each one needs;
+  * a hand-kept supplement (``SUPPLEMENT`` below) of terms this console is
+    typed at every day that SCOWL predates or omits;
   * a rank tag on the words common enough to be an autocorrect target, so the
     console can prefer "the" over "tea" and refuse to correct anything into an
-    obscure word.
+    obscure word. Only SCOWL's own small size classes and the supplement are
+    ranked: a derived word is spelled correctly but is never something Puppy
+    will type for you.
 
 The file format is exact and versioned; the console rejects anything else
 rather than tolerating an older shape:
@@ -56,13 +62,25 @@ SCOWL_URL = ("https://downloads.sourceforge.net/wordlist/"
 SCOWL_SHA256 = "5587667caa20c4891390c2d42dbb4d5c4c3f41bee77af1457ece3ba23fb859cc"
 
 # SCOWL splits every category by size class: 10 is the thousand commonest
-# words, 95 is everything anyone ever wrote down. 60 is the ordinary desktop
-# spelling dictionary; past it the list starts accepting words that are more
-# often somebody's typo than their intent.
-MAX_SIZE = 60
-MAX_NAME_SIZE = 50
+# words, 95 is everything anyone ever wrote down. 70 is the "large" class an
+# aspell/hunspell large dictionary is cut from - rare and technical English,
+# still every word somebody meant. 80 is where the list starts accepting
+# entries more often somebody's typo than their intent ("connaturalnesses",
+# "xanthoxyl"), and 95 is unusable, so this build stops at 70.
+MAX_SIZE = 70
+MAX_NAME_SIZE = 60
+# SCOWL's "variant" lists are alternative spellings of words the main lists
+# already carry, and past the ordinary desktop size they are the spellings
+# most readers would call a misspelling ("dependancy", "canteloupe",
+# "rarified"). A variant stays a variant, so they stop where they did.
+VARIANT_MAX_SIZE = 60
 # A word from these size classes may be offered first and corrected into.
 RANK_SIZES = (10, 20, 35, 40, 50)
+# A derived word is filed under this size, deliberately outside RANK_SIZES: it
+# is spelled correctly, but Puppy never offers it first and never types it for
+# you. The hand-kept supplement below is ranked, because those words are ones
+# the writer of this console actually reaches for.
+DERIVED_SIZE = MAX_SIZE
 
 LANGUAGES = ("english", "american", "british", "british_z", "canadian",
              "british_variant_1", "british_variant_2",
@@ -71,26 +89,43 @@ CATEGORIES = ("words", "upper", "contractions", "abbreviations", "proper-names")
 SIZES = (10, 20, 35, 40, 50, 55, 60, 70, 80, 95)
 
 # Words this console is typed at daily that a 2020 general-English list does
-# not carry. Kept short and deliberately ordinary: a word added here stops
-# being a typo everywhere, so nothing ambiguous belongs in it.
+# not carry. These are RANKED, so autocorrect may type them for you: keep the
+# list deliberately ordinary, and never add a word that a common word is one
+# edit away from ("wehn", "pytohn"), nor an abbreviation someone might mean
+# literally. Everything a suffix can form belongs in `derive` instead.
 SUPPLEMENT = """
-    agentic api apis async autocomplete autocorrect autocompletion await
-    backend backends blockquote boolean bot bots browserless callback callbacks
-    changelog chatbot cli config configs cron dev devs docstring dropdown
-    emoji endpoint endpoints env favicon filesystem frontend gzip hostname
-    hotkey http https init inline installable integer json kanban kubernetes
-    lint linter linting login logout markdown middleware misconfigured mixin
-    modal namespace namespaces nullable oauth offline onboarding param params
-    parsers passphrase pipelining plaintext plugin plugins prepend prepends
-    prepopulate preprocess prompted queueing rebase rebased refactor refactored
-    refactoring regex regexes rekey rename renames repo repos rerun reruns
-    runtime sandbox sandboxed screenshotted scroller sidebar spellcheck sql
-    ssh stderr stdin stdout subcommand subdirectory subfolder submodule
-    superuser sysadmin templating terminals timestamped todo tooltip traceback
-    truthy typo typos ui unarchive uncheck unchecked undock unfocus unindent
-    uninstall unpin unpinned untick upstream url urls username usernames uuid
-    validator viewport vpn webhook webhooks websocket websockets whitespace
-    wifi workflow workspace workspaces yaml zoomable ok
+    agentic api apis async autocomplete autocorrect autocompletion autoscale
+    autoscaling await backend backends backfill backfilled backlink blockquote
+    boolean bot bots breadcrumb breadcrumbs browserless bugfix bundler callback
+    callbacks changelog chatbot checkbox checkboxes cli codebase codebases
+    colorscheme commit config configs containerize containerized
+    containerization coroutine coroutines crontab cron dataset datasets
+    debounce debounced debouncing decrypt decrypted deduplicate deduplicated
+    dev devs devops directoryless docstring dropdown emoji endpoint endpoints
+    enum enums env failover favicon filesystem finetune finetuned finetuning
+    frontend gitignore grpc guardrail guardrails gzip hardcode hardcoded
+    hostname hotkey http https idempotent idempotency imap init inline
+    installable integer jsonl json jwt kanban kubernetes lazily ldap lint
+    linter linting llm llms login logout lookups markdown memoize memoized
+    memoization microservice microservices middleware minified minifier
+    misconfigured mixin modal monorepo multimodal mutex namespace namespaces
+    navbar nullable oauth offboarding offline onboarding orchestrator param
+    params parsers passphrase pipelining plaintext plugin plugins polyfill
+    polyfills popover prepend prepends prepopulate preprocess prompted
+    protobuf proxied queueing rebase rebased redeploy redeployed refactor
+    refactored refactoring regex regexes reindex reindexed rekey rename
+    renames rerender rerendered repo repos rerun reruns rollout rollouts
+    runtime saml sandbox sandboxed schemas screenshotted scrollbar scrollbars
+    scroller serverless sharded sharding sidebar smtp snackbar spellcheck sql
+    ssh stderr stdin stdout struct structs subagent subagents subcommand
+    subdirectory subfolder submodule superuser symlink symlinks sysadmin
+    systemd telemetry templating terminals timestamped tokenizer tokenizers
+    tokenize tokenized todo toml tooltip topbar traceback transpile transpiled
+    transpiler truthy tsv typo typos ui unarchive uncheck unchecked undock
+    unfocus unindent uninstall unmute unmuted unpin unpinned untick upsert
+    upserted upstream url urls username usernames utf uuid validator viewport
+    vpn webhook webhooks websocket websockets whitespace wifi wireframe
+    wireframes workflow workspace workspaces worktree yaml zoomable ok
 """
 
 
@@ -103,6 +138,8 @@ def scowl_lists(root):
     for language in LANGUAGES:
         for category in CATEGORIES:
             limit = MAX_NAME_SIZE if category == "proper-names" else MAX_SIZE
+            if "variant" in language:
+                limit = min(limit, VARIANT_MAX_SIZE)
             for size in SIZES:
                 if size > limit:
                     continue
@@ -132,6 +169,139 @@ def clean(word):
     return word
 
 
+VOWELS = "aeiou"
+# A stem this short, or already carrying the suffix, is left alone.
+MIN_STEM = 3
+# The longest silent-e stem that also keeps its e before "-able".
+MAX_EABLE_STEM = 6
+# "un-" is formed only over an adjective made from an everyday verb: SCOWL's
+# rare "large" tier holds verbs nobody negates the -able form of.
+MAX_NEGATED_STEM_SIZE = 60
+
+
+def _doubled(stem, known):
+    """The doubled stem behind "dragged", but only where SCOWL doubles it.
+
+    English doubles a final consonant after a short stressed vowel, and no
+    spelling rule can tell "dragged" from "inhibited" without knowing where
+    the stress falls. SCOWL already knows: it lists the inflections. So the
+    doubling this build performs is never guessed, only copied.
+    """
+    if len(stem) < 3 or stem[-1] in "aeiouwxy":
+        return None
+    if stem[-2] not in VOWELS or stem[-3] in VOWELS:
+        return None
+    twice = stem + stem[-1]
+    return twice if twice + "ed" in known or twice + "ing" in known else None
+
+
+def _borrows_e(stem, known):
+    """True when "<stem>ed" and "<stem>ing" belong to "<stem>e", not to `stem`.
+
+    "raged" and "raging" are "rage"'s, so they say nothing about the verb
+    "rag" - which has its own "ragged" and "ragging", and makes "raggable"
+    while "rageable" stays "rage"'s to make. "changed" is "change"'s rather
+    than the surname "Chang"'s. The sibling has to inflect as a verb itself
+    before it can claim them, so a stem beside a mere noun keeps its own.
+    """
+    return (not stem.endswith("e") and stem + "e" in known
+            and _is_verb(stem + "e", known))
+
+
+def _is_verb(stem, known):
+    """True when SCOWL inflects `stem` as a verb: -s, a past and an -ing."""
+    ies = stem.endswith("y") and len(stem) > 2 and stem[-2] not in VOWELS
+    borrowed = _borrows_e(stem, known)
+    if stem + "s" not in known:
+        if borrowed:
+            return False
+        if not (stem + "es" in known or (ies and stem[:-1] + "ies" in known)):
+            return False
+    twice = _doubled(stem, known)
+    forms = [] if borrowed else [stem + "ed", stem + "ing"]
+    if stem.endswith("e"):
+        forms += [stem[:-1] + "ed", stem[:-1] + "ing"]
+    if twice:
+        forms += [twice + "ed", twice + "ing"]
+    if ies:
+        forms.append(stem[:-1] + "ied")
+    past = any(f in known for f in forms if f.endswith("ed"))
+    progressive = any(f in known for f in forms if f.endswith("ing"))
+    return past and progressive
+
+
+def _able_forms(stem, known):
+    """Every "-able" spelling English forms from the verb `stem`.
+
+    Where two spellings are both current the build keeps both, because this
+    asset decides what to leave un-underlined: "resizable" and "resizeable",
+    "parsable" and "parseable" are each somebody's ordinary spelling.
+    """
+    if stem.endswith(("able", "ible")):
+        return []
+    if stem.endswith(("ce", "ge")):
+        return [stem + "able"]          # noticeable, manageable: the e stays
+    if stem.endswith("e"):
+        forms = []
+        # A verb that keeps its e before "-ing" keeps it before "-able" too:
+        # SCOWL says "resizing" but "dyeing", so "resizable" but "dyeable".
+        if stem[:-1] + "ing" in known and stem + "ing" not in known:
+            forms.append(stem[:-1] + "able")      # resize -> resizable
+        # The "-eable" variant is current for short stems and only those:
+        # "sizeable", "cacheable", "parseable" are ordinary spellings where
+        # "invalidateable" is nobody's. A long Latinate verb keeps one form.
+        if len(stem) <= MAX_EABLE_STEM:
+            forms.append(stem + "able")           # resize -> resizeable
+        return forms
+    if stem.endswith("y") and len(stem) > 2 and stem[-2] not in VOWELS:
+        return [stem[:-1] + "iable"]    # vary -> variable
+    forms = []
+    twice = _doubled(stem, known)
+    if twice:
+        forms.append(twice + "able")    # drag -> draggable
+    # Only the doubled form when the bare inflections are the sibling's:
+    # "rag" makes "raggable", and "rageable" is "rage"'s to make.
+    if not _borrows_e(stem, known) and (stem + "ed" in known or stem + "ing" in known):
+        forms.append(stem + "able")     # scroll -> scrollable, focus -> focusable
+    return forms
+
+
+def derive(best):
+    """The words SCOWL cannot list because they are formed, not collected.
+
+    English makes an adjective out of any transitive verb with "-able" and
+    negates any such adjective with "un-". No word list can enumerate that -
+    SCOWL 2020.12.07 has "clickable" but not "scrollable", "draggable" or
+    "resizable" - so the build forms them, from SCOWL's own verbs and only
+    where SCOWL's own inflections prove the spelling. Every word this returns
+    is unranked: it is spelled correctly, and Puppy will still never type it.
+    """
+    known = set(word.lower() for word in best)
+    size = {}
+    for word, class_ in best.items():
+        lower = word.lower()
+        if size.get(lower, 999) > class_:
+            size[lower] = class_
+    formed = set()
+    negatable = set()
+    for stem in known:
+        if len(stem) < MIN_STEM or not stem.isalpha() or not _is_verb(stem, known):
+            continue
+        for form in _able_forms(stem, known):
+            if size.get(stem, 999) <= MAX_NEGATED_STEM_SIZE:
+                negatable.add(form)
+            if form not in known:
+                formed.add(form)
+    # "un-" only over the adjectives an everyday verb made, so the dictionary
+    # gains "unscrollable" without inventing "untimetable" from a noun,
+    # "uncowerable" from a verb nobody suffixes, or "ununsettlable" from an
+    # adjective that is already negative.
+    for form in sorted(negatable):
+        if len(form) > 5 and not form.startswith("un") and "un" + form not in known:
+            formed.add("un" + form)
+    return sorted(formed)
+
+
 def build_words(root):
     """{word: rank digit or None} for the whole bundled dictionary."""
     best = {}                      # word -> smallest size class seen
@@ -159,11 +329,19 @@ def build_words(root):
         plain += 1
         if word in ranked:
             ranked.add(bare)
+    derived = 0
+    for word in derive(best):
+        best.setdefault(word, DERIVED_SIZE)
+        derived += 1
     supplement = 0
     for word in SUPPLEMENT.split():
         if word not in best:
             supplement += 1
-        best.setdefault(word, RANK_SIZES[-1])
+        # The supplement decides rank as well as membership: a word listed
+        # here is one this console is typed at, so it stays rankable even when
+        # SCOWL happens to carry it in a size class this build does not rank.
+        if best.get(word, 999) > RANK_SIZES[-1]:
+            best[word] = RANK_SIZES[-1]
         ranked.add(word)
     words = {}
     for word, size in best.items():
@@ -171,7 +349,7 @@ def build_words(root):
         if word in ranked and size in RANK_SIZES:
             rank = RANK_SIZES.index(size)
         words[word] = rank
-    return words, supplement, plain
+    return words, supplement, plain, derived
 
 
 def render(words):
@@ -180,6 +358,8 @@ def render(words):
     out.write("#source SCOWL %s (Spell Checker Oriented Word Lists), "
               "Copyright 2000-2020 Kevin Atkinson\n" % SCOWL_VERSION)
     out.write("#source see puppy/static/dict/COPYRIGHT for the full notice\n")
+    out.write("#source productive -able/un- derivations formed from SCOWL's "
+              "own verbs and inflections\n")
     out.write("#built tools/build_dictionary.py\n")
     out.write("#words %d\n" % len(words))
     for word in sorted(words):
@@ -232,7 +412,7 @@ def main():
         roots = [path for path in entries if os.path.isdir(path)]
         root = roots[0] if len(roots) == 1 else work
 
-    words, supplement, plain = build_words(root)
+    words, supplement, plain, derived = build_words(root)
     text = render(words)
     os.makedirs(args.out, exist_ok=True)
     path = os.path.join(args.out, "en.txt")
@@ -251,10 +431,10 @@ def main():
                   newline="\n") as handle:
             handle.write(notice)
     ranked = sum(1 for rank in words.values() if rank is not None)
-    print("%s: %d words (%d ranked, %d unaccented, %d from the supplement), "
-          "%.1f KB, %.1f KB gzipped"
-          % (path, len(words), ranked, plain, supplement, len(raw) / 1024,
-             os.path.getsize(path + ".gz") / 1024))
+    print("%s: %d words (%d ranked, %d unaccented, %d derived, "
+          "%d from the supplement), %.1f KB, %.1f KB gzipped"
+          % (path, len(words), ranked, plain, derived, supplement,
+             len(raw) / 1024, os.path.getsize(path + ".gz") / 1024))
     if work:
         import shutil
         shutil.rmtree(work, ignore_errors=True)

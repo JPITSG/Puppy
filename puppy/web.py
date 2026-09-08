@@ -1915,6 +1915,7 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
         runner.validate_persisted_queues(db.connect())
     app.on_startup.append(validate_queues)
     operations.register(app)
+    host_metrics.register(app)
     cli_releases.register(app)
     cli_auto_upgrade.register(app)
     system_prompts.register(app)
@@ -1986,7 +1987,6 @@ def build_app(runtime_web: dict = None,
                           client_max_size=8 * 1024 * 1024)
     live_websockets.initialize(app)
     app["puppy_role"] = "full"
-    host_metrics.register(app)
     app["puppy_snapshot_busy"] = None
     app["puppy_mutations"] = 0
     app["puppy_started_monotonic"] = time.monotonic()

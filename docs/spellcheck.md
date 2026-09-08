@@ -32,12 +32,38 @@ python3 tools/build_dictionary.py --scowl DIR   # or use an unpacked tree
 ```
 
 It carries the English, American, British and Canadian words, acronyms,
-contractions and abbreviations up to SCOWL size 60 (an ordinary desktop
-spelling dictionary), proper names up to size 50, and a short hand-kept
-supplement of terms this console is typed at every day. About 128,000 words,
-1.4 MB, and a `en.txt.gz` sibling that aiohttp's static handler serves to every
-browser that accepts gzip (about 370 KB on the wire). Both files are
-regenerated together; `tests/spellcheck_ui_test.js` fails if they disagree.
+contractions and abbreviations up to SCOWL size 70 (the "large" class an
+aspell/hunspell large dictionary is cut from) and proper names up to size 60.
+SCOWL's own "variant" lists stop at 60, because past that they are the
+spellings most readers would call a misspelling (`dependancy`, `canteloupe`).
+Size 80 is where a word list starts accepting more typos than words, so the
+build stops at 70.
+
+On top of that come the words English **forms** rather than collects. SCOWL
+2020.12.07 has `clickable` but not `scrollable`, `draggable` or `resizable`,
+because `-able` applies to any transitive verb and no collected list can
+enumerate that. So the build derives them, and derives `un-` over the
+adjectives they make:
+
+- a stem counts as a verb only when SCOWL itself inflects it (`-s`, a past and
+  an `-ing`), and inflections a silent-e sibling owns are never counted as its
+  own - `changed` belongs to `change` and not to the surname `Chang`, and
+  `raged` belongs to `rage`, so the verb `rag` makes `raggable` and leaves
+  `rageable` to `rage`;
+- a doubled consonant is copied from SCOWL, never guessed: it lists `dragged`,
+  so `draggable`, and it lists `inhibited`, so `inhibitable`;
+- both current spellings are kept where both are ordinary (`resizable` and
+  `resizeable`, `parsable` and `parseable`), but the `-eable` variant only for
+  a short stem, since `invalidateable` is nobody's spelling;
+- `un-` only over an adjective an everyday verb made, so the list gains
+  `unscrollable` and never `untimetable` or `ununsettlable`.
+
+Last comes a hand-kept supplement of terms this console is typed at every day.
+About 188,000 words - some 15,600 of them formed - 2.0 MB, and a `en.txt.gz`
+sibling that aiohttp's static handler serves to every browser that accepts
+gzip (about 555 KB on the wire, fetched once and revalidated after that). Both
+files are regenerated together; `tests/spellcheck_ui_test.js` fails if they
+disagree.
 
 The format is exact and versioned. A file that does not match is refused, never
 repaired: the checker stays off and its menu row says why.
@@ -45,7 +71,7 @@ repaired: the checker stays off and its menu row says why.
 ```
 #puppy-dictionary 1 en
 #source ...                  provenance, ignored by the reader
-#words 128808
+#words 188025
 aardvark
 the	0
 ```
@@ -53,11 +79,14 @@ the	0
 One word per line, sorted by code point, with an optional tab and a rank digit
 (`0`–`4`, indices into the build script's `RANK_SIZES`). A ranked word is
 common enough to be offered first and to be corrected into; an unranked word is
-spelled correctly but is never something Puppy will type for you. Proper names
-are deliberately unranked.
+spelled correctly but is never something Puppy will type for you. Proper names,
+SCOWL's rarer size classes and every derived word are deliberately unranked, so
+widening the dictionary never widens what autocorrect will type: `scrolable`
+finds `scrollable` in the suggestion menu, and autocorrect still leaves it
+alone.
 
 The console keeps the file's own text plus an `Int32Array` of line starts and
-answers every question with a binary search: 128k words cost about 1.5 MB of
+answers every question with a binary search: 188k words cost about 2.8 MB of
 memory and no per-word object. It is fetched once per console, lazily, when a
 prompt box with spell check on exists, and a failed fetch is retried no more
 often than once a minute.

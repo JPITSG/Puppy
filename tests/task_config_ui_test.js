@@ -311,5 +311,45 @@ const deletes = from => requests.slice(from).filter(r => r.method === "DELETE").
     hold = null; fail = false;
     assert.equal(Composer.live.size, 0);
   }
-  console.log("PASS: task modal engine defaults, engine/model dependencies, catalog refresh and delayed initialization, custom/retired choices, local/remote nodes, retry lifecycle, and its shared prompt box (Enter, attachments, discard on cancel)");
+  /* "Custom…" is a model the engine does not offer. A dynamic catalog that
+     has not answered yet is serving its driver's provisional fallback list,
+     which proves nothing: a saved default missing from it stays a model by
+     name, and the refresh that finally describes it closes any box the
+     provisional list opened. */
+  workspace.tab.bid = 7;
+  main.session = { ...mainChoices, engine: "second" };
+  const settled = remote[1];
+  const named = { value: "long[1m]", label: "Long context", effort_options: options(["", "high"]) };
+  const saved = { model: named.value, effort: "high", permission_mode: "full" };
+  remote[1] = { ...settled, model_catalog_loaded: false, session_defaults: saved };
+  requests = [];
+  catalogHold = new Promise(resolve => { releaseCatalog = resolve; });
+  n = await open();
+  assert.equal(requests[0].route, "engines", "a catalog that has not answered is refreshed");
+  assert.equal(n["#nt-model"].value, named.value, "a provisional list cannot invent a custom model");
+  assert.equal(n["#nt-model-custom"].value, "");
+  assert.equal(n["#nt-model-custom-wrap"].classList.contains("hidden"), true);
+  remote[1] = { ...settled, session_defaults: saved,
+    model_options: [...settled.model_options, named] };
+  releaseCatalog(); await settle(); catalogHold = null;
+  assert.deepEqual(values(n), { engine: "second", ...saved }, "the real catalog keeps that model");
+  assert.equal(n["#nt-model"].children.find(item => item.value === named.value).textContent, named.label);
+  assert.equal(n["#nt-model-custom-wrap"].classList.contains("hidden"), true);
+  assert.deepEqual(n["#nt-effort"].children.map(item => item.value), ["", "high"]);
+  dialog.close();
+  n = await open();
+  n["#nt-model"].value = "__custom__"; n["#nt-model"].onchange();
+  n["#nt-model-custom"].value = named.value; n["#nt-model-custom"].oninput();
+  rememberEnginePayload(7, { engines: remote });
+  assert.equal(n["#nt-model"].value, named.value, "a refresh stops calling a catalogued model custom");
+  assert.equal(n["#nt-model-custom-wrap"].classList.contains("hidden"), true);
+  n["#nt-model"].value = "__custom__"; n["#nt-model"].onchange();
+  n["#nt-model-custom"].value = "still/mine"; n["#nt-model-custom"].oninput();
+  rememberEnginePayload(7, { engines: remote });
+  assert.equal(n["#nt-model"].value, "__custom__", "a model the engine never offers keeps the box open");
+  assert.equal(n["#nt-model-custom"].value, "still/mine");
+  dialog.close();
+  remote[1] = settled;
+
+  console.log("PASS: task modal engine defaults, engine/model dependencies, catalog refresh and delayed initialization, provisional catalogs, custom/retired choices, local/remote nodes, retry lifecycle, and its shared prompt box (Enter, attachments, discard on cancel)");
 })().catch(error => { console.error(error); process.exitCode = 1; });

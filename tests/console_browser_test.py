@@ -1160,6 +1160,7 @@ async def checks(a, b, hub, capture=False):
     await operation_cancellation_checks(a)
     await timer_error_checks(a, capture)
     await usage_error_checks(a, capture)
+    await host_panel_checks(a, capture)
     # Measure real layout: an idle status must not reserve a row below tools.
     for width, height in [(1440, 900), (390, 844)]:
         await a.call("Emulation.setDeviceMetricsOverride", {"width": width, "height": height,
@@ -1552,6 +1553,125 @@ async def browser_cursor_checks(console):
             await evaluate(console, "closeTab(%s); true" % json.dumps(tab_id))
         await browser.manager().close(page.browser_id, "Cursor test finished")
 
+
+async def host_panel_checks(instance, capture=False):
+    """The CPU reading's box, in a real browser: a real click opens it, the
+    node answers over the real HTTP route, the chart is drawn where the data
+    says, the tree indents, and the box scrolls instead of the sidebar."""
+    await instance.call("Emulation.setDeviceMetricsOverride", {
+        "width": 1440, "height": 900, "deviceScaleFactor": 1,
+        "mobile": False}, session=instance.page_session)
+    await asyncio.sleep(.35)
+    point = await evaluate(instance, """(() => {
+        const chip=document.getElementById('host-cpu');
+        chip.classList.remove('hidden');           // the stream may not have sampled yet
+        const r=chip.getBoundingClientRect();
+        return {x:r.x+r.width/2, y:r.y+r.height/2, expanded:chip.getAttribute('aria-expanded')};
+    })()""")
+    assert point["expanded"] == "false", point
+    for kind in ("mousePressed", "mouseReleased"):
+        await instance.call("Input.dispatchMouseEvent", {
+            "type": kind, "x": point["x"], "y": point["y"], "button": "left",
+            "clickCount": 1}, session=instance.page_session)
+    try:
+        # The box polls this node over the same authenticated route a backend
+        # would answer, so its own process is what comes back.
+        await until(instance, "hostPanel.open && document.querySelectorAll('.host-proc').length > 0")
+        served = await evaluate(instance, """(() => {
+            const data=hostPanel.nodes.get(0).data;
+            return {pid:data.processes.root.pid, label:data.processes.root.label,
+                    cores:data.cpu.cores, total:data.processes.total,
+                    counted:data.processes.counted,
+                    expanded:document.getElementById('host-cpu').getAttribute('aria-expanded'),
+                    open:document.querySelector('.side-foot').classList.contains('host-open')};
+        })()""")
+        assert served["pid"] > 0 and served["cores"] >= 1, served
+        assert served["total"] >= served["counted"] >= 1, served
+        assert served["expanded"] == "true" and served["open"] is True, served
+        # A known series, drawn: the line spans the well, the peak reaches its
+        # top and the trough its floor, and the stroke keeps its width despite
+        # the box being stretched to the sidebar's width.
+        geometry = await evaluate(instance, """(() => {
+            const now=Date.now()/1000;
+            const data=hostPanel.nodes.get(0).data;
+            const step=data.cpu.interval;   // a minute of samples, floor to peak
+            data.cpu.history=[];
+            for (let i=0;i<=20;i++)
+                data.cpu.history.push([now-(20-i)*step, i===10?100:(i%2?50:0)]);
+            hostPanel.live.length=0;
+            renderHostPanel();
+            const svg=document.querySelector('.host-chart');
+            const slot=svg.parentElement.clientWidth;
+            const box=svg.getBoundingClientRect();
+            const line=svg.querySelector('.host-chart-line').getBoundingClientRect();
+            const stroke=parseFloat(getComputedStyle(svg.querySelector('.host-chart-line')).strokeWidth);
+            return {wide:box.width>200, fills:Math.abs(box.width-slot)<1.5,
+                    segments:svg.querySelectorAll('.host-chart-line').length,
+                    top:line.top-box.top, bottom:box.bottom-line.bottom,
+                    left:line.left-box.left, right:box.right-line.right,
+                    stroke, note:document.querySelector('.host-node-note').textContent};
+        })()""")
+        assert geometry["wide"] and geometry["fills"], geometry
+        assert geometry["segments"] == 1, geometry
+        for edge in ("top", "bottom", "left", "right"):
+            assert abs(geometry[edge]) <= 1.5, (edge, geometry)
+        assert 1 <= geometry["stroke"] <= 1.5, geometry
+        assert geometry["note"] == "0% · peak 100%", geometry
+        # Real layout: every child row is indented past its parent, and a
+        # folded group says how many processes it stands for.
+        layout = await evaluate(instance, """(() => {
+            const node=(label,kind,children,extra={}) => ({label,kind,children,cpu:1,rss:1048576,
+                threads:1,pid:1,uptime:1,cmd:label,...extra});
+            hostPanel.nodes.get(0).data.processes.root=node('python3 -m puppy','puppy',[
+                node('claude','claude',[node('agent bridges','bridge',[],{count:5,group:true})],
+                     {more:2})]);
+            renderHostPanel();
+            const rows=[...document.querySelectorAll('.host-proc')];
+            return {lefts:rows.map(r=>Math.round(r.getBoundingClientRect().left)),
+                    labels:rows.map(r=>r.textContent),
+                    inside:rows.every(r=>r.scrollWidth<=r.clientWidth)};
+        })()""")
+        assert layout["lefts"][0] < layout["lefts"][1] < layout["lefts"][2], layout
+        assert layout["lefts"][3] == layout["lefts"][2], layout
+        assert "×5" in layout["labels"][2] and layout["labels"][3] == "+2 more", layout
+        assert layout["inside"], layout
+        # It is the box that scrolls, not the session list under it.
+        scrolling = await evaluate(instance, """(() => {
+            const box=document.getElementById('foot-host');
+            const list=document.querySelector('.side-scroll');
+            const engines=document.getElementById('foot-engines');
+            for (let i=0;i<40;i++)
+                hostPanel.nodes.get(0).data.processes.root.children.push({
+                    label:'worker-'+i,kind:'proc',children:[],cpu:0,rss:1024,threads:1,
+                    pid:100+i,uptime:1,cmd:'worker'});
+            renderHostPanel();
+            box.scrollTop=9999;
+            return {scrolls:box.scrollHeight>box.clientHeight, moved:box.scrollTop>0,
+                    inside:box.getBoundingClientRect().bottom<=window.innerHeight,
+                    list:list.getBoundingClientRect().height>0,
+                    engines:engines.getBoundingClientRect().height>0};
+        })()""")
+        assert all(scrolling.values()), scrolling
+        if capture:
+            for theme in ("dark", "light"):
+                await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
+                shot = await instance.call("Page.captureScreenshot", {"format": "png"},
+                                           session=instance.page_session)
+                (BASE / "data" / ("host-panel-" + theme + ".png")).write_bytes(
+                    base64.b64decode(shot["data"]))
+    finally:
+        await evaluate(instance, "closeHostPanel(); applyTheme('dark'); true")
+    closed = await evaluate(instance, """(() => ({
+        empty: document.getElementById('foot-host').children.length === 0,
+        hidden: document.getElementById('foot-host').classList.contains('hidden'),
+        expanded: document.getElementById('host-cpu').getAttribute('aria-expanded'),
+        open: document.querySelector('.side-foot').classList.contains('host-open'),
+        polling: hostPanel.timer !== null,
+    }))()""")
+    assert closed == {"empty": True, "hidden": True, "expanded": "false",
+                      "open": False, "polling": False}, closed
+    print("PASS: the CPU reading opens a drawn, scrolling host box - real route, "
+          "chart geometry, indented tree - and closing it stops its polling", flush=True)
 
 async def main(args):
     instances = []

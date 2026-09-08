@@ -1750,11 +1750,14 @@ function closeChoiceMenu(returnFocus = false) {
   control.button.setAttribute("aria-expanded", "false");
   control.button.removeAttribute("aria-controls");
   control.button.removeAttribute("aria-activedescendant");
+  control.anchorRect = null;
   if (returnFocus && control.button.isConnected) control.button.focus();
 }
 
+/* Returns the anchor rect the float was placed against, so a caller can tell
+   later whether the anchor has since moved out from under it. */
 function positionAnchoredMenu(menu, button, matchButtonWidth = false) {
-  if (!menu || !button || !button.isConnected) return;
+  if (!menu || !button || !button.isConnected) return null;
   const rect = button.getBoundingClientRect();
   menu.style.visibility = "hidden";
   menu.style.position = "fixed";
@@ -1777,10 +1780,11 @@ function positionAnchoredMenu(menu, button, matchButtonWidth = false) {
   menu.style.left = Math.round(left) + "px";
   menu.style.top = Math.round(Math.max(edge, top)) + "px";
   menu.style.visibility = "visible";
+  return rect;
 }
 
 function positionChoiceMenu(control) {
-  positionAnchoredMenu(control.menu, control.button, true);
+  control.anchorRect = positionAnchoredMenu(control.menu, control.button, true);
 }
 
 function refreshChoiceSelect(select) {
@@ -1813,11 +1817,18 @@ function enhanceChoiceSelect(select) {
   select.tabIndex = -1;
   select.insertAdjacentElement("afterend", wrap);
 
+  /* Exactly what an open list is showing. A repaint that leaves this untouched
+     - a panel marking itself dirty, a busy flag going down, a card re-running
+     its paint - has nothing to say to the menu the user is reading. */
+  const choiceSignature = () => JSON.stringify([select.disabled, select.selectedIndex,
+    [...select.options].map(option =>
+      [option.value, option.textContent, !!option.disabled, option.title || ""])]);
+
   const control = {
     select, wrap, button, value, menu: null, activeIndex: -1,
-    typeBuffer: "", typeTimer: null,
+    anchorRect: null, signature: "", typeBuffer: "", typeTimer: null,
     refresh() {
-      if (openChoiceControl === control) closeChoiceMenu();
+      const shown = control.signature;
       let option = select.options[select.selectedIndex];
       if (!option && select.options.length) {
         select.selectedIndex = 0;
@@ -1833,6 +1844,33 @@ function enhanceChoiceSelect(select) {
         button.removeAttribute("data-tip");
       }
       button.setAttribute("aria-label", fieldName ? `${fieldName}: ${text}` : text);
+      control.signature = choiceSignature();
+      /* An open list survives its own control being repainted: only losing the
+         control closes it, and choices that really did change are redrawn in
+         place - the same contract the app's other menus keep through
+         syncOpenChoiceMenus. */
+      if (openChoiceControl !== control) return;
+      if (button.disabled) closeChoiceMenu();
+      else if (control.signature !== shown) control.syncMenu();
+    },
+    /* Re-read the select the rows came from, keeping the highlight on the
+       value it was on, the list where it was scrolled to, and the menu where
+       it was placed. */
+    syncMenu() {
+      const menu = control.menu;
+      if (!menu || !menu.isConnected) return;
+      const active = menu.querySelector(".choice-option.active");
+      const activeValue = active ? active.dataset.choiceValue : null;
+      const scrollTop = menu.scrollTop;
+      fillChoiceMenu(menu);
+      control.activeIndex = control.cursorIndex = -1;
+      button.removeAttribute("aria-activedescendant");
+      let index = [...select.options].findIndex(option =>
+        !option.disabled && activeValue !== null && option.value === activeValue);
+      if (index < 0) index = select.selectedIndex;
+      setActive(index, { quiet: true });
+      menu.scrollTop = scrollTop;
+      positionChoiceMenu(control);
     },
   };
   select._choiceControl = control;
@@ -1868,25 +1906,26 @@ function enhanceChoiceSelect(select) {
     const option = select.options[index];
     if (!option || option.disabled) return;
     select.selectedIndex = index;
+    /* The pick is what closes the list, not the repaint that follows it: the
+       change handler is free to rebuild this select without the menu's
+       lifetime hanging off whatever it does. */
+    closeChoiceMenu();
     select.dispatchEvent(new Event("change", { bubbles: true }));
     control.refresh();
     if (button.isConnected) button.focus();
   };
 
-  const open = () => {
-    if (button.disabled) return;
-    if (openChoiceControl === control) return;
-    closeAllMenus(null);
-    const menu = el("div", "choice-menu");
-    const menuId = `choice-menu-${++choiceMenuSeq}`;
-    menu.id = menuId;
-    menu.setAttribute("role", "listbox");
-    menu.setAttribute("aria-label", fieldName || "Choices");
+  /* The rows are the select's options. One builder for the first draw and
+     every redraw, so a list that re-reads a changed catalog is the same list
+     it opened as. */
+  const fillChoiceMenu = (menu) => {
+    menu.replaceChildren();
     [...select.options].forEach((option, index) => {
       const selected = index === select.selectedIndex;
       const row = choiceOptionNode(option.textContent, selected);
-      row.id = `${menuId}-${index}`;
+      row.id = `${menu.id}-${index}`;
       row.dataset.choiceIndex = String(index);
+      row.dataset.choiceValue = option.value;
       row.disabled = option.disabled;
       row.tabIndex = -1;
       if (option.title) row.title = option.title;
@@ -1895,6 +1934,17 @@ function enhanceChoiceSelect(select) {
       row.onclick = (event) => { event.stopPropagation(); choose(index); };
       menu.appendChild(row);
     });
+  };
+
+  const open = () => {
+    if (button.disabled) return;
+    if (openChoiceControl === control) return;
+    closeAllMenus(null);
+    const menu = el("div", "choice-menu");
+    menu.id = `choice-menu-${++choiceMenuSeq}`;
+    menu.setAttribute("role", "listbox");
+    menu.setAttribute("aria-label", fieldName || "Choices");
+    fillChoiceMenu(menu);
     /* the pointer takes its highlight with it when it goes */
     menu.onmouseleave = () => setActive(control.cursorIndex, { quiet: true });
     menu.onclick = (event) => event.stopPropagation();
@@ -1905,7 +1955,7 @@ function enhanceChoiceSelect(select) {
     openChoiceControl = control;
     wrap.classList.add("open");
     button.setAttribute("aria-expanded", "true");
-    button.setAttribute("aria-controls", menuId);
+    button.setAttribute("aria-controls", menu.id);
     setActive(control.activeIndex);
     positionChoiceMenu(control);
   };
@@ -1968,9 +2018,22 @@ window.addEventListener("resize", () => {
   closeAllMenus(null);   // anchored floats cannot survive a reflow
   requestAnimationFrame(syncAllTabOverflow);
 });
-document.addEventListener("scroll", (event) => {
-  if (openChoiceControl && (!openChoiceControl.menu ||
-      !openChoiceControl.menu.contains(event.target))) closeChoiceMenu();
+/* An open list is placed once, in viewport coordinates, so the only scroll
+   that invalidates it is one that moved the control it hangs from. Ask the
+   control, not the event: a transcript following an agent's output, a sidebar,
+   a log in another pane and the menu's own scroll area all scroll constantly
+   and move nothing, and dismissing on every scroll in the document is what
+   collapsed an open dropdown on every line an agent printed - anywhere in the
+   app, including a dialog sitting over the top of it. */
+document.addEventListener("scroll", () => {
+  const control = openChoiceControl;
+  if (!control || !control.menu) return;
+  if (!control.button.isConnected) { closeChoiceMenu(); return; }
+  const rect = control.button.getBoundingClientRect();
+  const placed = control.anchorRect;
+  if (placed && Math.abs(rect.top - placed.top) <= 1 &&
+      Math.abs(rect.left - placed.left) <= 1) return;
+  closeChoiceMenu();
 }, true);
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && openChoiceControl) {
@@ -2142,10 +2205,40 @@ function effortOptionsForModel(engine, model) {
   if (match && Array.isArray(match.effort_options)) return engineDefaultLabels(match.effort_options);
   /* A catalog-only engine rejects retired/unknown model IDs server-side. Do
      not offer its global effort union for such a model: those combinations
-     are not evidence-backed and the PATCH would be ignored. */
-  if (engine && engine.allow_custom_model === false)
+     are not evidence-backed and the PATCH would be ignored. A catalog still
+     on its way says nothing about the model, so its levels stay offered
+     until the real list arrives. */
+  if (engine && engine.allow_custom_model === false && !engineCatalogPending(engine))
     return [{ value: "", label: "Engine default", hint: "Engine model default" }];
   return engineDefaultLabels((engine && engine.effort_options) || []);
+}
+
+/* One answer to "does this engine offer that model?" for every picker.
+   A dynamic catalog that has not answered yet is serving its driver's
+   provisional fallback list, which is evidence of nothing: treating a model
+   missing from it as hand-typed turns a saved default such as "fable[1m]"
+   into a Custom… entry, and the picker keeps presenting it that way once the
+   real catalog names it. */
+function engineOffersModel(engine, model) {
+  return ((engine && engine.model_options) || [])
+    .some(option => option && option.value === model);
+}
+
+function engineCatalogPending(engine) {
+  return !!engine && engine.dynamic_model_options === true &&
+    engine.model_catalog_loaded !== true;
+}
+
+function isCustomModel(engine, model) {
+  return !!model && !engineOffersModel(engine, model) && !engineCatalogPending(engine);
+}
+
+/* The row that carries a model the engine has not described yet, so a
+   still-loading catalog shows the saved choice by name instead of an
+   "Unavailable" or "Custom…" flash. Empty once the catalog has answered. */
+function pendingModelRows(engine, model) {
+  return model && !engineOffersModel(engine, model) && engineCatalogPending(engine) ?
+    [{ value: model, label: model, hint: "Waiting for this engine's model list" }] : [];
 }
 
 function engineDefaultLabels(options) {
@@ -3839,11 +3932,16 @@ function renderHostCpu(cpuPercent) {
     output.textContent = "";
     output.removeAttribute("aria-label");
     output.classList.add("hidden");
+    /* The reading is the only way in and out of the box below it: a console
+       that has lost the node has nothing left to poll either. */
+    closeHostPanel();
     return;
   }
   output.textContent = `CPU ${Math.round(value)}%`;
   output.setAttribute("aria-label", `WebUI host CPU usage: ${value.toFixed(1)}%`);
+  output.title = "Host activity";
   output.classList.remove("hidden");
+  hostCpuSample(value);
 }
 
 function setLocalConnection(connected) {
@@ -6684,6 +6782,474 @@ function renderFootEngines() {
   }
 }
 
+/* ================= host activity ================= */
+/* The footer's CPU reading is a button: it opens this box under the engine
+   stats with each node's own CPU history, the round trip from this instance to
+   every paired backend, and the processes Puppy is running there. Nothing is
+   polled while the box is closed, and every number belongs to the node that
+   reported it - the controller times the backend pings itself, because that is
+   a fact about the link, not about the browser that asked for it. */
+const HOST_POLL_MS = 4000;
+const HOST_WINDOW_S = 900;
+const HOST_LIVE_SAMPLES = 400;
+const HOST_PINGS = 40;
+const HOST_CHART_H = 48;
+const HOST_SPARK_H = 13;
+/* A break in the line rather than a straight run across it: a node that was
+   away for a minute did not sit at that load while it was gone. */
+const HOST_GAP_FACTOR = 4;
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+const hostPanel = {
+  open: false, timer: null, sequence: 0,
+  nodes: new Map(),      // bid -> { data, error }
+  live: [],              // [seconds, percent] from this node's own stream
+  pings: new Map(),      // bid -> [[seconds, milliseconds]]
+  latency: [], latencyError: "",
+  charts: new Map(),     // bid -> the parts one live sample repaints
+};
+
+/* The live stream keeps this node's chart moving between polls, so the box
+   never looks frozen while it waits for the next fetch. */
+function hostCpuSample(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return;
+  hostPanel.live.push([Date.now() / 1000, Math.max(0, Math.min(100, value))]);
+  if (hostPanel.live.length > HOST_LIVE_SAMPLES)
+    hostPanel.live.splice(0, hostPanel.live.length - HOST_LIVE_SAMPLES);
+  if (hostPanel.open) paintHostNode(0);
+}
+
+/* The same node order as the engine box above it. */
+function hostPanelNodes() {
+  const groups = [{ bid: 0, name: backendName(0) }].concat(
+    state.backends.map(backend => ({ bid: backend.id, name: backend.name })));
+  for (const group of groups) {
+    group.offline = !!group.bid && state.remoteOk[group.bid] === false;
+    group.supported = nodeHasCapability(group.bid, "host-metrics-v1");
+  }
+  return sortNodeGroups(groups);
+}
+
+function syncHostCpuButton() {
+  const button = $("host-cpu");
+  if (button) button.setAttribute("aria-expanded", hostPanel.open ? "true" : "false");
+}
+
+function openHostPanel() {
+  if (hostPanel.open) return;
+  hostPanel.open = true;
+  syncHostCpuButton();
+  renderHostPanel();
+  pollHostPanel();
+}
+
+function closeHostPanel() {
+  if (!hostPanel.open) return;
+  hostPanel.open = false;
+  if (hostPanel.timer !== null) clearTimeout(hostPanel.timer);
+  hostPanel.timer = null;
+  hostPanel.sequence++;          // abandon whatever is still in flight
+  hostPanel.charts.clear();
+  syncHostCpuButton();
+  renderHostPanel();
+}
+
+function toggleHostPanel() {
+  if (hostPanel.open) closeHostPanel();
+  else openHostPanel();
+}
+
+function scheduleHostPoll() {
+  if (hostPanel.timer !== null) clearTimeout(hostPanel.timer);
+  hostPanel.timer = setTimeout(() => {
+    hostPanel.timer = null;
+    pollHostPanel();
+  }, HOST_POLL_MS);
+}
+
+async function pollHostPanel() {
+  if (hostPanel.timer !== null) clearTimeout(hostPanel.timer);
+  hostPanel.timer = null;
+  if (!hostPanel.open) return;
+  if (document.hidden) { scheduleHostPoll(); return; }   // nobody is looking
+  const sequence = ++hostPanel.sequence;
+  await Promise.all([readHostNodes(sequence), readHostLatency(sequence)]);
+  if (sequence !== hostPanel.sequence || !hostPanel.open) return;
+  renderHostPanel();
+  scheduleHostPoll();
+}
+
+async function readHostNodes(sequence) {
+  const nodes = hostPanelNodes();
+  const live = new Set(nodes.map(node => node.bid));
+  for (const bid of [...hostPanel.nodes.keys()])
+    if (!live.has(bid)) { hostPanel.nodes.delete(bid); hostPanel.pings.delete(bid); }
+  await Promise.all(nodes.map(async (node) => {
+    const previous = hostPanel.nodes.get(node.bid) || {};
+    const keep = (entry) => {
+      if (sequence === hostPanel.sequence) hostPanel.nodes.set(node.bid, entry);
+    };
+    /* An unreachable backend is the controller's verdict, not something a
+       metrics poll may go and rediscover. */
+    if (node.offline)
+      return keep({ data: null, error: remoteStoppingMessage(node.bid) ||
+        backendStateNote(remoteAvailability(node.bid), false, "activity") });
+    if (!node.supported)
+      return keep({ data: null, error: "This backend does not report host activity" });
+    try {
+      const data = await api(node.bid, `host/metrics?window=${HOST_WINDOW_S}`, { timeoutMs: 9000 });
+      keep({ data, error: "" });
+    } catch (error) {
+      keep({ data: previous.data || null, error: error.message || "could not read host activity" });
+    }
+  }));
+}
+
+async function readHostLatency(sequence) {
+  if (!state.backends.length) {
+    hostPanel.latency = [];
+    hostPanel.latencyError = "";
+    return;
+  }
+  try {
+    const payload = await api(0, "backends/latency", { timeoutMs: 9000 });
+    if (sequence !== hostPanel.sequence) return;
+    const rows = Array.isArray(payload && payload.backends) ? payload.backends : [];
+    const at = Number(payload && payload.measured_at) || Date.now() / 1000;
+    hostPanel.latency = rows;
+    hostPanel.latencyError = "";
+    for (const row of rows) {
+      if (!row || row.ok !== true || typeof row.ms !== "number") continue;
+      const series = hostPanel.pings.get(row.id) || [];
+      series.push([at, Math.max(0, row.ms)]);
+      if (series.length > HOST_PINGS) series.splice(0, series.length - HOST_PINGS);
+      hostPanel.pings.set(row.id, series);
+    }
+  } catch (error) {
+    if (sequence !== hostPanel.sequence) return;
+    hostPanel.latencyError = error.message || "could not measure latency";
+  }
+}
+
+/* ---- drawn charts ----
+   One 100x100 box stretched to whatever width the sidebar currently has, so
+   the line follows a resize without a re-render; the stroke stays 1px because
+   it opts out of that scaling. Text never goes inside: it would stretch too. */
+let hostChartSequence = 0;
+
+function hostChartSegments(series, from, to, max) {
+  const span = Math.max(1e-6, to - from);
+  const ceiling = Math.max(1e-6, max);
+  const gap = Math.max(1, (series.gap || 3) * HOST_GAP_FACTOR);
+  const segments = [];
+  let current = [], previous = null;
+  for (const [at, value] of series) {
+    if (previous !== null && at - previous > gap && current.length) {
+      segments.push(current);
+      current = [];
+    }
+    current.push([
+      Math.max(0, Math.min(100, ((at - from) / span) * 100)),
+      Math.max(0, Math.min(100, 100 - (value / ceiling) * 100)),
+    ]);
+    previous = at;
+  }
+  if (current.length) segments.push(current);
+  return segments;
+}
+
+function hostChart(series, options = {}) {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("class", `host-chart${options.cls ? ` ${options.cls}` : ""}`);
+  svg.setAttribute("viewBox", "0 0 100 100");
+  svg.setAttribute("preserveAspectRatio", "none");
+  svg.setAttribute("aria-hidden", "true");
+  svg.style.height = `${options.height || HOST_CHART_H}px`;
+  const id = `host-fill-${++hostChartSequence}`;
+  const defs = document.createElementNS(SVG_NS, "defs");
+  const gradient = document.createElementNS(SVG_NS, "linearGradient");
+  gradient.setAttribute("id", id);
+  for (const [name, value] of [["x1", "0"], ["y1", "0"], ["x2", "0"], ["y2", "1"]])
+    gradient.setAttribute(name, value);
+  for (const [offset, opacity] of [["0", ".4"], ["1", "0"]]) {
+    const stop = document.createElementNS(SVG_NS, "stop");
+    stop.setAttribute("offset", offset);
+    stop.setAttribute("stop-color", "currentColor");
+    stop.setAttribute("stop-opacity", opacity);
+    gradient.appendChild(stop);
+  }
+  defs.appendChild(gradient);
+  svg.appendChild(defs);
+  if (options.grid !== false) {
+    const grid = document.createElementNS(SVG_NS, "path");
+    grid.setAttribute("class", "host-chart-grid");
+    grid.setAttribute("d", "M0 50H100");
+    grid.setAttribute("vector-effect", "non-scaling-stroke");
+    svg.appendChild(grid);
+  }
+  const to = Number(options.to) || 0;
+  const from = Number(options.from) || 0;
+  for (const points of hostChartSegments(series, from, to, options.max || 100)) {
+    const line = points.map(([x, y], index) =>
+      `${index ? "L" : "M"}${x.toFixed(2)} ${y.toFixed(2)}`).join("");
+    if (points.length > 1) {
+      const area = document.createElementNS(SVG_NS, "path");
+      area.setAttribute("class", "host-chart-area");
+      area.setAttribute("fill", `url(#${id})`);
+      area.setAttribute("d",
+        `M${points[0][0].toFixed(2)} 100${line}L${points[points.length - 1][0].toFixed(2)} 100Z`);
+      svg.appendChild(area);
+    }
+    const path = document.createElementNS(SVG_NS, "path");
+    path.setAttribute("class", "host-chart-line");
+    path.setAttribute("d", points.length > 1 ? line :
+      `${line}L${(points[0][0] + .4).toFixed(2)} ${points[0][1].toFixed(2)}`);
+    path.setAttribute("vector-effect", "non-scaling-stroke");
+    svg.appendChild(path);
+  }
+  return svg;
+}
+
+/* This node's chart is its served history plus whatever the live stream has
+   added since; a backend's is exactly what it last served. */
+function hostSeries(bid) {
+  const entry = hostPanel.nodes.get(bid) || {};
+  const cpu = entry.data && entry.data.cpu;
+  const history = Array.isArray(cpu && cpu.history) ? cpu.history : [];
+  const clean = history.filter(row => Array.isArray(row) &&
+    typeof row[0] === "number" && typeof row[1] === "number");
+  clean.gap = Number(cpu && cpu.interval) || 3;
+  if (bid) return clean;
+  const last = clean.length ? clean[clean.length - 1][0] : 0;
+  const series = clean.concat(hostPanel.live.filter(([at]) => at > last));
+  series.gap = clean.gap;
+  return series;
+}
+
+function hostDuration(seconds) {
+  const value = Math.max(0, Math.round(Number(seconds) || 0));
+  if (value >= 86400) return `${Math.floor(value / 86400)}d ${Math.floor((value % 86400) / 3600)}h`;
+  if (value >= 3600) return `${Math.floor(value / 3600)}h ${Math.floor((value % 3600) / 60)}m`;
+  if (value >= 60) return `${Math.floor(value / 60)}m ${value % 60}s`;
+  return `${value}s`;
+}
+
+/* Compact enough for a sidebar row: 317M, 1.4G. */
+function hostBytes(value) {
+  const bytes = Math.max(0, Number(value) || 0);
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024 / 1024).toFixed(1)}G`;
+  if (bytes >= 1024 * 1024) return `${Math.round(bytes / 1024 / 1024)}M`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)}K`;
+  return `${Math.round(bytes)}B`;
+}
+
+/* Whole percents once a reading is big enough for one to matter, a tenth
+   below that, and never a trailing zero. */
+function hostPercent(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "";
+  return `${value >= 10 ? Math.round(value) : Math.round(value * 10) / 10}%`;
+}
+
+function hostNodeDot(node) {
+  const dot = el("span", `gdot ${node.bid ? remoteAvailability(node.bid) : "ok"}`);
+  dot.setAttribute("role", "img");
+  dot.setAttribute("aria-label", node.bid ? remoteAvailabilityTitle(node.bid) : "available");
+  return dot;
+}
+
+function hostSection(title, note) {
+  const section = el("div", "host-sec");
+  const head = el("div", "host-sec-head");
+  head.appendChild(el("span", "host-sec-title", title));
+  if (note) head.appendChild(el("span", "host-sec-note", note));
+  section.appendChild(head);
+  return section;
+}
+
+/* ---- the CPU section: one chart per node, this instance first ---- */
+function hostCpuBlock(node) {
+  const block = el("div", "host-node");
+  const head = el("div", "host-node-head");
+  head.appendChild(hostNodeDot(node));
+  head.appendChild(el("span", "host-node-name", node.name));
+  const note = el("span", "host-node-note");
+  head.appendChild(note);
+  block.appendChild(head);
+  const slot = el("div", "host-chart-slot");
+  block.appendChild(slot);
+  const facts = el("div", "host-facts");
+  block.appendChild(facts);
+  hostPanel.charts.set(node.bid, { slot, note, facts });
+  paintHostNode(node.bid);
+  return block;
+}
+
+function paintHostNode(bid) {
+  const chart = hostPanel.charts.get(bid);
+  if (!chart) return;
+  const entry = hostPanel.nodes.get(bid) || {};
+  const data = entry.data;
+  const series = hostSeries(bid);
+  const now = Date.now() / 1000;
+  const to = bid ? (Number(data && data.sampled_at) || now) : now;
+  const from = series.length ? Math.min(series[0][0], to - 60) : to - 60;
+  if (series.length > 1)
+    chart.slot.replaceChildren(hostChart(series, { from, to, height: HOST_CHART_H }));
+  else
+    chart.slot.replaceChildren(el("div", "host-chart-empty",
+      entry.error ? entry.error : "Collecting samples…"));
+  const values = series.map(([, value]) => value);
+  const current = values.length ? values[values.length - 1] : null;
+  const peak = values.length ? Math.max(...values) : null;
+  const cores = Number(data && data.cpu && data.cpu.cores) || 0;
+  chart.note.textContent = [
+    current === null ? "" : hostPercent(current),
+    peak === null ? "" : `peak ${hostPercent(peak)}`,
+  ].filter(Boolean).join(" · ");
+  /* A sidebar column is narrow: the row carries the shape of the machine and
+     the tooltip carries the rest, rather than an ellipsis eating the end. */
+  const memory = data && data.memory;
+  const load = Array.isArray(data && data.load) ? data.load : null;
+  const uptime = data && typeof data.uptime === "number" ? hostDuration(data.uptime) : "";
+  chart.facts.textContent = [
+    cores ? `${cores} cores` : "",
+    load ? `load ${load[0].toFixed(2)}` : "",
+    memory ? `${hostBytes(memory.used)}/${hostBytes(memory.total)}` : "",
+  ].filter(Boolean).join(" · ");
+  chart.facts.title = [
+    series.length > 1 ? `last ${hostDuration(to - from)}` : "",
+    cores ? `${cores} cores` : "",
+    load ? `load ${load.map(value => value.toFixed(2)).join(" ")}` : "",
+    memory ? `memory ${hostBytes(memory.used)} of ${hostBytes(memory.total)} used` : "",
+    uptime ? `up ${uptime}` : "",
+  ].filter(Boolean).join(" · ");
+}
+
+/* ---- the latency section: this instance to each paired backend ---- */
+function hostLatencyRow(row) {
+  const line = el("div", "host-ping");
+  const dot = el("span", `gdot ${row.ok === true ? "ok" : row.offline ? "bad" : "warn"}`);
+  dot.setAttribute("role", "img");
+  line.appendChild(dot);
+  const name = el("span", "host-ping-name", row.name || `backend ${row.id}`);
+  name.title = row.url || row.name || "";
+  line.appendChild(name);
+  const series = hostPanel.pings.get(row.id) || [];
+  if (series.length > 1) {
+    const values = series.map(([, value]) => value);
+    const to = series[series.length - 1][0];
+    line.appendChild(hostChart(series, {
+      from: Math.min(series[0][0], to - 30), to, height: HOST_SPARK_H, grid: false,
+      cls: "spark", max: Math.max(20, ...values),
+    }));
+  }
+  const value = el("span", "host-ping-ms" + (row.ok === true ? "" : " bad"),
+    row.ok === true ? `${row.ms >= 100 ? Math.round(row.ms) : row.ms.toFixed(1)} ms` :
+      row.offline ? "offline" : "failed");
+  if (row.error) value.title = row.error;
+  line.appendChild(value);
+  return line;
+}
+
+function hostLatencySection() {
+  if (!state.backends.length) return null;
+  const section = hostSection("Latency", "from this instance");
+  if (hostPanel.latencyError)
+    section.appendChild(el("div", "host-empty", hostPanel.latencyError));
+  else if (!hostPanel.latency.length)
+    section.appendChild(el("div", "host-empty", "Measuring…"));
+  else for (const row of hostPanel.latency)
+    if (row && typeof row === "object") section.appendChild(hostLatencyRow(row));
+  return section;
+}
+
+/* ---- the process section: what Puppy is running on each node ---- */
+function hostProcessRow(process, depth) {
+  const row = el("div", "host-proc");
+  row.style.setProperty("--depth", String(Math.min(depth, 7)));
+  row.appendChild(el("span", `host-proc-dot k-${process.kind || "proc"}`));
+  const name = el("span", "host-proc-name", process.label || "?");
+  row.appendChild(name);
+  if (process.count > 1) row.appendChild(el("span", "host-proc-count", `×${process.count}`));
+  const cpu = hostPercent(process.cpu);
+  row.appendChild(el("span", `host-proc-cpu${process.cpu ? "" : " quiet"}`, cpu || "–"));
+  row.appendChild(el("span", "host-proc-rss", hostBytes(process.rss)));
+  row.title = [
+    process.count > 1 ? `${process.count} processes` : `pid ${process.pid}`,
+    process.threads > 1 ? `${process.threads} threads` : "",
+    typeof process.uptime === "number" ? `up ${hostDuration(process.uptime)}` : "",
+    process.cmd || "",
+  ].filter(Boolean).join(" · ");
+  return row;
+}
+
+function hostProcessRows(process, depth, into) {
+  into.appendChild(hostProcessRow(process, depth));
+  for (const child of process.children || []) hostProcessRows(child, depth + 1, into);
+  if (process.more > 0) {
+    const more = el("div", "host-proc host-proc-more",
+      `+${process.more} more`);
+    more.style.setProperty("--depth", String(Math.min(depth + 1, 7)));
+    into.appendChild(more);
+  }
+}
+
+function hostProcessGroup(node) {
+  const group = el("div", "host-node");
+  const head = el("div", "host-node-head");
+  head.appendChild(hostNodeDot(node));
+  head.appendChild(el("span", "host-node-name", node.name));
+  const entry = hostPanel.nodes.get(node.bid) || {};
+  const processes = entry.data && entry.data.processes;
+  const root = processes && processes.root;
+  if (root) {
+    const note = el("span", "host-node-note",
+      `${processes.counted} of ${processes.total}`);
+    note.title = `${processes.counted} Puppy processes · ${processes.total} on the host`;
+    head.appendChild(note);
+  }
+  group.appendChild(head);
+  if (!root) group.appendChild(el("div", "host-empty", entry.error || "Reading…"));
+  else {
+    const tree = el("div", "host-tree");
+    hostProcessRows(root, 0, tree);
+    group.appendChild(tree);
+  }
+  return group;
+}
+
+function renderHostPanel() {
+  const root = $("foot-host");
+  if (!root) return;
+  root.classList.toggle("hidden", !hostPanel.open);
+  /* The footer decides who gives up height for this box: the engine stats
+     above it, never the session list. */
+  if (root.parentElement) root.parentElement.classList.toggle("host-open", hostPanel.open);
+  if (!hostPanel.open) {
+    root.replaceChildren();
+    return;
+  }
+  const scrolled = root.scrollTop;
+  hostPanel.charts.clear();
+  const nodes = hostPanelNodes();
+  const sections = [];
+  const cpu = hostSection("CPU", "");
+  for (const node of nodes) cpu.appendChild(hostCpuBlock(node));
+  sections.push(cpu);
+  const latency = hostLatencySection();
+  if (latency) sections.push(latency);
+  const processes = hostSection("Processes", "");
+  for (const node of nodes) processes.appendChild(hostProcessGroup(node));
+  sections.push(processes);
+  root.replaceChildren(...sections);
+  root.scrollTop = scrolled;
+}
+
+$("host-cpu").onclick = () => toggleHostPanel();
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && hostPanel.open) pollHostPanel();
+});
+
 $("toggle-archived").onclick = () => { state.showArchived = !state.showArchived; renderSidebar(); };
 
 /* ---- sidebar quick-search ----
@@ -8495,7 +9061,7 @@ for (const kind of ["pointerdown", "focusin", "click"])
 
 /* Under the anchor, or at a point when one was given. */
 function placeChoiceMenu(menu, anchor, at) {
-  if (!at) { positionChoiceMenu({ menu, button: anchor }); return; }
+  if (!at) { positionAnchoredMenu(menu, anchor, true); return; }
   menu.style.visibility = "hidden";
   menu.style.position = "fixed";
   menu.style.right = "auto";
@@ -8516,6 +9082,10 @@ function placeChoiceMenu(menu, anchor, at) {
 /* An open menu re-reads its own live spec: a payload that lands while the
    list is up (a model catalog, an engine's tools) redraws it in place. */
 function syncOpenChoiceMenus() {
+  /* A list whose trigger a re-render took away has nothing left to hang from.
+     Retire it on the same pass, rather than leave it over the page until the
+     next press or scroll. */
+  if (openChoiceControl && !openChoiceControl.button.isConnected) closeChoiceMenu();
   for (const menu of document.querySelectorAll(".choice-menu.dyn"))
     if (typeof menu.sync === "function") menu.sync();
 }
@@ -8791,8 +9361,8 @@ function spawnEffortOptionsFor(engine, modelOption) {
    exists, so a console that never types pays nothing for it.
 
    The word list lives in the browser as the file's own text plus an index of
-   line starts, and every question is a binary search over it: 128k words cost
-   about 1.5 MB and no per-word JS object. A rank digit marks the words common
+   line starts, and every question is a binary search over it: 188k words cost
+   about 2.8 MB and no per-word JS object. A rank digit marks the words common
    enough to be offered first and to be corrected INTO; an unranked word is
    still spelled correctly, it is just never something Puppy will type for
    you.
@@ -12039,8 +12609,15 @@ async function modalNewTask(workspace) {
     fillEngineChoice(permission, (info && info.permission_options) || [], selected.permission_mode || "");
     const options = engineDefaultLabels((info && info.model_options) || []);
     const customAllowed = info && info.allow_custom_model !== false;
-    const isCustom = customAllowed && (selected.custom ||
-      (!!selected.model && !options.some(item => item.value === selected.model)));
+    /* "Custom…" is a model this engine does not offer. `selected.custom`
+       carries the open box across a catalog refresh, but only for a model
+       the engine still does not name: a refresh that finally describes it
+       closes the box again instead of keeping a catalogued model dressed up
+       as hand-typed text. */
+    const offered = !!selected.model && engineOffersModel(info, selected.model);
+    const isCustom = customAllowed && !offered &&
+      (selected.custom || (!!selected.model && !engineCatalogPending(info)));
+    if (!isCustom) options.push(...pendingModelRows(info, selected.model || ""));
     if (customAllowed) options.push({ value: "__custom__", label: "Custom…" });
     custom.value = isCustom ? selected.model : "";
     fillEngineChoice(model, options, isCustom ? "__custom__" : selected.model || "");
@@ -15231,7 +15808,8 @@ class SessionView {
     };
     const options = engineDefaultLabels((eng && eng.model_options) || []);
     const current = eff.model || "";
-    const custom = !!current && !options.some(option => option.value === current);
+    const custom = isCustomModel(eng, current);
+    if (!custom) options.push(...pendingModelRows(eng, current));
     const customAllowed = !eng || eng.allow_custom_model !== false;
     if (native && custom) {
       options.push({ value: "__current_custom__", label: `Current: ${current}` });
@@ -21856,8 +22434,9 @@ function modalEngineDefaults(bid, key, conversationChoices = null) {
     hint.textContent = "Engine default lets the engine choose its model or effort.";
     fillEngineChoice(permission, engine.permission_options || [], choices.permission_mode);
     const models = engineDefaultLabels(engine.model_options || []);
-    const isCustom = !!choices.model && !models.some(item => item.value === choices.model) &&
-      engine.allow_custom_model !== false;
+    const isCustom = engine.allow_custom_model !== false &&
+      isCustomModel(engine, choices.model);
+    if (!isCustom) models.push(...pendingModelRows(engine, choices.model));
     if (engine.allow_custom_model !== false) models.push({ value: "__custom__", label: "Custom…" });
     custom.value = isCustom ? choices.model : "";
     fillEngineChoice(model, models, isCustom ? "__custom__" : choices.model);
@@ -22179,16 +22758,20 @@ async function modalNewSession(groupId = null) {
     fillEngineChoice(permSel, e2 ? e2.permission_options : [],
       previous ? previous.permission : defaults.permission_mode);
     const modelOptions = engineDefaultLabels((e2 && e2.model_options) || []);
-    let model = previous ? previous.model : defaults.model;
-    const isCustom = !!model && !modelOptions.some(option => option.value === model) &&
-      (!e2 || e2.allow_custom_model !== false);
-    if (!e2 || e2.allow_custom_model !== false)
-      modelOptions.push({ value: "__custom__", label: "Custom…" });
-    if (isCustom && model !== "__custom__") {
-      customInp.value = model;
-      model = "__custom__";
-    } else if (previous && model === "__custom__") customInp.value = previous.custom;
-    fillEngineChoice(modelSel, modelOptions, model);
+    const customAllowed = !e2 || e2.allow_custom_model !== false;
+    /* A catalog refresh hands back the picker's own value, where
+       "__custom__" only says the box is open. What decides is the text it
+       holds: the box stays open while this engine still does not offer that
+       model, and closes onto the real entry once the catalog names it. */
+    const picked = previous ? previous.model : defaults.model;
+    const model = picked === "__custom__" ? String(previous.custom || "").trim() : picked;
+    const offered = !!model && engineOffersModel(e2, model);
+    const isCustom = customAllowed && !offered &&
+      (picked === "__custom__" || (!!model && !engineCatalogPending(e2)));
+    if (!isCustom) modelOptions.push(...pendingModelRows(e2, model));
+    if (customAllowed) modelOptions.push({ value: "__custom__", label: "Custom…" });
+    if (isCustom) customInp.value = model;
+    fillEngineChoice(modelSel, modelOptions, isCustom ? "__custom__" : model);
     modelSel.disabled = !e2 || (e2.allow_custom_model === false &&
       !(e2.model_options || []).length);
     refreshChoiceSelect(modelSel);

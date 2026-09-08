@@ -514,6 +514,29 @@ The CLI also accepts `--turn-timeout 0`. Settings initialize new turns/jobs;
 unattended timer changes rearm existing unviewed instances immediately.
 See [the complete contract and required manual config preparation](../docs/timeouts.md).
 
+## Host activity
+
+Every node serves `GET /api/host/metrics` behind the additive `host-metrics-v1`
+capability. It answers with that node's own CPU history (the samples its
+process has taken, oldest first, inside the requested `window` seconds - a
+missing, hostile or oversized window falls back to the default 900), its core
+count and sampling interval, its load average, memory and uptime, and the
+trimmed tree of processes descending from the node's own Puppy process. Every
+value is read from `/proc`; a process's CPU share is the delta between two
+scans, so the first read of a fresh process reports `null` rather than a guess.
+
+The tree is trimmed, not dumped: identical childless siblings become one row
+carrying `count` (the five per-turn MCP bridges, a browser's renderers),
+children are capped per parent, depth and total nodes are bounded, and every
+omission is counted in that branch's `more` and the reply's `hidden`. Nothing
+is persisted or published on the state stream by a headless node, so a restart
+forgets it and no backup contains it.
+
+Round-trip latency belongs to the controller, not to a node: it times
+`GET /api/ping` on each backend it has already marked online and reports an
+offline one from its own health verdict without probing it. A failed
+measurement never changes availability.
+
 ## Spawned agents
 
 Every node advertises the additive `spawn-exec` capability: `POST /api/spawn`

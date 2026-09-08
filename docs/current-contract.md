@@ -90,6 +90,14 @@ and return `{ok: true, session}`. See the [backend contract](../backend/README.m
 No persisted shape changes: the existing session changes from `temporary` to
 `directory`; the transcript records a `workspace_move` info event.
 
+Host activity is additive `host-metrics-v1`: both execution runtimes serve
+`GET /api/host/metrics`, returning that node's in-memory CPU history, its
+cores/load/memory/uptime and the trimmed process tree below its own Puppy
+process. The controller's `GET /api/backends/latency` times its already-online
+backends. Neither adds persisted state, changes a backup shape, or moves an
+availability verdict; a node that does not advertise the capability is simply
+not asked.
+
 Cancellation is additive: `operation-cancel-v1` covers audited preparation
 requests and authenticated operation controls; `engine-upgrade-cancel`,
 `side-question-cancel` and `browser-navigation-stop` cover their native running

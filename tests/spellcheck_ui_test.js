@@ -140,6 +140,27 @@ const settle = async () => { for (let i = 0; i < 8; i++) await new Promise(r => 
                       "backend", "repo", "async",
                       "workflow", "ok", "Alice", "spellcheck"])
     assert.equal(spellWordKnown(word), true, word + " is a word");
+  // The supplement carries what this console is typed at; SCOWL's large class
+  // carries the rest of ordinary English.
+  for (const word of ["idempotent", "monorepo", "symlink", "debounce", "subagent",
+                      "worktree", "scrollbar", "telemetry", "unallocated", "unaffordable"])
+    assert.equal(spellWordKnown(word), true, word + " is a word");
+  /* Words English forms rather than collects. SCOWL 2020.12.07 lists none of
+     these; the build derives them from SCOWL's own verbs and inflections, so
+     the console stops underlining what its user actually writes. */
+  for (const word of ["scrollable", "draggable", "resizable", "hoverable", "focusable",
+                      "pluggable", "tappable", "pinnable", "renderable", "dismissable",
+                      "cacheable", "parseable", "unscrollable", "unclickable",
+                      "undraggable", "unresizable"])
+    assert.equal(spellWordKnown(word), true, word + " is a formed word");
+  /* and the shapes English does not form: a stem whose silent-e sibling owns
+     the inflections ("changed" is "change"'s, "raged" is "rage"'s, and "rag"
+     makes "raggable" instead), the "-eable" of a long Latinate verb, and "un-"
+     over something already negative. */
+  for (const word of ["changable", "dyable", "ragable", "wagable", "stagable",
+                      "spicable", "lungable", "invalidateable", "ununsettlable"])
+    assert.equal(spellWordKnown(word), false, word + " is not a word");
+  assert.equal(spellWordKnown("raggable"), true, "the doubled form is the one rag makes");
   for (const word of ["teh", "recieve", "seperate", "definately", "occurence", "Teh",
                       "thsi", "kittn", "backedn"])
     assert.equal(spellWordKnown(word), false, word + " is not");
@@ -175,6 +196,12 @@ const settle = async () => { for (let i = 0; i < 8; i++) await new Promise(r => 
   assert.ok([...spellSuggestions("seperatly")].some(item => item.word === "separately"),
     "a two-edit typo still finds its word");
   assert.ok(spellSuggestions("teh").length <= 6);
+  // A formed word is a suggestion like any other: this is the whole point of
+  // deriving them, since no single edit reaches "scrollable" from "scroll".
+  assert.equal(spellSuggestions("scrolable")[0].word, "scrollable");
+  assert.equal(spellSuggestions("scrollible")[0].word, "scrollable");
+  assert.equal(spellSuggestions("resizeble")[0].word, "resizable");
+  assert.ok([...spellSuggestions("draggble")].some(item => item.word === "draggable"));
 
   // Autocorrect is deliberately timid: one clear candidate, a common word,
   // and a margin over the runner-up. Everything else stays as typed.
@@ -199,6 +226,11 @@ const settle = async () => { for (let i = 0; i < 8; i++) await new Promise(r => 
   assert.equal(spellAutocorrection("wrd"), "", "word or ward: nothing stands clear");
   assert.equal(spellAutocorrection("ot"), "", "two letters say too little");
   assert.equal(spellAutocorrection("zzzqqq"), "", "nothing close enough");
+  assert.equal(spellAutocorrection("scrolable"), "",
+    "a derived word is unranked: Puppy suggests it but never types it");
+  // A supplement word is ranked, because it is one this console reaches for.
+  assert.equal(spellAutocorrection("idempotant"), "idempotent");
+  assert.equal(spellAutocorrection("monrepo"), "monorepo");
 
   /* ---------- the prompt box ---------- */
 

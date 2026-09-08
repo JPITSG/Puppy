@@ -174,6 +174,12 @@ VNC_INSTANCES_CAPABILITY = "vnc-instances"
 # Create request IDs and DELETE /api/vnc/connect/{request_id} abort pending dials.
 VNC_CONNECT_CANCEL_CAPABILITY = "vnc-connect-cancel"
 
+# GET /api/host/metrics reports this node's own CPU history, memory/load
+# facts, and the trimmed process tree descending from its Puppy process. It is
+# read-only telemetry a node keeps in memory only; nothing is persisted and a
+# node either serves the route or does not advertise it.
+HOST_METRICS_CAPABILITY = "host-metrics-v1"
+
 SESSION_REFERENCES_CAPABILITY = "session-references"
 
 BASE_CAPABILITIES = (
@@ -262,6 +268,7 @@ BASE_CAPABILITIES = (
     COMPLETION_EVENTS_CAPABILITY,
     NODE_STATE_STREAM_CAPABILITY,
     SESSION_CONTROL_WS_CAPABILITY,
+    HOST_METRICS_CAPABILITY,
 )
 TERMINAL_CAPABILITY = "terminal"
 # Identified node-owned PTYs, create/list/delete routes, and the ID-scoped

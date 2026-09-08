@@ -442,16 +442,121 @@ a{color:var(--acc2)}
 .foot-row{display:flex;align-items:center;gap:6px;border-top:1px solid var(--line);padding-top:7px}
 #btn-bell.on{color:var(--acc2)}
 .conn-state{display:flex;align-items:center;min-width:0;margin-left:auto}
+/* The reading is also the handle for the box below: a quiet chip until it is
+   hovered, accented while its box is open. */
 .host-cpu{
+  padding:1px 4px;margin:-1px -4px;border:0;border-radius:var(--r-xs);background:transparent;
   color:var(--txt3);font:var(--fs-2xs) var(--mono);font-variant-numeric:tabular-nums;
-  white-space:nowrap;
+  white-space:nowrap;cursor:pointer;
+  transition:background var(--t-base) var(--ease),color var(--t-base) var(--ease);
 }
+@media (hover:hover){.host-cpu:hover{background:var(--hov);color:var(--txt)}}
+.host-cpu:active{background:var(--hov);color:var(--txt)}
+.host-cpu[aria-expanded="true"]{color:var(--acc2)}
 .conn-dot{
   width:var(--dot-sm);height:var(--dot-sm);flex:0 0 auto;margin-left:6px;
   border-radius:50%;transition:background var(--t-slow) var(--ease);
 }
 .gdot.ok,.conn-dot.ok{background:var(--dot-ok)}
 .gdot.bad,.conn-dot{background:var(--dot-bad)}
+.gdot.warn{background:var(--warn)}
+
+/* ---------- host activity ----------
+   Opened by the CPU reading and stacked under the engine stats: this node's
+   CPU history, the round trip to each backend, and the processes Puppy runs
+   on every node. It scrolls on its own, and while it is open the engine box
+   gives up height rather than the session list. */
+.side-foot.host-open .foot-engines{max-height:22dvh}
+.foot-host{
+  display:flex;flex-direction:column;gap:11px;min-height:0;max-height:42dvh;
+  overflow-y:auto;border-top:1px solid var(--line);
+  padding:9px 6px 0 0;margin:0 -6px 0 0;
+}
+.host-sec{display:flex;flex-direction:column;gap:7px;min-width:0}
+.host-sec-head{display:flex;align-items:baseline;gap:6px;min-width:0}
+.host-sec-title{
+  font-family:var(--sans);font-size:var(--fs-2xs);font-weight:400;
+  text-transform:uppercase;letter-spacing:.09em;color:var(--txt3);
+}
+.host-sec-note,.host-node-note{
+  margin-left:auto;flex:0 0 auto;font:var(--fs-2xs) var(--mono);color:var(--txt3);
+  font-variant-numeric:tabular-nums;white-space:nowrap;
+}
+.host-node{display:flex;flex-direction:column;gap:4px;min-width:0}
+.host-node-head{display:flex;align-items:center;gap:6px;min-width:0}
+.host-node-name{
+  min-width:0;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-size:var(--fs-xs);color:var(--txt2);
+}
+/* the chart's own well, so an empty or collecting node still has a shape */
+.host-chart-slot{
+  border:1px solid var(--line);border-radius:var(--r-xs);
+  background:var(--hov-soft);overflow:hidden;
+}
+.host-chart{display:block;width:100%;color:var(--acc2)}
+.host-chart-line{
+  fill:none;stroke:currentColor;stroke-width:1.25;
+  stroke-linejoin:round;stroke-linecap:round;
+}
+.host-chart-area{stroke:none}
+.host-chart-grid{fill:none;stroke:var(--line2);stroke-width:1;stroke-dasharray:2 3}
+.host-chart.spark{flex:0 0 46px;width:46px;margin-left:auto;color:var(--ok)}
+.host-chart-empty{
+  padding:12px 8px;font-size:var(--fs-2xs);color:var(--txt3);text-align:center;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.host-facts{
+  font:var(--fs-2xs) var(--mono);color:var(--txt3);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.host-empty{padding-left:12px;font-size:var(--fs-2xs);color:var(--txt3)}
+.host-ping{display:flex;align-items:center;gap:6px;min-width:0}
+.host-ping-name{
+  min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-size:var(--fs-xs);color:var(--txt2);
+}
+.host-ping-ms{
+  flex:0 0 auto;margin-left:auto;font:var(--fs-2xs) var(--mono);color:var(--txt2);
+  font-variant-numeric:tabular-nums;
+}
+.host-chart.spark+.host-ping-ms{margin-left:0}
+.host-ping-ms.bad{color:var(--err)}
+/* One guide line per row at its own indent: deeper rows sit further right and
+   draw their own, so a subtree reads as a subtree without a canvas. */
+.host-tree{display:flex;flex-direction:column;min-width:0}
+.host-proc{
+  display:flex;align-items:center;gap:5px;min-width:0;
+  margin-left:calc(var(--depth,0) * 8px);padding:1px 0 1px 5px;
+  border-left:1px solid var(--line);font-size:var(--fs-2xs);color:var(--txt2);
+}
+.host-tree>.host-proc:first-child{border-left-color:transparent}
+@media (hover:hover){.host-proc:hover{background:var(--hov-soft)}}
+.host-proc-dot{
+  width:var(--dot-sm);height:var(--dot-sm);flex:0 0 var(--dot-sm);border-radius:50%;
+  color:var(--txt3);background:currentColor;
+}
+.host-proc-dot.k-puppy{color:var(--acc)}
+.host-proc-dot.k-claude{color:var(--claude)}
+.host-proc-dot.k-codex{color:var(--codex)}
+.host-proc-dot.k-opencode{color:var(--opencode)}
+.host-proc-dot.k-browser{color:var(--cyan)}
+.host-proc-dot.k-bridge{color:var(--violet)}
+.host-proc-dot.k-shell{color:var(--term)}
+.host-proc-name{
+  min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-family:var(--mono);
+}
+.host-proc-count{flex:0 0 auto;color:var(--txt3);font-family:var(--mono)}
+.host-proc-cpu{
+  flex:0 0 auto;margin-left:auto;min-width:32px;text-align:right;
+  font-family:var(--mono);font-variant-numeric:tabular-nums;color:var(--txt2);
+}
+.host-proc-cpu.quiet{color:var(--txt3)}
+.host-proc-rss{
+  flex:0 0 auto;min-width:34px;text-align:right;
+  font-family:var(--mono);font-variant-numeric:tabular-nums;color:var(--txt3);
+}
+.host-proc-more{color:var(--txt3)}
 .side-backdrop,.drawer-edge{display:none}
 
 /* ---------- buttons & inputs ---------- */

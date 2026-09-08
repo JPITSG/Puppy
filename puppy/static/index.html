@@ -34,13 +34,16 @@
     </div>
     <div class="side-foot">
       <div class="foot-engines" id="foot-engines"></div>
+      <div class="foot-host hidden" id="foot-host" role="region"
+        aria-label="Host activity"></div>
       <div class="foot-row">
         <button class="icon-btn" id="btn-settings" aria-label="Settings"></button>
         <button class="icon-btn" id="btn-theme" aria-label="Toggle light/dark mode"></button>
         <button class="icon-btn hidden" id="btn-bell" aria-label="Completion alerts"></button>
         <button class="icon-btn" id="btn-logout" aria-label="Sign out"></button>
         <span class="conn-state">
-          <span class="host-cpu hidden" id="host-cpu"></span>
+          <button type="button" class="host-cpu hidden" id="host-cpu"
+            aria-expanded="false" aria-controls="foot-host"></button>
           <span class="conn-dot" id="conn-dot" role="img" aria-label="Connection status"></span>
         </span>
       </div>

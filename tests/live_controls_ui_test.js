@@ -66,9 +66,13 @@ const context = vm.createContext({
   remoteStoppingMessage: () => "",
   browserEnabledFor: bid => bid ? !!state.remoteBrowser[bid]?.enabled : !!state.browser.enabled,
   closeBrowserTabsForBackend() {},
-  refreshChoiceSelect() {}, enhanceChoiceSelect() {},
+  refreshChoiceSelect() {}, enhanceChoiceSelect() {}, openChoiceControl: null,
   provSpec: key => ({ className: key, text: key }), sessDot: () => el("span"), choiceSvg: () => el("svg"), refreshIcon: () => el("svg"),
   refreshEngineVersions: bid => requests.push({ bid, route: "engines/refresh" }),
+  rememberEnginePayload(bid, result) {
+    if (bid) state.engCache[bid] = result.engines; else state.engines = result.engines;
+    for (const listener of enginePayloadListeners) listener(Number(bid) || 0, result.engines);
+  },
   esc: text => String(text), layoutSwatchRow() {},
   linkifyInto: (node, text) => { node.textContent = text; },
   window: { addEventListener() {}, removeEventListener() {} }, wireDirectoryPicker() {},
@@ -158,6 +162,23 @@ function engineCatalog(fast = false) {
   let model;
   view.applyModelChoice = value => { model = value; };
   button(models, "New model").click(); assert.equal(model, "new");
+  /* Same rule in the composer: while this engine's catalog has not answered,
+     the session's model is named plainly rather than reported as a choice
+     the engine no longer offers. */
+  view.session.model = "long[1m]";
+  state.engines[0].dynamic_model_options = true;
+  state.engines[0].model_catalog_loaded = false;
+  const provisional = view.showModelMenu(anchor);
+  assert.ok(button(provisional, "long[1m]"), "a pending catalog offers the model by name");
+  assert.equal(button(provisional, "Current: long[1m]"), undefined);
+  provisional.remove();
+  state.engines[0].model_catalog_loaded = true;
+  const answered = view.showModelMenu(anchor);
+  assert.ok(button(answered, "Current: long[1m]"), "an answered catalog reports an unknown model");
+  answered.remove();
+  view.session.model = "model";
+  delete state.engines[0].dynamic_model_options;
+  delete state.engines[0].model_catalog_loaded;
   const withdrawn = toolsMenu(view, anchor);
   state.engines[0].tool_options = []; update();
   assert.equal(button(withdrawn, "Compact context").disabled, true, "withdrawn actions disable live");
@@ -322,6 +343,45 @@ function engineCatalog(fast = false) {
   assert.equal(scratch.disabled, false);
   assert.equal(backend.value, "7");
   dialog.close(); assert.equal(nodeStateListeners.size, 0); assert.equal(enginePayloadListeners.size, 0);
+  update();
+
+  /* A dynamic catalog that has not answered is serving its driver's
+     provisional fallback list, so a saved default missing from it is not a
+     hand-typed model: it stays a model by name, and the answer that finally
+     describes it must not leave the picker stuck on "Custom…". */
+  const named = { value: "long[1m]", label: "Long context",
+    effort_options: [{ value: "high", label: "High" }] };
+  const pending = { ...engineCatalog()[0], allow_custom_model: true,
+    dynamic_model_options: true, model_catalog_loaded: false,
+    session_defaults: { permission_mode: "safe", model: named.value, effort: "high" } };
+  state.engines = [pending];
+  apiReply = { engines: [{ ...pending, model_catalog_loaded: true,
+    model_options: [...pending.model_options, named] }] };
+  let releaseEngines;
+  hold = new Promise(resolve => { releaseEngines = resolve; });
+  const opening = context.modalNewSession();
+  await new Promise(resolve => setImmediate(resolve));
+  const nsModel = dialog.m.querySelector("#ns-model");
+  const nsCustom = dialog.m.querySelector("#ns-model-custom");
+  const nsCustomWrap = dialog.m.querySelector("#ns-model-custom-wrap");
+  assert.equal(nsModel.value, named.value, "a provisional catalog cannot invent a custom model");
+  assert.equal(nsCustom.value, "");
+  assert.equal(nsCustomWrap.classList.contains("hidden"), true);
+  releaseEngines(); hold = null; await opening;
+  assert.equal(nsModel.value, named.value, "the answered catalog keeps that model");
+  assert.equal(nsModel.options.find(option => option.value === named.value).textContent, named.label);
+  assert.equal(nsCustomWrap.classList.contains("hidden"), true);
+  nsModel.value = "__custom__"; nsModel.onchange();
+  nsCustom.value = "mine/only"; nsCustom.oninput();
+  context.rememberEnginePayload(0, apiReply);
+  assert.equal(nsModel.value, "__custom__", "a model the engine never offers keeps the box open");
+  assert.equal(nsCustom.value, "mine/only");
+  nsCustom.value = named.value; nsCustom.oninput();
+  context.rememberEnginePayload(0, apiReply);
+  assert.equal(nsModel.value, named.value, "a refresh stops calling a catalogued model custom");
+  assert.equal(nsCustomWrap.classList.contains("hidden"), true);
+  dialog.close();
+  state.engines = engineCatalog(); apiReply = {};
   update();
 
   /* Permission cards stay until the backend confirms. Disconnects disable

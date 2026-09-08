@@ -1045,6 +1045,80 @@ async def probe_configured_backend(backend: dict, timeout: float = 8.0) -> dict:
     return result
 
 
+# Round-trip latency between this instance and each paired node. It is a
+# measurement, never a discovery: an offline node is reported from the
+# controller's own health verdict rather than probed here, and a failed
+# measurement never moves that verdict - only the health worker and the
+# explicit Test button may.
+LATENCY_TIMEOUT_SECONDS = 6.0
+LATENCY_CACHE_SECONDS = 1.5
+_latency = {"at": 0.0, "payload": None, "task": None}
+
+
+async def _measure_latency(backend: dict) -> dict:
+    bid = int(backend["id"])
+    row = {"id": bid, "name": str(backend.get("name") or bid)}
+    if not backend_is_online(bid):
+        availability = _availability(bid)
+        return dict(row, ok=False, offline=True,
+                    error=availability.get("reason") or "backend is unavailable")
+    urls = _ordered_backend_urls(backend)
+    if not urls:
+        return dict(row, ok=False, error="backend has no configured URL")
+    url = urls[0]
+    # The shared client pools its connections, so every measurement after the
+    # first is the request itself rather than a fresh handshake.
+    started = time.perf_counter()
+    try:
+        async with client().get(
+                "{}/api/ping".format(url.rstrip("/")),
+                headers={"X-Puppy-Token": backend["token"]},
+                timeout=aiohttp.ClientTimeout(total=LATENCY_TIMEOUT_SECONDS),
+                allow_redirects=False,
+                ssl=_ssl_pin(backend.get("tls_fingerprint") or "")) as response:
+            await response.read()
+            elapsed = (time.perf_counter() - started) * 1000.0
+            if response.status != 200:
+                return dict(row, ok=False, url=url,
+                            error="HTTP {}".format(response.status))
+    except asyncio.TimeoutError:
+        return dict(row, ok=False, url=url, error="timed out")
+    except Exception as exc:
+        return dict(row, ok=False, url=url, error=_connection_error(exc))
+    return dict(row, ok=True, url=url, ms=round(elapsed, 1))
+
+
+async def _measure_all_latency() -> dict:
+    configured = [get_backend(int(item["id"])) for item in list_backends()]
+    rows = await asyncio.gather(*(
+        _measure_latency(backend) for backend in configured if backend is not None))
+    payload = {"ok": True, "measured_at": time.time(), "backends": list(rows)}
+    _latency.update({"at": time.monotonic(), "payload": payload})
+    return payload
+
+
+async def measure_latency() -> dict:
+    """One shared measurement per moment, however many consoles are watching."""
+    now = time.monotonic()
+    cached = _latency["payload"]
+    if cached is not None and 0 <= now - _latency["at"] < LATENCY_CACHE_SECONDS:
+        return cached
+    task = _latency["task"]
+    if task is None or task.done():
+        task = asyncio.ensure_future(_measure_all_latency())
+        _latency["task"] = task
+    return await asyncio.shield(task)
+
+
+async def h_latency(request: web.Request):
+    try:
+        return web.json_response(await measure_latency())
+    except Exception as exc:
+        log.warning("backend latency measurement failed", exc_info=True)
+        return web.json_response(
+            {"error": "could not measure backend latency: {}".format(exc)}, status=500)
+
+
 def _metadata(remote: dict) -> tuple:
     return (
         int(remote.get("protocol", 0)),
@@ -2133,6 +2207,7 @@ async def close_client() -> None:
 
 def register(app: web.Application) -> None:
     app.router.add_get("/api/backends", h_list)
+    app.router.add_get("/api/backends/latency", h_latency)
     app.router.add_post("/api/backends", h_add)
     app.router.add_patch("/api/backends/{bid:\\d+}", h_patch)
     app.router.add_delete("/api/backends/{bid:\\d+}", h_delete)

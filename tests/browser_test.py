@@ -3813,6 +3813,8 @@ const exact={allow_custom_model:false,model_options:[
   effort_options:[{value:"",label:"Default"},{value:"max",label:"Max"}]};
 const custom={allow_custom_model:true,model_options:[],
   effort_options:[{value:"",label:"Default"},{value:"max",label:"Max"}]};
+const pending={...exact,dynamic_model_options:true,model_catalog_loaded:false};
+const answered={...pending,model_catalog_loaded:true};
 const saved={permission_mode:"read-only",model:"known",effort:"high"};
 const current=initialEngineConfig({...exact,session_defaults:saved});
 current.model="changed";
@@ -3831,6 +3833,15 @@ console.log(JSON.stringify({
   missingDefaultsRejected,
   nativeDefault:effortOptionsForModel(exact,"known")[0].label,
   unavailable:select.children[0].disabled && select.value === "retired",
+  /* a catalog that has not answered is not evidence that a saved model was
+     typed by hand, nor that its effort levels are unsupported */
+  pendingEfforts:effortOptionsForModel(pending,"unlisted").map(item=>item.value),
+  pendingCustom:isCustomModel(pending,"unlisted"),
+  answeredCustom:isCustomModel(answered,"unlisted"),
+  offered:[isCustomModel(answered,"known"),engineOffersModel(answered,"known")],
+  pendingRow:pendingModelRows(pending,"unlisted").map(item=>item.value),
+  answeredRow:pendingModelRows(answered,"unlisted"),
+  knownRow:pendingModelRows(pending,"known"),
 }));
 '''
     proc = subprocess.run(["node", "--input-type=module", "-e", with_live_views(script)],
@@ -3840,7 +3851,10 @@ console.log(JSON.stringify({
         "known": ["", "high"], "retired": [""], "custom": ["", "max"],
         "saved": {"permission_mode": "read-only", "model": "known", "effort": "high"},
         "missingDefaultsRejected": True,
-        "nativeDefault": "Engine default", "unavailable": True}
+        "nativeDefault": "Engine default", "unavailable": True,
+        "pendingEfforts": ["", "max"], "pendingCustom": False,
+        "answeredCustom": True, "offered": [False, True],
+        "pendingRow": ["unlisted"], "answeredRow": [], "knownRow": []}
 
 
 def check_timer_settings_ui(ui_source: str, css_source: str) -> None:
