@@ -1677,8 +1677,9 @@ async def host_panel_checks(instance, capture=False):
         assert abs(spacing["below"] - 8) < 0.6, spacing
         # Every leading dot in the footer stands in one column, the box's as
         # much as the backend and engine rows above it: whatever the dot's
-        # size, its centre is the same distance from the sidebar's edge as the
-        # text after it is from the dot - the same air on either side.
+        # size its centre is the same distance from the sidebar's edge, and
+        # the name belongs to its dot - the air after the dot is half the air
+        # before it.
         column = await evaluate(instance, """(() => {
             const edge=document.getElementById('side').getBoundingClientRect().left;
             const ink=node=>{const range=document.createRange();range.selectNode(node);
@@ -1702,7 +1703,7 @@ async def host_panel_checks(instance, capture=False):
             };
         })()""")
         for row in column.values():
-            assert abs(row["before"] - row["after"]) < 0.6, column
+            assert abs(row["before"] / 2 - row["after"]) < 0.6, column
             assert abs(row["mid"] - column["backend"]["mid"]) < 0.6, column
         # A known series, drawn: the line spans the well, the peak reaches its
         # top and the trough its floor, and the stroke keeps its width despite

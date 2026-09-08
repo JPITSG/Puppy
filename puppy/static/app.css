@@ -46,10 +46,11 @@
   /* status dots: session/engine identity, and the small availability marks */
   --dot:9px; --dot-sm:6px;
   /* The sidebar footer's one dot column: a cell pulled left of the content
-     edge so whatever stands in it is centred between the sidebar's own edge
-     and the text that follows the cell - the same air on both sides of every
-     leading dot, whatever that dot's size. */
-  --foot-ico:24px; --foot-ico-pull:8px;
+     edge so whatever stands in it is centred on the one column, whatever that
+     dot's size. The name belongs to its dot, so the air between them is half
+     the air between the dot and the sidebar's own edge - the cell's centre
+     stays 18px in and the text follows 6px past its 10px cell, at 29px. */
+  --foot-ico:10px; --foot-ico-pull:1px;
   /* Availability marks share brighter fills; text keeps its readable palette. */
   --dot-ok:#2befac; --dot-bad:#ff7a8e;
   /* hover washes: rows and heads take the soft one, --hov is for controls,
@@ -441,11 +442,12 @@ a{color:var(--acc2)}
 .foot-node-act svg{display:block}
 @media (hover:hover){.foot-node-act:hover{background:var(--hov);color:var(--txt)}}
 .foot-node-act:active{background:var(--hov);color:var(--txt);transform:scale(.9)}
-.foot-engine-empty{padding-left:22px;color:var(--txt3);font-size:var(--fs-2xs)}
+.foot-engine-empty{padding-left:15px;color:var(--txt3);font-size:var(--fs-2xs)}
 .foot-eng{display:flex;align-items:center;gap:6px;min-width:0;font-size:var(--fs-xs);color:var(--txt2)}
 /* The footer's one dot column, shared by the backend heads, the engine rows
-   and the host box below them: the pull puts its centre 18px from the
-   sidebar's edge, exactly half of where the text after it starts. */
+   and the host box below them: the pull keeps its centre 18px from the
+   sidebar's edge while the name that follows starts at 29px, so a dot sits
+   about twice as far from the edge as from its own text. */
 .foot-ico{
   width:var(--foot-ico);display:flex;align-items:center;justify-content:center;
   flex-shrink:0;margin-left:calc(-1 * var(--foot-ico-pull));
@@ -544,7 +546,7 @@ a{color:var(--acc2)}
 .host-fact{flex:1 1 0;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .host-fact.mid{text-align:center}
 .host-fact.end{text-align:right}
-.host-empty{padding-left:22px;font-size:var(--fs-2xs);color:var(--txt3)}
+.host-empty{padding-left:15px;font-size:var(--fs-2xs);color:var(--txt3)}
 .host-ping{display:flex;align-items:center;gap:6px;min-width:0}
 .host-ping-name{
   min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;

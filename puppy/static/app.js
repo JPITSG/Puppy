@@ -6705,8 +6705,9 @@ function wireNodeGroupDropZone(root) {
 
 /* The footer's one dot column. A backend's health, an engine's colour and a
    host row's kind are all leading marks of different sizes, so each is
-   centred in the same cell rather than laid against the edge: the air on
-   either side of the dot stays equal and every name starts in one column. */
+   centred in the same cell rather than laid against the edge, and every name
+   starts in one column - close behind its dot, which keeps twice that air
+   between itself and the sidebar's edge. */
 function footIcon(mark) {
   const ico = el("span", "foot-ico");
   ico.appendChild(mark);
