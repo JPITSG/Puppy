@@ -8487,7 +8487,7 @@ function dismissMenusOutside(event) {
   if (!add.classList.contains("hidden") && within(add, tabAddAnchor)) return;
   if (openChoiceControl && within(openChoiceControl.menu, openChoiceControl.button)) return;
   for (const menu of document.querySelectorAll(".menu.dyn,.choice-menu.dyn"))
-    if (within(menu, menu._anchor)) return;
+    if (within(menu, menu._floating ? null : menu._anchor)) return;
   closeAllMenus(null);
 }
 for (const kind of ["pointerdown", "focusin", "click"])
@@ -8534,6 +8534,10 @@ function openChoiceMenu(anchor, { opts = [], current = "", onPick = () => {},
   const menu = el("div", "choice-menu composer-choice-menu dyn");
   menu._ownerView = ownerView;
   menu._anchor = anchor;
+  /* A menu opened at a point floats over its anchor rather than hanging from
+     it (a right-click on a prompt box): a press anywhere but on the menu
+     itself, the anchor included, closes it. */
+  menu._floating = !!at;
   menu.setAttribute("role", footers.length ? "group" : actions ? "menu" : "listbox");
   menu.setAttribute("aria-label", label ||
     anchor.getAttribute("aria-label") || tips.text(anchor) || "Choices");
@@ -8811,15 +8815,23 @@ const SPELL_DRAW_DELAY = 140;       // typing settles before the marks move
 const SPELL_RETRY_MS = 60000;       // a failed dictionary fetch may be retried
 const SPELL_SUGGESTIONS = 6;
 const SPELL_RANK_RARE = 5;          // a known word carrying no rank digit
-/* What each way of being wrong costs. A transposition and a missing
-   apostrophe are the typist's fault rather than the speller's, so they win
-   against a substitution that would produce a different word entirely. */
-const SPELL_COST = { swap: 0, apostrophe: 0, sub: 1, ins: 1, del: 1, far: 2 };
-/* Rank breaks ties between candidates the same distance away; it is kept
+/* What each way of being wrong costs. A transposition, a missing apostrophe
+   and a letter struck twice (or once where it was wanted twice: "woord",
+   "hhigh", "untill", "tomorow") are the typist's fault rather than the
+   speller's, so they win against a substitution that would produce a
+   different word entirely. */
+const SPELL_COST = { swap: 0, apostrophe: 0, double: 0.25, sub: 1, ins: 1, del: 1, far: 2 };
+/* Rank breaks ties between suggestions the same distance away; it is kept
    small enough that a rarer word one edit off still beats a common word two
    edits off, which is how a name survives beside everyday prose. */
 const SPELL_RANK_COST = 0.15;
-const SPELL_CORRECT_MARGIN = 0.9;   // an autocorrection must beat the next best by this
+/* Autocorrect weighs rank more, because Puppy is about to type the word for
+   you, and still demands a clear winner: at the same edit cost only a word
+   three rank steps commoner than the runner-up ("woord" is "word", not
+   "wood") may be typed without asking; "grep" stays as typed rather than
+   becoming "grew". */
+const SPELL_CORRECT_RANK_COST = 0.25;
+const SPELL_CORRECT_MARGIN = 0.75;  // an autocorrection must beat the next best by this
 const SPELL_EDIT_LETTERS = "abcdefghijklmnopqrstuvwxyz";
 /* Letters, the accented Latin ones a dictionary word may carry, and the
    apostrophes that hold a contraction or a possessive together. */
@@ -9105,17 +9117,21 @@ function spellNeighbours(word) {
     const seen = out.get(candidate);
     if (seen === undefined || seen > cost) out.set(candidate, cost);
   };
+  /* a letter beside its twin was struck twice, or once too few times */
+  const doubled = (i) => word[i] === word[i - 1] || word[i] === word[i + 1];
   for (let i = 0; i < word.length; i++) {
-    note(word.slice(0, i) + word.slice(i + 1), SPELL_COST.del);
+    note(word.slice(0, i) + word.slice(i + 1), doubled(i) ? SPELL_COST.double : SPELL_COST.del);
     if (i + 1 < word.length)
       note(word.slice(0, i) + word[i + 1] + word[i] + word.slice(i + 2), SPELL_COST.swap);
     for (const letter of SPELL_EDIT_LETTERS) {
       if (letter !== word[i]) note(word.slice(0, i) + letter + word.slice(i + 1), SPELL_COST.sub);
-      note(word.slice(0, i) + letter + word.slice(i), SPELL_COST.ins);
+      note(word.slice(0, i) + letter + word.slice(i),
+        letter === word[i] || letter === word[i - 1] ? SPELL_COST.double : SPELL_COST.ins);
     }
     if (i > 0) note(word.slice(0, i) + "'" + word.slice(i), SPELL_COST.apostrophe);
   }
-  for (const letter of SPELL_EDIT_LETTERS) note(word + letter, SPELL_COST.ins);
+  for (const letter of SPELL_EDIT_LETTERS)
+    note(word + letter, letter === word[word.length - 1] ? SPELL_COST.double : SPELL_COST.ins);
   return out;
 }
 
@@ -9225,7 +9241,7 @@ function spellAutocorrection(word) {
     if (opensLower && entry.word.charAt(0) !== entry.word.charAt(0).toLowerCase()) continue;
     const shown = spellMatchCase(word, entry.word);
     if (shown === word) continue;
-    scored.push({ word: shown, score: cost + SPELL_RANK_COST * entry.rank });
+    scored.push({ word: shown, score: cost + SPELL_CORRECT_RANK_COST * entry.rank });
   }
   if (!scored.length) return "";
   scored.sort((a, b) => a.score - b.score || (a.word < b.word ? -1 : 1));
@@ -9354,7 +9370,12 @@ class Composer {
     this.spellEditing = false;    // a correction is being applied through this box
     this.spellFix = null;         // the last autocorrection, while it can still be undone
     this.spellRefused = new Set();// words this box was told, by an undo, to leave alone
+    this.spellTypingAt = null;    // the caret after the last keystroke, while it stays there
+    this.spellHeld = false;       // the last paint withheld the mark on the word being typed
     this.ta.addEventListener("scroll", () => this.spellSync(), { passive: true });
+    this.ta.addEventListener("blur", () => this.spellCaretMoved());
+    this.ta.addEventListener("keyup", () => this.spellCaretMoved());
+    this.ta.addEventListener("pointerup", () => this.spellCaretMoved());
     this.ta.addEventListener("contextmenu", (e) => this.spellContextMenu(e));
     this.ta.addEventListener("paste", (e) => this.handlePaste(e));
     box.addEventListener("dragenter", (e) => this.handleFileDragEnter(e));
@@ -9416,6 +9437,7 @@ class Composer {
        list follows the caret, so it listens to the document-level selection. */
     this._onSelectionChange = () => {
       if (document.activeElement === this.ta) this.updateMention();
+      this.spellCaretMoved();
     };
     document.addEventListener("selectionchange", this._onSelectionChange);
     Composer.live.add(this);
@@ -9576,7 +9598,18 @@ class Composer {
      cost the browser's own caret, undo and IME behaviour. */
   spellPaint() {
     const text = this.ta.value;
-    const marks = spellMisspellings(text);
+    const caret = this.spellTypingCaret();
+    let marks = spellMisspellings(text);
+    this.spellHeld = false;
+    /* The word still under the typist's fingers is not misspelled yet, it is
+       unfinished: its mark waits for the space, the punctuation or the caret
+       leaving it. Only the word the caret sits in or at the end of is held
+       back, and only while it has not moved since the last keystroke. */
+    if (caret !== null) marks = marks.filter(mark => {
+      const typing = mark.start < caret && caret <= mark.end;
+      if (typing) this.spellHeld = true;
+      return !typing;
+    });
     if (!marks.length) { this.spellClear(); return; }
     const layer = this.spellLayer || this.spellLayerNode();
     const parts = [];
@@ -9607,6 +9640,25 @@ class Composer {
     return layer;
   }
 
+  /* Where the last keystroke left the caret, if it is still there and the box
+     still has focus; null once the typist has moved on or away. */
+  spellTypingCaret() {
+    const ta = this.ta, at = this.spellTypingAt;
+    if (at === null || document.activeElement !== ta) return null;
+    if (ta.selectionStart !== at || ta.selectionEnd !== at) return null;
+    return at;
+  }
+
+  /* The caret moved without a keystroke (arrow keys, a click, a touch), or
+     the box lost focus: whatever word was being typed is finished now, and a
+     mark held back for it is painted. */
+  spellCaretMoved() {
+    if (this.closed || this.spellTypingAt === null) return;
+    if (this.spellTypingCaret() !== null) return;
+    this.spellTypingAt = null;
+    if (this.spellHeld) this.spellDraw();
+  }
+
   spellSync() {
     const layer = this.spellLayer;
     if (!layer || !this.ta.isConnected) return;
@@ -9630,6 +9682,12 @@ class Composer {
     if (this.closed) return;
     if (!this.spellEditing) {
       this.spellNoteUndo();
+      /* a keystroke - typed or deleted - leaves the caret in a word that is
+         still being written; a paste, a drop or an undo lands finished text */
+      const type = event && event.inputType ? String(event.inputType) : "";
+      const ta = this.ta;
+      this.spellTypingAt = (SPELL_TYPED_INPUT.has(type) || type.startsWith("delete")) &&
+        ta.selectionStart === ta.selectionEnd ? ta.selectionStart : null;
       if (spellPrefs.check && spellPrefs.correct && spellDictionary.data)
         this.spellCorrect(event);
     }
@@ -9784,6 +9842,7 @@ class Composer {
     this.hideMention();
     this.resize();
     this.spellFix = null;
+    this.spellTypingAt = null;
     this.spellRefused.clear();   // a new message starts with no refusals
     this.spellDraw(true);
     this.histDraft = "";
@@ -9820,6 +9879,7 @@ class Composer {
     this.ta.selectionStart = this.ta.selectionEnd = v.length;
     this.resize();
     this.spellFix = null;
+    this.spellTypingAt = null;    // recalled text is finished text
     this.spellDraw();
     scrollCaretIntoView(this.ta);   // recalling a long entry lands on its end
     this.notify(true);
@@ -10106,6 +10166,7 @@ class Composer {
     this.resize();
     /* A peer's draft is marked like any other text; it is never corrected. */
     this.spellFix = null;
+    this.spellTypingAt = null;
     this.spellDraw();
   }
 

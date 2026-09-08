@@ -184,8 +184,19 @@ const settle = async () => { for (let i = 0; i < 8; i++) await new Promise(r => 
   assert.equal(spellAutocorrection("dont"), "don't");
   assert.equal(spellAutocorrection("recieve"), "receive");
   assert.equal(spellAutocorrection("Teh"), "The");
+  // a letter struck twice, or once too few times, is the commonest slip of all
+  assert.equal(spellAutocorrection("woord"), "word", "not wood");
+  assert.equal(spellAutocorrection("hhigh"), "high", "not thigh");
+  assert.equal(spellAutocorrection("untill"), "until");
+  assert.equal(spellAutocorrection("tomorow"), "tomorrow");
+  assert.equal(spellAutocorrection("accross"), "across");
+  assert.equal(spellAutocorrection("begining"), "beginning");
+  assert.equal(spellSuggestions("woord")[0].word, "word");
   assert.equal(spellAutocorrection("the"), "", "a word it knows is left alone");
   assert.equal(spellAutocorrection("ther"), "", "an ambiguous typo is the writer's");
+  assert.equal(spellAutocorrection("realy"), "", "relay or really: the writer's call");
+  assert.equal(spellAutocorrection("grep"), "", "a commoner word is not reason enough");
+  assert.equal(spellAutocorrection("wrd"), "", "word or ward: nothing stands clear");
   assert.equal(spellAutocorrection("ot"), "", "two letters say too little");
   assert.equal(spellAutocorrection("zzzqqq"), "", "nothing close enough");
 
@@ -273,6 +284,52 @@ const settle = async () => { for (let i = 0; i < 8; i++) await new Promise(r => 
   assert.equal(b.box.querySelector(".spell-layer"), null, "off means no marks at all");
   setSpellPref("check", true);
   assert.deepEqual(painted(b.box), ["teh", "jumpd"], "and on brings them straight back");
+
+  // The word under the typist's fingers is unfinished, not misspelled: its
+  // mark waits for the word to end, or for the caret to leave it.
+  const held = makeBox();
+  held.ta.focus();
+  type(held.composer, "teh quick wro");
+  held.composer.spellDraw(true);
+  assert.deepEqual(painted(held.box), ["teh"], "the word being typed carries no mark");
+  assert.equal(layerText(held.box), "teh quick wro\n");
+  type(held.composer, "d");
+  held.composer.spellDraw(true);
+  assert.deepEqual(painted(held.box), ["teh"]);
+  type(held.composer, " ");
+  held.composer.spellDraw(true);
+  assert.deepEqual(painted(held.box), ["teh", "wrod"], "finished by a space, it is marked");
+  type(held.composer, "jumpd");
+  held.composer.spellDraw(true);
+  assert.deepEqual(painted(held.box), ["teh", "wrod"]);
+  // backspacing into the word keeps it under the fingers
+  held.ta.value = "teh quick wrod jum";
+  held.ta.selectionStart = held.ta.selectionEnd = held.ta.value.length;
+  fire(held.ta, "input", { inputType: "deleteContentBackward" });
+  held.composer.spellDraw(true);
+  assert.deepEqual(painted(held.box), ["teh", "wrod"]);
+  // the caret leaving the word (a click, an arrow key) finishes it
+  held.ta.selectionStart = held.ta.selectionEnd = 3;
+  fire(held.ta, "keyup", { key: "Home" });
+  await new Promise(resolve => setTimeout(resolve, 200));
+  assert.deepEqual(painted(held.box), ["teh", "wrod", "jum"]);
+  // so does leaving the box
+  held.ta.selectionStart = held.ta.selectionEnd = held.ta.value.length;
+  type(held.composer, "pd");
+  held.composer.spellDraw(true);
+  assert.deepEqual(painted(held.box), ["teh", "wrod"]);
+  held.ta.blur();
+  fire(held.ta, "blur");
+  await new Promise(resolve => setTimeout(resolve, 200));
+  assert.deepEqual(painted(held.box), ["teh", "wrod", "jumpd"], "a blurred box hides nothing");
+  // a paste lands finished text: the caret at its end holds nothing back
+  held.ta.focus();
+  held.ta.value = "teh quick wrod jumpd teh";
+  held.ta.selectionStart = held.ta.selectionEnd = held.ta.value.length;
+  fire(held.ta, "input", { inputType: "insertFromPaste", data: " teh" });
+  held.composer.spellDraw(true);
+  assert.deepEqual(painted(held.box), ["teh", "wrod", "jumpd", "teh"]);
+  held.ta.blur();
 
   // Autocorrect finishes a word, and only when the switch is on.
   const c = makeBox();

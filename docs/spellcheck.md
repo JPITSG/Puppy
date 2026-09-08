@@ -79,7 +79,10 @@ A candidate's score is the cost of the edit that reaches it plus a small rank
 term (`SPELL_RANK_COST`), kept small enough that a rarer word one edit away
 still beats a common word two edits away. Transpositions and missing
 apostrophes cost nothing — they are the typist's slip rather than a different
-word — so `adn` becomes `and` and `dont` becomes `don't`.
+word — so `adn` becomes `and` and `dont` becomes `don't`; a letter struck
+twice, or once where it was wanted twice, costs a quarter of a real edit
+(`SPELL_COST.double`), so `woord` finds `word` before `wood` and `untill`,
+`tomorow` and `accross` find their words.
 
 The suggestion menu (right-click, or a long press on Android) also scans the
 ranked words for anything two edits away, which is how `seperatly` finds
@@ -94,8 +97,14 @@ this holds:
   `insertLineBreak`, `insertParagraph`), never a paste, a drop or a deletion;
 - the character just typed finishes a word (whitespace or sentence
   punctuation), and the word before it is prose the dictionary does not know;
-- exactly one candidate one edit away is a **ranked** word, and it beats the
-  runner-up by `SPELL_CORRECT_MARGIN`;
+- the best candidate one edit away is a **ranked** word, and it beats the
+  runner-up by `SPELL_CORRECT_MARGIN`. Autocorrect scores rank more heavily
+  than the suggestion list does (`SPELL_CORRECT_RANK_COST`, since Puppy is
+  about to type the word for you) but not enough for commonness alone to
+  decide between two candidates the same edit away: `woord` becomes `word`
+  because the doubled letter is the cheaper edit, while `grep` is never turned
+  into `grew` and `wrd` is left for the writer to settle between `word` and
+  `ward`;
 - the candidate does not merely capitalise what was typed - autocorrect never
   decides you meant a name.
 
@@ -116,6 +125,22 @@ after every paint, on every textarea scroll, and from a `ResizeObserver`, so a
 box that grows or a window that changes width keeps its marks over their words.
 `tests/console_browser_test.py` asserts the two boxes and their scroll heights
 match to the pixel in real Chromium.
+
+The word still under the typist's fingers is unfinished, not misspelled, so it
+carries no mark until it ends. After a keystroke (typed or deleted, never a
+paste, a drop or an undo) `Composer` remembers where it left the caret; while
+the box has focus and the caret has not moved, the mark on the word the caret
+sits in or at the end of is withheld. The space or punctuation that ends the
+word paints it at once, and so does the caret leaving the word by arrow key,
+click or touch (the document's `selectionchange`, the field's `keyup` and
+`pointerup`) or the box losing focus. Paints are still debounced by
+`SPELL_DRAW_DELAY` behind the typing.
+
+The suggestion menu is the console's ordinary choice menu opened at the
+pointer (`openChoiceMenu` with `at`): it takes the arrow keys without a focus
+ring of the browser's own, and because it floats over its anchor rather than
+hanging from a button, a press anywhere but on the menu itself - the prompt
+box included - closes it.
 
 ## Nuances worth knowing
 

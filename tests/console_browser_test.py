@@ -943,6 +943,21 @@ async def spell_check_checks(instance, capture=False):
         "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
     keys = [{"type": "keyDown", "text": ch, "unmodifiedText": ch,
              "key": ch, "windowsVirtualKeyCode": ord(ch.upper())} for ch in "teh "]
+
+    async def press(text):
+        for ch in text:
+            code = ord(ch.upper())
+            await instance.call("Input.dispatchKeyEvent", {"type": "keyDown", "text": ch,
+                "unmodifiedText": ch, "key": ch, "windowsVirtualKeyCode": code},
+                session=instance.page_session)
+            await instance.call("Input.dispatchKeyEvent", {"type": "keyUp", "key": ch,
+                "windowsVirtualKeyCode": code}, session=instance.page_session)
+
+    async def click(x, y):
+        for kind in ("mousePressed", "mouseReleased"):
+            await instance.call("Input.dispatchMouseEvent", {"type": kind, "x": x, "y": y,
+                "button": "left", "clickCount": 1}, session=instance.page_session)
+
     try:
         # The console's own boxes never hand their text to the browser's checker.
         assert await evaluate(instance, """(() => {
@@ -1008,6 +1023,24 @@ async def spell_check_checks(instance, capture=False):
                                        session=instance.page_session)
             (BASE / "data" / "spell-marks.png").write_bytes(base64.b64decode(shot["data"]))
 
+        # A word still being typed is not marked; the space that ends it, or the
+        # caret leaving it, is what earns the underline.
+        await evaluate(instance, "demoView.composer.set(''); demoView.composer.ta.focus(); true")
+        await press("woord")
+        await until(instance, "demoView.composer.ta.value === 'woord'")
+        await asyncio.sleep(.4)
+        assert await evaluate(instance, "!demoView.composer.box.querySelector('.sp-bad')"), \
+            "the word under the fingers carries no mark"
+        await press(" ")
+        await until(instance, "demoView.composer.box.querySelector('.sp-bad')?.textContent === 'woord'")
+        await press("hhigh")
+        await asyncio.sleep(.4)
+        assert await evaluate(instance, "demoView.composer.box.querySelectorAll('.sp-bad').length === 1")
+        for phase in ("rawKeyDown", "keyUp"):
+            await instance.call("Input.dispatchKeyEvent", {"type": phase, "key": "Home",
+                "code": "Home", "windowsVirtualKeyCode": 36}, session=instance.page_session)
+        await until(instance, "demoView.composer.box.querySelectorAll('.sp-bad').length === 2")
+
         # Autocorrect, typed on a real keyboard, and taken back by a real undo.
         await evaluate(instance, "setSpellPref('correct', true); demoView.composer.set(''); "
                                  "demoView.composer.ta.focus(); true")
@@ -1057,6 +1090,28 @@ async def spell_check_checks(instance, capture=False):
         })()""")
         assert menu and menu["fits"], menu
         assert "kitten" in menu["rows"] and "Add to dictionary" in menu["rows"], menu
+        # It takes the keys without the browser painting a focus ring around
+        # it, and a click anywhere else - the prompt box included - closes it.
+        spot = await evaluate(instance, """(() => {
+            const open = document.querySelector('.choice-menu.dyn');
+            const menu = open.getBoundingClientRect(), ta = demoView.composer.ta.getBoundingClientRect();
+            const x = ta.right - 24, y = ta.top + ta.height / 2;
+            const covered = x >= menu.left && x <= menu.right && y >= menu.top && y <= menu.bottom;
+            return {focused: open.contains(document.activeElement),
+                outline: getComputedStyle(open).outlineStyle, x, y, covered};
+        })()""")
+        assert spot["focused"] and spot["outline"] == "none" and not spot["covered"], spot
+        await click(spot["x"], spot["y"])
+        await until(instance, "!document.querySelector('.choice-menu.dyn')")
+        await evaluate(instance, """(() => {
+            const c = demoView.composer, ta = c.ta;
+            ta.selectionStart = ta.selectionEnd = 4;
+            const spot = c.box.querySelector('.sp-bad').getBoundingClientRect();
+            ta.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true,
+                clientX: spot.x + spot.width / 2, clientY: spot.bottom}));
+            return true;
+        })()""")
+        await until(instance, "!!document.querySelector('.choice-menu.dyn')")
         picked = await evaluate(instance, """(() => {
             const rows = [...document.querySelectorAll('.choice-menu.dyn .choice-option')];
             rows.find(row => row.textContent === 'kitten').click();

@@ -205,18 +205,20 @@ type is sent anywhere to be checked, and no dictionary is downloaded from the
 internet. The tools button in every prompt box — the chat's and the New task
 dialog's — carries two switches:
 
-- **Spell check** (on by default) underlines what it does not know. Code
-  fences, inline code, paths, URLs, identifiers, acronyms, versions, `@`
-  mentions and attachment markers are never checked. Right-click (or long-press
-  on Android) a marked word for suggestions, or **Add to dictionary** to keep
-  the word in this browser for good.
+- **Spell check** (on by default) underlines what it does not know, once you
+  have finished the word: nothing is marked under your fingers while you are
+  still typing it. Code fences, inline code, paths, URLs, identifiers,
+  acronyms, versions, `@` mentions and attachment markers are never checked.
+  Right-click (or long-press on Android) a marked word for suggestions, or
+  **Add to dictionary** to keep the word in this browser for good; clicking
+  anywhere else closes the list.
 - **Autocorrect** (off by default) fixes a clear typo as you finish the word,
   and is unavailable while spell check is off. It is deliberately timid: it
-  only replaces a word it does not know, only with a common word one edit away,
-  only when that candidate stands clear of the runner-up, and never by
-  capitalising a word for you. `Ctrl+Z` takes a correction straight back, and a
-  word you restore is left alone for the rest of that message. Pasted text is
-  never rewritten.
+  only replaces a word it does not know, only with a common word one edit away
+  (a transposed, doubled or missing letter, a lost apostrophe), only when that
+  candidate stands clear of the runner-up, and never by capitalising a word
+  for you. `Ctrl+Z` takes a correction straight back, and a word you restore
+  is left alone for the rest of that message. Pasted text is never rewritten.
 
 The dictionary is fetched once per console, only when a prompt box with spell
 check on is on screen, and both switches are remembered per browser. The word
