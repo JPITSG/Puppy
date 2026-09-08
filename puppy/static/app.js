@@ -1511,7 +1511,7 @@ function shortFingerprint(value) {
 
 const collapsedStatusBackends = storedStringSet("puppy.collapsed.status-backends");
 let disclosureSeq = 0;
-const disclosureMotionTimers = new WeakMap();
+const disclosureMotions = new WeakMap();
 
 function tailPath(p, n = 26) {
   if (!p) return "";
@@ -1550,23 +1550,46 @@ function choiceSvg(kind) {
   return svg;
 }
 
+/* The one slide a panel that opens in place takes, for the engine-status
+   disclosures and the footer's host box alike: height and a fade, plus the
+   spacing the panel keeps above itself, so it can fall to nothing. */
+function clearDisclosureStyles(body) {
+  for (const name of ["height", "opacity", "margin-top", "padding-top", "border-top-width"])
+    body.style.removeProperty(name);
+}
+
+/* The end of a slide, whether the transition reached it or a later render
+   cut it short: the panel goes back to its own styling and, when it has
+   finished closing, tells its owner it may let the content go. */
+function endDisclosureMotion(body) {
+  const motion = disclosureMotions.get(body);
+  if (!motion) return;
+  disclosureMotions.delete(body);
+  clearTimeout(motion.timer);
+  body.classList.remove("disclosure-animating");
+  clearDisclosureStyles(body);
+  body.hidden = motion.collapsed;
+  if (motion.done) motion.done();
+}
+
 /* Backend sections are rebuilt whenever sessions or availability change. Keep
    their disclosure state outside the DOM, and expose a real button/panel
    relationship so the compact chevron remains keyboard and screen-reader
    accessible. */
-function setDisclosureCollapsed(body, collapsed, animate = false) {
-  const oldTimer = disclosureMotionTimers.get(body);
-  if (oldTimer) clearTimeout(oldTimer);
-  disclosureMotionTimers.delete(body);
+function setDisclosureCollapsed(body, collapsed, animate = false, done = null) {
+  /* A reversal abandons the motion under way without finishing it: the panel
+     that is opening again must not have its content cleared. */
+  const pending = disclosureMotions.get(body);
+  if (pending) clearTimeout(pending.timer);
+  disclosureMotions.delete(body);
 
   const reduced = window.matchMedia &&
     window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   if (!animate || reduced) {
     body.classList.remove("disclosure-animating");
-    body.style.removeProperty("height");
-    body.style.removeProperty("opacity");
-    body.style.removeProperty("margin-top");
+    clearDisclosureStyles(body);
     body.hidden = collapsed;
+    if (done) done();
     return;
   }
 
@@ -1574,42 +1597,73 @@ function setDisclosureCollapsed(body, collapsed, animate = false) {
      a rapid second click reverse smoothly from the middle of a transition. */
   const wasHidden = body.hidden;
   const style = wasHidden ? null : getComputedStyle(body);
+  const was = name => (style ? parseFloat(style.getPropertyValue(name)) || 0 : 0);
   const currentHeight = wasHidden ? 0 : body.getBoundingClientRect().height;
   const currentOpacity = wasHidden ? 0 : parseFloat(style.opacity) || 0;
-  const currentMargin = wasHidden ? 0 : parseFloat(style.marginTop) || 0;
+  const currentMargin = was("margin-top");
+  const currentPad = was("padding-top");
+  const currentBorder = was("border-top-width");
 
   /* Measure at auto height rather than with scrollHeight: compact text rows
      often land on a half pixel, while scrollHeight rounds to an integer and
      would leave a small snap when the inline target is cleared at the end.
-     Opacity and spacing stay pinned meanwhile, so revealing a hidden panel
-     cannot paint or establish a transition from their expanded values. */
+     The panel's own spacing has to be back for that measurement, since its
+     padding and rule are part of the height it is aimed at; opacity stays
+     pinned meanwhile, so revealing a hidden panel cannot paint from its
+     expanded value. */
   body.classList.remove("disclosure-animating");
-  body.style.removeProperty("height");
+  clearDisclosureStyles(body);
   body.style.opacity = String(currentOpacity);
-  body.style.marginTop = `${currentMargin}px`;
   body.hidden = false;
+  const natural = getComputedStyle(body);
   const fullHeight = body.getBoundingClientRect().height;
-  const fullMargin = parseFloat(getComputedStyle(body)
-    .getPropertyValue("--disclosure-gap")) || 0;
+  const fullMargin = parseFloat(natural.getPropertyValue("--disclosure-gap")) || 0;
+  const fullPad = parseFloat(natural.paddingTop) || 0;
+  const fullBorder = parseFloat(natural.borderTopWidth) || 0;
 
   body.classList.add("disclosure-animating");
   body.style.height = `${currentHeight}px`;
   body.style.opacity = String(currentOpacity);
   body.style.marginTop = `${currentMargin}px`;
+  body.style.paddingTop = `${currentPad}px`;
+  body.style.borderTopWidth = `${currentBorder}px`;
   void body.offsetHeight; // commit the starting geometry before setting the target
   body.style.height = collapsed ? "0px" : `${fullHeight}px`;
   body.style.opacity = collapsed ? "0" : "1";
   body.style.marginTop = collapsed ? "0px" : `${fullMargin}px`;
+  body.style.paddingTop = collapsed ? "0px" : `${fullPad}px`;
+  body.style.borderTopWidth = collapsed ? "0px" : `${fullBorder}px`;
 
-  const timer = setTimeout(() => {
-    disclosureMotionTimers.delete(body);
-    body.classList.remove("disclosure-animating");
-    body.style.removeProperty("height");
-    body.style.removeProperty("opacity");
-    body.style.removeProperty("margin-top");
-    body.hidden = collapsed;
-  }, SLIDE_MOTION_MS + 40);
-  disclosureMotionTimers.set(body, timer);
+  disclosureMotions.set(body, {
+    collapsed, done, height: fullHeight,
+    timer: setTimeout(() => endDisclosureMotion(body), SLIDE_MOTION_MS + 40),
+  });
+}
+
+/* Content that lands while a panel is still opening re-aims the slide at the
+   height it now wants, so a box whose first reading arrives mid-motion glides
+   to its real size instead of snapping to it when the transition ends. */
+function refreshDisclosureHeight(body) {
+  const motion = disclosureMotions.get(body);
+  if (!motion || motion.collapsed) return;
+  const pad = body.style.paddingTop, border = body.style.borderTopWidth;
+  const current = body.getBoundingClientRect().height;
+  body.style.removeProperty("height");
+  body.style.removeProperty("padding-top");
+  body.style.removeProperty("border-top-width");
+  const full = body.getBoundingClientRect().height;
+  body.style.paddingTop = pad;
+  body.style.borderTopWidth = border;
+  if (Math.abs(full - motion.height) < 0.5) {
+    body.style.height = `${motion.height}px`;
+    return;
+  }
+  motion.height = full;
+  body.style.height = `${current}px`;
+  void body.offsetHeight;
+  body.style.height = `${full}px`;
+  clearTimeout(motion.timer);
+  motion.timer = setTimeout(() => endDisclosureMotion(body), SLIDE_MOTION_MS + 40);
 }
 
 function disclosureButton(label, body, collapsedKeys, storageKey, itemKey) {
@@ -6837,11 +6891,27 @@ function syncHostCpuButton() {
   if (button) button.setAttribute("aria-expanded", hostPanel.open ? "true" : "false");
 }
 
+/* The box arrives and leaves the way every other panel in the sidebar does:
+   the shared disclosure slide, with the footer's engine stats giving up their
+   height in the same motion. Its content is only let go once a close has
+   actually finished, so the box has something to show on the way out. */
+function slideHostPanel() {
+  const root = $("foot-host");
+  if (!root) return;
+  /* The footer decides who gives up height for this box: the engine stats
+     above it, never the session list. */
+  if (root.parentElement) root.parentElement.classList.toggle("host-open", hostPanel.open);
+  setDisclosureCollapsed(root, !hostPanel.open, true, () => {
+    if (!hostPanel.open) root.replaceChildren();
+  });
+}
+
 function openHostPanel() {
   if (hostPanel.open) return;
   hostPanel.open = true;
   syncHostCpuButton();
   renderHostPanel();
+  slideHostPanel();
   pollHostPanel();
 }
 
@@ -6853,7 +6923,7 @@ function closeHostPanel() {
   hostPanel.sequence++;          // abandon whatever is still in flight
   hostPanel.charts.clear();
   syncHostCpuButton();
-  renderHostPanel();
+  slideHostPanel();
 }
 
 function toggleHostPanel() {
@@ -7243,15 +7313,7 @@ function hostProcessGroup(node) {
 
 function renderHostPanel() {
   const root = $("foot-host");
-  if (!root) return;
-  root.classList.toggle("hidden", !hostPanel.open);
-  /* The footer decides who gives up height for this box: the engine stats
-     above it, never the session list. */
-  if (root.parentElement) root.parentElement.classList.toggle("host-open", hostPanel.open);
-  if (!hostPanel.open) {
-    root.replaceChildren();
-    return;
-  }
+  if (!root || !hostPanel.open) return;
   const scrolled = root.scrollTop;
   hostPanel.charts.clear();
   const nodes = hostPanelNodes();
@@ -7266,6 +7328,9 @@ function renderHostPanel() {
   sections.push(processes);
   root.replaceChildren(...sections);
   root.scrollTop = scrolled;
+  /* The first readings usually land while the box is still opening: aim its
+     slide at the height they need rather than snapping to it at the end. */
+  refreshDisclosureHeight(root);
 }
 
 $("host-cpu").onclick = () => toggleHostPanel();

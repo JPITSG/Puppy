@@ -1575,8 +1575,12 @@ async def host_panel_checks(instance, capture=False):
             "clickCount": 1}, session=instance.page_session)
     try:
         # The box polls this node over the same authenticated route a backend
-        # would answer, so its own process is what comes back.
+        # would answer, so its own process is what comes back. It slides in
+        # like the sidebar's other panels, so let that motion settle before
+        # measuring anything drawn inside it.
         await until(instance, "hostPanel.open && document.querySelectorAll('.host-proc').length > 0")
+        await until(instance, "!document.getElementById('foot-host')"
+                              ".classList.contains('disclosure-animating')")
         served = await evaluate(instance, """(() => {
             const data=hostPanel.nodes.get(0).data;
             return {pid:data.processes.root.pid, label:data.processes.root.label,
@@ -1588,6 +1592,17 @@ async def host_panel_checks(instance, capture=False):
         assert served["pid"] > 0 and served["cores"] >= 1, served
         assert served["total"] >= served["counted"] >= 1, served
         assert served["expanded"] == "true" and served["open"] is True, served
+        # The footer's rows keep the spacing the column gap used to give them:
+        # 4px of air above the box's rule (the engine scroller's own -4px
+        # overhang eats half of the 8px) and 8px down to the icon row.
+        spacing = await evaluate(instance, """(() => {
+            const box=document.getElementById('foot-host').getBoundingClientRect();
+            const engines=document.getElementById('foot-engines').getBoundingClientRect();
+            const row=document.querySelector('.foot-row').getBoundingClientRect();
+            return {above:box.top-engines.bottom, below:row.top-box.bottom};
+        })()""")
+        assert abs(spacing["above"] - 4) < 0.6, spacing
+        assert abs(spacing["below"] - 8) < 0.6, spacing
         # A known series, drawn: the line spans the well, the peak reaches its
         # top and the trough its floor, and the stroke keeps its width despite
         # the box being stretched to the sidebar's width.
@@ -1673,19 +1688,63 @@ async def host_panel_checks(instance, capture=False):
                                            session=instance.page_session)
                 (BASE / "data" / ("host-panel-" + theme + ".png")).write_bytes(
                     base64.b64decode(shot["data"]))
+        # It leaves the way the sidebar's other panels do: the moment it is
+        # closed it is still on screen and still holding what it was showing,
+        # clipped and aimed at nothing, with its own rule and padding going
+        # down with its height.
+        closing = await evaluate(instance, """(() => {
+            const box=document.getElementById('foot-host');
+            closeHostPanel();
+            return {animating:box.classList.contains('disclosure-animating'),
+                    hidden:box.hidden===true, kept:box.children.length>0,
+                    standing:box.getBoundingClientRect().height>0,
+                    height:box.style.height, padding:box.style.paddingTop,
+                    border:box.style.borderTopWidth, margin:box.style.marginTop,
+                    clipped:getComputedStyle(box).overflowY==='hidden'};
+        })()""")
+        assert closing == {"animating": True, "hidden": False, "kept": True,
+                           "standing": True, "height": "0px", "padding": "0px",
+                           "border": "0px", "margin": "0px",
+                           "clipped": True}, closing
     finally:
         await evaluate(instance, "closeHostPanel(); applyTheme('dark'); true")
+    # ...and only once that slide has finished is the box hidden and let go
+    await until(instance, "document.getElementById('foot-host').hidden === true")
     closed = await evaluate(instance, """(() => ({
         empty: document.getElementById('foot-host').children.length === 0,
-        hidden: document.getElementById('foot-host').classList.contains('hidden'),
+        styled: document.getElementById('foot-host').getAttribute('style') || '',
         expanded: document.getElementById('host-cpu').getAttribute('aria-expanded'),
         open: document.querySelector('.side-foot').classList.contains('host-open'),
         polling: hostPanel.timer !== null,
+        engines: getComputedStyle(document.getElementById('foot-engines'))
+            .transitionProperty,
     }))()""")
-    assert closed == {"empty": True, "hidden": True, "expanded": "false",
-                      "open": False, "polling": False}, closed
+    assert closed == {"empty": True, "styled": "", "expanded": "false",
+                      "open": False, "polling": False,
+                      "engines": "max-height"}, closed
+    # The end of that slide is the closed footer: a box collapsed to nothing
+    # takes no room at all, so hiding it cannot make the footer jump by a gap,
+    # a padding or a rule the motion could not take with it.
+    footer = await evaluate(instance, """(() => {
+        const foot=document.querySelector('.side-foot');
+        const box=document.getElementById('foot-host');
+        const engines=document.getElementById('foot-engines').getBoundingClientRect();
+        const row=document.querySelector('.foot-row').getBoundingClientRect();
+        const shut=foot.getBoundingClientRect().height;
+        box.hidden=false;
+        for (const [name,value] of [['height','0px'],['paddingTop','0px'],
+                                    ['borderTopWidth','0px'],['marginTop','0px']])
+            box.style[name]=value;
+        const flat=foot.getBoundingClientRect().height;
+        box.hidden=true; box.removeAttribute('style');
+        return {shut, flat, back:foot.getBoundingClientRect().height,
+                gap:row.top-engines.bottom};
+    })()""")
+    assert abs(footer["flat"] - footer["shut"]) < 0.5, footer
+    assert abs(footer["back"] - footer["shut"]) < 0.5, footer
+    assert abs(footer["gap"] - 4) < 0.6, footer
     print("PASS: the CPU reading opens a drawn, scrolling host box - real route, "
-          "chart geometry, indented tree - and closing it stops its polling", flush=True)
+          "chart geometry, indented tree - and it slides shut and stops polling", flush=True)
 
 async def main(args):
     instances = []

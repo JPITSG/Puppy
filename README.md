@@ -459,8 +459,10 @@ history around it.
   engines, their turn-bound agent bridges, managed browsers and terminals, each
   with its CPU share and memory, folded where a row repeats (*agent bridges
   ×5*) and trimmed with a *+n more* where a branch is too wide or too deep to
-  read. Nothing is polled until the box is open, and nothing is stored: close
-  it and the node keeps only the reading in the corner.
+  read. The box slides in under the engine stats and slides shut again the way
+  the sidebar's other panels do, the engine stats giving up their height in the
+  same motion. Nothing is polled until the box is open, and nothing is stored:
+  close it and the node keeps only the reading in the corner.
 - **Notices that stay readable.** Confirmations, warnings and failures appear
   as one line in the bottom-right corner, coloured by outcome and worded the
   same way wherever they came from. The same notice arriving again counts up on

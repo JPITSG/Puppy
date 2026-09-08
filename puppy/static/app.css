@@ -372,7 +372,11 @@ a{color:var(--acc2)}
 .side-search-btn:active{transform:scale(.9);background:var(--hov);color:var(--txt)}
 .side-search.filtering #side-search-go{color:var(--acc2)}
 
-.side-foot{border-top:1px solid var(--line);padding:10px 14px;display:flex;flex-direction:column;gap:8px}
+/* The footer's rows carry the 8px between them themselves rather than taking
+   it from a column gap: the host box slides that space away with its own
+   height, and a gap the column still held would make the footer jump by it at
+   both ends of the motion. */
+.side-foot{border-top:1px solid var(--line);padding:10px 14px;display:flex;flex-direction:column}
 /* The compact disclosure overlaps its 13px header by a few pixels. When the
    final group is closed that overhang becomes the scroller's lowest content,
    so reserve it internally and cancel it externally to avoid a false bar.
@@ -382,19 +386,29 @@ a{color:var(--acc2)}
 .foot-engines{
   display:flex;flex-direction:column;gap:4px;max-height:38dvh;overflow-y:auto;
   padding:0 6px 4px 0;margin:0 -6px -4px 0;
+  transition:max-height var(--slide-time) var(--ease);
 }
+@media (prefers-reduced-motion:reduce){.foot-engines{transition:none}}
 .foot-engine-group{display:flex;flex-direction:column;min-width:0}
 .foot-engine-body{
   --disclosure-gap:4px;display:flex;flex-direction:column;gap:4px;min-width:0;
   margin-top:var(--disclosure-gap);
 }
 .foot-engine-body[hidden]{display:none}
-.foot-engine-body.disclosure-animating{
+/* One slide for every sidebar panel that opens in place: its height, a
+   shorter fade, and the spacing it keeps above itself - the gap, its own top
+   padding and the rule it draws there - so a panel carrying a separator
+   collapses to nothing rather than to a hairline. */
+.foot-engine-body.disclosure-animating,
+.foot-host.disclosure-animating{
   overflow:hidden;
-  transition:height var(--slide-time) var(--ease),opacity var(--slide-fade-time) var(--ease),margin-top var(--slide-time) var(--ease);
+  transition:height var(--slide-time) var(--ease),opacity var(--slide-fade-time) var(--ease),
+    margin-top var(--slide-time) var(--ease),padding-top var(--slide-time) var(--ease),
+    border-top-width var(--slide-time) var(--ease);
 }
 @media (prefers-reduced-motion:reduce){
-  .foot-engine-body.disclosure-animating{transition:none}
+  .foot-engine-body.disclosure-animating,
+  .foot-host.disclosure-animating{transition:none}
 }
 .foot-engine-group+.foot-engine-group{border-top:1px solid var(--line);margin-top:3px;padding-top:7px}
 .foot-engine-head{display:flex;align-items:center;gap:6px;min-width:0;color:var(--txt3);cursor:pointer;}
@@ -439,7 +453,7 @@ a{color:var(--acc2)}
 .foot-eng .st-sep{color:var(--txt3)}
 .foot-eng .st-quota{color:var(--ok)}
 .foot-eng .st-quota.low{color:var(--err)}
-.foot-row{display:flex;align-items:center;gap:6px;border-top:1px solid var(--line);padding-top:7px}
+.foot-row{display:flex;align-items:center;gap:6px;border-top:1px solid var(--line);margin-top:8px;padding-top:7px}
 #btn-bell.on{color:var(--acc2)}
 .conn-state{display:flex;align-items:center;min-width:0;margin-left:auto}
 /* The reading is also the handle for the box below: a quiet chip until it is
@@ -468,10 +482,12 @@ a{color:var(--acc2)}
    gives up height rather than the session list. */
 .side-foot.host-open .foot-engines{max-height:22dvh}
 .foot-host{
+  --disclosure-gap:8px;
   display:flex;flex-direction:column;gap:11px;min-height:0;max-height:42dvh;
   overflow-y:auto;border-top:1px solid var(--line);
-  padding:9px 6px 0 0;margin:0 -6px 0 0;
+  padding:9px 6px 0 0;margin:var(--disclosure-gap) -6px 0 0;
 }
+.foot-host[hidden]{display:none}
 .host-sec{display:flex;flex-direction:column;gap:7px;min-width:0}
 .host-sec-head{display:flex;align-items:baseline;gap:6px;min-width:0}
 .host-sec-title{

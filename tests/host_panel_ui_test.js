@@ -71,11 +71,22 @@ function consoleFor(options = {}) {
     nodeCapabilities: options.nodeCapabilities || ["host-metrics-v1"],
   };
   const calls = [];
+  const slides = [];
+  let aimed = 0;
   const context = vm.createContext({
     document, el, state, console, Date, Math, Number, Array, JSON, Set, Map,
     Promise, isNaN, parseFloat,
     setTimeout: () => 1, clearTimeout: () => {},
     $: id => document.getElementById(id),
+    /* The sidebar's shared slide lives outside this slice. Its contract with
+       the box is all that matters here: the panel is asked to move with the
+       motion on, and its content is only let go once a close has finished. */
+    setDisclosureCollapsed: (body, collapsed, animate, done) => {
+      slides.push({ collapsed, animate: !!animate });
+      body.hidden = collapsed;
+      if (done) done();
+    },
+    refreshDisclosureHeight: () => { aimed++; },
     backendName: bid => (bid ? `backend ${bid}` : "this instance"),
     nodeHasCapability: (bid, capability) => {
       const list = bid ? (state.backends.find(item => item.id === bid) || {}).capabilities
@@ -103,7 +114,8 @@ function consoleFor(options = {}) {
   /* The box's own state is a script-scoped const, like every other module
      private in app.js: read it out of the context rather than exporting it. */
   const hostPanel = vm.runInContext("hostPanel", context);
-  return { context, document, state, calls, hostPanel,
+  return { context, document, state, calls, hostPanel, slides,
+    aimed: () => aimed,
     panel: () => document.getElementById("foot-host"),
     foot };
 }
@@ -123,18 +135,25 @@ async function toggling() {
   assert.equal(app.hostPanel.open, false);
   context.toggleHostPanel();
   assert.equal(app.hostPanel.open, true);
-  assert.equal(app.panel().classList.contains("hidden"), false);
+  assert.equal(app.panel().hidden, false);
+  // it slides in rather than appearing, and does so with content to show
+  assert.deepEqual(app.slides, [{ collapsed: false, animate: true }]);
+  assert.ok(app.panel().children.length > 0);
   assert.equal(app.foot.classList.contains("host-open"), true);
   assert.equal(app.document.getElementById("host-cpu").getAttribute("aria-expanded"), "true");
   await new Promise(resolve => setTimeout(resolve, 0));
   assert.deepEqual(app.calls, [[0, "host/metrics?window=900"]]);
+  // the readings that landed mid-slide re-aim it instead of snapping at the end
+  assert.ok(app.aimed() > 0);
   // one CPU section and one process section, both naming this instance
   assert.equal(rows(app.panel(), "host-sec").length, 2);
   assert.equal(text(rows(app.panel(), "host-sec-title")[0]), "CPU");
   assert.equal(text(rows(app.panel(), "host-sec-title")[1]), "Processes");
   context.toggleHostPanel();
   assert.equal(app.hostPanel.open, false);
-  assert.equal(app.panel().classList.contains("hidden"), true);
+  assert.equal(app.panel().hidden, true);
+  assert.deepEqual(app.slides[1], { collapsed: true, animate: true });
+  // the content goes only once that slide has finished
   assert.equal(app.panel().children.length, 0);
   assert.equal(app.foot.classList.contains("host-open"), false);
   assert.equal(app.document.getElementById("host-cpu").getAttribute("aria-expanded"), "false");

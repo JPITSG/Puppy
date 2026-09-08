@@ -7235,9 +7235,16 @@ async def main() -> None:
             # restored collapse cannot animate during the first paint.
             assert "setDisclosureCollapsed(body, isCollapsed, animate);" in ui_source
             assert "sync(true);" in ui_source
-            assert ui_source.count("SLIDE_MOTION_MS + 40") == 2
+            assert ui_source.count("SLIDE_MOTION_MS + 40") == 3
             assert ".foot-engine-body[hidden]{display:none}" in css_source
-            assert ".foot-engine-body.disclosure-animating{" in css_source
+            # the footer's host box opens on the same slide, so it carries its
+            # own gap, padding and rule down with its height
+            assert (".foot-engine-body.disclosure-animating,\n"
+                    ".foot-host.disclosure-animating{") in css_source
+            assert ".foot-host[hidden]{display:none}" in css_source
+            assert "--disclosure-gap:8px;" in css_source
+            assert ("margin-top var(--slide-time) var(--ease),"
+                    "padding-top var(--slide-time) var(--ease),") in css_source
             assert "--slide-time:.24s;--slide-fade-time:.2s;" in css_source
             assert ("transition:height var(--slide-time) var(--ease)," +
                     "opacity var(--slide-fade-time) var(--ease),") in css_source
