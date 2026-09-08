@@ -110,6 +110,11 @@ function consoleFor(options = {}) {
 
 const rows = (node, cls) => node.querySelectorAll(`.${cls}`);
 const text = node => (node ? node.textContent : "");
+/* A row's rails read as a shape: "|" a level that still has rows below it,
+   "." one that is finished, "T" this row's tee and "L" its closing corner. */
+const railShape = row => row.querySelectorAll(".host-rail").map(rail =>
+  rail.className.includes("line") ? "|" : rail.className.includes("tee") ? "T" :
+    rail.className.includes("end") ? "L" : ".").join("");
 
 /* ---- opening, closing, and what each costs ---- */
 async function toggling() {
@@ -194,8 +199,14 @@ async function liveSamples() {
   // the note and facts read from the merged series and the node's own facts
   const note = text(rows(app.panel(), "host-node-note")[0]);
   assert.equal(note, "97% · peak 97%");
+  /* the three facts hold their own thirds of the chart's width: cores at the
+     left edge, load over the middle, memory at the right */
   const facts = rows(app.panel(), "host-facts")[0];
-  assert.equal(text(facts), "8 cores · load 0.50 · 8.0G/16.0G");
+  assert.deepEqual(facts.children.map(cell => [cell.className, text(cell)]), [
+    ["host-fact", "8 cores"],
+    ["host-fact mid", "load 0.50"],
+    ["host-fact end", "8.0G/16.0G"],
+  ]);
   // the sidebar is narrow, so the rest of the machine is one hover away
   assert.ok(facts.title.includes("load 0.50 0.25 0.10"), facts.title);
   assert.ok(facts.title.includes("memory 8.0G of 16.0G used"), facts.title);
@@ -222,9 +233,13 @@ async function processTree() {
   const tree = rows(app.panel(), "host-proc");
   assert.equal(tree.length, 4);                 // root, engine, folded bridges, +2 more
   assert.equal(text(rows(app.panel(), "host-proc-name")[0]), "python3 -m puppy");
-  assert.equal(tree[0].style["--depth"], "0");
-  assert.equal(tree[1].style["--depth"], "1");
-  assert.equal(tree[2].style["--depth"], "2");
+  /* One rail cell per level: the root has none, a last child ends in a corner
+     and a row with siblings still to come in a tee, and a level that is done
+     leaves a blank column rather than a bar running past its last row. */
+  assert.equal(railShape(tree[0]), "");
+  assert.equal(railShape(tree[1]), "L");        // the only child of the root
+  assert.equal(railShape(tree[2]), ".T");       // a trimmed "+n more" follows it
+  assert.equal(railShape(tree[3]), ".L");
   assert.ok(tree[0].querySelector(".k-puppy"));
   assert.ok(tree[1].querySelector(".k-claude"));
   assert.ok(tree[2].querySelector(".k-bridge"));
@@ -233,7 +248,6 @@ async function processTree() {
   assert.equal(text(tree[1].querySelector(".host-proc-rss")), "316M");
   assert.equal(text(tree[2].querySelector(".host-proc-count")), "×5");
   assert.equal(text(tree[3]), "+2 more");
-  assert.equal(tree[3].style["--depth"], "2");
   assert.ok(tree[0].title.startsWith("pid 10 · 9 threads · up 2h 0m"), tree[0].title);
   assert.ok(tree[0].title.endsWith("/usr/local/bin/python3 -m puppy"), tree[0].title);
   assert.ok(tree[2].title.startsWith("5 processes"), tree[2].title);
@@ -266,27 +280,61 @@ async function backends() {
   assert.deepEqual(app.calls.sort(), [
     [0, "backends/latency"], [0, "host/metrics?window=900"], [2, "host/metrics?window=900"],
   ].sort());
+  /* The unreachable backend is not shown anywhere in the box: no latency row,
+     no chart and no process tree. A node that answered but failed the ping
+     still has one, because that is a fact about a link that exists. */
   const pings = rows(app.panel(), "host-ping");
-  assert.equal(pings.length, 3);
+  assert.equal(pings.length, 2);
+  assert.equal(text(pings[0].querySelector(".host-ping-name")), "nas");
   assert.equal(text(pings[0].querySelector(".host-ping-ms")), "12.4 ms");
   assert.ok(pings[0].querySelector(".gdot.ok"));
-  assert.equal(text(pings[1].querySelector(".host-ping-ms")), "offline");
-  assert.equal(pings[1].querySelector(".host-ping-ms").title, "connection refused");
-  assert.equal(text(pings[2].querySelector(".host-ping-ms")), "failed");
-  // the offline and unsupported nodes still get a row, with their reason
+  assert.equal(text(pings[1].querySelector(".host-ping-name")), "old");
+  assert.equal(text(pings[1].querySelector(".host-ping-ms")), "failed");
+  assert.equal(rows(app.panel(), "host-node-name").map(text)
+    .includes("laptop"), false);
+  // a node that is there but does not report activity still says so
   const empties = rows(app.panel(), "host-empty").map(text);
-  assert.ok(empties.includes("Backend unavailable"), empties.join("|"));
+  assert.ok(!empties.includes("Backend unavailable"), empties.join("|"));
   assert.ok(empties.includes("This backend does not report host activity"), empties.join("|"));
   // a second measurement builds each backend's sparkline
   app.hostPanel.pings.set(2, [[500, 12.4], [504, 15.2]]);
   context.renderHostPanel();
   assert.ok(rows(app.panel(), "host-ping")[0].querySelector(".host-chart.spark"));
-  // four nodes, each with one chart block and one process block
-  assert.equal(rows(app.panel(), "host-node").length, 8);
+  // three reachable nodes, each with one chart block and one process block
+  assert.equal(rows(app.panel(), "host-node").length, 6);
   // a failed read keeps the tree that node last served rather than blanking it
   app.hostPanel.nodes.set(2, { data: metrics(), error: "network error" });
   context.renderHostPanel();
   assert.equal(rows(app.panel(), "host-tree").length, 2);
+}
+
+/* ---- every backend unreachable: the whole latency section goes ---- */
+async function allUnreachable() {
+  const app = consoleFor({
+    backends: [{ id: 2, name: "nas", capabilities: ["host-metrics-v1"] }],
+    remoteOk: { 2: false },
+    answers: {
+      "0:host/metrics": metrics(),
+      "0:backends/latency": { ok: true, measured_at: 500, backends: [
+        { id: 2, name: "nas", ok: false, offline: true, error: "connection refused" },
+      ] },
+    },
+  });
+  const { context } = app;
+  context.toggleHostPanel();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(rows(app.panel(), "host-ping").length, 0);
+  // CPU and Processes only, both holding this instance alone
+  assert.deepEqual(rows(app.panel(), "host-sec-title").map(text), ["CPU", "Processes"]);
+  assert.deepEqual(rows(app.panel(), "host-node-name").map(text),
+    ["this instance", "this instance"]);
+  // and it comes back the moment the health worker says the node is up
+  app.state.remoteOk[2] = true;
+  context.renderHostPanel();
+  assert.deepEqual(rows(app.panel(), "host-sec-title").map(text),
+    ["CPU", "Latency", "Processes"]);
+  assert.deepEqual(rows(app.panel(), "host-node-name").map(text),
+    ["this instance", "nas", "this instance", "nas"]);
 }
 
 /* ---- with no backends configured there is nothing to measure ---- */
@@ -321,6 +369,7 @@ async function main() {
   await liveSamples();
   await processTree();
   await backends();
+  await allUnreachable();
   await soloInstance();
   await emptyStates();
   console.log("host activity panel tests passed");

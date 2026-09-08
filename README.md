@@ -451,8 +451,11 @@ history around it.
   hour - the instance's own chart keeps moving with its live reading - beside
   its cores, load, memory and uptime. Where backends are paired, the instance
   times the round trip to each of them itself and keeps a sparkline of the last
-  measurements; an unreachable backend says so rather than being probed. Under
-  that, every node lists the processes Puppy is running there as a tree: the
+  measurements. Only reachable nodes appear: an unavailable backend is left out
+  of the box entirely - no chart, no round trip, no processes - rather than
+  being probed, and with none of them reachable the round-trip section goes
+  with them. Under that, every node lists the processes Puppy is running there
+  as a tree drawn with real branches, a corner closing each last child: the
   engines, their turn-bound agent bridges, managed browsers and terminals, each
   with its CPU share and memory, folded where a row repeats (*agent bridges
   ×5*) and trimmed with a *+n more* where a branch is too wide or too deep to

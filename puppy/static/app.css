@@ -505,10 +505,16 @@ a{color:var(--acc2)}
   padding:12px 8px;font-size:var(--fs-2xs);color:var(--txt3);text-align:center;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
 }
+/* Cores, load and memory under the chart, each holding a third of its width,
+   so load reads over the middle of the chart it belongs to. */
 .host-facts{
+  display:flex;align-items:baseline;gap:5px;
   font:var(--fs-2xs) var(--mono);color:var(--txt3);
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  font-variant-numeric:tabular-nums;
 }
+.host-fact{flex:1 1 0;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.host-fact.mid{text-align:center}
+.host-fact.end{text-align:right}
 .host-empty{padding-left:12px;font-size:var(--fs-2xs);color:var(--txt3)}
 .host-ping{display:flex;align-items:center;gap:6px;min-width:0}
 .host-ping-name{
@@ -521,15 +527,27 @@ a{color:var(--acc2)}
 }
 .host-chart.spark+.host-ping-ms{margin-left:0}
 .host-ping-ms.bad{color:var(--err)}
-/* One guide line per row at its own indent: deeper rows sit further right and
-   draw their own, so a subtree reads as a subtree without a canvas. */
-.host-tree{display:flex;flex-direction:column;min-width:0}
+/* The tree's own rails, drawn in the row rather than around it: one cell per
+   level, a bar only where that ancestor still has rows below, and an elbow at
+   the row's own level - a tee while siblings follow, a corner for the last of
+   them. The cells stretch the full row height, so the bars of one level join
+   up the column without a canvas. */
+.host-tree{display:flex;flex-direction:column;min-width:0;--rail-w:10px}
 .host-proc{
-  display:flex;align-items:center;gap:5px;min-width:0;
-  margin-left:calc(var(--depth,0) * 8px);padding:1px 0 1px 5px;
-  border-left:1px solid var(--line);font-size:var(--fs-2xs);color:var(--txt2);
+  display:flex;align-items:center;gap:5px;min-width:0;min-height:16px;
+  font-size:var(--fs-2xs);color:var(--txt2);
 }
-.host-tree>.host-proc:first-child{border-left-color:transparent}
+.host-proc-rails{flex:0 0 auto;align-self:stretch;display:flex}
+.host-rail{flex:0 0 var(--rail-w);position:relative}
+.host-rail.line::before,.host-rail.tee::before,.host-rail.end::before{
+  content:"";position:absolute;top:0;bottom:0;
+  left:calc(var(--rail-w) / 2);width:1px;background:var(--line2);
+}
+.host-rail.end::before{bottom:auto;height:calc(50% + 1px)}
+.host-rail.tee::after,.host-rail.end::after{
+  content:"";position:absolute;top:50%;height:1px;
+  left:calc(var(--rail-w) / 2);right:0;background:var(--line2);
+}
 @media (hover:hover){.host-proc:hover{background:var(--hov-soft)}}
 .host-proc-dot{
   width:var(--dot-sm);height:var(--dot-sm);flex:0 0 var(--dot-sm);border-radius:50%;
@@ -556,7 +574,7 @@ a{color:var(--acc2)}
   flex:0 0 auto;min-width:34px;text-align:right;
   font-family:var(--mono);font-variant-numeric:tabular-nums;color:var(--txt3);
 }
-.host-proc-more{color:var(--txt3)}
+.host-proc-more,.host-proc-more-label{color:var(--txt3)}
 .side-backdrop,.drawer-edge{display:none}
 
 /* ---------- buttons & inputs ---------- */

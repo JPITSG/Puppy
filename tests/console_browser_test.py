@@ -1617,8 +1617,10 @@ async def host_panel_checks(instance, capture=False):
             assert abs(geometry[edge]) <= 1.5, (edge, geometry)
         assert 1 <= geometry["stroke"] <= 1.5, geometry
         assert geometry["note"] == "0% · peak 100%", geometry
-        # Real layout: every child row is indented past its parent, and a
-        # folded group says how many processes it stands for.
+        # Real layout: every child row is indented past its parent, its rails
+        # are drawn as a tree - a corner for a last child, a tee where a
+        # trimmed "+n more" still follows - and one level's cells share a
+        # column and the full row height, so their bars join up.
         layout = await evaluate(instance, """(() => {
             const node=(label,kind,children,extra={}) => ({label,kind,children,cpu:1,rss:1048576,
                 threads:1,pid:1,uptime:1,cmd:label,...extra});
@@ -1627,12 +1629,24 @@ async def host_panel_checks(instance, capture=False):
                      {more:2})]);
             renderHostPanel();
             const rows=[...document.querySelectorAll('.host-proc')];
-            return {lefts:rows.map(r=>Math.round(r.getBoundingClientRect().left)),
+            const cells=r=>[...r.querySelectorAll('.host-rail')];
+            const lead=r=>Math.round([...r.children]
+                .find(k=>!k.classList.contains('host-proc-rails'))
+                .getBoundingClientRect().left);
+            const shape=r=>cells(r).map(c=>c.className.includes('line')?'|':
+                c.className.includes('tee')?'T':c.className.includes('end')?'L':'.').join('');
+            const last=r=>cells(r).pop().getBoundingClientRect();
+            return {lefts:rows.map(lead), shapes:rows.map(shape),
                     labels:rows.map(r=>r.textContent),
+                    column:Math.abs(last(rows[2]).left-last(rows[3]).left),
+                    stretched:rows.slice(1).every(r=>
+                        Math.abs(last(r).height-r.getBoundingClientRect().height)<.5),
                     inside:rows.every(r=>r.scrollWidth<=r.clientWidth)};
         })()""")
         assert layout["lefts"][0] < layout["lefts"][1] < layout["lefts"][2], layout
         assert layout["lefts"][3] == layout["lefts"][2], layout
+        assert layout["shapes"] == ["", "L", ".T", ".L"], layout
+        assert layout["column"] < 0.5 and layout["stretched"], layout
         assert "×5" in layout["labels"][2] and layout["labels"][3] == "+2 more", layout
         assert layout["inside"], layout
         # It is the box that scrolls, not the session list under it.

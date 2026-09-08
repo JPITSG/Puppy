@@ -3939,7 +3939,6 @@ function renderHostCpu(cpuPercent) {
   }
   output.textContent = `CPU ${Math.round(value)}%`;
   output.setAttribute("aria-label", `WebUI host CPU usage: ${value.toFixed(1)}%`);
-  output.title = "Host activity";
   output.classList.remove("hidden");
   hostCpuSample(value);
 }
@@ -6819,15 +6818,18 @@ function hostCpuSample(value) {
   if (hostPanel.open) paintHostNode(0);
 }
 
-/* The same node order as the engine box above it. */
+/* The same node order as the engine box above it, minus whatever the health
+   worker has marked unreachable: this box is about what a machine is doing,
+   and a node that is not there is doing nothing worth a row. It is dropped
+   here rather than by asking for less - the controller's verdict stays the
+   one place availability is decided. */
 function hostPanelNodes() {
   const groups = [{ bid: 0, name: backendName(0) }].concat(
     state.backends.map(backend => ({ bid: backend.id, name: backend.name })));
-  for (const group of groups) {
-    group.offline = !!group.bid && state.remoteOk[group.bid] === false;
+  const reachable = groups.filter(group => !group.bid || state.remoteOk[group.bid] !== false);
+  for (const group of reachable)
     group.supported = nodeHasCapability(group.bid, "host-metrics-v1");
-  }
-  return sortNodeGroups(groups);
+  return sortNodeGroups(reachable);
 }
 
 function syncHostCpuButton() {
@@ -6889,11 +6891,6 @@ async function readHostNodes(sequence) {
     const keep = (entry) => {
       if (sequence === hostPanel.sequence) hostPanel.nodes.set(node.bid, entry);
     };
-    /* An unreachable backend is the controller's verdict, not something a
-       metrics poll may go and rediscover. */
-    if (node.offline)
-      return keep({ data: null, error: remoteStoppingMessage(node.bid) ||
-        backendStateNote(remoteAvailability(node.bid), false, "activity") });
     if (!node.supported)
       return keep({ data: null, error: "This backend does not report host activity" });
     try {
@@ -7106,16 +7103,19 @@ function paintHostNode(bid) {
     current === null ? "" : hostPercent(current),
     peak === null ? "" : `peak ${hostPercent(peak)}`,
   ].filter(Boolean).join(" · ");
-  /* A sidebar column is narrow: the row carries the shape of the machine and
-     the tooltip carries the rest, rather than an ellipsis eating the end. */
+  /* Three facts under the chart, each holding its own third of its width:
+     cores at the left edge, load over the middle, memory at the right. A cell
+     with nothing to say still keeps its place, so the other two never drift.
+     A sidebar column is narrow, so the tooltip carries the rest rather than
+     an ellipsis eating the end of the row. */
   const memory = data && data.memory;
   const load = Array.isArray(data && data.load) ? data.load : null;
   const uptime = data && typeof data.uptime === "number" ? hostDuration(data.uptime) : "";
-  chart.facts.textContent = [
-    cores ? `${cores} cores` : "",
-    load ? `load ${load[0].toFixed(2)}` : "",
-    memory ? `${hostBytes(memory.used)}/${hostBytes(memory.total)}` : "",
-  ].filter(Boolean).join(" · ");
+  chart.facts.replaceChildren(
+    el("span", "host-fact", cores ? `${cores} cores` : ""),
+    el("span", "host-fact mid", load ? `load ${load[0].toFixed(2)}` : ""),
+    el("span", "host-fact end",
+      memory ? `${hostBytes(memory.used)}/${hostBytes(memory.total)}` : ""));
   chart.facts.title = [
     series.length > 1 ? `last ${hostDuration(to - from)}` : "",
     cores ? `${cores} cores` : "",
@@ -7128,7 +7128,7 @@ function paintHostNode(bid) {
 /* ---- the latency section: this instance to each paired backend ---- */
 function hostLatencyRow(row) {
   const line = el("div", "host-ping");
-  const dot = el("span", `gdot ${row.ok === true ? "ok" : row.offline ? "bad" : "warn"}`);
+  const dot = el("span", `gdot ${row.ok === true ? "ok" : "warn"}`);
   dot.setAttribute("role", "img");
   line.appendChild(dot);
   const name = el("span", "host-ping-name", row.name || `backend ${row.id}`);
@@ -7144,29 +7144,44 @@ function hostLatencyRow(row) {
     }));
   }
   const value = el("span", "host-ping-ms" + (row.ok === true ? "" : " bad"),
-    row.ok === true ? `${row.ms >= 100 ? Math.round(row.ms) : row.ms.toFixed(1)} ms` :
-      row.offline ? "offline" : "failed");
+    row.ok === true ? `${row.ms >= 100 ? Math.round(row.ms) : row.ms.toFixed(1)} ms` : "failed");
   if (row.error) value.title = row.error;
   line.appendChild(value);
   return line;
 }
 
 function hostLatencySection() {
-  if (!state.backends.length) return null;
+  const paired = state.backends.filter(backend => state.remoteOk[backend.id] !== false);
+  if (!paired.length) return null;
+  /* The controller reports the node it knows is offline; the box drops it,
+     exactly as it drops that node's chart and its processes. */
+  const rows = hostPanel.latency.filter(row => row && typeof row === "object" &&
+    !row.offline && state.remoteOk[row.id] !== false);
   const section = hostSection("Latency", "from this instance");
   if (hostPanel.latencyError)
     section.appendChild(el("div", "host-empty", hostPanel.latencyError));
-  else if (!hostPanel.latency.length)
+  else if (!rows.length)
     section.appendChild(el("div", "host-empty", "Measuring…"));
-  else for (const row of hostPanel.latency)
-    if (row && typeof row === "object") section.appendChild(hostLatencyRow(row));
+  else for (const row of rows) section.appendChild(hostLatencyRow(row));
   return section;
 }
 
-/* ---- the process section: what Puppy is running on each node ---- */
-function hostProcessRow(process, depth) {
+/* ---- the process section: what Puppy is running on each node ----
+   A row is preceded by one rail cell per level above it: a bar only where
+   that ancestor still has rows underneath, and at the row's own level an
+   elbow - a tee while siblings follow, a corner for the last of them - so a
+   branch visibly ends instead of running on under one more bar. */
+function hostProcessRails(rails, last) {
+  const box = el("span", "host-proc-rails");
+  for (const continues of rails)
+    box.appendChild(el("i", `host-rail${continues ? " line" : ""}`));
+  box.appendChild(el("i", `host-rail ${last ? "end" : "tee"}`));
+  return box;
+}
+
+function hostProcessRow(process, rails, last) {
   const row = el("div", "host-proc");
-  row.style.setProperty("--depth", String(Math.min(depth, 7)));
+  if (last !== null) row.appendChild(hostProcessRails(rails, last));
   row.appendChild(el("span", `host-proc-dot k-${process.kind || "proc"}`));
   const name = el("span", "host-proc-name", process.label || "?");
   row.appendChild(name);
@@ -7183,13 +7198,21 @@ function hostProcessRow(process, depth) {
   return row;
 }
 
-function hostProcessRows(process, depth, into) {
-  into.appendChild(hostProcessRow(process, depth));
-  for (const child of process.children || []) hostProcessRows(child, depth + 1, into);
-  if (process.more > 0) {
-    const more = el("div", "host-proc host-proc-more",
-      `+${process.more} more`);
-    more.style.setProperty("--depth", String(Math.min(depth + 1, 7)));
+/* `rails` is one continuation flag per level above this row and `last` says
+   how its own elbow is drawn - null for the root, which has neither. A cut
+   branch's "+n more" is the last row of that level, so the children above it
+   keep their tee. */
+function hostProcessRows(process, rails, last, into) {
+  into.appendChild(hostProcessRow(process, rails, last));
+  const children = process.children || [];
+  const trimmed = process.more > 0;
+  const below = last === null ? rails : rails.concat(!last);
+  children.forEach((child, index) => hostProcessRows(
+    child, below, !trimmed && index === children.length - 1, into));
+  if (trimmed) {
+    const more = el("div", "host-proc host-proc-more");
+    more.appendChild(hostProcessRails(below, true));
+    more.appendChild(el("span", "host-proc-more-label", `+${process.more} more`));
     into.appendChild(more);
   }
 }
@@ -7212,7 +7235,7 @@ function hostProcessGroup(node) {
   if (!root) group.appendChild(el("div", "host-empty", entry.error || "Reading…"));
   else {
     const tree = el("div", "host-tree");
-    hostProcessRows(root, 0, tree);
+    hostProcessRows(root, [], null, tree);
     group.appendChild(tree);
   }
   return group;
