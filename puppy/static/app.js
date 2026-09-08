@@ -11997,17 +11997,29 @@ function fillAsideAnswer(card, d) {
 /* Task endings stay visible even when their tool's input/output is folded.
    The native tool id is the only association: an absent id or a card outside
    this history window leaves a complete, independently readable update. */
+function taskUpdateNode(label, tone, text, kind) {
+  const n = el("div", "task-update " + kind);
+  n.appendChild(el("div", "task-update-label state-word" + (tone ? " " + tone : ""), label));
+  const prefix = label + ": ";
+  if (text.startsWith(prefix)) text = text.slice(prefix.length);
+  if (text) n.appendChild(linkifyInto(el("div", "task-update-text"), text));
+  return n;
+}
+
+function sessionTaskUpdateNode(d) {
+  const text = String(d.text || "");
+  // Session-task events carry their action in the existing text field.
+  // Only split a known heading; preserve other notices in full.
+  const actions = [["Task started", "busy"], ["Task changes applied", "ok"],
+    ["Conflict resolution started in task", "busy"]];
+  const [label, tone] = actions.find(([label]) => text.startsWith(label + ": ")) || ["Task updated", ""];
+  return taskUpdateNode(label, tone, text, "session-task-update");
+}
+
 function backgroundTaskUpdateNode(d) {
   const states = {completed: ["completed", "ok"], failed: ["failed", "bad"], stopped: ["stopped", "warn"]};
   const [label, tone] = Object.prototype.hasOwnProperty.call(states, d.status) ? states[d.status] : ["updated", ""];
-  const n = el("div", "background-task");
-  n.appendChild(el("div", "background-task-label state-word" + (tone ? " " + tone : ""),
-    `Background task ${label}`));
-  let text = String(d.text || "");
-  const prefix = `Background task ${label}: `;
-  if (text.startsWith(prefix)) text = text.slice(prefix.length);
-  if (text) n.appendChild(linkifyInto(el("div", "background-task-text"), text));
-  return n;
+  return taskUpdateNode(`Background task ${label}`, tone, String(d.text || ""), "background-task");
 }
 
 function backgroundTaskStateInto(card, d) {
@@ -15130,6 +15142,7 @@ class SessionView {
           }
           return node;
         }
+        if (d.subtype === "session_task") return sessionTaskUpdateNode(d);
         if (d.subtype === "session_task_archive") return taskArchiveNode(d, ev.ts, this.tab.bid);
         if (d.subtype === "session_request" && d.session_request) {
           const card = el("div", "session-request-card");
@@ -15166,11 +15179,19 @@ class SessionView {
           return toolCardNode({tool: "web_search", input: query ? {query} : undefined}, true);
         }
         if (d.subtype === "config_change") return this.switchLineNode(ev, d, false);
-        const warned = d.subtype === "interrupted" || d.subtype === "model_switch" ||
-          d.subtype === "workspace_reset" || d.subtype === "background_wait_stopped" ||
-          d.subtype === "engine_retry";
-        const n = el("div", "info-line" + (warned ? " warn" : "") +
-          (d.subtype === "background_wait" ? " bg-wait" : ""));
+        if (d.subtype === "background_wait")
+          return taskUpdateNode("Waiting for background tasks", "busy", String(d.text || ""), "background-wait-update");
+        if (d.subtype === "interrupted" || d.subtype === "background_wait_stopped")
+          return taskUpdateNode(d.subtype === "interrupted" ? "Interrupted" : "Background wait stopped",
+            "warn", String(d.text || ""), "interruption-update");
+        if (d.subtype === "model_switch") {
+          const text = String(d.text || "");
+          const changed = /^engine model changed: /i.test(text);
+          return taskUpdateNode(changed ? "Engine model changed" : "Engine model notice",
+            changed ? "" : "warn", changed ? text.replace(/^engine model changed: /i, "") : text, "model-update");
+        }
+        const warned = d.subtype === "workspace_reset" || d.subtype === "engine_retry";
+        const n = el("div", "info-line" + (warned ? " warn" : ""));
         n.textContent = d.text || d.subtype || "";
         return n;
       }

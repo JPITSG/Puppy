@@ -83,6 +83,14 @@ async def fixture():
         ("tool_result", {"tool_use_id": "demo-test", "content": "Command running in background"}),
         ("info", {"subtype": "task", "status": "completed", "task_id": "demo-layout-check",
                   "tool_use_id": "demo-test", "text": "12 layout tests passed, including card spacing, the activity feed and phone navigation"}),
+        ("info", {"subtype": "session_task", "task_id": 8,
+                  "text": "Task started: Activity feed headings"}),
+        ("info", {"subtype": "session_task", "task_id": 8,
+                  "text": "Conflict resolution started in task: Activity feed headings. Review its updated changes before applying."}),
+        ("info", {"subtype": "session_task", "task_id": 8,
+                  "text": "Task changes applied: Activity feed headings", "files": "M\tsrc/dashboard.css"}),
+        ("info", {"subtype": "interrupted", "text": "Turn interrupted by user"}),
+        ("info", {"subtype": "model_switch", "text": "engine model changed: preview-standard → preview-extended"}),
         ("assistant", {"text": "The dashboard now uses consistent spacing and clearer card headings. The activity feed stays visible on smaller screens.\n\nAll 12 layout tests passed, including the phone navigation checks."}),
         ("result", {"ok": True, "duration_ms": 12400, "usage": {"input_tokens": 8400, "output_tokens": 1250}}),
     ]
@@ -1293,6 +1301,17 @@ async def background_task_checks(instance, capture=False):
                 tool_use_id:'outside-window',status:'completed',text:command}},
             {seq:seq++,kind:'info',data:{subtype:'task',task_id:'unlinked',
                 status:'failed',text:'Background task failed: '+command}});
+        for (const label of ['Task started','Task changes applied','Conflict resolution started in task'])
+            backgroundDemoEvents.push({seq:seq++,kind:'info',data:{subtype:'session_task',task_id:8,
+                text:label+': '+command}});
+        for (const [subtype,text] of [
+            ['interrupted','Turn interrupted by user'],
+            ['interrupted','Stopped waiting for background tasks; the engine ended them'],
+            ['background_wait','Waiting for 1 background task: '+command],
+            ['background_wait_stopped','Stopped waiting for background tasks; the engine ended them'],
+            ['model_switch','engine model changed: preview-standard → '+command],
+            ['model_switch',"requested model 'preview-standard' but engine is serving "+command]])
+            backgroundDemoEvents.push({seq:seq++,kind:'info',data:{subtype,text}});
         demoView.rebuildTranscript(backgroundDemoEvents,{attached:true});
         return true;
     })()""")
@@ -1304,24 +1323,24 @@ async def background_task_checks(instance, capture=False):
             for theme in ("dark", "light"):
                 await evaluate(instance, "applyTheme(" + json.dumps(theme) + "); true")
                 layout = await evaluate(instance, """(() => {
-                    const updates=[...demoView.inner.querySelectorAll('.background-task')];
+                    const updates=[...demoView.inner.querySelectorAll('.task-update')];
                     return {count:updates.length,
                         standalone:updates.filter(n=>n.parentNode===demoView.inner).length,
                         centered:demoView.inner.querySelectorAll('.info-line').length,
                         fits:updates.every(n=>n.scrollWidth<=n.clientWidth+1 &&
-                            n.querySelector('.background-task-text').scrollWidth<=n.clientWidth+1),
+                            n.querySelector('.task-update-text').scrollWidth<=n.clientWidth+1),
                         left:updates.every(n=>getComputedStyle(n).textAlign==='left'),
                         visible:updates.every(n=>n.getBoundingClientRect().height>30),
                         collapsed:[...demoView.inner.querySelectorAll('.tool-body')].every(n=>getComputedStyle(n).display==='none'),
                         tones:['completed','failed','stopped'].map(status=>{
                             const card=demoView.toolCards['demo-background-'+status];
-                            const label=card.querySelector('.background-task-label');
+                            const label=card.querySelector('.task-update-label');
                             return {label:label.textContent,color:getComputedStyle(label).color,
                                 head:getComputedStyle(card.querySelector('.t-state')).color};
                         }),
                         pageFits:document.documentElement.scrollWidth<=innerWidth};
                 })()""")
-                assert layout["count"] == 5 and layout["standalone"] == 2, layout
+                assert layout["count"] == 14 and layout["standalone"] == 11, layout
                 assert layout["centered"] == 0, layout
                 assert all(layout[k] for k in ("fits", "left", "visible", "collapsed", "pageFits")), layout
                 assert [row["label"] for row in layout["tones"]] == [

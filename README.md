@@ -249,6 +249,12 @@ Updates remain visible with the card collapsed; those without a matching card
 stand on their own. Transient engine failures (such as an OAuth refresh lock)
 retry on their own with a back-off note in the transcript.
 
+Interruptions, background waits and engine-reported model notices use the same
+cards. Headings are green for success, blue for active work or waiting, amber
+for interruptions, stops and model mismatches, red for failures, and neutral
+for ordinary model-change notices. Engine switches and requested model/effort
+changes remain centered dividers.
+
 ### Tasks: parallel work in isolated copies
 
 Open a session and press **+ Task** beside **Main**. Each task is its own
@@ -283,6 +289,8 @@ does not reopen its tab. Once started, use the task's **Stop** control.
   follow-up to the task's own agent with snapshots of the baseline, the task
   and Main, so the agent reconciles both sides in its copy for you to review
   again. Nothing is ever applied unseen.
+- Task starts, applied changes and conflict-resolution starts appear as labeled,
+  left-aligned cards in Main’s transcript, matching background-task updates.
 - **Fold into Main** keeps a condensed, searchable copy of the task's
   conversation as a collapsible card in Main's transcript when the task is
   removed, with the files it applied. Optionally let Main's model see the

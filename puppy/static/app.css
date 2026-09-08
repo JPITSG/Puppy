@@ -1331,14 +1331,14 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 }
 .tool-body .tb-label{font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.09em;color:var(--txt3);margin:6px 0 3px}
 
-.background-task{
+.task-update{
   align-self:stretch;min-width:0;text-align:left;padding:8px 11px;
   background:var(--panel);border:1px solid var(--line);border-radius:var(--r-md);
   font-size:var(--fs-sm);
 }
-.tool-card>.background-task{border:0;border-top:1px solid var(--line);border-radius:0}
-.background-task-label{font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.09em;color:var(--txt3)}
-.background-task-text{margin-top:4px;color:var(--txt2);white-space:pre-wrap;overflow-wrap:anywhere}
+.tool-card>.task-update{border:0;border-top:1px solid var(--line);border-radius:0}
+.task-update-label{font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.09em;color:var(--txt3)}
+.task-update-text{margin-top:4px;color:var(--txt2);white-space:pre-wrap;overflow-wrap:anywhere}
 .info-line{align-self:center;font-size:var(--fs-sm);color:var(--txt3);text-align:center;padding:2px 10px;font-family:var(--mono);white-space:pre-wrap}
 .todo-card{
   align-self:flex-start;background:var(--panel);border:1px solid var(--line);border-radius:var(--r-md);
@@ -1351,7 +1351,6 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 }
 .todo-row.done .todo-txt{color:var(--txt3);text-decoration:line-through}
 .info-line.warn{color:var(--warn)}
-.info-line.bg-wait{color:var(--txt2)}
 .switch-line{
   align-self:stretch;display:flex;align-items:center;justify-content:center;color:var(--txt3);
   font-size:var(--fs-xs);text-transform:uppercase;letter-spacing:.08em;margin:6px 0;
