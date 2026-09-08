@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 
 
 BASE = Path(__file__).resolve().parent.parent
@@ -99,6 +100,32 @@ def check_parsers_and_turn_ingest() -> None:
     assert values(claude[1]["effort_options"]) == [""]
     assert "vendor-default" in claude[0]["hint"]
     assert claude[0]["resolved_model"] == "vendor-default"
+
+    # 2.1.263's picker says fable; older saved requests say fable[1m].
+    # Alternate request spellings belong to the same row without rewriting
+    # the saved request or borrowing another model's effort levels.
+    renamed = parse_claude_catalog([
+        {"value": "default", "resolvedModel": "vendor-current"},
+        {"value": "fable", "displayName": "Fable",
+         "resolvedModel": "claude-fable-5-1",
+         "supportedEffortLevels": ["high", "max"]},
+        {"value": "future", "displayName": "Future",
+         "resolvedModel": "vendor-current", "supportedEffortLevels": ["low"]},
+        {"value": "future[1m]", "displayName": "Future extended",
+         "resolvedModel": "vendor-current[1m]", "supportedEffortLevels": ["max"]},
+    ])
+    assert "aliases" not in renamed[0]  # default remains engine-owned
+    assert "fable[1m]" in renamed[1]["aliases"]
+    assert "claude-fable-5-1" in renamed[1]["aliases"]
+    aliases = ClaudeDriver()
+    aliases._model_catalog_state().ingest(renamed)
+    assert values(aliases.effort_options_for_model("fable[1m]")) == ["", "high", "max"]
+    assert values(aliases.effort_options_for_model("future")) == ["", "low"]
+    assert values(aliases.effort_options_for_model("future[1m]")) == ["", "max"]
+    assert values(aliases.effort_options_for_model("vendor-current[1m]")) == ["", "max"]
+    assert values(aliases.effort_options_for_model("vendor-current")) == ["", "low"]
+    assert aliases.model_request_matches("future[1m]", "vendor-current") is True
+    assert aliases.model_request_matches("future[1m]", "vendor-other") is False
 
     # The catalog already returned by a real turn is useful evidence too and
     # must update the same last-known-good state as the no-turn probe.
@@ -322,6 +349,7 @@ async def check_shared_cache() -> None:
         await driver.refresh_model_options(force=True)
         assert driver.model_options() == previous
         assert driver.model_catalog_error() == "catalog unavailable"
+        assert driver.model_catalog_loaded() is True  # still has last-known-good
         attempts = len(driver.calls)
         await driver.refresh_model_options()
         assert len(driver.calls) == attempts  # failure back-off
@@ -340,6 +368,15 @@ async def check_shared_cache() -> None:
         await driver.refresh_model_options(force=True)
         assert driver.model_options() == kept
         assert driver.model_catalog_error() == "engine reported no models"
+
+        first_failure = FakeCatalogDriver()
+        first_failure.fail = True
+        await first_failure.refresh_model_options()
+        assert first_failure.model_catalog_checked_at() is not None
+        assert first_failure.model_catalog_loaded() is False
+        first_failure.fail = False
+        await first_failure.refresh_model_options(force=True)
+        assert first_failure.model_catalog_loaded() is True
     finally:
         base.MODEL_CATALOG_TTL_SECONDS = old_ttl
         base.MODEL_CATALOG_RETRY_SECONDS = old_retry
@@ -389,7 +426,7 @@ async def check_manual_refresh_route() -> None:
         web_module.all_drivers = lambda: [driver]
         web_module.cli_releases.refresh_if_due = release_refresh
         web_module.db.meta_get = lambda _key: None
-        response = await web_module.h_engines_refresh(None)
+        response = await web_module.h_engines_refresh(SimpleNamespace(headers={}))
         payload = json.loads(response.text)
     finally:
         (web_module.all_drivers,

@@ -79,8 +79,10 @@ async def fixture():
         ("assistant", {"text": "The cards share one layout rule. I can reduce the visual noise without changing how the activity feed works."}),
         ("tool_use", {"tool_use_id": "demo-edit", "tool": "Edit", "input": {"file_path": "/home/mira/projects/harbor/src/dashboard.css", "old_string": "gap: 24px;", "new_string": "gap: 16px;"}}),
         ("tool_result", {"tool_use_id": "demo-edit", "content": "Updated the shared card spacing"}),
-        ("tool_use", {"tool_use_id": "demo-test", "tool": "Bash", "input": {"command": "npm test -- dashboard"}}),
-        ("tool_result", {"tool_use_id": "demo-test", "content": "12 tests passed"}),
+        ("tool_use", {"tool_use_id": "demo-test", "tool": "Bash", "input": {"command": "npm test -- dashboard --viewport=phone --check=card-spacing,activity-feed,navigation"}}),
+        ("tool_result", {"tool_use_id": "demo-test", "content": "Command running in background"}),
+        ("info", {"subtype": "task", "status": "completed", "task_id": "demo-layout-check",
+                  "tool_use_id": "demo-test", "text": "12 layout tests passed, including card spacing, the activity feed and phone navigation"}),
         ("assistant", {"text": "The dashboard now uses consistent spacing and clearer card headings. The activity feed stays visible on smaller screens.\n\nAll 12 layout tests passed, including the phone navigation checks."}),
         ("result", {"ok": True, "duration_ms": 12400, "usage": {"input_tokens": 8400, "output_tokens": 1250}}),
     ]
@@ -336,6 +338,64 @@ async def new_session_choices_checks(instance, capture=False):
             prefersNativeChoices=savedNativeChoices; delete window.savedNativeChoices;
             applyTheme('dark'); true""")
     print("PASS: New session model, effort and permission controls fit desktop and narrow windows with mouse and touch choices in both themes", flush=True)
+
+
+async def model_alias_checks(instance):
+    from puppy.drivers.claude import parse_model_catalog
+
+    driver = next(item for item in all_drivers() if item.key == "claude")
+    models = parse_model_catalog([
+        {"value": "default", "displayName": "Default"},
+        {"value": "fable", "displayName": "Fable", "resolvedModel": "claude-fable-5-1",
+         "supportedEffortLevels": ["high", "max"]},
+    ])
+    saved = dict(config.get("engines.defaults.claude"))
+
+    async def alias_engines(*args, **kwargs):
+        payload = await engines()
+        for engine in payload:
+            if engine["key"] == "claude":
+                engine["model_options"] = models
+        return payload
+
+    try:
+        config.set_value("engines.defaults.claude", {
+            "model": "fable[1m]", "effort": "max", "permission_mode": "auto"})
+        with patch.object(driver, "model_options", return_value=models), \
+                patch.object(driver, "model_catalog_loaded", return_value=True), \
+                patch.object(webui, "_engines_payload", alias_engines):
+            await evaluate(instance, "(async()=>{rememberEnginePayload(0, await api(0,'engines')); return true})()")
+            for width, height, name in [(1440, 900, "desktop"), (390, 844, "phone")]:
+                await instance.call("Emulation.setDeviceMetricsOverride", {
+                    "width": width, "height": height, "deviceScaleFactor": 1,
+                    "mobile": width < 900}, session=instance.page_session)
+                for prefix, opening, wrap in [
+                    ("nt", "modalNewTask(state.views['s:0:1'])", "nt-model-custom-wrap"),
+                    ("ns", "modalNewSession()", "ns-model-custom-wrap"),
+                    ("ed", "modalEngineDefaults(0,'claude')", "ed-custom-wrap"),
+                ]:
+                    await evaluate(instance, opening + "; true")
+                    await until(instance, "document.querySelector('#%s-model')?.value==='fable[1m]'" % prefix)
+                    result = await evaluate(instance, """(() => {
+                        const select=document.querySelector('#%s-model');
+                        return [select.selectedOptions[0].textContent,
+                            document.querySelector('#%s-effort').value,
+                            document.querySelector('#%s').classList.contains('hidden'),
+                            [...select.options].filter(o=>o.textContent==='Fable').length];
+                    })()""" % (prefix, prefix, wrap))
+                    assert result == ["Fable", "max", True, 1], (name, prefix, result)
+                    if prefix == "nt":
+                        shot = await instance.call("Page.captureScreenshot", {"format": "png"},
+                                                   session=instance.page_session)
+                        (BASE / "data" / ("fable-task-" + name + ".png")).write_bytes(
+                            base64.b64decode(shot["data"]))
+                    await evaluate(instance, "document.querySelector('#%s-cancel').click(); true" % prefix)
+    finally:
+        config.set_value("engines.defaults.claude", saved)
+        await evaluate(instance, """(async()=>{
+            document.querySelector('#nt-cancel,#ns-cancel,#ed-cancel')?.click();
+            rememberEnginePayload(0, await api(0,'engines')); return true})()""")
+    print("PASS: saved Fable context alias is named in New task, New session and Engine defaults on desktop and phone; request and Max effort preserved", flush=True)
 
 
 async def reply_image_checks(instance, capture=False):
@@ -1213,7 +1273,106 @@ async def spell_check_checks(instance, capture=False):
           "suggestion and tools menus", flush=True)
 
 
+async def background_task_checks(instance, capture=False):
+    await evaluate(instance, """(async () => {
+        window.backgroundSavedEvents=(await api(demoView.tab.bid,
+            `sessions/${demoView.tab.sid}/events?limit=200`)).events;
+        const command='node tests/layout.js --report=/home/mira/projects/harbor/'+'long-path-'.repeat(35);
+        window.backgroundDemoEvents=[];
+        let seq=1;
+        for(const status of ['completed','failed','stopped']) {
+            const id='demo-background-'+status;
+            backgroundDemoEvents.push(
+                {seq:seq++,kind:'tool_use',data:{tool:'Bash',tool_use_id:id,input:{command}}},
+                {seq:seq++,kind:'tool_result',data:{tool_use_id:id,content:'Command running in background'}},
+                {seq:seq++,kind:'info',data:{subtype:'task',tool_use_id:id,task_id:id,status,
+                    text:status==='completed'?command:`Background task ${status}: ${command}`}});
+        }
+        backgroundDemoEvents.push(
+            {seq:seq++,kind:'info',data:{subtype:'task',task_id:'missing-card',
+                tool_use_id:'outside-window',status:'completed',text:command}},
+            {seq:seq++,kind:'info',data:{subtype:'task',task_id:'unlinked',
+                status:'failed',text:'Background task failed: '+command}});
+        demoView.rebuildTranscript(backgroundDemoEvents,{attached:true});
+        return true;
+    })()""")
+    try:
+        for width, height, name in [(1440, 900, "desktop"), (390, 844, "mobile")]:
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width": width, "height": height, "deviceScaleFactor": 1,
+                "mobile": name == "mobile"}, session=instance.page_session)
+            for theme in ("dark", "light"):
+                await evaluate(instance, "applyTheme(" + json.dumps(theme) + "); true")
+                layout = await evaluate(instance, """(() => {
+                    const updates=[...demoView.inner.querySelectorAll('.background-task')];
+                    return {count:updates.length,
+                        standalone:updates.filter(n=>n.parentNode===demoView.inner).length,
+                        centered:demoView.inner.querySelectorAll('.info-line').length,
+                        fits:updates.every(n=>n.scrollWidth<=n.clientWidth+1 &&
+                            n.querySelector('.background-task-text').scrollWidth<=n.clientWidth+1),
+                        left:updates.every(n=>getComputedStyle(n).textAlign==='left'),
+                        visible:updates.every(n=>n.getBoundingClientRect().height>30),
+                        collapsed:[...demoView.inner.querySelectorAll('.tool-body')].every(n=>getComputedStyle(n).display==='none'),
+                        tones:['completed','failed','stopped'].map(status=>{
+                            const card=demoView.toolCards['demo-background-'+status];
+                            const label=card.querySelector('.background-task-label');
+                            return {label:label.textContent,color:getComputedStyle(label).color,
+                                head:getComputedStyle(card.querySelector('.t-state')).color};
+                        }),
+                        pageFits:document.documentElement.scrollWidth<=innerWidth};
+                })()""")
+                assert layout["count"] == 5 and layout["standalone"] == 2, layout
+                assert layout["centered"] == 0, layout
+                assert all(layout[k] for k in ("fits", "left", "visible", "collapsed", "pageFits")), layout
+                assert [row["label"] for row in layout["tones"]] == [
+                    "Background task completed", "Background task failed", "Background task stopped"], layout
+                assert len({row["color"] for row in layout["tones"]}) == 3, layout
+                assert all(row["color"] == row["head"] for row in layout["tones"]), layout
+                if capture:
+                    await evaluate(instance, "demoView.scroll.scrollTop=0; true")
+                    await asyncio.sleep(.1)
+                    data = await instance.call("Page.captureScreenshot", {"format": "png"}, session=instance.page_session)
+                    (BASE / "data" / ("background-tasks-" + name + "-" + theme + ".png")).write_bytes(base64.b64decode(data["data"]))
+        # Search can land directly on a visible update inside a folded card.
+        assert await evaluate(instance, """(async () => {
+            await demoView.jumpToSeq(6);
+            const n=demoView.findEventNode(6);
+            return n.classList.contains('background-task') && n.classList.contains('search-flash') &&
+                n.getBoundingClientRect().bottom>0 && n.getBoundingClientRect().top<innerHeight;
+        })()""")
+        # Rebuilding a narrow history window retains the notice. Bringing its
+        # origin into view reparents that node instead of duplicating it.
+        assert await evaluate(instance, """(async () => {
+            demoView.rebuildTranscript([backgroundDemoEvents[2]],{attached:false,mayHaveOlder:true});
+            const update=demoView.findEventNode(3);
+            if(update.parentNode!==demoView.inner) return false;
+            const savedApi=api;
+            let requests=0;
+            api=async (bid,route,...args)=>{
+                if(route.includes('/events?before_seq=3')) {
+                    requests++;
+                    return {events:backgroundDemoEvents.slice(0,2)};
+                }
+                return savedApi(bid,route,...args);
+            };
+            try {
+                await demoView._loadOlderFn();
+                const card=demoView.toolCards['demo-background-completed'];
+                return requests===1 && update.parentNode===card && card.parentNode===demoView.inner &&
+                    !demoView.inner.querySelector('.load-older') && demoView.oldestSeq===1 &&
+                    demoView.inner.querySelectorAll('.background-task').length===1 &&
+                    demoView.findEventNode(3)===update;
+            } finally {api=savedApi;}
+        })()""")
+    finally:
+        await evaluate(instance, """demoView.rebuildTranscript(backgroundSavedEvents,{attached:true});
+            delete window.backgroundSavedEvents; delete window.backgroundDemoEvents;
+            demoView.scrollBottom(true); true""")
+    print("PASS: background-task updates attach by native ID, remain visible in folded cards, wrap on desktop and phone in both themes, and retain history/search targets", flush=True)
+
+
 async def checks(a, b, hub, capture=False):
+    await background_task_checks(a, capture)
     await message_reuse_checks(a)
     await spell_check_checks(a, capture)
     await workspace_move_checks(a, capture)
@@ -1884,6 +2043,7 @@ async def main(args):
                 await open_console(instance, url, sid)
             await quota_checks(instances[0])
             await engine_activity_checks(instances[0])
+            await model_alias_checks(instances[0])
             await checks(*instances, runner.hub(sid), args.screenshots)
             await browser_cursor_checks(instances[0])
             await terminal_io_checks(instances[0])

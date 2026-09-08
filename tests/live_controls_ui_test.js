@@ -381,6 +381,35 @@ function engineCatalog(fast = false) {
   assert.equal(nsModel.value, named.value, "a refresh stops calling a catalogued model custom");
   assert.equal(nsCustomWrap.classList.contains("hidden"), true);
   dialog.close();
+
+  /* A catalog alias uses the named model in both dialog and composer pickers
+     without turning a saved context selector into a different request. */
+  const aliasRow = { value: "fable", label: "Fable", aliases: ["fable[1m]"],
+    effort_options: [{ value: "max", label: "Max" }] };
+  state.engines = [{ ...pending, model_catalog_loaded: true,
+    session_defaults: { permission_mode: "safe", model: "fable[1m]", effort: "max" },
+    model_options: [...pending.model_options, aliasRow] }];
+  await context.modalNewSession();
+  const aliasSelect = dialog.m.querySelector("#ns-model");
+  assert.equal(aliasSelect.value, "fable[1m]");
+  assert.equal(aliasSelect.options.find(option => option.value === "fable[1m]").textContent, "Fable");
+  assert.equal(dialog.m.querySelector("#ns-model-custom-wrap").classList.contains("hidden"), true);
+  assert.equal(dialog.m.querySelector("#ns-effort").value, "max");
+  dialog.close();
+  const aliasView = sessionView();
+  aliasView.session.model = "fable[1m]";
+  for (const native of [false, true]) {
+    const spec = aliasView.composerChoiceSpec("model", native);
+    assert.equal(spec.selected, "fable[1m]");
+    assert.equal(spec.options.find(option => option.value === spec.selected).label, "Fable");
+  }
+  const exactContext = { ...aliasRow, value: "fable[1m]", label: "Fable extended", aliases: [],
+    effort_options: [{ value: "high", label: "High" }] };
+  state.engines[0].model_options.push(exactContext);
+  assert.equal(aliasView.composerChoiceSpec("model").options.find(
+    option => option.value === "fable[1m]").label, "Fable extended", "exact entries precede aliases");
+  assert.equal(aliasView.composerChoiceSpec("effort").options[0].value, "high");
+  aliasView.root.remove();
   state.engines = engineCatalog(); apiReply = {};
   update();
 

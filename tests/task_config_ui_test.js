@@ -351,5 +351,31 @@ const deletes = from => requests.slice(from).filter(r => r.method === "DELETE").
   dialog.close();
   remote[1] = settled;
 
+  /* A completed catalog may change its preferred alias. The saved request
+     stays byte-for-byte intact, but is presented as the catalog's model. */
+  const fable = { value: "fable", label: "Fable", aliases: ["fable[1m]"],
+    effort_options: options(["", "high", "max"]) };
+  const fableSaved = { model: "fable[1m]", effort: "max", permission_mode: "safe" };
+  remote[1] = { ...settled, session_defaults: fableSaved,
+    model_options: [...settled.model_options, fable] };
+  requests = [];
+  n = await open();
+  assert.equal(n["#nt-model"].value, fableSaved.model);
+  assert.equal(n["#nt-model"].children.find(item => item.value === fableSaved.model).textContent, "Fable");
+  assert.equal(n["#nt-model-custom-wrap"].classList.contains("hidden"), true);
+  assert.deepEqual(n["#nt-effort"].children.map(item => item.value), ["", "high", "max"]);
+  n["#nt-model"].value = "__custom__"; n["#nt-model"].onchange();
+  n["#nt-model-custom"].value = fableSaved.model; n["#nt-model-custom"].oninput();
+  n["#nt-effort"].value = "max";
+  rememberEnginePayload(7, { engines: remote });
+  assert.deepEqual(values(n), { engine: "second", ...fableSaved });
+  assert.equal(n["#nt-model-custom-wrap"].classList.contains("hidden"), true,
+    "a refresh recognizes an alias even when the custom box was already open");
+  n["#nt-prompt"].value = "Check alias handling";
+  await n["#nt-start"].onclick();
+  assert.equal(requests.at(-1).body.model, fableSaved.model, "submission preserves the context selector");
+  assert.equal(requests.at(-1).body.effort, "max");
+  remote[1] = settled;
+
   console.log("PASS: task modal engine defaults, engine/model dependencies, catalog refresh and delayed initialization, provisional catalogs, custom/retired choices, local/remote nodes, retry lifecycle, and its shared prompt box (Enter, attachments, discard on cancel)");
 })().catch(error => { console.error(error); process.exitCode = 1; });

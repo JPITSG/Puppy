@@ -291,7 +291,10 @@ tasks. The session stays `running` for the whole wait (bounded by
 `sessions.turn_timeout`). A persisted `info` event with subtype
 `background_wait` (`tasks: [{id, type, description}]`) marks the pause, an
 `info` event with subtype `task` (`status`, `task_id`) records each task that
-ends, and `background_wait_stopped` records a wait the node ended itself. One
+ends. When the CLI supplies its originating `tool_use_id`, that provenance is
+retained on the task event so consoles can attach the update to its tool card;
+no association is inferred when the native ID is absent.
+`background_wait_stopped` records a wait the node ended itself. One
 `result` closes the turn, with `usage` and `num_turns` summed over every
 wake-up and an additive `wakeups` count. Stopping the turn during the wait
 closes the engine's stdin so it ends its tasks gracefully; the answer given
@@ -410,6 +413,12 @@ The same payload drives new-session cards and active-session selectors. A live
 catalog update preserves a still-valid selection, does not rebuild a native
 mobile picker while it is open, and never offers an effort level that the
 selected catalog model did not report.
+
+Named Claude rows also publish `aliases`: resolved model IDs and the CLI's
+`[1m]` request spellings. Controllers can show the matching model name and
+effort levels without rewriting a saved request. Exact catalog values take
+precedence over aliases. `model_catalog_loaded` is true only after a successful
+discovery; a failed first check still serves a provisional fallback list.
 
 OpenCode is registered in the headless artifact just like it is in the full
 runtime. Its status is binary availability only: provider authentication is

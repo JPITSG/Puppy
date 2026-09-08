@@ -21,6 +21,7 @@ os.environ["PUPPY_DATA"] = str(ROOT / "data")
 from aiohttp.test_utils import TestClient, TestServer
 from puppy import config, db, engine_defaults, runner
 from puppy.drivers import all_drivers, get_driver
+from puppy.drivers.claude import parse_model_catalog
 from puppy.web import build_app
 
 MODELS = [
@@ -91,6 +92,27 @@ async def main():
                 wake.assert_any_call("engines")
                 engines = (await request("GET", "engines"))["engines"]
                 assert all(engine["session_defaults"]["model"] == "provider/precise" for engine in engines)
+
+                # Real Claude catalog normalization reaches the API unchanged.
+                # Saving/creating with an alternate spelling preserves it and
+                # validates effort against that model, not the global union.
+                claude = get_driver("claude")
+                original_defaults = dict(config.get("engines.defaults.claude"))
+                alias_models = parse_model_catalog([
+                    {"value": "fable", "displayName": "Fable",
+                     "resolvedModel": "claude-fable-5-1", "supportedEffortLevels": ["max"]},
+                    {"value": "quick", "displayName": "Quick", "supportedEffortLevels": ["low"]},
+                ])
+                with patch.object(claude, "model_options", return_value=alias_models), \
+                        patch.object(claude, "allow_custom_model", True):
+                    alias_choices = {"model": "fable[1m]", "effort": "max", "permission_mode": "auto"}
+                    saved_alias = (await request("PUT", "engines/claude/defaults", alias_choices))["engine"]
+                    assert saved_alias["session_defaults"] == alias_choices
+                    assert "fable[1m]" in saved_alias["model_options"][1]["aliases"]
+                    await request("PUT", "engines/claude/defaults", {**alias_choices, "effort": "low"}, status=400)
+                    created_alias = (await request("POST", "sessions", {"engine": "claude", "cwd": str(ROOT)}))["session"]
+                    assert {key: created_alias[key] for key in alias_choices} == alias_choices
+                await request("PUT", "engines/claude/defaults", original_defaults)
 
                 # The queue captures all three choices at request time. Later
                 # saves cannot rewrite the switch or the prompts before it.

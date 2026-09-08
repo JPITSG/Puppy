@@ -126,7 +126,10 @@ context is.
   and reasoning efforts (plus **Fast mode** where the catalog offers a Fast
   tier), OpenCode every provider model that installation knows. Change any of
   them mid-conversation; while work is pending the change waits its turn in
-  the queue and applies in order.
+  the queue and applies in order. Claude's saved aliases and full model IDs,
+  including `[1m]` context selectors, use the matching catalog name and effort
+  choices without rewriting the saved request. A catalog that has never
+  loaded successfully keeps unlisted saved choices visible by ID until it does.
 - **Engine defaults per backend.** Save the starting permission, model and
   effort for each engine; new sessions, tasks and engine switches start from them.
 - **Switch engines any time.** A session can move between installed engines.
@@ -239,9 +242,12 @@ the transcript. Images in Markdown replies shrink to fit the available width
 while keeping their proportions; smaller images keep their natural size.
 
 Engines that keep working after answering are handled too: Claude Code's
-background commands, agents and monitors keep their turn alive until they end,
-and transient engine failures (such as an OAuth refresh lock) retry on their own
-with a back-off note in the transcript.
+background commands, agents and monitors keep their turn alive until they end.
+Their completion, failure and stop updates are labeled and left-aligned, attached
+to the originating tool card when the native tool ID and card are available.
+Updates remain visible with the card collapsed; those without a matching card
+stand on their own. Transient engine failures (such as an OAuth refresh lock)
+retry on their own with a back-off note in the transcript.
 
 ### Tasks: parallel work in isolated copies
 

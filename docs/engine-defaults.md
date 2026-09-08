@@ -16,6 +16,16 @@ The prepared task's choices survive catalog/default refreshes. Engine-native
 defaults remain a separate choice: an empty model or effort lets the engine decide.
 Defaults do not alter the engines' config files or one-shot spawned jobs.
 
+Claude's catalog rows carry driver-owned `aliases`, including their resolved
+model IDs and the CLI's [documented `[1m]` request spellings](https://code.claude.com/docs/en/model-config#extended-context). Every model picker
+uses those rows' names and effort levels while keeping the selected request
+unchanged: a saved `fable[1m]` remains that request when the CLI lists `fable` as
+Fable. Exact catalog values take precedence over aliases, and engine default
+stays separate from an explicit model. Unknown custom models still use the
+custom input. `model_catalog_loaded` means at least one successful discovery;
+a failed first attempt leaves the provisional list pending, and a later failure
+retains the last successful catalog. These are wire fields, not persisted state.
+
 `engine-defaults` is an additive capability on both runtimes. Authenticated
 `GET /api/engines/{key}/defaults` returns an `engine` object with picker catalogs,
 `session_defaults`, and `factory_defaults`. `PUT` replaces that engine's complete

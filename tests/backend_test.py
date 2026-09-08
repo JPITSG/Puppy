@@ -114,6 +114,19 @@ def exercise_driver_normalization() -> None:
         bg_ctx) == [{"a": "event", "kind": "info", "data": {
             "subtype": "task", "status": "completed", "task_id": "b1",
             "text": 'Background command "watch" completed (exit code 0)'}}]
+    # Preserve only the native association. Notices without a tool id above
+    # remain independent; matching command text is never identity evidence.
+    for status in ("completed", "failed", "stopped"):
+        notice = claude.parse_line(json.dumps({
+            "type": "system", "subtype": "task_notification", "task_id": "b1",
+            "tool_use_id": "toolu_background", "status": status,
+            "summary": "watch"}), bg_ctx)[-1]
+        assert notice["kind"] == "info"
+        assert notice["data"] == {
+            "subtype": "task", "status": status, "task_id": "b1",
+            "tool_use_id": "toolu_background",
+            "text": "watch" if status == "completed" else
+                    "Background task {}: watch".format(status)}
     assert claude.parse_line(json.dumps({
         "type": "result", "session_id": "s", "num_turns": 1, "duration_api_ms": 900,
         "total_cost_usd": 0.03, "stop_reason": "end_turn", "is_error": False,
@@ -1286,6 +1299,7 @@ finish()
             "id": "btask1", "type": "local_bash",
             "description": "fake background command"}]
         assert events[3]["data"]["status"] == "completed"
+        assert events[3]["data"]["tool_use_id"] == "toolu_1"
         assert events[3]["data"]["text"] == \
             'Background command "fake background command" completed (exit code 0)'
         assert events[4]["data"]["text"] == "continued after task"
@@ -1335,6 +1349,7 @@ finish()
             ("user", ""), ("assistant", ""), ("info", "background_wait"),
             ("info", "task"), ("info", "interrupted"), ("result", "")], shape(events)
         assert events[3]["data"]["status"] == "stopped"
+        assert events[3]["data"]["tool_use_id"] == "toolu_1"
         assert events[4]["data"]["text"] == \
             "Stopped waiting for background tasks; the engine ended them"
         assert events[5]["data"]["ok"] is True

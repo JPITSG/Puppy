@@ -18,7 +18,8 @@ Normalized transcript event kinds (persisted):
                  Engine background work uses three subtypes: background_wait
                  {tasks} when the model has answered but the engine still
                  owns background tasks whose end will wake it within this
-                 same turn, task {status, task_id} when one of them ends, and
+                 same turn, task {status, task_id, tool_use_id?} when one of
+                 them ends (the optional native tool id links its card), and
                  background_wait_stopped when the node ended such a wait
                  itself (turn timeout, or an engine that never continued).
     result       {ok, usage?, cost_usd?, engine_duration_ms?,
@@ -520,6 +521,18 @@ class Driver:
             result.append(dict(raw))
         return result
 
+    def model_option(self, model: str, options=None):
+        """Find a picker row, preferring exact values to driver-owned aliases."""
+        options = self.model_options() if options is None else options
+        for item in options:
+            if isinstance(item, dict) and item.get("value") == model:
+                return item
+        for item in options:
+            if isinstance(item, dict) and isinstance(item.get("aliases"), list) and \
+                    model in item["aliases"]:
+                return item
+        return None
+
     def model_request_matches(self, requested: str, reported: str, ctx=None) -> bool:
         """Whether one engine report satisfies the model Puppy requested.
 
@@ -635,7 +648,7 @@ class Driver:
 
     def model_catalog_loaded(self) -> bool:
         return not self.dynamic_model_options or \
-            self._model_catalog_state().checked_at is not None
+            self._model_catalog_state().updated_at is not None
 
     def default_model(self) -> str:
         """Model used when a new/reseeded session does not name one."""
@@ -647,10 +660,10 @@ class Driver:
 
     def effort_options_for_model(self, model: str):
         """Prefer capabilities attached to the selected catalog entry."""
-        for item in self.model_options():
-            if item.get("value") == model and isinstance(item.get("effort_options"), list):
-                return [dict(option) for option in item["effort_options"]
-                        if isinstance(option, dict)]
+        item = self.model_option(model)
+        if item is not None and isinstance(item.get("effort_options"), list):
+            return [dict(option) for option in item["effort_options"]
+                    if isinstance(option, dict)]
         if self.allow_custom_model:
             return self.effort_options()
         return [{"value": "", "label": "Default", "hint": "Engine model default"}]

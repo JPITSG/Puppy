@@ -127,6 +127,30 @@ def _claude_efforts(values=None) -> list:
     return options
 
 
+def _model_aliases(value: str, resolved: str) -> list:
+    """Request spellings covered by a named initialize row.
+
+    Claude accepts its documented [1m] selector on aliases and full IDs even
+    when the picker lists only the bare name (observed in 2.1.263). These are
+    display/capability matches, not permission to rewrite a requested context
+    window. Exact picker entries always take precedence over these aliases.
+    """
+    aliases = []
+    for name in (value, resolved):
+        if not name:
+            continue
+        forms = [name]
+        selector = _CONTEXT_SELECTOR_RE.search(name)
+        if selector is None:
+            forms.append(name + "[1m]")
+        elif selector.group().lower() == "[1m]":
+            forms.append(name[:selector.start()])
+        for form in forms:
+            if form != value and form not in aliases:
+                aliases.append(form)
+    return aliases
+
+
 def parse_model_catalog(models) -> list:
     """Normalize the initialize reply's model picker without guessing IDs."""
     if not isinstance(models, list):
@@ -168,6 +192,19 @@ def parse_model_catalog(models) -> list:
             "value": "", "label": "Default", "hint": "Claude CLI default model",
             "effort_options": _claude_efforts(),
         })
+    # A row explicitly resolving to an ID owns that spelling ahead of a
+    # context variant inferred from another row. This keeps separate short
+    # and extended entries' effort levels distinct, including full-ID picks.
+    owners = {option["value"]: option for option in options}
+    for option in options:
+        if option["value"] and option.get("resolved_model"):
+            owners.setdefault(option["resolved_model"], option)
+    for option in options:
+        if not option["value"]:
+            continue
+        option["aliases"] = [alias for alias in _model_aliases(
+            option["value"], option.get("resolved_model", ""))
+            if owners.setdefault(alias, option) is option]
     return options
 
 
@@ -347,9 +384,7 @@ class ClaudeDriver(Driver):
         # Values are engine-owned and normally compared exactly. The casefold
         # fallback retains the CLI's long-standing case-insensitive aliases
         # without making provider-specific ids case-insensitive generally.
-        option = next((item for item in options
-                       if isinstance(item, dict) and
-                       item.get("value") == requested), None)
+        option = self.model_option(requested, options)
         if option is None:
             folded = requested.casefold()
             option = next((item for item in options
@@ -723,10 +758,15 @@ class ClaudeDriver(Driver):
                     return acts
                 if ev.get("skip_transcript") or ev.get("ambient"):
                     return acts
-                acts.append({"a": "event", "kind": "info", "data": {
+                data = {
                     "subtype": "task", "status": str(ev.get("status") or ""),
                     "task_id": str(ev.get("task_id") or ""),
-                    "text": _task_notice(ev)}})
+                    "text": _task_notice(ev)}
+                # Native provenance, when supplied: never guess a tool from
+                # its command or task description. Some notices have no tool.
+                if ev.get("tool_use_id"):
+                    data["tool_use_id"] = str(ev["tool_use_id"])
+                acts.append({"a": "event", "kind": "info", "data": data})
                 return acts
             return []
 

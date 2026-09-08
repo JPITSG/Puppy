@@ -2254,8 +2254,7 @@ function engineStatusText(engine) {
 }
 
 function effortOptionsForModel(engine, model) {
-  const match = ((engine && engine.model_options) || [])
-    .find(option => option && option.value === model);
+  const match = engineModelOption(engine, model);
   if (match && Array.isArray(match.effort_options)) return engineDefaultLabels(match.effort_options);
   /* A catalog-only engine rejects retired/unknown model IDs server-side. Do
      not offer its global effort union for such a model: those combinations
@@ -2273,9 +2272,24 @@ function effortOptionsForModel(engine, model) {
    missing from it as hand-typed turns a saved default such as "fable[1m]"
    into a Custom… entry, and the picker keeps presenting it that way once the
    real catalog names it. */
+function engineModelOption(engine, model) {
+  const options = ((engine && engine.model_options) || []);
+  return options.find(option => option && option.value === model) ||
+    options.find(option => option && Array.isArray(option.aliases) && option.aliases.includes(model));
+}
+
 function engineOffersModel(engine, model) {
-  return ((engine && engine.model_options) || [])
-    .some(option => option && option.value === model);
+  return !!engineModelOption(engine, model);
+}
+
+/* An alternate spelling uses the catalog's label and capabilities, but the
+   selected request survives unchanged. Replacing just its matching row keeps
+   one choice per model; exact rows (including distinct context variants) win. */
+function modelOptionsForPicker(engine, model) {
+  const match = engineModelOption(engine, model);
+  return engineDefaultLabels(((engine && engine.model_options) || []).map(option =>
+    option === match && option.value !== model ? { ...option, value: model,
+      hint: `${model}${option.hint ? " · " + option.hint : ""}` } : option));
 }
 
 function engineCatalogPending(engine) {
@@ -2346,7 +2360,7 @@ function modelShorthand(eng, value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
   const options = ((eng && eng.model_options) || []).filter(o => o && o.value);
-  const match = options.find(o => o.value === raw);
+  const match = engineModelOption(eng, raw);
   let text = (match && match.label) || raw;
   let peers = options.map(o => o.label || o.value);
   while (peers.length > 1 && tailWords(text)) {
@@ -7253,7 +7267,7 @@ function hostLatencySection() {
      exactly as it drops that node's chart and its processes. */
   const rows = hostPanel.latency.filter(row => row && typeof row === "object" &&
     !row.offline && state.remoteOk[row.id] !== false);
-  const section = hostSection("Latency", "from this instance");
+  const section = hostSection("Latency", "");
   if (hostPanel.latencyError)
     section.appendChild(el("div", "host-empty", hostPanel.latencyError));
   else if (!rows.length)
@@ -11980,6 +11994,41 @@ function fillAsideAnswer(card, d) {
   card.appendChild(body);
 }
 
+/* Task endings stay visible even when their tool's input/output is folded.
+   The native tool id is the only association: an absent id or a card outside
+   this history window leaves a complete, independently readable update. */
+function backgroundTaskUpdateNode(d) {
+  const states = {completed: ["completed", "ok"], failed: ["failed", "bad"], stopped: ["stopped", "warn"]};
+  const [label, tone] = Object.prototype.hasOwnProperty.call(states, d.status) ? states[d.status] : ["updated", ""];
+  const n = el("div", "background-task");
+  n.appendChild(el("div", "background-task-label state-word" + (tone ? " " + tone : ""),
+    `Background task ${label}`));
+  let text = String(d.text || "");
+  const prefix = `Background task ${label}: `;
+  if (text.startsWith(prefix)) text = text.slice(prefix.length);
+  if (text) n.appendChild(linkifyInto(el("div", "background-task-text"), text));
+  return n;
+}
+
+function backgroundTaskStateInto(card, d) {
+  if (!["completed", "failed", "stopped"].includes(d.status)) return;
+  const stateEl = card.querySelector(".t-state");
+  if (d.status === "stopped") {
+    stateEl.className = "t-state warn";
+    stateEl.textContent = "stopped";
+    stateEl.setAttribute("aria-label", "stopped");
+  } else toolStateInto(stateEl, true, d.status === "failed");
+  card.classList.toggle("err", d.status === "failed");
+}
+
+function attachBackgroundTaskUpdate(card, update) {
+  card.appendChild(update.node);
+  if (!card._backgroundTaskUpdate || update.seq >= card._backgroundTaskUpdate.seq) {
+    card._backgroundTaskUpdate = update;
+    backgroundTaskStateInto(card, update.data);
+  }
+}
+
 function toolCardNode(data, completed = false) {
   const d = data || {};
   const n = el("div", "tool-card" + (d.is_error ? " err" : ""));
@@ -12817,7 +12866,7 @@ async function modalNewTask(workspace) {
       card.setAttribute("aria-pressed", String(card.dataset.key === engine));
     });
     fillEngineChoice(permission, (info && info.permission_options) || [], selected.permission_mode || "");
-    const options = engineDefaultLabels((info && info.model_options) || []);
+    const options = modelOptionsForPicker(info, selected.model || "");
     const customAllowed = info && info.allow_custom_model !== false;
     /* "Custom…" is a model this engine does not offer. `selected.custom`
        carries the open box across a catalog refresh, but only for a model
@@ -13313,6 +13362,7 @@ class SessionView {
     this.reconnectTimer = null;
     this.connectionSequence = 0;
     this.toolCards = {};
+    this.backgroundTaskUpdates = new Map();
     this.switchLines = [];    // engine-switch dividers, re-labelled as state arrives
     this.liveEl = null;
     this.liveKind = null;
@@ -14621,7 +14671,8 @@ class SessionView {
         if (!evs.length) { stop(); btn.remove(); return; }
         this.oldestSeq = evs[0].seq;
         const frag = document.createDocumentFragment();
-        const anchor = btn.nextSibling;
+        const beforeHeight = this.scroll.scrollHeight;
+        const top = this.scroll.scrollTop;
         evs.forEach(ev => {
           const node = this.buildEventNode(ev);
           if (node) { node.dataset.seq = String(ev.seq); frag.appendChild(node); }
@@ -14630,9 +14681,9 @@ class SessionView {
            user is looking at, so without giving that height back the transcript
            would jump - and, at scrollTop 0, the button would still be in view
            and immediately load again. */
-        const beforeHeight = this.scroll.scrollHeight;
-        const top = this.scroll.scrollTop;
-        this.inner.insertBefore(frag, anchor);
+        /* A newly loaded tool may have adopted the first visible task
+           update, so choose the insertion anchor after building the cards. */
+        this.inner.insertBefore(frag, btn.nextSibling);
         this.scroll.scrollTop = top + (this.scroll.scrollHeight - beforeHeight);
         if (evs.length < 200) { stop(); btn.remove(); return; }
       } catch (e) {
@@ -14763,6 +14814,7 @@ class SessionView {
     this.clearLive();
     this.inner.innerHTML = "";
     this.toolCards = {};
+    this.backgroundTaskUpdates = new Map();
     this.asideCards = {};
     this.switchLines = [];
     this.oldestSeq = events.length ? events[0].seq : null;
@@ -15011,7 +15063,11 @@ class SessionView {
       }
       case "tool_use": {
         const n = toolCardNode(d);
-        if (d.tool_use_id) this.toolCards[d.tool_use_id] = n;
+        if (d.tool_use_id) {
+          this.toolCards[d.tool_use_id] = n;
+          for (const update of this.backgroundTaskUpdates.get(d.tool_use_id) || [])
+            attachBackgroundTaskUpdate(n, update);
+        }
         return n;
       }
       case "tool_result": {
@@ -15019,6 +15075,8 @@ class SessionView {
         if (card) {
           toolStateInto(card.querySelector(".t-state"), true, d.is_error);
           if (d.is_error) card.classList.add("err");
+          if (card._backgroundTaskUpdate)
+            backgroundTaskStateInto(card, card._backgroundTaskUpdate.data);
           const body = card.querySelector(".tool-body");
           body.appendChild(el("div", "tb-label", d.is_error ? "error" : "result"));
           body.appendChild(linkifyInto(el("pre"), displayValue(d.content) || "(Empty)"));
@@ -15059,6 +15117,19 @@ class SessionView {
         return orphan;
       }
       case "info": {
+        if (d.subtype === "task") {
+          const node = backgroundTaskUpdateNode(d);
+          node.dataset.seq = String(ev.seq);
+          if (d.tool_use_id) {
+            const update = {node, data: d, seq: Number(ev.seq)};
+            const updates = this.backgroundTaskUpdates.get(d.tool_use_id) || [];
+            updates.push(update);
+            this.backgroundTaskUpdates.set(d.tool_use_id, updates);
+            const card = this.toolCards[d.tool_use_id];
+            if (card) { attachBackgroundTaskUpdate(card, update); return null; }
+          }
+          return node;
+        }
         if (d.subtype === "session_task_archive") return taskArchiveNode(d, ev.ts, this.tab.bid);
         if (d.subtype === "session_request" && d.session_request) {
           const card = el("div", "session-request-card");
@@ -15097,8 +15168,7 @@ class SessionView {
         if (d.subtype === "config_change") return this.switchLineNode(ev, d, false);
         const warned = d.subtype === "interrupted" || d.subtype === "model_switch" ||
           d.subtype === "workspace_reset" || d.subtype === "background_wait_stopped" ||
-          d.subtype === "engine_retry" ||
-          (d.subtype === "task" && !!d.status && d.status !== "completed");
+          d.subtype === "engine_retry";
         const n = el("div", "info-line" + (warned ? " warn" : "") +
           (d.subtype === "background_wait" ? " bg-wait" : ""));
         n.textContent = d.text || d.subtype || "";
@@ -16016,8 +16086,8 @@ class SessionView {
       options: effortOptionsForModel(eng, eff.model || ""),
       selected: eff.effort || "",
     };
-    const options = engineDefaultLabels((eng && eng.model_options) || []);
     const current = eff.model || "";
+    const options = modelOptionsForPicker(eng, current);
     const custom = isCustomModel(eng, current);
     if (!custom) options.push(...pendingModelRows(eng, current));
     const customAllowed = !eng || eng.allow_custom_model !== false;
@@ -22643,7 +22713,7 @@ function modalEngineDefaults(bid, key, conversationChoices = null) {
     setError("");
     hint.textContent = "Engine default lets the engine choose its model or effort.";
     fillEngineChoice(permission, engine.permission_options || [], choices.permission_mode);
-    const models = engineDefaultLabels(engine.model_options || []);
+    const models = modelOptionsForPicker(engine, choices.model);
     const isCustom = engine.allow_custom_model !== false &&
       isCustomModel(engine, choices.model);
     if (!isCustom) models.push(...pendingModelRows(engine, choices.model));
@@ -22967,7 +23037,6 @@ async function modalNewSession(groupId = null) {
     const defaults = initialEngineConfig(e2);
     fillEngineChoice(permSel, e2 ? e2.permission_options : [],
       previous ? previous.permission : defaults.permission_mode);
-    const modelOptions = engineDefaultLabels((e2 && e2.model_options) || []);
     const customAllowed = !e2 || e2.allow_custom_model !== false;
     /* A catalog refresh hands back the picker's own value, where
        "__custom__" only says the box is open. What decides is the text it
@@ -22975,6 +23044,7 @@ async function modalNewSession(groupId = null) {
        model, and closes onto the real entry once the catalog names it. */
     const picked = previous ? previous.model : defaults.model;
     const model = picked === "__custom__" ? String(previous.custom || "").trim() : picked;
+    const modelOptions = modelOptionsForPicker(e2, model);
     const offered = !!model && engineOffersModel(e2, model);
     const isCustom = customAllowed && !offered &&
       (picked === "__custom__" || (!!model && !engineCatalogPending(e2)));
