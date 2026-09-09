@@ -145,6 +145,24 @@ const settle = async () => { for (let i = 0; i < 8; i++) await new Promise(r => 
   for (const word of ["idempotent", "monorepo", "symlink", "debounce", "subagent",
                       "worktree", "scrollbar", "telemetry", "unallocated", "unaffordable"])
     assert.equal(spellWordKnown(word), true, word + " is a word");
+  // Broader source coverage must reach the real checker, including both
+  // regional spellings and the complete verb family that prompted the fix.
+  for (const word of ["anonymize", "anonymized", "anonymizes", "anonymizing",
+                      "anonymise", "anonymised", "anonymises", "anonymising",
+                      "deduplication", "deserialize", "deserialise", "cybersecurity",
+                      "livestream", "livestreamed", "livestreaming", "livestreams",
+                      "neurodiversity", "microplastic", "workaround", "uptime"])
+    assert.equal(spellWordKnown(word), true, word + " is a word");
+  assert.deepEqual(marks("Please anonymize this data and anonymise the screenshots"), []);
+  assert.deepEqual(marks("Anonymized data needs deduplication and deserialization"), []);
+  assert.deepEqual(marks("Please anonmyize this data"), ["anonmyize"]);
+  assert.ok(spellSuggestions("anonmyize").some(item => item.word === "anonymize"));
+  for (const word of ["anonymize", "Anonymise", "deduplication", "deserialize"])
+    assert.equal(spellAutocorrection(word), "", word + " stays as typed");
+  for (const word of ["anonmyize", "deserialzie", "livestreaam"])
+    assert.equal(spellAutocorrection(word), "", "an added word is not an automatic target");
+  for (const word of ["dependancy", "canteloupe", "anonymyze", "anonymiseing"])
+    assert.equal(spellWordKnown(word), false, word + " remains a misspelling");
   /* Words English forms rather than collects. SCOWL 2020.12.07 lists none of
      these; the build derives them from SCOWL's own verbs and inflections, so
      the console stops underlining what its user actually writes. */
@@ -171,12 +189,12 @@ const settle = async () => { for (let i = 0; i < 8; i++) await new Promise(r => 
   assert.deepEqual(marks("run `npm instal foo` now"), []);
   assert.deepEqual(marks("```\nteh broekn code\n```\nand teh prose"), ["teh"]);
   assert.deepEqual(marks("```\nunclosed teh fence"), []);
-  assert.deepEqual(marks("see puppy/static/app.js and /etc/scripts/pupy"), []);
+  assert.deepEqual(marks("see puppy/static/app.js and /srv/projects/pupy"), []);
   assert.deepEqual(marks("the file app.js and dict.txt"), []);
   assert.deepEqual(marks("call esc(value) and spellDraw twice"), []);
   assert.deepEqual(marks("VNC RFB ACP MCP are fine"), []);
-  assert.deepEqual(marks("visit https://exampel.com/thigns today"), []);
-  assert.deepEqual(marks("mail someone@exampel.com now"), []);
+  assert.deepEqual(marks("visit https://exampel.test/thigns today"), []);
+  assert.deepEqual(marks("mail someone@exampel.test now"), []);
   assert.deepEqual(marks("@Browser A8AR open teh page"), ["teh"]);
   assert.deepEqual(marks("@Spawn an agent using codex at high effort"), []);
   assert.deepEqual(marks("[image attached: /srv/data/uploads/10/x/shot.png — view it with your image/file tools]"), []);

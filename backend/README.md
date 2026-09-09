@@ -88,9 +88,10 @@ backend/dist/puppy-backend.pyz --version
 The build emits `puppy-backend.pyz`, the stdlib-only
 `puppy-backend-launcher.py`, and a copy of `LICENSE`. The zipapp also carries the
 license and all Puppy Python code required at runtime; the stable launcher owns
-restart health checks and rollback. The target still needs Python 3.9+,
-`aiohttp`, and whichever official engine CLIs it will run. No frontend assets
-are included.
+restart health checks and rollback. The target still needs Linux, Python 3.9+
+with SQLite FTS5 support, `aiohttp`, and whichever official engine CLIs it will
+run. Generating a self-signed TLS identity also needs the `openssl` command;
+imported certificate/key pairs do not. No frontend assets are included.
 
 Run from the source tree without building:
 

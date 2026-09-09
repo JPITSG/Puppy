@@ -657,6 +657,11 @@ def check_static_template_styles(ui_source: str) -> None:
 
 def with_live_views(script):
     """Isolated UI snippets share the production task-view traversal helper."""
+    # Navigation itself is exercised with a real asynchronous history stack
+    # and Chromium; unrelated extracted widgets only need its notification hooks.
+    for name in ("navigationRemember", "navigationChanged"):
+        if name + "()" in script and "function " + name + "(" not in script:
+            script = "function " + name + "() {}\n" + script
     if "liveViews()" in script and "function liveViews()" not in script:
         source = (BASE / "puppy" / "static" / "app.js").read_text()
         start = source.index("function liveViews()")
@@ -2026,6 +2031,8 @@ const nodes = {app:new Target(), side:new Target(300),
   "side-backdrop":new Target(), "drawer-edge":new Target()};
 const $ = id => nodes[id];
 const window = {matchMedia:q => ({matches:q.includes("max-width")})};
+const openDrawer = () => nodes.app.classList.add("side-open");
+const closeDrawer = () => nodes.app.classList.remove("side-open");
 let frame = null;
 const requestAnimationFrame = fn => { frame = fn; return 1; };
 const cancelAnimationFrame = () => { frame = null; };

@@ -1,6 +1,10 @@
 data/
 AGENTS.md
 CLAUDE.md
+.venv/
+.env
+.env.*
+!.env.example
 __pycache__/
 *.pyc
 *.log

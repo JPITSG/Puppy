@@ -64,33 +64,46 @@ There is no build step, no npm, no daemon besides Puppy itself: Python 3.9+,
   <img src="assets/mobile-dark-sidebar.png" alt="Puppy on a phone with the session drawer open, listing demo projects and the engine status footer" width="270">
 </p>
 
+The screenshots above use fictional demo people, projects and hosts.
+
 ## Quick start
 
 ```sh
 git clone <repository-url> puppy
 cd puppy
-./run.sh                       # listens on http://127.0.0.1:10888
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+PUPPY_PYTHON="$PWD/.venv/bin/python" ./run.sh  # http://127.0.0.1:10888
 ```
 
 Open `http://127.0.0.1:10888` on the host and create the administrator account.
 Fresh installs listen on loopback only; move the listener to another address
 from Settings once the account exists. Sign in to the engines with their own
-tools (`claude login`, `codex login`, OpenCode's provider authentication) as
+tools (`claude auth login`, `codex login`, OpenCode's provider authentication) as
 the user that runs Puppy.
 
 **Requirements**
 
 - Linux with Bash.
-- Python 3.9 or newer with `aiohttp`. No other Python packages.
+- Python 3.9 or newer with SQLite FTS5 support and `aiohttp` (the sole direct
+  Python dependency). The commands above also need Python's `venv` and `pip` support.
 - One or more of the `claude`, `codex` and `opencode` CLIs on the service's
   `PATH` (OpenCode is also found at `$HOME/.opencode/bin/opencode`).
 - Git, if you want to use Tasks.
 - Optional: a Chromium or Chrome binary (major version 112 or newer, on `PATH`
   or named by `PUPPY_BROWSER_BIN`) for managed browsers.
+- Optional: the `openssl` command for generating self-signed HTTPS certificates
+  on the console or a headless backend. Imported certificates do not need it.
 
 `run.sh` uses `python3` from `PATH`; set `PUPPY_PYTHON` to an absolute
 interpreter path to use a specific virtual environment. Run it under whichever
-service manager your host uses.
+service manager your host uses, preserving that interpreter setting and the
+service user's `HOME` and engine `PATH`. If `aiohttp` is already installed for
+your chosen interpreter, you can run `./run.sh` directly. The default project
+directory is the service user's home; change it in Settings. Private state
+defaults to `data/` beside the source; set `PUPPY_DATA` to an absolute directory
+to keep it elsewhere. Restart settings are described under
+[Security](#data-privacy-and-security).
 
 ## The tour
 
@@ -123,8 +136,9 @@ the tool icon and from the icon to its label.
   Deleting the session then leaves the project files intact. Permanent project
   directories are outside Puppy's backup coverage.
 - **Model, effort and permissions per session.** Each engine's model catalog
-  and per-model effort levels are discovered from the CLI itself, never
-  hard-coded. Claude offers its aliases and effort levels, Codex its models
+  and per-model effort levels are discovered from the CLI itself, with a
+  provisional fallback list until a catalog loads. Claude offers its aliases
+  and effort levels, Codex its models
   and reasoning efforts (plus **Fast mode** where the catalog offers a Fast
   tier), OpenCode every provider model that installation knows. Change any of
   them mid-conversation; while work is pending the change waits its turn in
@@ -189,9 +203,9 @@ hide the checkboxes and keep the saved Enter choice.
 Everything typed at an agent goes through one shared prompt box: `Enter` sends
 (using the chosen action during a running turn),
 `Shift+Enter` or `Ctrl+J` breaks a line, and `@` opens the mention list (browsers,
-terminals, sessions, a new spawn). In session chats, `↑` at the start of the box
-recalls earlier prompts. The New task box keeps normal Up/Down caret movement
-and does not recall Main's prompts. Recall reads the session's stored prompts, loading older pages as
+terminals, VNC screens, sessions, a new spawn). In session chats, `↑` at the
+start of the box recalls earlier prompts. The New task box keeps normal
+Up/Down caret movement and does not recall Main's prompts. Recall reads the session's stored prompts, loading older pages as
 needed with no history limit, all the way back to its first prompt, on any
 device. `↓` at the end walks forward again and restores your unsent draft and
 attachments after the newest prompt. Each new recall walk picks up prompts
@@ -212,12 +226,15 @@ send is awaiting acknowledgement remain in the composer for the next message.
 **Spell check** is Puppy's own, not the browser's. Every prompt box turns the
 browser's checker and its autocorrection off, so a phone, a desktop and a kiosk
 all behave the same and the words Puppy knows are the words that shipped with
-it: a 188,000-word English dictionary built from
+it: a 190,500-word English dictionary built from
 [SCOWL](http://wordlist.aspell.net/) and bundled in the repository. It goes
 past a collected word list where English does: `-able` applies to any verb, so
 the build forms `scrollable`, `draggable` and `resizable` from SCOWL's own
-verbs and inflections, and `un-` over the adjectives they make. Nothing you
-type is sent anywhere to be checked, and no dictionary is downloaded from the
+verbs and inflections, and `un-` over the adjectives they make. It also includes
+the 2026 standard dictionaries' additions, such as `deduplication`, `deserialize`
+and `cybersecurity`, plus `anonymize`/`anonymise` and their verb forms. These
+additions are recognized and suggested without becoming autocorrect targets.
+Nothing you type is sent anywhere to be checked, and no dictionary is downloaded from the
 internet. The tools button in every prompt box — the chat's and the New task
 dialog's — carries two switches:
 
@@ -317,6 +334,8 @@ does not reopen its tab. Once started, use the task's **Stop** control.
 Tasks need a Git repository. Limits: 64 tasks per session, 50,000 files or
 512 MiB of initial working files, 16 MiB per review. Details and the exact
 persistence contract are in [docs/session-tasks.md](docs/session-tasks.md).
+The session menu's **Enable tasks** switch hides or restores the task strip;
+disabling it requires removing that session's existing tasks first.
 
 ### Terminals, browsers and remote screens
 
@@ -369,8 +388,8 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
   the browser tab: the same toolbar, the same identity and statistics pills,
   the same stage, the same mouse, keyboard, wheel and touch handling. Give it a
   host and either a port or a bare display number (`1` means 5901); IPv6 goes
-  in brackets. A password, when the server asks for one, is used for that
-  connection's challenge and is never written to disk. *View only* watches
+  in brackets. A password entered in this connection dialog is kept only in
+  memory for the connection. *View only* watches
   without sending input. *Cancel*, Escape and clicking outside the connection
   dialog remain available while connecting; cancellation aborts the dial on
   backends advertising `vnc-connect-cancel`. Older backends finish their attempt
@@ -407,7 +426,9 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
   the agent works the machine the way you would. `@VNC A8AR` in the chat box
   points it at an open connection and `@VNC 192.168.1.10:5900 password` at a
   server to dial; the `@` menu's *New VNC connection* wizard builds either for
-  you. A screen the agent touches opens as a tab beside the chat, so you can
+  you. Passwords included in a prompt are saved with that conversation; to
+  avoid this, connect through the VNC tab's dialog and mention only its ID.
+  A screen the agent touches opens as a tab beside the chat, so you can
   watch it work and take over at any moment.
 
 ### Agents that delegate and collaborate
@@ -463,6 +484,15 @@ history around it.
 
 ### Never lose your place
 
+- **Browser Back and Forward.** Navigate between tabs, Main and tasks, submitted
+  searches, result/message locations and Settings backends. Back dismisses the
+  top dialog, phone drawer or Host activity panel; Forward reopens supported
+  surfaces. Settings drafts and recent reading/search positions stay in place.
+  History never repeats a command or recreates a closed terminal, browser or
+  VNC connection. Leaving a form runs its usual cleanup; Forward opens a fresh
+  form. Reload restores available views and message locations, while recent
+  search results and dialog reopen state live only in this page's memory.
+  See [browser history](docs/browser-history.md) for the full behavior.
 - **Tabs and splits.** Sessions, terminals, browsers and search open as tabs;
   drag a tab to the edge of a pane to split the workspace. Tab layout is
   remembered per browser. Drag a divider or use its arrow keys to resize panes;
@@ -496,9 +526,10 @@ history around it.
   where a row repeats (*agent bridges ×5*) and trimmed with a *+n more* where
   a branch is too wide or too deep to read. The box slides in under the engine
   stats and slides shut again the way the sidebar's other panels do, the
-  engine stats giving up their height in the same motion. Nothing is polled
-  until the box is open, and nothing is stored: close it and the node keeps
-  only the reading in the corner.
+  engine stats giving up their height in the same motion. The console polls
+  the panel only while it is open and the page is visible. Each backend keeps
+  sampling in the background, retaining up to half an hour of CPU history in
+  memory; none of these readings is written to disk.
 - **Notices that stay readable.** Confirmations, warnings and failures appear
   as one line in the bottom-right corner, coloured by outcome and worded the
   same way wherever they came from. The same notice arriving again counts up on
@@ -521,6 +552,14 @@ history around it.
   stops export preparation or import upload/validation and removes staging.
   Once restore starts replacing live state, it finishes or rolls back safely;
   the progress dialog then offers **Close**.
+  The archive includes this instance's TLS identities and saved workspace
+  conflict copies, plus the exporting browser's Puppy tabs and drafts. It
+  excludes remote backend data, ordinary project directories, managed-browser
+  profiles and shared sign-ins, and engine credentials and native histories;
+  back those up separately if needed. Limits are 512 MiB compressed, 2 GiB
+  extracted, 1 GiB per file and 50,000 archive entries. Restore requires the
+  current database, configuration and archive shapes; older shapes are refused
+  without automatic migration.
   The card measures approximate uncompressed file storage for this instance's
   backup-covered data when Settings opens, including the database's live sidecars.
   It excludes remote data, ordinary projects, caches, logs, exported archives,
@@ -603,13 +642,19 @@ backend name stays readable; long button labels wrap within the button.
   **Refresh** and an **Update** button that runs each vendor's own updater
   (`claude update`, `codex update`, `opencode upgrade`), plus an **Engine
   updates** schedule for unattended updates that tries each new version once.
+  An npm-published release must remain unchanged for ten minutes after the
+  backend first observes it before a manual or automatic update can run.
+  Updates are refused while that engine has running sessions, queued work or
+  spawned jobs; automatic updates wait until it is idle. New turns are refused
+  while its updater runs.
 - **Usage refresh** – how often each backend refreshes its read-only account
   usage snapshot without starting a model turn (Codex today), with an on-demand
   refresh control. Claude supplies fresh percentages during turns. Account-bound
   readings are kept in memory: after a restart, a fresh reading from that backend
   or a verified matching peer is needed. Unidentified historical readings are
   never assigned to the current login.
-- **File uploads** – the per-file attachment limit on each backend.
+- **File uploads** – the per-file attachment limit on each backend: 8 MiB by
+  default, configurable from 0 to 1024 MiB; **0 disables uploads**.
 - **Completion alerts** – success and failure commands, their shared backend,
   and a test button for each outcome. The enabled switch and sidebar bell
   control both commands; tests run the entered draft even while alerts are off.
@@ -641,8 +686,10 @@ documented in [Timeout settings](docs/timeouts.md).
 
 - **Self-hosted, single-user.** Accounts are stored with PBKDF2; sign-in
   cookies last 30 days and are `__Host-` secured over HTTPS; failed sign-ins are
-  rate limited. Puppy drives the installed CLIs and leaves their logins to
-  them: no credentials are extracted or proxied to provider APIs.
+  rate limited. Puppy drives the installed CLIs and leaves authentication and
+  provider requests to them. To match usage readings across backends, it reads
+  local account metadata, including identity claims in Codex's stored ID token;
+  it publishes a hashed account key, never raw credentials or account IDs.
 - **Unbranded sign-in.** The sign-in and first-run setup page uses neutral
   wording and a lock icon. Its HTML, styles, scripts and favicon contain no
   product branding; console assets and the instance name require authentication.
@@ -667,18 +714,22 @@ documented in [Timeout settings](docs/timeouts.md).
   Without a hook the verified setting is saved and waits for a manual restart.
   An HTTPS reverse-proxy page cannot prove a plain-HTTP endpoint (browsers
   block it as mixed content), so it fails closed.
-- **Everything private lives in `data/`** (gitignored): `config.json`,
+- **Puppy's server-side private state lives in `data/`** (gitignored): `config.json`,
   `puppy.db`, uploads, scratch and task workspaces, browser profiles, TLS
-  identities, the search index and logs. `PUPPY_DATA` relocates it. Backup
+  identities, the search index and logs. `PUPPY_DATA` relocates it. Browser-local
+  preferences and draft journals stay in your viewing browser; ordinary project
+  files and the engines' own stores stay at their configured locations. Backup
   archives contain password hashes, API tokens and TLS material: treat them as
   credentials.
 - **Backends never talk to each other** and never learn each other's tokens;
   the controller relays everything over channels it already authenticates.
   Managed browsers are reachable only through Puppy's private debugging pipe,
   never a DevTools port.
-- **VNC passwords are never stored.** A connection's password lives only in the
-  backend process that dialled the server, for as long as that connection
-  exists; it is absent from `config.json`, the database and backup archives.
+- **VNC connection passwords stay in memory.** A connection's password lives
+  only in the backend process that dialled the server, for as long as that
+  connection exists; the VNC client does not persist it. A password you include in a chat
+  prompt or tool call can still appear in the transcript and its backups, so
+  use the connection dialog and share the connection ID with the agent.
   RFB's own challenge is legacy DES over at most eight characters and its
   screen traffic is unencrypted, so treat a VNC server the way VNC itself does:
   reach it over a trusted network or a tunnel, not the open internet.
@@ -687,13 +738,15 @@ documented in [Timeout settings](docs/timeouts.md).
 
 ## Tests
 
-The suites run without a browser, a real engine, network access or quota unless
-noted:
+The suites below use stubs, local files and loopback servers; they do not need
+an external network, a real engine, a browser or subscription quota. Install
+Node.js to run the JavaScript suites:
 
 ```sh
 node tests/sidebar_ui_test.js        # sidebar ordering, pins, reorders, filtering
 node tests/tab_drag_ui_test.js       # task discovery, saved visibility and tab dragging
 node tests/menu_dismiss_ui_test.js   # menu dismissal, toggles and open dropdowns
+node tests/navigation_ui_test.js    # browser Back/Forward, dialogs and cancellation ownership
 node tests/composer_ui_test.js       # the shared prompt box and its "@" list
 node tests/backend_settings_ui_test.js # backend forms, removal errors and retry
 node tests/task_config_ui_test.js    # the New task dialog
@@ -719,6 +772,7 @@ node tests/browser_frames_ui_test.js # bounded image loading, stale frames and r
 node tests/browser_input_ui_test.js  # immediate gesture starts and bounded trailing input
 python3 tests/cli_upgrade_test.py    # engine CLI updates against a stub updater
 python3 tests/session_links_test.py  # session references, requests, workflows
+python3 tests/portability_test.py     # service homes, saved settings and relocatable launch
 ```
 
 `python3 tests/console_browser_test.py` exercises the console with real host
@@ -740,4 +794,5 @@ controls in the same no-quota style.
 
 Puppy is released under the [MIT License](LICENSE). Vendored front-end
 libraries in `puppy/static/vendor/` (xterm.js, marked, DOMPurify) keep their own
-license notices.
+license notices. The bundled SCOWL dictionary retains its separate
+[copyright and license notices](puppy/static/dict/COPYRIGHT).

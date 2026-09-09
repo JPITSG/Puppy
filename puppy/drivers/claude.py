@@ -1032,9 +1032,9 @@ class ClaudeDriver(Driver):
                         if verdict.get(k) and verdict.get(k) != "none"]
                 return {"auth": "ok",
                         "detail": "logged in" + (" · " + " · ".join(bits) if bits else "")}
-            return {"auth": "missing", "detail": "run `claude login` as this user"}
+            return {"auth": "missing", "detail": "run `claude auth login` as this user"}
         home = service_home()
         cred = os.path.join(home, ".claude", ".credentials.json")
         if os.path.exists(cred):
             return {"auth": "ok", "detail": "credentials file present (auth verb unavailable)"}
-        return {"auth": "missing", "detail": f"run `claude login` as this user ({cred} not found)"}
+        return {"auth": "missing", "detail": f"run `claude auth login` as this user ({cred} not found)"}

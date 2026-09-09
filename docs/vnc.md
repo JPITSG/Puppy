@@ -108,8 +108,11 @@ cancellation on capable nodes. The console allows 45 seconds for the create
 request, covering the 15-second dial and 20-second handshake bounds.
 
 A connection's password is held only by the process that dialled the server and
-only while the instance exists. It is never persisted, never returned by any
-route, and never part of a backup.
+only while the instance exists. The VNC client never persists it or returns it
+through a route. A password included in an agent prompt or tool call can still
+be retained in the conversation and its backups. To keep it out of the
+transcript, connect through the VNC tab's dialog and give the agent only the
+connection's four-character ID.
 
 The `vnc.idle_timeout` setting (Settings → Timeouts) drops an unwatched
 connection but keeps its identity, so reopening the tab dials the same server

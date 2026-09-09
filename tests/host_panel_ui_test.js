@@ -74,6 +74,7 @@ function consoleFor(options = {}) {
   const slides = [];
   let aimed = 0;
   const context = vm.createContext({
+  navigation: { layer: () => () => {} }, navigationRemember: () => {}, navigationChanged: () => {},
     document, el, state, console, Date, Math, Number, Array, JSON, Set, Map,
     Promise, isNaN, parseFloat,
     setTimeout: () => 1, clearTimeout: () => {},

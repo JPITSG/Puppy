@@ -10,7 +10,8 @@ const document = new FakeDocument();
 const state = { timeouts: null, remoteTimeouts: {}, backends: [] };
 const requests = [], toasts = [];
 const reachable = new Set([0, 1]);
-const context = vm.createContext({ document, state, console, Number, Map, Set, Promise,
+const context = vm.createContext({
+  navigationRemember: () => {}, navigationChanged: () => {}, document, state, console, Number, Map, Set, Promise,
   el: (tag, cls, text) => { const e = document.createElement(tag); e.className = cls; if (text) e.textContent = text; return e; },
   enhanceChoiceSelect: () => {}, refreshChoiceSelect: () => {},
   backendSupportsTimeoutSettings: bid => bid !== 3,

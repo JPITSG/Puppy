@@ -45,6 +45,7 @@ const context = vm.createContext({
   window: { innerHeight: 800 }, setTimeout, clearTimeout,
   $: id => document.getElementById(id),
   drawerLayout: () => mobile,
+  openDrawer: () => app.classList.add("side-open"),
   setSideCollapsed: on => app.classList.toggle("side-collapsed", on),
   /* the real one measures and places; only the rect it reports back matters here */
   positionAnchoredMenu: (menu, button) =>

@@ -86,8 +86,8 @@ const context = vm.createContext({
   vncInstancesFor: bid => state.vncInstances[bid] || null,
   vncTargetLabel: tab => tab.vncLabel || tab.vncHost || "",
   vncIcon: icon,
-  modalVncShortcut: (bid, screens, onInsert) => {
-    calls.vncWizard.push({ bid, screens });
+  modalVncShortcut: (bid, screens, onInsert, current) => {
+    calls.vncWizard.push({ bid, screens, onInsert, current });
     onInsert("@VNC 192.168.1.20:5900 secret");
   },
   backendHasCapability: (backend, capability) => !!backend && backend.capabilities.includes(capability),
@@ -547,6 +547,11 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
     "the wizard is offered the screens that already exist");
   assert.equal(b.ta.value, "look at @VNC 192.168.1.20:5900 secret ",
     "the finished directive replaces the token the row was chosen from");
+  assert.equal(calls.vncWizard[0].current(), false, "history cannot reopen a shortcut over a changed prompt");
+  const inserted = b.ta.value;
+  calls.vncWizard[0].onInsert("@VNC stale.example");
+  assert.equal(b.ta.value, inserted, "an old insertion callback cannot splice a newer draft");
+  assert.match(calls.toasts[calls.toasts.length - 1].text, /prompt changed/);
   assert.equal(b.composer.mention, null);
   for (const text of ["@VNC A8AR", "@VNC 192.168.1.1:5900 pwd",
                       '@VNC 10.0.0.4 "two words"']) {

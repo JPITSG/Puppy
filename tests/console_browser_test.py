@@ -756,6 +756,7 @@ async def operation_cancellation_checks(instance):
             for theme in ("dark", "light"):
                 await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
                 for dismiss in ["document.querySelector('.operation-cancel').click()",
+                                "history.back()",
                                 "document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))",
                                 "document.querySelector('.operation-cancel').closest('.modal-backdrop').dispatchEvent(new MouseEvent('mousedown',{bubbles:true}))"]:
                     assert await evaluate(instance, """(() => {
@@ -2287,6 +2288,152 @@ async def host_panel_checks(instance, capture=False):
     print("PASS: the CPU reading opens a drawn, scrolling host box - real route, "
           "chart geometry, indented tree - and it slides shut and stops polling", flush=True)
 
+async def navigation_checks(instance, url, sid):
+    """Real popstate, hash/reload and UI lifecycle; no command is replayed."""
+    await instance.call("Emulation.setDeviceMetricsOverride", {
+        "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False},
+        session=instance.page_session)
+
+    async def run(script):
+        await evaluate(instance, script + "; true")
+        await until(instance, "!navigation.pending && !navigation.scheduled")
+
+    async def travel(delta, condition):
+        await evaluate(instance, "history.go(%d); true" % delta)
+        await until(instance, condition + " && !navigation.pending && !navigation.scheduled")
+
+    await run("for (const item of [...modalStack].reverse()) item.close(); closeDrawer(); closeHostPanel()")
+    await run("openSessionTab(0,1,findSessionMeta(0,1)); state.views['s:0:1'].select(1)")
+    await run("openSessionTab(0,2,findSessionMeta(0,2))")
+    await run("openSettingsTab()")
+    await until(instance, "!!state.views.settings.inner.querySelector('input')")
+    await run("window.navSettingsField=state.views.settings.inner.querySelector('input'); navSettingsField.value='history-draft'; window.navSettingsScroll=state.views.settings.root.querySelector('.settings-scroll'); navSettingsScroll.scrollTop=300; navigationRemember()")
+    await run("openSearchTab()")
+    await travel(-1, "state.active==='settings'")
+    assert await evaluate(instance, "navSettingsField.isConnected && navSettingsField.value==='history-draft' && navSettingsScroll.scrollTop===300")
+    await run("""window.navBackend={id:991,name:'History fixture',capabilities:['timeout-settings'],availability:{state:'online'}};
+        state.backends.push(navBackend); state.remoteOk[991]=true; state.remoteTimeouts[991]=state.timeouts;
+        window.navSettings=state.views.settings;
+        navSettings.inner.querySelector('.timeouts-card').replaceWith(navSettings.timeoutSettingsCard(
+          [{bid:0,name:'Studio'},{bid:991,name:'History fixture'}],state.timeouts,navSettings.renderGeneration));
+        window.navBackendChoice=navSettings.inner.querySelector('.timeouts-card select');
+        navBackendChoice.value='991'; navBackendChoice.dispatchEvent(new Event('change',{bubbles:true}))""")
+    await travel(-1, "navBackendChoice.value==='0'")
+    await travel(1, "navBackendChoice.value==='991'")
+    await travel(-1, "navBackendChoice.value==='0'")
+    await run("state.backends=state.backends.filter(node=>node!==navBackend); delete state.remoteOk[991]; delete state.remoteTimeouts[991]")
+    await travel(-1, "state.active==='s:0:2'")
+    await run("openSearchTab()")
+    await run("state.views.search.presetQuery('dashboard')")
+    await until(instance, "!state.views.search.searchController")
+    await run("state.views.search.presetQuery('cards')")
+    await until(instance, "!state.views.search.searchController")
+    await travel(-1, "state.views.search.input.value==='dashboard'")
+    assert await evaluate(instance, "state.views.search.lastCore.q==='dashboard' && !!state.views.search.resultsBox.children.length")
+    await travel(1, "state.views.search.input.value==='cards'")
+    await run("state.views.search.openMatch(0,findSessionMeta(0,1),4)")
+    await until(instance, "state.active==='s:0:1' && state.views['s:0:1'].navigationSeq===4")
+    await travel(-1, "state.active==='search' && state.views.search.input.value==='cards'")
+    await travel(1, "state.active==='s:0:1' && state.views['s:0:1'].navigationSeq===4")
+
+    # A slow transcript jump cannot overwrite a newer jump or leave the live
+    # transcript detached after its result has been abandoned.
+    await run("""window.navReadApi=api; window.navWindow=null;
+        api=(bid,path,opts)=>path.includes('/events?after_seq=') ?
+          new Promise(resolve=>navWindow=resolve) : navReadApi(bid,path,opts);
+        window.navChat=state.views['s:0:1'].activeView(); navChat.jumpToSeq(5000)""")
+    await until(instance, "!!navWindow")
+    await run("navChat.jumpToSeq(4); navWindow({events:[]}); api=navReadApi")
+    assert await evaluate(instance, "navChat.navigationSeq===4 && !navChat.detached")
+
+    await run("window.navWorkspace=state.views['s:0:1']; navWorkspace.select(1); window.navTask=navWorkspace.tasks()[0].id; navWorkspace.openTask(navTask)")
+    await travel(-1, "navWorkspace.selected===1")
+    await travel(1, "navWorkspace.selected===navTask")
+    count = await evaluate(instance, "history.length")
+    await run("navWorkspace.select(navTask); renderSidebar(); navWorkspace.refreshTasks()")
+    assert await evaluate(instance, "history.length") == count
+    await run("navWorkspace.openTaskOverview()")
+    await travel(-1, "!document.querySelector('.task-overview-modal')")
+    await travel(1, "!!document.querySelector('.task-overview-modal')")
+    await run("document.querySelector('#to-close').click()")
+
+    await run("modalNewSession()")
+    await until(instance, "!!document.querySelector('#ns-name')")
+    await run("document.querySelector('#ns-name').value='Unsaved history test'; window.navConfirm=null; modalConfirm('Delete?','History must never submit this',{destructive:true}).then(value=>navConfirm=value)")
+    await travel(-1, "navConfirm===false && modalStack.length===1")
+    assert await evaluate(instance, "document.querySelector('#ns-name').value==='Unsaved history test'")
+    await travel(-1, "modalStack.length===0")
+    await travel(1, "!!document.querySelector('#ns-name')")
+    assert await evaluate(instance, "!document.querySelector('#mc-yes') && document.activeElement.closest('.modal')!==null")
+    await run("document.querySelector('#ns-cancel').click(); openSettingsTab()")
+    await travel(-1, "state.active==='s:0:1' && !modalStack.length")
+    await run("openHostPanel()")
+    await travel(-1, "!hostPanel.open")
+    await travel(1, "hostPanel.open")
+    await run("closeHostPanel()")
+
+    await instance.call("Emulation.setDeviceMetricsOverride", {
+        "width": 390, "height": 844, "deviceScaleFactor": 2, "mobile": True},
+        session=instance.page_session)
+    await run("document.querySelector('.burger').click()")
+    await travel(-1, "!document.querySelector('#app').classList.contains('side-open')")
+    await travel(1, "document.querySelector('#app').classList.contains('side-open')")
+    await run("document.querySelector('#btn-settings').click()")
+    await travel(-1, "state.active==='s:0:1' && !document.querySelector('#app').classList.contains('side-open')")
+
+    # Closing an identified viewer is a command. Traversal cannot reopen it or
+    # issue its DELETE again. A stub view avoids touching any actual backend.
+    await run("""window.navApi=api; window.navWrites=[];
+        api=(bid,path,opts={})=>{ if(opts.method && opts.method!=='GET') navWrites.push([path,opts.method]); return navApi(bid,path,opts); };
+        state.views['v:0:HST1']={root:el('div','view'),onShow(){},destroy(){this.root.remove()}};
+        openVncTab(0,'HST1')""")
+    await travel(-1, "state.active==='s:0:1'")
+    assert await evaluate(instance, "navWrites.length===0 && !!state.tabs.find(t=>t.id==='v:0:HST1')")
+    await travel(1, "state.active==='v:0:HST1'")
+    await run("closeTab('v:0:HST1')")
+    writes = await evaluate(instance, "navWrites.length")
+    assert writes == 1
+    previous_index = await evaluate(instance, "history.state.index")
+    await travel(-1, "history.state.index===%d" % (previous_index - 1))
+    assert await evaluate(instance, "navWrites.length===1 && !state.tabs.find(t=>t.id==='v:0:HST1')")
+    await run("api=navApi; openSessionTab(0,1,findSessionMeta(0,1)); state.views['s:0:1'].openTask(navTask)")
+    await instance.call("Page.reload", session=instance.page_session)
+    await until(instance, "typeof navigation!=='undefined' && !!navigation.current && state.active==='s:0:1' && state.views['s:0:1'].selected!==1")
+    assert await evaluate(instance, "modalStack.length===0 && !hostPanel.open && !document.querySelector('#app').classList.contains('side-open')")
+    await run("openSettingsTab()")
+    await travel(-1, "state.active==='s:0:1'")
+    await travel(1, "state.active==='settings'")
+
+    # A reference resolving after the reader moves elsewhere must stay behind.
+    await run("""window.navLinkApi=api; window.navCatalog=null;
+        api=(bid,path,opts)=>path==='session-links/catalog' ?
+          new Promise(resolve=>navCatalog=resolve) : navLinkApi(bid,path,opts);
+        window.navLinkDone=openSessionReference('delayed/1',4)""")
+    await run("openSearchTab(); navCatalog({sessions:[{ref:'delayed/1',bid:0,id:1}]}); api=navLinkApi")
+    await evaluate(instance, "navLinkDone")
+    assert await evaluate(instance, "state.active==='search'")
+    await run("openSettingsTab()")
+
+    # Existing cross-session citation URLs still bootstrap and enter history.
+    ref = db.node_uuid() + "/1"
+    await instance.call("Page.navigate", {"url": url + "#session=" + ref + "&seq=4"}, session=instance.page_session)
+    await until(instance, "state.active==='s:0:1' && state.views['s:0:1'].navigationSeq===4")
+    await travel(-1, "state.active==='settings'")
+    await travel(1, "state.active==='s:0:1' && state.views['s:0:1'].navigationSeq===4")
+    await run("location.hash=''")
+    await until(instance, "state.active===null && !document.querySelector('#empty-hint').classList.contains('hidden')")
+    assert await evaluate(instance, "state.tabs.length>0 && document.querySelector('#empty-hint').textContent.includes('Choose a tab')")
+    await travel(-1, "state.active==='s:0:1'")
+    await instance.call("Page.navigate", {"url": url + "?history-bootstrap=1#session=" + ref + "&seq=4"}, session=instance.page_session)
+    await until(instance, "typeof navigation!=='undefined' && !!navigation.current && state.active==='s:0:1' && state.views['s:0:1'].navigationSeq===4")
+    assert await evaluate(instance, "JSON.stringify(history.state).indexOf('history-draft')===-1")
+    await run("""for (const tab of [...state.tabs]) if(['search','settings'].includes(tab.id) || tab.id==='s:0:2') closeTab(tab.id);
+        activateTab('s:0:1'); state.views['s:0:1'].select(1);
+        window.demoView=state.views['s:0:1'].activeView(); demoView.returnToTail(false)""")
+    await until(instance, "demoView.draftReady && !demoView._returning")
+    print("PASS: browser Back/Forward across tabs, search queries/results, tasks, nested dialogs, Host activity and phone drawer; Settings backends/drafts/scroll, reload/citation routes, stale async results, and no replay of viewer close commands", flush=True)
+
+
 async def main(args):
     instances = []
     server = None
@@ -2309,12 +2456,16 @@ async def main(args):
             instances = [browser.Manager("TSTA"), browser.Manager("TSTB")]
             for instance in instances:
                 await open_console(instance, url, sid)
+            if args.navigation_only:
+                await navigation_checks(instances[0], url, sid)
+                return
             await quota_checks(instances[0])
             await engine_activity_checks(instances[0])
             await model_alias_checks(instances[0])
             await checks(*instances, runner.hub(sid), args.screenshots)
             await browser_cursor_checks(instances[0])
             await terminal_io_checks(instances[0])
+            await navigation_checks(instances[0], url, sid)
             if args.screenshots:
                 await screenshots(instances[0])
     finally:
@@ -2331,4 +2482,5 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--screenshots", action="store_true")
     parser.add_argument("--serve", action="store_true")
+    parser.add_argument("--navigation-only", action="store_true")
     asyncio.run(main(parser.parse_args()))

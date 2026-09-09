@@ -3618,7 +3618,8 @@ async function enterApp() {
   renderTabs(); renderSidebar();
   connectUpdates();
   startRemotePolling();
-  openSessionHash();
+  await openSessionHash();
+  navigation.start(navigationHash());
 }
 
 async function refreshState() {
@@ -4971,7 +4972,7 @@ function modalMoveWorkspace(bid, session) {
       <p class="form-error hidden" role="alert"></p>
       <div class="m-btns"><button type="button" class="btn" id="move-cancel">Cancel</button>
         <button type="submit" class="btn btn-pri" id="move-go">Move project</button></div>
-    </form>`);
+    </form>`, "", () => navigationSessionDialog(bid, session.id, modalMoveWorkspace));
   const form = m.querySelector("form"), input = m.querySelector("#move-cwd");
   const error = m.querySelector(".form-error"), go = m.querySelector("#move-go");
   form.noValidate = true;
@@ -5655,7 +5656,7 @@ function modalAgentNotes(bid, s) {
       <p class="form-error hidden" role="alert"></p>
       <div class="m-btns"><button type="button" class="btn" id="agent-notes-cancel">Cancel</button>
         <button type="submit" class="btn btn-pri" id="agent-notes-save" disabled>Save</button></div>
-    </form>`, "agent-notes-modal");
+    </form>`, "agent-notes-modal", () => navigationSessionDialog(bid, s.id, modalAgentNotes));
   const form = m.querySelector("#agent-notes-form");
   const intro = m.querySelector(".agent-notes-intro");
   const files = m.querySelector(".agent-notes-files");
@@ -6928,6 +6929,7 @@ function slideHostPanel() {
   });
 }
 
+let hostPanelHistory = null;
 function openHostPanel() {
   if (hostPanel.open) return;
   hostPanel.open = true;
@@ -6935,6 +6937,7 @@ function openHostPanel() {
   renderHostPanel();
   slideHostPanel();
   pollHostPanel();
+  hostPanelHistory = navigation.layer(closeHostPanel, openHostPanel);
 }
 
 function closeHostPanel() {
@@ -6946,6 +6949,7 @@ function closeHostPanel() {
   hostPanel.charts.clear();
   syncHostCpuButton();
   slideHostPanel();
+  if (hostPanelHistory) { hostPanelHistory(); hostPanelHistory = null; }
 }
 
 function toggleHostPanel() {
@@ -7690,6 +7694,167 @@ function handleVncActivity(bid, sid, turnId, vncId = "") {
       host: known.host, port: known.port, label: known.label });
 }
 
+/* ================= console navigation ================= */
+let navigationSearchSequence = 0;
+const navigation = new ConsoleHistory({
+  read: navigationRoute, apply: navigationApply, capture: navigationCapture,
+  url: route => location.pathname + location.search + (route.tab ?
+    `#view=${encodeURIComponent(route.tab)}&task=${route.task}&seq=${route.seq}` +
+      (route.tab === "settings" ? `&settings=${route.settings.join(",")}` : "") : ""),
+  dismissMenus: () => closeAllMenus(null),
+  external: () => {
+    const route = navigationHash();
+    if (route) navigation.adopt(route);
+    else if (!location.hash) navigation.adopt({ tab: "", task: 0, seq: 0, search: 0, settings: [0, 0, 0] });
+    else openSessionHash();
+  },
+  error: () => toast("Could not update browser history", "bad"),
+});
+
+function navigationChanged() { navigation.changed(); }
+function navigationRemember() { navigation.remember(); }
+
+function navigationSessionDialog(bid, sid, open) {
+  const session = findSessionMeta(bid, sid);
+  if (session) open(bid, session);
+  else toast("This session is no longer available", "warn");
+}
+
+function navigationHash() {
+  const match = /^#view=([^&]+)&task=(\d+)&seq=(\d+)(?:&settings=(\d+,\d+,\d+))?$/.exec(location.hash);
+  if (!match) return null;
+  try {
+    const route = { tab: decodeURIComponent(match[1]), task: Number(match[2]), seq: Number(match[3]), search: 0,
+      settings: match[4] ? match[4].split(",").map(Number) : [0, 0, 0] };
+    return ConsoleHistory.route(route) ? route : null;
+  } catch (_) { return null; }
+}
+
+function navigationRoute() {
+  const tab = state.tabs.find(item => item.id === state.active);
+  const view = tab && state.views[tab.id];
+  return { tab: tab ? tab.id : "", task: tab && tab.type === "session" && view ? view.selected : 0,
+    seq: tab && tab.type === "session" && view ? view.navigationSeq || 0 : 0,
+    search: tab && tab.type === "search" && view ? view.navigationSearch || 0 : 0,
+    settings: tab && tab.type === "settings" && view ?
+      [view.timeoutSettingsBid || 0, view.timerSettingsBid || 0, view.systemPromptBid || 0] : [0, 0, 0] };
+}
+
+function navigationCapture() {
+  const view = state.views[state.active];
+  if (!view) return null;
+  const scrolls = [...view.root.querySelectorAll(".settings-scroll,.search-scroll,.chat-scroll")]
+    .map(node => [node, node.scrollTop, node.scrollLeft]);
+  const chat = typeof view.activeView === "function" ? view.activeView() : null;
+  let anchor = null;
+  if (chat && chat.scroll.clientHeight && !chat.atBottom()) {
+    const top = chat.scroll.getBoundingClientRect().top;
+    const node = [...chat.inner.children].find(item => item.dataset.seq && item.getBoundingClientRect().bottom > top);
+    if (node) anchor = { seq: Number(node.dataset.seq), offset: node.getBoundingClientRect().top - top };
+  }
+  return { scrolls, chat: chat && chat.captureScroll(),
+    anchor,
+    search: view.tab.type === "search" ? {
+      ...(view.navigationQuery || { query: view.input.value, kinds: [...view.kinds],
+        time: view.timeKey, order: view.order, excluded: [...view.excludedNodes] }), core: view.lastCore,
+      pending: !!view.searchController,
+      results: [...view.resultsBox.childNodes], status: [...view.statusBox.childNodes],
+    } : null };
+}
+
+function navigationApply(route, memory) {
+  let tab = state.tabs.find(item => item.id === route.tab);
+  if (!tab && route.tab === "settings") openSettingsTab();
+  else if (!tab && route.tab === "search") openSearchTab();
+  else if (!tab && route.tab.startsWith("s:")) {
+    const [, bid, sid] = route.tab.split(":").map(Number);
+    const meta = findSessionMeta(bid, sid);
+    if (meta) openSessionTab(bid, sid, meta);
+  }
+  tab = state.tabs.find(item => item.id === route.tab);
+  if (route.tab && !tab) {
+    // A closed terminal/browser/screen is an ended resource. History cannot
+    // recreate it (or re-execute the command that originally opened it).
+    toast("This view is no longer available", "warn");
+    return;
+  }
+  if (!tab) {
+    for (const pane of workspacePanes()) pane.active = null;
+    state.active = null;
+    renderTabs(); renderSidebar();
+    return;
+  }
+  if (state.active !== tab.id) activateTab(tab.id);
+  const workspace = state.views[tab.id];
+  if (tab.type === "session" && workspace) {
+    const task = route.task || tab.sid;
+    if (workspace.selected !== task) {
+      if (task === tab.sid) workspace.select(task);
+      else workspace.openTask(task);
+    }
+    const view = workspace.activeView();
+    view.cancelNavigationWindow();
+    const revision = navigation.revision;
+    const restore = async () => {
+      const current = () => navigation.revision === revision;
+      if (!current() || !memory || !memory.chat) return;
+      if (memory.anchor) {
+        if (!view.inLoadedRange(memory.anchor.seq)) await view.loadWindowAround(memory.anchor.seq, current);
+        if (!current()) return;
+        const node = view.findEventNode(memory.anchor.seq);
+        if (node) {
+          view.scroll.scrollTop += node.getBoundingClientRect().top -
+            view.scroll.getBoundingClientRect().top - memory.anchor.offset;
+          return;
+        }
+      }
+      view.restoreScroll(memory.chat);
+    };
+    if ((view.navigationSeq || 0) !== route.seq) {
+      const loading = route.seq ? view.jumpToSeq(route.seq, false) : view.returnToTail(false);
+      Promise.resolve(loading).then(restore).catch(error => toast(error.message, "bad"));
+    } else restore().catch(error => toast(error.message, "bad"));
+  } else if (tab.type === "settings" && workspace) {
+    const choices = [["timeoutSettingsBid", ".timeouts-card select"],
+      ["timerSettingsBid", ".timers-card select"], ["systemPromptBid", ".system-prompt-card select"]];
+    choices.forEach(([key, selector], index) => {
+      const select = workspace.root.querySelector(selector);
+      const value = route.settings[index];
+      workspace[key] = value && !state.backends.some(node => node.id === value) ? 0 : value;
+      if (select && select.value !== String(value) && [...select.options].some(option => option.value === String(value))) {
+        select.value = String(value); select.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+  } else if (tab.type === "search" && workspace && workspace.navigationSearch !== route.search) {
+    workspace.cancelSearch();
+    workspace.navigationSearch = route.search;
+    const saved = memory && memory.search;
+    workspace.navigationQuery = saved ? { query: saved.query, kinds: saved.kinds,
+      time: saved.time, order: saved.order, excluded: saved.excluded } : null;
+    workspace.input.value = saved ? saved.query : "";
+    workspace.lastCore = saved ? saved.core : null;
+    workspace.resultsBox.replaceChildren(...(saved ? saved.results : []));
+    workspace.statusBox.replaceChildren(...(saved ? saved.status : []));
+    if (saved) {
+      workspace.kinds = new Set(saved.kinds); workspace.timeKey = saved.time; workspace.order = saved.order;
+      workspace.excludedNodes = new Set(saved.excluded);
+      workspace.renderKindChips(); workspace.renderSegs(); workspace.renderNodeChips();
+      if (saved.pending) workspace.runSearch();
+    }
+  }
+  if (memory) for (const [node, top, left] of memory.scrolls) {
+    if (node.isConnected) { node.scrollTop = top; node.scrollLeft = left; }
+  }
+}
+
+// Only the focused view's reading scroll enriches its current entry. Sidebar,
+// menu, composer and other panes' scrolls do not scan its transcript.
+document.addEventListener("scroll", event => {
+  const view = state.views[state.active];
+  if (view && view.root.contains(event.target) && event.target.matches(".chat-scroll,.settings-scroll,.search-scroll"))
+    navigationRemember();
+}, true);
+
 function openSettingsTab(groupId = null) {
   if (!state.tabs.some(t => t.id === "settings")) {
     state.tabs.push({ id: "settings", type: "settings", title: "Settings" });
@@ -7722,9 +7887,10 @@ function closeBrowserTabsForBackend(bid) {
   return ids.length;
 }
 
-function closeTab(id) {
+function closeTab(id, recordHistory = true) {
   const idx = state.tabs.findIndex(t => t.id === id);
   if (idx < 0) return;
+  navigationRemember();
   const closing = state.tabs[idx];
   if (closing.type === "browser" && closing.browserId) {
     api(closing.bid || 0, `browser/instances/${encodeURIComponent(closing.browserId)}`,
@@ -7762,6 +7928,7 @@ function closeTab(id) {
   renderTabs(state.active);
   renderSidebar();
   if (closing.type === "browser" || closing.type === "term") syncSessionBrowserChips();
+  if (recordHistory) navigationChanged(); else navigation.reconcile();
 }
 
 function isTabVisible(id) {
@@ -7772,6 +7939,7 @@ function isTabVisible(id) {
 function focusWorkspacePane(groupId) {
   const pane = workspacePane(groupId);
   if (!pane || state.activeGroup === pane.id) return;
+  navigationRemember();
   state.activeGroup = pane.id;
   state.active = pane.active;
   const tab = state.tabs.find(item => item.id === state.active);
@@ -7782,11 +7950,13 @@ function focusWorkspacePane(groupId) {
   renderSidebar();
   syncSessionBrowserChips();
   saveTabs();
+  navigationChanged();
 }
 
 function activateTab(id, groupId = null) {
   const tab = state.tabs.find(t => t.id === id);
   if (!tab) return;
+  navigationRemember();
   const pane = workspacePaneForTab(id) || putTabInPane(id, groupId);
   pane.active = id;
   state.activeGroup = pane.id;
@@ -7796,6 +7966,7 @@ function activateTab(id, groupId = null) {
   syncTabOrderFromLayout();
   renderTabs(id); renderSidebar();
   syncSessionBrowserChips();
+  navigationChanged();
 }
 
 function ensureTabView(tab) {
@@ -7827,7 +7998,7 @@ function burgerButton() {
     /* Two layouts, one control. Narrow: the sidebar is a drawer, so open it.
        Wide: it is a column and there is no drawer to open, so the same button
        collapses it and hands the width to the workspace. */
-    if (drawerLayout()) $("app").classList.add("side-open");
+    if (drawerLayout()) openDrawer();
     else setSideCollapsed(!$("app").classList.contains("side-collapsed"));
   };
   return button;
@@ -8194,6 +8365,7 @@ function dropTabOnToolbar(pane, tabsRoot, event, taskWorkspace = null) {
   const source = workspacePane(context.sourcePaneId);
   const destination = workspacePane(pane.id);
   if (!source || !destination) { cancelTabDrag(); return; }
+  navigationRemember();
 
   if (source.id === destination.id) {
     const ids = reorderChildren(tabsRoot, ".tab").map(node => node.dataset.tabId);
@@ -8216,6 +8388,7 @@ function dropTabOnToolbar(pane, tabsRoot, event, taskWorkspace = null) {
   normalizeWorkspace();
   renderTabs(state.active);
   renderSidebar();
+  navigationChanged();
 }
 
 function wireTabbar(tabbar, tabsRoot, pane, taskWorkspace = null) {
@@ -8278,6 +8451,7 @@ function splitTabIntoPane(tabId, targetPaneId, side) {
   let target = workspacePane(targetPaneId);
   const source = workspacePaneForTab(tabId);
   if (!target || !source || (target === source && source.tabs.length < 2)) return false;
+  navigationRemember();
   removeTabFromPane(tabId);
   if (source !== target) {
     collapseEmptyPane(source);
@@ -8293,6 +8467,7 @@ function splitTabIntoPane(tabId, targetPaneId, side) {
   state.activeGroup = pane.id;
   state.active = tabId;
   normalizeWorkspace();
+  navigationChanged();
   return true;
 }
 
@@ -8531,9 +8706,12 @@ function renderTabs(focusTabId = null) {
   }
 
   const panes = workspacePanes();
-  if (!state.tabs.length) {
+  if (!panes.some(pane => pane.active)) {
     const host = tree.querySelector(".pane-views");
     hint.classList.remove("hidden");
+    hint.querySelector("p").innerHTML = state.tabs.length ?
+      "Choose a tab above or open a session from the left." :
+      "No tabs open.<br>Create a session or open one from the left.";
     if (host) host.appendChild(hint);
   } else {
     hint.classList.add("hidden");
@@ -8587,7 +8765,7 @@ function syncTabsWithSessions() {
   let dirty = false;
   for (const t of [...state.tabs]) {
     if (t.type === "session" && !t.bid && !state.sessions.some(s => s.id === t.sid)) {
-      closeTab(t.id); dirty = true;
+      closeTab(t.id, false); dirty = true;
     }
   }
   if (!dirty) renderTabs();
@@ -8617,7 +8795,16 @@ $("btn-settings").onclick = () => { openSettingsTab(state.activeGroup); closeDra
 
 /* drawer (mobile) */
 $("side-backdrop").onclick = closeDrawer;
-function closeDrawer() { $("app").classList.remove("side-open"); }
+let drawerHistory = null;
+function openDrawer() {
+  if (!drawerLayout() || $("app").classList.contains("side-open")) return;
+  $("app").classList.add("side-open");
+  drawerHistory = navigation.layer(closeDrawer, openDrawer);
+}
+function closeDrawer() {
+  $("app").classList.remove("side-open");
+  if (drawerHistory) { drawerHistory(); drawerHistory = null; }
+}
 
 /* Touch-only drawer drag. The narrow edge target keeps ordinary chat,
    terminal and tab gestures untouched while making the closed drawer easy to
@@ -8642,7 +8829,7 @@ function closeDrawer() { $("app").classList.remove("side-open"); }
   }
 
   function settle(open) {
-    app.classList.toggle("side-open", !!open);
+    if (open) openDrawer(); else closeDrawer();
     app.classList.remove("drawer-dragging");
     if (settleFrame !== null) cancelAnimationFrame(settleFrame);
     const reduced = window.matchMedia &&
@@ -9495,7 +9682,7 @@ function spawnEffortOptionsFor(engine, modelOption) {
    exists, so a console that never types pays nothing for it.
 
    The word list lives in the browser as the file's own text plus an index of
-   line starts, and every question is a binary search over it: 188k words cost
+   line starts, and every question is a binary search over it: 191k words cost
    about 2.8 MB and no per-word JS object. A rank digit marks the words common
    enough to be offered first and to be corrected INTO; an unranked word is
    still spelled correctly, it is just never something Puppy will type for
@@ -11268,10 +11455,15 @@ class Composer {
     const m = this.mention;
     if (!m) return;
     const token = { start: m.start, end: this.ta.selectionStart };
+    const draft = this.ta.value;
+    const current = () => !this.closed && this.ta.value === draft;
     this.mentionDismissedAt = -1;
     this.hideMention();
     modalVncShortcut(this.host.bid || 0, this.knownVncScreens(true),
-      insert => this.insertMentionText(token, insert));
+      insert => {
+        if (current()) this.insertMentionText(token, insert);
+        else toast("Could not insert shortcut · the prompt changed · open a new shortcut", "bad", TOAST_LONG);
+      }, current);
   }
 
   /* What "@" can point the agent at on this session's node: live instances
@@ -12637,7 +12829,7 @@ class SessionWorkspaceView {
     const dialog = modal(`<h2>Tasks</h2>
       <p class="modal-copy">Each task works in its own chat and copy of Main's project. Review a finished task to apply its changes to Main; Main must be idle while they are applied.</p>
       <div class="task-list"></div>
-      <div class="m-btns"><button type="button" class="btn" id="to-close">Close</button><button type="button" class="btn btn-pri" id="to-new">New task</button></div>`, "task-overview-modal");
+      <div class="m-btns"><button type="button" class="btn" id="to-close">Close</button><button type="button" class="btn btn-pri" id="to-new">New task</button></div>`, "task-overview-modal", () => { const view = state.views[this.tab.id]; if (view) view.openTaskOverview(); });
     this.taskOverview = dialog;
     this.overview = dialog.m.querySelector(".task-list");
     this.renderedOverview = "";
@@ -12725,6 +12917,7 @@ class SessionWorkspaceView {
     this.select(sid);
   }
   select(sid) {
+    navigationRemember();
     const old = this.activeView();
     if (old.composer) old.composer.stopTyping();
     old.restoreScroll(old.captureScroll());
@@ -12734,18 +12927,20 @@ class SessionWorkspaceView {
     const selected = this.strip.querySelector('[aria-selected="true"]');
     if (selected) selected.scrollIntoView({block:"nearest", inline:"nearest"});
     this.save();
+    navigationChanged();
   }
   /* Hiding a tab never touches the conversation: its work, queue and
      approvals continue, and the Tasks sheet reopens it. */
   closeTask(sid, render = true) {
     if (sid === this.tab.sid) return;
+    if (render) navigationRemember();
     this.hidden.add(sid);
     this.opened = this.opened.filter(id => id !== sid);
     const view = this.taskViews.get(sid);
     if (view) view.destroy();
     this.taskViews.delete(sid);
     if (this.selected === sid) this.selected = this.tab.sid;
-    if (render) { this.refreshTasks(); this.save(); }
+    if (render) { this.refreshTasks(); this.save(); navigationChanged(); }
   }
   refreshTasks() {
     const tasks = this.tasks();
@@ -12875,7 +13070,7 @@ async function modalNewTask(workspace) {
     <p class="hint">Starts with the engine's saved defaults and Main's recent conversation context.</p>
     <p class="hint">Main must be idle to create or apply a task. Local Git projects only; ignored files are not copied.</p>
     <p class="form-error hidden" role="alert"></p>
-    <div class="m-btns"><button type="button" class="btn" id="nt-cancel">Cancel</button><button type="button" class="btn btn-pri" id="nt-start">Start task</button></div>`, "new-task-modal");
+    <div class="m-btns"><button type="button" class="btn" id="nt-cancel">Cancel</button><button type="button" class="btn btn-pri" id="nt-start">Start task</button></div>`, "new-task-modal", () => { const view = state.views[workspace.tab.id]; if (view) modalNewTask(view); });
   const start = m.querySelector("#nt-start");
   const error = m.querySelector(".form-error");
   /* The task box is the chat's own prompt box - the same "@" list, pasted
@@ -13031,7 +13226,7 @@ async function modalReviewTask(workspace, session) {
       <p class="help task-review-fold-note" id="tr-fold-note">After a successful apply, keep the conversation in Main as a condensed archive, permanently remove the task's private working copy, close its tab and focus Main. On by default for each review.</p>
     </div>
     <p class="form-error hidden" role="alert"></p>
-    <div class="m-btns"><button type="button" class="btn" id="tr-close">Cancel</button><button type="button" class="btn btn-pri" id="tr-apply" disabled>Apply to Main</button></div>`, "task-review-modal");
+    <div class="m-btns"><button type="button" class="btn" id="tr-close">Cancel</button><button type="button" class="btn btn-pri" id="tr-apply" disabled>Apply to Main</button></div>`, "task-review-modal", () => { const view = state.views[workspace.tab.id], task = findSessionMeta(workspace.tab.bid, session.id); if (view && task) modalReviewTask(view, task); });
   const facts = m.querySelector(".task-review-facts");
   const fact = (label, value, cls = "") => {
     const row = el("div", "ws-fact");
@@ -13364,7 +13559,7 @@ class SharedDraft {
         <button type="button" class="btn draft-cancel">Keep editing</button>
         <button type="button" class="btn draft-use-shared">Use shared draft</button>
         <button type="submit" class="btn btn-pri">Share my draft</button>
-      </div></form>`, "draft-review-modal");
+      </div></form>`, "draft-review-modal", () => { if (v.root.isConnected) this.review(); });
     m.querySelector(".draft-local").value = local;
     m.querySelector(".draft-shared").value = shared.text;
     onClose(() => { this.reviewOpen = false; });
@@ -14820,19 +15015,27 @@ class SessionView {
      (or newer than a detached window) swaps in a slice of history around the
      target, with Load older / Load newer at its edges and a pill back to the
      live tail. A merged tool result lands on the card that carries it. */
-  async jumpToSeq(seq) {
+  async jumpToSeq(seq, recordHistory = true) {
     seq = Number(seq);
-    if (!Number.isFinite(seq) || seq < 1 || this._jumping) return;
+    if (!Number.isSafeInteger(seq) || seq < 1) return;
+    this.cancelNavigationWindow();
+    if (recordHistory) navigationRemember();
+    this.navigationSeq = seq;
+    if (recordHistory) navigationChanged();
     if (!this.session) { this._pendingJumpSeq = seq; return; }
+    const sequence = this._jumpSequence = (this._jumpSequence || 0) + 1;
+    const current = () => this._jumpSequence === sequence;
     this._jumping = true;
     try {
       if (!this.inLoadedRange(seq)) {
         const above = this.oldestSeq !== null && seq < this.oldestSeq;
         if (above && this.oldestSeq - seq <= JUMP_PAGE_REACH * 200)
           await this.pageBackTo(seq, JUMP_PAGE_REACH);
+        if (!current()) return;
         if (!this.inLoadedRange(seq))
-          await this.loadWindowAround(seq);
+          await this.loadWindowAround(seq, current);
       }
+      if (!current()) return;
       const target = this.findEventNode(seq);
       if (!target) {
         toast("That message is no longer in this transcript", "info", TOAST_LONG);
@@ -14848,7 +15051,7 @@ class SessionView {
     } catch (error) {
       toast(error.message, "bad");
     } finally {
-      this._jumping = false;
+      if (current()) this._jumping = false;
     }
   }
 
@@ -14871,8 +15074,14 @@ class SessionView {
   /* Replace the transcript with a slice of history around seq. Detached from
      the moment the fetch starts, so whatever the tail produces meanwhile is
      held rather than painted into a view about to be replaced. */
-  async loadWindowAround(seq) {
+  async loadWindowAround(seq, current = () => true) {
     const after = Math.max(0, seq - JUMP_CONTEXT_BEFORE);
+    const pending = this._navigationWindow = { detached: this.detached };
+    const abandoned = () => {
+      if (current()) return false;
+      if (this._navigationWindow === pending) this.cancelNavigationWindow();
+      return true;
+    };
     this.detached = true;
     let events;
     try {
@@ -14880,19 +15089,31 @@ class SessionView {
         `sessions/${this.tab.sid}/events?after_seq=${after}&limit=${JUMP_WINDOW}`);
       events = d.events || [];
     } catch (error) {
-      this.detached = false;
-      this.mergeSkipped();
+      if (abandoned()) return;
+      this._navigationWindow = null;
+      this.detached = pending.detached;
+      if (!this.detached) this.mergeSkipped();
       this.syncTailPill();
       throw error;
     }
+    if (abandoned()) return;
+    this._navigationWindow = null;
     if (!events.length) {         // nothing there any more: settle on the tail
-      await this.returnToTail();
+      await this.returnToTail(false);
       return;
     }
     const reachedTail = events.length < JUMP_WINDOW;   // nothing newer was persisted
     this.rebuildTranscript(events, {
       attached: reachedTail, mayHaveOlder: after > 0, mayHaveNewer: !reachedTail });
     if (reachedTail) this.attachToTail();
+  }
+
+  cancelNavigationWindow() {
+    if (!this._navigationWindow) return;
+    this.detached = this._navigationWindow.detached;
+    this._navigationWindow = null;
+    if (!this.detached) this.mergeSkipped();
+    this.syncTailPill();
   }
 
   /* One contiguous run of events replaces whatever was rendered. Attached, it
@@ -14989,12 +15210,18 @@ class SessionView {
   }
 
   /* Drop the window and show the newest history again, following the tail. */
-  async returnToTail() {
-    if (this._returning) return;
+  async returnToTail(recordHistory = true) {
+    this.cancelNavigationWindow();
+    if (recordHistory) navigationRemember();
+    this.navigationSeq = 0;
+    this._pendingJumpSeq = null;
+    if (recordHistory) navigationChanged();
+    const sequence = this._jumpSequence = (this._jumpSequence || 0) + 1;
     this._returning = true;
     if (this.tailButton) this.tailButton.disabled = true;
     try {
       const d = await api(this.tab.bid, `sessions/${this.tab.sid}/events?limit=200`);
+      if (this._jumpSequence !== sequence) return;
       const events = d.events || [];
       this.rebuildTranscript(events, {
         attached: true, mayHaveOlder: events.length >= 200 });
@@ -15004,7 +15231,7 @@ class SessionView {
     } catch (e) {
       toast(e.message, "bad");
     } finally {
-      this._returning = false;
+      if (this._jumpSequence === sequence) this._returning = false;
       if (this.tailButton) this.tailButton.disabled = false;
     }
   }
@@ -19021,6 +19248,14 @@ class SearchView {
       this.input.focus();
       return;
     }
+    navigationRemember();
+    const destination = { query, kinds: [...this.kinds], time: this.timeKey,
+      order: this.order, excluded: [...this.excludedNodes] };
+    if (JSON.stringify(destination) !== JSON.stringify(this.navigationQuery)) {
+      this.navigationQuery = destination;
+      this.navigationSearch = ++navigationSearchSequence;
+      navigationChanged();
+    }
     if (this.searchController) this.cancelSearch();
     const sequence = ++this.searchSequence;
     const catalog = this.nodesCatalog();
@@ -19181,11 +19416,7 @@ class SearchView {
   }
 
   openMatch(bid, session, seq) {
-    openSessionTab(bid, session.id, session);
-    if (seq > 0) {
-      const view = sessionViewFor(bid, session.id);
-      if (view && typeof view.jumpToSeq === "function") view.jumpToSeq(seq);
-    }
+    openSessionLocation(bid, session.id, session, seq);
   }
 }
 
@@ -19244,7 +19475,14 @@ class SettingsView {
     this.timeoutSettingsSync = null;
     this.root.remove();
   }
-  onShow() { this.render(); }
+  onShow() {
+    const backends = JSON.stringify(state.backends.map(node => [node.id, node.name, node.protocol, node.capabilities]));
+    if (!this.inner.children.length || this.navigationBackends !== backends) {
+      this.navigationBackends = backends;
+      this.render();
+    }
+    else { this.syncRemoteState(); this.startUpgradeReadinessPolling(); }
+  }
 
   stopUpgradeReadinessPolling() {
     this.upgradePollGeneration++;
@@ -20541,8 +20779,10 @@ class SettingsView {
       }
     };
     select.onchange = () => {
+      navigationRemember();
       activeBid = Number(select.value) || 0;
       this.timeoutSettingsBid = activeBid;
+      navigationChanged();
       resetError = ""; paint();
       if (!nodeStateStreamActive(activeBid) || !current(activeBid)) load(activeBid);
     };
@@ -20860,8 +21100,10 @@ class SettingsView {
     };
 
     select.onchange = () => {
+      navigationRemember();
       activeBid = Number(select.value) || 0;
       this.timerSettingsBid = activeBid;
+      navigationChanged();
       for (const record of rows) {
         record.error.textContent = ""; record.error.classList.add("hidden");
         record.input.setAttribute("aria-invalid", "false");
@@ -21209,9 +21451,11 @@ class SettingsView {
     };
 
     select.onchange = () => {
+      navigationRemember();
       stash();
       activeBid = Number(select.value) || 0;
       this.systemPromptBid = activeBid;
+      navigationChanged();
       paint();
       if (!records.has(activeBid)) load();
     };
@@ -22453,11 +22697,13 @@ class SettingsView {
 const modalStack = [];
 const MODAL_FOCUSABLE = 'a[href],button:not([disabled]),input:not([disabled]):not([type=hidden]),' +
   'select:not([disabled]):not(.choice-native),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
-function modal(html, className = "") {
+function modal(html, className = "", reopen = null) {
+  navigationRemember();
   const back = el("div", "modal-backdrop");
   const m = el("div", "modal" + (className ? " " + className : ""));
   m.setAttribute("role", "dialog");
   m.setAttribute("aria-modal", "true");
+  m.tabIndex = -1;
   m.innerHTML = html;
   back.appendChild(m);
   $("modal-root").appendChild(back);
@@ -22466,6 +22712,7 @@ function modal(html, className = "") {
   let closed = false;
   const closeListeners = new Set();
   let dismissHandler = null;
+  let releaseHistory = null;
   const dismiss = () => dismissHandler ? dismissHandler() : close();
   const record = { m, close: dismiss };
   const close = () => {
@@ -22475,6 +22722,7 @@ function modal(html, className = "") {
     const at = modalStack.indexOf(record);
     if (at >= 0) modalStack.splice(at, 1);
     back.remove();
+    if (releaseHistory) releaseHistory();
     for (const listener of closeListeners) {
       try { listener(); } catch (error) { console.warn("modal close listener failed", error); }
     }
@@ -22488,6 +22736,8 @@ function modal(html, className = "") {
     }
   };
   modalStack.push(record);
+  releaseHistory = navigation.layer(dismiss, reopen);
+  if (navigation.applying) m.focus({ preventScroll: true });
   const onClose = listener => {
     if (closed) listener();
     else closeListeners.add(listener);
@@ -22571,7 +22821,7 @@ function modalConfirm(title, text, options = {}) {
 function modalNotice(title, text) {
   const { m, close } = modal(`<h2>${esc(title)}</h2>
     ${modalCopyHtml(text)}
-    <div class="m-btns"><button type="button" class="btn btn-pri" id="mn-ok">OK</button></div>`);
+    <div class="m-btns"><button type="button" class="btn btn-pri" id="mn-ok">OK</button></div>`, "", () => modalNotice(title, text));
   m.querySelector("#mn-ok").onclick = close;
   m.querySelector("#mn-ok").focus();
 }
@@ -22632,7 +22882,7 @@ function modalEditBackend(backend, onSaved) {
       </div>
       <div class="m-btns"><button type="button" class="btn" id="backend-edit-cancel">Cancel</button>
         <button type="submit" class="btn btn-pri" id="backend-edit-save">Save changes</button></div>
-    </form>`, "backend-edit-modal");
+    </form>`, "backend-edit-modal", () => { const node = state.backends.find(item => item.id === backend.id); if (node) modalEditBackend(node, onSaved); });
   const form = m.querySelector("#backend-edit-form");
   const name = m.querySelector("#backend-edit-name");
   const urlEditor = backendUrlEditor(m.querySelector("#backend-edit-urls"),
@@ -22776,7 +23026,7 @@ function modalEngineDefaults(bid, key, conversationChoices = null) {
         <button type="button" class="btn" id="ed-cancel">Cancel</button>
         <button type="submit" class="btn btn-pri" id="ed-save" disabled>Save defaults</button>
       </div>
-    </form>`, "engine-defaults-modal");
+    </form>`, "engine-defaults-modal", () => modalEngineDefaults(bid, key, conversationChoices));
   const form = m.querySelector("form");
   const permission = m.querySelector("#ed-permission");
   const model = m.querySelector("#ed-model");
@@ -22918,7 +23168,7 @@ async function modalNewSession(groupId = null) {
     <p class="form-error hidden" role="alert"></p>
     <div class="m-btns"><button type="button" class="btn" id="ns-cancel">Cancel</button><button type="submit" class="btn btn-pri" id="ns-go">Start session</button></div>
     </form>`,
-    "new-session-modal");
+    "new-session-modal", () => modalNewSession(groupId));
 
   const beSel = m.querySelector("#ns-be");
   const engBox = m.querySelector("#ns-engines");
@@ -23264,7 +23514,7 @@ function modalOpenSession(groupId = null) {
   const groups = [{ bid: 0, name: backendName(0), sessions: state.sessions }]
     .concat(state.backends.map(b => ({ bid: b.id, name: b.name, sessions: state.remoteSessions[b.id] || [] })));
   let html = `<h2>Open session</h2><input type="text" id="os-filter" placeholder="Filter sessions" aria-label="Filter sessions"><div id="os-list" class="open-session-list"></div>`;
-  const { m, close } = modal(html);
+  const { m, close } = modal(html, "", () => modalOpenSession(groupId));
   const list = m.querySelector("#os-list");
   const filterInp = m.querySelector("#os-filter");
   const render = () => {
@@ -23311,7 +23561,7 @@ function modalWorkspaceLink(bid, session) {
       <button type="button" class="btn" id="wsl-close">Cancel</button>
       <button type="button" class="btn hidden" id="wsl-term">Terminal</button>
       <button type="button" class="btn btn-pri" id="wsl-sync">Sync now</button>
-    </div>`, "ws-link-modal");
+    </div>`, "ws-link-modal", () => navigationSessionDialog(bid, session.id, modalWorkspaceLink));
   const facts = m.querySelector(".ws-facts");
   const conflictWrap = m.querySelector(".ws-conflict-box");
   const conflictBox = m.querySelector(".ws-conflicts");
@@ -23477,7 +23727,7 @@ function modalNewTerminal(groupId = null) {
     <label>Backend<select id="nt-be">${beOpts.map(b => `<option value="${b.id}">${esc(b.name)}</option>`).join("")}</select></label>
     <label>Command <span class="field-optional">(optional)</span><input type="text" id="nt-cmd" placeholder="Default shell, or e.g. ssh user@host"></label>
     <div class="m-btns"><button type="button" class="btn" id="nt-cancel">Cancel</button><button type="submit" class="btn btn-pri" id="nt-go">Open terminal</button></div>
-    </form>`);
+    </form>`, "", () => modalNewTerminal(groupId));
   m.querySelector("#nt-cancel").onclick = close;
   m.querySelector("#nt-form").onsubmit = event => {
     event.preventDefault();
@@ -23490,7 +23740,7 @@ function modalNewTerminal(groupId = null) {
 }
 
 /* new isolated browser */
-function openBrowserFromMenu(groupId = null) {
+function openBrowserFromMenu(groupId = null, choose = false) {
   const nodes = [{ id: 0, name: backendName(0) }]
     .concat(state.backends)
     .filter(node => browserEnabledFor(node.id));
@@ -23499,7 +23749,7 @@ function openBrowserFromMenu(groupId = null) {
     openSettingsTab(groupId);
     return;
   }
-  if (nodes.length === 1) {
+  if (nodes.length === 1 && !choose) {
     openNewBrowser(nodes[0].id, groupId);
     return;
   }
@@ -23509,7 +23759,7 @@ function openBrowserFromMenu(groupId = null) {
       `<option value="${b.id}">${esc(b.name)}</option>`).join("")}</select></label>
     <div class="m-btns"><button type="button" class="btn" id="nb-cancel">Cancel</button>
     <button type="submit" class="btn btn-pri" id="nb-go">Open browser</button></div>
-    </form>`);
+    </form>`, "", () => openBrowserFromMenu(groupId, true));
   m.querySelector("#nb-cancel").onclick = close;
   m.querySelector("#nb-form").onsubmit = event => {
     event.preventDefault();
@@ -23551,7 +23801,7 @@ function modalNewVnc(groupId = null) {
       <p class="form-error hidden" role="alert"></p>
       <div class="m-btns"><button type="button" class="btn" id="nv-cancel">Cancel</button>
       <button type="submit" class="btn btn-pri" id="nv-go">Connect</button></div>
-    </form>`);
+    </form>`, "", () => modalNewVnc(groupId));
   const form = m.querySelector("#nv-form");
   const host = m.querySelector("#nv-host"), port = m.querySelector("#nv-port");
   const error = m.querySelector(".form-error"), go = m.querySelector("#nv-go");
@@ -23661,7 +23911,7 @@ function vncShortcutText(target, password) {
   return `@VNC ${target} ${/\s/.test(value) ? `"${value}"` : value}`;
 }
 
-function modalVncShortcut(bid, screens, onInsert) {
+function modalVncShortcut(bid, screens, onInsert, current = () => true) {
   const rows = Array.isArray(screens) ? screens : [];
   const { m, close } = modal(`<h2>VNC shortcut</h2>
     <p class="modal-copy">Point the agent at a remote screen. The shortcut goes into your
@@ -23691,7 +23941,10 @@ function modalVncShortcut(bid, screens, onInsert) {
       <p class="form-error hidden" role="alert"></p>
       <div class="m-btns"><button type="button" class="btn" id="vs-cancel">Cancel</button>
       <button type="submit" class="btn btn-pri" id="vs-go">Insert</button></div>
-    </form>`);
+    </form>`, "", () => {
+      if (current()) modalVncShortcut(bid, screens, onInsert, current);
+      else toast("This shortcut's prompt changed · open a new shortcut", "warn", TOAST_LONG);
+    });
   const form = m.querySelector("#vs-form");
   const pick = m.querySelector("#vs-pick");
   const fields = m.querySelector("#vs-target");
@@ -23761,7 +24014,7 @@ function modalSwitchEngine(view) {
     <form id="se-form">
     <div class="engine-pick" id="se-engines" role="group" aria-label="Engine"></div>
     <div class="m-btns"><button type="button" class="btn" id="se-cancel">Cancel</button><button type="submit" class="btn btn-pri" id="se-go">Switch</button></div>
-    </form>`);
+    </form>`, "", () => navigationSessionDialog(view.tab.bid, s.id, (bid, session) => modalSwitchEngine(sessionViewFor(bid, session.id) || {tab: {bid}, session})));
   const box = m.querySelector("#se-engines");
   let pick = (engines.find(engine => engine.key === (pendingEngine || s.engine)) ||
     engines[0] || {}).key || "";
@@ -23801,16 +24054,31 @@ initAuth().catch(e => {
 });
 
 
-async function openSessionReference(ref, seq = 0) {
+async function openSessionReference(ref, seq = 0, adoptHistory = false) {
+  const revision = navigation.revision;
+  const request = ++sessionReferenceSequence;
   try {
     const data = await api(0, "session-links/catalog");
     const row = data.sessions.find(item => item.ref === ref);
     if (!row) throw new Error("That session is deleted or its backend is unavailable");
     const payload = await api(row.bid, `sessions/${row.id}`);
-    openSessionTab(row.bid, row.id, payload.session);
-    const view = sessionViewFor(row.bid, row.id);
-    if (seq > 0 && view) view.jumpToSeq(seq);
+    if (request !== sessionReferenceSequence || revision !== navigation.revision) return;
+    if (adoptHistory && navigation.current) {
+      const session = payload.session;
+      const rows = sessionsFor(row.bid);
+      if (!rows.some(item => item.id === session.id)) rows.push(session);
+      navigation.adopt({ tab: `s:${row.bid}:${session.task ? session.task.parent : row.id}`,
+        task: row.id, seq, search: 0, settings: [0, 0, 0] });
+    } else openSessionLocation(row.bid, row.id, payload.session, seq);
   } catch (error) { toast(error.message, "bad"); }
+}
+
+function openSessionLocation(bid, sid, session, seq) {
+  openSessionTab(bid, sid, session);
+  const parent = state.views[`s:${bid}:${session.task ? session.task.parent : sid}`];
+  if (parent && parent.selected !== sid) parent.select(sid);
+  const view = sessionViewFor(bid, sid);
+  if (seq > 0 && view) view.jumpToSeq(seq);
 }
 
 document.addEventListener("click", event => {
@@ -23824,10 +24092,19 @@ document.addEventListener("click", event => {
   openSessionReference(match[1], Number(match[2]));
 });
 
+let sessionReferenceSequence = 0;
+let sessionHashPending = null;
 function openSessionHash() {
   if (!state.authed) return;
+  if (sessionHashPending && sessionHashPending.hash === location.hash) return sessionHashPending.promise;
   const match = /^#session=([a-f0-9]{32}\/[1-9][0-9]*)&seq=([0-9]+)$/.exec(location.hash);
-  if (match) openSessionReference(match[1], Number(match[2]));
+  if (!match) return;
+  const pending = { hash: location.hash, promise: null };
+  sessionHashPending = pending;
+  pending.promise = openSessionReference(match[1], Number(match[2]), true).finally(() => {
+    if (sessionHashPending === pending) sessionHashPending = null;
+  });
+  return pending.promise;
 }
 window.addEventListener("hashchange", openSessionHash);
 
@@ -23836,7 +24113,7 @@ async function modalSessionRequest(record) {
     <div class="session-request-detail"><p class="modal-copy">Loading…</p></div>
     <div class="m-btns"><button type="button" class="btn sr-close">Close</button>
     <button type="button" class="btn btn-danger sr-cancel" disabled>Stop remaining work</button>
-    <button type="button" class="btn btn-pri sr-refresh">Refresh</button></div>`, "session-request-modal");
+    <button type="button" class="btn btn-pri sr-refresh">Refresh</button></div>`, "session-request-modal", () => modalSessionRequest(record));
   m.querySelector(".sr-close").onclick = close;
   let targetBid = 0;
   const detail = m.querySelector(".session-request-detail");

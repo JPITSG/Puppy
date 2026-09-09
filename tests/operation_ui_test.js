@@ -18,6 +18,7 @@ const response = (status, data) => ({ status, ok: status < 400, json: async () =
 let now = 1000000, nextTimer = 0;
 const timers = new Map();
 const context = vm.createContext({
+  navigation: { layer: () => () => {} }, navigationRemember: () => {}, navigationChanged: () => {},
   document, HTMLElement: FakeElement, console, el, $: id => document.getElementById(id),
   esc: text => text, state: { backends: [] }, AbortController, Blob,
   setTimeout: (fn, ms) => {

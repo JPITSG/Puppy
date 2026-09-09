@@ -6,8 +6,8 @@ service, no new runtime dependency. The word list it consults is generated
 here, checked into the repository under ``puppy/static/dict/`` and served to
 the console like any other authenticated static asset.
 
-    python3 tools/build_dictionary.py            # download the pinned release
-    python3 tools/build_dictionary.py --scowl <dir-or-tarball>
+    python3 tools/build_dictionary.py            # download the pinned releases
+    python3 tools/build_dictionary.py --scowl <dir-or-tarball> --speller <zip-dir>
 
 The source is SCOWL (Spell Checker Oriented Word Lists) by Kevin Atkinson,
 the same collection the aspell/hunspell English dictionaries are cut from.
@@ -28,6 +28,8 @@ What lands in the asset:
     "unscrollable"). See ``derive`` below for the evidence each one needs;
   * a hand-kept supplement (``SUPPLEMENT`` below) of terms this console is
     typed at every day that SCOWL predates or omits;
+  * additions from the 2026 standard American, British and Canadian word
+    lists, plus the size-80 anonymize/anonymise verb family, all unranked;
   * a rank tag on the words common enough to be an autocorrect target, so the
     console can prefer "the" over "tea" and refuse to correct anything into an
     obscure word. Only SCOWL's own small size classes and the supplement are
@@ -55,11 +57,34 @@ import sys
 import tarfile
 import unicodedata
 import urllib.request
+import zipfile
 
 SCOWL_VERSION = "2020.12.07"
 SCOWL_URL = ("https://downloads.sourceforge.net/wordlist/"
              "scowl-%s.tar.gz" % SCOWL_VERSION)
 SCOWL_SHA256 = "5587667caa20c4891390c2d42dbb4d5c4c3f41bee77af1457ece3ba23fb859cc"
+
+# Add the newer standard dictionaries to the established large dictionary.
+# The released plain word lists include inflections; no Hunspell runtime or
+# affix interpreter is needed. Keep existing ranks and leave additions
+# unranked: these archives do not carry per-word frequency information.
+SPELLER_VERSION = "2026.02.25"
+SPELLER_URL = "https://downloads.sourceforge.net/wordlist/speller/%s/" % SPELLER_VERSION
+SPELLER_SHA256 = {
+    "en_US": "caeb6ee8a38e98ccbd6e5c717889a1bab68073dcba8a9c0ca6570641926913e9",
+    "en_GB-ise": "7ddd492ebb697bd231be0c2df3343d11b9000284db2a0d73760085d9293ff625",
+    "en_GB-ize": "6cdd7909aa271a54dbd6a3230690589c4c56b0878c8abb00d2f6c4249e91be3d",
+    "en_CA": "775d01fdd60e86f8f9e48da75b1cd3caa02c677b39629644b9bd4f3af42f820b",
+}
+
+# SCOWL 2020 files these ordinary verbs at size 80, and the 2026 standard
+# and large lists still omit them.
+# Admit their attested spellings explicitly, without accepting all of that
+# tier or making them autocorrect targets.
+EXTRA_WORDS = """
+    anonymize anonymized anonymizes anonymizing
+    anonymise anonymised anonymises anonymising
+"""
 
 # SCOWL splits every category by size class: 10 is the thousand commonest
 # words, 95 is everything anyone ever wrote down. 70 is the "large" class an
@@ -358,6 +383,9 @@ def render(words):
     out.write("#source SCOWL %s (Spell Checker Oriented Word Lists), "
               "Copyright 2000-2020 Kevin Atkinson\n" % SCOWL_VERSION)
     out.write("#source see puppy/static/dict/COPYRIGHT for the full notice\n")
+    out.write("#source SCOWL speller %s standard American, British (-ise/-ize) "
+              "and Canadian lists; additions unranked\n" % SPELLER_VERSION)
+    out.write("#source selected size-80 anonymize/anonymise verb forms; unranked\n")
     out.write("#source productive -able/un- derivations formed from SCOWL's "
               "own verbs and inflections\n")
     out.write("#built tools/build_dictionary.py\n")
@@ -376,6 +404,40 @@ def fetch(url):
         return response.read()
 
 
+def speller_words(directory=""):
+    """Read every pinned modern archive before any output is written.
+
+    A local archive is checked just like a download; there is deliberately no
+    fallback to a partial set when one is missing or its digest differs.
+    """
+    words = set(EXTRA_WORDS.split())
+    notices = set()
+    for dialect, expected in SPELLER_SHA256.items():
+        name = "wordlist-%s-%s.zip" % (dialect, SPELLER_VERSION)
+        if directory:
+            with open(os.path.join(directory, name), "rb") as source:
+                blob = source.read()
+        else:
+            blob = fetch(SPELLER_URL + name)
+        digest = hashlib.sha256(blob).hexdigest()
+        if digest != expected:
+            raise SystemExit("%s checksum mismatch: expected %s, got %s"
+                             % (name, expected, digest))
+        with zipfile.ZipFile(io.BytesIO(blob)) as archive:
+            content = archive.read(dialect + ".txt").decode("utf-8")
+            notice = archive.read("README_%s.txt" % dialect).decode("utf-8")
+        # Preserve the common upstream licence and credits once, even though
+        # each archive prefixes them with its own dialect's README heading.
+        start = notice.index("Copyright 2000-2026 by Kevin Atkinson")
+        end = notice.index("\nBuild Date:", start)
+        notices.add(notice[start:end].rstrip() + "\n")
+        for line in content.splitlines():
+            word = clean(line)
+            if word:
+                words.add(word)
+    return words, "\n".join(sorted(notices))
+
+
 def main():
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -384,8 +446,12 @@ def main():
                              "omitted downloads the pinned release")
     parser.add_argument("--out", default=os.path.join(here, "puppy", "static", "dict"),
                         help="output directory (default puppy/static/dict)")
+    parser.add_argument("--speller", default="",
+                        help="directory containing the four pinned speller ZIPs; "
+                             "omitted downloads them")
     args = parser.parse_args()
 
+    extra, extra_notice = speller_words(args.speller)
     work = None
     root = args.scowl
     if root and os.path.isdir(root):
@@ -413,6 +479,9 @@ def main():
         root = roots[0] if len(roots) == 1 else work
 
     words, supplement, plain, derived = build_words(root)
+    expanded = len(extra.difference(words))
+    for word in extra:
+        words.setdefault(word, None)
     text = render(words)
     os.makedirs(args.out, exist_ok=True)
     path = os.path.join(args.out, "en.txt")
@@ -427,14 +496,15 @@ def main():
     if os.path.exists(copyright_src):
         with open(copyright_src, "r", encoding="latin-1") as source:
             notice = source.read()
+        notice += "\nSCOWL speller %s additions:\n\n%s" % (SPELLER_VERSION, extra_notice)
         with open(os.path.join(args.out, "COPYRIGHT"), "w", encoding="utf-8",
                   newline="\n") as handle:
             handle.write(notice)
     ranked = sum(1 for rank in words.values() if rank is not None)
     print("%s: %d words (%d ranked, %d unaccented, %d derived, "
-          "%d from the supplement), %.1f KB, %.1f KB gzipped"
+          "%d from the supplement, %d expanded), %.1f KB, %.1f KB gzipped"
           % (path, len(words), ranked, plain, derived, supplement,
-             len(raw) / 1024, os.path.getsize(path + ".gz") / 1024))
+             expanded, len(raw) / 1024, os.path.getsize(path + ".gz") / 1024))
     if work:
         import shutil
         shutil.rmtree(work, ignore_errors=True)
