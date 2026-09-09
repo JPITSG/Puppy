@@ -4076,7 +4076,8 @@ def check_sidebar_icon_alignment(css_source: str) -> None:
     # The row centres its own marks: no per-element optical offset.
     assert ".si-row .sess-dot{margin:0 1px}" in css_source
     assert "font-variant-numeric:tabular-nums;\n  position:relative;top:1px;" in css_source
-    assert ".foot-engine-head{display:flex;align-items:center;" in css_source
+    # The host box's section heads share this centring row.
+    assert ".foot-engine-head,.host-sec-head{display:flex;align-items:center;" in css_source
     assert ".foot-eng{display:flex;align-items:center;" in css_source
     assert ".foot-engine-head>.foot-ico{" not in css_source
     assert ".foot-engine-head>.disclosure-toggle svg" not in css_source
@@ -7249,8 +7250,11 @@ async def main() -> None:
             assert ".foot-engine-body[hidden]{display:none}" in css_source
             # the footer's host box opens on the same slide, so it carries its
             # own gap, padding and rule down with its height
+            # the host box and its own sections open on that same slide
             assert (".foot-engine-body.disclosure-animating,\n"
+                    ".host-sec-body.disclosure-animating,\n"
                     ".foot-host.disclosure-animating{") in css_source
+            assert ".host-sec-body[hidden]{display:none}" in css_source
             assert ".foot-host[hidden]{display:none}" in css_source
             assert "--disclosure-gap:8px;" in css_source
             assert ("margin-top var(--slide-time) var(--ease),"

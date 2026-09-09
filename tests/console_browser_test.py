@@ -2054,6 +2054,125 @@ async def browser_cursor_checks(console):
         await browser.manager().close(page.browser_id, "Cursor test finished")
 
 
+async def host_section_checks(instance, capture=False):
+    # Add an invented reachable peer to exercise Latency as well as the two
+    # sections a standalone instance has. Pause polling while using this data.
+    # An ordinary state refresh replaces state.backends and would drop the
+    # invented peer mid-check, so pin it behind an accessor for the duration
+    # rather than re-injecting it and hoping no refresh lands in between.
+    await evaluate(instance, """window.sectionSaved={backends:state.backends, remoteOk:state.remoteOk};
+        clearTimeout(hostPanel.timer); hostPanel.timer=null;
+        window.sectionPeer={id:998,name:'Workshop',capabilities:[]};
+        window.sectionBackends=state.backends;
+        Object.defineProperty(state,'backends',{configurable:true,
+            get(){return [...window.sectionBackends, window.sectionPeer];},
+            set(value){window.sectionBackends=value.filter(b=>b.id!==998);}});
+        window.sectionOk={...state.remoteOk,998:true};
+        window.sectionOkView=new Proxy(window.sectionOk,{
+            get:(t,k)=>k==='998'?true:t[k],
+            set:(t,k,v)=>{if(k!=='998')t[k]=v; return true;}});
+        Object.defineProperty(state,'remoteOk',{configurable:true,
+            get(){return window.sectionOkView;},
+            set(value){Object.assign(window.sectionOk, value);}});
+        hostPanel.latency=[{id:998,name:'Workshop',ok:true,ms:2.4}];
+        renderHostPanel(); true""")
+    try:
+        for width, height in [(1440, 900), (390, 844)]:
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width": width, "height": height, "deviceScaleFactor": 1,
+                "mobile": width < 900}, session=instance.page_session)
+            await evaluate(instance, "$('app').classList.toggle('side-open', innerWidth<900); true")
+            for theme in ("dark", "light"):
+                await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
+                await asyncio.sleep(.3)
+                spacing = await evaluate(instance, """(() => {
+                    const backend=document.querySelector('.foot-engine-head');
+                    const control=backend.querySelector('.disclosure-toggle');
+                    return [...document.querySelectorAll('.host-sec-head')].every(head=>{
+                        const button=head.querySelector('.disclosure-toggle');
+                        return getComputedStyle(head).gap===getComputedStyle(backend).gap &&
+                            getComputedStyle(button).marginLeft===getComputedStyle(control).marginLeft &&
+                            button.getBoundingClientRect().width===control.getBoundingClientRect().width &&
+                            button.getAttribute('aria-expanded')==='true';
+                    });
+                })()""")
+                assert spacing, (width, theme)
+                for key in ("cpu", "latency", "processes"):
+                    selector = "#host-section-" + key
+                    point = await evaluate(instance, """(() => {
+                        const button=document.querySelector(%s+' .disclosure-toggle');
+                        if(!button) return {missing:true, open:hostPanel.open,
+                            ids:[...$('foot-host').children].map(c=>c.id),
+                            backends:state.backends.map(b=>b.id),
+                            remoteOk:JSON.stringify(state.remoteOk),
+                            latency:hostPanel.latency.length,
+                            err:hostPanel.latencyError};
+                        button.scrollIntoView({block:'nearest'});
+                        const r=button.getBoundingClientRect();
+                        return {x:r.x+r.width/2,y:r.y+r.height/2};
+                    })()""" % json.dumps(selector))
+                    for kind in ("mousePressed", "mouseReleased"):
+                        await instance.call("Input.dispatchMouseEvent", {
+                            "type": kind, **point, "button": "left", "clickCount": 1},
+                            session=instance.page_session)
+                    # An update during the slide must keep the same button,
+                    # focus, collapsed choice and running animation.
+                    kept = await evaluate(instance, """(() => {
+                        const section=document.querySelector(%s);
+                        const button=section.querySelector('.disclosure-toggle');
+                        const body=section.querySelector('.host-sec-body');
+                        const moving=body.classList.contains('disclosure-animating');
+                        renderHostPanel(); hostCpuSample(22);
+                        return {moving, focused: document.activeElement===button,
+                            activeClass: document.activeElement ? document.activeElement.className : null,
+                            same: document.getElementById(body.id)===body,
+                            expanded: button.getAttribute('aria-expanded'),
+                            hidden: body.hidden,
+                            ids:[...$('foot-host').children].map(c=>c.id),
+                            backends:state.backends.map(b=>b.id)};
+                    })()""" % json.dumps(selector))
+                    assert not point.get("missing"), (width, theme, key, point)
+                    assert kept and kept["moving"] and kept["focused"] and kept["same"] \
+                        and kept["expanded"] == "false", (width, theme, key, kept)
+                    await until(instance, "document.querySelector(%s+' .host-sec-body').hidden" %
+                                json.dumps(selector))
+                assert await evaluate(instance, "document.querySelectorAll('.host-sec-body[hidden]').length===3")
+                assert await evaluate(instance, "$('foot-host').scrollHeight <= $('foot-host').clientHeight"), "Collapsed sections must not leave a scrollbar"
+                # Native keyboard activation works with both Enter and Space.
+                for key, name, code, number in [("cpu", "Enter", "Enter", 13),
+                                               ("latency", " ", "Space", 32),
+                                               ("processes", "Enter", "Enter", 13)]:
+                    selector = "#host-section-" + key
+                    await evaluate(instance, "document.querySelector(%s+' .disclosure-toggle').focus(); true" %
+                                   json.dumps(selector))
+                    for kind in ("keyDown", "keyUp"):
+                        await instance.call("Input.dispatchKeyEvent", {
+                            "type": kind, "key": name, "code": code,
+                            "text": ("\r" if name == "Enter" else " ") if kind == "keyDown" else "",
+                            "windowsVirtualKeyCode": number}, session=instance.page_session)
+                    await until(instance, "document.querySelector(%s+' .disclosure-toggle').getAttribute('aria-expanded')==='true'" %
+                                json.dumps(selector))
+                await until(instance, "!document.querySelector('.host-sec-body.disclosure-animating')")
+                if capture:
+                    await evaluate(instance, "$('foot-host').scrollTop=0; true")
+                    shot = await instance.call("Page.captureScreenshot", {"format": "png"},
+                                               session=instance.page_session)
+                    name = "desktop" if width > 900 else "phone"
+                    (BASE / "data" / ("host-sections-" + name + "-" + theme + ".png")).write_bytes(
+                        base64.b64decode(shot["data"]))
+    finally:
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": 1440, "height": 900, "deviceScaleFactor": 1,
+            "mobile": False}, session=instance.page_session)
+        await evaluate(instance, """delete state.backends; delete state.remoteOk;
+            state.backends=sectionSaved.backends; state.remoteOk=sectionSaved.remoteOk;
+            delete window.sectionSaved; delete window.sectionPeer; delete window.sectionBackends;
+            delete window.sectionOk; delete window.sectionOkView;
+            hostPanel.collapsed.clear();
+            $('app').classList.remove('side-open'); applyTheme('dark'); renderHostPanel(); true""")
+    print("PASS: independent host section chevrons, backend spacing, live updates during slides, keyboard focus and Enter/Space on desktop and phone in both themes", flush=True)
+
+
 async def host_panel_checks(instance, capture=False):
     """The CPU reading's box, in a real browser: a real click opens it, the
     node answers over the real HTTP route, the chart is drawn where the data
@@ -2206,6 +2325,7 @@ async def host_panel_checks(instance, capture=False):
         assert layout["column"] < 0.5 and layout["stretched"], layout
         assert "×5" in layout["labels"][2] and layout["labels"][3] == "+2 more", layout
         assert layout["inside"], layout
+        await host_section_checks(instance, capture)
         # It is the box that scrolls, not the session list under it.
         scrolling = await evaluate(instance, """(() => {
             const box=document.getElementById('foot-host');
@@ -2368,8 +2488,12 @@ async def navigation_checks(instance, url, sid):
     await run("document.querySelector('#ns-cancel').click(); openSettingsTab()")
     await travel(-1, "state.active==='s:0:1' && !modalStack.length")
     await run("openHostPanel()")
+    await run("window.hostSectionHistory=JSON.stringify(history.state); document.querySelector('#host-section-cpu .disclosure-toggle').click()")
+    assert await evaluate(instance, "JSON.stringify(history.state)===hostSectionHistory"), "Host disclosures add no history stop"
     await travel(-1, "!hostPanel.open")
     await travel(1, "hostPanel.open")
+    assert await evaluate(instance, "document.querySelector('#host-section-cpu .disclosure-toggle').getAttribute('aria-expanded')==='false'")
+    await run("document.querySelector('#host-section-cpu .disclosure-toggle').click(); delete window.hostSectionHistory")
     await run("closeHostPanel()")
 
     await instance.call("Emulation.setDeviceMetricsOverride", {

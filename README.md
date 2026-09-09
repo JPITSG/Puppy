@@ -511,9 +511,12 @@ history around it.
   readiness and upgrade status remain per backend. See [shared usage](docs/shared-usage.md)
   for identity requirements and freshness rules.
 - **Host activity.** The CPU reading in the footer's corner opens a box under
-  the engine stats. Each node draws its own CPU over the last quarter of an
-  hour - the instance's own chart keeps moving with its live reading - beside
-  its cores, load, memory and uptime. Where backends are paired, the instance
+  the engine stats. CPU, Latency and Processes each have a chevron to collapse
+  or expand their contents. All three start expanded on a fresh page and keep
+  their choices through live updates and closing/reopening the box. Each node
+  draws its own CPU over the last quarter of an hour - the instance's own chart
+  keeps moving with its live reading - beside its cores, load, memory and
+  uptime. Where backends are paired, the instance
   times the round trip to each of them itself and keeps a sparkline of the last
   measurements side by side, scaled to their own peak so one slow round trip
   reads as the spike it was. Only reachable nodes appear: an unavailable

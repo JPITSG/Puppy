@@ -404,6 +404,7 @@ a{color:var(--acc2)}
    padding and the rule it draws there - so a panel carrying a separator
    collapses to nothing rather than to a hairline. */
 .foot-engine-body.disclosure-animating,
+.host-sec-body.disclosure-animating,
 .foot-host.disclosure-animating{
   overflow:hidden;
   transition:height var(--slide-time) var(--ease),opacity var(--slide-fade-time) var(--ease),
@@ -412,10 +413,11 @@ a{color:var(--acc2)}
 }
 @media (prefers-reduced-motion:reduce){
   .foot-engine-body.disclosure-animating,
+  .host-sec-body.disclosure-animating,
   .foot-host.disclosure-animating{transition:none}
 }
 .foot-engine-group+.foot-engine-group{border-top:1px solid var(--line);margin-top:3px;padding-top:7px}
-.foot-engine-head{display:flex;align-items:center;gap:6px;min-width:0;color:var(--txt3);cursor:pointer;}
+.foot-engine-head,.host-sec-head{display:flex;align-items:center;gap:6px;min-width:0;color:var(--txt3);cursor:pointer;}
 .foot-engine-group.dragging{opacity:.28}
 .foot-engines.reordering .foot-engine-group{will-change:transform}
 .foot-engine-name{
@@ -494,13 +496,21 @@ a{color:var(--acc2)}
   padding:9px 6px 0 0;margin:var(--disclosure-gap) -6px 0 0;
 }
 .foot-host[hidden]{display:none}
-.host-sec{display:flex;flex-direction:column;gap:7px;min-width:0}
-.host-sec-head{display:flex;align-items:baseline;gap:6px;min-width:0}
+.host-sec{display:flex;flex-direction:column;min-width:0}
+/* Contain the last heading's compact button overhang when its body is shut,
+   just as the engine scroller does, without leaving a false scrollbar. */
+.host-sec:last-child{padding-bottom:4px}
+.host-sec-head{user-select:none}
+.host-sec-body{
+  --disclosure-gap:7px;display:flex;flex-direction:column;gap:7px;min-width:0;
+  margin-top:var(--disclosure-gap);
+}
+.host-sec-body[hidden]{display:none}
 .host-sec-title{
   font-family:var(--sans);font-size:var(--fs-2xs);font-weight:400;
   text-transform:uppercase;letter-spacing:.09em;color:var(--txt3);
 }
-.host-sec-note,.host-node-note{
+.host-node-note{
   margin-left:auto;flex:0 0 auto;font:var(--fs-2xs) var(--mono);color:var(--txt3);
   font-variant-numeric:tabular-nums;white-space:nowrap;
 }

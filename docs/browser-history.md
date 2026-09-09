@@ -20,7 +20,7 @@ There is no extra entry trapping the reader at the console's starting page.
 | Phone drawer and Host activity | Separate layers, including the drawer's swipe gestures; Back closes them, Forward reopens them |
 | Close a tab | Records the resulting destination. Session, Search and Settings views can be reopened; closed terminal/browser/VNC resources are never recreated |
 | Re-select a destination, streaming updates, polling, background agent-created tabs | No additional navigation stop |
-| Scroll, load more results/messages, expand a tool/task card, unfold a queue, sidebar disclosure/filter/archive controls, choice/context menus, browser/VNC typing controls | Local presentation and input controls; no additional stop. Menus dismiss when history changes |
+| Scroll, load more results/messages, expand a tool/task card, unfold a queue, sidebar disclosure/filter/archive controls (including CPU, Latency and Processes inside Host activity), choice/context menus, browser/VNC typing controls | Local presentation and input controls; no additional stop. Menus dismiss when history changes |
 | Type a draft, recall a prompt, change a model/permission, send/steer/ask/stop, save/reset a setting, apply/delete/sync, reorder/resize layout, toggle theme/alerts | Commands and preferences are not undone or replayed by history |
 | Embedded browser's own Back/Forward buttons | Continue navigating that browser's website history; the enclosing console's history selects console views |
 

@@ -1684,7 +1684,7 @@ function disclosureButton(label, body, collapsedKeys, storageKey, itemKey) {
   button.onclick = () => {
     if (collapsedKeys.has(key)) collapsedKeys.delete(key);
     else collapsedKeys.add(key);
-    saveStringSet(storageKey, collapsedKeys);
+    if (storageKey) saveStringSet(storageKey, collapsedKeys);
     sync(true);
   };
   sync();
@@ -6883,6 +6883,7 @@ const hostPanel = {
   pings: new Map(),      // bid -> [[seconds, milliseconds]]
   latency: [], latencyError: "",
   charts: new Map(),     // bid -> the parts one live sample repaints
+  collapsed: new Set(),  // section keys; presentation only, expanded on a fresh page
 };
 
 /* The live stream keeps this node's chart moving between polls, so the box
@@ -7161,12 +7162,25 @@ function hostNodeDot(node) {
   return footIcon(dot);
 }
 
-function hostSection(title, note) {
-  const section = el("div", "host-sec");
-  const head = el("div", "host-sec-head");
-  head.appendChild(el("span", "host-sec-title", title));
-  if (note) head.appendChild(el("span", "host-sec-note", note));
-  section.appendChild(head);
+function hostSection(key, title, content) {
+  /* Keep the controls and their bodies mounted through polls: keyboard focus
+     and an in-flight disclosure slide belong to the person reading them. */
+  let section = $("foot-host").querySelector(`#host-section-${key}`);
+  if (!section) {
+    section = el("div", "host-sec");
+    section.id = `host-section-${key}`;
+    const head = el("div", "host-sec-head");
+    head.appendChild(el("span", "host-sec-title", title));
+    const body = el("div", "host-sec-body");
+    const button = disclosureButton(title, body, hostPanel.collapsed, null, key);
+    head.appendChild(button);
+    wireDisclosureSurface(head, button);
+    section.appendChild(head);
+    section.appendChild(body);
+  }
+  const body = section.querySelector(".host-sec-body");
+  body.replaceChildren(...content);
+  refreshDisclosureHeight(body);
   return section;
 }
 
@@ -7271,13 +7285,13 @@ function hostLatencySection() {
      exactly as it drops that node's chart and its processes. */
   const rows = hostPanel.latency.filter(row => row && typeof row === "object" &&
     !row.offline && state.remoteOk[row.id] !== false);
-  const section = hostSection("Latency", "");
+  const content = [];
   if (hostPanel.latencyError)
-    section.appendChild(el("div", "host-empty", hostPanel.latencyError));
+    content.push(el("div", "host-empty", hostPanel.latencyError));
   else if (!rows.length)
-    section.appendChild(el("div", "host-empty", "Measuring…"));
-  else for (const row of rows) section.appendChild(hostLatencyRow(row));
-  return section;
+    content.push(el("div", "host-empty", "Measuring…"));
+  else for (const row of rows) content.push(hostLatencyRow(row));
+  return hostSection("latency", "Latency", content);
 }
 
 /* ---- the process section: what Puppy is running on each node ----
@@ -7368,15 +7382,16 @@ function renderHostPanel() {
   hostPanel.charts.clear();
   const nodes = hostPanelNodes();
   const sections = [];
-  const cpu = hostSection("CPU", "");
-  for (const node of nodes) cpu.appendChild(hostCpuBlock(node));
-  sections.push(cpu);
+  sections.push(hostSection("cpu", "CPU", nodes.map(hostCpuBlock)));
   const latency = hostLatencySection();
   if (latency) sections.push(latency);
-  const processes = hostSection("Processes", "");
-  for (const node of nodes) processes.appendChild(hostProcessGroup(node));
-  sections.push(processes);
-  root.replaceChildren(...sections);
+  sections.push(hostSection("processes", "Processes", nodes.map(hostProcessGroup)));
+  for (const section of [...root.children])
+    if (!sections.includes(section)) section.remove();
+  sections.forEach((section, index) => {
+    if (root.children[index] !== section)
+      root.insertBefore(section, root.children[index] || null);
+  });
   root.scrollTop = scrolled;
   /* The first readings usually land while the box is still opening: aim its
      slide at the height they need rather than snapping to it at the end. */

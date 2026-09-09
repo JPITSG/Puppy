@@ -78,12 +78,14 @@ function consoleFor(options = {}) {
     document, el, state, console, Date, Math, Number, Array, JSON, Set, Map,
     Promise, isNaN, parseFloat,
     setTimeout: () => 1, clearTimeout: () => {},
+    choiceSvg: () => el("svg"),
+    saveStringSet: () => assert.fail("Host section choices must stay page-local"),
     $: id => document.getElementById(id),
     /* The sidebar's shared slide lives outside this slice. Its contract with
        the box is all that matters here: the panel is asked to move with the
        motion on, and its content is only let go once a close has finished. */
     setDisclosureCollapsed: (body, collapsed, animate, done) => {
-      slides.push({ collapsed, animate: !!animate });
+      if (animate) slides.push({ collapsed, animate: true });
       body.hidden = collapsed;
       if (done) done();
     },
@@ -109,6 +111,9 @@ function consoleFor(options = {}) {
       return typeof answer === "function" ? answer() : answer;
     },
   });
+  vm.runInContext("let disclosureSeq = 0;\n" +
+    between("function disclosureButton(", "/* A mouse has a natural double-click;") +
+    between("function wireDisclosureSurface(", "function choiceOptionNode("), context);
   /* The box borrows the footer's shared dot column, so bring the real helper
      in beside the slice rather than stubbing the column it draws. */
   vm.runInContext(between("/* The footer's one dot column.",
@@ -123,6 +128,60 @@ function consoleFor(options = {}) {
     aimed: () => aimed,
     panel: () => document.getElementById("foot-host"),
     foot };
+}
+
+/* All three disclosures start open, act independently, and survive both
+   polling and the whole box being closed. A disappearing backend cannot
+   reset Latency's choice or detach a focused Processes control. */
+async function sections() {
+  const app = consoleFor({
+    backends: [{ id: 2, name: "Workshop", capabilities: ["host-metrics-v1"] }],
+    remoteOk: { 2: true },
+    answers: { "0:host/metrics": metrics(), "2:host/metrics": metrics(),
+      "0:backends/latency": { backends: [{ id: 2, name: "Workshop", ok: true, ms: 2 }] } },
+  });
+  app.context.openHostPanel();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const section = key => app.document.getElementById(`host-section-${key}`);
+  const button = key => section(key).querySelector(".disclosure-toggle");
+  const body = key => section(key).querySelector(".host-sec-body");
+  for (const key of ["cpu", "latency", "processes"]) {
+    assert.equal(button(key).getAttribute("aria-expanded"), "true");
+    assert.equal(button(key).getAttribute("aria-controls"), body(key).id);
+    assert.equal(body(key).hidden, false);
+    button(key).click();
+    assert.equal(body(key).hidden, true);
+    assert.equal(button(key).getAttribute("aria-expanded"), "false");
+    assert.match(button(key).getAttribute("aria-label"), /^Expand /);
+    const control = button(key);
+    control.focus();
+    await app.context.pollHostPanel();
+    assert.equal(button(key), control);
+    assert.equal(app.document.activeElement, control);
+    assert.equal(body(key).hidden, true);
+    button(key).click();
+    assert.equal(body(key).hidden, false);
+  }
+  button("latency").click();
+  button("processes").focus();
+  const processControl = button("processes");
+  app.state.remoteOk[2] = false;
+  app.context.renderHostPanel();
+  assert.equal(section("latency"), null);
+  assert.equal(button("processes"), processControl);
+  app.state.remoteOk[2] = true;
+  app.context.renderHostPanel();
+  assert.equal(body("latency").hidden, true);
+  assert.equal(body("cpu").hidden, false);
+  assert.equal(body("processes").hidden, false);
+  app.context.closeHostPanel();
+  app.context.openHostPanel();
+  assert.equal(body("latency").hidden, true);
+  assert.equal(body("cpu").hidden, false);
+  // Clicking the heading uses the same single-click contract as a backend.
+  section("latency").querySelector(".host-sec-title").click();
+  assert.equal(body("latency").hidden, false);
+  app.context.closeHostPanel();
 }
 
 const rows = (node, cls) => node.querySelectorAll(`.${cls}`);
@@ -423,6 +482,7 @@ async function emptyStates() {
 
 async function main() {
   await toggling();
+  await sections();
   charting();
   await liveSamples();
   await processTree();
