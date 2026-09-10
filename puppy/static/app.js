@@ -12270,6 +12270,18 @@ function backgroundTaskUpdateNode(d) {
   return taskUpdateNode(`Background task ${label}`, tone, String(d.text || ""), "background-task");
 }
 
+/* A result belongs inside its call's card, folded away like every other
+   card's body until the reader opens it. */
+function fillToolResultInto(card, d) {
+  toolStateInto(card.querySelector(".t-state"), true, d.is_error);
+  if (d.is_error) card.classList.add("err");
+  if (card._backgroundTaskUpdate)
+    backgroundTaskStateInto(card, card._backgroundTaskUpdate.data);
+  const body = card.querySelector(".tool-body");
+  body.appendChild(el("div", "tb-label", d.is_error ? "error" : "result"));
+  body.appendChild(linkifyInto(el("pre"), displayValue(d.content) || "(Empty)"));
+}
+
 function backgroundTaskStateInto(card, d) {
   if (!["completed", "failed", "stopped"].includes(d.status)) return;
   const stateEl = card.querySelector(".t-state");
@@ -13626,6 +13638,7 @@ class SessionView {
     this.connectionSequence = 0;
     this.toolCards = {};
     this.backgroundTaskUpdates = new Map();
+    this.orphanResults = new Map();   // results whose call is not in this window
     this.switchLines = [];    // engine-switch dividers, re-labelled as state arrives
     this.liveEl = null;
     this.liveKind = null;
@@ -15142,6 +15155,7 @@ class SessionView {
     this.inner.innerHTML = "";
     this.toolCards = {};
     this.backgroundTaskUpdates = new Map();
+    this.orphanResults = new Map();
     this.asideCards = {};
     this.switchLines = [];
     this.oldestSeq = events.length ? events[0].seq : null;
@@ -15400,26 +15414,30 @@ class SessionView {
           this.toolCards[d.tool_use_id] = n;
           for (const update of this.backgroundTaskUpdates.get(d.tool_use_id) || [])
             attachBackgroundTaskUpdate(n, update);
+          /* Paging back reunites the pair: the result this call was missing
+             moves into it and stops standing alone. */
+          for (const orphan of this.orphanResults.get(d.tool_use_id) || []) {
+            fillToolResultInto(n, orphan.data);
+            orphan.node.remove();
+          }
+          this.orphanResults.delete(d.tool_use_id);
         }
         return n;
       }
       case "tool_result": {
         const card = d.tool_use_id && this.toolCards[d.tool_use_id];
-        if (card) {
-          toolStateInto(card.querySelector(".t-state"), true, d.is_error);
-          if (d.is_error) card.classList.add("err");
-          if (card._backgroundTaskUpdate)
-            backgroundTaskStateInto(card, card._backgroundTaskUpdate.data);
-          const body = card.querySelector(".tool-body");
-          body.appendChild(el("div", "tb-label", d.is_error ? "error" : "result"));
-          body.appendChild(linkifyInto(el("pre"), displayValue(d.content) || "(Empty)"));
-          return null;
-        }
+        if (card) { fillToolResultInto(card, d); return null; }
+        /* The call is outside this window - the newest page starts partway
+           through a turn, or the reader jumped into history - so the result
+           stands on its own until paging back brings its card in. It is still
+           a result: folded away like any other, never opened for the reader. */
         const n = toolCardNode({tool: d.tool || "tool_result", is_error: d.is_error}, true);
-        n.classList.add("open");
-        const body = n.querySelector(".tool-body");
-        body.appendChild(el("div", "tb-label", d.is_error ? "error" : "result"));
-        body.appendChild(linkifyInto(el("pre"), displayValue(d.content) || "(Empty)"));
+        fillToolResultInto(n, d);
+        if (d.tool_use_id) {
+          const waiting = this.orphanResults.get(d.tool_use_id) || [];
+          waiting.push({node: n, data: d});
+          this.orphanResults.set(d.tool_use_id, waiting);
+        }
         return n;
       }
       case "side_question": {

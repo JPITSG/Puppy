@@ -588,6 +588,20 @@ def _completed_tool(tool: str, tool_input, result, item_id: str,
     ]
 
 
+def _change_kind(change: dict) -> str:
+    """What one file change did, however the CLI spells it.
+
+    0.154.0 sends `kind` as an object (`{"type": "add"}`) where earlier builds
+    sent the bare word, and formatting the object put a Python dict in front of
+    the reader. Read the word out of either shape, never a repr.
+    """
+    kind = change.get("kind")
+    if isinstance(kind, dict):
+        kind = kind.get("type") or kind.get("kind")
+    text = str(kind or "").strip()
+    return text or "edit"
+
+
 def _web_search_input(item: dict) -> dict:
     action = item.get("action")
     out = dict(action) if isinstance(action, dict) else {}
@@ -1230,8 +1244,7 @@ class CodexDriver(Driver):
             if not isinstance(changes, list):
                 changes = [changes]
             summary = "\n".join(
-                "{}: {}".format(change.get("kind", "edit"),
-                                change.get("path", "?"))
+                "{}: {}".format(_change_kind(change), change.get("path", "?"))
                 if isinstance(change, dict) else str(change)
                 for change in changes) or "(no changes)"
             failed = str(item.get("status") or "").lower() in \

@@ -33,6 +33,7 @@ function view() {
   const v = new context.View();
   v.toolCards = {};
   v.backgroundTaskUpdates = new Map();
+  v.orphanResults = new Map();
   v.inner = document.createElement("div");
   document.body.appendChild(v.inner);
   v.newestSeq = 0;

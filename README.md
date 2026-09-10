@@ -763,6 +763,7 @@ node tests/task_config_ui_test.js    # the New task dialog
 node tests/operation_ui_test.js      # cancellation, commit races and cleanup feedback
 python3 tests/operations_test.py     # cancellation/rollback on both runtimes
 node tests/task_fold_ui_test.js      # task removal and the folded archive card
+node tests/tool_result_ui_test.js    # tool results folded into their call's card
 node tests/toast_ui_test.js          # notice grammar, tones, lives and folded repeats
 node tests/spellcheck_ui_test.js     # the bundled dictionary, its marks and autocorrect
 node tests/host_panel_ui_test.js     # the host box: charts, latency rows, process tree
