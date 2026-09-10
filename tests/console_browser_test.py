@@ -1453,6 +1453,83 @@ async def icon_alignment_checks(instance):
           "in both themes, desktop/phone, at 1x/2x", flush=True)
 
 
+async def queue_expand_checks(instance, capture=False):
+    """Expanding the queue must not raise a horizontal scrollbar.
+
+    `.queue-strip.expanded` only names overflow-y, and a lone overflow-y
+    computes the other axis to auto; each row's cancel tap target reaches 6px
+    past the strip, which is enough to paint a horizontal bar over "Show
+    fewer" even when there is nothing to scroll vertically."""
+    await evaluate(instance, """(() => {
+        window.queueSaved={q:demoView.queued,held:demoView.held,
+            paused:demoView.pausedQueue,open:demoView.queueOpen};
+        window.queueFill=n=>{
+            demoView.queueOpen=false;
+            demoView.renderQueue(Array.from({length:n},(_,i)=>
+                `queued prompt ${i+1} — a line long enough to run past the right edge of the strip`),
+                [], [], demoView.queueRevision);
+        };
+        window.queueBars=()=>{
+            const box=demoView.queueEl, css=getComputedStyle(box);
+            return {expanded:box.classList.contains('expanded'),
+                hbar:box.offsetHeight-box.clientHeight,
+                vbar:box.offsetWidth-box.clientWidth,
+                overflowX:css.overflowX, overflowY:css.overflowY,
+                hOverflow:box.scrollWidth-box.clientWidth,
+                vOverflow:box.scrollHeight-box.clientHeight,
+                more:(box.querySelector('.q-more')||{}).textContent||''};
+        };
+        true;
+    })()""")
+    try:
+        for width, height, name in [(1440, 900, "desktop"), (390, 844, "phone")]:
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width": width, "height": height, "deviceScaleFactor": 1,
+                "mobile": width < 900}, session=instance.page_session)
+            # Wait for the sidebar resize transition before measuring.
+            await asyncio.sleep(.35)
+            for theme in ("dark", "light"):
+                await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
+                # A short queue: expanding it has nothing to scroll vertically,
+                # so a horizontal bar would be the only one on screen.
+                for rows, vertical in ((9, False), (60, True)):
+                    await evaluate(instance, "queueFill(%d)" % rows)
+                    await evaluate(instance, "new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
+                    collapsed = await evaluate(instance, "queueBars()")
+                    assert collapsed["expanded"] is False, (name, theme, rows, collapsed)
+                    assert collapsed["hbar"] == 0 and collapsed["vbar"] == 0, (name, theme, rows, collapsed)
+                    assert collapsed["more"] == "+%d more" % (rows - 5), (name, theme, rows, collapsed)
+                    # A real click on the real control, not a flag flip.
+                    await evaluate(instance, "demoView.queueEl.querySelector('.q-more').click(); true")
+                    await evaluate(instance, "new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
+                    open_ = await evaluate(instance, "queueBars()")
+                    assert open_["expanded"] is True, (name, theme, rows, open_)
+                    assert open_["more"] == "Show fewer", (name, theme, rows, open_)
+                    assert open_["hbar"] == 0, (name, theme, rows, open_)
+                    assert open_["overflowX"] != "auto", (name, theme, rows, open_)
+                    # The cap still applies, and the vertical bar is the one
+                    # the expanded strip is allowed to grow.
+                    assert (open_["vOverflow"] > 0) is vertical, (name, theme, rows, open_)
+                    assert (open_["vbar"] > 0) is vertical, (name, theme, rows, open_)
+                    if capture and rows == 9 and width == 1440:
+                        shot = await instance.call("Page.captureScreenshot", {"format": "png"},
+                                                   session=instance.page_session)
+                        (BASE / "data" / ("queue-expanded-" + name + "-" + theme + ".png")).write_bytes(
+                            base64.b64decode(shot["data"]))
+                    # Collapsing again returns the "+N more" foot.
+                    await evaluate(instance, "demoView.queueEl.querySelector('.q-more').click(); true")
+                    back = await evaluate(instance, "queueBars()")
+                    assert back["expanded"] is False and back["hbar"] == 0, (name, theme, rows, back)
+    finally:
+        await evaluate(instance, """demoView.queueOpen=queueSaved.open;
+            demoView.renderQueue(queueSaved.q||[], queueSaved.held||[], queueSaved.paused||[],
+                demoView.queueRevision);
+            delete window.queueFill; delete window.queueBars; delete window.queueSaved;
+            applyTheme('dark'); true""")
+    print("PASS: expanding the queue raises no horizontal scrollbar on desktop or phone in "
+          "either theme, with and without a vertical one, and Show fewer collapses it again", flush=True)
+
+
 async def background_task_checks(instance, capture=False):
     await evaluate(instance, """(async () => {
         window.backgroundSavedEvents=(await api(demoView.tab.bid,
@@ -1630,6 +1707,7 @@ async def checks(a, b, hub, capture=False):
     await background_count_checks(a, b, hub)
     await icon_alignment_checks(a)
     await background_task_checks(a, capture)
+    await queue_expand_checks(a, capture)
     await message_reuse_checks(a)
     await spell_check_checks(a, capture)
     await workspace_move_checks(a, capture)

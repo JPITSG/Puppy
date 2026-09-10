@@ -27,8 +27,12 @@ vm.runInContext([
   "class View {",
   between("  findEventNode(seq)", "  /* Dividers mark"),
   between("  buildEventNode(ev)", "  /* live streaming bubble */"),
+  between("  atBottom() {", "  /* ---- outgoing ---- */"),
   "} globalThis.View = View;",
 ].join("\n"), context);
+/* one row is taller than the 160px of slack atBottom allows, so a single box
+   arriving is the difference between following the tail and losing it */
+const ROW = 200, VIEWPORT = 300;
 function view() {
   const v = new context.View();
   v.toolCards = {};
@@ -37,7 +41,14 @@ function view() {
   v.inner = document.createElement("div");
   document.body.appendChild(v.inner);
   v.newestSeq = 0;
-  v.scrollBottom = () => {};
+  /* Nothing here lays anything out, so the scroller is modelled: every box in
+     the transcript is one row tall wherever it sits, so a card that grows in
+     place moves the foot exactly as an appended node does. The real atBottom,
+     scrollBottom and followingTail run against it. */
+  const rows = () => v.inner.querySelectorAll(
+    ".tool-card,.task-update,.msg,.tool-card.open .tb-label").length;
+  v.scroll = {clientHeight: VIEWPORT, scrollTop: 0,
+    get scrollHeight() { return rows() * ROW; }};
   return v;
 }
 const tool = (id, seq = 1) => ({seq, kind: "tool_use", data: {
@@ -106,7 +117,56 @@ safe.renderEvent(unknown, false);
 assert.equal(safe.inner.querySelector(".task-update-label").textContent, "Background task updated");
 assert.equal(safe.inner.querySelector(".task-update-text").textContent, unknown.data.text);
 assert.equal(safe.inner.querySelector("img"), null, "engine text is not markup");
+
 console.log("PASS: background-task labels, exact native tool association, visible folded updates, independent history, late results and search targets");
+
+/* The tail follows a card that grows in place. An ending folded into a card
+   already on screen adds its box to the transcript exactly as an appended node
+   does, and the reader at the foot must be shown it - measured afterwards that
+   growth is indistinguishable from having scrolled away, so the decision has
+   to be sampled first and cannot be recovered. */
+const tail = (rows) => {
+  const v = view();
+  for (let i = 0; i < rows; i++) v.renderEvent(tool(`t${i}`, i + 1), false);
+  v.scroll.scrollTop = v.scroll.scrollHeight - v.scroll.clientHeight;  // at the foot
+  assert.ok(v.atBottom(), "the reading starts on the tail");
+  return v;
+};
+
+const folded = tail(4);
+folded.renderEvent(notice("completed", "t0", 20), true);
+assert.equal(folded.inner.children.length, 4, "the ending folded into its card");
+assert.ok(folded.toolCards.t0.querySelector(".background-task"), "and is really there");
+assert.ok(folded.atBottom(), "a card that grew in place keeps the reader on the tail");
+
+const standalone = tail(4);
+standalone.renderEvent(notice("completed", null, 20), true);
+assert.equal(standalone.inner.children.length, 5, "no card to fold into");
+assert.ok(standalone.atBottom(), "an appended ending follows the tail too");
+
+const opened = tail(4);
+opened.toolCards.t0.querySelector(".tool-head").onclick();   // the reader opens it
+opened.scroll.scrollTop = opened.scroll.scrollHeight - opened.scroll.clientHeight;
+opened.renderEvent(result("t0", 21), true);
+assert.ok(opened.toolCards.t0.classList.contains("open"));
+assert.ok(opened.atBottom(), "a result filled into an open card follows too");
+
+const reading = tail(4);
+reading.scroll.scrollTop = 0;   // scrolled up into the conversation
+reading.renderEvent(notice("completed", "t0", 20), true);
+assert.equal(reading.scroll.scrollTop, 0, "growth never yanks a reader off their place");
+
+const detached = tail(4);
+detached.detached = true;
+const parked = detached.scroll.scrollTop;
+detached.renderEvent(notice("completed", "t0", 20), true);
+assert.equal(detached.scroll.scrollTop, parked,
+  "a history window is never pulled to the tail");
+
+const held = tail(4);
+held.renderEvent(notice("completed", "t0", 20), true, false);
+assert.ok(!held.atBottom(), "an explicit refusal to follow is still obeyed");
+console.log("PASS: the tail follows content grown inside a card, and only when it was already following");
 
 // Exercise the real socket dispatcher and lifecycle methods as well as the
 // pill renderer: a history rebuild must never masquerade as live task state.

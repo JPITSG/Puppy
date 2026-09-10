@@ -1500,8 +1500,15 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .queue-strip .q-resend:active{transform:scale(.88);background:var(--hov);color:var(--ok)}
 /* expands the tail past the cap, and collapses it again */
 .queue-strip .q-more{align-self:flex-start;padding:3px 2px;font-family:var(--sans)}
-/* an expanded queue scrolls rather than shoving the composer off the screen */
-.queue-strip.expanded{max-height:36vh;overflow-y:auto;overscroll-behavior:contain}
+/* An expanded queue scrolls rather than shoving the composer off the screen.
+   overflow-x is pinned because a lone overflow-y computes the other axis to
+   auto, and the rows' tap targets (.q-x::after) reach 6px past the strip's
+   right edge - enough to raise a horizontal scrollbar over "Show fewer" even
+   with nothing to scroll vertically. A scroll container already clips that
+   overhang here, so nothing reachable is lost; the collapsed strip keeps it. */
+.queue-strip.expanded{
+  max-height:36vh;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;
+}
 
 /* composer - the chat's frame around the shared prompt box. Everything from
    .composer-box down is the box itself (Composer in app.js), which the New

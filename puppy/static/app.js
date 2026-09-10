@@ -13817,9 +13817,10 @@ class SessionView {
       tools: () => this.toolsMenuSpec(),
       runTool: (tool) => this.runSessionTool(tool),
       menuOwner: () => this.root,
-      /* re-pin the transcript when the box's height moved it */
-      beforeResize: () => this.scroll.scrollHeight - this.scroll.scrollTop - this.scroll.clientHeight < 60,
-      afterResize: (pinned) => { if (pinned) this.scroll.scrollTop = this.scroll.scrollHeight; },
+      /* re-pin the transcript when the box's height moved it, on the same
+         reading of "following the tail" as everything else in the view */
+      beforeResize: () => !this.detached && this.atBottom(),
+      afterResize: (pinned) => { if (pinned) this.scrollBottom(true); },
       /* Another device's shared draft may still name these files. */
       privateUploads: () => false,
     });
@@ -15287,14 +15288,20 @@ class SessionView {
 
   renderEvent(ev, live, follow = null) {
     if (Number(ev.seq) > this.newestSeq) this.newestSeq = Number(ev.seq);
+    /* A decision sampled before the DOM moves beats re-measuring after it,
+       which the new content's own height would skew. */
+    if (follow === null) follow = live ? !this.detached && this.atBottom() : true;
+    /* An event with no node of its own was folded into a card that is already
+       on screen - a task ending appended to its tool card, a side question's
+       answer, a result filled into an open card - which grows the transcript
+       exactly as an appended node does. Follow the tail for both, or that
+       growth lands below the fold with nothing to bring it back. */
     const node = this.buildEventNode(ev);
-    if (!node) return;
-    node.dataset.seq = String(ev.seq);
-    this.inner.appendChild(node);
-    /* A decision sampled before the append beats re-measuring after it, which
-       the new node's own height would skew. */
-    if (follow === null) this.scrollBottom(!live);
-    else if (follow) this.scrollBottom(true);
+    if (node) {
+      node.dataset.seq = String(ev.seq);
+      this.inner.appendChild(node);
+    }
+    if (follow) this.scrollBottom(true);
   }
 
   /* Dividers mark where the configuration changed, and name it on both sides.
@@ -15618,12 +15625,12 @@ class SessionView {
       this.liveFrame = null;
     }
     if (!this.liveTextNode || !this.livePendingText) return;
-    const follow = this.atBottom();
-    const text = this.livePendingText;
-    this.livePendingText = "";
-    this.liveTextNode.appendData(text);
-    if (this.liveKind === "thinking") syncThinkingOpenable(this.liveEl);
-    if (follow) this.scrollBottom(true);
+    this.followingTail(() => {
+      const text = this.livePendingText;
+      this.livePendingText = "";
+      this.liveTextNode.appendData(text);
+      if (this.liveKind === "thinking") syncThinkingOpenable(this.liveEl);
+    });
   }
   clearLive() {
     if (this.liveFrame !== null) cancelAnimationFrame(this.liveFrame);
@@ -15674,9 +15681,8 @@ class SessionView {
       updatePromptStatusLabel(label, text);
     }
     if (this.inner.lastChild !== this.statusRow) {
-      const follow = this.atBottom();
-      this.inner.appendChild(this.statusRow);   // stays the last thing in the transcript
-      if (follow) this.scrollBottom(true);
+      // stays the last thing in the transcript
+      this.followingTail(() => this.inner.appendChild(this.statusRow));
     }
   }
 
@@ -15692,6 +15698,21 @@ class SessionView {
 
   scrollBottom(force) {
     if (force || this.atBottom()) this.scroll.scrollTop = this.scroll.scrollHeight;
+  }
+
+  /* The one contract for anything that changes what the foot of the transcript
+     looks like: sample whether the reader is following the tail BEFORE the
+     change, and put them back on it afterwards. Content the reader cannot see
+     is content they were never shown, and the decision cannot be re-derived
+     once the change has landed. It covers both halves of that: the transcript
+     growing (an appended message, a card grown in place) and the chrome under
+     it growing, since a queue row or a taller composer shortens the scroller
+     and pushes the tail out of view just as surely. A detached history window
+     never follows - it is deliberately parked away from the tail. */
+  followingTail(mutate) {
+    const follow = !this.detached && this.atBottom();
+    try { return mutate(); }
+    finally { if (follow) this.scrollBottom(true); }
   }
 
   /* ---- outgoing ---- */
@@ -15941,7 +15962,13 @@ class SessionView {
     return { row, ident, cfg };
   }
 
+  /* The strip stands between the transcript and the composer, so a row
+     arriving or the list expanding takes its height out of the scroller. */
   renderQueue(q, held, paused, revision) {
+    this.followingTail(() => this.paintQueue(q, held, paused, revision));
+  }
+
+  paintQueue(q, held, paused, revision) {
     const box = this.queueEl;
     if (this.queueDrag) this.cancelQueueDrag(null, true);
     this.queued = q;

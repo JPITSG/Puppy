@@ -121,7 +121,11 @@ side questions, engine switches and a result line for every turn with elapsed
 time, tokens in and out, and, when the engine reports it, how full the model's
 context is. Tool cards and folded-task headers share a vertically centered row
 for their carets, icons and status marks, with equal spacing from the chevron to
-the tool icon and from the icon to its label.
+the tool icon and from the icon to its label. Reading at the foot of a live
+transcript keeps you there: a card that grows where it stands - a background
+task ending, an answer to a side question, a result dropped into a card you
+opened - carries the view down with it, exactly as a new message does, while a
+reading anywhere further up is never pulled away from it.
 
 - **Three workspaces to choose from.** Point a session at a project directory,
   start it in a private disposable **Scratch** workspace with no folder to

@@ -1460,19 +1460,21 @@ def check_thinking_icons(ui_source: str) -> None:
                     return ui_source[start:index + 1]
         raise AssertionError("unbalanced " + name)
 
-    start = ui_source.index("\n  syncLiveStatus()") + 1
-    brace = ui_source.index("{", start)
-    depth = 0
-    method = None
-    for index in range(brace, len(ui_source)):
-        if ui_source[index] == "{":
-            depth += 1
-        elif ui_source[index] == "}":
-            depth -= 1
-            if depth == 0:
-                method = ui_source[start:index + 1]
-                break
-    assert method is not None, "unbalanced SessionView.syncLiveStatus"
+    def view_method(name):
+        start = ui_source.index("\n  " + name + "(") + 1
+        brace = ui_source.index("{", start)
+        depth = 0
+        for index in range(brace, len(ui_source)):
+            if ui_source[index] == "{":
+                depth += 1
+            elif ui_source[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    return ui_source[start:index + 1]
+        raise AssertionError("unbalanced SessionView." + name)
+
+    # the status row rejoins the foot through the shared tail-follow contract
+    method = view_method("syncLiveStatus") + ",\n" + view_method("followingTail")
     script = r"""
 class Node {
   constructor(tag,cls="",text="") {
@@ -2700,7 +2702,7 @@ const cleared={queued:frames.size,text:textNode.data,writes:textNode.writes,
   bubbles:inner.children.length,cancelled:cancelled.length,live:view.liveEl};
 console.log(JSON.stringify({before,after,secondPaint,cleared}));
 """ % ",\n".join(method(name) for name in (
-        "appendLive", "flushLive", "clearLive"))
+        "appendLive", "flushLive", "clearLive", "followingTail"))
     proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:1000]
     result = json.loads(proc.stdout)

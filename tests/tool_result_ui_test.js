@@ -28,9 +28,13 @@ vm.runInContext([
   "class View {",
   between("  findEventNode(seq)", "  /* Dividers mark"),
   between("  buildEventNode(ev)", "  /* live streaming bubble */"),
+  between("  atBottom() {", "  /* ---- outgoing ---- */"),
   "} globalThis.View = View;",
 ].join("\n"), context);
 
+/* one row is taller than the 160px of slack atBottom allows, so a single box
+   arriving is the difference between following the tail and losing it */
+const ROW = 200, VIEWPORT = 300;
 function view() {
   const v = new context.View();
   v.toolCards = {};
@@ -39,7 +43,14 @@ function view() {
   v.inner = document.createElement("div");
   document.body.appendChild(v.inner);
   v.newestSeq = 0;
-  v.scrollBottom = () => {};
+  /* Nothing here lays anything out, so the scroller is modelled: every box in
+     the transcript is one row tall wherever it sits, so a card that grows in
+     place moves the foot exactly as an appended node does. The real atBottom,
+     scrollBottom and followingTail run against it. */
+  const rows = () => v.inner.querySelectorAll(
+    ".tool-card,.task-update,.msg,.tool-card.open .tb-label").length;
+  v.scroll = {clientHeight: VIEWPORT, scrollTop: 0,
+    get scrollHeight() { return rows() * ROW; }};
   return v;
 }
 const call = (id, seq) => ({seq, kind: "tool_use", data: {
@@ -116,6 +127,24 @@ const resultText = card => {
   assert.equal(cards(v).length, 1);
   assert.ok(!cards(v)[0].classList.contains("open"));
   assert.equal(v.orphanResults.size, 0);
+}
+
+/* Filling a card the reader has opened grows the transcript exactly as a new
+   card does, so a reading at the foot has to be carried down with it. */
+{
+  const v = view();
+  for (let i = 0; i < 4; i++) v.renderEvent(call(`c${i}`, i + 1), false);
+  v.toolCards.c0.querySelector(".tool-head").onclick();          // opened to read
+  v.scroll.scrollTop = v.scroll.scrollHeight - v.scroll.clientHeight;
+  assert.ok(v.atBottom(), "the reading starts on the tail");
+  v.renderEvent(result("c0", 20), true);
+  assert.equal(cards(v).length, 4, "the result folded into its call's card");
+  assert.ok(v.atBottom(), "an open card that grew keeps the reader on the tail");
+
+  v.scroll.scrollTop = 0;                                        // scrolled up
+  v.toolCards.c1.querySelector(".tool-head").onclick();
+  v.renderEvent(result("c1", 21), true);
+  assert.equal(v.scroll.scrollTop, 0, "and never moves a reader who is not");
 }
 
 console.log("PASS: tool results fold into their call's card, closed, and reunite when it loads");
