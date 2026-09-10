@@ -276,6 +276,13 @@ Updates remain visible with the card collapsed; those without a matching card
 stand on their own. Transient engine failures (such as an OAuth refresh lock)
 retry on their own with a back-off note in the transcript.
 
+Retries an engine performs inside a running turn (Codex counting a dropped
+response stream back up while it falls back to another transport) appear in the
+status line in the engine's own words - except in a turn's first ten seconds,
+where the status simply stays **Starting…**. A connection the engine repairs
+itself before the model has said anything is the turn coming up, not trouble to
+report; anything the engine will not retry is still shown as an error.
+
 A blue pill in the session header shows the live background-task count (for
 example, **2 tasks**), including while the model is still working. It disappears
 at zero, on disconnect and when the turn ends; reconnecting restores the current
@@ -774,6 +781,7 @@ node tests/browser_cursor_ui_test.js # cursor refresh, stale replies and viewer 
 node tests/browser_frames_ui_test.js # bounded image loading, stale frames and resource cleanup
 node tests/browser_input_ui_test.js  # immediate gesture starts and bounded trailing input
 python3 tests/cli_upgrade_test.py    # engine CLI updates against a stub updater
+python3 tests/codex_turn_test.py     # Codex turn statuses and the start-up retry grace
 python3 tests/session_links_test.py  # session references, requests, workflows
 python3 tests/portability_test.py     # service homes, saved settings and relocatable launch
 ```

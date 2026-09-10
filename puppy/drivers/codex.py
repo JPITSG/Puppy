@@ -15,6 +15,12 @@ Fast contract verified against 0.153.2: ``model/list`` advertises per-model
 ``serviceTiers`` and stable ``turn/start`` accepts ``serviceTierForTurn``.
 The catalog's semantic name selects the tier; its opaque id is never assumed.
 
+Verified against 0.154.0: a stream the CLI re-establishes on its own arrives as
+an ``error`` notification carrying ``willRetry`` (here
+``codexErrorInfo.responseStreamDisconnected``, counting itself down as
+"Reconnecting... 2/5"), and a ``warning`` once it settles on another transport.
+Both are the CLI's own recovery, never the turn's outcome.
+
 Puppy's Codex permission setting remains a sandbox choice. We explicitly use
 ``approvalPolicy: never``, matching the old non-interactive ``codex exec``
 behavior: sandbox denials go back to the model rather than blocking on a UI
@@ -71,6 +77,19 @@ _EFFORT_FALLBACKS = {
     "xhigh": "Extensive reasoning",
     "max": "Maximum reasoning",
 }
+
+# The CLI retries some failures on its own and narrates the attempts while it
+# does: a response stream that has to fall back to another transport counts
+# itself down as "Reconnecting... 2/5" before the model has said anything. For
+# this long after a turn's own start that countdown is the engine coming up,
+# not news the person who just pressed Send can act on, so the console keeps
+# the starting word it already shows. A retry after the window carries the
+# engine's own wording, because by then something is genuinely going wrong.
+START_GRACE_SECONDS = 10.0
+# The word the console itself shows from Send until the engine speaks, so a
+# masked retry changes nothing on screen rather than swapping one word for
+# another (app.js: setStatus("Starting…")).
+_STARTING_STATUS = "Starting…"
 
 
 def _rpc(request_id, method: str, params=None) -> dict:
@@ -907,6 +926,9 @@ class CodexDriver(Driver):
             "tool": tool_name(tool),
             "tool_params": dict(tool) if isinstance(tool, dict) else {},
             "phase": "initialize",
+            # the runner builds this context immediately before spawning the
+            # process, so it dates the turn itself for the retry grace
+            "started_at": time.monotonic(),
             "first_turn": bool(first_turn),
             "native_session_id": str(session.get("native_session_id") or ""),
             "thread_id": "",
@@ -1007,6 +1029,19 @@ class CodexDriver(Driver):
             {"a": "result", "data": {"ok": False, "error": text,
                                        "stop_reason": "error"}},
         ]
+
+    @staticmethod
+    def _starting(ctx: dict) -> bool:
+        """Is this turn still inside its start-up window?
+
+        A context without the stamp (an older resumed turn, a caller that
+        builds its own) is simply not in the window: the engine's own wording
+        is the safe answer.
+        """
+        started = ctx.get("started_at") if isinstance(ctx, dict) else None
+        if not isinstance(started, (int, float)) or isinstance(started, bool):
+            return False
+        return (time.monotonic() - float(started)) < START_GRACE_SECONDS
 
     @staticmethod
     def _active_params(params: dict, ctx: dict, require_turn=False) -> bool:
@@ -1384,6 +1419,9 @@ class CodexDriver(Driver):
                 return []
             text = _error_text(params.get("error"), "Codex turn error")
             if params.get("willRetry"):
+                if self._starting(ctx):
+                    return [{"a": "transient", "msg": {
+                        "type": "status", "text": _STARTING_STATUS}}]
                 return [{"a": "transient", "msg": {
                     "type": "status", "text": "Retrying: {}".format(text[:160])}}]
             ctx["last_error"] = text
