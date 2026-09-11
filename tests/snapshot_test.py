@@ -24,7 +24,7 @@ from tests.scratch import private_root  # noqa: E402
 TEST_ROOT = private_root("snapshot-")
 os.environ["PUPPY_DATA"] = str(TEST_ROOT / "data")
 
-from puppy import (auth, cli_releases, config, db, listener_handoff, notify,
+from puppy import (auth, cli_releases, config, db, listener_handoff, notices, notify,
                    runner as session_runner, snapshots, terminal, uploads,
                    web_tls, workspace_sync,
                    workspaces)  # noqa: E402
@@ -174,7 +174,8 @@ async def exercise_http(archive_ui: dict, session_id: int, project: Path) -> Non
             updates = await http.ws_connect(url + "/api/ws/updates", headers=headers)
             ready = await updates.receive_json(timeout=3)
             assert ready["type"] == "updates_ready" and ready["stream_version"] == 1
-            wanted = {"sessions", "node", "backends", "workspace_links", "notify"}
+            wanted = {"sessions", "node", "backends", "workspace_links", "notify",
+                      "notices"}
             streamed = {}
             deadline = time.monotonic() + 6
             while wanted - set(streamed) and time.monotonic() < deadline:
@@ -188,6 +189,9 @@ async def exercise_http(archive_ui: dict, session_id: int, project: Path) -> Non
             assert len(streamed["backends"]["backends"]) == 1
             assert streamed["workspace_links"]["links"]
             assert streamed["notify"]["configured"] is True
+            assert [item["text"] for item in streamed["notices"]["items"]] == \
+                ["NAS: Could not save", "Session deleted"], \
+                "the restored notification history is on the stream"
     finally:
         await runner.cleanup()
 
@@ -321,6 +325,13 @@ async def main() -> None:
         assert saved_recency > 0
         saved_completion = notify._record_completion(
             db.get_session(linked_id), "ok", 7)
+        # The notification history is Puppy-owned durable state in the same
+        # database, so it travels with the backup exactly as recorded.
+        notices.record("Session deleted", "ok")
+        notices.record("NAS: Could not save", "bad")
+        notices.record("NAS: Could not save", "bad")
+        saved_notices = notices.payload()["items"]
+        assert [item["count"] for item in saved_notices] == [2, 1]
         db.execute(
             "INSERT INTO workspace_links(uid,exec_backend,session_id,ws_backend,"
             "root,lease,state,generation,conflicts,resolutions,last_error,created_at) "
@@ -394,6 +405,17 @@ async def main() -> None:
             lambda: snapshots._validate_database(invalid_completion_db),
             "completion state")
         invalid_completion_db.unlink()
+        invalid_notices_db = TEST_ROOT / "invalid-notices.db"
+        db.backup_to(str(invalid_notices_db))
+        invalid_notices_connection = sqlite3.connect(str(invalid_notices_db))
+        invalid_notices_connection.execute(
+            "UPDATE meta SET value='{\"format\":1}' WHERE key=?", (notices.META_KEY,))
+        invalid_notices_connection.commit()
+        invalid_notices_connection.close()
+        expect_snapshot_error(
+            lambda: snapshots._validate_database(invalid_notices_db),
+            "notification history")
+        invalid_notices_db.unlink()
         missing_transport_db = TEST_ROOT / "missing-web-transport.db"
         db.backup_to(str(missing_transport_db))
         missing_transport_connection = sqlite3.connect(str(missing_transport_db))
@@ -596,6 +618,9 @@ async def main() -> None:
                    ("backend_last_sessions.{}".format(backend_id),))
         db.execute("DELETE FROM meta WHERE key IN (?,?)", (
             "completion_log", "session_completion.{}".format(linked_id)))
+        notices.record("mutated after export", "warn")
+        db.execute("DELETE FROM meta WHERE key=?", (notices.META_KEY,))
+        assert notices.payload()["items"] == []
         (Path(mirror_cwd) / "newer-cache.txt").write_text(
             "must not survive restore", encoding="utf-8")
         keep_file.write_text("mutated loser", encoding="utf-8")
@@ -847,6 +872,7 @@ async def main() -> None:
         assert restored_completion["completion_id"] == \
             saved_completion["completion_id"]
         assert restored_completion["cwd"] == str(project)
+        assert notices.payload()["items"] == saved_notices
         restored_mirror = Path(restored_linked["cwd"])
         assert restored_mirror.is_dir()
         assert not (restored_mirror / "clean-cache.txt").exists()

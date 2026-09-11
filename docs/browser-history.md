@@ -17,10 +17,10 @@ There is no extra entry trapping the reader at the console's starting page.
 | New session/task/terminal/browser/VNC, Open session, Tasks, Review task, Agent notes, linked workspace, Move to directory, Edit backend, engine defaults/switch, VNC shortcut, draft conflict review, request/workflow detail, notices | Dialog entries; Back dismisses the top layer; Forward opens a fresh dialog using current data |
 | Confirmations, one-field prompts and Remove task confirmation | Back cancels the pending choice; Forward cannot revive a resolved promise or repeat its action |
 | Delayed operation/read progress, including nested progress over a form | Back invokes the existing dismissal/cancellation contract; a cancellation that owns its dialog keeps it visible until cleanup finishes |
-| Phone drawer and Host activity | Separate layers, including the drawer's swipe gestures; Back closes them, Forward reopens them |
+| Phone drawer, Host activity and Notifications | Separate layers, including the drawer's swipe gestures; Back closes them, Forward reopens them. The two footer boxes share the space under the engine stats, so opening one closes the other |
 | Close a tab | Records the resulting destination. Session, Search and Settings views can be reopened; closed terminal/browser/VNC resources are never recreated |
 | Re-select a destination, streaming updates, polling, background agent-created tabs | No additional navigation stop |
-| Scroll, load more results/messages, expand a tool/task card, unfold a queue, sidebar disclosure/filter/archive controls (including CPU, Latency and Processes inside Host activity), choice/context menus, browser/VNC typing controls | Local presentation and input controls; no additional stop. Menus dismiss when history changes |
+| Scroll, load more results/messages, expand a tool/task card, unfold a queue, sidebar disclosure/filter/archive controls (including CPU, Latency and Processes inside Host activity), choice/context menus, browser/VNC typing controls, notices arriving in an open Notifications box | Local presentation and input controls; no additional stop. Menus dismiss when history changes |
 | Type a draft, recall a prompt, change a model/permission, send/steer/ask/stop, save/reset a setting, apply/delete/sync, reorder/resize layout, toggle theme/alerts | Commands and preferences are not undone or replayed by history |
 | Embedded browser's own Back/Forward buttons | Continue navigating that browser's website history; the enclosing console's history selects console views |
 

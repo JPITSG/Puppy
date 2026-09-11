@@ -562,6 +562,16 @@ history around it.
   the row it already occupies (*2 ×*, *3 ×*) and restarts its timer instead of
   stacking copies; anything naming a next step stays up longer. On touch, hold
   a notice to keep it or swipe it right to dismiss it.
+- **Notification history.** Every notice shown is also kept by the instance,
+  so a line that scrolled away can be read later from any browser. The tray in
+  the footer, between the bell and *Sign out*, slides open a box under the
+  engine stats listing the last 100 notifications newest first - each with its
+  outcome dot, its text and the time it last arrived - and slides shut again
+  like the host box, with which it shares that space. A notice repeating the
+  newest entry counts up on it (*2 ×*) rather than adding a row, and the
+  oldest entry falls away past 100. The list is stored in the instance's
+  database, updates live in every open console, and a notice raised while the
+  instance is unreachable is reported once the connection returns.
 - **Completion alerts.** Run separate success and failure commands on a chosen
   backend when a session finishes everything it had queued (play a sound, ping
   your home automation). Leave either command empty to skip that outcome;
@@ -572,9 +582,10 @@ history around it.
   model, status, duration and directory. Arm or silence it with the bell in the
   footer.
 - **Backup and restore.** Export one `.tar.gz` with settings, accounts, backend
-  registrations, sessions and transcripts, uploads, scratch workspaces, task
-  copies, tabs and drafts. Import validates the whole archive first, only runs
-  while the instance is idle, and rolls back if the install fails. **Cancel**
+  registrations, sessions and transcripts, notification history, uploads,
+  scratch workspaces, task copies, tabs and drafts. Import validates the whole
+  archive first, only runs while the instance is idle, and rolls back if the
+  install fails. **Cancel**
   stops export preparation or import upload/validation and removes staging.
   Once restore starts replacing live state, it finishes or rolls back safely;
   the progress dialog then offers **Close**.
@@ -780,7 +791,9 @@ node tests/operation_ui_test.js      # cancellation, commit races and cleanup fe
 python3 tests/operations_test.py     # cancellation/rollback on both runtimes
 node tests/task_fold_ui_test.js      # task removal and the folded archive card
 node tests/tool_result_ui_test.js    # tool results folded into their call's card
-node tests/toast_ui_test.js          # notice grammar, tones, lives and folded repeats
+node tests/toast_ui_test.js          # notice grammar, tones, lives, folded repeats and their reports
+node tests/notices_ui_test.js        # the notification box: its slide, rows, live arrivals
+python3 tests/notices_test.py        # the notification history record, routes and stream topic
 node tests/spellcheck_ui_test.js     # the bundled dictionary, its marks and autocorrect
 node tests/host_panel_ui_test.js     # the host box: charts, latency rows, process tree
 python3 tests/host_metrics_test.py   # CPU history, the process tree and backend latency

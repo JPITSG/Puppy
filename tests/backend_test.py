@@ -3229,9 +3229,12 @@ async def exercise_node(url: str, token: str, expected_version: str,
             ("ready" if upgrade_enabled else "unsupported")
         for path in ("/", "/static/app.js", "/api/settings", "/api/auth/status",
                      "/api/ws/term", "/api/terminal/instances",
-                     "/api/ws/terminal/A1B2"):
+                     "/api/ws/terminal/A1B2", "/api/notices"):
             async with http.get(url + path, headers=good, ssl=pinned) as response:
                 assert response.status == 404, (path, response.status)
+        async with http.post(url + "/api/notices", headers=good, ssl=pinned,
+                             json={"text": "hi", "tone": "ok"}) as response:
+            assert response.status == 404  # the notification history is a console surface
         async with http.post(url + "/api/snapshot/export", headers=good,
                              json={"ui": {}}, ssl=pinned) as response:
             assert response.status == 404  # backup/restore is a full-WebUI surface

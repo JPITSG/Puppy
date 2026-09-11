@@ -1,8 +1,10 @@
 /* Run with node tests/toast_ui_test.js. No browser or engine required.
    The console's one notice surface, against the fake DOM: the shared grammar
-   every message is held to, the status tone vocabulary, the two lives, and
-   the folding of an identical notice into a counted row that renews its own
-   hide timer instead of stacking a second copy. */
+   every message is held to, the status tone vocabulary, the two lives, the
+   folding of an identical notice into a counted row that renews its own hide
+   timer instead of stacking a second copy, and the report every shown notice
+   sends to the controller's history - in order, one at a time, kept through
+   an outage and dropped only on a refusal. */
 "use strict";
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -24,6 +26,11 @@ document.body.appendChild(host);
 /* One clock for Date.now and the timers, so a life can be spent exactly. */
 let now = 1000000, nextTimer = 0;
 const timers = new Map();
+/* The controller the reports go to: every call is kept, and `answer` decides
+   whether the next one is taken, refused for good or lost on the way. */
+const reports = [];
+const ingested = [];
+let answer = () => ({ type: "notices", items: [] });
 const context = vm.createContext({
   document,
   Date: { now: () => now },
@@ -33,6 +40,15 @@ const context = vm.createContext({
     return id;
   },
   clearTimeout: id => { timers.delete(id); },
+  api: async (bid, route, options) => {
+    assert.equal(bid, 0, "the history lives on the controller");
+    assert.equal(route, "notices");
+    assert.equal(options.method, "POST");
+    assert.equal(options.noAuthRedirect, true, "a report never sends the reader to sign in");
+    reports.push({ ...options.body });
+    return answer(options.body);
+  },
+  ingestNoticesPayload: payload => { ingested.push(payload); },
 });
 const advance = ms => {
   const until = now + ms;
@@ -192,5 +208,127 @@ toast("Not connected · wait for the session to reconnect", "bad", TOAST_LONG);
 assert.equal(only().children.length, 1,
   "a swiped notice releases its slot, so the next one is not counted onto it");
 
-console.log("PASS: toast grammar, tone vocabulary, two lives, folded repeats with " +
-  "renewed timers, and swipe/hold lifetimes");
+// ---- every shown notice is reported to the history, in order -----------
+const settle = () => new Promise(resolve => setImmediate(resolve));
+const outbox = () => read("noticeOutbox");
+const refusal = status => Object.assign(new Error(`HTTP ${status}`), { status });
+(async () => {
+  await settle();
+  assert.equal(outbox().length, 0, "everything shown so far has been reported");
+  assert.deepEqual(reports[0], { text: "Session deleted", tone: "ok" },
+    "the report carries the normalised text and tone the toast showed");
+  assert.deepEqual(reports[1], { text: "NAS: Could not save", tone: "bad" });
+  assert.ok(!reports.some(report => report.text === ""), "an empty notice is not reported");
+  const repeats = reports.filter(report =>
+    report.text === "Could not copy to the clipboard" && report.tone === "bad");
+  assert.equal(repeats.length, 4, "a folded repeat is reported like the first arrival");
+  assert.equal(ingested.length, reports.length, "each answer is the list, taken as published");
+  reports.length = 0;
+  ingested.length = 0;
+  clear();
+
+  // A controller that cannot be reached keeps the report for later; nothing
+  // is dropped, nothing is reordered, and no toast is raised about it.
+  answer = () => { throw new Error("network error"); };
+  toast("Backend Workshop: Could not reach it", "bad");
+  await settle();
+  assert.equal(reports.length, 1);
+  assert.equal(outbox().length, 1, "a lost report waits");
+  assert.equal(rows().length, 1, "no notice is raised about a notice");
+  toast("Session renamed", "ok");
+  toast("Session renamed", "ok");
+  await settle();
+  assert.equal(reports.length, 1, "an outage is not retried on every toast");
+  assert.deepEqual(Array.from(outbox(), entry => entry.text),
+    ["Backend Workshop: Could not reach it", "Session renamed", "Session renamed"]);
+  answer = () => ({ type: "notices", items: [] });
+  advance(read("NOTICE_RETRY_MS") - 1);
+  await settle();
+  assert.equal(reports.length, 1, "the retry waits its full interval");
+  advance(1);
+  await settle();
+  assert.equal(outbox().length, 0, "the retry sends everything that waited, in order");
+  assert.deepEqual(reports.slice(1).map(report => report.text),
+    ["Backend Workshop: Could not reach it", "Session renamed", "Session renamed"]);
+  reports.length = 0;
+  clear();
+
+  // A reconnect flushes at once instead of waiting for the timer.
+  answer = () => { throw new Error("network error"); };
+  toast("Draft saved", "ok");
+  await settle();
+  assert.equal(outbox().length, 1);
+  answer = () => ({ type: "notices", items: [] });
+  context.flushNotices();
+  await settle();
+  assert.equal(outbox().length, 0);
+  assert.equal(reports.length, 2);
+  assert.equal(timers.size, 1, "the retry timer is cancelled; only the toast's own remains");
+  reports.length = 0;
+  clear();
+
+  // A reconnect with nothing waiting is not a flush: it must not leave a
+  // finished flush in place that every later notice would queue behind.
+  assert.equal(context.flushNotices(), null);
+  await settle();
+  assert.equal(read("noticeFlush"), null);
+  toast("Session archived", "ok");
+  await settle();
+  assert.equal(reports.length, 1, "the next notice still goes out at once");
+  assert.equal(outbox().length, 0);
+  reports.length = 0;
+  clear();
+
+  // A list the box cannot draw does not stall the reports behind it.
+  context.ingestNoticesPayload = () => { throw new Error("cannot draw"); };
+  toast("Draft discarded", "ok");
+  toast("Draft discarded again", "ok");
+  await settle();
+  assert.equal(reports.length, 2);
+  assert.equal(outbox().length, 0);
+  assert.equal(read("noticeFlush"), null);
+  context.ingestNoticesPayload = payload => { ingested.push(payload); };
+  reports.length = 0;
+  clear();
+
+  // A refusal is final; a busy controller, a session that must sign in again
+  // and a timeout are not.
+  for (const status of [400, 404, 413]) {
+    answer = () => { throw refusal(status); };
+    toast(`Refused ${status}`, "info");
+    await settle();
+    assert.equal(outbox().length, 0, `a ${status} drops the report`);
+    assert.equal(reports.length, 1);
+    reports.length = 0;
+    clear();
+  }
+  for (const status of [401, 408, 429, 500, 503]) {
+    answer = () => { throw refusal(status); };
+    toast(`Kept ${status}`, "info");
+    await settle();
+    assert.equal(outbox().length, 1, `a ${status} keeps the report`);
+    answer = () => ({ type: "notices", items: [] });
+    advance(read("NOTICE_RETRY_MS"));
+    await settle();
+    assert.equal(outbox().length, 0);
+    assert.equal(reports.length, 2);
+    reports.length = 0;
+    clear();
+  }
+
+  // The outbox is bounded: the oldest waiting reports make room.
+  answer = () => { throw new Error("network error"); };
+  for (let index = 0; index < 130; index++) toast(`Burst ${index}`, "info");
+  await settle();
+  assert.equal(outbox().length, read("NOTICE_OUTBOX"));
+  assert.equal(outbox()[0].text, "Burst 30");
+  assert.equal(outbox()[outbox().length - 1].text, "Burst 129");
+  answer = () => ({ type: "notices", items: [] });
+  context.flushNotices();
+  await settle();
+  assert.equal(outbox().length, 0);
+
+  console.log("PASS: toast grammar, tone vocabulary, two lives, folded repeats with " +
+    "renewed timers, swipe/hold lifetimes, and every shown notice reported to the " +
+    "history in order through outages, refusals and reconnects");
+})().catch(error => { console.error(error); process.exit(1); });

@@ -26,7 +26,7 @@ ROOT = private_root("console-")
 os.environ["PUPPY_DATA"] = str(ROOT / "data")
 
 from aiohttp import web
-from puppy import auth, browser, config, db, runner, search, session_tasks, session_aliases, terminal
+from puppy import auth, browser, config, db, notices, runner, search, session_tasks, session_aliases, terminal
 from puppy import web as webui
 from puppy.drivers import all_drivers
 
@@ -1729,6 +1729,7 @@ async def checks(a, b, hub, capture=False):
     await timer_error_checks(a, capture)
     await usage_error_checks(a, capture)
     await host_panel_checks(a, capture)
+    await notices_panel_checks(a, capture)
     # Measure real layout: an idle status must not reserve a row below tools.
     for width, height in [(1440, 900), (390, 844)]:
         await a.call("Emulation.setDeviceMetricsOverride", {"width": width, "height": height,
@@ -2584,6 +2585,168 @@ async def host_panel_checks(instance, capture=False):
     print("PASS: the CPU reading opens a drawn, scrolling host box - real route, "
           "chart geometry, indented tree - and it slides shut and stops polling", flush=True)
 
+async def notices_panel_checks(instance, capture=False):
+    """The tray's box, in a real browser: a real click on the tray between the
+    bell and Sign out opens it, a notice raised in the page reaches the
+    controller over the real route and lands at the top of the open box, a
+    repeat counts up on the row it already has, the dots stand in the footer's
+    dot column, and a full history scrolls inside the box rather than the
+    sidebar. It shares the footer with the host box and slides shut like it."""
+    await instance.call("Emulation.setDeviceMetricsOverride", {
+        "width": 1440, "height": 900, "deviceScaleFactor": 1,
+        "mobile": False}, session=instance.page_session)
+    await asyncio.sleep(.35)
+    point = await evaluate(instance, """(() => {
+        const tray=document.getElementById('btn-notices');
+        const r=tray.getBoundingClientRect();
+        return {x:r.x+r.width/2, y:r.y+r.height/2, expanded:tray.getAttribute('aria-expanded'),
+                before:tray.previousElementSibling.id, after:tray.nextElementSibling.id,
+                drawn:tray.querySelector('svg')!==null, width:r.width, height:r.height};
+    })()""")
+    assert point["expanded"] == "false", point
+    assert point["before"] == "btn-bell" and point["after"] == "btn-logout", point
+    assert point["drawn"] and point["width"] > 0 and point["height"] > 0, point
+    await evaluate(instance, "openHostPanel(); true")
+    await until(instance, "hostPanel.open")
+    for kind in ("mousePressed", "mouseReleased"):
+        await instance.call("Input.dispatchMouseEvent", {
+            "type": kind, "x": point["x"], "y": point["y"], "button": "left",
+            "clickCount": 1}, session=instance.page_session)
+    try:
+        await until(instance, "noticesPanel.open && !hostPanel.open && !!state.notices")
+        await until(instance, "!document.getElementById('foot-notices')"
+                              ".classList.contains('disclosure-animating')")
+        opened = await evaluate(instance, """(() => ({
+            expanded:document.getElementById('btn-notices').getAttribute('aria-expanded'),
+            open:document.querySelector('.side-foot').classList.contains('notices-open'),
+            hostOpen:document.querySelector('.side-foot').classList.contains('host-open'),
+            title:document.querySelector('#foot-notices .host-sec-title').textContent,
+            rows:document.querySelectorAll('#foot-notices .notice-row').length,
+            empty:document.querySelector('#foot-notices .host-empty')!==null,
+        }))()""")
+        assert opened["expanded"] == "true" and opened["open"] and not opened["hostOpen"], opened
+        assert opened["title"] == "Notifications", opened
+        assert opened["rows"] > 0 or opened["empty"], opened
+        # A notice raised in the page is reported over the real route and the
+        # stream brings it back to the top of the open box; a repeat counts
+        # up on that same row, and a different notice goes above it while the
+        # earlier row keeps its node and moves down.
+        await evaluate(instance, "toast('Harbor dashboard: Session renamed', 'ok'); true")
+        await until(instance, "document.querySelector('#foot-notices .notice-row .notice-text')"
+                              " && document.querySelector('#foot-notices .notice-row .notice-text')"
+                              ".textContent==='Harbor dashboard: Session renamed'")
+        await evaluate(instance, "document.querySelector('#foot-notices .notice-row').__first=true;"
+                                 " toast('Harbor dashboard: Session renamed', 'ok'); true")
+        await until(instance, "document.querySelector('#foot-notices .notice-row .toast-count')"
+                              " && document.querySelector('#foot-notices .notice-row .toast-count')"
+                              ".textContent==='2 ×'")
+        await evaluate(instance, "toast('Garden laptop: Could not reach it · retrying', 'bad', TOAST_LONG); true")
+        await until(instance, "document.querySelectorAll('#foot-notices .notice-row').length>=2"
+                              " && document.querySelector('#foot-notices .notice-row .notice-text')"
+                              ".textContent==='Garden laptop: Could not reach it · retrying'")
+        rows = await evaluate(instance, """(() => {
+            const rows=[...document.querySelectorAll('#foot-notices .notice-row')];
+            const item=state.notices.items[0];
+            return {
+                top:rows[0].querySelector('.gdot').className, entered:rows[0].classList.contains('notice-new'),
+                kept:rows[1].__first===true, count:rows[1].querySelector('.toast-count').textContent,
+                second:rows[1].querySelector('.gdot').className,
+                stamp:rows[0].querySelector('.notice-time').textContent, expected:fmtStamp(item.at),
+                note:document.querySelector('#foot-notices .host-node-note').textContent,
+                total:state.notices.items.length,
+            };
+        })()""")
+        assert rows["top"] == "gdot bad" and rows["entered"], rows
+        assert rows["kept"] and rows["count"] == "2 ×" and rows["second"] == "gdot ok", rows
+        assert rows["stamp"] and rows["stamp"] == rows["expected"], rows
+        assert rows["note"] == str(rows["total"]), rows
+        stored = notices.payload()["items"]
+        assert stored[0]["text"] == "Garden laptop: Could not reach it · retrying", stored[:2]
+        assert stored[0]["tone"] == "bad" and stored[0]["count"] == 1, stored[:2]
+        assert stored[1]["text"] == "Harbor dashboard: Session renamed", stored[:2]
+        assert stored[1]["tone"] == "ok" and stored[1]["count"] == 2, stored[:2]
+        # The box keeps the host box's spacing under the engine stats, and its
+        # dots stand in the footer's one column beside the backend head's.
+        spacing = await evaluate(instance, """(() => {
+            const box=document.getElementById('foot-notices').getBoundingClientRect();
+            const engines=document.getElementById('foot-engines').getBoundingClientRect();
+            const row=document.querySelector('.foot-row').getBoundingClientRect();
+            const edge=document.getElementById('side').getBoundingClientRect().left;
+            const measure=(row, dot, text)=>{
+                const d=row.querySelector(dot).getBoundingClientRect();
+                const t=row.querySelector(text).getBoundingClientRect();
+                return {before:d.left-edge, mid:d.left+d.width/2-edge, after:t.left-d.right,
+                        line:Math.abs((d.top+d.height/2)-(t.top+parseFloat(getComputedStyle(row.querySelector(text)).lineHeight)/2))};
+            };
+            return {above:box.top-engines.bottom, below:row.top-box.bottom,
+                    backend:measure(document.querySelector('.foot-engine-head'),'.gdot','.foot-engine-name'),
+                    notice:measure(document.querySelector('#foot-notices .notice-row'),'.gdot','.notice-text')};
+        })()""")
+        assert abs(spacing["above"] - 4) < 0.6 and abs(spacing["below"] - 8) < 0.6, spacing
+        assert abs(spacing["notice"]["mid"] - spacing["backend"]["mid"]) < 0.6, spacing
+        assert abs(spacing["notice"]["before"] / 2 - spacing["notice"]["after"]) < 0.6, spacing
+        assert spacing["notice"]["line"] < 1.5, spacing
+        # A full history - a hundred rows, brought by the stream - scrolls
+        # inside the box; the session list and the engine stats keep theirs.
+        for number in range(notices.LIMIT):
+            notices.record("Weekend notes: Draft saved {}".format(number), "info")
+        await until(instance, "document.querySelectorAll('#foot-notices .notice-row').length===%d"
+                    % notices.LIMIT)
+        scrolling = await evaluate(instance, """(() => {
+            const box=document.getElementById('foot-notices');
+            const list=document.querySelector('.side-scroll');
+            const engines=document.getElementById('foot-engines');
+            const first=document.querySelector('#foot-notices .notice-text').textContent;
+            box.scrollTop=9999;
+            return {scrolls:box.scrollHeight>box.clientHeight, moved:box.scrollTop>0,
+                    inside:box.getBoundingClientRect().bottom<=window.innerHeight,
+                    list:list.getBoundingClientRect().height>0,
+                    engines:engines.getBoundingClientRect().height>0,
+                    newest:first, note:document.querySelector('#foot-notices .host-node-note').textContent,
+                    wrapped:[...document.querySelectorAll('#foot-notices .notice-text')]
+                        .every(node=>node.getBoundingClientRect().right<=box.getBoundingClientRect().right)};
+        })()""")
+        assert scrolling["newest"] == "Weekend notes: Draft saved %d" % (notices.LIMIT - 1), scrolling
+        assert scrolling["note"] == str(notices.LIMIT), scrolling
+        assert all(scrolling[key] for key in ("scrolls", "moved", "inside", "list", "engines", "wrapped")), scrolling
+        if capture:
+            await evaluate(instance, "document.getElementById('foot-notices').scrollTop=0; true")
+            for theme in ("dark", "light"):
+                await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
+                shot = await instance.call("Page.captureScreenshot", {"format": "png"},
+                                           session=instance.page_session)
+                (BASE / "data" / ("notices-panel-" + theme + ".png")).write_bytes(
+                    base64.b64decode(shot["data"]))
+        # Opening the host box takes the notification box's place under the
+        # engine stats, and the tray closes its box the way it opened it.
+        await evaluate(instance, "openHostPanel(); true")
+        await until(instance, "hostPanel.open && !noticesPanel.open")
+        await evaluate(instance, "closeHostPanel(); openNoticesPanel(); true")
+        await until(instance, "noticesPanel.open && !document.getElementById('foot-notices')"
+                              ".classList.contains('disclosure-animating')")
+        for kind in ("mousePressed", "mouseReleased"):
+            await instance.call("Input.dispatchMouseEvent", {
+                "type": kind, "x": point["x"], "y": point["y"], "button": "left",
+                "clickCount": 1}, session=instance.page_session)
+        await until(instance, "!noticesPanel.open")
+    finally:
+        await evaluate(instance, "closeNoticesPanel(); closeHostPanel(); applyTheme('dark'); "
+                                 "document.getElementById('toasts').replaceChildren(); true")
+    await until(instance, "document.getElementById('foot-notices').hidden === true")
+    closed = await evaluate(instance, """(() => ({
+        empty: document.getElementById('foot-notices').children.length === 0,
+        styled: document.getElementById('foot-notices').getAttribute('style') || '',
+        expanded: document.getElementById('btn-notices').getAttribute('aria-expanded'),
+        open: document.querySelector('.side-foot').classList.contains('notices-open'),
+        kept: state.notices.items.length,
+    }))()""")
+    assert closed == {"empty": True, "styled": "", "expanded": "false", "open": False,
+                      "kept": notices.LIMIT}, closed
+    print("PASS: the tray between the bell and Sign out opens a notification box - real "
+          "route and stream, counted repeats, dot column, a scrolling hundred - that "
+          "shares the footer with the host box and slides shut", flush=True)
+
+
 async def navigation_checks(instance, url, sid):
     """Real popstate, hash/reload and UI lifecycle; no command is replayed."""
     await instance.call("Emulation.setDeviceMetricsOverride", {
@@ -2598,7 +2761,7 @@ async def navigation_checks(instance, url, sid):
         await evaluate(instance, "history.go(%d); true" % delta)
         await until(instance, condition + " && !navigation.pending && !navigation.scheduled")
 
-    await run("for (const item of [...modalStack].reverse()) item.close(); closeDrawer(); closeHostPanel()")
+    await run("for (const item of [...modalStack].reverse()) item.close(); closeDrawer(); closeHostPanel(); closeNoticesPanel()")
     await run("openSessionTab(0,1,findSessionMeta(0,1)); state.views['s:0:1'].select(1)")
     await run("openSessionTab(0,2,findSessionMeta(0,2))")
     await run("openSettingsTab()")
@@ -2671,6 +2834,11 @@ async def navigation_checks(instance, url, sid):
     assert await evaluate(instance, "document.querySelector('#host-section-cpu .disclosure-toggle').getAttribute('aria-expanded')==='false'")
     await run("document.querySelector('#host-section-cpu .disclosure-toggle').click(); delete window.hostSectionHistory")
     await run("closeHostPanel()")
+    await run("openNoticesPanel()")
+    await travel(-1, "!noticesPanel.open")
+    await travel(1, "noticesPanel.open")
+    assert await evaluate(instance, "document.getElementById('btn-notices').getAttribute('aria-expanded')==='true'")
+    await run("closeNoticesPanel()")
 
     await instance.call("Emulation.setDeviceMetricsOverride", {
         "width": 390, "height": 844, "deviceScaleFactor": 2, "mobile": True},
@@ -2683,8 +2851,10 @@ async def navigation_checks(instance, url, sid):
 
     # Closing an identified viewer is a command. Traversal cannot reopen it or
     # issue its DELETE again. A stub view avoids touching any actual backend.
+    # A notice reporting itself to the history is not a command, so it is
+    # left out of the count.
     await run("""window.navApi=api; window.navWrites=[];
-        api=(bid,path,opts={})=>{ if(opts.method && opts.method!=='GET') navWrites.push([path,opts.method]); return navApi(bid,path,opts); };
+        api=(bid,path,opts={})=>{ if(opts.method && opts.method!=='GET' && path!=='notices') navWrites.push([path,opts.method]); return navApi(bid,path,opts); };
         state.views['v:0:HST1']={root:el('div','view'),onShow(){},destroy(){this.root.remove()}};
         openVncTab(0,'HST1')""")
     await travel(-1, "state.active==='s:0:1'")
@@ -2699,7 +2869,7 @@ async def navigation_checks(instance, url, sid):
     await run("api=navApi; openSessionTab(0,1,findSessionMeta(0,1)); state.views['s:0:1'].openTask(navTask)")
     await instance.call("Page.reload", session=instance.page_session)
     await until(instance, "typeof navigation!=='undefined' && !!navigation.current && state.active==='s:0:1' && state.views['s:0:1'].selected!==1")
-    assert await evaluate(instance, "modalStack.length===0 && !hostPanel.open && !document.querySelector('#app').classList.contains('side-open')")
+    assert await evaluate(instance, "modalStack.length===0 && !hostPanel.open && !noticesPanel.open && !document.querySelector('#app').classList.contains('side-open')")
     await run("openSettingsTab()")
     await travel(-1, "state.active==='s:0:1'")
     await travel(1, "state.active==='settings'")
@@ -2731,7 +2901,7 @@ async def navigation_checks(instance, url, sid):
         activateTab('s:0:1'); state.views['s:0:1'].select(1);
         window.demoView=state.views['s:0:1'].activeView(); demoView.returnToTail(false)""")
     await until(instance, "demoView.draftReady && !demoView._returning")
-    print("PASS: browser Back/Forward across tabs, search queries/results, tasks, nested dialogs, Host activity and phone drawer; Settings backends/drafts/scroll, reload/citation routes, stale async results, and no replay of viewer close commands", flush=True)
+    print("PASS: browser Back/Forward across tabs, search queries/results, tasks, nested dialogs, Host activity, Notifications and phone drawer; Settings backends/drafts/scroll, reload/citation routes, stale async results, and no replay of viewer close commands", flush=True)
 
 
 async def main(args):

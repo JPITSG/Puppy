@@ -712,6 +712,12 @@ def _validate_database(path: Path):
         except ValueError as exc:
             raise SnapshotError(
                 "snapshot database contains invalid completion state") from exc
+        from puppy import notices
+        try:
+            notices.validate_persisted(connection)
+        except ValueError as exc:
+            raise SnapshotError(
+                "snapshot database contains invalid notification history") from exc
         orphan = connection.execute(
             "SELECT 1 FROM events e LEFT JOIN sessions s ON s.id=e.session_id "
             "WHERE s.id IS NULL LIMIT 1").fetchone()

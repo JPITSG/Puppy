@@ -72,9 +72,12 @@ function consoleFor(options = {}) {
   };
   const calls = [];
   const slides = [];
-  let aimed = 0;
+  let aimed = 0, noticesClosed = 0;
   const context = vm.createContext({
   navigation: { layer: () => () => {} }, navigationRemember: () => {}, navigationChanged: () => {},
+    /* The footer holds one box under the engine stats: opening this one
+       closes the notification box, whose own test covers the other way. */
+    closeNoticesPanel: () => { noticesClosed++; },
     document, el, state, console, Date, Math, Number, Array, JSON, Set, Map,
     Promise, isNaN, parseFloat,
     setTimeout: () => 1, clearTimeout: () => {},
@@ -125,7 +128,7 @@ function consoleFor(options = {}) {
      private in app.js: read it out of the context rather than exporting it. */
   const hostPanel = vm.runInContext("hostPanel", context);
   return { context, document, state, calls, hostPanel, slides,
-    aimed: () => aimed,
+    aimed: () => aimed, noticesClosed: () => noticesClosed,
     panel: () => document.getElementById("foot-host"),
     foot };
 }
@@ -213,6 +216,7 @@ async function toggling() {
   assert.ok(app.panel().children.length > 0);
   assert.equal(app.foot.classList.contains("host-open"), true);
   assert.equal(app.document.getElementById("host-cpu").getAttribute("aria-expanded"), "true");
+  assert.equal(app.noticesClosed(), 1, "the notification box gives way to this one");
   await new Promise(resolve => setTimeout(resolve, 0));
   assert.deepEqual(app.calls, [[0, "host/metrics?window=900"]]);
   // the readings that landed mid-slide re-aim it instead of snapping at the end

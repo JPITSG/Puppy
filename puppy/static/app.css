@@ -405,7 +405,8 @@ a{color:var(--acc2)}
    collapses to nothing rather than to a hairline. */
 .foot-engine-body.disclosure-animating,
 .host-sec-body.disclosure-animating,
-.foot-host.disclosure-animating{
+.foot-host.disclosure-animating,
+.foot-notices.disclosure-animating{
   overflow:hidden;
   transition:height var(--slide-time) var(--ease),opacity var(--slide-fade-time) var(--ease),
     margin-top var(--slide-time) var(--ease),padding-top var(--slide-time) var(--ease),
@@ -414,7 +415,8 @@ a{color:var(--acc2)}
 @media (prefers-reduced-motion:reduce){
   .foot-engine-body.disclosure-animating,
   .host-sec-body.disclosure-animating,
-  .foot-host.disclosure-animating{transition:none}
+  .foot-host.disclosure-animating,
+  .foot-notices.disclosure-animating{transition:none}
 }
 .foot-engine-group+.foot-engine-group{border-top:1px solid var(--line);margin-top:3px;padding-top:7px}
 .foot-engine-head,.host-sec-head{display:flex;align-items:center;gap:6px;min-width:0;color:var(--txt3);cursor:pointer;}
@@ -463,6 +465,8 @@ a{color:var(--acc2)}
 .foot-eng .st-quota.low{color:var(--err)}
 .foot-row{display:flex;align-items:center;gap:6px;border-top:1px solid var(--line);margin-top:8px;padding-top:7px}
 #btn-bell.on{color:var(--acc2)}
+/* the tray is accented while its box is open, like the CPU reading beside it */
+#btn-notices[aria-expanded="true"]{color:var(--acc2)}
 .conn-state{display:flex;align-items:center;min-width:0;margin-left:auto}
 /* The reading is also the handle for the box below: a quiet chip until it is
    hovered, accented while its box is open. */
@@ -482,13 +486,16 @@ a{color:var(--acc2)}
 .gdot.ok,.conn-dot.ok{background:var(--dot-ok)}
 .gdot.bad,.conn-dot{background:var(--dot-bad)}
 .gdot.warn{background:var(--warn)}
+/* the two remaining toast tones, for the notification rows' dots */
+.gdot.busy{background:var(--acc2)}
+.gdot.info{background:var(--acc)}
 
 /* ---------- host activity ----------
    Opened by the CPU reading and stacked under the engine stats: this node's
    CPU history, the round trip to each backend, and the processes Puppy runs
    on every node. It scrolls on its own, and while it is open the engine box
    gives up height rather than the session list. */
-.side-foot.host-open .foot-engines{max-height:22dvh}
+.side-foot.host-open .foot-engines,.side-foot.notices-open .foot-engines{max-height:22dvh}
 .foot-host{
   --disclosure-gap:8px;
   display:flex;flex-direction:column;gap:11px;min-height:0;max-height:42dvh;
@@ -615,6 +622,38 @@ a{color:var(--acc2)}
   font-family:var(--mono);font-variant-numeric:tabular-nums;color:var(--txt3);
 }
 .host-proc-more,.host-proc-more-label{color:var(--txt3)}
+
+/* ---------- notifications ----------
+   Opened by the tray in the footer's icon row and stacked under the engine
+   stats exactly as the host box is - the same rule, spacing, scroll and slide,
+   and the same head vocabulary. Each row is a notice as the toast showed it:
+   its tone as a dot in the footer's dot column, its count where it repeated,
+   its text wrapping beside the stamp of its latest arrival. */
+.foot-notices{
+  --disclosure-gap:8px;
+  display:flex;flex-direction:column;gap:6px;min-height:0;max-height:42dvh;
+  overflow-y:auto;border-top:1px solid var(--line);
+  padding:9px 6px 0 0;margin:var(--disclosure-gap) -6px 0 0;
+}
+.foot-notices[hidden]{display:none}
+.notices-head{display:flex;align-items:center;gap:6px;min-width:0;color:var(--txt3);user-select:none}
+.notices-list{display:flex;flex-direction:column;min-width:0;padding-bottom:4px}
+.notice-row{
+  display:flex;align-items:flex-start;gap:6px;min-width:0;padding:3px 0;
+  font-size:var(--fs-2xs);line-height:1.4;color:var(--txt2);
+}
+@media (hover:hover){.notice-row:hover{background:var(--hov-soft)}}
+/* the dot column is one line tall here, so the dot stands on the first line
+   of a notice that wraps rather than in the middle of it */
+.notice-row .foot-ico{height:1.4em}
+.notice-row .toast-count{line-height:inherit}
+.notice-text{flex:1 1 auto;min-width:0;overflow-wrap:anywhere}
+.notice-time{
+  flex:0 0 auto;margin-left:auto;font:var(--fs-2xs) var(--mono);line-height:1.4;
+  color:var(--txt3);font-variant-numeric:tabular-nums;white-space:nowrap;
+}
+/* a notice arriving while the box is open enters the way its toast did */
+.notice-row.notice-new{animation:toast-in var(--t-slow) var(--ease)}
 .side-backdrop,.drawer-edge{display:none}
 
 /* ---------- buttons & inputs ---------- */

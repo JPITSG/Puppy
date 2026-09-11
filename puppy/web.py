@@ -16,7 +16,7 @@ from aiohttp import WSMsgType, web
 
 from puppy import (__version__, agent_notes, auth, backends, bind_verify, browser,
                    cli_auto_upgrade, cli_releases,
-                   cli_upgrade, config, db, engine_defaults, host_metrics, listener_handoff, notify, operations,
+                   cli_upgrade, config, db, engine_defaults, host_metrics, listener_handoff, notices, notify, operations,
                    live_websockets, localization, protocol, runner, search, snapshots,
                    spawn_exec,
                    state_stream, system_prompts, terminal, uploads, vnc,
@@ -52,7 +52,10 @@ async def state_change_guard(request: web.Request, handler):
         return web.json_response(
             {"error": "Puppy {} in progress".format(
                 "restore" if busy == "restore" else "backup")}, status=503)
-    if mutating and not snapshot_path:
+    # A notice report is one atomic row the backup copies whole, and a toast
+    # can be raised at the very moment Export is pressed: counting it would
+    # refuse that backup for nothing. The busy refusal above still applies.
+    if mutating and not snapshot_path and request.path != notices.API_PATH:
         request.app["puppy_mutations"] = request.app.get("puppy_mutations", 0) + 1
         try:
             return await handler(request)
@@ -264,6 +267,7 @@ async def _publish_restored_state(app: web.Application) -> None:
     runner.publish_state({"type": "workspace_links",
                           "links": workspace_links.public_links()})
     runner.publish_state({"type": "notify", **notify.public_state()})
+    notices.publish()
     for payload in await _state_stream_snapshots(app, None, probes=False):
         runner.publish_state(payload)
     state_stream.wake()
@@ -1863,6 +1867,36 @@ async def h_notify_set(request: web.Request):
     return web.json_response({"ok": True, "settings": notify.settings()})
 
 
+# ---- notification history ----
+# The console reports every notice it shows; the list rides the ``notices``
+# state topic, and these answer a console whose stream is not there to bring it.
+
+async def h_notices_get(request: web.Request):
+    try:
+        return web.json_response(notices.publish())
+    except notices.ShapeError as exc:
+        log.error("%s", exc)
+        return web.json_response({"error": str(exc)}, status=500)
+
+
+async def h_notices_post(request: web.Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid notice"}, status=400)
+    if not isinstance(body, dict) or set(body) != {"text", "tone"}:
+        return web.json_response({"error": "supply text and tone"}, status=400)
+    try:
+        payload = notices.record(body["text"], body["tone"])
+    except notices.ShapeError as exc:
+        # Not the console's fault: it keeps the notice for a later attempt.
+        log.error("%s", exc)
+        return web.json_response({"error": str(exc)}, status=500)
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    return web.json_response(payload)
+
+
 async def h_notify_toggle(request: web.Request):
     body = await request.json()
     if not isinstance(body, dict) or set(body) != {"enabled"}:
@@ -2017,6 +2051,15 @@ def build_app(runtime_web: dict = None,
     r.add_post("/api/notify", h_notify_set)
     r.add_post("/api/notify/toggle", h_notify_toggle)
     r.add_post("/api/notify/test", h_notify_test)
+    r.add_get(notices.API_PATH, h_notices_get)
+    r.add_post(notices.API_PATH, h_notices_post)
+
+    async def publish_notices(_app):
+        # A malformed record refuses to start rather than being repaired; a
+        # valid one is on the stream before the first console attaches.
+        notices.validate_persisted(db.connect())
+        notices.publish()
+    app.on_startup.append(publish_notices)
     r.add_get("/api/settings", h_settings_get)
     r.add_patch("/api/settings", h_settings_patch)
     r.add_post("/api/settings/bind/prepare", h_bind_prepare)

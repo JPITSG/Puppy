@@ -115,6 +115,31 @@ function logoutIcon(size) {
   return svg;
 }
 
+/* The tray the footer's notification list opens from: an in-tray with its
+   shelf, drawn in the same 24-box at the same 1.5 weight as the bell and the
+   sign-out arrow it stands between. */
+function trayIcon(size) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const draw = (d) => {
+    const p = document.createElementNS(NS, "path");
+    p.setAttribute("d", d);
+    p.setAttribute("fill", "none");
+    p.setAttribute("stroke", "currentColor");
+    p.setAttribute("stroke-width", "1.5");
+    p.setAttribute("stroke-linecap", "round");
+    p.setAttribute("stroke-linejoin", "round");
+    svg.appendChild(p);
+  };
+  draw("M5.7 5.5h12.6L21 12.7V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-5.3z");
+  draw("M3 12.7h5.2l1.5 2.6h4.6l1.5-2.6H21");
+  return svg;
+}
+
 /* Same reason as the close cross above: a "+" character is placed on the font's
    math axis, which is not the middle of its line box, so the glyph lands about
    1.5px low in a flex-centred button however the box is aligned. Drawn ink is
@@ -996,10 +1021,72 @@ function toastTone(tone) {
   return TOAST_TONES.includes(word) ? word : "info";
 }
 
+/* Every notice shown is also written to the controller's own history, the
+   list behind the footer's tray, so a line that scrolled away in one browser
+   can be read later in any of them. The report follows the toast and can
+   never raise one - a notice about a notice that could not be kept would
+   loop. Reports leave in the order the notices appeared, one at a time,
+   because the controller folds a repeat into the entry it follows; one the
+   controller could not take (a dropped link, a backup in progress, a session
+   that has to sign in again) waits in a bounded outbox for the next flush -
+   the stream reconnecting or the retry timer - rather than being forgotten,
+   while a refusal is final and that entry is dropped. */
+const NOTICE_OUTBOX = 100;
+const NOTICE_RETRY_MS = 8000;
+const noticeOutbox = [];
+let noticeFlush = null, noticeRetryTimer = null;
+
+function recordNotice(text, tone) {
+  noticeOutbox.push({ text, tone });
+  if (noticeOutbox.length > NOTICE_OUTBOX)
+    noticeOutbox.splice(0, noticeOutbox.length - NOTICE_OUTBOX);
+  /* A controller that just refused the link is left to the retry timer:
+     every toast of an outage does not need its own attempt. */
+  if (noticeRetryTimer === null) flushNotices();
+}
+
+function flushNotices() {
+  if (noticeFlush) return noticeFlush;
+  if (noticeRetryTimer !== null) { clearTimeout(noticeRetryTimer); noticeRetryTimer = null; }
+  if (!noticeOutbox.length) return null;
+  const flush = (async () => {
+    while (noticeOutbox.length) {
+      const entry = noticeOutbox[0];
+      let payload;
+      try {
+        payload = await api(0, "notices",
+          { method: "POST", body: entry, noAuthRedirect: true, timeoutMs: 9000 });
+      } catch (error) {
+        const status = Number(error && error.status) || 0;
+        const refused = status >= 400 && status < 500 &&
+          status !== 401 && status !== 408 && status !== 429;
+        if (refused) { noticeOutbox.shift(); continue; }
+        noticeRetryTimer = setTimeout(() => {
+          noticeRetryTimer = null;
+          flushNotices();
+        }, NOTICE_RETRY_MS);
+        return;
+      }
+      noticeOutbox.shift();
+      /* The list is a courtesy of the answer; a box that cannot draw it must
+         not stall the reports behind it. */
+      try { ingestNoticesPayload(payload); }
+      catch (error) { console.warn("notification history update failed", error); }
+    }
+  })();
+  /* Released once the flush has settled, never from inside it: the outbox is
+     never empty here, so the loop always awaits at least once and the release
+     cannot run before this assignment. */
+  noticeFlush = flush;
+  flush.finally(() => { if (noticeFlush === flush) noticeFlush = null; });
+  return flush;
+}
+
 /* Identical notices fold instead of stacking: the second one turns the live
    toast into "2 × …" where it already sits, bumps the count so the repeat is
    visible, and renews its life. A burst of the same failure therefore costs
-   one line of screen instead of burying everything else. */
+   one line of screen instead of burying everything else. The history keeps
+   the same count: every arrival is reported, folded or not. */
 const liveToasts = new Map();
 
 function toast(text, tone = "info", ms = TOAST_SHORT) {
@@ -1008,7 +1095,7 @@ function toast(text, tone = "info", ms = TOAST_SHORT) {
   const level = toastTone(tone);
   const key = level + "\u0000" + body;
   const live = liveToasts.get(key);
-  if (live) { live.repeat(ms); return; }
+  if (live) { live.repeat(ms); recordNotice(body, level); return; }
 
   const node = el("div", "toast " + level);
   const count = el("span", "toast-count");
@@ -1054,6 +1141,7 @@ function toast(text, tone = "info", ms = TOAST_SHORT) {
     });
   liveToasts.set(key, record);
   arm(ms);
+  recordNotice(body, level);
 }
 
 /* Clipboard.writeText is unavailable on some plain-HTTP deployments. Keep one
@@ -3042,6 +3130,7 @@ const state = {
   remoteStopping: {},     // bid -> graceful node lifecycle notice
   engCache: {},           // bid -> engines[]
   notify: { configured: false, enabled: false },   // completion-alert bell
+  notices: null,          // {items, limit}: the controller's notice history, newest first
   browser: { enabled: false },  // this instance's managed-browser toggle
   browserStatus: null,          // full local browser status from node-state stream
   remoteBrowser: {},      // bid -> {enabled} from that node's ping metadata
@@ -3899,6 +3988,8 @@ function handleUpdatesMessage(d) {
   } else if (d.type === "notify") {
     state.notify = { configured: !!d.configured, enabled: !!d.enabled };
     syncBell();
+  } else if (d.type === "notices") {
+    applyNotices(d);
   } else if (d.type === "browser") {
     state.browser = { ...state.browser, enabled: !!d.enabled };
     if (d.enabled === false) closeBrowserTabsForBackend(0);
@@ -3956,6 +4047,7 @@ function connectUpdates() {
     updatesHasOpened = true;
     updatesRetry = 800;
     setLocalConnection(true);
+    flushNotices();          // whatever was shown while the link was down
     if (reconnect) {
       if (updatesReconnectRefreshTimer !== null) clearTimeout(updatesReconnectRefreshTimer);
       updatesReconnectRefreshTimer = setTimeout(() => {
@@ -6933,6 +7025,7 @@ function slideHostPanel() {
 let hostPanelHistory = null;
 function openHostPanel() {
   if (hostPanel.open) return;
+  closeNoticesPanel();           // the footer holds one box under the engine stats
   hostPanel.open = true;
   syncHostCpuButton();
   renderHostPanel();
@@ -7402,6 +7495,201 @@ $("host-cpu").onclick = () => toggleHostPanel();
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden && hostPanel.open) pollHostPanel();
 });
+
+/* ================= notifications ================= */
+/* The footer's tray opens this box under the engine stats: the last
+   NOTICES_LIMIT notices shown by this console and every other one, newest
+   first, exactly as the controller keeps them - a repeat counted on the
+   entry it followed, the way the live toast folds. Nothing is polled: the
+   list rides the state stream, and the box asks for it itself only when
+   that stream is not there to bring it. The host box and this one share the
+   space under the engine stats, so opening either closes the other. */
+const NOTICES_LIMIT = 100;
+const NOTICE_TONE_LABELS = {
+  info: "notice", ok: "completed", warn: "warning", bad: "failed", busy: "in progress",
+};
+const noticesPanel = {
+  open: false,
+  painted: false,        // a list has been drawn since the box opened
+  rows: new Map(),       // notice id -> { node, count } kept across repaints
+};
+let noticesPanelHistory = null;
+
+function validNotice(item) {
+  return !!item && typeof item === "object" &&
+    Number.isInteger(item.id) && item.id > 0 &&
+    typeof item.text === "string" && item.text !== "" &&
+    Object.prototype.hasOwnProperty.call(NOTICE_TONE_LABELS, item.tone) &&
+    Number.isInteger(item.count) && item.count > 0 &&
+    typeof item.at === "number" && Number.isFinite(item.at) &&
+    typeof item.first_at === "number" && Number.isFinite(item.first_at);
+}
+
+/* The list as the controller published it, on the stream or in answer to a
+   report or a read of this console's own. */
+function applyNotices(payload) {
+  if (!payload || !Array.isArray(payload.items)) return;
+  state.notices = {
+    items: payload.items.filter(validNotice),
+    limit: Number.isInteger(payload.limit) && payload.limit > 0 ? payload.limit : NOTICES_LIMIT,
+  };
+  renderNoticesPanel();
+}
+
+/* An HTTP answer carries the same revision stamp as the stream, so the two
+   cannot rewind each other: whichever arrives second is simply the same list. */
+function ingestNoticesPayload(payload) {
+  if (!payload || payload.type !== "notices" || !Array.isArray(payload.items)) return;
+  if (!acceptStateSnapshot(0, payload)) return;
+  applyNotices(payload);
+}
+
+function syncNoticesButton() {
+  const button = $("btn-notices");
+  if (button) button.setAttribute("aria-expanded", noticesPanel.open ? "true" : "false");
+}
+
+function slideNoticesPanel() {
+  const root = $("foot-notices");
+  if (!root) return;
+  if (root.parentElement) root.parentElement.classList.toggle("notices-open", noticesPanel.open);
+  setDisclosureCollapsed(root, !noticesPanel.open, true, () => {
+    if (noticesPanel.open) return;
+    root.replaceChildren();
+    noticesPanel.rows.clear();
+    noticesPanel.painted = false;
+  });
+}
+
+function openNoticesPanel() {
+  if (noticesPanel.open) return;
+  closeHostPanel();
+  noticesPanel.open = true;
+  syncNoticesButton();
+  renderNoticesPanel();
+  slideNoticesPanel();
+  if (!state.notices || !nodeStateStreamActive(0)) readNotices();
+  noticesPanelHistory = navigation.layer(closeNoticesPanel, openNoticesPanel);
+}
+
+function closeNoticesPanel() {
+  if (!noticesPanel.open) return;
+  noticesPanel.open = false;
+  syncNoticesButton();
+  slideNoticesPanel();
+  if (noticesPanelHistory) { noticesPanelHistory(); noticesPanelHistory = null; }
+}
+
+function toggleNoticesPanel() {
+  if (noticesPanel.open) closeNoticesPanel();
+  else openNoticesPanel();
+}
+
+async function readNotices() {
+  let payload;
+  try {
+    payload = await api(0, "notices", { timeoutMs: 9000 });
+  } catch (error) {
+    if (!state.notices) renderNoticesPanel(error.message || "could not read notifications");
+    return;
+  }
+  ingestNoticesPayload(payload);
+}
+
+function noticeRow(item) {
+  const row = el("div", "notice-row");
+  const dot = el("span", `gdot ${item.tone}`);
+  dot.setAttribute("role", "img");
+  dot.setAttribute("aria-label", NOTICE_TONE_LABELS[item.tone]);
+  row.appendChild(footIcon(dot));
+  row.appendChild(el("span", "notice-text", item.text));
+  row.appendChild(el("time", "notice-time"));
+  return row;
+}
+
+/* A repeat bumps the count where it already stands, exactly as the live
+   toast does; the stamp is the latest arrival and the tooltip keeps the first. */
+function paintNoticeRow(entry, item) {
+  const row = entry.node;
+  const text = row.querySelector(".notice-text");
+  if (item.count > 1) {
+    let count = row.querySelector(".toast-count");
+    if (!count) {
+      count = el("span", "toast-count");
+      row.insertBefore(count, text);
+    }
+    count.textContent = `${item.count} ×`;
+    if (entry.count && item.count > entry.count) {
+      count.classList.remove("toast-bump");
+      void count.offsetWidth;            // replay the bump on every repeat
+      count.classList.add("toast-bump");
+    }
+  }
+  entry.count = item.count;
+  const time = row.querySelector(".notice-time");
+  time.textContent = fmtStamp(item.at);
+  const stamp = new Date(item.at * 1000);
+  if (!Number.isNaN(stamp.getTime())) time.setAttribute("datetime", stamp.toISOString());
+  row.title = item.count > 1 ?
+    `${item.count} × · first ${fmtDateTime(item.first_at)} · last ${fmtDateTime(item.at)}` :
+    fmtDateTime(item.at);
+}
+
+function renderNoticesPanel(problem = "") {
+  const root = $("foot-notices");
+  if (!root || !noticesPanel.open) return;
+  let head = root.querySelector(".notices-head");
+  if (!head) {
+    head = el("div", "notices-head");
+    head.appendChild(el("span", "host-sec-title", "Notifications"));
+    head.appendChild(el("span", "host-node-note"));
+    root.appendChild(head);
+  }
+  let list = root.querySelector(".notices-list");
+  if (!list) {
+    list = el("div", "notices-list");
+    root.appendChild(list);
+  }
+  const items = state.notices ? state.notices.items : null;
+  const limit = state.notices ? state.notices.limit : NOTICES_LIMIT;
+  const note = head.querySelector(".host-node-note");
+  note.textContent = items ? String(items.length) : "";
+  head.title = `The last ${limit} notifications, newest first`;
+  if (!items || !items.length) {
+    list.replaceChildren(el("div", "host-empty",
+      items ? "No notifications yet" : (problem || "Reading…")));
+    noticesPanel.rows.clear();
+    noticesPanel.painted = !!items;
+    refreshDisclosureHeight(root);
+    return;
+  }
+  /* Rows keep their identity through repaints: a new arrival slides in at
+     the top while the ones below it - and the reader's place among them -
+     stay where they were. Only an arrival is animated: the list the box
+     opens with, read or streamed, is simply there. */
+  const live = new Set();
+  const fresh = noticesPanel.painted;
+  noticesPanel.painted = true;
+  items.forEach((item, index) => {
+    let entry = noticesPanel.rows.get(item.id);
+    if (!entry) {
+      entry = { node: noticeRow(item), count: 0 };
+      noticesPanel.rows.set(item.id, entry);
+      if (fresh) entry.node.classList.add("notice-new");
+    }
+    paintNoticeRow(entry, item);
+    live.add(item.id);
+    if (list.children[index] !== entry.node)
+      list.insertBefore(entry.node, list.children[index] || null);
+  });
+  for (const [id, entry] of [...noticesPanel.rows])
+    if (!live.has(id)) { entry.node.remove(); noticesPanel.rows.delete(id); }
+  while (list.children.length > items.length)
+    list.children[list.children.length - 1].remove();   // the empty line, if it was there
+  refreshDisclosureHeight(root);
+}
+
+$("btn-notices").onclick = () => toggleNoticesPanel();
 
 $("toggle-archived").onclick = () => { state.showArchived = !state.showArchived; renderSidebar(); };
 
@@ -9072,6 +9360,7 @@ if (logoutButton) {
   logoutButton.appendChild(logoutIcon(14));
   logoutButton.onclick = signOut;
 }
+$("btn-notices").appendChild(trayIcon(14));
 
 $("btn-bell").onclick = async () => {
   const want = !(state.notify && state.notify.enabled);
