@@ -44,7 +44,10 @@ There is no build step, no npm, no daemon besides Puppy itself: Python 3.9+,
 - **Nothing gets lost.** Durable message queues, drafts that follow you between
   devices, full-history search, and one-click backup and restore.
 - **Type together without losing your place.** On backends with typing presence,
-  the chat shows when another console is typing. Concurrent edits keep your
+  the chat shows when another console is typing, and while you are not editing
+  yourself your caret follows theirs to the spot being written (a long draft
+  scrolls to it), so picking the draft up on this device continues exactly
+  where the other one left off. Concurrent edits keep your
   text, caret, and attachments in place; **Review drafts** lets you compare
   your local version with the shared one, keep editing, use the shared draft,
   or share yours. A conflicting local draft survives reloads in that browser's
@@ -219,8 +222,11 @@ message text to the chat box with a blank line before any existing text, selects
 that existing text, and focuses the box. Staged attachments stay in place.
 Drafts are shared through the session's backend, so the
 half-finished prompt on your desktop is on your phone too. On backends with
-typing presence, overlapping edits stay local until you review the drafts or
-send your message; another console's edits never interrupt your typing.
+typing presence, another console's typing also moves this console's caret to
+the same spot while you are not editing here, and scrolls a long draft to show
+it, so you can carry on from where the other device stopped. Overlapping edits
+stay local until you review the drafts or send your message; another console's
+edits never interrupt your typing or move your caret while you type.
 The status row below the tools appears only for typing activity, a draft conflict,
 or a save/send error; it takes no space when idle.
 

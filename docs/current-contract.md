@@ -76,7 +76,9 @@ still contain a value written before that release.
 - `session-draft-presence` adds expiring, anonymous typing hints to the existing
   session socket and optional revision comparisons for shared-draft writes.
   Conflicts retain the local editor and its existing journal until reviewed;
-  no draft, config, database or backup format changes are needed.
+  no draft, config, database or backup format changes are needed. A draft
+  write's optional `caret` is relayed on the accepted frame, never stored, so
+  consoles that are not editing can follow the writer's caret.
 - Internal browser bridge aliases and the obsolete engines-response `user`
   alias are removed.
 

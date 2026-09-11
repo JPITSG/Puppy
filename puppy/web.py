@@ -1695,8 +1695,9 @@ async def ws_session(request: web.Request):
                 draft_result = await h.update_draft(
                     data.get("text"), data.get("client_id", ""),
                     data.get("client_seq", 0),
-                    recipient=ws, **({"expected_revision": data["expected_revision"]}
-                                     if "expected_revision" in data else {}))
+                    recipient=ws, caret=data.get("caret"),
+                    **({"expected_revision": data["expected_revision"]}
+                       if "expected_revision" in data else {}))
                 if "error" in draft_result:
                     await _session_write_error(ws, data, draft_result["error"])
             elif t in ("steer", "ask"):

@@ -1749,6 +1749,42 @@ async def checks(a, b, hub, capture=False):
     await a.call("Emulation.setDeviceMetricsOverride", {"width": 1280, "height": 800,
                  "deviceScaleFactor": 1, "mobile": False}, session=a.page_session)
     print("PASS: idle composer collapses below tools on desktop and phone; active status remains visible", flush=True)
+    # Typing on one console puts the other console's caret on the same spot
+    # and brings that spot into view, so a draft picked up on the next device
+    # continues exactly where the last one left off: after the text typed at
+    # the end, at the insertion made in the middle, then at the top, with a
+    # long draft scrolling the box to wherever the writing happens.
+    await evaluate(b, "demoView.composer.ta.blur(); true")
+    caret_b = "[demoView.composer.ta.selectionStart, demoView.composer.ta.selectionEnd]"
+    await type_text(a, "Ship the fix")
+    await until(b, "demoView.composer.text() === 'Ship the fix' && " + caret_b + ".join() === '12,12'")
+    await evaluate(a, "demoView.composer.ta.setSelectionRange(5, 5); true")
+    await type_text(a, "login ")
+    await until(b, "demoView.composer.text() === 'Ship login the fix' && " + caret_b + ".join() === '11,11'")
+    lines = "\n".join("line %d" % n for n in range(1, 41))
+    middle = lines.index("line 20")
+    await evaluate(a, "demoView.composer.set(%s); true" % json.dumps(lines))
+    await until(b, "demoView.composer.text().endsWith('line 40') && " + caret_b + ".join() === '%d,%d'"
+                % (len(lines), len(lines)))
+    scroll_b = ("({top:demoView.composer.ta.scrollTop, room:demoView.composer.ta.scrollHeight-demoView.composer.ta.clientHeight,"
+                " line:parseFloat(getComputedStyle(demoView.composer.ta).lineHeight)})")
+    scrolled = await evaluate(b, scroll_b)
+    assert scrolled["room"] > scrolled["line"] and scrolled["room"] - scrolled["top"] < scrolled["line"], scrolled
+    await evaluate(a, "demoView.composer.ta.setSelectionRange(%d, %d); true" % (middle, middle))
+    await type_text(a, "Mid: ")
+    await until(b, "demoView.composer.text().includes('Mid: line 20') && " + caret_b + ".join() === '%d,%d'"
+                % (middle + 5, middle + 5))
+    scrolled = await evaluate(b, scroll_b)
+    assert scrolled["line"] < scrolled["top"] < scrolled["room"] - scrolled["line"], scrolled
+    await evaluate(a, "demoView.composer.ta.setSelectionRange(0, 0); true")
+    await type_text(a, "Top: ")
+    await until(b, "demoView.composer.text().startsWith('Top: line 1') && " + caret_b + ".join() === '5,5'")
+    scrolled = await evaluate(b, scroll_b)
+    assert scrolled["top"] < scrolled["line"], scrolled
+    await evaluate(a, "demoView.composer.set(''); true")
+    await until(b, "demoView.composer.text() === '' && !demoView.sharedDraft.flight")
+    await until(a, "!demoView.sharedDraft.flight")
+    print("PASS: a peer's typing moves this console's caret to the same spot and scrolls a long draft to it", flush=True)
     # Take the second editor offline, so both edits really begin from the
     # same revision. Reconnect must retain the local fork and reveal it.
     await evaluate(b, "demoView.ws.close(); true")

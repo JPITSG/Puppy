@@ -820,6 +820,16 @@ revision actually shown. There is no automatic text merge or persisted-shape
 change; backups retain their existing draft coverage. Older clients keep
 the original wire contract, and older backends do not offer presence.
 
+A `draft` write may also carry `caret: [start, end]`, the writer's selection
+over the value it sent in the console's own UTF-16 offsets. The hub relays it
+on the accepted broadcast frame exactly as sent - two ordered non-negative
+integers within the text, anything else is dropped from an otherwise accepted
+write - and never stores it: the draft record, the snapshot and a
+`draft_conflict` reply carry none. A console that adopts a peer's frame puts
+its own caret there (clamped to its prose) and scrolls to it; its own echo,
+a kept local draft and an IME composition are never moved. Older backends
+ignore the field and older clients never send it.
+
 Negotiated draft failures use correlated `draft_error` replies. Messages sent
 with `draft_guarded:true` receive `draft_send_error` on refusal (or with
 `accepted:true` if the prompt was accepted but clearing its draft failed).

@@ -11020,6 +11020,26 @@ class Composer {
     try { this.ta.setSelectionRange(end, end); } catch (_) {}
   }
 
+  /* Where this box's caret is, as [start, end] over its prose, for the
+     draft write that carries it to the other devices. */
+  caret() {
+    return [this.ta.selectionStart, this.ta.selectionEnd];
+  }
+
+  /* Put the caret where another device's is, and show that spot: a peer's
+     typing lands here exactly where it lands there, so picking the draft up
+     on this device continues from the same place, and a long draft scrolls
+     to where it is being written. The hint is clamped, never trusted: the
+     marker split may have taken trailing whitespace the peer's caret still
+     counted. */
+  follow(caret) {
+    const length = this.ta.value.length;
+    const end = Math.min(Math.max(0, caret[1]), length);
+    const start = Math.min(Math.max(0, caret[0]), end);
+    try { this.ta.setSelectionRange(start, end); } catch (_) {}
+    this.revealCaret();
+  }
+
   focus(reveal = false) {
     this.ta.focus();
     if (reveal) this.revealCaret();
@@ -11133,8 +11153,10 @@ class Composer {
 
   /* Replace prose and completed attachment chips, ordinarily preserving local
      uploads still in flight. An explicit queue edit replaces those too.
-     Matching local image blobs are reused; everything else is released. */
-  replace(text, caretAtEnd = false, replaceUploading = false) {
+     Matching local image blobs are reused; everything else is released.
+     The caret keeps its place in the text that survived unless the value
+     came with a peer's caret to follow, or belongs at the end. */
+  replace(text, caretAtEnd = false, replaceUploading = false, caret = null) {
     // An unchanged shared-draft snapshot on reconnect must not end a walk.
     if (this.history && !replaceUploading && text === this.value()) return;
     this.stopHistory();
@@ -11193,11 +11215,12 @@ class Composer {
     try {
       if (caretAtEnd)
         this.ta.setSelectionRange(restored.text.length, restored.text.length);
-      else
+      else if (!caret)
         this.ta.setSelectionRange(remap(oldStart), remap(oldEnd));
     } catch (_) {}
     this.renderAttachments(false);
     this.resize();
+    if (caret && !caretAtEnd) this.follow(caret);   // once the box has its final height
     /* A peer's draft is marked like any other text; it is never corrected. */
     this.spellFix = null;
     this.spellTypingAt = null;
@@ -13350,7 +13373,10 @@ async function modalReviewTask(workspace, session) {
 
 /* Negotiated shared-draft editor. Full values stay bounded to one outstanding
    write; a compare failure forks locally instead of replaying over a peer.
-   Presence never carries text and never manipulates the textarea. */
+   Presence never carries text and never manipulates the textarea. Each write
+   carries this device's caret, and a peer's write that is adopted here brings
+   its caret with it, so the caret on a device nobody is typing at sits where
+   the typing happens. */
 class SharedDraft {
   constructor(view) {
     this.view = view;
@@ -13365,6 +13391,8 @@ class SharedDraft {
     this.sendError = false;
     this.clearingSent = false;
     this.reviewOpen = false;
+    // where a peer's write left its caret, by the revision that write made
+    this.caret = null;
   }
 
   paint() {
@@ -13398,11 +13426,31 @@ class SharedDraft {
     v.draftJournal = { text, baseRevision, submitted };
   }
 
+  /* Remember where a peer's write left its caret, keyed by the revision it
+     made: this device's own conflict reply repeats that revision without
+     the caret, and Use shared draft adopts it later. An echo of this
+     device's own write says only where its caret WAS, and a hint that is
+     not two whole numbers is no caret at all. */
+  noteCaret(value) {
+    const caret = value.caret;
+    if (value.client_id === this.view.draftClientId || !Array.isArray(caret) ||
+        caret.length !== 2 || !caret.every(Number.isInteger)) return;
+    this.caret = { revision: value.revision, at: caret };
+  }
+
+  /* The peer caret known for the revision being adopted, or null. */
+  peerCaret(value) {
+    return this.caret && this.caret.revision === value.revision ? this.caret.at : null;
+  }
+
   adopt(value, replaceUploading = false) {
     this.base = value.revision;
     this.conflict = false;
+    const caret = this.peerCaret(value);
     if (this.view.draftValue() !== value.text || replaceUploading)
-      this.view.composer.replace(value.text, false, replaceUploading);
+      this.view.composer.replace(value.text, false, replaceUploading, caret);
+    else if (caret && !this.view.composer.protectsDraft())
+      this.view.composer.follow(caret);   // the same text, but never under a typist
     this.view.clearDraftJournal();
     this.paint();
   }
@@ -13416,6 +13464,9 @@ class SharedDraft {
     this.error = "";
     this.sendError = false;
     this.clearingSent = false;
+    // A snapshot carries no caret; nor may a caret from before the
+    // reconnect snap this device's back to a spot it has since left.
+    this.caret = null;
     v.draftRevision = value.revision;
     v.draftReady = true;
     const touched = v.draftTouchedBeforeReady || v.composer.protectsDraft();
@@ -13457,7 +13508,7 @@ class SharedDraft {
     this.flight = { seq, text, clearAfterSend: !!this.clearingSent };
     this.clearingSent = false;
     v.ws.send(JSON.stringify({ type: "draft", text, expected_revision: this.base,
-      client_id: v.draftClientId, client_seq: seq }));
+      client_id: v.draftClientId, client_seq: seq, caret: v.composer.caret() }));
   }
 
   keepLocal() {
@@ -13469,6 +13520,7 @@ class SharedDraft {
   receive(value) {
     const v = this.view;
     if (!v.draftReady) return;
+    this.noteCaret(value);
     const own = value.client_id === v.draftClientId;
     const ack = own && this.flight && value.client_seq === this.flight.seq;
     const clearedSend = ack && this.flight.clearAfterSend;
@@ -16328,7 +16380,8 @@ class SessionView {
     } else if (deferred && deferred.revision === this.draftRevision) {
       /* A peer authored a newer value after the queue edit. Preserve that
          normal last-writer-wins result instead of reviving our older one. */
-      this.composer.replace(deferred.text);
+      this.composer.replace(deferred.text, false, false,
+        this.sharedDraft ? this.sharedDraft.peerCaret(deferred) : null);
       this.clearDraftJournal();
     }
     if (message.started) {

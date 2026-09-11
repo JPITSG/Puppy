@@ -697,6 +697,22 @@ TYPING_LEASE_SECONDS = 6.0
 _UNSET_DRAFT_REVISION = object()
 
 
+def draft_caret(caret, text: str):
+    """The selection a draft write says its writer had, as ``[start, end]``
+    in the console's own UTF-16 offsets over the value it sent, or None.
+
+    It is a hint for the other consoles' carets, relayed on the broadcast
+    frame exactly as sent and never stored: anything else than two ordered
+    non-negative integers within the text is dropped, never repaired."""
+    if not (isinstance(caret, list) and len(caret) == 2 and
+            all(type(value) is int for value in caret) and
+            0 <= caret[0] <= caret[1]):
+        return None
+    if caret[1] > len(text.encode("utf-16-le", "surrogatepass")) // 2:
+        return None
+    return [caret[0], caret[1]]
+
+
 def _background_wait_text(tasks) -> str:
     """The transcript row for a model that answered while its engine still
     owns background work."""
@@ -884,8 +900,14 @@ class SessionHub:
         return payload
 
     async def update_draft(self, text, client_id="", client_seq=0,
-                           expected_revision=_UNSET_DRAFT_REVISION, recipient=None) -> dict:
-        """Persist and fan out one full composer value in a total order."""
+                           expected_revision=_UNSET_DRAFT_REVISION, recipient=None,
+                           caret=None) -> dict:
+        """Persist and fan out one full composer value in a total order.
+
+        ``caret`` is the writer's selection over that value. It travels on
+        the accepted frame so the other consoles can put their own caret on
+        the spot being typed at; a conflict reply and the stored draft carry
+        none."""
         if not isinstance(text, str):
             return {"error": "draft text must be text"}
         if len(text) > db.MAX_DRAFT_CHARS:
@@ -894,6 +916,7 @@ class SessionHub:
         if expected_revision is not _UNSET_DRAFT_REVISION and (
                 type(expected_revision) is not int or expected_revision < 0):
             return {"error": "expected draft revision must be a non-negative integer"}
+        caret = draft_caret(caret, text)
         async with self._draft_lock:
             if db.get_session(self.id) is None:
                 return {"error": "session gone"}
@@ -911,6 +934,8 @@ class SessionHub:
                 log.exception("could not persist draft for session %s", self.id)
                 return {"error": "could not save draft"}
             payload = self._draft_payload(current, client_id, client_seq)
+            if caret is not None:
+                payload["caret"] = caret
             await self._broadcast_draft(payload)
             # Do not delete an upload merely because this revision dropped its
             # marker. A concurrent client may already have sent a later full

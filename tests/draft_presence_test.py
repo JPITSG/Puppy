@@ -137,13 +137,44 @@ async def contract(factory):
             await b.send_json({"type": "typing", "active": True})
             assert (await frame(late, "typing"))["count"] == 0
         assert hub._typists == {}
+        # A write carries its writer's caret to every console on the accepted
+        # frame, in the console's own UTF-16 offsets (the emoji counts two),
+        # exactly as sent and never stored: the draft record and a fresh
+        # snapshot know nothing of it, a stale writer's conflict reply carries
+        # none, and a malformed hint is dropped from an otherwise accepted
+        # write rather than refused or repaired.
+        await b.send_json({"type": "draft", "text": "Caret \U0001F600 here", "client_id": "b",
+                           "client_seq": 10, "expected_revision": 2, "caret": [13, 13]})
+        for ws in (b, late):
+            accepted = await frame(ws, "draft")
+            assert accepted["revision"] == 3 and accepted["caret"] == [13, 13], accepted
+        assert "caret" not in db.get_session_draft(sid)
+        fresh = await client.ws_connect(route, headers=headers)
+        assert "caret" not in (await frame(fresh, "snapshot"))["draft"]
+        await fresh.close()
+        revision = 3
+        for invalid in ([14, 14], [5, 3], [-1, 2], [1], [1, 2, 3], [1.5, 2], [True, 2],
+                        "13", {"start": 1, "end": 1}, None):
+            await b.send_json({"type": "draft", "text": "Caret \U0001F600 here", "client_id": "b",
+                               "client_seq": 11, "expected_revision": revision,
+                               "caret": invalid})
+            revision += 1
+            for ws in (b, late):
+                accepted = await frame(ws, "draft")
+                assert accepted["revision"] == revision and "caret" not in accepted, \
+                    (invalid, accepted)
+        await late.send_json({"type": "draft", "text": "Stale", "client_id": "late",
+                              "client_seq": 1, "expected_revision": 2, "caret": [0, 0]})
+        conflict = await frame(late, "draft_conflict")
+        assert conflict["revision"] == revision and "caret" not in conflict
+        assert db.get_session_draft(sid)["text"] == "Caret \U0001F600 here"
         await b.close()
         await late.close()
         await isolated.close()
     assert not hub.watchers and not hub._typists
     # Neither leases nor collision variants add any durable schema or events.
     assert db.get_events(sid) == []
-    print("PASS: {} draft revisions, collisions, typing, isolation, expiry and auth".format(app["puppy_role"]))
+    print("PASS: {} draft revisions, collisions, typing, carets, isolation, expiry and auth".format(app["puppy_role"]))
 
 
 async def main():

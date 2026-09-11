@@ -402,6 +402,53 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
   assert.equal(idle.ta.value, "follow on another device", "preedit is never interrupted");
   fire(idle.ta, "compositionend");
 
+  /* Every write carries this device's caret, and a peer's write that is
+     adopted brings its caret here, so the caret on a device nobody is typing
+     at sits where the typing happens. An echo of this device's own write
+     only says where its caret was, a hint is clamped to the prose the marker
+     split left and ignored unless it is two whole numbers, and a kept local
+     draft keeps its caret with its text. */
+  const follower = draftBox("draft-follow");
+  const selection = () => [follower.ta.selectionStart, follower.ta.selectionEnd];
+  follower.ta.focus();
+  follower.ta.value = "mine"; follower.ta.setSelectionRange(2, 2); fire(follower.ta, "input");
+  const written = follower.sent.filter(x => x.type === "draft").at(-1);
+  assert.deepEqual(written.caret, [2, 2], "a write carries the caret at the moment of writing");
+  follower.ta.setSelectionRange(4, 4);
+  follower.sync.receive(wire("mine", 2, "draft-follow", written.client_seq, { caret: [2, 2] }));
+  assert.deepEqual(selection(), [4, 4], "an own echo moves nothing");
+  follower.ta.blur(); fire(follower.ta, "blur");
+  follower.sync.receive(wire("mine and theirs", 3, "peer", 1, { caret: [9, 9] }));
+  assert.equal(follower.ta.value, "mine and theirs");
+  assert.deepEqual(selection(), [9, 9], "a peer's typing puts the caret where it types");
+  follower.sync.receive(wire("mine and theirs", 4, "peer", 2, { caret: [5, 8] }));
+  assert.deepEqual(selection(), [5, 8], "unchanged text still follows the peer's selection");
+  follower.ta.focus(); type(follower.ta, "mine and theirs"); follower.ta.setSelectionRange(1, 1);
+  follower.sync.receive(wire("mine and theirs", 5, "peer", 3, { caret: [15, 15] }));
+  assert.deepEqual(selection(), [1, 1], "a typist who wrote the same text keeps their caret");
+  follower.ta.blur(); fire(follower.ta, "blur");
+  const peerMarker = "[image attached: /srv/data/uploads/10/1700000000000-peer/shot.png — view it with your image/file tools]";
+  follower.sync.receive(wire("theirs \n\n" + peerMarker, 6, "peer", 4, { caret: [7, 7] }));
+  assert.equal(follower.ta.value, "theirs");
+  assert.deepEqual(selection(), [6, 6], "a caret past the prose is clamped, never thrown");
+  follower.ta.setSelectionRange(0, 0);
+  follower.sync.receive(wire("theirs!", 7, "peer", 5, { caret: [3] }));
+  assert.deepEqual(selection(), [0, 0], "a hint that is not two whole numbers is not followed");
+  follower.sync.receive(wire("theirs!?", 8, "peer", 6));
+  assert.deepEqual(selection(), [0, 0], "and a frame without one keeps the caret's place");
+  follower.ta.focus(); type(follower.ta, "theirs!? and mine"); follower.ta.setSelectionRange(2, 2);
+  follower.sync.receive(wire("theirs!? and a peer", 10, "peer", 7, { caret: [19, 19] }));
+  assert.equal(follower.ta.value, "theirs!? and mine"); assert.equal(follower.sync.conflict, true);
+  assert.deepEqual(selection(), [2, 2], "a kept draft keeps its caret with its text");
+  /* the stale write's own conflict reply repeats that revision without the
+     peer's caret; choosing the shared draft still lands where it was typed */
+  follower.sync.receive(wire("theirs!? and a peer", 10, "draft-follow", follower.sync.flight.seq,
+    { type: "draft_conflict" }));
+  follower.sync.review(); reviewDialog.m.querySelector(".draft-use-shared").click();
+  assert.equal(follower.ta.value, "theirs!? and a peer");
+  assert.deepEqual(selection(), [19, 19], "choosing the shared draft lands where it was typed");
+  follower.composer.destroy();
+
   /* Send consumes its own saved prefix after overtaking coalesced edits; a
      peer's different draft remains intact and typing after Send survives. */
   const sending = draftBox("draft-send");
