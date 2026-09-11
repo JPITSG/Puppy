@@ -516,10 +516,12 @@ history around it.
   double-click a divider to reset it.
 - **Status at a glance.** Every session row shows a spinner and a running clock
   while its agent works, the backend it runs on when idle, and task activity or
-  a waiting approval. The footer lists every backend with its Puppy version
-  and each of its engines with sign-in state, an orange *Ready* when a newer
-  CLI is published, a green spinner beside the status while a session or task
-  uses that engine on that backend (hover to see its models), and the remaining
+  a waiting approval. The executing backend owns the clock: refreshing,
+  reconnecting or opening another browser preserves elapsed time, including
+  across consecutive queued turns. The footer lists every backend with its
+  Puppy version and each of its engines with sign-in state, an orange *Ready*
+  when a newer CLI is published, a green spinner beside the status while a
+  session or task uses that engine on that backend (hover to see its models), and the remaining
   weekly quota where the engine reports it. Claude and Codex entries with
   verified matching provider, user, account/workspace and quota bucket share
   the newest percentage across

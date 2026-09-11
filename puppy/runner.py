@@ -7,6 +7,7 @@ import asyncio
 import copy
 import json
 import logging
+import math
 import os
 import re
 import signal
@@ -27,6 +28,7 @@ _hubs = {}
 _updates_watchers = {}  # websocket -> one ordered, bounded node-state writer
 _update_runtime_id = ""
 _update_state = {}       # topic -> last revisioned snapshot
+_update_sampled_at = {}  # topic -> monotonic time when that snapshot was received
 _update_revisions = {}   # topic -> process-local monotonic revision
 
 UPDATE_STREAM_VERSION = 1
@@ -316,6 +318,29 @@ def session_payload(session):
     return out
 
 
+def _state_at_delivery(payload: dict, sampled_at: float) -> dict:
+    """Advance a session sample's clock through cache and writer-queue time.
+
+    active_since belongs to the executing backend. A cached server_time must
+    advance with it on every delivery, including a controller's nested remote
+    snapshot; replaying the original pair makes a reload lose all the time
+    since publication. Use monotonic residence time, never the relay's UTC,
+    and leave the revisioned snapshot and work-block start untouched.
+    """
+    sample = payload.get("event") if payload.get("type") == "remote_state" else payload
+    if not isinstance(sample, dict) or sample.get("type") != "sessions":
+        return payload
+    server_time = sample.get("server_time")
+    try:
+        if type(server_time) not in (int, float) or not math.isfinite(server_time):
+            return payload
+        current = server_time + max(0.0, time.monotonic() - sampled_at)
+    except OverflowError:
+        return payload
+    sample = dict(sample, server_time=current)
+    return dict(payload, event=sample) if payload.get("type") == "remote_state" else sample
+
+
 class _UpdateWatcher:
     """One serialized writer for the node-wide update stream.
 
@@ -334,22 +359,26 @@ class _UpdateWatcher:
         self.waiters = set()
         self.task = asyncio.ensure_future(self._run())
 
-    def send(self, payload: dict, state_topic: str = "", wait: bool = False):
+    def send(self, payload: dict, state_topic: str = "", wait: bool = False,
+             sampled_at=None):
         if self.closed:
             return None
         future = asyncio.get_running_loop().create_future() if wait else None
         if future is not None:
             self.waiters.add(future)
         topic = str(state_topic or "")
+        sampled_at = time.monotonic() if sampled_at is None else sampled_at
         key = (topic, self.barrier) if topic and future is None else None
         previous = self.pending.get(key) if key is not None else None
         if previous is not None:
             previous["payload"] = copy.deepcopy(payload)
+            previous["sampled_at"] = sampled_at
             return future
         if not topic:
             self.barrier += 1
         item = {
             "payload": copy.deepcopy(payload), "key": key, "future": future,
+            "sampled_at": sampled_at,
         }
         if key is not None:
             self.pending[key] = item
@@ -388,7 +417,8 @@ class _UpdateWatcher:
                     self.pending.pop(key, None)
                 future = item["future"]
                 try:
-                    await self.ws.send_json(item["payload"])
+                    await self.ws.send_json(_state_at_delivery(
+                        item["payload"], item["sampled_at"]))
                 except Exception as exc:
                     if future is not None and not future.done():
                         future.set_exception(exc)
@@ -418,6 +448,7 @@ def configure_updates(runtime_id: str) -> None:
     global _update_runtime_id
     _update_runtime_id = str(runtime_id or "")
     _update_state.clear()
+    _update_sampled_at.clear()
     _update_revisions.clear()
     publish_state(sessions_payload(), broadcast=False)
 
@@ -452,9 +483,10 @@ def publish_state(payload: dict, topic: str = "", force: bool = False,
     canonical["state_topic"] = key
     canonical["runtime_id"] = _update_runtime_id
     _update_state[key] = canonical
+    sampled_at = _update_sampled_at[key] = time.monotonic()
     if broadcast:
         for watcher in list(_updates_watchers.values()):
-            watcher.send(canonical, state_topic=key)
+            watcher.send(canonical, state_topic=key, sampled_at=sampled_at)
     return copy.deepcopy(canonical)
 
 
@@ -469,6 +501,7 @@ def clear_published_state(prefix: str) -> None:
     for key in list(_update_state):
         if key.startswith(prefix):
             _update_state.pop(key, None)
+            _update_sampled_at.pop(key, None)
 
 
 def updates_attach(ws) -> None:
@@ -480,7 +513,8 @@ def updates_attach(ws) -> None:
         "topics": list(_update_state),
     })
     for topic, payload in list(_update_state.items()):
-        watcher.send(payload, state_topic=topic)
+        watcher.send(payload, state_topic=topic,
+                     sampled_at=_update_sampled_at[topic])
 
 
 def updates_detach(ws) -> None:

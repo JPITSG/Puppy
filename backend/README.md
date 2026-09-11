@@ -221,10 +221,19 @@ session stores.
 Session-list responses and update events include `server_time`. A running
 session also includes `active_since`, the start of its current uninterrupted
 work block. That start is retained while queued messages flow into subsequent
-turns and is cleared only after both the active turn and queue are empty. This
-lets a controller show one continuous elapsed time while compensating for clock
-differences between the controller and backend. Both timing fields are part of
-the current contract; the console does not estimate a missing start time.
+turns and is cleared when no runnable work remains (paused or held prompts do
+not keep it running). This lets a controller show one continuous elapsed time
+while compensating for clock differences between the controller and backend.
+Both timing fields are part of the current contract; the console does not
+estimate a missing start time.
+
+The state-stream writer advances `server_time` by the monotonic time a snapshot
+spent in the backend's cache and viewer queue before delivering it. The
+controller does the same for relayed session snapshots using the originating
+backend's clock, including on attach and reconnect. Cached starts and topic
+revisions stay unchanged, so refreshing or opening another console preserves
+elapsed time without extra polling or browser storage. This timing bookkeeping
+is transient; restarting the executing node ends its active work blocks.
 
 When a work block becomes idle, session lists, snapshots and `turn_done` also
 carry the additive `completion_status`. A controller uses `interrupted` to

@@ -16,6 +16,7 @@ import shlex
 import shutil
 import sys
 import time
+from types import SimpleNamespace
 from unittest.mock import patch
 
 BASE = Path(__file__).resolve().parent.parent
@@ -1943,6 +1944,67 @@ async def quota_checks(instance):
     print("PASS: real footer shares only matching accounts and retains the newest observation", flush=True)
 
 
+async def session_activity_checks(a, b):
+    """Two real consoles, an unopened session, and an aged attach snapshot."""
+    h = runner.hub(2)  # neither console has this session's transcript socket
+    h.status = "running"
+    h.active_since = time.time() - 125
+    try:
+        # Model a publication made two minutes ago without waiting two minutes.
+        # The real update writer, HTTP bootstrap and browser clocks do the rest.
+        old_clock = SimpleNamespace(time=lambda: time.time() - 120,
+                                    monotonic=lambda: time.monotonic() - 120)
+        with patch.object(runner, "time", old_clock):
+            runner.publish_state(runner.sessions_payload(), broadcast=False)
+        expression = """(() => {
+            const label=document.querySelector('[data-session-key="0:2"] .active-time');
+            if (!label) return -1;
+            return label.textContent.split(':').reduce((n, part) => n*60+Number(part), 0);
+        })()"""
+
+        async def reload_and_read(instance):
+            await evaluate(instance, "window.activityReloadMarker=true")
+            await instance.call("Page.reload", session=instance.page_session)
+            await until(instance, "!window.activityReloadMarker && "
+                        "typeof localStateStreamTopics !== 'undefined' && "
+                        "localStateStreamTopics.has('sessions')")
+            seconds = await evaluate(instance, expression)
+            assert 124 <= seconds < 145, seconds
+            return seconds
+
+        first = await reload_and_read(a)
+        second = await reload_and_read(b)
+        assert abs(first - second) <= 3, (first, second)
+        again = await reload_and_read(a)
+        assert again >= first, (first, again)
+
+        # Reconnect only the state socket, retaining the page and its anchors.
+        await evaluate(a, "window.activitySocket=updatesWs; updatesWs.close(); true")
+        await until(a, "updatesWs && updatesWs !== activitySocket && "
+                    "localStateStreamTopics.has('sessions')")
+        assert await evaluate(a, expression) >= again
+
+        h.status = "idle"
+        h.active_since = None
+        runner.broadcast_sessions()
+        for instance in (a, b):
+            await until(instance, expression + " === -1")
+        h.status = "running"
+        h.active_since = time.time()
+        runner.broadcast_sessions()
+        for instance in (a, b):
+            await until(instance, expression + " >= 0")
+            assert await evaluate(instance, expression) < 5
+    finally:
+        h.status = "idle"
+        h.active_since = None
+        runner.broadcast_sessions()
+        for instance in (a, b):
+            await evaluate(instance, "window.demoView=state.views['s:0:1'].activeView(); true")
+            await until(instance, "demoView.draftReady")
+    print("PASS: backend session clock survives reloads, a second browser and socket reconnect; idle clears it and new work starts from zero", flush=True)
+
+
 async def engine_activity_checks(instance):
     result = await evaluate(instance, """(() => {
         const saved = {engines:state.engines, backends:state.backends,
@@ -2697,6 +2759,7 @@ async def main(args):
             if args.navigation_only:
                 await navigation_checks(instances[0], url, sid)
                 return
+            await session_activity_checks(*instances)
             await quota_checks(instances[0])
             await engine_activity_checks(instances[0])
             await model_alias_checks(instances[0])

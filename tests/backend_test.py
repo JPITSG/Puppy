@@ -2065,6 +2065,82 @@ async def exercise_update_stream_ordering(runner_module) -> None:
         runner_module.updates_detach(capture)
 
 
+async def exercise_activity_snapshot_delivery(runner_module) -> None:
+    """Reloads and relays count time spent in the backend's snapshot cache."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    class Capture:
+        def __init__(self):
+            self.messages = []
+
+        async def send_json(self, payload):
+            self.messages.append(payload)
+
+    clock = [100.0]
+    fake_time = SimpleNamespace(monotonic=lambda: clock[0], time=lambda: 10000.0)
+
+    async def drain(capture, count):
+        for _ in range(100):
+            if len(capture.messages) >= count:
+                return
+            await asyncio.sleep(0)
+        raise AssertionError(capture.messages)
+
+    with patch.object(runner_module, "time", fake_time):
+        runner_module.configure_updates("activity-cache-test")
+        original = runner_module.publish_state({
+            "type": "sessions", "server_time": 10000.0,
+            "sessions": [{"id": 1, "status": "running", "active_since": 9995.0},
+                         {"id": 2, "status": "idle", "active_since": None}],
+        }, broadcast=False)
+        # An identical publication must not reset the cached sample's age.
+        clock[0] += 60
+        runner_module.publish_state(original, broadcast=False)
+        first = Capture()
+        runner_module.updates_attach(first)
+        clock[0] += 30  # includes time waiting in this viewer's write queue
+        try:
+            await drain(first, 2)
+            frame = first.messages[1]
+            assert frame["server_time"] - frame["sessions"][0]["active_since"] == 95, frame
+            assert frame["state_revision"] == original["state_revision"]
+            assert frame["sessions"][1]["active_since"] is None
+            assert original["server_time"] == 10000.0, "delivery mutated cached state"
+        finally:
+            runner_module.updates_detach(first)
+
+        # A controller receives a backend clock that differs from its own.
+        # Its second cache must age that clock, never substitute local UTC.
+        runner_module.publish_state({
+            "type": "remote_state", "backend_id": 7, "event": frame,
+        }, topic="remote:7:sessions", broadcast=False)
+        clock[0] += 120
+        second = Capture()
+        runner_module.updates_attach(second)
+        try:
+            await drain(second, 3)
+            local, remote = second.messages[1], second.messages[2]["event"]
+            for sample in (local, remote):
+                assert sample["server_time"] - sample["sessions"][0]["active_since"] == 215, sample
+                assert sample["state_revision"] == original["state_revision"]
+            assert frame["server_time"] == 10090.0, "relay mutated received frame"
+
+            # Coalescing replaces the sample and its age together. An idle
+            # transition followed by a new block starts a new timer.
+            runner_module.publish_state({"type": "sessions", "server_time": 10210.0,
+                "sessions": [{"id": 1, "status": "idle", "active_since": None}]})
+            clock[0] += 20
+            runner_module.publish_state({"type": "sessions", "server_time": 10230.0,
+                "sessions": [{"id": 1, "status": "running", "active_since": 10230.0}]})
+            clock[0] += 4
+            await drain(second, 4)
+            sample = second.messages[3]
+            assert sample["server_time"] - sample["sessions"][0]["active_since"] == 4, sample
+        finally:
+            runner_module.updates_detach(second)
+
+
 async def exercise_state_topic_isolation(state_stream_module, runner_module) -> None:
     """A slow or failed probe cannot hold independent node state behind it."""
     slow_started = asyncio.Event()
@@ -5798,6 +5874,7 @@ async def main() -> None:
         exercise_restore_stream_clear(controller_backends, runner)
         exercise_update_revision_epoch(runner)
         await exercise_update_stream_ordering(runner)
+        await exercise_activity_snapshot_delivery(runner)
         await exercise_state_topic_isolation(state_stream, runner)
         await exercise_shutdown_broadcast(runner)
         await exercise_queue_persistence(runner, db)
