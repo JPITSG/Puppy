@@ -4,7 +4,8 @@ One ``opencode acp`` subprocess is started per Puppy turn.  Puppy initializes
 the JSON-RPC stream, creates or resumes the OpenCode session, selects the
 node-configured model/variant, then sends one prompt.  Provider authentication,
 native history, project rules, plugins, and credentials remain entirely owned
-by OpenCode.
+by OpenCode. Maintenance turns use its public local HTTP API through
+``opencode serve``; ordinary prompts continue to use ACP.
 
 The model catalog is intentionally discovered from ``opencode models
 --verbose``. OpenCode can route many providers, so Puppy never ships provider
@@ -22,6 +23,7 @@ from urllib.parse import quote
 from puppy import __version__
 from puppy.drivers import base as driver_base
 from puppy.drivers.base import Driver, clean_env
+from puppy.drivers.opencode_compact import NativeCompaction, serve_command
 from puppy.user_paths import service_home
 
 ACP_PROTOCOL = 1
@@ -444,20 +446,32 @@ class OpenCodeDriver(Driver):
             order.index(item["value"].lower()) if item["value"].lower() in order else 99,
             item["value"].lower()))
 
+    def tool_options(self):
+        return [{"value": "compact", "label": "Compact context",
+                 "hint": "Summarize the conversation so far into a shorter context"}]
+
+    def tool_plan(self, tool, session, turns):
+        if tool != "compact":
+            raise driver_base.ToolUnavailable("{} does not support {}".format(self.label, tool))
+        return {"run": True, "params": {}}
+
     def build_cmd(self, session, first_turn, prompt, pinned_id, browser_mcp=None,
                   system_prompt="", terminal_mcp=None, vnc_mcp=None,
-                  spawn_mcp=None, session_mcp=None):
+                  spawn_mcp=None, session_mcp=None, tool=None):
+        if driver_base.tool_name(tool):
+            return serve_command(self.resolved_binary() or self.binary)
         return [self.resolved_binary() or self.binary,
                 "acp", "--cwd", session["cwd"]]
 
     def build_env(self, session, first_turn, prompt, pinned_id, browser_mcp=None,
                   system_prompt="", terminal_mcp=None, vnc_mcp=None,
-                  spawn_mcp=None, session_mcp=None):
-        guidance = [str(system_prompt or "").strip()]
+                  spawn_mcp=None, session_mcp=None, tool=None):
+        maintenance = bool(driver_base.tool_name(tool))
+        guidance = [] if maintenance else [str(system_prompt or "").strip()]
         guidance.extend(str(item.get("engine_guidance") or "").strip()
                         for item in (browser_mcp, terminal_mcp, vnc_mcp,
                                      spawn_mcp, session_mcp)
-                        if item)
+                        if item and not maintenance)
         agent = {
             "description": "Puppy managed interactive coding session",
             "mode": "primary",
@@ -491,7 +505,10 @@ class OpenCodeDriver(Driver):
 
     def turn_context(self, session, first_turn, prompt, pinned_id, browser_mcp=None,
                      system_prompt="", terminal_mcp=None, vnc_mcp=None,
-                     spawn_mcp=None, session_mcp=None):
+                     spawn_mcp=None, session_mcp=None, tool=None):
+        if driver_base.tool_name(tool):
+            return {"tool": driver_base.tool_name(tool),
+                    "transport": NativeCompaction(session)}
         return {
             "phase": "initialize",
             "first_turn": bool(first_turn),
@@ -516,7 +533,12 @@ class OpenCodeDriver(Driver):
             "usage_baseline": None,
         }
 
-    def initial_stdin(self, session, prompt):
+    def turn_transport(self, ctx):
+        return ctx.get("transport") if isinstance(ctx, dict) else None
+
+    def initial_stdin(self, session, prompt, tool=None):
+        if driver_base.tool_name(tool):
+            return []
         return [_rpc(_ID_INITIALIZE, "initialize", {
             "protocolVersion": ACP_PROTOCOL,
             "clientInfo": {"name": "puppy", "title": "Puppy", "version": __version__},

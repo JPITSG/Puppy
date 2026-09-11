@@ -761,15 +761,30 @@ reconcile.
 
 Nodes advertising `session-tools` accept `POST /api/sessions/{sid}/tool` with
 `{"tool": "compact"}` or `{"tool": "undo"}`, and every entry of `/api/engines`
-carries the additive `tool_options` list naming what that engine can run
-(OpenCode's ACP surface offers neither, so its list is empty). Both actions
-are engine-native: Claude compacts by running its `/compact` local command
+carries the additive `tool_options` list naming what that engine can run.
+OpenCode offers compaction; Claude and Codex offer both actions. All are
+engine-native: Claude compacts by running its `/compact` local command
 inside an ordinary stream-json turn and undoes by resuming the next prompt
 with `--resume-session-at`/`--resume-drops-turn`, which branches its
 transcript so the dropped turn stays orphaned for every later resume; Codex
 compacts with `thread/compact/start` (a turn of its own) and undoes with
-`thread/revert`. Undo is conversation-only on both engines: files changed by
-the dropped turn are left alone.
+`thread/revert`. OpenCode compacts through its public HTTP summarize API in
+a temporary, authenticated loopback server, bypassing custom slash commands.
+Undo is conversation-only on both engines that offer it: files changed by the
+dropped turn are left alone.
+
+OpenCode's HTTP success reply alone does not prove compaction succeeded.
+Puppy verifies a new, completed, nonempty summary linked to this operation's
+manual compaction request. Before submitting that request it durably detaches
+the native session ID, restoring it only after verification. A failure, stop,
+timeout or crash after this checkpoint therefore leaves fresh native context
+for the next prompt, seeded by Puppy's existing bounded transcript handoff;
+queued work is held for explicit resend. A preflight refusal leaves the native
+context unchanged. The native history and Puppy's transcript remain stored.
+The maintenance server and its children end with the turn, including when
+the owning process is killed. No new persisted format or dependency is needed.
+See [the compaction contract](../docs/opencode-compaction.md) for verification,
+limits and reproducible tests.
 
 Compaction while a turn runs or prompts wait joins the message queue as a
 runnable, additive `{kind:"tool"}` row tagged with the engine in force at the

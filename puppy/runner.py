@@ -2497,6 +2497,10 @@ class SessionHub:
         """
         if self._interrupt_protocol_sent:
             return True
+        transport = driver.turn_transport(self._driver_ctx)
+        if transport is not None and transport.interrupt():
+            self._interrupt_protocol_sent = True
+            return True
         proc = self.proc
         if proc is None or proc.stdin is None or proc.stdin.is_closing():
             return False
@@ -2884,6 +2888,8 @@ class SessionHub:
         retry_delay = None   # set when this attempt ended in a transient failure
         engine_ran = False
         descriptor = None
+        transport = None
+        context_checkpoint = ""
         self._block_status = "error"   # until a result says otherwise
         try:
             session = db.get_session(self.id)
@@ -3041,6 +3047,9 @@ class SessionHub:
                                       **driver_kwargs)
             if not isinstance(ctx, dict):
                 ctx = {}
+            transport = driver.turn_transport(ctx)
+            if transport is not None:
+                env.update(transport.environment())
             self._driver_ctx = ctx
             self._publish_steering_state(session)
 
@@ -3049,7 +3058,9 @@ class SessionHub:
                 self._emit("error", {"text": f"Working directory missing: {cwd}"})
                 return
 
-            log.info("session %s turn: %s", self.id, " ".join(argv[:8]) + " ...")
+            log.info("session %s turn: %s", self.id,
+                     "{} {}".format(driver.label, tool) if transport is not None
+                     else " ".join(argv[:8]) + " ...")
             turn_started = time.monotonic()
             self.proc = await asyncio.create_subprocess_exec(
                 *argv, cwd=cwd, env=env,
@@ -3085,7 +3096,18 @@ class SessionHub:
             sq_grace_until = None
 
             def settle_result(data) -> None:
-                nonlocal got_result, retry_delay, sq_grace_until
+                nonlocal got_result, retry_delay, sq_grace_until, context_checkpoint
+                if context_checkpoint and data.get("ok"):
+                    if data.get("context_verified") is not True or \
+                            data.get("native_session_id") != context_checkpoint:
+                        data = dict(data, ok=False, stop_reason="error",
+                                    error="The engine did not verify its compacted context")
+                    else:
+                        # The id is detached BEFORE native mutation. A crash
+                        # at any earlier point therefore cannot resume an
+                        # incomplete/empty native summary after restart.
+                        db.touch_session(self.id, native_session_id=context_checkpoint)
+                        context_checkpoint = ""
                 got_result = True
                 if not data.get("ok") and not tool and \
                         driver_base.looks_transient_auth(data.get("error")) and \
@@ -3182,18 +3204,24 @@ class SessionHub:
                     read_cap = min(read_cap,
                                    max(0.5, sq_grace_until - time.time()))
                 try:
-                    line = await asyncio.wait_for(self.proc.stdout.readline(), timeout=read_cap)
+                    if transport is not None:
+                        actions = await asyncio.wait_for(
+                            transport.read_actions(self.proc), timeout=read_cap)
+                        line = actions is not None
+                    else:
+                        line = await asyncio.wait_for(self.proc.stdout.readline(), timeout=read_cap)
                 except asyncio.TimeoutError:
                     continue
                 if not line:
                     self._turn_stopping = True
                     self._publish_steering_state(session)
                     break
-                try:
-                    actions = driver.parse_line(line.decode(errors="replace").strip(), ctx)
-                except Exception as e:
-                    log.exception("parse_line failed: %s", e)
-                    continue
+                if transport is None:
+                    try:
+                        actions = driver.parse_line(line.decode(errors="replace").strip(), ctx)
+                    except Exception as e:
+                        log.exception("parse_line failed: %s", e)
+                        continue
                 for act in actions:
                     a = act.get("a")
                     if a == "event":
@@ -3235,7 +3263,21 @@ class SessionHub:
                             "tasks": [dict(row) for row in tasks]})
                         self._publish_background()
                         self._publish_steering_state(session)
-                    elif a == "native_id":
+                    elif a == "context_checkpoint":
+                        nid = act.get("id")
+                        ack = act.get("ack")
+                        if isinstance(ack, asyncio.Future) and ack.cancelled():
+                            # The transport stopped before it received the
+                            # checkpoint; it was never allowed to mutate.
+                            continue
+                        if not tool or transport is None or context_checkpoint or \
+                                not nid or nid != session.get("native_session_id") or \
+                                not isinstance(ack, asyncio.Future) or ack.done():
+                            raise RuntimeError("Invalid native context checkpoint")
+                        db.touch_session(self.id, native_session_id="")
+                        context_checkpoint = nid
+                        ack.set_result(None)
+                    elif a == "native_id" and not context_checkpoint:
                         nid = act.get("id") or ""
                         if nid and nid != session.get("native_session_id"):
                             session["native_session_id"] = nid
@@ -3343,6 +3385,20 @@ class SessionHub:
             except Exception:
                 pass
         finally:
+            if transport is not None:
+                await transport.close()
+            if context_checkpoint:
+                # The old native session may already contain a bad summary.
+                # Do not run queued prompts into it or silently spend them on
+                # a fresh context. No new persisted format is needed: empty
+                # native ids and held work already survive a restart.
+                self._park_queue()
+                self._emit("info", {
+                    "subtype": "context_reset",
+                    "text": "Compaction could not be verified. Queued work is held; "
+                            "the next prompt will start fresh engine context from "
+                            "Puppy's transcript.",
+                })
             self._reject_unacknowledged_steers(
                 "the active turn stopped before the engine acknowledged steering")
             self._active_prompt_text = ""

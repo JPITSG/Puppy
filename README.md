@@ -158,9 +158,13 @@ reading anywhere further up is never pulled away from it.
 - **Switch engines any time.** A session can move between installed engines.
   The new engine starts a fresh native session seeded with a handoff of the
   conversation so far, in the same working directory.
-- **Session tools.** Claude and Codex sessions can **Compact context** using
-  the engine's own compaction, and **Undo last turn** to drop the last prompt
-  and reply from the engine's memory without touching your files.
+- **Session tools.** Claude, Codex and OpenCode sessions can **Compact context**
+  using the engine's own compaction. Claude and Codex also offer **Undo last
+  turn** to drop the last prompt and reply from the engine's memory without
+  touching your files. OpenCode verifies the native summary. If an operation
+  begins changing context and is interrupted or cannot be verified, Puppy
+  holds queued work and prepares fresh engine context from its bounded
+  transcript handoff for your next prompt.
 - **Pins, colors, archive, drag-and-drop.** Sessions carry a color, can be
   pinned to the top, archived out of the way, renamed, and reordered by
   dragging. New session preselects a least-used color across the console's

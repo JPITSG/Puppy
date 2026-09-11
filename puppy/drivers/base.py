@@ -53,6 +53,13 @@ Actions returned by parse_line() (consumed by the runner):
     {"a": "event", "kind": ..., "data": {...}}      persist + broadcast
     {"a": "transient", "msg": {...}}                 broadcast only (deltas, status)
     {"a": "native_id", "id": "..."}                  store engine-native session id
+    {"a": "context_checkpoint", "id": "...", "ack": Future}
+                                                     maintenance only: detach this native
+                                                     id durably, then acknowledge before
+                                                     the driver may mutate it. Only a
+                                                     verified successful result restores
+                                                     it; failure/crash starts fresh with
+                                                     a transcript handoff and holds work.
     {"a": "model", "model": "..."}                   engine-confirmed effective model;
                                                      the runner asks the driver
                                                      whether requested/reported
@@ -106,6 +113,28 @@ def _configured_timer_seconds(name: str, _fallback: float) -> float:
     # persisted setting is the runtime source of truth.
     from puppy import config
     return config.timer_seconds(name)
+
+
+class TurnTransport:
+    """Optional asynchronous transport for a runner-owned CLI process.
+
+    The runner still owns spawn, stderr, timeout, process group and queue.
+    read_actions returns normalized actions, or None at EOF; cancelling one
+    read must not cancel an in-flight native request. close joins every task
+    and releases resources before the runner can advance the queue.
+    """
+
+    def environment(self) -> dict:
+        return {}
+
+    async def read_actions(self, process):
+        raise NotImplementedError
+
+    def interrupt(self) -> bool:
+        return False
+
+    async def close(self) -> None:
+        pass
 
 
 class ModelCatalogResult:
@@ -719,6 +748,15 @@ class Driver:
     def initial_stdin(self, session: dict, prompt: str, tool=None) -> list:
         """JSON objects to write to stdin right after spawn (stdin-stream engines)."""
         return []
+
+    def turn_transport(self, ctx):
+        """An optional TurnTransport stored in this turn's context, else None.
+
+        Ordinary turns keep their existing stdin/parse_line contract. A
+        transport uses the same normalized actions for a native API that
+        cannot be driven solely by parsing stdout.
+        """
+        return None
 
     def parse_line(self, line: str, ctx: dict) -> list:
         """One stdout line -> list of actions. ctx is a per-turn scratch dict."""

@@ -139,6 +139,20 @@ function engineCatalog(fast = false) {
   const view = sessionView();
   state.views.chat = view;
   const anchor = mount(el("button"));
+  // The same composer on an updated OpenCode node enables compact alone;
+  // an older node's empty offer must continue to disable it.
+  const opencode = { key: "opencode", label: "OpenCode", tool_options: [] };
+  state.engines.push(opencode);
+  const nativeView = sessionView();
+  nativeView.session.engine = "opencode";
+  state.views.native = nativeView;
+  const nativeMenu = toolsMenu(nativeView, anchor);
+  assert.equal(button(nativeMenu, "Compact context").disabled, true);
+  opencode.tool_options = [{ value: "compact" }]; update();
+  assert.ok(nativeMenu.isConnected);
+  assert.equal(button(nativeMenu, "Compact context").disabled, false);
+  assert.equal(button(nativeMenu, "Undo last turn").disabled, true);
+  nativeMenu.remove(); delete state.views.native;
   const menu = toolsMenu(view, anchor);
   assert.equal(button(menu, "Undo last turn").disabled, true);
   assert.equal(button(menu, "Fast mode").disabled, true);
