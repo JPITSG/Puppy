@@ -7095,6 +7095,7 @@ async function readHostNodes(sequence) {
 async function readHostLatency(sequence) {
   if (!state.backends.length) {
     hostPanel.latency = [];
+    hostPanel.pings.clear();
     hostPanel.latencyError = "";
     return;
   }
@@ -7102,16 +7103,19 @@ async function readHostLatency(sequence) {
     const payload = await api(0, "backends/latency", { timeoutMs: 9000 });
     if (sequence !== hostPanel.sequence) return;
     const rows = Array.isArray(payload && payload.backends) ? payload.backends : [];
-    const at = Number(payload && payload.measured_at) || Date.now() / 1000;
     hostPanel.latency = rows;
     hostPanel.latencyError = "";
+    hostPanel.pings.clear();
     for (const row of rows) {
-      if (!row || row.ok !== true || typeof row.ms !== "number") continue;
-      const series = hostPanel.pings.get(row.id) || [];
-      series.push([at, Math.max(0, row.ms)]);
-      if (series.length > HOST_PINGS) series.splice(0, series.length - HOST_PINGS);
+      if (!row || row.offline || !Array.isArray(row.history)) continue;
+      const series = row.history.slice(-HOST_PINGS).filter(point =>
+        Array.isArray(point) && point.length === 2 &&
+        point.every(value => typeof value === "number" && Number.isFinite(value)) &&
+        point[1] >= 0);
       hostPanel.pings.set(row.id, series);
     }
+    // Cached latency can paint immediately, even if a node's process read is slow.
+    if (hostPanel.open) renderHostPanel();
   } catch (error) {
     if (sequence !== hostPanel.sequence) return;
     hostPanel.latencyError = error.message || "could not measure latency";
@@ -7350,9 +7354,8 @@ function hostLatencyRow(row) {
   line.appendChild(name);
   const series = hostPanel.pings.get(row.id) || [];
   if (series.length > 1) {
-    /* A measurement exists only while someone is watching, so the sparkline
-       is the last measurements side by side rather than a clock: a spell
-       with the tab hidden is not a gap in the link, and an unbroken line on
+    /* The controller samples even while nobody is watching. The sparkline
+       shows its bounded history side by side, and an unbroken line on
        its floor is what a steady link should look like. Its ceiling is the
        peak with a little headroom, so a 1 ms link still has a visible shape
        and one slow round trip reads as the spike it was. */
@@ -7376,8 +7379,9 @@ function hostLatencySection() {
   if (!paired.length) return null;
   /* The controller reports the node it knows is offline; the box drops it,
      exactly as it drops that node's chart and its processes. */
+  const pairedIds = new Set(paired.map(backend => backend.id));
   const rows = hostPanel.latency.filter(row => row && typeof row === "object" &&
-    !row.offline && state.remoteOk[row.id] !== false);
+    pairedIds.has(row.id) && !row.offline && state.remoteOk[row.id] !== false);
   const content = [];
   if (hostPanel.latencyError)
     content.push(el("div", "host-empty", hostPanel.latencyError));

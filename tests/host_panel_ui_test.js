@@ -429,6 +429,47 @@ async function backends() {
   assert.equal(rows(app.panel(), "host-tree").length, 2);
 }
 
+/* ---- a first read already has a chart, independent of slow process reads ---- */
+async function cachedLatency() {
+  const history = Array.from({ length: 60 }, (_, i) => [1000 + i * 4, i + 1]);
+  let payload = { backends: [{ id: 2, name: "Workshop", ok: true, ms: 60, history }] };
+  let finishMetrics;
+  const slowMetrics = new Promise(resolve => { finishMetrics = resolve; });
+  const app = consoleFor({
+    backends: [{ id: 2, name: "Workshop", capabilities: [] }],
+    remoteOk: { 2: true },
+    answers: { "0:host/metrics": () => slowMetrics,
+      "0:backends/latency": () => payload },
+  });
+  app.context.openHostPanel();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.ok(app.panel().querySelector(".host-chart.spark"));
+  assert.equal(app.hostPanel.pings.get(2).length, 40);
+  assert.equal(app.hostPanel.pings.get(2)[0][0], history[20][0]);
+  await app.context.readHostLatency(app.hostPanel.sequence);
+  assert.equal(app.hostPanel.pings.get(2).length, 40); // replacement, never duplicated
+  app.context.closeHostPanel();
+  finishMetrics(metrics());
+  await new Promise(resolve => setTimeout(resolve, 0));
+  app.context.openHostPanel();
+  assert.ok(app.panel().querySelector(".host-chart.spark"));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  payload = { backends: [{ id: 2, name: "Workshop", ok: false, offline: true, history: [] }] };
+  await app.context.readHostLatency(app.hostPanel.sequence);
+  assert.equal(app.hostPanel.pings.size, 0);
+  payload = { backends: [{ id: 2, name: "Workshop", ok: true, ms: 3,
+    history: [[2000, 2], [2004, 3]] }] };
+  await app.context.readHostLatency(app.hostPanel.sequence);
+  assert.equal(app.hostPanel.pings.get(2).length, 2);
+  assert.ok(app.panel().querySelector(".host-chart.spark"));
+  app.state.backends = [];
+  app.context.renderHostPanel();
+  assert.equal(rows(app.panel(), "host-ping").length, 0);
+  await app.context.readHostLatency(app.hostPanel.sequence);
+  assert.equal(app.hostPanel.pings.size, 0);
+  app.context.closeHostPanel();
+}
+
 /* ---- every backend unreachable: the whole latency section goes ---- */
 async function allUnreachable() {
   const app = consoleFor({
@@ -491,6 +532,7 @@ async function main() {
   await liveSamples();
   await processTree();
   await backends();
+  await cachedLatency();
   await allUnreachable();
   await soloInstance();
   await emptyStates();

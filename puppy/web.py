@@ -2042,6 +2042,7 @@ def build_app(runtime_web: dict = None,
     backends.register(app)
     workspace_links.register(app)
     app.on_startup.append(backends.start_health_worker)
+    app.on_startup.append(backends.start_latency_worker)
     app.on_startup.append(backends.start_auto_upgrade_worker)
     app.on_startup.append(workspace_links.start_worker)
     app.on_startup.append(notify.start_worker)
@@ -2082,6 +2083,7 @@ def build_app(runtime_web: dict = None,
         try:
             await bind_verify.close_all(app)
             await backends.stop_auto_upgrade_worker(app)
+            await backends.stop_latency_worker(app)
             await backends.stop_health_worker(app)
             await workspace_links.stop_worker(app)
             await notify.stop_worker(app)

@@ -4,6 +4,7 @@ HTTP and websocket traffic to them, authenticated with their api_token."""
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 import json
 import logging
 from pathlib import Path
@@ -260,6 +261,8 @@ def _set_health(bid: int, state: str, reason: str = "") -> bool:
     bid = int(bid)
     reason = str(reason or "")[:500]
     previous = _health.get(bid)
+    if previous is None or previous.get("state") != state:
+        _forget_latency(bid)
     _health[bid] = {
         "state": state,
         "reason": reason,
@@ -294,6 +297,7 @@ def _mark_backend_offline(bid: int, reason: str) -> bool:
 
 def _clear_backend_health(bid: int) -> None:
     bid = int(bid)
+    _forget_latency(bid)
     _health.pop(bid, None)
     _health_retry_after.pop(bid, None)
     _health_retry_delay.pop(bid, None)
@@ -780,6 +784,8 @@ def reset_auto_upgrade_schedule() -> None:
     _auto_upgrade_last_errors.clear()
     _active_urls.clear()
     _url_cursors.clear()
+    _latency.clear()
+    _wake_latency()
     _health.clear()
     _health_retry_after.clear()
     _health_retry_delay.clear()
@@ -1051,8 +1057,70 @@ async def probe_configured_backend(backend: dict, timeout: float = 8.0) -> dict:
 # measurement never moves that verdict - only the health worker and the
 # explicit Test button may.
 LATENCY_TIMEOUT_SECONDS = 6.0
-LATENCY_CACHE_SECONDS = 1.5
-_latency = {"at": 0.0, "payload": None, "task": None}
+LATENCY_INTERVAL_SECONDS = 4.0
+LATENCY_HISTORY_SAMPLES = 40
+_latency = {}                 # online backend id -> bounded, in-memory observations
+_latency_task = None
+_latency_wake = None
+_latency_measure_task = None
+
+
+def _wake_latency() -> None:
+    if _latency_wake is not None:
+        _latency_wake.set()
+
+
+def _forget_latency(bid: int) -> None:
+    # A recovery starts a new series, never a line through an outage. Removing
+    # the entry also prevents an in-flight pre-outage ping from repopulating it.
+    _latency.pop(bid, None)
+    _wake_latency()
+
+
+def _latency_entry(backend: dict):
+    bid = int(backend["id"])
+    if not backend_is_online(bid):
+        _latency.pop(bid, None)
+        return None
+    # Failover, connection edits and restored/reused ids must not borrow
+    # observations of a different endpoint. This key is never serialized.
+    key = (tuple(_ordered_backend_urls(backend)), backend["token"],
+           backend.get("tls_fingerprint") or "")
+    entry = _latency.get(bid)
+    if entry is None or entry["key"] != key:
+        entry = {"key": key, "at": None, "row": None,
+                 "history": deque(maxlen=LATENCY_HISTORY_SAMPLES)}
+        _latency[bid] = entry
+    return entry
+
+
+def _latency_entries() -> list:
+    configured = [get_backend(int(item["id"]))
+                  for item in db.query("SELECT id FROM backends ORDER BY id")]
+    online = {int(row["id"]) for row in configured
+              if row is not None and backend_is_online(int(row["id"]))}
+    for bid in list(_latency):
+        if bid not in online:
+            _latency.pop(bid)
+    return [(backend, _latency_entry(backend)) for backend in configured
+            if backend is not None]
+
+
+def latency_payload() -> dict:
+    """Read only: opening a console never starts or waits for a network probe."""
+    rows = []
+    for backend, entry in _latency_entries():
+        bid = int(backend["id"])
+        base = {"id": bid, "name": str(backend.get("name") or bid)}
+        if entry is None:
+            rows.append(dict(base, ok=False, offline=True, history=[],
+                             error=_availability(bid).get("reason") or
+                             "backend is unavailable"))
+        elif entry["row"] is not None:
+            rows.append(dict(entry["row"], **base, history=list(entry["history"])))
+    return {"ok": True, "measured_at": max(
+        (row["measured_at"] for row in rows if "measured_at" in row), default=None),
+        "backends": rows}
 
 
 async def _measure_latency(backend: dict) -> dict:
@@ -1089,34 +1157,78 @@ async def _measure_latency(backend: dict) -> dict:
 
 
 async def _measure_all_latency() -> dict:
-    configured = [get_backend(int(item["id"])) for item in list_backends()]
-    rows = await asyncio.gather(*(
-        _measure_latency(backend) for backend in configured if backend is not None))
-    payload = {"ok": True, "measured_at": time.time(), "backends": list(rows)}
-    _latency.update({"at": time.monotonic(), "payload": payload})
-    return payload
+    async def sample(backend, entry):
+        now = time.monotonic()
+        if entry is None or (entry["at"] is not None and
+                             now - entry["at"] < LATENCY_INTERVAL_SECONDS):
+            return
+        row = await _measure_latency(backend)
+        # Reconcile after the await: removal, a health transition, restore or
+        # connection edit may have invalidated this observation while it ran.
+        bid = int(backend["id"])
+        current = get_backend(bid)
+        if current is None:
+            _latency.pop(bid, None)
+            return
+        if _latency_entry(current) is not entry:
+            return
+        row["measured_at"] = time.time()
+        entry["at"] = now
+        entry["row"] = row
+        if row.get("ok") is True:
+            entry["history"].append([row["measured_at"], row["ms"]])
+
+    await asyncio.gather(*(sample(backend, entry)
+                           for backend, entry in _latency_entries()))
+    return latency_payload()
 
 
 async def measure_latency() -> dict:
-    """One shared measurement per moment, however many consoles are watching."""
-    now = time.monotonic()
-    cached = _latency["payload"]
-    if cached is not None and 0 <= now - _latency["at"] < LATENCY_CACHE_SECONDS:
-        return cached
-    task = _latency["task"]
-    if task is None or task.done():
-        task = asyncio.ensure_future(_measure_all_latency())
-        _latency["task"] = task
-    return await asyncio.shield(task)
+    """Coalesce sampler passes, with one due measurement per online backend."""
+    global _latency_measure_task
+    if _latency_measure_task is None or _latency_measure_task.done():
+        _latency_measure_task = asyncio.create_task(_measure_all_latency())
+    return await asyncio.shield(_latency_measure_task)
+
+
+async def _latency_loop() -> None:
+    while True:
+        _latency_wake.clear()
+        started = time.monotonic()
+        try:
+            await measure_latency()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("backend latency sampling failed")
+        try:
+            await asyncio.wait_for(_latency_wake.wait(), timeout=max(
+                0.1, LATENCY_INTERVAL_SECONDS - (time.monotonic() - started)))
+        except asyncio.TimeoutError:
+            pass
+
+
+async def start_latency_worker(_app: web.Application) -> None:
+    global _latency_task, _latency_wake
+    if _latency_task is not None and not _latency_task.done():
+        return
+    _latency.clear()
+    _latency_wake = asyncio.Event()
+    _latency_task = asyncio.create_task(_latency_loop())
+
+
+async def stop_latency_worker(_app: web.Application = None) -> None:
+    global _latency_task, _latency_wake, _latency_measure_task
+    tasks = [task for task in (_latency_task, _latency_measure_task) if task is not None]
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    _latency_task = _latency_wake = _latency_measure_task = None
+    _latency.clear()
 
 
 async def h_latency(request: web.Request):
-    try:
-        return web.json_response(await measure_latency())
-    except Exception as exc:
-        log.warning("backend latency measurement failed", exc_info=True)
-        return web.json_response(
-            {"error": "could not measure backend latency: {}".format(exc)}, status=500)
+    return web.json_response(latency_payload())
 
 
 def _metadata(remote: dict) -> tuple:

@@ -95,10 +95,15 @@ No persisted shape changes: the existing session changes from `temporary` to
 Host activity is additive `host-metrics-v1`: both execution runtimes serve
 `GET /api/host/metrics`, returning that node's in-memory CPU history, its
 cores/load/memory/uptime and the trimmed process tree below its own Puppy
-process. The controller's `GET /api/backends/latency` times its already-online
-backends. Neither adds persisted state, changes a backup shape, or moves an
-availability verdict; a node that does not advertise the capability is simply
-not asked.
+process. The controller samples already-online backends every four seconds,
+independently of viewers. Its `GET /api/backends/latency` returns cached readings
+without probing: each measured row includes `measured_at` and `history` (up to
+40 successful `[seconds, milliseconds]` pairs). Offline rows have empty history;
+newly online nodes collect a fresh series. Removal, connection changes and
+snapshot restore discard old observations, including in-flight results. Neither
+surface adds persisted state, changes a backup shape, or moves an availability
+verdict. Host metrics requests require the capability; latency uses the existing
+ping route and is controller-only.
 
 Cancellation is additive: `operation-cancel-v1` covers audited preparation
 requests and authenticated operation controls; `engine-upgrade-cancel`,

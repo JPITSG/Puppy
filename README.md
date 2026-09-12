@@ -540,8 +540,13 @@ history around it.
   draws its own CPU over the last quarter of an hour - the instance's own chart
   keeps moving with its live reading - beside its cores, load, memory and
   uptime. Where backends are paired, the instance
-  times the round trip to each of them itself and keeps a sparkline of the last
-  measurements side by side, scaled to their own peak so one slow round trip
+  samples the round trip to each reachable backend every four seconds, even
+  with the box closed or no browsers connected. It keeps only the last 40
+  successful measurements per backend in memory, so opening the box loads an
+  already populated sparkline. A restart or newly online backend starts a fresh
+  series; offline, removed or changed connections lose their old readings, and
+  recovery wakes the sampler immediately. The measurements sit side by side,
+  scaled to their own peak so one slow round trip
   reads as the spike it was. Only reachable nodes appear: an unavailable
   backend is left out of the box entirely - no chart, no round trip, no
   processes - rather than being probed, and with none of them reachable the

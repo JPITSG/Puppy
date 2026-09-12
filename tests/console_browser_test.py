@@ -26,7 +26,8 @@ ROOT = private_root("console-")
 os.environ["PUPPY_DATA"] = str(ROOT / "data")
 
 from aiohttp import web
-from puppy import auth, browser, config, db, notices, runner, search, session_tasks, session_aliases, terminal
+from aiohttp.test_utils import TestServer
+from puppy import auth, backends, browser, config, db, notices, runner, search, session_tasks, session_aliases, terminal
 from puppy import web as webui
 from puppy.drivers import all_drivers
 
@@ -2253,7 +2254,34 @@ async def host_section_checks(instance, capture=False):
             set(value){Object.assign(window.sectionOk, value);}});
         hostPanel.latency=[{id:998,name:'Workshop',ok:true,ms:2.4}];
         renderHostPanel(); true""")
+    # Warm the controller's real sampler without a panel read, then let the
+    # first authenticated latency GET draw that history in both viewport sizes.
+    peer = web.Application()
+    async def ping(_request):
+        return web.json_response({"ok": True})
+    peer.router.add_get("/api/ping", ping)
+    server = TestServer(peer)
+    await server.start_server()
+    url = str(server.make_url("")).rstrip("/")
+    db.execute("INSERT INTO backends(id,name,url,urls,token,created_at) VALUES(?,?,?,?,?,?)",
+               (998, "Workshop", url, json.dumps([url]), "demo-token", time.time()))
+    backends._mark_backend_online(998)
+    interval = backends.LATENCY_INTERVAL_SECONDS
+    backends.LATENCY_INTERVAL_SECONDS = .02
+    await backends.start_latency_worker(None)
     try:
+        deadline = time.monotonic() + 3
+        while len(backends._latency.get(998, {}).get("history", [])) < 3:
+            assert time.monotonic() < deadline, "latency worker did not collect history"
+            await asyncio.sleep(.01)
+        backends.LATENCY_INTERVAL_SECONDS = interval
+        drawn = await evaluate(instance, """(async () => {
+            hostPanel.pings.clear(); hostPanel.latency=[];
+            await readHostLatency(hostPanel.sequence);
+            return {count:hostPanel.pings.get(998)?.length,
+                chart:!!document.querySelector('.host-ping .host-chart.spark')};
+        })()""")
+        assert drawn["count"] >= 3 and drawn["chart"], drawn
         for width, height in [(1440, 900), (390, 844)]:
             await instance.call("Emulation.setDeviceMetricsOverride", {
                 "width": width, "height": height, "deviceScaleFactor": 1,
@@ -2338,6 +2366,12 @@ async def host_section_checks(instance, capture=False):
                     (BASE / "data" / ("host-sections-" + name + "-" + theme + ".png")).write_bytes(
                         base64.b64decode(shot["data"]))
     finally:
+        backends.LATENCY_INTERVAL_SECONDS = interval
+        await backends.stop_latency_worker()
+        db.execute("DELETE FROM backends WHERE id=998")
+        backends._clear_backend_health(998)
+        await server.close()
+        await backends.close_client()
         await instance.call("Emulation.setDeviceMetricsOverride", {
             "width": 1440, "height": 900, "deviceScaleFactor": 1,
             "mobile": False}, session=instance.page_session)
@@ -2347,7 +2381,7 @@ async def host_section_checks(instance, capture=False):
             delete window.sectionOk; delete window.sectionOkView;
             hostPanel.collapsed.clear();
             $('app').classList.remove('side-open'); applyTheme('dark'); renderHostPanel(); true""")
-    print("PASS: independent host section chevrons, backend spacing, live updates during slides, keyboard focus and Enter/Space on desktop and phone in both themes", flush=True)
+    print("PASS: background latency history on the first panel read, independent host section chevrons, backend spacing, live updates during slides, keyboard focus and Enter/Space on desktop and phone in both themes", flush=True)
 
 
 async def host_panel_checks(instance, capture=False):

@@ -244,13 +244,18 @@ class _RouterlessApp:
 
 async def routes(factory, proc_root):
     app = factory()
+    assert (backends.start_latency_worker in app.on_startup) == (factory is webui.build_app)
     app.on_startup.clear()
     app.on_shutdown.clear()
     app.on_cleanup.clear()
     assert protocol.HOST_METRICS_CAPABILITY in app["puppy_capabilities"]
     async with TestClient(TestServer(app)) as client:
         assert (await client.get("/api/host/metrics")).status == 401
+        if factory is webui.build_app:
+            assert (await client.get("/api/backends/latency")).status == 401
         headers = {"X-Puppy-Token": config.get("auth.api_token")}
+        latency_response = await client.get("/api/backends/latency", headers=headers)
+        assert latency_response.status == (200 if factory is webui.build_app else 404)
         response = await client.get("/api/host/metrics", headers=headers)
         assert response.status == 200
         payload = await response.json()
@@ -276,10 +281,14 @@ async def routes(factory, proc_root):
 
 async def latency():
     """The controller times each backend itself, and never probes an offline one."""
-    served = {"pings": 0}
+    served = {"pings": 0, "block": False}
+    entered, release = asyncio.Event(), asyncio.Event()
 
     async def ping(_request):
         served["pings"] += 1
+        if served["block"]:
+            entered.set()
+            await release.wait()
         return web.json_response({"ok": True, "protocol": protocol.API_PROTOCOL,
                                   "capabilities": [], "version": "0.0.0"})
 
@@ -308,7 +317,6 @@ async def latency():
     # one shared measurement per moment, however many consoles are watching
     await asyncio.gather(backends.measure_latency(), backends.measure_latency())
     assert served["pings"] == 1
-    backends._latency.update({"at": 0.0, "payload": None})
     # an offline node is reported from the controller's verdict, never probed
     backends._mark_backend_offline(rows["reachable"], "connection refused")
     payload = await backends.measure_latency()
@@ -316,9 +324,102 @@ async def latency():
     assert measured["reachable"]["offline"] is True
     assert measured["reachable"]["error"] == "connection refused"
     assert served["pings"] == 1
+    assert rows["reachable"] not in backends._latency
+    backends._mark_backend_online(rows["reachable"])
+    payload = await backends.measure_latency()
+    recovered = next(row for row in payload["backends"] if row["id"] == rows["reachable"])
+    assert len(recovered["history"]) == 1 and served["pings"] == 2
+
+    # Neither repeated reads nor multiple viewers add pings or duplicate history.
+    count = served["pings"]
+    for _ in range(5):
+        response = await backends.h_latency(None)
+        assert len(json.loads(response.text)["backends"][0]["history"]) == 1
+    assert served["pings"] == count
+
+    # Count-bounded retention drops the oldest observations; copies sent to a
+    # browser cannot mutate the controller's ring.
+    for _ in range(backends.LATENCY_HISTORY_SAMPLES + 5):
+        backends._latency[rows["reachable"]]["at"] = None
+        payload = await backends.measure_latency()
+    series = next(row["history"] for row in payload["backends"]
+                  if row["id"] == rows["reachable"])
+    assert len(series) == backends.LATENCY_HISTORY_SAMPLES
+    assert series[0][0] > recovered["history"][0][0]
+    assert all(a[0] <= b[0] for a, b in zip(series, series[1:]))
+    series.clear()
+    assert len(backends._latency[rows["reachable"]]["history"]) == backends.LATENCY_HISTORY_SAMPLES
+
+    # In-flight reads answer immediately from the old history. An outage and
+    # recovery before that ping finishes must discard its pre-outage result.
+    served["block"] = True
+    backends._latency[rows["reachable"]]["at"] = None
+    pending = asyncio.create_task(backends.measure_latency())
+    await asyncio.wait_for(entered.wait(), 1)
+    response = await asyncio.wait_for(backends.h_latency(None), .2)
+    assert len(json.loads(response.text)["backends"][0]["history"]) == backends.LATENCY_HISTORY_SAMPLES
+    backends._mark_backend_offline(rows["reachable"], "lost")
+    backends._mark_backend_online(rows["reachable"])
+    release.set()
+    await pending
+    assert backends._latency[rows["reachable"]]["row"] is None
+    served["block"] = False
+    await backends.measure_latency()
+    assert len(backends._latency[rows["reachable"]]["history"]) == 1
+
+    # Changes of endpoint or identity cannot reuse old samples, even when an
+    # operator replaces a row without going through the edit handler.
+    db.execute("UPDATE backends SET token=? WHERE id=?", ("new-token", rows["reachable"]))
+    backends.latency_payload()
+    assert not backends._latency[rows["reachable"]]["history"]
+    await backends.measure_latency()
+    backends.reset_auto_upgrade_schedule()
+    assert not backends._latency
+
+    # The real worker fills the ring with no console or API requests at all.
+    # An offline node stays untouched; waking on recovery starts immediately.
+    backends._mark_backend_online(rows["reachable"])
+    backends._mark_backend_offline(rows["dead"], "offline")
+    interval = backends.LATENCY_INTERVAL_SECONDS
+    backends.LATENCY_INTERVAL_SECONDS = .02
+    await backends.start_latency_worker(None)
+    worker = backends._latency_task
+    await backends.start_latency_worker(None)
+    assert backends._latency_task is worker
+
+    async def wait_history(count):
+        while len(backends._latency.get(rows["reachable"], {}).get("history", [])) < count:
+            await asyncio.sleep(.005)
+
+    try:
+        await asyncio.wait_for(wait_history(3), 2)
+        backends._mark_backend_offline(rows["reachable"], "offline")
+        await asyncio.sleep(.05)
+        before = served["pings"]
+        await asyncio.sleep(.05)
+        assert served["pings"] == before
+        assert not backends._latency
+        # A long regular interval proves recovery uses the wake, not its timer.
+        backends.LATENCY_INTERVAL_SECONDS = 30
+        backends._wake_latency()
+        await asyncio.sleep(.03)
+        backends._mark_backend_online(rows["reachable"])
+        await asyncio.wait_for(wait_history(1), .5)
+        assert served["pings"] == before + 1
+        # Rename keeps history but immediately updates the response label.
+        db.execute("UPDATE backends SET name=? WHERE id=?", ("renamed", rows["reachable"]))
+        assert backends.latency_payload()["backends"][0]["name"] == "renamed"
+        db.execute("DELETE FROM backends")
+        assert backends.latency_payload()["backends"] == [] and not backends._latency
+    finally:
+        await backends.stop_latency_worker()
+        backends.LATENCY_INTERVAL_SECONDS = interval
+    assert worker.done() and backends._latency_measure_task is None
+    before = served["pings"]
+    await asyncio.sleep(.05)
+    assert served["pings"] == before
     await server.close()
     await backends.close_client()
-    db.execute("DELETE FROM backends")
 
 
 async def main():
