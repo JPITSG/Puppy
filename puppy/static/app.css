@@ -638,6 +638,11 @@ a{color:var(--acc2)}
 .foot-notices[hidden]{display:none}
 .notices-head{display:flex;align-items:center;gap:6px;min-width:0;color:var(--txt3);user-select:none}
 .notices-list{display:flex;flex-direction:column;min-width:0;padding-bottom:4px}
+/* An empty history is the head alone, "0" beside it, centred between the
+   box's rule and the footer row's: the list takes no room, and the head keeps
+   the one pixel between the box's 9px top padding and the row's 8px margin. */
+.notices-list:empty{display:none}
+.foot-notices:has(.notices-list:empty) .notices-head{padding-bottom:1px}
 .notice-row{
   display:flex;align-items:flex-start;gap:6px;min-width:0;padding:3px 0;
   font-size:var(--fs-2xs);line-height:1.4;color:var(--txt2);

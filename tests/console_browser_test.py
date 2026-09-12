@@ -2587,11 +2587,12 @@ async def host_panel_checks(instance, capture=False):
 
 async def notices_panel_checks(instance, capture=False):
     """The tray's box, in a real browser: a real click on the tray between the
-    bell and Sign out opens it, a notice raised in the page reaches the
-    controller over the real route and lands at the top of the open box, a
-    repeat counts up on the row it already has, the dots stand in the footer's
-    dot column, and a full history scrolls inside the box rather than the
-    sidebar. It shares the footer with the host box and slides shut like it."""
+    bell and Sign out opens it, an empty history is the head alone centred
+    between the rules, a notice raised in the page reaches the controller over
+    the real route and lands at the top of the open box, a repeat counts up on
+    the row it already has, the dots stand in the footer's dot column, and a
+    full history scrolls inside the box rather than the sidebar. It shares the
+    footer with the host box and slides shut like it."""
     await instance.call("Emulation.setDeviceMetricsOverride", {
         "width": 1440, "height": 900, "deviceScaleFactor": 1,
         "mobile": False}, session=instance.page_session)
@@ -2626,7 +2627,33 @@ async def notices_panel_checks(instance, capture=False):
         }))()""")
         assert opened["expanded"] == "true" and opened["open"] and not opened["hostOpen"], opened
         assert opened["title"] == "Notifications", opened
-        assert opened["rows"] > 0 or opened["empty"], opened
+        assert opened["rows"] == len(notices.payload()["items"]) and not opened["empty"], opened
+        # With nothing recorded the box is its head alone, "0" beside it and
+        # no line saying so: the list takes no room, and the words stand as
+        # far under the box's own rule as they do above the footer row's.
+        blank = await evaluate(instance, """(() => {
+            window.keptNotices=state.notices;
+            applyNotices({type:'notices', items:[]});
+            const box=document.getElementById('foot-notices');
+            const rule=box.getBoundingClientRect().top+parseFloat(getComputedStyle(box).borderTopWidth);
+            const row=document.querySelector('.foot-row').getBoundingClientRect().top;
+            const title=box.querySelector('.host-sec-title').getBoundingClientRect();
+            const note=box.querySelector('.host-node-note').getBoundingClientRect();
+            return {rows:box.querySelectorAll('.notice-row').length,
+                    empty:box.querySelector('.host-empty')!==null,
+                    list:getComputedStyle(box.querySelector('.notices-list')).display,
+                    count:box.querySelector('.host-node-note').textContent,
+                    tooltip:box.querySelector('.notices-head').title,
+                    above:title.top-rule, below:row-title.bottom,
+                    noteAbove:note.top-rule, noteBelow:row-note.bottom};
+        })()""")
+        assert blank["rows"] == 0 and not blank["empty"] and blank["list"] == "none", blank
+        assert blank["count"] == "0" and blank["tooltip"] == "", blank
+        assert abs(blank["above"] - blank["below"]) < 0.6 and abs(blank["above"] - 9) < 0.6, blank
+        assert abs(blank["noteAbove"] - blank["noteBelow"]) < 0.6, blank
+        await evaluate(instance, "applyNotices({type:'notices', items:keptNotices.items}); true")
+        await until(instance, "document.querySelectorAll('#foot-notices .notice-row').length===%d"
+                    % opened["rows"])
         # A notice raised in the page is reported over the real route and the
         # stream brings it back to the top of the open box; a repeat counts
         # up on that same row, and a different notice goes above it while the
@@ -2654,12 +2681,14 @@ async def notices_panel_checks(instance, capture=False):
                 stamp:rows[0].querySelector('.notice-time').textContent, expected:fmtStamp(item.at),
                 note:document.querySelector('#foot-notices .host-node-note').textContent,
                 total:state.notices.items.length,
+                tooltips:[document.querySelector('#foot-notices .notices-head'), ...rows]
+                    .filter(node=>node.title).length,
             };
         })()""")
         assert rows["top"] == "gdot bad" and rows["entered"], rows
         assert rows["kept"] and rows["count"] == "2 ×" and rows["second"] == "gdot ok", rows
         assert rows["stamp"] and rows["stamp"] == rows["expected"], rows
-        assert rows["note"] == str(rows["total"]), rows
+        assert rows["note"] == str(rows["total"]) and rows["tooltips"] == 0, rows
         stored = notices.payload()["items"]
         assert stored[0]["text"] == "Garden laptop: Could not reach it · retrying", stored[:2]
         assert stored[0]["tone"] == "bad" and stored[0]["count"] == 1, stored[:2]
@@ -2743,8 +2772,9 @@ async def notices_panel_checks(instance, capture=False):
     assert closed == {"empty": True, "styled": "", "expanded": "false", "open": False,
                       "kept": notices.LIMIT}, closed
     print("PASS: the tray between the bell and Sign out opens a notification box - real "
-          "route and stream, counted repeats, dot column, a scrolling hundred - that "
-          "shares the footer with the host box and slides shut", flush=True)
+          "route and stream, an empty head centred between the rules, counted repeats, "
+          "dot column, a scrolling hundred - that shares the footer with the host box "
+          "and slides shut", flush=True)
 
 
 async def navigation_checks(instance, url, sid):

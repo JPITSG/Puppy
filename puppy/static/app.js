@@ -3130,7 +3130,7 @@ const state = {
   remoteStopping: {},     // bid -> graceful node lifecycle notice
   engCache: {},           // bid -> engines[]
   notify: { configured: false, enabled: false },   // completion-alert bell
-  notices: null,          // {items, limit}: the controller's notice history, newest first
+  notices: null,          // {items}: the controller's notice history, newest first
   browser: { enabled: false },  // this instance's managed-browser toggle
   browserStatus: null,          // full local browser status from node-state stream
   remoteBrowser: {},      // bid -> {enabled} from that node's ping metadata
@@ -7497,14 +7497,13 @@ document.addEventListener("visibilitychange", () => {
 });
 
 /* ================= notifications ================= */
-/* The footer's tray opens this box under the engine stats: the last
-   NOTICES_LIMIT notices shown by this console and every other one, newest
-   first, exactly as the controller keeps them - a repeat counted on the
-   entry it followed, the way the live toast folds. Nothing is polled: the
-   list rides the state stream, and the box asks for it itself only when
-   that stream is not there to bring it. The host box and this one share the
-   space under the engine stats, so opening either closes the other. */
-const NOTICES_LIMIT = 100;
+/* The footer's tray opens this box under the engine stats: the last hundred
+   notices shown by this console and every other one, newest first, exactly
+   as the controller keeps them - a repeat counted on the entry it followed,
+   the way the live toast folds. Nothing is polled: the list rides the state
+   stream, and the box asks for it itself only when that stream is not there
+   to bring it. The host box and this one share the space under the engine
+   stats, so opening either closes the other. */
 const NOTICE_TONE_LABELS = {
   info: "notice", ok: "completed", warn: "warning", bad: "failed", busy: "in progress",
 };
@@ -7529,10 +7528,7 @@ function validNotice(item) {
    report or a read of this console's own. */
 function applyNotices(payload) {
   if (!payload || !Array.isArray(payload.items)) return;
-  state.notices = {
-    items: payload.items.filter(validNotice),
-    limit: Number.isInteger(payload.limit) && payload.limit > 0 ? payload.limit : NOTICES_LIMIT,
-  };
+  state.notices = { items: payload.items.filter(validNotice) };
   renderNoticesPanel();
 }
 
@@ -7608,7 +7604,7 @@ function noticeRow(item) {
 }
 
 /* A repeat bumps the count where it already stands, exactly as the live
-   toast does; the stamp is the latest arrival and the tooltip keeps the first. */
+   toast does, and the stamp is the latest arrival. */
 function paintNoticeRow(entry, item) {
   const row = entry.node;
   const text = row.querySelector(".notice-text");
@@ -7630,9 +7626,6 @@ function paintNoticeRow(entry, item) {
   time.textContent = fmtStamp(item.at);
   const stamp = new Date(item.at * 1000);
   if (!Number.isNaN(stamp.getTime())) time.setAttribute("datetime", stamp.toISOString());
-  row.title = item.count > 1 ?
-    `${item.count} × · first ${fmtDateTime(item.first_at)} · last ${fmtDateTime(item.at)}` :
-    fmtDateTime(item.at);
 }
 
 function renderNoticesPanel(problem = "") {
@@ -7651,13 +7644,13 @@ function renderNoticesPanel(problem = "") {
     root.appendChild(list);
   }
   const items = state.notices ? state.notices.items : null;
-  const limit = state.notices ? state.notices.limit : NOTICES_LIMIT;
-  const note = head.querySelector(".host-node-note");
-  note.textContent = items ? String(items.length) : "";
-  head.title = `The last ${limit} notifications, newest first`;
+  head.querySelector(".host-node-note").textContent = items ? String(items.length) : "";
   if (!items || !items.length) {
-    list.replaceChildren(el("div", "host-empty",
-      items ? "No notifications yet" : (problem || "Reading…")));
+    /* An empty history says so with its count alone: the box is its head,
+       "0" beside it. Only a list not yet read, or one the read could not
+       bring, explains itself on a line. */
+    if (items) list.replaceChildren();
+    else list.replaceChildren(el("div", "host-empty", problem || "Reading…"));
     noticesPanel.rows.clear();
     noticesPanel.painted = !!items;
     refreshDisclosureHeight(root);

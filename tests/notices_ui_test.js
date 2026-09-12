@@ -127,16 +127,13 @@ async function openingAndReading() {
   assert.ok(inDotColumn(first) && first.querySelector(".gdot").classList.contains("ok"));
   assert.equal(first.querySelector(".gdot").getAttribute("aria-label"), "completed");
   assert.equal(text(first.querySelector(".notice-time")), app.context.fmtStamp(NOW - 2));
-  assert.equal(first.title, app.context.fmtDateTime(NOW - 2));
   assert.equal(text(second.querySelector(".toast-count")), "3 ×");
   assert.ok(second.querySelector(".gdot").classList.contains("bad"));
   assert.equal(text(second.querySelector(".notice-time")), app.context.fmtStamp(NOW - 10));
-  assert.equal(second.title, `3 × · first ${app.context.fmtDateTime(NOW - 60)} · last ` +
-    `${app.context.fmtDateTime(NOW - 10)}`, "a repeat keeps its first sighting in the tooltip");
+  assert.ok(!first.title && !second.title, "a row carries no tooltip");
   assert.equal(text(app.box.querySelector(".host-sec-title")), "Notifications");
   assert.equal(text(app.box.querySelector(".host-node-note")), "2");
-  assert.equal(app.box.querySelector(".notices-head").title,
-    "The last 100 notifications, newest first");
+  assert.ok(!app.box.querySelector(".notices-head").title, "nor does the head");
   assert.equal(app.box.querySelector(".host-empty"), null);
   assert.ok(!app.rows().some(row => row.classList.contains("notice-new")),
     "the first paint does not animate every row in");
@@ -174,8 +171,11 @@ async function emptyAndFailed() {
   const empty = consoleFor({ read: payload([]) });
   empty.context.openNoticesPanel();
   await settle();
-  assert.equal(text(empty.box.querySelector(".host-empty")), "No notifications yet");
-  assert.equal(text(empty.box.querySelector(".host-node-note")), "0");
+  assert.equal(text(empty.box.querySelector(".host-node-note")), "0",
+    "an empty history is the head alone, its count saying so");
+  assert.equal(empty.box.querySelector(".host-empty"), null, "no line explains a zero");
+  assert.equal(empty.box.querySelector(".notices-list").children.length, 0);
+  assert.equal(empty.rows().length, 0);
   empty.context.closeNoticesPanel();
 
   const failed = consoleFor({ read: new Error("network error") });
@@ -252,9 +252,11 @@ async function liveUpdates() {
   assert.equal(app.rows().length, 1);
   assert.equal(text(app.rows()[0].querySelector(".notice-text")), "kept");
   assert.ok(app.rows()[0].querySelector(".gdot").classList.contains("warn"));
-  assert.equal(app.state.notices.limit, 100);
   app.context.applyNotices({ type: "notices", items: [] });
-  assert.equal(text(app.box.querySelector(".host-empty")), "No notifications yet");
+  assert.equal(app.rows().length, 0);
+  assert.equal(app.box.querySelector(".host-empty"), null, "an emptied list draws no line");
+  assert.equal(app.box.querySelector(".notices-list").children.length, 0);
+  assert.equal(text(app.box.querySelector(".host-node-note")), "0");
   app.context.applyNotices({ type: "notices" });
   assert.equal(app.state.notices.items.length, 0, "a payload without items changes nothing");
   app.context.closeNoticesPanel();
@@ -281,7 +283,6 @@ function toggling() {
   const labels = vm.runInContext("NOTICE_TONE_LABELS", app.context);
   assert.deepEqual(Object.keys(labels).sort(), ["bad", "busy", "info", "ok", "warn"],
     "the toast's whole tone vocabulary, and nothing else");
-  assert.equal(vm.runInContext("NOTICES_LIMIT", app.context), 100);
 }
 
 (async () => {
