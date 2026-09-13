@@ -574,7 +574,9 @@ history around it.
   outcome dot, its text and the time it last arrived - and slides shut again
   like the host box, with which it shares that space. A notice repeating the
   newest entry counts up on it (*2 ×*) rather than adding a row, and the
-  oldest entry falls away past 100. The list is stored in the instance's
+  oldest entry falls away past 100. The count in the box's head is a pill with
+  a clear beside it, enabled only while there is something to clear: one press
+  empties the history for every console. The list is stored in the instance's
   database, updates live in every open console, and a notice raised while the
   instance is unreachable is reported once the connection returns.
 - **Completion alerts.** Run separate success and failure commands on a chosen
@@ -797,7 +799,7 @@ python3 tests/operations_test.py     # cancellation/rollback on both runtimes
 node tests/task_fold_ui_test.js      # task removal and the folded archive card
 node tests/tool_result_ui_test.js    # tool results folded into their call's card
 node tests/toast_ui_test.js          # notice grammar, tones, lives, folded repeats and their reports
-node tests/notices_ui_test.js        # the notification box: its slide, rows, live arrivals
+node tests/notices_ui_test.js        # the notification box: its slide, rows, live arrivals, its clear
 python3 tests/notices_test.py        # the notification history record, routes and stream topic
 node tests/spellcheck_ui_test.js     # the bundled dictionary, its marks and autocorrect
 node tests/host_panel_ui_test.js     # the host box: charts, latency rows, process tree

@@ -52,9 +52,10 @@ async def state_change_guard(request: web.Request, handler):
         return web.json_response(
             {"error": "Puppy {} in progress".format(
                 "restore" if busy == "restore" else "backup")}, status=503)
-    # A notice report is one atomic row the backup copies whole, and a toast
-    # can be raised at the very moment Export is pressed: counting it would
-    # refuse that backup for nothing. The busy refusal above still applies.
+    # A notice report, like a clear of the history, is one atomic row the
+    # backup copies whole, and a toast can be raised at the very moment Export
+    # is pressed: counting it would refuse that backup for nothing. The busy
+    # refusal above still applies.
     if mutating and not snapshot_path and request.path != notices.API_PATH:
         request.app["puppy_mutations"] = request.app.get("puppy_mutations", 0) + 1
         try:
@@ -1868,8 +1869,9 @@ async def h_notify_set(request: web.Request):
 
 
 # ---- notification history ----
-# The console reports every notice it shows; the list rides the ``notices``
-# state topic, and these answer a console whose stream is not there to bring it.
+# The console reports every notice it shows and clears the list from the pill
+# in its box's head; the list rides the ``notices`` state topic, and the read
+# answers a console whose stream is not there to bring it.
 
 async def h_notices_get(request: web.Request):
     try:
@@ -1894,6 +1896,16 @@ async def h_notices_post(request: web.Request):
         return web.json_response({"error": str(exc)}, status=500)
     except ValueError as exc:
         return web.json_response({"error": str(exc)}, status=400)
+    return web.json_response(payload)
+
+
+async def h_notices_clear(request: web.Request):
+    try:
+        payload = notices.clear()
+    except notices.ShapeError as exc:
+        log.error("%s", exc)
+        return web.json_response({"error": str(exc)}, status=500)
+    log.info("notification history cleared")
     return web.json_response(payload)
 
 
@@ -2054,6 +2066,7 @@ def build_app(runtime_web: dict = None,
     r.add_post("/api/notify/test", h_notify_test)
     r.add_get(notices.API_PATH, h_notices_get)
     r.add_post(notices.API_PATH, h_notices_post)
+    r.add_delete(notices.API_PATH, h_notices_clear)
 
     async def publish_notices(_app):
         # A malformed record refuses to start rather than being repaired; a

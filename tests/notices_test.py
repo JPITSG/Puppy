@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """The controller's notification history: the record every shown notice is
-folded into, its exact persisted shape, the routes the console reports through
-and reads from, the state topic that carries the list, and the guards around a
-backup. Both runtimes are booted; no engine, network or quota."""
+folded into, its exact persisted shape, the clear that empties it while its ids
+keep advancing, the routes the console reports through, reads from and clears
+with, the state topic that carries the list, and the guards around a backup.
+Both runtimes are booted; no engine, network or quota."""
 from __future__ import annotations
 
 import asyncio
@@ -122,6 +123,43 @@ def recording():
     notices.validate_persisted(db.connect())
 
 
+def clearing():
+    """A clear empties the list in one go; the ids keep advancing past it."""
+    before = notices.publish()
+    assert len(before["items"]) == notices.LIMIT
+    next_id = stored()["next_id"]
+    cleared = notices.clear()
+    assert cleared["items"] == [] and cleared["limit"] == notices.LIMIT
+    assert cleared["state_topic"] == "notices"
+    assert cleared["state_revision"] > before["state_revision"]
+    record = stored()
+    assert record == {"format": 1, "next_id": next_id, "items": []}, \
+        "the emptied record keeps its next id"
+    notices.validate_persisted(db.connect())
+    assert notices.payload()["items"] == []
+    # Clearing an empty list changes nothing: no write, no new revision.
+    raw = db.query_one("SELECT value FROM meta WHERE key=?", (notices.META_KEY,))["value"]
+    again = notices.clear()
+    assert again["items"] == [] and again["state_revision"] == cleared["state_revision"]
+    assert db.query_one("SELECT value FROM meta WHERE key=?",
+                        (notices.META_KEY,))["value"] == raw
+    # The next notice takes the id the clear preserved, never one of those
+    # let go, and folding starts afresh: a repeat of a cleared entry is new.
+    after = notices.record("notice 0", "info")
+    assert texts(after) == [("notice 0", "info", 1)]
+    assert after["items"][0]["id"] == next_id
+    assert stored()["next_id"] == next_id + 1
+    # With no record at all, a clear writes nothing and publishes the empty list.
+    db.execute("DELETE FROM meta WHERE key=?", (notices.META_KEY,))
+    fresh = notices.clear()
+    assert fresh["items"] == []
+    assert db.query_one("SELECT 1 FROM meta WHERE key=?", (notices.META_KEY,)) is None
+    # Leave a full history for the shape checks that follow.
+    for number in range(notices.LIMIT + 5):
+        notices.record("notice {}".format(number), "info")
+    assert len(notices.payload()["items"]) == notices.LIMIT
+
+
 def persisted_shape():
     good = stored()
     connection = db.connect()
@@ -139,7 +177,7 @@ def persisted_shape():
             pass
         else:
             raise AssertionError(label)
-        for call in (notices.payload, lambda: notices.record("x", "ok")):
+        for call in (notices.payload, lambda: notices.record("x", "ok"), notices.clear):
             try:
                 call()
             except ValueError:
@@ -201,7 +239,7 @@ async def full_runtime_routes():
     runner.configure_updates(app["puppy_runtime_id"])
     await startup[0](app)
     async with TestClient(TestServer(app)) as client:
-        for method in (client.get, client.post):
+        for method in (client.get, client.post, client.delete):
             response = await method("/api/notices")
             assert response.status == 401
         headers = {"X-Puppy-Token": config.get("auth.api_token")}
@@ -251,14 +289,37 @@ async def full_runtime_routes():
         streamed = await socket.receive_json(timeout=3)
         assert streamed["items"][0]["count"] == 2
 
-        # A backup in progress refuses the report (the console keeps it for
-        # later) and a report never counts as a state change that could make
-        # an export racing a toast fail.
+        # The pill's clear: the list comes back empty in the answer and on the
+        # stream, at one new revision, and a later notice takes a later id.
+        cleared_id = streamed["items"][0]["id"]
+        response = await client.delete("/api/notices", headers=headers)
+        assert response.status == 200, await response.text()
+        cleared = await response.json()
+        assert cleared["items"] == [] and cleared["limit"] == notices.LIMIT
+        assert cleared["state_revision"] > streamed["state_revision"]
+        streamed = await socket.receive_json(timeout=3)
+        assert streamed["type"] == "notices" and streamed["items"] == []
+        assert streamed["state_revision"] == cleared["state_revision"]
+        assert notices.payload()["items"] == []
+        response = await client.post("/api/notices", headers=headers,
+                                     json={"text": "NAS: could not save.", "tone": "bad"})
+        recorded = await response.json()
+        assert texts(recorded) == [("NAS: could not save.", "bad", 1)], \
+            "a repeat of a cleared entry is a new entry"
+        assert recorded["items"][0]["id"] > cleared_id
+        streamed = await socket.receive_json(timeout=3)
+        assert streamed["items"] == recorded["items"]
+
+        # A backup in progress refuses the report and the clear (the console
+        # keeps the report for later), and neither counts as a state change
+        # that could make an export racing a toast fail.
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", DeprecationWarning)   # a started app's state
             app["puppy_snapshot_busy"] = "export"
         response = await client.post("/api/notices", headers=headers,
                                      json={"text": "During a backup", "tone": "info"})
+        assert response.status == 503
+        response = await client.delete("/api/notices", headers=headers)
         assert response.status == 503
         assert (await client.get("/api/notices", headers=headers)).status == 200
         with warnings.catch_warnings():
@@ -266,17 +327,27 @@ async def full_runtime_routes():
             app["puppy_snapshot_busy"] = None
         assert notices.payload()["items"][0]["text"] == "NAS: could not save."
         seen = []
-        real_record = notices.record
+        real_record, real_clear = notices.record, notices.clear
 
         def counted(text, tone):
             seen.append(int(app.get("puppy_mutations", 0)))
             return real_record(text, tone)
 
-        with patch.object(notices, "record", counted):
+        def counted_clear():
+            seen.append(int(app.get("puppy_mutations", 0)))
+            return real_clear()
+
+        with patch.object(notices, "record", counted), \
+                patch.object(notices, "clear", counted_clear):
             response = await client.post("/api/notices", headers=headers,
                                          json={"text": "After the backup", "tone": "ok"})
             assert response.status == 200
-        assert seen == [0], seen
+            response = await client.delete("/api/notices", headers=headers)
+            assert response.status == 200
+        assert seen == [0, 0], seen
+        assert notices.payload()["items"] == []
+        while (await socket.receive_json(timeout=3))["items"] != []:
+            pass
         # A record that has gone malformed underneath is the instance's
         # problem, not a refusal of the notice: the console keeps it.
         db.execute("INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE "
@@ -287,6 +358,10 @@ async def full_runtime_routes():
             assert response.status == 500, response.status
             response = await client.get("/api/notices", headers=headers)
             assert response.status == 500, response.status
+            response = await client.delete("/api/notices", headers=headers)
+            assert response.status == 500, response.status
+            raw = db.query_one("SELECT value FROM meta WHERE key=?", (notices.META_KEY,))
+            assert raw["value"] == "[]", "a clear never repairs a malformed record either"
         finally:
             db.execute("DELETE FROM meta WHERE key=?", (notices.META_KEY,))
         await socket.close()
@@ -315,7 +390,7 @@ async def headless_runtime_has_none():
     assert not any(hook.__name__ == "publish_notices" for hook in app.on_startup)
     async with TestClient(TestServer(app)) as client:
         headers = {"X-Puppy-Token": config.get("auth.api_token")}
-        for method in (client.get, client.post):
+        for method in (client.get, client.post, client.delete):
             response = await method("/api/notices", headers=headers,
                                     json={"text": "hi", "tone": "ok"})
             assert response.status == 404, response.status
@@ -329,11 +404,12 @@ async def main():
     try:
         text_shape()
         recording()
+        clearing()
         persisted_shape()
         await full_runtime_routes()
         await headless_runtime_has_none()
-        print("PASS: notification history record, shape validation, routes, stream topic, "
-              "backup guards, and its absence from the headless backend")
+        print("PASS: notification history record, its clear, shape validation, routes, "
+              "stream topic, backup guards, and its absence from the headless backend")
     finally:
         shutil.rmtree(TEST_ROOT, ignore_errors=True)
 

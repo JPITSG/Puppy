@@ -3235,6 +3235,8 @@ async def exercise_node(url: str, token: str, expected_version: str,
         async with http.post(url + "/api/notices", headers=good, ssl=pinned,
                              json={"text": "hi", "tone": "ok"}) as response:
             assert response.status == 404  # the notification history is a console surface
+        async with http.delete(url + "/api/notices", headers=good, ssl=pinned) as response:
+            assert response.status == 404  # and so is its clear
         async with http.post(url + "/api/snapshot/export", headers=good,
                              json={"ui": {}}, ssl=pinned) as response:
             assert response.status == 404  # backup/restore is a full-WebUI surface

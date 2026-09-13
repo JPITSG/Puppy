@@ -2622,11 +2622,13 @@ async def host_panel_checks(instance, capture=False):
 async def notices_panel_checks(instance, capture=False):
     """The tray's box, in a real browser: a real click on the tray between the
     bell and Sign out opens it, an empty history is the head alone centred
-    between the rules, a notice raised in the page reaches the controller over
-    the real route and lands at the top of the open box, a repeat counts up on
-    the row it already has, the dots stand in the footer's dot column, and a
-    full history scrolls inside the box rather than the sidebar. It shares the
-    footer with the host box and slides shut like it."""
+    between the rules with its pill's clear disabled, a notice raised in the
+    page reaches the controller over the real route and lands at the top of
+    the open box, a repeat counts up on the row it already has, the dots stand
+    in the footer's dot column, a full history scrolls inside the box rather
+    than the sidebar, and a real click on the pill's clear empties it over the
+    real route for the stream to bring back. It shares the footer with the
+    host box and slides shut like it."""
     await instance.call("Emulation.setDeviceMetricsOverride", {
         "width": 1440, "height": 900, "deviceScaleFactor": 1,
         "mobile": False}, session=instance.page_session)
@@ -2662,9 +2664,11 @@ async def notices_panel_checks(instance, capture=False):
         assert opened["expanded"] == "true" and opened["open"] and not opened["hostOpen"], opened
         assert opened["title"] == "Notifications", opened
         assert opened["rows"] == len(notices.payload()["items"]) and not opened["empty"], opened
-        # With nothing recorded the box is its head alone, "0" beside it and
-        # no line saying so: the list takes no room, and the words stand as
-        # far under the box's own rule as they do above the footer row's.
+        # With nothing recorded the box is its head alone, the pill reading
+        # "0" with its clear disabled and no line saying so: the list takes
+        # no room, the words stand as far under the box's own rule as they do
+        # above the footer row's, the pill is centred on the same line, and
+        # nothing hangs below it to give a one-line box a scrollbar.
         blank = await evaluate(instance, """(() => {
             window.keptNotices=state.notices;
             applyNotices({type:'notices', items:[]});
@@ -2672,19 +2676,33 @@ async def notices_panel_checks(instance, capture=False):
             const rule=box.getBoundingClientRect().top+parseFloat(getComputedStyle(box).borderTopWidth);
             const row=document.querySelector('.foot-row').getBoundingClientRect().top;
             const title=box.querySelector('.host-sec-title').getBoundingClientRect();
-            const note=box.querySelector('.host-node-note').getBoundingClientRect();
+            const pill=box.querySelector('.notices-pill').getBoundingClientRect();
+            const clear=box.querySelector('.notices-clear');
+            const button=clear.getBoundingClientRect();
+            const icon=clear.querySelector('svg').getBoundingClientRect();
             return {rows:box.querySelectorAll('.notice-row').length,
                     empty:box.querySelector('.host-empty')!==null,
                     list:getComputedStyle(box.querySelector('.notices-list')).display,
-                    count:box.querySelector('.host-node-note').textContent,
-                    tooltip:box.querySelector('.notices-head').title,
+                    count:box.querySelector('.notices-count').textContent,
+                    disabled:clear.disabled, label:clear.getAttribute('aria-label'),
+                    tooltip:box.querySelector('.notices-head').title+box.querySelector('.notices-pill').title+clear.title,
+                    dim:parseFloat(getComputedStyle(clear).opacity),
                     above:title.top-rule, below:row-title.bottom,
-                    noteAbove:note.top-rule, noteBelow:row-note.bottom};
+                    pillAbove:pill.top-rule, pillBelow:row-pill.bottom,
+                    pillRight:box.getBoundingClientRect().right-parseFloat(getComputedStyle(box).paddingRight)-pill.right,
+                    inset:[icon.left-button.left, icon.top-button.top],
+                    scrolls:box.scrollHeight>box.clientHeight,
+                    gutter:box.offsetWidth-box.clientWidth};
         })()""")
         assert blank["rows"] == 0 and not blank["empty"] and blank["list"] == "none", blank
         assert blank["count"] == "0" and blank["tooltip"] == "", blank
+        assert blank["disabled"] and blank["label"] == "Clear notifications", blank
+        assert blank["dim"] < 0.6, blank
         assert abs(blank["above"] - blank["below"]) < 0.6 and abs(blank["above"] - 9) < 0.6, blank
-        assert abs(blank["noteAbove"] - blank["noteBelow"]) < 0.6, blank
+        assert abs(blank["pillAbove"] - blank["pillBelow"]) < 0.6, blank
+        assert abs(blank["pillRight"]) < 0.6, blank
+        assert blank["inset"] == [5, 2], blank   # the bin sits on whole pixels in its cell
+        assert not blank["scrolls"] and blank["gutter"] == 0, blank
         await evaluate(instance, "applyNotices({type:'notices', items:keptNotices.items}); true")
         await until(instance, "document.querySelectorAll('#foot-notices .notice-row').length===%d"
                     % opened["rows"])
@@ -2713,8 +2731,9 @@ async def notices_panel_checks(instance, capture=False):
                 kept:rows[1].__first===true, count:rows[1].querySelector('.toast-count').textContent,
                 second:rows[1].querySelector('.gdot').className,
                 stamp:rows[0].querySelector('.notice-time').textContent, expected:fmtStamp(item.at),
-                note:document.querySelector('#foot-notices .host-node-note').textContent,
+                note:document.querySelector('#foot-notices .notices-count').textContent,
                 total:state.notices.items.length,
+                clearable:!document.querySelector('#foot-notices .notices-clear').disabled,
                 tooltips:[document.querySelector('#foot-notices .notices-head'), ...rows]
                     .filter(node=>node.title).length,
             };
@@ -2723,6 +2742,7 @@ async def notices_panel_checks(instance, capture=False):
         assert rows["kept"] and rows["count"] == "2 ×" and rows["second"] == "gdot ok", rows
         assert rows["stamp"] and rows["stamp"] == rows["expected"], rows
         assert rows["note"] == str(rows["total"]) and rows["tooltips"] == 0, rows
+        assert rows["clearable"], rows
         stored = notices.payload()["items"]
         assert stored[0]["text"] == "Garden laptop: Could not reach it · retrying", stored[:2]
         assert stored[0]["tone"] == "bad" and stored[0]["count"] == 1, stored[:2]
@@ -2765,7 +2785,7 @@ async def notices_panel_checks(instance, capture=False):
                     inside:box.getBoundingClientRect().bottom<=window.innerHeight,
                     list:list.getBoundingClientRect().height>0,
                     engines:engines.getBoundingClientRect().height>0,
-                    newest:first, note:document.querySelector('#foot-notices .host-node-note').textContent,
+                    newest:first, note:document.querySelector('#foot-notices .notices-count').textContent,
                     wrapped:[...document.querySelectorAll('#foot-notices .notice-text')]
                         .every(node=>node.getBoundingClientRect().right<=box.getBoundingClientRect().right)};
         })()""")
@@ -2780,6 +2800,45 @@ async def notices_panel_checks(instance, capture=False):
                                            session=instance.page_session)
                 (BASE / "data" / ("notices-panel-" + theme + ".png")).write_bytes(
                     base64.b64decode(shot["data"]))
+        # A real click on the pill's clear sends the hundred away over the
+        # real route: the stream brings the emptied list to the box, the
+        # count reads 0 with the clear disabled again, the scrollbar goes
+        # with the rows, and the controller has nothing left. A notice raised
+        # afterwards is a fresh row with a later id, so nothing cleared can
+        # come back as a repeat.
+        clear = await evaluate(instance, """(() => {
+            document.getElementById('foot-notices').scrollTop=0;
+            const r=document.querySelector('#foot-notices .notices-clear').getBoundingClientRect();
+            return {x:r.x+r.width/2, y:r.y+r.height/2, width:r.width, height:r.height};
+        })()""")
+        assert clear["width"] >= 18 and clear["height"] >= 14, clear
+        last_id = notices.payload()["items"][0]["id"]
+        for kind in ("mousePressed", "mouseReleased"):
+            await instance.call("Input.dispatchMouseEvent", {
+                "type": kind, "x": clear["x"], "y": clear["y"], "button": "left",
+                "clickCount": 1}, session=instance.page_session)
+        await until(instance, "!noticesPanel.clearing && state.notices.items.length===0"
+                              " && document.querySelectorAll('#foot-notices .notice-row').length===0")
+        cleared = await evaluate(instance, """(() => {
+            const box=document.getElementById('foot-notices');
+            return {count:box.querySelector('.notices-count').textContent,
+                    disabled:box.querySelector('.notices-clear').disabled,
+                    empty:box.querySelector('.host-empty')!==null,
+                    scrolls:box.scrollHeight>box.clientHeight,
+                    failed:[...document.querySelectorAll('#toasts .toast')]
+                        .filter(node=>node.textContent.includes('Could not clear')).length};
+        })()""")
+        assert cleared == {"count": "0", "disabled": True, "empty": False, "scrolls": False,
+                           "failed": 0}, cleared
+        assert notices.payload()["items"] == []
+        await evaluate(instance, "toast('Harbor dashboard: Session renamed', 'ok'); true")
+        await until(instance, "state.notices.items.length===1"
+                              " && !document.querySelector('#foot-notices .notices-clear').disabled")
+        stored = notices.payload()["items"]
+        assert [(item["text"], item["count"]) for item in stored] == \
+            [("Harbor dashboard: Session renamed", 1)], stored
+        assert stored[0]["id"] > last_id, (stored, last_id)
+        await evaluate(instance, "document.getElementById('toasts').replaceChildren(); true")
         # Opening the host box takes the notification box's place under the
         # engine stats, and the tray closes its box the way it opened it.
         await evaluate(instance, "openHostPanel(); true")
@@ -2804,11 +2863,12 @@ async def notices_panel_checks(instance, capture=False):
         kept: state.notices.items.length,
     }))()""")
     assert closed == {"empty": True, "styled": "", "expanded": "false", "open": False,
-                      "kept": notices.LIMIT}, closed
+                      "kept": 1}, closed
     print("PASS: the tray between the bell and Sign out opens a notification box - real "
-          "route and stream, an empty head centred between the rules, counted repeats, "
-          "dot column, a scrolling hundred - that shares the footer with the host box "
-          "and slides shut", flush=True)
+          "route and stream, an empty head centred between the rules with its pill's "
+          "clear disabled, counted repeats, dot column, a scrolling hundred cleared by "
+          "one real click - that shares the footer with the host box and slides shut",
+          flush=True)
 
 
 async def navigation_checks(instance, url, sid):

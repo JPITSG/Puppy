@@ -637,6 +637,33 @@ a{color:var(--acc2)}
 }
 .foot-notices[hidden]{display:none}
 .notices-head{display:flex;align-items:center;gap:6px;min-width:0;color:var(--txt3);user-select:none}
+/* The head's count is a pill: the number on the left, the clear on the right,
+   a hairline between them. It stands a pixel proud of the head's line on
+   either side without moving it, the way the CPU reading does in the footer
+   row, and its clear takes the wash every disabled control takes while there
+   is nothing to clear. Nothing reaches past the pill: an empty history ends
+   the box at the head, and a hit target hanging below it would be scrollable
+   overflow, a scrollbar on a box with one line in it. */
+.notices-pill{
+  display:inline-flex;align-items:stretch;flex:0 0 auto;margin:-1px 0 -1px auto;
+  height:17px;border:1px solid var(--line2);border-radius:99px;background:var(--panel2);
+}
+.notices-pill[hidden]{display:none}
+.notices-count{
+  display:inline-flex;align-items:center;padding:0 6px 0 7px;
+  font:var(--fs-2xs) var(--mono);line-height:1;font-variant-numeric:tabular-nums;white-space:nowrap;
+}
+/* 20px wide less its hairline leaves the 11px bin whole pixels either side */
+.notices-clear{
+  display:inline-grid;place-items:center;width:20px;margin:0;padding:0;
+  border:0;border-left:1px solid var(--line2);border-radius:0 99px 99px 0;
+  background:transparent;color:var(--txt3);cursor:pointer;line-height:0;
+  transition:background var(--t-base) var(--ease),color var(--t-base) var(--ease);
+}
+.notices-clear svg{display:block}
+@media (hover:hover){.notices-clear:not(:disabled):hover{background:var(--hov);color:var(--txt)}}
+.notices-clear:not(:disabled):active{background:var(--hov);color:var(--txt)}
+.notices-clear:disabled{opacity:.4;cursor:not-allowed}
 .notices-list{display:flex;flex-direction:column;min-width:0;padding-bottom:4px}
 /* An empty history is the head alone, "0" beside it, centred between the
    box's rule and the footer row's: the list takes no room, and the head keeps

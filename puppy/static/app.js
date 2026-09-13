@@ -140,6 +140,28 @@ function trayIcon(size) {
   return svg;
 }
 
+/* The clear in the notification box's pill: a bin on the 12-grid the close
+   cross uses, since it is drawn at the same size. Its lid, handle and body
+   are one path, centred on the box by construction. */
+function binIcon(size) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 12 12");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const p = document.createElementNS(NS, "path");
+  p.setAttribute("d", "M2.25 3.25h7.5M4.75 3.25v-1a.5.5 0 0 1 .5-.5h1.5a.5.5 0 0 1 .5.5v1" +
+    "M3.25 3.25l.45 6.2a.8.8 0 0 0 .8.75h3a.8.8 0 0 0 .8-.75l.45-6.2");
+  p.setAttribute("stroke", "currentColor");
+  p.setAttribute("stroke-width", "1.3");
+  p.setAttribute("stroke-linecap", "round");
+  p.setAttribute("stroke-linejoin", "round");
+  p.setAttribute("fill", "none");
+  svg.appendChild(p);
+  return svg;
+}
+
 /* Same reason as the close cross above: a "+" character is placed on the font's
    math axis, which is not the middle of its line box, so the glyph lands about
    1.5px low in a flex-centred button however the box is aligned. Drawn ink is
@@ -7506,14 +7528,16 @@ document.addEventListener("visibilitychange", () => {
    as the controller keeps them - a repeat counted on the entry it followed,
    the way the live toast folds. Nothing is polled: the list rides the state
    stream, and the box asks for it itself only when that stream is not there
-   to bring it. The host box and this one share the space under the engine
-   stats, so opening either closes the other. */
+   to bring it. The head's count is a pill with the clear beside it, which
+   empties the history for every console. The host box and this one share
+   the space under the engine stats, so opening either closes the other. */
 const NOTICE_TONE_LABELS = {
   info: "notice", ok: "completed", warn: "warning", bad: "failed", busy: "in progress",
 };
 const noticesPanel = {
   open: false,
   painted: false,        // a list has been drawn since the box opened
+  clearing: false,       // a clear is on its way to the controller
   rows: new Map(),       // notice id -> { node, count } kept across repaints
 };
 let noticesPanelHistory = null;
@@ -7596,6 +7620,24 @@ async function readNotices() {
   ingestNoticesPayload(payload);
 }
 
+/* The pill's clear lets the whole history go, for every console, and the
+   list comes back empty on the stream or in the answer - whichever is first.
+   A failure is a notice like any other: the list it could not clear is still
+   there to read beside it. */
+async function clearNotices() {
+  if (noticesPanel.clearing || !state.notices || !state.notices.items.length) return;
+  noticesPanel.clearing = true;
+  renderNoticesPanel();
+  try {
+    ingestNoticesPayload(await api(0, "notices", { method: "DELETE", timeoutMs: 9000 }));
+  } catch (error) {
+    toast(`Could not clear notifications · ${error.message}`, "bad");
+  } finally {
+    noticesPanel.clearing = false;
+    renderNoticesPanel();
+  }
+}
+
 function noticeRow(item) {
   const row = el("div", "notice-row");
   const dot = el("span", `gdot ${item.tone}`);
@@ -7639,7 +7681,15 @@ function renderNoticesPanel(problem = "") {
   if (!head) {
     head = el("div", "notices-head");
     head.appendChild(el("span", "host-sec-title", "Notifications"));
-    head.appendChild(el("span", "host-node-note"));
+    const pill = el("span", "notices-pill");
+    pill.appendChild(el("span", "notices-count"));
+    const clear = el("button", "notices-clear");
+    clear.type = "button";
+    clear.setAttribute("aria-label", "Clear notifications");
+    clear.appendChild(binIcon(11));
+    clear.onclick = () => clearNotices();
+    pill.appendChild(clear);
+    head.appendChild(pill);
     root.appendChild(head);
   }
   let list = root.querySelector(".notices-list");
@@ -7648,7 +7698,17 @@ function renderNoticesPanel(problem = "") {
     root.appendChild(list);
   }
   const items = state.notices ? state.notices.items : null;
-  head.querySelector(".host-node-note").textContent = items ? String(items.length) : "";
+  /* The pill counts the list once there is one to count; its clear is
+     enabled exactly while there is something to clear and no clear is
+     already on its way. A control going disabled cannot keep the focus it
+     holds, so that passes to the tray rather than dropping to the page. */
+  const pill = head.querySelector(".notices-pill");
+  pill.hidden = !items;
+  head.querySelector(".notices-count").textContent = items ? String(items.length) : "";
+  const clear = head.querySelector(".notices-clear");
+  const idle = !items || !items.length || noticesPanel.clearing;
+  if (idle && !clear.disabled && document.activeElement === clear) $("btn-notices").focus();
+  clear.disabled = idle;
   if (!items || !items.length) {
     /* An empty history says so with its count alone: the box is its head,
        "0" beside it. Only a list not yet read, or one the read could not

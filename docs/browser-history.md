@@ -21,7 +21,7 @@ There is no extra entry trapping the reader at the console's starting page.
 | Close a tab | Records the resulting destination. Session, Search and Settings views can be reopened; closed terminal/browser/VNC resources are never recreated |
 | Re-select a destination, streaming updates, polling, background agent-created tabs | No additional navigation stop |
 | Scroll, load more results/messages, expand a tool/task card, unfold a queue, sidebar disclosure/filter/archive controls (including CPU, Latency and Processes inside Host activity), choice/context menus, browser/VNC typing controls, notices arriving in an open Notifications box | Local presentation and input controls; no additional stop. Menus dismiss when history changes |
-| Type a draft, recall a prompt, change a model/permission, send/steer/ask/stop, save/reset a setting, apply/delete/sync, reorder/resize layout, toggle theme/alerts | Commands and preferences are not undone or replayed by history |
+| Type a draft, recall a prompt, change a model/permission, send/steer/ask/stop, save/reset a setting, apply/delete/sync, clear the notification history, reorder/resize layout, toggle theme/alerts | Commands and preferences are not undone or replayed by history |
 | Embedded browser's own Back/Forward buttons | Continue navigating that browser's website history; the enclosing console's history selects console views |
 
 Closing a dialog with its own control consumes its history layer. Closing a

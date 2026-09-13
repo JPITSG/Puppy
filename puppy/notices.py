@@ -5,9 +5,11 @@ are backend prose the console never wrote - so the console reports each one it
 shows and this module keeps the last LIMIT of them in one exact-shape ``notices``
 meta record. A report that repeats the newest entry (same text, same tone)
 counts up on it the way the live toast folds into "2 ×"; anything else is a new
-entry and the oldest falls away. Every console learns the list through the
-``notices`` state topic, so the box behind the footer's tray is live in each of
-them. The headless backend has no console and serves none of this.
+entry and the oldest falls away. Clearing empties the list in one go while the
+ids keep advancing, so an entry recorded after a clear is never mistaken for
+one that was cleared. Every console learns the list through the ``notices``
+state topic, so the box behind the footer's tray is live in each of them. The
+headless backend has no console and serves none of this.
 """
 from __future__ import annotations
 
@@ -109,6 +111,13 @@ def _load(connection) -> dict:
     return state
 
 
+def _store(connection, state: dict) -> None:
+    connection.execute(
+        "INSERT INTO meta(key,value) VALUES(?,?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (META_KEY, json.dumps(state)))
+
+
 def validate_persisted(connection) -> None:
     """Reject a malformed record before startup or a restore, never repair it."""
     _load(connection)
@@ -160,10 +169,30 @@ def record(text, tone) -> dict:
                               "count": 1, "first_at": now, "at": now})
                 state["next_id"] += 1
                 del items[:-LIMIT]
-            connection.execute(
-                "INSERT INTO meta(key,value) VALUES(?,?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (META_KEY, json.dumps(state)))
+            _store(connection, state)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+    return runner.publish_state(_payload(state))
+
+
+def clear() -> dict:
+    """Let every entry go and return the published (empty) list.
+
+    Only the items are emptied: ``next_id`` keeps advancing, so the ids stay
+    strictly increasing across a clear and a console's rows keyed by them can
+    never mistake a later entry for one it already drew. Nothing is written
+    while there is nothing to clear.
+    """
+    with db._lock:
+        connection = db.connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            state = _load(connection)
+            if state["items"]:
+                state["items"] = []
+                _store(connection, state)
             connection.commit()
         except Exception:
             connection.rollback()
