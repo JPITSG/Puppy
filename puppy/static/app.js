@@ -8103,17 +8103,12 @@ function navigationRoute() {
 function navigationCapture() {
   const view = state.views[state.active];
   if (!view) return null;
-  const scrolls = [...view.root.querySelectorAll(".settings-scroll,.search-scroll,.chat-scroll")]
+  const scrolls = [...view.root.querySelectorAll(".settings-scroll,.search-scroll")]
     .map(node => [node, node.scrollTop, node.scrollLeft]);
+  // The transcript's own place: an anchored message, so a reloaded history
+  // window is never confused with an old pixel offset.
   const chat = typeof view.activeView === "function" ? view.activeView() : null;
-  let anchor = null;
-  if (chat && chat.scroll.clientHeight && !chat.atBottom()) {
-    const top = chat.scroll.getBoundingClientRect().top;
-    const node = [...chat.inner.children].find(item => item.dataset.seq && item.getBoundingClientRect().bottom > top);
-    if (node) anchor = { seq: Number(node.dataset.seq), offset: node.getBoundingClientRect().top - top };
-  }
   return { scrolls, chat: chat && chat.captureScroll(),
-    anchor,
     search: view.tab.type === "search" ? {
       ...(view.navigationQuery || { query: view.input.value, kinds: [...view.kinds],
         time: view.timeKey, order: view.order, excluded: [...view.excludedNodes] }), core: view.lastCore,
@@ -8158,17 +8153,12 @@ function navigationApply(route, memory) {
     const restore = async () => {
       const current = () => navigation.revision === revision;
       if (!current() || !memory || !memory.chat) return;
-      if (memory.anchor) {
-        if (!view.inLoadedRange(memory.anchor.seq)) await view.loadWindowAround(memory.anchor.seq, current);
+      const place = memory.chat;
+      if (place.seq && !place.bottom && !view.inLoadedRange(place.seq)) {
+        await view.loadWindowAround(place.seq, current);
         if (!current()) return;
-        const node = view.findEventNode(memory.anchor.seq);
-        if (node) {
-          view.scroll.scrollTop += node.getBoundingClientRect().top -
-            view.scroll.getBoundingClientRect().top - memory.anchor.offset;
-          return;
-        }
       }
-      view.restoreScroll(memory.chat);
+      view.restoreScroll(place);
     };
     if ((view.navigationSeq || 0) !== route.seq) {
       const loading = route.seq ? view.jumpToSeq(route.seq, false) : view.returnToTail(false);
@@ -9049,10 +9039,12 @@ function renderTabs(focusTabId = null) {
   if (finishPaneResize) finishPaneResize();
   const hint = $("empty-hint");
   hint.remove();
-  /* Detaching a node discards its scroll offset outright - unlike display:none,
-     which keeps it - which is why plain tab switching never showed this. This
-     rebuild re-attaches every view, so positions are handed over and taken back
-     around it; otherwise splitting a pane rewinds a long transcript to the top. */
+  /* Detaching a node discards its scroll offset outright. This rebuild
+     re-attaches every view, so each reader's place is asked for and handed
+     back around it; otherwise splitting a pane rewinds a long transcript to
+     the top. A view that stays on the screen takes its place back at once; one
+     coming onto it lands through onShow, and one leaving it keeps the place
+     for its return. */
   const scrolls = new Map();
   for (const [id, view] of Object.entries(state.views)) {
     if (view && typeof view.captureScroll === "function") scrolls.set(id, view.captureScroll());
@@ -13167,6 +13159,7 @@ class SessionWorkspaceView {
     this.root.append(this.bar, this.body);
     this.taskViews = new Map();
     this.selected = tab.sid;
+    this.shown = null;           // the conversation whose view is on display
     this.opened = [];
     this.hidden = new Set();
     this.seen = {};
@@ -13314,10 +13307,10 @@ class SessionWorkspaceView {
   }
   select(sid) {
     navigationRemember();
-    const old = this.activeView();
-    if (old.composer) old.composer.stopTyping();
-    old.restoreScroll(old.captureScroll());
-    this.selected = sid;
+    if (sid !== this.selected) {
+      this.activeView().onVisibility(false);
+      this.selected = sid;
+    }
     this.refreshTasks();
     this.activeView().onShow(true);
     const selected = this.strip.querySelector('[aria-selected="true"]');
@@ -13335,8 +13328,14 @@ class SessionWorkspaceView {
     const view = this.taskViews.get(sid);
     if (view) view.destroy();
     this.taskViews.delete(sid);
-    if (this.selected === sid) this.selected = this.tab.sid;
-    if (render) { this.refreshTasks(); this.save(); navigationChanged(); }
+    const fell = this.selected === sid;
+    if (fell) this.selected = this.tab.sid;
+    if (render) {
+      this.refreshTasks();
+      if (fell) this.activeView().onShow(true);   // Main takes the closed tab's focus
+      this.save();
+      navigationChanged();
+    }
   }
   refreshTasks() {
     const tasks = this.tasks();
@@ -13362,6 +13361,14 @@ class SessionWorkspaceView {
       if (task) this.seen[task.id] = task.task.result_seq;
     }
     for (const [sid, view] of this.taskViews) view.root.classList.toggle("on", sid === this.selected);
+    /* A conversation put on display by anything but its own selection - the
+       tab the reader was on closed, or its task vanished - lands the way a
+       selected one does, without taking their focus. */
+    const shown = this.taskViews.has(this.selected) ? this.selected : null;
+    if (shown !== this.shown) {
+      this.shown = shown;
+      if (shown !== null) this.taskViews.get(shown).onShow(false);
+    }
     if (this.overview) this.renderOverview(tasks);
     // Keep the native drag's source connected while live task updates land.
     // The drop validates against opened before committing; removed or newly
@@ -13426,8 +13433,7 @@ class SessionWorkspaceView {
   onShow(focus = true) { this.refreshTasks(); this.activeView().onShow(focus); }
   onVisibility(visible) {
     if (visible) this.refreshTasks();
-    else for (const view of this.taskViews.values())
-      if (view.composer) view.composer.stopTyping();
+    else for (const view of this.taskViews.values()) view.onVisibility(false);
   }
   captureScroll() { return [...this.taskViews].map(([sid, view]) => [sid, view.captureScroll()]); }
   restoreScroll(values) { for (const [sid, saved] of values || []) { const view = this.taskViews.get(sid); if (view) view.restoreScroll(saved); } }
@@ -14076,8 +14082,8 @@ class SessionView {
     this.nativeComposerChoices = prefersNativeChoices();
     this.browserChipKey = null;   // set of linked-browser bubbles now rendered
     this.terminalChipKey = null;  // set of linked-terminal bubbles now rendered
-    this.pendingScroll = null;    // position owed back after a workspace rebuild
-    this.lastScroll = null;       // last position seen while this view was visible
+    this.place = null;            // the reader's place, kept while this view is off screen
+    this.onScreen = false;        // shown and landed; a re-show never moves the transcript
     this.buildDom();
     this.syncBrowserChips();      // a restored browser tab has a bubble at once
     this.syncTerminalChips();
@@ -14149,13 +14155,6 @@ class SessionView {
     if (!sessionShowsMeta(findSessionMeta(this.tab.bid, this.tab.sid)))
       root.classList.add("meta-hidden");
     this.scroll = root.querySelector(".chat-scroll");
-    /* Tracked while visible so a view that is hidden when the workspace is
-       rebuilt still has a position to be handed back - a display:none element
-       reports scrollTop 0, so it cannot be read at capture time. */
-    this.scroll.addEventListener("scroll", () => {
-      if (this.scroll.clientHeight)
-        this.lastScroll = { top: this.scroll.scrollTop, bottom: this.atBottom() };
-    }, { passive: true });
     this.inner = root.querySelector(".chat-inner");
     /* Floats over the bottom of a detached history window and leads back to
        the live tail; zero-height and sticky, so it displaces no message. */
@@ -14408,35 +14407,102 @@ class SessionView {
   onShow(focus = true) {
     this.syncGutter(); this.syncComposerMeta(); this.syncHeadOverflow();
     this.composer.syncUploadButton();
-    /* A position owed from a rebuild wins over jumping to the newest message:
-       the user did not open this tab, it was re-attached underneath them. */
-    if (!this.applyPendingScroll()) this.scrollBottom(true);
+    /* Only a view coming onto the screen has a landing to choose. One that is
+       already there and shown again - its tab re-selected, a neighbour
+       closed, the workspace re-attached under the reader - stays exactly
+       where they have it. */
+    if (this.scroll.clientHeight && !this.onScreen) {
+      this.onScreen = true;
+      this.land();
+    }
     if (focus) this.composer.focus();
   }
 
-  /* Read live while visible; a hidden view has no scroll box to read, so it
-     falls back to the last position seen (or one still owed to it). */
+  /* Leaving the screen. A task tab switched away from is still laid out, so
+     its place is read now; a workspace rebuild has already asked for it. The
+     shared draft's typing lease ends with the view. */
+  onVisibility(visible) {
+    if (visible) return;
+    this.captureScroll();
+    this.onScreen = false;
+    this.composer.stopTyping();
+  }
+
+  /* Where the transcript lands as the view comes onto the screen. An idle
+     conversation goes back to the reader's place, so flipping between tabs
+     loses nobody their spot, and a detached window is the place they chose.
+     A running turn, or one that ran while the tab was away and left newer
+     messages than the place knew of, shows the newest message instead - as
+     does a view with no place to go back to. */
+  land() {
+    const place = this.place;
+    this.place = null;
+    const kept = !!place && (this.detached ||
+      (this.status !== "running" && place.newest === this.newestSeq));
+    if (!kept || !this.applyPlace(place)) this.scrollBottom(true);
+  }
+
+  /* The reader's place: the tail itself, or the first message still below
+     the top of the box and how far below it stands. An anchored message
+     rather than a pixel offset, because the box's width and everything above
+     the place may change while the view is hidden - a resized window, a
+     split pane, a card rendered in full - and the same message should still
+     be the one on screen. The tail is the exact foot, not the slack that
+     counts as following it: a reader who stopped a paragraph short comes back
+     to that paragraph. Read live while the box is laid out and kept, so a
+     view hidden straight afterwards still knows it; a hidden box reads as
+     empty, so a hidden view answers with what it kept. */
   captureScroll() {
-    if (this.scroll.clientHeight)
-      return { top: this.scroll.scrollTop, bottom: this.atBottom() };
-    return this.pendingScroll || this.lastScroll;
+    const box = this.scroll;
+    if (!box.clientHeight) {
+      this.onScreen = false;
+      return this.place;
+    }
+    const bottom = box.scrollHeight - box.scrollTop - box.clientHeight < 1;
+    let seq = 0, offset = 0;
+    if (!bottom) {
+      const edge = box.getBoundingClientRect().top;
+      for (const node of this.inner.children) {
+        if (!node.dataset.seq) continue;
+        const rect = node.getBoundingClientRect();
+        if (rect.bottom <= edge) continue;
+        seq = Number(node.dataset.seq);
+        offset = rect.top - edge;
+        break;
+      }
+    }
+    this.place = { seq, offset, top: box.scrollTop, bottom, newest: this.newestSeq };
+    return this.place;
   }
 
-  restoreScroll(saved) {
-    this.pendingScroll = saved || null;
-    this.applyPendingScroll();
+  /* Hand a place back. A view on the screen takes it at once - a workspace
+     rebuild re-attaches every view under its reader, and history restores a
+     reading position - while one that is not holds it for its landing. */
+  restoreScroll(place) {
+    this.place = place || null;
+    if (!this.scroll.clientHeight) this.onScreen = false;
+    else if (this.onScreen && place) this.applyPlace(place);
   }
 
-  /* Whether the position was actually applied: writing scrollTop on a
-     display:none element is silently ignored, so a hidden view holds onto it
-     until onShow. Following the tail is restored as the tail, not as a stale
-     offset, since the transcript may have grown or been re-laid out. */
-  applyPendingScroll() {
-    const saved = this.pendingScroll;
-    if (!saved || !this.scroll.clientHeight) return false;
-    this.pendingScroll = null;
-    this.scroll.scrollTop = saved.bottom ? this.scroll.scrollHeight : saved.top;
-    this.lastScroll = { top: this.scroll.scrollTop, bottom: saved.bottom };
+  /* Whether the place could be taken. The tail is taken as the tail, never
+     as a stale offset, since the transcript may have grown or been re-laid
+     out; an anchored message is put back at its height; a place with no
+     anchor (nothing persisted on screen yet) is its pixel offset; and a
+     message no longer in the transcript cannot be gone back to at all. */
+  applyPlace(place) {
+    if (!this.scroll.clientHeight) return false;
+    if (place.bottom) {
+      this.scroll.scrollTop = this.scroll.scrollHeight;
+      return true;
+    }
+    if (!place.seq) {
+      this.scroll.scrollTop = place.top;
+      return true;
+    }
+    const node = this.findEventNode(place.seq);
+    if (!node) return false;
+    this.scroll.scrollTop += node.getBoundingClientRect().top -
+      this.scroll.getBoundingClientRect().top - place.offset;
     return true;
   }
 

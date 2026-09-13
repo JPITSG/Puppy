@@ -55,8 +55,13 @@ before `app.js`, with the same version substitution and cache policy.
 destination, then mark the change; synchronous parts of one action coalesce.
 Background invalidation uses `reconcile()` to replace the current destination
 instead of adding an action the reader never took. Scroll enriches the current
-entry without pushing. Transcript positions keep an event anchor so replacing
-a loaded history window does not confuse an old pixel offset with new content.
+entry without pushing. A transcript position is the view's own reading place
+(`SessionView.captureScroll()` / `restoreScroll()`): the tail, or an event
+anchor and its height in the box, so replacing a loaded history window or
+re-laying out the box never confuses an old pixel offset with new content.
+History restores that place unconditionally; plain tab selection restores the
+same place for an idle conversation (a running turn, or newer messages than the
+place knew of, land on the tail) without adding a history stop.
 Async links and transcript windows check their request/revision before landing.
 
 `modal(html, className, reopen)` registers every dialog with the shared layer

@@ -40,6 +40,7 @@ function harness(bid = 0, namespace = "") {
     captureScroll() { return 17; }
     restoreScroll(value) { this.scroll = value; }
     onShow() { this.shows++; }
+    onVisibility() {}
     destroy() { this.destroyed = true; this.root.remove(); }
   }
   const icon = () => document.createElement("svg");

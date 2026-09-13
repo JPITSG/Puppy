@@ -505,6 +505,14 @@ history around it.
 
 ### Never lose your place
 
+- **Your spot in every conversation.** Flip between tabs - sessions, Main and
+  task tabs, Settings, Search, a terminal - and an idle conversation comes
+  back to the message you were reading, at the same height, even if the
+  window or pane changed width meanwhile. A running turn, or one that ran and
+  finished while you were away, shows its newest message instead, and closing
+  another tab or selecting the tab you are already on never moves the
+  transcript. The spot lives in this page only: closing the tab or reloading
+  starts from the latest message again.
 - **Browser Back and Forward.** Navigate between tabs, Main and tasks, submitted
   searches, result/message locations and Settings backends. Back dismisses the
   top dialog, phone drawer or Host activity panel; Forward reopens supported

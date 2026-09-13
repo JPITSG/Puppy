@@ -995,6 +995,81 @@ async def pane_resize_checks(instance):
     print("PASS: nested horizontal/vertical resizing without size badges in both themes; release, cancellation, capture loss, blur, keyboard, reset and rebuild cleanup", flush=True)
 
 
+async def reading_place_checks(instance):
+    """Scroll position memory across tabs, with real layout and display:none:
+    an idle conversation left mid-transcript comes back to the same message at
+    the same height, whatever width the box has meanwhile; a running turn, or
+    one that ran while the tab was away, shows its newest message; Main and a
+    task tab keep their places independently; closing another tab or
+    re-selecting this one moves nothing; Back restores the place too."""
+    metrics = lambda width: instance.call("Emulation.setDeviceMetricsOverride", {
+        "width": width, "height": 420, "deviceScaleFactor": 1, "mobile": False},
+        session=instance.page_session)
+    await metrics(1440)
+    await evaluate(instance, "activateTab('s:0:1'); state.views['s:0:1'].select(1); window.placeView=state.views['s:0:1'].activeView(); true")
+    await until(instance, "placeView.scroll.scrollHeight - placeView.scroll.clientHeight > 200")
+    at = "placeView.scroll.scrollTop"
+    tail = "placeView.scroll.scrollTop === placeView.scroll.scrollHeight - placeView.scroll.clientHeight"
+    anchored = """(() => { const edge = placeView.scroll.getBoundingClientRect().top;
+        const node = placeView.findEventNode(Number(placeAnchor.seq));
+        return node.dataset.seq === placeAnchor.seq &&
+            Math.abs(node.getBoundingClientRect().top - edge - placeAnchor.offset) < 1; })()"""
+    spot = await evaluate(instance, """(() => {
+        const box = placeView.scroll;
+        box.scrollTop = Math.round((box.scrollHeight - box.clientHeight) / 2);
+        const edge = box.getBoundingClientRect().top;
+        const node = [...placeView.inner.children].find(n => n.dataset.seq && n.getBoundingClientRect().bottom > edge);
+        window.placeAnchor = {seq: node.dataset.seq, offset: node.getBoundingClientRect().top - edge};
+        return box.scrollTop; })()""")
+    assert spot > 50, spot
+    await evaluate(instance, "openSettingsTab(); true")
+    assert await evaluate(instance, "placeView.scroll.clientHeight === 0 && !placeView.onScreen && placeView.place.seq === Number(placeAnchor.seq)")
+    await evaluate(instance, "activateTab('s:0:1'); true")
+    assert await evaluate(instance, at) == spot, "an idle conversation comes back to the reader's place"
+    assert await evaluate(instance, anchored)
+    await evaluate(instance, "closeTab('settings'); true")
+    assert await evaluate(instance, at) == spot, "closing another tab moves nothing"
+    await evaluate(instance, "activateTab('s:0:1'); true")
+    assert await evaluate(instance, at) == spot, "re-selecting the tab moves nothing"
+    # Main and a task tab keep their places independently.
+    shown = await evaluate(instance, """(() => { const w = state.views['s:0:1']; window.placeTask = w.tasks()[0].id;
+        w.openTask(placeTask); const task = w.activeView();
+        return task !== placeView && task.scroll.clientHeight > 0 && task.onScreen && placeView.scroll.clientHeight === 0; })()""")
+    assert shown
+    await evaluate(instance, "state.views['s:0:1'].select(1); true")
+    assert await evaluate(instance, at) == spot, "Main comes back to its place from a task tab"
+    # The anchor, not the pixel: the box is a different width when the tab returns.
+    await evaluate(instance, "openSettingsTab(); true")
+    await metrics(900)
+    await evaluate(instance, "activateTab('s:0:1'); true")
+    assert await evaluate(instance, anchored), "the same message stands at the same height after a resize"
+    await metrics(1440)
+    # A running turn shows its newest message; so does one that ran while the tab was away.
+    await evaluate(instance, "placeView.scroll.scrollTop = %d; placeView.status = 'running'; openSettingsTab(); activateTab('s:0:1'); placeView.status = 'idle'; true" % spot)
+    assert await evaluate(instance, tail), "a running turn lands on the tail"
+    await evaluate(instance, """placeView.scroll.scrollTop = %d; window.placeNewest = placeView.newestSeq; openSettingsTab();
+        placeView.handle({type:'event', event:{seq: placeNewest + 1, kind:'info', ts: Date.now() / 1000,
+            data:{subtype:'note', text:'A note that arrived while the tab was away'}}});
+        activateTab('s:0:1'); true""" % spot)
+    assert await evaluate(instance, tail), "newer messages than the place knew of land on the tail"
+    # The note was never persisted: the node's own transcript takes the view
+    # back, recorded as the Jump to latest control records it, so history's
+    # current destination is the one being read from.
+    await evaluate(instance, "placeView.returnToTail(); true")
+    await until(instance, "!placeView._returning && placeView.newestSeq === placeNewest && !navigation.pending && !navigation.scheduled")
+    # History restores the place as well.
+    await evaluate(instance, "placeView.scroll.scrollTop = %d; navigationRemember(); openSettingsTab(); true" % spot)
+    await until(instance, "!navigation.pending && !navigation.scheduled")
+    await evaluate(instance, "history.go(-1); true")
+    await until(instance, "state.active === 's:0:1' && !navigation.pending && !navigation.scheduled")
+    assert await evaluate(instance, at) == spot, "Back restores the reading position"
+    await evaluate(instance, "closeTab('settings'); delete window.placeView; delete window.placeAnchor; delete window.placeTask; delete window.placeNewest; true")
+    await instance.call("Emulation.setDeviceMetricsOverride", {
+        "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False},
+        session=instance.page_session)
+    print("PASS: reading place kept across tab switches for idle conversations, anchored through a resize, independent for Main and tasks, unmoved by closing another tab or re-selecting, tail for running turns and newer messages, restored by Back", flush=True)
+
+
 async def session_mention_checks(instance):
     await evaluate(instance, "demoView.composer.set('', true); demoView.composer.ta.focus(); true")
     await type_text(instance, "@Session-P")
@@ -1715,6 +1790,7 @@ async def checks(a, b, hub, capture=False):
     await workspace_move_checks(a, capture)
     await session_mention_checks(a)
     await pane_resize_checks(a)
+    await reading_place_checks(a)
     await narrow_composer_checks(a, capture)
     await composer_enter_checks(a, capture)
     await context_menu_checks(a, capture)
