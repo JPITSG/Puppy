@@ -151,10 +151,13 @@ SESSION_FAST_MODE_CAPABILITY = "session-fast-mode"
 SESSION_AGENT_NOTES_CAPABILITY = "session-agent-notes"
 # Every session payload carries the additive ``git`` record saying whether the
 # working directory is inside a Git work tree (null until the node has
-# looked), the node re-checks on its ``git_check_minutes`` timer - carried in
-# its timers payload - and POST /api/sessions/{sid}/git/refresh re-checks one
-# session at once. A console shows the sidebar's Git mark only for nodes that
-# advertise this.
+# looked) and, inside one, the additive ``changes``/``unpushed`` counts of
+# work it is holding (null with ``error`` when git would not read them); the
+# node re-checks on its ``git_check_minutes`` timer - carried in its timers
+# payload - when a prompt finishes in the directory, and on
+# POST /api/sessions/{sid}/git/refresh for one session at once. A console
+# shows the sidebar's Git mark only for nodes that advertise this, and reads
+# a repository without counts as a plain repository.
 SESSION_GIT_CAPABILITY = "session-git"
 # Node-owned pinned flags and session order. Drag-and-drop requires the
 # complete starting order and pin cohort as compare tokens.

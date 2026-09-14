@@ -10,6 +10,7 @@ import argparse
 import asyncio
 import base64
 import json
+import math
 import os
 from pathlib import Path
 import shlex
@@ -49,14 +50,19 @@ async def engines(*args, **kwargs):
 
 # The Git marks of the invented projects. The node's own discovery would
 # find no such directories, so its cache is seeded with these answers and
-# every later look (the worker's pass, a focus refresh) is answered from here.
-DEMO_GIT = {"/home/mira/projects/" + folder: repo for folder, repo in (
-    ("harbor", True), ("garden", True), ("atlas", True), ("notes", False),
-    ("harbor-task", True))}
+# every later look (the worker's pass, a focus refresh) is answered from
+# here. The garden is the heads-up: work its owner has not committed or
+# pushed; the atlas has no remote to push to; the notes are no repository.
+DEMO_GIT = {"/home/mira/projects/" + folder: dict(record) for folder, record in (
+    ("harbor", {"repo": True, "changes": 0, "unpushed": 0}),
+    ("garden", {"repo": True, "changes": 3, "unpushed": 1}),
+    ("atlas", {"repo": True, "changes": 0, "unpushed": None}),
+    ("notes", {"repo": False}),
+    ("harbor-task", {"repo": True, "changes": 2, "unpushed": 0}))}
 
 
 def demo_git(cwd):
-    return {"repo": DEMO_GIT.get(str(cwd), False), "checked_at": time.time()}
+    return dict(DEMO_GIT.get(str(cwd), {"repo": False}), checked_at=time.time())
 
 
 async def fixture():
@@ -1545,6 +1551,148 @@ async def icon_alignment_checks(instance):
           "in both themes, desktop/phone, at 1x/2x", flush=True)
 
 
+async def scrollbar_corner_checks(instance, capture=False):
+    """Read the rendered pixels of every kind of rounded scroll box: a thumb
+    parked at either end of its bar begins after the box's own radius, the
+    box's background fills the corner it would have sat in, and a square
+    pane's thumb still runs to the edge. Both bars, both themes, 1x/2x."""
+    await evaluate(instance, """(() => {
+        const lines=Array.from({length:80},(_,i)=>'        line '+(i+1)).join('\\n');
+        const wide='        '+'wide '.repeat(120);
+        window.sbProbe=el('div');
+        sbProbe.style.cssText='position:fixed;left:24px;top:24px;width:320px;z-index:2147483647;'+
+            'display:flex;flex-direction:column;gap:12px;background:var(--bg)';
+        document.body.appendChild(sbProbe);
+        const place=(node,probe,css,parent)=>{
+            node.dataset.probe=probe; node.style.cssText+=';'+css;
+            (parent||sbProbe).appendChild(node); return node;
+        };
+        place(el('textarea'),'textarea','height:96px;resize:none').value=lines;
+        const md=el('div','md'); sbProbe.appendChild(md);
+        place(el('pre',null,wide),'code block','height:56px',md);
+        place(el('div','task-review-diff',wide+'\\n'+lines),'review diff','height:96px;min-height:0');
+        const menu=place(el('div','choice-menu'),'choice menu',
+            'position:static;height:96px;width:320px;max-width:none;animation:none;box-shadow:none');
+        for(let i=1;i<=40;i++) menu.appendChild(el('div',null,'row '+i)).style.paddingLeft='24px';
+        const modal=place(el('div','modal'),'modal','height:120px;box-shadow:none');
+        modal.appendChild(el('div',null,lines)).style.cssText='white-space:pre;padding-left:24px';
+        place(el('div',null,lines),'square pane',
+            'height:96px;overflow:auto;white-space:pre;background:var(--panel2)');
+        // Sampled from a screenshot of one box: the image is decoded in the
+        // page, and every coordinate is a CSS pixel of the box's border box.
+        window.sbSample=async(data,points)=>{
+            const img=new Image(); img.src='data:image/png;base64,'+data; await img.decode();
+            const canvas=document.createElement('canvas');
+            canvas.width=img.width; canvas.height=img.height;
+            const ctx=canvas.getContext('2d',{willReadFrequently:true});
+            ctx.drawImage(img,0,0);
+            const k=img.width/points.width;
+            return points.list.map(([x,y])=>
+                [...ctx.getImageData(Math.floor((x+.5)*k),Math.floor((y+.5)*k),1,1).data].slice(0,3));
+        };
+        window.sbColor=value=>{
+            const swatch=sbProbe.appendChild(el('div'));
+            swatch.style.background=value;
+            const rgb=getComputedStyle(swatch).backgroundColor; swatch.remove();
+            return rgb.match(/[\\d.]+/g).slice(0,3).map(Number);
+        };
+        return true;
+    })()""")
+    geometry = """(() => {
+        const node=sbProbe.querySelector('[data-probe=%s]'), cs=getComputedStyle(node);
+        const r=node.getBoundingClientRect();
+        return {x:r.x,y:r.y,width:r.width,height:r.height,
+            border:[cs.borderTopWidth,cs.borderRightWidth,cs.borderBottomWidth,cs.borderLeftWidth].map(parseFloat),
+            radius:parseFloat(cs.borderTopLeftRadius),
+            vertical:node.scrollHeight>node.clientHeight, horizontal:node.scrollWidth>node.clientWidth,
+            thumb:sbColor('var(--scrollbar-thumb)')};
+    })()"""
+    close = lambda a, b: all(abs(p - q) <= 3 for p, q in zip(a, b))
+
+    async def sample(geom, points):
+        clip = {"x": geom["x"], "y": geom["y"], "width": geom["width"], "height": geom["height"], "scale": 1}
+        shot = await instance.call("Page.captureScreenshot", {"format": "png", "clip": clip},
+                                   session=instance.page_session)
+        return await evaluate(instance, "sbSample(%s, %s)" % (
+            json.dumps(shot["data"]), json.dumps({"width": geom["width"], "list": points})))
+
+    async def bar_checks(name, geom, axis, parked, label):
+        # A bar's own axis (0 = vertical, 1 = horizontal), its start and end
+        # corners, and the thumb after the inset - the box's own radius -
+        # mirrored through `at`.
+        top, right, bottom, left = geom["border"]
+        inset = geom["radius"]
+        length = geom["height"] if axis == 0 else geom["width"]
+        lead = top if axis == 0 else left
+        trail = bottom if axis == 0 else right
+        across = (geom["width"] - right - 5) if axis == 0 else (geom["height"] - bottom - 5)
+        at = (lambda along: [across, along]) if axis == 0 else (lambda along: [along, across])
+        inner = geom["radius"] - lead
+        # rows/columns of the corner that lie inside the box's inner curve
+        clear = int(math.ceil(inner - math.sqrt(max(inner * inner - (inner - 5) ** 2, 0)))) + 1 if inner > 0 else 0
+        corner = list(range(lead + clear, lead + inset - 1)) if parked == "start" else \
+            list(range(length - trail - inset + 1, length - trail - clear))
+        thumb_at = lead + inset + 3 if parked == "start" else length - trail - inset - 4
+        # the box's own background: the same row inside the left padding for a
+        # vertical bar, the middle of the bar's own row for a horizontal one
+        reference = (lambda along: [max(geom["radius"], 12), along]) if axis == 0 else \
+            (lambda along: [geom["width"] // 2, across])
+        points = [at(along) for along in corner] + [reference(along) for along in corner] + [at(thumb_at)]
+        pixels = await sample(geom, points)
+        seen = pixels[:len(corner)]
+        expected = pixels[len(corner):2 * len(corner)]
+        thumb = pixels[-1]
+        for along, pixel, background in zip(corner, seen, expected):
+            assert close(pixel, background), (label, name, parked, "corner", along, pixel, background)
+        assert close(thumb, geom["thumb"]), (label, name, parked, "thumb", thumb_at, thumb, geom["thumb"])
+        if corner:
+            assert not close(thumb, expected[0]), (label, name, parked, "thumb is not the background", thumb)
+
+    boxes = ("textarea", "code block", "review diff", "choice menu", "modal", "square pane")
+    try:
+        for scale in (1, 2):
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width": 1440, "height": 900, "deviceScaleFactor": scale, "mobile": False},
+                session=instance.page_session)
+            for theme in ("dark", "light"):
+                await evaluate(instance, "applyTheme(" + json.dumps(theme) + "); true")
+                await asyncio.sleep(.4)  # colour transitions have settled
+                label = "%dx %s" % (scale, theme)
+                for name in boxes:
+                    geom = await evaluate(instance, geometry % json.dumps(name))
+                    assert all(float(geom[key]).is_integer() for key in ("x", "y", "width", "height")), (name, geom)
+                    assert (geom["radius"] > 0) == (name != "square pane"), (name, geom)
+                    axes = [axis for axis, has in ((0, geom["vertical"]), (1, geom["horizontal"])) if has]
+                    assert axes, (name, geom)
+                    for axis in axes:
+                        for parked in ("start", "end"):
+                            if parked == "end" and len(axes) == 2:
+                                continue  # that end meets the other bar, not a corner
+                            await evaluate(instance, """(() => {
+                                const node=sbProbe.querySelector('[data-probe=%s]');
+                                node[%s]=%s; return true;
+                            })()""" % (json.dumps(name), json.dumps("scrollTop" if axis == 0 else "scrollLeft"),
+                                       "0" if parked == "start" else "1e6"))
+                            await asyncio.sleep(.05)
+                            await bar_checks(name, geom, axis, parked, label)
+                if capture and scale == 2:
+                    geom = await evaluate(instance, geometry % json.dumps("textarea"))
+                    await evaluate(instance, "sbProbe.querySelector('[data-probe=textarea]').scrollTop=0; true")
+                    clip = {"x": geom["x"], "y": geom["y"], "width": geom["width"], "height": geom["height"], "scale": 2}
+                    shot = await instance.call("Page.captureScreenshot", {"format": "png", "clip": clip},
+                                               session=instance.page_session)
+                    (BASE / "data" / ("scrollbar-corner-" + theme + ".png")).write_bytes(base64.b64decode(shot["data"]))
+    finally:
+        await evaluate(instance, "sbProbe.remove(); delete window.sbProbe; delete window.sbSample; delete window.sbColor; applyTheme('dark'); true")
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": 1440, "height": 900, "deviceScaleFactor": 1,
+            "mobile": False}, session=instance.page_session)
+    print("PASS: a rounded scroll box's thumb starts after the box's radius at both ends of a "
+          "vertical or horizontal bar (textarea, code block, review diff, choice menu, modal), "
+          "the corner keeps the box's background, and a square pane's thumb runs to the edge, "
+          "in both themes at 1x/2x", flush=True)
+
+
 async def queue_expand_checks(instance, capture=False):
     """Expanding the queue must not raise a horizontal scrollbar.
 
@@ -1872,45 +2020,73 @@ async def attachment_steering_checks(instance, hub):
 
 async def git_mark_checks(a, b):
     """Every row carries the Git mark between its pin and its notes, drawn
-    from the node's record; focusing another session asks the node to look
-    again, and a changed answer reaches every console through the list."""
-    marks = await evaluate(a, """(() => Array.from(document.querySelectorAll('.sess-item')).map(row => {
+    from the node's record: a repository holding uncommitted or unpushed
+    work in the console's warn tone with the counts in its label, the rest
+    as before. Focusing another session asks the node to look again, and a
+    changed answer - a mark or a count - reaches every console through the
+    list."""
+    marks = await evaluate(a, """(() => {
+        const probe = document.createElement('span');
+        probe.style.color = 'var(--warn)'; document.body.appendChild(probe);
+        const warn = getComputedStyle(probe).color; probe.remove();
+        return Array.from(document.querySelectorAll('.sess-item')).map(row => {
         const lane = Array.from(row.querySelector('.si-actions').children).map(m => m.className.split(' ')[0]);
         const git = row.querySelector('.si-git');
-        return {lane, has: git.classList.contains('has'), label: git.getAttribute('aria-label'),
+        return {lane, has: git.classList.contains('has'), warn: git.classList.contains('warn'),
+            orange: getComputedStyle(git).color === warn,
+            label: git.getAttribute('aria-label'), name: row.querySelector('.si-name').textContent,
             role: git.getAttribute('role'), cursor: getComputedStyle(git).cursor,
             size: git.querySelector('svg').getBoundingClientRect().width};
-    }))()""")
+    })})()""")
     assert len(marks) == 5, marks
     for mark in marks:
         assert mark["lane"] == ["si-pin", "si-git", "si-notes"], mark
         assert mark["role"] == "img" and mark["cursor"] == "pointer" and mark["size"] == 14, mark
+        assert mark["orange"] == mark["warn"], mark
     assert [mark["has"] for mark in marks] == [True, True, True, True, False], marks
-    assert marks[-1]["label"] == "No Git repository" and marks[0]["label"] == "Git repository"
+    assert marks[-1]["label"] == "No Git repository"
+    assert marks[0]["label"] == "Git repository · nothing to commit or push"
+    by_name = {mark["name"]: mark for mark in marks}
+    assert [name for name, mark in by_name.items() if mark["warn"]] == ["Garden planner"], marks
+    assert by_name["Garden planner"]["label"] == \
+        "Git repository · 3 uncommitted changes · 1 unpushed commit"
+    assert by_name["API cleanup"]["label"] == "Git repository · nothing to commit · no remote"
     # a fresh answer for the focused session: the node re-checks on focus
     # and publishes the changed mark to the other console as well
     notes = next(s for s in db.list_sessions() if s["cwd"].endswith("/notes"))
-    DEMO_GIT[notes["cwd"]] = True
+    DEMO_GIT[notes["cwd"]] = {"repo": True, "changes": 1, "unpushed": None}
     try:
         await evaluate(a, "openSessionTab(0,%d,state.sessions.find(s=>s.id===%d)); true" % (notes["id"], notes["id"]))
         for instance in (a, b):
-            await until(instance, "state.sessions.find(s=>s.id===%d).git.repo===true && "
-                        "document.querySelectorAll('.si-git.has').length===5" % notes["id"])
-    finally:
-        DEMO_GIT[notes["cwd"]] = False
+            await until(instance, "state.sessions.find(s=>s.id===%d).git.changes===1 && "
+                        "document.querySelectorAll('.si-git.has').length===5 && "
+                        "document.querySelectorAll('.si-git.has.warn').length===2" % notes["id"])
+        # the count alone moving is news too: the same repository, more work
+        DEMO_GIT[notes["cwd"]]["changes"] = 2
         session_git._store(notes["cwd"], demo_git(notes["cwd"]))
         runner.broadcast_sessions()
         for instance in (a, b):
-            await until(instance, "document.querySelectorAll('.si-git.has').length===4")
+            await until(instance, "document.querySelector('.sess-item[data-session-key=\"0:%d\"] .si-git')"
+                        ".getAttribute('aria-label')==='Git repository · 2 uncommitted changes · no remote'"
+                        % notes["id"])
+    finally:
+        DEMO_GIT[notes["cwd"]] = {"repo": False}
+        session_git._store(notes["cwd"], demo_git(notes["cwd"]))
+        runner.broadcast_sessions()
+        for instance in (a, b):
+            await until(instance, "document.querySelectorAll('.si-git.has').length===4 && "
+                        "document.querySelectorAll('.si-git.warn').length===1")
         await evaluate(a, "closeTab('s:0:%d'); activateTab('s:0:1'); true" % notes["id"])
-    print("PASS: the Git mark between pin and notes on every row, drawn from the node's record, "
-          "re-checked on focus and published to every console", flush=True)
+    print("PASS: the Git mark between pin and notes on every row, drawn from the node's record - "
+          "orange with its counts for uncommitted or unpushed work - re-checked on focus and "
+          "published to every console", flush=True)
 
 
 async def checks(a, b, hub, capture=False):
     await background_count_checks(a, b, hub)
     await git_mark_checks(a, b)
     await icon_alignment_checks(a)
+    await scrollbar_corner_checks(a, capture)
     await background_task_checks(a, capture)
     await queue_expand_checks(a, capture)
     await message_reuse_checks(a)
@@ -3114,6 +3290,16 @@ async def navigation_checks(instance, url, sid):
     await run("openSearchTab()")
     await run("state.views.search.presetQuery('dashboard')")
     await until(instance, "!state.views.search.searchController")
+    # The session with more matches than its first page carries the button;
+    # a real press loads the rest over the node's own route: every row where
+    # the preview stood, the button gone, and no notice raised.
+    await until(instance, "document.querySelector('.search-results .sh-more')?.textContent==='Show all 7 matches'"
+                          " && document.querySelectorAll('.search-results .sh-matches .sh-match').length===5")
+    await evaluate(instance, "document.getElementById('toasts').replaceChildren();"
+                             " document.querySelector('.search-results .sh-more').click(); true")
+    await until(instance, "!document.querySelector('.search-results .sh-more')"
+                          " && document.querySelectorAll('.search-results .sh-matches .sh-match').length===7")
+    assert await evaluate(instance, "!document.querySelector('#toasts .toast') && state.views.search.pageRequests.size===0")
     await run("state.views.search.presetQuery('cards')")
     await until(instance, "!state.views.search.searchController")
     await travel(-1, "state.views.search.input.value==='dashboard'")

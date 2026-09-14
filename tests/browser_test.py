@@ -4627,8 +4627,23 @@ def check_session_pins(ui_source: str, css_source: str) -> None:
     assert "tabIndex" not in git_mark and 'addEventListener("click"' not in git_mark
     for needle in ('"Git repository"', '"No Git repository"',
                    '"Git repository not checked yet"',
-                   '"Git repository could not be checked"'):
+                   '"Git repository could not be checked"',
+                   '"Git repository · nothing to commit or push"',
+                   '`Git repository · changes could not be checked · ${git.error}`',
+                   'uncommitted change${work.changes === 1 ? "" : "s"}',
+                   'unpushed commit${work.unpushed === 1 ? "" : "s"}',
+                   '"nothing to commit"', '"nothing to push"', '"no remote"'):
         assert needle in git_mark, needle
+    # The heads-up is the warn tone on the same mark, from the record's
+    # counts alone: uncommitted paths or commits no remote holds. A node
+    # from before the counts, or a git that declined, is a plain repository.
+    assert "const work = sessionGitWork(git);" in git_mark
+    assert '(work && (work.changes || work.unpushed) ? " warn" : "")' in git_mark
+    assert 'if (!git || git.repo !== true || git.error || typeof git.changes !== "number") return null;' \
+        in git_mark
+    assert ".sess-item .si-git.has.warn{color:var(--warn)}" in css_source
+    assert "count(aRecord.changes) === count(bRecord.changes)" in git_mark
+    assert "count(aRecord.unpushed) === count(bRecord.unpushed)" in git_mark
     assert "if (key === sessionGitFocusKey) return;" in git_mark
     assert "!backendSupportsSessionGit(bid) || !backendConnectionAllowed(bid)" in git_mark
     assert 'api(bid, `sessions/${sid}/git/refresh`, { method: "POST"' in git_mark

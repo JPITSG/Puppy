@@ -108,12 +108,18 @@ No persisted shape changes: the existing session changes from `temporary` to
 
 The sidebar's Git mark is additive `session-git`: every session payload carries
 `git` (`null` until the node has looked, then a `repo`/`checked_at` record, with
-`error` when the directory could not be read), both execution runtimes serve
+`error` when the directory could not be read; a repository also carries the
+additive `changes` and `unpushed` counts, or `null` for both with `error`
+when `git` would not read its state), both execution runtimes serve
 `POST /api/sessions/{sid}/git/refresh`, and the node's `git_check_minutes` timer
-rides the existing `timer-settings` payload. A console reads a node without the
-capability as before: no mark, and its six timers still editable. Nothing is
-persisted beyond the timer value; nothing changes a backup shape except that
-timer, and no availability verdict moves.
+rides the existing `timer-settings` payload. The node re-checks a directory
+when a prompt finishes in it (never a task's), when a task's changes are
+applied to it, and when its agent notes are written. A console reads a node
+without the capability as before: no mark, and its six timers still editable;
+a node from before the counts answers a repository without them, which is a
+plain repository, never the warn tone. Nothing is persisted beyond the timer
+value; nothing changes a backup shape except that timer, and no availability
+verdict moves.
 
 Host activity is additive `host-metrics-v1`: both execution runtimes serve
 `GET /api/host/metrics`, returning that node's in-memory CPU history, its

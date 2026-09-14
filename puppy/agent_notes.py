@@ -21,7 +21,7 @@ import tempfile
 
 from aiohttp import web
 
-from puppy import db, workspace_sync
+from puppy import db, session_git, workspace_sync
 
 log = logging.getLogger("puppy.agent_notes")
 
@@ -339,6 +339,8 @@ async def h_put(request: web.Request):
         payload = describe(session)
     except NotesError as exc:
         return web.json_response({"error": str(exc)}, status=exc.status)
+    # a written or removed note is uncommitted work in the directory's repository
+    session_git.request(session["cwd"])
     runner.broadcast_sessions()
     return web.json_response(dict(payload, ok=True))
 

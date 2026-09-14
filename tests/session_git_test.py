@@ -1,18 +1,54 @@
 #!/usr/bin/env python3
 """The sidebar's Git mark, from the directory up: discovery against a real
-tree, the node's cache and worker, the focus refresh on both authenticated
-runtimes, the timer that paces it, and the guards around it. No engine,
-network or quota; ``git`` itself is never run."""
+tree, the work state read from real repositories (uncommitted paths,
+commits no remote holds, and every way git can decline to say), the node's
+cache and worker, the focus refresh on both authenticated runtimes, the
+re-check a finished prompt asks for - through the runner itself, with a
+task's prompt left out - the timer that paces it, and the guards around it.
+No engine, network or quota; ``git`` runs only on scratch repositories."""
 from __future__ import annotations
 
 import asyncio
+from contextlib import ExitStack
+import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import time
 from types import SimpleNamespace
 from unittest.mock import patch
+
+
+def fixture():
+    """An engine that answers one prompt with one result, like the real CLI
+    would after a turn that touched the working directory, then waits for
+    the runner to close its input."""
+    def read():
+        line = sys.stdin.readline()
+        assert line, "stdin closed before the expected request"
+        return json.loads(line)
+
+    def send(value):
+        print(json.dumps(value), flush=True)
+
+    init = read()
+    assert init["request"]["subtype"] == "initialize"
+    send({"type": "control_response", "response": {
+        "subtype": "success", "request_id": init["request_id"], "response": {}}})
+    read()  # the prompt
+    send({"type": "system", "subtype": "init", "session_id": "native-session", "tools": []})
+    send({"type": "result", "subtype": "success", "is_error": False,
+          "session_id": "native-session", "num_turns": 1,
+          "usage": {"input_tokens": 2, "output_tokens": 1}, "result": "done"})
+    while sys.stdin.readline():
+        pass
+
+
+if __name__ == "__main__" and sys.argv[1:2] == ["--fixture"]:
+    fixture()
+    raise SystemExit
 
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
@@ -26,14 +62,36 @@ TREE = TEST_ROOT / "tree"
 os.environ["GIT_CEILING_DIRECTORIES"] = str(TREE)
 
 from aiohttp.test_utils import TestClient, TestServer  # noqa: E402
-from puppy import config, db, protocol, runner, session_git  # noqa: E402
+from puppy import config, db, protocol, runner, session_git, session_tasks, workspaces  # noqa: E402
 from puppy import web as webui  # noqa: E402
+from puppy.drivers import get_driver  # noqa: E402
 from backend.puppy_backend.app import build_app as backend_app  # noqa: E402
 
 
 def git_dir(path: Path) -> None:
+    """The least git itself accepts as a git dir: HEAD, objects and refs."""
     path.mkdir(parents=True, exist_ok=True)
     (path / "HEAD").write_text("ref: refs/heads/main\n")
+    (path / "objects").mkdir(exist_ok=True)
+    (path / "refs").mkdir(exist_ok=True)
+
+
+def git(cwd, *args) -> str:
+    """The real git on a scratch repository, with a fixed identity so no
+    global configuration (signing, hooks, a default branch) can differ."""
+    return subprocess.run(
+        ["git", "-c", "user.name=Puppy tests", "-c", "user.email=tests@localhost",
+         "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main",
+         "-c", "core.hooksPath=/dev/null", *args],
+        cwd=str(cwd), check=True, capture_output=True, text=True,
+        env=dict(os.environ, GIT_TERMINAL_PROMPT="0")).stdout
+
+
+def state(cwd) -> tuple:
+    """(repo, changes, unpushed, error) of one inspection."""
+    record = session_git.inspect(str(cwd))
+    return (record["repo"], record.get("changes"), record.get("unpushed"),
+            record.get("error"))
 
 
 def discovery() -> None:
@@ -61,8 +119,6 @@ def discovery() -> None:
     (headless / ".git").mkdir(parents=True)
     bare = TREE / "bare"
     git_dir(bare)
-    (bare / "objects").mkdir()
-    (bare / "refs").mkdir()
     link = TREE / "link"
     link.symlink_to(repo / "src")
     (TREE / "file.txt").write_text("x")
@@ -111,20 +167,137 @@ def discovery() -> None:
     print("discovery: git dirs, gitfiles, parents, links, boundaries and non-directories")
 
 
+def work_state() -> None:
+    """The counts a repository's record carries, read by git itself."""
+    project = TREE / "project"
+    project.mkdir()
+    git(project, "init", "-q")
+    (project / "README").write_text("hello\n")
+    # an unborn branch with no remote: the untracked file is the one change,
+    # and there is nowhere to push to
+    assert state(project) == (True, 1, None, None)
+    git(project, "add", "README")
+    assert state(project) == (True, 1, None, None), "staged is still uncommitted"
+    git(project, "commit", "-q", "-m", "one")
+    assert state(project) == (True, 0, None, None)
+    # a remote that has never been pushed to holds nothing: every commit is
+    # unpushed, an upstream or not
+    git(TREE, "init", "-q", "--bare", "remote.git")
+    git(project, "remote", "add", "origin", str(TREE / "remote.git"))
+    assert state(project) == (True, 0, 1, None)
+    git(project, "push", "-q", "-u", "origin", "main")
+    assert state(project) == (True, 0, 0, None)
+    # the whole work tree counts, whatever subdirectory the session sits in:
+    # a modified file, an untracked file and an untracked directory as one
+    (project / "README").write_text("changed\n")
+    (project / "new.txt").write_text("x")
+    (project / "dir").mkdir()
+    (project / "dir" / "a").write_text("a")
+    (project / "dir" / "b").write_text("b")
+    assert state(project) == (True, 3, 0, None)
+    assert state(project / "dir") == (True, 3, 0, None)
+    git(project, "add", "-A")
+    assert state(project) == (True, 4, 0, None), "staged paths are listed one by one"
+    git(project, "commit", "-q", "-m", "two")
+    assert state(project) == (True, 0, 1, None)
+    git(project, "commit", "-q", "--allow-empty", "-m", "three")
+    assert state(project) == (True, 0, 2, None)
+    # a branch without an upstream is unpushed work like any other, until
+    # some remote holds its commits - any remote, not only its upstream
+    git(project, "checkout", "-q", "-b", "feature")
+    git(project, "commit", "-q", "--allow-empty", "-m", "four")
+    assert state(project) == (True, 0, 3, None)
+    git(project, "push", "-q", "origin", "main")
+    assert state(project) == (True, 0, 1, None)
+    git(TREE, "init", "-q", "--bare", "backup.git")
+    git(project, "remote", "add", "backup", str(TREE / "backup.git"))
+    git(project, "push", "-q", "backup", "feature")
+    assert state(project) == (True, 0, 0, None)
+    # a detached head is counted the same way
+    git(project, "checkout", "-q", "--detach", "main")
+    git(project, "commit", "-q", "--allow-empty", "-m", "five")
+    assert state(project) == (True, 0, 1, None)
+    # a fresh clone is clean, pushed and unremarkable
+    git(TREE, "clone", "-q", str(TREE / "remote.git"), "clone")
+    assert state(TREE / "clone") == (True, 0, 0, None)
+    (TREE / "clone" / "note").write_text("n")
+    assert state(TREE / "clone") == (True, 1, 0, None)
+
+    # When git will not answer, the repository stays a repository - the
+    # discovery read the tree itself - and the record carries the reason
+    # in place of the counts: a git dir git rejects, a git that is not
+    # installed, and a git that does not come back.
+    refused = TREE / "refused"
+    (refused / ".git").mkdir(parents=True)
+    (refused / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    repo, changes, unpushed, error = state(refused)
+    assert (repo, changes, unpushed) == (True, None, None) and "not a git repository" in error, error
+    nobin = TREE / "nobin"
+    nobin.mkdir()
+    with patch.dict(os.environ, {"PATH": str(nobin)}):
+        assert state(project) == (True, None, None, "git is not installed on this backend")
+    slow = TREE / "slowbin"
+    slow.mkdir()
+    (slow / "git").write_text("#!/bin/sh\nexec /bin/sleep 5\n")
+    (slow / "git").chmod(0o755)
+    started = time.monotonic()
+    with patch.dict(os.environ, {"PATH": str(slow)}), patch.object(session_git, "GIT_TIMEOUT", 1.0):
+        assert state(project) == (True, None, None, "git did not answer within 1 seconds")
+    assert time.monotonic() - started < 4, "the timeout ended the run"
+    # the public record carries the counts for a repository and the reason
+    # beside them only when git declined; a non-repository carries neither
+    assert set(session_git._public(session_git.inspect(str(project)))) == \
+        {"repo", "checked_at", "changes", "unpushed"}
+    assert set(session_git._public(session_git.inspect(str(refused)))) == \
+        {"repo", "checked_at", "changes", "unpushed", "error"}
+    assert set(session_git._public(session_git.inspect(str(TREE / "plain")))) == {"repo", "checked_at"}
+    print("work state: uncommitted paths, unpushed commits, remotes, branches and git's refusals")
+
+
 async def listed(client, headers):
     response = await client.get("/api/sessions", headers=headers)
     assert response.status == 200
     return {row["id"]: row["git"] for row in (await response.json())["sessions"]}
 
 
-async def answered(client, headers, ids, timeout=10.0):
+async def answered(client, headers, ids, condition=None, timeout=10.0):
     deadline = time.monotonic() + timeout
     while True:
         rows = await listed(client, headers)
-        if all(rows.get(sid) is not None for sid in ids):
+        if all(rows.get(sid) is not None and (condition is None or condition(rows[sid]))
+               for sid in ids):
             return rows
         assert time.monotonic() < deadline, rows
         await asyncio.sleep(.05)
+
+
+async def run_turn(sid) -> None:
+    """One prompt through the real runner, answered by the fixture engine."""
+    assert db.get_session(sid)["engine"] == "claude", "the fixture speaks claude's stream-json"
+    driver = get_driver("claude")
+    hub = runner.hub(sid)
+
+    def command(*args, **kwargs):
+        return [sys.executable, str(Path(__file__).resolve()), "--fixture"]
+
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(driver, "build_cmd", side_effect=command))
+        stack.enter_context(patch.object(runner, "STEERING_ACK_GRACE", .2))
+        stack.enter_context(patch.object(runner, "SIDE_QUESTION_GRACE", .2))
+        try:
+            assert hub.send_message("touch the tree") == {"queued": False}
+            deadline = time.monotonic() + 20
+            while hub.status != "idle":
+                assert time.monotonic() < deadline, "the fixture turn did not end"
+                await asyncio.sleep(.02)
+            await hub.turn_task
+        finally:
+            if hub.status != "idle":
+                await hub.kill()
+            if hub.turn_task:
+                await asyncio.gather(hub.turn_task, return_exceptions=True)
+    events = db.get_events(sid)
+    assert any(e["kind"] == "result" and e["data"].get("ok") for e in events), events
 
 
 async def api_contract(factory) -> None:
@@ -151,13 +324,21 @@ async def api_contract(factory) -> None:
         async with TestClient(TestServer(app)) as client:
             worker = session_git._lifecycle(app)
             await worker.__anext__()
-            # the worker's first pass answers every session's directory
+            # the worker's first pass answers every session's directory,
+            # counts included: the repository holds nothing git would list
+            # (empty directories are not files) and no remote, and the
+            # record says so and nothing else
             rows = await answered(client, headers, ids)
-            assert rows[ids[0]]["repo"] is True and "error" not in rows[ids[0]]
-            assert rows[ids[1]]["repo"] is False
+            assert rows[ids[0]] == {"repo": True, "checked_at": rows[ids[0]]["checked_at"],
+                                    "changes": 0, "unpushed": None}, rows[ids[0]]
+            assert rows[ids[1]]["repo"] is False and "changes" not in rows[ids[1]]
             assert rows[ids[2]]["repo"] is None and rows[ids[2]]["error"]
+            (repo / "src" / "deep" / "file.txt").write_text("f")
+            response = await client.post("/api/sessions/{}/git/refresh".format(ids[0]),
+                                         headers=headers)
+            assert (await response.json())["git"]["changes"] == 1
             response = await client.get("/api/sessions/{}".format(ids[0]), headers=headers)
-            assert (await response.json())["session"]["git"]["repo"] is True
+            assert (await response.json())["session"]["git"]["changes"] == 1
 
             refresh = "/api/sessions/{}/git/refresh"
             response = await client.post(refresh.format(ids[1]))
@@ -193,10 +374,54 @@ async def api_contract(factory) -> None:
             # next scheduled pass: asking about it wakes the worker
             late = TREE / "late" / str(int(time.time() * 1000))
             git_dir(late / ".git")
-            new_id = db.create_session("", "codex", str(late), "", "", "", "default")
+            new_id = db.create_session("", "claude", str(late), "", "", "", "default")
             assert (await listed(client, headers))[new_id] is None
             rows = await answered(client, headers, [new_id])
             assert rows[new_id]["repo"] is True
+
+            # Something on this node changed the repository: a request is
+            # served by the worker's next iteration, not the next pass, and
+            # a changed count is published like a changed mark.
+            (late / "one.txt").write_text("1")
+            assert (await listed(client, headers))[new_id]["changes"] == 0
+            session_git.request(str(late))
+            rows = await answered(client, headers, [new_id], lambda row: row["changes"] == 1)
+            assert rows[new_id]["unpushed"] is None
+            # a finished prompt asks the same way for an ordinary session
+            (late / "two.txt").write_text("2")
+            session_git.turn_finished(db.get_session(new_id))
+            await answered(client, headers, [new_id], lambda row: row["changes"] == 2)
+            # and not for a task: its copy is a repository of its own, and
+            # its prompts never reach the project's
+            task_cwd = Path(workspaces.create_temporary())
+            git(task_cwd, "init", "-q")
+            task_id = db.create_session("", "claude", str(task_cwd), "", "", "", "default",
+                                        workspace_kind="temporary")
+            session_tasks._save(task_id, {
+                "format": 1, "parent": new_id, "request_id": "git-test-task", "prompt": "t",
+                "context": "", "base": "0" * 40, "created_at": time.time(), "outcome": "pending",
+                "summary": "", "completed_at": 0, "applied_at": 0, "result_seq": 0})
+            rows = await answered(client, headers, [task_id])
+            assert rows[task_id]["changes"] == 0, rows[task_id]
+            (task_cwd / "edit.txt").write_text("e")
+            session_git.turn_finished(db.get_session(task_id))
+            assert str(task_cwd) not in session_git._requested
+            await asyncio.sleep(.3)
+            assert (await listed(client, headers))[task_id]["changes"] == 0, "not looked at again"
+            session_git.request(str(task_cwd))
+            await answered(client, headers, [task_id], lambda row: row["changes"] == 1)
+
+            # The runner itself: a prompt that ran the engine ends with the
+            # re-check for an ordinary session, and without one for a task.
+            (late / "three.txt").write_text("3")
+            (task_cwd / "more.txt").write_text("m")
+            await run_turn(new_id)
+            await answered(client, headers, [new_id], lambda row: row["changes"] == 3)
+            await run_turn(task_id)
+            await asyncio.sleep(.3)
+            assert (await listed(client, headers))[task_id]["changes"] == 1, "a task's prompt asks nothing"
+            db.query("DELETE FROM meta WHERE key=?", (session_tasks.PREFIX + str(task_id),))
+            db.delete_session(task_id)
 
             # a directory no session uses any more is forgotten by the next pass
             db.delete_session(new_id)
@@ -204,6 +429,11 @@ async def api_contract(factory) -> None:
             await session_git._pass(full=True)
             assert str(late) not in session_git._records
             assert str(repo) in session_git._records
+            # a request about a directory no session uses is ignored
+            session_git.request(str(late))
+            await session_git._pass(full=False, requested={str(late)})
+            assert str(late) not in session_git._records
+            session_git._requested.clear()
 
             # the timer that paces the worker is the node's own, edited with
             # the other backend timers and waking the worker when it moves
@@ -255,6 +485,7 @@ async def api_contract(factory) -> None:
     finally:
         for sid in ids:
             db.delete_session(sid)
+        (repo / "src" / "deep" / "file.txt").unlink()
         session_git.reset_for_tests()
     print("routes and worker on the {} runtime".format("full" if full else "headless"))
 
@@ -280,6 +511,7 @@ async def main() -> None:
         config.load()
         db.connect()
         discovery()
+        work_state()
         config_shape()
         await api_contract(webui.build_app)
         await api_contract(backend_app)

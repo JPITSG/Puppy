@@ -1955,9 +1955,10 @@ async def exercise_agent_notes(http, url, headers, pinned, session, cwd: Path) -
 
 
 async def exercise_session_git(http, url, headers, pinned, session, cwd: Path) -> None:
-    """Whether the working directory is inside a Git work tree: the node's
-    cached answer on every session payload, re-checked by the focus refresh,
-    which answers at once and publishes a changed mark."""
+    """Whether the working directory is inside a Git work tree, and what that
+    repository is holding: the node's cached answer on every session payload,
+    re-checked by the focus refresh, which answers at once and publishes a
+    changed record."""
     sid = session["id"]
     refresh_url = url + f"/api/sessions/{sid}/git/refresh"
 
@@ -1966,28 +1967,55 @@ async def exercise_session_git(http, url, headers, pinned, session, cwd: Path) -
             rows = (await response.json())["sessions"]
         return next(row["git"] for row in rows if row["id"] == sid)
 
+    def git(*args):
+        subprocess.run(["git", "-c", "user.name=Puppy tests", "-c", "user.email=tests@localhost",
+                        "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main", *args],
+                       cwd=str(cwd), check=True, capture_output=True,
+                       env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+
     assert "git" in session
     async with http.post(refresh_url, headers=headers, ssl=pinned) as response:
         data = await response.json()
         assert response.status == 200, data
     assert data["ok"] is True and data["git"]["repo"] is False, data
-    assert "error" not in data["git"] and isinstance(data["git"]["checked_at"], float)
+    assert "error" not in data["git"] and "changes" not in data["git"]
+    assert isinstance(data["git"]["checked_at"], float)
     assert (await listed())["repo"] is False
-    (cwd / ".git").mkdir()
-    (cwd / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    git("init", "-q")
     # the list carries the node's cached answer, never a per-request look
     assert (await listed())["repo"] is False
     async with http.post(refresh_url, headers=headers, ssl=pinned) as response:
-        assert (await response.json())["git"]["repo"] is True
-    assert (await listed())["repo"] is True
+        record = (await response.json())["git"]
+    # the repository holds the session's own files, uncommitted, and has no
+    # remote to push to
+    assert record["repo"] is True and record["changes"] >= 1 and record["unpushed"] is None, record
+    assert "error" not in record
+    assert (await listed()) == record
     async with http.get(url + f"/api/sessions/{sid}", headers=headers, ssl=pinned) as response:
-        assert (await response.json())["session"]["git"]["repo"] is True
+        assert (await response.json())["session"]["git"] == record
+    git("add", "-A")
+    git("commit", "-q", "-m", "everything")
+    async with http.post(refresh_url, headers=headers, ssl=pinned) as response:
+        committed = (await response.json())["git"]
+    assert committed["changes"] == 0 and committed["unpushed"] is None, committed
+    remote = Path(tempfile.mkdtemp(prefix="puppy-session-git-remote-"))
+    git("init", "-q", "--bare", str(remote))
+    git("remote", "add", "origin", str(remote))
+    async with http.post(refresh_url, headers=headers, ssl=pinned) as response:
+        unpushed = (await response.json())["git"]
+    assert unpushed["changes"] == 0 and unpushed["unpushed"] == 1, unpushed
+    git("push", "-q", "-u", "origin", "main")
+    async with http.post(refresh_url, headers=headers, ssl=pinned) as response:
+        pushed = (await response.json())["git"]
+    assert pushed["changes"] == 0 and pushed["unpushed"] == 0, pushed
+    assert (await listed()) == pushed
     async with http.post(url + "/api/sessions/999999/git/refresh",
                          headers=headers, ssl=pinned) as response:
         assert response.status == 404
     async with http.post(refresh_url, ssl=pinned) as response:
         assert response.status == 401
     shutil.rmtree(cwd / ".git")
+    shutil.rmtree(remote, ignore_errors=True)
     async with http.post(refresh_url, headers=headers, ssl=pinned) as response:
         assert (await response.json())["git"]["repo"] is False
     assert (await listed())["repo"] is False
@@ -2919,12 +2947,21 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert pinned_payload["session"]["pinned"] is True
         assert pinned_payload["sessions"][0]["id"] == scratch["id"]
         assert pinned_payload["sessions"][0]["pinned"] is True
-        while True:
-            pin_notice = await pin_updates.receive_json(timeout=3)
-            if pin_notice.get("type") == "sessions" and \
-                    pin_notice.get("state_revision", 0) > pin_revision:
-                break
-        assert pin_notice["sessions"][0]["pinned"] is True
+        # The pin reaches the stream within the timeout. A list published in
+        # between for another reason - the Git worker answering a directory
+        # created moments ago - is not the pin, and is read past; the
+        # scratch session already heads the list by recency, so the pinned
+        # flag itself is what marks the pin's own list.
+        try:
+            while True:
+                pin_notice = await pin_updates.receive_json(timeout=3)
+                if pin_notice.get("type") == "sessions" and \
+                        pin_notice.get("state_revision", 0) > pin_revision and \
+                        pin_notice["sessions"][0]["id"] == scratch["id"] and \
+                        pin_notice["sessions"][0]["pinned"] is True:
+                    break
+        except asyncio.TimeoutError:
+            raise AssertionError("the pin never reached the state stream")
         await pin_updates.close()
         for missing in ("expected_order", "expected_pinned"):
             body = {"order": [scratch["id"]], "expected_order": [scratch["id"]],

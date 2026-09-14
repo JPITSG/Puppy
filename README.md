@@ -174,11 +174,18 @@ reading anywhere further up is never pulled away from it.
   are more actions than the available height.
 - **Git repositories.** A branch mark on every session row, between the pin
   and the agent notes, shows whether the session's directory is inside a Git
-  repository. The backend that runs the session checks its directory every
-  15 minutes (Settings → Timers) and again whenever you open or switch to the
-  session; a directory it has not looked at yet, or could not read, keeps a
-  faint mark with the reason in its label. The mark is a reading only - nothing
-  opens from it yet.
+  repository - and turns orange when that repository is holding work you have
+  not committed or pushed: uncommitted changes (staged, unstaged or untracked)
+  or commits that no remote has yet. Its label says how much of each, or
+  "nothing to commit or push"; a repository with no remote has nowhere to push
+  to and is never flagged for its commits. The backend that runs the session
+  checks its directory every 15 minutes (Settings → Timers), whenever you open
+  or switch to the session, and every time a prompt finishes in it - a task's
+  prompts excepted, since a task works in its own clone; applying a task's
+  changes to Main re-checks Main instead. A directory it has not looked at
+  yet, or could not read, keeps a faint mark with the reason in its label, and
+  a repository whose state `git` refuses to read keeps the plain mark with
+  `git`'s reason. The mark is a reading only - nothing opens from it yet.
 - **Agent notes.** A mark on every session row shows whether its directory has
   an `AGENTS.md` or `CLAUDE.md`, and opens a small editor for exactly those two
   files.
@@ -728,8 +735,8 @@ backend name stays readable; long button labels wrap within the button.
   [completion alert configuration](docs/completion-alerts.md) for the saved shape.
 - **Timers** – per backend: release checks, model catalog and sign-in caching,
   and how often the backend re-checks whether each session's directory is a
-  Git repository (15 minutes); for this instance, the controller's polling and
-  synchronization intervals. A backend from before the Git check keeps its
+  Git repository with uncommitted or unpushed work (15 minutes); for this
+  instance, the controller's polling and synchronization intervals. A backend from before the Git check keeps its
   other timers editable with that row disabled. Validation and save errors
   appear beneath the affected field; edit it or press Escape to clear the error.
 - **Timeouts** – per backend: maximum agent turn duration (2 hours), spawned-agent
@@ -833,6 +840,7 @@ python3 tests/host_metrics_test.py   # CPU history, the process tree and backend
 python3 tests/backend_test.py        # headless package, auth, protocol, capabilities
 python3 tests/snapshot_test.py       # backup export/import and rollback
 python3 tests/search_test.py         # the search index and query language
+node tests/search_ui_test.js         # the Search tab's results, Show all pages and their cancellation
 python3 tests/spawn_test.py          # spawned agents against a stub engine
 python3 tests/mcp_startup_test.py     # source/zipapp MCP startup with filtered environments
 python3 tests/workspace_sync_test.py # remote workspace sync and conflicts

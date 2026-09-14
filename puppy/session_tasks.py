@@ -21,7 +21,7 @@ import time
 
 from aiohttp import web
 
-from puppy import db, operations, uploads, workspaces
+from puppy import db, operations, session_git, uploads, workspaces
 
 PREFIX = "session_task."
 # Per-session Tasks preference: an exact true marker means disabled;
@@ -937,6 +937,8 @@ async def review(parent_id, sid, expected=None, resolve_conflicts=False):
                     # the task's delta is empty, so a later fold reads it here.
                     runner.hub(parent_id)._emit("info", {"subtype": "session_task", "task_id": sid,
                         "text": "Task changes applied: " + task["name"], "files": files})
+                    # the applied files are uncommitted work in Main's repository now
+                    session_git.request(parent["cwd"])
                     runner.broadcast_sessions()
             return {"task": runner.session_payload(db.get_session(sid)), "token": token,
                     "files": files, "diff": patch[:200000].decode("utf-8", "replace"),

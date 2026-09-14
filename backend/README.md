@@ -764,19 +764,29 @@ reconcile.
 
 Nodes advertising `session-git` carry the additive `git` field on every
 session payload: `null` until the node has looked at the session's working
-directory, then `{"repo": true|false, "checked_at": <seconds>}`, or
+directory, then `{"repo": false, "checked_at": <seconds>}`,
+`{"repo": true, "checked_at": <seconds>, "changes": <n>, "unpushed": <n>|null}`,
+`{"repo": true, "checked_at": <seconds>, "changes": null, "unpushed": null,
+"error": "…"}` when `git` would not read the repository's state, or
 `{"repo": null, "checked_at": <seconds>, "error": "…"}` for a directory it
 could not read. The answer says whether the directory is inside a Git work
 tree, found the way `git` finds it - a `.git` directory or gitfile in the
 directory or a parent, stopping at the filesystem root, a mount boundary or
-`GIT_CEILING_DIRECTORIES` - without running `git`. It is cached in memory per
-directory, re-checked by the node's worker every `git_check_minutes`
-(`/api/timers`, default 15) and at once by `POST /api/sessions/{sid}/git/refresh`,
-which answers `{"ok": true, "git": <record>}` and publishes the session list
-when the mark changed. Nothing is persisted or backed up. The console shows the
-record as the branch mark between each sidebar row's pin and notes and posts
-the refresh when a session is brought into focus. See
-[Git repositories](../docs/session-git.md).
+`GIT_CEILING_DIRECTORIES` - without running `git`; inside one, `git` itself
+is asked how many paths its status lists (`changes`) and how many commits on
+`HEAD` no remote-tracking branch holds (`unpushed`, `null` when no remote is
+configured), read-only, without the optional index lock and bounded to 30
+seconds. It is cached in memory per directory, re-checked by the node's
+worker every `git_check_minutes` (`/api/timers`, default 15), at once by
+`POST /api/sessions/{sid}/git/refresh`, which answers `{"ok": true, "git":
+<record>}` and publishes the session list when the record changed, and again
+when a prompt finishes in the directory (a task's prompt excepted - its clone
+is not the project), when a task's changes are applied to it, and when its
+agent notes are written. Nothing is persisted or backed up. The console shows
+the record as the branch mark between each sidebar row's pin and notes - in
+the warn tone with the counts in its label when there is uncommitted or
+unpushed work - and posts the refresh when a session is brought into focus.
+See [Git repositories](../docs/session-git.md).
 
 ## Session tools
 

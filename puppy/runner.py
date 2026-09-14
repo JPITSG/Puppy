@@ -3506,6 +3506,12 @@ class SessionHub:
                 except Exception:
                     log.exception("post-turn workspace barrier failed for "
                                   "session %s", self.id)
+            if engine_ran and not tool:
+                # The prompt may have edited, committed or pushed in the
+                # project: its Git mark is looked at again now rather than
+                # at the node's next pass. A task's prompt is left out there -
+                # its copy is a repository of its own.
+                session_git.turn_finished(session)
             block_started = self.active_since
             queue_waiting = self._queue_reorder is not None and bool(self.queue)
             retry_item = None

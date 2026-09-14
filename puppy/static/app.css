@@ -120,6 +120,21 @@ body::after{
 ::-webkit-scrollbar{width:10px;height:10px}
 ::-webkit-scrollbar-thumb{background:var(--scrollbar-thumb);border-radius:var(--r-sm);border:2px solid var(--bg)}
 ::-webkit-scrollbar-track{background:transparent}
+/* A scroll box with rounded corners keeps its thumb out of them. The track
+   runs the full padding edge, so a thumb parked at either end would sit in
+   the curve with its --bg border cutting across the box's own border; the
+   track is inset by the box's radius instead. The margin counts only along
+   the bar's own axis, so one value serves a vertical and a horizontal bar,
+   and a square pane's thumb still runs edge to edge. Every scroll box that
+   draws a rounded border belongs here, under its radius. */
+textarea::-webkit-scrollbar-track,.md pre::-webkit-scrollbar-track,
+.approval pre::-webkit-scrollbar-track,.dirpick::-webkit-scrollbar-track,
+.task-review-files::-webkit-scrollbar-track,.task-review-diff::-webkit-scrollbar-track{
+  margin:var(--r-sm);
+}
+.menu::-webkit-scrollbar-track,.choice-menu::-webkit-scrollbar-track,
+.mention-pop::-webkit-scrollbar-track{margin:var(--r-md)}
+.modal::-webkit-scrollbar-track{margin:var(--r-lg)}
 /* where a vertical and a horizontal bar meet: the browser's default there is
    an opaque square that ignores the theme */
 ::-webkit-scrollbar-corner{background:transparent}
@@ -323,6 +338,9 @@ a{color:var(--acc2)}
 .sess-item .si-pin.on{opacity:1;color:var(--acc2)}
 .sess-item .si-pin.pending{opacity:.55;cursor:wait}
 .sess-item .si-git.has{opacity:1;color:var(--acc2)}
+/* The heads-up: a repository holding uncommitted changes or unpushed commits
+   takes the console's one warn tone, like a workspace with a caveat. */
+.sess-item .si-git.has.warn{color:var(--warn)}
 .sess-item .si-notes.has{opacity:1;color:var(--acc2)}
 @media (hover:hover){
   .sess-item .si-pin:hover,.sess-item .si-notes:hover{

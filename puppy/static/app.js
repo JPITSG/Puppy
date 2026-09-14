@@ -5734,28 +5734,54 @@ function backendSupportsSessionGit(bid) {
 }
 
 /* Between the pin and the notes: whether the working directory is inside a
-   Git work tree. The node answers from its own cache - re-checked on its
-   git_check_minutes timer and the moment the session is brought into focus
-   (sessionGitFocused) - so the row only ever draws what the list says. A
-   repository reads at full strength like present notes, no repository as
-   the same faint outline; a directory the node has not looked at yet, or
-   could not read, stays faint with the reason in its label. Nothing opens
-   from it yet, so it is a labelled image, not a button, and a press on it
-   is a press on the row. */
+   Git work tree, and whether that repository is holding work. The node
+   answers from its own cache - re-checked on its git_check_minutes timer,
+   the moment the session is brought into focus (sessionGitFocused), and
+   when a prompt ends in the directory - so the row only ever draws what the
+   list says. A repository reads at full strength like present notes, no
+   repository as the same faint outline; a directory the node has not looked
+   at yet, or could not read, stays faint with the reason in its label. The
+   heads-up is the warn tone: a repository with uncommitted changes or
+   commits no remote holds turns orange, and its label says how much of each.
+   Nothing opens from it yet, so it is a labelled image, not a button, and a
+   press on it is a press on the row. */
 function sessionGitMark(bid, s) {
   const git = s.git && typeof s.git === "object" ? s.git : null;
-  const mark = el("span", "si-git" + (git && git.repo === true ? " has" : ""));
+  const work = sessionGitWork(git);
+  const mark = el("span", "si-git" + (git && git.repo === true ? " has" : "") +
+    (work && (work.changes || work.unpushed) ? " warn" : ""));
   mark.setAttribute("role", "img");
   mark.setAttribute("aria-label", sessionGitLabel(git));
   mark.appendChild(sessionGitIcon(14));
   return mark;
 }
 
+/* The work a repository record says it is holding: paths git has not
+   committed and commits no remote has, each 0 when there are none. Null
+   for anything but a repository whose state the node could read - a node
+   from before the work state answers a repository without counts, and that
+   is a plain repository, never a heads-up. */
+function sessionGitWork(git) {
+  if (!git || git.repo !== true || git.error || typeof git.changes !== "number") return null;
+  const count = value => typeof value === "number" && value > 0 ? value : 0;
+  return { changes: count(git.changes), unpushed: count(git.unpushed) };
+}
+
 function sessionGitLabel(git) {
   if (!git) return "Git repository not checked yet";
-  if (git.repo === true) return "Git repository";
   if (git.repo === false) return "No Git repository";
-  return "Git repository could not be checked" + (git.error ? ` · ${git.error}` : "");
+  if (git.repo !== true)
+    return "Git repository could not be checked" + (git.error ? ` · ${git.error}` : "");
+  if (git.error) return `Git repository · changes could not be checked · ${git.error}`;
+  const work = sessionGitWork(git);
+  if (!work) return "Git repository";
+  const commit = work.changes ?
+    `${work.changes} uncommitted change${work.changes === 1 ? "" : "s"}` : "nothing to commit";
+  const push = git.unpushed === null ? "no remote" : work.unpushed ?
+    `${work.unpushed} unpushed commit${work.unpushed === 1 ? "" : "s"}` : "nothing to push";
+  if (!work.changes && !work.unpushed && git.unpushed !== null)
+    return "Git repository · nothing to commit or push";
+  return `Git repository · ${commit} · ${push}`;
 }
 
 /* The mark's second trigger. Selecting a session in the sidebar, activating
@@ -5786,7 +5812,10 @@ function sessionGitSame(a, b) {
   const aRecord = a && typeof a === "object" ? a : null;
   const bRecord = b && typeof b === "object" ? b : null;
   if (!aRecord || !bRecord) return aRecord === bRecord;
-  return aRecord.repo === bRecord.repo && (aRecord.error || "") === (bRecord.error || "");
+  const count = value => typeof value === "number" ? value : null;
+  return aRecord.repo === bRecord.repo && (aRecord.error || "") === (bRecord.error || "") &&
+    count(aRecord.changes) === count(bRecord.changes) &&
+    count(aRecord.unpushed) === count(bRecord.unpushed);
 }
 
 /* The row itself is a button, so this follows the notes control's established
@@ -19685,6 +19714,7 @@ class SearchView {
     this.tab = tab;
     this.searchSequence = 0;
     this.searchController = null;
+    this.pageRequests = new Set();   // the "Show all" pages still on their way
     this.excludedNodes = new Set();
     this.focusedOnce = false;
     this.lastCore = null;      // the filters the visible results were run with
@@ -19742,7 +19772,16 @@ class SearchView {
 
   destroy() {
     this.cancelSearch();
+    this.cancelPages();
     this.root.remove();
+  }
+
+  /* A page of one session's matches belongs to the results it was pressed
+     in: replacing them or dropping the view ends the request as well as the
+     display, and the button it was pressed on is handed back untouched. */
+  cancelPages() {
+    for (const controller of this.pageRequests) controller.abort();
+    this.pageRequests.clear();
   }
 
   onShow(focus) {
@@ -19919,6 +19958,7 @@ class SearchView {
     this.goButton.textContent = "Cancel";
     const core = this.coreParams(query);
     this.lastCore = core;
+    this.cancelPages();
     this.resultsBox.replaceChildren();
     const spinner = el("span", "spinner");
     this.setStatus(spinner, `Searching ${targets.length} backend${targets.length === 1 ? "" : "s"}…`);
@@ -20034,8 +20074,15 @@ class SearchView {
     return row;
   }
 
+  /* The page lands in the list it was pressed in even when Back has moved
+     that list into history's memory, so Forward shows what was loaded; a
+     failure hands the button back with the label it carried, so a
+     continuation keeps saying "Load more" rather than promising everything. */
   async expandSession(bid, session, list, more, offset) {
     if (!this.lastCore) return;
+    const controller = new AbortController();
+    this.pageRequests.add(controller);
+    const label = more.textContent;
     more.disabled = true;
     more.textContent = "Loading…";
     const params = new URLSearchParams({ ...this.lastCore,
@@ -20044,7 +20091,6 @@ class SearchView {
     try {
       const data = await api(bid, `search?${params}`,
         { timeoutMs: SEARCH_TIMEOUT, signal: controller.signal });
-      if (!more.isConnected) return;
       if (!offset) list.replaceChildren();
       for (const match of data.matches || [])
         list.appendChild(this.matchRow(bid, session, match));
@@ -20057,11 +20103,12 @@ class SearchView {
         more.remove();
       }
     } catch (error) {
-      toast(error.message, "bad");
-      if (more.isConnected) {
-        more.disabled = false;
-        more.textContent = `Show all matches`;
-      }
+      if (!controller.signal.aborted)
+        toast(`${backendName(bid)}: Could not load matches · ${error.message}`, "bad");
+      more.disabled = false;
+      more.textContent = label;
+    } finally {
+      this.pageRequests.delete(controller);
     }
   }
 
@@ -21466,7 +21513,8 @@ class SettingsView {
       {
         key: "git_check_minutes", scope: "engine", label: "Git repository checks",
         description: "How often this backend re-checks whether each session's directory is a Git " +
-          "repository; a session is also checked when you open it.",
+          "repository with uncommitted or unpushed work; a session is also checked when you " +
+          "open it and when a prompt finishes in it.",
       },
       {
         key: "remote_session_seconds", scope: "console", label: "Remote session fallback polling",

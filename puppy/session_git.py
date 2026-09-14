@@ -1,19 +1,26 @@
-"""Whether a session's working directory is a Git repository.
+"""Whether a session's working directory is a Git repository, and whether
+that repository is holding work.
 
 The sidebar carries a Git mark on every row, between the pin and the agent
-notes. It says one thing for now - the directory is inside a Git work tree,
-or it is not - and the answer is node-owned like the agent notes beside it,
-because the directory lives on the node that runs the session.
+notes. It says two things: the directory is inside a Git work tree, or it is
+not; and, inside one, whether there is uncommitted or unpushed work - the
+heads-up that turns the mark orange. The answer is node-owned like the agent
+notes beside it, because the directory lives on the node that runs the
+session.
 
 Unlike the notes, the answer is cached rather than read on every payload: one
 record per working directory, kept in memory only, refreshed by a worker on
-this node every ``timers.git_check_minutes`` and again the moment a console
+this node every ``timers.git_check_minutes``, again the moment a console
 brings a session into focus (``POST /api/sessions/{sid}/git/refresh``,
 registered in ``register_execution_api`` so both runtimes serve it and a
-controller reaches a backend's copy through the ordinary proxy). A directory
-no payload has an answer for yet wakes the worker, so a new session is
-answered within moments rather than at the next scheduled pass. Nothing here
-is persisted and nothing belongs in a backup.
+controller reaches a backend's copy through the ordinary proxy), and again
+when something on this node may have changed the repository: a prompt ended
+in the directory (``turn_finished`` - a task's prompt is left out, its copy
+being a repository of its own), a task's changes were applied to it, or its
+agent notes were written (``request``). A directory no payload has an answer
+for yet wakes the worker, so a new session is answered within moments rather
+than at the next scheduled pass. Nothing here is persisted and nothing
+belongs in a backup.
 
 Discovery follows Git's own rules closely enough for a mark: walk upward from
 the directory looking for ``.git`` - a directory holding a ``HEAD`` is a git
@@ -22,7 +29,10 @@ submodule and counts when it names one - and give up at the filesystem root,
 where the device changes, or below a ``GIT_CEILING_DIRECTORIES`` entry, which
 is where ``git`` itself stops by default. It runs no process, so a directory
 whose owner Git would call dubious still answers truthfully about what is on
-disk.
+disk. The work state is the one thing ``git`` itself is asked: what its
+status lists and which commits no remote holds. A ``git`` that refuses (or is
+not installed) does not unmake the repository - the record keeps ``repo``
+true and carries the reason instead of the counts.
 """
 from __future__ import annotations
 
@@ -30,9 +40,11 @@ import asyncio
 import json
 import logging
 import os
+import signal
 import stat
+import subprocess
 import time
-from typing import Dict, Optional
+from typing import Dict, Optional, Set
 
 from aiohttp import web
 
@@ -48,9 +60,17 @@ CHECK_TIMER = "git_check_minutes"
 REFRESH_SUFFIX = "/git/refresh"
 # A gitfile is one short line; anything longer is not one.
 GITFILE_BYTES = 4096
+# Reading the work state runs git; every command is bounded by this, so a
+# repository on a stalled network mount cannot hold the worker for ever.
+GIT_TIMEOUT = 30.0
+# Wording the record carries when git would not answer; cut like the
+# discovery's own reasons so a label stays a label.
+REASON_CHARS = 300
 
 _records: Dict[str, dict] = {}
 _inflight: Dict[str, asyncio.Future] = {}
+# directories to look at again before the next pass (request)
+_requested: Set[str] = set()
 _task: Optional[asyncio.Task] = None
 _wake: Optional[asyncio.Event] = None
 _loop: Optional[asyncio.AbstractEventLoop] = None
@@ -93,9 +113,104 @@ def _ceilings() -> tuple:
     return tuple(os.path.realpath(entry) for entry in raw.split(os.pathsep) if entry)
 
 
+class GitRefused(Exception):
+    """git did not answer: it is missing, it timed out, or it refused with
+    the message this carries."""
+
+
+def _reason(stderr: bytes, returncode: int) -> str:
+    for line in stderr.decode("utf-8", "replace").splitlines():
+        line = line.strip()
+        if line:
+            for prefix in ("fatal: ", "error: "):
+                if line.startswith(prefix):
+                    line = line[len(prefix):]
+            return line[:REASON_CHARS]
+    return "git exited with status {}".format(returncode)
+
+
+def _run_git(cwd: str, *args: str) -> "subprocess.CompletedProcess":
+    """One read-only, non-interactive git command in ``cwd``: no prompt, no
+    optional lock on the index (a session's engine may be using it), no file
+    monitor daemon left behind, English messages for the record, and its
+    whole process group ended when GIT_TIMEOUT runs out. The process's own
+    git environment is not inherited: the session's directory is the
+    repository, whatever this process was started with."""
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", LC_ALL="C")
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+                 "GIT_NAMESPACE", "GIT_COMMON_DIR"):
+        env.pop(name, None)
+    argv = ["git", "--no-optional-locks", "-c", "core.fsmonitor=false"] + list(args)
+    try:
+        process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   start_new_session=True)
+    except FileNotFoundError:
+        raise GitRefused("git is not installed on this backend")
+    except OSError as exc:
+        raise GitRefused("git could not be run: {}".format(exc.strerror or exc)[:REASON_CHARS])
+    with process:
+        try:
+            out, err = process.communicate(timeout=GIT_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.communicate()
+            raise GitRefused("git did not answer within {:.0f} seconds".format(GIT_TIMEOUT))
+    return subprocess.CompletedProcess(argv, process.returncode, out, err)
+
+
+def _git(cwd: str, *args: str) -> str:
+    result = _run_git(cwd, *args)
+    if result.returncode:
+        raise GitRefused(_reason(result.stderr, result.returncode))
+    return result.stdout.decode("utf-8", "replace")
+
+
+def work_state(cwd: str) -> dict:
+    """What the repository around ``cwd`` is holding, as ``git`` sees it:
+    ``changes`` is the number of paths its status lists - staged, unstaged
+    and untracked alike, an untracked directory as one, the whole work tree
+    whatever subdirectory the session sits in - and ``unpushed`` the number
+    of commits on HEAD that no remote-tracking branch holds, or None when
+    no remote is configured and there is nowhere to push to. A branch
+    without an upstream still counts: its commits are unpushed until some
+    remote has them. Raises GitRefused when git would not answer."""
+    status = _git(cwd, "status", "--porcelain", "--untracked-files=normal")
+    changes = sum(1 for line in status.split("\n") if line)
+    remotes = [line for line in _git(cwd, "remote").split("\n") if line.strip()]
+    if not remotes:
+        return {"changes": changes, "unpushed": None}
+    # an unborn branch has nothing to push yet, and no HEAD to count from
+    if _run_git(cwd, "rev-parse", "--verify", "-q", "HEAD^{commit}").returncode:
+        return {"changes": changes, "unpushed": 0}
+    count = _git(cwd, "rev-list", "--count", "HEAD", "--not", "--remotes").strip()
+    try:
+        unpushed = int(count)
+    except ValueError:
+        raise GitRefused("git rev-list answered {!r}".format(count[:40]))
+    return {"changes": changes, "unpushed": unpushed}
+
+
+def _work_fields(cwd: str) -> dict:
+    """The work-state half of a repository's record: the counts, or the
+    reason git would not give them."""
+    try:
+        return work_state(cwd)
+    except GitRefused as exc:
+        return {"changes": None, "unpushed": None, "error": str(exc)}
+    except Exception as exc:  # a broken pipe, a decode error: still an answer
+        log.warning("git work state of %s failed: %s", cwd, exc)
+        return {"changes": None, "unpushed": None,
+                "error": "check failed: {}".format(exc)[:REASON_CHARS]}
+
+
 def inspect(cwd) -> dict:
     """One check of one directory, run in a thread by the worker and the
-    refresh route. The record it returns is what the payload carries."""
+    refresh route. The record it returns is what the payload carries: the
+    discovery's answer, and for a repository the work state git reports."""
     now = time.time()
     root = str(cwd or "")
     try:
@@ -110,7 +225,7 @@ def inspect(cwd) -> dict:
     path = os.path.realpath(root)
     while True:
         if _git_dir_at(os.path.join(path, ".git")):
-            return {"repo": True, "checked_at": now}
+            return dict({"repo": True, "checked_at": now}, **_work_fields(root))
         parent = os.path.dirname(path)
         if parent == path or parent in ceilings:
             return {"repo": False, "checked_at": now}
@@ -126,7 +241,10 @@ def inspect(cwd) -> dict:
 
 def _public(entry: dict) -> dict:
     out = {"repo": entry.get("repo"), "checked_at": entry.get("checked_at")}
-    if entry.get("repo") is None:
+    if out["repo"] is True:
+        out["changes"] = entry.get("changes")
+        out["unpushed"] = entry.get("unpushed")
+    if out["repo"] is None or (out["repo"] is True and entry.get("error")):
         out["error"] = str(entry.get("error") or "")
     return out
 
@@ -145,19 +263,35 @@ def record(cwd) -> Optional[dict]:
 
 
 def _store(cwd: str, entry: dict) -> bool:
-    """Keep one answer; True when a console would see a different mark."""
+    """Keep one answer; True when a console would see a different mark or
+    read a different label - the counts are part of what it says."""
     previous = _records.get(cwd)
     _records[cwd] = entry
-    return previous is None or previous.get("repo") != entry.get("repo") or \
-        previous.get("error") != entry.get("error")
+    return previous is None or any(
+        previous.get(key) != entry.get(key)
+        for key in ("repo", "error", "changes", "unpushed"))
 
 
-async def _check(cwd: str) -> dict:
+async def _check(cwd: str, fresh: bool = False) -> dict:
     """One inspection per directory at a time: a pass and a focus refresh
     that meet on the same directory share the thread rather than racing. An
     inspection that fails outright is an answer too - "could not be checked"
-    with the reason - never a hole a payload would keep asking to fill."""
+    with the reason - never a hole a payload would keep asking to fill.
+
+    ``fresh`` is the request form: the caller knows something changed just
+    now, so an inspection already under way - which may have read the
+    directory before that change - is not good enough to join. It finishes
+    for those who asked for it, and this looks once more."""
     future = _inflight.get(cwd)
+    if fresh and future is not None:
+        stale = future
+        try:
+            await asyncio.shield(stale)
+        except Exception:
+            pass
+        future = _inflight.get(cwd)
+        if future is stale:
+            future = None
     if future is None:
         future = asyncio.get_running_loop().run_in_executor(None, inspect, cwd)
         _inflight[cwd] = future
@@ -224,10 +358,38 @@ def settings_changed() -> None:
     wake()
 
 
-async def _pass(full: bool) -> bool:
-    """Check every directory a session uses (``full``) or only those without
-    an answer, forget the directories no session uses any more, and publish
-    the list when any mark changed."""
+def request(cwd) -> None:
+    """Something on this node may have changed the repository around
+    ``cwd`` - a task's changes were applied to it, its agent notes were
+    written - so it is looked at again by the worker's next iteration, not
+    at the next scheduled pass, and a changed mark is published. A
+    directory no session uses is ignored by the pass that serves this."""
+    key = str(cwd or "")
+    if not key:
+        return
+    _requested.add(key)
+    wake()
+
+
+def turn_finished(session) -> None:
+    """A prompt ended in this session's directory. The turn may have edited,
+    committed or pushed, so the mark is looked at again now. A task's
+    prompt is left out: its copy is a repository of its own, nothing it
+    does reaches the project's, and the project's mark moves when the task
+    is applied (session_tasks asks for that through ``request``)."""
+    if not session or not session.get("cwd"):
+        return
+    from puppy import session_tasks
+    if session_tasks.record(session["id"]):
+        return
+    request(session["cwd"])
+
+
+async def _pass(full: bool, requested=()) -> bool:
+    """Check every directory a session uses (``full``), or only those
+    without an answer and those asked about again (``requested``); forget
+    the directories no session uses any more, and publish the list when
+    any mark changed."""
     wanted = {}
     for session in db.list_sessions(include_archived=True):
         cwd = str(session["cwd"] or "")
@@ -235,8 +397,8 @@ async def _pass(full: bool) -> bool:
             wanted[cwd] = True
     changed = False
     for cwd in list(wanted):
-        if full or cwd not in _records:
-            changed = _store(cwd, await _check(cwd)) or changed
+        if full or cwd not in _records or cwd in requested:
+            changed = _store(cwd, await _check(cwd, fresh=cwd in requested)) or changed
     for stale in [cwd for cwd in _records if cwd not in wanted]:
         _records.pop(stale, None)
     if changed:
@@ -256,16 +418,18 @@ async def _run(app) -> None:
         due = 0.0 if _last_full is None else _last_full + interval_seconds()
         now = time.monotonic()
         full = now >= due
-        partial = _missing
+        requested = set(_requested)
+        partial = _missing or bool(requested)
         # Clear the requests before the pass, so one raised while it runs
         # is answered by the next iteration instead of lost.
         _missing = False
+        _requested.clear()
         _wake.clear()
         if full or partial:
             if full:
                 _last_full = now
             try:
-                await _pass(full)
+                await _pass(full, requested)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -325,6 +489,7 @@ def reset_for_tests() -> None:
     global _task, _wake, _loop, _missing, _last_full
     _records.clear()
     _inflight.clear()
+    _requested.clear()
     _task = None
     _wake = None
     _loop = None

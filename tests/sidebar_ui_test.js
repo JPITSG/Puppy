@@ -125,7 +125,7 @@ console.log("sidebar cross-backend ordering tests passed");
 // in its label when the node could not look. It is a labelled image, never a
 // button, and it is drawn only for nodes that advertise the capability.
 const lane = consoleFor([
-  session(1, 40, { git: { repo: true, checked_at: 1 }, agent_notes: ["AGENTS.md"] }),
+  session(1, 40, { git: { repo: true, checked_at: 1, changes: 0, unpushed: 0 }, agent_notes: ["AGENTS.md"] }),
   session(2, 30, { git: { repo: false, checked_at: 1 } }),
   session(3, 20, { git: null }),
   session(4, 10, { git: { repo: null, checked_at: 1, error: "Permission denied" } }),
@@ -152,12 +152,63 @@ for (const row of rows) {
 }
 const labels = rows.map(row => row.querySelector(".si-git").getAttribute("aria-label"));
 assert.deepEqual(labels, [
-  "Git repository", "No Git repository", "Git repository not checked yet",
+  "Git repository · nothing to commit or push", "No Git repository", "Git repository not checked yet",
   "Git repository could not be checked · Permission denied", "Git repository not checked yet",
 ]);
 assert.deepEqual(rows.map(row => row.querySelector(".si-git").classList.contains("has")),
   [true, false, false, false, false]);
+assert.deepEqual(rows.map(row => row.querySelector(".si-git").classList.contains("warn")),
+  [false, false, false, false, false]);
 assert.equal(rows[0].querySelector(".si-notes").classList.contains("has"), true);
+
+// The heads-up: a repository holding uncommitted changes or commits no
+// remote has takes the warn tone as well as full strength, and its label
+// says how much of each. A repository with no remote has nowhere to push,
+// so its commits are never unpushed; a repository git would not read keeps
+// the plain mark with git's reason; and a node from before the work state
+// answers without counts, which is a plain repository, never a heads-up.
+{
+  const work = consoleFor([
+    session(1, 90, { git: { repo: true, checked_at: 1, changes: 3, unpushed: 2 } }),
+    session(2, 80, { git: { repo: true, checked_at: 1, changes: 1, unpushed: 0 } }),
+    session(3, 70, { git: { repo: true, checked_at: 1, changes: 0, unpushed: 1 } }),
+    session(4, 60, { git: { repo: true, checked_at: 1, changes: 0, unpushed: null } }),
+    session(5, 50, { git: { repo: true, checked_at: 1, changes: 2, unpushed: null } }),
+    session(6, 40, { git: { repo: true, checked_at: 1, changes: null, unpushed: null,
+      error: "detected dubious ownership in repository at '/srv/app'" } }),
+    session(7, 30, { git: { repo: true, checked_at: 1 } }),
+    session(8, 20, { git: { repo: false, checked_at: 1, changes: 4, unpushed: 4 } }),
+  ], {}, true);
+  work.render();
+  const marks = work.document.getElementById("sess-groups").children
+    .filter(node => node.classList.contains("sess-item"))
+    .map(row => row.querySelector(".si-git"));
+  assert.deepEqual(marks.map(mark => mark.className), [
+    "si-git has warn", "si-git has warn", "si-git has warn", "si-git has", "si-git has warn",
+    "si-git has", "si-git has", "si-git",
+  ]);
+  assert.deepEqual(marks.map(mark => mark.getAttribute("aria-label")), [
+    "Git repository · 3 uncommitted changes · 2 unpushed commits",
+    "Git repository · 1 uncommitted change · nothing to push",
+    "Git repository · nothing to commit · 1 unpushed commit",
+    "Git repository · nothing to commit · no remote",
+    "Git repository · 2 uncommitted changes · no remote",
+    "Git repository · changes could not be checked · detected dubious ownership in repository at '/srv/app'",
+    "Git repository",
+    "No Git repository",
+  ]);
+  // a changed count is a changed record - the label and possibly the tone -
+  // while null and a missing count are the same absence
+  const same = work.context.sessionGitSame;
+  const base = { repo: true, checked_at: 1, changes: 1, unpushed: 0 };
+  assert.equal(same(base, { ...base, checked_at: 2 }), true);
+  assert.equal(same(base, { ...base, changes: 2 }), false);
+  assert.equal(same(base, { ...base, unpushed: 1 }), false);
+  assert.equal(same(base, { ...base, unpushed: null }), false);
+  assert.equal(same({ repo: true, checked_at: 1 }, { repo: true, checked_at: 2, changes: null, unpushed: null }), true);
+  assert.equal(same({ repo: true, checked_at: 1 }, { repo: true, checked_at: 2, changes: 0, unpushed: 0 }), false);
+  assert.equal(same({ repo: false, checked_at: 1 }, { repo: false, checked_at: 2 }), true);
+}
 
 // A node that does not advertise the capability gets no mark and no request.
 const bare = consoleFor([session(1, 40, { git: { repo: true, checked_at: 1 } })], {}, false);
@@ -193,17 +244,28 @@ assert.equal(bare.document.querySelectorAll(".si-git").length, 0);
     return Promise.resolve().then(() => Promise.resolve());
   }).then(() => {
     assert.equal(renders, 2, "session 2 changed; session 1 already said so");
+    // a fresh count on the focused session is news: the row turns orange
+    answer = { ok: true, git: { repo: true, checked_at: 4, changes: 2, unpushed: 0 } };
+    focus.context.sessionGitFocused(0, 2);
+    focus.context.sessionGitFocused(0, 1);
+    return Promise.resolve().then(() => Promise.resolve());
+  }).then(() => {
+    assert.equal(renders, 4, "each session's count changed");
+    const marks = focus.document.getElementById("sess-groups").children
+      .filter(node => node.classList.contains("sess-item"))
+      .map(row => row.querySelector(".si-git")).filter(Boolean).map(mark => mark.className);
+    assert.deepEqual(marks, ["si-git has warn", "si-git has warn"], "the remote node offers no mark");
     focus.context.backendConnectionAllowed = bid => bid !== 2;
     focus.context.sessionGitFocused(2, 7);
-    assert.equal(calls.length, 3, "an unreachable node is not probed");
+    assert.equal(calls.length, 5, "an unreachable node is not probed");
     focus.context.backendConnectionAllowed = () => true;
     focus.context.api = () => Promise.reject(new Error("HTTP 503"));
     focus.context.sessionGitFocused(0, 2);
     focus.context.sessionGitFocused(0, 1);
     return Promise.resolve().then(() => Promise.resolve());
   }).then(() => {
-    assert.equal(renders, 2, "a failed re-check changes nothing");
-    assert.deepEqual(focus.state.sessions[0].git, { repo: true, checked_at: 2 });
+    assert.equal(renders, 4, "a failed re-check changes nothing");
+    assert.deepEqual(focus.state.sessions[0].git, { repo: true, checked_at: 4, changes: 2, unpushed: 0 });
     console.log("sidebar git mark tests passed");
   }).catch(error => { console.error(error); process.exit(1); });
 }
