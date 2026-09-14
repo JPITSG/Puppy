@@ -1780,6 +1780,81 @@ async def background_count_checks(a, b, hub):
           "zero removal and blue pill geometry on desktop/phone in both themes", flush=True)
 
 
+async def attachment_steering_checks(instance, hub):
+    # Real uploads and native clicks, with a held handoff so the editor can
+    # change before acknowledgement. Both server transports are covered by
+    # steering_test.py; this checks the rendered control and shared Composer.
+    fields = ("status", "proc", "_proc_ready", "_driver_ctx", "_active_turn_id")
+    saved = {key: getattr(hub, key) for key in fields}
+    hub.status, hub._proc_ready, hub._active_turn_id = "running", True, "attachment-ui"
+    hub.proc = SimpleNamespace(returncode=None, stdin=SimpleNamespace(is_closing=lambda: False))
+    hub._driver_ctx = {"initial_user_replayed": True, "tool": ""}
+    for viewer in list(hub.watchers):
+        await hub.attach_with_snapshot(viewer)
+    await until(instance, "demoView.steering.ready")
+    await evaluate(instance, """window.attachmentProbe={
+        send:demoView.sendActiveTurnControl, draft:demoView.composer.value(),
+        release:null};
+        demoView.sendActiveTurnControl=(kind,body)=>new Promise(resolve=>{
+            attachmentProbe.kind=kind; attachmentProbe.body=body; attachmentProbe.release=resolve;
+        }); true""")
+    try:
+        for width, height, mobile in ((1440, 900, False), (390, 844, True)):
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width": width, "height": height, "deviceScaleFactor": 2 if mobile else 1,
+                "mobile": mobile}, session=instance.page_session)
+            await evaluate(instance, """$('app').classList.remove('side-open'); demoView.composer.replace('');
+                demoView.status='running'; demoView.setSteeringState({supported:true,ready:true,turn_id:'attachment-ui'});
+                demoView.updateRunState(); attachmentProbe.body=null;
+                demoView.composer.uploadFile(new File(['Invented fixture'], 'note.txt', {type:'text/plain'}))""")
+            await until(instance, "!demoView.steerBtn.disabled && demoView.composer.attachments[0]?.path")
+            await asyncio.sleep(.2)  # let the responsive composer finish its height change
+            assert await evaluate(instance, "demoView.composer.text()===''"), "attachment-only steering"
+            await evaluate(instance, "attachmentProbe.expected=demoView.composer.message(); true")
+            point = await evaluate(instance, """(() => {
+                const r=demoView.steerBtn.getBoundingClientRect();
+                return {x:r.x+r.width/2,y:r.y+r.height/2};
+            })()""")
+            for kind in ("mousePressed", "mouseReleased"):
+                await instance.call("Input.dispatchMouseEvent", {
+                    "type": kind, **point, "button": "left", "clickCount": 1}, session=instance.page_session)
+            await until(instance, "!!attachmentProbe.body")
+            assert await evaluate(instance, "attachmentProbe.kind==='steer' && attachmentProbe.body.text===attachmentProbe.expected && attachmentProbe.body.expected_turn_id==='attachment-ui'")
+            assert await evaluate(instance, "demoView.steerBtn.disabled && demoView.composer.attachments.length===1")
+            await evaluate(instance, "attachmentProbe.release({ok:true,status:'sent'}); true")
+            await until(instance, "demoView.composer.isEmpty() && !demoView.steerPending")
+
+            # A second upload begun during the handoff must survive, even
+            # before its response has supplied a path for draft serialization.
+            await evaluate(instance, """demoView.composer.uploadFile(new File(['Original'], 'first.txt', {type:'text/plain'}))""")
+            await until(instance, "!demoView.composer.sendBlocker()")
+            await evaluate(instance, """attachmentProbe.body=null; demoView.steer();
+                attachmentProbe.fetch=window.fetch;
+                window.fetch=(url,opts)=>String(url).endsWith('/upload') ? new Promise((resolve,reject)=>{
+                    attachmentProbe.upload=()=>attachmentProbe.fetch.call(window,url,opts).then(resolve,reject);
+                }) : attachmentProbe.fetch.call(window,url,opts);
+                demoView.composer.uploadFile(new File(['Next'], 'second.txt', {type:'text/plain'})); true""")
+            await until(instance, "!!attachmentProbe.body && !!attachmentProbe.upload")
+            assert await evaluate(instance, "demoView.composer.attachments[1].uploading && demoView.steerBtn.disabled")
+            await evaluate(instance, "attachmentProbe.release({ok:true,status:'sent'}); true")
+            await until(instance, "!demoView.steerPending")
+            assert await evaluate(instance, "demoView.composer.attachments.length===2 && demoView.composer.attachments[1].uploading")
+            await evaluate(instance, "window.fetch=attachmentProbe.fetch; attachmentProbe.upload(); true")
+            await until(instance, "!demoView.composer.sendBlocker() && !demoView.steerBtn.disabled")
+            assert await evaluate(instance, "demoView.composer.attachments[1].name==='second.txt'")
+    finally:
+        for key, value in saved.items():
+            setattr(hub, key, value)
+        for viewer in list(hub.watchers):
+            await hub.attach_with_snapshot(viewer)
+        await evaluate(instance, """if(attachmentProbe.fetch) window.fetch=attachmentProbe.fetch;
+            demoView.sendActiveTurnControl=attachmentProbe.send;
+            demoView.composer.replace(attachmentProbe.draft); demoView.saveDraft();
+            demoView.status='idle'; demoView.setSteeringState({}); demoView.updateRunState();
+            delete window.attachmentProbe; true""")
+    print("PASS: attachment-only steering by real desktop/phone clicks; uploads and edits survive delayed handoffs", flush=True)
+
+
 async def checks(a, b, hub, capture=False):
     await background_count_checks(a, b, hub)
     await icon_alignment_checks(a)
@@ -1793,6 +1868,7 @@ async def checks(a, b, hub, capture=False):
     await reading_place_checks(a)
     await narrow_composer_checks(a, capture)
     await composer_enter_checks(a, capture)
+    await attachment_steering_checks(a, hub)
     await context_menu_checks(a, capture)
     await workspace_footer_checks(a, capture)
     await new_session_choices_checks(a, capture)

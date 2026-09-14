@@ -183,7 +183,8 @@ reading anywhere further up is never pulled away from it.
 The composer changes shape with the session's state. While a turn is running
 you can:
 
-- **Steer** – send an extra instruction into the running turn on any engine.
+- **Steer** – send an extra instruction or attachments into the running turn on
+  any engine. Steering waits until every file has finished uploading.
 - **Ask** – put a side question to Claude Code beside its turn. The answer comes
   from a tool-less fork of the live conversation, so the engine's own work never
   sees the exchange. Follow-ups thread; the card sits in the transcript next to
@@ -234,8 +235,11 @@ edits never interrupt your typing or move your caret while you type.
 The status row below the tools appears only for typing activity, a draft conflict,
 or a save/send error; it takes no space when idle.
 
-Ask and Steer accept text only. Text edits and attachments added while their
-send is awaiting acknowledgement remain in the composer for the next message.
+Steer accepts the same files as ordinary messages, including attachments without
+text. The agent receives their paths and uses its file or image tools to inspect
+them; image understanding depends on the selected model. Ask accepts text only.
+Text edits and attachment changes made while either send is awaiting
+acknowledgement remain in the composer for the next message.
 
 **Spell check** is Puppy's own, not the browser's. Every prompt box turns the
 browser's checker and its autocorrection off, so a phone, a desktop and a kiosk

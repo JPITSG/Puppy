@@ -317,11 +317,14 @@ ends, and snapshots carry the same object as `background_tasks`; while
 
 ## Active-turn steering transport
 
-`POST /api/sessions/{sid}/steer` sends an additional text instruction to the
-engine turn which is already running. It is intentionally separate from the
-ordinary message route: steering never joins the session queue or starts a new
-native turn. The shared runner maps it to each pinned CLI protocol (streamed
-user input, app-server `turn/steer`, or an active ACP prompt), persists the
+`POST /api/sessions/{sid}/steer` sends an additional instruction to the
+engine turn which is already running. Its `text` may include the same uploaded
+file/image marker lines as an ordinary message, including a message containing
+only attachment markers. Upload the files to that session's backend first;
+the engine inspects their paths using its existing tools. It is intentionally
+separate from the ordinary message route: steering never joins the session queue
+or starts a new native turn. The shared runner maps it to each pinned CLI protocol
+(streamed user input, app-server `turn/steer`, or an active ACP prompt), persists the
 accepted text as a user event with `steering: true`, and refuses idle, starting,
 stopping, approval-waiting, or unsupported turns. The route is authenticated
 and is present in both the full runtime and the headless package.

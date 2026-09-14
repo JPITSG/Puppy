@@ -765,7 +765,7 @@ const xIcon = () => node();
 const localStorage = { getItem() { return null; }, setItem() {} };
 %s
 const view = Object.create(SessionWorkspaceView.prototype);
-const main = { root: node(), draft: "Keep this draft" };
+const main = { root: node(), draft: "Keep this draft", shows: 0, onShow() { this.shows++; } };
 Object.assign(view, { tab: { bid: 0, sid: 1 }, root: node(), strip: node(), overviewButton: node(),
   taskViews: new Map([[1, main]]), opened: [], hidden: new Set(), selected: 1, seen: {}, overview: null, rendered: "" });
 view.refreshTasks();
@@ -777,6 +777,7 @@ for (const enabled of [true, false, true, false]) {
   assert.strictEqual(view.root.classList.contains("tasks-disabled"), !enabled);
   assert.strictEqual(view.activeView(), main);
   assert.strictEqual(main.draft, "Keep this draft");
+  assert.strictEqual(main.shows, 1, "An unchanged task list must not re-show the conversation");
 }
 building = true;
 session = null;
@@ -3136,8 +3137,6 @@ def check_active_turn_steering_ui(ui_source: str, css_source: str) -> None:
     assert "expected_turn_id: request.turnId" in ui_source
     assert "this.steerBtn.classList.toggle(\"hidden\", !(running && supported));" \
         in ui_source
-    assert "hasAttachments" in ui_source and \
-        "Steering accepts text only · queue the message to attach files" in ui_source
 
     # Stop keeps its accessible name while its visible face is only one drawn
     # square. Width, height, padding, and the icon's zero margin make both
@@ -7255,7 +7254,8 @@ async def main() -> None:
             # the host box and its own sections open on that same slide
             assert (".foot-engine-body.disclosure-animating,\n"
                     ".host-sec-body.disclosure-animating,\n"
-                    ".foot-host.disclosure-animating{") in css_source
+                    ".foot-host.disclosure-animating,\n"
+                    ".foot-notices.disclosure-animating{") in css_source
             assert ".host-sec-body[hidden]{display:none}" in css_source
             assert ".foot-host[hidden]{display:none}" in css_source
             assert "--disclosure-gap:8px;" in css_source

@@ -11214,12 +11214,18 @@ class Composer {
     return message;
   }
 
-  /* Ask/Steer acknowledge text only. A file added while that handoff was in
-     flight is a new draft edit, even before its upload has a marker path. */
-  clearSentText(text) {
-    if (this.composing || this.text() !== text || this.attachments.length) return false;
+  /* A handoff may clear only the exact draft it sent. An unfinished upload
+     is a new edit even before it has a marker path in value(). */
+  clearSentMessage(value) {
+    if (this.closed || this.composing || this.value() !== value || this.sendBlocker()) return false;
     this.take();
     return true;
+  }
+
+  /* Side questions still send prose alone. A staged file belongs to the
+     next message even when its upload has not produced a path yet. */
+  clearSentText(text) {
+    return !this.attachments.length && this.clearSentMessage(text);
   }
 
   /* Reuse transcript prose without disturbing staged files or sending it. */
@@ -15350,12 +15356,12 @@ class SessionView {
     this.steerBtn.classList.toggle("hidden", !(running && supported));
     const stopping = !!remoteStoppingMessage(this.tab.bid);
     const unavailable = !!this.tab.bid && !backendConnectionAllowed(this.tab.bid);
-    const hasAttachments = this.composer.attachments.length > 0;
+    const blocker = this.composer.sendBlocker();
     this.steerBtn.disabled = !running || !supported || !this.steering.ready ||
       !!this.steerPending || this.reconnecting || stopping || unavailable ||
-      hasAttachments;
+      !!blocker;
     let label = "Steer the active turn";
-    if (hasAttachments) label = "Steering accepts text only · queue the message to attach files";
+    if (blocker) label = blocker;
     else if (this.steerPending) label = "Sending steering guidance";
     else if (!this.steering.ready) label = "The active turn is not ready for steering";
     this.steerBtn.setAttribute("aria-label", label);
@@ -16181,13 +16187,11 @@ class SessionView {
 
   /* ---- outgoing ---- */
   async steer() {
-    const composerText = this.composer.text();
-    const text = composerText.trim();
-    if (!text) return;
-    if (this.composer.attachments.length) {
-      toast("Steering accepts text only · queue the message to attach files", "bad", TOAST_LONG);
-      return;
-    }
+    if (this.composer.isEmpty()) return;
+    const blocker = this.composer.sendBlocker();
+    if (blocker) { toast(blocker, "bad", TOAST_LONG); return; }
+    const draft = this.composer.value();
+    const text = this.composer.message();
     if (!this.draftReady) {
       toast("Draft is still syncing · wait for the session to reconnect",
         "bad", TOAST_LONG);
@@ -16230,7 +16234,7 @@ class SessionView {
        successful transport handoff, so another steer may follow while its
        later accepted/rejected status remains visible through the socket. */
     if (this.steerPending === request) this.steerPending = null;
-    if (this.composer.clearSentText(composerText)) this.saveDraft();
+    if (this.composer.clearSentMessage(draft)) this.saveDraft();
     this.updateSteerControl();
     this.scrollBottom(true);
   }

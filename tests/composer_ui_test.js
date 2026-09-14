@@ -24,6 +24,7 @@ const storage = new Map([["puppy.spellcheck", "0"]]);
 let reviewDialog;
 let blobs = 0;
 let controlHold = null;
+let controlFailure = "";
 let historyRead = null;
 let sessionCatalog = null;
 let storedEvents = [];
@@ -56,9 +57,12 @@ const context = vm.createContext({
     if (/\/events\?/.test(route))
       return historyRead ? historyRead(bid, route, options) : historyPage(route);
     if (controlHold && /\/(ask|steer)$/.test(route)) await controlHold;
+    if (controlFailure && /\/(ask|steer)$/.test(route)) throw new Error(controlFailure);
     return {};
   },
   backendSupportsSessionControlSocket: () => false,
+  backendSupportsActiveSteering: () => true,
+  remoteStoppingMessage: () => "",
   newDraftClientId: () => "control-test", TOAST_LONG: 7000,
   apiPath: (bid, route) => (bid ? `/api/b/${bid}/` : "/api/") + route,
   toast: (text, level) => calls.toasts.push({ text, level }),
@@ -1061,6 +1065,92 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
       }
       box.composer.destroy();
     }
+  /* Steering carries the same completed files as Send, including files with
+     no prose. Exercise both transports and preserve every kind of newer edit. */
+  const makeSteerView = box => {
+    const view = Object.create(SessionView.prototype);
+    Object.assign(view, { composer: box.composer, tab: { bid: 0, sid: 10 },
+      status: "running", draftReady: true,
+      steering: { supported: true, ready: true, turn_id: "attachment-turn" },
+      steerBtn: document.createElement("button"),
+      updateAskControl() {}, scrollBottom() {}, saves: 0, saveDraft() { this.saves++; },
+      sendActiveTurnControl: (kind, body) => context.api(0, `sessions/10/${kind}`, { body }),
+    });
+    return view;
+  };
+  const attach = async (box, file = image) => {
+    paste(box.ta, file); completeUpload(calls.fetch.at(-1)); await settle();
+  };
+  const documentFile = { name: "notes (final), v2.txt", size: 5, type: "text/plain" };
+  for (const socket of [false, true]) {
+    context.backendSupportsSessionControlSocket = () => socket;
+    for (const kind of ["file", "image", "mixed"]) {
+      const box = makeBox({ privateUploads: () => false }), view = makeSteerView(box);
+      if (kind !== "image") await attach(box, documentFile);
+      if (kind !== "file") await attach(box);
+      if (kind === "mixed") type(box.ta, "  Use these files\n ");
+      const message = box.composer.message(), attachments = box.composer.attachments.slice();
+      view.updateSteerControl();
+      assert.equal(view.steerBtn.disabled, false, `${kind}: completed attachments can steer`);
+      const mark = calls.api.length;
+      await view.steer();
+      const sent = calls.api.slice(mark).find(c => c.route.endsWith("/steer"));
+      assert.equal(sent.body.text, message);
+      assert.equal(sent.body.expected_turn_id, "attachment-turn");
+      assert.ok(box.composer.isEmpty());
+      assert.equal(view.saves, 1);
+      assert.equal(deletes(mark).length, 0, "sent uploads remain owned by the transcript");
+      for (const attachment of attachments.filter(a => a.preview))
+        assert.equal(box.composer.sentThumbs.get(attachment.path), attachment.url);
+      box.composer.recall(message);
+      assert.equal(box.composer.message(), message, "steered files recall as attachments");
+      box.composer.destroy();
+    }
+    for (const change of ["text", "uploading", "uploaded", "removed", "reordered", "shared", "composing", "failure"]) {
+      const box = makeBox({ privateUploads: () => false }), view = makeSteerView(box);
+      type(box.ta, "Use these files"); await attach(box, documentFile); await attach(box);
+      const sent = box.composer.message();
+      let release;
+      controlHold = new Promise(resolve => { release = resolve; });
+      const pending = view.steer();
+      assert.equal(view.steerBtn.disabled, true, "an in-flight send disables steering");
+      assert.equal(calls.api.at(-1).body.text, sent);
+      let upload;
+      if (change === "text") type(box.ta, "My next instruction");
+      if (change === "uploading" || change === "uploaded") {
+        paste(box.ta); upload = calls.fetch.at(-1);
+        if (change === "uploaded") { completeUpload(upload); await settle(); }
+      }
+      if (change === "removed") box.composer.removeAttachment(box.composer.attachments[0]);
+      if (change === "reordered") box.composer.attachments.reverse();
+      if (change === "shared") box.composer.replace("Peer edit\n\n" + marker);
+      if (change === "composing") fire(box.ta, "compositionstart");
+      if (change === "failure") controlFailure = "The active turn changed";
+      const current = box.composer.value(), chips = box.composer.attachments.slice();
+      release(); await pending; controlHold = null; controlFailure = "";
+      assert.equal(view.saves, 0, `${change}: the draft was not cleared`);
+      assert.equal(box.composer.value(), current);
+      assert.deepEqual(box.composer.attachments, chips);
+      if (change === "uploading") { completeUpload(upload); await settle(); }
+      if (change === "composing") fire(box.ta, "compositionend");
+      box.composer.destroy();
+    }
+    const box = makeBox({ privateUploads: () => false }), view = makeSteerView(box);
+    paste(box.ta);
+    view.updateSteerControl();
+    assert.equal(view.steerBtn.disabled, true);
+    assert.match(view.steerBtn.getAttribute("aria-label"), /uploads to finish/);
+    const mark = calls.api.length;
+    await view.steer();
+    assert.equal(calls.api.length, mark, "an unfinished upload is never sent");
+    completeUpload(calls.fetch.at(-1)); await settle();
+    view.steering.ready = false; view.steering.turn_id = "";
+    view.updateSteerControl(); await view.steer();
+    assert.equal(view.steerBtn.disabled, true);
+    assert.equal(calls.api.length, mark, "finishing an upload cannot steer a completed turn");
+    assert.equal(box.composer.attachments.length, 1);
+    box.composer.destroy();
+  }
   {
     const b = makeBox();
     paste(b.ta);
