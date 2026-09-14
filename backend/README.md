@@ -760,6 +760,24 @@ edited inside a linked workspace's mirror marks the session dirty so the
 controller carries the change to the authoritative project at its next
 reconcile.
 
+## Git repositories
+
+Nodes advertising `session-git` carry the additive `git` field on every
+session payload: `null` until the node has looked at the session's working
+directory, then `{"repo": true|false, "checked_at": <seconds>}`, or
+`{"repo": null, "checked_at": <seconds>, "error": "…"}` for a directory it
+could not read. The answer says whether the directory is inside a Git work
+tree, found the way `git` finds it - a `.git` directory or gitfile in the
+directory or a parent, stopping at the filesystem root, a mount boundary or
+`GIT_CEILING_DIRECTORIES` - without running `git`. It is cached in memory per
+directory, re-checked by the node's worker every `git_check_minutes`
+(`/api/timers`, default 15) and at once by `POST /api/sessions/{sid}/git/refresh`,
+which answers `{"ok": true, "git": <record>}` and publishes the session list
+when the mark changed. Nothing is persisted or backed up. The console shows the
+record as the branch mark between each sidebar row's pin and notes and posts
+the refresh when a session is brought into focus. See
+[Git repositories](../docs/session-git.md).
+
 ## Session tools
 
 Nodes advertising `session-tools` accept `POST /api/sessions/{sid}/tool` with
@@ -922,11 +940,12 @@ in the sidebar, visibly muted until the node is healthy again.
 Every node exposes its refresh/cache settings through `GET`/`PATCH /api/timers`
 and advertises the additive `timer-settings` capability. The response includes
 the current values, defaults, units, and accepted ranges. Published CLI release
-checks, model-catalog caching, and installed-version/sign-in caching are owned by
-the node running those engines. Remote session polling, remote node/engine
-polling, and completion synchronization are controller-owned; their persisted
-fields remain in the headless node's exact config shape for portable, strict
-backup validation but are not scheduled there.
+checks, model-catalog caching, installed-version/sign-in caching, and the Git
+repository check (`git_check_minutes`, below) are owned by the node running
+those sessions. Remote session polling, remote node/engine polling, and
+completion synchronization are controller-owned; their persisted fields remain
+in the headless node's exact config shape for portable, strict backup
+validation but are not scheduled there.
 
 ## Unattended engine updates
 

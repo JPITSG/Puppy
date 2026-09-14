@@ -172,6 +172,13 @@ reading anywhere further up is never pulled away from it.
   randomly; you can choose another color. The order belongs to the backend,
   so every console sees the same list. Session context menus stay within the screen and scroll when there
   are more actions than the available height.
+- **Git repositories.** A branch mark on every session row, between the pin
+  and the agent notes, shows whether the session's directory is inside a Git
+  repository. The backend that runs the session checks its directory every
+  15 minutes (Settings → Timers) and again whenever you open or switch to the
+  session; a directory it has not looked at yet, or could not read, keeps a
+  faint mark with the reason in its label. The mark is a reading only - nothing
+  opens from it yet.
 - **Agent notes.** A mark on every session row shows whether its directory has
   an `AGENTS.md` or `CLAUDE.md`, and opens a small editor for exactly those two
   files.
@@ -719,8 +726,11 @@ backend name stays readable; long button labels wrap within the button.
   control both commands; tests run the entered draft even while alerts are off.
   Both commands are included in Backup & restore. See
   [completion alert configuration](docs/completion-alerts.md) for the saved shape.
-- **Timers** – release checks, model catalog and sign-in caching, and the
-  controller's polling and synchronization intervals. Validation and save errors
+- **Timers** – per backend: release checks, model catalog and sign-in caching,
+  and how often the backend re-checks whether each session's directory is a
+  Git repository (15 minutes); for this instance, the controller's polling and
+  synchronization intervals. A backend from before the Git check keeps its
+  other timers editable with that row disabled. Validation and save errors
   appear beneath the affected field; edit it or press Escape to clear the error.
 - **Timeouts** – per backend: maximum agent turn duration (2 hours), spawned-agent
   runtime (2 hours) and inactivity (10 minutes), and unattended terminal, browser
@@ -739,7 +749,8 @@ backend name stays readable; long button labels wrap within the button.
 Engine defaults are edited from the composer's dropdowns or the session menu.
 
 Timeout persistence and manual preparation of existing installations are
-documented in [Timeout settings](docs/timeouts.md).
+documented in [Timeout settings](docs/timeouts.md); the Git repository check,
+its timer and the same preparation step in [Git repositories](docs/session-git.md).
 
 ## Data, privacy and security
 
@@ -850,8 +861,8 @@ These suites do not invoke an engine or spend subscription quota.
 `tests/integration_test.py` and `tests/side_question_test.py` drive real engines
 and spend a little subscription quota; run them deliberately. The remaining
 `tests/*_test.py` and `tests/*_test.js` files cover engine defaults, model
-catalogs, agent notes, timers, terminals, workspaces, tasks and the live
-controls in the same no-quota style.
+catalogs, agent notes, Git repository marks, timers, terminals, workspaces,
+tasks and the live controls in the same no-quota style.
 
 ## License
 

@@ -27,7 +27,7 @@ os.environ["PUPPY_DATA"] = str(ROOT / "data")
 
 from aiohttp import web
 from aiohttp.test_utils import TestServer
-from puppy import auth, backends, browser, config, db, notices, runner, search, session_tasks, session_aliases, terminal
+from puppy import auth, backends, browser, config, db, notices, runner, search, session_git, session_tasks, session_aliases, terminal
 from puppy import web as webui
 from puppy.drivers import all_drivers
 
@@ -45,6 +45,18 @@ async def engines(*args, **kwargs):
              "model_options": [{"value": "", "label": "Default",
                                 "effort_options": [{"value": "", "label": "Default"}]}]}
             for driver in all_drivers()]
+
+
+# The Git marks of the invented projects. The node's own discovery would
+# find no such directories, so its cache is seeded with these answers and
+# every later look (the worker's pass, a focus refresh) is answered from here.
+DEMO_GIT = {"/home/mira/projects/" + folder: repo for folder, repo in (
+    ("harbor", True), ("garden", True), ("atlas", True), ("notes", False),
+    ("harbor-task", True))}
+
+
+def demo_git(cwd):
+    return {"repo": DEMO_GIT.get(str(cwd), False), "checked_at": time.time()}
 
 
 async def fixture():
@@ -99,6 +111,8 @@ async def fixture():
     for kind, data in events:
         db.add_event(sid, kind, data)
     search.reconcile()
+    for cwd in DEMO_GIT:
+        session_git._store(cwd, demo_git(cwd))
     app = webui.build_app()
     app.on_startup.clear()
     app.on_shutdown.clear()
@@ -1505,7 +1519,8 @@ async def icon_alignment_checks(instance):
                                 ['.btn .btn-ico svg','.btn'], ['.icon-btn>svg','.icon-btn'],
                                 ['.disclosure-toggle svg','.disclosure-toggle'],
                                 ['.side-search-btn svg','.side-search-btn'],
-                                ['.si-pin svg','.si-pin'], ['.si-notes svg','.si-notes'],
+                                ['.si-pin svg','.si-pin'], ['.si-git svg','.si-git'],
+                                ['.si-notes svg','.si-notes'],
                                 ['.t-close svg','.t-close'], ['.tab .t-dot svg','.t-dot'],
                                 ['.composer-row .mini svg','.mini'],
                                 ['.foot-node-act svg','.foot-node-act'],
@@ -1855,8 +1870,46 @@ async def attachment_steering_checks(instance, hub):
     print("PASS: attachment-only steering by real desktop/phone clicks; uploads and edits survive delayed handoffs", flush=True)
 
 
+async def git_mark_checks(a, b):
+    """Every row carries the Git mark between its pin and its notes, drawn
+    from the node's record; focusing another session asks the node to look
+    again, and a changed answer reaches every console through the list."""
+    marks = await evaluate(a, """(() => Array.from(document.querySelectorAll('.sess-item')).map(row => {
+        const lane = Array.from(row.querySelector('.si-actions').children).map(m => m.className.split(' ')[0]);
+        const git = row.querySelector('.si-git');
+        return {lane, has: git.classList.contains('has'), label: git.getAttribute('aria-label'),
+            role: git.getAttribute('role'), cursor: getComputedStyle(git).cursor,
+            size: git.querySelector('svg').getBoundingClientRect().width};
+    }))()""")
+    assert len(marks) == 5, marks
+    for mark in marks:
+        assert mark["lane"] == ["si-pin", "si-git", "si-notes"], mark
+        assert mark["role"] == "img" and mark["cursor"] == "pointer" and mark["size"] == 14, mark
+    assert [mark["has"] for mark in marks] == [True, True, True, True, False], marks
+    assert marks[-1]["label"] == "No Git repository" and marks[0]["label"] == "Git repository"
+    # a fresh answer for the focused session: the node re-checks on focus
+    # and publishes the changed mark to the other console as well
+    notes = next(s for s in db.list_sessions() if s["cwd"].endswith("/notes"))
+    DEMO_GIT[notes["cwd"]] = True
+    try:
+        await evaluate(a, "openSessionTab(0,%d,state.sessions.find(s=>s.id===%d)); true" % (notes["id"], notes["id"]))
+        for instance in (a, b):
+            await until(instance, "state.sessions.find(s=>s.id===%d).git.repo===true && "
+                        "document.querySelectorAll('.si-git.has').length===5" % notes["id"])
+    finally:
+        DEMO_GIT[notes["cwd"]] = False
+        session_git._store(notes["cwd"], demo_git(notes["cwd"]))
+        runner.broadcast_sessions()
+        for instance in (a, b):
+            await until(instance, "document.querySelectorAll('.si-git.has').length===4")
+        await evaluate(a, "closeTab('s:0:%d'); activateTab('s:0:1'); true" % notes["id"])
+    print("PASS: the Git mark between pin and notes on every row, drawn from the node's record, "
+          "re-checked on focus and published to every console", flush=True)
+
+
 async def checks(a, b, hub, capture=False):
     await background_count_checks(a, b, hub)
+    await git_mark_checks(a, b)
     await icon_alignment_checks(a)
     await background_task_checks(a, capture)
     await queue_expand_checks(a, capture)
@@ -3184,7 +3237,8 @@ async def main(args):
     instances = []
     server = None
     try:
-        with patch.object(webui, "_engines_payload", engines), patch.object(webui, "_node_user", return_value="mira"):
+        with patch.object(webui, "_engines_payload", engines), patch.object(webui, "_node_user", return_value="mira"), \
+                patch.object(session_git, "inspect", demo_git):
             app, sid = await fixture()
             server = web.AppRunner(app)
             await server.setup()

@@ -17,7 +17,7 @@ from aiohttp import WSMsgType, web
 from puppy import (__version__, agent_notes, auth, backends, bind_verify, browser,
                    cli_auto_upgrade, cli_releases,
                    cli_upgrade, config, db, engine_defaults, host_metrics, listener_handoff, notices, notify, operations,
-                   live_websockets, localization, protocol, runner, search, snapshots,
+                   live_websockets, localization, protocol, runner, search, session_git, snapshots,
                    spawn_exec,
                    state_stream, system_prompts, terminal, uploads, vnc,
                    usage_refresh, workspace_links, workspace_sync, workspaces)
@@ -54,9 +54,11 @@ async def state_change_guard(request: web.Request, handler):
                 "restore" if busy == "restore" else "backup")}, status=503)
     # A notice report, like a clear of the history, is one atomic row the
     # backup copies whole, and a toast can be raised at the very moment Export
-    # is pressed: counting it would refuse that backup for nothing. The busy
-    # refusal above still applies.
-    if mutating and not snapshot_path and request.path != notices.API_PATH:
+    # is pressed: counting it would refuse that backup for nothing. A Git
+    # re-check changes nothing a backup could copy at all, and focusing a
+    # session raises one. The busy refusal above still applies to both.
+    if mutating and not snapshot_path and request.path != notices.API_PATH and \
+            not request.path.endswith(session_git.REFRESH_SUFFIX):
         request.app["puppy_mutations"] = request.app.get("puppy_mutations", 0) + 1
         try:
             return await handler(request)
@@ -393,6 +395,8 @@ async def h_timers_patch(request: web.Request):
         driver_base.invalidate_status()
     if "completion_sync_seconds" in changed:
         notify.wake_worker()
+    if session_git.CHECK_TIMER in changed:
+        session_git.settings_changed()
     state_stream.wake("engines", "node")
     return web.json_response({"ok": True, "timers": config.timers_payload()})
 
@@ -2021,6 +2025,7 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     session_tasks.register(app)
     search.register(app)
     agent_notes.register(app)
+    session_git.register(app)
     state_stream.register(
         app, _state_stream_snapshots, _state_stream_interval,
         snapshot_topics=("engines", "node", "browser_status",

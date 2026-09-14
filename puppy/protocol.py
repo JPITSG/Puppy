@@ -149,6 +149,13 @@ SESSION_FAST_MODE_CAPABILITY = "session-fast-mode"
 # agent_notes list naming which of them exist. A console shows the sidebar's
 # notes button and its editor only for nodes that advertise this.
 SESSION_AGENT_NOTES_CAPABILITY = "session-agent-notes"
+# Every session payload carries the additive ``git`` record saying whether the
+# working directory is inside a Git work tree (null until the node has
+# looked), the node re-checks on its ``git_check_minutes`` timer - carried in
+# its timers payload - and POST /api/sessions/{sid}/git/refresh re-checks one
+# session at once. A console shows the sidebar's Git mark only for nodes that
+# advertise this.
+SESSION_GIT_CAPABILITY = "session-git"
 # Node-owned pinned flags and session order. Drag-and-drop requires the
 # complete starting order and pin cohort as compare tokens.
 SESSION_PINNING_CAPABILITY = "session-pinning"
@@ -263,6 +270,7 @@ BASE_CAPABILITIES = (
     SESSION_TOOLS_CAPABILITY,
     SESSION_FAST_MODE_CAPABILITY,
     SESSION_AGENT_NOTES_CAPABILITY,
+    SESSION_GIT_CAPABILITY,
     SESSION_PINNING_CAPABILITY,
     SESSION_ORDER_RECENCY_CAPABILITY,
     COMPLETION_EVENTS_CAPABILITY,

@@ -300,24 +300,29 @@ a{color:var(--acc2)}
 .sess-item .si-ws.warn{color:var(--warn)}
 .sess-item .si-ws.bad{color:var(--err)}
 .sess-item .si-ws.busy{color:var(--acc2)}
-/* Quiet row actions form one compact, square-cornered lane. Use 22px
-   targets without inheriting the wider metadata gap between the two icons. */
+/* Quiet row marks form one compact, square-cornered lane. Use 22px
+   targets without inheriting the wider metadata gap between the icons. */
 .sess-item .si-actions{
   flex:0 0 auto;display:inline-flex;align-items:center;gap:0;
   height:22px;margin:-4px -6px -4px 0;
 }
 .sess-item .si-pin,
+.sess-item .si-git,
 .sess-item .si-notes{
   flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;
   width:22px;height:22px;margin:0;border-radius:var(--btn-r);
-  color:var(--txt3);opacity:.38;cursor:pointer;
+  color:var(--txt3);opacity:.38;
   transition:opacity var(--t-base) var(--ease),background var(--t-base) var(--ease),color var(--t-base) var(--ease);
 }
-/* One drawing size for the pair: both glyphs are cut on the same 18-unit grid
-   at the same stroke, so the marks read as one weight rather than two. */
-.sess-item .si-pin svg,.sess-item .si-notes svg{width:14px;height:14px}
+/* The pin and the notes are actions; the Git mark is a reading for now, so
+   it keeps the row's own cursor and a press on it is a press on the row. */
+.sess-item .si-pin,.sess-item .si-notes{cursor:pointer}
+/* One drawing size for the set: every glyph is cut on the same 18-unit grid
+   at the same stroke, so the marks read as one weight rather than three. */
+.sess-item .si-pin svg,.sess-item .si-git svg,.sess-item .si-notes svg{width:14px;height:14px}
 .sess-item .si-pin.on{opacity:1;color:var(--acc2)}
 .sess-item .si-pin.pending{opacity:.55;cursor:wait}
+.sess-item .si-git.has{opacity:1;color:var(--acc2)}
 .sess-item .si-notes.has{opacity:1;color:var(--acc2)}
 @media (hover:hover){
   .sess-item .si-pin:hover,.sess-item .si-notes:hover{
@@ -325,9 +330,10 @@ a{color:var(--acc2)}
   }
 }
 /* Pointer users reveal the repeated row actions on hover. A touch screen has
-   no such reveal, so its resting controls must remain findable. */
+   no such reveal, so its resting controls must remain findable - and the
+   reading between them rests at the same strength, so the lane stays even. */
 @media (hover:none){
-  .sess-item .si-pin,.sess-item .si-notes{opacity:.55}
+  .sess-item .si-pin,.sess-item .si-git,.sess-item .si-notes{opacity:.55}
 }
 .sess-item .si-pin:focus-visible,
 .sess-item .si-notes:focus-visible{

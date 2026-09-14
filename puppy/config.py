@@ -36,6 +36,9 @@ TIMER_DEFAULTS = {
     "cli_release_minutes": 6 * 60,
     "model_catalog_minutes": 5,
     "cli_status_minutes": 5,
+    # how often the node re-checks whether each session's working directory
+    # is a Git repository (session_git); a focused session is checked at once
+    "git_check_minutes": 15,
     "remote_session_seconds": 12,
     "remote_engine_seconds": 60,
     "completion_sync_seconds": 2,
@@ -44,6 +47,7 @@ TIMER_LIMITS = {
     "cli_release_minutes": (1, 7 * 24 * 60),
     "model_catalog_minutes": (1, 24 * 60),
     "cli_status_minutes": (1, 24 * 60),
+    "git_check_minutes": (1, 7 * 24 * 60),
     "remote_session_seconds": (2, 5 * 60),
     "remote_engine_seconds": (5, 60 * 60),
     "completion_sync_seconds": (1, 5 * 60),

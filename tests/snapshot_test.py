@@ -224,6 +224,7 @@ async def main() -> None:
             "cli_release_minutes": 240,
             "model_catalog_minutes": 7,
             "cli_status_minutes": 8,
+            "git_check_minutes": 45,
             "remote_session_seconds": 17,
             "remote_engine_seconds": 75,
             "completion_sync_seconds": 3,
@@ -591,6 +592,7 @@ async def main() -> None:
             "cli_release_minutes": 60,
             "model_catalog_minutes": 2,
             "cli_status_minutes": 2,
+            "git_check_minutes": 2,
             "remote_session_seconds": 3,
             "remote_engine_seconds": 10,
             "completion_sync_seconds": 1,
@@ -659,6 +661,7 @@ async def main() -> None:
             "cli_release_minutes": 240,
             "model_catalog_minutes": 7,
             "cli_status_minutes": 8,
+            "git_check_minutes": 45,
             "remote_session_seconds": 17,
             "remote_engine_seconds": 75,
             "completion_sync_seconds": 3,
@@ -706,6 +709,8 @@ async def main() -> None:
         missing_timers.pop("timers", None)
         previous_timer_shape = config.export_data()
         previous_timer_shape["timers"].pop("completion_sync_seconds", None)
+        pre_git_timer_shape = config.export_data()
+        pre_git_timer_shape["timers"].pop("git_check_minutes", None)
         missing_engine_defaults = config.export_data()
         missing_engine_defaults["engines"].pop("defaults")
         partial_engine_defaults = config.export_data()
@@ -720,6 +725,7 @@ async def main() -> None:
                         previous_vnc_prompt_shape,
                         previous_spawn_prompt_shape,
                         missing_cwd, missing_timers, previous_timer_shape,
+                        pre_git_timer_shape,
                         missing_spawn, missing_browser_idle, missing_terminal_idle,
                         unknown_selection, missing_engine_defaults,
                         partial_engine_defaults, mistyped_engine_defaults):

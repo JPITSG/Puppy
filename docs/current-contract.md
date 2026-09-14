@@ -49,6 +49,14 @@ still contain a value written before that release.
   node starts - any string, or Puppy's `DEFAULT_VNC_SYSTEM_PROMPT`. Startup and
   backup validation reject the earlier shape instead of filling it in, and a
   backup archive exported before this change is refused for the same reason.
+- `config.timers` contains exactly `cli_release_minutes`,
+  `model_catalog_minutes`, `cli_status_minutes`, `git_check_minutes`,
+  `remote_session_seconds`, `remote_engine_seconds` and
+  `completion_sync_seconds`. A `config.json` written before the Git repository
+  check must have `"git_check_minutes": 15` (1 to 10080) added to `timers` by
+  hand before that node starts; startup and backup validation reject the
+  six-field shape, and an archive exported before this change is refused.
+  See [Git repositories](session-git.md).
 
 ## Runtime APIs and console
 
@@ -97,6 +105,15 @@ Scratch promotion is additive `workspace-move`: both execution runtimes serve
 and return `{ok: true, session}`. See the [backend contract](../backend/README.md).
 No persisted shape changes: the existing session changes from `temporary` to
 `directory`; the transcript records a `workspace_move` info event.
+
+The sidebar's Git mark is additive `session-git`: every session payload carries
+`git` (`null` until the node has looked, then a `repo`/`checked_at` record, with
+`error` when the directory could not be read), both execution runtimes serve
+`POST /api/sessions/{sid}/git/refresh`, and the node's `git_check_minutes` timer
+rides the existing `timer-settings` payload. A console reads a node without the
+capability as before: no mark, and its six timers still editable. Nothing is
+persisted beyond the timer value; nothing changes a backup shape except that
+timer, and no availability verdict moves.
 
 Host activity is additive `host-metrics-v1`: both execution runtimes serve
 `GET /api/host/metrics`, returning that node's in-memory CPU history, its

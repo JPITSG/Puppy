@@ -3872,6 +3872,7 @@ def check_timer_settings_ui(ui_source: str, css_source: str) -> None:
     for label in (
             "Published CLI releases", "Model catalogs",
             "Installed CLI versions and sign-in status",
+            "Git repository checks",
             "Remote session fallback polling",
             "Remote metadata fallback polling",
             "Remote completion notification synchronization"):
@@ -3916,12 +3917,24 @@ const before=remotePollingTickMilliseconds();
 payload.values.remote_session_seconds=120;
 payload.values.remote_engine_seconds=7;
 state.timers=normalizeTimerSettings(payload);
-console.log(JSON.stringify({before,after:remotePollingTickMilliseconds(),valid:!!state.timers}));
+// a node from before the Git check serves six timers and is still valid;
+// one that has it carries it, and one that mangles it is refused as before
+const older={values:{...payload.values},defaults:{...payload.defaults},limits:{...payload.limits}};
+delete older.values.git_check_minutes; delete older.defaults.git_check_minutes; delete older.limits.git_check_minutes;
+const olderNormalized=normalizeTimerSettings(older);
+const mangled={values:{...payload.values},defaults:{...payload.defaults},limits:{...payload.limits}};
+mangled.values.git_check_minutes=0;
+console.log(JSON.stringify({before,after:remotePollingTickMilliseconds(),valid:!!state.timers,
+  git:state.timers.values.git_check_minutes,
+  olderValid:!!olderNormalized,olderHasGit:"git_check_minutes" in olderNormalized.values,
+  mangledValid:!!normalizeTimerSettings(mangled)}));
 '''
     proc = subprocess.run(["node", "--input-type=module", "-e", with_live_views(script)],
                           capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:700]
-    assert json.loads(proc.stdout) == {"before": 12000, "after": 7000, "valid": True}
+    assert json.loads(proc.stdout) == {
+        "before": 12000, "after": 7000, "valid": True, "git": 15,
+        "olderValid": True, "olderHasGit": False, "mangledValid": False}
 
     targets_start = ui_source.index("function onlineTimerTargets(")
     targets_end = ui_source.index("\n\nfunction backendSupportsSystemPrompt", targets_start)
@@ -4131,8 +4144,8 @@ def check_ui_contrast_palette(ui_source: str, css_source: str) -> None:
 
     assert "color:var(--terminal-overlay-ink);" in css_source
     assert contrast(dark["terminal-overlay-ink"], dark["bg"]) >= 7
-    assert "@media (hover:none){\n  .sess-item .si-pin,.sess-item .si-notes{opacity:.55}" \
-        in css_source
+    assert "@media (hover:none){\n  .sess-item .si-pin,.sess-item .si-git," \
+        ".sess-item .si-notes{opacity:.55}" in css_source
 
     # A fresh managed browser paints its own standalone document, so it must
     # carry the same readable light ink instead of silently retaining the old
@@ -4574,8 +4587,10 @@ def check_session_pins(ui_source: str, css_source: str) -> None:
         ui_source.index("\nfunction sessDot", ui_source.index("function renderSidebar()"))]
     assert 'item.dataset.pinned = s.pinned === true ? "1" : "0";' in sidebar
     pin_append = "actions.appendChild(sessionPinMark(bid, s))"
+    git_append = "actions.appendChild(sessionGitMark(bid, s))"
     notes_append = "actions.appendChild(agentNotesMark(bid, s))"
-    assert sidebar.index(pin_append) < sidebar.index(notes_append)
+    assert sidebar.index(pin_append) < sidebar.index(git_append) < sidebar.index(notes_append)
+    assert "if (backendSupportsSessionGit(bid)) " + git_append in sidebar
     assert 'const actions = el("span", "si-actions")' in sidebar
     assert "if (actions.childElementCount) r2.appendChild(actions);" in sidebar
     # Never locally sort on the flag: the array order is the node's contract.
@@ -4598,6 +4613,31 @@ def check_session_pins(ui_source: str, css_source: str) -> None:
                    'mark.addEventListener("dragstart"'):
         assert needle in mark
     assert '"Pin session to top"' in mark and '"Unpin session"' in mark
+
+    # The Git mark reads the node's record and nothing else: a labelled image
+    # that no press opens yet, drawn only for nodes advertising the capability,
+    # and its focus re-check asks once per change of focus and never probes
+    # a backend the health worker calls unreachable.
+    git_mark = ui_source[
+        ui_source.index("function backendSupportsSessionGit("):
+        ui_source.index("\n/* The row itself is a button")]
+    assert 'backend.capabilities.includes("session-git")' in git_mark
+    assert 'mark.setAttribute("role", "img")' in git_mark
+    assert "mark.appendChild(sessionGitIcon(14));" in git_mark
+    assert "tabIndex" not in git_mark and 'addEventListener("click"' not in git_mark
+    for needle in ('"Git repository"', '"No Git repository"',
+                   '"Git repository not checked yet"',
+                   '"Git repository could not be checked"'):
+        assert needle in git_mark, needle
+    assert "if (key === sessionGitFocusKey) return;" in git_mark
+    assert "!backendSupportsSessionGit(bid) || !backendConnectionAllowed(bid)" in git_mark
+    assert 'api(bid, `sessions/${sid}/git/refresh`, { method: "POST"' in git_mark
+    assert "toast(" not in git_mark
+    for caller in ("function selectSidebarSession(", "function focusWorkspacePane(",
+                   "function activateTab(", "async function enterApp("):
+        body = ui_source[ui_source.index(caller):]
+        body = body[:body.index("\n}\n")]
+        assert "sessionGitFocused(" in body, caller
 
     context = ui_source[
         ui_source.index("function sessionContextMenu("):
@@ -4636,11 +4676,14 @@ def check_session_pins(ui_source: str, css_source: str) -> None:
     # The row's two marks are one pair, not two icons that happen to sit side by
     # side: one drawing size in CSS, and one grid and stroke in the glyphs, so
     # neither can drift into looking heavier than the other.
-    assert ".sess-item .si-pin svg,.sess-item .si-notes svg{width:14px;height:14px}" \
-        in css_source
+    assert ".sess-item .si-pin svg,.sess-item .si-git svg,.sess-item .si-notes svg" \
+        "{width:14px;height:14px}" in css_source
+    assert ".sess-item .si-git.has{opacity:1;color:var(--acc2)}" in css_source
+    assert ".sess-item .si-pin,.sess-item .si-notes{cursor:pointer}" in css_source
     assert "mark.appendChild(sessionPinIcon(14));" in ui_source
+    assert "mark.appendChild(sessionGitIcon(14));" in ui_source
     assert "mark.appendChild(agentNotesIcon(14));" in ui_source
-    for glyph in ("sessionPinIcon", "agentNotesIcon"):
+    for glyph in ("sessionPinIcon", "sessionGitIcon", "agentNotesIcon"):
         body = ui_source[ui_source.index("function %s(size = 14) {" % glyph):]
         body = body[:body.index("\n}\n")]
         assert 'setAttribute("viewBox", "0 0 18 18")' in body, glyph

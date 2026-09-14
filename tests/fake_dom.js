@@ -112,6 +112,7 @@ class FakeElement {
     return false;
   }
   get firstElementChild() { return this.children[0] || null; }
+  get childElementCount() { return this.children.length; }
   get parentElement() { return this.parentNode instanceof FakeElement ? this.parentNode : null; }
   get nextSibling() {
     if (!this.parentNode) return null;

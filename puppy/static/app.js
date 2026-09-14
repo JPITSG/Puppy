@@ -793,16 +793,17 @@ function attachmentFileIcon(size = 18) {
   return svg;
 }
 
-/* The sidebar row's two marks - this pin and the agent-notes page below it -
-   are drawn as one pair on a shared grid: the same 18-unit viewBox at the same
-   14px size, the same 1.25 stroke, and each glyph placed so its inked centre of
-   mass, not its bounding box, sits on the grid's middle. That last rule is what
-   makes them look level. A pushpin carries nearly all its ink in the head, so a
-   box-centred one measures its mass at 7.6 of 18 and reads a full pixel high
-   beside an evenly weighted page; the geometry below is the same pin shifted
-   0.95 down onto 9.0, which is why its head starts low and its point runs close
-   to the bottom edge. Keep both glyphs on this grid, and re-measure the mass
-   rather than the bounds, whenever either one changes. */
+/* The sidebar row's three marks - this pin, the Git branch and the agent-notes
+   page below it - are drawn as one set on a shared grid: the same 18-unit
+   viewBox at the same 14px size, the same 1.25 stroke, and each glyph placed
+   so its inked centre of mass, not its bounding box, sits on the grid's
+   middle. That last rule is what makes them look level. A pushpin carries
+   nearly all its ink in the head, so a box-centred one measures its mass at
+   7.6 of 18 and reads a full pixel high beside an evenly weighted page; the
+   geometry below is the same pin shifted 0.95 down onto 9.0, which is why its
+   head starts low and its point runs close to the bottom edge. Keep every
+   glyph on this grid, and re-measure the mass rather than the bounds,
+   whenever one of them changes. */
 function sessionPinIcon(size = 14) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
@@ -822,10 +823,44 @@ function sessionPinIcon(size = 14) {
   return svg;
 }
 
-/* The pin's partner. A page rather than the attachment chip's file glyph,
-   which is drawn nearly full-bleed for its own 18px box and would tower over
-   the pin here; this one is sized so the two carry the same weight side by
-   side, and is already mass-centred because a rectangle is evenly inked. */
+/* Between the pin and the page: a branch, three nodes with the link that
+   forks off the top one. Its ink gathers at the bottom left, where two of
+   the nodes sit, so a box-centred drawing would hang low and left; the
+   circles below are placed so the measured mass (three equal rings, the
+   short stem, the quarter arc and its two straights) lands on 9.0, 9.0 -
+   the box itself runs from 4.85 to 14.55 across and 3.25 to 13.75 down. */
+function sessionGitIcon(size = 14) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 18 18");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  for (const [cx, cy] of [[6.4, 4.8], [6.4, 12.2], [13, 12.2]]) {
+    const node = document.createElementNS(NS, "circle");
+    node.setAttribute("cx", cx); node.setAttribute("cy", cy);
+    node.setAttribute("r", "1.55");
+    node.setAttribute("fill", "none");
+    node.setAttribute("stroke", "currentColor");
+    node.setAttribute("stroke-width", "1.25");
+    svg.appendChild(node);
+  }
+  const link = document.createElementNS(NS, "path");
+  link.setAttribute("d", "M6.4 6.35V10.65M7.95 4.8H9.3A3.7 3.7 0 0 1 13 8.5V10.65");
+  link.setAttribute("fill", "none");
+  link.setAttribute("stroke", "currentColor");
+  link.setAttribute("stroke-width", "1.25");
+  link.setAttribute("stroke-linecap", "round");
+  link.setAttribute("stroke-linejoin", "round");
+  svg.appendChild(link);
+  return svg;
+}
+
+/* The pin's other partner. A page rather than the attachment chip's file
+   glyph, which is drawn nearly full-bleed for its own 18px box and would
+   tower over the pin here; this one is sized so the set carries the same
+   weight side by side, and is already mass-centred because a rectangle is
+   evenly inked. */
 function agentNotesIcon(size = 14) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
@@ -3203,10 +3238,14 @@ const TIMER_DEFAULT_VALUES = Object.freeze({
   cli_release_minutes: 360,
   model_catalog_minutes: 5,
   cli_status_minutes: 5,
+  git_check_minutes: 15,
   remote_session_seconds: 12,
   remote_engine_seconds: 60,
   completion_sync_seconds: 2,
 });
+/* A timer a node may not have: a backend from before the Git mark serves the
+   other six and is edited as before, with that one row disabled for it. */
+const TIMER_OPTIONAL_KEYS = Object.freeze(new Set(["git_check_minutes"]));
 
 function timerMilliseconds(name) {
   const values = state.timers && state.timers.values;
@@ -3727,6 +3766,9 @@ async function enterApp() {
   state.tabs = valid;
   normalizeWorkspace();
   renderTabs(); renderSidebar();
+  /* a reload brings the restored session into focus as a click would */
+  const focused = state.tabs.find(t => t.id === state.active);
+  if (focused && focused.type === "session") sessionGitFocused(focused.bid, focused.sid);
   connectUpdates();
   startRemotePolling();
   await openSessionHash();
@@ -5441,6 +5483,7 @@ function focusedSessionKey() {
 function selectSidebarSession(bid, sid) {
   const key = sidebarSessionKey(bid, sid);
   state.selectedSession = key;
+  sessionGitFocused(bid, sid);
   document.querySelectorAll(".sess-item[data-session-key]").forEach(item =>
     item.classList.toggle("active", item.dataset.sessionKey === key));
   syncSessionBrowserChips();
@@ -5636,6 +5679,7 @@ function renderSidebar() {
          controls themselves sit together as one deliberate pair. */
       const actions = el("span", "si-actions");
       if (backendSupportsSessionPinning(bid)) actions.appendChild(sessionPinMark(bid, s));
+      if (backendSupportsSessionGit(bid)) actions.appendChild(sessionGitMark(bid, s));
       if (backendSupportsAgentNotes(bid)) actions.appendChild(agentNotesMark(bid, s));
       if (actions.childElementCount) r2.appendChild(actions);
       item.appendChild(r1); item.appendChild(r2);
@@ -5680,6 +5724,69 @@ function backendSupportsAgentNotes(bid) {
   const backend = state.backends.find(b => b.id === bid);
   return !!backend && Array.isArray(backend.capabilities) &&
     backend.capabilities.includes("session-agent-notes");
+}
+
+function backendSupportsSessionGit(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(b => b.id === bid);
+  return !!backend && Array.isArray(backend.capabilities) &&
+    backend.capabilities.includes("session-git");
+}
+
+/* Between the pin and the notes: whether the working directory is inside a
+   Git work tree. The node answers from its own cache - re-checked on its
+   git_check_minutes timer and the moment the session is brought into focus
+   (sessionGitFocused) - so the row only ever draws what the list says. A
+   repository reads at full strength like present notes, no repository as
+   the same faint outline; a directory the node has not looked at yet, or
+   could not read, stays faint with the reason in its label. Nothing opens
+   from it yet, so it is a labelled image, not a button, and a press on it
+   is a press on the row. */
+function sessionGitMark(bid, s) {
+  const git = s.git && typeof s.git === "object" ? s.git : null;
+  const mark = el("span", "si-git" + (git && git.repo === true ? " has" : ""));
+  mark.setAttribute("role", "img");
+  mark.setAttribute("aria-label", sessionGitLabel(git));
+  mark.appendChild(sessionGitIcon(14));
+  return mark;
+}
+
+function sessionGitLabel(git) {
+  if (!git) return "Git repository not checked yet";
+  if (git.repo === true) return "Git repository";
+  if (git.repo === false) return "No Git repository";
+  return "Git repository could not be checked" + (git.error ? ` · ${git.error}` : "");
+}
+
+/* The mark's second trigger. Selecting a session in the sidebar, activating
+   its tab or focusing its pane all land here; only a session other than the
+   one focused before asks the node to look again, so re-selecting the
+   current tab, a re-render or a pane repaint sends nothing. The answer is
+   applied to the row directly, and the node also broadcasts the list when
+   the mark changed, so every console sees it. A failed re-check is not news:
+   the mark keeps what the list said. */
+let sessionGitFocusKey = null;
+function sessionGitFocused(bid, sid) {
+  const key = sidebarSessionKey(bid, sid);
+  if (key === sessionGitFocusKey) return;
+  sessionGitFocusKey = key;
+  if (!backendSupportsSessionGit(bid) || !backendConnectionAllowed(bid)) return;
+  api(bid, `sessions/${sid}/git/refresh`, { method: "POST", timeoutMs: 15000 })
+    .then(result => {
+      if (!result || !("git" in result)) return;
+      const row = sessionsFor(bid).find(item => item.id === sid);
+      if (!row || sessionGitSame(row.git, result.git)) return;
+      row.git = result.git;
+      renderSidebar();
+    })
+    .catch(() => {});
+}
+
+function sessionGitSame(a, b) {
+  const aRecord = a && typeof a === "object" ? a : null;
+  const bRecord = b && typeof b === "object" ? b : null;
+  if (!aRecord || !bRecord) return aRecord === bRecord;
+  return aRecord.repo === bRecord.repo && (aRecord.error || "") === (bRecord.error || "");
 }
 
 /* The row itself is a button, so this follows the notes control's established
@@ -6560,6 +6667,8 @@ function normalizeTimerSettings(payload) {
   const limits = {};
   for (const name of Object.keys(TIMER_DEFAULT_VALUES)) {
     const spec = payload.limits[name];
+    if (TIMER_OPTIONAL_KEYS.has(name) && !spec && !(name in payload.values) &&
+        !(name in payload.defaults)) continue;
     const value = Number(payload.values[name]);
     const defaultValue = Number(payload.defaults[name]);
     if (!spec || !Number.isInteger(value) || !Number.isInteger(defaultValue) ||
@@ -6582,6 +6691,14 @@ function rememberTimerSettings(bid, payload) {
   if (bid) state.remoteTimers[bid] = normalized;
   else state.timers = normalized;
   return normalized;
+}
+
+/* Whether a node's remembered timer payload carries a timer at all. A node
+   whose payload is not known yet is given the benefit of the doubt: a PATCH
+   it refuses is reported by name, never silently skipped. */
+function timerOffered(bid, key) {
+  const payload = bid ? state.remoteTimers[bid] : state.timers;
+  return !payload || !payload.values || key in payload.values;
 }
 
 /* Every node's engine payload is remembered here and nowhere else. Several
@@ -8293,8 +8410,10 @@ function focusWorkspacePane(groupId) {
   state.activeGroup = pane.id;
   state.active = pane.active;
   const tab = state.tabs.find(item => item.id === state.active);
-  if (tab && tab.type === "session")
+  if (tab && tab.type === "session") {
     state.selectedSession = sidebarSessionKey(tab.bid, tab.sid);
+    sessionGitFocused(tab.bid, tab.sid);
+  }
   document.querySelectorAll(".workspace-pane").forEach(node =>
     node.classList.toggle("focused", node.dataset.paneId === pane.id));
   renderSidebar();
@@ -8311,8 +8430,10 @@ function activateTab(id, groupId = null) {
   pane.active = id;
   state.activeGroup = pane.id;
   state.active = id;
-  if (tab.type === "session")
+  if (tab.type === "session") {
     state.selectedSession = sidebarSessionKey(tab.bid, tab.sid);
+    sessionGitFocused(tab.bid, tab.sid);
+  }
   syncTabOrderFromLayout();
   renderTabs(id); renderSidebar();
   syncSessionBrowserChips();
@@ -21324,8 +21445,8 @@ class SettingsView {
   timerSettingsCard(nodes, initialPayload, generation) {
     const card = el("div", "card timers-card");
     card.innerHTML = `<h2>Timers</h2>
-      <p class="timer-card-copy">Control how often Puppy refreshes engine information and
-        synchronizes remote activity. Engine checks belong to the selected backend; console
+      <p class="timer-card-copy">Control how often Puppy refreshes engine and project information
+        and synchronizes remote activity. Backend checks belong to the selected backend; console
         synchronization belongs to this instance.</p>`;
 
     const specs = [
@@ -21341,6 +21462,11 @@ class SettingsView {
         key: "cli_status_minutes", scope: "engine",
         label: "Installed CLI versions and sign-in status",
         description: "How long installed-version and sign-in probes are reused before checking again.",
+      },
+      {
+        key: "git_check_minutes", scope: "engine", label: "Git repository checks",
+        description: "How often this backend re-checks whether each session's directory is a Git " +
+          "repository; a session is also checked when you open it.",
       },
       {
         key: "remote_session_seconds", scope: "console", label: "Remote session fallback polling",
@@ -21369,9 +21495,9 @@ class SettingsView {
 
     const engineSection = el("section", "timer-section");
     const engineHead = el("div", "timer-section-head");
-    engineHead.appendChild(el("h3", "", "Engine checks"));
+    engineHead.appendChild(el("h3", "", "Backend checks"));
     engineHead.appendChild(el("p", "",
-      "These values are stored and used on the backend that runs the engine."));
+      "These values are stored and used on the selected backend."));
     engineSection.appendChild(engineHead);
     const nodeField = el("label", "timer-node");
     nodeField.appendChild(el("span", "timer-node-label", "Backend"));
@@ -21414,7 +21540,8 @@ class SettingsView {
       root.noValidate = true;
       const copy = el("div", "timer-row-copy");
       copy.appendChild(el("div", "timer-row-name", spec.label));
-      copy.appendChild(el("div", "timer-row-description", spec.description));
+      const description = el("div", "timer-row-description", spec.description);
+      copy.appendChild(description);
       const controls = el("div", "timer-row-controls");
       const input = document.createElement("input");
       input.type = "number";
@@ -21434,7 +21561,7 @@ class SettingsView {
       error.id = `timer-error-${spec.key}`;
       input.setAttribute("aria-describedby", error.id);
       root.appendChild(error);
-      const record = { spec, root, input, unit, save, error, saving: false };
+      const record = { spec, root, input, unit, save, error, description, saving: false };
       const setError = message => {
         error.textContent = message;
         error.classList.toggle("hidden", !message);
@@ -21475,7 +21602,8 @@ class SettingsView {
           const sourceName = node ? node.name : "This instance";
           const savedMessage = `${sourceName}: ${spec.label} set to ${value} ${longUnit}`;
           const targets = spec.scope === "engine" ?
-            onlineTimerPropagationTargets(nodes, bid) : [];
+            onlineTimerPropagationTargets(nodes, bid)
+              .filter(target => timerOffered(target.bid, spec.key)) : [];
           if (!targets.length || !(await modalConfirm(
             "Apply to other online backends?",
             `${savedMessage}.\n\nApply the same value to ${targets.length} other online ` +
@@ -21531,7 +21659,7 @@ class SettingsView {
           `backend${peers.length === 1 ? "" : "s"}` : "the primary instance";
       const confirmed = await modalConfirm(
         "Reset timers everywhere?",
-        `This will reset all six timer values on ${scope}: ` +
+        `This will reset every timer value on ${scope}: ` +
           `${targets.map(target => target.name).join(", ")}.\n\nEach backend will use the ` +
           "defaults advertised by its installed Puppy version. Offline or incompatible " +
           "backends will not be changed.",
@@ -21595,7 +21723,7 @@ class SettingsView {
       else if (availability !== "ok")
         nodeNote.textContent = backendStateNote(availability, !!current, "timers");
       else if (!current) nodeNote.textContent = "Waiting for timer settings…";
-      else nodeNote.textContent = `Engine timers stored on ${node ? node.name : "this instance"}`;
+      else nodeNote.textContent = `Backend timers stored on ${node ? node.name : "this instance"}`;
 
       select.disabled = resetting;
       refreshChoiceSelect(select);
@@ -21603,14 +21731,18 @@ class SettingsView {
       resetButton.textContent = resetting ? "Resetting…" : "Reset all to defaults";
 
       for (const record of rows) {
-        const { spec, input, unit, save } = record;
+        const { spec, input, unit, save, description } = record;
         const payload = timerPayload(spec);
         const limit = payload && payload.limits && payload.limits[spec.key];
         const bid = targetBid(spec);
         const canUse = spec.scope === "console" || backendSupportsTimerSettings(bid);
         const reachable = !bid || backendConnectionAllowed(bid);
+        /* a node from before this timer serves the others; its row says so */
+        const offered = !payload || spec.key in payload.values;
+        description.textContent = offered ? spec.description :
+          `${spec.description} Not offered by this backend's version.`;
         if (payload && !record.error.textContent && document.activeElement !== input)
-          input.value = String(payload.values[spec.key]);
+          input.value = offered ? String(payload.values[spec.key]) : "";
         if (limit) {
           input.min = String(limit.min);
           input.max = String(limit.max);
@@ -21621,7 +21753,8 @@ class SettingsView {
           unit.textContent = spec.key.endsWith("_minutes") ? "min" : "sec";
           input.setAttribute("aria-label", spec.label);
         }
-        const disabled = resetting || record.saving || !payload || !canUse || !reachable;
+        const disabled = resetting || record.saving || !payload || !canUse || !reachable ||
+          !offered;
         input.disabled = disabled;
         save.disabled = disabled;
         save.textContent = record.saving ? "Saving…" : "Apply";

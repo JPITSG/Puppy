@@ -1954,6 +1954,45 @@ async def exercise_agent_notes(http, url, headers, pinned, session, cwd: Path) -
         assert response.status == 404
 
 
+async def exercise_session_git(http, url, headers, pinned, session, cwd: Path) -> None:
+    """Whether the working directory is inside a Git work tree: the node's
+    cached answer on every session payload, re-checked by the focus refresh,
+    which answers at once and publishes a changed mark."""
+    sid = session["id"]
+    refresh_url = url + f"/api/sessions/{sid}/git/refresh"
+
+    async def listed():
+        async with http.get(url + "/api/sessions", headers=headers, ssl=pinned) as response:
+            rows = (await response.json())["sessions"]
+        return next(row["git"] for row in rows if row["id"] == sid)
+
+    assert "git" in session
+    async with http.post(refresh_url, headers=headers, ssl=pinned) as response:
+        data = await response.json()
+        assert response.status == 200, data
+    assert data["ok"] is True and data["git"]["repo"] is False, data
+    assert "error" not in data["git"] and isinstance(data["git"]["checked_at"], float)
+    assert (await listed())["repo"] is False
+    (cwd / ".git").mkdir()
+    (cwd / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    # the list carries the node's cached answer, never a per-request look
+    assert (await listed())["repo"] is False
+    async with http.post(refresh_url, headers=headers, ssl=pinned) as response:
+        assert (await response.json())["git"]["repo"] is True
+    assert (await listed())["repo"] is True
+    async with http.get(url + f"/api/sessions/{sid}", headers=headers, ssl=pinned) as response:
+        assert (await response.json())["session"]["git"]["repo"] is True
+    async with http.post(url + "/api/sessions/999999/git/refresh",
+                         headers=headers, ssl=pinned) as response:
+        assert response.status == 404
+    async with http.post(refresh_url, ssl=pinned) as response:
+        assert response.status == 401
+    shutil.rmtree(cwd / ".git")
+    async with http.post(refresh_url, headers=headers, ssl=pinned) as response:
+        assert (await response.json())["git"]["repo"] is False
+    assert (await listed())["repo"] is False
+
+
 def exercise_activity_blocks(session_hub_cls) -> None:
     """Queued turns retain one start time and become idle only after the tail."""
     hub = session_hub_cls(-1)
@@ -2487,6 +2526,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "session-tools" in ping["capabilities"]
         assert "session-fast-mode" in ping["capabilities"]
         assert "session-agent-notes" in ping["capabilities"]
+        assert "session-git" in ping["capabilities"]
         assert "session-pinning" in ping["capabilities"]
         assert "session-order-recency" in ping["capabilities"]
         assert "completion-events" in ping["capabilities"]
@@ -2653,6 +2693,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
             "cli_release_minutes": 360,
             "model_catalog_minutes": 5,
             "cli_status_minutes": 5,
+            "git_check_minutes": 15,
             "remote_session_seconds": 12,
             "remote_engine_seconds": 60,
             "completion_sync_seconds": 2,
@@ -2762,6 +2803,8 @@ async def exercise_node(url: str, token: str, expected_version: str,
             assert response.status == 200, timer_settings
         assert timer_settings["timers"]["limits"]["model_catalog_minutes"] == {
             "min": 1, "max": 1440, "unit": "minutes"}
+        assert timer_settings["timers"]["limits"]["git_check_minutes"] == {
+            "min": 1, "max": 10080, "unit": "minutes"}
         async with http.patch(url + "/api/timers", headers=good, ssl=pinned,
                               json={"model_catalog_minutes": 9}) as response:
             changed_timers = await response.json()
@@ -2965,6 +3008,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
                 assert response.status == 200, normal_created
             normal = normal_created["session"]
             await exercise_agent_notes(http, url, good, pinned, normal, normal_path)
+            await exercise_session_git(http, url, good, pinned, normal, normal_path)
             assert normal["workspace_kind"] == "directory"
 
             # Malformed direct clients get bounded 4xx responses and cannot

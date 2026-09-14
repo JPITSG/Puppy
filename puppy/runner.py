@@ -16,7 +16,7 @@ import uuid
 
 from puppy import (agent_notes, browser_agent, config, db, handoff, notify, spawn_agent,
                    system_prompts, terminal_agent, vnc_agent,
-                   session_agent, session_links, uploads, workspace_sync,
+                   session_agent, session_git, session_links, uploads, workspace_sync,
                    workspaces, session_tasks)
 from puppy.drivers import get_driver
 from puppy.drivers import base as driver_base
@@ -306,6 +306,7 @@ def session_payload(session):
         out["task"] = task
     out["session_ref"] = session_links.reference(session["id"])
     out["agent_notes"] = agent_notes.present(session.get("cwd"))
+    out["git"] = session_git.record(session.get("cwd"))
     out["workspace_missing"] = workspaces.is_temporary(out) and not workspaces.is_available(out)
     out["used_config"] = parse_used_config(out["used_config"])
     out["show_meta"] = out["show_meta"] != 0
@@ -551,6 +552,9 @@ def sessions_payload() -> dict:
             "workspace_kind": s["workspace_kind"],
             # which of AGENTS.md / CLAUDE.md the working directory holds
             "agent_notes": agent_notes.present(s["cwd"]),
+            # whether it is inside a Git work tree: the node's cached answer,
+            # null until its worker has looked (asking wakes the worker)
+            "git": session_git.record(s["cwd"]),
             "workspace_missing": workspaces.is_temporary(s) and not workspaces.is_available(s),
             "workspace": descriptor,
             "ws_dirty": bool(s["ws_dirty"]),
