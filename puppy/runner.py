@@ -39,6 +39,9 @@ QUEUE_REORDER_HOLD_SECONDS = 30
 MAX_STEER_CHARS = 128 * 1024
 MAX_STEER_TURN_ID_CHARS = 128
 MAX_STEERS_PER_TURN = 64
+# OpenCode 1.18.30 can acknowledge a concurrent session/prompt just AFTER
+# the original prompt's result. Keep reading those replies before stdin EOF.
+STEERING_ACK_GRACE = 2.0
 MAX_SIDE_QUESTION_CHARS = 16 * 1024
 MAX_SIDE_QUESTIONS_PER_TURN = 32
 # Probed on claude 2.1.258: a side question can resolve seconds AFTER the
@@ -1245,7 +1248,8 @@ class SessionHub:
     def _handle_steer_result(self, action: dict) -> None:
         request_id = str(action.get("request_id") or "")
         receipt = self._steer_receipts.get(request_id)
-        if receipt is None or receipt.get("generation") != self._turn_generation:
+        if receipt is None or receipt.get("generation") != self._turn_generation or \
+                receipt.get("status") not in ("sending", "sent"):
             return
         receipt["status"] = "accepted" if action.get("ok") else "rejected"
         receipt["error"] = "" if action.get("ok") else \
@@ -1255,10 +1259,17 @@ class SessionHub:
             receipt["error_event"] = True
             self._emit("error", {
                 "subtype": "steering_rejected",
-                "text": "Steering was not accepted: {}".format(receipt["error"]),
+                "text": "{}: {}".format(
+                    "Could not confirm steering" if action.get("unconfirmed") else
+                    "Steering was not accepted", receipt["error"]),
                 "request_id": request_id,
                 "turn_id": receipt["turn_id"],
             })
+
+    def _steers_pending(self) -> bool:
+        return any(receipt.get("generation") == self._turn_generation and
+                   receipt.get("status") in ("sending", "sent")
+                   for receipt in self._steer_receipts.values())
 
     def _reject_unacknowledged_steers(self, reason: str) -> None:
         """Resolve every transport-delivered steer before its turn vanishes."""
@@ -1268,6 +1279,7 @@ class SessionHub:
             self._handle_steer_result({
                 "request_id": request_id,
                 "ok": False,
+                "unconfirmed": True,
                 "error": reason,
             })
 
@@ -1285,8 +1297,10 @@ class SessionHub:
         # turn does, so a held approval and a background-task wait both keep
         # it available - both were probe-verified to answer, and a held
         # approval is exactly when "why do you want to run that?" is asked.
-        # Only a turn on its way out, or one whose stdin has gone, cannot.
+        # A completed turn may only drain replies already in flight. A pause
+        # for background work still belongs to the active turn.
         ready = supported and bool(turn_id) and not self.interrupted and \
+            (not self._turn_result_seen or self._bg_wait_since is not None) and \
             not self._turn_stopping and not self._side_questions_pending() and \
             self._proc_ready and proc is not None and proc.returncode is None and \
             proc.stdin is not None and not proc.stdin.is_closing() and \
@@ -2460,10 +2474,10 @@ class SessionHub:
         await self._interrupt_proc(proc)
 
     async def _interrupt_proc(self, proc, driver=None) -> None:
-        if self._bg_wait_since is not None:
-            # The model has already answered; only its background tasks keep
-            # the process alive. EOF is the CLI's own cue to end them and
-            # exit, reporting each one as stopped on the way out.
+        if self._bg_wait_since is not None or self._turn_result_seen:
+            # The model has answered; only background tasks or outstanding
+            # control replies keep the process alive. Stop ends either wait
+            # through EOF rather than interrupting an already completed turn.
             self._close_stdin()
             for delay, sig in ((8, signal.SIGINT), (15, signal.SIGKILL)):
                 asyncio.get_event_loop().call_later(delay, self._signal_if_alive, proc, sig)
@@ -2573,8 +2587,8 @@ class SessionHub:
             return
         self._turn_stopping = True
         self._publish_steering_state()
-        if self._bg_wait_since is not None:
-            # idle on background work: EOF is the CLI's own cue to end it
+        if self._bg_wait_since is not None or self._turn_result_seen:
+            # Idle on background work or control replies: end the wait too.
             self._close_stdin()
         # SIGINT first: engines abort the turn cleanly (codex releases its
         # thread writer and records the interruption), then escalate.
@@ -3091,12 +3105,16 @@ class SessionHub:
             pending_result = None
             wait_closed = ""       # why a wait was ended early, if it was
             bg_idle_since = None   # when every task ended without a wake-up
-            # deadline for holding the process open after the result purely so
-            # an in-flight side question can still land
+            # Independent bounds for replies that can follow the turn result.
+            # Neither channel may close stdin while the other is still owed a
+            # response. These are durations, so wall-clock changes cannot
+            # extend or cut short either grace.
             sq_grace_until = None
+            steer_grace_until = None
 
             def settle_result(data) -> None:
                 nonlocal got_result, retry_delay, sq_grace_until, context_checkpoint
+                nonlocal steer_grace_until
                 if context_checkpoint and data.get("ok"):
                     if data.get("context_verified") is not True or \
                             data.get("native_session_id") != context_checkpoint:
@@ -3149,16 +3167,17 @@ class SessionHub:
                 if tool:
                     data["tool"] = tool
                 self._emit("result", data)
-                # claude: close stdin so the process exits cleanly. A side
-                # question asked near the end of the turn can still be in
-                # flight, and closing stdin would end it - probed on claude
-                # 2.1.258, its answer arrives seconds AFTER the result. The
-                # process is held open for a bounded grace rather than
-                # discarding an answer the user already paid for.
+                # A turn result completes the model's work, not necessarily
+                # every protocol request. Drain outstanding acknowledgements
+                # and side answers before ending the JSONL service.
                 if driver.uses_stdin_stream:
-                    if self._side_questions_pending():
-                        sq_grace_until = time.time() + SIDE_QUESTION_GRACE
-                    else:
+                    if not self.interrupted:
+                        now = time.monotonic()
+                        if self._side_questions_pending():
+                            sq_grace_until = now + SIDE_QUESTION_GRACE
+                        if self._steers_pending():
+                            steer_grace_until = now + STEERING_ACK_GRACE
+                    if sq_grace_until is None and steer_grace_until is None:
                         self._close_stdin()
 
             def end_wait(reason, text) -> None:
@@ -3171,12 +3190,21 @@ class SessionHub:
                 deadline = time.time() + 30
 
             while True:
-                if sq_grace_until is not None and (
-                        not self._side_questions_pending() or
-                        time.time() >= sq_grace_until):
-                    # answered, or out of grace: _close_stdin resolves
-                    # whatever is still outstanding
-                    sq_grace_until = None
+                waiting_for_replies = sq_grace_until is not None or steer_grace_until is not None
+                now = time.monotonic()
+                if steer_grace_until is not None:
+                    if now >= steer_grace_until:
+                        self._reject_unacknowledged_steers(
+                            "the engine did not acknowledge steering within {:g}s "
+                            "after the turn completed".format(STEERING_ACK_GRACE))
+                    if not self._steers_pending():
+                        steer_grace_until = None
+                if sq_grace_until is not None:
+                    if now >= sq_grace_until:
+                        self._fail_side_questions("the turn ended before the engine answered")
+                    if not self._side_questions_pending():
+                        sq_grace_until = None
+                if waiting_for_replies and sq_grace_until is None and steer_grace_until is None:
                     self._close_stdin()
                 if pending_result is not None and not wait_closed and \
                         bg_idle_since is not None and \
@@ -3200,9 +3228,9 @@ class SessionHub:
                     self._signal_if_alive(self.proc, signal.SIGKILL)
                     break
                 read_cap = min(remaining, 60)
-                if sq_grace_until is not None:
-                    read_cap = min(read_cap,
-                                   max(0.5, sq_grace_until - time.time()))
+                for grace_until in (sq_grace_until, steer_grace_until):
+                    if grace_until is not None:
+                        read_cap = min(read_cap, max(0.001, grace_until - time.monotonic()))
                 try:
                     if transport is not None:
                         actions = await asyncio.wait_for(
@@ -3242,9 +3270,9 @@ class SessionHub:
                         if self._bg_wait_since is not None:
                             bg_idle_since = None if self._bg_tasks else time.time()
                     elif a == "turn_pause":
-                        self._reject_unacknowledged_steers(
-                            "the model finished its answer before the engine "
-                            "acknowledged steering")
+                        # The native turn still owns background work, and can
+                        # acknowledge steering while paused. Only final
+                        # completion starts the acknowledgement grace.
                         self._turn_result_seen = True
                         data = dict(act["data"])
                         if self.interrupted:
@@ -3318,9 +3346,6 @@ class SessionHub:
                         db.meta_set(f"rate_limit.{session['engine']}", info)
                         self.broadcast({"type": "rate_limit", "engine": session["engine"], "info": info})
                     elif a == "result":
-                        self._reject_unacknowledged_steers(
-                            "the active turn completed before the engine "
-                            "acknowledged steering")
                         self._turn_result_seen = True
                         if self.interrupted and act["data"].get("stop_reason") in \
                                 ("cancelled", "canceled"):

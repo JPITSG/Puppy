@@ -459,7 +459,8 @@ class Driver:
     supports_steering = False
     # Protocols with a distinct native acknowledgement of the steering
     # request set this. Other explicitly supported protocols use stdin drain
-    # as their strongest available acceptance signal.
+    # as their strongest available acceptance signal. Acknowledgements may
+    # follow the turn result; the runner drains them for a bounded grace.
     steering_acknowledged = False
     # True only when the pinned protocol can put a question to the model
     # ALONGSIDE the running turn: answered from the same conversation context,

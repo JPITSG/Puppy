@@ -886,7 +886,7 @@ with open(os.environ["PUPPY_FAKE_CODEX_LOG"], "a", encoding="utf-8") as handle:
             await asyncio.sleep(0.02)
         assert hub._steer_receipts["runner-steer-unacknowledged"]["status"] == \
             "rejected"
-        assert "completed before" in \
+        assert "did not acknowledge steering within" in \
             hub._steer_receipts["runner-steer-unacknowledged"]["error"]
 
         # The result notification closes steering before process teardown.

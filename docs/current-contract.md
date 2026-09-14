@@ -81,6 +81,12 @@ still contain a value written before that release.
   consoles that are not editing can follow the writer's caret.
 - Internal browser bridge aliases and the obsolete engines-response `user`
   alias are removed.
+- Final turn completion refuses new steering and side questions, while
+  already-sent steering may acknowledge for up to two seconds afterward.
+  Native refusals and unconfirmed handoffs remain distinct in their error
+  wording. Steering and side-question reply deadlines are independent;
+  background pauses continue accepting side questions. This changes no stored
+  format or wire capability.
 
 This cleanup preserves transaction rollback, interrupted-operation recovery,
 offline retry, historical transcript rendering, and external engine/Chromium

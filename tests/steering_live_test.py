@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Opt-in attachment steering probe against an installed engine and real model.
+"""Opt-in steering probe against an installed engine and real model.
 
 Run: python3 tests/steering_live_test.py --engine claude|codex|opencode [--model ID]
+     [--scenario text|file|file-image]
 Spends one short real model turn. Copies only native sign-in/model selection
 files into private scratch storage; original configuration/history is untouched.
-The model must read a random file and view an image attached after its first
-shell command starts, within the same native turn and process.
+The model must follow new text, read an attached file, or read a file and view
+an image after its first shell command starts, within the same native turn and
+process. The default remains the file-and-image check.
 """
 from __future__ import annotations
 
@@ -96,6 +98,8 @@ async def probe(args, root, child):
     driver = get_driver(args.engine)
     build_env = driver.build_env
     build_cmd = driver.build_cmd
+    parse_line = driver.parse_line
+    protocol_results = []
     project = root / "project"
     project.mkdir()
     (root / "tmp").mkdir()
@@ -119,24 +123,39 @@ async def probe(args, root, child):
             # directory in the native policy instead of guessing that path
             # from a prompt displayed without its file arguments.
             inline["agent"][PUPPY_AGENT]["permission"] = {
-                "read": {"*": "deny", str(root) + "/**": "allow"},
+                # OpenCode v1.18.30 matches read against a worktree-relative
+                # path, including for a file outside that worktree. The
+                # external-directory guard independently uses absolute paths.
+                "read": {"*": "deny", str(root) + "/**": "allow",
+                         os.path.relpath(root / "puppy" / "uploads", project) + "/**": "allow"},
                 "external_directory": {"*": "deny", str(root) + "/**": "allow"},
             }
             value["OPENCODE_CONFIG_CONTENT"] = json.dumps(inline)
         return value
 
+    def parse(line, ctx):
+        actions = parse_line(line, ctx)
+        for action in actions:
+            if action.get("a") in ("steer_result", "result"):
+                protocol_results.append({"at": time.monotonic(), "action": action})
+        return actions
+
     mode = "read-only" if args.engine == "codex" else "default"
-    sid = db.create_session("Attachment probe", args.engine, str(project), args.model or "", "", "", mode)
+    sid = db.create_session("Steering probe", args.engine, str(project), args.model or "", "", "", mode)
     hub = runner.hub(sid)
     secret = secrets.token_hex(12)
+    instruction_code = secrets.token_hex(12)
     palette = {"red": (255, 0, 0), "green": (0, 180, 0), "blue": (0, 0, 255), "yellow": (255, 255, 0)}
     colors = random.SystemRandom().sample(list(palette), 3)
-    prompt = ("First use your shell to run exactly `sleep 10`. Do not use other tools in parallel. "
+    prompt = ("We are testing a follow-up instruction during a running turn. "
+              "I will send that instruction and may attach a text file while you wait. "
+              "First use your shell to run exactly `sleep 10`. Do not use other tools in parallel. "
               "After it finishes follow any additional user instruction received during the wait; "
               "otherwise reply WAIT_FINISHED. Do not read files unless a later message attaches them.")
     with ExitStack() as stack:
         stack.enter_context(patch.object(driver, "build_env", side_effect=environment))
         stack.enter_context(patch.object(driver, "build_cmd", side_effect=command))
+        stack.enter_context(patch.object(driver, "parse_line", side_effect=parse))
         for name in ("browser_agent", "terminal_agent", "vnc_agent", "spawn_agent", "session_agent"):
             stack.enter_context(patch.object(getattr(runner, name), "turn_mcp", return_value=None))
         stack.enter_context(patch.object(runner.session_links, "prepare_turn", AsyncMock()))
@@ -170,22 +189,32 @@ async def probe(args, root, child):
                 if not submitted and sleeping and hub.steering_state()["ready"]:
                     # These files did not exist when the original prompt ran.
                     paths = []
-                    for name, data in (("note.txt", (secret + "\n").encode()),
-                                       ("picture.png", png([palette[c] for c in colors]))):
+                    files = [] if args.scenario == "text" else [("note.txt", (secret + "\n").encode())]
+                    if args.scenario == "file-image":
+                        files.append(("picture.png", png([palette[c] for c in colors])))
+                    for name, data in files:
                         directory = uploads._new_upload_directory(sid)
                         path = directory / name
                         path.write_bytes(data)
                         paths.append(path)
-                    text = ("Read the attached text file and open the attached image with your image viewing tool. "
-                            "Do not infer the image from its filename or decode its pixels with code. "
-                            "Reply with FILE_CODE=<file contents> and IMAGE_COLORS=<three color names, left to right, comma separated>.\n\n" +
+                    if args.scenario == "text":
+                        text = "Please include this reference number in your reply: " + instruction_code
+                    elif args.scenario == "file":
+                        text = ("Please read the attached text file and tell me the code it contains. "
+                                "Also include this reference number in your reply: " + instruction_code + ".\n\n" +
+                                uploads.ATTACH_FILE_PREFIX + str(paths[0]) +
+                                " (note.txt, 25 B)" + uploads.ATTACH_FILE_SUFFIX)
+                    else:
+                        text = ("Read the attached text file and open the attached image with your image viewing tool. "
+                                "Do not infer the image from its filename or decode its pixels with code. "
+                                "Reply with FILE_CODE=<file contents> and IMAGE_COLORS=<three color names, left to right, comma separated>.\n\n" +
                             uploads.ATTACH_FILE_PREFIX + str(paths[0]) + " (note.txt, 25 B)" + uploads.ATTACH_FILE_SUFFIX + "\n" +
                             uploads.ATTACH_IMAGE_PREFIX + str(paths[1]) + uploads.ATTACH_IMAGE_SUFFIX)
                     turn_id, pid = hub.steering_state()["turn_id"], hub.proc.pid
                     response = await hub.steer(text, "attachment-probe", expected_turn_id=turn_id)
                     assert response.get("ok"), response
                     submitted = True
-                    print(args.engine + ": attachments handed to the active engine", flush=True)
+                    print(args.engine + " (" + args.scenario + "): steering handed to the active engine", flush=True)
                 if hub.status == "idle":
                     break
                 if submitted and not hub._turn_result_seen:
@@ -199,14 +228,23 @@ async def probe(args, root, child):
             results = [e["data"] for e in events if e["kind"] == "result"]
             answers = "\n".join(e["data"].get("text", "") for e in events if e["kind"] == "assistant")
             (root / "events.json").write_text(json.dumps(events))
+            (root / "protocol-results.json").write_text(json.dumps(protocol_results))
+            (root / "steering-receipts.json").write_text(json.dumps(hub._steer_receipts))
             assert submitted, "engine never offered an active shell boundary"
             assert len(results) == 1 and results[0].get("ok"), "native turn failed"
-            assert secret in answers, "model did not read the newly attached file"
-            normalized = answers.lower().replace(" ", "")
-            assert ",".join(colors) in normalized, "model did not identify the newly attached image"
+            if args.scenario in ("text", "file"):
+                assert instruction_code in answers, "model did not follow the new steering text"
+            if args.scenario != "text":
+                assert secret in answers, "model did not read the newly attached file"
+            if args.scenario == "file-image":
+                normalized = answers.lower().replace(" ", "")
+                assert ",".join(colors) in normalized, "model did not identify the newly attached image"
             assert hub._steer_receipts["attachment-probe"]["status"] == "accepted", "native acknowledgement missing"
+            assert not any(e["kind"] == "error" and e["data"].get("subtype") == "steering_rejected"
+                           for e in events), "steering was falsely reported rejected before its acknowledgement"
             assert not hub.queue and len([e for e in events if e["kind"] == "user"]) == 2
-            print("PASS: " + args.engine + " read the new file, viewed the new image and acknowledged steering in one native turn", flush=True)
+            print("PASS: " + args.engine + " (" + (args.model or "default") + ", " + args.scenario +
+                  ") followed and acknowledged steering in one native turn; unchanged process, empty queue", flush=True)
         finally:
             if hub.status != "idle":
                 await hub.kill()
@@ -219,6 +257,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--engine", required=True, choices=("claude", "codex", "opencode"))
     parser.add_argument("--model", help="explicit native model; otherwise use the engine default")
+    parser.add_argument("--scenario", choices=("text", "file", "file-image"), default="file-image",
+                        help="steering content to verify (default: file-image)")
     parser.add_argument("--keep", action="store_true", help="retain private probe data for diagnosis")
     args = parser.parse_args()
     root = private_root("steering-live-")

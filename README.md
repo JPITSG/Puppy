@@ -240,6 +240,9 @@ text. The agent receives their paths and uses its file or image tools to inspect
 them; image understanding depends on the selected model. Ask accepts text only.
 Text edits and attachment changes made while either send is awaiting
 acknowledgement remain in the composer for the next message.
+Steering already sent can be acknowledged after the answer finishes: Puppy
+waits up to two seconds for that reply. A missing acknowledgement is reported
+as unconfirmed; an explicit engine refusal is reported as rejected.
 
 **Spell check** is Puppy's own, not the browser's. Every prompt box turns the
 browser's checker and its autocorrection off, so a phone, a desktop and a kiosk
