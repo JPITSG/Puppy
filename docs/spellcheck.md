@@ -174,7 +174,9 @@ spelled right, which is what **Add to dictionary** is for.
 A textarea cannot carry marks, and a contenteditable box would cost the
 browser's caret, undo and IME behaviour. So the same text is laid out again on
 a layer beneath it (`.spell-layer`) in the same font, at the same size, with
-the same padding and wrapping, scrolled together and clipped the same way; its
+the same padding and wrapping (and the same leading trimmed off its first
+line, so both boxes' first lines start on the same row), scrolled together and
+clipped the same way; its
 letters are transparent and only the wavy underline under a marked word shows
 through the transparent field above. `Composer.spellSync` writes those metrics
 after every paint, on every textarea scroll, and from a `ResizeObserver`, so a

@@ -1261,7 +1261,7 @@ async def spell_check_checks(instance, capture=False):
             const box = ta.getBoundingClientRect(), mine = layer.getBoundingClientRect();
             const ts = getComputedStyle(ta), ls = getComputedStyle(layer);
             const same = ['fontFamily','fontSize','lineHeight','letterSpacing','paddingTop',
-                          'paddingLeft','paddingRight','paddingBottom']
+                          'paddingLeft','paddingRight','paddingBottom','textBoxTrim','textBoxEdge']
                 .every(prop => ts[prop] === ls[prop]);
             const first = marks[0].getBoundingClientRect();
             const last = marks[marks.length - 1].getBoundingClientRect();
@@ -1717,6 +1717,186 @@ async def scrollbar_corner_checks(instance, capture=False):
           "vertical or horizontal bar (textarea, code block, review diff, choice menu, modal), "
           "the corner keeps the box's background, and a square pane's thumb runs to the edge, "
           "in both themes at 1x/2x", flush=True)
+
+
+async def text_inset_checks(instance):
+    """Read the rendered pixels of every kind of text box: the first line's
+    letters stand as far below the top border as the text stands in from
+    the left one. A line box carries leading above its letters, so app.css
+    trims it off the first line and the padding above becomes the padding
+    beside; where a font's letters then land is the font's own affair (the
+    host's hinted mono renders its caps a pixel or two above their declared
+    height, and a glyph has a side bearing), so every box is read against a
+    trimmed line of its own first line's text and font with no padding at
+    all. The chat composer, with a typed line and with its placeholder alone
+    - one trimmed line tall either way, the letters in the same place - and
+    a textarea, a code block, the approval's command, the review diff and
+    the Git sheet's list built from the console's own classes, at 1x/2x."""
+    assert await evaluate(instance, "CSS.supports('text-box', 'trim-start cap alphabetic')"), \
+        "the host Chromium does not trim leading (text-box needs 133 or newer)"
+    await evaluate(instance, """(() => {
+        window.insetProbe=el('div');
+        insetProbe.style.cssText='position:fixed;left:24px;top:24px;width:360px;z-index:2147483647;'+
+            'display:flex;flex-direction:column;gap:14px;background:var(--bg)';
+        document.body.appendChild(insetProbe);
+        const place=(node,probe,css,parent)=>{
+            node.dataset.probe=probe; node.style.cssText+=';'+css;
+            (parent||insetProbe).appendChild(node); return node;
+        };
+        place(el('textarea'),'textarea','height:96px;resize:none').value='Hello world\\nsecond line';
+        const md=el('div','md'); insetProbe.appendChild(md);
+        place(el('pre',null,'Hello world\\nsecond line'),'code block','height:56px',md);
+        const approval=el('div','approval'); approval.style.cssText='margin:0;width:auto;max-width:none';
+        insetProbe.appendChild(approval);
+        place(el('pre',null,'Hello world\\nsecond line'),'approval','',approval);
+        place(el('div','task-review-diff','Hello world\\nsecond line'),'review diff','height:96px;min-height:0');
+        const list=place(el('div','session-git-list'),'git list','');
+        const group=list.appendChild(el('div','sgl-group'));
+        group.appendChild(el('div','sgl-kind','Unstaged'));
+        const rows=group.appendChild(el('div','sgl-rows'));
+        rows.appendChild(el('span','sgl-what','modified')); rows.appendChild(el('span','sgl-path','README.md'));
+        // The reference: one trimmed line of the same text in the same font,
+        // with no padding, on the probe's own background.
+        window.insetReference=(source,text)=>{
+            insetProbe.querySelectorAll('[data-probe=reference]').forEach(node=>node.remove());
+            const cs=getComputedStyle(source), line=el('div',null,text);
+            line.dataset.probe='reference';
+            line.style.cssText='text-box:trim-start cap alphabetic;padding:0;border:0;margin:8px 0 0 8px;'+
+                'white-space:pre;width:max-content';
+            for (const prop of ['fontFamily','fontSize','fontWeight','fontStyle','lineHeight',
+                                'letterSpacing','textTransform','wordSpacing','color'])
+                line.style[prop]=cs[prop];
+            insetProbe.appendChild(line);
+            return line;
+        };
+        // The capture around a node: its top-left corner and a margin,
+        // snapped to whole pixels so the image's rows are the page's.
+        window.insetClip=(node,margin)=>{
+            const r=node.getBoundingClientRect();
+            const clip={x:Math.floor(r.x-margin),y:Math.floor(r.y-margin),width:0,height:0};
+            clip.width=Math.ceil(r.x+Math.min(r.width,80))-clip.x;
+            clip.height=Math.ceil(r.y+Math.min(r.height,60))-clip.y;
+            return clip;
+        };
+        // Where the ink starts inside a node, in CSS pixels from the inner
+        // edge of its border (negative: above or left of it, which only the
+        // unpadded reference can show): the capture is decoded in the page
+        // and scanned at device resolution, a pixel counting as ink when it
+        // leaves the background - the top padding row past the corner for a
+        // box, the margin for the reference - and the corner outside the
+        // border's curve left out.
+        window.insetInk=async(data,node,margin)=>{
+            const r=node.getBoundingClientRect(), cs=getComputedStyle(node), clip=insetClip(node,margin);
+            const border=parseFloat(cs.borderTopWidth), inner=parseFloat(cs.borderTopLeftRadius)-border;
+            const img=new Image(); img.src='data:image/png;base64,'+data; await img.decode();
+            const canvas=document.createElement('canvas');
+            canvas.width=img.width; canvas.height=img.height;
+            const ctx=canvas.getContext('2d',{willReadFrequently:true});
+            ctx.drawImage(img,0,0);
+            const k=img.width/clip.width, step=1/k;
+            const px=(x,y)=>[...ctx.getImageData(Math.floor(x*k),Math.floor(y*k),1,1).data].slice(0,3);
+            const ox=r.x-clip.x+border, oy=r.y-clip.y+border;
+            const bg=margin?px(1,1):px(ox+inner+6,oy+1);
+            const inside=(dx,dy)=>{
+                if (margin) return true;
+                if (dx<0||dy<0) return false;
+                if (dx<inner&&dy<inner) {           // the corner: only well inside the curve
+                    const cx=inner-dx, cy=inner-dy;
+                    return cx*cx+cy*cy<(inner-1.5)*(inner-1.5);
+                }
+                return true;
+            };
+            let top=null, left=null;
+            for (let y=0;y<Math.min(clip.height,oy+40);y+=step) for (let x=0;x<Math.min(clip.width,ox+60);x+=step) {
+                const dx=x-ox, dy=y-oy;
+                if (!inside(dx,dy)) continue;
+                const p=px(x,y);
+                if (Math.abs(p[0]-bg[0])+Math.abs(p[1]-bg[1])+Math.abs(p[2]-bg[2])<=60) continue;
+                if (top===null||dy<top) top=dy;
+                if (left===null||dx<left) left=dx;
+            }
+            return {top,left,height:r.height,paddingTop:parseFloat(cs.paddingTop),
+                paddingLeft:parseFloat(cs.paddingLeft),trim:cs.textBoxTrim,edge:cs.textBoxEdge};
+        };
+        return true;
+    })()""")
+
+    async def ink(node, margin=0):
+        clip = await evaluate(instance, "insetClip(%s, %d)" % (node, margin))
+        shot = await instance.call("Page.captureScreenshot", {"format": "png", "clip": dict(clip, scale=1)},
+                                   session=instance.page_session)
+        return await evaluate(instance, "insetInk(%s, %s, %d)" % (json.dumps(shot["data"]), node, margin))
+
+    async def reference(source, text):
+        await evaluate(instance, "insetReference(%s, %s); true" % (source, json.dumps(text)))
+        return await ink("insetProbe.querySelector('[data-probe=reference]')", 8)
+
+    def landed(label, box, ref, top, left):
+        # the letters stand exactly the padding from the border, once the
+        # font's own rendering (the reference's offsets) is allowed for
+        assert box["top"] is not None and box["left"] is not None, (label, box)
+        assert abs(box["top"] - (top + ref["top"])) <= 1, (label, "top", box, ref, top)
+        assert abs(box["left"] - (left + ref["left"])) <= 1, (label, "left", box, ref, left)
+
+    boxes = (("textarea", None), ("code block", None), ("approval", None),
+             ("review diff", None), ("git list", ".sgl-kind"))
+    try:
+        for scale in (1, 2):
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width": 1440, "height": 900, "deviceScaleFactor": scale, "mobile": False},
+                session=instance.page_session)
+            await asyncio.sleep(.2)
+            for name, first in boxes:
+                node = "insetProbe.querySelector('[data-probe=%s]')" % json.dumps(name)
+                box = await ink(node)
+                assert (box["trim"], box["edge"]) == ("trim-start", "cap alphabetic"), (name, box)
+                assert box["paddingTop"] == box["paddingLeft"], (name, box)
+                source = node + (".querySelector(%s)" % json.dumps(first) if first else "")
+                ref = await reference(source, "Unstaged" if first else "Hello world")
+                landed("%dx %s" % (scale, name), box, ref, box["paddingTop"], box["paddingLeft"])
+            # The composer: its box's padding and its textarea's add up the
+            # same above and beside, and an empty box is exactly one trimmed
+            # line tall with the placeholder's letters where typed ones go.
+            seen = {}
+            for text in ("Hello world", ""):
+                await evaluate(instance, "demoView.composer.set(%s); true" % json.dumps(text))
+                await asyncio.sleep(.1)
+                box = await ink("demoView.composer.box")
+                field = await evaluate(instance, """(() => {
+                    const ta=demoView.composer.ta, cs=getComputedStyle(ta), r=ta.getBoundingClientRect();
+                    return {paddingTop:parseFloat(cs.paddingTop),paddingLeft:parseFloat(cs.paddingLeft),
+                        paddingBottom:parseFloat(cs.paddingBottom),trim:cs.textBoxTrim,edge:cs.textBoxEdge,
+                        height:r.height,minHeight:parseFloat(cs.minHeight),lineHeight:parseFloat(cs.lineHeight)};
+                })()""")
+                assert (field["trim"], field["edge"]) == ("trim-start", "cap alphabetic"), field
+                top = box["paddingTop"] + field["paddingTop"]
+                left = box["paddingLeft"] + field["paddingLeft"]
+                assert top == left, (box, field)
+                ref = await reference("demoView.composer.ta", "Hello world")
+                landed("%dx composer %r" % (scale, text), box, ref, top, left)
+                # one trimmed line: the reference's height plus the padding,
+                # never the floor
+                assert field["minHeight"] < field["height"], field
+                assert abs(field["height"] - (field["paddingTop"] + field["paddingBottom"] + ref["height"])) < .5, \
+                    (field, ref)
+                assert ref["height"] < field["lineHeight"], (field, ref)
+                seen[text] = (box["top"], box["left"], field["height"])
+            # the same height, and the placeholder's letters where the typed
+            # ones stand (its fainter grey gives up half a device pixel of
+            # antialiasing at the top of a glyph)
+            typed, empty = seen["Hello world"], seen[""]
+            assert typed[2] == empty[2] and abs(typed[0] - empty[0]) <= .5 and \
+                abs(typed[1] - empty[1]) <= 1, seen
+    finally:
+        await evaluate(instance, "insetProbe.remove(); delete window.insetProbe; delete window.insetReference; "
+                       "delete window.insetClip; delete window.insetInk; demoView.composer.set(''); true")
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": 1440, "height": 900, "deviceScaleFactor": 1,
+            "mobile": False}, session=instance.page_session)
+    print("PASS: a text box's first line stands as far below the top border as the text stands "
+          "in from the left one (the composer typed and empty, a textarea, a code block, the "
+          "approval's command, the review diff, the Git sheet's list) at 1x/2x, and an empty "
+          "composer is one trimmed line tall", flush=True)
 
 
 async def queue_expand_checks(instance, capture=False):
@@ -2415,6 +2595,7 @@ async def checks(a, b, hub, capture=False):
     await git_sheet_checks(a)
     await icon_alignment_checks(a)
     await scrollbar_corner_checks(a, capture)
+    await text_inset_checks(a)
     await background_task_checks(a, capture)
     await queue_expand_checks(a, capture)
     await message_reuse_checks(a)

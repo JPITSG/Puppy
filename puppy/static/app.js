@@ -10244,6 +10244,10 @@ const CARET_MIRROR_STYLES = [
   "fontFamily", "fontSize", "fontWeight", "fontStyle", "lineHeight", "letterSpacing",
   "textIndent", "textTransform", "wordSpacing", "tabSize",
   "paddingTop", "paddingBottom", "paddingLeft", "paddingRight",
+  /* the leading trimmed off the first line (app.css), so the mirror's first
+     line starts where the textarea's does; a browser without text-box
+     reports neither and copies nothing */
+  "textBoxTrim", "textBoxEdge",
 ];
 function scrollCaretIntoView(ta) {
   if (!ta || ta.scrollHeight <= ta.clientHeight + 1) return;   // nothing to scroll
@@ -11291,7 +11295,8 @@ class Composer {
       const tcs = getComputedStyle(this.ta);
       for (const p of ["fontFamily", "fontSize", "fontWeight", "lineHeight", "letterSpacing",
                        "paddingTop", "paddingBottom", "paddingLeft", "paddingRight",
-                       "borderTopWidth", "borderBottomWidth", "borderLeftWidth", "borderRightWidth", "boxSizing"])
+                       "borderTopWidth", "borderBottomWidth", "borderLeftWidth", "borderRightWidth", "boxSizing",
+                       "textBoxTrim", "textBoxEdge"])
         this.taGhost.style[p] = tcs[p];
       box.appendChild(this.taGhost);
     }
@@ -12025,7 +12030,10 @@ class Composer {
       const v = ta.value;
       g.textContent = v.endsWith("\n") ? v + "\u200b" : (v || "\u200b");
       const bounds = this.heightBounds();
-      const needed = Math.min(Math.max(g.offsetHeight, bounds[0]), bounds[1]);
+      /* the first line is trimmed to its cap height, a fractional amount, so
+         the ghost is rounded up: a box a fraction shorter than its text
+         would overflow by that fraction and scroll under every keystroke */
+      const needed = Math.min(Math.max(Math.ceil(g.getBoundingClientRect().height), bounds[0]), bounds[1]);
       if (needed !== ta.offsetHeight) ta.style.height = needed + "px";
     }
     const h = ta.offsetHeight;
@@ -12039,9 +12047,9 @@ class Composer {
      (the New task dialog) is measured against its own bounds; the chat's
      values stand in until the element is laid out. */
   heightBounds() {
-    if (!this.ta.isConnected) return [24, 224];
+    if (!this.ta.isConnected) return [20, 224];
     const cs = getComputedStyle(this.ta);
-    return [parseFloat(cs.minHeight) || 24, parseFloat(cs.maxHeight) || 224];
+    return [parseFloat(cs.minHeight) || 20, parseFloat(cs.maxHeight) || 224];
   }
 
   syncUploadButton() {
