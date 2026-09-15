@@ -94,6 +94,15 @@ def state(cwd) -> tuple:
             record.get("error"))
 
 
+def rundown(cwd) -> tuple:
+    """(branch, staged, unstaged, untracked, conflicts) of one inspection:
+    the tooltip's half of the record, which adds up to its changes."""
+    record = session_git.inspect(str(cwd))
+    kinds = tuple(record[key] for key in ("staged", "unstaged", "untracked", "conflicts"))
+    assert sum(kinds) == record["changes"], record
+    return (record["branch"],) + kinds
+
+
 def discovery() -> None:
     repo = TREE / "repo"
     git_dir(repo / ".git")
@@ -176,10 +185,13 @@ def work_state() -> None:
     # an unborn branch with no remote: the untracked file is the one change,
     # and there is nowhere to push to
     assert state(project) == (True, 1, None, None)
+    assert rundown(project) == ("main", 0, 0, 1, 0), "the unborn branch is still named"
     git(project, "add", "README")
     assert state(project) == (True, 1, None, None), "staged is still uncommitted"
+    assert rundown(project) == ("main", 1, 0, 0, 0)
     git(project, "commit", "-q", "-m", "one")
     assert state(project) == (True, 0, None, None)
+    assert rundown(project) == ("main", 0, 0, 0, 0)
     # a remote that has never been pushed to holds nothing: every commit is
     # unpushed, an upstream or not
     git(TREE, "init", "-q", "--bare", "remote.git")
@@ -196,8 +208,15 @@ def work_state() -> None:
     (project / "dir" / "b").write_text("b")
     assert state(project) == (True, 3, 0, None)
     assert state(project / "dir") == (True, 3, 0, None)
+    assert rundown(project) == ("main", 0, 1, 2, 0), "the untracked directory is one path"
     git(project, "add", "-A")
     assert state(project) == (True, 4, 0, None), "staged paths are listed one by one"
+    assert rundown(project) == ("main", 4, 0, 0, 0)
+    # a path staged and then edited again is staged: one path, one kind
+    (project / "README").write_text("changed again\n")
+    assert state(project) == (True, 4, 0, None)
+    assert rundown(project) == ("main", 4, 0, 0, 0)
+    git(project, "add", "README")
     git(project, "commit", "-q", "-m", "two")
     assert state(project) == (True, 0, 1, None)
     git(project, "commit", "-q", "--allow-empty", "-m", "three")
@@ -207,16 +226,34 @@ def work_state() -> None:
     git(project, "checkout", "-q", "-b", "feature")
     git(project, "commit", "-q", "--allow-empty", "-m", "four")
     assert state(project) == (True, 0, 3, None)
+    assert rundown(project) == ("feature", 0, 0, 0, 0)
+    # a merge that stops on a conflict: the unmerged path is a conflict,
+    # whatever else the index and the work tree hold for it
+    (project / "README").write_text("feature\n")
+    git(project, "commit", "-q", "-am", "feature readme")
+    git(project, "checkout", "-q", "main")
+    (project / "README").write_text("main\n")
+    git(project, "commit", "-q", "-am", "main readme")
+    merge = subprocess.run(["git", "merge", "feature"], cwd=str(project), capture_output=True, text=True)
+    assert merge.returncode and "CONFLICT" in merge.stdout, merge
+    assert state(project) == (True, 1, 3, None), "main's own commits since the push"
+    assert rundown(project) == ("main", 0, 0, 0, 1)
+    git(project, "merge", "--abort")
+    git(project, "reset", "-q", "--hard", "HEAD~1")
+    git(project, "checkout", "-q", "feature")
+    git(project, "reset", "-q", "--hard", "HEAD~1")
+    assert state(project) == (True, 0, 3, None)
     git(project, "push", "-q", "origin", "main")
     assert state(project) == (True, 0, 1, None)
     git(TREE, "init", "-q", "--bare", "backup.git")
     git(project, "remote", "add", "backup", str(TREE / "backup.git"))
     git(project, "push", "-q", "backup", "feature")
     assert state(project) == (True, 0, 0, None)
-    # a detached head is counted the same way
+    # a detached head is counted the same way, and named as no branch
     git(project, "checkout", "-q", "--detach", "main")
     git(project, "commit", "-q", "--allow-empty", "-m", "five")
     assert state(project) == (True, 0, 1, None)
+    assert rundown(project) == (None, 0, 0, 0, 0)
     # a fresh clone is clean, pushed and unremarkable
     git(TREE, "clone", "-q", str(TREE / "remote.git"), "clone")
     assert state(TREE / "clone") == (True, 0, 0, None)
@@ -244,14 +281,29 @@ def work_state() -> None:
     with patch.dict(os.environ, {"PATH": str(slow)}), patch.object(session_git, "GIT_TIMEOUT", 1.0):
         assert state(project) == (True, None, None, "git did not answer within 1 seconds")
     assert time.monotonic() - started < 4, "the timeout ended the run"
-    # the public record carries the counts for a repository and the reason
-    # beside them only when git declined; a non-repository carries neither
+    # the public record carries the counts and the rundown for a repository
+    # and the reason in place of all of them when git declined; a
+    # non-repository carries none of it, and a record seeded without the
+    # rundown (a node from before it) is published without one
     assert set(session_git._public(session_git.inspect(str(project)))) == \
-        {"repo", "checked_at", "changes", "unpushed"}
+        {"repo", "checked_at", "changes", "unpushed", "branch", "staged", "unstaged", "untracked", "conflicts"}
     assert set(session_git._public(session_git.inspect(str(refused)))) == \
         {"repo", "checked_at", "changes", "unpushed", "error"}
     assert set(session_git._public(session_git.inspect(str(TREE / "plain")))) == {"repo", "checked_at"}
-    print("work state: uncommitted paths, unpushed commits, remotes, branches and git's refusals")
+    assert session_git._public({"repo": True, "checked_at": 1, "changes": 2, "unpushed": 0}) == \
+        {"repo": True, "checked_at": 1, "changes": 2, "unpushed": 0}
+    # the rundown is part of what a console draws, so a re-sorted or
+    # re-branched answer with the same totals is a changed record
+    session_git.reset_for_tests()
+    seed = {"repo": True, "checked_at": 1, "changes": 1, "unpushed": 0, "branch": "main",
+            "staged": 1, "unstaged": 0, "untracked": 0, "conflicts": 0}
+    assert session_git._store("/x", dict(seed)) is True
+    assert session_git._store("/x", dict(seed, checked_at=2)) is False
+    assert session_git._store("/x", dict(seed, staged=0, unstaged=1)) is True
+    assert session_git._store("/x", dict(seed, staged=0, unstaged=1, branch="feature")) is True
+    assert session_git._store("/x", dict(seed, staged=0, unstaged=1, branch=None)) is True
+    session_git.reset_for_tests()
+    print("work state: uncommitted paths by kind, unpushed commits, remotes, branches and git's refusals")
 
 
 async def listed(client, headers):
@@ -325,20 +377,23 @@ async def api_contract(factory) -> None:
             worker = session_git._lifecycle(app)
             await worker.__anext__()
             # the worker's first pass answers every session's directory,
-            # counts included: the repository holds nothing git would list
-            # (empty directories are not files) and no remote, and the
-            # record says so and nothing else
+            # counts and rundown included: the repository holds nothing git
+            # would list (empty directories are not files) and no remote,
+            # and the record says so and nothing else
             rows = await answered(client, headers, ids)
             assert rows[ids[0]] == {"repo": True, "checked_at": rows[ids[0]]["checked_at"],
-                                    "changes": 0, "unpushed": None}, rows[ids[0]]
+                                    "changes": 0, "unpushed": None, "branch": "main",
+                                    "staged": 0, "unstaged": 0, "untracked": 0,
+                                    "conflicts": 0}, rows[ids[0]]
             assert rows[ids[1]]["repo"] is False and "changes" not in rows[ids[1]]
             assert rows[ids[2]]["repo"] is None and rows[ids[2]]["error"]
             (repo / "src" / "deep" / "file.txt").write_text("f")
             response = await client.post("/api/sessions/{}/git/refresh".format(ids[0]),
                                          headers=headers)
-            assert (await response.json())["git"]["changes"] == 1
+            refreshed = (await response.json())["git"]
+            assert refreshed["changes"] == 1 and refreshed["untracked"] == 1, refreshed
             response = await client.get("/api/sessions/{}".format(ids[0]), headers=headers)
-            assert (await response.json())["session"]["git"]["changes"] == 1
+            assert (await response.json())["session"]["git"] == refreshed
 
             refresh = "/api/sessions/{}/git/refresh"
             response = await client.post(refresh.format(ids[1]))

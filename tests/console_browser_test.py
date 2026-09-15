@@ -52,10 +52,12 @@ async def engines(*args, **kwargs):
 # find no such directories, so its cache is seeded with these answers and
 # every later look (the worker's pass, a focus refresh) is answered from
 # here. The garden is the heads-up: work its owner has not committed or
-# pushed; the atlas has no remote to push to; the notes are no repository.
+# pushed, with the rundown its tooltip reads; the atlas has no remote to
+# push to; the notes are no repository.
 DEMO_GIT = {"/home/mira/projects/" + folder: dict(record) for folder, record in (
     ("harbor", {"repo": True, "changes": 0, "unpushed": 0}),
-    ("garden", {"repo": True, "changes": 3, "unpushed": 1}),
+    ("garden", {"repo": True, "changes": 3, "unpushed": 1, "branch": "main",
+                "staged": 1, "unstaged": 1, "untracked": 1, "conflicts": 0}),
     ("atlas", {"repo": True, "changes": 0, "unpushed": None}),
     ("notes", {"repo": False}),
     ("harbor-task", {"repo": True, "changes": 2, "unpushed": 0}))}
@@ -2021,10 +2023,11 @@ async def attachment_steering_checks(instance, hub):
 async def git_mark_checks(a, b):
     """Every row carries the Git mark between its pin and its notes, drawn
     from the node's record: a repository holding uncommitted or unpushed
-    work in the console's warn tone with the counts in its label, the rest
-    as before. Focusing another session asks the node to look again, and a
-    changed answer - a mark or a count - reaches every console through the
-    list."""
+    work in the console's warn tone with the counts in its label and the
+    rundown in its tooltip - raised by a real hover, one line per cause -
+    the rest as before, with no tooltip. Focusing another session asks the
+    node to look again, and a changed answer - a mark or a count - reaches
+    every console through the list."""
     marks = await evaluate(a, """(() => {
         const probe = document.createElement('span');
         probe.style.color = 'var(--warn)'; document.body.appendChild(probe);
@@ -2051,6 +2054,39 @@ async def git_mark_checks(a, b):
     assert by_name["Garden planner"]["label"] == \
         "Git repository · 3 uncommitted changes · 1 unpushed commit"
     assert by_name["API cleanup"]["label"] == "Git repository · nothing to commit · no remote"
+    # The orange mark alone carries a tooltip: the console's own bubble,
+    # raised by hovering it, with the branch on its first line and then
+    # one line for each cause, kept on separate lines by the bubble.
+    rundown = ("Uncommitted and unpushed work on main\n"
+               "3 changes · 1 staged, 1 unstaged, 1 untracked\n1 unpushed commit")
+    tips = await evaluate(a, """Array.from(document.querySelectorAll('.sess-item')).map(row => {
+        const git = row.querySelector('.si-git');
+        return [row.querySelector('.si-name').textContent,
+            git.hasAttribute('title') ? git.getAttribute('title') : git.getAttribute('data-tip')]; })""")
+    assert dict(tips) == {name: (rundown if name == "Garden planner" else None) for name in by_name}, tips
+    # a desktop, where the sidebar stands beside the chat and a pointer can
+    # rest on its marks (the checks before this one end on a phone)
+    await a.call("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 900,
+                 "deviceScaleFactor": 1, "mobile": False}, session=a.page_session)
+    await a.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 0, "y": 0}, session=a.page_session)
+    await evaluate(a, "new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+    spot = await evaluate(a, """(() => { const r = Array.from(document.querySelectorAll('.sess-item'))
+        .find(row => row.querySelector('.si-name').textContent === 'Garden planner')
+        .querySelector('.si-git').getBoundingClientRect();
+        return {x: r.x + r.width / 2, y: r.y + r.height / 2}; })()""")
+    await a.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": spot["x"], "y": spot["y"]},
+                 session=a.page_session)
+    await until(a, "(() => { const tip = document.getElementById('tip'); return !!tip && !tip.hidden && "
+                   "tip.querySelector('.tip-card').textContent === %s; })()" % json.dumps(rundown))
+    bubble = await evaluate(a, """(() => { const card = document.querySelector('#tip .tip-card');
+        const style = getComputedStyle(card); const box = card.getBoundingClientRect();
+        const mark = document.querySelector('.sess-item .si-git.warn').getBoundingClientRect();
+        return {whiteSpace: style.whiteSpace, lines: box.height / parseFloat(style.lineHeight),
+            below: box.top >= mark.bottom, centred: Math.abs((box.left + box.right) / 2 - (mark.left + mark.right) / 2) <= 8}; })()""")
+    assert bubble["whiteSpace"] == "pre-line" and 3 <= bubble["lines"] < 4, bubble
+    assert bubble["below"] and bubble["centred"], bubble
+    await a.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 0, "y": 0}, session=a.page_session)
+    await until(a, "document.getElementById('tip').hidden")
     # a fresh answer for the focused session: the node re-checks on focus
     # and publishes the changed mark to the other console as well
     notes = next(s for s in db.list_sessions() if s["cwd"].endswith("/notes"))
@@ -2078,8 +2114,8 @@ async def git_mark_checks(a, b):
                         "document.querySelectorAll('.si-git.warn').length===1")
         await evaluate(a, "closeTab('s:0:%d'); activateTab('s:0:1'); true" % notes["id"])
     print("PASS: the Git mark between pin and notes on every row, drawn from the node's record - "
-          "orange with its counts for uncommitted or unpushed work - re-checked on focus and "
-          "published to every console", flush=True)
+          "orange with its counts for uncommitted or unpushed work and the rundown in its hovered "
+          "tooltip - re-checked on focus and published to every console", flush=True)
 
 
 async def checks(a, b, hub, capture=False):
@@ -3300,6 +3336,61 @@ async def navigation_checks(instance, url, sid):
     await until(instance, "!document.querySelector('.search-results .sh-more')"
                           " && document.querySelectorAll('.search-results .sh-matches .sh-match').length===7")
     assert await evaluate(instance, "!document.querySelector('#toasts .toast') && state.views.search.pageRequests.size===0")
+    # Results on display make the filters live. Typing in the box asks
+    # nothing; a real press on the Tools chip runs the results' own query
+    # again over the node's own route - no press on Search, the draft left
+    # in the box and not searched - and the tool rows leave with the kind.
+    await run("""window.navSearchApi=api; window.navSearches=[];
+        api=(bid,path,opts)=>{ if(path.startsWith('search?')) navSearches.push(new URLSearchParams(path.slice(7)).get('q'));
+          return navSearchApi(bid,path,opts); };
+        state.views.search.input.focus()""")
+    await instance.call("Input.insertText", {"text": " draft"}, session=instance.page_session)
+    assert await evaluate(instance, "state.views.search.input.value==='dashboard draft' && navSearches.length===0"
+                                    " && !state.views.search.searchController")
+
+    async def press_kind(label, pressed):
+        point = await evaluate(instance, """(() => {
+            const chip=[...document.querySelectorAll('.search-kinds .search-chip')].find(c=>c.textContent===%s);
+            const r=chip.getBoundingClientRect();
+            return {x:r.x+r.width/2, y:r.y+r.height/2, pressed:chip.getAttribute('aria-pressed')};
+        })()""" % json.dumps(label))
+        assert point["pressed"] == pressed, point
+        for kind in ("mousePressed", "mouseReleased"):
+            await instance.call("Input.dispatchMouseEvent", {
+                "type": kind, "x": point["x"], "y": point["y"], "button": "left",
+                "clickCount": 1}, session=instance.page_session)
+        await until(instance, "!state.views.search.searchController && !navigation.pending && !navigation.scheduled")
+
+    await press_kind("Tools", "true")
+    filtered = await evaluate(instance, """(() => ({
+        asked: navSearches, draft: state.views.search.input.value,
+        kinds: state.views.search.lastCore.kinds, tools: state.views.search.kinds.has('tool'),
+        count: document.querySelector('.search-results .sh-count').textContent,
+        rows: [...document.querySelectorAll('.search-results .sh-kind')].map(n=>n.textContent).sort(),
+        more: !!document.querySelector('.search-results .sh-more'),
+        toasts: document.querySelectorAll('#toasts .toast').length,
+    }))()""")
+    assert filtered == {"asked": ["dashboard"], "draft": "dashboard draft",
+                        "kinds": "title,user,assistant,thinking,info", "tools": False,
+                        "count": "3 matches", "rows": ["Prompt", "Reply", "Title"],
+                        "more": False, "toasts": 0}, filtered
+    # Back restores the results the chip replaced - every kind, the seven
+    # rows Show all loaded - without asking again; Forward the filtered
+    # ones; the chip pressed back on searches once more and leaves the
+    # saved kinds as they were found.
+    await travel(-1, "state.views.search.kinds.has('tool')")
+    assert await evaluate(instance, "navSearches.length===1 && state.views.search.input.value==='dashboard'"
+                                    " && document.querySelectorAll('.search-results .sh-match').length===7"
+                                    " && [...document.querySelectorAll('.search-kinds .search-chip')]"
+                                    ".find(c=>c.textContent==='Tools').getAttribute('aria-pressed')==='true'")
+    await travel(1, "!state.views.search.kinds.has('tool')")
+    assert await evaluate(instance, "navSearches.length===1"
+                                    " && document.querySelectorAll('.search-results .sh-match').length===3")
+    await press_kind("Tools", "false")
+    assert await evaluate(instance, "navSearches.length===2 && state.views.search.kinds.size===6"
+                                    " && document.querySelector('.search-results .sh-more')?.textContent==='Show all 7 matches'"
+                                    " && JSON.parse(lsGet('puppy.search')).kinds.length===6")
+    await run("api=navSearchApi")
     await run("state.views.search.presetQuery('cards')")
     await until(instance, "!state.views.search.searchController")
     await travel(-1, "state.views.search.input.value==='dashboard'")
@@ -3416,7 +3507,7 @@ async def navigation_checks(instance, url, sid):
         activateTab('s:0:1'); state.views['s:0:1'].select(1);
         window.demoView=state.views['s:0:1'].activeView(); demoView.returnToTail(false)""")
     await until(instance, "demoView.draftReady && !demoView._returning")
-    print("PASS: browser Back/Forward across tabs, search queries/results, tasks, nested dialogs, Host activity, Notifications and phone drawer; Settings backends/drafts/scroll, reload/citation routes, stale async results, and no replay of viewer close commands", flush=True)
+    print("PASS: browser Back/Forward across tabs, search queries/results and live filters, tasks, nested dialogs, Host activity, Notifications and phone drawer; Settings backends/drafts/scroll, reload/citation routes, stale async results, and no replay of viewer close commands", flush=True)
 
 
 async def main(args):

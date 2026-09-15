@@ -5742,9 +5742,10 @@ function backendSupportsSessionGit(bid) {
    repository as the same faint outline; a directory the node has not looked
    at yet, or could not read, stays faint with the reason in its label. The
    heads-up is the warn tone: a repository with uncommitted changes or
-   commits no remote holds turns orange, and its label says how much of each.
-   Nothing opens from it yet, so it is a labelled image, not a button, and a
-   press on it is a press on the row. */
+   commits no remote holds turns orange, its label says how much of each,
+   and its tooltip (sessionGitTip) says why in a few lines. Nothing opens
+   from it yet, so it is a labelled image, not a button, and a press on it
+   is a press on the row. */
 function sessionGitMark(bid, s) {
   const git = s.git && typeof s.git === "object" ? s.git : null;
   const work = sessionGitWork(git);
@@ -5752,6 +5753,8 @@ function sessionGitMark(bid, s) {
     (work && (work.changes || work.unpushed) ? " warn" : ""));
   mark.setAttribute("role", "img");
   mark.setAttribute("aria-label", sessionGitLabel(git));
+  const tip = sessionGitTip(git);
+  if (tip) mark.title = tip;
   mark.appendChild(sessionGitIcon(14));
   return mark;
 }
@@ -5765,6 +5768,51 @@ function sessionGitWork(git) {
   if (!git || git.repo !== true || git.error || typeof git.changes !== "number") return null;
   const count = value => typeof value === "number" && value > 0 ? value : 0;
   return { changes: count(git.changes), unpushed: count(git.unpushed) };
+}
+
+/* The kinds a repository record sorts its uncommitted paths into, in the
+   order the tooltip lists them, each with its wording for a count. */
+const SESSION_GIT_KINDS = [
+  ["staged", count => `${count} staged`],
+  ["unstaged", count => `${count} unstaged`],
+  ["untracked", count => `${count} untracked`],
+  ["conflicts", count => `${count} conflict${count === 1 ? "" : "s"}`],
+];
+
+/* The branch a record names: its name, null with HEAD detached, undefined
+   when the record does not say (a node from before it). */
+function sessionGitBranch(git) {
+  if (!git) return undefined;
+  if (typeof git.branch === "string") return git.branch;
+  return git.branch === null ? null : undefined;
+}
+
+/* Why an orange mark is orange, for its tooltip: one line naming the work
+   and the branch holding it, then one per cause - the changes with their
+   kinds, the commits no remote has - each line only what the record says.
+   The tip bubble keeps line breaks, so the rundown reads as a short list
+   rather than one long sentence, and each line is kept short enough to
+   stay one: the heading already says "uncommitted", so the changes line
+   spends its width on the kinds. Empty for a plain mark, whose label
+   already says all there is. */
+function sessionGitTip(git) {
+  const work = sessionGitWork(git);
+  if (!work || !(work.changes || work.unpushed)) return "";
+  const plural = (count, word) => `${count} ${word}${count === 1 ? "" : "s"}`;
+  const branch = sessionGitBranch(git);
+  const where = typeof branch === "string" ? ` on ${branch}` :
+    branch === null ? " on a detached HEAD" : "";
+  const lines = [(work.changes && work.unpushed ? "Uncommitted and unpushed work" :
+    work.changes ? "Uncommitted work" : "Unpushed work") + where];
+  if (work.changes) {
+    const kinds = SESSION_GIT_KINDS
+      .filter(([key]) => typeof git[key] === "number" && git[key] > 0)
+      .map(([key, wording]) => wording(git[key]));
+    lines.push(kinds.length ? `${plural(work.changes, "change")} · ${kinds.join(", ")}` :
+      plural(work.changes, "uncommitted change"));
+  }
+  if (work.unpushed) lines.push(plural(work.unpushed, "unpushed commit"));
+  return lines.join("\n");
 }
 
 function sessionGitLabel(git) {
@@ -5808,14 +5856,17 @@ function sessionGitFocused(bid, sid) {
     .catch(() => {});
 }
 
+/* Whether two records draw the same mark, label and tooltip: the counts,
+   the branch and the kinds are all part of what the row says. */
 function sessionGitSame(a, b) {
   const aRecord = a && typeof a === "object" ? a : null;
   const bRecord = b && typeof b === "object" ? b : null;
   if (!aRecord || !bRecord) return aRecord === bRecord;
   const count = value => typeof value === "number" ? value : null;
   return aRecord.repo === bRecord.repo && (aRecord.error || "") === (bRecord.error || "") &&
-    count(aRecord.changes) === count(bRecord.changes) &&
-    count(aRecord.unpushed) === count(bRecord.unpushed);
+    ["changes", "unpushed"].concat(SESSION_GIT_KINDS.map(([key]) => key))
+      .every(key => count(aRecord[key]) === count(bRecord[key])) &&
+    sessionGitBranch(aRecord) === sessionGitBranch(bRecord);
 }
 
 /* The row itself is a button, so this follows the notes control's established
@@ -19858,6 +19909,7 @@ class SearchView {
           if (this.excludedNodes.has(node.bid)) this.excludedNodes.delete(node.bid);
           else this.excludedNodes.add(node.bid);
           this.renderNodeChips();
+          this.filtersChanged();
         };
       }
       this.nodesBox.appendChild(chip);
@@ -19880,6 +19932,7 @@ class SearchView {
         }
         this.savePrefs();
         this.renderKindChips();
+        this.filtersChanged();
       };
       this.kindsBox.appendChild(chip);
     }
@@ -19892,7 +19945,10 @@ class SearchView {
         const btn = el("button",
           "seg-btn" + (choice.key === current ? " on" : ""), choice.label);
         btn.type = "button";
-        btn.onclick = () => { apply(choice.key); this.savePrefs(); this.renderSegs(); };
+        btn.onclick = () => {
+          if (choice.key === current) return;   // the choice already made
+          apply(choice.key); this.savePrefs(); this.renderSegs(); this.filtersChanged();
+        };
         host.appendChild(btn);
       }
     };
@@ -19900,6 +19956,16 @@ class SearchView {
       key => { this.timeKey = key; });
     build(this.orderBox, SEARCH_ORDER_CHOICES, this.order,
       key => { this.order = key; });
+  }
+
+  /* Once a search has run, its filters are live: a backend, kind, time or
+     sort change searches again for the query the results answer - never the
+     text in the box, which is a draft until Enter or Search submits it, so
+     nothing is ever searched that was not asked for. Before the first
+     search a filter is a setting for it. */
+  filtersChanged() {
+    if (!this.lastCore) return;
+    this.runSearch(this.lastCore.q);
   }
 
   /* ---- execution ---- */
@@ -19931,8 +19997,7 @@ class SearchView {
     this.setStatus("Search cancelled");
   }
 
-  async runSearch() {
-    const query = this.input.value.trim();
+  async runSearch(query = this.input.value.trim()) {
     if (!query) {
       this.input.focus();
       return;
@@ -19951,6 +20016,8 @@ class SearchView {
     const targets = catalog.filter(node => node.on);
     const skipped = catalog.filter(node => !node.enabled);
     if (!targets.length) {
+      this.cancelPages();
+      this.resultsBox.replaceChildren();
       this.setStatus("No online backends are selected to search");
       return;
     }

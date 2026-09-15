@@ -152,12 +152,16 @@ SESSION_AGENT_NOTES_CAPABILITY = "session-agent-notes"
 # Every session payload carries the additive ``git`` record saying whether the
 # working directory is inside a Git work tree (null until the node has
 # looked) and, inside one, the additive ``changes``/``unpushed`` counts of
-# work it is holding (null with ``error`` when git would not read them); the
-# node re-checks on its ``git_check_minutes`` timer - carried in its timers
+# work it is holding (null with ``error`` when git would not read them) with
+# the additive rundown behind them - ``branch`` (null with HEAD detached)
+# and the ``staged``/``unstaged``/``untracked``/``conflicts`` kinds adding
+# up to ``changes`` - that an orange mark's tooltip reads; the node
+# re-checks on its ``git_check_minutes`` timer - carried in its timers
 # payload - when a prompt finishes in the directory, and on
 # POST /api/sessions/{sid}/git/refresh for one session at once. A console
-# shows the sidebar's Git mark only for nodes that advertise this, and reads
-# a repository without counts as a plain repository.
+# shows the sidebar's Git mark only for nodes that advertise this, reads a
+# repository without counts as a plain repository, and one without the
+# rundown as counts alone.
 SESSION_GIT_CAPABILITY = "session-git"
 # Node-owned pinned flags and session order. Drag-and-drop requires the
 # complete starting order and pin cohort as compare tokens.

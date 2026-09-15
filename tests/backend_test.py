@@ -1987,8 +1987,10 @@ async def exercise_session_git(http, url, headers, pinned, session, cwd: Path) -
     async with http.post(refresh_url, headers=headers, ssl=pinned) as response:
         record = (await response.json())["git"]
     # the repository holds the session's own files, uncommitted, and has no
-    # remote to push to
+    # remote to push to; the rundown sorts them as untracked on main
     assert record["repo"] is True and record["changes"] >= 1 and record["unpushed"] is None, record
+    assert record["branch"] == "main" and record["untracked"] == record["changes"], record
+    assert (record["staged"], record["unstaged"], record["conflicts"]) == (0, 0, 0), record
     assert "error" not in record
     assert (await listed()) == record
     async with http.get(url + f"/api/sessions/{sid}", headers=headers, ssl=pinned) as response:
@@ -2009,6 +2011,8 @@ async def exercise_session_git(http, url, headers, pinned, session, cwd: Path) -
         pushed = (await response.json())["git"]
     assert pushed["changes"] == 0 and pushed["unpushed"] == 0, pushed
     assert (await listed()) == pushed
+    assert set(pushed) == {"repo", "checked_at", "changes", "unpushed", "branch",
+                           "staged", "unstaged", "untracked", "conflicts"}, pushed
     async with http.post(url + "/api/sessions/999999/git/refresh",
                          headers=headers, ssl=pinned) as response:
         assert response.status == 404

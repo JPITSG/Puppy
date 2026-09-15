@@ -5,8 +5,9 @@ agent notes. It says two things: the session's working directory is inside a
 Git repository, or it is not; and, inside one, whether that repository is
 holding work - uncommitted changes, or commits no remote has - which turns the
 mark orange, the console's warn tone, with the counts in its label. It is the
-heads-up that there is something to commit or push here. Nothing opens from
-it yet.
+heads-up that there is something to commit or push here, and hovering an
+orange mark says why: the branch, the changes sorted by what `git` would do
+with them, and the commits no remote has. Nothing opens from it yet.
 
 ## What is checked, and where
 
@@ -34,6 +35,14 @@ the same check:
   and a commit pushed to any remote is pushed. It is `null` when the
   repository has no remote configured - there is nowhere to push to, so its
   commits are never a heads-up - and `0` on an unborn branch.
+- The rundown behind those counts comes from the same `git status` call
+  (`--porcelain=v2 --branch`, the stable format every `git` since 2.11
+  writes): `branch` is the checked-out branch - an unborn
+  one included - or `null` with `HEAD` detached, and `staged`, `unstaged`,
+  `untracked` and `conflicts` sort the listed paths by what `git` would do
+  with them. Each path is counted once: one staged and then edited again is
+  staged, an unmerged path is a conflict whatever else it holds, so the four
+  add up to `changes`.
 
 Every `git` run is read-only and bounded: no prompt, no pager, no optional
 index lock (`--no-optional-locks`, so an engine mid-turn is never blocked),
@@ -68,8 +77,9 @@ persisted and outside every backup:
   files and ask nothing.
 - Directories no session uses any more are forgotten at the next pass.
 
-A changed answer - the mark or a count - is published with the session list,
-so every console sees the new mark, including consoles that did not ask.
+A changed answer - the mark, a count, the branch or a kind - is published
+with the session list, so every console sees the new mark and tooltip,
+including consoles that did not ask.
 
 ## Wire contract
 
@@ -81,7 +91,7 @@ copy through the ordinary proxy. Every session payload carries the additive
 | Value | Meaning |
 | --- | --- |
 | `null` | the node has not looked at this directory yet |
-| `{"repo": true, "checked_at": <seconds>, "changes": <n>, "unpushed": <n> or null}` | inside a Git work tree, holding that much uncommitted and unpushed work (`unpushed` is `null` with no remote) |
+| `{"repo": true, "checked_at": <seconds>, "changes": <n>, "unpushed": <n> or null, "branch": "<name>" or null, "staged": <n>, "unstaged": <n>, "untracked": <n>, "conflicts": <n>}` | inside a Git work tree, holding that much uncommitted and unpushed work (`unpushed` is `null` with no remote, `branch` with `HEAD` detached; the four kinds add up to `changes`) |
 | `{"repo": true, "checked_at": <seconds>, "changes": null, "unpushed": null, "error": "…"}` | inside a Git work tree whose state `git` would not read |
 | `{"repo": false, "checked_at": <seconds>}` | not inside one |
 | `{"repo": null, "checked_at": <seconds>, "error": "…"}` | could not be checked |
@@ -91,9 +101,11 @@ with a fresh record (404 for an unknown session). Concurrent refreshes of the
 same directory share one inspection; a re-check asked for after a change (a
 finished prompt, an apply) waits for an inspection already under way and
 looks once more, so it never answers from a read that began before the
-change. On the full runtime the refresh is left out of the snapshot guard's
-mutation count - it changes nothing a backup could copy - while the busy
-refusal during a backup or restore still applies.
+change. A record is published as changed when any of its fields moved - the
+mark, a count, the branch or a kind - because each of them is something a
+console draws. On the full runtime the refresh is left out of the snapshot
+guard's mutation count - it changes nothing a backup could copy - while the
+busy refusal during a backup or restore still applies.
 
 The console draws the mark only for nodes that advertise the capability: a
 repository at full strength like present agent notes, in the warn tone when
@@ -101,10 +113,19 @@ repository at full strength like present agent notes, in the warn tone when
 outline, and an unanswered or unreadable directory faint with the reason in
 its label. The label carries the counts ("Git repository · 3 uncommitted
 changes · 1 unpushed commit", "… · nothing to commit · no remote", "… ·
-nothing to commit or push"). A node from before the work state answers a
-repository without `changes`/`unpushed`, which the console reads as a plain
-repository, never a heads-up. It is a labelled image, not a button, and a
-press on it is a press on the row.
+nothing to commit or push"). An orange mark also carries a tooltip - the
+console's own bubble, on hover - saying why in a few lines: one naming the
+work and the branch holding it ("Uncommitted and unpushed work on main",
+"Unpushed work on a detached HEAD"), then one for each cause that applies -
+the changes with their kinds ("3 changes · 1 staged, 1 unstaged, 1
+untracked", listing only the kinds with anything in them) and the commits
+("1 unpushed commit"). A plain mark carries no tooltip; its label already
+says all there is. A node from before the work state answers a repository
+without `changes`/`unpushed`, which the console reads as a plain repository,
+never a heads-up; one from before the rundown answers counts without the
+branch or the kinds, and the tooltip says only what it knows ("Uncommitted
+work" over "3 uncommitted changes"). It is a labelled image, not a button,
+and a press on it is a press on the row.
 
 ## The timer
 

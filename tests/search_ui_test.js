@@ -5,13 +5,17 @@
    the pages after it, a failure that hands the button back with its own
    label, and the page requests cancelled - silently - when a new search
    replaces the results or the tab closes, while a page that Back has moved
-   into history's memory still lands in its own list. */
+   into history's memory still lands in its own list. Then the live filters:
+   a backend, kind, time or sort change once a search has run searches again
+   for the results' own query and leaves the box's draft alone, while a
+   filter before the first search, a choice already made, the last kind, a
+   reachability repaint and typing ask nothing. */
 "use strict";
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const path = require("node:path");
-const { FakeDocument } = require("./fake_dom.js");
+const { FakeDocument, FakeEvent } = require("./fake_dom.js");
 const source = fs.readFileSync(path.join(__dirname, "../puppy/static/app.js"), "utf8");
 const between = (from, to) => {
   const start = source.indexOf(from), end = source.indexOf(to, start);
@@ -31,7 +35,7 @@ const state = {
 /* Every request is held until the test answers it, the way a backend
    answers in its own time, and honours the signal the way api() does: an
    abort rejects at once with a cancelled error. */
-let requests = [], toasts = [], opened = [];
+let requests = [], toasts = [], opened = [], stops = 0;
 function api(bid, route, options = {}) {
   const request = { bid, route, options, params: new URLSearchParams(route.split("?")[1] || "") };
   requests.push(request);
@@ -45,7 +49,7 @@ function api(bid, route, options = {}) {
 const context = vm.createContext({
   document, el, state, api, console, setTimeout, clearTimeout, AbortController, URLSearchParams,
   toast: (text, tone) => toasts.push({ text: context.toastText(text), tone }),
-  navigationRemember() {}, navigationChanged() {},
+  navigationRemember() {}, navigationChanged() { stops++; },
   lsGet: () => null, lsSet() {},
   backendName: bid => bid ? state.backends.find(node => node.id === bid).name : "Studio",
   sessDot: () => el("span", "sdot"), provIcon: () => el("svg"),
@@ -57,9 +61,9 @@ vm.runInContext([
   "let navigationSearchSequence = 0;",
   between("function toastText(", "/* The console's one tone vocabulary"),
   between("const SEARCH_KIND_CHIPS =", "class SettingsView {"),
-  "Object.assign(globalThis, { SearchView, SEARCH_PER_SESSION, SEARCH_PAGE });",
+  "Object.assign(globalThis, { SearchView, SEARCH_PER_SESSION, SEARCH_PAGE, SEARCH_KIND_CHIPS });",
 ].join("\n"), context);
-const { SearchView, SEARCH_PER_SESSION, SEARCH_PAGE } = context;
+const { SearchView, SEARCH_PER_SESSION, SEARCH_PAGE, SEARCH_KIND_CHIPS } = context;
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
 const match = (seq, kind = "assistant") => ({ seq, kind, ts: seq, snippet: `hit ${seq} here` });
@@ -218,7 +222,184 @@ async function main() {
   assert.deepEqual(toasts, []);
   assert.equal(view.root.isConnected, false);
 
-  console.log("PASS: search results, the Show all button, its pages and continuations, a failed page's notice and label, and pages cancelled by a new search or a closed tab but not by Back");
+  /* ---- live filters ---- */
+  const live = new SearchView({ id: "search", type: "search" });
+  document.body.appendChild(live.root);
+  const kindChip = label => [...live.kindsBox.children].find(chip => chip.textContent === label);
+  const nodeChip = name => [...live.nodesBox.children].find(chip =>
+    chip.querySelector(".search-chip-label").textContent === name);
+  const seg = (box, label) => [...box.children].find(btn => btn.textContent === label);
+  const empty = { total: 0, session_total: 0, sessions: [] };
+  const answer = (reply = { total: 1, session_total: 1, sessions: [group(1, 1)] }) => {
+    for (const request of requests.splice(0)) request.resolve(request.bid ? empty : reply);
+    return settle();
+  };
+  const kindsExcept = key => SEARCH_KIND_CHIPS.map(chip => chip.key).filter(k => k !== key).join(",");
+
+  /* Before the first search a filter is a setting for it: nothing is asked
+     and no destination is recorded. */
+  let marker = stops;
+  kindChip("Tools").click();
+  seg(live.timeBox, "7 days").click();
+  seg(live.orderBox, "Newest").click();
+  nodeChip("Peer").click();
+  await settle();
+  assert.equal(requests.length, 0, "a filter before the first search asks nothing");
+  assert.equal(stops, marker);
+  assert.equal(JSON.stringify([live.kinds.has("tool"), live.timeKey, live.order, [...live.excludedNodes]]),
+    JSON.stringify([false, "week", "recent", [7]]), "the settings are still taken");
+  kindChip("Tools").click();
+  seg(live.timeBox, "Any time").click();
+  seg(live.orderBox, "Relevance").click();
+  nodeChip("Peer").click();
+  await settle();
+  assert.equal(requests.length, 0);
+
+  /* Results up, and a draft in the box nobody submitted: a kind pressed
+     off searches again for the query the results answer, with the kinds
+     that remain, and the draft stays where it was. */
+  await search(live, "dashboard", {
+    0: { total: 14, session_total: 2, sessions: [group(1, 12), group(2, 2)] },
+    7: { total: 3, session_total: 1, sessions: [group(5, 3)] },
+  });
+  assert.equal(live.resultsBox.querySelectorAll(".search-hit").length, 3);
+  live.input.value = "cards draft";
+  live.input.dispatchEvent(new FakeEvent("input", { bubbles: true }));
+  live.input.dispatchEvent(new FakeEvent("keydown", { key: "s", bubbles: true }));
+  await settle();
+  assert.equal(requests.length, 0, "typing alone asks nothing");
+  marker = stops;
+  kindChip("Tools").click();
+  await settle();
+  assert.equal(requests.length, 2, "one request per online backend, without a press on Search");
+  for (const request of requests) {
+    assert.equal(request.params.get("q"), "dashboard", "the results' own query, not the draft");
+    assert.equal(request.params.get("kinds"), kindsExcept("tool"));
+    assert.equal(request.params.get("per"), String(SEARCH_PER_SESSION), "a fan-out query, like Search");
+  }
+  assert.equal(live.input.value, "cards draft", "the draft is not submitted");
+  assert.equal(live.goButton.textContent, "Cancel");
+  assert.equal(stops, marker + 1, "a filter search is a destination of its own");
+  assert.equal(JSON.stringify(live.navigationQuery), JSON.stringify({ query: "dashboard",
+    kinds: kindsExcept("tool").split(","), time: "any", order: "relevance", excluded: [] }));
+  await answer();
+  assert.equal(live.resultsBox.querySelectorAll(".search-hit").length, 1, "the results are replaced");
+  assert.equal(live.lastCore.kinds, kindsExcept("tool"), "pages take the new filters");
+  assert.equal(live.goButton.textContent, "Search");
+
+  /* The last kind cannot go, so nothing is asked. */
+  live.kinds = new Set(["info"]);
+  live.renderKindChips();
+  kindChip("System").click();
+  await settle();
+  assert.equal(requests.length, 0, "a kind that must stay asks nothing");
+  assert.equal(JSON.stringify([...live.kinds]), '["info"]');
+  live.kinds = new Set(kindsExcept("tool").split(","));
+  live.renderKindChips();
+
+  /* A search in flight is replaced, not joined: the time window asks
+     again, the sort cancels that and asks once more, and the choice
+     already made is not a change. */
+  seg(live.timeBox, "7 days").click();
+  await settle();
+  const windowed = requests.splice(0);
+  assert.equal(windowed.length, 2);
+  assert.ok(windowed.every(request => Number(request.params.get("after")) > 0), "the window rides the query");
+  seg(live.orderBox, "Newest").click();
+  await settle();
+  assert.ok(windowed.every(request => request.options.signal.aborted), "the next change cancels the last's requests");
+  const sorted = requests.splice(0);
+  assert.equal(sorted.length, 2);
+  assert.ok(sorted.every(request => request.params.get("order") === "recent" &&
+    Number(request.params.get("after")) > 0));
+  marker = stops;
+  seg(live.orderBox, "Newest").click();
+  seg(live.timeBox, "7 days").click();
+  await settle();
+  assert.equal(requests.length, 0, "the choice already made asks nothing");
+  assert.equal(stops, marker);
+  assert.ok(sorted.every(request => !request.options.signal.aborted), "and cancels nothing");
+  assert.deepEqual(toasts, [], "a replaced search is not a failure");
+  for (const request of sorted) request.resolve({ total: 0, session_total: 0, sessions: [] });
+  await settle();
+  assert.match(live.resultsBox.textContent, /No matches for "dashboard"/);
+
+  /* Nothing found is still an answer: widening the window asks again. */
+  seg(live.timeBox, "Any time").click();
+  await settle();
+  assert.equal(requests.length, 2);
+  assert.ok(requests.every(request => !request.params.has("after")));
+  await answer();
+  assert.equal(live.resultsBox.querySelectorAll(".search-hit").length, 1);
+
+  /* Backends: leaving the peer out asks this console alone; a repaint for
+     reachability asks nothing; nothing selected shows nothing, because
+     the earlier results do not stand for backends no longer searched. */
+  nodeChip("Peer").click();
+  await settle();
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].bid, 0);
+  await answer({ total: 2, session_total: 1, sessions: [group(1, 2)] });
+  assert.equal(rows(live.resultsBox.querySelector(".search-hit")).length, 2);
+  state.remoteOk[8] = true;
+  live.syncRemoteState();
+  assert.equal(nodeChip("Asleep").disabled, false, "the repaint took the change");
+  state.remoteOk[8] = false;
+  live.syncRemoteState();
+  assert.equal(nodeChip("Asleep").disabled, true);
+  await settle();
+  assert.equal(requests.length, 0, "a reachability repaint asks nothing");
+  const shown = live.resultsBox.querySelector(".search-hit");
+  nodeChip("Studio").click();
+  await settle();
+  assert.equal(requests.length, 0, "nothing selected asks nothing");
+  assert.match(live.statusBox.textContent, /No online backends are selected to search/);
+  assert.equal(live.resultsBox.children.length, 0, "and shows nothing");
+  assert.equal(shown.isConnected, false);
+  assert.equal(live.goButton.textContent, "Search");
+  nodeChip("Studio").click();
+  await settle();
+  assert.equal(requests.length, 1, "selecting one again asks it");
+  assert.equal(requests[0].params.get("q"), "dashboard");
+  await answer();
+
+  /* A cancelled search keeps its filters live: leaving out the backend
+     that was slow is the very thing to do, and it runs again without it. */
+  nodeChip("Peer").click();
+  await settle();
+  assert.equal(requests.length, 2);
+  live.cancelSearch();
+  assert.ok(requests.every(request => request.options.signal.aborted));
+  requests.splice(0);
+  assert.match(live.statusBox.textContent, /Search cancelled/);
+  nodeChip("Peer").click();
+  await settle();
+  assert.equal(requests.length, 1, "a filter after a cancel searches again");
+  assert.equal(requests[0].bid, 0);
+  await answer();
+  assert.equal(live.resultsBox.querySelectorAll(".search-hit").length, 1);
+
+  /* Back to the tab before its first search: the filters are settings
+     again until Enter or Search runs one. */
+  live.cancelSearch(); live.lastCore = null;   // what navigationApply does for that entry
+  live.resultsBox.replaceChildren(); live.statusBox.replaceChildren();
+  marker = stops;
+  kindChip("Tools").click();
+  seg(live.orderBox, "Relevance").click();
+  await settle();
+  assert.equal(requests.length, 0, "no search to run again");
+  assert.equal(stops, marker);
+  live.input.value = "dashboard";
+  live.input.dispatchEvent(new FakeEvent("keydown", { key: "Enter", bubbles: true }));
+  await settle();
+  assert.equal(requests.length, 1, "Enter runs the box");
+  assert.equal(requests[0].params.get("q"), "dashboard");
+  assert.equal(requests[0].params.has("kinds"), false, "every kind again");
+  await answer();
+  live.destroy();
+  assert.deepEqual(toasts, []);
+
+  console.log("PASS: search results, the Show all button, its pages and continuations, a failed page's notice and label, pages cancelled by a new search or a closed tab but not by Back, and the filters that search again once results are up - never the draft in the box");
 }
 
 main().catch(error => { console.error(error); process.exit(1); });

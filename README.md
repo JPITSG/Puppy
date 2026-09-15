@@ -177,8 +177,10 @@ reading anywhere further up is never pulled away from it.
   repository - and turns orange when that repository is holding work you have
   not committed or pushed: uncommitted changes (staged, unstaged or untracked)
   or commits that no remote has yet. Its label says how much of each, or
-  "nothing to commit or push"; a repository with no remote has nowhere to push
-  to and is never flagged for its commits. The backend that runs the session
+  "nothing to commit or push", and hovering an orange mark shows why in a few
+  lines: the branch, the changes sorted into staged, unstaged, untracked and
+  conflicts, and the commits no remote has. A repository with no remote has
+  nowhere to push to and is never flagged for its commits. The backend that runs the session
   checks its directory every 15 minutes (Settings → Timers), whenever you open
   or switch to the session, and every time a prompt finishes in it - a task's
   prompts excepted, since a task works in its own clone; applying a task's
@@ -521,8 +523,10 @@ The sidebar box filters sessions by title, location and backend as you type.
 The advanced **Search** tab searches the full history of every online backend:
 prompts, replies, thinking, tool activity and system notes, with phrases,
 `-exclusion`, `OR`, kind filters, a time window, relevance or newest ordering,
-and grouped results. Opening a hit lands on that exact message with a window of
-history around it.
+and grouped results. Once a search has run, changing a backend, kind, time or
+sort filter searches again at once for the same query; the query box searches
+only when you press Enter or Search. Opening a hit lands on that exact message
+with a window of history around it.
 
 ### Never lose your place
 

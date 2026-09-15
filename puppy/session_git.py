@@ -30,9 +30,11 @@ where the device changes, or below a ``GIT_CEILING_DIRECTORIES`` entry, which
 is where ``git`` itself stops by default. It runs no process, so a directory
 whose owner Git would call dubious still answers truthfully about what is on
 disk. The work state is the one thing ``git`` itself is asked: what its
-status lists and which commits no remote holds. A ``git`` that refuses (or is
-not installed) does not unmake the repository - the record keeps ``repo``
-true and carries the reason instead of the counts.
+status lists - each path sorted by what git would do with it, so an orange
+mark's tooltip can say why - the branch that is checked out, and which
+commits no remote holds. A ``git`` that refuses (or is not installed) does
+not unmake the repository - the record keeps ``repo`` true and carries the
+reason instead of the counts.
 """
 from __future__ import annotations
 
@@ -66,6 +68,14 @@ GIT_TIMEOUT = 30.0
 # Wording the record carries when git would not answer; cut like the
 # discovery's own reasons so a label stays a label.
 REASON_CHARS = 300
+# The rundown behind the counts: the checked-out branch and the paths of
+# ``changes`` by kind. Carried beside ``changes``/``unpushed`` when git read
+# the repository, absent when it would not (and from a node before them).
+DETAIL_KEYS = ("branch", "staged", "unstaged", "untracked", "conflicts")
+# What a status line is, by its first field in porcelain v2: an ordinary or
+# renamed change (with the index and work-tree columns behind it), an
+# unmerged path, an untracked one; ignored paths are never listed here.
+_HEADER, _CHANGE, _RENAME, _UNMERGED, _UNTRACKED = "#", "1", "2", "u", "?"
 
 _records: Dict[str, dict] = {}
 _inflight: Dict[str, asyncio.Future] = {}
@@ -177,21 +187,52 @@ def work_state(cwd: str) -> dict:
     of commits on HEAD that no remote-tracking branch holds, or None when
     no remote is configured and there is nowhere to push to. A branch
     without an upstream still counts: its commits are unpushed until some
-    remote has them. Raises GitRefused when git would not answer."""
-    status = _git(cwd, "status", "--porcelain", "--untracked-files=normal")
-    changes = sum(1 for line in status.split("\n") if line)
+    remote has them.
+
+    Beside them, the rundown a tooltip needs: ``branch`` is the checked-out
+    branch (an unborn one included), None with HEAD detached; ``staged``,
+    ``unstaged``, ``untracked`` and ``conflicts`` sort the same paths by
+    what git would do with them - a path with staged and further unstaged
+    edits is staged, an unmerged path is a conflict whatever else it holds
+    - so the four add up to ``changes``. Raises GitRefused when git would
+    not answer."""
+    status = _git(cwd, "status", "--porcelain=v2", "--branch", "--untracked-files=normal")
+    branch = None
+    kinds = {"staged": 0, "unstaged": 0, "untracked": 0, "conflicts": 0}
+    changes = 0
+    for line in status.split("\n"):
+        if not line:
+            continue
+        kind = line[0]
+        if kind == _HEADER:
+            if line.startswith("# branch.head "):
+                head = line[len("# branch.head "):]
+                branch = None if head == "(detached)" else head
+            continue
+        changes += 1
+        if kind == _UNTRACKED:
+            kinds["untracked"] += 1
+        elif kind == _UNMERGED:
+            kinds["conflicts"] += 1
+        elif kind in (_CHANGE, _RENAME):
+            # "<kind> <XY> ...": X is the index column, "." when the index
+            # holds nothing for the path and only the work tree changed
+            kinds["staged" if line[2:3] != "." else "unstaged"] += 1
+        # an entry kind this does not know is still a listed path, so it
+        # counts as a change and belongs to no kind
+    state = dict(kinds, changes=changes, branch=branch)
     remotes = [line for line in _git(cwd, "remote").split("\n") if line.strip()]
     if not remotes:
-        return {"changes": changes, "unpushed": None}
+        return dict(state, unpushed=None)
     # an unborn branch has nothing to push yet, and no HEAD to count from
     if _run_git(cwd, "rev-parse", "--verify", "-q", "HEAD^{commit}").returncode:
-        return {"changes": changes, "unpushed": 0}
+        return dict(state, unpushed=0)
     count = _git(cwd, "rev-list", "--count", "HEAD", "--not", "--remotes").strip()
     try:
         unpushed = int(count)
     except ValueError:
         raise GitRefused("git rev-list answered {!r}".format(count[:40]))
-    return {"changes": changes, "unpushed": unpushed}
+    return dict(state, unpushed=unpushed)
 
 
 def _work_fields(cwd: str) -> dict:
@@ -244,6 +285,11 @@ def _public(entry: dict) -> dict:
     if out["repo"] is True:
         out["changes"] = entry.get("changes")
         out["unpushed"] = entry.get("unpushed")
+        # the rundown rides only with counts git gave: a record carrying
+        # the reason instead has none, and a console says only what it knows
+        for key in DETAIL_KEYS:
+            if key in entry:
+                out[key] = entry[key]
     if out["repo"] is None or (out["repo"] is True and entry.get("error")):
         out["error"] = str(entry.get("error") or "")
     return out
@@ -263,13 +309,14 @@ def record(cwd) -> Optional[dict]:
 
 
 def _store(cwd: str, entry: dict) -> bool:
-    """Keep one answer; True when a console would see a different mark or
-    read a different label - the counts are part of what it says."""
+    """Keep one answer; True when a console would see a different mark,
+    read a different label or a different tooltip - the counts, the branch
+    and the kinds are all part of what it says."""
     previous = _records.get(cwd)
     _records[cwd] = entry
     return previous is None or any(
         previous.get(key) != entry.get(key)
-        for key in ("repo", "error", "changes", "unpushed"))
+        for key in ("repo", "error", "changes", "unpushed") + DETAIL_KEYS)
 
 
 async def _check(cwd: str, fresh: bool = False) -> dict:

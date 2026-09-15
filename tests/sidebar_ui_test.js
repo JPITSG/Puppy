@@ -159,6 +159,8 @@ assert.deepEqual(rows.map(row => row.querySelector(".si-git").classList.contains
   [true, false, false, false, false]);
 assert.deepEqual(rows.map(row => row.querySelector(".si-git").classList.contains("warn")),
   [false, false, false, false, false]);
+// a plain mark carries no tooltip: its label already says all there is
+assert.deepEqual(rows.map(row => row.querySelector(".si-git").title), [undefined, undefined, undefined, undefined, undefined]);
 assert.equal(rows[0].querySelector(".si-notes").classList.contains("has"), true);
 
 // The heads-up: a repository holding uncommitted changes or commits no
@@ -197,6 +199,16 @@ assert.equal(rows[0].querySelector(".si-notes").classList.contains("has"), true)
     "Git repository",
     "No Git repository",
   ]);
+  // The orange marks alone carry a tooltip saying why: a node from before
+  // the rundown answers counts alone, so these say only what they know.
+  assert.deepEqual(marks.map(mark => mark.title), [
+    "Uncommitted and unpushed work\n3 uncommitted changes\n2 unpushed commits",
+    "Uncommitted work\n1 uncommitted change",
+    "Unpushed work\n1 unpushed commit",
+    undefined,
+    "Uncommitted work\n2 uncommitted changes",
+    undefined, undefined, undefined,
+  ]);
   // a changed count is a changed record - the label and possibly the tone -
   // while null and a missing count are the same absence
   const same = work.context.sessionGitSame;
@@ -208,6 +220,56 @@ assert.equal(rows[0].querySelector(".si-notes").classList.contains("has"), true)
   assert.equal(same({ repo: true, checked_at: 1 }, { repo: true, checked_at: 2, changes: null, unpushed: null }), true);
   assert.equal(same({ repo: true, checked_at: 1 }, { repo: true, checked_at: 2, changes: 0, unpushed: 0 }), false);
   assert.equal(same({ repo: false, checked_at: 1 }, { repo: false, checked_at: 2 }), true);
+  // the rundown is part of the record too: the same totals sorted into
+  // other kinds, or on another branch, redraw the tooltip; a node that
+  // stops naming the branch, or names it detached, is a change as well
+  const full = { ...base, branch: "main", staged: 1, unstaged: 0, untracked: 0, conflicts: 0 };
+  assert.equal(same(full, { ...full, checked_at: 2 }), true);
+  assert.equal(same(full, { ...full, staged: 0, unstaged: 1 }), false);
+  assert.equal(same(full, { ...full, branch: "feature" }), false);
+  assert.equal(same(full, { ...full, branch: null }), false);
+  assert.equal(same(full, base), false);
+  assert.equal(same({ ...full, branch: null }, { ...full, branch: null, checked_at: 3 }), true);
+}
+
+// The tooltip of an orange mark: one line naming the work and the branch
+// holding it, then the changes sorted by what git would do with them and
+// the commits no remote has, each only when there is any. A kind with
+// nothing in it is not listed, a detached HEAD is named as such, a record
+// naming no branch says nothing about one, and only a record without the
+// kinds spells "uncommitted" out again on the changes line.
+{
+  const tip = record => {
+    const one = consoleFor([session(1, 10, { git: record })], {}, true);
+    one.render();
+    return one.document.querySelector(".si-git").title;
+  };
+  const repo = { repo: true, checked_at: 1 };
+  assert.equal(tip({ ...repo, changes: 3, unpushed: 1, branch: "main",
+    staged: 1, unstaged: 1, untracked: 1, conflicts: 0 }),
+    "Uncommitted and unpushed work on main\n" +
+    "3 changes · 1 staged, 1 unstaged, 1 untracked\n1 unpushed commit");
+  assert.equal(tip({ ...repo, changes: 1, unpushed: 0, branch: "feature/login",
+    staged: 0, unstaged: 0, untracked: 1, conflicts: 0 }),
+    "Uncommitted work on feature/login\n1 change · 1 untracked");
+  assert.equal(tip({ ...repo, changes: 0, unpushed: 2, branch: "main",
+    staged: 0, unstaged: 0, untracked: 0, conflicts: 0 }),
+    "Unpushed work on main\n2 unpushed commits");
+  assert.equal(tip({ ...repo, changes: 3, unpushed: null, branch: "main",
+    staged: 0, unstaged: 1, untracked: 0, conflicts: 2 }),
+    "Uncommitted work on main\n3 changes · 1 unstaged, 2 conflicts");
+  assert.equal(tip({ ...repo, changes: 1, unpushed: 1, branch: null,
+    staged: 0, unstaged: 0, untracked: 0, conflicts: 1 }),
+    "Uncommitted and unpushed work on a detached HEAD\n" +
+    "1 change · 1 conflict\n1 unpushed commit");
+  assert.equal(tip({ ...repo, changes: 2, unpushed: 0, staged: 2, unstaged: 0, untracked: 0, conflicts: 0 }),
+    "Uncommitted work\n2 changes · 2 staged");
+  assert.equal(tip({ ...repo, changes: 2, unpushed: 0, branch: "main" }),
+    "Uncommitted work on main\n2 uncommitted changes");
+  assert.equal(tip({ ...repo, changes: 0, unpushed: 0, branch: "main",
+    staged: 0, unstaged: 0, untracked: 0, conflicts: 0 }), undefined, "nothing to say");
+  assert.equal(tip({ ...repo, changes: null, unpushed: null, error: "no git" }), undefined);
+  console.log("sidebar git tooltip tests passed");
 }
 
 // A node that does not advertise the capability gets no mark and no request.
