@@ -1595,8 +1595,10 @@ async def scrollbar_corner_checks(instance, capture=False):
         };
         place(el('textarea'),'textarea','height:96px;resize:none').value=lines;
         const md=el('div','md'); sbProbe.appendChild(md);
-        place(el('pre',null,wide),'code block','height:56px',md);
-        place(el('div','task-review-diff',wide+'\\n'+lines),'review diff','height:96px;min-height:0');
+        const code=el('pre'); code.appendChild(el('code',null,wide));
+        place(code,'code block','height:56px',md);
+        const diff=el('div','task-review-diff'); diff.appendChild(el('div','box-lines',wide+'\\n'+lines));
+        place(diff,'review diff','height:96px;min-height:0');
         const menu=place(el('div','choice-menu'),'choice menu',
             'position:static;height:96px;width:320px;max-width:none;animation:none;box-shadow:none');
         for(let i=1;i<=40;i++) menu.appendChild(el('div',null,'row '+i)).style.paddingLeft='24px';
@@ -1721,18 +1723,22 @@ async def scrollbar_corner_checks(instance, capture=False):
 
 async def text_inset_checks(instance):
     """Read the rendered pixels of every kind of text box: the first line's
-    letters stand as far below the top border as the text stands in from
-    the left one. A line box carries leading above its letters, so app.css
-    trims it off the first line and the padding above becomes the padding
-    beside; where a font's letters then land is the font's own affair (the
-    host's hinted mono renders its caps a pixel or two above their declared
-    height, and a glyph has a side bearing), so every box is read against a
-    trimmed line of its own first line's text and font with no padding at
-    all. The chat composer, with a typed line and with its placeholder alone
-    - one trimmed line tall either way, the letters in the same place - and
-    a textarea, a code block, the approval's command, the review diff and
-    the Git sheet's list built from the console's own classes, at 1x/2x."""
-    assert await evaluate(instance, "CSS.supports('text-box', 'trim-start cap alphabetic')"), \
+    letters stand as far below the top border, and the last line's baseline
+    as far above the bottom one, as the text stands in from the left. A
+    line box carries leading above and below its letters, so app.css trims
+    it off the first and the last line and the padding above and below
+    becomes the padding beside; where a font's letters then land is the
+    font's own affair (the host's hinted mono renders its caps a pixel or
+    two above their declared height, and a glyph has a side bearing), so
+    every box is read against a trimmed line of its own text and font with
+    no padding at all. The chat composer, with a typed line and with its
+    placeholder alone - one trimmed line tall either way, the letters in the
+    same place - and a textarea, a code block, the approval's command, the
+    review diff and the Git sheet's list built from the console's own
+    classes, at 1x/2x; then a one-line box of each kind sized by its text
+    alone, which is the padding and a cap height tall with nothing to
+    scroll, its letters as far from the bottom border as from the top."""
+    assert await evaluate(instance, "CSS.supports('text-box', 'trim-both cap alphabetic')"), \
         "the host Chromium does not trim leading (text-box needs 133 or newer)"
     await evaluate(instance, """(() => {
         window.insetProbe=el('div');
@@ -1743,25 +1749,40 @@ async def text_inset_checks(instance):
             node.dataset.probe=probe; node.style.cssText+=';'+css;
             (parent||insetProbe).appendChild(node); return node;
         };
+        // Every scroll box holds its lines in one block, as the console
+        // builds them: the code block's code, .box-lines, the list's groups.
+        const lines=(box,cls,text)=>{ box.appendChild(el(cls==='code'?'code':'div',cls==='code'?null:cls,text)); return box; };
         place(el('textarea'),'textarea','height:96px;resize:none').value='Hello world\\nsecond line';
         const md=el('div','md'); insetProbe.appendChild(md);
-        place(el('pre',null,'Hello world\\nsecond line'),'code block','height:56px',md);
+        place(lines(el('pre'),'code','Hello world\\nsecond line'),'code block','height:56px',md);
         const approval=el('div','approval'); approval.style.cssText='margin:0;width:auto;max-width:none';
         insetProbe.appendChild(approval);
-        place(el('pre',null,'Hello world\\nsecond line'),'approval','',approval);
-        place(el('div','task-review-diff','Hello world\\nsecond line'),'review diff','height:96px;min-height:0');
+        place(lines(el('pre'),'box-lines','Hello world\\nsecond line'),'approval','',approval);
+        place(lines(el('div','task-review-diff'),'box-lines','Hello world\\nsecond line'),'review diff','height:96px;min-height:0');
         const list=place(el('div','session-git-list'),'git list','');
         const group=list.appendChild(el('div','sgl-group'));
         group.appendChild(el('div','sgl-kind','Unstaged'));
         const rows=group.appendChild(el('div','sgl-rows'));
         rows.appendChild(el('span','sgl-what','modified')); rows.appendChild(el('span','sgl-path','README.md'));
+        // One line of each kind, sized by that line alone: the height a
+        // pinned box hides is the one a box holding a single line shows.
+        const one=el('textarea'); one.rows=1;
+        place(one,'one textarea','height:auto;min-height:0;resize:none;field-sizing:content').value='Hello world';
+        const md1=el('div','md'); insetProbe.appendChild(md1);
+        place(lines(el('pre'),'code','Hello world'),'one code block','',md1);
+        const approval1=el('div','approval'); approval1.style.cssText='margin:0;width:auto;max-width:none';
+        insetProbe.appendChild(approval1);
+        place(lines(el('pre'),'box-lines','Hello world'),'one approval','',approval1);
+        place(lines(el('div','task-review-files'),'box-lines','Hello world'),'one review files','min-height:0');
+        const list1=place(el('div','session-git-list'),'one git list','');
+        list1.appendChild(el('div','sgl-empty','Hello world'));
         // The reference: one trimmed line of the same text in the same font,
         // with no padding, on the probe's own background.
         window.insetReference=(source,text)=>{
             insetProbe.querySelectorAll('[data-probe=reference]').forEach(node=>node.remove());
             const cs=getComputedStyle(source), line=el('div',null,text);
             line.dataset.probe='reference';
-            line.style.cssText='text-box:trim-start cap alphabetic;padding:0;border:0;margin:8px 0 0 8px;'+
+            line.style.cssText='text-box:trim-both cap alphabetic;padding:0;border:0;margin:8px 0 8px 8px;'+
                 'white-space:pre;width:max-content';
             for (const prop of ['fontFamily','fontSize','fontWeight','fontStyle','lineHeight',
                                 'letterSpacing','textTransform','wordSpacing','color'])
@@ -1770,23 +1791,25 @@ async def text_inset_checks(instance):
             return line;
         };
         // The capture around a node: its top-left corner and a margin,
-        // snapped to whole pixels so the image's rows are the page's.
-        window.insetClip=(node,margin)=>{
+        // snapped to whole pixels so the image's rows are the page's; a
+        // box read to its bottom edge is captured whole.
+        window.insetClip=(node,margin,whole)=>{
             const r=node.getBoundingClientRect();
             const clip={x:Math.floor(r.x-margin),y:Math.floor(r.y-margin),width:0,height:0};
             clip.width=Math.ceil(r.x+Math.min(r.width,80))-clip.x;
-            clip.height=Math.ceil(r.y+Math.min(r.height,60))-clip.y;
+            clip.height=Math.ceil(r.y+(whole?r.height:Math.min(r.height,60))+margin)-clip.y;
             return clip;
         };
         // Where the ink starts inside a node, in CSS pixels from the inner
         // edge of its border (negative: above or left of it, which only the
-        // unpadded reference can show): the capture is decoded in the page
-        // and scanned at device resolution, a pixel counting as ink when it
-        // leaves the background - the top padding row past the corner for a
-        // box, the margin for the reference - and the corner outside the
-        // border's curve left out.
-        window.insetInk=async(data,node,margin)=>{
-            const r=node.getBoundingClientRect(), cs=getComputedStyle(node), clip=insetClip(node,margin);
+        // unpadded reference can show), and where it ends above the inner
+        // bottom edge: the capture is decoded in the page and scanned at
+        // device resolution, a pixel counting as ink when it leaves the
+        // background - the top padding row past the corner for a box, the
+        // margin for the reference - and the corners outside the border's
+        // curve left out.
+        window.insetInk=async(data,node,margin,whole)=>{
+            const r=node.getBoundingClientRect(), cs=getComputedStyle(node), clip=insetClip(node,margin,whole);
             const border=parseFloat(cs.borderTopWidth), inner=parseFloat(cs.borderTopLeftRadius)-border;
             const img=new Image(); img.src='data:image/png;base64,'+data; await img.decode();
             const canvas=document.createElement('canvas');
@@ -1795,51 +1818,68 @@ async def text_inset_checks(instance):
             ctx.drawImage(img,0,0);
             const k=img.width/clip.width, step=1/k;
             const px=(x,y)=>[...ctx.getImageData(Math.floor(x*k),Math.floor(y*k),1,1).data].slice(0,3);
-            const ox=r.x-clip.x+border, oy=r.y-clip.y+border;
+            const ox=r.x-clip.x+border, oy=r.y-clip.y+border, innerH=r.height-2*border;
             const bg=margin?px(1,1):px(ox+inner+6,oy+1);
             const inside=(dx,dy)=>{
                 if (margin) return true;
-                if (dx<0||dy<0) return false;
-                if (dx<inner&&dy<inner) {           // the corner: only well inside the curve
-                    const cx=inner-dx, cy=inner-dy;
+                if (dx<0||dy<0||dy>=innerH) return false;
+                if (dx<inner&&(dy<inner||dy>=innerH-inner)) {   // a corner: only well inside the curve
+                    const cx=inner-dx, cy=dy<inner?inner-dy:dy-(innerH-inner);
                     return cx*cx+cy*cy<(inner-1.5)*(inner-1.5);
                 }
                 return true;
             };
-            let top=null, left=null;
-            for (let y=0;y<Math.min(clip.height,oy+40);y+=step) for (let x=0;x<Math.min(clip.width,ox+60);x+=step) {
+            const rows=whole?clip.height:Math.min(clip.height,oy+40);
+            let top=null, left=null, bottom=null;
+            for (let y=0;y<rows;y+=step) for (let x=0;x<Math.min(clip.width,ox+60);x+=step) {
                 const dx=x-ox, dy=y-oy;
                 if (!inside(dx,dy)) continue;
                 const p=px(x,y);
                 if (Math.abs(p[0]-bg[0])+Math.abs(p[1]-bg[1])+Math.abs(p[2]-bg[2])<=60) continue;
                 if (top===null||dy<top) top=dy;
                 if (left===null||dx<left) left=dx;
+                if (bottom===null||innerH-(dy+step)<bottom) bottom=innerH-(dy+step);
             }
-            return {top,left,height:r.height,paddingTop:parseFloat(cs.paddingTop),
-                paddingLeft:parseFloat(cs.paddingLeft),trim:cs.textBoxTrim,edge:cs.textBoxEdge};
+            // how far the box can actually scroll (scrollHeight is a
+            // rounded integer, a fractional line's is a pixel too many)
+            const held=node.scrollTop; node.scrollTop=1e6; const scrollable=node.scrollTop; node.scrollTop=held;
+            return {top,left,bottom:whole?bottom:null,height:r.height,innerHeight:innerH,
+                paddingTop:parseFloat(cs.paddingTop),paddingLeft:parseFloat(cs.paddingLeft),
+                paddingBottom:parseFloat(cs.paddingBottom),trim:cs.textBoxTrim,edge:cs.textBoxEdge,scrollable};
         };
         return true;
     })()""")
 
-    async def ink(node, margin=0):
-        clip = await evaluate(instance, "insetClip(%s, %d)" % (node, margin))
+    async def ink(node, margin=0, whole=False):
+        clip = await evaluate(instance, "insetClip(%s, %d, %s)" % (node, margin, "true" if whole else "false"))
         shot = await instance.call("Page.captureScreenshot", {"format": "png", "clip": dict(clip, scale=1)},
                                    session=instance.page_session)
-        return await evaluate(instance, "insetInk(%s, %s, %d)" % (json.dumps(shot["data"]), node, margin))
+        return await evaluate(instance, "insetInk(%s, %s, %d, %s)" % (
+            json.dumps(shot["data"]), node, margin, "true" if whole else "false"))
 
     async def reference(source, text):
         await evaluate(instance, "insetReference(%s, %s); true" % (source, json.dumps(text)))
-        return await ink("insetProbe.querySelector('[data-probe=reference]')", 8)
+        return await ink("insetProbe.querySelector('[data-probe=reference]')", 8, True)
 
-    def landed(label, box, ref, top, left):
+    def landed(label, box, ref, top, left, bottom=None):
         # the letters stand exactly the padding from the border, once the
         # font's own rendering (the reference's offsets) is allowed for
         assert box["top"] is not None and box["left"] is not None, (label, box)
         assert abs(box["top"] - (top + ref["top"])) <= 1, (label, "top", box, ref, top)
         assert abs(box["left"] - (left + ref["left"])) <= 1, (label, "left", box, ref, left)
+        if bottom is not None:
+            assert box["bottom"] is not None, (label, box)
+            assert abs(box["bottom"] - (bottom + ref["bottom"])) <= 1, (label, "bottom", box, ref, bottom)
 
-    boxes = (("textarea", None), ("code block", None), ("approval", None),
-             ("review diff", None), ("git list", ".sgl-kind"))
+    def trimmed(label, box):
+        assert (box["trim"], box["edge"]) == ("trim-both", "cap alphabetic"), (label, box)
+        assert box["paddingTop"] == box["paddingLeft"] == box["paddingBottom"], (label, box)
+
+    # each box and the element whose font its first line is set in
+    boxes = (("textarea", None), ("code block", "code"), ("approval", ".box-lines"),
+             ("review diff", ".box-lines"), ("git list", ".sgl-kind"))
+    ones = (("one textarea", None), ("one code block", "code"), ("one approval", ".box-lines"),
+            ("one review files", ".box-lines"), ("one git list", ".sgl-empty"))
     try:
         for scale in (1, 2):
             await instance.call("Emulation.setDeviceMetricsOverride", {
@@ -1849,37 +1889,56 @@ async def text_inset_checks(instance):
             for name, first in boxes:
                 node = "insetProbe.querySelector('[data-probe=%s]')" % json.dumps(name)
                 box = await ink(node)
-                assert (box["trim"], box["edge"]) == ("trim-start", "cap alphabetic"), (name, box)
-                assert box["paddingTop"] == box["paddingLeft"], (name, box)
+                trimmed(name, box)
                 source = node + (".querySelector(%s)" % json.dumps(first) if first else "")
-                ref = await reference(source, "Unstaged" if first else "Hello world")
+                ref = await reference(source, "Unstaged" if first == ".sgl-kind" else "Hello world")
                 landed("%dx %s" % (scale, name), box, ref, box["paddingTop"], box["paddingLeft"])
+            # One line, the box sized by it: the padding above, the cap
+            # height, the padding below and nothing more - so nothing to
+            # scroll - with the baseline standing the padding above the
+            # bottom border as the caps stand below the top one.
+            for name, line in ones:
+                node = "insetProbe.querySelector('[data-probe=%s]')" % json.dumps(name)
+                box = await ink(node, 0, True)
+                trimmed(name, box)
+                ref = await reference(node + (".querySelector(%s)" % json.dumps(line) if line else ""), "Hello world")
+                landed("%dx %s" % (scale, name), box, ref,
+                       box["paddingTop"], box["paddingLeft"], box["paddingBottom"])
+                assert abs(box["innerHeight"] - (box["paddingTop"] + box["paddingBottom"] + ref["height"])) < .5, \
+                    (name, box, ref)
+                assert box["scrollable"] < .5, (name, box)
             # The composer: its box's padding and its textarea's add up the
-            # same above and beside, and an empty box is exactly one trimmed
-            # line tall with the placeholder's letters where typed ones go.
+            # same above and beside, the last line's baseline stands the
+            # textarea's bottom padding above its edge with nothing to
+            # scroll, and an empty box is exactly one trimmed line tall with
+            # the placeholder's letters where typed ones go.
             seen = {}
             for text in ("Hello world", ""):
                 await evaluate(instance, "demoView.composer.set(%s); true" % json.dumps(text))
                 await asyncio.sleep(.1)
                 box = await ink("demoView.composer.box")
-                field = await evaluate(instance, """(() => {
-                    const ta=demoView.composer.ta, cs=getComputedStyle(ta), r=ta.getBoundingClientRect();
-                    return {paddingTop:parseFloat(cs.paddingTop),paddingLeft:parseFloat(cs.paddingLeft),
-                        paddingBottom:parseFloat(cs.paddingBottom),trim:cs.textBoxTrim,edge:cs.textBoxEdge,
-                        height:r.height,minHeight:parseFloat(cs.minHeight),lineHeight:parseFloat(cs.lineHeight)};
-                })()""")
-                assert (field["trim"], field["edge"]) == ("trim-start", "cap alphabetic"), field
+                field = await ink("demoView.composer.ta", 0, True)
+                assert (field["trim"], field["edge"]) == ("trim-both", "cap alphabetic"), field
                 top = box["paddingTop"] + field["paddingTop"]
                 left = box["paddingLeft"] + field["paddingLeft"]
                 assert top == left, (box, field)
                 ref = await reference("demoView.composer.ta", "Hello world")
                 landed("%dx composer %r" % (scale, text), box, ref, top, left)
+                # the typed line's baseline stands the padding above the
+                # field's bottom edge (the placeholder ends in a descender)
+                landed("%dx composer field %r" % (scale, text), field, ref,
+                       field["paddingTop"], field["paddingLeft"], field["paddingBottom"] if text else None)
                 # one trimmed line: the reference's height plus the padding,
-                # never the floor
-                assert field["minHeight"] < field["height"], field
+                # never the floor, and nothing to scroll
+                minimum, line_height = await evaluate(instance, """(() => {
+                    const cs=getComputedStyle(demoView.composer.ta);
+                    return [parseFloat(cs.minHeight), parseFloat(cs.lineHeight)];
+                })()""")
+                assert minimum < field["height"], (minimum, field)
                 assert abs(field["height"] - (field["paddingTop"] + field["paddingBottom"] + ref["height"])) < .5, \
                     (field, ref)
-                assert ref["height"] < field["lineHeight"], (field, ref)
+                assert ref["height"] < line_height, (field, ref)
+                assert field["scrollable"] < .5, field
                 seen[text] = (box["top"], box["left"], field["height"])
             # the same height, and the placeholder's letters where the typed
             # ones stand (its fainter grey gives up half a device pixel of
@@ -1893,10 +1952,11 @@ async def text_inset_checks(instance):
         await instance.call("Emulation.setDeviceMetricsOverride", {
             "width": 1440, "height": 900, "deviceScaleFactor": 1,
             "mobile": False}, session=instance.page_session)
-    print("PASS: a text box's first line stands as far below the top border as the text stands "
-          "in from the left one (the composer typed and empty, a textarea, a code block, the "
-          "approval's command, the review diff, the Git sheet's list) at 1x/2x, and an empty "
-          "composer is one trimmed line tall", flush=True)
+    print("PASS: a text box's letters stand as far below the top border, and their baseline as far "
+          "above the bottom one, as the text stands in from the left (the composer typed and empty, "
+          "a textarea, a code block, the approval's command, the review diff, the Git sheet's list, "
+          "and a one-line box of each kind sized by its text with nothing to scroll) at 1x/2x, and "
+          "an empty composer is one trimmed line tall", flush=True)
 
 
 async def queue_expand_checks(instance, capture=False):

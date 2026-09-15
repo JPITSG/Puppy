@@ -10244,9 +10244,9 @@ const CARET_MIRROR_STYLES = [
   "fontFamily", "fontSize", "fontWeight", "fontStyle", "lineHeight", "letterSpacing",
   "textIndent", "textTransform", "wordSpacing", "tabSize",
   "paddingTop", "paddingBottom", "paddingLeft", "paddingRight",
-  /* the leading trimmed off the first line (app.css), so the mirror's first
-     line starts where the textarea's does; a browser without text-box
-     reports neither and copies nothing */
+  /* the leading trimmed off the first and the last line (app.css), so the
+     mirror's lines start and end where the textarea's do; a browser without
+     text-box reports neither and copies nothing */
   "textBoxTrim", "textBoxEdge",
 ];
 function scrollCaretIntoView(ta) {
@@ -11552,7 +11552,13 @@ class Composer {
     /* the trailing newline keeps a final empty line wrapping like the
        textarea's, exactly as the autosize mirror does */
     parts.push(document.createTextNode(text.slice(at) + "\n"));
-    layer.replaceChildren(...parts);
+    /* the lines stand in one block inside the layer, as the textarea's do in
+       its inner editor: a scroll box holding its lines itself counts the
+       leading trimmed off the last one as room to scroll, and this layer
+       must reach exactly the textarea's scroll positions, no more (app.css) */
+    const lines = el("div", "box-lines");
+    lines.replaceChildren(...parts);
+    layer.replaceChildren(lines);
     this.spellText = text;
     this.spellMarks = marks;
     this.spellSync();
@@ -12030,9 +12036,10 @@ class Composer {
       const v = ta.value;
       g.textContent = v.endsWith("\n") ? v + "\u200b" : (v || "\u200b");
       const bounds = this.heightBounds();
-      /* the first line is trimmed to its cap height, a fractional amount, so
-         the ghost is rounded up: a box a fraction shorter than its text
-         would overflow by that fraction and scroll under every keystroke */
+      /* the first line is trimmed to its cap height and the last to its
+         baseline, fractional amounts, so the ghost is rounded up: a box a
+         fraction shorter than its text would overflow by that fraction and
+         scroll under every keystroke */
       const needed = Math.min(Math.max(Math.ceil(g.getBoundingClientRect().height), bounds[0]), bounds[1]);
       if (needed !== ta.offsetHeight) ta.style.height = needed + "px";
     }
@@ -14228,8 +14235,8 @@ async function modalReviewTask(workspace, session) {
   const task = session.task || {};
   const { m, close } = modal(`<h2>Review task</h2>
     <div class="ws-facts task-review-facts"></div>
-    <pre class="task-review-files">Loading changes…</pre>
-    <pre class="task-review-diff hidden"></pre>
+    <pre class="task-review-files"><div class="box-lines" id="tr-files">Loading changes…</div></pre>
+    <pre class="task-review-diff hidden"><div class="box-lines" id="tr-diff"></div></pre>
     <p class="hint task-review-truncated hidden">The diff preview is shortened.</p>
     <p class="hint task-review-note hidden"></p>
     <div class="task-review-resolve hidden" id="tr-resolve-wrap">
@@ -14253,7 +14260,9 @@ async function modalReviewTask(workspace, session) {
   fact("Task", session.name || `Task ${session.id}`);
   fact("State", taskStateLabel(task), taskStateClass(task));
   if (task.applied_at) fact("Last applied", fmtStamp(task.applied_at));
-  const files = m.querySelector(".task-review-files"), diff = m.querySelector(".task-review-diff");
+  // each list's lines stand in one block inside its scroll box (app.css)
+  const files = m.querySelector("#tr-files"), diff = m.querySelector(".task-review-diff");
+  const diffLines = m.querySelector("#tr-diff");
   const note = m.querySelector(".task-review-note"), error = m.querySelector(".form-error");
   const apply = m.querySelector("#tr-apply");
   const resolve = m.querySelector("#tr-resolve"), resolveWrap = m.querySelector("#tr-resolve-wrap");
@@ -14269,9 +14278,9 @@ async function modalReviewTask(workspace, session) {
     fact("Changes", count ? `${count} file${count === 1 ? "" : "s"}` : "none since the last apply");
     files.textContent = list || "No changes to apply";
     if (data.diff) {
-      diff.replaceChildren();
+      diffLines.replaceChildren();
       for (const line of String(data.diff).split("\n"))
-        diff.appendChild(el("span", diffLineClass(line), line + "\n"));
+        diffLines.appendChild(el("span", diffLineClass(line), line + "\n"));
       diff.classList.remove("hidden");
     }
     if (data.truncated) m.querySelector(".task-review-truncated").classList.remove("hidden");
@@ -16933,7 +16942,9 @@ class SessionView {
       (req.description ? ` · ${req.description}` : "")));
     const pre = el("pre");
     const inp = req.input || {};
-    linkifyInto(pre, inp.command || inp.file_path && (inp.file_path + (inp.content ? "\n---\n" + String(inp.content).slice(0, 800) : ""))
+    // the command's lines in one block inside the scroll box (app.css)
+    linkifyInto(pre.appendChild(el("div", "box-lines")),
+      inp.command || inp.file_path && (inp.file_path + (inp.content ? "\n---\n" + String(inp.content).slice(0, 800) : ""))
       || JSON.stringify(inp, null, 2).slice(0, 1500));
     this.approvalEl.appendChild(pre);
     /* the answers in one order: Allow, then the engine's wider ways of

@@ -139,27 +139,43 @@ textarea::-webkit-scrollbar-track,.md pre::-webkit-scrollbar-track,
 /* where a vertical and a horizontal bar meet: the browser's default there is
    an opaque square that ignores the theme */
 ::-webkit-scrollbar-corner{background:transparent}
-/* A box of text is inset the same above its first line as beside it: the
-   letters stand as far below the top border as they stand in from the left
-   one. Padding alone cannot say that, because a line box carries leading
-   above its letters - half of what the line-height adds, then the font's
-   own room over the cap height - and the eye reads the gap to the letters,
-   not to the line box. So the first line's leading is trimmed off (to the
-   cap height: an ascender or an accent may rise a little into the inset,
-   as it rises above a capital) and the top padding lands on the letters.
-   Every textarea and every read-only box of text belongs here - the code
-   blocks, the approval's command, the review sheets' lists - each with its
-   top padding equal to its left; the composer's textarea keeps its own
-   padding, and the mirrors that measure or shadow it (CARET_MIRROR_STYLES,
-   the autosize ghost) copy the trim so their first line lands where its
-   does. A browser without text-box keeps the leading and the old inset. */
+/* A box of text is inset the same above its first line and below its last
+   as beside them: the letters stand as far below the top border, and their
+   baseline as far above the bottom one, as the text stands in from the
+   left. Padding alone cannot say that, because a line box carries leading
+   around its letters - half of what the line-height adds at either end,
+   then the font's own room over the cap height and under the baseline -
+   and the eye reads the gap to the letters, not to the line box; a
+   one-line box padded the same on every side still stood taller below its
+   text than above. So the leading is trimmed off both ends - the first
+   line's to the cap height, the last line's to the baseline: an ascender
+   or an accent may rise a little into the inset above, as it rises above
+   a capital, and a descender dips as far into the inset below - and the
+   top and bottom padding land on the letters. Every textarea and every
+   read-only box of text belongs here - the code blocks, the approval's
+   command, the review sheets' lists - each padded the same on every side
+   (the composer's textarea keeps its own padding, deeper below because
+   a row of controls follows, not a border), and the mirrors that measure
+   or shadow a textarea (CARET_MIRROR_STYLES, the autosize ghost) copy the
+   trim so their lines land where its do. A browser without text-box keeps
+   the leading and the old inset. */
 textarea,.md pre,.approval pre,.task-review-files,.task-review-diff,.session-git-list{
-  text-box:trim-start cap alphabetic;
+  text-box:trim-both cap alphabetic;
 }
+/* A scroll box counts its own line boxes as room to scroll, leading and
+   all, so a box that held its lines itself offered a scrollbar for the
+   leading it had trimmed off the last line. So no scroll box holds its
+   lines itself: they stand in one block inside it - the code block's own
+   code, `.box-lines` in the approval's command, the review sheets' lists
+   and the composer's spelling layer, the Git sheet's groups - whose box is
+   what the scroll box measures, while the trim reaches the first and the
+   last line through it. A textarea's lines are in the browser's own inner
+   editor, which counts them the same way. */
+.md pre code,.box-lines{display:block}
 /* the placeholder is a box of its own inside the control, trimmed on its
    own account: an empty textarea stands as tall as one typed line, and the
    first keystroke moves nothing */
-textarea::placeholder{text-box:trim-start cap alphabetic}
+textarea::placeholder{text-box:trim-both cap alphabetic}
 a{color:var(--acc2)}
 
 /* ---------- layout ---------- */
@@ -1325,11 +1341,11 @@ select.choice-native{display:none!important}
    markers hung outside the card, and no code, table or paragraph rhythm. */
 .md>*+*{margin-top:.6em}
 .md img{max-width:100%;height:auto}
-/* inset 12px at the sides and, with the first line's leading trimmed, the
-   same 12px above the letters; the last line keeps its own leading below */
+/* inset 12px at the sides and, with the leading trimmed off the first and
+   the last line, the same 12px above the letters and below their baseline */
 .md pre{
   background:var(--panel);border:1px solid var(--line);border-radius:var(--r-sm);
-  padding:12px 12px 10px;overflow-x:auto;font-family:var(--mono);font-size:var(--fs-md);line-height:1.45;
+  padding:12px;overflow-x:auto;font-family:var(--mono);font-size:var(--fs-md);line-height:1.45;
 }
 .md .code-block{position:relative}
 .md .code-block>pre{padding-right:46px}
@@ -1533,11 +1549,11 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   max-width:900px;width:calc(100% - 32px - var(--sbw,0px));align-self:center;
 }
 .approval .ap-title{font-weight:600;font-size:var(--fs-lg);color:var(--warn);display:flex;gap:8px;align-items:center}
-/* the command stands 10px in and, its first line's leading trimmed, 10px
-   below the box's top edge */
+/* the command stands 10px in and, the leading trimmed off its first and
+   its last line, 10px below the box's top edge and above its bottom one */
 .approval pre{
   font-family:var(--mono);font-size:var(--fs-sm);background:rgba(0,0,0,.3);border-radius:var(--r-sm);
-  padding:10px 10px 8px;margin:8px 0;max-height:180px;overflow:auto;white-space:pre-wrap;word-break:break-word;
+  padding:10px;margin:8px 0;max-height:180px;overflow:auto;white-space:pre-wrap;word-break:break-word;
 }
 .approval .ap-btns{display:flex;gap:8px;flex-wrap:wrap}
 
@@ -1670,17 +1686,24 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   border:none;background:none;box-shadow:none!important;resize:none;
   /* the text stands 14px in from the box's border (its 11px and this 3px)
      and, with the first line's leading trimmed, its letters 14px below it
-     (the box's 9px and this 5px); the bottom keeps the 2px that sets the
-     last line off the row of controls */
-  padding:5px 3px 2px;
+     (the box's 9px and this 5px). Below, the last line's leading is
+     trimmed too and the baseline stands 8px above this box's edge - the
+     2px that set the last line off the row of controls plus the leading
+     that stood under it before, so the row keeps its distance. Less than
+     the trimmed leading (about 6px, the font's own) would not do: a
+     textarea is a scroll box holding its lines itself, and the line box
+     the caret spans still reaches the untrimmed depth, so a shallower
+     bottom would be a pixel or two to scroll on every keystroke. */
+  padding:5px 3px 8px;
   /* integer line-height: fractional line heights (1.45*13.5=19.575px) make every
      content height sub-pixel; integer height writes then overflow by a fraction
      and Firefox jitters its internal scroll per keystroke to keep the caret visible.
-     The trimmed first line is the one fractional height left, which is why
-     the ghost is read with Math.ceil. min/max-height are read back by
-     Composer.resize for browsers without field-sizing, so a host that wants
-     a taller box restyles only these; the floor sits under one trimmed line
-     on every platform's font, so an empty box is exactly one line tall. */
+     The trimmed first and last lines are the one fractional height left,
+     which is why the ghost is read with Math.ceil. min/max-height are read
+     back by Composer.resize for browsers without field-sizing, so a host
+     that wants a taller box restyles only these; the floor sits under one
+     trimmed line (the padding and a cap height) on every platform's font,
+     so an empty box is exactly one line tall. */
   min-height:20px;max-height:224px;font-size:var(--fs-xl);line-height:20px;
   /* positioned, so it paints over the spelling layer that precedes it and
      shows through it; no z-index needed, DOM order decides */
@@ -2400,8 +2423,8 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .backend-edit-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:0 14px}
 .backend-edit-grid .full{grid-column:1/-1}
 /* a pinned height, never sized by rows or content: a 54px text window
-   inside the shared 10px inset and the border - three lines, once the first
-   line's leading is trimmed */
+   inside the shared 10px inset and the border - three lines, once the
+   leading is trimmed off the first and the last */
 .config-textarea{display:block;height:76px;min-height:76px;max-height:76px;resize:none}
 /* the footnote that sits under a field, shared by every modal */
 .backend-edit-help,.listener-handoff-help{margin:-5px 0 9px}

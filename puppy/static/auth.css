@@ -133,8 +133,9 @@ input[type=text],input[type=password],input[type=number],input[type=time],select
   height:var(--field-h);padding:0 10px;line-height:1.2;
 }
 /* the same inset on every side: the first line's letters sit as far below
-   the border as the text stands in from it, because the console trims the
-   leading above that line (the text-box rule in app.css) */
+   the border, and the last line's baseline as far above it, as the text
+   stands in from it, because the console trims the leading above the first
+   line and below the last (the text-box rule in app.css) */
 textarea{padding:10px}
 
 select{
