@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """The sidebar's Git mark, from the directory up: discovery against a real
 tree, the work state read from real repositories (uncommitted paths,
-commits no remote holds, and every way git can decline to say), the node's
-cache and worker, the focus refresh on both authenticated runtimes, the
-re-check a finished prompt asks for - through the runner itself, with a
-task's prompt left out - the timer that paces it, and the guards around it.
-No engine, network or quota; ``git`` runs only on scratch repositories."""
+commits no remote holds, and every way git can decline to say), the
+listing behind those counts that the mark's sheet reads, the node's cache
+and worker, the focus refresh and the sheet's read on both authenticated
+runtimes, the re-check a finished prompt asks for - through the runner
+itself, with a task's prompt left out - the timer that paces it, and the
+guards around it. No engine, network or quota; ``git`` runs only on scratch
+repositories."""
 from __future__ import annotations
 
 import asyncio
@@ -306,6 +308,118 @@ def work_state() -> None:
     print("work state: uncommitted paths by kind, unpushed commits, remotes, branches and git's refusals")
 
 
+def listing() -> None:
+    """The sheet's read: the same inspection with the paths and the commits
+    behind the counts listed, exactly as git holds them."""
+    project = TREE / "listing"
+    project.mkdir()
+    git(project, "init", "-q")
+    # an unborn branch with nothing yet: no HEAD, no upstream, no remote
+    record = session_git.inspect(str(project), listing=True)
+    assert record["root"] == str(project.resolve()), record
+    detail = record["detail"]
+    assert detail == {"head": None, "upstream": None, "ahead": None, "behind": None,
+                      "remotes": [], "paths": [], "commits": [],
+                      "more_paths": 0, "more_commits": 0}, detail
+    # a plain inspection carries neither the root nor the listing, the cache
+    # keeps neither, and the payload never sees them
+    plain = session_git.inspect(str(project))
+    assert "root" not in plain and "detail" not in plain, plain
+    session_git.reset_for_tests()
+    assert session_git._store(str(project), record) is True
+    assert set(session_git._records[str(project)]) == set(plain), session_git._records
+    assert set(session_git._public(record)) == set(session_git._public(plain))
+    session_git.reset_for_tests()
+
+    (project / "kept.txt").write_text("k\n")
+    (project / "old name.txt").write_text("o\n")
+    (project / "edited.txt").write_text("e\n")
+    (project / "gone.txt").write_text("g\n")
+    git(project, "add", "-A")
+    git(project, "commit", "-q", "-m", "one")
+    git(project, "commit", "-q", "--allow-empty", "-m", "two: the second\n\nwith a body")
+    git(TREE, "init", "-q", "--bare", "listing-remote.git")
+    git(project, "remote", "add", "origin", str(TREE / "listing-remote.git"))
+    git(project, "mv", "old name.txt", "new name.txt")
+    (project / "new name.txt").write_text("renamed and edited\n")
+    (project / "edited.txt").write_text("changed\n")
+    (project / "gone.txt").unlink()
+    (project / "added.txt").write_text("a\n")
+    git(project, "add", "added.txt")
+    (project / "loose.txt").write_text("l\n")
+    (project / "dir").mkdir()
+    (project / "dir" / "inner").write_text("i\n")
+    record = session_git.inspect(str(project), listing=True)
+    assert (record["changes"], record["staged"], record["unstaged"], record["untracked"],
+            record["conflicts"]) == (6, 2, 2, 2, 0), record
+    detail = record["detail"]
+    # every listed path with its kind and git's own code, a rename with its
+    # old name, a space carried exactly, an untracked directory as one
+    assert detail["paths"] == [
+        {"kind": "staged", "code": "A.", "path": "added.txt"},
+        {"kind": "unstaged", "code": ".M", "path": "edited.txt"},
+        {"kind": "unstaged", "code": ".D", "path": "gone.txt"},
+        {"kind": "staged", "code": "RM", "path": "new name.txt", "from": "old name.txt"},
+        {"kind": "untracked", "code": "??", "path": "dir/"},
+        {"kind": "untracked", "code": "??", "path": "loose.txt"},
+    ], detail["paths"]
+    assert len(detail["paths"]) == record["changes"]
+    assert detail["remotes"] == ["origin"] and detail["upstream"] is None
+    assert detail["ahead"] is None and detail["behind"] is None
+    assert len(detail["head"]) == 40 and record["unpushed"] == 2
+    # the commits newest first, the subject one line however the message
+    # was written, the author and the commit time
+    commits = detail["commits"]
+    assert [c["subject"] for c in commits] == ["two: the second", "one"], commits
+    assert all(c["author"] == "Puppy tests" and abs(c["at"] - time.time()) < 60 for c in commits), commits
+    assert all(len(c["hash"]) >= 7 for c in commits), commits
+    assert detail["head"].startswith(commits[0]["hash"])
+    assert (detail["more_paths"], detail["more_commits"]) == (0, 0)
+    # pushed with an upstream: nothing unpushed, the upstream named and even
+    git(project, "push", "-q", "-u", "origin", "main")
+    detail = session_git.inspect(str(project), listing=True)["detail"]
+    assert detail["upstream"] == "origin/main" and (detail["ahead"], detail["behind"]) == (0, 0)
+    assert detail["commits"] == []
+    # ahead of it again - two commits written past the index, so the staged
+    # work stays staged - and the bounds: what they cut is counted
+    for subject in ("three", "four"):
+        tree = git(project, "rev-parse", "HEAD^{tree}").strip()
+        commit = git(project, "commit-tree", tree, "-p", "HEAD", "-m", subject).strip()
+        git(project, "update-ref", "HEAD", commit)
+    with patch.object(session_git, "DETAIL_PATHS", 4), patch.object(session_git, "DETAIL_COMMITS", 1):
+        record = session_git.inspect(str(project), listing=True)
+    detail = record["detail"]
+    assert (detail["ahead"], detail["behind"]) == (2, 0)
+    assert record["changes"] == 6 and len(detail["paths"]) == 4 and detail["more_paths"] == 2
+    assert record["unpushed"] == 2 and [c["subject"] for c in detail["commits"]] == ["four"]
+    assert detail["more_commits"] == 1
+    # a conflict is named as git names it, on both sides
+    git(project, "checkout", "-q", "-b", "side")
+    git(project, "commit", "-q", "-am", "side edit")
+    git(project, "checkout", "-q", "main")
+    (project / "edited.txt").write_text("main\n")
+    git(project, "commit", "-q", "-am", "main edit")
+    merge = subprocess.run(["git", "merge", "side"], cwd=str(project), capture_output=True, text=True)
+    assert merge.returncode and "CONFLICT" in merge.stdout, merge
+    detail = session_git.inspect(str(project), listing=True)["detail"]
+    assert {"kind": "conflicts", "code": "UU", "path": "edited.txt"} in detail["paths"], detail["paths"]
+    git(project, "merge", "--abort")
+    # a detached HEAD: no branch, the commit it is at
+    git(project, "checkout", "-q", "--detach", "main")
+    record = session_git.inspect(str(project), listing=True)
+    assert record["branch"] is None and len(record["detail"]["head"]) == 40
+    assert record["detail"]["upstream"] is None
+    # git's refusal: the root is still known, the listing is not
+    refused = TREE / "refused"
+    record = session_git.inspect(str(refused), listing=True)
+    assert record["repo"] is True and record["error"] and "detail" not in record, record
+    assert record["root"] == str(refused.resolve())
+    # outside a repository there is nothing to carry
+    record = session_git.inspect(str(TREE / "plain"), listing=True)
+    assert record == {"repo": False, "checked_at": record["checked_at"]}, record
+    print("listing: paths by kind with git's codes and old names, commits, upstream, bounds and refusals")
+
+
 async def listed(client, headers):
     response = await client.get("/api/sessions", headers=headers)
     assert response.status == 200
@@ -400,6 +514,35 @@ async def api_contract(factory) -> None:
             assert response.status == 401
             response = await client.post(refresh.format(987654), headers=headers)
             assert response.status == 404
+
+            # the sheet's read: one more look with the listing behind the
+            # counts, the record brought up to date by it and published like
+            # a refresh, the root the discovery stopped at
+            assert protocol.SESSION_GIT_DETAIL_CAPABILITY in app["puppy_capabilities"]
+            sheet = "/api/sessions/{}/git"
+            response = await client.get(sheet.format(ids[0]), headers=headers)
+            data = await response.json()
+            assert response.status == 200 and data["ok"] is True, data
+            assert data["git"]["changes"] == 1 and data["git"]["untracked"] == 1, data
+            assert data["root"] == str(repo.resolve()), data
+            # the one untracked directory git lists, the whole of it new
+            assert data["detail"]["paths"] == [{"kind": "untracked", "code": "??", "path": "src/"}], data
+            assert data["detail"]["commits"] == [] and data["detail"]["remotes"] == []
+            assert data["detail"]["head"] is None and data["detail"]["upstream"] is None
+            assert (await listed(client, headers))[ids[0]] == data["git"], "the cache moved with the read"
+            # outside a repository, and for a directory that is not there,
+            # there is nothing to list and no root to name
+            response = await client.get(sheet.format(ids[1]), headers=headers)
+            data = await response.json()
+            assert data["git"]["repo"] is False and data["root"] is None and data["detail"] is None, data
+            response = await client.get(sheet.format(ids[2]), headers=headers)
+            data = await response.json()
+            assert data["git"]["repo"] is None and data["git"]["error"], data
+            assert data["root"] is None and data["detail"] is None
+            response = await client.get(sheet.format(ids[0]))
+            assert response.status == 401
+            response = await client.get(sheet.format(987654), headers=headers)
+            assert response.status == 404
             # a focus refresh answers at once and publishes a changed mark
             response = await client.post(refresh.format(ids[1]), headers=headers)
             assert response.status == 200
@@ -408,10 +551,10 @@ async def api_contract(factory) -> None:
             calls = []
             real_inspect = session_git.inspect
 
-            def counted(cwd):
-                calls.append(cwd)
+            def counted(cwd, listing=False):
+                calls.append((cwd, listing))
                 time.sleep(.2)
-                return real_inspect(cwd)
+                return real_inspect(cwd, listing)
 
             with patch.object(session_git, "inspect", counted):
                 first, second = await asyncio.gather(
@@ -419,8 +562,31 @@ async def api_contract(factory) -> None:
                     client.post(refresh.format(ids[1]), headers=headers))
                 assert (await first.json())["git"]["repo"] is True
                 assert (await second.json())["git"]["repo"] is True
-            assert calls == [str(plain)], "concurrent refreshes share one inspection"
+            assert calls == [(str(plain), False)], "concurrent refreshes share one inspection"
             assert (await listed(client, headers))[ids[1]]["repo"] is True
+            # a listing inspection serves the sheet's reads and a refresh
+            # that meet on it alike; one without the listing serves no read,
+            # which waits for it and looks once more
+            calls.clear()
+            with patch.object(session_git, "inspect", counted):
+                first = asyncio.ensure_future(client.get(sheet.format(ids[1]), headers=headers))
+                await asyncio.sleep(.05)
+                second, third = await asyncio.gather(
+                    client.get(sheet.format(ids[1]), headers=headers),
+                    client.post(refresh.format(ids[1]), headers=headers))
+                await first
+                assert calls == [(str(plain), True)], calls
+                assert (await (await first).json())["detail"]["paths"] == []
+                assert (await second.json())["root"] == str(plain.resolve())
+                assert (await third.json())["git"]["repo"] is True
+                calls.clear()
+                first = asyncio.ensure_future(client.post(refresh.format(ids[1]), headers=headers))
+                await asyncio.sleep(.05)
+                second = await client.get(sheet.format(ids[1]), headers=headers)
+                await first
+                assert calls == [(str(plain), False), (str(plain), True)], calls
+                assert (await second.json())["detail"]["remotes"] == []
+            assert not session_git._inflight and not session_git._listing
             published = runner.publish_state(runner.sessions_payload(), broadcast=False)
             assert next(row["git"] for row in published["sessions"]
                         if row["id"] == ids[1])["repo"] is True
@@ -517,17 +683,27 @@ async def api_contract(factory) -> None:
                 # as a mutation a backup would wait for; the busy refusal holds
                 seen = []
 
-                def watching(cwd):
+                def watching(cwd, listing=False):
                     seen.append(app["puppy_mutations"])
-                    return real_inspect(cwd)
+                    return real_inspect(cwd, listing)
 
                 with patch.object(session_git, "inspect", watching):
                     response = await client.post(refresh.format(ids[0]), headers=headers)
                     assert response.status == 200
-                assert seen == [0], seen
+                    response = await client.get(sheet.format(ids[0]), headers=headers)
+                    assert response.status == 200
+                assert seen == [0, 0], seen
                 app["puppy_snapshot_busy"] = "export"
                 try:
                     response = await client.post(refresh.format(ids[0]), headers=headers)
+                    assert response.status == 503
+                    # a read is a read: it answers while a backup is built,
+                    # and only a restore, which replaces the very list it
+                    # reads, refuses it
+                    response = await client.get(sheet.format(ids[0]), headers=headers)
+                    assert response.status == 200
+                    app["puppy_snapshot_busy"] = "restore"
+                    response = await client.get(sheet.format(ids[0]), headers=headers)
                     assert response.status == 503
                 finally:
                     app["puppy_snapshot_busy"] = None
@@ -542,7 +718,7 @@ async def api_contract(factory) -> None:
             db.delete_session(sid)
         (repo / "src" / "deep" / "file.txt").unlink()
         session_git.reset_for_tests()
-    print("routes and worker on the {} runtime".format("full" if full else "headless"))
+    print("routes, the sheet's read and worker on the {} runtime".format("full" if full else "headless"))
 
 
 def config_shape() -> None:
@@ -567,6 +743,7 @@ async def main() -> None:
         db.connect()
         discovery()
         work_state()
+        listing()
         config_shape()
         await api_contract(webui.build_app)
         await api_contract(backend_app)

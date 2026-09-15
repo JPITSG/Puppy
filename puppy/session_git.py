@@ -6,7 +6,10 @@ notes. It says two things: the directory is inside a Git work tree, or it is
 not; and, inside one, whether there is uncommitted or unpushed work - the
 heads-up that turns the mark orange. The answer is node-owned like the agent
 notes beside it, because the directory lives on the node that runs the
-session.
+session. A repository's mark opens a sheet that says exactly what the mark
+summarises: ``GET /api/sessions/{sid}/git`` looks at the directory once more
+and lists the paths behind ``changes`` and the commits behind ``unpushed``
+(``detail``), bringing the mark's own record up to date by the same look.
 
 Unlike the notes, the answer is cached rather than read on every payload: one
 record per working directory, kept in memory only, refreshed by a worker on
@@ -72,6 +75,13 @@ REASON_CHARS = 300
 # ``changes`` by kind. Carried beside ``changes``/``unpushed`` when git read
 # the repository, absent when it would not (and from a node before them).
 DETAIL_KEYS = ("branch", "staged", "unstaged", "untracked", "conflicts")
+# The sheet's listing is bounded: this many paths and this many commits at
+# most, the rest reported as a count (``more_paths``/``more_commits``).
+DETAIL_PATHS = 500
+DETAIL_COMMITS = 200
+# What a listing inspection carries beyond the record: the work tree's root
+# and the listing itself. Neither belongs in the cache or a payload.
+_LISTING_KEYS = ("root", "detail")
 # What a status line is, by its first field in porcelain v2: an ordinary or
 # renamed change (with the index and work-tree columns behind it), an
 # unmerged path, an untracked one; ignored paths are never listed here.
@@ -79,6 +89,8 @@ _HEADER, _CHANGE, _RENAME, _UNMERGED, _UNTRACKED = "#", "1", "2", "u", "?"
 
 _records: Dict[str, dict] = {}
 _inflight: Dict[str, asyncio.Future] = {}
+# the directories whose in-flight inspection is a listing one
+_listing: Set[str] = set()
 # directories to look at again before the next pass (request)
 _requested: Set[str] = set()
 _task: Optional[asyncio.Task] = None
@@ -179,7 +191,96 @@ def _git(cwd: str, *args: str) -> str:
     return result.stdout.decode("utf-8", "replace")
 
 
-def work_state(cwd: str) -> dict:
+def _parse_status(text: str) -> dict:
+    """``git status --porcelain=v2 --branch -z`` read into its branch header
+    - ``oid`` (None on an unborn branch), ``branch`` (None with HEAD
+    detached), ``upstream`` and the ``ahead``/``behind`` counts git gives
+    only with an upstream - and one ``(kind, code, path, origin)`` row per
+    listed path: the kind what git would do with the path (``staged``,
+    ``unstaged``, ``untracked``, ``conflicts``; "" for an entry kind this
+    does not know, still a listed path), the code git's own two-column XY,
+    and ``origin`` the old name of a rename or copy. NUL terminates every
+    entry and separates a rename's two names, so a path is carried exactly
+    as git holds it, never C-quoted."""
+    head = {"oid": None, "branch": None, "upstream": None, "ahead": None, "behind": None}
+    rows = []
+    tokens = text.split("\0")
+    index = 0
+    while index < len(tokens):
+        line = tokens[index]
+        index += 1
+        if not line:
+            continue
+        kind = line[0]
+        if kind == _HEADER:
+            fields = line.split(" ", 2)
+            if len(fields) == 3:
+                name, value = fields[1], fields[2]
+                if name == "branch.oid":
+                    head["oid"] = None if value == "(initial)" else value
+                elif name == "branch.head":
+                    head["branch"] = None if value == "(detached)" else value
+                elif name == "branch.upstream":
+                    head["upstream"] = value
+                elif name == "branch.ab":
+                    ahead, _, behind = value.partition(" ")
+                    try:
+                        head["ahead"] = int(ahead.lstrip("+"))
+                        head["behind"] = int(behind.lstrip("-"))
+                    except ValueError:
+                        head["ahead"] = head["behind"] = None
+            continue
+        if kind == _UNTRACKED:
+            rows.append(("untracked", "??", line[2:], None))
+        elif kind == _UNMERGED:
+            # "u <XY> <sub> <m1> <m2> <m3> <mW> <h1> <h2> <h3> <path>"
+            fields = line.split(" ", 10)
+            rows.append(("conflicts", fields[1] if len(fields) > 1 else "",
+                         fields[10] if len(fields) > 10 else line, None))
+        elif kind in (_CHANGE, _RENAME):
+            # "1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>" or
+            # "2 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <X><score> <path>" with
+            # the old name in the next entry: X is the index column, "."
+            # when the index holds nothing for the path and only the work
+            # tree changed
+            fields = line.split(" ", 8 if kind == _CHANGE else 9)
+            code = fields[1] if len(fields) > 1 else ""
+            path = fields[-1] if len(fields) == (9 if kind == _CHANGE else 10) else line
+            origin = None
+            if kind == _RENAME:
+                origin = tokens[index] if index < len(tokens) else None
+                index += 1
+            rows.append(("staged" if code[:1] != "." else "unstaged", code, path, origin))
+        else:
+            # an entry kind this does not know is still a listed path, so it
+            # counts as a change and belongs to no kind
+            rows.append(("", "", line, None))
+    return {"head": head, "rows": rows}
+
+
+def _commits(cwd: str) -> list:
+    """The commits on HEAD that no remote-tracking branch holds, newest
+    first, at most DETAIL_COMMITS of them: the abbreviated hash git chooses
+    for this repository, the subject, the author and the commit time. NUL
+    separates the fields and ends each record, so a subject is carried
+    exactly."""
+    out = _git(cwd, "log", "HEAD", "--not", "--remotes", "-z",
+               "--max-count={}".format(DETAIL_COMMITS), "--format=%h%x00%s%x00%an%x00%ct")
+    fields = out.split("\0")
+    commits = []
+    for at in range(0, len(fields) - 3, 4):
+        short, subject, author, stamp = fields[at:at + 4]
+        if not short:
+            continue
+        try:
+            when = int(stamp)
+        except ValueError:
+            when = None
+        commits.append({"hash": short, "subject": subject, "author": author, "at": when})
+    return commits
+
+
+def work_state(cwd: str, listing: bool = False) -> dict:
     """What the repository around ``cwd`` is holding, as ``git`` sees it:
     ``changes`` is the number of paths its status lists - staged, unstaged
     and untracked alike, an untracked directory as one, the whole work tree
@@ -194,52 +295,63 @@ def work_state(cwd: str) -> dict:
     ``unstaged``, ``untracked`` and ``conflicts`` sort the same paths by
     what git would do with them - a path with staged and further unstaged
     edits is staged, an unmerged path is a conflict whatever else it holds
-    - so the four add up to ``changes``. Raises GitRefused when git would
-    not answer."""
-    status = _git(cwd, "status", "--porcelain=v2", "--branch", "--untracked-files=normal")
-    branch = None
+    - so the four add up to ``changes``.
+
+    With ``listing``, the sheet's ``detail`` as well, from the same status
+    read: ``head`` (the commit HEAD is at, None on an unborn branch),
+    ``upstream`` with its ``ahead``/``behind`` counts (None without one),
+    the ``remotes``, the first DETAIL_PATHS ``paths`` behind ``changes``
+    (``kind``, git's ``code``, ``path`` and the ``from`` of a rename) and
+    the first DETAIL_COMMITS ``commits`` behind ``unpushed``, with
+    ``more_paths``/``more_commits`` counting whatever the bounds cut.
+    Raises GitRefused when git would not answer."""
+    status = _parse_status(_git(cwd, "status", "--porcelain=v2", "--branch", "-z",
+                                "--untracked-files=normal"))
+    head, rows = status["head"], status["rows"]
     kinds = {"staged": 0, "unstaged": 0, "untracked": 0, "conflicts": 0}
-    changes = 0
-    for line in status.split("\n"):
-        if not line:
-            continue
-        kind = line[0]
-        if kind == _HEADER:
-            if line.startswith("# branch.head "):
-                head = line[len("# branch.head "):]
-                branch = None if head == "(detached)" else head
-            continue
-        changes += 1
-        if kind == _UNTRACKED:
-            kinds["untracked"] += 1
-        elif kind == _UNMERGED:
-            kinds["conflicts"] += 1
-        elif kind in (_CHANGE, _RENAME):
-            # "<kind> <XY> ...": X is the index column, "." when the index
-            # holds nothing for the path and only the work tree changed
-            kinds["staged" if line[2:3] != "." else "unstaged"] += 1
-        # an entry kind this does not know is still a listed path, so it
-        # counts as a change and belongs to no kind
-    state = dict(kinds, changes=changes, branch=branch)
+    for kind, _code, _path, _origin in rows:
+        if kind in kinds:
+            kinds[kind] += 1
+    state = dict(kinds, changes=len(rows), branch=head["branch"])
     remotes = [line for line in _git(cwd, "remote").split("\n") if line.strip()]
+    commits = []
     if not remotes:
-        return dict(state, unpushed=None)
+        unpushed = None
     # an unborn branch has nothing to push yet, and no HEAD to count from
-    if _run_git(cwd, "rev-parse", "--verify", "-q", "HEAD^{commit}").returncode:
-        return dict(state, unpushed=0)
-    count = _git(cwd, "rev-list", "--count", "HEAD", "--not", "--remotes").strip()
-    try:
-        unpushed = int(count)
-    except ValueError:
-        raise GitRefused("git rev-list answered {!r}".format(count[:40]))
-    return dict(state, unpushed=unpushed)
+    elif _run_git(cwd, "rev-parse", "--verify", "-q", "HEAD^{commit}").returncode:
+        unpushed = 0
+    else:
+        count = _git(cwd, "rev-list", "--count", "HEAD", "--not", "--remotes").strip()
+        try:
+            unpushed = int(count)
+        except ValueError:
+            raise GitRefused("git rev-list answered {!r}".format(count[:40]))
+        if listing and unpushed:
+            commits = _commits(cwd)
+    state["unpushed"] = unpushed
+    if listing:
+        paths = []
+        for kind, code, path, origin in rows[:DETAIL_PATHS]:
+            entry = {"kind": kind, "code": code, "path": path}
+            if origin is not None:
+                entry["from"] = origin
+            paths.append(entry)
+        state["detail"] = {
+            "head": head["oid"], "upstream": head["upstream"],
+            "ahead": head["ahead"], "behind": head["behind"], "remotes": remotes,
+            "paths": paths, "commits": commits,
+            "more_paths": max(0, len(rows) - len(paths)),
+            "more_commits": max(0, (unpushed or 0) - len(commits)),
+        }
+    return state
 
 
-def _work_fields(cwd: str) -> dict:
-    """The work-state half of a repository's record: the counts, or the
-    reason git would not give them."""
+def _work_fields(cwd: str, listing: bool = False) -> dict:
+    """The work-state half of a repository's record: the counts (and the
+    listing behind them when asked), or the reason git would not give
+    them."""
     try:
-        return work_state(cwd)
+        return work_state(cwd, listing)
     except GitRefused as exc:
         return {"changes": None, "unpushed": None, "error": str(exc)}
     except Exception as exc:  # a broken pipe, a decode error: still an answer
@@ -248,10 +360,13 @@ def _work_fields(cwd: str) -> dict:
                 "error": "check failed: {}".format(exc)[:REASON_CHARS]}
 
 
-def inspect(cwd) -> dict:
+def inspect(cwd, listing: bool = False) -> dict:
     """One check of one directory, run in a thread by the worker and the
     refresh route. The record it returns is what the payload carries: the
-    discovery's answer, and for a repository the work state git reports."""
+    discovery's answer, and for a repository the work state git reports.
+    A ``listing`` inspection - the sheet's read - adds what the payload
+    never carries: the work tree's ``root`` the discovery stopped at, and
+    the ``detail`` git listed behind the counts (absent when it refused)."""
     now = time.time()
     root = str(cwd or "")
     try:
@@ -266,7 +381,10 @@ def inspect(cwd) -> dict:
     path = os.path.realpath(root)
     while True:
         if _git_dir_at(os.path.join(path, ".git")):
-            return dict({"repo": True, "checked_at": now}, **_work_fields(root))
+            entry = dict({"repo": True, "checked_at": now}, **_work_fields(root, listing))
+            if listing:
+                entry["root"] = path
+            return entry
         parent = os.path.dirname(path)
         if parent == path or parent in ceilings:
             return {"repo": False, "checked_at": now}
@@ -311,7 +429,9 @@ def record(cwd) -> Optional[dict]:
 def _store(cwd: str, entry: dict) -> bool:
     """Keep one answer; True when a console would see a different mark,
     read a different label or a different tooltip - the counts, the branch
-    and the kinds are all part of what it says."""
+    and the kinds are all part of what it says. A listing inspection's
+    extras are not kept: the cache holds records, not path lists."""
+    entry = {key: value for key, value in entry.items() if key not in _LISTING_KEYS}
     previous = _records.get(cwd)
     _records[cwd] = entry
     return previous is None or any(
@@ -319,7 +439,7 @@ def _store(cwd: str, entry: dict) -> bool:
         for key in ("repo", "error", "changes", "unpushed") + DETAIL_KEYS)
 
 
-async def _check(cwd: str, fresh: bool = False) -> dict:
+async def _check(cwd: str, fresh: bool = False, listing: bool = False) -> dict:
     """One inspection per directory at a time: a pass and a focus refresh
     that meet on the same directory share the thread rather than racing. An
     inspection that fails outright is an answer too - "could not be checked"
@@ -328,24 +448,33 @@ async def _check(cwd: str, fresh: bool = False) -> dict:
     ``fresh`` is the request form: the caller knows something changed just
     now, so an inspection already under way - which may have read the
     directory before that change - is not good enough to join. It finishes
-    for those who asked for it, and this looks once more."""
-    future = _inflight.get(cwd)
-    if fresh and future is not None:
-        stale = future
+    for those who asked for it, and this looks once more. ``listing`` is
+    the sheet's form: an inspection without the listing is not good enough
+    to join either, while one with it serves a plain check as well."""
+    while True:
+        future = _inflight.get(cwd)
+        if future is None or not (fresh or (listing and cwd not in _listing)):
+            break
         try:
-            await asyncio.shield(stale)
+            await asyncio.shield(future)
         except Exception:
             pass
-        future = _inflight.get(cwd)
-        if future is stale:
+        if _inflight.get(cwd) is future:
             future = None
+            break
+        # whatever replaced it began after this call did, which is all that
+        # fresh asks for; whether it lists is judged again
+        fresh = False
     if future is None:
-        future = asyncio.get_running_loop().run_in_executor(None, inspect, cwd)
+        future = asyncio.get_running_loop().run_in_executor(None, inspect, cwd, listing)
         _inflight[cwd] = future
+        if listing:
+            _listing.add(cwd)
 
         def settled(done, key=cwd):
             if _inflight.get(key) is done:
                 _inflight.pop(key, None)
+                _listing.discard(key)
         future.add_done_callback(settled)
     try:
         return await asyncio.shield(future)
@@ -372,6 +501,21 @@ async def refresh(session: dict) -> Optional[dict]:
     if _store(cwd, entry):
         _broadcast()
     return _public(entry)
+
+
+async def detail(session: dict) -> dict:
+    """What the sheet shows: one more look at the session's directory, this
+    time listing the paths and the commits behind the counts (``detail``,
+    with the work tree's ``root``; both None outside a repository and the
+    listing None when git refused), and the mark's own record brought up to
+    date by the same look - published like a refresh when it changed."""
+    cwd = str((session or {}).get("cwd") or "")
+    if not cwd:
+        return {"git": None, "root": None, "detail": None}
+    entry = await _check(cwd, listing=True)
+    if _store(cwd, entry):
+        _broadcast()
+    return {"git": _public(entry), "root": entry.get("root"), "detail": entry.get("detail")}
 
 
 # ---- the worker ----
@@ -523,11 +667,17 @@ async def h_refresh(request: web.Request):
     return web.json_response({"ok": True, "git": await refresh(session)})
 
 
+async def h_detail(request: web.Request):
+    session = _session_or_404(request)
+    return web.json_response(dict({"ok": True}, **await detail(session)))
+
+
 def register(app) -> None:
-    """Both runtimes: the worker and the focus refresh."""
+    """Both runtimes: the worker, the focus refresh and the sheet's read."""
     if app.get("puppy_session_git_registered"):
         return
     app["puppy_session_git_registered"] = True
+    app.router.add_get("/api/sessions/{sid:\\d+}/git", h_detail)
     app.router.add_post("/api/sessions/{sid:\\d+}" + REFRESH_SUFFIX, h_refresh)
     app.cleanup_ctx.append(_lifecycle)
 
@@ -536,6 +686,7 @@ def reset_for_tests() -> None:
     global _task, _wake, _loop, _missing, _last_full
     _records.clear()
     _inflight.clear()
+    _listing.clear()
     _requested.clear()
     _task = None
     _wake = None

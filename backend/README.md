@@ -792,6 +792,24 @@ up. The console shows the record as the branch mark between each sidebar
 row's pin and notes - in the warn tone with the counts in its label and the
 branch, kinds and commits in its hover tooltip when there is uncommitted or
 unpushed work - and posts the refresh when a session is brought into focus.
+
+Nodes advertising `session-git-detail` also serve
+`GET /api/sessions/{sid}/git`, the read behind the sheet a repository's mark
+opens: one more inspection of the directory answering `{"ok": true, "git":
+<record>, "root": "<work tree>"|null, "detail": <listing>|null}` - the fresh
+record (the cache and the published mark move with it), the resolved work
+tree the listed paths are relative to, and the listing `git` gave: `head`
+(`null` on an unborn branch), `upstream` with `ahead`/`behind` (`null`
+without one), `remotes`, `paths` (`{"kind", "code", "path"}` plus `"from"`
+for a rename: the kind the record counts it under, git's own two-column
+porcelain code and the path exactly as git holds it), `commits` (`{"hash",
+"subject", "author", "at"}`, newest first, the commits no remote-tracking
+branch holds) and `more_paths`/`more_commits` for what the bounds of 500
+paths and 200 commits cut. `root` and `detail` are `null` outside a
+repository, `detail` alone when `git` refused (the reason in the record's
+`error`). Concurrent reads of one directory share one inspection; the read
+is never counted as a mutation. The console makes a repository's mark a
+button that opens the sheet only for nodes that advertise this.
 See [Git repositories](../docs/session-git.md).
 
 ## Session tools

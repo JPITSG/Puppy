@@ -1958,7 +1958,7 @@ async def exercise_session_git(http, url, headers, pinned, session, cwd: Path) -
     """Whether the working directory is inside a Git work tree, and what that
     repository is holding: the node's cached answer on every session payload,
     re-checked by the focus refresh, which answers at once and publishes a
-    changed record."""
+    changed record, and listed in full by the sheet's read."""
     sid = session["id"]
     refresh_url = url + f"/api/sessions/{sid}/git/refresh"
 
@@ -2006,6 +2006,23 @@ async def exercise_session_git(http, url, headers, pinned, session, cwd: Path) -
     async with http.post(refresh_url, headers=headers, ssl=pinned) as response:
         unpushed = (await response.json())["git"]
     assert unpushed["changes"] == 0 and unpushed["unpushed"] == 1, unpushed
+    # the sheet's read lists what the counts summarise - here the one
+    # commit no remote has - names the work tree's root and the remotes,
+    # and moves the cached record with the same look
+    sheet_url = url + f"/api/sessions/{sid}/git"
+    (cwd / "sheet.txt").write_text("s")
+    async with http.get(sheet_url, headers=headers, ssl=pinned) as response:
+        sheet = await response.json()
+        assert response.status == 200, sheet
+    assert sheet["ok"] is True and sheet["root"] == str(cwd.resolve()), sheet
+    assert sheet["git"]["changes"] == 1 and sheet["git"]["unpushed"] == 1, sheet
+    assert sheet["detail"]["paths"] == [{"kind": "untracked", "code": "??", "path": "sheet.txt"}], sheet
+    assert [c["subject"] for c in sheet["detail"]["commits"]] == ["everything"], sheet
+    assert sheet["detail"]["remotes"] == ["origin"] and sheet["detail"]["upstream"] is None, sheet
+    assert set(sheet["detail"]) == {"head", "upstream", "ahead", "behind", "remotes", "paths",
+                                    "commits", "more_paths", "more_commits"}, sheet
+    assert (await listed()) == sheet["git"]
+    (cwd / "sheet.txt").unlink()
     git("push", "-q", "-u", "origin", "main")
     async with http.post(refresh_url, headers=headers, ssl=pinned) as response:
         pushed = (await response.json())["git"]
@@ -2013,16 +2030,28 @@ async def exercise_session_git(http, url, headers, pinned, session, cwd: Path) -
     assert (await listed()) == pushed
     assert set(pushed) == {"repo", "checked_at", "changes", "unpushed", "branch",
                            "staged", "unstaged", "untracked", "conflicts"}, pushed
+    async with http.get(sheet_url, headers=headers, ssl=pinned) as response:
+        sheet = await response.json()
+    assert sheet["detail"]["upstream"] == "origin/main", sheet
+    assert (sheet["detail"]["ahead"], sheet["detail"]["behind"]) == (0, 0), sheet
+    assert sheet["detail"]["paths"] == [] and sheet["detail"]["commits"] == [], sheet
     async with http.post(url + "/api/sessions/999999/git/refresh",
                          headers=headers, ssl=pinned) as response:
         assert response.status == 404
+    async with http.get(url + "/api/sessions/999999/git", headers=headers, ssl=pinned) as response:
+        assert response.status == 404
     async with http.post(refresh_url, ssl=pinned) as response:
+        assert response.status == 401
+    async with http.get(sheet_url, ssl=pinned) as response:
         assert response.status == 401
     shutil.rmtree(cwd / ".git")
     shutil.rmtree(remote, ignore_errors=True)
     async with http.post(refresh_url, headers=headers, ssl=pinned) as response:
         assert (await response.json())["git"]["repo"] is False
     assert (await listed())["repo"] is False
+    async with http.get(sheet_url, headers=headers, ssl=pinned) as response:
+        sheet = await response.json()
+    assert sheet["git"]["repo"] is False and sheet["root"] is None and sheet["detail"] is None, sheet
 
 
 def exercise_activity_blocks(session_hub_cls) -> None:
@@ -2559,6 +2588,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "session-fast-mode" in ping["capabilities"]
         assert "session-agent-notes" in ping["capabilities"]
         assert "session-git" in ping["capabilities"]
+        assert "session-git-detail" in ping["capabilities"]
         assert "session-pinning" in ping["capabilities"]
         assert "session-order-recency" in ping["capabilities"]
         assert "completion-events" in ping["capabilities"]

@@ -125,6 +125,20 @@ answers counts alone, whose tooltip says only what it knows. Nothing is
 persisted beyond the timer value; nothing changes a backup shape except that
 timer, and no availability verdict moves.
 
+The sheet behind a repository's mark is additive `session-git-detail`: both
+execution runtimes serve `GET /api/sessions/{sid}/git`, one more inspection
+of the directory that answers the fresh `git` record (the cache and the
+published mark move with it), the work tree's `root`, and the `detail` behind
+the counts - `head`, `upstream` with `ahead`/`behind`, `remotes`, the first
+500 `paths` (`kind`, git's two-column `code`, `path`, a rename's `from`) and
+the first 200 `commits` (`hash`, `subject`, `author`, `at`), with
+`more_paths`/`more_commits` counting what the bounds cut; `root` and
+`detail` are `null` outside a repository, `detail` alone when `git` refused.
+A console makes a repository's mark a button that opens the sheet only for
+nodes that advertise this; on every other node the mark stays the labelled
+image it was. Nothing is persisted, nothing enters the cache or a payload
+beyond the record, and no backup shape changes.
+
 Host activity is additive `host-metrics-v1`: both execution runtimes serve
 `GET /api/host/metrics`, returning that node's in-memory CPU history, its
 cores/load/memory/uptime and the trimmed process tree below its own Puppy

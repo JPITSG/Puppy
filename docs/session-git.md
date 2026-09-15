@@ -7,7 +7,9 @@ holding work - uncommitted changes, or commits no remote has - which turns the
 mark orange, the console's warn tone, with the counts in its label. It is the
 heads-up that there is something to commit or push here, and hovering an
 orange mark says why: the branch, the changes sorted by what `git` would do
-with them, and the commits no remote has. Nothing opens from it yet.
+with them, and the commits no remote has. Clicking a repository's mark opens
+its sheet, which lists exactly what those counts summarise: the paths and
+the commits themselves.
 
 ## What is checked, and where
 
@@ -107,6 +109,78 @@ console draws. On the full runtime the refresh is left out of the snapshot
 guard's mutation count - it changes nothing a backup could copy - while the
 busy refusal during a backup or restore still applies.
 
+## The sheet
+
+Nodes advertising the additive `session-git-detail` capability also serve
+`GET /api/sessions/{sid}/git`, the read behind the sheet a repository's mark
+opens. It is one more inspection of the same directory - the same discovery,
+the same `git status` and `rev-list` - that this time keeps what the record
+only counts, and it answers
+
+```json
+{"ok": true, "git": <record>, "root": "<work tree>" | null, "detail": <listing> | null}
+```
+
+where `git` is the fresh record exactly as the refresh would answer it (and
+the cache and every console's mark move with it, published when it changed),
+`root` is the work tree the discovery stopped at - the directory holding
+`.git`, resolved, which the listed paths are relative to whatever
+subdirectory the session sits in - and `detail`, present when `git` read the
+repository, is:
+
+| Field | Meaning |
+| --- | --- |
+| `head` | the commit `HEAD` is at, `null` on an unborn branch |
+| `upstream` | the branch's remote-tracking upstream (`origin/main`), `null` without one |
+| `ahead`, `behind` | how far `HEAD` is from that upstream, `null` without one |
+| `remotes` | the configured remotes, in `git remote` order |
+| `paths` | the paths `git status` lists, in its order: `{"kind", "code", "path"}` plus `"from"` for a rename or copy - `kind` one of `staged`, `unstaged`, `untracked`, `conflicts` (empty for an entry kind Puppy does not know, still a listed path), `code` git's own two-column porcelain code (`M.`, `.M`, `A.`, `RM`, `??`, `UU`, …), and `path` exactly as git holds it, never C-quoted (`-z`) |
+| `commits` | the commits on `HEAD` no remote-tracking branch holds, newest first: `{"hash", "subject", "author", "at"}` - the abbreviated hash git chooses for the repository, the subject, the author's name and the commit time in seconds |
+| `more_paths`, `more_commits` | what the bounds cut: at most 500 paths and 200 commits are listed, and these count the rest |
+
+Outside a repository `root` and `detail` are `null`; when `git` refuses,
+`root` is still named and `detail` is `null`, the reason riding in the
+record's `error` as ever. Concurrent reads of one directory share one
+inspection, and a plain refresh that meets a listing inspection joins it -
+a listing serves a plain check - while a read that meets a plain inspection
+waits for it and looks once more. The read is a `GET`, so it never counts as
+a mutation a backup would wait for; a restore refuses it like every other
+read. The paths never enter the cache or a payload: the record the cache
+keeps is exactly what the refresh answers.
+
+The console opens the sheet from a repository's mark, which is a button
+(role `button`, focusable, Enter or Space) only where the node advertises
+`session-git-detail`; every other mark - no repository, not looked at yet,
+could not be checked - stays a labelled image, and a press on it is a press
+on the row. The sheet stands in the linked-workspace sheet's voice: the
+session and its location, then the facts - the work tree's root when the
+session sits below it, the branch (`main`, `main · no commits yet`, `HEAD
+detached at 3f9c2a1`), the upstream with `up to date`, `1 ahead`, `2 behind`
+or `1 ahead, 2 behind` (`not set` with remotes but no upstream, `no remote`
+without any), the State in the mark's own tone (`Uncommitted and unpushed
+work`, `Uncommitted work` or `Unpushed work` in the warn tone; `Nothing to
+commit or push` or `Nothing to commit · no remote` in the ok tone; `Could not
+be read · <reason>` in the bad tone), and when the node looked - then two
+captioned lists on the review sheet's surface. **Changes** carries the count
+and the kinds beside it (`3 · 1 staged, 1 unstaged, 1 untracked`, or `none`)
+and groups the paths as `git status` groups them - Staged, Unstaged,
+Untracked, Conflicts - each path with the verb git would use for it
+(`modified`, `new file`, `deleted`, `renamed` with `old → new`, `copied`,
+`type changed`; a staged path edited again as `modified · edited since
+staging`; a conflict as `both modified`, `deleted by them`, …; an untracked
+path with none), the columns of one group aligned like git aligns its own.
+**Unpushed commits** carries the count and which remote lacks them (`1 · not
+on origin`, `2 · not on any remote`, `none`, `no remote`) and lists each
+commit as its hash, subject and, in the help colour, author and time. A
+clean repository says `Nothing to commit` and `Nothing to push`; one without
+a remote, `No remote to push to`; what the bounds cut ends a list as `… and
+40 more paths`. The sheet reads on opening and on **Refresh** (one press, one
+read, the button held while it runs), keeps the facts and captions from the
+row's record until the read answers, hands the fresh record to the row so the
+mark never disagrees with the sheet, keeps the last listing and reports
+inline when a read fails, and is a dialog like the agent-notes editor: Back
+closes it, Forward opens a fresh one for the session as it is then.
+
 The console draws the mark only for nodes that advertise the capability: a
 repository at full strength like present agent notes, in the warn tone when
 `changes` or `unpushed` is above zero, no repository as the same faint
@@ -124,8 +198,9 @@ says all there is. A node from before the work state answers a repository
 without `changes`/`unpushed`, which the console reads as a plain repository,
 never a heads-up; one from before the rundown answers counts without the
 branch or the kinds, and the tooltip says only what it knows ("Uncommitted
-work" over "3 uncommitted changes"). It is a labelled image, not a button,
-and a press on it is a press on the row.
+work" over "3 uncommitted changes"). A repository's mark is a button that
+opens the sheet where the node serves its read (see above); the other marks
+are labelled images, and a press on one of those is a press on the row.
 
 ## The timer
 

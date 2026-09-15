@@ -5733,6 +5733,15 @@ function backendSupportsSessionGit(bid) {
     backend.capabilities.includes("session-git");
 }
 
+/* The sheet behind the mark reads the paths and the commits through a route
+   of its own, so a repository's mark opens only where the node serves it. */
+function backendSupportsSessionGitDetail(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(b => b.id === bid);
+  return !!backend && Array.isArray(backend.capabilities) &&
+    backend.capabilities.includes("session-git-detail");
+}
+
 /* Between the pin and the notes: whether the working directory is inside a
    Git work tree, and whether that repository is holding work. The node
    answers from its own cache - re-checked on its git_check_minutes timer,
@@ -5743,19 +5752,37 @@ function backendSupportsSessionGit(bid) {
    at yet, or could not read, stays faint with the reason in its label. The
    heads-up is the warn tone: a repository with uncommitted changes or
    commits no remote holds turns orange, its label says how much of each,
-   and its tooltip (sessionGitTip) says why in a few lines. Nothing opens
-   from it yet, so it is a labelled image, not a button, and a press on it
-   is a press on the row. */
+   and its tooltip (sessionGitTip) says why in a few lines. A repository's
+   mark is a button on the notes control's focusable-span vocabulary - it
+   opens the sheet (modalSessionGit) that lists exactly what the counts
+   summarise, where the node serves that read - while every other mark
+   stays a labelled image: nothing opens from "no repository" or "not
+   looked at yet", so a press on those is a press on the row. */
 function sessionGitMark(bid, s) {
   const git = s.git && typeof s.git === "object" ? s.git : null;
   const work = sessionGitWork(git);
   const mark = el("span", "si-git" + (git && git.repo === true ? " has" : "") +
     (work && (work.changes || work.unpushed) ? " warn" : ""));
-  mark.setAttribute("role", "img");
-  mark.setAttribute("aria-label", sessionGitLabel(git));
+  const opens = !!git && git.repo === true && backendSupportsSessionGitDetail(bid);
+  mark.setAttribute("role", opens ? "button" : "img");
+  mark.setAttribute("aria-label", sessionGitLabel(git) + (opens ? " · open details" : ""));
   const tip = sessionGitTip(git);
   if (tip) mark.title = tip;
   mark.appendChild(sessionGitIcon(14));
+  if (!opens) return mark;
+  mark.tabIndex = 0;
+  const open = event => {
+    event.preventDefault();
+    event.stopPropagation();
+    modalSessionGit(bid, s);
+  };
+  mark.addEventListener("click", open);
+  mark.addEventListener("keydown", event => {
+    if (event.key === "Enter" || event.key === " ") open(event);
+  });
+  /* a press on the mark is never the start of a row drag or a row activation */
+  mark.addEventListener("pointerdown", event => event.stopPropagation());
+  mark.addEventListener("contextmenu", event => event.stopPropagation());
   return mark;
 }
 
@@ -5787,6 +5814,22 @@ function sessionGitBranch(git) {
   return git.branch === null ? null : undefined;
 }
 
+/* The heads-up in words, for the tooltip's first line and the sheet's State:
+   what kind of work the repository is holding. Empty when it holds none. */
+function sessionGitHeadline(work) {
+  if (!work || !(work.changes || work.unpushed)) return "";
+  return work.changes && work.unpushed ? "Uncommitted and unpushed work" :
+    work.changes ? "Uncommitted work" : "Unpushed work";
+}
+
+/* The kinds a record counts, worded for a tooltip line or a caption: only
+   the kinds with anything in them, empty for a record without the rundown. */
+function sessionGitKindsText(git) {
+  return SESSION_GIT_KINDS
+    .filter(([key]) => git && typeof git[key] === "number" && git[key] > 0)
+    .map(([key, wording]) => wording(git[key])).join(", ");
+}
+
 /* Why an orange mark is orange, for its tooltip: one line naming the work
    and the branch holding it, then one per cause - the changes with their
    kinds, the commits no remote has - each line only what the record says.
@@ -5797,18 +5840,16 @@ function sessionGitBranch(git) {
    already says all there is. */
 function sessionGitTip(git) {
   const work = sessionGitWork(git);
-  if (!work || !(work.changes || work.unpushed)) return "";
+  const headline = sessionGitHeadline(work);
+  if (!headline) return "";
   const plural = (count, word) => `${count} ${word}${count === 1 ? "" : "s"}`;
   const branch = sessionGitBranch(git);
   const where = typeof branch === "string" ? ` on ${branch}` :
     branch === null ? " on a detached HEAD" : "";
-  const lines = [(work.changes && work.unpushed ? "Uncommitted and unpushed work" :
-    work.changes ? "Uncommitted work" : "Unpushed work") + where];
+  const lines = [headline + where];
   if (work.changes) {
-    const kinds = SESSION_GIT_KINDS
-      .filter(([key]) => typeof git[key] === "number" && git[key] > 0)
-      .map(([key, wording]) => wording(git[key]));
-    lines.push(kinds.length ? `${plural(work.changes, "change")} · ${kinds.join(", ")}` :
+    const kinds = sessionGitKindsText(git);
+    lines.push(kinds ? `${plural(work.changes, "change")} · ${kinds}` :
       plural(work.changes, "uncommitted change"));
   }
   if (work.unpushed) lines.push(plural(work.unpushed, "unpushed commit"));
@@ -5847,13 +5888,20 @@ function sessionGitFocused(bid, sid) {
   if (!backendSupportsSessionGit(bid) || !backendConnectionAllowed(bid)) return;
   api(bid, `sessions/${sid}/git/refresh`, { method: "POST", timeoutMs: 15000 })
     .then(result => {
-      if (!result || !("git" in result)) return;
-      const row = sessionsFor(bid).find(item => item.id === sid);
-      if (!row || sessionGitSame(row.git, result.git)) return;
-      row.git = result.git;
-      renderSidebar();
+      if (result && "git" in result) sessionGitAnswered(bid, sid, result.git);
     })
     .catch(() => {});
+}
+
+/* A fresh answer for one session's directory, however it was asked for (a
+   focus re-check, the sheet's read): it lands on the row, and the list is
+   redrawn only when the mark, its label or its tooltip would change. */
+function sessionGitAnswered(bid, sid, git) {
+  const row = sessionsFor(bid).find(item => item.id === sid);
+  if (!row || sessionGitSame(row.git, git)) return false;
+  row.git = git;
+  renderSidebar();
+  return true;
 }
 
 /* Whether two records draw the same mark, label and tooltip: the counts,
@@ -6134,6 +6182,245 @@ function modalAgentNotes(bid, s) {
     files.innerHTML = "";
     setError(err.message || "the notes could not be loaded");
   });
+}
+
+/* git's own words for what it would do with a path, read from the
+   two-column code its porcelain status carries: the index column for a
+   staged path, the work-tree column for an unstaged one, the pair for an
+   unmerged one. A staged path edited again since is said so; an untracked
+   path needs no verb; a code this does not know is shown as git wrote it. */
+const SESSION_GIT_VERBS = {
+  M: "modified", A: "new file", D: "deleted", R: "renamed", C: "copied", T: "type changed",
+};
+const SESSION_GIT_SINCE = {
+  M: "edited since staging", D: "deleted since staging", T: "type changed since staging",
+};
+const SESSION_GIT_CONFLICTS = {
+  DD: "both deleted", AU: "added by us", UD: "deleted by them", UA: "added by them",
+  DU: "deleted by us", AA: "both added", UU: "both modified",
+};
+function sessionGitWhat(entry) {
+  const code = typeof entry.code === "string" ? entry.code : "";
+  const raw = code.replace(/\./g, " ").trim();
+  if (entry.kind === "untracked") return "";
+  if (entry.kind === "conflicts") return SESSION_GIT_CONFLICTS[code] || raw || "unmerged";
+  const index = code[0] || ".", tree = code[1] || ".";
+  if (entry.kind === "staged") {
+    const verb = SESSION_GIT_VERBS[index] || raw;
+    return SESSION_GIT_SINCE[tree] ? `${verb} · ${SESSION_GIT_SINCE[tree]}` : verb;
+  }
+  if (entry.kind === "unstaged") return SESSION_GIT_VERBS[tree] || raw;
+  return raw;
+}
+
+/* The mark's summary as the sheet's State: what the repository is holding
+   in the warn tone, a clean repository in the ok tone, and the reason in
+   the bad tone when the directory or its state could not be read. */
+function sessionGitState(git) {
+  if (!git) return { text: "Not checked yet", tone: "" };
+  if (git.repo === false) return { text: "No Git repository", tone: "" };
+  if (git.repo !== true)
+    return { text: "Could not be checked" + (git.error ? ` · ${git.error}` : ""), tone: "bad" };
+  if (git.error) return { text: `Could not be read · ${git.error}`, tone: "bad" };
+  const work = sessionGitWork(git);
+  if (!work) return { text: "Repository", tone: "" };
+  const headline = sessionGitHeadline(work);
+  if (headline) return { text: headline, tone: "warn" };
+  return { text: git.unpushed === null ? "Nothing to commit · no remote" :
+    "Nothing to commit or push", tone: "ok" };
+}
+
+/* The kinds' headings in the sheet, in the tooltip's order. */
+const SESSION_GIT_KIND_NAMES = {
+  staged: "Staged", unstaged: "Unstaged", untracked: "Untracked", conflicts: "Conflicts",
+};
+
+/* The sheet a repository's mark opens: exactly what the mark summarises,
+   listed. The facts stand in the linked-workspace sheet's voice - the work
+   tree's root when the session sits below it, the branch, its upstream
+   with how far ahead or behind, the State the mark's tone comes from, and
+   when the node looked - then the paths behind the changes count and the
+   commits behind the unpushed count on the review sheet's list surface,
+   grouped the way git's own status groups them, each caption carrying the
+   count the mark's label carries.
+   It reads fresh on opening and on Refresh through the node's own route,
+   and that read brings the row's record up to date like a focus re-check,
+   so the sheet and the mark never disagree; until it answers, the facts
+   and the captions come from the row's record and the lists say so. A
+   read that fails keeps what was shown and reports inline. Back closes
+   it; Forward opens a fresh one for the session as it is then. */
+function modalSessionGit(bid, s) {
+  const { m, close } = modal(`<h2>Git repository</h2>
+    <p class="modal-copy session-git-intro"></p>
+    <div class="ws-facts session-git-facts"></div>
+    <div class="session-git-body"></div>
+    <p class="form-error hidden" role="alert"></p>
+    <div class="m-btns"><button type="button" class="btn" id="session-git-close">Close</button>
+      <button type="button" class="btn btn-pri" id="session-git-refresh">Refresh</button></div>`,
+    "session-git-modal", () => navigationSessionDialog(bid, s.id, modalSessionGit));
+  const intro = m.querySelector(".session-git-intro"), facts = m.querySelector(".session-git-facts");
+  const body = m.querySelector(".session-git-body"), error = m.querySelector(".form-error");
+  const closeButton = m.querySelector("#session-git-close");
+  const refresh = m.querySelector("#session-git-refresh");
+  intro.textContent = `${s.name || `Session ${s.id}`} · ${sessionLocationLabel(s, bid)}`;
+  /* the row's record until the read answers, then the read's own */
+  let record = s.git && typeof s.git === "object" ? s.git : null;
+  let root = null, detail = null;
+  const count = value => typeof value === "number" && value > 0 ? value : 0;
+  const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+  const fact = (label, value, tone = "") => {
+    const row = el("div", "ws-fact");
+    row.appendChild(el("span", "wsf-l", label));
+    row.appendChild(el("span", "wsf-v" + (tone ? " " + tone : ""), value));
+    facts.appendChild(row);
+  };
+  const renderFacts = () => {
+    facts.replaceChildren();
+    /* the work tree's root, when it is not the session's own directory: the
+       intro already names that, and the paths below are relative to this */
+    if (root && root !== s.cwd) fact("Repository", root);
+    const branch = sessionGitBranch(record);
+    if (typeof branch === "string")
+      fact("Branch", branch + (detail && detail.head === null ? " · no commits yet" : ""));
+    else if (branch === null)
+      fact("Branch", "HEAD detached" + (detail && typeof detail.head === "string" ?
+        ` at ${detail.head.slice(0, 7)}` : ""));
+    if (detail) {
+      if (detail.upstream) {
+        const drift = [];
+        if (count(detail.ahead)) drift.push(`${detail.ahead} ahead`);
+        if (count(detail.behind)) drift.push(`${detail.behind} behind`);
+        fact("Upstream", `${detail.upstream} · ${drift.length ? drift.join(", ") : "up to date"}`);
+      } else {
+        fact("Upstream", Array.isArray(detail.remotes) && detail.remotes.length ? "not set" : "no remote");
+      }
+    }
+    const state = sessionGitState(record);
+    fact("State", state.text, state.tone);
+    if (record && typeof record.checked_at === "number") fact("Checked", fmtStamp(record.checked_at));
+  };
+
+  /* one captioned list: the caption in the field voice with its count
+     beside it, the list on the review sheet's surface */
+  const section = (title, note, fill) => {
+    const wrap = el("div", "session-git-section");
+    const caption = el("div", "field-lbl", title + " ");
+    caption.appendChild(el("span", "field-optional", note));
+    wrap.appendChild(caption);
+    const list = el("div", "session-git-list");
+    fill(list);
+    wrap.appendChild(list);
+    body.appendChild(wrap);
+  };
+  const changesNote = () => {
+    const work = sessionGitWork(record);
+    if (!work || !work.changes) return "none";
+    const kinds = sessionGitKindsText(record);
+    return kinds ? `${work.changes} · ${kinds}` : String(work.changes);
+  };
+  const commitsNote = () => {
+    if (!record || record.unpushed === null) return "no remote";
+    const work = sessionGitWork(record);
+    if (!work || !work.unpushed) return "none";
+    /* which remote lacks them is the read's to say; the count is the row's */
+    const remotes = detail && Array.isArray(detail.remotes) ? detail.remotes : [];
+    if (!remotes.length) return String(work.unpushed);
+    return `${work.unpushed} · not on ${remotes.length === 1 ? remotes[0] : "any remote"}`;
+  };
+  const fillPaths = list => {
+    const entries = Array.isArray(detail.paths) ? detail.paths : [];
+    if (!entries.length) { list.appendChild(el("div", "sgl-empty", "Nothing to commit")); return; }
+    for (const [kind, name] of Object.entries(SESSION_GIT_KIND_NAMES).concat([["", ""]])) {
+      const own = entries.filter(entry => (entry.kind || "") === kind);
+      if (!own.length) continue;
+      const group = el("div", "sgl-group");
+      if (name) group.appendChild(el("div", "sgl-kind", name));
+      const rows = el("div", "sgl-rows");
+      for (const entry of own) {
+        const what = sessionGitWhat(entry);
+        if (what) rows.appendChild(el("span", "sgl-what", what));
+        const path = el("span", "sgl-path" + (what ? "" : " full"));
+        if (typeof entry.from === "string" && entry.from)
+          path.appendChild(el("span", "sgl-from", `${entry.from} → `));
+        path.appendChild(document.createTextNode(String(entry.path || "")));
+        rows.appendChild(path);
+      }
+      group.appendChild(rows);
+      list.appendChild(group);
+    }
+    if (count(detail.more_paths))
+      list.appendChild(el("div", "sgl-more", `… and ${plural(detail.more_paths, "more path")}`));
+  };
+  const fillCommits = list => {
+    if (record && record.unpushed === null) {
+      list.appendChild(el("div", "sgl-empty", "No remote to push to"));
+      return;
+    }
+    const entries = Array.isArray(detail.commits) ? detail.commits : [];
+    if (!entries.length) { list.appendChild(el("div", "sgl-empty", "Nothing to push")); return; }
+    const rows = el("div", "sgl-commits");
+    for (const commit of entries) {
+      rows.appendChild(el("span", "sgl-hash", String(commit.hash || "")));
+      rows.appendChild(el("span", "sgl-subject", String(commit.subject || "")));
+      const meta = [commit.author, typeof commit.at === "number" ? fmtStamp(commit.at) : ""]
+        .filter(Boolean).join(" · ");
+      rows.appendChild(el("span", "sgl-meta", meta));
+    }
+    list.appendChild(rows);
+    if (count(detail.more_commits))
+      list.appendChild(el("div", "sgl-more", `… and ${plural(detail.more_commits, "more commit")}`));
+  };
+  const renderBody = loading => {
+    body.replaceChildren();
+    /* nothing to list outside a repository, when git would not read it (the
+       State fact carries the reason), or when the read itself failed */
+    if (!record || record.repo !== true || record.error || !(loading || detail)) return;
+    const waiting = list => list.appendChild(el("div", "sgl-empty", "Loading…"));
+    section("Changes", changesNote(), loading ? waiting : fillPaths);
+    section("Unpushed commits", commitsNote(), loading ? waiting : fillCommits);
+  };
+
+  let loading = false;
+  const load = async () => {
+    if (loading) return;
+    loading = true;
+    refresh.disabled = true;
+    m.setAttribute("aria-busy", "true");
+    error.classList.add("hidden");
+    try {
+      const data = await api(bid, `sessions/${s.id}/git`, { timeoutMs: 45000 });
+      if (!m.isConnected) return;
+      record = data && data.git && typeof data.git === "object" ? data.git : null;
+      root = data && typeof data.root === "string" ? data.root : null;
+      detail = data && data.detail && typeof data.detail === "object" ? data.detail : null;
+      /* the row first - it is usually this very object - so a changed
+         record is seen as changed and the list redrawn */
+      sessionGitAnswered(bid, s.id, record);
+      s.git = record;
+      renderFacts();
+      renderBody(false);
+    } catch (err) {
+      if (!m.isConnected) return;
+      /* a first read that fails leaves nothing to list; a later one keeps
+         what the last read showed */
+      if (!detail) renderBody(false);
+      error.textContent = err.message || "the repository could not be read";
+      error.classList.remove("hidden");
+    } finally {
+      loading = false;
+      if (m.isConnected) {
+        refresh.disabled = false;
+        m.removeAttribute("aria-busy");
+      }
+    }
+  };
+  closeButton.onclick = close;
+  refresh.onclick = load;
+  renderFacts();
+  renderBody(true);
+  closeButton.focus();
+  load();
 }
 
 function sessDot(s) {
@@ -6430,7 +6717,7 @@ function wireSessionDrag(item, bid, sid) {
   item.draggable = true;
   const blockTouchDrag = guardNativeTouchDrag(item);
   item.addEventListener("dragstart", (e) => {
-    if (e.target && e.target.closest && e.target.closest(".si-pin,.si-notes")) {
+    if (e.target && e.target.closest && e.target.closest(".si-pin,.si-notes,.si-git[role=button]")) {
       e.preventDefault();
       return;
     }

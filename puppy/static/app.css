@@ -129,7 +129,8 @@ body::after{
    draws a rounded border belongs here, under its radius. */
 textarea::-webkit-scrollbar-track,.md pre::-webkit-scrollbar-track,
 .approval pre::-webkit-scrollbar-track,.dirpick::-webkit-scrollbar-track,
-.task-review-files::-webkit-scrollbar-track,.task-review-diff::-webkit-scrollbar-track{
+.task-review-files::-webkit-scrollbar-track,.task-review-diff::-webkit-scrollbar-track,
+.session-git-list::-webkit-scrollbar-track{
   margin:var(--r-sm);
 }
 .menu::-webkit-scrollbar-track,.choice-menu::-webkit-scrollbar-track,
@@ -329,9 +330,10 @@ a{color:var(--acc2)}
   color:var(--txt3);opacity:.38;
   transition:opacity var(--t-base) var(--ease),background var(--t-base) var(--ease),color var(--t-base) var(--ease);
 }
-/* The pin and the notes are actions; the Git mark is a reading for now, so
-   it keeps the row's own cursor and a press on it is a press on the row. */
-.sess-item .si-pin,.sess-item .si-notes{cursor:pointer}
+/* The pin and the notes are actions, and so is a repository's Git mark
+   (role=button, it opens the sheet); the other Git marks are readings that
+   keep the row's own cursor, so a press on them is a press on the row. */
+.sess-item .si-pin,.sess-item .si-notes,.sess-item .si-git[role=button]{cursor:pointer}
 /* One drawing size for the set: every glyph is cut on the same 18-unit grid
    at the same stroke, so the marks read as one weight rather than three. */
 .sess-item .si-pin svg,.sess-item .si-git svg,.sess-item .si-notes svg{width:14px;height:14px}
@@ -343,7 +345,7 @@ a{color:var(--acc2)}
 .sess-item .si-git.has.warn{color:var(--warn)}
 .sess-item .si-notes.has{opacity:1;color:var(--acc2)}
 @media (hover:hover){
-  .sess-item .si-pin:hover,.sess-item .si-notes:hover{
+  .sess-item .si-pin:hover,.sess-item .si-notes:hover,.sess-item .si-git[role=button]:hover{
     opacity:1;background:var(--hov);color:var(--txt)
   }
 }
@@ -354,10 +356,11 @@ a{color:var(--acc2)}
   .sess-item .si-pin,.sess-item .si-git,.sess-item .si-notes{opacity:.55}
 }
 .sess-item .si-pin:focus-visible,
-.sess-item .si-notes:focus-visible{
+.sess-item .si-notes:focus-visible,
+.sess-item .si-git[role=button]:focus-visible{
   opacity:1;outline:2px solid var(--acc);outline-offset:2px
 }
-.sess-item .si-pin:active,.sess-item .si-notes:active{background:var(--hov)}
+.sess-item .si-pin:active,.sess-item .si-notes:active,.sess-item .si-git[role=button]:active{background:var(--hov)}
 /* Quiet text actions share one voice: the archive toggle here, the queue
    strip's "+N more" and a search hit's "Show all". Each rule below adds only
    its own placement. */
@@ -3202,7 +3205,7 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
 .task-review-modal .field-lbl{margin-bottom:5px}
 .task-review-facts .ws-fact{align-items:flex-start}
 .task-review-facts .field-lbl{flex:0 0 84px;margin-bottom:0}
-.task-review-files,.task-review-diff{
+.task-review-files,.task-review-diff,.session-git-list{
   flex:0 1 auto;margin:0 0 10px;padding:8px 10px;background:var(--panel2);
   border:1px solid var(--line2);border-radius:var(--r-sm);
   font-family:var(--mono);font-size:var(--fs-sm);line-height:1.45;tab-size:4;
@@ -3219,3 +3222,34 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
 .task-review-resolve,.task-review-fold{margin:0 0 6px}
 .task-review-resolve-note,.task-review-fold-note{margin:0 0 10px}
 .task-review-resolve-note .note-para+.note-para{margin-top:4px}
+/* the Git sheet: the repository's facts in the linked-workspace sheet's
+   voice, then the paths and the commits behind the mark's counts on the
+   review sheet's list surface. Each list is captioned in the field voice
+   with its count beside it, as close as a label's own control; the paths
+   are grouped the way git's own status groups them - a kicker per kind,
+   the verb git would use in the help colour, the path at full strength,
+   the columns aligned within the group like git aligns its own - and a
+   commit is its abbreviated hash, its subject and, in the help colour, who
+   made it and when, which steps under the subject on a phone. */
+.session-git-modal{--modal-w:var(--modal-w-editor)}
+.session-git-modal .form-error{margin-top:12px}
+.session-git-section{margin-top:12px}
+.session-git-modal .field-lbl{margin-bottom:5px;overflow-wrap:anywhere}
+.session-git-list{margin:0;max-height:32vh;overflow-wrap:anywhere;overflow-x:hidden}
+.sgl-group+.sgl-group{margin-top:8px}
+.sgl-kind{
+  font-family:var(--sans);font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.09em;
+  color:var(--txt3);margin-bottom:2px;
+}
+.sgl-rows{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:0 10px}
+.sgl-what,.sgl-from,.sgl-hash,.sgl-meta,.sgl-empty,.sgl-more{color:var(--txt3)}
+.sgl-what,.sgl-meta{white-space:nowrap}
+.sgl-path,.sgl-subject{min-width:0}
+.sgl-path.full{grid-column:1/-1}
+.sgl-commits{display:grid;grid-template-columns:max-content minmax(0,1fr) max-content;gap:0 10px}
+.sgl-meta{grid-column:3}
+.sgl-more{margin-top:4px}
+@media (max-width:560px){
+  .sgl-commits{grid-template-columns:max-content minmax(0,1fr)}
+  .sgl-meta{grid-column:2}
+}

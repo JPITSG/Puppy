@@ -163,6 +163,16 @@ SESSION_AGENT_NOTES_CAPABILITY = "session-agent-notes"
 # repository without counts as a plain repository, and one without the
 # rundown as counts alone.
 SESSION_GIT_CAPABILITY = "session-git"
+# GET /api/sessions/{sid}/git looks at the directory once more and answers
+# the fresh ``git`` record with the work tree's ``root`` and the ``detail``
+# behind the counts: the paths git's status lists (each with its kind, git's
+# own two-column code and, for a rename, the old name), the commits no
+# remote-tracking branch holds (abbreviated hash, subject, author, time),
+# HEAD, the upstream with its ahead/behind counts and the remotes, bounded
+# with ``more_paths``/``more_commits`` for what the bounds cut. The record
+# in the cache moves with the same look. A console makes a repository's
+# mark open its sheet only for nodes that advertise this.
+SESSION_GIT_DETAIL_CAPABILITY = "session-git-detail"
 # Node-owned pinned flags and session order. Drag-and-drop requires the
 # complete starting order and pin cohort as compare tokens.
 SESSION_PINNING_CAPABILITY = "session-pinning"
@@ -278,6 +288,7 @@ BASE_CAPABILITIES = (
     SESSION_FAST_MODE_CAPABILITY,
     SESSION_AGENT_NOTES_CAPABILITY,
     SESSION_GIT_CAPABILITY,
+    SESSION_GIT_DETAIL_CAPABILITY,
     SESSION_PINNING_CAPABILITY,
     SESSION_ORDER_RECENCY_CAPABILITY,
     COMPLETION_EVENTS_CAPABILITY,

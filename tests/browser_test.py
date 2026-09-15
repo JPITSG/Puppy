@@ -4614,17 +4614,26 @@ def check_session_pins(ui_source: str, css_source: str) -> None:
         assert needle in mark
     assert '"Pin session to top"' in mark and '"Unpin session"' in mark
 
-    # The Git mark reads the node's record and nothing else: a labelled image
-    # that no press opens yet, drawn only for nodes advertising the capability,
-    # and its focus re-check asks once per change of focus and never probes
-    # a backend the health worker calls unreachable.
+    # The Git mark reads the node's record and nothing else, drawn only for
+    # nodes advertising the capability: a repository's mark is the button
+    # that opens its sheet where the node serves the sheet's read, every
+    # other mark a labelled image that no press opens; and its focus
+    # re-check asks once per change of focus and never probes a backend the
+    # health worker calls unreachable.
     git_mark = ui_source[
         ui_source.index("function backendSupportsSessionGit("):
         ui_source.index("\n/* The row itself is a button")]
     assert 'backend.capabilities.includes("session-git")' in git_mark
-    assert 'mark.setAttribute("role", "img")' in git_mark
+    assert 'backend.capabilities.includes("session-git-detail")' in git_mark
+    assert 'const opens = !!git && git.repo === true && backendSupportsSessionGitDetail(bid);' in git_mark
+    assert 'mark.setAttribute("role", opens ? "button" : "img");' in git_mark
     assert "mark.appendChild(sessionGitIcon(14));" in git_mark
-    assert "tabIndex" not in git_mark and 'addEventListener("click"' not in git_mark
+    assert "if (!opens) return mark;" in git_mark
+    assert "mark.tabIndex = 0;" in git_mark and "modalSessionGit(bid, s);" in git_mark
+    for needle in ('mark.addEventListener("click", open)',
+                   'mark.addEventListener("pointerdown"',
+                   'mark.addEventListener("contextmenu"'):
+        assert needle in git_mark, needle
     for needle in ('"Git repository"', '"No Git repository"',
                    '"Git repository not checked yet"',
                    '"Git repository could not be checked"',
@@ -4642,8 +4651,9 @@ def check_session_pins(ui_source: str, css_source: str) -> None:
     assert 'if (!git || git.repo !== true || git.error || typeof git.changes !== "number") return null;' \
         in git_mark
     assert ".sess-item .si-git.has.warn{color:var(--warn)}" in css_source
-    assert "count(aRecord.changes) === count(bRecord.changes)" in git_mark
-    assert "count(aRecord.unpushed) === count(bRecord.unpushed)" in git_mark
+    assert '["changes", "unpushed"].concat(SESSION_GIT_KINDS.map(([key]) => key))' in git_mark
+    assert ".every(key => count(aRecord[key]) === count(bRecord[key]))" in git_mark
+    assert "sessionGitBranch(aRecord) === sessionGitBranch(bRecord)" in git_mark
     assert "if (key === sessionGitFocusKey) return;" in git_mark
     assert "!backendSupportsSessionGit(bid) || !backendConnectionAllowed(bid)" in git_mark
     assert 'api(bid, `sessions/${sid}/git/refresh`, { method: "POST"' in git_mark
@@ -4664,7 +4674,7 @@ def check_session_pins(ui_source: str, css_source: str) -> None:
     drag = ui_source[
         ui_source.index("let dragSess = null;"):
         ui_source.index("\n// below this much", ui_source.index("let dragSess = null;"))]
-    assert 'e.target.closest(".si-pin,.si-notes")' in drag
+    assert 'e.target.closest(".si-pin,.si-notes,.si-git[role=button]")' in drag
     assert "sessionOrderPending.has(nodeKey)" in drag
     assert "orderSnapshot: sessionOrderSnapshot(bid)" in drag
     assert "sameSessionOrderSnapshot(" in drag
@@ -4694,7 +4704,8 @@ def check_session_pins(ui_source: str, css_source: str) -> None:
     assert ".sess-item .si-pin svg,.sess-item .si-git svg,.sess-item .si-notes svg" \
         "{width:14px;height:14px}" in css_source
     assert ".sess-item .si-git.has{opacity:1;color:var(--acc2)}" in css_source
-    assert ".sess-item .si-pin,.sess-item .si-notes{cursor:pointer}" in css_source
+    assert ".sess-item .si-pin,.sess-item .si-notes,.sess-item .si-git[role=button]{cursor:pointer}" in css_source
+    assert ".sess-item .si-git[role=button]:focus-visible{" in css_source
     assert "mark.appendChild(sessionPinIcon(14));" in ui_source
     assert "mark.appendChild(sessionGitIcon(14));" in ui_source
     assert "mark.appendChild(agentNotesIcon(14));" in ui_source

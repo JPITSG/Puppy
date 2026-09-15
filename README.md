@@ -187,7 +187,15 @@ reading anywhere further up is never pulled away from it.
   changes to Main re-checks Main instead. A directory it has not looked at
   yet, or could not read, keeps a faint mark with the reason in its label, and
   a repository whose state `git` refuses to read keeps the plain mark with
-  `git`'s reason. The mark is a reading only - nothing opens from it yet.
+  `git`'s reason. Click a repository's mark to see exactly what is behind it:
+  the sheet names the branch, its upstream and how far ahead or behind it is,
+  the state that gives the mark its colour, and lists the changes themselves -
+  every path grouped as `git status` groups them (staged, unstaged, untracked,
+  conflicts) with what `git` would do with it - and every unpushed commit with
+  its hash, subject, author and time (the first 500 paths and 200 commits,
+  the rest counted). It reads the repository afresh when opened and on
+  Refresh, and the mark follows what it finds. A mark that says "no
+  repository", "not checked yet" or "could not be checked" opens nothing.
 - **Agent notes.** A mark on every session row shows whether its directory has
   an `AGENTS.md` or `CLAUDE.md`, and opens a small editor for exactly those two
   files.

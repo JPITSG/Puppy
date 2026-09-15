@@ -50,21 +50,44 @@ async def engines(*args, **kwargs):
 
 # The Git marks of the invented projects. The node's own discovery would
 # find no such directories, so its cache is seeded with these answers and
-# every later look (the worker's pass, a focus refresh) is answered from
-# here. The garden is the heads-up: work its owner has not committed or
-# pushed, with the rundown its tooltip reads; the atlas has no remote to
-# push to; the notes are no repository.
+# every later look (the worker's pass, a focus refresh, the sheet's read)
+# is answered from here. The garden is the heads-up: work its owner has
+# not committed or pushed, with the rundown its tooltip reads and the paths
+# and the commit its sheet lists; the atlas has no remote to push to; the
+# notes are no repository.
 DEMO_GIT = {"/home/mira/projects/" + folder: dict(record) for folder, record in (
-    ("harbor", {"repo": True, "changes": 0, "unpushed": 0}),
+    ("harbor", {"repo": True, "changes": 0, "unpushed": 0, "branch": "main",
+                "staged": 0, "unstaged": 0, "untracked": 0, "conflicts": 0}),
     ("garden", {"repo": True, "changes": 3, "unpushed": 1, "branch": "main",
                 "staged": 1, "unstaged": 1, "untracked": 1, "conflicts": 0}),
-    ("atlas", {"repo": True, "changes": 0, "unpushed": None}),
+    ("atlas", {"repo": True, "changes": 0, "unpushed": None, "branch": "main",
+               "staged": 0, "unstaged": 0, "untracked": 0, "conflicts": 0}),
     ("notes", {"repo": False}),
     ("harbor-task", {"repo": True, "changes": 2, "unpushed": 0}))}
+# What the sheet lists behind those counts, per project.
+DEMO_GIT_DETAIL = {"/home/mira/projects/" + folder: dict(detail) for folder, detail in (
+    ("harbor", {"head": "9b1d2e4c" * 5, "upstream": "origin/main", "ahead": 0, "behind": 0,
+                "remotes": ["origin"], "paths": [], "commits": [],
+                "more_paths": 0, "more_commits": 0}),
+    ("garden", {"head": "4f2c9ab7" * 5, "upstream": "origin/main", "ahead": 1, "behind": 2,
+                "remotes": ["origin"],
+                "paths": [{"kind": "staged", "code": "M.", "path": "src/planner.css"},
+                          {"kind": "unstaged", "code": ".M", "path": "src/beds.js"},
+                          {"kind": "untracked", "code": "??", "path": "notes/spring.md"}],
+                "commits": [{"hash": "4f2c9ab", "subject": "Shade map for the north beds",
+                             "author": "Mira Holt", "at": time.time() - 7200}],
+                "more_paths": 0, "more_commits": 0}),
+    ("atlas", {"head": "c07e5a19" * 5, "upstream": None, "ahead": None, "behind": None,
+               "remotes": [], "paths": [], "commits": [], "more_paths": 0, "more_commits": 0}))}
 
 
-def demo_git(cwd):
-    return dict(DEMO_GIT.get(str(cwd), {"repo": False}), checked_at=time.time())
+def demo_git(cwd, listing=False):
+    record = dict(DEMO_GIT.get(str(cwd), {"repo": False}), checked_at=time.time())
+    if listing and record["repo"] is True:
+        record["root"] = str(cwd)
+        if str(cwd) in DEMO_GIT_DETAIL:
+            record["detail"] = dict(DEMO_GIT_DETAIL[str(cwd)])
+    return record
 
 
 async def fixture():
@@ -2039,21 +2062,26 @@ async def git_mark_checks(a, b):
             orange: getComputedStyle(git).color === warn,
             label: git.getAttribute('aria-label'), name: row.querySelector('.si-name').textContent,
             role: git.getAttribute('role'), cursor: getComputedStyle(git).cursor,
+            focusable: git.tabIndex === 0,
             size: git.querySelector('svg').getBoundingClientRect().width};
     })})()""")
     assert len(marks) == 5, marks
     for mark in marks:
         assert mark["lane"] == ["si-pin", "si-git", "si-notes"], mark
-        assert mark["role"] == "img" and mark["cursor"] == "pointer" and mark["size"] == 14, mark
+        assert mark["cursor"] == "pointer" and mark["size"] == 14, mark
         assert mark["orange"] == mark["warn"], mark
+        # a repository's mark is the button that opens its sheet; the rest
+        # are labelled images
+        assert mark["role"] == ("button" if mark["has"] else "img"), mark
+        assert mark["focusable"] == mark["has"], mark
     assert [mark["has"] for mark in marks] == [True, True, True, True, False], marks
     assert marks[-1]["label"] == "No Git repository"
-    assert marks[0]["label"] == "Git repository · nothing to commit or push"
+    assert marks[0]["label"] == "Git repository · nothing to commit or push · open details"
     by_name = {mark["name"]: mark for mark in marks}
     assert [name for name, mark in by_name.items() if mark["warn"]] == ["Garden planner"], marks
     assert by_name["Garden planner"]["label"] == \
-        "Git repository · 3 uncommitted changes · 1 unpushed commit"
-    assert by_name["API cleanup"]["label"] == "Git repository · nothing to commit · no remote"
+        "Git repository · 3 uncommitted changes · 1 unpushed commit · open details"
+    assert by_name["API cleanup"]["label"] == "Git repository · nothing to commit · no remote · open details"
     # The orange mark alone carries a tooltip: the console's own bubble,
     # raised by hovering it, with the branch on its first line and then
     # one line for each cause, kept on separate lines by the bubble.
@@ -2103,7 +2131,7 @@ async def git_mark_checks(a, b):
         runner.broadcast_sessions()
         for instance in (a, b):
             await until(instance, "document.querySelector('.sess-item[data-session-key=\"0:%d\"] .si-git')"
-                        ".getAttribute('aria-label')==='Git repository · 2 uncommitted changes · no remote'"
+                        ".getAttribute('aria-label')==='Git repository · 2 uncommitted changes · no remote · open details'"
                         % notes["id"])
     finally:
         DEMO_GIT[notes["cwd"]] = {"repo": False}
@@ -2118,9 +2146,122 @@ async def git_mark_checks(a, b):
           "tooltip - re-checked on focus and published to every console", flush=True)
 
 
+async def git_sheet_checks(a):
+    """The sheet an orange mark opens, by a real click: the session's facts
+    in the linked-workspace sheet's voice with the State in the mark's own
+    tone, the paths grouped by kind with git's verbs and the unpushed commit
+    on the review sheet's list surface, read over the node's own route;
+    Refresh reading again; Back closing it and Forward opening a fresh one;
+    and, on a phone, the commit's author and time stepping under its
+    subject with nothing pushed off the screen. The type is the console's:
+    the fact labels and the kind kickers on one kicker step, the lists in
+    the one monospace, the captions in the field voice."""
+    garden = next(s for s in db.list_sessions() if s["cwd"].endswith("/garden"))
+    reads = "performance.getEntriesByType('resource').filter(e => e.name.endsWith('/api/sessions/%d/git')).length" % garden["id"]
+    active = await evaluate(a, "document.querySelector('.sess-item.active') ? document.querySelector('.sess-item.active').querySelector('.si-name').textContent : ''")
+    spot = await evaluate(a, """(() => { const r = Array.from(document.querySelectorAll('.sess-item'))
+        .find(row => row.querySelector('.si-name').textContent === 'Garden planner')
+        .querySelector('.si-git').getBoundingClientRect();
+        return {x: r.x + r.width / 2, y: r.y + r.height / 2}; })()""")
+    for kind in ("mousePressed", "mouseReleased"):
+        await a.call("Input.dispatchMouseEvent", {"type": kind, "x": spot["x"], "y": spot["y"],
+                     "button": "left", "clickCount": 1}, session=a.page_session)
+    await until(a, "!!document.querySelector('.session-git-modal') && " + reads + " === 1 && "
+                   "!document.querySelector('.session-git-modal').hasAttribute('aria-busy')")
+    sheet = await evaluate(a, """(() => {
+        const m = document.querySelector('.session-git-modal');
+        const probe = document.createElement('span'); document.body.appendChild(probe);
+        const computed = (prop, value) => { probe.style[prop] = value; return getComputedStyle(probe)[prop]; };
+        const warn = computed('color', 'var(--warn)'), mono = computed('fontFamily', 'var(--mono)');
+        const kicker = computed('fontSize', 'var(--fs-2xs)'), field = computed('fontSize', 'var(--fs-xs)');
+        probe.remove();
+        const style = node => getComputedStyle(node);
+        const label = m.querySelector('.wsf-l'), caption = m.querySelector('.session-git-section .field-lbl');
+        const kind = m.querySelector('.sgl-kind'), list = m.querySelector('.session-git-list');
+        const state = Array.from(m.querySelectorAll('.ws-fact')).find(row => row.querySelector('.wsf-l').textContent === 'State').querySelector('.wsf-v');
+        const staged = m.querySelector('.sgl-group .sgl-rows');
+        const what = staged.children[0].getBoundingClientRect(), path = staged.children[1].getBoundingClientRect();
+        const commit = m.querySelector('.sgl-commits');
+        return {title: m.querySelector('h2').textContent, intro: m.querySelector('.session-git-intro').textContent,
+            facts: Array.from(m.querySelectorAll('.ws-fact')).map(row => [row.querySelector('.wsf-l').textContent, row.querySelector('.wsf-v').textContent]),
+            stateOrange: style(state).color === warn,
+            captions: Array.from(m.querySelectorAll('.session-git-section .field-lbl')).map(node => node.textContent),
+            kinds: Array.from(m.querySelectorAll('.sgl-kind')).map(node => node.textContent),
+            rows: Array.from(m.querySelectorAll('.sgl-rows')).map(node => Array.from(node.children).map(cell => cell.textContent)),
+            commit: Array.from(commit.children).map(cell => cell.textContent),
+            metaRight: commit.lastElementChild.getBoundingClientRect().right,
+            metaTop: commit.lastElementChild.getBoundingClientRect().top,
+            subjectTop: commit.children[1].getBoundingClientRect().top,
+            listRight: list.getBoundingClientRect().right,
+            width: m.getBoundingClientRect().width,
+            labelKicker: style(label).fontSize === kicker && style(label).textTransform === 'uppercase',
+            kindKicker: style(kind).fontSize === kicker && style(kind).textTransform === 'uppercase' &&
+                style(kind).letterSpacing === style(label).letterSpacing && style(kind).color === style(label).color,
+            captionField: style(caption).fontSize === field && style(caption).textTransform === 'uppercase',
+            noteCase: style(caption.querySelector('.field-optional')).textTransform === 'none',
+            listMono: style(list).fontFamily === mono, factMono: style(state).fontFamily === mono,
+            columns: path.left > what.right && Math.abs(path.top - what.top) < 1,
+            buttons: Array.from(m.querySelectorAll('.m-btns .btn')).map(b => [b.textContent, b.disabled]),
+            focused: document.activeElement === m.querySelector('#session-git-close')};
+    })()""")
+    assert sheet["title"] == "Git repository" and sheet["intro"] == "Garden planner · /home/mira/projects/garden", sheet
+    assert sheet["facts"] == [["Branch", "main"], ["Upstream", "origin/main · 1 ahead, 2 behind"],
+                              ["State", "Uncommitted and unpushed work"], ["Checked", sheet["facts"][3][1]]], sheet
+    assert sheet["facts"][3][1] and sheet["stateOrange"], sheet
+    assert sheet["captions"] == ["Changes 3 · 1 staged, 1 unstaged, 1 untracked", "Unpushed commits 1 · not on origin"], sheet
+    assert sheet["kinds"] == ["Staged", "Unstaged", "Untracked"], sheet
+    assert sheet["rows"] == [["modified", "src/planner.css"], ["modified", "src/beds.js"], ["notes/spring.md"]], sheet
+    assert sheet["commit"][:2] == ["4f2c9ab", "Shade map for the north beds"] and sheet["commit"][2].startswith("Mira Holt · "), sheet
+    assert abs(sheet["metaTop"] - sheet["subjectTop"]) < 1 and sheet["listRight"] - sheet["metaRight"] > 8, sheet
+    assert sheet["width"] == 640, sheet
+    assert sheet["labelKicker"] and sheet["kindKicker"] and sheet["captionField"] and sheet["noteCase"], sheet
+    assert sheet["listMono"] and sheet["factMono"] and sheet["columns"], sheet
+    assert sheet["buttons"] == [["Close", False], ["Refresh", False]] and sheet["focused"], sheet
+    # a press on the mark opened the sheet and nothing else: the row it sits
+    # on was not selected by it
+    assert await evaluate(a, "document.querySelector('.sess-item.active') ? document.querySelector('.sess-item.active').querySelector('.si-name').textContent : ''") == active
+    # Refresh reads again, once per press
+    button = await evaluate(a, "(() => { const r = document.querySelector('#session-git-refresh').getBoundingClientRect(); return {x: r.x + r.width / 2, y: r.y + r.height / 2}; })()")
+    for kind in ("mousePressed", "mouseReleased"):
+        await a.call("Input.dispatchMouseEvent", {"type": kind, "x": button["x"], "y": button["y"],
+                     "button": "left", "clickCount": 1}, session=a.page_session)
+    await until(a, reads + " === 2 && !document.querySelector('.session-git-modal').hasAttribute('aria-busy')")
+    assert await evaluate(a, "document.querySelectorAll('.session-git-modal .sgl-rows').length === 3")
+    # Back closes the sheet; Forward opens a fresh one, read anew
+    await evaluate(a, "history.back(); true")
+    await until(a, "!document.querySelector('.session-git-modal')")
+    await evaluate(a, "history.forward(); true")
+    await until(a, "!!document.querySelector('.session-git-modal') && " + reads + " === 3 && "
+                   "!document.querySelector('.session-git-modal').hasAttribute('aria-busy')")
+    # a phone: the commit's author and time step under the subject, and the
+    # sheet keeps to the screen
+    await a.call("Emulation.setDeviceMetricsOverride", {"width": 390, "height": 844,
+                 "deviceScaleFactor": 1, "mobile": True}, session=a.page_session)
+    await evaluate(a, "new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+    phone = await evaluate(a, """(() => {
+        const m = document.querySelector('.session-git-modal'), commit = m.querySelector('.sgl-commits');
+        const meta = commit.lastElementChild.getBoundingClientRect(), subject = commit.children[1].getBoundingClientRect();
+        return {under: meta.top >= subject.bottom - 1 && Math.abs(meta.left - subject.left) < 1,
+            fits: m.getBoundingClientRect().right <= innerWidth && document.documentElement.scrollWidth <= innerWidth,
+            listFits: m.querySelector('.session-git-list').scrollWidth <= m.querySelector('.session-git-list').clientWidth};
+    })()""")
+    assert phone["under"] and phone["fits"] and phone["listFits"], phone
+    button = await evaluate(a, "(() => { const r = document.querySelector('#session-git-close').getBoundingClientRect(); return {x: r.x + r.width / 2, y: r.y + r.height / 2}; })()")
+    for kind in ("mousePressed", "mouseReleased"):
+        await a.call("Input.dispatchMouseEvent", {"type": kind, "x": button["x"], "y": button["y"],
+                     "button": "left", "clickCount": 1}, session=a.page_session)
+    await until(a, "!document.querySelector('.session-git-modal')")
+    await a.call("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 900,
+                 "deviceScaleFactor": 1, "mobile": False}, session=a.page_session)
+    print("PASS: the Git sheet opened by a real click on the orange mark - facts, grouped paths and the "
+          "unpushed commit in the console's own type, read over the node's route, read again by Refresh, "
+          "closed by Back and reopened fresh by Forward, and fitting a phone", flush=True)
+
+
 async def checks(a, b, hub, capture=False):
     await background_count_checks(a, b, hub)
     await git_mark_checks(a, b)
+    await git_sheet_checks(a)
     await icon_alignment_checks(a)
     await scrollbar_corner_checks(a, capture)
     await background_task_checks(a, capture)
