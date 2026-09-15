@@ -453,7 +453,10 @@ function engineCatalog(fast = false) {
   approval.ws = { readyState: 1, send: text => sent.push(JSON.parse(text)) };
   approval.setReconnecting(false);
   assert.ok(choices().every(choice => !choice.disabled));
-  choices()[2].onclick();
+  /* Allow, the engine's wider allows in their order, Deny last */
+  assert.deepEqual([...choices()].map(choice => choice.textContent),
+    ["Allow", "Allow + switch to safe", "Always allow", "Deny"]);
+  choices()[1].onclick();
   assert.equal(sent.length, 1);
   assert.deepEqual(sent[0].updated_permissions, [req.suggestions[0]]);
   assert.ok(visible(), "WebSocket.send does not prove backend acceptance");
@@ -465,7 +468,7 @@ function engineCatalog(fast = false) {
   approval.handle({ type: "toast", level: "error", text: "backup or restore in progress" });
   assert.ok(visible());
   assert.ok(choices().every(choice => !choice.disabled), "a legacy refusal permits retry");
-  choices()[1].onclick();
+  choices()[3].onclick();
   assert.equal(sent[1].behavior, "deny");
   approval.ws = null; approval.setReconnecting(true);
   assert.ok(visible(), "disconnect before confirmation preserves the request");

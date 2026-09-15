@@ -1963,6 +1963,8 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   z-index:20;
 }
 .term-dead-message{line-height:1}
+/* the ended pane's two buttons read like a dialog's row: Close first, the
+   primary (New shell, Reconnect) last, only centred under the message */
 .term-dead-actions{display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:wrap}
 
 /* ---------- managed browser tab ---------- */
@@ -2464,8 +2466,10 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   font:var(--fs-sm)/1.55 var(--mono);tab-size:2;
 }
 .system-prompt-reset{flex:0 0 auto;margin-top:0;white-space:nowrap}
+/* the same row as .settings-actions and .notify-actions - the primary at the
+   start, the status after it - under the rule that closes the editor */
 .system-prompt-actions{
-  display:flex;align-items:center;justify-content:space-between;gap:10px;
+  display:flex;align-items:center;justify-content:flex-start;gap:10px;
   margin-top:12px;padding-top:12px;border-top:1px solid var(--line);
 }
 .system-prompt-status{min-width:0;overflow-wrap:anywhere}
@@ -2699,6 +2703,13 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   padding:18px;box-shadow:0 30px 80px -20px rgba(0,0,0,.9);
 }
 .modal h2{display:flex;align-items:center;gap:8px}
+/* The row reads left to right from the least to the most consequential
+   press: Cancel or Close first, any plain secondary verb next (Refresh,
+   Terminal, Use shared draft), and the primary - the verb the dialog exists
+   for, the one Enter runs - last. A verb that undoes or destroys without
+   being that purpose (Reset, Revert, Stop remaining work) stands apart at
+   the row's start, so it never sits beside the primary: each such button
+   is pushed over below, never given a second row or its own alignment. */
 .modal .m-btns{display:flex;gap:8px;justify-content:flex-end;margin-top:14px}
 /* .modal-copy is the shared body voice (see .copy in the settings section);
    .hint stays the smaller note that belongs to a field. The copy owns the gap
@@ -2708,7 +2719,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 /* the thing a confirm is about - a task or backend name - on its own line
    above the copy; a long automatic title wraps rather than overflowing */
 .modal-subject{color:var(--txt);font-weight:600;overflow-wrap:anywhere}
-.engine-defaults-modal #ed-reset{margin-right:auto}
+.engine-defaults-modal #ed-reset,.session-request-modal .sr-cancel{margin-right:auto}
 .engine-pick{display:grid;grid-template-columns:repeat(auto-fit,minmax(90px,1fr));gap:8px;margin-bottom:10px}
 .engine-pick .ep{
   flex:1;padding:11px 10px;border-radius:var(--r-md);border:1px solid var(--line2);cursor:pointer;
@@ -3018,7 +3029,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   .system-prompt-section-head{display:grid;grid-template-columns:minmax(0,1fr)}
   .system-prompt-reset{justify-self:start;height:32px}
   .system-prompt-textarea{line-height:1.45}
-  .system-prompt-actions{display:grid;grid-template-columns:minmax(0,1fr) auto}
+  .system-prompt-actions{display:grid;grid-template-columns:auto minmax(0,1fr)}
   .system-prompt-actions .btn{height:34px}
   /* Search on a phone: labels take their own line, the location line wraps
      under the session identity, and the kind column narrows. */

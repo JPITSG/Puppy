@@ -3585,7 +3585,7 @@ const vncSection=card.children[5],vnc=vncSection.children[1];
 const vncReset=vncSection.children[0].children[1];
 const spawnSection=card.children[6],spawn=spawnSection.children[1];
 const spawnReset=spawnSection.children[0].children[1];
-const actions=card.children[7],status=actions.children[0],save=actions.children[1];
+const actions=card.children[7],save=actions.children[0],status=actions.children[1];
 const before={custom:custom.value,remoteWorkspace:remoteWorkspace.value,
   browser:browser.value,terminal:terminal.value,vnc:vnc.value,spawn:spawn.value,
   status:status.textContent,

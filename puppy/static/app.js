@@ -16928,12 +16928,13 @@ class SessionView {
     linkifyInto(pre, inp.command || inp.file_path && (inp.file_path + (inp.content ? "\n---\n" + String(inp.content).slice(0, 800) : ""))
       || JSON.stringify(inp, null, 2).slice(0, 1500));
     this.approvalEl.appendChild(pre);
+    /* the answers in one order: Allow, then the engine's wider ways of
+       allowing beside it, and Deny last - the refusal ends the strip the way
+       Remove ends a backend row, never splitting the allows */
     const btns = el("div", "ap-btns");
     const allow = el("button", "btn btn-ok btn-sm", "Allow");
     allow.onclick = () => this.respondApproval(req, "allow");
-    const deny = el("button", "btn btn-danger btn-sm", "Deny");
-    deny.onclick = () => this.respondApproval(req, "deny");
-    btns.appendChild(allow); btns.appendChild(deny);
+    btns.appendChild(allow);
     for (const sug of req.suggestions || []) {
       if (sug.type === "setMode" && sug.mode) {
         const b = el("button", "btn btn-sm", `Allow + switch to ${sug.mode}`);
@@ -16946,6 +16947,9 @@ class SessionView {
         btns.appendChild(b);
       }
     }
+    const deny = el("button", "btn btn-danger btn-sm", "Deny");
+    deny.onclick = () => this.respondApproval(req, "deny");
+    btns.appendChild(deny);
     this.approvalEl.appendChild(btns);
     this.updateApprovalControl();
     this.scrollBottom(true);
@@ -18276,8 +18280,9 @@ class TermView {
     const close = el("button", "btn term-dead-close", "Close shell");
     close.type = "button";
     close.onclick = () => closeTab(this.tab.id);
-    actions.appendChild(fresh);
+    /* a dialog's row: the way out first, the primary last */
     actions.appendChild(close);
+    actions.appendChild(fresh);
     d.appendChild(actions);
     /* Anchored to the terminal box, not the padded view, so the stack is
        centred on the black rectangle the user is actually looking at. */
@@ -19291,8 +19296,9 @@ class BrowserView {
     const close = el("button", "btn", "Close");
     close.type = "button";
     close.onclick = () => closeTab(this.tab.id);
-    actions.appendChild(again);
+    /* a dialog's row: the way out first, the primary last */
     actions.appendChild(close);
+    actions.appendChild(again);
     dead.appendChild(actions);
     this.stage.appendChild(dead);
   }
@@ -20029,8 +20035,9 @@ class VncView {
     const close = el("button", "btn", "Close");
     close.type = "button";
     close.onclick = () => closeTab(this.tab.id);
-    actions.appendChild(again);
+    /* a dialog's row: the way out first, the primary last */
     actions.appendChild(close);
+    actions.appendChild(again);
     dead.appendChild(actions);
     this.stage.appendChild(dead);
     this.renderIdentity();
@@ -22431,14 +22438,16 @@ class SettingsView {
     spawnSection.appendChild(spawnText);
     card.appendChild(spawnSection);
 
+    /* the card's row like every other card's: the primary first, its
+       status beside it */
     const actions = el("div", "system-prompt-actions");
     const status = el("span", "system-prompt-status", "Ready");
     status.setAttribute("role", "status");
     status.setAttribute("aria-live", "polite");
     const save = el("button", "btn btn-pri btn-sm", "Save prompt");
     save.type = "button";
-    actions.appendChild(status);
     actions.appendChild(save);
+    actions.appendChild(status);
     card.appendChild(actions);
 
     const nodeByBid = bid => nodes.find(node => node.bid === bid);
@@ -24734,7 +24743,7 @@ function modalWorkspaceLink(bid, session) {
     <p class="hint ws-nolink hidden">This console has no link record for this session,
     so it cannot sync it. The controller that created the link manages synchronization.</p>
     <div class="m-btns">
-      <button type="button" class="btn" id="wsl-close">Cancel</button>
+      <button type="button" class="btn" id="wsl-close">Close</button>
       <button type="button" class="btn hidden" id="wsl-term">Terminal</button>
       <button type="button" class="btn btn-pri" id="wsl-sync">Sync now</button>
     </div>`, "ws-link-modal", () => navigationSessionDialog(bid, session.id, modalWorkspaceLink));
@@ -25284,12 +25293,16 @@ function openSessionHash() {
 }
 window.addEventListener("hashchange", openSessionHash);
 
+/* The request sheet's row is the Git sheet's: Close, then Refresh (a read,
+   not the dialog's purpose, so a plain button), with Stop remaining work
+   on its own side at the start like Revert - the destructive verb never
+   stands beside the buttons that only read. */
 async function modalSessionRequest(record) {
   const {m, close} = modal(`<h2>${record.workflow ? "Session workflow" : "Session request"}</h2>
     <div class="session-request-detail"><p class="modal-copy">Loading…</p></div>
-    <div class="m-btns"><button type="button" class="btn sr-close">Close</button>
-    <button type="button" class="btn btn-danger sr-cancel" disabled>Stop remaining work</button>
-    <button type="button" class="btn btn-pri sr-refresh">Refresh</button></div>`, "session-request-modal", () => modalSessionRequest(record));
+    <div class="m-btns"><button type="button" class="btn btn-danger sr-cancel" disabled>Stop remaining work</button>
+    <button type="button" class="btn sr-close">Close</button>
+    <button type="button" class="btn sr-refresh">Refresh</button></div>`, "session-request-modal", () => modalSessionRequest(record));
   m.querySelector(".sr-close").onclick = close;
   let targetBid = 0;
   const detail = m.querySelector(".session-request-detail");
