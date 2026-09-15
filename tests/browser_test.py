@@ -3478,8 +3478,8 @@ def check_system_prompt_settings(ui_source: str, css_source: str) -> None:
     assert ".system-prompt-section+.system-prompt-section{" in css_source
     assert ".system-prompt-section-head{" in css_source
     assert ".system-prompt-textarea{" in css_source
-    assert ".config-textarea{display:block;height:72px;min-height:72px;" \
-           "max-height:72px;resize:none}" in css_source
+    assert ".config-textarea{display:block;height:76px;min-height:76px;" \
+           "max-height:76px;resize:none}" in css_source
     assert "system-prompt-textarea::-webkit-resizer" not in css_source
     assert 'custom.className = "system-prompt-textarea config-textarea";' in ui_source
     assert 'remoteText.className = "system-prompt-textarea config-textarea";' in ui_source
@@ -3784,7 +3784,7 @@ def check_opencode_chat_models(ui_source: str, css_source: str) -> None:
 
     mark_source = (BASE / "puppy" / "static" / "vendor" / "opencode.svg").read_text()
     assert 'viewBox="0 0 31 20"' in mark_source
-    assert 'M0 0h15v20H0zM4 4h7v12H4zM19 0h12v4h-8v12h8v4H19z' in mark_source
+    assert 'M0 0h14v20H0zM4 4h6v12H4zM18 0h13v4h-9v12h9v4H18z' in mark_source
 
     start = ui_source.index("const PROVIDERS =")
     end = ui_source.index("\nfunction provIcon(", start)

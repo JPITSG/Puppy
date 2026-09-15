@@ -132,7 +132,9 @@ input[type=text],input[type=password],input[type=number],input[type=time],select
 input[type=text],input[type=password],input[type=number],input[type=time],select{
   height:var(--field-h);padding:0 10px;line-height:1.2;
 }
-textarea{padding:8px 10px}
+/* the same inset on every side: the first line sits as far below the
+   border as the text stands in from it */
+textarea{padding:10px}
 
 select{
   padding-right:30px;background-image:var(--select-arrow);background-repeat:no-repeat;
