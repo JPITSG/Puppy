@@ -3251,8 +3251,12 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
 .session-git-modal{--modal-w:var(--modal-w-editor)}
 .session-git-modal .form-error{margin-top:12px}
 .session-git-modal #session-git-revert{margin-right:auto}
-.session-git-section{margin-top:12px}
-.session-git-section .field-lbl{margin-bottom:5px;overflow-wrap:anywhere}
+/* the captions keep the facts' own step: from the last fact to the first
+   caption, and from a list to the next caption and from that caption to its
+   list, the same six pixels that stand between one fact and the next */
+.session-git-facts{margin-bottom:0}
+.session-git-section{margin-top:6px}
+.session-git-section .field-lbl{margin-bottom:6px;overflow-wrap:anywhere}
 .session-git-list{margin:0;max-height:32vh;overflow-wrap:anywhere;overflow-x:hidden}
 .sgl-group+.sgl-group{margin-top:8px}
 .sgl-kind{

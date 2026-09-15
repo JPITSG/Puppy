@@ -2207,6 +2207,12 @@ async def git_sheet_checks(a):
             reviewStep, factStep: parseFloat(style(facts).rowGap),
             reviewTitleStep, titleStep: facts.getBoundingClientRect().top - m.querySelector('h2').getBoundingClientRect().bottom,
             steps: rows.slice(1).map((box, i) => box.top - rows[i].bottom),
+            captionSteps: (() => {
+                const sections = Array.from(m.querySelectorAll('.session-git-section'));
+                const caps = sections.map(node => node.querySelector('.field-lbl').getBoundingClientRect());
+                const lists = sections.map(node => node.querySelector('.session-git-list').getBoundingClientRect());
+                return {first: caps[0].top - rows[rows.length - 1].bottom,
+                    above: caps[1].top - lists[0].bottom, below: lists[1].top - caps[1].bottom}; })(),
             stateOrange: style(state).color === warn,
             captions: Array.from(m.querySelectorAll('.session-git-section .field-lbl')).map(node => node.textContent),
             kinds: Array.from(m.querySelectorAll('.sgl-kind')).map(node => node.textContent),
@@ -2242,6 +2248,9 @@ async def git_sheet_checks(a):
     assert sheet["reviewStep"] == 6 and sheet["factStep"] == sheet["reviewStep"], sheet
     assert len(sheet["steps"]) == 3 and all(abs(step - sheet["reviewStep"]) < .5 for step in sheet["steps"]), sheet
     assert sheet["reviewTitleStep"] > 12 and abs(sheet["titleStep"] - sheet["reviewTitleStep"]) < .5, sheet
+    # the captions at that same step: Changes under the last fact, Unpushed
+    # commits under the first list and above its own
+    assert all(abs(step - sheet["reviewStep"]) < .5 for step in sheet["captionSteps"].values()), sheet["captionSteps"]
     assert sheet["captions"] == ["Changes · 3 · 1 staged, 1 unstaged, 1 untracked", "Unpushed commits · 1 · not on origin"], sheet
     assert sheet["kinds"] == ["Staged", "Unstaged", "Untracked"], sheet
     assert sheet["rows"] == [["modified", "src/planner.css"], ["modified", "src/beds.js"], ["notes/spring.md"]], sheet
