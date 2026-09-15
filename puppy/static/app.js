@@ -6272,18 +6272,22 @@ const SESSION_GIT_KIND_NAMES = {
    there is followed by a read, because what it managed is unknown. */
 function modalSessionGit(bid, s) {
   const { m, close } = modal(`<h2>Git repository</h2>
+    <p class="modal-copy session-git-intro"></p>
     <div class="ws-facts session-git-facts"></div>
     <div class="session-git-body"></div>
     <p class="form-error hidden" role="alert"></p>
     <div class="m-btns"><button type="button" class="btn" id="session-git-close">Close</button>
       <button type="button" class="btn" id="session-git-refresh">Refresh</button></div>`,
     "session-git-modal", () => navigationSessionDialog(bid, s.id, modalSessionGit));
-  const facts = m.querySelector(".session-git-facts");
+  const intro = m.querySelector(".session-git-intro"), facts = m.querySelector(".session-git-facts");
   const body = m.querySelector(".session-git-body"), error = m.querySelector(".form-error");
   const buttons = m.querySelector(".m-btns");
   const closeButton = m.querySelector("#session-git-close");
   const refresh = m.querySelector("#session-git-refresh");
   const actions = backendSupportsSessionGitActions(bid);
+  /* the session and its directory under the title, as the agent-notes
+     editor names them */
+  intro.textContent = `${s.name || `Session ${s.id}`} · ${sessionLocationLabel(s, bid)}`;
   /* the row's record until the read answers, then the read's own */
   let record = s.git && typeof s.git === "object" ? s.git : null;
   let root = null, detail = null;
@@ -6300,7 +6304,7 @@ function modalSessionGit(bid, s) {
   const renderFacts = () => {
     facts.replaceChildren();
     /* the work tree's root, when it is not the session's own directory (the
-       sidebar row names that one), since the paths below are relative to it */
+       intro names that one), since the paths below are relative to it */
     if (root && root !== s.cwd) fact("Repository", root);
     const branch = sessionGitBranch(record);
     if (typeof branch === "string")

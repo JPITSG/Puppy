@@ -188,8 +188,9 @@ reading anywhere further up is never pulled away from it.
   yet, or could not read, keeps a faint mark with the reason in its label, and
   a repository whose state `git` refuses to read keeps the plain mark with
   `git`'s reason. Click a repository's mark to see exactly what is behind it:
-  the sheet names the branch, its upstream and how far ahead or behind it is,
-  the state that gives the mark its colour, and lists the changes themselves -
+  the sheet names the session and its directory, the branch, its upstream and
+  how far ahead or behind it is, the state that gives the mark its colour, and
+  lists the changes themselves -
   every path grouped as `git status` groups them (staged, unstaged, untracked,
   conflicts) with what `git` would do with it - and every unpushed commit with
   its hash, subject, author and time (the first 500 paths and 200 commits,

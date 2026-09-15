@@ -153,9 +153,10 @@ The console opens the sheet from a repository's mark, which is a button
 (role `button`, focusable, Enter or Space) only where the node advertises
 `session-git-detail`; every other mark - no repository, not looked at yet,
 could not be checked - stays a labelled image, and a press on it is a press
-on the row. The sheet stands in the review sheet's voice, its facts on that
-sheet's column and at its steps - the work tree's root when the session sits
-below it, the branch (`main`, `main · no commits yet`, `HEAD
+on the row. The sheet names the session and its directory under its title,
+as the agent-notes editor does and at that editor's steps, then stands in the
+review sheet's voice, its facts on that sheet's column and at its steps - the
+work tree's root when the session sits below it, the branch (`main`, `main · no commits yet`, `HEAD
 detached at 3f9c2a1`), the upstream with `up to date`, `1 ahead`, `2 behind`
 or `1 ahead, 2 behind` (`not set` with remotes but no upstream, `no remote`
 without any), the State in the mark's own tone (`Uncommitted and unpushed

@@ -3302,10 +3302,13 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
 .task-review-resolve,.task-review-fold{margin:0 0 6px}
 .task-review-resolve-note,.task-review-fold-note{margin:0 0 10px}
 .task-review-resolve-note .note-para+.note-para{margin-top:4px}
-/* the Git sheet: the repository's facts in the review sheet's voice and
-   laid out as that sheet is (a flex column, so its title stands the same
-   step above the first fact), then the paths and the commits behind the
-   mark's counts on the review sheet's list surface. Each list is captioned
+/* the Git sheet: the session and its directory under the title, in the
+   agent-notes editor's intro voice and at its steps (the body copy's twelve
+   pixels above and below; the sheet is a flex column, whose margins add
+   rather than collapse, so the facts carry none of their own), then the
+   repository's facts in the review sheet's voice and on its column, then
+   the paths and the commits behind the mark's counts on the review sheet's
+   list surface. Each list is captioned
    in the field voice with its count after a separator; the paths
    are grouped the way git's own status groups them - a kicker per kind,
    the verb git would use in the help colour, the path at full strength,
@@ -3322,7 +3325,7 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
 /* the captions keep the facts' own step: from the last fact to the first
    caption, and from a list to the next caption and from that caption to its
    list, the same six pixels that stand between one fact and the next */
-.session-git-facts{margin-bottom:0}
+.session-git-facts{margin:0}
 .session-git-section{margin-top:6px}
 .session-git-section .field-lbl{margin-bottom:6px;overflow-wrap:anywhere}
 .session-git-list{margin:0;max-height:32vh;overflow-wrap:anywhere;overflow-x:hidden}
