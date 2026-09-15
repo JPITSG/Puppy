@@ -67,10 +67,10 @@ DEMO_GIT = {"/home/mira/projects/" + folder: dict(record) for folder, record in 
 # What the sheet lists behind those counts, per project.
 DEMO_GIT_DETAIL = {"/home/mira/projects/" + folder: dict(detail) for folder, detail in (
     ("harbor", {"head": "9b1d2e4c" * 5, "upstream": "origin/main", "ahead": 0, "behind": 0,
-                "remotes": ["origin"], "paths": [], "commits": [],
+                "remotes": ["origin"], "push_to": "origin/main", "paths": [], "commits": [],
                 "more_paths": 0, "more_commits": 0}),
     ("garden", {"head": "4f2c9ab7" * 5, "upstream": "origin/main", "ahead": 1, "behind": 2,
-                "remotes": ["origin"],
+                "remotes": ["origin"], "push_to": "origin/main",
                 "paths": [{"kind": "staged", "code": "M.", "path": "src/planner.css"},
                           {"kind": "unstaged", "code": ".M", "path": "src/beds.js"},
                           {"kind": "untracked", "code": "??", "path": "notes/spring.md"}],
@@ -78,7 +78,8 @@ DEMO_GIT_DETAIL = {"/home/mira/projects/" + folder: dict(detail) for folder, det
                              "author": "Mira Holt", "at": time.time() - 7200}],
                 "more_paths": 0, "more_commits": 0}),
     ("atlas", {"head": "c07e5a19" * 5, "upstream": None, "ahead": None, "behind": None,
-               "remotes": [], "paths": [], "commits": [], "more_paths": 0, "more_commits": 0}))}
+               "remotes": [], "push_to": None, "paths": [], "commits": [],
+               "more_paths": 0, "more_commits": 0}))}
 
 
 def demo_git(cwd, listing=False):
@@ -2148,15 +2149,20 @@ async def git_mark_checks(a, b):
 
 async def git_sheet_checks(a):
     """The sheet an orange mark opens, by a real click: the session's facts
-    in the linked-workspace sheet's voice with the State in the mark's own
-    tone, the paths grouped by kind with git's verbs and the unpushed commit
-    on the review sheet's list surface, read over the node's own route;
-    Refresh reading again; Back closing it and Forward opening a fresh one;
-    and, on a phone, the commit's author and time stepping under its
-    subject with nothing pushed off the screen. The type is the console's:
-    the fact labels and the kind kickers on one kicker step, the lists in
-    the one monospace, the captions in the field voice; the facts stand on
-    the review sheet's column, one row under the next at its step."""
+    in the review sheet's voice with the State in the mark's own tone, the
+    paths grouped by kind with git's verbs and the unpushed commit on the
+    review sheet's list surface, read over the node's own route; Refresh
+    reading again; Back closing it and Forward opening a fresh one; and, on
+    a phone, the commit's author and time stepping under its subject with
+    nothing pushed off the screen. The type is the console's: the fact
+    labels and the captions in the field voice, the kind kickers on the
+    kicker step, the lists in the one monospace; the facts stand on the
+    review sheet's column, its own step under the title and one row under
+    the next at its step. Then the actions: Revert on its own side of the
+    row and Push, the primary, at its end on the desktop, two lines of two
+    on a phone with every word fitting; a real click on Push and one on
+    Revert through its confirm, each over the node's route, taking its
+    count off the row's mark and its button off the row with a toast."""
     garden = next(s for s in db.list_sessions() if s["cwd"].endswith("/garden"))
     reads = "performance.getEntriesByType('resource').filter(e => e.name.endsWith('/api/sessions/%d/git')).length" % garden["id"]
     active = await evaluate(a, "document.querySelector('.sess-item.active') ? document.querySelector('.sess-item.active').querySelector('.si-name').textContent : ''")
@@ -2175,23 +2181,31 @@ async def git_sheet_checks(a):
         const computed = (prop, value) => { probe.style[prop] = value; return getComputedStyle(probe)[prop]; };
         const warn = computed('color', 'var(--warn)'), mono = computed('fontFamily', 'var(--mono)');
         const kicker = computed('fontSize', 'var(--fs-2xs)'), field = computed('fontSize', 'var(--fs-xs)');
+        const help = computed('color', 'var(--txt3)');
         probe.remove();
         const style = node => getComputedStyle(node);
-        /* the review sheet's fact column, as a probe: the step its rows keep */
-        const review = document.createElement('div'); review.className = 'ws-facts task-review-facts';
+        /* the review sheet, as a probe: the step its rows keep and the step
+           from its title to the first of them */
+        const review = document.createElement('div'); review.className = 'modal task-review-modal';
+        review.innerHTML = '<h2>Review task</h2><div class="ws-facts task-review-facts"><div class="ws-fact"><span class="field-lbl">Task</span><span class="wsf-v">x</span></div></div>';
         document.body.appendChild(review);
-        const reviewStep = parseFloat(style(review).rowGap); review.remove();
+        const reviewFacts = review.querySelector('.ws-facts');
+        const reviewStep = parseFloat(style(reviewFacts).rowGap);
+        const reviewTitleStep = reviewFacts.getBoundingClientRect().top - review.querySelector('h2').getBoundingClientRect().bottom;
+        const reviewLabel = style(review.querySelector('.field-lbl')).fontSize;
+        review.remove();
         const facts = m.querySelector('.session-git-facts');
         const rows = Array.from(m.querySelectorAll('.ws-fact')).map(row => row.getBoundingClientRect());
-        const label = m.querySelector('.wsf-l'), caption = m.querySelector('.session-git-section .field-lbl');
+        const label = m.querySelector('.ws-fact .field-lbl'), caption = m.querySelector('.session-git-section .field-lbl');
         const kind = m.querySelector('.sgl-kind'), list = m.querySelector('.session-git-list');
-        const state = Array.from(m.querySelectorAll('.ws-fact')).find(row => row.querySelector('.wsf-l').textContent === 'State').querySelector('.wsf-v');
+        const state = Array.from(m.querySelectorAll('.ws-fact')).find(row => row.querySelector('.field-lbl').textContent === 'State').querySelector('.wsf-v');
         const staged = m.querySelector('.sgl-group .sgl-rows');
         const what = staged.children[0].getBoundingClientRect(), path = staged.children[1].getBoundingClientRect();
         const commit = m.querySelector('.sgl-commits');
-        return {title: m.querySelector('h2').textContent, intro: m.querySelector('.session-git-intro').textContent,
-            facts: Array.from(m.querySelectorAll('.ws-fact')).map(row => [row.querySelector('.wsf-l').textContent, row.querySelector('.wsf-v').textContent]),
+        return {title: m.querySelector('h2').textContent, intro: m.querySelector('.session-git-intro'),
+            facts: Array.from(m.querySelectorAll('.ws-fact')).map(row => [row.querySelector('.field-lbl').textContent, row.querySelector('.wsf-v').textContent]),
             reviewStep, factStep: parseFloat(style(facts).rowGap),
+            reviewTitleStep, titleStep: facts.getBoundingClientRect().top - m.querySelector('h2').getBoundingClientRect().bottom,
             steps: rows.slice(1).map((box, i) => box.top - rows[i].bottom),
             stateOrange: style(state).color === warn,
             captions: Array.from(m.querySelectorAll('.session-git-section .field-lbl')).map(node => node.textContent),
@@ -2203,32 +2217,45 @@ async def git_sheet_checks(a):
             subjectTop: commit.children[1].getBoundingClientRect().top,
             listRight: list.getBoundingClientRect().right,
             width: m.getBoundingClientRect().width,
-            labelKicker: style(label).fontSize === kicker && style(label).textTransform === 'uppercase',
+            labelField: style(label).fontSize === field && style(label).fontSize === reviewLabel &&
+                style(label).textTransform === 'uppercase' && parseFloat(style(label).marginBottom) === 0,
             kindKicker: style(kind).fontSize === kicker && style(kind).textTransform === 'uppercase' &&
-                style(kind).letterSpacing === style(label).letterSpacing && style(kind).color === style(label).color,
+                style(kind).color === help,
             captionField: style(caption).fontSize === field && style(caption).textTransform === 'uppercase',
             noteCase: style(caption.querySelector('.field-optional')).textTransform === 'none',
             listMono: style(list).fontFamily === mono, factMono: style(state).fontFamily === mono,
             columns: path.left > what.right && Math.abs(path.top - what.top) < 1,
-            buttons: Array.from(m.querySelectorAll('.m-btns .btn')).map(b => [b.textContent, b.disabled]),
+            buttons: Array.from(m.querySelectorAll('.m-btns .btn')).map(b => [b.textContent, b.disabled, b.classList.contains('btn-pri'), b.classList.contains('btn-danger')]),
+            row: (() => { const row = m.querySelector('.m-btns').getBoundingClientRect();
+                const boxes = Array.from(m.querySelectorAll('.m-btns .btn')).map(b => b.getBoundingClientRect());
+                return {revertAtStart: Math.abs(boxes[0].left - row.left) < 1, pushAtEnd: Math.abs(boxes[3].right - row.right) < 1,
+                    oneLine: boxes.every(b => Math.abs(b.top - boxes[0].top) < 1),
+                    apart: boxes[1].left - boxes[0].right > 100}; })(),
             focused: document.activeElement === m.querySelector('#session-git-close')};
     })()""")
-    assert sheet["title"] == "Git repository" and sheet["intro"] == "Garden planner · /home/mira/projects/garden", sheet
+    assert sheet["title"] == "Git repository" and sheet["intro"] is None, sheet
     assert sheet["facts"] == [["Branch", "main"], ["Upstream", "origin/main · 1 ahead, 2 behind"],
                               ["State", "Uncommitted and unpushed work"], ["Checked", sheet["facts"][3][1]]], sheet
     assert sheet["facts"][3][1] and sheet["stateOrange"], sheet
-    # the four facts one under the next at the review sheet's own step
+    # the four facts one under the next at the review sheet's own step, and
+    # the title the same step above the first of them as the review's is
     assert sheet["reviewStep"] == 6 and sheet["factStep"] == sheet["reviewStep"], sheet
     assert len(sheet["steps"]) == 3 and all(abs(step - sheet["reviewStep"]) < .5 for step in sheet["steps"]), sheet
-    assert sheet["captions"] == ["Changes 3 · 1 staged, 1 unstaged, 1 untracked", "Unpushed commits 1 · not on origin"], sheet
+    assert sheet["reviewTitleStep"] > 12 and abs(sheet["titleStep"] - sheet["reviewTitleStep"]) < .5, sheet
+    assert sheet["captions"] == ["Changes · 3 · 1 staged, 1 unstaged, 1 untracked", "Unpushed commits · 1 · not on origin"], sheet
     assert sheet["kinds"] == ["Staged", "Unstaged", "Untracked"], sheet
     assert sheet["rows"] == [["modified", "src/planner.css"], ["modified", "src/beds.js"], ["notes/spring.md"]], sheet
     assert sheet["commit"][:2] == ["4f2c9ab", "Shade map for the north beds"] and sheet["commit"][2].startswith("Mira Holt · "), sheet
     assert abs(sheet["metaTop"] - sheet["subjectTop"]) < 1 and sheet["listRight"] - sheet["metaRight"] > 8, sheet
     assert sheet["width"] == 640, sheet
-    assert sheet["labelKicker"] and sheet["kindKicker"] and sheet["captionField"] and sheet["noteCase"], sheet
+    assert sheet["labelField"] and sheet["kindKicker"] and sheet["captionField"] and sheet["noteCase"], sheet
     assert sheet["listMono"] and sheet["factMono"] and sheet["columns"], sheet
-    assert sheet["buttons"] == [["Close", False], ["Refresh", False]] and sheet["focused"], sheet
+    # the row: Revert alone at the start, Close, Refresh and the primary
+    # Push together at the end, on one line
+    assert sheet["buttons"] == [["Revert", False, False, True], ["Close", False, False, False],
+                                ["Refresh", False, False, False], ["Push", False, True, False]], sheet
+    assert all(sheet["row"].values()), sheet["row"]
+    assert sheet["focused"], sheet
     # a press on the mark opened the sheet and nothing else: the row it sits
     # on was not selected by it
     assert await evaluate(a, "document.querySelector('.sess-item.active') ? document.querySelector('.sess-item.active').querySelector('.si-name').textContent : ''") == active
@@ -2253,11 +2280,26 @@ async def git_sheet_checks(a):
     phone = await evaluate(a, """(() => {
         const m = document.querySelector('.session-git-modal'), commit = m.querySelector('.sgl-commits');
         const meta = commit.lastElementChild.getBoundingClientRect(), subject = commit.children[1].getBoundingClientRect();
+        const row = m.querySelector('.m-btns').getBoundingClientRect();
+        const buttons = Array.from(m.querySelectorAll('.m-btns .btn'));
+        const boxes = buttons.map(b => b.getBoundingClientRect());
         return {under: meta.top >= subject.bottom - 1 && Math.abs(meta.left - subject.left) < 1,
             fits: m.getBoundingClientRect().right <= innerWidth && document.documentElement.scrollWidth <= innerWidth,
-            listFits: m.querySelector('.session-git-list').scrollWidth <= m.querySelector('.session-git-list').clientWidth};
+            listFits: m.querySelector('.session-git-list').scrollWidth <= m.querySelector('.session-git-list').clientWidth,
+            names: buttons.map(b => b.textContent),
+            /* two lines of two: Revert and Close, then Refresh and Push, each
+               pair sharing a line and the row's two edges, the second line
+               below the first, every word inside its button */
+            lines: [Math.abs(boxes[0].top - boxes[1].top) < 1, Math.abs(boxes[2].top - boxes[3].top) < 1, boxes[2].top > boxes[0].bottom],
+            edges: [Math.abs(boxes[0].left - row.left) < 1, Math.abs(boxes[1].right - row.right) < 1,
+                    Math.abs(boxes[2].left - row.left) < 1, Math.abs(boxes[3].right - row.right) < 1],
+            widths: boxes.map(b => Math.round(b.width)),
+            words: buttons.every(b => b.scrollWidth <= b.clientWidth)};
     })()""")
     assert phone["under"] and phone["fits"] and phone["listFits"], phone
+    assert phone["names"] == ["Revert", "Close", "Refresh", "Push"], phone
+    assert all(phone["lines"]) and all(phone["edges"]) and phone["words"], phone
+    assert len(set(phone["widths"])) == 1 and phone["widths"][0] > 100, phone
     button = await evaluate(a, "(() => { const r = document.querySelector('#session-git-close').getBoundingClientRect(); return {x: r.x + r.width / 2, y: r.y + r.height / 2}; })()")
     for kind in ("mousePressed", "mouseReleased"):
         await a.call("Input.dispatchMouseEvent", {"type": kind, "x": button["x"], "y": button["y"],
@@ -2265,9 +2307,97 @@ async def git_sheet_checks(a):
     await until(a, "!document.querySelector('.session-git-modal')")
     await a.call("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 900,
                  "deviceScaleFactor": 1, "mobile": False}, session=a.page_session)
+
+    # The actions, by real clicks, against a node whose push and revert are
+    # stubbed to move the invented record the way the real ones move a
+    # repository's: the route, the guards and the fresh look are the real
+    # ones. Push takes the commit off the row's mark and the button off the
+    # row, and says so in a toast.
+    record, listing = DEMO_GIT[garden["cwd"]], DEMO_GIT_DETAIL[garden["cwd"]]
+    kept, kept_listing = dict(record), dict(listing)
+    clicks = "performance.getEntriesByType('resource').filter(e => /\\/api\\/sessions\\/%d\\/git\\/(push|revert)$/.test(e.name)).length" % garden["id"]
+    mark = "Array.from(document.querySelectorAll('.sess-item')).find(row => row.querySelector('.si-name').textContent === 'Garden planner').querySelector('.si-git').getAttribute('aria-label')"
+
+    def fake_push(root):
+        assert root == garden["cwd"], root
+        record["unpushed"] = 0
+        listing.update({"commits": [], "ahead": 0})
+        return {"to": "origin/main"}
+
+    def fake_revert(root, cwd):
+        assert (root, cwd) == (garden["cwd"], garden["cwd"]), (root, cwd)
+        record.update({"changes": 0, "staged": 0, "unstaged": 0, "untracked": 0})
+        listing["paths"] = []
+
+    async def press(selector):
+        spot = await evaluate(a, "(() => { const r = document.querySelector(%s).getBoundingClientRect(); return {x: r.x + r.width / 2, y: r.y + r.height / 2}; })()" % json.dumps(selector))
+        for kind in ("mousePressed", "mouseReleased"):
+            await a.call("Input.dispatchMouseEvent", {"type": kind, "x": spot["x"], "y": spot["y"],
+                         "button": "left", "clickCount": 1}, session=a.page_session)
+
+    try:
+        await evaluate(a, "modalSessionGit(0, state.sessions.find(s => s.id === %d)); true" % garden["id"])
+        await until(a, "!!document.querySelector('.session-git-modal') && !document.querySelector('.session-git-modal').hasAttribute('aria-busy')")
+        assert await evaluate(a, mark) == "Git repository · 3 uncommitted changes · 1 unpushed commit · open details"
+        with patch.object(session_git, "_push", fake_push), patch.object(session_git, "_revert", fake_revert):
+            await press("#session-git-push")
+            await until(a, clicks + " === 1 && !document.querySelector('.session-git-modal').hasAttribute('aria-busy')")
+            after = await evaluate(a, """(() => { const m = document.querySelector('.session-git-modal');
+                return {buttons: Array.from(m.querySelectorAll('.m-btns .btn')).map(b => b.textContent),
+                    caption: m.querySelectorAll('.session-git-section .field-lbl')[1].textContent,
+                    state: Array.from(m.querySelectorAll('.ws-fact')).find(row => row.querySelector('.field-lbl').textContent === 'State').querySelector('.wsf-v').textContent,
+                    toast: (document.querySelector('#toasts .toast:last-child .toast-text') || {}).textContent,
+                    error: m.querySelector('.form-error').classList.contains('hidden'),
+                    focused: document.activeElement === m.querySelector('#session-git-close')}; })()""")
+            assert after["buttons"] == ["Revert", "Close", "Refresh"], after
+            assert after["caption"] == "Unpushed commits · 0" and after["state"] == "Uncommitted work", after
+            assert after["toast"] == "Pushed 1 commit to origin/main" and after["error"] and after["focused"], after
+            assert await evaluate(a, mark) == "Git repository · 3 uncommitted changes · nothing to push · open details"
+            # Revert asks first - a destructive confirm, Cancel focused - and
+            # its Cancel sends nothing; the confirm's Revert does the rest
+            await press("#session-git-revert")
+            await until(a, "document.querySelectorAll('.modal').length === 2 && document.activeElement && document.activeElement.id === 'mc-no'")
+            confirm = await evaluate(a, """(() => { const m = document.querySelectorAll('.modal')[1];
+                return {title: m.querySelector('h2').textContent, subject: m.querySelector('.modal-subject').textContent,
+                    copy: m.querySelector('.modal-copy:not(.modal-subject)').textContent,
+                    verb: m.querySelector('#mc-yes').textContent, red: m.querySelector('#mc-yes').classList.contains('btn-danger')}; })()""")
+            assert confirm["title"] == "Revert 3 changes?" and confirm["subject"] == "/home/mira/projects/garden", confirm
+            assert confirm["copy"].startswith("Every uncommitted change in the work tree on main is discarded: 1 staged, 1 unstaged, 1 untracked."), confirm
+            assert confirm["verb"] == "Revert" and confirm["red"], confirm
+            await press("#mc-no")
+            await until(a, "document.querySelectorAll('.modal').length === 1")
+            assert await evaluate(a, clicks) == 1
+            await press("#session-git-revert")
+            await until(a, "document.querySelectorAll('.modal').length === 2")
+            await press("#mc-yes")
+            await until(a, clicks + " === 2 && document.querySelectorAll('.modal').length === 1 && !document.querySelector('.session-git-modal').hasAttribute('aria-busy')")
+            after = await evaluate(a, """(() => { const m = document.querySelector('.session-git-modal');
+                return {buttons: Array.from(m.querySelectorAll('.m-btns .btn')).map(b => b.textContent),
+                    caption: m.querySelectorAll('.session-git-section .field-lbl')[0].textContent,
+                    state: Array.from(m.querySelectorAll('.ws-fact')).find(row => row.querySelector('.field-lbl').textContent === 'State').querySelector('.wsf-v').textContent,
+                    empty: Array.from(m.querySelectorAll('.sgl-empty')).map(node => node.textContent),
+                    toast: (document.querySelector('#toasts .toast:last-child .toast-text') || {}).textContent}; })()""")
+            assert after["buttons"] == ["Close", "Refresh"], after
+            assert after["caption"] == "Changes · 0" and after["state"] == "Nothing to commit or push", after
+            assert after["empty"] == ["Nothing to commit", "Nothing to push"], after
+            assert after["toast"] == "Reverted 3 changes", after
+            assert await evaluate(a, mark) == "Git repository · nothing to commit or push · open details"
+        await press("#session-git-close")
+        await until(a, "!document.querySelector('.session-git-modal')")
+    finally:
+        # the invented heads-up is put back for the lanes after this one
+        record.clear()
+        record.update(kept)
+        listing.clear()
+        listing.update(kept_listing)
+        session_git._store(garden["cwd"], demo_git(garden["cwd"]))
+        runner.broadcast_sessions()
+    await until(a, mark + " === 'Git repository · 3 uncommitted changes · 1 unpushed commit · open details'")
     print("PASS: the Git sheet opened by a real click on the orange mark - facts, grouped paths and the "
           "unpushed commit in the console's own type, read over the node's route, read again by Refresh, "
-          "closed by Back and reopened fresh by Forward, and fitting a phone", flush=True)
+          "closed by Back and reopened fresh by Forward, and fitting a phone with its four buttons on two "
+          "lines; Push and Revert by real clicks over the node's routes, the confirm before a revert, "
+          "each taking its count off the mark and its button off the row with a toast", flush=True)
 
 
 async def checks(a, b, hub, capture=False):

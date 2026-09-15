@@ -194,8 +194,20 @@ reading anywhere further up is never pulled away from it.
   conflicts) with what `git` would do with it - and every unpushed commit with
   its hash, subject, author and time (the first 500 paths and 200 commits,
   the rest counted). It reads the repository afresh when opened and on
-  Refresh, and the mark follows what it finds. A mark that says "no
-  repository", "not checked yet" or "could not be checked" opens nothing.
+  Refresh, and the mark follows what it finds. The sheet also acts on the
+  two counts: **Push** appears while there are commits to push and somewhere
+  to push them - the branch's upstream, or the only remote, which the push
+  then makes its upstream - and sends them there (no force; a rejected push
+  reports `git`'s reason inline, and a push still running after five seconds
+  can be cancelled); **Revert** appears while there are uncommitted changes
+  and, after a confirmation that spells out what goes, discards every one
+  of them - tracked paths return to the last commit, untracked paths are
+  deleted, ignored files and nested repositories are left alone, and a merge
+  stopped on a conflict is abandoned. Both are refused while a turn is running
+  or queued in any session on that project, or while a task is being prepared
+  or applied to it, and a prompt sent to the session meanwhile waits for them.
+  A mark that says "no repository", "not checked yet" or "could not be
+  checked" opens nothing.
 - **Agent notes.** A mark on every session row shows whether its directory has
   an `AGENTS.md` or `CLAUDE.md`, and opens a small editor for exactly those two
   files.

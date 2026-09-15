@@ -173,6 +173,18 @@ SESSION_GIT_CAPABILITY = "session-git"
 # in the cache moves with the same look. A console makes a repository's
 # mark open its sheet only for nodes that advertise this.
 SESSION_GIT_DETAIL_CAPABILITY = "session-git-detail"
+# The sheet's two actions: POST /api/sessions/{sid}/git/push sends the
+# checked-out branch's commits where a push would go (its upstream, or the
+# one remote with the upstream set as it goes - the listing's additive
+# ``push_to`` names that target, null when there is none) and
+# POST /api/sessions/{sid}/git/revert discards every uncommitted change in
+# the work tree (tracked paths back to HEAD, untracked ones removed, ignored
+# ones kept). Both refuse while a turn runs or waits anywhere in the project
+# and answer the read's fresh ``git``/``root``/``detail`` plus ``pushed``
+# (``to``, ``commits``) or ``reverted`` (``changes``); a push honours the
+# operation-cancel header. A console offers Push and Revert only for nodes
+# that advertise this.
+SESSION_GIT_ACTIONS_CAPABILITY = "session-git-actions"
 # Node-owned pinned flags and session order. Drag-and-drop requires the
 # complete starting order and pin cohort as compare tokens.
 SESSION_PINNING_CAPABILITY = "session-pinning"
@@ -289,6 +301,7 @@ BASE_CAPABILITIES = (
     SESSION_AGENT_NOTES_CAPABILITY,
     SESSION_GIT_CAPABILITY,
     SESSION_GIT_DETAIL_CAPABILITY,
+    SESSION_GIT_ACTIONS_CAPABILITY,
     SESSION_PINNING_CAPABILITY,
     SESSION_ORDER_RECENCY_CAPABILITY,
     COMPLETION_EVENTS_CAPABILITY,

@@ -2744,7 +2744,8 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .workspace-pick .wp-sub{max-width:100%;font:var(--fs-2xs) var(--mono);color:var(--txt3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .scratch-note{margin-top:0}
 /* linked-workspace sheet; the review and Git sheets set their facts on the
-   same column with the same step between rows */
+   same column with the same step between rows, their labels in the field
+   voice rather than this sheet's kicker */
 .ws-link-modal .ws-facts,.task-review-facts,.session-git-facts{display:flex;flex-direction:column;gap:6px;margin:10px 0 4px}
 .ws-link-modal .m-btns{flex-wrap:wrap}
 .ws-link-modal .m-btns .btn{
@@ -2978,6 +2979,13 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   .modal .m-btns .btn{flex:1 1 0;min-width:0}
   .modal.ws-link-modal .m-btns{flex-direction:column}
   .modal.ws-link-modal .m-btns .btn{flex:0 0 auto}
+  /* the Git sheet's row: two or three buttons share one line, four take
+     two lines of two (Revert and Close, then Refresh and Push), each wide
+     enough for its word */
+  .session-git-modal .m-btns{flex-wrap:wrap}
+  .session-git-modal #session-git-revert{margin-right:0}
+  .session-git-modal .m-btns .btn:first-child:nth-last-child(4),
+  .session-git-modal .m-btns .btn:first-child:nth-last-child(4)~.btn{flex:1 1 calc(50% - 4px)}
   /* the address keeps its own line; port and protocol share the one below */
   .bind-fields{grid-template-columns:minmax(0,1fr) auto}
   .bind-fields>:first-child{grid-column:1/-1}
@@ -3203,11 +3211,12 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
    file list folds to a few lines first, the diff (what the
    review is about) keeps the most; the modal's own scrollbar remains the
    fallback for a viewport the fixed rows alone cannot fit. */
-.task-review-modal{--modal-w:var(--modal-w-wide);display:flex;flex-direction:column}
-.task-review-modal>*{flex:0 0 auto}
+.task-review-modal{--modal-w:var(--modal-w-wide)}
+.task-review-modal,.session-git-modal{display:flex;flex-direction:column}
+.task-review-modal>*,.session-git-modal>*{flex:0 0 auto}
 .task-review-modal .field-lbl{margin-bottom:5px}
-.task-review-facts .ws-fact{align-items:flex-start}
-.task-review-facts .field-lbl{flex:0 0 84px;margin-bottom:0}
+.task-review-facts .ws-fact,.session-git-facts .ws-fact{align-items:flex-start}
+.task-review-facts .field-lbl,.session-git-facts .field-lbl{flex:0 0 84px;margin-bottom:0}
 .task-review-files,.task-review-diff,.session-git-list{
   flex:0 1 auto;margin:0 0 10px;padding:10px;background:var(--panel2);
   border:1px solid var(--line2);border-radius:var(--r-sm);
@@ -3225,19 +3234,25 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
 .task-review-resolve,.task-review-fold{margin:0 0 6px}
 .task-review-resolve-note,.task-review-fold-note{margin:0 0 10px}
 .task-review-resolve-note .note-para+.note-para{margin-top:4px}
-/* the Git sheet: the repository's facts in the linked-workspace sheet's
-   voice, then the paths and the commits behind the mark's counts on the
-   review sheet's list surface. Each list is captioned in the field voice
-   with its count beside it, as close as a label's own control; the paths
+/* the Git sheet: the repository's facts in the review sheet's voice and
+   laid out as that sheet is (a flex column, so its title stands the same
+   step above the first fact), then the paths and the commits behind the
+   mark's counts on the review sheet's list surface. Each list is captioned
+   in the field voice with its count after a separator; the paths
    are grouped the way git's own status groups them - a kicker per kind,
    the verb git would use in the help colour, the path at full strength,
    the columns aligned within the group like git aligns its own - and a
    commit is its abbreviated hash, its subject and, in the help colour, who
-   made it and when, which steps under the subject on a phone. */
+   made it and when, which steps under the subject on a phone.
+   The button row holds Close and Refresh, and the two actions exactly while
+   they apply: Push, the primary, at the row's end, and Revert on its own
+   side at the start like the engine-defaults sheet's Reset, so the
+   destructive verb never stands beside the primary. */
 .session-git-modal{--modal-w:var(--modal-w-editor)}
 .session-git-modal .form-error{margin-top:12px}
+.session-git-modal #session-git-revert{margin-right:auto}
 .session-git-section{margin-top:12px}
-.session-git-modal .field-lbl{margin-bottom:5px;overflow-wrap:anywhere}
+.session-git-section .field-lbl{margin-bottom:5px;overflow-wrap:anywhere}
 .session-git-list{margin:0;max-height:32vh;overflow-wrap:anywhere;overflow-x:hidden}
 .sgl-group+.sgl-group{margin-top:8px}
 .sgl-kind{

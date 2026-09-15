@@ -4,10 +4,12 @@ tree, the work state read from real repositories (uncommitted paths,
 commits no remote holds, and every way git can decline to say), the
 listing behind those counts that the mark's sheet reads, the node's cache
 and worker, the focus refresh and the sheet's read on both authenticated
-runtimes, the re-check a finished prompt asks for - through the runner
-itself, with a task's prompt left out - the timer that paces it, and the
-guards around it. No engine, network or quota; ``git`` runs only on scratch
-repositories."""
+runtimes, the sheet's Push and Revert against a real bare remote - what
+they do to the tree, what they answer, what they refuse and the cancel of
+a push under way - the re-check a finished prompt asks for - through the
+runner itself, with a task's prompt left out - the timer that paces it,
+and the guards around it. No engine, network or quota; ``git`` runs only
+on scratch repositories."""
 from __future__ import annotations
 
 import asyncio
@@ -64,7 +66,7 @@ TREE = TEST_ROOT / "tree"
 os.environ["GIT_CEILING_DIRECTORIES"] = str(TREE)
 
 from aiohttp.test_utils import TestClient, TestServer  # noqa: E402
-from puppy import config, db, protocol, runner, session_git, session_tasks, workspaces  # noqa: E402
+from puppy import config, db, operations, protocol, runner, session_git, session_tasks, workspaces  # noqa: E402
 from puppy import web as webui  # noqa: E402
 from puppy.drivers import get_driver  # noqa: E402
 from backend.puppy_backend.app import build_app as backend_app  # noqa: E402
@@ -319,7 +321,7 @@ def listing() -> None:
     assert record["root"] == str(project.resolve()), record
     detail = record["detail"]
     assert detail == {"head": None, "upstream": None, "ahead": None, "behind": None,
-                      "remotes": [], "paths": [], "commits": [],
+                      "remotes": [], "push_to": None, "paths": [], "commits": [],
                       "more_paths": 0, "more_commits": 0}, detail
     # a plain inspection carries neither the root nor the listing, the cache
     # keeps neither, and the payload never sees them
@@ -366,6 +368,8 @@ def listing() -> None:
     assert len(detail["paths"]) == record["changes"]
     assert detail["remotes"] == ["origin"] and detail["upstream"] is None
     assert detail["ahead"] is None and detail["behind"] is None
+    # where a push would go without an upstream: the one remote there is
+    assert detail["push_to"] == "origin/main"
     assert len(detail["head"]) == 40 and record["unpushed"] == 2
     # the commits newest first, the subject one line however the message
     # was written, the author and the commit time
@@ -379,7 +383,7 @@ def listing() -> None:
     git(project, "push", "-q", "-u", "origin", "main")
     detail = session_git.inspect(str(project), listing=True)["detail"]
     assert detail["upstream"] == "origin/main" and (detail["ahead"], detail["behind"]) == (0, 0)
-    assert detail["commits"] == []
+    assert detail["commits"] == [] and detail["push_to"] == "origin/main"
     # ahead of it again - two commits written past the index, so the staged
     # work stays staged - and the bounds: what they cut is counted
     for subject in ("three", "four"):
@@ -408,7 +412,7 @@ def listing() -> None:
     git(project, "checkout", "-q", "--detach", "main")
     record = session_git.inspect(str(project), listing=True)
     assert record["branch"] is None and len(record["detail"]["head"]) == 40
-    assert record["detail"]["upstream"] is None
+    assert record["detail"]["upstream"] is None and record["detail"]["push_to"] is None
     # git's refusal: the root is still known, the listing is not
     refused = TREE / "refused"
     record = session_git.inspect(str(refused), listing=True)
@@ -707,6 +711,7 @@ async def api_contract(factory) -> None:
                     assert response.status == 503
                 finally:
                     app["puppy_snapshot_busy"] = None
+            await actions(client, headers, app)
             if worker is not None:
                 try:
                     await worker.__anext__()
@@ -718,7 +723,234 @@ async def api_contract(factory) -> None:
             db.delete_session(sid)
         (repo / "src" / "deep" / "file.txt").unlink()
         session_git.reset_for_tests()
-    print("routes, the sheet's read and worker on the {} runtime".format("full" if full else "headless"))
+    print("routes, the sheet's read, its actions and worker on the {} runtime".format(
+        "full" if full else "headless"))
+
+
+async def actions(client, headers, app) -> None:
+    """The sheet's Push and Revert over the route, on a real repository with
+    a real bare remote, from a session that sits in a subdirectory of it."""
+    assert protocol.SESSION_GIT_ACTIONS_CAPABILITY in app["puppy_capabilities"]
+    full = app["puppy_role"] == "full"
+    stamp = str(int(time.time() * 1000))
+    work = TREE / "acted" / stamp
+    remote = TREE / "acted-remote" / (stamp + ".git")
+    remote.parent.mkdir(parents=True, exist_ok=True)
+    git(TREE, "init", "-q", "--bare", "-b", "main", str(remote))
+    (work / "sub").mkdir(parents=True)
+    git(work, "init", "-q")
+    (work / ".gitignore").write_text("ignored.txt\n")
+    (work / "kept.txt").write_text("original\n")
+    git(work, "add", ".gitignore", "kept.txt")
+    git(work, "commit", "-q", "-m", "first")
+    git(work, "remote", "add", "origin", str(remote))
+    sid = db.create_session("", "claude", str(work / "sub"), "", "", "", "default")
+    push, revert = "/api/sessions/{}/git/push".format(sid), "/api/sessions/{}/git/revert".format(sid)
+    sheet = "/api/sessions/{}/git".format(sid)
+    try:
+        response = await client.get(sheet, headers=headers)
+        data = await response.json()
+        # where a push would go, with the one remote and no upstream yet
+        assert data["detail"]["push_to"] == "origin/main" and data["detail"]["upstream"] is None, data
+        assert data["git"]["unpushed"] == 1 and data["git"]["changes"] == 0, data
+
+        # Push: the commit sent to the one remote, the upstream set by the
+        # push, the answer the read's fresh look plus what went where, the
+        # cache and the list moved with it
+        response = await client.post(push, headers=headers, json={})
+        data = await response.json()
+        assert response.status == 200 and data["ok"] is True, data
+        assert data["pushed"] == {"to": "origin/main", "commits": 1}, data
+        assert data["git"]["unpushed"] == 0 and data["root"] == str(work.resolve()), data
+        assert data["detail"]["upstream"] == "origin/main" and data["detail"]["commits"] == [], data
+        assert git(work, "rev-parse", "HEAD") == git(TREE, "--git-dir", str(remote), "rev-parse", "main")
+        assert (await listed(client, headers))[sid] == data["git"]
+        response = await client.post(push, headers=headers, json={})
+        assert response.status == 409 and (await response.json())["error"] == "Nothing to push"
+
+        # Revert, from the subdirectory the session sits in: the whole work
+        # tree - a staged file, a modified one, an untracked one, a merge
+        # stopped on a conflict - back to the last commit, the ignored file
+        # and the nested repository left alone, and the session's own
+        # directory - untracked, so cleaned away with its file - put back
+        (work / "staged.txt").write_text("s\n")
+        git(work, "add", "staged.txt")
+        (work / "kept.txt").write_text("edited\n")
+        (work / "sub" / "loose.txt").write_text("l\n")
+        (work / "ignored.txt").write_text("i\n")
+        (work / "nested").mkdir()
+        git(work / "nested", "init", "-q")
+        (work / "nested" / "inner.txt").write_text("n\n")
+        response = await client.get(sheet, headers=headers)
+        assert (await response.json())["git"]["changes"] == 4
+        response = await client.post(revert, headers=headers, json={})
+        data = await response.json()
+        assert response.status == 200 and data["ok"] is True, data
+        assert data["reverted"] == {"changes": 3}, data
+        assert data["git"]["changes"] == 1 and data["git"]["untracked"] == 1, data
+        assert data["detail"]["paths"] == [{"kind": "untracked", "code": "??", "path": "nested/"}], data
+        assert not (work / "staged.txt").exists() and not (work / "sub" / "loose.txt").exists()
+        assert (work / "sub").is_dir() and not os.listdir(work / "sub"), "the session's directory is back, empty"
+        assert (work / "kept.txt").read_text() == "original\n"
+        assert (work / "ignored.txt").read_text() == "i\n", "an ignored file was never part of the work"
+        assert (work / "nested" / "inner.txt").exists(), "a nested repository is not cleaned"
+        assert (await listed(client, headers))[sid] == data["git"]
+        shutil.rmtree(work / "nested")
+        response = await client.post(revert, headers=headers, json={})
+        assert response.status == 409 and (await response.json())["error"] == "Nothing to revert"
+        # a conflict: the merge abandoned with the paths
+        git(work, "checkout", "-q", "-b", "side")
+        (work / "kept.txt").write_text("side\n")
+        git(work, "commit", "-q", "-am", "side")
+        git(work, "checkout", "-q", "main")
+        (work / "kept.txt").write_text("main\n")
+        git(work, "commit", "-q", "-am", "main")
+        assert subprocess.run(["git", "merge", "side"], cwd=str(work), capture_output=True).returncode
+        response = await client.get(sheet, headers=headers)
+        assert (await response.json())["git"]["conflicts"] == 1
+        response = await client.post(revert, headers=headers, json={})
+        data = await response.json()
+        assert response.status == 200 and data["reverted"] == {"changes": 1}, data
+        assert data["git"]["changes"] == 0 and (work / "kept.txt").read_text() == "main\n"
+        assert not (work / ".git" / "MERGE_HEAD").exists(), "the merge is abandoned"
+
+        # a rejected push is git's own reason; a detached HEAD has nothing
+        # to push from and the listing says there is nowhere to push to
+        git(TREE, "clone", "-q", str(remote), str(work.parent / (stamp + "-other")))
+        other = work.parent / (stamp + "-other")
+        (other / "theirs.txt").write_text("t\n")
+        git(other, "add", "theirs.txt")
+        git(other, "commit", "-q", "-m", "theirs")
+        git(other, "push", "-q", "origin", "main")
+        response = await client.post(push, headers=headers, json={})
+        assert response.status == 409, await response.text()
+        assert (await response.json())["error"] == "[rejected] main -> main (fetch first)"
+        git(work, "checkout", "-q", "--detach")
+        response = await client.get(sheet, headers=headers)
+        data = await response.json()
+        assert data["git"]["branch"] is None and data["detail"]["push_to"] is None, data
+        response = await client.post(push, headers=headers, json={})
+        assert response.status == 409
+        assert (await response.json())["error"] == "HEAD is detached; check out a branch to push it"
+        git(work, "checkout", "-q", "main")
+        # two remotes and no upstream: nowhere a push would go, unless
+        # remote.pushDefault says
+        git(work, "branch", "--unset-upstream")
+        git(work, "remote", "add", "backup", str(remote))
+        response = await client.get(sheet, headers=headers)
+        assert (await response.json())["detail"]["push_to"] is None
+        git(work, "config", "remote.pushDefault", "backup")
+        response = await client.get(sheet, headers=headers)
+        assert (await response.json())["detail"]["push_to"] == "backup/main"
+        git(work, "config", "--unset", "remote.pushDefault")
+        git(work, "remote", "remove", "backup")
+        git(work, "branch", "-u", "origin/main")
+
+        # refused while a turn runs or waits anywhere in the project - a
+        # second session in the same work tree counts - and for a task's
+        # copy, whatever its state
+        (work / "again.txt").write_text("a\n")
+        peer = db.create_session("", "claude", str(work), "", "", "", "default")
+        hub = runner.hub(peer)
+        hub.status = "running"
+        try:
+            response = await client.post(revert, headers=headers, json={})
+            assert response.status == 409, await response.text()
+            assert (await response.json())["error"] == \
+                "Main or another session is using this project; try again when it is idle"
+            assert (work / "again.txt").exists()
+            response = await client.post(push, headers=headers, json={})
+            assert response.status == 409
+        finally:
+            hub.status = "idle"
+            runner._hubs.pop(peer, None)
+            db.delete_session(peer)
+        task_cwd = Path(workspaces.create_temporary())
+        git(task_cwd, "init", "-q")
+        (task_cwd / "t.txt").write_text("t\n")
+        task_id = db.create_session("", "claude", str(task_cwd), "", "", "", "default",
+                                    workspace_kind="temporary")
+        session_tasks._save(task_id, {
+            "format": 1, "parent": sid, "request_id": "git-action-task", "prompt": "t",
+            "context": "", "base": "0" * 40, "created_at": time.time(), "outcome": "pending",
+            "summary": "", "completed_at": 0, "applied_at": 0, "result_seq": 0})
+        try:
+            response = await client.post("/api/sessions/{}/git/revert".format(task_id), headers=headers, json={})
+            assert response.status == 409
+            assert (await response.json())["error"].startswith("A task's copy is reviewed and applied from Main")
+            assert (task_cwd / "t.txt").exists()
+        finally:
+            db.query("DELETE FROM meta WHERE key=?", (session_tasks.PREFIX + str(task_id),))
+            db.delete_session(task_id)
+        # the route's guards: authentication, the session, the two verbs
+        response = await client.post(revert, json={})
+        assert response.status == 401
+        response = await client.post("/api/sessions/987654/git/push", headers=headers, json={})
+        assert response.status == 404
+        response = await client.post("/api/sessions/{}/git/reset".format(sid), headers=headers, json={})
+        assert response.status == 404
+
+        # a push under way is cancelled through the operation it was
+        # started as: git's process group ended, the project released
+        started = []
+
+        def slow_push(root):
+            started.append(time.monotonic())
+            operations.run_process(["sleep", "30"], timeout=60)
+            raise AssertionError("the push was not cancelled")
+
+        identity = "git-action-cancel-" + stamp
+        with patch.object(session_git, "_push", slow_push):
+            request = asyncio.ensure_future(client.post(
+                push, headers=dict(headers, **{operations.HEADER: identity}), json={}))
+            deadline = time.monotonic() + 5
+            while not started:
+                assert time.monotonic() < deadline, "the push did not start"
+                await asyncio.sleep(.02)
+            response = await client.delete("/api/operations/" + identity, headers=headers)
+            assert response.status == 200 and (await response.json())["state"] == "cancelling"
+            response = await request
+        assert response.status == 409 and (await response.json()).get("cancelled") is True
+        assert time.monotonic() - started[0] < 5, "the sleeping git was ended, not waited out"
+        assert not session_tasks.busy() and not session_tasks._operations
+        assert (await listed(client, headers))[sid]["unpushed"] == 1, "nothing was pushed"
+        # and a revert can follow at once
+        response = await client.post(revert, headers=headers, json={})
+        assert response.status == 200 and (await response.json())["reverted"] == {"changes": 1}
+
+        if full:
+            # an action is a write: it counts as a mutation a backup waits
+            # for, and is refused while one is built
+            seen = []
+            real_revert = session_git._revert
+
+            def watching(root, cwd):
+                seen.append(app["puppy_mutations"])
+                return real_revert(root, cwd)
+
+            (work / "once.txt").write_text("o\n")
+            with patch.object(session_git, "_revert", watching):
+                response = await client.post(revert, headers=headers, json={})
+                assert response.status == 200
+            assert seen == [1], seen
+            app["puppy_snapshot_busy"] = "export"
+            try:
+                response = await client.post(revert, headers=headers, json={})
+                assert response.status == 503
+            finally:
+                app["puppy_snapshot_busy"] = None
+        else:
+            app["puppy_snapshot_busy"] = "export"
+            try:
+                response = await client.post(revert, headers=headers, json={})
+                assert response.status == 409
+                assert (await response.json())["error"] == "Git actions are paused for a snapshot"
+            finally:
+                app["puppy_snapshot_busy"] = None
+    finally:
+        db.delete_session(sid)
+        shutil.rmtree(work.parent, ignore_errors=True)
+        shutil.rmtree(remote.parent, ignore_errors=True)
 
 
 def config_shape() -> None:

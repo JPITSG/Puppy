@@ -8,8 +8,9 @@ mark orange, the console's warn tone, with the counts in its label. It is the
 heads-up that there is something to commit or push here, and hovering an
 orange mark says why: the branch, the changes sorted by what `git` would do
 with them, and the commits no remote has. Clicking a repository's mark opens
-its sheet, which lists exactly what those counts summarise: the paths and
-the commits themselves.
+its sheet, which lists exactly what those counts summarise - the paths and
+the commits themselves - and acts on them: Push for the commits, Revert for
+the changes.
 
 ## What is checked, and where
 
@@ -152,9 +153,9 @@ The console opens the sheet from a repository's mark, which is a button
 (role `button`, focusable, Enter or Space) only where the node advertises
 `session-git-detail`; every other mark - no repository, not looked at yet,
 could not be checked - stays a labelled image, and a press on it is a press
-on the row. The sheet stands in the linked-workspace sheet's voice: the
-session and its location, then the facts - the work tree's root when the
-session sits below it, the branch (`main`, `main · no commits yet`, `HEAD
+on the row. The sheet stands in the review sheet's voice, its facts on that
+sheet's column and at its steps - the work tree's root when the session sits
+below it, the branch (`main`, `main · no commits yet`, `HEAD
 detached at 3f9c2a1`), the upstream with `up to date`, `1 ahead`, `2 behind`
 or `1 ahead, 2 behind` (`not set` with remotes but no upstream, `no remote`
 without any), the State in the mark's own tone (`Uncommitted and unpushed
@@ -162,15 +163,16 @@ work`, `Uncommitted work` or `Unpushed work` in the warn tone; `Nothing to
 commit or push` or `Nothing to commit · no remote` in the ok tone; `Could not
 be read · <reason>` in the bad tone), and when the node looked - then two
 captioned lists on the review sheet's surface. **Changes** carries the count
-and the kinds beside it (`3 · 1 staged, 1 unstaged, 1 untracked`, or `none`)
+and the kinds after a separator (`Changes · 3 · 1 staged, 1 unstaged, 1
+untracked`, or `Changes · 0`)
 and groups the paths as `git status` groups them - Staged, Unstaged,
 Untracked, Conflicts - each path with the verb git would use for it
 (`modified`, `new file`, `deleted`, `renamed` with `old → new`, `copied`,
 `type changed`; a staged path edited again as `modified · edited since
 staging`; a conflict as `both modified`, `deleted by them`, …; an untracked
 path with none), the columns of one group aligned like git aligns its own.
-**Unpushed commits** carries the count and which remote lacks them (`1 · not
-on origin`, `2 · not on any remote`, `none`, `no remote`) and lists each
+**Unpushed commits** carries the count and which remote lacks them (`· 1 ·
+not on origin`, `· 2 · not on any remote`, `· 0`, `· no remote`) and lists each
 commit as its hash, subject and, in the help colour, author and time. A
 clean repository says `Nothing to commit` and `Nothing to push`; one without
 a remote, `No remote to push to`; what the bounds cut ends a list as `… and
@@ -180,6 +182,75 @@ row's record until the read answers, hands the fresh record to the row so the
 mark never disagrees with the sheet, keeps the last listing and reports
 inline when a read fails, and is a dialog like the agent-notes editor: Back
 closes it, Forward opens a fresh one for the session as it is then.
+
+## The actions
+
+Nodes advertising the additive `session-git-actions` capability also serve
+the two writes behind the sheet's buttons, under `/api/sessions/{sid}/git/`:
+
+- `POST …/push` sends the checked-out branch's commits where a push would
+  go. That target is the branch's upstream (`branch.<name>.remote` and
+  `.merge`) when it has one; otherwise `remote.pushDefault` if set, or the
+  only remote there is, and the push sets the upstream as it goes
+  (`--set-upstream`). With `HEAD` detached, without a remote, or with several
+  remotes and nothing saying which, there is no target. The listing names it
+  as the additive `detail.push_to` (`origin/main`, `null` when there is
+  none), which is how the sheet knows whether to offer Push. The push is an
+  explicit refspec (`git push origin main:refs/heads/main`), never forced;
+  hooks run as they would from a terminal, and whatever credentials `git`
+  finds non-interactively are the ones used - there is no terminal to prompt
+  on and `GIT_TERMINAL_PROMPT` is off, so a push that would need one fails
+  with `git`'s reason. A rejected push answers that reason too, taken from
+  the rejected ref's own line (`[rejected] main -> main (fetch first)`).
+- `POST …/revert` discards every uncommitted change in the work tree, from
+  its root whatever subdirectory the session sits in: `git reset --hard HEAD`
+  (a merge stopped on a conflict is abandoned with it; on an unborn branch,
+  which has no `HEAD`, the index is emptied instead) followed by `git clean
+  -fd` - untracked paths removed, ignored files kept because they were never
+  part of the work, and a nested repository left alone as `git clean` leaves
+  it. The session's own directory is put back if it went with them (an
+  untracked directory the session was created in): empty, it is no change
+  to `git`, and the session keeps a place to work.
+
+Both answer exactly what the read answers - the fresh `git` record (the
+cache and every console's mark move with it), `root` and `detail` - plus
+`pushed` (`{"to": "origin/main", "commits": 2}`) or `reverted`
+(`{"changes": 3}`) counting what the action took off the record (a nested
+repository a revert leaves alone stays counted). Every refusal is a `409`
+with its reason: a task's copy (reviewed and applied from Main, never pushed
+or reverted), a session mirroring another node's project (acted on there),
+Puppy draining, no repository or one `git` would not read, `Nothing to push`
+/ `Nothing to revert`, a detached `HEAD` or no target for a push, and -
+because both run under the project lock a task apply takes, keyed by the
+work tree's real root - a turn running or queued in any session inside that
+project (`Main or another session is using this project; try again when it
+is idle`) or a task being prepared or applied to it. A prompt sent to a
+session in the project while an action runs waits for it, as it waits for an
+apply. A push honours the `operation-cancel-v1` header: cancelling ends
+`git`'s process group while it still runs, and once it has succeeded the
+operation commits so a late cancel cannot misreport it. Ownership outlives a
+caller that disconnects, so a closed tab never abandons a push halfway;
+while either runs the node counts as busy for backups and upgrades like a
+task apply, and both count as mutations a backup waits for. Each command is
+bounded by `ACTION_TIMEOUT` (300 seconds) rather than the reads' 30.
+
+In the sheet, Push - the primary - stands beside Close and Refresh at the
+end of the button row exactly while `unpushed` is above zero and the read
+named a `push_to`; Revert stands on the row's other side, in the danger
+tone, exactly while `changes` is above zero (on a phone the four make two
+lines of two: Revert and Close, then Refresh and Push). Push is one press one
+request; Revert asks first, with a destructive confirm ("Revert 3 changes?"
+over the work tree's path, saying which kinds go, that untracked paths are
+deleted and ignored files kept, that a merge is abandoned when a conflict is
+among them, and that it cannot be undone; Cancel has first focus). The
+answer lands like a read's - the facts, the captions, the lists and the
+buttons move together, the row's mark with them - with a toast for what was
+done ("Pushed 2 commits to origin/main", "Reverted 3 changes"); a refusal or
+a failure stays inline in the sheet; a push cancelled from the operation
+dialog is followed by a fresh read, because what it managed is unknown. The
+row is held while any request runs, and focus returns to the pressed button
+afterwards, or to Close when the press removed its own button. A node
+without the capability shows Close and Refresh alone.
 
 The console draws the mark only for nodes that advertise the capability: a
 repository at full strength like present agent notes, in the warn tone when

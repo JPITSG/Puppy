@@ -1958,7 +1958,8 @@ async def exercise_session_git(http, url, headers, pinned, session, cwd: Path) -
     """Whether the working directory is inside a Git work tree, and what that
     repository is holding: the node's cached answer on every session payload,
     re-checked by the focus refresh, which answers at once and publishes a
-    changed record, and listed in full by the sheet's read."""
+    changed record, listed in full by the sheet's read, and acted on by its
+    Revert and Push over the same routes."""
     sid = session["id"]
     refresh_url = url + f"/api/sessions/{sid}/git/refresh"
 
@@ -2019,17 +2020,43 @@ async def exercise_session_git(http, url, headers, pinned, session, cwd: Path) -
     assert sheet["detail"]["paths"] == [{"kind": "untracked", "code": "??", "path": "sheet.txt"}], sheet
     assert [c["subject"] for c in sheet["detail"]["commits"]] == ["everything"], sheet
     assert sheet["detail"]["remotes"] == ["origin"] and sheet["detail"]["upstream"] is None, sheet
-    assert set(sheet["detail"]) == {"head", "upstream", "ahead", "behind", "remotes", "paths",
-                                    "commits", "more_paths", "more_commits"}, sheet
+    # where a push would go: the one remote, with no upstream set yet
+    assert sheet["detail"]["push_to"] == "origin/main", sheet
+    assert set(sheet["detail"]) == {"head", "upstream", "ahead", "behind", "remotes", "push_to",
+                                    "paths", "commits", "more_paths", "more_commits"}, sheet
     assert (await listed()) == sheet["git"]
-    (cwd / "sheet.txt").unlink()
-    git("push", "-q", "-u", "origin", "main")
-    async with http.post(refresh_url, headers=headers, ssl=pinned) as response:
-        pushed = (await response.json())["git"]
+    # the sheet's Revert: the untracked file gone, the answer the same fresh
+    # look the read gives with what the revert took off the record
+    revert_url = url + f"/api/sessions/{sid}/git/revert"
+    async with http.post(revert_url, headers=headers, ssl=pinned, json={}) as response:
+        reverted = await response.json()
+        assert response.status == 200, reverted
+    assert reverted["ok"] is True and reverted["reverted"] == {"changes": 1}, reverted
+    assert not (cwd / "sheet.txt").exists()
+    assert reverted["git"]["changes"] == 0 and reverted["git"]["unpushed"] == 1, reverted
+    assert reverted["root"] == str(cwd.resolve()) and reverted["detail"]["paths"] == [], reverted
+    assert (await listed()) == reverted["git"]
+    async with http.post(revert_url, headers=headers, ssl=pinned, json={}) as response:
+        assert response.status == 409 and (await response.json())["error"] == "Nothing to revert"
+    # the sheet's Push: the one commit sent to the one remote, the upstream
+    # set by it, the bare remote now holding HEAD
+    push_url = url + f"/api/sessions/{sid}/git/push"
+    async with http.post(push_url, headers=headers, ssl=pinned, json={}) as response:
+        answer = await response.json()
+        assert response.status == 200, answer
+    assert answer["ok"] is True and answer["pushed"] == {"to": "origin/main", "commits": 1}, answer
+    pushed = answer["git"]
     assert pushed["changes"] == 0 and pushed["unpushed"] == 0, pushed
     assert (await listed()) == pushed
     assert set(pushed) == {"repo", "checked_at", "changes", "unpushed", "branch",
                            "staged", "unstaged", "untracked", "conflicts"}, pushed
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(cwd), check=True,
+                          capture_output=True, text=True).stdout.strip()
+    held = subprocess.run(["git", "--git-dir", str(remote), "rev-parse", "main"], check=True,
+                          capture_output=True, text=True).stdout.strip()
+    assert head == held and answer["detail"]["upstream"] == "origin/main", answer
+    async with http.post(push_url, headers=headers, ssl=pinned, json={}) as response:
+        assert response.status == 409 and (await response.json())["error"] == "Nothing to push"
     async with http.get(sheet_url, headers=headers, ssl=pinned) as response:
         sheet = await response.json()
     assert sheet["detail"]["upstream"] == "origin/main", sheet
@@ -2040,9 +2067,17 @@ async def exercise_session_git(http, url, headers, pinned, session, cwd: Path) -
         assert response.status == 404
     async with http.get(url + "/api/sessions/999999/git", headers=headers, ssl=pinned) as response:
         assert response.status == 404
+    async with http.post(url + "/api/sessions/999999/git/push", headers=headers, ssl=pinned) as response:
+        assert response.status == 404
+    async with http.post(url + f"/api/sessions/{sid}/git/reset", headers=headers, ssl=pinned) as response:
+        assert response.status == 404, "only the two actions are routes"
     async with http.post(refresh_url, ssl=pinned) as response:
         assert response.status == 401
     async with http.get(sheet_url, ssl=pinned) as response:
+        assert response.status == 401
+    async with http.post(push_url, ssl=pinned) as response:
+        assert response.status == 401
+    async with http.post(revert_url, ssl=pinned) as response:
         assert response.status == 401
     shutil.rmtree(cwd / ".git")
     shutil.rmtree(remote, ignore_errors=True)
@@ -2589,6 +2624,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "session-agent-notes" in ping["capabilities"]
         assert "session-git" in ping["capabilities"]
         assert "session-git-detail" in ping["capabilities"]
+        assert "session-git-actions" in ping["capabilities"]
         assert "session-pinning" in ping["capabilities"]
         assert "session-order-recency" in ping["capabilities"]
         assert "completion-events" in ping["capabilities"]

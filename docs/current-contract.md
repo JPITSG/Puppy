@@ -139,6 +139,26 @@ nodes that advertise this; on every other node the mark stays the labelled
 image it was. Nothing is persisted, nothing enters the cache or a payload
 beyond the record, and no backup shape changes.
 
+The sheet's actions are additive `session-git-actions`: both execution
+runtimes serve `POST /api/sessions/{sid}/git/push` (the checked-out branch's
+commits sent to its upstream, or to the one remote - `remote.pushDefault`
+or the only one - with the upstream set by the push; never forced) and
+`POST /api/sessions/{sid}/git/revert` (`reset --hard HEAD` then `clean -fd`
+from the work tree's root: tracked paths back to the last commit, untracked
+paths removed, ignored files and nested repositories kept, the session's own
+directory put back if it went). The listing carries the additive
+`detail.push_to` (`origin/main`, or `null` with `HEAD` detached, no remote,
+or several remotes and nothing choosing) so a console knows whether to offer
+Push. Both answer the read's fresh `git`/`root`/`detail` plus `pushed`
+(`to`, `commits`) or `reverted` (`changes`), refuse with `409` for a task's
+copy, a mirrored workspace, a repository `git` would not read, nothing to
+do, no push target, and a turn running or queued anywhere in the project or
+a task being prepared or applied to it (the same project lock as an apply,
+which a prompt sent meanwhile waits for), and honour the
+`operation-cancel-v1` header on a push. A console offers Push and Revert
+only for nodes that advertise this. Nothing is persisted and no backup shape
+changes; while either runs the node is busy like a task apply.
+
 Host activity is additive `host-metrics-v1`: both execution runtimes serve
 `GET /api/host/metrics`, returning that node's in-memory CPU history, its
 cores/load/memory/uptime and the trimmed process tree below its own Puppy

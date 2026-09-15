@@ -4625,6 +4625,7 @@ def check_session_pins(ui_source: str, css_source: str) -> None:
         ui_source.index("\n/* The row itself is a button")]
     assert 'backend.capabilities.includes("session-git")' in git_mark
     assert 'backend.capabilities.includes("session-git-detail")' in git_mark
+    assert 'backend.capabilities.includes("session-git-actions")' in git_mark
     assert 'const opens = !!git && git.repo === true && backendSupportsSessionGitDetail(bid);' in git_mark
     assert 'mark.setAttribute("role", opens ? "button" : "img");' in git_mark
     assert "mark.appendChild(sessionGitIcon(14));" in git_mark

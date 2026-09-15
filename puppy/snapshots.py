@@ -167,7 +167,7 @@ def blockers() -> List[str]:
     reasons.extend(notify.snapshot_blockers())
     from puppy import session_tasks
     if session_tasks.busy():
-        reasons.append("workspace copy, apply or move in progress")
+        reasons.append("workspace copy, apply, move, push or revert in progress")
     from puppy import session_coordination
     if session_coordination.busy():
         reasons.append("unfinished session requests or coordination workflows")

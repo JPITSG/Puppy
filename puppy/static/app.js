@@ -5742,6 +5742,15 @@ function backendSupportsSessionGitDetail(bid) {
     backend.capabilities.includes("session-git-detail");
 }
 
+/* The sheet's Push and Revert act through routes of their own, so they are
+   offered only where the node serves them. */
+function backendSupportsSessionGitActions(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(b => b.id === bid);
+  return !!backend && Array.isArray(backend.capabilities) &&
+    backend.capabilities.includes("session-git-actions");
+}
+
 /* Between the pin and the notes: whether the working directory is inside a
    Git work tree, and whether that repository is holding work. The node
    answers from its own cache - re-checked on its git_check_minutes timer,
@@ -6236,49 +6245,62 @@ const SESSION_GIT_KIND_NAMES = {
 };
 
 /* The sheet a repository's mark opens: exactly what the mark summarises,
-   listed. The facts stand in the linked-workspace sheet's voice - the work
-   tree's root when the session sits below it, the branch, its upstream
-   with how far ahead or behind, the State the mark's tone comes from, and
-   when the node looked - then the paths behind the changes count and the
-   commits behind the unpushed count on the review sheet's list surface,
-   grouped the way git's own status groups them, each caption carrying the
-   count the mark's label carries.
+   listed. The facts stand in the review sheet's voice - the work tree's
+   root when the session sits below it, the branch, its upstream with how
+   far ahead or behind, the State the mark's tone comes from, and when the
+   node looked - then the paths behind the changes count and the commits
+   behind the unpushed count on the review sheet's list surface, grouped
+   the way git's own status groups them, each caption carrying the count
+   the mark's label carries after a separator.
    It reads fresh on opening and on Refresh through the node's own route,
    and that read brings the row's record up to date like a focus re-check,
    so the sheet and the mark never disagree; until it answers, the facts
    and the captions come from the row's record and the lists say so. A
    read that fails keeps what was shown and reports inline. Back closes
-   it; Forward opens a fresh one for the session as it is then. */
+   it; Forward opens a fresh one for the session as it is then.
+   The two counts are also what the sheet acts on, where the node serves
+   the actions: Push, the primary, stands beside Refresh exactly when there
+   are commits to push and the read named where a push would go (the
+   upstream, or the one remote), and sends them there; Revert stands on
+   the row's other side, in the danger tone, exactly when there are
+   changes, and after a destructive confirm that says what goes discards
+   every one of them. Each is one press one request, refused by the node
+   while a turn runs or waits in the project, answered with the same fresh
+   look a read gives (so the facts, the lists and the buttons move at
+   once), reported as a toast when it did its work and inline when it did
+   not; a push that runs long shows the operation dialog, and one cancelled
+   there is followed by a read, because what it managed is unknown. */
 function modalSessionGit(bid, s) {
   const { m, close } = modal(`<h2>Git repository</h2>
-    <p class="modal-copy session-git-intro"></p>
     <div class="ws-facts session-git-facts"></div>
     <div class="session-git-body"></div>
     <p class="form-error hidden" role="alert"></p>
     <div class="m-btns"><button type="button" class="btn" id="session-git-close">Close</button>
-      <button type="button" class="btn btn-pri" id="session-git-refresh">Refresh</button></div>`,
+      <button type="button" class="btn" id="session-git-refresh">Refresh</button></div>`,
     "session-git-modal", () => navigationSessionDialog(bid, s.id, modalSessionGit));
-  const intro = m.querySelector(".session-git-intro"), facts = m.querySelector(".session-git-facts");
+  const facts = m.querySelector(".session-git-facts");
   const body = m.querySelector(".session-git-body"), error = m.querySelector(".form-error");
+  const buttons = m.querySelector(".m-btns");
   const closeButton = m.querySelector("#session-git-close");
   const refresh = m.querySelector("#session-git-refresh");
-  intro.textContent = `${s.name || `Session ${s.id}`} · ${sessionLocationLabel(s, bid)}`;
+  const actions = backendSupportsSessionGitActions(bid);
   /* the row's record until the read answers, then the read's own */
   let record = s.git && typeof s.git === "object" ? s.git : null;
   let root = null, detail = null;
   const count = value => typeof value === "number" && value > 0 ? value : 0;
   const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
+  /* the review sheet's fact row: its label in the field voice */
   const fact = (label, value, tone = "") => {
     const row = el("div", "ws-fact");
-    row.appendChild(el("span", "wsf-l", label));
+    row.appendChild(el("span", "field-lbl", label));
     row.appendChild(el("span", "wsf-v" + (tone ? " " + tone : ""), value));
     facts.appendChild(row);
   };
   const renderFacts = () => {
     facts.replaceChildren();
-    /* the work tree's root, when it is not the session's own directory: the
-       intro already names that, and the paths below are relative to this */
+    /* the work tree's root, when it is not the session's own directory (the
+       sidebar row names that one), since the paths below are relative to it */
     if (root && root !== s.cwd) fact("Repository", root);
     const branch = sessionGitBranch(record);
     if (typeof branch === "string")
@@ -6302,10 +6324,10 @@ function modalSessionGit(bid, s) {
   };
 
   /* one captioned list: the caption in the field voice with its count
-     beside it, the list on the review sheet's surface */
+     after a separator, the list on the review sheet's surface */
   const section = (title, note, fill) => {
     const wrap = el("div", "session-git-section");
-    const caption = el("div", "field-lbl", title + " ");
+    const caption = el("div", "field-lbl", title + " · ");
     caption.appendChild(el("span", "field-optional", note));
     wrap.appendChild(caption);
     const list = el("div", "session-git-list");
@@ -6315,14 +6337,14 @@ function modalSessionGit(bid, s) {
   };
   const changesNote = () => {
     const work = sessionGitWork(record);
-    if (!work || !work.changes) return "none";
+    if (!work || !work.changes) return "0";
     const kinds = sessionGitKindsText(record);
     return kinds ? `${work.changes} · ${kinds}` : String(work.changes);
   };
   const commitsNote = () => {
     if (!record || record.unpushed === null) return "no remote";
     const work = sessionGitWork(record);
-    if (!work || !work.unpushed) return "none";
+    if (!work || !work.unpushed) return "0";
     /* which remote lacks them is the read's to say; the count is the row's */
     const remotes = detail && Array.isArray(detail.remotes) ? detail.remotes : [];
     if (!remotes.length) return String(work.unpushed);
@@ -6381,44 +6403,134 @@ function modalSessionGit(bid, s) {
     section("Unpushed commits", commitsNote(), loading ? waiting : fillCommits);
   };
 
-  let loading = false;
-  const load = async () => {
-    if (loading) return;
-    loading = true;
-    refresh.disabled = true;
-    m.setAttribute("aria-busy", "true");
+  /* the actions, drawn from what the record and the read say: a button
+     is in the row exactly while its action applies, so the row holds two,
+     three or four and lays them out by that count. The row is held while
+     a request runs, and holding a button drops the focus its press gave
+     it, so the pressed button is remembered and focus goes back to it
+     afterwards - or to Close when the press removed its own button (the
+     push that emptied the count) rather than to the page. */
+  let revertButton = null, pushButton = null, busy = false, pressed = null;
+  const readable = () => !!record && record.repo === true && !record.error;
+  const canRevert = () => actions && readable() && count(record.changes) > 0;
+  const canPush = () => actions && readable() && count(record.unpushed) > 0 &&
+    !!(detail && typeof detail.push_to === "string" && detail.push_to);
+  const setBusy = () => {
+    for (const button of [refresh, revertButton, pushButton]) if (button) button.disabled = busy;
+    if (busy) m.setAttribute("aria-busy", "true");
+    else m.removeAttribute("aria-busy");
+  };
+  const begin = () => {
+    const focused = document.activeElement;
+    pressed = focused && focused !== m && m.contains(focused) ? focused : null;
+    busy = true;
+    setBusy();
     error.classList.add("hidden");
+  };
+  const end = () => {
+    busy = false;
+    if (!m.isConnected) return;
+    setBusy();
+    if (pressed) (pressed.isConnected ? pressed : closeButton).focus();
+    pressed = null;
+  };
+  const renderActions = () => {
+    for (const old of [revertButton, pushButton]) if (old) old.remove();
+    revertButton = pushButton = null;
+    if (canRevert()) {
+      revertButton = el("button", "btn btn-danger", "Revert");
+      revertButton.setAttribute("type", "button");
+      revertButton.id = "session-git-revert";
+      revertButton.onclick = revert;
+      buttons.insertBefore(revertButton, closeButton);
+    }
+    if (canPush()) {
+      pushButton = el("button", "btn btn-pri", "Push");
+      pushButton.setAttribute("type", "button");
+      pushButton.id = "session-git-push";
+      pushButton.onclick = push;
+      buttons.appendChild(pushButton);
+    }
+    setBusy();
+  };
+  /* a read's answer, and an action's: the row first - it is usually this
+     very object - so a changed record is seen as changed and the list
+     redrawn, then the sheet from the same data */
+  const land = data => {
+    record = data && data.git && typeof data.git === "object" ? data.git : null;
+    root = data && typeof data.root === "string" ? data.root : null;
+    detail = data && data.detail && typeof data.detail === "object" ? data.detail : null;
+    sessionGitAnswered(bid, s.id, record);
+    s.git = record;
+    renderFacts();
+    renderBody(false);
+    renderActions();
+  };
+  const fail = (err, fallback) => {
+    error.textContent = err.message || fallback;
+    error.classList.remove("hidden");
+  };
+  const load = async () => {
+    if (busy) return;
+    begin();
     try {
-      const data = await api(bid, `sessions/${s.id}/git`, { timeoutMs: 45000 });
-      if (!m.isConnected) return;
-      record = data && data.git && typeof data.git === "object" ? data.git : null;
-      root = data && typeof data.root === "string" ? data.root : null;
-      detail = data && data.detail && typeof data.detail === "object" ? data.detail : null;
-      /* the row first - it is usually this very object - so a changed
-         record is seen as changed and the list redrawn */
-      sessionGitAnswered(bid, s.id, record);
-      s.git = record;
-      renderFacts();
-      renderBody(false);
+      land(await api(bid, `sessions/${s.id}/git`, { timeoutMs: 45000 }));
     } catch (err) {
       if (!m.isConnected) return;
       /* a first read that fails leaves nothing to list; a later one keeps
          what the last read showed */
       if (!detail) renderBody(false);
-      error.textContent = err.message || "the repository could not be read";
-      error.classList.remove("hidden");
+      fail(err, "the repository could not be read");
     } finally {
-      loading = false;
-      if (m.isConnected) {
-        refresh.disabled = false;
-        m.removeAttribute("aria-busy");
-      }
+      end();
     }
+  };
+  const act = async (action, request, report) => {
+    if (busy) return;
+    begin();
+    let cancelled = false;
+    try {
+      const data = await api(bid, `sessions/${s.id}/git/${action}`, request);
+      if (!m.isConnected) return;
+      land(data);
+      report(data);
+    } catch (err) {
+      if (!m.isConnected) return;
+      if (err.cancelled) cancelled = true;
+      else fail(err, `the ${action} did not go through`);
+    } finally {
+      end();
+    }
+    if (cancelled) load();
+  };
+  const push = () => act("push", { method: "POST", body: {}, timeoutMs: 330000, operation: "Pushing" },
+    data => {
+      const pushed = data && data.pushed && typeof data.pushed === "object" ? data.pushed : {};
+      toast(`Pushed ${plural(count(pushed.commits), "commit")}` +
+        (typeof pushed.to === "string" && pushed.to ? ` to ${pushed.to}` : ""), "ok");
+    });
+  const revert = async () => {
+    if (busy) return;
+    const changes = count(record && record.changes), kinds = sessionGitKindsText(record);
+    const branch = sessionGitBranch(record);
+    const where = typeof branch === "string" ? ` on ${branch}` : "";
+    const merge = count(record && record.conflicts) ? " A merge stopped on a conflict is abandoned." : "";
+    const ok = await modalConfirm(`Revert ${plural(changes, "change")}?`,
+      `Every uncommitted change in the work tree${where} is discarded${kinds ? `: ${kinds}` : ""}. ` +
+      "Tracked paths return to the last commit and untracked paths are deleted; ignored files are kept." +
+      merge + " This cannot be undone.",
+      { subject: root || s.cwd, confirmLabel: "Revert", destructive: true });
+    if (!ok || !m.isConnected) return;
+    await act("revert", { method: "POST", body: {}, timeoutMs: 330000 }, data => {
+      const reverted = data && data.reverted && typeof data.reverted === "object" ? data.reverted : {};
+      toast(`Reverted ${plural(count(reverted.changes), "change")}`, "ok");
+    });
   };
   closeButton.onclick = close;
   refresh.onclick = load;
   renderFacts();
   renderBody(true);
+  renderActions();
   closeButton.focus();
   load();
 }

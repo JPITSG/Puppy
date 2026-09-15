@@ -387,7 +387,12 @@ assert.equal(bare.document.querySelectorAll(".si-git").length, 0);
 // paths grouped by kind with git's verbs and the commits, the row's record
 // moving with that read, the empty lines of a clean repository, a
 // repository with no remote, an unborn branch and a detached HEAD, git's
-// refusal and a vanished repository, a read that fails, and Refresh.
+// refusal and a vanished repository, a read that fails, and Refresh; then
+// the two actions - the buttons in the row exactly while they apply, Push
+// one press one request and Revert behind its destructive confirm, each
+// answer landing on the row and the sheet at once with its toast, a
+// refusal inline, a cancelled push followed by a read, and no button at
+// all on a node without the actions.
 {
   const document = new FakeDocument();
   const el = (tag, cls = "", text = "") => {
@@ -396,6 +401,7 @@ assert.equal(bare.document.querySelectorAll(".si-git").length, 0);
   };
   const sessions = [];
   let dialog = null, reopen = null, replies = [], requests = [], renders = 0, dialogs = [];
+  let actionsOffered = true, confirmAnswer = true, confirms = [], toasts = [];
   const modal = (html, className = "", again = null) => {
     const m = document.createElement("div");
     m.className = "modal" + (className ? " " + className : "");
@@ -415,6 +421,12 @@ assert.equal(bare.document.querySelectorAll(".si-git").length, 0);
     },
     sessionsFor: () => sessions, renderSidebar: () => { renders++; },
     sidebarSessionKey: (bid, sid) => `${bid}:${sid}`, backendSupportsSessionGit: () => true,
+    backendSupportsSessionGitActions: () => actionsOffered,
+    modalConfirm: (title, text, options) => {
+      confirms.push([title, text, JSON.parse(JSON.stringify(options))]);
+      return Promise.resolve(confirmAnswer);
+    },
+    toast: (text, tone) => { toasts.push([text, tone]); },
     backendConnectionAllowed: () => true, sessionLocationLabel: s => `…/${s.cwd.split("/").pop()}`,
     fmtStamp: at => `at ${at}`, navigationSessionDialog: (bid, sid, open) => open(bid, { id: sid, cwd: "/p", git: null }),
   });
@@ -425,9 +437,11 @@ assert.equal(bare.document.querySelectorAll(".si-git").length, 0);
   const settle = () => new Promise(resolve => setTimeout(resolve, 0));
   const text = selector => [...dialog.m.querySelectorAll(selector)].map(node => node.textContent);
   const facts = () => [...dialog.m.querySelectorAll(".ws-fact")]
-    .map(row => [row.querySelector(".wsf-l").textContent, row.querySelector(".wsf-v").textContent,
+    .map(row => [row.querySelector(".field-lbl").textContent, row.querySelector(".wsf-v").textContent,
                  row.querySelector(".wsf-v").className.replace("wsf-v", "").trim()]);
   const captions = () => text(".session-git-section .field-lbl");
+  const buttons = () => [...dialog.m.querySelectorAll(".m-btns .btn")]
+    .map(button => [button.textContent, button.className.replace("btn", "").trim(), button.disabled]);
   const lists = () => [...dialog.m.querySelectorAll(".session-git-list")].map(list => list.children.map(child => {
     if (child.classList.contains("sgl-group")) {
       const kind = child.querySelector(".sgl-kind");
@@ -482,7 +496,7 @@ assert.equal(bare.document.querySelectorAll(".si-git").length, 0);
       changes: 5, unpushed: 2, branch: "main", staged: 2, unstaged: 1, untracked: 1, conflicts: 1 } };
     sessions.length = 0; sessions.push(row);
     const read = { ok: true, git: { ...row.git, checked_at: 6 }, root: "/home/mira/garden", detail: {
-      head: "abc1234def", upstream: "origin/main", ahead: 2, behind: 1, remotes: ["origin"],
+      head: "abc1234def", upstream: "origin/main", ahead: 2, behind: 1, remotes: ["origin"], push_to: "origin/main",
       paths: [{ kind: "staged", code: "M.", path: "src/a.js" },
               { kind: "staged", code: "RM", path: "src/new name.js", from: "src/old.js" },
               { kind: "unstaged", code: ".D", path: "src/gone.js" },
@@ -494,22 +508,28 @@ assert.equal(bare.document.querySelectorAll(".si-git").length, 0);
     replies = [read];
     context.modalSessionGit(0, row);
     assert.deepEqual(dialogs, ["session-git-modal"]);
-    assert.equal(dialog.m.querySelector(".session-git-intro").textContent, "Garden · …/src");
+    assert.equal(dialog.m.querySelector(".session-git-intro"), null);
     assert.deepEqual(facts(), [["Branch", "main", ""], ["State", "Uncommitted and unpushed work", "warn"], ["Checked", "at 5", ""]]);
-    assert.deepEqual(captions(), ["Changes 5 · 2 staged, 1 unstaged, 1 untracked, 1 conflict", "Unpushed commits 2"]);
+    assert.deepEqual(captions(), ["Changes · 5 · 2 staged, 1 unstaged, 1 untracked, 1 conflict", "Unpushed commits · 2"]);
     assert.deepEqual(lists(), [["Loading…"], ["Loading…"]]);
     assert.equal(dialog.m.querySelector("#session-git-refresh").disabled, true);
     assert.equal(dialog.m.getAttribute("aria-busy"), "true");
     assert.equal(document.activeElement, dialog.m.querySelector("#session-git-close"));
     assert.deepEqual(requests, [[0, "sessions/1/git", { timeoutMs: 45000 }]]);
+    // Revert stands at the row's start from the row's own record, held
+    // with Refresh while the read runs; Push waits for the read to say
+    // where a push would go
+    assert.deepEqual(buttons(), [["Revert", "btn-danger", true], ["Close", "", false], ["Refresh", "", true]]);
     await settle();
+    assert.deepEqual(buttons(), [["Revert", "btn-danger", false], ["Close", "", false],
+      ["Refresh", "", false], ["Push", "btn-pri", false]]);
     // the read: the root above the session's directory, the upstream, the
     // paths grouped the way git groups them, the commits, and the row's
     // record brought up to date - the list redrawn because it changed
     assert.deepEqual(facts(), [["Repository", "/home/mira/garden", ""], ["Branch", "main", ""],
       ["Upstream", "origin/main · 2 ahead, 1 behind", ""],
       ["State", "Uncommitted and unpushed work", "warn"], ["Checked", "at 6", ""]]);
-    assert.deepEqual(captions(), ["Changes 5 · 2 staged, 1 unstaged, 1 untracked, 1 conflict", "Unpushed commits 2 · not on origin"]);
+    assert.deepEqual(captions(), ["Changes · 5 · 2 staged, 1 unstaged, 1 untracked, 1 conflict", "Unpushed commits · 2 · not on origin"]);
     assert.deepEqual(lists(), [[
       ["Staged", ["modified", "src/a.js", "renamed · edited since staging", "src/old.js → src/new name.js"]],
       ["Unstaged", ["deleted", "src/gone.js"]],
@@ -536,7 +556,7 @@ assert.equal(bare.document.querySelectorAll(".si-git").length, 0);
     await settle();
     assert.equal(row.git.changes, 6);
     assert.equal(renders, 1);
-    assert.deepEqual(captions(), ["Changes 6 · 2 staged, 1 unstaged, 2 untracked, 1 conflict", "Unpushed commits 2 · not on origin"]);
+    assert.deepEqual(captions(), ["Changes · 6 · 2 staged, 1 unstaged, 2 untracked, 1 conflict", "Unpushed commits · 2 · not on origin"]);
     assert.deepEqual(lists()[0][4], "… and 40 more paths");
     assert.deepEqual(lists()[1][1], "… and 1 more commit");
     // a read that fails after one that answered keeps the lists and says
@@ -578,11 +598,10 @@ assert.equal(bare.document.querySelectorAll(".si-git").length, 0);
       paths: [], commits: [], more_paths: 0, more_commits: 0 };
     replies = [{ ok: true, git: clean.git, root: "/p", detail: bare }];
     context.modalSessionGit(0, clean);
-    assert.equal(dialog.m.querySelector(".session-git-intro").textContent, "Session 2 · …/p");
     await settle();
     assert.deepEqual(facts(), [["Branch", "main", ""], ["Upstream", "origin/main · up to date", ""],
       ["State", "Nothing to commit or push", "ok"], ["Checked", "at 1", ""]]);
-    assert.deepEqual(captions(), ["Changes none", "Unpushed commits none"]);
+    assert.deepEqual(captions(), ["Changes · 0", "Unpushed commits · 0"]);
     assert.deepEqual(lists(), [["Nothing to commit"], ["Nothing to push"]]);
     dialog.close();
     replies = [{ ok: true, git: { ...clean.git, unpushed: null, branch: "trunk" }, root: "/p",
@@ -591,29 +610,143 @@ assert.equal(bare.document.querySelectorAll(".si-git").length, 0);
     await settle();
     assert.deepEqual(facts(), [["Branch", "trunk · no commits yet", ""], ["Upstream", "no remote", ""],
       ["State", "Nothing to commit · no remote", "ok"], ["Checked", "at 1", ""]]);
-    assert.deepEqual(captions(), ["Changes none", "Unpushed commits no remote"]);
+    assert.deepEqual(captions(), ["Changes · 0", "Unpushed commits · no remote"]);
     assert.deepEqual(lists(), [["Nothing to commit"], ["No remote to push to"]]);
     dialog.close();
     replies = [{ ok: true, git: { ...clean.git, unpushed: 1, branch: null }, root: "/p",
       detail: { ...bare, upstream: null, remotes: ["origin", "backup"],
         commits: [{ hash: "1234567", subject: "Five", author: "Mira", at: 3 }] } }];
     context.modalSessionGit(0, { ...clean, git: { ...clean.git, unpushed: 1, branch: null } });
-    assert.deepEqual(captions(), ["Changes none", "Unpushed commits 1"]);
+    assert.deepEqual(captions(), ["Changes · 0", "Unpushed commits · 1"]);
     await settle();
     assert.deepEqual(facts(), [["Branch", "HEAD detached at 1234567", ""], ["Upstream", "not set", ""],
       ["State", "Unpushed work", "warn"], ["Checked", "at 1", ""]]);
-    assert.deepEqual(captions(), ["Changes none", "Unpushed commits 1 · not on any remote"]);
+    assert.deepEqual(captions(), ["Changes · 0", "Unpushed commits · 1 · not on any remote"]);
     assert.deepEqual(lists(), [["Nothing to commit"], [["1234567", "Five", "Mira · at 3"]]]);
     dialog.close();
 
-    // git's refusal: the reason in the State fact, and nothing to list
+    // git's refusal: the reason in the State fact, nothing to list and
+    // nothing to act on
     replies = [{ ok: true, git: { repo: true, checked_at: 2, changes: null, unpushed: null,
       error: "detected dubious ownership in repository at '/p'" }, root: "/p", detail: null }];
     context.modalSessionGit(0, clean);
     await settle();
     assert.deepEqual(facts(), [["State", "Could not be read · detected dubious ownership in repository at '/p'", "bad"], ["Checked", "at 2", ""]]);
     assert.deepEqual(lists(), []);
+    assert.deepEqual(buttons().map(b => b[0]), ["Close", "Refresh"]);
     dialog.close();
+
+    // The actions. Push: one press one request through the operation
+    // dialog, the answer landing on the row and the sheet at once - the
+    // count gone, so the button with it and focus handed to Close - and
+    // the toast naming what went where.
+    const work = { id: 3, name: "Garden", cwd: "/home/mira/garden", git: { repo: true, checked_at: 1,
+      changes: 3, unpushed: 2, branch: "main", staged: 1, unstaged: 1, untracked: 1, conflicts: 0 } };
+    sessions.length = 0; sessions.push(work);
+    const listing = { head: "abc1234def", upstream: "origin/main", ahead: 2, behind: 0, remotes: ["origin"],
+      push_to: "origin/main", paths: [{ kind: "staged", code: "M.", path: "a" }, { kind: "unstaged", code: ".M", path: "b" },
+      { kind: "untracked", code: "??", path: "c" }], commits: [{ hash: "abc1234", subject: "One", author: "Mira", at: 1 },
+      { hash: "def5678", subject: "Two", author: "Mira", at: 2 }], more_paths: 0, more_commits: 0 };
+    replies = [{ ok: true, git: { ...work.git }, root: "/home/mira/garden", detail: listing }];
+    requests.length = 0; renders = 0; toasts.length = 0;
+    context.modalSessionGit(0, work);
+    await settle();
+    assert.deepEqual(buttons().map(b => b[0]), ["Revert", "Close", "Refresh", "Push"]);
+    const pushed = { ...work.git, checked_at: 2, unpushed: 0 };
+    replies = [{ ok: true, git: pushed, root: "/home/mira/garden",
+      detail: { ...listing, ahead: 0, commits: [] }, pushed: { to: "origin/main", commits: 2 } }];
+    dialog.m.querySelector("#session-git-push").focus();
+    dialog.m.querySelector("#session-git-push").click();
+    dialog.m.querySelector("#session-git-push").click();
+    assert.deepEqual(requests.slice(1), [[0, "sessions/3/git/push", { method: "POST", body: {}, timeoutMs: 330000, operation: "Pushing" }]]);
+    assert.deepEqual(buttons().map(b => b[2]), [true, false, true, true], "the row is held while the push runs");
+    assert.equal(dialog.m.getAttribute("aria-busy"), "true");
+    await settle();
+    assert.deepEqual(buttons(), [["Revert", "btn-danger", false], ["Close", "", false], ["Refresh", "", false]]);
+    assert.deepEqual(toasts, [["Pushed 2 commits to origin/main", "ok"]]);
+    assert.equal(work.git, pushed, "the row carries the answer's record");
+    assert.equal(renders, 1, "a changed record redraws the list");
+    assert.deepEqual(facts()[2], ["State", "Uncommitted work", "warn"]);
+    assert.deepEqual(captions()[1], "Unpushed commits · 0");
+    assert.equal(document.activeElement, dialog.m.querySelector("#session-git-close"), "the pressed button is gone");
+    assert.equal(dialog.m.getAttribute("aria-busy"), null);
+
+    // Revert: the destructive confirm says what goes - the count, the
+    // branch, the kinds - and names the work tree; Cancel sends nothing
+    confirmAnswer = false; confirms.length = 0; toasts.length = 0; requests.length = 0;
+    dialog.m.querySelector("#session-git-revert").click();
+    await settle();
+    assert.deepEqual(confirms, [["Revert 3 changes?",
+      "Every uncommitted change in the work tree on main is discarded: 1 staged, 1 unstaged, 1 untracked. " +
+      "Tracked paths return to the last commit and untracked paths are deleted; ignored files are kept. This cannot be undone.",
+      { subject: "/home/mira/garden", confirmLabel: "Revert", destructive: true }]]);
+    assert.deepEqual(requests, []);
+    assert.deepEqual(buttons().map(b => b[0]), ["Revert", "Close", "Refresh"]);
+    // Revert confirmed: one request, the answer landing like a read's,
+    // the changes gone and the button with them
+    confirmAnswer = true; confirms.length = 0;
+    const reverted = { ...pushed, checked_at: 3, changes: 0, staged: 0, unstaged: 0, untracked: 0 };
+    replies = [{ ok: true, git: reverted, root: "/home/mira/garden",
+      detail: { ...listing, ahead: 0, commits: [], paths: [] }, reverted: { changes: 3 } }];
+    dialog.m.querySelector("#session-git-revert").focus();
+    dialog.m.querySelector("#session-git-revert").click();
+    await settle();
+    assert.deepEqual(requests, [[0, "sessions/3/git/revert", { method: "POST", body: {}, timeoutMs: 330000 }]]);
+    assert.deepEqual(buttons(), [["Close", "", false], ["Refresh", "", false]]);
+    assert.deepEqual(toasts, [["Reverted 3 changes", "ok"]]);
+    assert.equal(work.git, reverted);
+    assert.deepEqual(facts()[2], ["State", "Nothing to commit or push", "ok"]);
+    assert.deepEqual(lists(), [["Nothing to commit"], ["Nothing to push"]]);
+    assert.equal(document.activeElement, dialog.m.querySelector("#session-git-close"));
+    dialog.close();
+
+    // a conflict is named in the confirm; a refusal stays inline with the
+    // buttons back; a push cancelled in the operation dialog is followed
+    // by a read, because what it managed is unknown
+    const merging = { id: 4, name: "", cwd: "/p/sub", git: { repo: true, checked_at: 1, changes: 2, unpushed: 1,
+      branch: null, staged: 1, unstaged: 0, untracked: 0, conflicts: 1 } };
+    sessions.length = 0; sessions.push(merging);
+    replies = [{ ok: true, git: { ...merging.git }, root: "/p", detail: { ...listing, upstream: null, ahead: null, behind: null,
+      remotes: ["origin", "backup"], push_to: null } }];
+    requests.length = 0; toasts.length = 0; confirms.length = 0;
+    context.modalSessionGit(0, merging);
+    await settle();
+    assert.deepEqual(buttons().map(b => b[0]), ["Revert", "Close", "Refresh"], "no Push without a place to push to");
+    replies = [new Error("Main or another session is using this project; try again when it is idle")];
+    dialog.m.querySelector("#session-git-revert").click();
+    await settle();
+    assert.deepEqual(confirms.map(c => [c[0], c[2].subject]), [["Revert 2 changes?", "/p"]]);
+    assert.ok(confirms[0][1].startsWith("Every uncommitted change in the work tree is discarded: 1 staged, 1 conflict. "), confirms[0][1]);
+    assert.ok(confirms[0][1].includes(" A merge stopped on a conflict is abandoned. This cannot be undone."), confirms[0][1]);
+    assert.deepEqual(requests.map(r => r[1]), ["sessions/4/git", "sessions/4/git/revert"]);
+    assert.equal(dialog.m.querySelector(".form-error").textContent, "Main or another session is using this project; try again when it is idle");
+    assert.deepEqual(buttons().map(b => b[2]), [false, false, false], "the row is back after a refusal");
+    assert.deepEqual(toasts, []);
+    dialog.close();
+    replies = [{ ok: true, git: { ...work.git, changes: 0, staged: 0, unstaged: 0, untracked: 0, unpushed: 2 },
+      root: "/home/mira/garden", detail: listing }];
+    sessions.length = 0; sessions.push({ ...work, git: { ...work.git, changes: 0, unpushed: 2 } });
+    context.modalSessionGit(0, sessions[0]);
+    await settle();
+    assert.deepEqual(buttons().map(b => b[0]), ["Close", "Refresh", "Push"], "no Revert without changes");
+    const cancelled = Object.assign(new Error("Operation cancelled"), { cancelled: true });
+    replies = [cancelled, { ok: true, git: { ...sessions[0].git, unpushed: 1 }, root: "/home/mira/garden", detail: listing }];
+    requests.length = 0;
+    dialog.m.querySelector("#session-git-push").click();
+    await settle(); await settle();
+    assert.deepEqual(requests.map(r => r[1]), ["sessions/3/git/push", "sessions/3/git"]);
+    assert.ok(dialog.m.querySelector(".form-error").classList.contains("hidden"), "a cancel is not a failure");
+    assert.deepEqual(captions()[1], "Unpushed commits · 1 · not on origin");
+    dialog.close();
+    // a node without the actions: the row is Close and Refresh, whatever
+    // the counts
+    actionsOffered = false;
+    replies = [{ ok: true, git: { ...work.git }, root: "/home/mira/garden", detail: listing }];
+    context.modalSessionGit(0, work);
+    await settle();
+    assert.deepEqual(buttons(), [["Close", "", false], ["Refresh", "", false]]);
+    dialog.close();
+    actionsOffered = true;
     console.log("sidebar git sheet tests passed");
   };
   run().catch(error => { console.error(error); process.exit(1); });

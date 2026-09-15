@@ -810,7 +810,31 @@ repository, `detail` alone when `git` refused (the reason in the record's
 `error`). Concurrent reads of one directory share one inspection; the read
 is never counted as a mutation. The console makes a repository's mark a
 button that opens the sheet only for nodes that advertise this.
-See [Git repositories](../docs/session-git.md).
+
+Nodes advertising `session-git-actions` also serve the sheet's two writes,
+`POST /api/sessions/{sid}/git/push` and `POST /api/sessions/{sid}/git/revert`
+(an empty JSON body). Push sends the checked-out branch's commits where a
+push would go - its upstream, or the one remote (`remote.pushDefault` or the
+only one) with the upstream set by the push, never forced, with whatever
+credentials `git` finds non-interactively; the listing's additive
+`detail.push_to` names that target (`origin/main`) or is `null` when there is
+none (`HEAD` detached, no remote, several remotes and nothing choosing).
+Revert runs `reset --hard HEAD` (the index emptied instead on an unborn
+branch) and `clean -fd` from the work tree's root: tracked paths back to the
+last commit, untracked paths removed, ignored files and nested repositories
+kept, and the session's own directory put back if it went with them. Both
+answer `{"ok": true, "git": <record>, "root": …, "detail": <listing>}` like
+the read plus `"pushed": {"to": "origin/main", "commits": 1}` or
+`"reverted": {"changes": 3}`, and refuse with `409` and a reason: a task's
+copy, a mirrored workspace, Puppy draining, no repository or one `git` would
+not read, `Nothing to push`, `Nothing to revert`, a detached `HEAD` or no push
+target, a rejected push (`git`'s own reason, such as `[rejected] main -> main
+(fetch first)`), and a turn running or queued in any session inside the
+project or a task being prepared or applied to it - both run under the
+project lock an apply takes, a prompt sent meanwhile waits for them, and
+the node is busy for backups and upgrades while they run. A push honours the
+`X-Puppy-Operation` cancel header; each `git` command is bounded to 300
+seconds. See [Git repositories](../docs/session-git.md).
 
 ## Session tools
 

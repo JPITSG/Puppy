@@ -10,6 +10,13 @@ session. A repository's mark opens a sheet that says exactly what the mark
 summarises: ``GET /api/sessions/{sid}/git`` looks at the directory once more
 and lists the paths behind ``changes`` and the commits behind ``unpushed``
 (``detail``), bringing the mark's own record up to date by the same look.
+The sheet also acts on the two counts, and these are the only writes this
+module makes: ``POST /api/sessions/{sid}/git/push`` sends the checked-out
+branch's commits where a push would go, and ``POST .../git/revert`` discards
+every uncommitted change in the work tree. Both run under the same project
+lock a task apply takes, so they refuse while a turn is running or queued
+anywhere in the project and a turn sent meanwhile waits for them, and both
+answer with the same fresh look the sheet's read gives.
 
 Unlike the notes, the answer is cached rather than read on every payload: one
 record per working directory, kept in memory only, refreshed by a worker on
@@ -53,7 +60,7 @@ from typing import Dict, Optional, Set
 
 from aiohttp import web
 
-from puppy import config, db
+from puppy import config, db, operations
 
 log = logging.getLogger("puppy.session_git")
 
@@ -63,11 +70,16 @@ CHECK_TIMER = "git_check_minutes"
 # guard leaves a refresh out of its mutation count because it changes nothing
 # a backup could copy.
 REFRESH_SUFFIX = "/git/refresh"
+# The sheet's actions, one route suffix each under /api/sessions/{sid}/git.
+ACTIONS = ("push", "revert")
 # A gitfile is one short line; anything longer is not one.
 GITFILE_BYTES = 4096
 # Reading the work state runs git; every command is bounded by this, so a
 # repository on a stalled network mount cannot hold the worker for ever.
 GIT_TIMEOUT = 30.0
+# The sheet's actions are bounded by this instead: a push crosses the
+# network, and a reset of a large tree is longer than a status of it.
+ACTION_TIMEOUT = 300.0
 # Wording the record carries when git would not answer; cut like the
 # discovery's own reasons so a label stays a label.
 REASON_CHARS = 300
@@ -151,18 +163,24 @@ def _reason(stderr: bytes, returncode: int) -> str:
     return "git exited with status {}".format(returncode)
 
 
-def _run_git(cwd: str, *args: str) -> "subprocess.CompletedProcess":
-    """One read-only, non-interactive git command in ``cwd``: no prompt, no
-    optional lock on the index (a session's engine may be using it), no file
-    monitor daemon left behind, English messages for the record, and its
-    whole process group ended when GIT_TIMEOUT runs out. The process's own
-    git environment is not inherited: the session's directory is the
+def _git_command(args) -> tuple:
+    """The argv and environment of every git command here: non-interactive
+    (no prompt on a terminal there is none of), no optional lock on the
+    index (a session's engine may be using it), no file monitor daemon left
+    behind, English messages for the record. The process's own git
+    environment is not inherited: the session's directory is the
     repository, whatever this process was started with."""
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0", LC_ALL="C")
     for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
                  "GIT_NAMESPACE", "GIT_COMMON_DIR"):
         env.pop(name, None)
-    argv = ["git", "--no-optional-locks", "-c", "core.fsmonitor=false"] + list(args)
+    return ["git", "--no-optional-locks", "-c", "core.fsmonitor=false"] + list(args), env
+
+
+def _run_git(cwd: str, *args: str) -> "subprocess.CompletedProcess":
+    """One read-only git command in ``cwd`` (see _git_command), its whole
+    process group ended when GIT_TIMEOUT runs out."""
+    argv, env = _git_command(args)
     try:
         process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -339,11 +357,45 @@ def work_state(cwd: str, listing: bool = False) -> dict:
         state["detail"] = {
             "head": head["oid"], "upstream": head["upstream"],
             "ahead": head["ahead"], "behind": head["behind"], "remotes": remotes,
+            "push_to": _push_label(_push_target(cwd, head["branch"], remotes)),
             "paths": paths, "commits": commits,
             "more_paths": max(0, len(rows) - len(paths)),
             "more_commits": max(0, (unpushed or 0) - len(commits)),
         }
     return state
+
+
+def _config_value(cwd: str, key: str) -> str:
+    """One git configuration value, "" when it is not set."""
+    result = _run_git(cwd, "config", "--get", key)
+    return result.stdout.decode("utf-8", "replace").strip() if result.returncode == 0 else ""
+
+
+def _push_target(cwd: str, branch, remotes: list) -> Optional[dict]:
+    """Where ``git push`` would send the checked-out branch: the remote and
+    the ref of its upstream when it has one, otherwise ``remote.pushDefault``
+    or the only remote there is - a push that sets the upstream as it goes.
+    None with HEAD detached, without a remote, or with several remotes and
+    nothing saying which: the sheet offers no Push then."""
+    if not isinstance(branch, str) or not branch or not remotes:
+        return None
+    remote = _config_value(cwd, "branch.{}.remote".format(branch))
+    merge = _config_value(cwd, "branch.{}.merge".format(branch))
+    if remote in remotes and merge:
+        return {"remote": remote, "ref": merge, "upstream": True}
+    remote = _config_value(cwd, "remote.pushDefault") or (remotes[0] if len(remotes) == 1 else "")
+    if remote not in remotes:
+        return None
+    return {"remote": remote, "ref": "refs/heads/" + branch, "upstream": False}
+
+
+def _push_label(target: Optional[dict]) -> Optional[str]:
+    """The target as the sheet names it: ``origin/main``."""
+    if not target:
+        return None
+    ref = target["ref"]
+    return "{}/{}".format(target["remote"],
+                          ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref)
 
 
 def _work_fields(cwd: str, listing: bool = False) -> dict:
@@ -518,6 +570,147 @@ async def detail(session: dict) -> dict:
     return {"git": _public(entry), "root": entry.get("root"), "detail": entry.get("detail")}
 
 
+# ---- the actions ----
+
+class ActionRefused(Exception):
+    """The action cannot run as things stand; the reason is for the console."""
+
+
+def _action_git(cwd: str, *args: str) -> "subprocess.CompletedProcess":
+    """One git command of the sheet's actions - the reads' environment and
+    prefix, ACTION_TIMEOUT, and the process group ended when the console
+    cancels the operation as well as at the deadline."""
+    argv, env = _git_command(args)
+    try:
+        return operations.run_process(argv, timeout=ACTION_TIMEOUT, cwd=cwd, env=env,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except FileNotFoundError:
+        raise GitRefused("git is not installed on this backend")
+    except subprocess.TimeoutExpired:
+        raise GitRefused("git did not answer within {:.0f} seconds".format(ACTION_TIMEOUT))
+    except OSError as exc:
+        raise GitRefused("git could not be run: {}".format(exc.strerror or exc)[:REASON_CHARS])
+
+
+def _push_reason(stderr: bytes, returncode: int) -> str:
+    """The line of a failed push worth showing: the rejected ref's own
+    (``[rejected] main -> main (fetch first)``), else the first line that is
+    not a hint, without git's ``fatal:``/``error:`` prefix."""
+    lines = [line.strip() for line in stderr.decode("utf-8", "replace").splitlines()
+             if line.strip()]
+    for line in lines:
+        if line.startswith("! "):
+            return " ".join(line[2:].split())[:REASON_CHARS]
+    for line in lines:
+        if line.startswith("hint:"):
+            continue
+        for prefix in ("fatal: ", "error: "):
+            if line.startswith(prefix):
+                line = line[len(prefix):]
+        return line[:REASON_CHARS]
+    return "git exited with status {}".format(returncode)
+
+
+def _push(root: str) -> dict:
+    """Push the checked-out branch where a push would go (_push_target),
+    from the work tree's root: to its upstream, or to the one remote there
+    is with the upstream set by the push. Hooks run as they would from a
+    terminal; there is no force. Returns the target as the sheet names it."""
+    status = _parse_status(_git(root, "status", "--porcelain=v2", "--branch", "-z",
+                                "--untracked-files=no"))
+    branch = status["head"]["branch"]
+    if branch is None:
+        raise ActionRefused("HEAD is detached; check out a branch to push it")
+    remotes = [line for line in _git(root, "remote").split("\n") if line.strip()]
+    target = _push_target(root, branch, remotes)
+    if target is None:
+        raise ActionRefused("No remote to push to" if not remotes else
+                            "The branch has no upstream and there is more than one remote; "
+                            "push it once with -u to choose")
+    args = ["push"] + ([] if target["upstream"] else ["--set-upstream"]) + \
+        [target["remote"], "{}:{}".format(branch, target["ref"])]
+    result = _action_git(root, *args)
+    if result.returncode:
+        raise GitRefused(_push_reason(result.stderr, result.returncode))
+    return {"to": _push_label(target)}
+
+
+def _revert(root: str, cwd: str) -> None:
+    """Discard every uncommitted change in the work tree, from its root:
+    the index and the tracked paths back to HEAD (a merge stopped on a
+    conflict is abandoned with them; an unborn branch has no HEAD, so its
+    index is emptied instead), then the untracked paths removed - never the
+    ignored ones, which were never part of the work, and never a nested
+    repository. The session's own directory is put back if it went with
+    them (an untracked directory the session was created in): empty, it is
+    no change to git, and the session keeps a place to work."""
+    if _action_git(root, "rev-parse", "--verify", "-q", "HEAD^{commit}").returncode:
+        result = _action_git(root, "read-tree", "--empty")
+    else:
+        result = _action_git(root, "reset", "--hard", "--quiet", "HEAD")
+    if result.returncode:
+        raise GitRefused(_reason(result.stderr, result.returncode))
+    result = _action_git(root, "clean", "-fd", "--quiet")
+    if result.returncode:
+        raise GitRefused(_reason(result.stderr, result.returncode))
+    os.makedirs(cwd, exist_ok=True)
+
+
+async def act(session: dict, action: str) -> dict:
+    """One of the sheet's actions on the session's repository, then the
+    same fresh look the sheet's read gives, stored and published like it.
+    Refused for a task's copy (reviewed and applied from Main) and a mirror
+    of another node's project (acted on there), while Puppy drains, outside
+    a repository or where git would not read one; under the project lock a
+    task apply takes, so never beside a running or queued turn anywhere in
+    the project, nor beside a task being prepared or applied - and a turn
+    sent meanwhile waits until this is over. Answers ``git``/``root``/
+    ``detail`` like the read, plus ``pushed`` (``to``, ``commits``) or
+    ``reverted`` (``changes``) counting what the action took off the
+    record - a nested repository, which a revert leaves alone, stays
+    counted."""
+    from puppy import runner, session_tasks, workspace_sync
+    cwd = str((session or {}).get("cwd") or "")
+    if not cwd:
+        raise ActionRefused("The session has no working directory")
+    if session_tasks.record(session["id"]):
+        raise ActionRefused("A task's copy is reviewed and applied from Main, never pushed or reverted")
+    if workspace_sync.session_workspace(session):
+        raise ActionRefused("This session mirrors a project on another node; push or revert it there")
+    if runner._draining:
+        raise ActionRefused("Puppy is shutting down; retry after the restart")
+    before = await _check(cwd, fresh=True, listing=True)
+    if before.get("repo") is not True:
+        raise ActionRefused("No Git repository" if before.get("repo") is False else
+                            "Could not be checked · {}".format(before.get("error") or ""))
+    if before.get("error"):
+        raise ActionRefused("Could not be read · {}".format(before["error"]))
+    root = before.get("root") or cwd
+    async with session_tasks.workspace_operation(root):
+        if action == "push":
+            if not before.get("unpushed"):
+                raise ActionRefused("Nothing to push")
+            pushed = await operations.to_thread(_push, root)
+        else:
+            if not before.get("changes"):
+                raise ActionRefused("Nothing to revert")
+            await operations.to_thread(_revert, root, cwd)
+        # the repository has changed: a cancel from here on would only
+        # misreport what already happened
+        operations.commit()
+        after = await _check(cwd, fresh=True, listing=True)
+    if _store(cwd, after):
+        _broadcast()
+    answer = {"git": _public(after), "root": after.get("root"), "detail": after.get("detail")}
+    if action == "push":
+        answer["pushed"] = {"to": pushed["to"], "commits": max(
+            0, (before.get("unpushed") or 0) - (after.get("unpushed") or 0))}
+    else:
+        answer["reverted"] = {"changes": max(
+            0, (before.get("changes") or 0) - (after.get("changes") or 0))}
+    return answer
+
+
 # ---- the worker ----
 
 def interval_seconds() -> float:
@@ -672,13 +865,33 @@ async def h_detail(request: web.Request):
     return web.json_response(dict({"ok": True}, **await detail(session)))
 
 
+@operations.cancellable
+async def h_action(request: web.Request):
+    """Push or revert. The operation header makes a push cancellable while
+    git still runs (its process group is ended); ownership outlives a
+    caller that disconnects, like a task apply's, so a push is never
+    abandoned halfway by a closed tab."""
+    session = _session_or_404(request)
+    if request.app.get("puppy_snapshot_busy"):
+        return web.json_response({"error": "Git actions are paused for a snapshot"}, status=409)
+    from puppy import session_tasks
+    try:
+        answer = await session_tasks.durable_workspace_operation(
+            act(session, request.match_info["action"]), session["id"])
+    except (ActionRefused, GitRefused, session_tasks.TaskError) as exc:
+        return web.json_response({"error": str(exc)}, status=409)
+    return web.json_response(dict({"ok": True}, **answer))
+
+
 def register(app) -> None:
-    """Both runtimes: the worker, the focus refresh and the sheet's read."""
+    """Both runtimes: the worker, the focus refresh, the sheet's read and
+    its two actions."""
     if app.get("puppy_session_git_registered"):
         return
     app["puppy_session_git_registered"] = True
     app.router.add_get("/api/sessions/{sid:\\d+}/git", h_detail)
     app.router.add_post("/api/sessions/{sid:\\d+}" + REFRESH_SUFFIX, h_refresh)
+    app.router.add_post("/api/sessions/{sid:\\d+}/git/{action:" + "|".join(ACTIONS) + "}", h_action)
     app.cleanup_ctx.append(_lifecycle)
 
 
