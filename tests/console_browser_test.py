@@ -2155,7 +2155,8 @@ async def git_sheet_checks(a):
     and, on a phone, the commit's author and time stepping under its
     subject with nothing pushed off the screen. The type is the console's:
     the fact labels and the kind kickers on one kicker step, the lists in
-    the one monospace, the captions in the field voice."""
+    the one monospace, the captions in the field voice; the facts stand on
+    the review sheet's column, one row under the next at its step."""
     garden = next(s for s in db.list_sessions() if s["cwd"].endswith("/garden"))
     reads = "performance.getEntriesByType('resource').filter(e => e.name.endsWith('/api/sessions/%d/git')).length" % garden["id"]
     active = await evaluate(a, "document.querySelector('.sess-item.active') ? document.querySelector('.sess-item.active').querySelector('.si-name').textContent : ''")
@@ -2176,6 +2177,12 @@ async def git_sheet_checks(a):
         const kicker = computed('fontSize', 'var(--fs-2xs)'), field = computed('fontSize', 'var(--fs-xs)');
         probe.remove();
         const style = node => getComputedStyle(node);
+        /* the review sheet's fact column, as a probe: the step its rows keep */
+        const review = document.createElement('div'); review.className = 'ws-facts task-review-facts';
+        document.body.appendChild(review);
+        const reviewStep = parseFloat(style(review).rowGap); review.remove();
+        const facts = m.querySelector('.session-git-facts');
+        const rows = Array.from(m.querySelectorAll('.ws-fact')).map(row => row.getBoundingClientRect());
         const label = m.querySelector('.wsf-l'), caption = m.querySelector('.session-git-section .field-lbl');
         const kind = m.querySelector('.sgl-kind'), list = m.querySelector('.session-git-list');
         const state = Array.from(m.querySelectorAll('.ws-fact')).find(row => row.querySelector('.wsf-l').textContent === 'State').querySelector('.wsf-v');
@@ -2184,6 +2191,8 @@ async def git_sheet_checks(a):
         const commit = m.querySelector('.sgl-commits');
         return {title: m.querySelector('h2').textContent, intro: m.querySelector('.session-git-intro').textContent,
             facts: Array.from(m.querySelectorAll('.ws-fact')).map(row => [row.querySelector('.wsf-l').textContent, row.querySelector('.wsf-v').textContent]),
+            reviewStep, factStep: parseFloat(style(facts).rowGap),
+            steps: rows.slice(1).map((box, i) => box.top - rows[i].bottom),
             stateOrange: style(state).color === warn,
             captions: Array.from(m.querySelectorAll('.session-git-section .field-lbl')).map(node => node.textContent),
             kinds: Array.from(m.querySelectorAll('.sgl-kind')).map(node => node.textContent),
@@ -2208,6 +2217,9 @@ async def git_sheet_checks(a):
     assert sheet["facts"] == [["Branch", "main"], ["Upstream", "origin/main · 1 ahead, 2 behind"],
                               ["State", "Uncommitted and unpushed work"], ["Checked", sheet["facts"][3][1]]], sheet
     assert sheet["facts"][3][1] and sheet["stateOrange"], sheet
+    # the four facts one under the next at the review sheet's own step
+    assert sheet["reviewStep"] == 6 and sheet["factStep"] == sheet["reviewStep"], sheet
+    assert len(sheet["steps"]) == 3 and all(abs(step - sheet["reviewStep"]) < .5 for step in sheet["steps"]), sheet
     assert sheet["captions"] == ["Changes 3 · 1 staged, 1 unstaged, 1 untracked", "Unpushed commits 1 · not on origin"], sheet
     assert sheet["kinds"] == ["Staged", "Unstaged", "Untracked"], sheet
     assert sheet["rows"] == [["modified", "src/planner.css"], ["modified", "src/beds.js"], ["notes/spring.md"]], sheet

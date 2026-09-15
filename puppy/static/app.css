@@ -2743,8 +2743,9 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .workspace-pick .wp-name{font-size:var(--fs-md);font-weight:600}
 .workspace-pick .wp-sub{max-width:100%;font:var(--fs-2xs) var(--mono);color:var(--txt3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .scratch-note{margin-top:0}
-/* linked-workspace sheet */
-.ws-link-modal .ws-facts,.task-review-facts{display:flex;flex-direction:column;gap:6px;margin:10px 0 4px}
+/* linked-workspace sheet; the review and Git sheets set their facts on the
+   same column with the same step between rows */
+.ws-link-modal .ws-facts,.task-review-facts,.session-git-facts{display:flex;flex-direction:column;gap:6px;margin:10px 0 4px}
 .ws-link-modal .m-btns{flex-wrap:wrap}
 .ws-link-modal .m-btns .btn{
   max-width:100%;height:auto;min-height:var(--btn-h);padding:8px 15px;
