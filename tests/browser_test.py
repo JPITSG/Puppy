@@ -762,6 +762,7 @@ const el = () => {
 const syncPromptSpinnerPhase = () => {};
 const syncHorizontalOverflow = () => {};
 const xIcon = () => node();
+const titlePending = () => false;
 const localStorage = { getItem() { return null; }, setItem() {} };
 %s
 const view = Object.create(SessionWorkspaceView.prototype);
@@ -3174,8 +3175,11 @@ def check_active_turn_steering_ui(ui_source: str, css_source: str) -> None:
                                   ui_source.index("function steerActionIcon(")]
     steer_icon_source = ui_source[ui_source.index("function steerActionIcon("):
                                   ui_source.index("function folderIcon(")]
-    assert "], 140);" not in queue_icon_source
-    assert "], 140);" in steer_icon_source
+    # the traced arrow's 50-unit lines wear the outline that makes them the
+    # queue's 66; the queue's contours are already that wide and wear none
+    assert "], 160);" not in queue_icon_source
+    assert "stroke-width" not in queue_icon_source
+    assert "], 160);" in steer_icon_source
     assert ('this.steerBtn.querySelector(".composer-action-icon").' +
             'appendChild(steerActionIcon());') in ui_source
     assert ('this.queueBtn.querySelector(".composer-action-icon").' +
@@ -3329,6 +3333,17 @@ def check_side_question_ui(ui_source: str, css_source: str) -> None:
     assert ui_source.index(ask_markup) < ui_source.index(steer_markup)
     assert 'class="composer-action-label">Ask</span>' in ui_source
     assert "function askActionIcon(size = 18)" in ui_source
+    # one 66-unit round-capped stroke on the traced icons' 800 grid - the
+    # width the queue's contours measure - with a dot of the stroke's own
+    # width, so the three symbols share one line weight
+    ask_icon_source = ui_source[ui_source.index("function askActionIcon("):
+                                ui_source.index("function queueActionIcon(")]
+    assert 'svg.setAttribute("viewBox", "0 0 800 800");' in ask_icon_source
+    assert ('"M232.7 217.1A178 178 0 1 1 514.4 414.4C457 462.6 400 460 400 520V560"'
+            in ask_icon_source)
+    assert 'hook.setAttribute("stroke-width", "66");' in ask_icon_source
+    assert 'hook.setAttribute("stroke-linecap", "round");' in ask_icon_source
+    assert 'dot.setAttribute("r", "33");' in ask_icon_source
     assert ('this.askBtn.querySelector(".composer-action-icon").' +
             'appendChild(askActionIcon());') in ui_source
     assert "this.askBtn.onclick = () => this.ask();" in ui_source
@@ -4255,6 +4270,7 @@ const syncPromptSpinnerPhase = node => { node.synced = true; };
 const guardNativeTouchDrag = () => () => false;
 const suppressContextGestureActivation = () => {};
 const xIcon = () => el('span', '');
+const titlePending = () => false;
 let meta;
 const findSessionMeta = () => meta;
 %s

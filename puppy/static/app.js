@@ -269,7 +269,16 @@ function filledReferenceIcon(size, paths, strokeWidth = 0) {
 /* The composer's side-question mark. Drawn rather than typeset for the same
    reason the other composer actions are: a glyph from the UI font would not
    share their optical box, so the three buttons would not line up when the
-   narrow layout drops their labels. */
+   narrow layout drops their labels. It is drawn on the two traced icons'
+   800 grid with their line: the queue's frame, plus and corner are all 66
+   units wide, so the hook, stem and dot are one 66-unit stroke with the
+   round ends of the queue's plus, and its ink stands from 67 to 733 like
+   the queue's frame rather than filling the box, so the three read as one
+   set of equally weighted marks rather than one bold glyph beside two
+   light ones. The hook is a 178-radius arc from a little above nine
+   o'clock over the top to five o'clock, handed by a tangent-continuous
+   curve into a short vertical stem; the dot is the stroke's own width,
+   one width below the stem's end so the gap survives 18px. */
 function askActionIcon(size = 18) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
@@ -277,15 +286,20 @@ function askActionIcon(size = 18) {
   svg.setAttribute("width", size);
   svg.setAttribute("height", size);
   svg.setAttribute("aria-hidden", "true");
-  const path = document.createElementNS(NS, "path");
-  path.setAttribute("fill", "currentColor");
-  path.setAttribute("d",
-    "M400 0C250 0 190 31 165 76c-23 43-25 105-25 171h132c0-57 3-92 20-112" +
-    "c20-23 58-30 108-30s88 7 108 30c18 20 25 60 25 112c0 53-15 83-55 103" +
-    "l-80 30c-60 23-80 50-90 90c-8 35-10 50-10 75h132c0-25 3-45 13-60" +
-    "c13-20 45-35 85-53c70-32 130-77 130-185c0-66-2-128-25-171C550 31 490 0 400 0Z" +
-    "M297 653h138v147H297Z");
-  svg.appendChild(path);
+  const hook = document.createElementNS(NS, "path");
+  hook.setAttribute("d",
+    "M232.7 217.1A178 178 0 1 1 514.4 414.4C457 462.6 400 460 400 520V560");
+  hook.setAttribute("fill", "none");
+  hook.setAttribute("stroke", "currentColor");
+  hook.setAttribute("stroke-width", "66");
+  hook.setAttribute("stroke-linecap", "round");
+  svg.appendChild(hook);
+  const dot = document.createElementNS(NS, "circle");
+  dot.setAttribute("cx", "400");
+  dot.setAttribute("cy", "700");
+  dot.setAttribute("r", "33");
+  dot.setAttribute("fill", "currentColor");
+  svg.appendChild(dot);
   return svg;
 }
 
@@ -326,7 +340,11 @@ function steerActionIcon(size = 18) {
 -10 507 -94 991 -973 1700 -1961 1580z`,
     `M3500 2000 l0 -1000 250 0 250 0 0 1000 0 1000 -250 0 -250 0 0
 -1000z`,
-  ], 140);
+  /* The traced arrow's arc, shaft and chevron are 50 units wide on the 800
+     grid against the queue's 66. Outlining the contours grows every line by
+     the stroke, and in the tenfold path units 160 is the 16 that makes them
+     measure the same 66. */
+  ], 160);
 }
 
 /* stroke is a parameter for the same reason bellIcon runs lighter: this 24-box
