@@ -17,7 +17,7 @@ import uuid
 from puppy import (agent_notes, browser_agent, config, db, handoff, notify, spawn_agent,
                    system_prompts, terminal_agent, vnc_agent,
                    session_agent, session_git, session_links, uploads, workspace_sync,
-                   workspaces, session_tasks)
+                   workspaces, session_tasks, session_titles)
 from puppy.drivers import get_driver
 from puppy.drivers import base as driver_base
 from puppy.drivers.base import clean_env
@@ -312,6 +312,7 @@ def session_payload(session):
     out["show_meta"] = out["show_meta"] != 0
     out["tasks_enabled"] = session_tasks.enabled(session["id"])
     out["tasks_digest"] = session_tasks.digest_enabled(session["id"])
+    out["auto_title"] = session_titles.public(session_titles.record(session["id"]))
     out["fast_mode"] = bool(out.get("fast_mode"))
     # Raw descriptor JSON becomes a structured object on the wire, while the
     # private mirror cwd never leaves the node.
@@ -578,6 +579,7 @@ def sessions_payload() -> dict:
             }),
         })
     session_tasks.decorate(sessions)
+    session_titles.decorate(sessions)
     return {"type": "sessions", "server_time": now, "sessions": sessions}
 
 
@@ -1208,6 +1210,9 @@ class SessionHub:
         if not session["name"]:
             name = db.auto_session_name(text)
             db.touch_session(self.id, name=name)
+            # a session armed for a generated title asks for one now; the
+            # first line stands in until it lands (or for good, otherwise)
+            session_titles.first_prompt(self.id, text, name)
             broadcast_sessions()
         # also queue behind a non-empty queue while idle (the moment between a
         # turn ending and its successor starting): a pending change in there

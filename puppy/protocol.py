@@ -218,6 +218,17 @@ HOST_METRICS_CAPABILITY = "host-metrics-v1"
 
 SESSION_REFERENCES_CAPABILITY = "session-references"
 
+# Generated session titles. A node keeps the per-session intent (POST
+# /api/sessions with auto_title, the same field on task creation) as the
+# exact session_title.<sid> record, carries it on every session payload as
+# the additive ``auto_title`` (``{state, requested_at}`` or null), serves
+# GET/POST /api/sessions/{sid}/title to read a request's text and settle it
+# with the generated name or an error, and runs the model's one-shot title
+# job through POST /api/titles/jobs (a spawn job in an empty private
+# directory, polled and cancelled through the spawn routes). The controller
+# that consumes requests never asks a node without this marker.
+SESSION_TITLES_CAPABILITY = "session-titles"
+
 BASE_CAPABILITIES = (
     "operation-cancel-v1",
     "side-question-cancel",
@@ -305,6 +316,7 @@ BASE_CAPABILITIES = (
     SESSION_PINNING_CAPABILITY,
     SESSION_ORDER_RECENCY_CAPABILITY,
     COMPLETION_EVENTS_CAPABILITY,
+    SESSION_TITLES_CAPABILITY,
     NODE_STATE_STREAM_CAPABILITY,
     SESSION_CONTROL_WS_CAPABILITY,
     HOST_METRICS_CAPABILITY,

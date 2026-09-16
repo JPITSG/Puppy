@@ -18,7 +18,7 @@ from puppy import (__version__, agent_notes, auth, backends, bind_verify, browse
                    cli_auto_upgrade, cli_releases,
                    cli_upgrade, config, db, engine_defaults, host_metrics, listener_handoff, notices, notify, operations,
                    live_websockets, localization, protocol, runner, search, session_git, snapshots,
-                   spawn_exec,
+                   session_titles, spawn_exec,
                    state_stream, system_prompts, terminal, uploads, vnc,
                    usage_refresh, workspace_links, workspace_sync, workspaces)
 from puppy import web_tls
@@ -270,6 +270,7 @@ async def _publish_restored_state(app: web.Application) -> None:
     runner.publish_state({"type": "workspace_links",
                           "links": workspace_links.public_links()})
     runner.publish_state({"type": "notify", **notify.public_state()})
+    runner.publish_state({"type": "titles", **session_titles.public_state()})
     notices.publish()
     for payload in await _state_stream_snapshots(app, None, probes=False):
         runner.publish_state(payload)
@@ -314,6 +315,7 @@ async def h_state(request: web.Request):
         "uploads": uploads.settings_payload(),
         "session_colors": db.SESSION_COLORS,
         "notify": notify.public_state(),
+        "titles": session_titles.public_state(),
         "browser": browser.ping_payload(),
     }
     _publish_engines({
@@ -328,6 +330,7 @@ async def h_state(request: web.Request):
     runner.publish_state({"type": "workspace_links",
                           "links": payload["workspace_links"]})
     runner.publish_state({"type": "notify", **payload["notify"]})
+    runner.publish_state({"type": "titles", **payload["titles"]})
     return web.json_response(payload)
 
 
@@ -626,6 +629,9 @@ async def h_session_create(request: web.Request):
     perm, model, effort = choices["permission_mode"], choices["model"], choices["effort"]
     color = body.get("color") if body.get("color") in db.SESSION_COLORS else random.choice(db.SESSION_COLORS)
     name = str(body.get("name") or "").strip()[:80]
+    auto_title = body.get("auto_title", False)
+    if type(auto_title) is not bool:
+        return web.json_response({"error": "auto_title must be true or false"}, status=400)
     created_workspace = ""
     if workspace_kind == workspaces.KIND_TEMPORARY:
         try:
@@ -636,6 +642,9 @@ async def h_session_create(request: web.Request):
         sid = db.create_session(name, engine, cwd, model, effort, color, perm,
                                 workspace_kind=workspace_kind,
                                 workspace=workspace_json)
+        # a typed name is the person's; only an unnamed session asks for one
+        if auto_title and not name:
+            session_titles.arm(sid)
     except Exception:
         if created_workspace:
             workspaces.discard_created(created_workspace)
@@ -1956,6 +1965,98 @@ async def h_notify_test(request: web.Request):
     return web.json_response(result)
 
 
+# ---- generated session titles (controller-owned settings) ----
+
+def _titles_broadcast() -> None:
+    runner.publish_state({"type": "titles", **session_titles.public_state()})
+
+
+async def h_titles_get(request: web.Request):
+    return web.json_response({"ok": True, "settings": session_titles.settings(),
+                              "default_prompt": config.DEFAULT_TITLE_PROMPT,
+                              "placeholder": config.TITLE_PLACEHOLDER,
+                              "max_prompt_chars": config.MAX_TITLE_PROMPT_CHARS})
+
+
+async def h_titles_put(request: web.Request):
+    """Save the backend, engine, model, effort and prompt together. The
+    switch is its own request, so saving never undoes it."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    if not isinstance(body, dict) or set(body) != {"backend", "engine", "model", "effort", "prompt"}:
+        return web.json_response(
+            {"error": "supply backend, engine, model, effort, and prompt"}, status=400)
+    prompt = body["prompt"].strip() if isinstance(body["prompt"], str) else body["prompt"]
+    try:
+        checked = config.normalize_titles({**session_titles.settings(), **body, "prompt": prompt})
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    if checked["backend"] and backends.get_backend(checked["backend"]) is None:
+        return web.json_response({"error": "unknown backend"}, status=400)
+    try:
+        config.set_titles({key: checked[key] for key in ("backend", "engine", "model", "effort", "prompt")})
+    except OSError:
+        log.exception("could not save title settings")
+        return web.json_response({"error": "Could not save title settings"}, status=500)
+    _titles_broadcast()
+    session_titles.settings_changed()
+    log.info("title settings saved (backend %s, %s %s)", checked["backend"],
+             checked["engine"] or "no engine", checked["model"] or "default model")
+    return web.json_response({"ok": True, "settings": session_titles.settings()})
+
+
+async def h_titles_toggle(request: web.Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    if not isinstance(body, dict) or set(body) != {"enabled"}:
+        return web.json_response({"error": "supply enabled"}, status=400)
+    try:
+        config.set_titles(body)
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    except OSError:
+        log.exception("could not save title switch")
+        return web.json_response({"error": "Could not save title settings"}, status=500)
+    _titles_broadcast()
+    session_titles.settings_changed()
+    return web.json_response({"ok": True, "settings": session_titles.settings()})
+
+
+@operations.cancellable
+async def h_titles_test(request: web.Request):
+    """Generate one title from the panel's unsaved values and a sample
+    message, so the prompt and model can be judged before they name anything."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    if not isinstance(body, dict) or set(body) != {
+            "backend", "engine", "model", "effort", "prompt", "message"}:
+        return web.json_response(
+            {"error": "supply backend, engine, model, effort, prompt, and message"}, status=400)
+    message = body.pop("message")
+    if not isinstance(message, str) or not message.strip():
+        return web.json_response({"error": "Enter a message to make a title from"}, status=400)
+    if len(message) > session_titles.TEXT_LIMIT:
+        return web.json_response({"error": "The sample message is too long"}, status=400)
+    prompt = body["prompt"].strip() if isinstance(body["prompt"], str) else body["prompt"]
+    try:
+        checked = config.normalize_titles({**session_titles.settings(), **body, "prompt": prompt})
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    if checked["backend"] and backends.get_backend(checked["backend"]) is None:
+        return web.json_response({"error": "unknown backend"}, status=400)
+    try:
+        result = await operations.wait(session_titles.test_title(checked, message))
+    except session_titles.TitleError as exc:
+        return web.json_response({"error": str(exc)}, status=409 if exc.transient else 400)
+    return web.json_response(dict(result, ok=True))
+
+
 def register_execution_api(app: web.Application, include_terminal: bool = True) -> None:
     """Register the API surface consumed through a local or remote session tab.
 
@@ -2026,6 +2127,7 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     search.register(app)
     agent_notes.register(app)
     session_git.register(app)
+    session_titles.register(app)
     state_stream.register(
         app, _state_stream_snapshots, _state_stream_interval,
         snapshot_topics=("engines", "node", "browser_status",
@@ -2063,12 +2165,17 @@ def build_app(runtime_web: dict = None,
     app.on_startup.append(backends.start_auto_upgrade_worker)
     app.on_startup.append(workspace_links.start_worker)
     app.on_startup.append(notify.start_worker)
+    app.on_startup.append(session_titles.start_worker)
 
     r.add_get("/api/state", h_state)
     r.add_get("/api/notify", h_notify_get)
     r.add_post("/api/notify", h_notify_set)
     r.add_post("/api/notify/toggle", h_notify_toggle)
     r.add_post("/api/notify/test", h_notify_test)
+    r.add_get("/api/titles", h_titles_get)
+    r.add_put("/api/titles", h_titles_put)
+    r.add_post("/api/titles/toggle", h_titles_toggle)
+    r.add_post("/api/titles/test", h_titles_test)
     r.add_get(notices.API_PATH, h_notices_get)
     r.add_post(notices.API_PATH, h_notices_post)
     r.add_delete(notices.API_PATH, h_notices_clear)
@@ -2105,6 +2212,7 @@ def build_app(runtime_web: dict = None,
             await backends.stop_health_worker(app)
             await workspace_links.stop_worker(app)
             await notify.stop_worker(app)
+            await session_titles.stop_worker(app)
             await runner.shutdown()
         finally:
             await live_websockets.close_all(app)

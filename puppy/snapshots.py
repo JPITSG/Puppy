@@ -671,6 +671,11 @@ def _validate_database(path: Path):
             session_tasks.validate_persisted(connection)
         except (ValueError, TypeError) as exc:
             raise SnapshotError("snapshot session references are not current") from exc
+        from puppy import session_titles
+        try:
+            session_titles.validate_persisted(connection)
+        except (ValueError, TypeError) as exc:
+            raise SnapshotError("snapshot session title state is not current") from exc
         transport_row = connection.execute(
             "SELECT value FROM meta WHERE key=?", (web_tls.STATE_KEY,)).fetchone()
         if transport_row is None:

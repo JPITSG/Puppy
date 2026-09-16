@@ -39,6 +39,7 @@ const backendConnectionAllowed = bid => !bid || state.remoteOk[bid] === true;
 const context = vm.createContext({
   console, document, el, state, nodeStateListeners, enginePayloadListeners, modal,
   Composer: { live: new Set() },
+  wireAutoTitleChoice: () => ({ sync() {}, wanted: () => false }),
   backendSupportsFileUploads: bid => capability(bid, "file-uploads"),
   uploadSettingsFor: () => ({ enabled: true, max_file_size_mb: 10 }),
   requestAnimationFrame: callback => { callback(); return 1; }, setTimeout, clearTimeout,

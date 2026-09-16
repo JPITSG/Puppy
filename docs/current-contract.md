@@ -57,6 +57,14 @@ still contain a value written before that release.
   hand before that node starts; startup and backup validation reject the
   six-field shape, and an archive exported before this change is refused.
   See [Git repositories](session-git.md).
+- `config.titles` contains exactly `enabled`, `backend`, `engine`, `model`,
+  `effort` and `prompt`. A `config.json` written before generated session
+  titles must have the section added by hand before that node starts - every
+  runtime, headless nodes included; startup and backup validation reject a
+  config without it, and an archive exported before this change is refused.
+  `session_title.<sid>` records are exact `{format: 1, state, text,
+  placeholder, requested_at}` rows belonging to existing sessions. See
+  [Session titles](session-titles.md).
 
 ## Runtime APIs and console
 
@@ -138,6 +146,23 @@ A console makes a repository's mark a button that opens the sheet only for
 nodes that advertise this; on every other node the mark stays the labelled
 image it was. Nothing is persisted, nothing enters the cache or a payload
 beyond the record, and no backup shape changes.
+
+Generated session titles are additive `session-titles`: both execution
+runtimes accept `auto_title` on session and task creation, carry the additive
+`auto_title` record (`null`, or `{state, requested_at}` - never the message)
+on every session payload, serve `GET`/`POST /api/sessions/{sid}/title` to
+read a request's text and settle it with a `name` or an `error`, and serve
+`POST /api/titles/jobs`, one spawn job of the chosen engine in an empty
+private directory that the spawn job routes then poll and cancel. The
+controller alone owns the settings (`GET`/`PUT /api/titles`, `POST
+/api/titles/toggle`, the cancellable `POST /api/titles/test`), publishes their
+public state on `/api/state` and the `titles` stream topic, consumes requests
+from its own sessions and from every sessions payload a backend answers with,
+and raises a failed title as a `toast` frame on the updates stream. A console
+offers the creation dialogs' choice only for nodes that advertise this; a
+node without it names a session from its first line as before. The `titles`
+config section is a persisted-shape change (above); nothing else changes a
+backup shape.
 
 The sheet's actions are additive `session-git-actions`: both execution
 runtimes serve `POST /api/sessions/{sid}/git/push` (the checked-out branch's

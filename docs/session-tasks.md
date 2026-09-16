@@ -12,7 +12,11 @@ own prompt box: `@` offers Main's browsers, terminals, sessions and a spawn,
 images and files can be pasted, dropped or attached with **+**, Enter starts the
 task and Shift+Enter breaks the line. Attached files are copied into the task's
 own storage as it starts, so they belong to the task like any message's
-attachments. Optionally name the task. The engine initially follows Main, even
+attachments. Optionally name the task; left unnamed, it takes its prompt's
+first line, or - with Session titles configured and **Generate a title from
+the task** left on - a title a model writes from the prompt, which replaces
+that first line when it arrives (see [Session titles](session-titles.md)).
+The engine initially follows Main, even
 if another task tab is selected. Model, effort and permissions start with that
 engine's saved defaults on the selected backend. Adjust any of them
 before starting; these choices apply only to the new task. Switching engines

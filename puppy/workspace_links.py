@@ -1040,7 +1040,8 @@ async def create_linked_session(body: dict) -> dict:
     if exec_channel is None or ws_channel is None:
         raise NodeError("unknown backend", 404)
     session_fields = {}
-    for key in ("engine", "name", "model", "effort", "permission_mode", "color"):
+    for key in ("engine", "name", "model", "effort", "permission_mode", "color",
+                "auto_title"):
         if body.get(key) is not None:
             session_fields[key] = body.get(key)
 

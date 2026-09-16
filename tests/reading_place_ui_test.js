@@ -33,6 +33,7 @@ const context = vm.createContext({
   findSessionMeta: (bid, sid) => sessions.find(session => session.id === sid),
   navigationRemember: () => { remembered++; }, navigationChanged: () => { changed++; },
   wireTabbar() {}, wireTabDrag() {}, syncHorizontalOverflow() {}, syncPromptSpinnerPhase() {},
+  titlePending: () => false,
   tasksIcon: () => el("svg"), plusIcon: () => el("svg"), xIcon: () => el("svg"),
   taskStateClass: () => "", taskStateLabel: () => "Ready", taskActivityTitle: () => "",
   promptStatusLabel: label => el("span", "t-state", label),

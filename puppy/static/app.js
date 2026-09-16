@@ -3187,6 +3187,9 @@ const state = {
   remoteStopping: {},     // bid -> graceful node lifecycle notice
   engCache: {},           // bid -> engines[]
   notify: { configured: false, enabled: false },   // completion-alert bell
+  // generated titles: the controller's switch and the model that names
+  // unnamed sessions and tasks (backend id, engine key, model id)
+  titles: { enabled: false, configured: false, backend: 0, engine: "", model: "" },
   notices: null,          // {items}: the controller's notice history, newest first
   browser: { enabled: false },  // this instance's managed-browser toggle
   browserStatus: null,          // full local browser status from node-state stream
@@ -3783,6 +3786,7 @@ async function refreshState() {
   state.runtimeId = typeof s.runtime_id === "string" ? s.runtime_id : "";
   state.clockFormat = s.clock_format === "12h" ? "12h" : "24h";
   if (s.notify) { state.notify = s.notify; syncBell(); }
+  if (s.titles) state.titles = titlesPublicState(s.titles);
   state.sessionColors = s.session_colors || [];
   rememberEnginePayload(0, {
     engines: Array.isArray(s.engines) ? s.engines : [],
@@ -3972,7 +3976,9 @@ function applyNodeStateSnapshot(bid, message) {
     }
     ingestSessionActivity(bid, message.sessions, message.server_time);
     syncRemoteStateViews();
+    /* the tab strip reads names and pending titles from these lists too */
     if (!bid) syncTabsWithSessions();
+    else renderTabs();
   } else if (message.type === "engines") {
     applyEnginesPayload(bid, message, markReachable);
   } else if (message.type === "node") {
@@ -4052,6 +4058,13 @@ function handleUpdatesMessage(d) {
   } else if (d.type === "notify") {
     state.notify = { configured: !!d.configured, enabled: !!d.enabled };
     syncBell();
+  } else if (d.type === "titles") {
+    state.titles = titlesPublicState(d);
+    for (const sync of titlesStateListeners) sync();
+  } else if (d.type === "toast") {
+    /* a notice the controller itself raises for every console - a title
+       that could not be generated - on the one surface notices have */
+    if (typeof d.text === "string" && d.text) toast(d.text, d.level || "info", TOAST_LONG);
   } else if (d.type === "notices") {
     applyNotices(d);
   } else if (d.type === "browser") {
@@ -5530,7 +5543,9 @@ function animateSessionRows(root, rebuild) {
 function sessionRowRows(bid, s, slots = []) {
   const r1 = el("div", "si-row");
   r1.appendChild(sessDot(s));
-  r1.appendChild(el("div", "si-name", s.name || `Session ${s.id}`));
+  /* a title still being generated shimmers where it will land */
+  r1.appendChild(el("div", "si-name" + (titlePending(s) ? " titling" : ""),
+    s.name || `Session ${s.id}`));
   for (const slot of slots) if (slot) r1.appendChild(slot);
   const r2 = el("div", "si-row sub");
   r2.appendChild(provIcon(s.engine));
@@ -9077,7 +9092,8 @@ function renderTabNode(t, pane, tabsRoot) {
   else if (t.type === "browser") tdot.appendChild(globeIcon(12));
   else if (t.type === "vnc") tdot.appendChild(vncIcon(12));
   tab.appendChild(tdot);
-  tab.appendChild(el("span", "t-title",
+  const titling = t.type === "session" && titlePending(findSessionMeta(t.bid, t.sid));
+  tab.appendChild(el("span", "t-title" + (titling ? " titling" : ""),
     (t.type === "term") ? terminalTabTitle(t) :
     (t.type === "browser") ? browserTabTitle(t) :
     (t.type === "vnc") ? vncTabTitle(t) : (t.title || "tab")));
@@ -9956,6 +9972,83 @@ function applyTheme(t) {
 $("btn-theme").onclick = () =>
   applyTheme(document.documentElement.classList.contains("light") ? "dark" : "light");
 applyTheme(lsGet("puppy.theme") || "dark");
+
+/* generated titles: what the console keeps of the controller's settings -
+   whether they name new sessions at all, and who does the naming */
+const titlesStateListeners = new Set();
+
+function titlesPublicState(value) {
+  const item = value && typeof value === "object" ? value : {};
+  const engine = typeof item.engine === "string" ? item.engine : "";
+  return {
+    enabled: !!item.enabled,
+    configured: item.configured === undefined ? !!engine : !!item.configured,
+    backend: Number(item.backend) || 0,
+    engine,
+    model: typeof item.model === "string" ? item.model : "",
+  };
+}
+
+function titlesPublicStateFromSettings(settings) {
+  return titlesPublicState({ ...settings, configured: !!(settings && settings.engine) });
+}
+
+/* whether a session or task created unnamed on this backend can ask for a
+   generated title: the controller's switch is on with a model chosen, and
+   the backend that will hold the session keeps such requests */
+function titlesOfferedFor(bid) {
+  const titles = state.titles || {};
+  if (!titles.enabled || !titles.configured) return false;
+  if (!bid) return true;
+  const backend = state.backends.find(item => item.id === Number(bid));
+  return backendHasCapability(backend, "session-titles");
+}
+
+/* "Claude · claude-haiku-4-5 · NAS.lan": the engine's label, the model as
+   the backend's catalog names it (or its id, or its default), and the
+   backend when it is not this instance */
+function titlesGeneratorLabel() {
+  const titles = state.titles || {};
+  const info = engineInfo(titles.backend, titles.engine);
+  const parts = [(info && info.label) || titles.engine || "a model"];
+  if (titles.model) {
+    const row = info && Array.isArray(info.model_options) ?
+      info.model_options.find(item => item && item.value === titles.model) : null;
+    parts.push(row && row.label ? row.label : titles.model);
+  } else parts.push("default model");
+  if (titles.backend) parts.push(backendName(titles.backend));
+  return parts.join(" · ");
+}
+
+function titlePending(session) {
+  return !!(session && session.auto_title && session.auto_title.state === "requested");
+}
+
+/* The generated-title choice a creation dialog carries under its Name field
+   (New session, New task): shown only where a title can be asked for - the
+   controller's switch on with a model chosen, and the backend that will hold
+   the session keeping such requests - checked by default, and yielding to a
+   typed name, which is never replaced. ``when`` completes the note: "<who>
+   names it <when>." */
+function wireAutoTitleChoice(wrap, nameInput, backendOf, onClose, when) {
+  const check = wrap.querySelector('input[type="checkbox"]');
+  const note = wrap.querySelector(".auto-title-note");
+  let offered = false;
+  const sync = () => {
+    offered = titlesOfferedFor(backendOf());
+    wrap.classList.toggle("hidden", !offered);
+    if (!offered) return;
+    const typed = !!nameInput.value.trim();
+    check.disabled = typed;
+    note.textContent = typed ? "The name above is kept as typed." :
+      `${titlesGeneratorLabel()} names it ${when}.`;
+  };
+  nameInput.addEventListener("input", sync);
+  titlesStateListeners.add(sync);
+  onClose(() => titlesStateListeners.delete(sync));
+  sync();
+  return { sync, wanted: () => offered && !nameInput.value.trim() && check.checked };
+}
 
 /* completion-alert bell: appears once a completion command is configured;
    click arms or silences it (the state lives on the server, so it holds
@@ -13999,7 +14092,7 @@ class SessionWorkspaceView {
     // The drop validates against opened before committing; removed or newly
     // opened tabs invalidate that permutation just like the outer tab bar.
     if (dragTab && dragTab.taskWorkspace === this && dragTab.item.isConnected) return;
-    const face = s => [s.id, s.name, s.status, s.color, s.engine, s.task];
+    const face = s => [s.id, s.name, s.status, s.color, s.engine, s.task, titlePending(s)];
     const signature = JSON.stringify([this.selected, this.opened, this.seen, main ? face(main) : null, tasks.map(face)]);
     if (signature === this.rendered) return;
     this.rendered = signature;
@@ -14018,7 +14111,7 @@ class SessionWorkspaceView {
       if (session && session.color) dot.style.color = session.color;
       if (running) syncPromptSpinnerPhase(dot);
       tab.appendChild(dot);
-      tab.appendChild(el("span", "t-title", title));
+      tab.appendChild(el("span", "t-title" + (titlePending(session) ? " titling" : ""), title));
       tab.onclick = () => this.select(sid);
       tab.onkeydown = event => {
         if (!["ArrowLeft","ArrowRight","Home","End"].includes(event.key)) return;
@@ -14088,6 +14181,10 @@ async function modalNewTask(workspace) {
     ${composerBoxHtml({ id: "nt-prompt", rows: 6, placeholder: "Describe the feature or change…",
                         className: "mention-below" })}
     <label>Name <span class="field-optional">(optional, auto from the task)</span><input type="text" id="nt-name" maxlength="80"></label>
+    <div class="auto-title hidden" id="nt-title-wrap">
+      <label class="check"><input type="checkbox" id="nt-title" aria-describedby="nt-title-note" checked> Generate a title from the task</label>
+      <p class="help auto-title-note" id="nt-title-note"></p>
+    </div>
     <div class="field-row">
       <label>Model<select id="nt-model"></select></label>
       <label>Effort<select id="nt-effort"></select></label>
@@ -14117,6 +14214,9 @@ async function modalNewTask(workspace) {
   onClose(() => composer.destroy({ discardUploads: !submitted }));
   const engBox = m.querySelector("#nt-engines"), model = m.querySelector("#nt-model");
   const effort = m.querySelector("#nt-effort"), permission = m.querySelector("#nt-perm");
+  const nameInp = m.querySelector("#nt-name");
+  const titleChoice = wireAutoTitleChoice(m.querySelector("#nt-title-wrap"), nameInp,
+    () => bid, onClose, "as the task starts; until then the task's first line stands in");
   const custom = m.querySelector("#nt-model-custom"), customWrap = m.querySelector("#nt-model-custom-wrap");
   const getModel = () => model.value === "__custom__" ? custom.value.trim() : model.value;
   const choices = () => ({ engine, model: getModel(), effort: effort.value, permission_mode: permission.value });
@@ -14215,8 +14315,8 @@ async function modalNewTask(workspace) {
        exactly what a send from the chat would carry */
     const prompt = composer.message();
     if (!prompt) { composer.focus(); return; }
-    const body = { name: m.querySelector("#nt-name").value, prompt, request_id: requestId,
-      ...choices() };
+    const body = { name: nameInp.value, prompt, request_id: requestId,
+      ...choices(), auto_title: titleChoice.wanted() };
     preparing = true; syncBusy();
     error.classList.add("hidden");
     try {
@@ -20637,6 +20737,8 @@ class SettingsView {
     this.engineUpgradePollGeneration = 0;
     this.localEngineGroup = null;
     this.notifyBackendsSync = null;
+    this.titlesSync = null;
+    this.titlesRetire = null;
     this.systemPromptSync = null;
     this.timerSettingsSync = null;
     this.timeoutSettingsSync = null;
@@ -20663,6 +20765,9 @@ class SettingsView {
     this.upgradesInProgress.clear();
     this.localEngineGroup = null;
     this.notifyBackendsSync = null;
+    this.titlesSync = null;
+    if (this.titlesRetire) this.titlesRetire();
+    this.titlesRetire = null;
     this.systemPromptSync = null;
     this.timerSettingsSync = null;
     this.timeoutSettingsSync = null;
@@ -21060,6 +21165,7 @@ class SettingsView {
       }
     }
     if (this.notifyBackendsSync) this.notifyBackendsSync();
+    if (this.titlesSync) this.titlesSync();
     if (this.systemPromptSync) this.systemPromptSync();
     if (this.timerSettingsSync) this.timerSettingsSync();
     if (this.timeoutSettingsSync) this.timeoutSettingsSync();
@@ -22952,6 +23058,357 @@ class SettingsView {
     return card;
   }
 
+  /* Generated titles: the switch, then who does the naming - a backend, an
+     engine it has installed, a model from that engine's catalog and an
+     effort that model offers - the prompt the model is given, and a sample
+     message to try the lot on before it names anything. The same card
+     shape as Completion alerts: a head with its switch, the fields, and one
+     row of Save, Try it and the note. */
+  titleSettingsCard(generation) {
+    const card = el("div", "card titles-card");
+    card.innerHTML = `<div class="notify-head">
+        <h2>Session titles</h2>
+        <label class="be-auto notify-toggle" id="tt-enabled-wrap">
+          <input type="checkbox" id="tt-enabled">
+          <span class="be-auto-track" aria-hidden="true"><span></span></span>
+          <span class="be-auto-label">Enabled</span>
+        </label>
+      </div>
+      <p class="usage-refresh-copy">A session or task started without a name is titled by a
+        model from its first message. The message's first line stands in until the title
+        arrives, and a name you type is always kept. New session and New task offer the
+        choice for each one.</p>
+      <form>
+        <div class="notify-fields titles-fields">
+          <label>Run on<select id="tt-backend" aria-label="Backend the title model runs on"></select></label>
+          <label>Engine<select id="tt-engine" aria-label="Engine that names sessions"></select></label>
+          <label>Model<select id="tt-model" aria-label="Model that names sessions"></select></label>
+          <label>Effort<select id="tt-effort" aria-label="Reasoning effort for titles"></select></label>
+        </div>
+        <label class="hidden" id="tt-custom-wrap">Custom model<input type="text" id="tt-custom"
+          placeholder="Model ID" spellcheck="false" maxlength="256" autocomplete="off"></label>
+        <p class="hint titles-engine-note" id="tt-engine-note" role="status"></p>
+        <section class="system-prompt-section titles-prompt-section">
+          <div class="system-prompt-section-head">
+            <div class="system-prompt-section-copy">
+              <h3>Prompt</h3>
+              <p>Sent to the model with the message in place of
+                <span class="mono-inline">{message}</span> (or after the text without it).
+                The model answers alone in an empty directory: no tools, no project, no
+                system prompt.</p>
+            </div>
+            <button type="button" class="btn btn-sm btn-ghost system-prompt-reset" id="tt-reset">Reset to default</button>
+          </div>
+          <textarea class="system-prompt-textarea config-textarea" id="tt-prompt" rows="3"
+            aria-label="Title prompt"></textarea>
+        </section>
+        <label class="titles-sample">Try it on<input type="text" id="tt-sample" maxlength="4000"
+          autocomplete="off" placeholder="A first message"></label>
+        <p class="usage-refresh-copy">The switch applies immediately; the rest waits for Save.
+          Try it titles the sample message with the values entered here, saved or not, even
+          while titles are off.</p>
+        <p class="form-error hidden" role="alert"></p>
+        <div class="notify-actions">
+          <button type="submit" class="btn btn-pri btn-sm" id="tt-save">Save</button>
+          <button type="button" class="btn btn-sm" id="tt-try">Try it</button>
+          <button type="button" class="btn btn-sm hidden" id="tt-retry">Retry</button>
+          <span class="notify-note" id="tt-note" role="status" aria-live="polite"></span>
+        </div>
+      </form>`;
+    const form = card.querySelector("form");
+    const backend = card.querySelector("#tt-backend");
+    const engine = card.querySelector("#tt-engine");
+    const model = card.querySelector("#tt-model");
+    const effort = card.querySelector("#tt-effort");
+    const custom = card.querySelector("#tt-custom");
+    const customWrap = card.querySelector("#tt-custom-wrap");
+    const engineNote = card.querySelector("#tt-engine-note");
+    const prompt = card.querySelector("#tt-prompt");
+    const reset = card.querySelector("#tt-reset");
+    const sample = card.querySelector("#tt-sample");
+    const enabled = card.querySelector("#tt-enabled");
+    const note = card.querySelector("#tt-note");
+    const error = card.querySelector(".form-error");
+    const save = card.querySelector("#tt-save");
+    const tryIt = card.querySelector("#tt-try");
+    const retry = card.querySelector("#tt-retry");
+    sample.value = "Fix the login redirect loop after signing in";
+    let loaded = false, busy = false, saved = null, defaultPrompt = "";
+    let nodeSignature = "", engineLoad = 0;
+    /* the choices the card holds - saved, or made since - kept while the
+       catalog that names them is on its way, so a repaint never loses a
+       model the picker cannot show yet, nor a choice just made */
+    let chosen = { engine: "", model: "", effort: "" };
+    const current = () => generation === this.renderGeneration && card.isConnected;
+    const getModel = () => model.value === "__custom__" ? custom.value.trim() : model.value;
+    const values = () => ({
+      backend: Number(backend.value) || 0, engine: engine.value,
+      model: getModel(), effort: effort.value, prompt: prompt.value.trim(),
+    });
+    const snapshot = () => JSON.stringify(values());
+    const setError = text => {
+      error.textContent = text;
+      error.classList.toggle("hidden", !text);
+    };
+    const paint = () => {
+      form.setAttribute("aria-busy", busy ? "true" : "false");
+      const ready = loaded && !busy;
+      for (const control of [backend, engine, prompt, reset, sample, save]) control.disabled = !ready;
+      const info = engineInfo(Number(backend.value) || 0, engine.value);
+      model.disabled = !ready || !engine.value || !info ||
+        (info.allow_custom_model === false && !(info.model_options || []).length);
+      effort.disabled = !ready || !engine.value;
+      custom.disabled = !ready;
+      tryIt.disabled = !ready || !engine.value || !sample.value.trim();
+      retry.disabled = busy;
+      for (const control of [backend, engine, model, effort]) refreshChoiceSelect(control);
+    };
+    const paintDirty = () => {
+      setError("");
+      const dirty = loaded && snapshot() !== saved;
+      note.textContent = dirty ? "Unsaved changes" : "";
+      note.classList.toggle("dirty", dirty);
+      paint();
+    };
+    const enginesFor = bid => bid ? (Array.isArray(state.engCache[bid]) ? state.engCache[bid] : null) : state.engines;
+    /* the engine list follows the chosen backend: what it has installed,
+       with the saved engine kept visible when that backend lacks it */
+    const renderEngines = () => {
+      const bid = Number(backend.value) || 0;
+      const list = enginesFor(bid);
+      const wanted = engine.value || chosen.engine;
+      const rows = [{ value: "", label: "Choose an engine" }];
+      for (const info of list || []) {
+        if (!info || !info.key) continue;
+        rows.push({ value: info.key, label: info.label || info.key, disabled: !info.installed,
+          hint: info.installed ? "" : "Not installed on this backend" });
+      }
+      if (wanted && !rows.some(row => row.value === wanted))
+        rows.push({ value: wanted, label: `${wanted} · not on this backend`, disabled: true });
+      engine.innerHTML = "";
+      for (const row of rows) {
+        const option = document.createElement("option");
+        option.value = row.value;
+        option.textContent = row.label;
+        option.title = row.hint || "";
+        option.disabled = !!row.disabled;
+        engine.appendChild(option);
+      }
+      engine.value = wanted;
+      if (engine.value !== wanted) engine.value = "";
+      refreshChoiceSelect(engine);
+      paintEngineNote();
+      renderModels();
+    };
+    const paintEngineNote = () => {
+      const bid = Number(backend.value) || 0;
+      const info = engineInfo(bid, engine.value);
+      engineNote.textContent = enginesFor(bid) === null ? "Loading this backend's engines…" :
+        !engine.value ? "Choose the engine that names sessions." :
+        !info || !info.installed ? "This engine is not installed on the chosen backend." : "";
+    };
+    /* the model and effort pickers are the engine-defaults dialog's: the
+       catalog's rows, a still-loading catalog's saved choice by name, and
+       Custom… for a model the engine does not offer */
+    const renderModels = () => {
+      if (!engine.value) {
+        /* no engine yet: the two pickers wait, showing what they will hold */
+        const waiting = [{ value: "", label: "Engine default" }];
+        fillEngineChoice(model, waiting, "");
+        fillEngineChoice(effort, waiting, "");
+        customWrap.classList.add("hidden");
+        paint();
+        return;
+      }
+      const info = engineInfo(Number(backend.value) || 0, engine.value);
+      const wanted = model.value ? getModel() : chosen.model;
+      const rows = modelOptionsForPicker(info, wanted);
+      const customAllowed = !info || info.allow_custom_model !== false;
+      const isCustom = customAllowed && !!info && isCustomModel(info, wanted);
+      if (!isCustom) rows.push(...pendingModelRows(info, wanted));
+      if (customAllowed) rows.push({ value: "__custom__", label: "Custom…" });
+      if (isCustom) custom.value = wanted;
+      fillEngineChoice(model, rows, isCustom ? "__custom__" : wanted);
+      customWrap.classList.toggle("hidden", model.value !== "__custom__");
+      const effortWanted = effort.value || chosen.effort;
+      fillEngineChoice(effort, effortOptionsForModel(info, getModel()), effortWanted);
+      paint();
+    };
+    const syncEffort = () => {
+      const info = engineInfo(Number(backend.value) || 0, engine.value);
+      const options = effortOptionsForModel(info, getModel());
+      fillEngineChoice(effort, options, options.some(item => item.value === effort.value) ? effort.value : "");
+      customWrap.classList.toggle("hidden", model.value !== "__custom__");
+      chosen = { ...chosen, model: getModel(), effort: effort.value };
+      paintDirty();
+    };
+    /* a backend whose engines this console has not seen is asked once */
+    const loadEngines = async () => {
+      const bid = Number(backend.value) || 0;
+      if (!bid || Array.isArray(state.engCache[bid]) || !backendConnectionAllowed(bid)) return;
+      const sequence = ++engineLoad;
+      try {
+        const result = await api(bid, "engines", { timeoutMs: ENGINE_POLL_TIMEOUT });
+        if (!current() || sequence !== engineLoad) return;
+        if (!result || !Array.isArray(result.engines)) throw new Error("backend returned an invalid engines response");
+        rememberEnginePayload(bid, result);
+      } catch (e) {
+        if (!current() || sequence !== engineLoad) return;
+        engineNote.textContent = `Could not load this backend's engines · ${e.message}`;
+      }
+    };
+    this.titlesSync = () => {
+      const signature = JSON.stringify([backendName(0), state.backends.map(b =>
+        [b.id, b.name, b.capabilities, !!backendConnectionAllowed(b.id)])]);
+      if (signature === nodeSignature) return;
+      nodeSignature = signature;
+      const selected = backend.value || "0";
+      backend.replaceChildren();
+      for (const b of [{ id: 0, name: `${backendName(0)} (local)` }, ...state.backends]) {
+        const option = document.createElement("option");
+        option.value = String(b.id);
+        const capable = !b.id || (backendHasCapability(b, "spawn-exec") &&
+          backendHasCapability(b, "session-titles"));
+        option.textContent = b.name + (capable ? "" : " · upgrade to enable");
+        option.disabled = !capable;
+        backend.appendChild(option);
+      }
+      if (![...backend.options].some(option => option.value === selected)) {
+        const option = document.createElement("option");
+        option.value = selected;
+        option.textContent = "Unavailable backend";
+        option.disabled = true;
+        backend.appendChild(option);
+      }
+      backend.value = selected;
+      refreshChoiceSelect(backend);
+    };
+    this.titlesSync();
+    for (const control of [backend, engine, model, effort]) enhanceChoiceSelect(control);
+    const enginePayloadListener = bid => {
+      if (!current() || bid !== (Number(backend.value) || 0)) return;
+      renderEngines();
+      paintDirty();
+    };
+    enginePayloadListeners.add(enginePayloadListener);
+    /* the switch follows the controller's state, like the alert card's,
+       and says what it does in words a screen reader can read */
+    const enabledWrap = card.querySelector("#tt-enabled-wrap");
+    const titlesListener = () => {
+      const titles = state.titles || {};
+      const saving = enabled.dataset.saving === "true";
+      if (!saving) enabled.checked = !!titles.enabled;
+      enabled.disabled = saving;
+      enabledWrap.classList.toggle("disabled", saving);
+      const label = saving ? "Updating session titles" : titles.enabled && !titles.configured ?
+        "Session titles enabled, but no engine is chosen, so nothing will be named" :
+        `Session titles ${titles.enabled ? "enabled" : "disabled"}`;
+      enabled.setAttribute("aria-label", saving ? label :
+        `${label}; activate to ${titles.enabled ? "disable" : "enable"}`);
+    };
+    titlesStateListeners.add(titlesListener);
+    titlesListener();
+    const forget = () => {
+      enginePayloadListeners.delete(enginePayloadListener);
+      titlesStateListeners.delete(titlesListener);
+    };
+    const load = async () => {
+      busy = true; setError(""); note.textContent = "Loading…"; paint();
+      try {
+        const r = await api(0, "titles");
+        if (!current()) return;
+        const settings = r.settings || {};
+        chosen = { engine: settings.engine || "", model: settings.model || "", effort: settings.effort || "" };
+        defaultPrompt = typeof r.default_prompt === "string" ? r.default_prompt : "";
+        prompt.value = settings.prompt || defaultPrompt;
+        backend.value = String(settings.backend || 0);
+        if (![...backend.options].some(option => option.value === String(settings.backend || 0))) {
+          const option = document.createElement("option");
+          option.value = String(settings.backend || 0); option.textContent = "Unavailable backend";
+          option.disabled = true; backend.appendChild(option);
+          backend.value = option.value;
+        }
+        state.titles = titlesPublicStateFromSettings(settings);
+        titlesListener();
+        engine.value = ""; model.value = ""; effort.value = "";
+        renderEngines();
+        saved = snapshot(); loaded = true;
+        retry.classList.add("hidden");
+        note.textContent = "";
+        loadEngines();
+      } catch (e) {
+        if (!current()) return;
+        setError(e.message || "Could not load title settings");
+        note.textContent = ""; retry.classList.remove("hidden");
+      } finally { busy = false; if (current()) paint(); }
+    };
+    retry.onclick = load;
+    backend.onchange = () => { engine.value = ""; model.value = ""; effort.value = ""; renderEngines(); paintDirty(); loadEngines(); };
+    engine.onchange = () => { model.value = ""; effort.value = ""; chosen = { engine: engine.value, model: "", effort: "" }; paintEngineNote(); renderModels(); paintDirty(); };
+    model.onchange = syncEffort;
+    custom.oninput = syncEffort;
+    effort.onchange = () => { chosen = { ...chosen, effort: effort.value }; paintDirty(); };
+    prompt.oninput = paintDirty;
+    sample.oninput = paint;
+    reset.onclick = () => { prompt.value = defaultPrompt; paintDirty(); };
+    prompt.addEventListener("keydown", event => {
+      if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+        event.preventDefault();
+        if (!save.disabled) form.requestSubmit ? form.requestSubmit() : save.click();
+      }
+    });
+    enabled.onchange = async () => {
+      if (enabled.dataset.saving === "true") return;
+      const desired = enabled.checked;
+      enabled.dataset.saving = "true"; setError(""); titlesListener();
+      try {
+        const r = await api(0, "titles/toggle", { method: "POST", body: { enabled: desired } });
+        if (current()) state.titles = titlesPublicStateFromSettings(r.settings);
+      } catch (e) {
+        if (current()) setError(e.message);
+      } finally {
+        delete enabled.dataset.saving;
+        if (current()) { titlesListener(); for (const sync of titlesStateListeners) if (sync !== titlesListener) sync(); }
+      }
+    };
+    form.onsubmit = async event => {
+      event.preventDefault();
+      if (busy || !loaded) return;
+      busy = true; setError(""); note.textContent = "Saving…"; note.classList.remove("dirty"); paint();
+      try {
+        const r = await api(0, "titles", { method: "PUT", body: values() });
+        if (!current()) return;
+        chosen = { engine: r.settings.engine, model: r.settings.model, effort: r.settings.effort };
+        prompt.value = r.settings.prompt;
+        saved = snapshot(); state.titles = titlesPublicStateFromSettings(r.settings);
+        titlesListener();
+        for (const sync of titlesStateListeners) if (sync !== titlesListener) sync();
+        note.textContent = "Saved";
+      } catch (e) { if (current()) { setError(e.message); note.textContent = "Unsaved changes"; note.classList.add("dirty"); } }
+      finally { busy = false; if (current()) paint(); }
+    };
+    tryIt.onclick = async () => {
+      if (busy || !loaded || !engine.value || !sample.value.trim()) return;
+      busy = true; setError(""); note.textContent = "Titling…"; note.classList.remove("dirty"); paint();
+      try {
+        const r = await api(0, "titles/test", { method: "POST", operation: "Generating a title",
+          timeoutMs: 240000, body: { ...values(), message: sample.value.trim() } });
+        if (!current()) return;
+        const detail = [r.model, r.elapsed_s != null ? `${r.elapsed_s}s` : ""].filter(Boolean).join(" · ");
+        note.textContent = `“${r.title}”` + (detail ? ` · ${detail}` : "") +
+          (snapshot() !== saved ? " · Unsaved changes" : "");
+        note.classList.toggle("dirty", false);
+      } catch (e) { if (current()) { note.textContent = snapshot() !== saved ? "Unsaved changes" : ""; note.classList.toggle("dirty", snapshot() !== saved); if (!e.cancelled) setError(e.message); } }
+      finally { busy = false; if (current()) paint(); }
+    };
+    paint();
+    Promise.resolve().then(load);
+    /* the listeners retire with the card: on destroy, and when a re-render
+       replaces it */
+    this.titlesRetire = forget;
+    return card;
+  }
+
   async render() {
     this.stopUpgradeReadinessPolling();
     const generation = ++this.renderGeneration;
@@ -22995,6 +23452,9 @@ class SettingsView {
     this.upgradeReadiness.clear();
     this.localEngineGroup = null;
     this.notifyBackendsSync = null;
+    this.titlesSync = null;
+    if (this.titlesRetire) this.titlesRetire();
+    this.titlesRetire = null;
     this.systemPromptSync = null;
     this.timerSettingsSync = null;
     this.timeoutSettingsSync = null;
@@ -23475,6 +23935,7 @@ class SettingsView {
 
     this.inner.appendChild(this.notifySettingsCard(generation));
     syncBell();
+    this.inner.appendChild(this.titleSettingsCard(generation));
 
     /* backends */
     const c3 = el("div", "card");
@@ -24366,6 +24827,10 @@ async function modalNewSession(groupId = null) {
     </div>
     <p class="hint scratch-note hidden" id="ns-scratch-note">Puppy creates a private empty workspace for this session. Its files are deleted when you reset the workspace or delete this session.</p>
     <label>Name <span class="field-optional">(optional, auto from first message)</span><input type="text" id="ns-name"></label>
+    <div class="auto-title hidden" id="ns-title-wrap">
+      <label class="check"><input type="checkbox" id="ns-title" aria-describedby="ns-title-note" checked> Generate a title from the first message</label>
+      <p class="help auto-title-note" id="ns-title-note"></p>
+    </div>
     <div class="field-row">
       <label>Model<select id="ns-model"></select></label>
       <label>Effort<select id="ns-effort"></select></label>
@@ -24392,6 +24857,13 @@ async function modalNewSession(groupId = null) {
   const remoteButton = workspaceBox.querySelector('[data-kind="remote"]');
   const wsbeWrap = m.querySelector("#ns-wsbe-wrap");
   const wsbeSel = m.querySelector("#ns-wsbe");
+  const nameInp = m.querySelector("#ns-name");
+  /* the generated-title choice: offered when the controller's switch is on
+     with a model chosen and the backend keeps such requests, and yielding
+     to a typed name, which is never replaced */
+  const titleChoice = wireAutoTitleChoice(m.querySelector("#ns-title-wrap"), nameInp,
+    () => parseInt(beSel.value, 10) || 0, onClose,
+    "once the first message is sent; until then the message's first line stands in");
   /* the same inline error and busy treatment the backend editor and the New
      task dialog give a form: a failure stays on the sheet beside its fields */
   const form = m.querySelector("#ns-form");
@@ -24660,7 +25132,7 @@ async function modalNewSession(groupId = null) {
   nodeStateListeners.add(syncNodes);
   onClose(() => nodeStateListeners.delete(syncNodes));
   syncNodes();
-  beSel.onchange = () => { syncWorkspaceSupport(); loadEngines(); };
+  beSel.onchange = () => { syncWorkspaceSupport(); loadEngines(); titleChoice.sync(); };
   syncWorkspaceSupport();
   m.querySelector("#ns-cancel").onclick = close;
   form.onsubmit = event => event.preventDefault();
@@ -24678,9 +25150,10 @@ async function modalNewSession(groupId = null) {
     setError("");
     if (!engine) { setError("Pick an engine"); return; }
     const shared = {
-      engine, name: m.querySelector("#ns-name").value,
+      engine, name: nameInp.value,
       model: modelSel.value === "__custom__" ? customInp.value.trim() : modelSel.value,
       effort: effortSel.value, permission_mode: permSel.value, color: nsColor,
+      auto_title: titleChoice.wanted(),
     };
     setBusy(true);
     try {

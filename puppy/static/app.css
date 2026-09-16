@@ -2501,6 +2501,26 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 }
 .card .engine-updates-section h2{margin-bottom:12px}
 
+/* ---------- generated titles ---------- */
+/* the card's four choices share the alert card's two-column grid; the
+   prompt editor is the system prompt's section, standing alone */
+.titles-fields{margin-top:2px}
+.titles-engine-note:empty{display:none}
+.titles-prompt-section{margin-top:4px}
+.titles-sample{margin-top:14px}
+/* A name a model is still writing: the placeholder shimmers where the title
+   will land - one band of light through dimmed text, the address bar's
+   loading sweep in letters - and holds still, dimmed, under reduced motion. */
+.titling{
+  color:transparent;
+  background:linear-gradient(90deg,var(--txt3) 0%,var(--txt3) 38%,var(--txt) 50%,var(--txt3) 62%,var(--txt3) 100%);
+  background-size:300% 100%;
+  -webkit-background-clip:text;background-clip:text;
+  animation:titling-sweep 1.8s linear infinite;
+}
+@keyframes titling-sweep{from{background-position:100% 0}to{background-position:0 0}}
+@media (prefers-reduced-motion:reduce){.titling{animation:none;background:none;color:var(--txt3)}}
+
 /* ---------- system prompt ---------- */
 .system-prompt-node{width:min(360px,100%);margin:0 0 14px}
 .system-prompt-node-label{display:block}
@@ -2856,6 +2876,11 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .dirpick button:active{background:var(--hov);filter:brightness(.95)}
 .hint{margin-top:-4px;margin-bottom:10px}
 .new-session-mkdir{margin:8px 0}
+/* the generated-title choice under a creation dialog's Name field: the
+   check, then its note aligned with the check's own text */
+.auto-title{margin:-2px 0 12px}
+.auto-title .check{margin:0}
+.auto-title-note{margin:5px 0 0 23px}
 .new-session-color{margin-top:8px}
 .open-session-list{max-height:50vh;overflow-y:auto;margin-top:10px}
 

@@ -54,7 +54,7 @@ function harness(bid = 0, namespace = "") {
     sessionsFor: node => sessions.get(node) || [],
     findSessionMeta: (node, sid) => (sessions.get(node) || []).find(session => session.id === sid),
     tasksIcon: icon, plusIcon: icon, xIcon: icon,
-    syncHorizontalOverflow() {}, syncPromptSpinnerPhase() {},
+    syncHorizontalOverflow() {}, syncPromptSpinnerPhase() {}, titlePending: () => false,
     sessionHasActivity: meta => meta.status === "running",
     suppressContextGestureActivation() {},
     workspacePane: id => panes.find(pane => pane.id === id),

@@ -21,7 +21,7 @@ import time
 
 from aiohttp import web
 
-from puppy import db, operations, session_git, uploads, workspaces
+from puppy import db, operations, session_git, session_titles, uploads, workspaces
 
 PREFIX = "session_task."
 # Per-session Tasks preference: an exact true marker means disabled;
@@ -783,6 +783,9 @@ async def create(parent_id, args):
         raise TaskError("Enter a task prompt")
     if not isinstance(name, str) or len(name) > 80 or not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,100}", key):
         raise TaskError("Invalid task name or request identity")
+    auto_title = args.get("auto_title", False)
+    if type(auto_title) is not bool:
+        raise TaskError("auto_title must be true or false")
     # As written in Main's dialog: its attachment marker lines name files staged
     # under Main, which the task adopts into its own storage below.
     original = prompt.strip()
@@ -861,6 +864,10 @@ async def create(parent_id, args):
                         "summary": "", "completed_at": 0, "applied_at": 0, "result_seq": 0})
             if parent.get("fast_mode") and engine == parent["engine"]:
                 db.touch_session(sid, fast_mode=1)
+            # named at creation from the prompt's first line, so a generated
+            # title is asked for here rather than by the first prompt
+            if auto_title and not name.strip():
+                session_titles.request(sid, original, db.get_session(sid)["name"])
             result = runner.hub(sid).send_message(prompt)
             if result.get("error"):
                 raise TaskError(result["error"])

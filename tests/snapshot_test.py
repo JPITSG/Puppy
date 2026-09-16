@@ -246,6 +246,9 @@ async def main() -> None:
         config.set_value("notify.backend", 1)
         config.set_value("notify.success_command", "printf done: %s {session}")
         config.set_value("notify.failure_command", "printf failed: %s {session}")
+        config.set_titles({"enabled": True, "backend": 1, "engine": "claude",
+                           "model": "haiku", "effort": "low",
+                           "prompt": "Name this session: {message}"})
         backend_id = db.execute(
             "INSERT INTO backends(name,url,urls,token,protocol,capabilities,remote_version,role,"
             "tls_fingerprint,auto_upgrade,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
@@ -503,6 +506,25 @@ async def main() -> None:
             connection.close()
             expect_snapshot_error(lambda: snapshots._validate_database(invalid_tasks_db), "not current")
         invalid_tasks_db.unlink()
+        # a title request rides in the archive exactly as recorded; a record
+        # of another shape or without a session refuses the archive
+        from puppy import session_titles
+        session_titles.arm(linked_id)
+        title_request = session_titles.request(directory_id, "Name me from this", "Name me from this")
+        invalid_titles_db = TEST_ROOT / "invalid-session-titles.db"
+        for key, value in (
+                (session_titles.PREFIX + "999999", json.dumps(title_request)),
+                (session_titles.PREFIX + str(scratch_id), '{"format": 1, "state": "armed"}'),
+                (session_titles.PREFIX + str(scratch_id), json.dumps(dict(title_request, text=""))),
+                (session_titles.PREFIX + str(scratch_id), json.dumps(dict(title_request, state="done")))):
+            db.backup_to(str(invalid_titles_db))
+            connection = sqlite3.connect(str(invalid_titles_db))
+            connection.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)", (key, value))
+            connection.commit()
+            connection.close()
+            expect_snapshot_error(lambda: snapshots._validate_database(invalid_titles_db),
+                                  "session title state is not current")
+        invalid_titles_db.unlink()
         invalid_order_db = TEST_ROOT / "invalid-session-order.db"
         order_key = "session_order_at." + str(scratch_id)
         for key, value in (
@@ -610,6 +632,8 @@ async def main() -> None:
         config.set_value("notify.enabled", False)
         config.set_value("notify.success_command", "mutated")
         config.set_value("notify.failure_command", "mutated failure")
+        config.set_titles({"enabled": False, "backend": 0, "engine": "", "model": "",
+                           "effort": "", "prompt": config.DEFAULT_TITLE_PROMPT})
         db.execute("DELETE FROM events")
         db.execute("DELETE FROM session_drafts")
         db.execute("DELETE FROM sessions")
@@ -675,6 +699,9 @@ async def main() -> None:
             "format": 1, "scheme": "http", "https_source": "auto"}
         assert web_tls.settings_payload()["identities"]["auto"]["sha256"] == \
             saved_web_identity["sha256"]
+        assert config.get("titles") == {
+            "enabled": True, "backend": 1, "engine": "claude", "model": "haiku",
+            "effort": "low", "prompt": "Name this session: {message}"}
         assert config.get("system_prompt.custom") == \
             "Keep answers concise.\nPreserve operator terminology."
         assert config.get("system_prompt.remote_workspace") == \
@@ -735,6 +762,29 @@ async def main() -> None:
                 pass
             else:
                 raise AssertionError("outdated config shape was accepted")
+        missing_titles = config.export_data()
+        missing_titles.pop("titles", None)
+        partial_titles = config.export_data()
+        partial_titles["titles"].pop("prompt", None)
+        for invalid in (missing_titles, partial_titles):
+            try:
+                config.normalize_import(invalid)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("outdated titles config shape was accepted")
+        for titles_shape in (
+                dict(config.export_data()["titles"], engine="gemini"),
+                dict(config.export_data()["titles"], backend=-1),
+                dict(config.export_data()["titles"], prompt="")):
+            invalid = config.export_data()
+            invalid["titles"] = titles_shape
+            try:
+                config.normalize_import(invalid)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("invalid titles config was accepted")
         for notify_shape in (
                 {"enabled": True, "backend": 0, "command": "old"},
                 {"enabled": True, "backend": 0, "success_command": "only"},
@@ -848,6 +898,9 @@ async def main() -> None:
         assert session_tasks.digest_enabled(directory_id) is True
         assert session_tasks.digest_enabled(linked_id) is False
         session_tasks.validate_persisted(db.connect())
+        assert session_titles.record(linked_id)["state"] == "armed"
+        assert session_titles.record(directory_id) == title_request
+        session_titles.validate_persisted(db.connect())
         session_tasks._git(restored_scratch["cwd"], "cat-file", "-e", task_base)
         for name in ("base", "main", "task"):
             session_tasks._git(restored_scratch["cwd"], "cat-file", "-e", resolution_ref + "/" + name)

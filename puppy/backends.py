@@ -426,12 +426,37 @@ def _merge_last_known(bid: int, updates: dict) -> bool:
     return True
 
 
+_sessions_observers = []   # fn(bid, sessions): every remote session list seen
+
+
+def add_sessions_observer(fn) -> None:
+    """Hear every sessions payload a backend answers with - over its state
+    stream or a proxied read - so a controller-side consumer (generated
+    titles) needs no subscription of its own."""
+    if fn not in _sessions_observers:
+        _sessions_observers.append(fn)
+
+
+def cached_remote_sessions(bid: int) -> list:
+    """The last session list this controller saw from a backend."""
+    return _load_last_sessions(bid) or []
+
+
+def _observe_remote_sessions(bid: int, sessions: list) -> None:
+    for fn in list(_sessions_observers):
+        try:
+            fn(bid, sessions)
+        except Exception:
+            log.exception("sessions observer failed for backend %s", bid)
+
+
 def _cache_remote_payload(bid: int, tail: str, payload: dict) -> bool:
     """Remember settings/status learned through one authenticated node reply."""
     if not isinstance(payload, dict):
         return False
     updates = {}
     if tail == "sessions" and isinstance(payload.get("sessions"), list):
+        _observe_remote_sessions(bid, payload["sessions"])
         return _cache_remote_sessions(bid, payload["sessions"])
     elif tail in ("ping", "node"):
         for name in ("uploads", "browser"):

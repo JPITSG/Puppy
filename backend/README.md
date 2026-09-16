@@ -760,6 +760,27 @@ edited inside a linked workspace's mirror marks the session dirty so the
 controller carries the change to the authoritative project at its next
 reconcile.
 
+## Session titles
+
+Nodes advertising `session-titles` keep a session's request for a generated
+title: `POST /api/sessions` and task creation accept `auto_title: true`
+(ignored with a `name`), every session payload carries the additive
+`auto_title` (`null`, or `{"state": "armed"|"requested", "requested_at"}`),
+`GET /api/sessions/{sid}/title` returns the request with its text (`404`
+without one), and `POST /api/sessions/{sid}/title` with `{"requested_at",
+"name"}` or `{"requested_at", "error"}` settles it - the name lands only
+while the session still carries the placeholder the request recorded - and
+answers `{"ok": true, "applied", "name"}` (`409` once it is no longer
+pending). `POST /api/titles/jobs` with `{"engine", "model", "effort",
+"prompt", "wait_s"}` starts one spawn job of that engine in the node's empty
+`data/titles/` directory, without the node's system prompt, under a 60-second
+silence limit and a 180-second runtime, answering `{"ok": true, "job"}` in the
+spawn payload shape; `GET`/`DELETE /api/spawn/{job_id}` poll and cancel it.
+The settings and the consumer that runs jobs live on the controller; a
+headless node only keeps the records and runs the jobs it is asked to. The
+`titles` config section is required on every runtime. See
+[Session titles](../docs/session-titles.md).
+
 ## Git repositories
 
 Nodes advertising `session-git` carry the additive `git` field on every

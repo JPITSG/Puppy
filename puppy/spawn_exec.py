@@ -301,6 +301,9 @@ class SpawnJob:
         self.cwd = request["cwd"]
         self.idle_timeout_s = request["idle_timeout_s"]
         self.max_runtime_s = request["max_runtime_s"]
+        # the node's own system prompt rides along by default; a title job
+        # (session_titles) asks one narrow question and leaves it out
+        self.guidance = bool(request.get("guidance", True))
         self.created_at = time.time()
         self.created_clock = time.monotonic()
         # 0 means unleased (a turn-owned job dies with its turn instead)
@@ -660,7 +663,7 @@ class SpawnJob:
                 "native_session_id": "",
             }
             pinned = str(uuid.uuid4())
-            prompt_text = system_prompts.turn_prompt()
+            prompt_text = system_prompts.turn_prompt() if self.guidance else ""
             argv = driver.build_cmd(fake_session, True, self.prompt, pinned,
                                     system_prompt=prompt_text)
             env = clean_env(dict(os.environ))
@@ -1241,6 +1244,12 @@ async def _node_request(channel: dict, method: str, path: str, body=None,
                      unreached=True)
 
 
+# session_titles runs its one-shot title jobs through the same authenticated
+# node request and job refresh the relay uses, so a title is polled and
+# cancelled exactly like a spawned agent.
+node_request = _node_request
+
+
 def _node_forgot(exc: SpawnError) -> bool:
     """The node answered and has no such job: the definitive end of it."""
     return exc.status == 404 and not exc.unreached
@@ -1505,6 +1514,9 @@ async def _refresh_remote(channel: dict, job: dict, wait_s: float,
         stale = dict(job)
         stale["wait_note"] = "status unavailable ({}) - wait again".format(exc)
         return stale
+
+
+refresh_remote = _refresh_remote
 
 
 def _unconfirmed_job(job_id: str, body: dict, exc: SpawnError) -> dict:

@@ -86,6 +86,9 @@ const context = vm.createContext({
   fetch: (url, init) => new Promise(resolve => fetches.push({ url, init, resolve })),
   refreshChoiceSelect, provSpec, renderSidebar, enginePayloadListeners, state, sessionsFor, modal, api,
   rememberEnginePayload, ENGINE_POLL_TIMEOUT,
+  /* the generated-title choice has its own suite (titles_ui_test); here it
+     is offered nowhere */
+  wireAutoTitleChoice: () => ({ sync() {}, wanted: () => false }),
   toast: (text, level) => toasts.push({ text, level }), TOAST_LONG: 7000,
   esc: text => String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"),
   apiPath: (bid, route) => (bid ? `/api/b/${bid}/` : "/api/") + route,
@@ -185,7 +188,7 @@ const deletes = from => requests.slice(from).filter(r => r.method === "DELETE").
   assert.equal(requests[0].bid, 7);
   assert.equal(requests[0].route, "sessions/10/tasks");
   assert.deepEqual(JSON.parse(JSON.stringify(requests[0].body)), { ...captured, name: "My task", prompt: "A task",
-    request_id: requests[0].body.request_id });
+    request_id: requests[0].body.request_id, auto_title: false });
   assert.equal(workspace.opened, 50);
   assert.equal(enginePayloadListeners.size, 0);
   assert.equal(Composer.live.size, 0, "a closed dialog leaves no box behind");

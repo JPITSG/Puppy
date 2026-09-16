@@ -213,7 +213,14 @@ reading anywhere further up is never pulled away from it.
   an `AGENTS.md` or `CLAUDE.md`, and opens a small editor for exactly those two
   files.
 - **Session titles come free.** An unnamed session takes its title from the
-  first line of its first prompt.
+  first line of its first prompt. With **Session titles** switched on in
+  Settings, a model can write a better one: the New session dialog offers
+  **Generate a title from the first message** (on by default, and stepping
+  aside for a name you type), the first line stands in while the chosen
+  engine, model and effort - on whichever backend you picked - read the
+  message and answer with a title, the name shimmers until it lands, and a
+  name you type in the meantime is kept. A title that does not come keeps the
+  first line and says so in a toast; the model is never asked twice.
 
 ### Talk to it while it works
 
@@ -363,7 +370,10 @@ working in an independent Git clone of Main's project that starts from Main's
 current files, uncommitted changes included. Run several at once on different
 features. New tasks initially select Main's engine and use that backend's saved
 model, effort and permission defaults. Adjust these choices before starting.
-Attachments are locked while the task is preparing. On backends advertising
+An unnamed task is named from its prompt's first line, or by a model when
+**Generate a title from the task** is on (offered while Session titles are
+configured; a typed name is kept). Attachments are locked while the task is
+preparing. On backends advertising
 `operation-cancel-v1`, **Cancel**, Escape and clicking outside the progress dialog
 stop preparation and clean up the task copy and staged attachments before any
 agent starts. An older backend may finish after the dialog closes; a late reply
@@ -758,6 +768,13 @@ backend name stays readable; long button labels wrap within the button.
   control both commands; tests run the entered draft even while alerts are off.
   Both commands are included in Backup & restore. See
   [completion alert configuration](docs/completion-alerts.md) for the saved shape.
+- **Session titles** – the switch, then which backend, engine, model and
+  effort name unnamed sessions and tasks from their first message, the prompt
+  they are given (with `{message}` where the message goes, and a reset to
+  Puppy's default), and **Try it**, which titles a sample message with the
+  values on the card before they are saved. The switch applies immediately;
+  the rest waits for Save. See [Session titles](docs/session-titles.md) for
+  the saved shape and the manual preparation step.
 - **Timers** – per backend: release checks, model catalog and sign-in caching,
   and how often the backend re-checks whether each session's directory is a
   Git repository with uncommitted or unpushed work (15 minutes); for this
@@ -782,7 +799,8 @@ Engine defaults are edited from the composer's dropdowns or the session menu.
 
 Timeout persistence and manual preparation of existing installations are
 documented in [Timeout settings](docs/timeouts.md); the Git repository check,
-its timer and the same preparation step in [Git repositories](docs/session-git.md).
+its timer and the same preparation step in [Git repositories](docs/session-git.md);
+generated session titles and theirs in [Session titles](docs/session-titles.md).
 
 ## Data, privacy and security
 
@@ -867,6 +885,8 @@ python3 tests/snapshot_test.py       # backup export/import and rollback
 python3 tests/search_test.py         # the search index and query language
 node tests/search_ui_test.js         # the Search tab's results, Show all pages and their cancellation
 python3 tests/spawn_test.py          # spawned agents against a stub engine
+python3 tests/session_titles_test.py # generated titles: the record, the job and both runtimes' routes
+node tests/titles_ui_test.js         # the Session titles card and the dialogs' title choice
 python3 tests/mcp_startup_test.py     # source/zipapp MCP startup with filtered environments
 python3 tests/workspace_sync_test.py # remote workspace sync and conflicts
 python3 tests/browser_test.py        # managed browsers against a stub Chromium

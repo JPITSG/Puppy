@@ -876,6 +876,8 @@ def delete_session(session_id: int) -> None:
             conn.execute("DELETE FROM meta WHERE key=?", ("session_task." + str(session_id),))
             conn.execute("DELETE FROM meta WHERE key=?", (session_tasks.DISABLED_PREFIX + str(session_id),))
             conn.execute("DELETE FROM meta WHERE key=?", (session_tasks.DIGEST_PREFIX + str(session_id),))
+            # a generated-title request (session_titles.PREFIX) goes with it
+            conn.execute("DELETE FROM meta WHERE key=?", ("session_title." + str(session_id),))
             conn.execute("DELETE FROM events WHERE session_id=?", (session_id,))
             conn.execute("DELETE FROM session_drafts WHERE session_id=?", (session_id,))
             conn.execute("DELETE FROM sessions WHERE id=?", (session_id,))
