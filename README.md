@@ -151,7 +151,12 @@ reading anywhere further up is never pulled away from it.
   them mid-conversation; while work is pending the change waits its turn in
   the queue and applies in order. Claude's saved aliases and full model IDs,
   including `[1m]` context selectors, use the matching catalog name and effort
-  choices without rewriting the saved request. A catalog that has never
+  choices without rewriting the saved request: every spelling the CLI has
+  shown for a model stays that model's alias across catalog refreshes, a
+  running turn's picker adds to the list rather than replacing it, and a
+  saved default or session model the list does not name is resolved by
+  the CLI itself, so a catalogued model never reads as Custom… because a
+  later turn spelled it differently. A catalog that has never
   loaded successfully keeps unlisted saved choices visible by ID until it does.
 - **Engine defaults per backend.** Save the starting permission, model and
   effort for each engine; new sessions, tasks and engine switches start from them.

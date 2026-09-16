@@ -152,6 +152,85 @@ class ModelCatalogResult:
         self.note = str(note or "")[:400]
 
 
+def _row_spellings(row: dict) -> list:
+    """Every request spelling a catalog row stands for: its value, then its
+    aliases, each once."""
+    spellings = []
+    for spelling in [row.get("value")] + list(row.get("aliases") or []):
+        if isinstance(spelling, str) and spelling and spelling not in spellings:
+            spellings.append(spelling)
+    return spellings
+
+
+def _row_identity(row: dict) -> str:
+    """The engine's stable name for a named row: its resolved model when the
+    driver recorded one, otherwise the row's own value."""
+    resolved = row.get("resolved_model")
+    if isinstance(resolved, str) and resolved:
+        return resolved
+    return row.get("value") or ""
+
+
+def _claim_aliases(rows: list) -> list:
+    """Settle alias ownership across a catalog.
+
+    A spelling that is a row's own value belongs to that row, then a row's
+    resolved model belongs to it, then the first row listing a spelling
+    among its aliases keeps it: exact entries always win over inferred or
+    inherited spellings, and no spelling names two rows. Rows are edited in
+    place and returned.
+    """
+    owners = {}
+    for row in rows:
+        owners.setdefault(row["value"], row)
+    for row in rows:
+        resolved = row.get("resolved_model")
+        if row["value"] and isinstance(resolved, str) and resolved:
+            owners.setdefault(resolved, row)
+    for row in rows:
+        if "aliases" not in row and not row.get("resolved_model"):
+            continue
+        aliases = []
+        for alias in row.get("aliases") or []:
+            if not isinstance(alias, str) or not alias or alias == row["value"] or \
+                    alias in aliases or not row["value"]:
+                continue
+            if owners.setdefault(alias, row) is row:
+                aliases.append(alias)
+        if aliases or "aliases" in row:
+            row["aliases"] = aliases
+    return rows
+
+
+def inherit_spellings(previous: list, rows: list) -> list:
+    """Carry every spelling the engine has shown for a model onto its new row.
+
+    A picker's spelling of a model is not the model: Claude Code spells the
+    current model exactly as it was requested and spells org-gated rows from
+    a persisted cache written by whichever request last refreshed it, so the
+    same resolved model is ``fable[1m]`` in one read and
+    ``claude-fable-5-1[1m]`` in the next. The resolved model is the identity;
+    a spelling once seen for it remains its alias across refreshes, unless
+    the new catalog names that spelling as a row of its own.
+    """
+    shown = {}
+    for row in previous:
+        if row.get("value"):
+            shown.setdefault(_row_identity(row), []).extend(_row_spellings(row))
+    for row in rows:
+        if not row.get("value"):
+            continue
+        inherited = shown.get(_row_identity(row))
+        if not inherited:
+            continue
+        aliases = list(row.get("aliases") or [])
+        for spelling in inherited:
+            if spelling != row["value"] and spelling not in aliases:
+                aliases.append(spelling)
+        row["aliases"] = aliases
+    return _claim_aliases(rows)
+
+
 class ModelCatalog:
     """Loop-safe, in-memory last-known-good state for a dynamic model list."""
 
@@ -167,6 +246,10 @@ class ModelCatalog:
         self.attempt_forced = False
         self.force_started_mono = 0.0
         self.failures = 0
+        # Request spellings the engine was asked to resolve since the last
+        # discovery, so an unknown spelling costs one probe per catalog, not
+        # one per read.
+        self.spelling_attempts = set()
         self._lock = None
         self._lock_loop = None
 
@@ -203,7 +286,7 @@ class ModelCatalog:
     def succeeded(self, result: ModelCatalogResult, forced: bool) -> None:
         now_mono = time.monotonic()
         now_wall = time.time()
-        self.options = self._validated(result.options)
+        self.options = inherit_spellings(self.options, self._validated(result.options))
         self.source = result.source
         self.error = ""
         self.note = result.note
@@ -230,8 +313,66 @@ class ModelCatalog:
         self.next_due_mono = now_mono + delay
 
     def ingest(self, options: list, source: str = "turn") -> None:
-        """Accept a catalog carried by an already-running native protocol."""
-        self.succeeded(ModelCatalogResult(options, source=source), forced=False)
+        """Accept a catalog carried by an already-running native protocol.
+
+        A turn's picker is evidence, not the picker: it is spelled for that
+        turn's own request. With nothing known yet it seeds the list. Otherwise
+        the rows already known keep their names and gain the spellings this
+        run showed for them, and a model the list has never named is added -
+        never a replacement that would rename every row after every turn.
+        """
+        rows = self._validated(options)
+        if not self.options:
+            self.succeeded(ModelCatalogResult(rows, source=source), forced=False)
+            return
+        known = [dict(row) for row in self.options]
+        by_value = {row["value"]: row for row in known}
+        by_identity = {}
+        for row in known:
+            if row["value"]:
+                by_identity.setdefault(_row_identity(row), row)
+        for row in rows:
+            target = by_value.get(row["value"])
+            if target is None and row["value"]:
+                target = by_identity.get(_row_identity(row))
+            if target is None:
+                known.append(row)
+                by_value[row["value"]] = row
+                if row["value"]:
+                    by_identity.setdefault(_row_identity(row), row)
+                continue
+            if not row["value"] or not target["value"]:
+                continue
+            aliases = list(target.get("aliases") or [])
+            for spelling in _row_spellings(row):
+                if spelling != target["value"] and spelling not in aliases:
+                    aliases.append(spelling)
+            target["aliases"] = aliases
+        self.succeeded(ModelCatalogResult(_claim_aliases(known),
+                                          source=self.source or source,
+                                          note=self.note), forced=False)
+
+    def learn_spelling(self, spelling: str, resolved: str) -> bool:
+        """Attach a request spelling the engine resolved to a listed model.
+
+        True when a named row already stands for ``resolved`` (its value or
+        its resolved model) and now carries ``spelling``; False - and nothing
+        changes - when the engine resolved the spelling to a model this list
+        does not offer, which keeps a hand-typed model hand-typed.
+        """
+        spelling = str(spelling or "")
+        resolved = str(resolved or "")
+        if not spelling or not resolved:
+            return False
+        rows = [dict(row) for row in self.options]
+        target = next((row for row in rows if row["value"] and
+                       resolved in (row["value"], row.get("resolved_model"))), None)
+        if target is None:
+            return False
+        if spelling not in _row_spellings(target):
+            target["aliases"] = list(target.get("aliases") or []) + [spelling]
+        self.options = _claim_aliases(rows)
+        return spelling in _row_spellings(target)
 
 
 async def start_probe(argv: list, *, writable_stdin: bool = False,
@@ -644,6 +785,7 @@ class Driver:
                 if not isinstance(result, ModelCatalogResult):
                     raise RuntimeError("model discovery returned an invalid result")
                 state.succeeded(result, force)
+                state.spelling_attempts.clear()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -657,6 +799,18 @@ class Driver:
                 state_stream.wake("engines")
             except Exception:
                 pass
+        return None
+
+    async def cover_model_spellings(self, spellings) -> None:
+        """Make the catalog describe the request spellings this node holds.
+
+        A saved default or a session's model is a request spelling the engine
+        accepts, which its picker may spell differently or not list at all.
+        A driver whose engine can resolve a spelling on demand asks it here,
+        bounded and at most once per catalog, and attaches the answer as an
+        alias of the listed model it resolves to. The base engine has no such
+        oracle and leaves the list as it is.
+        """
         return None
 
     def model_catalog_error(self) -> str:
@@ -679,6 +833,7 @@ class Driver:
         state = self._model_catalog_state()
         state.next_due_mono = 0.0
         state.force_started_mono = 0.0
+        state.spelling_attempts.clear()
 
     def model_catalog_loaded(self) -> bool:
         return not self.dynamic_model_options or \

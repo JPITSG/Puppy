@@ -151,8 +151,25 @@ async def _engines_payload(refresh_usage: bool = True, refresh_models: bool = Tr
             if isinstance(result, BaseException):
                 log.warning("%s model catalog refresh escaped its driver: %s",
                             driver.key, result)
+        covered = await asyncio.gather(
+            *(driver.cover_model_spellings(_model_spellings(driver)) for driver in due),
+            return_exceptions=True)
+        for driver, result in zip(due, covered):
+            if isinstance(result, BaseException):
+                log.warning("%s model spelling resolution escaped its driver: %s",
+                            driver.key, result)
     return [{**status, **_engine_choices(driver)}
             for driver, status in zip(drivers, statuses)]
+
+
+def _model_spellings(driver) -> list:
+    """The request spellings this node's pickers must describe for an engine:
+    its saved default and the model of every session that runs on it."""
+    spellings = [engine_defaults.values(driver).get("model") or ""]
+    for row in db.query("SELECT DISTINCT model FROM sessions WHERE engine=? AND model<>''",
+                        (driver.key,)):
+        spellings.append(row["model"])
+    return [spelling for spelling in spellings if spelling]
 
 
 def _engine_choices(d) -> dict:

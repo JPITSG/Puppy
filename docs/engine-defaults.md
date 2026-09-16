@@ -21,7 +21,15 @@ model IDs and the CLI's [documented `[1m]` request spellings](https://code.claud
 uses those rows' names and effort levels while keeping the selected request
 unchanged: a saved `fable[1m]` remains that request when the CLI lists `fable` as
 Fable. Exact catalog values take precedence over aliases, and engine default
-stays separate from an explicit model. Unknown custom models still use the
+stays separate from an explicit model. The CLI's picker spells the current
+model as it was requested and Fable from its persisted cache, so its spelling
+of a model changes from one read to the next; a row's identity is its resolved
+model, every spelling the CLI has shown for that model stays its alias across
+discoveries, a running turn's picker adds spellings and new rows to the list
+instead of replacing it, and the node asks the CLI (an `initialize` probe
+started with `--model <spelling>`) what the saved default or a session's model
+names when the list does not, keeping the answer only when it resolves to a
+listed model. Unknown custom models still use the
 custom input. `model_catalog_loaded` means at least one successful discovery;
 a failed first attempt leaves the provisional list pending, and a later failure
 retains the last successful catalog. These are wire fields, not persisted state.

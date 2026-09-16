@@ -251,6 +251,23 @@ const same = (actual, expected) => assert.equal(JSON.stringify(actual), JSON.str
   // closing the dialog retires its listener
   const before = context.titlesStateListeners.size;
   closers.forEach(fn => fn()); assert.equal(context.titlesStateListeners.size, before - 1);
+  // the New task dialog carries the choice without a note: offered, disabled
+  // under a typed name and released with it, and nothing to write to
+  state.titles = { enabled: true, configured: true, backend: 1, engine: "claude", model: "haiku" };
+  const bare = document.createElement("div"); bare.className = "auto-title hidden";
+  bare.innerHTML = `<label class="check"><input type="checkbox" checked> Generate a title from the task</label>`;
+  const bareName = document.createElement("input");
+  const bareClosers = [];
+  const bareChoice = context.wireAutoTitleChoice(bare, bareName, () => 1, fn => bareClosers.push(fn));
+  const bareCheck = bare.querySelector("input");
+  assert.equal(bare.querySelector(".auto-title-note"), null);
+  assert.equal(bare.classList.contains("hidden"), false); assert.equal(bareChoice.wanted(), true);
+  bareName.value = "Typed"; bareName.dispatchEvent(new FakeEvent("input"));
+  assert.equal(bareCheck.disabled, true); assert.equal(bareChoice.wanted(), false);
+  bareName.value = ""; bareName.dispatchEvent(new FakeEvent("input"));
+  assert.equal(bareCheck.disabled, false); assert.equal(bareChoice.wanted(), true);
+  assert.equal(bare.children.length, 1, "no note is added for the dialog");
+  bareClosers.forEach(fn => fn());
   // what shimmers: a request on its way, never an armed or absent record
   assert.equal(context.titlePending({ auto_title: { state: "requested", requested_at: 1 } }), true);
   assert.equal(context.titlePending({ auto_title: { state: "armed", requested_at: 0 } }), false);

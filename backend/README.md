@@ -427,8 +427,11 @@ catalog update preserves a still-valid selection, does not rebuild a native
 mobile picker while it is open, and never offers an effort level that the
 selected catalog model did not report.
 
-Named Claude rows also publish `aliases`: resolved model IDs and the CLI's
-`[1m]` request spellings. Controllers can show the matching model name and
+Named Claude rows also publish `aliases`: resolved model IDs, the CLI's
+`[1m]` request spellings, every spelling the CLI has shown for the same
+resolved model in an earlier discovery or a turn's own picker, and the saved
+default or session models the node had the CLI resolve to that model.
+Controllers can show the matching model name and
 effort levels without rewriting a saved request. Exact catalog values take
 precedence over aliases. `model_catalog_loaded` is true only after a successful
 discovery; a failed first check still serves a provisional fallback list.

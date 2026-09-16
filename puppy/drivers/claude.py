@@ -36,7 +36,9 @@ the CLI's own login (subscription OAuth), which is the vendor-sanctioned path.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import os
 import re
 
@@ -44,6 +46,8 @@ from puppy import quota
 from puppy.drivers import base as driver_base
 from puppy.drivers.base import Driver, ToolUnavailable, stringify_content
 from puppy.user_paths import service_home
+
+log = logging.getLogger("puppy.drivers")
 
 
 USAGE_KEYS = ("input_tokens", "output_tokens", "cache_read_input_tokens",
@@ -94,6 +98,8 @@ _MODEL_MESSAGE_LIMIT = 128
 # or version, so future catalog names remain opaque to Puppy.
 _CONTEXT_SELECTOR_RE = re.compile(r"\[[1-9][0-9]*(?:\.[0-9]+)?[km]\]$", re.I)
 _EFFORT_ORDER = ("low", "medium", "high", "xhigh", "max", "ultra")
+# Unlisted request spellings the CLI is asked to resolve per catalog read.
+MODEL_RESOLVE_LIMIT = 6
 _EFFORT_HINTS = {
     "low": "Fastest, minimal reasoning",
     "medium": "Balanced",
@@ -224,13 +230,22 @@ def _static_model_options() -> list:
     ]
 
 
-async def _read_model_catalog(binary: str) -> list:
+async def _read_model_catalog(binary: str, model: str = "") -> list:
+    """The CLI's picker from a no-turn initialize exchange.
+
+    With ``model`` the CLI is started as a turn would be for that request,
+    and its picker then carries a row spelled exactly that way with the
+    model it resolves to (observed on 2.1.273: a spelling it knows lands on
+    that model's row, an unknown one becomes a row resolving to itself).
+    """
     argv = [
         binary, "-p", "--output-format", "stream-json",
         "--input-format", "stream-json", "--verbose",
         "--no-session-persistence", "--strict-mcp-config",
         "--mcp-config", '{"mcpServers":{}}',
     ]
+    if model:
+        argv += ["--model", model]
     process = await driver_base.start_probe(argv, writable_stdin=True)
     total = 0
     try:
@@ -343,6 +358,60 @@ class ClaudeDriver(Driver):
             raise RuntimeError("Claude binary not found")
         return driver_base.ModelCatalogResult(
             await _read_model_catalog(binary), source="engine")
+
+    async def cover_model_spellings(self, spellings) -> None:
+        """Ask the CLI which listed model each unlisted spelling names.
+
+        The picker spells a model as it was last requested, so a saved
+        default such as ``fable[1m]`` can be absent from a list that names
+        the same model ``claude-fable-5-1[1m]``. Puppy never guesses that
+        family from the text: the CLI started with ``--model <spelling>``
+        reports the spelling's resolved model in its own picker, and only a
+        spelling resolving to a model the catalog already lists becomes that
+        row's alias. Each spelling is asked once per catalog, at most
+        ``MODEL_RESOLVE_LIMIT`` per read, under the catalog's own lock.
+        """
+        state = self._model_catalog_state()
+        if not state.options:
+            return
+        wanted = []
+        for raw in spellings or ():
+            spelling = str(raw or "").strip()
+            if spelling and spelling not in wanted and \
+                    spelling not in state.spelling_attempts and \
+                    self.model_option(spelling, state.options) is None:
+                wanted.append(spelling)
+        if not wanted:
+            return
+        binary = self.resolved_binary()
+        if not binary:
+            return
+        async with state.lock():
+            for spelling in wanted[:MODEL_RESOLVE_LIMIT]:
+                if not state.options or spelling in state.spelling_attempts or \
+                        self.model_option(spelling, state.options) is not None:
+                    continue
+                if driver_base.cli_upgrade.is_running(self.key):
+                    return
+                state.spelling_attempts.add(spelling)
+                try:
+                    rows = await asyncio.wait_for(
+                        _read_model_catalog(binary, model=spelling),
+                        timeout=self.model_catalog_timeout(False))
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    log.info("claude could not resolve model %r: %s", spelling, exc)
+                    continue
+                echo = next((row for row in rows
+                             if row["value"].casefold() == spelling.casefold()), None)
+                resolved = str((echo or {}).get("resolved_model") or "")
+                if not resolved:
+                    log.info("claude did not resolve model %r", spelling)
+                elif state.learn_spelling(spelling, resolved):
+                    log.info("claude resolves model %r to %s", spelling, resolved)
+                else:
+                    log.info("claude resolves model %r to unlisted %s", spelling, resolved)
 
     def effort_options(self):
         seen = {}

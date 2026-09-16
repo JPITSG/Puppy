@@ -10046,8 +10046,9 @@ function titlePending(session) {
    (New session, New task): shown only where a title can be asked for - the
    controller's switch on with a model chosen, and the backend that will hold
    the session keeping such requests - checked by default, and yielding to a
-   typed name, which is never replaced. ``when`` completes the note: "<who>
-   names it <when>." */
+   typed name, which is never replaced. The note under the box is the
+   dialog's to carry: where there is one (New session), ``when`` completes it -
+   "<who> names it <when>." - and the New task dialog has none. */
 function wireAutoTitleChoice(wrap, nameInput, backendOf, onClose, when) {
   const check = wrap.querySelector('input[type="checkbox"]');
   const note = wrap.querySelector(".auto-title-note");
@@ -10058,7 +10059,7 @@ function wireAutoTitleChoice(wrap, nameInput, backendOf, onClose, when) {
     if (!offered) return;
     const typed = !!nameInput.value.trim();
     check.disabled = typed;
-    note.textContent = typed ? "The name above is kept as typed." :
+    if (note) note.textContent = typed ? "The name above is kept as typed." :
       `${titlesGeneratorLabel()} names it ${when}.`;
   };
   nameInput.addEventListener("input", sync);
@@ -14200,8 +14201,7 @@ async function modalNewTask(workspace) {
                         className: "mention-below" })}
     <label>Name <span class="field-optional">(optional, auto from the task)</span><input type="text" id="nt-name" maxlength="80"></label>
     <div class="auto-title hidden" id="nt-title-wrap">
-      <label class="check"><input type="checkbox" id="nt-title" aria-describedby="nt-title-note" checked> Generate a title from the task</label>
-      <p class="help auto-title-note" id="nt-title-note"></p>
+      <label class="check"><input type="checkbox" id="nt-title" checked> Generate a title from the task</label>
     </div>
     <div class="field-row">
       <label>Model<select id="nt-model"></select></label>
@@ -14209,8 +14209,6 @@ async function modalNewTask(workspace) {
       <label>Permissions<select id="nt-perm"></select></label>
     </div>
     <label class="hidden" id="nt-model-custom-wrap">Custom model<input type="text" id="nt-model-custom" placeholder="Model ID" spellcheck="false" maxlength="256"></label>
-    <p class="hint">Starts with the engine's saved defaults and Main's recent conversation context.</p>
-    <p class="hint">Main must be idle to create or apply a task. Local Git projects only; ignored files are not copied.</p>
     <p class="form-error hidden" role="alert"></p>
     <div class="m-btns"><button type="button" class="btn" id="nt-cancel">Cancel</button><button type="button" class="btn btn-pri" id="nt-start">Start task</button></div>`, "new-task-modal", () => { const view = state.views[workspace.tab.id]; if (view) modalNewTask(view); });
   const start = m.querySelector("#nt-start");
@@ -14233,8 +14231,10 @@ async function modalNewTask(workspace) {
   const engBox = m.querySelector("#nt-engines"), model = m.querySelector("#nt-model");
   const effort = m.querySelector("#nt-effort"), permission = m.querySelector("#nt-perm");
   const nameInp = m.querySelector("#nt-name");
+  /* the generated-title choice, without the New session dialog's note: the
+     Name field's own label already says the task is the fallback */
   const titleChoice = wireAutoTitleChoice(m.querySelector("#nt-title-wrap"), nameInp,
-    () => bid, onClose, "as the task starts; until then the task's first line stands in");
+    () => bid, onClose);
   const custom = m.querySelector("#nt-model-custom"), customWrap = m.querySelector("#nt-model-custom-wrap");
   const getModel = () => model.value === "__custom__" ? custom.value.trim() : model.value;
   const choices = () => ({ engine, model: getModel(), effort: effort.value, permission_mode: permission.value });
