@@ -86,6 +86,7 @@ class FakeElement {
     this.selectionEnd = 0;
     this.scrollHeight = 0; this.clientHeight = 0; this.offsetHeight = 0;
     this.scrollWidth = 0; this.clientWidth = 0; this.offsetWidth = 0; this.scrollTop = 0;
+    this.scrollLeft = 0; this.clientLeft = 0; this.clientTop = 0;
     this.files = null;
     this.checked = false;
     const classes = this._classes;

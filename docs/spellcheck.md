@@ -179,14 +179,31 @@ its last line, so both boxes' lines start and end on the same rows - its lines
 in one inner block, as the textarea's are in its inner editor, so both scroll
 exactly as far), scrolled together and clipped the same way; its
 letters are transparent and only the wavy underline under a marked word shows
-through the transparent field above. `Composer.spellSync` writes those metrics
-after every paint, on every textarea scroll, and from a `ResizeObserver`, so a
-box that grows or a window that changes width keeps its marks over their words.
-A scroll made from script - the caret brought back into view after `Ctrl+J` or
-a recalled prompt - reports itself only on the next frame, so
-`Composer.revealCaret` writes those metrics itself instead of leaving the marks
-a frame behind. `tests/console_browser_test.py` asserts the two boxes and their
-scroll heights match to the pixel in real Chromium.
+through the transparent field above. The layer stands on the field's
+scrollport - the box its text wraps in and scrolls through - never on its
+border box: once a prompt overflows, the field's scrollbar (the console's own,
+10px wide, never an overlay) takes its width from the text's, and a layer as
+wide as the whole field wrapped its lines 10px later. A word that ended just
+past the field's edge fitted at the layer's, every line after it stood one
+line higher than its text and, the layer's text being that much shorter, it
+could not scroll as far as the field - so with a long prompt scrolled to its
+end, every mark hung a line or two below its word. `Composer.spellSync`
+therefore reads the field's box from its rect, fractions and all (a pane
+split down the middle gives the field a half-pixel width, and the browser
+breaks its lines at exactly that width while `clientWidth` reports it
+rounded), less what `offsetWidth` exceeds `clientWidth` by - the border and
+the scrollbar, whole pixels both - and places the layer at the field's client
+edges inside the box's border. It writes those metrics after every paint, on
+every textarea scroll, and from a `ResizeObserver`, so a box that grows or a
+window that changes width keeps its marks over their words. A scroll made from
+script - the caret brought back into view after `Ctrl+J` or a recalled
+prompt - reports itself only on the next frame, so `Composer.revealCaret`
+writes those metrics itself instead of leaving the marks a frame behind.
+`tests/console_browser_test.py` asserts the two boxes and their scroll heights
+match to the pixel in real Chromium: on a text whose every paragraph ends
+just past the field's edge and within the scrollbar's width of it, on a field
+of fractional width with a run of one narrow letter broken wherever the edge
+falls, and scrolled to the end, where the layer must reach the same position.
 
 The word still under the typist's fingers is unfinished, not misspelled, so it
 carries no mark until it ends. After a keystroke (typed or deleted, never a

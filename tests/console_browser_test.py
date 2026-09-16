@@ -1248,28 +1248,85 @@ async def spell_check_checks(instance, capture=False):
         assert transfer and transfer["decoded"] > 1000000, transfer
         assert transfer["encoded"] * 2 < transfer["decoded"], transfer
 
-        # The marks are laid out exactly where the words are: same box, same
-        # metrics, same wrapping, same scroll.
+        # The marks are laid out exactly where the words are: on the field's
+        # scrollport (its box less the scrollbar, which takes its width from
+        # the text once a prompt overflows), with the same metrics, the same
+        # wrapping and the same scroll. Every paragraph of the text is built
+        # to end just past the field's edge and just short of the field's
+        # full width, so a layer as wide as the whole field - which once
+        # stood a line short of the text per paragraph and, scrolled to the
+        # end, hung every mark that far below its word - would fail `wraps`
+        # and `bottom`; `exposes` says the text has that shape first.
         layout = await evaluate(instance, """(() => {
             const c = demoView.composer, ta = c.ta;
-            c.set('Teh quick brown fox jumpd over the lazy dog. '.repeat(60) + 'sentance');
+            const ts = getComputedStyle(ta);
+            /* the text's height wrapped in the field's own metrics at a width */
+            const wrapped = (text, width) => {
+              const mirror = document.createElement('div');
+              for (const prop of CARET_MIRROR_STYLES) mirror.style[prop] = ts[prop];
+              mirror.style.cssText += ';position:absolute;top:0;left:-9999px;visibility:hidden;' +
+                'white-space:pre-wrap;overflow-wrap:break-word;box-sizing:border-box;width:' +
+                width + 'px';
+              mirror.textContent = text + '\\n';
+              document.body.appendChild(mirror);
+              const height = mirror.getBoundingClientRect().height;
+              mirror.remove();
+              return height;
+            };
+            /* the field at its full height carries the scrollbar */
+            c.set('x\\n'.repeat(40));
+            const inner = ta.clientWidth, outer = ta.offsetWidth;
+            const one = wrapped('x', inner);
+            const pool = ['teh', 'quick', 'brown', 'fox', 'jumpd', 'over', 'the', 'lazy', 'dog', 'sentance'];
+            const bad = ['teh', 'jumpd', 'sentance'];
+            const paragraphs = [];
+            let next = 0, shaped = true;
+            for (let i = 0; i < 14; i++) {
+              /* words while they fit the field's line, then single letters -
+                 which the checker never marks - until one no longer does */
+              let line = pool[next++ % pool.length];
+              for (;;) {
+                const longer = line + ' ' + pool[next % pool.length];
+                if (wrapped(longer, inner) > one) break;
+                line = longer;
+                next++;
+              }
+              while (wrapped(line + ' i', inner) === one) line += ' i';
+              line += ' i';
+              /* past the field's edge, within the layer's former width */
+              if (wrapped(line, inner) === one || wrapped(line, outer) !== one) shaped = false;
+              paragraphs.push(line);
+            }
+            const text = paragraphs.join('\\n');
+            c.set(text);
             c.spellDraw(true);
             const layer = c.box.querySelector('.spell-layer');
             ta.scrollTop = 0;
             ta.dispatchEvent(new Event('scroll'));
             const marks = [...layer.querySelectorAll('.sp-bad')];
             const box = ta.getBoundingClientRect(), mine = layer.getBoundingClientRect();
-            const ts = getComputedStyle(ta), ls = getComputedStyle(layer);
+            const ls = getComputedStyle(layer);
             const same = ['fontFamily','fontSize','lineHeight','letterSpacing','paddingTop',
                           'paddingLeft','paddingRight','paddingBottom','textBoxTrim','textBoxEdge']
                 .every(prop => ts[prop] === ls[prop]);
             const first = marks[0].getBoundingClientRect();
             const last = marks[marks.length - 1].getBoundingClientRect();
+            ta.scrollTop = ta.scrollHeight;
+            ta.dispatchEvent(new Event('scroll'));
+            const bottom = ta.scrollTop > 40 && layer.scrollTop === ta.scrollTop;
             ta.scrollTop = 40;
             ta.dispatchEvent(new Event('scroll'));
-            return {words: marks.map(node => node.textContent), same,
-                aligned: Math.abs(box.x - mine.x) < .5 && Math.abs(box.y - mine.y) < .5 &&
-                    Math.abs(box.width - mine.width) < .5 && Math.abs(box.height - mine.height) < .5,
+            return {words: marks.map(node => node.textContent),
+                expected: text.split(/\\s+/).filter(word => bad.includes(word)), same,
+                /* the scrollbar takes its width from the text here, and every
+                   paragraph wraps into one more line for it */
+                gutter: inner < outer && ta.clientWidth === inner,
+                shaped, exposes: wrapped(text, outer) < wrapped(text, inner),
+                /* the layer is the field's client box, not its border box */
+                aligned: Math.abs(mine.x - (box.x + ta.clientLeft)) < .5 &&
+                    Math.abs(mine.y - (box.y + ta.clientTop)) < .5 &&
+                    Math.abs(mine.width - ta.clientWidth) < .5 &&
+                    Math.abs(mine.height - ta.clientHeight) < .5,
                 inside: first.width > 0 && first.height > 0 &&
                     first.top >= box.top - .5 && first.left >= box.left - .5 &&
                     first.bottom <= box.bottom + .5,
@@ -1282,18 +1339,74 @@ async def spell_check_checks(instance, capture=False):
                 hidden: ls.color === 'rgba(0, 0, 0, 0)',
                 /* the field paints over the layer: positioned, and after it */
                 under: layer.nextElementSibling === ta && ts.position === 'relative',
+                /* and the layer reaches the field's last scroll position */
+                bottom,
                 scrolled: ta.scrollTop > 0 && layer.scrollTop === ta.scrollTop,
                 clipped: ls.overflow === 'hidden'};
         })()""")
-        assert layout["words"][:2] == ["Teh", "jumpd"] and "sentance" in layout["words"], layout
+        assert layout["words"] == layout["expected"] and len(layout["words"]) > 20, layout
+        assert layout["gutter"] and layout["shaped"] and layout["exposes"], layout
         assert layout["same"] and layout["aligned"] and layout["inside"], layout
         assert layout["wraps"] and layout["lines"], layout
         assert layout["decoration"] and layout["hidden"] and layout["under"], layout
-        assert layout["scrolled"] and layout["clipped"], layout
+        assert layout["bottom"] and layout["scrolled"] and layout["clipped"], layout
         if capture:
             shot = await instance.call("Page.captureScreenshot", {"format": "png"},
                                        session=instance.page_session)
             (BASE / "data" / "spell-marks.png").write_bytes(base64.b64decode(shot["data"]))
+        # A pane split down the middle gives the field a fractional width, and
+        # the browser breaks its lines at exactly that width while clientWidth
+        # reports it rounded. A run of one narrow letter, broken wherever the
+        # edge falls, tells the two apart: the box widths are tried until one
+        # wraps the run differently at the exact and the rounded width, and
+        # the layer must then stand on the exact one.
+        fraction = await evaluate(instance, """(() => {
+            const c = demoView.composer, ta = c.ta;
+            const ts = getComputedStyle(ta);
+            const wrapped = (text, width) => {
+              const mirror = document.createElement('div');
+              for (const prop of CARET_MIRROR_STYLES) mirror.style[prop] = ts[prop];
+              mirror.style.cssText += ';position:absolute;top:0;left:-9999px;visibility:hidden;' +
+                'white-space:pre-wrap;overflow-wrap:break-word;box-sizing:border-box;width:' +
+                width + 'px';
+              mirror.textContent = text + '\\n';
+              document.body.appendChild(mirror);
+              const height = mirror.getBoundingClientRect().height;
+              mirror.remove();
+              return height;
+            };
+            const run = 'i'.repeat(4000);
+            c.box.style.maxWidth = 'none';
+            let found = null;
+            for (const width of [896.5, 897.5, 898.5, 896.25, 897.25, 898.25, 896.75, 897.75, 898.75]) {
+              c.box.style.width = width + 'px';
+              c.set(run);
+              const exact = ta.getBoundingClientRect().width - (ta.offsetWidth - ta.clientWidth);
+              if (exact !== ta.clientWidth && wrapped(run, exact) !== wrapped(run, ta.clientWidth)) {
+                found = {width, exact, rounded: ta.clientWidth};
+                break;
+              }
+            }
+            let result = {found};
+            if (found) {
+              c.spellDraw(true);
+              const layer = c.box.querySelector('.spell-layer');
+              const mine = layer.getBoundingClientRect(), box = ta.getBoundingClientRect();
+              ta.scrollTop = ta.scrollHeight;
+              ta.dispatchEvent(new Event('scroll'));
+              result = {found, gutter: ta.clientWidth < ta.offsetWidth,
+                exact: Math.abs(mine.width - found.exact) < 1 / 64 &&
+                    Math.abs(mine.x - box.x) < 1 / 64 && Math.abs(mine.y - box.y) < 1 / 64,
+                wraps: ta.scrollHeight === layer.scrollHeight && ta.scrollHeight > ta.clientHeight,
+                bottom: ta.scrollTop > 40 && layer.scrollTop === ta.scrollTop};
+            }
+            c.box.style.width = '';
+            c.box.style.maxWidth = '';
+            c.set('');
+            return result;
+        })()""")
+        assert fraction["found"] and fraction["gutter"], fraction
+        assert fraction["exact"] and fraction["wraps"] and fraction["bottom"], fraction
 
         # A ctrl+j moves every line after it down and grows the box under it.
         # The marks go with their words in the same tick: the debounced scan is
@@ -1326,9 +1439,10 @@ async def spell_check_checks(instance, capture=False):
             const was = window.__before;
             return {value: ta.value, words: marks.map(node => node.textContent),
                 text: layer.textContent,
-                aligned: Math.abs(box.x - mine.x) < .5 && Math.abs(box.y - mine.y) < .5 &&
-                    Math.abs(box.width - mine.width) < .5 &&
-                    Math.abs(box.height - mine.height) < .5,
+                aligned: Math.abs(mine.x - (box.x + ta.clientLeft)) < .5 &&
+                    Math.abs(mine.y - (box.y + ta.clientTop)) < .5 &&
+                    Math.abs(mine.width - ta.clientWidth) < .5 &&
+                    Math.abs(mine.height - ta.clientHeight) < .5,
                 wraps: ta.scrollHeight === layer.scrollHeight,
                 stayed: Math.abs(now[0] - was[0]) < 1,
                 shifted: Math.abs((now[1] - was[1]) - line) < 1};

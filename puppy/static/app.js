@@ -11707,16 +11707,31 @@ class Composer {
     if (this.spellHeld) this.spellDraw();
   }
 
+  /* The layer stands on the textarea's scrollport - the box its text wraps
+     in and scrolls through - never its border box. Once a prompt overflows,
+     the field's scrollbar (the console's own, 10px wide, never an overlay)
+     takes its width from the text's, and a layer as wide as the whole field
+     wrapped its lines 10px later: a word that ended just past the field's
+     edge fitted at the layer's, every line after it stood one line higher
+     than its text and, the layer's text being that much shorter, it could
+     not scroll as far as the field - so with the field scrolled to its end,
+     every mark hung a line or two below its word. The box is read from the
+     rects, fractions and all: a pane split down the middle gives the field a
+     half-pixel width, the browser breaks its lines at exactly that width,
+     and clientWidth is that width rounded. What offsetWidth exceeds
+     clientWidth by is the border and the scrollbar, whole pixels both. */
   spellSync() {
     const layer = this.spellLayer;
     if (!layer || !this.ta.isConnected) return;
-    const ta = this.ta;
+    const ta = this.ta, box = this.box;
     const cs = getComputedStyle(ta);
     for (const prop of CARET_MIRROR_STYLES) layer.style[prop] = cs[prop];
-    layer.style.left = ta.offsetLeft + "px";
-    layer.style.top = ta.offsetTop + "px";
-    layer.style.width = ta.offsetWidth + "px";
-    layer.style.height = ta.offsetHeight + "px";
+    const rect = ta.getBoundingClientRect(), frame = box.getBoundingClientRect();
+    /* absolute offsets count from the box's padding edge, inside its border */
+    layer.style.left = (rect.left - frame.left - box.clientLeft + ta.clientLeft) + "px";
+    layer.style.top = (rect.top - frame.top - box.clientTop + ta.clientTop) + "px";
+    layer.style.width = (rect.width - (ta.offsetWidth - ta.clientWidth)) + "px";
+    layer.style.height = (rect.height - (ta.offsetHeight - ta.clientHeight)) + "px";
     layer.scrollTop = ta.scrollTop;
     layer.scrollLeft = ta.scrollLeft;
   }

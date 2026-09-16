@@ -335,6 +335,34 @@ const settle = async () => { for (let i = 0; i < 8; i++) await new Promise(r => 
   setSpellPref("check", true);
   assert.deepEqual(painted(b.box), ["teh", "jumpd"], "and on brings them straight back");
 
+  /* The layer stands on the field's scrollport, not its border box: once a
+     prompt overflows, the scrollbar takes its width from the text, and a
+     layer as wide as the whole field wrapped its lines later than the field
+     did and could not scroll as far. The box is read from the rects, so a
+     field half a pixel wide - which breaks its lines at exactly that width -
+     is matched to the fraction, not to the rounded clientWidth. */
+  const port = makeBox();
+  port.box.clientLeft = port.box.clientTop = 1;     // the box's own border
+  port.box.getBoundingClientRect = () => ({ left: 100, top: 200, width: 900, height: 320 });
+  port.ta.getBoundingClientRect = () => ({ left: 112.5, top: 210, width: 875.5, height: 224 });
+  Object.assign(port.ta, { offsetWidth: 876, clientWidth: 866, offsetHeight: 224, clientHeight: 224,
+    scrollTop: 78 });
+  type(port.composer, "teh quick");
+  port.composer.spellDraw(true);
+  const portLayer = port.box.querySelector(".spell-layer");
+  const portBox = () => [portLayer.style.left, portLayer.style.top, portLayer.style.width, portLayer.style.height];
+  assert.deepEqual(portBox(), ["11.5px", "9px", "865.5px", "224px"],
+    "from the box's padding edge, the field's exact width less its 10px scrollbar");
+  assert.equal(portLayer.scrollTop, 78, "scrolled as far as the field");
+  // a field with a border of its own: the layer stands inside it
+  Object.assign(port.ta, { clientLeft: 1, clientTop: 1, clientWidth: 864, clientHeight: 222 });
+  port.composer.spellSync();
+  assert.deepEqual(portBox(), ["12.5px", "10px", "863.5px", "222px"]);
+  // the same field with nothing to scroll: the whole padding box
+  Object.assign(port.ta, { clientLeft: 0, clientTop: 0, clientWidth: 876, clientHeight: 224 });
+  port.composer.spellSync();
+  assert.deepEqual(portBox(), ["11.5px", "9px", "875.5px", "224px"]);
+
   /* An edit moves the words the marks sit under: ctrl+j puts every line
      after it one line down, and the box grows under them. The marks go with
      the text in the same tick, without waiting for the next scan. */
