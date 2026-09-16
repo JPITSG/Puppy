@@ -2876,11 +2876,9 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .dirpick button:active{background:var(--hov);filter:brightness(.95)}
 .hint{margin-top:-4px;margin-bottom:10px}
 .new-session-mkdir{margin:8px 0}
-/* the generated-title choice under a creation dialog's Name field: the
-   check, then its note aligned with the check's own text */
+/* the generated-title choice under a creation dialog's Name field */
 .auto-title{margin:-2px 0 12px}
 .auto-title .check{margin:0}
-.auto-title-note{margin:5px 0 0 23px}
 .new-session-color{margin-top:8px}
 .open-session-list{max-height:50vh;overflow-y:auto;margin-top:10px}
 

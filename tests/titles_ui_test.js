@@ -212,14 +212,12 @@ const same = (actual, expected) => assert.equal(JSON.stringify(actual), JSON.str
   ];
   state.titles = { enabled: false, configured: false, backend: 0, engine: "", model: "" };
   const wrap = document.createElement("div"); wrap.className = "auto-title hidden";
-  wrap.innerHTML = `<label class="check"><input type="checkbox" checked> Generate a title</label>
-    <p class="help auto-title-note"></p>`;
+  wrap.innerHTML = `<label class="check"><input type="checkbox" checked> Generate a title</label>`;
   const nameInput = document.createElement("input");
   const closers = [];
   let bid = 0;
-  const choice = context.wireAutoTitleChoice(wrap, nameInput, () => bid, fn => closers.push(fn),
-    "once the first message is sent");
-  const check = wrap.querySelector("input"), noteEl = wrap.querySelector(".auto-title-note");
+  const choice = context.wireAutoTitleChoice(wrap, nameInput, () => bid, fn => closers.push(fn));
+  const check = wrap.querySelector("input");
   assert.equal(wrap.classList.contains("hidden"), true); assert.equal(choice.wanted(), false);
   // on, but nothing chosen: still nothing to offer
   state.titles = { enabled: true, configured: false, backend: 0, engine: "", model: "" };
@@ -229,12 +227,13 @@ const same = (actual, expected) => assert.equal(JSON.stringify(actual), JSON.str
   state.engCache[1] = [claude];
   for (const sync of context.titlesStateListeners) sync();
   assert.equal(wrap.classList.contains("hidden"), false); assert.equal(choice.wanted(), true);
-  assert.equal(noteEl.textContent, "Claude Code · Haiku · Peer names it once the first message is sent.");
   assert.equal(check.disabled, false);
+  // the check is the whole choice: no note is written under it
+  assert.equal(wrap.children.length, 1);
   // a typed name wins
   nameInput.value = "Typed"; nameInput.dispatchEvent(new FakeEvent("input"));
   assert.equal(check.disabled, true); assert.equal(choice.wanted(), false);
-  assert.equal(noteEl.textContent, "The name above is kept as typed.");
+  assert.equal(wrap.children.length, 1);
   nameInput.value = ""; nameInput.dispatchEvent(new FakeEvent("input"));
   assert.equal(check.disabled, false); assert.equal(choice.wanted(), true);
   check.checked = false; assert.equal(choice.wanted(), false); check.checked = true;
@@ -242,17 +241,11 @@ const same = (actual, expected) => assert.equal(JSON.stringify(actual), JSON.str
   bid = 2; choice.sync();
   assert.equal(wrap.classList.contains("hidden"), true); assert.equal(choice.wanted(), false);
   bid = 1; choice.sync(); assert.equal(wrap.classList.contains("hidden"), false);
-  // the label names the model by its id when no catalog describes it, and
-  // leaves out this instance
-  state.titles = { enabled: true, configured: true, backend: 0, engine: "codex", model: "gpt-z" };
-  assert.equal(context.titlesGeneratorLabel(), "Codex · gpt-z");
-  state.titles = { enabled: true, configured: true, backend: 0, engine: "claude", model: "" };
-  assert.equal(context.titlesGeneratorLabel(), "Claude Code · default model");
   // closing the dialog retires its listener
   const before = context.titlesStateListeners.size;
   closers.forEach(fn => fn()); assert.equal(context.titlesStateListeners.size, before - 1);
-  // the New task dialog carries the choice without a note: offered, disabled
-  // under a typed name and released with it, and nothing to write to
+  // the New task dialog carries the same choice: offered, disabled under a
+  // typed name and released with it
   state.titles = { enabled: true, configured: true, backend: 1, engine: "claude", model: "haiku" };
   const bare = document.createElement("div"); bare.className = "auto-title hidden";
   bare.innerHTML = `<label class="check"><input type="checkbox" checked> Generate a title from the task</label>`;
@@ -260,13 +253,12 @@ const same = (actual, expected) => assert.equal(JSON.stringify(actual), JSON.str
   const bareClosers = [];
   const bareChoice = context.wireAutoTitleChoice(bare, bareName, () => 1, fn => bareClosers.push(fn));
   const bareCheck = bare.querySelector("input");
-  assert.equal(bare.querySelector(".auto-title-note"), null);
   assert.equal(bare.classList.contains("hidden"), false); assert.equal(bareChoice.wanted(), true);
   bareName.value = "Typed"; bareName.dispatchEvent(new FakeEvent("input"));
   assert.equal(bareCheck.disabled, true); assert.equal(bareChoice.wanted(), false);
   bareName.value = ""; bareName.dispatchEvent(new FakeEvent("input"));
   assert.equal(bareCheck.disabled, false); assert.equal(bareChoice.wanted(), true);
-  assert.equal(bare.children.length, 1, "no note is added for the dialog");
+  assert.equal(bare.children.length, 1);
   bareClosers.forEach(fn => fn());
   // what shimmers: a request on its way, never an armed or absent record
   assert.equal(context.titlePending({ auto_title: { state: "requested", requested_at: 1 } }), true);

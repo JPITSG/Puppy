@@ -10022,22 +10022,6 @@ function titlesOfferedFor(bid) {
   return backendHasCapability(backend, "session-titles");
 }
 
-/* "Claude · claude-haiku-4-5 · NAS.lan": the engine's label, the model as
-   the backend's catalog names it (or its id, or its default), and the
-   backend when it is not this instance */
-function titlesGeneratorLabel() {
-  const titles = state.titles || {};
-  const info = engineInfo(titles.backend, titles.engine);
-  const parts = [(info && info.label) || titles.engine || "a model"];
-  if (titles.model) {
-    const row = info && Array.isArray(info.model_options) ?
-      info.model_options.find(item => item && item.value === titles.model) : null;
-    parts.push(row && row.label ? row.label : titles.model);
-  } else parts.push("default model");
-  if (titles.backend) parts.push(backendName(titles.backend));
-  return parts.join(" · ");
-}
-
 function titlePending(session) {
   return !!(session && session.auto_title && session.auto_title.state === "requested");
 }
@@ -10046,21 +10030,16 @@ function titlePending(session) {
    (New session, New task): shown only where a title can be asked for - the
    controller's switch on with a model chosen, and the backend that will hold
    the session keeping such requests - checked by default, and yielding to a
-   typed name, which is never replaced. The note under the box is the
-   dialog's to carry: where there is one (New session), ``when`` completes it -
-   "<who> names it <when>." - and the New task dialog has none. */
-function wireAutoTitleChoice(wrap, nameInput, backendOf, onClose, when) {
+   typed name, which is never replaced. The check is the whole choice: the
+   Name field's own label already says what stands in for a typed name. */
+function wireAutoTitleChoice(wrap, nameInput, backendOf, onClose) {
   const check = wrap.querySelector('input[type="checkbox"]');
-  const note = wrap.querySelector(".auto-title-note");
   let offered = false;
   const sync = () => {
     offered = titlesOfferedFor(backendOf());
     wrap.classList.toggle("hidden", !offered);
     if (!offered) return;
-    const typed = !!nameInput.value.trim();
-    check.disabled = typed;
-    if (note) note.textContent = typed ? "The name above is kept as typed." :
-      `${titlesGeneratorLabel()} names it ${when}.`;
+    check.disabled = !!nameInput.value.trim();
   };
   nameInput.addEventListener("input", sync);
   titlesStateListeners.add(sync);
@@ -14231,8 +14210,8 @@ async function modalNewTask(workspace) {
   const engBox = m.querySelector("#nt-engines"), model = m.querySelector("#nt-model");
   const effort = m.querySelector("#nt-effort"), permission = m.querySelector("#nt-perm");
   const nameInp = m.querySelector("#nt-name");
-  /* the generated-title choice, without the New session dialog's note: the
-     Name field's own label already says the task is the fallback */
+  /* the generated-title choice: the Name field's own label already says
+     the task is the fallback */
   const titleChoice = wireAutoTitleChoice(m.querySelector("#nt-title-wrap"), nameInp,
     () => bid, onClose);
   const custom = m.querySelector("#nt-model-custom"), customWrap = m.querySelector("#nt-model-custom-wrap");
@@ -24846,8 +24825,7 @@ async function modalNewSession(groupId = null) {
     <p class="hint scratch-note hidden" id="ns-scratch-note">Puppy creates a private empty workspace for this session. Its files are deleted when you reset the workspace or delete this session.</p>
     <label>Name <span class="field-optional">(optional, auto from first message)</span><input type="text" id="ns-name"></label>
     <div class="auto-title hidden" id="ns-title-wrap">
-      <label class="check"><input type="checkbox" id="ns-title" aria-describedby="ns-title-note" checked> Generate a title from the first message</label>
-      <p class="help auto-title-note" id="ns-title-note"></p>
+      <label class="check"><input type="checkbox" id="ns-title" checked> Generate a title from the first message</label>
     </div>
     <div class="field-row">
       <label>Model<select id="ns-model"></select></label>
@@ -24880,8 +24858,7 @@ async function modalNewSession(groupId = null) {
      with a model chosen and the backend keeps such requests, and yielding
      to a typed name, which is never replaced */
   const titleChoice = wireAutoTitleChoice(m.querySelector("#ns-title-wrap"), nameInp,
-    () => parseInt(beSel.value, 10) || 0, onClose,
-    "once the first message is sent; until then the message's first line stands in");
+    () => parseInt(beSel.value, 10) || 0, onClose);
   /* the same inline error and busy treatment the backend editor and the New
      task dialog give a form: a failure stays on the sheet beside its fields */
   const form = m.querySelector("#ns-form");
