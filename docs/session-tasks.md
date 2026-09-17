@@ -7,6 +7,13 @@ across consoles and restarts and is included in backups. Remove every task
 conversation before disabling Tasks, including finished tasks whose tabs were
 hidden. Hiding a tab alone does not close its conversation or stop its work.
 
+**Show status bar** is likewise the session's setting: Main and every task
+tab show or hide their head strips together. The row in a task's own menu
+sets Main's setting, and the sidebar's context menu on the session is the
+way back once the strips - and the menu buttons they carry - are hidden. A
+task's session payload and list row report Main's value; a `show_meta` write
+aimed at a task is refused (409), because only Main's row is ever read.
+
 Open a session and select **+ Task** beside **Main**. The task box is the chat's
 own prompt box: `@` offers Main's browsers, terminals, sessions and a spawn,
 images and files can be pasted, dropped or attached with **+**, Enter starts the
@@ -39,7 +46,17 @@ conversation's dot (spinning while it works) and the task's state; hiding a tab
 with its close mark never stops the task. A tab stays visible until explicitly
 hidden on that device or the task is removed; hiding is remembered across reloads
 and does not hide it on other devices. Reopen hidden tabs from the **Tasks**
-sheet, opened by the button beside **+** on the strip. The sidebar lists the parent
+sheet, opened by the button at the right of the strip. Between that button and
+**+** stand the selected task's own two verbs, shown only while a task is
+selected, never for Main: the diff mark opens **Review changes** - the sheet the
+task's menu row and the Tasks sheet open - and is greyed exactly when that menu
+row is, since a task still running, queued, starting or held has nothing to
+review yet; the bin removes the task through the same **Remove task** confirm
+as the task's menu and the sheet's **Remove**, and is shown only while the task
+can go - never while it is running, waiting for an approval or queued - so a
+task the node reports working again greys Review and takes the bin away. Both
+name the task in their hover, and the bin, the strip's one destructive verb,
+turns red under the pointer like the menu's row. The sidebar lists the parent
 once; while Main is idle its activity slot reports working tasks or an approval
 waiting for input. Task links and search results open the corresponding inner
 conversation.
@@ -55,6 +72,8 @@ The **Tasks** sheet lists every task with its state, latest answer and the
 **Open**, **Review changes** and **Remove** actions, without scrolling Main's
 chat. Review stays visible but disabled while a task or its queue is working and
 becomes available as it finishes; a task's own menu offers the same review.
+Remove is disabled exactly while the strip's bin would be hidden for that task:
+a running or queued task must be stopped first.
 **Review changes** shows the changed files and a coloured diff; **Apply to Main**
 applies that task's delta to Main's working files. A review reads the task copy
 through a private Git index, so it never stages files behind the engine's back.

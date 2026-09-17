@@ -34,8 +34,10 @@ const context = vm.createContext({
   navigationRemember: () => { remembered++; }, navigationChanged: () => { changed++; },
   wireTabbar() {}, wireTabDrag() {}, syncHorizontalOverflow() {}, syncPromptSpinnerPhase() {},
   titlePending: () => false,
-  tasksIcon: () => el("svg"), plusIcon: () => el("svg"), xIcon: () => el("svg"),
-  taskStateClass: () => "", taskStateLabel: () => "Ready", taskActivityTitle: () => "",
+  tasksIcon: () => el("svg"), plusIcon: () => el("svg"), xIcon: () => el("svg"), binIcon: () => el("svg"),
+  reviewIcon: () => el("svg"),
+  taskStateClass: () => "", taskStateLabel: () => "Ready", taskActivityTitle: () => "", taskRemovable: () => true,
+  taskReviewable: () => true,
   promptStatusLabel: label => el("span", "t-state", label),
   modalNewTask() {}, modal() { throw new Error("no dialog expected"); },
 });
@@ -104,6 +106,7 @@ class SessionView {
     if (typeof globalThis.built === "function") globalThis.built(this);
   }
   syncTaskReviewMenu() {}
+  syncMetaVisibility() {}
   destroy() { this.destroyed = true; this.root.remove(); }
 }
 for (const name of ["onShow", "onVisibility", "land", "captureScroll", "restoreScroll", "applyPlace",

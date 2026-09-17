@@ -460,6 +460,32 @@ async def toggle_api(app, parent, child):
         data = await response.json()
         assert data['session']['tasks_enabled'] is True and data['session']['show_meta'] is False
         assert db.meta_get(tasks.DISABLED_PREFIX + str(empty)) is None
+        # The status bar is the session's setting: a task's list row and
+        # payload say what Main's says, a write aimed at the task is refused,
+        # and Main's toggle turns every task row with it. The task's own
+        # column is never read, so a stale value there changes nothing.
+        task_route = '/api/sessions/' + str(child)
+        main_route = '/api/sessions/' + str(parent)
+        listed_show = lambda rows, sid: next(s for s in rows if s['id'] == sid)['show_meta']
+        async def shown():
+            rows = (await (await client.get('/api/sessions')).json())['sessions']
+            single = (await (await client.get(task_route)).json())['session']['show_meta']
+            return listed_show(rows, parent), listed_show(rows, child), single
+        assert await shown() == (True, True, True)
+        response = await client.patch(task_route, json={'show_meta': False})
+        assert response.status == 409 and 'main session' in (await response.json())['error']
+        assert db.get_session(child)['show_meta'] == 1 and await shown() == (True, True, True)
+        with patch.object(runner.hub(parent), 'broadcast') as broadcast:
+            response = await client.patch(main_route, json={'show_meta': False})
+            assert response.status == 200 and (await response.json())['session']['show_meta'] is False
+            assert broadcast.call_args[0][0]['session']['show_meta'] is False
+        assert db.get_session(child)['show_meta'] == 1 and await shown() == (False, False, False)
+        assert runner.session_payload(db.get_session(child))['show_meta'] is False
+        db.touch_session(child, show_meta=0)
+        response = await client.patch(main_route, json={'show_meta': True})
+        assert response.status == 200 and await shown() == (True, True, True)
+        assert runner.session_payload(db.get_session(child))['show_meta'] is True
+        db.touch_session(child, show_meta=1)
         # Finished/hidden, running, queued, and held children all block it.
         hub = runner.hub(child)
         for status, queue, held in [('idle', [], []), ('running', [], []),

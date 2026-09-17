@@ -764,10 +764,12 @@ const syncHorizontalOverflow = () => {};
 const xIcon = () => node();
 const titlePending = () => false;
 const localStorage = { getItem() { return null; }, setItem() {} };
+const document = { activeElement: null };
 %s
 const view = Object.create(SessionWorkspaceView.prototype);
-const main = { root: node(), draft: "Keep this draft", shows: 0, onShow() { this.shows++; } };
-Object.assign(view, { tab: { bid: 0, sid: 1 }, root: node(), strip: node(), overviewButton: node(),
+const main = { root: node(), draft: "Keep this draft", shows: 0, onShow() { this.shows++; },
+  syncMetaVisibility() {} };
+Object.assign(view, { tab: { bid: 0, sid: 1 }, root: node(), strip: node(), overviewButton: node(), reviewButton: node(), removeButton: node(),
   taskViews: new Map([[1, main]]), opened: [], hidden: new Set(), selected: 1, seen: {}, overview: null, rendered: "" });
 view.refreshTasks();
 const painted = view.strip.children.length;
@@ -7404,15 +7406,16 @@ async def main() -> None:
             assert ui_source.count("closeBrowserTabsForBackend(") == 5
             assert "if (result.enabled === false) closeBrowserTabsForBackend(bid);" in ui_source
             assert "if (node.browser && node.browser.enabled === false)" in ui_source
-            # the head strip hides per session, and the toggle sits in BOTH the
-            # head's own menu and the sidebar menu - hiding the head takes its
-            # own opener with it, so the sidebar copy is the way back
+            # the head strip hides per session - a task's with Main's - and
+            # the toggle sits in BOTH the head's own menu and the sidebar menu:
+            # hiding the head takes its own opener with it, so the sidebar
+            # copy is the way back, and one setter serves every menu
             assert ui_source.count('menuCheckRow("Show status bar"') == 2
-            assert "classList.toggle(\"meta-hidden\", !sessionShowsMeta(s))" in ui_source
+            assert ui_source.count("setSessionShowsMeta(") == 3
+            assert "classList.toggle(\"meta-hidden\", !sessionViewShowsMeta(this))" in ui_source
             # decided before the view is attached, so a session that hides the
             # strip never paints it and then drops it on the first frame
-            assert ("if (!sessionShowsMeta(findSessionMeta(this.tab.bid, this.tab.sid)))"
-                    in ui_source)
+            assert "    this.syncMetaVisibility();\n    this.scroll = root.querySelector" in ui_source
             assert "syncSessionMetaVisibility();" in ui_source
             # The directory list sits in normal flow, so closing it on focus
             # loss reflows the page. Held until the press that took the focus

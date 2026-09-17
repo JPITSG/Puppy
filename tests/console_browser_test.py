@@ -1116,6 +1116,133 @@ async def reading_place_checks(instance):
     print("PASS: reading place kept across tab switches for idle conversations, anchored through a resize, independent for Main and tasks, unmoved by closing another tab or re-selecting, tail for running turns and newer messages, restored by Back", flush=True)
 
 
+async def task_strip_verbs_checks(instance):
+    """The strip's two verbs for the selected task, Review and the bin, on
+    the console's own icon-button face: absent with Main selected; Review
+    greyed and the bin absent with a running task selected; both live once
+    the node reports that task stopped, standing between the Tasks button
+    and + on the strip's 26px box with their glyphs centred in it and named
+    for the task; the bin taking the error tone under a real hover while
+    Review takes the ordinary one; a real click on Review opening the review
+    sheet for that task and Cancel closing it with the focus back on the
+    button; a real click on the bin opening the Remove task confirm named for
+    that task with Cancel holding the first focus, Cancel leaving the task
+    and the bin in place with the focus back on the bin; and both verbs
+    going grey or away the moment the node reports the task working."""
+    workspace = "state.views['s:0:1']"
+    hidden = lambda button: workspace + "." + button + ".classList.contains('hidden')"
+    review_hidden, bin_hidden = hidden("reviewButton"), hidden("removeButton")
+    review_greyed = workspace + ".reviewButton.disabled"
+    tid = next(s["id"] for s in db.list_sessions() if s["name"] == "Card spacing")
+    hub = runner.hub(tid)
+    record = session_tasks.record(tid)
+
+    async def click(x, y):
+        for kind in ("mousePressed", "mouseReleased"):
+            await instance.call("Input.dispatchMouseEvent", {"type": kind, "x": x, "y": y,
+                                "button": "left", "clickCount": 1}, session=instance.page_session)
+
+    async def hover(x, y):
+        await instance.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y},
+                            session=instance.page_session)
+
+    await evaluate(instance, "activateTab('s:0:1'); %s.select(1); true" % workspace)
+    assert await evaluate(instance, review_hidden + " && " + bin_hidden), "Main offers neither verb"
+    await evaluate(instance, "%s.openTask(%d); true" % (workspace, tid))
+    await until(instance, "%s.selected === %d" % (workspace, tid))
+    assert await evaluate(instance, "!%s && %s && %s" % (review_hidden, review_greyed, bin_hidden)), \
+        "a running task: Review greyed like the menu's row, no bin"
+    try:
+        hub.status = "idle"
+        db.touch_session(tid, status="idle")
+        session_tasks._save(tid, dict(record, outcome="ok", completed_at=time.time()))
+        runner.broadcast_sessions()
+        await until(instance, "!%s && !%s && !%s" % (review_hidden, review_greyed, bin_hidden))
+        row = await evaluate(instance, """(() => {
+            const wrap = document.querySelector('.task-tab-actions');
+            const buttons = [...wrap.children];
+            const boxes = buttons.map(node => node.getBoundingClientRect());
+            const mid = box => box.top + box.height / 2;
+            const centre = box => [box.left + box.width / 2, mid(box)];
+            /* every glyph's ink box stands on its button's centre */
+            const centred = buttons.every(node => {
+                const [bx, by] = centre(node.getBoundingClientRect());
+                const [gx, gy] = centre(node.querySelector('svg').getBoundingClientRect());
+                return Math.abs(bx - gx) < 1 && Math.abs(by - gy) < 1; });
+            return {order: buttons.map(node => node.className.split(' ').find(cls => cls.startsWith('task-'))),
+                    face: buttons.every(node => node.classList.contains('icon-btn') && node.type === 'button'),
+                    left: boxes.every((box, i) => !i || boxes[i - 1].right <= box.left),
+                    boxes: boxes.map(box => [Math.round(box.width), Math.round(box.height)]),
+                    level: boxes.every(box => Math.abs(mid(box) - mid(boxes[0])) < 1),
+                    centred,
+                    labels: buttons.slice(1, 3).map(node => node.getAttribute('aria-label')),
+                    review: centre(boxes[1]), bin: centre(boxes[2]),
+                    away: [boxes[0].left - 40, mid(boxes[0])]}; })()""")
+        assert row["order"] == ["task-overview-button", "task-review-button", "task-remove-button", "task-add-button"], row
+        assert row["face"] and row["left"] and row["level"] and row["centred"], row
+        assert row["boxes"] == [[26, 26]] * 4, row
+        assert row["labels"] == ["Review Card spacing", "Remove Card spacing"], row
+        # the tones under the pointer: the console's error tone on the bin,
+        # the ordinary hover on Review - read against the tokens themselves.
+        # Pipe-driven headless Chromium reports hover:none, so the desktop
+        # media branch is switched on while its real :hover rules are read.
+        tones = "(() => { const probe = document.createElement('span'); document.body.appendChild(probe);" \
+                " probe.style.color = 'var(--err)'; const err = getComputedStyle(probe).color;" \
+                " probe.style.color = 'var(--txt)'; const txt = getComputedStyle(probe).color; probe.remove();" \
+                " return {err, txt, review: getComputedStyle(%s.reviewButton).color," \
+                " bin: getComputedStyle(%s.removeButton).color}; })()" % (workspace, workspace)
+        await evaluate(instance, """window.verbHoverRules=[...document.styleSheets].flatMap(s=>[...s.cssRules])
+            .filter(r=>r.media && r.conditionText==='(hover: hover)');
+            verbHoverRules.forEach(r=>r.media.mediaText='all'); true""")
+        try:
+            await hover(*row["bin"])
+            await until(instance, "(t => t.bin === t.err && t.review !== t.err)(%s)" % tones)
+            await hover(*row["review"])
+            await until(instance, "(t => t.review === t.txt && t.bin !== t.err)(%s)" % tones)
+            await hover(*row["away"])
+        finally:
+            await evaluate(instance, "verbHoverRules.forEach(r=>r.media.mediaText='(hover: hover)'); delete window.verbHoverRules; true")
+        # Review by a real click: the sheet for that task, closed by Cancel
+        await click(*row["review"])
+        await until(instance, "!!document.querySelector('.task-review-modal')")
+        await until(instance, "document.querySelector('.task-review-modal .form-error:not(.hidden)') !== null || "
+                              "document.querySelector('.task-review-modal #tr-files').textContent !== 'Loading changes…'")
+        sheet = await evaluate(instance, """(() => {
+            const m = document.querySelector('.task-review-modal');
+            const facts = [...m.querySelectorAll('.ws-fact')].map(row => [row.querySelector('.field-lbl').textContent,
+                row.querySelector('.wsf-v').textContent]);
+            return {facts: facts.slice(0, 2), top: modalStack[modalStack.length - 1].m === m}; })()""")
+        assert sheet["facts"] == [["Task", "Card spacing"], ["State", "Review"]] and sheet["top"], sheet
+        await evaluate(instance, "document.querySelector('#tr-close').click(); true")
+        await until(instance, "!document.querySelector('.task-review-modal')")
+        assert await evaluate(instance, "document.activeElement === %s.reviewButton" % workspace), \
+            "Cancel hands the focus back to Review"
+        # the bin by a real click: the confirm named for that task
+        await click(*row["bin"])
+        await until(instance, "!!document.querySelector('.remove-task-modal')")
+        confirm = await evaluate(instance, """({subject: document.querySelector('.remove-task-modal .modal-subject').textContent,
+            fold: document.querySelector('#rt-fold').checked,
+            focus: document.activeElement === document.querySelector('#rt-no')})""")
+        assert confirm == {"subject": "Card spacing", "fold": True, "focus": True}, confirm
+        await evaluate(instance, "document.querySelector('#rt-no').click(); true")
+        await until(instance, "!document.querySelector('.remove-task-modal')")
+        assert await evaluate(instance, "%s.tasks().some(s => s.id === %d) && !%s && !%s && document.activeElement === %s.removeButton"
+                              % (workspace, tid, bin_hidden, review_greyed, workspace)), \
+            "Cancel keeps the task, both verbs and the bin's focus"
+        hub.status = "running"
+        db.touch_session(tid, status="running")
+        session_tasks._save(tid, record)
+        runner.broadcast_sessions()
+        await until(instance, "%s && %s && !%s" % (bin_hidden, review_greyed, review_hidden))
+    finally:
+        hub.status = "running"
+        db.touch_session(tid, status="running")
+        session_tasks._save(tid, record)
+        runner.broadcast_sessions()
+        await evaluate(instance, "%s.select(1); true" % workspace)
+    print("PASS: the task strip's Review and bin stand between Tasks and + for the selected task only, Review greyed as the menu's row and the bin absent while it works, glyphs centred on the strip's box, the bin red under the pointer, real clicks opening the review sheet and the named Remove task confirm, Cancel keeping everything", flush=True)
+
+
 async def session_mention_checks(instance):
     await evaluate(instance, "demoView.composer.set('', true); demoView.composer.ta.focus(); true")
     await type_text(instance, "@Session-P")
@@ -2798,6 +2925,7 @@ async def checks(a, b, hub, capture=False):
     await session_mention_checks(a)
     await pane_resize_checks(a)
     await reading_place_checks(a)
+    await task_strip_verbs_checks(a)
     await narrow_composer_checks(a, capture)
     await composer_enter_checks(a, capture)
     await attachment_steering_checks(a, hub)

@@ -3235,6 +3235,11 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
 .tab.task-tab{font-size:var(--fs-sm);padding:5px var(--tab-space);max-width:200px}
 .task-tabbar .tab-add-wrap{margin-top:-6px;gap:2px}
 .task-tabbar .icon-btn.attention{color:var(--warn)}
+/* the bin is the strip's one destructive verb: quiet at rest like its
+   neighbours, the error tone under the pointer like the queue strip's
+   remove, the menu's Remove task row and the sheet's Remove */
+@media (hover:hover){.task-tabbar .task-remove-button:hover{color:var(--err)}}
+.task-tabbar .task-remove-button:active{color:var(--err)}
 .task-tab .t-state{font-size:var(--fs-2xs);color:var(--txt3);flex-shrink:0;white-space:nowrap}
 /* an answer nobody has looked at yet */
 .task-tab .t-state.unread::before{

@@ -19,7 +19,7 @@ const context = vm.createContext({
   closeAllMenus() { document.querySelectorAll(".menu").forEach(menu => menu.remove()); return false; },
   backendSupportsEngineDefaults: () => false,
   menuCheckRow: () => document.createElement("button"),
-  sessionShowsMeta: () => true, appendSessionTasksToggle() {},
+  sessionViewShowsMeta: () => true, setSessionShowsMeta() {}, appendSessionTasksToggle() {},
   sessionWorkspace: () => null, isScratchWorkspace: () => true,
   positionAnchoredMenu() {},
   modalReviewTask: (workspace, session) => { reviewed = { workspace, session }; },

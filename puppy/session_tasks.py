@@ -212,6 +212,8 @@ def decorate(rows):
         lookup[sid]["task"] = info
         parent = lookup.get(value["parent"])
         if parent is not None:
+            # a task shows Main's status bar: its row says what Main's says
+            lookup[sid]["show_meta"] = parent["show_meta"]
             counts = parent.setdefault("task_activity", {"running": 0, "approval": 0, "ready": 0, "total": 0})
             counts["total"] += 1
             counts["running"] += info["state"] in ("running", "queued")

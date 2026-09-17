@@ -828,6 +828,12 @@ async def h_session_patch(request: web.Request):
     if "archived" in body:
         fields["archived"] = 1 if body["archived"] else 0
     if "show_meta" in body:
+        from puppy import session_tasks
+        # a task's strip follows Main's, and only Main's row is ever read
+        if session_tasks.record(s["id"]):
+            return web.json_response(
+                {"error": "The status bar is shown or hidden from the main session"},
+                status=409)
         fields["show_meta"] = 1 if body["show_meta"] else 0
     # While a turn runs or prompts wait, a configuration change joins the queue
     # and applies in order - prompts sent before it keep the configuration they

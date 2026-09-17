@@ -309,7 +309,11 @@ def session_payload(session):
     out["git"] = session_git.record(session.get("cwd"))
     out["workspace_missing"] = workspaces.is_temporary(out) and not workspaces.is_available(out)
     out["used_config"] = parse_used_config(out["used_config"])
-    out["show_meta"] = out["show_meta"] != 0
+    # The status bar is the session's setting: a task's strip shows and
+    # hides with Main's, so its payload says what Main's row says and its
+    # own column is never read.
+    main = db.get_session(task["parent"]) if task else None
+    out["show_meta"] = (main if main is not None else out)["show_meta"] != 0
     out["tasks_enabled"] = session_tasks.enabled(session["id"])
     out["tasks_digest"] = session_tasks.digest_enabled(session["id"])
     out["auto_title"] = session_titles.public(session_titles.record(session["id"]))
@@ -564,7 +568,8 @@ def sessions_payload() -> dict:
             "workspace_phase": (h._ws_phase if h else ""),
             # the sidebar menu is the way back once the head is hidden, so the
             # list has to carry this too - reading it only from the single
-            # session payload left that menu permanently showing "on"
+            # session payload left that menu permanently showing "on"; a
+            # task row takes Main's value below, once decorate names Main
             "show_meta": s["show_meta"] != 0,
             # tasks_enabled and task grouping are added by session_tasks.decorate
             "steering": (h.steering_state(s) if h else {

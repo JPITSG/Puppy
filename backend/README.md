@@ -24,6 +24,9 @@ creation. Disabled sessions reject new tasks until re-enabled. This preference
 is node-owned, survives restarts and travels in full-WebUI backups. Deleting a
 session or resetting its scratch workspace is refused with 409 only while that
 session's own tasks exist or a task copy, review or apply is using its files.
+The status bar (`show_meta`, a boolean `PATCH /api/sessions/{sid}` field) is
+likewise the session's: a task's session payload and list row report its Main
+session's value, and a `show_meta` write aimed at a task is refused with 409.
 
 Nodes advertising `workspace-move` accept authenticated
 `POST /api/sessions/{sid}/workspace/move` with `{"destination":"/absolute/new/folder"}`.

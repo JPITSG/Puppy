@@ -388,6 +388,13 @@ does not reopen its tab. Once started, use the task's **Stop** control.
   device was away, without switching the selected conversation. They stay there
   until closed on that device or removed. Closing a tab keeps the task running;
   reopen it from the **Tasks** sheet.
+- Two buttons between the **Tasks** button and **+** act on the selected
+  task, never on Main: the diff mark opens **Review changes** and is greyed
+  exactly when the task's menu row is (nothing to review while the task is
+  running, queued, starting or held); the bin removes the task through the
+  same **Remove task** confirm as its menu and the sheet, and is shown only
+  while the task can go - never while it is running, waiting for an approval
+  or queued (stop it first).
 - Drag task tabs to reorder them with the same drag card and sliding animation
   as workspace tabs. Main stays first; the order is saved in this browser.
 - Running task tabs animate one, two, then three dots in a fixed-width slot,
@@ -415,7 +422,10 @@ Tasks need a Git repository. Limits: 64 tasks per session, 50,000 files or
 512 MiB of initial working files, 16 MiB per review. Details and the exact
 persistence contract are in [docs/session-tasks.md](docs/session-tasks.md).
 The session menu's **Enable tasks** switch hides or restores the task strip;
-disabling it requires removing that session's existing tasks first.
+disabling it requires removing that session's existing tasks first. **Show
+status bar**, in the same menus, is the session's setting too: Main and every
+task tab show or hide their head strips together, and the sidebar's context
+menu on the session brings them back once they are hidden.
 
 ### Terminals, browsers and remote screens
 
@@ -878,6 +888,7 @@ node tests/task_config_ui_test.js    # the New task dialog
 node tests/operation_ui_test.js      # cancellation, commit races and cleanup feedback
 python3 tests/operations_test.py     # cancellation/rollback on both runtimes
 node tests/task_fold_ui_test.js      # task removal and the folded archive card
+node tests/status_bar_ui_test.js     # the status bar: one session setting, followed by every task tab
 node tests/tool_result_ui_test.js    # tool results folded into their call's card
 node tests/toast_ui_test.js          # notice grammar, tones, lives, folded repeats and their reports
 node tests/notices_ui_test.js        # the notification box: its slide, rows, live arrivals, its clear

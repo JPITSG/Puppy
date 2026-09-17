@@ -2271,6 +2271,44 @@ function sessionShowsMeta(session) {
   return value === undefined || value === null ? true : !!value;
 }
 
+/* The status bar is the session's setting, not each conversation's: a task
+   tab shows and hides its strip with Main's, so the one row a session has in
+   the sidebar reaches every tab of the workspace once the strips - and the ⋮
+   they carry - are gone. This is the row the setting lives on: the list's
+   Main row for a task, the session itself otherwise. */
+function sessionMetaOwner(bid, session) {
+  const parent = session && session.task ? session.task.parent : null;
+  return parent ? findSessionMeta(bid, parent) || null : session;
+}
+
+/* What a view's strip follows: Main's own socket payload, or its list row
+   before that lands (so a session that hides the strip never paints it
+   first); Main's list row for a task, whatever the task's own payload says;
+   and the default (shown) for a session the list does not know yet. */
+function sessionViewShowsMeta(view) {
+  const own = view.session || findSessionMeta(view.tab.bid, view.tab.sid);
+  return sessionShowsMeta(sessionMetaOwner(view.tab.bid, own));
+}
+
+/* One press in any of the menus that carry the row - a sidebar row's, a
+   head's, a task head's - sets the session's status bar. The answer lands at
+   once on the list row and on every open view of the workspace, ahead of the
+   list the stream brings, so the next menu opened anywhere already agrees. */
+async function setSessionShowsMeta(bid, session, on) {
+  const owner = sessionMetaOwner(bid, session) || session;
+  if (!owner) return;
+  try {
+    const result = await api(bid, `sessions/${owner.id}`,
+      { method: "PATCH", body: { show_meta: !!on } });
+    const meta = findSessionMeta(bid, owner.id);
+    if (meta) meta.show_meta = result.session.show_meta;
+    const view = sessionViewFor(bid, owner.id);
+    if (view) { view.session = result.session; view.updateHead(); }
+    renderSidebar();   // every workspace's task views follow Main's row
+    if (bid) refreshGroup(bid);
+  } catch (error) { toast(error.message, "bad"); }
+}
+
 /* A menu row that carries its own on/off state. The tick sits out at the right
    margin, so the label starts on the same column as every other row in the
    menu whether it is ticked or not. */
@@ -6704,9 +6742,11 @@ function sessionContextMenu(ev, bid, s) {
     add(s.pinned === true ? "Unpin session" : "Pin session to top",
       () => setSessionPinned(bid, s, s.pinned !== true));
   /* Also here, not only in the head's own menu: hiding the head takes its ⋮
-     with it, and this is where the setting stays reachable afterwards. */
-  menu.appendChild(menuCheckRow("Show status bar", sessionShowsMeta(s),
-    () => patch({ show_meta: !sessionShowsMeta(s) })));
+     with it, and this is where the setting stays reachable afterwards - for
+     the task tabs too, which hide their strips with Main's. */
+  const shown = sessionShowsMeta(sessionMetaOwner(bid, s));
+  menu.appendChild(menuCheckRow("Show status bar", shown,
+    () => setSessionShowsMeta(bid, s, !shown)));
   appendSessionTasksToggle(menu, bid, s);
   menu.appendChild(el("div", "menu-sep"));
   const sessionWs = sessionWorkspace(s);
@@ -9745,8 +9785,7 @@ function syncSessionMetaVisibility() {
     const tab = view && view.tab;
     if (!tab || tab.type !== "session") continue;
     if (!view.root || view.session) continue;   // its own data wins
-    const meta = findSessionMeta(tab.bid, tab.sid);
-    if (meta) view.root.classList.toggle("meta-hidden", !sessionShowsMeta(meta));
+    if (findSessionMeta(tab.bid, tab.sid)) view.syncMetaVisibility();
   }
 }
 
@@ -13630,6 +13669,14 @@ function taskStateClass(task) {
 function taskReviewable(task) {
   return ["ready", "applied", "failed", "stopped"].includes(task.state);
 }
+/* A task the node would take back right now: the Tasks sheet's Remove and
+   the strip's bin ask the same question. A running or queued task must be
+   stopped first (the node refuses), and a task waiting for an approval is
+   running. Every other state - starting, held, ready, applied, stopped,
+   failed - is a task nobody needs to stop, so it can go. */
+function taskRemovable(task) {
+  return !!task && !["running", "queued"].includes(task.state);
+}
 /* A removed task's condensed conversation, folded into Main where it was
    removed. Its state is the task's last state in the sheet's voice, except
    that "ready" no longer means anything can be reviewed. */
@@ -13804,6 +13851,29 @@ function tasksIcon(size) {
   svg.appendChild(p);
   return svg;
 }
+/* the strip's Review: a diff - a plus over a minus - on the same 12-grid,
+   in the bin's stroke since it is drawn at the same size beside it. The
+   plus's centre stands at 4.25 and the minus at 9.5 so the ink's mass
+   lands on 6,6: the whole glyph is 5 wide, narrower than its neighbours,
+   because a diff mark is a narrow thing and widening it would only make
+   the plus read as the strip's own New task +. */
+function reviewIcon(size) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 12 12");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const p = document.createElementNS(NS, "path");
+  p.setAttribute("d", "M6 1.75v5M3.5 4.25h5M3.5 9.5h5");
+  p.setAttribute("stroke", "currentColor");
+  p.setAttribute("stroke-width", "1.3");
+  p.setAttribute("stroke-linecap", "round");
+  p.setAttribute("stroke-linejoin", "round");
+  p.setAttribute("fill", "none");
+  svg.appendChild(p);
+  return svg;
+}
 /* Removing a task is the moment its conversation would be lost, so the
    confirm offers to fold a condensed copy into Main first. The checkbox is on
    by default and is the whole decision: a failed or stopped task folds the
@@ -13863,7 +13933,9 @@ class SessionWorkspaceView {
     this.root = el("div", "view session-workspace");
     /* The strip is the outer tab bar's own vocabulary one step smaller: the
        session dot (spinning while that conversation works), a close mark
-       that only hides a task's tab, and the + at the right. */
+       that only hides a task's tab, and at the right the Tasks sheet, the
+       selected task's own two verbs - Review, then the bin, the destructive
+       one last as in every inline strip - and the +. */
     this.bar = el("div", "tabbar task-tabbar");
     const scroll = el("div", "tab-scroll edge-scroll-viewport");
     this.strip = el("div", "tabs task-tabs");
@@ -13879,12 +13951,29 @@ class SessionWorkspaceView {
     this.overviewButton.setAttribute("aria-haspopup", "dialog");
     this.overviewButton.appendChild(tasksIcon(14));
     this.overviewButton.onclick = () => this.openTaskOverview();
+    /* the selected task's own Review and Remove, the verbs its menu and the
+       Tasks sheet offer, one press away. refreshTasks shows both only for a
+       task: Review stands for every task and is greyed exactly when the
+       menu's row is, while the bin stands only for a task the node would
+       take back. */
+    this.reviewButton = el("button", "icon-btn task-review-button hidden");
+    this.reviewButton.type = "button";
+    this.reviewButton.setAttribute("aria-label", "Review changes");
+    this.reviewButton.setAttribute("aria-haspopup", "dialog");
+    this.reviewButton.appendChild(reviewIcon(14));
+    this.reviewButton.onclick = () => this.reviewSelectedTask();
+    this.removeButton = el("button", "icon-btn task-remove-button hidden");
+    this.removeButton.type = "button";
+    this.removeButton.setAttribute("aria-label", "Remove task");
+    this.removeButton.appendChild(binIcon(14));
+    this.removeButton.onclick = () => this.removeSelectedTask();
+    this.removing = false;
     const add = el("button", "icon-btn task-add-button");
     add.type = "button";
     add.setAttribute("aria-label", "New task");
     add.appendChild(plusIcon(14));
     add.onclick = () => modalNewTask(this);
-    actions.append(this.overviewButton, add);
+    actions.append(this.overviewButton, this.reviewButton, this.removeButton, add);
     this.bar.append(scroll, actions);
     this.body = el("div", "session-task-body");
     this.root.append(this.bar, this.body);
@@ -13964,6 +14053,27 @@ class SessionWorkspaceView {
     dialog.m.querySelector("#to-close").focus();
   }
   closeTaskOverview() { if (this.taskOverview) this.taskOverview.close(); }
+  /* The strip's Review: the sheet the menu's row and the Tasks sheet open,
+     for the conversation on display. The sheet itself is modal from its
+     first frame, so a second press lands on its backdrop. */
+  reviewSelectedTask() {
+    const session = this.tasks().find(s => s.id === this.selected);
+    if (!session || !taskReviewable(session.task)) return;
+    modalReviewTask(this, session);
+  }
+  /* The strip's bin: the same confirm and request as the Tasks sheet's
+     Remove, for the conversation on display. One press is one request - a
+     second press while the confirm or the request is still out is ignored -
+     and a task that started working between the render and the press is
+     refused by the node, whose reason arrives as the toast. */
+  async removeSelectedTask() {
+    if (this.removing) return;
+    const session = this.tasks().find(s => s.id === this.selected);
+    if (!session || !taskRemovable(session.task)) return;
+    this.removing = true;
+    try { await removeTask(this.tab.bid, session); }
+    finally { this.removing = false; }
+  }
   /* The sheet's cards: the transcript's tool-card surface with the session
      dot, the task's state in the tab strip's voice, its latest answer, and
      the three verbs as small buttons. Re-rendered live while the sheet is
@@ -14003,7 +14113,7 @@ class SessionWorkspaceView {
       review.onclick = () => { this.closeTaskOverview(); modalReviewTask(this, session); };
       const remove = el("button", "btn btn-sm btn-danger", "Remove");
       remove.type = "button";
-      remove.disabled = ["running", "queued"].includes(task.state);
+      remove.disabled = !taskRemovable(task);
       remove.onclick = () => { this.closeTaskOverview(); removeTask(this.tab.bid, session); };
       actions.append(open, review, remove);
       card.appendChild(actions);
@@ -14074,6 +14184,9 @@ class SessionWorkspaceView {
     // Visibility is independent of the strip's render cache: a toggle must
     // land even when the task list itself has not changed.
     this.root.classList.toggle("tasks-disabled", !!main && main.tasks_enabled === false);
+    // The strips too: every task tab shows and hides its head with Main's,
+    // and a toggle from any menu or console lands through the list here.
+    if (main) for (const view of this.taskViews.values()) view.syncMetaVisibility();
     // Do not erase restored selection before its node's bootstrap arrives.
     if (main) {
       for (const sid of [...this.opened]) if (!tasks.some(s => s.id === sid)) this.closeTask(sid, false);
@@ -14112,6 +14225,33 @@ class SessionWorkspaceView {
     this.overviewButton.classList.toggle("hidden", !tasks.length);
     this.overviewButton.classList.toggle("attention", tasks.some(s => s.task.needs_approval));
     this.overviewButton.title = main && main.task_activity ? taskActivityTitle(main.task_activity) : "Tasks";
+    /* The task's two verbs stand only while the selected conversation is a
+       task: never for Main, never before the node's list has named the
+       selection. Review stands for every task and is greyed exactly when
+       the menu's row is (a task still working, queued, starting or held
+       has nothing to review yet); the bin stands only while the node would
+       take the task back - never for a task still working or queued. Both
+       name the task the way the tab's close mark does, so the hover says
+       which conversation the verb is for. When a verb goes from under the
+       focus it held - its task removed, or started again from another
+       console - that focus passes to the selected tab, never to the page. */
+    const chosen = tasks.find(s => s.id === this.selected);
+    const onTask = this.selected !== this.tab.sid && !!chosen;
+    const reviewable = onTask && taskReviewable(chosen.task);
+    const removable = onTask && taskRemovable(chosen.task);
+    const held = document.activeElement;
+    const verbHeldFocus = (held === this.reviewButton && !reviewable) ||
+      (held === this.removeButton && !removable);
+    this.reviewButton.classList.toggle("hidden", !onTask);
+    this.reviewButton.disabled = !reviewable;
+    this.removeButton.classList.toggle("hidden", !removable);
+    if (onTask) {
+      const name = chosen.name || `Task ${chosen.id}`;
+      for (const [button, verb] of [[this.reviewButton, "Review"], [this.removeButton, "Remove"]]) {
+        button.setAttribute("aria-label", `${verb} ${name}`);
+        button.title = `${verb} ${name}`;
+      }
+    }
     this.strip.replaceChildren();
     const addTab = (sid, title, session, task = null) => {
       const running = !!session && session.status === "running";
@@ -14157,6 +14297,10 @@ class SessionWorkspaceView {
     for (const sid of this.opened) {
       const task = tasks.find(s => s.id === sid);
       if (task) addTab(sid, task.name || `Task ${sid}`, task, task.task);
+    }
+    if (verbHeldFocus) {
+      const selected = this.strip.querySelector('[aria-selected="true"]');
+      if (selected) selected.focus({ preventScroll: true });
     }
     syncHorizontalOverflow(this.strip);
     this.save();
@@ -14891,8 +15035,7 @@ class SessionView {
        and rendering it visible until then made a session that hides it flash
        its strip and then drop it. An unknown session keeps the default (shown)
        and is corrected by syncSessionMetaVisibility when the list arrives. */
-    if (!sessionShowsMeta(findSessionMeta(this.tab.bid, this.tab.sid)))
-      root.classList.add("meta-hidden");
+    this.syncMetaVisibility();
     this.scroll = root.querySelector(".chat-scroll");
     this.inner = root.querySelector(".chat-inner");
     /* Floats over the bottom of a detached history window and leads back to
@@ -15860,11 +16003,17 @@ class SessionView {
     chip.onclick = () => modalWorkspaceLink(this.tab.bid, s);
   }
 
+  /* The strip shows or hides with the session's setting - Main's, for a
+     task - wherever that is known from: the socket, the list, a menu press. */
+  syncMetaVisibility() {
+    this.root.classList.toggle("meta-hidden", !sessionViewShowsMeta(this));
+  }
+
   updateHead() {
     const s = this.session;
     if (!s) return;
     this.syncTaskReviewMenu();
-    this.root.classList.toggle("meta-hidden", !sessionShowsMeta(s));
+    this.syncMetaVisibility();
     const eff = this.effectiveConfig();
     const eng = this.root.querySelector(".chip.eng");
     const engLabel = key => (state.engMap[key] ? state.engMap[key].label : key);
@@ -17611,8 +17760,12 @@ class SessionView {
         if (workspace && taskReviewable(task)) modalReviewTask(workspace, this.session);
       });
     }
-    menu.appendChild(menuCheckRow("Show status bar", sessionShowsMeta(this.session),
-      () => this.patchSession({ show_meta: !sessionShowsMeta(this.session) })));
+    /* the session's setting: from a task's head it sets Main's, which every
+       tab of the workspace follows */
+    const shown = sessionViewShowsMeta(this);
+    menu.appendChild(menuCheckRow("Show status bar", shown,
+      () => setSessionShowsMeta(this.tab.bid,
+        this.session || findSessionMeta(this.tab.bid, this.tab.sid), !shown)));
     appendSessionTasksToggle(menu, this.tab.bid, this.session);
     menu.appendChild(el("div", "menu-sep"));
     const sessionWs = sessionWorkspace(this.session);

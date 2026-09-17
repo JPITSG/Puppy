@@ -37,6 +37,7 @@ function harness(bid = 0, namespace = "") {
   class SessionView {
     constructor(tab) { this.tab = tab; this.root = document.createElement("div"); this.shows = 0; }
     syncTaskReviewMenu() {}
+    syncMetaVisibility() {}
     captureScroll() { return 17; }
     restoreScroll(value) { this.scroll = value; }
     onShow() { this.shows++; }
@@ -53,7 +54,7 @@ function harness(bid = 0, namespace = "") {
     requestAnimationFrame: fn => frames.push(fn),
     sessionsFor: node => sessions.get(node) || [],
     findSessionMeta: (node, sid) => (sessions.get(node) || []).find(session => session.id === sid),
-    tasksIcon: icon, plusIcon: icon, xIcon: icon,
+    tasksIcon: icon, plusIcon: icon, xIcon: icon, binIcon: icon, reviewIcon: icon,
     syncHorizontalOverflow() {}, syncPromptSpinnerPhase() {}, titlePending: () => false,
     sessionHasActivity: meta => meta.status === "running",
     suppressContextGestureActivation() {},
