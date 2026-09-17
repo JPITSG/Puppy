@@ -1118,21 +1118,22 @@ async def reading_place_checks(instance):
 
 async def task_strip_verbs_checks(instance):
     """The strip's two verbs for the selected task, Review and the bin, on
-    the console's own icon-button face: absent with Main selected; Review
-    greyed and the bin absent with a running task selected; both live once
-    the node reports that task stopped, standing between the Tasks button
-    and + on the strip's 26px box with their glyphs centred in it and named
-    for the task; the bin taking the error tone under a real hover while
-    Review takes the ordinary one; a real click on Review opening the review
-    sheet for that task and Cancel closing it with the focus back on the
-    button; a real click on the bin opening the Remove task confirm named for
-    that task with Cancel holding the first focus, Cancel leaving the task
-    and the bin in place with the focus back on the bin; and both verbs
-    going grey or away the moment the node reports the task working."""
+    the console's own icon-button face: absent with Main selected; both
+    greyed with a running task selected; both live once the node reports
+    that task stopped, standing between the Tasks button and + on the
+    strip's 26px box with their glyphs centred in it and named for the
+    task; the bin taking the error tone under a real hover while Review
+    takes the ordinary one; a real click on Review opening the review sheet
+    for that task and Cancel closing it with the focus back on the button;
+    a real click on the bin opening the Remove task confirm named for that
+    task with Cancel holding the first focus, Cancel leaving the task and
+    the bin in place with the focus back on the bin; both verbs going grey
+    the moment the node reports the task working, the bin keeping its place
+    at the console's disabled look and taking no tone under the pointer."""
     workspace = "state.views['s:0:1']"
     hidden = lambda button: workspace + "." + button + ".classList.contains('hidden')"
     review_hidden, bin_hidden = hidden("reviewButton"), hidden("removeButton")
-    review_greyed = workspace + ".reviewButton.disabled"
+    review_greyed, bin_greyed = workspace + ".reviewButton.disabled", workspace + ".removeButton.disabled"
     tid = next(s["id"] for s in db.list_sessions() if s["name"] == "Card spacing")
     hub = runner.hub(tid)
     record = session_tasks.record(tid)
@@ -1150,14 +1151,14 @@ async def task_strip_verbs_checks(instance):
     assert await evaluate(instance, review_hidden + " && " + bin_hidden), "Main offers neither verb"
     await evaluate(instance, "%s.openTask(%d); true" % (workspace, tid))
     await until(instance, "%s.selected === %d" % (workspace, tid))
-    assert await evaluate(instance, "!%s && %s && %s" % (review_hidden, review_greyed, bin_hidden)), \
-        "a running task: Review greyed like the menu's row, no bin"
+    assert await evaluate(instance, "!%s && %s && !%s && %s" % (review_hidden, review_greyed, bin_hidden, bin_greyed)), \
+        "a running task: Review greyed like the menu's row, the bin greyed in its place"
     try:
         hub.status = "idle"
         db.touch_session(tid, status="idle")
         session_tasks._save(tid, dict(record, outcome="ok", completed_at=time.time()))
         runner.broadcast_sessions()
-        await until(instance, "!%s && !%s && !%s" % (review_hidden, review_greyed, bin_hidden))
+        await until(instance, "!%s && !%s && !%s && !%s" % (review_hidden, review_greyed, bin_hidden, bin_greyed))
         row = await evaluate(instance, """(() => {
             const wrap = document.querySelector('.task-tab-actions');
             const buttons = [...wrap.children];
@@ -1189,19 +1190,22 @@ async def task_strip_verbs_checks(instance):
         tones = "(() => { const probe = document.createElement('span'); document.body.appendChild(probe);" \
                 " probe.style.color = 'var(--err)'; const err = getComputedStyle(probe).color;" \
                 " probe.style.color = 'var(--txt)'; const txt = getComputedStyle(probe).color; probe.remove();" \
+                " const bin = getComputedStyle(%s.removeButton);" \
                 " return {err, txt, review: getComputedStyle(%s.reviewButton).color," \
-                " bin: getComputedStyle(%s.removeButton).color}; })()" % (workspace, workspace)
-        await evaluate(instance, """window.verbHoverRules=[...document.styleSheets].flatMap(s=>[...s.cssRules])
+                " bin: bin.color, opacity: bin.opacity}; })()" % (workspace, workspace)
+        hover_rules_on = """window.verbHoverRules=[...document.styleSheets].flatMap(s=>[...s.cssRules])
             .filter(r=>r.media && r.conditionText==='(hover: hover)');
-            verbHoverRules.forEach(r=>r.media.mediaText='all'); true""")
+            verbHoverRules.forEach(r=>r.media.mediaText='all'); true"""
+        hover_rules_off = "verbHoverRules.forEach(r=>r.media.mediaText='(hover: hover)'); delete window.verbHoverRules; true"
+        await evaluate(instance, hover_rules_on)
         try:
             await hover(*row["bin"])
-            await until(instance, "(t => t.bin === t.err && t.review !== t.err)(%s)" % tones)
+            await until(instance, "(t => t.bin === t.err && t.review !== t.err && t.opacity === '1')(%s)" % tones)
             await hover(*row["review"])
             await until(instance, "(t => t.review === t.txt && t.bin !== t.err)(%s)" % tones)
             await hover(*row["away"])
         finally:
-            await evaluate(instance, "verbHoverRules.forEach(r=>r.media.mediaText='(hover: hover)'); delete window.verbHoverRules; true")
+            await evaluate(instance, hover_rules_off)
         # Review by a real click: the sheet for that task, closed by Cancel
         await click(*row["review"])
         await until(instance, "!!document.querySelector('.task-review-modal')")
@@ -1233,14 +1237,34 @@ async def task_strip_verbs_checks(instance):
         db.touch_session(tid, status="running")
         session_tasks._save(tid, record)
         runner.broadcast_sessions()
-        await until(instance, "%s && %s && !%s" % (bin_hidden, review_greyed, review_hidden))
+        await until(instance, "%s && %s && !%s && !%s" % (bin_greyed, review_greyed, review_hidden, bin_hidden))
+        # the greyed bin keeps its place on the strip at the console's
+        # disabled look, and a real hover over it lands on the strip beneath
+        # (pointer-events off) instead of painting the error tone
+        greyed = await evaluate(instance, """(() => {
+            const wrap = document.querySelector('.task-tab-actions');
+            const boxes = [...wrap.children].map(node => node.getBoundingClientRect());
+            const centre = box => [box.left + box.width / 2, box.top + box.height / 2];
+            return {review: centre(boxes[1]), bin: centre(boxes[2]),
+                    boxes: boxes.map(box => [Math.round(box.width), Math.round(box.height)])}; })()""")
+        assert greyed["bin"] == row["bin"] and greyed["review"] == row["review"], (greyed, row)
+        assert greyed["boxes"] == [[26, 26]] * 4, greyed
+        await evaluate(instance, hover_rules_on)
+        try:
+            await hover(*row["bin"])
+            await until(instance, "document.querySelector('.task-tab-actions:hover') !== null")
+            assert await evaluate(instance, "(t => t.bin !== t.err && t.opacity === '0.4')(%s)" % tones), \
+                "a greyed bin takes no tone under the pointer"
+            await hover(*row["away"])
+        finally:
+            await evaluate(instance, hover_rules_off)
     finally:
         hub.status = "running"
         db.touch_session(tid, status="running")
         session_tasks._save(tid, record)
         runner.broadcast_sessions()
         await evaluate(instance, "%s.select(1); true" % workspace)
-    print("PASS: the task strip's Review and bin stand between Tasks and + for the selected task only, Review greyed as the menu's row and the bin absent while it works, glyphs centred on the strip's box, the bin red under the pointer, real clicks opening the review sheet and the named Remove task confirm, Cancel keeping everything", flush=True)
+    print("PASS: the task strip's Review and bin stand between Tasks and + for the selected task only, both greyed while it works with the bin keeping its place and taking no tone, glyphs centred on the strip's box, the bin red under the pointer, real clicks opening the review sheet and the named Remove task confirm, Cancel keeping everything", flush=True)
 
 
 async def session_mention_checks(instance):
@@ -3350,6 +3374,175 @@ async def terminal_io_checks(console):
             await terminal.manager().close(terminal_id, "test finished")
 
 
+async def engine_terminal_checks(console, sid):
+    """The footer's engine names as links to the engine's own CLI, in a real
+    browser: the plain text's face to the pixel with the pointer's cursor the
+    only tell; a real click opening a terminal the node starts as the CLI
+    itself in its scratch home, the tab named for it; the CLI's own quit
+    ending the pane with Close terminal and Start Claude Code; a fresh start
+    from that button in the same home; the name pressed again going to the
+    live tab; and Close terminal closing it on the node."""
+    script = ROOT / "fake-claude"
+    script.write_text("#!/bin/sh\nprintf 'PUPPY_CLI_HOME=%s\\n' \"$PWD\"\nread -r line\nexit 0\n",
+                      encoding="utf-8")
+    script.chmod(0o755)
+    cli_tmp = ROOT / "tmp"
+    cli_tmp.mkdir(exist_ok=True)
+    home = cli_tmp / ("puppy-cli-%d" % os.geteuid()) / "claude"
+    claude = next(driver for driver in all_drivers() if driver.key == "claude")
+
+    def stub_cli(key):
+        assert key == "claude", key
+        return claude, str(script)
+
+    local = "document.querySelector('#foot-engines .foot-engine-group[data-node-key=\"local\"]')"
+    # The face, against the same rows drawn by a node without the route: the
+    # name is a button whose letters stand exactly where the plain text's
+    # stood, in the row's font and colour, with no box of its own, the status
+    # word where it was - and the pointer's cursor, which the plain text
+    # never had. The letters are read the same way in both: a range over the
+    # text node, the button's own box being the line it sits on.
+    face = await evaluate(console, """(() => {
+        const local = () => %s;
+        const measure = () => [...local().querySelectorAll('.foot-eng')].map(row => {
+            const button = row.querySelector('.foot-eng-open');
+            const text = button ? button.firstChild : [...row.childNodes].find(n => n.nodeType === 3);
+            const range = document.createRange(); range.selectNode(text);
+            const rect = range.getBoundingClientRect();
+            const style = getComputedStyle(button || row);
+            const status = row.querySelector('.st').getBoundingClientRect();
+            return {name: text.textContent, link: !!button, cursor: style.cursor,
+                type: [style.fontFamily, style.fontSize, style.fontWeight, style.lineHeight,
+                       style.color, style.letterSpacing, style.textTransform].join('|'),
+                box: [rect.left, rect.top, rect.width, rect.height].map(v => Math.round(v * 2) / 2),
+                status: Math.round(status.left * 2) / 2,
+                row: Math.round(row.getBoundingClientRect().height * 2) / 2,
+                background: style.backgroundColor, border: style.borderStyle,
+                padding: style.padding, margin: style.margin,
+                label: button ? button.getAttribute('aria-label') : null};
+        });
+        const saved = state.nodeCapabilities;
+        try {
+            state.nodeCapabilities = saved.filter(c => c !== 'terminal-engine-cli');
+            renderFootEngines();
+            const plain = measure();
+            state.nodeCapabilities = saved;
+            renderFootEngines();
+            return {plain, links: measure()};
+        } finally { state.nodeCapabilities = saved; renderFootEngines(); }
+    })()""" % local)
+    assert [row["name"] for row in face["links"]] == ["Claude Code", "Codex", "OpenCode"], face
+    for plain, link in zip(face["plain"], face["links"]):
+        assert not plain["link"] and link["link"], (plain, link)
+        assert plain["cursor"] != "pointer" and link["cursor"] == "pointer", (plain, link)
+        assert link["label"] == "Open %s in a terminal on Studio" % link["name"], link
+        for key in ("name", "type", "box", "status", "row"):
+            assert plain[key] == link[key], (key, plain, link)
+        assert link["background"] == "rgba(0, 0, 0, 0)" and link["border"] == "none", link
+        assert link["padding"] == "0px" and link["margin"] == "0px", link
+
+    tab_count = await evaluate(console, "state.tabs.length")
+    button = "%s.querySelector('.foot-eng-open')" % local
+    centre = "(() => { const r = %s.getBoundingClientRect(); return {x: r.x + r.width / 2, y: r.y + r.height / 2}; })()"
+
+    async def click(selector):
+        point = await evaluate(console, centre % selector)
+        for kind in ("mousePressed", "mouseReleased"):
+            await console.call("Input.dispatchMouseEvent", {
+                "type": kind, **point, "button": "left", "clickCount": 1},
+                session=console.page_session)
+
+    async def press_enter():
+        await evaluate(console, "cliView.term.focus(); true")
+        for kind in ("keyDown", "keyUp"):
+            await console.call("Input.dispatchKeyEvent", {
+                "type": kind, "key": "Enter", "code": "Enter",
+                "text": "\r" if kind == "keyDown" else "",
+                "windowsVirtualKeyCode": 13}, session=console.page_session)
+
+    first = second = None
+    try:
+        with patch.object(terminal, "_engine_cli", stub_cli), \
+                patch.object(terminal.tempfile, "gettempdir", return_value=str(cli_tmp)):
+            # A real click on the name: one terminal tab, asking the node for
+            # the engine, which starts the CLI itself where it keeps it.
+            await click(button)
+            await until(console, "state.tabs.length === %d && state.tabs[state.tabs.length - 1].type === 'term' && "
+                                 "state.tabs[state.tabs.length - 1].engine === 'claude'" % (tab_count + 1))
+            await evaluate(console, "window.cliTab = state.tabs[state.tabs.length - 1]; "
+                                    "window.cliView = state.views[cliTab.id]; true")
+            await until(console, "!!cliView && !!cliView.term && !!cliView.dataSub && !!cliTab.terminalId")
+            await evaluate(console, """window.cliText = () => {
+                const b = cliView.term.buffer.active, lines = [];
+                for (let i = 0; i < b.length; i++) lines.push(b.getLine(i).translateToString(true));
+                return lines.join('\\n');
+            }; true""")
+            first = terminal.manager().get(await evaluate(console, "cliTab.terminalId"))
+            assert first.engine == "claude" and first.engine_label == "Claude Code", first.status_payload()
+            assert first.cwd == str(home) and home.is_dir(), first.cwd
+            assert first.command == shlex.quote(str(script)), first.command
+            await until(console, "cliText().includes('PUPPY_CLI_HOME=%s')" % home)
+            assert await evaluate(console, "cliTab.cmd === '' && cliTab.cwd === ''"), "the node chose both"
+            # the tab is named for the CLI and is the one on screen
+            assert await evaluate(console, "state.active === cliTab.id && document.querySelector('.tab.active .t-title').textContent") == \
+                "Claude Code %s @ Studio" % first.terminal_id
+            # the name pressed again goes to this tab and opens nothing
+            await evaluate(console, "activateTab('s:0:%d'); true" % sid)
+            await until(console, "state.active === 's:0:%d'" % sid)
+            await click(button)
+            await until(console, "state.active === cliTab.id")
+            assert await evaluate(console, "state.tabs.length") == tab_count + 1
+            assert terminal.manager().engine_instances("claude") == [first]
+            # The CLI's own quit ends the terminal in the pane - under its
+            # name, with Close terminal and Start Claude Code, no shell.
+            await press_enter()
+            await until(console, "cliView.isDead()")
+            pane = await evaluate(console, """(() => {
+                const dead = cliView.root.querySelector('.term-dead');
+                return {message: dead.querySelector('.term-dead-message').textContent,
+                    buttons: [...dead.querySelectorAll('button')].map(b => [b.textContent, b.classList.contains('btn-pri')])};
+            })()""")
+            assert pane == {"message": "Claude Code ended",
+                            "buttons": [["Close terminal", False], ["Start Claude Code", True]]}, pane
+            assert not first.running and first.ended_reason == "Claude Code ended"
+            assert terminal.manager().engine_instances("claude") == []
+            # Start Claude Code starts the CLI again: a new terminal in the
+            # same home, the old one released on the node.
+            await click("cliView.root.querySelector('.term-dead-new')")
+            await until(console, "!cliView.isDead() && cliTab.terminalId !== %s && !!cliView.dataSub" %
+                        json.dumps(first.terminal_id))
+            second = terminal.manager().get(await evaluate(console, "cliTab.terminalId"))
+            assert second.engine == "claude" and second.cwd == str(home), second.status_payload()
+            await until(console, "cliText().includes('PUPPY_CLI_HOME=%s')" % home)
+            try:
+                terminal.manager().get(first.terminal_id)
+            except terminal.TerminalError:
+                pass
+            else:
+                raise AssertionError("the ended terminal was kept on the node")
+            assert await evaluate(console, "document.querySelector('.tab.active .t-title').textContent") == \
+                "Claude Code %s @ Studio" % second.terminal_id
+            # Close terminal takes the tab and the node's terminal with it.
+            await press_enter()
+            await until(console, "cliView.isDead()")
+            await click("cliView.root.querySelector('.term-dead-close')")
+            await until(console, "!state.tabs.some(t => t.id === cliTab.id) && state.tabs.length === %d" % tab_count)
+            try:
+                terminal.manager().get(second.terminal_id)
+            except terminal.TerminalError:
+                pass
+            else:
+                raise AssertionError("Close terminal left the terminal on the node")
+        print("PASS: footer engine names are links with the plain face; a real click opens the CLI in its "
+              "scratch home, the CLI's quit ends the pane with Close terminal and Start Claude Code, "
+              "a restart reuses the home, the name pressed again goes to the live tab", flush=True)
+    finally:
+        await evaluate(console, "if (window.cliTab && state.tabs.some(t => t.id === cliTab.id)) closeTab(cliTab.id); true")
+        for instance in (first, second):
+            if instance is not None:
+                await terminal.manager().close(instance.terminal_id, "test finished")
+
+
 async def browser_cursor_checks(console):
     """Actual CDP hit testing -> authenticated viewer socket -> image cursor."""
     page = await browser.manager().create()
@@ -3654,7 +3847,9 @@ async def host_panel_checks(instance, capture=False):
             const edge=document.getElementById('side').getBoundingClientRect().left;
             const ink=node=>{const range=document.createRange();range.selectNode(node);
                 return range.getBoundingClientRect();};
-            const label=row=>[...row.childNodes].find(n=>n.nodeType===3);
+            /* the name is a button when it opens the engine's CLI, plain
+               text otherwise; either way its ink is the name's box */
+            const label=row=>row.querySelector('.foot-eng-open')||[...row.childNodes].find(n=>n.nodeType===3);
             const measure=(row, dot, text)=>{
                 const d=row.querySelector(dot).getBoundingClientRect();
                 const t=(typeof text==='string' ? row.querySelector(text)
@@ -4338,6 +4533,7 @@ async def main(args):
             await checks(*instances, runner.hub(sid), args.screenshots)
             await browser_cursor_checks(instances[0])
             await terminal_io_checks(instances[0])
+            await engine_terminal_checks(instances[0], sid)
             await navigation_checks(instances[0], url, sid)
             if args.screenshots:
                 await screenshots(instances[0])

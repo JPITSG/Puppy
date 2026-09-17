@@ -71,6 +71,9 @@ still contain a value written before that release.
 - Terminal and browser viewers always use identified instances. Anonymous
   `/api/ws/term` and singleton `/api/ws/browser` routes are removed. Terminal
   creation uses `command`; the anonymous route's `cmd` alias is rejected.
+  Behind `terminal-engine-cli`, `engine` in its place runs that engine's own
+  interactive CLI in the node's scratch home for it, and instances carry the
+  additive `engine` field.
 - Durable completion records drive notifications. Browser-reported completion
   `/api/notify/fire` and its deduplication cache are removed.
 - Session reordering requires both starting-order and pin-cohort compare tokens.

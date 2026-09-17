@@ -6109,6 +6109,7 @@ async def main() -> None:
                 assert "browser-file-workflows" in ping["capabilities"], ping
                 assert "terminal-instances" in ping["capabilities"], ping
                 assert "terminal-handoff" in ping["capabilities"], ping
+                assert "terminal-engine-cli" in ping["capabilities"], ping
                 assert "system-prompt" in ping["capabilities"], ping
                 assert ping["browser"] == {"enabled": False}, ping
             async with http.get(url + "/api/state", headers=headers) as r:

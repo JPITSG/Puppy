@@ -4,6 +4,14 @@ Each identified terminal has exactly one PTY reader. Output is fanned out to
 every attached WebSocket viewer and retained in a bounded buffer for the
 turn-scoped terminal MCP bridge. User and agent input pass through one lock so
 individual writes stay intact. Every viewer attaches to an explicit terminal ID.
+
+A terminal normally runs the configured shell in a directory the caller
+names. Created with ``engine`` instead, it runs that engine's own interactive
+CLI - the installed binary its driver resolves, exactly as a turn would spawn
+it - in the node's private scratch home for that engine under the system
+temporary directory (``cli_home``), so the CLI starts in an empty project of
+its own rather than in Puppy's checkout or the service home, and so a
+``/quit`` ends the terminal instead of dropping into a shell.
 """
 from __future__ import annotations
 
@@ -18,8 +26,10 @@ import re
 import secrets
 import shlex
 import signal
+import stat
 import string
 import struct
+import tempfile
 import termios
 import time
 
@@ -40,6 +50,10 @@ MAX_RAW_OUTPUT = 2 * 1024 * 1024
 MAX_AGENT_TEXT = 64 * 1024
 MAX_COMMAND = 16 * 1024
 MAX_CWD = 4096
+# The scratch homes engine CLIs start in: one private directory per engine
+# under the system temporary directory, named for the account so two service
+# users on one host never share (or refuse over) the same one.
+CLI_HOME_PREFIX = "puppy-cli-"
 # Drain a ready PTY in bounded bursts. There is no timer or wait to fill this:
 # a keystroke echo leaves as soon as read() says nothing else is ready.
 OUTPUT_READ_BUDGET = 64 * 1024
@@ -94,6 +108,86 @@ def _set_winsize(fd: int, cols: int, rows: int) -> None:
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
     except OSError:
         pass
+
+
+def cli_home_root() -> str:
+    """The parent of every engine's scratch home on this node."""
+    return os.path.join(tempfile.gettempdir(),
+                        "{}{}".format(CLI_HOME_PREFIX, os.geteuid()))
+
+
+def _private_directory(path: str) -> None:
+    """Create ``path`` as a mode-0700 directory of this account, or make sure
+    that is what is already there.
+
+    The temporary directory is world-writable, so an entry there is trusted
+    only when this account created it: an engine CLI reads project settings
+    (hooks, agent notes, config) from its working directory, and one planted
+    by someone else would run their commands with the service's privileges. A
+    directory of ours whose mode has drifted wider is tightened back; anything
+    else - a symlink, a file, another account's directory - is refused, never
+    replaced.
+    """
+    try:
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        raise TerminalError("could not create {}: {}".format(
+            path, exc.strerror or exc))
+    try:
+        info = os.lstat(path)
+    except OSError as exc:
+        raise TerminalError("could not inspect {}: {}".format(
+            path, exc.strerror or exc))
+    if not stat.S_ISDIR(info.st_mode):
+        raise TerminalError("{} is not a directory".format(path))
+    if info.st_uid != os.geteuid():
+        raise TerminalError("{} belongs to another account".format(path))
+    if stat.S_IMODE(info.st_mode) != 0o700:
+        try:
+            os.chmod(path, 0o700)
+        except OSError as exc:
+            raise TerminalError("could not make {} private: {}".format(
+                path, exc.strerror or exc))
+
+
+def cli_home(engine_key: str) -> str:
+    """The private scratch directory an engine's interactive CLI starts in.
+
+    One per engine per node, kept between openings so the CLI's own project
+    memory - the trust it was given for that folder, the sessions it lists
+    for ``--resume`` - applies to the next opening too. Nothing Puppy owns is
+    kept there; a reboot may clear it like the rest of the temporary
+    directory, and the next opening simply makes it again.
+    """
+    from puppy.drivers import engine_keys
+    engine_key = str(engine_key or "")
+    if engine_key not in engine_keys():
+        raise TerminalError("unknown engine")
+    root = cli_home_root()
+    _private_directory(root)
+    path = os.path.join(root, engine_key)
+    _private_directory(path)
+    return path
+
+
+def _engine_cli(engine_key: str):
+    """The driver and the executable behind an engine key, for a terminal
+    that runs the CLI itself. Refused like a turn would be: no binary, or the
+    vendor updater rewriting the package right now."""
+    from puppy import cli_upgrade
+    from puppy.drivers import get_driver
+    try:
+        driver = get_driver(str(engine_key or ""))
+    except KeyError:
+        raise TerminalError("unknown engine")
+    binary = driver.resolved_binary()
+    if not binary:
+        raise TerminalError("{} is not installed on this backend".format(driver.label))
+    if cli_upgrade.is_running(driver.key):
+        raise TerminalError("{} is being updated on this backend".format(driver.label))
+    return driver, binary
 
 
 def _plain_terminal_text(raw: bytes, max_chars: int, max_lines: int) -> str:
@@ -209,7 +303,8 @@ class TerminalInstance:
     """One PTY process, its viewers, transcript, and serialized input."""
 
     def __init__(self, terminal_id: str, command: str, cwd: str, cols: int,
-                 rows: int, origin: str = "user", owner_session=None):
+                 rows: int, origin: str = "user", owner_session=None,
+                 engine: str = "", engine_label: str = ""):
         self.terminal_id = normalize_terminal_id(terminal_id)
         if origin not in ("user", "agent"):
             raise TerminalError("invalid terminal origin")
@@ -217,6 +312,10 @@ class TerminalInstance:
         self.owner_session = int(owner_session) if owner_session is not None else None
         self.command = command
         self.cwd = cwd
+        # The engine whose interactive CLI this terminal runs, or "" for a
+        # shell; its label names the process in the terminal's own messages.
+        self.engine = str(engine or "")
+        self.engine_label = str(engine_label or self.engine)
         self.cols = cols
         self.rows = rows
         self.pid = None
@@ -244,6 +343,7 @@ class TerminalInstance:
         return {
             "type": "status", "terminal_id": self.terminal_id,
             "running": self.running, "command": self.command, "cwd": self.cwd,
+            "engine": self.engine or None,
             "cols": self.cols, "rows": self.rows,
             "sequence": self.output_sequence,
             "replay_truncated": self.output_truncated,
@@ -558,7 +658,10 @@ class TerminalInstance:
                     None, os.waitpid, self.pid, 0)
             except (ChildProcessError, OSError):
                 pass
-            self._finish("Terminal ended")
+            # An engine CLI that exits (its /quit, a crash) ends the terminal
+            # under its own name: there is no shell left to fall back to.
+            self._finish("{} ended".format(self.engine_label) if self.engine
+                         else "Terminal ended")
 
     def _finish(self, reason: str) -> None:
         global _active_terminals
@@ -664,7 +767,20 @@ class TerminalRegistry:
 
     async def create(self, command: str = "", cwd: str = "", cols: int = 80,
                      rows: int = 24, origin: str = "user",
-                     owner_session=None) -> TerminalInstance:
+                     owner_session=None, engine: str = "") -> TerminalInstance:
+        engine = str(engine or "")
+        engine_label = ""
+        if engine:
+            # The node chooses both the command and the directory: the
+            # engine's resolved binary, run bare so it opens its interactive
+            # session, in the private scratch home kept for that engine.
+            if str(command or "").strip() or str(cwd or "").strip():
+                raise TerminalError(
+                    "an engine terminal takes neither a command nor a directory")
+            driver, binary = _engine_cli(engine)
+            engine, engine_label = driver.key, driver.label
+            command = shlex.quote(binary)
+            cwd = cli_home(engine)
         command = str(command or "").strip() or config.get(
             "terminal.command", "/bin/bash -l")
         cwd = str(cwd or "").strip() or service_home()
@@ -673,7 +789,8 @@ class TerminalRegistry:
         owner_session = self._normalize_owner(owner_session)
         async with self.lock:
             instance = TerminalInstance(
-                self._new_id(), command, cwd, cols, rows, origin, owner_session)
+                self._new_id(), command, cwd, cols, rows, origin, owner_session,
+                engine=engine, engine_label=engine_label)
             self.instances[instance.terminal_id] = instance
             if owner_session is not None:
                 self._bind_locked(instance, owner_session)
@@ -788,8 +905,17 @@ class TerminalRegistry:
             "session_id": instance.owner_session,
             "command": instance.command,
             "cwd": instance.cwd,
+            "engine": instance.engine or None,
             "created_at": instance.started_at,
         } for instance in self.instances.values()]
+
+    def engine_instances(self, engine: str) -> list:
+        """The live terminals running one engine's interactive CLI - a
+        process of that CLI as much as a turn is, so its updater waits."""
+        engine = str(engine or "")
+        return [instance for instance in self.instances.values()
+                if instance.running and not instance.closed and
+                instance.engine == engine]
 
     async def stop(self, reason: str) -> None:
         async with self.lock:
@@ -823,16 +949,24 @@ def _request_spec(source) -> dict:
         raise TerminalError("cmd is unsupported; use command")
     command = source.get("command") or ""
     cwd = source.get("cwd") or ""
+    engine = source.get("engine") or ""
     if not isinstance(command, str) or "\x00" in command or \
             len(command) > MAX_COMMAND:
         raise TerminalError("invalid terminal command")
     if not isinstance(cwd, str) or "\x00" in cwd or len(cwd) > MAX_CWD:
         raise TerminalError("invalid terminal working directory")
+    if not isinstance(engine, str) or len(engine) > 64:
+        raise TerminalError("invalid terminal engine")
     command = command.strip()
     cwd = cwd.strip()
+    engine = engine.strip()
+    if engine and (command or cwd):
+        raise TerminalError(
+            "an engine terminal takes neither a command nor a directory")
     return {
         "command": command,
         "cwd": cwd,
+        "engine": engine,
         "cols": _bounded_int(source.get("cols"), 80, 10, 500),
         "rows": _bounded_int(source.get("rows"), 24, 4, 300),
     }

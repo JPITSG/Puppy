@@ -328,6 +328,11 @@ TERMINAL_INSTANCES_CAPABILITY = "terminal-instances"
 # Explicitly link one identified terminal to one chat. The linked engine turn
 # receives the private terminal MCP bridge and first-use activity events.
 TERMINAL_HANDOFF_CAPABILITY = "terminal-handoff"
+# POST /api/terminal/instances accepts ``engine`` instead of a command: the
+# node starts that engine's own interactive CLI (the installed binary its
+# driver resolves, in the node's private scratch home for that engine under
+# the system temporary directory) and reports the engine on the instance.
+TERMINAL_ENGINE_CLI_CAPABILITY = "terminal-engine-cli"
 # POST /api/notify/exec runs a controller-supplied completion command. It is
 # part of the node's shell surface, so it exists exactly when terminal does.
 NOTIFY_EXEC_CAPABILITY = "notify-exec"
@@ -350,5 +355,6 @@ def execution_capabilities(include_terminal: bool = True) -> list:
         caps.append(TERMINAL_CAPABILITY)
         caps.append(TERMINAL_INSTANCES_CAPABILITY)
         caps.append(TERMINAL_HANDOFF_CAPABILITY)
+        caps.append(TERMINAL_ENGINE_CLI_CAPABILITY)
         caps.append(NOTIFY_EXEC_CAPABILITY)
     return caps

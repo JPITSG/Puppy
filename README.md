@@ -389,12 +389,12 @@ does not reopen its tab. Once started, use the task's **Stop** control.
   until closed on that device or removed. Closing a tab keeps the task running;
   reopen it from the **Tasks** sheet.
 - Two buttons between the **Tasks** button and **+** act on the selected
-  task, never on Main: the diff mark opens **Review changes** and is greyed
+  task, never on Main: the eye opens **Review changes** and is greyed
   exactly when the task's menu row is (nothing to review while the task is
   running, queued, starting or held); the bin removes the task through the
-  same **Remove task** confirm as its menu and the sheet, and is shown only
-  while the task can go - never while it is running, waiting for an approval
-  or queued (stop it first).
+  same **Remove task** confirm as its menu and the sheet, and is greyed
+  while the task cannot go yet - while it is running, waiting for an
+  approval or queued (stop it first).
 - Drag task tabs to reorder them with the same drag card and sliding animation
   as workspace tabs. Main stays first; the order is saved in this browser.
 - Running task tabs animate one, two, then three dots in a fixed-width slot,
@@ -448,6 +448,19 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
   requested tail after stripping terminal escapes, keeping large scrollback
   reads from needlessly processing every old line. See the
   [terminal latency audit](docs/terminal-latency.md) for measurements and limits.
+- **The engine CLIs themselves.** Every installed engine's name in the
+  footer's status box is a link: it opens that backend's own `claude`, `codex`
+  or `opencode` interactively in a shared terminal (a *Claude Code A8AR @
+  backend* tab), signed in or not - the CLI is where you sign in. The backend
+  runs the binary its engine driver resolves, never your shell, in a private
+  scratch home of its own under the system temporary directory
+  (`/tmp/puppy-cli-<uid>/<engine>/`, one per engine, kept between openings so
+  the CLI's folder trust and `--resume` list carry over), so quitting the CLI
+  ends the terminal and leaves the pane with **Close terminal** and **Start
+  Claude Code** rather than a shell prompt. Pressing the name again returns
+  to the CLI already open on that backend. An open CLI counts as that
+  engine's running process: its updater waits for it. Backends from before
+  this route show plain names.
 - **Managed browsers.** Enable Browser on a backend that has Chromium and Puppy
   runs isolated headless instances, each with a four-character ID and its own
   profile. You get a live view in a tab with an address bar, back and reload
@@ -605,7 +618,9 @@ with a window of history around it.
   Puppy version and each of its engines with sign-in state, an orange *Ready*
   when a newer CLI is published, a green spinner beside the status while a
   session or task uses that engine on that backend (hover to see its models), and the remaining
-  weekly quota where the engine reports it. Claude and Codex entries with
+  weekly quota where the engine reports it. An installed engine's name is a
+  link (only the pointer says so) that opens its CLI in a shared terminal on
+  that backend. Claude and Codex entries with
   verified matching provider, user, account/workspace and quota bucket share
   the newest percentage across
   connected backends. The tooltip identifies the reading's backend, time and
@@ -767,9 +782,9 @@ backend name stays readable; long button labels wrap within the button.
   updates** schedule for unattended updates that tries each new version once.
   An npm-published release must remain unchanged for ten minutes after the
   backend first observes it before a manual or automatic update can run.
-  Updates are refused while that engine has running sessions, queued work or
-  spawned jobs; automatic updates wait until it is idle. New turns are refused
-  while its updater runs.
+  Updates are refused while that engine has running sessions, queued work,
+  spawned jobs or its CLI open in a shared terminal; automatic updates wait
+  until it is idle. New turns are refused while its updater runs.
 - **Usage refresh** – how often each backend refreshes its read-only account
   usage snapshot without starting a model turn (Codex today), with an on-demand
   refresh control. Claude supplies fresh percentages during turns. Account-bound

@@ -34,7 +34,7 @@ const context = vm.createContext({
   navigationRemember: () => { remembered++; }, navigationChanged: () => { changed++; },
   wireTabbar() {}, wireTabDrag() {}, syncHorizontalOverflow() {}, syncPromptSpinnerPhase() {},
   titlePending: () => false,
-  tasksIcon: () => el("svg"), plusIcon: () => el("svg"), xIcon: () => el("svg"), binIcon: () => el("svg"),
+  tasksIcon: () => el("svg"), plusIcon: () => el("svg"), xIcon: () => el("svg"), trashIcon: () => el("svg"),
   reviewIcon: () => el("svg"),
   taskStateClass: () => "", taskStateLabel: () => "Ready", taskActivityTitle: () => "", taskRemovable: () => true,
   taskReviewable: () => true,

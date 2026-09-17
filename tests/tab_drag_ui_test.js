@@ -54,7 +54,7 @@ function harness(bid = 0, namespace = "") {
     requestAnimationFrame: fn => frames.push(fn),
     sessionsFor: node => sessions.get(node) || [],
     findSessionMeta: (node, sid) => (sessions.get(node) || []).find(session => session.id === sid),
-    tasksIcon: icon, plusIcon: icon, xIcon: icon, binIcon: icon, reviewIcon: icon,
+    tasksIcon: icon, plusIcon: icon, xIcon: icon, trashIcon: icon, reviewIcon: icon,
     syncHorizontalOverflow() {}, syncPromptSpinnerPhase() {}, titlePending: () => false,
     sessionHasActivity: meta => meta.status === "running",
     suppressContextGestureActivation() {},

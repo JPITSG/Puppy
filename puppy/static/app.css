@@ -506,6 +506,14 @@ a{color:var(--acc2)}
 .foot-node-act:active{background:var(--hov);color:var(--txt);transform:scale(.9)}
 .foot-engine-empty{padding-left:15px;color:var(--txt3);font-size:var(--fs-2xs)}
 .foot-eng{display:flex;align-items:center;gap:6px;min-width:0;font-size:var(--fs-xs);color:var(--txt2)}
+/* An engine's name when it opens the engine's own CLI in a terminal: the
+   plain text's face to the pixel - the row's font, colour and line, no box,
+   inset or wash of its own - with the pointer's link cursor the only tell.
+   The shared focus ring still marks it for a keyboard. */
+.foot-eng-open{
+  margin:0;padding:0;border:0;background:none;color:inherit;font:inherit;
+  letter-spacing:inherit;text-align:left;white-space:inherit;cursor:pointer;
+}
 /* The footer's one dot column, shared by the backend heads, the engine rows
    and the host box below them: the pull keeps its centre 18px from the
    sidebar's edge while the name that follows starts at 29px, so a dot sits
@@ -3237,7 +3245,9 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
 .task-tabbar .icon-btn.attention{color:var(--warn)}
 /* the bin is the strip's one destructive verb: quiet at rest like its
    neighbours, the error tone under the pointer like the queue strip's
-   remove, the menu's Remove task row and the sheet's Remove */
+   remove, the menu's Remove task row and the sheet's Remove; greyed for a
+   task that cannot go yet it keeps its place at the icon-btn :disabled
+   look, whose pointer-events:none also keeps this tone off it */
 @media (hover:hover){.task-tabbar .task-remove-button:hover{color:var(--err)}}
 .task-tabbar .task-remove-button:active{color:var(--err)}
 .task-tab .t-state{font-size:var(--fs-2xs);color:var(--txt3);flex-shrink:0;white-space:nowrap}

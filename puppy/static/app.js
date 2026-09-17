@@ -3723,7 +3723,7 @@ function saveTabs() {
         id: t.id, type: t.type, bid: t.bid, sid: t.sid, title: t.title,
         browserId: t.browserId, terminalId: t.terminalId, vncId: t.vncId,
         vncHost: t.vncHost, vncPort: t.vncPort, vncLabel: t.vncLabel,
-        cmd: t.cmd, cwd: t.cwd, ended: t.ended === true,
+        cmd: t.cmd, cwd: t.cwd, engine: t.engine, ended: t.ended === true,
       })),
       active: state.active,
       activeGroup: state.activeGroup,
@@ -3763,6 +3763,10 @@ function storedTabs(value) {
     if (typeof item.title === "string") tab.title = item.title.slice(0, 1000);
     if (typeof item.cmd === "string") tab.cmd = item.cmd.slice(0, 10000);
     if (typeof item.cwd === "string") tab.cwd = item.cwd.slice(0, 4096);
+    /* the engine key a CLI tab reopens with; anything else is a shell */
+    if (item.type === "term" && typeof item.engine === "string" &&
+        /^[a-z0-9][a-z0-9_-]{0,63}$/.test(item.engine))
+      tab.engine = item.engine;
     /* A shell the user ended is restored as ended: reopening the tab must not
        silently start a second login session on that host. */
     if (item.ended === true) tab.ended = true;
@@ -4744,10 +4748,49 @@ function sessionFilterHaystack(bid, s) {
     backendName(bid)).toLowerCase();
 }
 
+/* The engine whose own CLI a terminal tab runs, named as the footer names it;
+   "" for a shell. The tab keeps the key, because the label is the node's and
+   a restored tab may be read before its engine list has arrived. */
+function terminalCliLabel(tab) {
+  const key = tab && typeof tab.engine === "string" ? tab.engine : "";
+  if (!key) return "";
+  const info = engineInfo(tab.bid || 0, key);
+  return (info && info.label) || key;
+}
+
+/* The ended pane's words for a tab: a shell's, or the CLI's own name, so a
+   Claude Code that was quit says so and offers to start Claude Code again
+   rather than a shell it never was. */
+function terminalDeadWording(tab) {
+  const cli = terminalCliLabel(tab);
+  return {
+    ended: `${cli || "Terminal"} ended`,
+    start: cli ? `Start ${cli}` : "New shell",
+    close: cli ? "Close terminal" : "Close shell",
+  };
+}
+
+/* What a terminal tab asks its node for: an engine tab names the engine and
+   leaves the command and the directory to the node; a shell tab carries its
+   own. */
+function terminalCreateBody(tab, cols, rows) {
+  const body = { cols, rows };
+  if (tab && tab.engine) body.engine = String(tab.engine);
+  else {
+    body.command = (tab && tab.cmd) || "";
+    body.cwd = (tab && tab.cwd) || "";
+  }
+  return body;
+}
+
 function terminalTabTitle(tabOrBid, terminalId = "") {
   const tab = tabOrBid && typeof tabOrBid === "object" ? tabOrBid : null;
   const bid = tab ? (tab.bid || 0) : (Number(tabOrBid) || 0);
   const id = String(tab ? (tab.terminalId || "") : terminalId).toUpperCase();
+  /* A tab running an engine's own CLI is named for it - "Claude Code A8AR @
+     Workshop" says what is in the box, the way a VNC tab names its host. */
+  const cli = terminalCliLabel(tab);
+  if (cli) return id ? `${cli} ${id} @ ${backendName(bid)}` : `${cli} @ ${backendName(bid)}`;
   return id ? `Terminal ${id} @ ${backendName(bid)}` : `Terminal @ ${backendName(bid)}`;
 }
 
@@ -7505,6 +7548,16 @@ function wireNodeGroupDropZone(root) {
   });
 }
 
+/* Whether an engine row's name opens the engine's own CLI: the node offers
+   terminals and the route that starts a CLI in one, the CLI is installed
+   there - signed in or not, since the CLI is where one signs in - and the
+   backend is reachable right now. A missing binary has nothing to open. */
+function engineCliOpenable(group, engine) {
+  return !!engine && engine.installed === true && !!group.terminal &&
+    nodeHasCapability(group.bid, "terminal-engine-cli") &&
+    backendConnectionAllowed(group.bid);
+}
+
 /* The footer's one dot column. A backend's health, an engine's colour and a
    host row's kind are all leading marks of different sizes, so each is
    centred in the same cell rather than laid against the edge, and every name
@@ -7602,7 +7655,21 @@ function renderFootEngines() {
     } else for (const e of g.engines) {
       const row = el("div", "foot-eng");
       row.appendChild(footIcon(el("span", `engine-dot ${e.key}`)));
-      row.appendChild(document.createTextNode(e.label));
+      /* An engine with a CLI to run is a link to it: the name becomes a
+         button with the plain text's exact face, the pointer's link cursor
+         the only thing that says so. */
+      if (engineCliOpenable(g, e)) {
+        const open = el("button", "foot-eng-open", e.label);
+        open.type = "button";
+        open.setAttribute("aria-label", `Open ${e.label} in a terminal on ${g.name}`);
+        open.onclick = event => {
+          event.preventDefault();
+          event.stopPropagation();
+          openEngineTerminal(g.bid, e.key);
+          closeDrawer();
+        };
+        row.appendChild(open);
+      } else row.appendChild(document.createTextNode(e.label));
       const quotaSample = quotas.get(e) || null;
       const pct = weeklyQuotaLeft(quotaSample);
       const healthy = engineReady(e);
@@ -8561,8 +8628,9 @@ function openTermTab(bid, cmd, groupId = null, cwd = "", terminalId = "", option
   }
   const id = `t:${Date.now()}:${termSeq++}`;
   const tab = { id, type: "term", bid: bid || 0, cmd: cmd || "",
-    cwd: cwd || "", terminalId,
-    title: terminalTabTitle(bid, terminalId) };
+    cwd: cwd || "", terminalId, title: "" };
+  if (options.engine) tab.engine = String(options.engine);
+  tab.title = terminalTabTitle(tab);
   if (Number(options.sid) > 0) tab.sid = Number(options.sid);
   state.tabs.push(tab);
   if (options.afterTabId) putTabAfter(id, options.afterTabId, groupId);
@@ -8571,6 +8639,25 @@ function openTermTab(bid, cmd, groupId = null, cwd = "", terminalId = "", option
     syncTabOrderFromLayout(); renderTabs(); syncSessionBrowserChips();
   } else activateTab(id);
   return tab;
+}
+
+/* The footer's engine names open that engine's own CLI in a shared terminal
+   on that backend: the installed claude, codex or opencode itself, run
+   interactively in a scratch home of its own on the node. A press goes to the
+   CLI already open there before starting another - a link leads to one
+   place - while one that was quit leaves its ended tab standing, so the next
+   press opens a fresh one beside it. */
+function openEngineTerminal(bid, engineKey, groupId = null) {
+  bid = Number(bid) || 0;
+  const key = String(engineKey || "");
+  if (!key) return null;
+  const live = state.tabs.find(t => t.type === "term" && (t.bid || 0) === bid &&
+    t.engine === key && t.ended !== true && t.terminalGone !== true);
+  if (live) {
+    activateTab(live.id);
+    return live;
+  }
+  return openTermTab(bid, "", groupId, "", "", { engine: key });
 }
 
 /* Browser IDs are node-scoped. Reopening one ID reuses its screen while a new
@@ -13851,12 +13938,14 @@ function tasksIcon(size) {
   svg.appendChild(p);
   return svg;
 }
-/* the strip's Review: a diff - a plus over a minus - on the same 12-grid,
-   in the bin's stroke since it is drawn at the same size beside it. The
-   plus's centre stands at 4.25 and the minus at 9.5 so the ink's mass
-   lands on 6,6: the whole glyph is 5 wide, narrower than its neighbours,
-   because a diff mark is a narrow thing and widening it would only make
-   the plus read as the strip's own New task +. */
+/* the strip's Review: an eye on the same 12-grid, in the Tasks button's
+   1.1 stroke since the three drawn verbs stand side by side at one size.
+   The lids meet in points at 1.25 and 10.75 and the pupil is a ring on
+   6,6, so the ink's mass lands on the button's centre. An eye is a wide
+   thing: drawn 9.5 wide and 7 tall it is wider than its neighbours, and
+   narrowing it to their width would only half-close it. The ring's
+   radius leaves a unit of air under the upper lid and a pixel of white
+   inside it at 14px, so it reads as a pupil rather than a dot. */
 function reviewIcon(size) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
@@ -13865,9 +13954,36 @@ function reviewIcon(size) {
   svg.setAttribute("height", size);
   svg.setAttribute("aria-hidden", "true");
   const p = document.createElementNS(NS, "path");
-  p.setAttribute("d", "M6 1.75v5M3.5 4.25h5M3.5 9.5h5");
+  p.setAttribute("d", "M1.25 6s1.75-3.5 4.75-3.5 4.75 3.5 4.75 3.5-1.75 3.5-4.75 3.5S1.25 6 1.25 6z" +
+    "M7.4 6a1.4 1.4 0 1 1-2.8 0a1.4 1.4 0 1 1 2.8 0z");
   p.setAttribute("stroke", "currentColor");
-  p.setAttribute("stroke-width", "1.3");
+  p.setAttribute("stroke-width", "1.1");
+  p.setAttribute("stroke-linecap", "round");
+  p.setAttribute("stroke-linejoin", "round");
+  p.setAttribute("fill", "none");
+  svg.appendChild(p);
+  return svg;
+}
+/* the strip's Remove: a can - a lid with a handle, straight sides on
+   rounded feet and two slats - on the same 12-grid and in the same 1.1
+   stroke as the eye and the Tasks button. It is not the notification
+   pill's bin (binIcon), a tapered outline drawn at 11px where slats would
+   smear into a hatched box: at the strip's 14px the slats stand 1.15
+   either side of the centre, a pixel and a quarter of air from each other
+   and from the sides, so the can reads as a can on a 1x screen too. The
+   handle's top at 2 and the feet at 10 centre the ink on 6,6. */
+function trashIcon(size) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 12 12");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const p = document.createElementNS(NS, "path");
+  p.setAttribute("d", "M1.75 3.5h8.5M4.5 3.5v-.75a.75.75 0 0 1 .75-.75h1.5a.75.75 0 0 1 .75.75v.75" +
+    "M2.5 3.5v5.5a1 1 0 0 0 1 1h5a1 1 0 0 0 1-1v-5.5M4.85 5.5v3M7.15 5.5v3");
+  p.setAttribute("stroke", "currentColor");
+  p.setAttribute("stroke-width", "1.1");
   p.setAttribute("stroke-linecap", "round");
   p.setAttribute("stroke-linejoin", "round");
   p.setAttribute("fill", "none");
@@ -13953,9 +14069,9 @@ class SessionWorkspaceView {
     this.overviewButton.onclick = () => this.openTaskOverview();
     /* the selected task's own Review and Remove, the verbs its menu and the
        Tasks sheet offer, one press away. refreshTasks shows both only for a
-       task: Review stands for every task and is greyed exactly when the
-       menu's row is, while the bin stands only for a task the node would
-       take back. */
+       task, and both stand for every task: Review is greyed exactly when the
+       menu's row is, the bin exactly when the node would not take the task
+       back. */
     this.reviewButton = el("button", "icon-btn task-review-button hidden");
     this.reviewButton.type = "button";
     this.reviewButton.setAttribute("aria-label", "Review changes");
@@ -13965,7 +14081,7 @@ class SessionWorkspaceView {
     this.removeButton = el("button", "icon-btn task-remove-button hidden");
     this.removeButton.type = "button";
     this.removeButton.setAttribute("aria-label", "Remove task");
-    this.removeButton.appendChild(binIcon(14));
+    this.removeButton.appendChild(trashIcon(14));
     this.removeButton.onclick = () => this.removeSelectedTask();
     this.removing = false;
     const add = el("button", "icon-btn task-add-button");
@@ -14227,14 +14343,17 @@ class SessionWorkspaceView {
     this.overviewButton.title = main && main.task_activity ? taskActivityTitle(main.task_activity) : "Tasks";
     /* The task's two verbs stand only while the selected conversation is a
        task: never for Main, never before the node's list has named the
-       selection. Review stands for every task and is greyed exactly when
-       the menu's row is (a task still working, queued, starting or held
-       has nothing to review yet); the bin stands only while the node would
-       take the task back - never for a task still working or queued. Both
-       name the task the way the tab's close mark does, so the hover says
-       which conversation the verb is for. When a verb goes from under the
-       focus it held - its task removed, or started again from another
-       console - that focus passes to the selected tab, never to the page. */
+       selection. Both stand for every task, each greyed on its own rule:
+       Review exactly when the menu's row is (a task still working, queued,
+       starting or held has nothing to review yet), the bin exactly when
+       the node would not take the task back (a task still working or
+       queued must be stopped first) - so a task's two verbs keep their
+       places and the strip never shifts under the pointer. Both name the
+       task the way the tab's close mark does, so the hover says which
+       conversation the verb is for. When a verb goes grey or away from
+       under the focus it held - its task removed, or started again from
+       another console - that focus passes to the selected tab, never to
+       the page. */
     const chosen = tasks.find(s => s.id === this.selected);
     const onTask = this.selected !== this.tab.sid && !!chosen;
     const reviewable = onTask && taskReviewable(chosen.task);
@@ -14244,7 +14363,8 @@ class SessionWorkspaceView {
       (held === this.removeButton && !removable);
     this.reviewButton.classList.toggle("hidden", !onTask);
     this.reviewButton.disabled = !reviewable;
-    this.removeButton.classList.toggle("hidden", !removable);
+    this.removeButton.classList.toggle("hidden", !onTask);
+    this.removeButton.disabled = !removable;
     if (onTask) {
       const name = chosen.name || `Task ${chosen.id}`;
       for (const [button, verb] of [[this.reviewButton, "Review"], [this.removeButton, "Remove"]]) {
@@ -18383,10 +18503,7 @@ class TermView {
     this.resizeObs.observe(this.mount);
   }
   async createInstance(sequence, ownerSession = null) {
-    const body = {
-      command: this.tab.cmd || "", cwd: this.tab.cwd || "",
-      cols: this.term.cols, rows: this.term.rows,
-    };
+    const body = terminalCreateBody(this.tab, this.term.cols, this.term.rows);
     if (Number(ownerSession) > 0) body.session_id = Number(ownerSession);
     const result = await api(this.tab.bid, "terminal/instances", {
       method: "POST", body, timeoutMs: 30000,
@@ -18552,10 +18669,11 @@ class TermView {
        renderer xterm chose. reset() on a new shell brings it back. */
     this.term.write("\x1b[?25l");
     this.term.blur();
+    const words = terminalDeadWording(this.tab);
     const d = el("div", "term-dead");
-    d.appendChild(el("div", "term-dead-message", "Terminal ended"));
+    d.appendChild(el("div", "term-dead-message", words.ended));
     const actions = el("div", "term-dead-actions");
-    const fresh = el("button", "btn btn-pri term-dead-new", "New shell");
+    const fresh = el("button", "btn btn-pri term-dead-new", words.start);
     fresh.type = "button";
     fresh.onclick = () => {
       if (this.tab.bid && !backendConnectionAllowed(this.tab.bid)) return;
@@ -18565,7 +18683,7 @@ class TermView {
         this.connect(); this.term.focus();
       }
     };
-    const close = el("button", "btn term-dead-close", "Close shell");
+    const close = el("button", "btn term-dead-close", words.close);
     close.type = "button";
     close.onclick = () => closeTab(this.tab.id);
     /* a dialog's row: the way out first, the primary last */
@@ -18597,11 +18715,13 @@ class TermView {
     if (!dead) return;
     const message = dead.querySelector(".term-dead-message");
     const button = dead.querySelector(".term-dead-new");
+    const words = terminalDeadWording(this.tab);
+    const ended = this.tab.ended || this.nodeEnded;
     message.textContent = remoteStoppingMessage(this.tab.bid) ||
       (unavailable ? "Backend unavailable" : this.deadReason ||
-       (this.tab.ended || this.nodeEnded ? "Terminal ended" : "Terminal disconnected"));
+       (ended ? words.ended : "Terminal disconnected"));
     button.textContent = unavailable ? "Waiting for backend…" :
-      (this.tab.ended || this.nodeEnded ? "New shell" : "Reconnect");
+      (ended ? words.start : "Reconnect");
     button.disabled = unavailable;
   }
   destroy() {

@@ -6,7 +6,9 @@ import asyncio
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -20,12 +22,19 @@ from tests.scratch import private_root  # noqa: E402
 TEST_ROOT = private_root("terminal-")
 os.environ["PUPPY_DATA"] = str(TEST_ROOT / "data")
 
-from puppy import config, db, protocol, runner, system_prompts, terminal  # noqa: E402
+from aiohttp.test_utils import TestClient, TestServer  # noqa: E402
+from puppy import cli_upgrade, config, db, protocol, runner, system_prompts, terminal  # noqa: E402
 from puppy import terminal_agent  # noqa: E402
+from puppy.drivers import get_driver  # noqa: E402
 from puppy.drivers.claude import ClaudeDriver  # noqa: E402
 from puppy.drivers.codex import CodexDriver  # noqa: E402
 from puppy.drivers.opencode import OpenCodeDriver  # noqa: E402
 from puppy.web import build_app  # noqa: E402
+from backend.puppy_backend.app import build_app as backend_app  # noqa: E402
+
+# The temporary directory the engine scratch homes are made under, for every
+# check here: nothing in this suite may touch the host's own /tmp.
+CLI_TMP = TEST_ROOT / "tmp"
 
 
 class CaptureSocket:
@@ -257,18 +266,36 @@ def check_static_contract() -> None:
     assert protocol.TERMINAL_CAPABILITY in caps
     assert protocol.TERMINAL_INSTANCES_CAPABILITY in caps
     assert protocol.TERMINAL_HANDOFF_CAPABILITY in caps
+    assert protocol.TERMINAL_ENGINE_CLI_CAPABILITY in caps
+    assert protocol.TERMINAL_ENGINE_CLI_CAPABILITY == "terminal-engine-cli"
     disabled = protocol.execution_capabilities(include_terminal=False)
     assert protocol.TERMINAL_CAPABILITY not in disabled
     assert protocol.TERMINAL_INSTANCES_CAPABILITY not in disabled
     assert protocol.TERMINAL_HANDOFF_CAPABILITY not in disabled
+    assert protocol.TERMINAL_ENGINE_CLI_CAPABILITY not in disabled
 
     assert terminal._request_spec({"command": "/bin/bash"})["command"] == "/bin/bash"
+    assert terminal._request_spec({"command": "/bin/bash"})["engine"] == ""
     try:
         terminal._request_spec({"cmd": "/bin/bash"})
     except terminal.TerminalError as exc:
         assert "use command" in str(exc)
     else:
         raise AssertionError("retired anonymous-terminal command alias was accepted")
+    # An engine terminal names only the engine: the node chooses the command
+    # and the directory, so a request naming either beside it is refused.
+    spec = terminal._request_spec({"engine": " claude ", "cols": 100, "rows": 30})
+    assert spec == {"command": "", "cwd": "", "engine": "claude", "cols": 100, "rows": 30}
+    for bad, reason in ((["claude"], "invalid terminal engine"),
+                        ("c" * 65, "invalid terminal engine"),
+                        ({"engine": "claude", "command": "/bin/sh"}, "neither a command"),
+                        ({"engine": "claude", "cwd": "/"}, "neither a command")):
+        try:
+            terminal._request_spec(bad if isinstance(bad, dict) else {"engine": bad})
+        except terminal.TerminalError as exc:
+            assert reason in str(exc), (bad, exc)
+        else:
+            raise AssertionError("bad engine terminal request was accepted: %r" % (bad,))
 
     app = build_app()
     routes = {(route.method, route.resource.canonical) for route in app.router.routes()}
@@ -286,6 +313,13 @@ def check_static_contract() -> None:
     ui = (BASE / "puppy" / "static" / "app.js").read_text(encoding="utf-8")
     css = (BASE / "puppy" / "static" / "app.css").read_text(encoding="utf-8")
     assert "`Terminal ${id} @ ${backendName(bid)}`" in ui
+    # the footer's engine names open the CLI through this route, behind the
+    # capability, and a CLI tab asks for the engine rather than a command
+    assert 'nodeHasCapability(group.bid, "terminal-engine-cli")' in ui
+    assert 'el("button", "foot-eng-open", e.label)' in ui
+    assert "function terminalCreateBody(tab, cols, rows)" in ui
+    assert "body.engine = String(tab.engine)" in ui
+    assert ".foot-eng-open{" in css
     assert 'class="br-meta term-meta edge-scroll-viewport hidden"' in ui
     assert 'aria-label="Terminal identity"' in ui
     assert 'aria-label="Copy Terminal ID"' in ui
@@ -558,6 +592,261 @@ async def check_terminal_lifecycle(session_id: int, other_session_id: int) -> No
         runner._hubs.pop(session_id, None)
 
 
+def check_cli_home() -> None:
+    """The scratch home an engine CLI starts in: one private directory per
+    engine under the system temporary directory, made on first use, kept for
+    the next, and refused - never followed or replaced - when something else
+    stands where it should be."""
+    CLI_TMP.mkdir(parents=True, exist_ok=True)
+    with patch.object(terminal.tempfile, "gettempdir", return_value=str(CLI_TMP)):
+        root = Path(terminal.cli_home_root())
+        assert root == CLI_TMP / "puppy-cli-{}".format(os.geteuid())
+        assert not root.exists()
+        home = Path(terminal.cli_home("claude"))
+        assert home == root / "claude" and home.is_dir()
+        assert stat.S_IMODE(root.stat().st_mode) == 0o700
+        assert stat.S_IMODE(home.stat().st_mode) == 0o700
+        # The next opening finds the same directory with whatever the CLI
+        # left in it - that is its project memory - and a mode that drifted
+        # wider is tightened back rather than trusted.
+        (home / "note.txt").write_text("kept", encoding="utf-8")
+        home.chmod(0o755)
+        assert terminal.cli_home("claude") == str(home)
+        assert stat.S_IMODE(home.stat().st_mode) == 0o700
+        assert (home / "note.txt").read_text(encoding="utf-8") == "kept"
+        assert Path(terminal.cli_home("codex")) == root / "codex"
+        # Only a registered engine key ever becomes a path component.
+        for key in ("../etc", "claude/../codex", "", None, "nope"):
+            try:
+                terminal.cli_home(key)
+            except terminal.TerminalError as exc:
+                assert "unknown engine" in str(exc)
+            else:
+                raise AssertionError("unregistered engine key accepted: %r" % (key,))
+        # A symlink or a file standing in the way is refused and left alone.
+        planted = root / "opencode"
+        planted.symlink_to(home)
+        try:
+            terminal.cli_home("opencode")
+        except terminal.TerminalError as exc:
+            assert "not a directory" in str(exc)
+        else:
+            raise AssertionError("a symlink was accepted as a scratch home")
+        assert planted.is_symlink() and (home / "note.txt").exists()
+        planted.unlink()
+        planted.write_text("in the way", encoding="utf-8")
+        try:
+            terminal.cli_home("opencode")
+        except terminal.TerminalError as exc:
+            assert "not a directory" in str(exc)
+        else:
+            raise AssertionError("a file was accepted as a scratch home")
+        assert planted.read_text(encoding="utf-8") == "in the way"
+        planted.unlink()
+        # Another account's directory is refused: the CLI reads its project
+        # settings from there, so it must be ours.
+        with patch.object(terminal.os, "geteuid", return_value=os.geteuid() + 1):
+            try:
+                terminal.cli_home("claude")
+            except terminal.TerminalError as exc:
+                assert "another account" in str(exc)
+            else:
+                raise AssertionError("another account's directory was accepted")
+
+
+def check_engine_cli_lookup() -> None:
+    """What stands behind an engine key: the registered driver's resolved
+    binary, refused when there is none or its updater is running."""
+    claude = get_driver("claude")
+    try:
+        terminal._engine_cli("nope")
+    except terminal.TerminalError as exc:
+        assert "unknown engine" in str(exc)
+    else:
+        raise AssertionError("an unknown engine resolved to a CLI")
+    with patch.object(claude, "resolved_binary", return_value=""):
+        try:
+            terminal._engine_cli("claude")
+        except terminal.TerminalError as exc:
+            assert str(exc) == "Claude Code is not installed on this backend"
+        else:
+            raise AssertionError("a missing binary resolved to a CLI")
+    with patch.object(claude, "resolved_binary", return_value="/opt/bin/claude"), \
+            patch.object(cli_upgrade, "is_running", return_value=True):
+        try:
+            terminal._engine_cli("claude")
+        except terminal.TerminalError as exc:
+            assert str(exc) == "Claude Code is being updated on this backend"
+        else:
+            raise AssertionError("an engine mid-update resolved to a CLI")
+    with patch.object(claude, "resolved_binary", return_value="/opt/bin/claude"), \
+            patch.object(cli_upgrade, "is_running", return_value=False):
+        assert terminal._engine_cli("claude") == (claude, "/opt/bin/claude")
+
+
+def fake_cli() -> Path:
+    """A stand-in CLI: prints where it started, waits for one line the way an
+    interactive tool waits for /quit, then exits."""
+    script = TEST_ROOT / "fake-cli"
+    script.write_text("#!/bin/sh\nprintf 'PUPPY_CLI_HOME=%s\\n' \"$PWD\"\n"
+                      "read -r line\nexit 0\n", encoding="utf-8")
+    script.chmod(0o755)
+    return script
+
+
+class StubClaude:
+    key = "claude"
+    label = "Claude Code"
+
+
+async def check_engine_terminal() -> None:
+    """A terminal created for an engine runs the CLI its driver resolves, bare,
+    in the engine's scratch home; it is the engine's process for as long as
+    it runs, and its exit ends the terminal under the engine's own name."""
+    registry = terminal.TerminalRegistry()
+    old_manager = terminal._manager
+    terminal._manager = registry
+    script = fake_cli()
+    viewer = TerminalViewer()
+    instance = None
+    CLI_TMP.mkdir(parents=True, exist_ok=True)
+
+    def stub_cli(key):
+        assert key == "claude", key
+        return StubClaude, str(script)
+
+    try:
+        with patch.object(terminal, "_engine_cli", stub_cli), \
+                patch.object(terminal.tempfile, "gettempdir", return_value=str(CLI_TMP)):
+            for extra in ({"command": "/bin/sh"}, {"cwd": str(TEST_ROOT)}):
+                try:
+                    await registry.create(engine="claude", **extra)
+                except terminal.TerminalError as exc:
+                    assert "neither a command" in str(exc)
+                else:
+                    raise AssertionError("an engine terminal took %r" % (extra,))
+            assert not registry.instances, "a refused request allocates nothing"
+            instance = await registry.create(engine="claude", cols=100, rows=30)
+            assert instance.engine == "claude" and instance.engine_label == "Claude Code"
+            assert instance.command == shlex.quote(str(script))
+            assert instance.cwd == terminal.cli_home("claude")
+            assert instance.cwd.startswith(str(CLI_TMP)) and instance.origin == "user"
+            listed = next(item for item in registry.instance_payloads()
+                          if item["id"] == instance.terminal_id)
+            assert listed["engine"] == "claude" and listed["cwd"] == instance.cwd
+            assert instance.status_payload()["engine"] == "claude"
+            await instance.attach_viewer(viewer)
+            await wait_for(lambda: ("PUPPY_CLI_HOME=" + instance.cwd).encode() in viewer.bytes)
+            # Live, it is a process of that CLI: the updater must wait for it
+            # exactly as it waits for a session, and for no other engine.
+            assert registry.engine_instances("claude") == [instance]
+            assert registry.engine_instances("codex") == []
+            blockers = runner.engine_blockers("claude")
+            assert [item for item in blockers if item["name"] == "Terminal " + instance.terminal_id
+                    and item["running"] is True and item["id"] == 0], blockers
+            assert not [item for item in runner.engine_blockers("codex")
+                        if item["name"].startswith("Terminal")]
+            # Its own quit ends the terminal - under the engine's name, with
+            # no shell to fall into - and releases the updater.
+            await instance.write(b"\n")
+            await wait_for(lambda: not instance.running)
+            assert instance.ended_reason == "Claude Code ended"
+            assert registry.engine_instances("claude") == []
+            assert not [item for item in runner.engine_blockers("claude")
+                        if item["name"].startswith("Terminal")]
+            await wait_for(lambda: any(item.get("type") == "status" and
+                                       item.get("running") is False
+                                       for item in viewer.messages))
+            ended = [item for item in viewer.messages
+                     if item.get("type") == "status" and item.get("running") is False][-1]
+            assert ended["reason"] == "Claude Code ended" and ended["engine"] == "claude"
+            # A shell terminal is what it always was.
+            shell = await registry.create(command="/bin/bash --noprofile --norc",
+                                          cwd=str(TEST_ROOT))
+            assert shell.engine == "" and shell.status_payload()["engine"] is None
+            assert next(item for item in registry.instance_payloads()
+                        if item["id"] == shell.terminal_id)["engine"] is None
+            await registry.close(shell.terminal_id, "engine test complete")
+    finally:
+        if instance is not None:
+            instance.detach_viewer(viewer)
+        await registry.stop("engine test cleanup")
+        terminal._manager = old_manager
+
+
+async def check_engine_routes() -> None:
+    """Both runtimes create an engine terminal through the same route, report
+    the engine on it, and refuse what the node cannot run."""
+    script = fake_cli()
+    CLI_TMP.mkdir(parents=True, exist_ok=True)
+
+    def stub_cli(key):
+        if key != "claude":
+            raise terminal.TerminalError("unknown engine")
+        if stub_cli.missing:
+            raise terminal.TerminalError("Claude Code is not installed on this backend")
+        return StubClaude, str(script)
+    stub_cli.missing = False
+
+    for runtime, make in (("full", build_app), ("headless", backend_app)):
+        registry = terminal.TerminalRegistry()
+        old_manager = terminal._manager
+        terminal._manager = registry
+        app = make()
+        app.on_startup.clear()
+        app.on_shutdown.clear()
+        app.on_cleanup.clear()
+        try:
+            with patch.object(terminal, "_engine_cli", stub_cli), \
+                    patch.object(terminal.tempfile, "gettempdir", return_value=str(CLI_TMP)):
+                async with TestClient(TestServer(app)) as client:
+                    headers = {"X-Puppy-Token": config.get("auth.api_token")}
+                    response = await client.get("/api/ping", headers=headers)
+                    ping = await response.json()
+                    assert response.status == 200, ping
+                    assert "terminal-engine-cli" in ping["capabilities"], (runtime, ping)
+                    response = await client.post(
+                        "/api/terminal/instances", headers=headers,
+                        json={"engine": "claude", "cols": 80, "rows": 24})
+                    created = await response.json()
+                    assert response.status == 201, (runtime, created)
+                    assert created["terminal"]["engine"] == "claude", created
+                    assert created["terminal"]["cwd"] == terminal.cli_home("claude")
+                    assert created["terminal"]["command"] == shlex.quote(str(script))
+                    terminal_id = created["terminal"]["id"]
+                    response = await client.get("/api/terminal/instances", headers=headers)
+                    listed = await response.json()
+                    assert next(item for item in listed["instances"]
+                                if item["id"] == terminal_id)["engine"] == "claude"
+                    for body, reason in (
+                            ({"engine": "claude", "command": "/bin/sh"}, "neither a command"),
+                            ({"engine": "claude", "cwd": "/"}, "neither a command"),
+                            ({"engine": "nope"}, "unknown engine"),
+                            ({"engine": 5}, "invalid terminal engine")):
+                        response = await client.post(
+                            "/api/terminal/instances", headers=headers, json=body)
+                        refused = await response.json()
+                        assert response.status == 409, (runtime, body, refused)
+                        assert reason in refused["error"], (runtime, body, refused)
+                    stub_cli.missing = True
+                    try:
+                        response = await client.post(
+                            "/api/terminal/instances", headers=headers,
+                            json={"engine": "claude"})
+                        refused = await response.json()
+                        assert response.status == 409, (runtime, refused)
+                        assert refused["error"] == "Claude Code is not installed on this backend"
+                    finally:
+                        stub_cli.missing = False
+                    assert [item["id"] for item in registry.instance_payloads()] == [terminal_id]
+                    response = await client.delete(
+                        "/api/terminal/instances/" + terminal_id, headers=headers)
+                    assert response.status == 200, await response.text()
+        finally:
+            await registry.stop("engine route test cleanup")
+            terminal._manager = old_manager
+
+
 async def main() -> None:
     try:
         config.load()
@@ -591,11 +880,15 @@ async def main() -> None:
         check_mcp_protocol()
         check_driver_wiring(session_id)
         check_transcript_tail()
+        check_cli_home()
+        check_engine_cli_lookup()
         await check_output_drain()
         await check_input_readiness()
         await check_resize_deduplication()
         await check_slow_viewer()
         await check_terminal_lifecycle(session_id, other_session_id)
+        await check_engine_terminal()
+        await check_engine_routes()
         print("terminal tests passed")
     finally:
         if db._conn is not None:

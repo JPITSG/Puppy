@@ -2728,6 +2728,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "terminal" not in ping["capabilities"]
         assert "terminal-instances" not in ping["capabilities"]
         assert "terminal-handoff" not in ping["capabilities"]
+        assert "terminal-engine-cli" not in ping["capabilities"]
         # the completion-command endpoint is part of the shell surface: a node
         # deployed without a terminal must not run commands either
         assert "notify-exec" not in ping["capabilities"]
@@ -3464,6 +3465,7 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert "terminal" in full_ping["capabilities"]
         assert "terminal-instances" in full_ping["capabilities"]
         assert "terminal-handoff" in full_ping["capabilities"]
+        assert "terminal-engine-cli" in full_ping["capabilities"]
         assert "queue-pause" in full_ping["capabilities"]
         assert "queue-edit" in full_ping["capabilities"]
         assert "queue-reorder" in full_ping["capabilities"]
@@ -5953,6 +5955,7 @@ async def main() -> None:
         assert "terminal" in enabled_pairing["capabilities"]
         assert "terminal-instances" in enabled_pairing["capabilities"]
         assert "terminal-handoff" in enabled_pairing["capabilities"]
+        assert "terminal-engine-cli" in enabled_pairing["capabilities"]
         assert "engine-model-selection" not in enabled_pairing["capabilities"]
         assert enabled_pairing["usage_refresh_minutes"] == 30
         assert enabled_pairing["max_upload_size_mb"] == 4

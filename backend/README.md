@@ -651,6 +651,23 @@ ID-scoped WebSocket. Four-character Terminal IDs, process lifetime, transcript
 replay, and session links therefore survive viewer reconnects. Viewer sockets
 always name an existing terminal.
 
+Behind the additive `terminal-engine-cli` capability the same POST accepts
+`engine` (an engine key such as `claude`) instead of `command` and `cwd`: the
+node runs that engine's own interactive CLI - the installed binary its driver
+resolves, exactly as a turn would spawn it, with no arguments - in a private
+scratch home of its own, `<system temp>/puppy-cli-<uid>/<engine>/`, created
+mode 0700 on first use and kept for the next (the CLI's folder trust and
+resumable sessions belong to that directory). A request naming `engine`
+beside a command or directory, an unknown engine, an engine whose binary is
+missing, or one whose vendor updater is running is refused with 409 and the
+reason. Instance and status payloads carry the additive `engine` (`null` for
+a shell), the CLI's exit ends the terminal with the reason `<Engine> ended`,
+and while it runs the terminal counts as that engine's live process: the
+engine's CLI upgrade is refused (`blockers` names `Terminal <ID>`) and the
+scheduler waits. The scratch home holds nothing Puppy owns and is outside
+backups; only a directory this account owns is ever used - a symlink, a file
+or another account's directory in its place is refused, never replaced.
+
 A terminal can be linked to exactly one chat and a chat to one current
 terminal. Every engine turn on a terminal-enabled node receives a private stdio
 MCP server backed by a mode-0600, same-uid Unix socket into that node-owned PTY.

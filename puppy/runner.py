@@ -632,6 +632,13 @@ def engine_blockers(engine: str) -> list:
         if job.engine == str(engine):
             out.append({"id": 0, "name": "spawned agent {}".format(job.id),
                         "running": True, "queued": 0})
+    # So is the CLI itself, open interactively in a shared terminal: the
+    # process the updater would rewrite from under is the one the person is
+    # typing at.
+    from puppy import terminal
+    for instance in terminal.manager().engine_instances(engine):
+        out.append({"id": 0, "name": "Terminal {}".format(instance.terminal_id),
+                    "running": True, "queued": 0})
     return out
 
 

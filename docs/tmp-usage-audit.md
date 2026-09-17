@@ -29,7 +29,14 @@ names still describe the session-owned disposable lifecycle. They do not
 select the OS temporary directory. No persisted setting/schema change,
 automatic migration, or backup creation routine was added.
 
-The remaining **OS-temp allocations** are separate build and test work:
+The one runtime **OS-temp allocation** is deliberate: the scratch home an
+engine's interactive CLI starts in when its name is pressed in the footer.
+
+| Source | Path under the selected OS temporary directory | Contents and cleanup |
+| --- | --- | --- |
+| [terminal.py](../puppy/terminal.py) `cli_home` | `puppy-cli-<uid>/<engine>/` | An empty project of the CLI's own, mode 0700, created on first use and kept between openings so the CLI's folder trust and resumable sessions carry over. Nothing Puppy owns is written there and it is outside backups; the host's temporary-file policy may clear it and the next opening makes it again. Only a directory this account owns is used - a symlink, a file or another account's directory in its place is refused, never replaced. |
+
+The remaining OS-temp allocations are separate build and test work:
 
 | Source | Prefixes under the selected OS temporary directory | Contents and cleanup |
 | --- | --- | --- |
@@ -41,10 +48,11 @@ The remaining **OS-temp allocations** are separate build and test work:
 | [backend_test.py](../tests/backend_test.py) | `opencode-usage-`, `puppy-normal-workspace-` | Synthetic usage database and ordinary-project deletion fixture; both removed in `finally`. |
 
 These are ten creation sites without an explicit directory: one build site and
-nine test sites. Python selects their temporary directory from `TMPDIR`,
-`TEMP`, `TMP`, or platform defaults (normally `/tmp` on Unix). Neither `run.sh`
-nor the supplied backend service template sets these variables. Moving managed
-workspaces does not relocate these separate allocations.
+nine test sites, plus the CLI scratch home above. Python selects their
+temporary directory from `TMPDIR`, `TEMP`, `TMP`, or platform defaults
+(normally `/tmp` on Unix). Neither `run.sh` nor the supplied backend service
+template sets these variables. Moving managed workspaces does not relocate
+these separate allocations.
 
 The shared [test root helper](../tests/scratch.py) uses
 `<checkout>/data/tests/`, with a six-hour stale-root sweep. The main backend

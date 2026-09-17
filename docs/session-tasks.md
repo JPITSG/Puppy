@@ -48,18 +48,18 @@ hidden on that device or the task is removed; hiding is remembered across reload
 and does not hide it on other devices. Reopen hidden tabs from the **Tasks**
 sheet, opened by the button at the right of the strip. Between that button and
 **+** stand the selected task's own two verbs, shown only while a task is
-selected, never for Main: the diff mark opens **Review changes** - the sheet the
+selected, never for Main: the eye opens **Review changes** - the sheet the
 task's menu row and the Tasks sheet open - and is greyed exactly when that menu
 row is, since a task still running, queued, starting or held has nothing to
 review yet; the bin removes the task through the same **Remove task** confirm
-as the task's menu and the sheet's **Remove**, and is shown only while the task
-can go - never while it is running, waiting for an approval or queued - so a
-task the node reports working again greys Review and takes the bin away. Both
+as the task's menu and the sheet's **Remove**, and is greyed while the task
+cannot go yet - while it is running, waiting for an approval or queued - so a
+task the node reports working again greys both verbs where they stand. Both
 name the task in their hover, and the bin, the strip's one destructive verb,
-turns red under the pointer like the menu's row. The sidebar lists the parent
-once; while Main is idle its activity slot reports working tasks or an approval
-waiting for input. Task links and search results open the corresponding inner
-conversation.
+turns red under the pointer like the menu's row; greyed, it takes no tone. The
+sidebar lists the parent once; while Main is idle its activity slot reports
+working tasks or an approval waiting for input. Task links and search results
+open the corresponding inner conversation.
 
 Drag task tabs to reorder them beside Main, using the workspace tabs' same drag
 card and sliding animation. Main stays first. Reordering keeps the selected
@@ -72,7 +72,7 @@ The **Tasks** sheet lists every task with its state, latest answer and the
 **Open**, **Review changes** and **Remove** actions, without scrolling Main's
 chat. Review stays visible but disabled while a task or its queue is working and
 becomes available as it finishes; a task's own menu offers the same review.
-Remove is disabled exactly while the strip's bin would be hidden for that task:
+Remove is disabled exactly while the strip's bin would be greyed for that task:
 a running or queued task must be stopped first.
 **Review changes** shows the changed files and a coloured diff; **Apply to Main**
 applies that task's delta to Main's working files. A review reads the task copy
