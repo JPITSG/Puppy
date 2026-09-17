@@ -108,9 +108,9 @@ workspace.openTask(2);
 assert.equal(binFace(), "live", "a finished task can go");
 assert.equal(reviewFace(), "live", "a finished task can be reviewed");
 assert.equal(bin.getAttribute("aria-label"), "Remove Card spacing", "named like the tab's close mark");
-assert.equal(bin.title, "Remove Card spacing", "the hover says which conversation goes");
+assert.equal(bin.title, undefined, "no tooltip: the name rides the accessible label alone");
 assert.equal(review.getAttribute("aria-label"), "Review Card spacing", "Review named the same way");
-assert.equal(review.title, "Review Card spacing");
+assert.equal(review.title, undefined, "Review carries none either");
 for (const [id, binExpected, reviewExpected, why] of [
   [3, "greyed", "greyed", "a running task must be stopped first, and has nothing to review yet"],
   [4, "greyed", "greyed", "a queued task is still working"],

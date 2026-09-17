@@ -14367,10 +14367,9 @@ class SessionWorkspaceView {
     this.removeButton.disabled = !removable;
     if (onTask) {
       const name = chosen.name || `Task ${chosen.id}`;
-      for (const [button, verb] of [[this.reviewButton, "Review"], [this.removeButton, "Remove"]]) {
+      // the name rides the accessible label alone: no tooltip, like the +
+      for (const [button, verb] of [[this.reviewButton, "Review"], [this.removeButton, "Remove"]])
         button.setAttribute("aria-label", `${verb} ${name}`);
-        button.title = `${verb} ${name}`;
-      }
     }
     this.strip.replaceChildren();
     const addTab = (sid, title, session, task = null) => {
