@@ -341,6 +341,11 @@ a{color:var(--acc2)}
 .sess-item.archived.backend-unavailable{opacity:.4}
 .sess-item.dragging{opacity:.28}
 #sess-groups.reordering .sess-item{will-change:transform}
+/* Every list a reorder drag scrolls (aimDragScroll in app.js: the session
+   list, the footer's backend box, a tab strip, the queue) while the drag
+   is over it. The drag moves the list itself, so the browser's scroll
+   anchoring must not move it back when the dragged row crosses the anchor. */
+.reorder-scroll{overflow-anchor:none}
 .engine-dot{width:var(--dot);height:var(--dot);border-radius:50%;flex-shrink:0;color:var(--txt3);background:currentColor}
 .engine-dot.claude{color:var(--claude)}
 .engine-dot.codex{color:var(--codex)}

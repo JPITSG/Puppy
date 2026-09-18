@@ -65,8 +65,11 @@ Drag task tabs to reorder them beside Main, using the workspace tabs' same drag
 card and sliding animation. Main stays first. Reordering keeps the selected
 conversation and saves the open-tab order in this browser across reloads;
 reopened hidden tasks join the end. Tasks stay within their own session strip
-and do not create workspace splits. Touch keeps the same horizontal swipe
-behavior as workspace tabs.
+and do not create workspace splits. Like the workspace tabs' strip, an
+overflowing task strip scrolls sideways while the dragged tab is held near
+either end or past it, over the strip's buttons, and a tab let go there lands
+at the end it reached. Touch keeps the same horizontal swipe behavior as
+workspace tabs.
 
 The **Tasks** sheet lists every task with its state, latest answer and the
 **Open**, **Review changes** and **Remove** actions, without scrolling Main's

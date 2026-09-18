@@ -23,10 +23,14 @@ class FakeEvent {
   stopPropagation() { this.propagationStopped = true; }
 }
 
+/* [name], [name="value"] and the app's own unquoted [name=value] */
+const ATTRIBUTE_RE = /\[([\w-]+)(?:=(?:"([^"]*)"|([^\]"]+)))?\]/g;
+
 function matchesCompound(node, compound) {
-  const attributes = [...compound.matchAll(/\[([\w-]+)(?:="([^"]*)")?\]/g)];
-  compound = compound.replace(/\[([\w-]+)(?:="([^"]*)")?\]/g, "");
-  for (const [, name, value] of attributes) {
+  const attributes = [...compound.matchAll(ATTRIBUTE_RE)];
+  compound = compound.replace(ATTRIBUTE_RE, "");
+  for (const [, name, quoted, bare] of attributes) {
+    const value = quoted !== undefined ? quoted : bare;
     if (!node.hasAttribute(name) || (value !== undefined && node.getAttribute(name) !== value)) return false;
   }
   const parts = /^([a-zA-Z][\w-]*|\*)?((?:[#.][\w-]+)*)$/.exec(compound);

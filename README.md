@@ -172,7 +172,12 @@ reading anywhere further up is never pulled away from it.
   transcript handoff for your next prompt.
 - **Pins, colors, archive, drag-and-drop.** Sessions carry a color, can be
   pinned to the top, archived out of the way, renamed, and reordered by
-  dragging. New session preselects a least-used color across the console's
+  dragging. Every list reordered by dragging - sessions, the footer's
+  backends, tabs and queued prompts - scrolls itself while the dragged item
+  is held near its edge, faster toward the edge, and keeps scrolling with
+  the item at the last visible slot while it is held past that edge over
+  the rest of the sidebar, tab bar or queue box; releasing it there still
+  lands it. New session preselects a least-used color across the console's
   known sessions on all backends, including archived sessions, breaking ties
   randomly; you can choose another color. The order belongs to the backend,
   so every console sees the same list. Session context menus stay within the screen and scroll when there
@@ -895,6 +900,7 @@ Node.js to run the JavaScript suites:
 ```sh
 node tests/sidebar_ui_test.js        # sidebar ordering, pins, reorders, filtering
 node tests/tab_drag_ui_test.js       # task discovery, saved visibility and tab dragging
+node tests/drag_scroll_ui_test.js    # the lists a reorder drag scrolls, and the drops past their ends
 node tests/menu_dismiss_ui_test.js   # menu dismissal, toggles and open dropdowns
 node tests/navigation_ui_test.js    # browser Back/Forward, dialogs and cancellation ownership
 node tests/composer_ui_test.js       # the shared prompt box and its "@" list

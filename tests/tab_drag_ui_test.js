@@ -6,7 +6,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const path = require("node:path");
-const { FakeDocument, fire } = require("./fake_dom.js");
+const { FakeDocument, FakeElement, fire } = require("./fake_dom.js");
 const source = fs.readFileSync(path.join(__dirname, "../puppy/static/app.js"), "utf8");
 function between(from, to) {
   const start = source.indexOf(from), end = source.indexOf(to, start);
@@ -23,7 +23,11 @@ function harness(bid = 0, namespace = "") {
   document.createElement = tag => {
     const node = createElement(tag);
     node.getBoundingClientRect = () => {
-      const index = node.parentNode ? node.parentNode.children.indexOf(node) : 0;
+      /* a strip wide enough for every tab unless a check narrows it */
+      if (node.classList.contains("tabs")) return { left: 0, top: 40, right: 10000, bottom: 70, width: 10000, height: 30 };
+      /* the drop marker is a hairline: it takes no slot of its own */
+      const index = node.parentNode ? node.parentNode.children
+        .filter(child => !child.classList.contains("tab-drop-marker")).indexOf(node) : 0;
       const left = index * 100 - ((node.parentNode && node.parentNode.scrollLeft) || 0);
       return { left, top: 40, right: left + 100, bottom: 70, width: 100, height: 30 };
     };
@@ -47,11 +51,12 @@ function harness(bid = 0, namespace = "") {
   const icon = () => document.createElement("svg");
   const context = vm.createContext({
   navigation: { layer: () => () => {} }, navigationRemember: () => {}, navigationChanged: () => {},
-    document, state, SessionView,
+    document, state, SessionView, Element: FakeElement,
     lsKey: key => namespace + key,
     localStorage: { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value) },
     window: { matchMedia: () => ({ matches: reduced }) },
     requestAnimationFrame: fn => frames.push(fn),
+    cancelAnimationFrame() {},
     sessionsFor: node => sessions.get(node) || [],
     findSessionMeta: (node, sid) => (sessions.get(node) || []).find(session => session.id === sid),
     tasksIcon: icon, plusIcon: icon, xIcon: icon, trashIcon: icon, reviewIcon: icon,
@@ -132,7 +137,7 @@ function harness(bid = 0, namespace = "") {
     while (frames.length) frames.shift()();
     return { data, event };
   }
-  return { document, storage, sessions, context, animations, workspace, toolbar, start, bid,
+  return { document, storage, sessions, context, animations, frames, workspace, toolbar, start, bid,
     setReduced: value => { reduced = value; }, saves: () => saves, revealed: () => revealed };
 }
 const order = strip => strip.children.map(tab => Number(tab.dataset.sid));
@@ -369,4 +374,60 @@ for (const change of ["remove", "open", "discover"]) {
   assert.equal(destination.pane.active, "outer-b");
   assert.equal(h.document.querySelector(".tab-drop-marker"), null);
 }
-console.log("PASS: task discovery across devices, explicit hiding, reloads, scope, shared tab dragging, live updates and touch");
+/* A strip scrolls sideways for a tab held at or past either end of it - the
+   bar past the strip is the surface, so the + and the burger count - with
+   the slot at the last tab shown, and a tab from another pane moves its
+   marker the same way. Six 100px tabs stand in a 100px strip here. */
+{
+  const h = harness(), view = h.workspace(1, [2, 3, 4, 5, 6]);
+  const strip = view.strip;
+  const narrow = node => {
+    node.clientWidth = 100;
+    node.getBoundingClientRect = () => ({ left: 0, top: 40, right: 100, bottom: 70, width: 100, height: 30 });
+  };
+  narrow(strip); strip.scrollWidth = 600;
+  const run = (from, count, step = 25) => {
+    for (let i = 0; i < count; i++) { const pending = h.frames.splice(0, h.frames.length); pending.forEach(fn => fn(from + i * step)); }
+  };
+  const near = (value, expected, what) => assert.ok(Math.abs(value - expected) < .01, `${what} (${value})`);
+  h.start(taskTab(view, 2));
+  over(view.bar, 50);
+  assert.equal(h.frames.length, 0, "the strip's middle moves nothing");
+  over(view.bar, 500);   // past the strip's end, over the buttons
+  assert.equal(h.frames.length, 1, "past the end, the strip scrolls on frames");
+  assert.deepEqual(order(strip), [1, 2, 3, 4, 5, 6], "the tab keeps the last slot shown");
+  run(1000, 1);
+  near(strip.scrollLeft, 9.6, "a nominal first frame");
+  run(1025, 40);
+  assert.equal(strip.scrollLeft, 500, "to the strip's end");
+  assert.deepEqual(order(strip), [1, 3, 4, 5, 6, 2], "where the tab is last, past every tab that scrolled under the pointer");
+  assert.equal(h.frames.length, 0, "and the loop ends");
+  over(view.bar, -200);   // past the burger
+  run(1600, 1);
+  near(strip.scrollLeft, 490.4, "back the other way");
+  run(1625, 40);
+  assert.equal(strip.scrollLeft, 0);
+  assert.deepEqual(order(strip), [1, 2, 3, 4, 5, 6], "Main stays first; the tab is first after it");
+  fire(taskTab(view, 2), "dragend");
+  assert.equal(h.context.currentDrag(), null);
+  assert.equal(strip.classList.contains("reorder-scroll"), false, "the end releases the strip");
+
+  const outer = h.toolbar("pane", ["outer-a", "outer-b", "outer-c", "outer-d", "outer-e"]);
+  narrow(outer.strip); outer.strip.scrollWidth = 500;
+  const other = h.toolbar("other", ["outer-f"]);
+  h.start(other.strip.children[0]);
+  over(outer.bar, 900);   // a tab from another pane, held past this strip's end
+  assert.equal(h.frames.length, 1, "scrolls this strip too");
+  assert.equal(outer.strip.children.indexOf(h.document.querySelector(".tab-drop-marker")), 1,
+    "its marker stands at the last slot shown");
+  run(2000, 30);
+  assert.equal(outer.strip.scrollLeft, 400);
+  assert.equal(outer.strip.children.indexOf(h.document.querySelector(".tab-drop-marker")), 5,
+    "and follows the tabs to the end");
+  drop(outer.bar);
+  assert.deepEqual([...outer.pane.tabs], ["outer-a", "outer-b", "outer-c", "outer-d", "outer-e", "outer-f"],
+    "let go there, the tab lands last");
+  assert.equal(h.context.currentDrag(), null);
+  assert.equal(outer.strip.classList.contains("reorder-scroll"), false);
+}
+console.log("PASS: task discovery across devices, explicit hiding, reloads, scope, shared tab dragging, live updates, touch and the strips scrolling for a held tab");

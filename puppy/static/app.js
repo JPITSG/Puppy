@@ -6926,6 +6926,124 @@ function acceptReorderDrag(event) {
   if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
 }
 
+/* A reorder drag scrolls the list it is in. The browser's own drag
+   autoscroll is not enough: Chromium moves a list only while the pointer
+   sits in a 20px belt inside its edge and not at all once it is past the
+   edge, and other browsers move nothing, so a row could not be dragged any
+   further than the box showed. Every reorder drag therefore aims this from
+   its surface's dragover: `surface` is where the drag is accepted (the
+   whole sidebar for its two lists, a tab bar for its strip, the queue box
+   for its rows), `scroller` the box that scrolls, `horizontal` the axis,
+   `active` whether the drag still stands and `follow(x, y)` the drag's own
+   slot placement for the last pointer position. Within DRAG_SCROLL_BAND of
+   the scroller's edge on that axis the list moves toward that edge - barely
+   at the band's inner side, DRAG_SCROLL_SPEED at the edge itself and the
+   same past it, over the rest of the surface - on animation frames, the
+   slot following the rows as they pass under a pointer that has not moved
+   (no dragover comes for a still pointer). A frame something else already
+   scrolled - the browser's own belt, a wheel - adds nothing, so the two
+   never double up. The document's dragover hook parks it while the pointer
+   is off the surface and every drag's end stops it. */
+const DRAG_SCROLL_BAND = 48;
+const DRAG_SCROLL_SPEED = 600;
+let dragScroll = null;
+
+/* Signed pixels per second toward the nearer edge, from where the pointer
+   stands against the scroller's box on the drag's axis; 0 outside the band.
+   The band is a third of a short box, so its middle third stays still. */
+function dragScrollVelocity(scroller, horizontal, x, y) {
+  const box = scroller.getBoundingClientRect();
+  const size = horizontal ? box.width : box.height;
+  const band = Math.min(DRAG_SCROLL_BAND, size / 3);
+  if (!(band > 0)) return 0;
+  const before = (horizontal ? x - box.left : y - box.top);
+  const after = (horizontal ? box.right - x : box.bottom - y);
+  const inward = Math.min(before, after);
+  if (inward >= band) return 0;
+  const depth = Math.min(1, (band - inward) / band);
+  return (before < after ? -1 : 1) * DRAG_SCROLL_SPEED * depth * depth;
+}
+
+function dragScrollFrame(now) {
+  const scroll = dragScroll;
+  if (!scroll) return;
+  scroll.frame = null;
+  const box = scroll.scroller;
+  if (!scroll.active() || !box.isConnected || !scroll.velocity) return;
+  const key = scroll.horizontal ? "scrollLeft" : "scrollTop";
+  const limit = Math.max(0, scroll.horizontal ?
+    box.scrollWidth - box.clientWidth : box.scrollHeight - box.clientHeight);
+  const at = typeof now === "number" ? now : Date.now();
+  const elapsed = scroll.at === null ? 16 : Math.max(0, Math.min(50, at - scroll.at));
+  scroll.at = at;
+  const current = box[key];
+  if (scroll.last === null || Math.abs(current - scroll.last) < 1) {
+    /* ours to move: the wanted position keeps the fraction a browser that
+       rounds scroll positions would otherwise lose every frame */
+    const wanted = (scroll.wanted === null ? current : scroll.wanted) +
+      scroll.velocity * elapsed / 1000;
+    /* the last half pixel is the end itself */
+    scroll.wanted = wanted <= .5 ? 0 : wanted >= limit - .5 ? limit : wanted;
+    box[key] = scroll.wanted;
+  } else scroll.wanted = null;   // something else moved it: that frame is its
+  scroll.last = box[key];
+  scroll.follow(scroll.x, scroll.y);
+  const ended = scroll.velocity < 0 ? scroll.last <= 0 : scroll.last >= limit - .5;
+  if (!ended) scroll.frame = requestAnimationFrame(dragScrollFrame);
+}
+
+function aimDragScroll(event, spec) {
+  if (!spec.scroller) return;
+  if (!dragScroll || dragScroll.scroller !== spec.scroller || dragScroll.surface !== spec.surface) {
+    stopDragScroll();
+    dragScroll = { ...spec, x: 0, y: 0, velocity: 0, frame: null, at: null, last: null, wanted: null };
+    spec.scroller.classList.add("reorder-scroll");
+  }
+  const scroll = dragScroll;
+  scroll.active = spec.active;
+  scroll.follow = spec.follow;
+  scroll.x = event.clientX;
+  scroll.y = event.clientY;
+  scroll.velocity = dragScrollVelocity(scroll.scroller, scroll.horizontal, scroll.x, scroll.y);
+  if (scroll.velocity && scroll.frame === null) {
+    scroll.at = null;
+    scroll.last = null;
+    scroll.wanted = null;
+    scroll.frame = requestAnimationFrame(dragScrollFrame);
+  }
+}
+
+/* The coordinate a slot is placed at: the pointer's, held within the
+   scroller's box on the drag's axis, so a pointer past the edge takes the
+   edge's own slot - the last row shown, never one scrolled out of sight -
+   while the list brings more rows to it. */
+function dragSlotCoordinate(scroller, horizontal, coordinate) {
+  if (!scroller) return coordinate;
+  const box = scroller.getBoundingClientRect();
+  return Math.max(horizontal ? box.left : box.top,
+    Math.min(horizontal ? box.right : box.bottom, coordinate));
+}
+
+/* The pointer is off the surface: the list holds where it is until the
+   pointer comes back, and the drag keeps its target. */
+function parkDragScroll() {
+  if (dragScroll) dragScroll.velocity = 0;
+}
+
+function stopDragScroll() {
+  const scroll = dragScroll;
+  if (!scroll) return;
+  dragScroll = null;
+  if (scroll.frame !== null) cancelAnimationFrame(scroll.frame);
+  scroll.scroller.classList.remove("reorder-scroll");
+}
+
+document.addEventListener("dragover", event => {
+  if (!dragScroll) return;
+  const target = event.target instanceof Element ? event.target : null;
+  if (!target || !dragScroll.surface.contains(target)) parkDragScroll();
+}, true);
+
 /* Sticky manual ordering remains scoped to one backend and one pin cohort.
    Hidden archived/search-filtered rows retain their durable slots while the
    visible rows move around them. */
@@ -6935,6 +7053,7 @@ function cancelSessionDrag(item = null) {
   if (!dragSess || (item && dragSess.item !== item)) return;
   const context = dragSess;
   dragSess = null;
+  stopDragScroll();
   restoreDragSlots(context, ".sess-item");
   if (context.item) context.item.classList.remove("dragging");
   if (context.container) context.container.classList.remove("reordering");
@@ -6979,30 +7098,42 @@ function wireSessionDrag(item, bid, sid) {
 }
 
 function wireSessionDropZone(root) {
-  /* The flat panel is one shared drop surface, wired once because the element
-     outlives its rows. Sticky manual ordering stays scoped to one backend:
-     the drag's own bid selects which rows it may slide between, so every
-     other backend's rows simply flow around the moving slot. dragenter
-     matters when live reflow puts a different element beneath a stationary
-     pointer before the next dragover event arrives. */
-  if (root.dataset.sessionReorderWired === "1") return;
-  root.dataset.sessionReorderWired = "1";
+  /* The whole sidebar is the one drop surface for its rows, wired once
+     because it outlives them: a row pushed past the list's end - onto the
+     search box, the footer or the New session button - keeps the end slot
+     while the list scrolls to it (aimDragScroll), and released there still
+     lands, where a drop the list itself could not see would have thrown the
+     reorder away. Sticky manual ordering stays scoped to one backend: the
+     drag's own bid selects which rows it may slide between, so every other
+     backend's rows simply flow around the moving slot. dragenter matters
+     when live reflow puts a different element beneath a stationary pointer
+     before the next dragover event arrives. */
+  const surface = root.closest(".side") || root;
+  if (surface.dataset.sessionReorderWired === "1") return;
+  surface.dataset.sessionReorderWired = "1";
   const mine = () => !!dragSess && dragSess.container === root;
   const rowSelector = () => `.sess-item[data-bid="${dragSess.bid}"]` +
     (dragSess.pinning ? `[data-pinned="${dragSess.pinned}"]` : "");
-  root.addEventListener("dragenter", (e) => {
+  const place = y => {
+    if (mine()) moveDragSlot(root, dragSess.item, rowSelector(),
+      dragSlotCoordinate(root.parentElement, false, y), false);
+  };
+  surface.addEventListener("dragenter", (e) => {
     if (mine()) acceptReorderDrag(e);
   });
-  root.addEventListener("dragover", (e) => {
+  surface.addEventListener("dragover", (e) => {
     if (!mine()) return;
     acceptReorderDrag(e);
-    moveDragSlot(root, dragSess.item, rowSelector(), e.clientY, false);
+    aimDragScroll(e, { surface, scroller: root.parentElement, horizontal: false,
+      active: mine, follow: (x, y) => place(y) });
+    place(e.clientY);
   });
-  root.addEventListener("drop", async (e) => {
+  surface.addEventListener("drop", async (e) => {
     if (!mine()) return;
     acceptReorderDrag(e);
     const context = dragSess;
     dragSess = null;
+    stopDragScroll();
     context.item.classList.remove("dragging");
     root.classList.remove("reordering");
 
@@ -7483,6 +7614,7 @@ function cancelNodeDrag(item = null) {
   if (!dragNode || (item && dragNode.item !== item)) return;
   const context = dragNode;
   dragNode = null;
+  stopDragScroll();
   restoreDragSlots(context, context.selector);
   if (context.item) context.item.classList.remove("dragging");
   if (context.container) context.container.classList.remove("reordering");
@@ -7521,22 +7653,33 @@ function wireNodeGroupDrag(group, head, key, selector = ".foot-engine-group") {
 }
 
 function wireNodeGroupDropZone(root) {
-  if (root.dataset.reorderWired === "1") return;   // the panel outlives its rows
-  root.dataset.reorderWired = "1";
-  const mine = () => dragNode && dragNode.container === root;
-  root.addEventListener("dragenter", (event) => {
+  /* The sidebar is the surface here too: the box is a few groups tall and
+     scrolls, and a group pushed past its edge keeps the end slot while the
+     box scrolls to it (aimDragScroll) and lands wherever it is let go. */
+  const surface = root.closest(".side") || root;
+  if (surface.dataset.reorderWired === "1") return;   // the panel outlives its rows
+  surface.dataset.reorderWired = "1";
+  const mine = () => !!dragNode && dragNode.container === root;
+  const place = y => {
+    if (mine()) moveDragSlot(root, dragNode.item, dragNode.selector,
+      dragSlotCoordinate(root, false, y), false);
+  };
+  surface.addEventListener("dragenter", (event) => {
     if (mine()) acceptReorderDrag(event);
   });
-  root.addEventListener("dragover", (event) => {
+  surface.addEventListener("dragover", (event) => {
     if (!mine()) return;
     acceptReorderDrag(event);
-    moveDragSlot(root, dragNode.item, dragNode.selector, event.clientY, false);
+    aimDragScroll(event, { surface, scroller: root, horizontal: false,
+      active: mine, follow: (x, y) => place(y) });
+    place(event.clientY);
   });
-  root.addEventListener("drop", (event) => {
+  surface.addEventListener("drop", (event) => {
     if (!mine()) return;
     acceptReorderDrag(event);
     const context = dragNode;
     dragNode = null;
+    stopDragScroll();
     context.item.classList.remove("dragging");
     root.classList.remove("reordering");
     const keys = reorderChildren(root, context.selector)
@@ -9132,6 +9275,7 @@ function makeTabDragImage(tab) {
 }
 
 function cleanupTabDrag(context = dragTab) {
+  stopDragScroll();
   if (tabDropMarker) { tabDropMarker.remove(); tabDropMarker = null; }
   document.querySelectorAll(".split-preview.on").forEach(node =>
     node.classList.remove("on", "left", "right", "top", "bottom"));
@@ -9507,7 +9651,25 @@ function dropTabOnToolbar(pane, tabsRoot, event, taskWorkspace = null) {
 }
 
 function wireTabbar(tabbar, tabsRoot, pane, taskWorkspace = null) {
-  const accepts = () => dragTab && (dragTab.taskWorkspace || null) === taskWorkspace;
+  const accepts = () => !!dragTab && (dragTab.taskWorkspace || null) === taskWorkspace;
+  /* the slot, or the marker of a tab coming from another pane, at x */
+  const place = at => {
+    if (!accepts()) return;
+    const x = dragSlotCoordinate(tabsRoot, true, at);
+    cleanupSplitPreview();
+    if (taskWorkspace) {
+      moveDragSlot(tabsRoot, dragTab.item, ".tab[data-task-id]", x, true);
+      return;
+    }
+    const source = workspacePane(dragTab.sourcePaneId);
+    if (source && source.id === pane.id) {
+      if (tabDropMarker) { tabDropMarker.remove(); tabDropMarker = null; }
+      moveDragSlot(tabsRoot, dragTab.item, ".tab", x, true);
+    } else {
+      const index = tabInsertionIndex(tabsRoot, x);
+      showTabDropMarker(tabsRoot, index);
+    }
+  };
   tabbar.addEventListener("dragenter", event => {
     if (!accepts()) return;
     acceptReorderDrag(event);
@@ -9516,19 +9678,12 @@ function wireTabbar(tabbar, tabsRoot, pane, taskWorkspace = null) {
     if (!accepts()) return;
     acceptReorderDrag(event);
     event.stopPropagation();
-    cleanupSplitPreview();
-    if (taskWorkspace) {
-      moveDragSlot(tabsRoot, dragTab.item, ".tab[data-task-id]", event.clientX, true);
-      return;
-    }
-    const source = workspacePane(dragTab.sourcePaneId);
-    if (source && source.id === pane.id) {
-      if (tabDropMarker) { tabDropMarker.remove(); tabDropMarker = null; }
-      moveDragSlot(tabsRoot, dragTab.item, ".tab", event.clientX, true);
-    } else {
-      const index = tabInsertionIndex(tabsRoot, event.clientX);
-      showTabDropMarker(tabsRoot, index);
-    }
+    /* the whole bar - burger, strip and the buttons past it - is the
+       surface; the strip under it scrolls sideways for a tab held at or
+       past either end */
+    aimDragScroll(event, { surface: tabbar, scroller: tabsRoot, horizontal: true,
+      active: accepts, follow: place });
+    place(event.clientX);
   });
   tabbar.addEventListener("drop", event => dropTabOnToolbar(pane, tabsRoot, event, taskWorkspace));
 }
@@ -17604,27 +17759,45 @@ class SessionView {
     row.addEventListener("dragend", () => this.cancelQueueDrag(row, true));
   }
 
-  wireQueueDropZone(container) {
-    const mine = () => this.queueDrag && this.queueDrag.dragging &&
-      this.queueDrag.container === container;
-    container.addEventListener("dragenter", event => {
+  wireQueueDropZone(list) {
+    /* The strip's box is the surface, wired once for every list painted
+       into it: expanded, the box scrolls, and a row pushed past the rows
+       - onto the head or Show fewer - keeps the end slot while the box
+       scrolls to it (aimDragScroll) and lands where it is let go. The list
+       a drag is in is the drag's own, never this paint's. */
+    const surface = this.queueEl || list;
+    if (surface.dataset.queueReorderWired === "1") return;
+    surface.dataset.queueReorderWired = "1";
+    const mine = () => !!this.queueDrag && this.queueDrag.dragging &&
+      surface.contains(this.queueDrag.container);
+    const place = y => {
+      if (!mine()) return;
+      const container = this.queueDrag.container;
+      moveDragSlot(container, this.queueDrag.item, ".q-live",
+        dragSlotCoordinate(surface, false, y), false);
+    };
+    surface.addEventListener("dragenter", event => {
       if (mine()) acceptReorderDrag(event);
     });
-    container.addEventListener("dragover", event => {
+    surface.addEventListener("dragover", event => {
       if (!mine()) return;
       acceptReorderDrag(event);
-      moveDragSlot(container, this.queueDrag.item, ".q-live", event.clientY, false);
+      aimDragScroll(event, { surface, scroller: surface, horizontal: false,
+        active: mine, follow: (x, y) => place(y) });
+      place(event.clientY);
     });
-    container.addEventListener("drop", event => {
+    surface.addEventListener("drop", event => {
       if (!mine()) return;
       acceptReorderDrag(event);
       const context = this.queueDrag;
+      const container = context.container;
       const visibleOrder = reorderChildren(container, ".q-live")
         .map(node => Number(node.dataset.queueIndex));
       const visible = new Set(visibleOrder);
       const order = visibleOrder.concat(
         this.queued.map((_, index) => index).filter(index => !visible.has(index)));
       this.queueDrag = null;
+      stopDragScroll();
       this.cleanupQueuePointer(context);
       context.item.classList.remove("dragging");
       container.classList.remove("reordering");
@@ -17651,6 +17824,7 @@ class SessionView {
     const context = this.queueDrag;
     if (!context || (item && context.item !== item)) return;
     this.queueDrag = null;
+    stopDragScroll();
     this.cleanupQueuePointer(context);
     if (context.dragging)
       restoreDragSlots(context, ".q-live");

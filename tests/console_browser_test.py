@@ -1267,6 +1267,169 @@ async def task_strip_verbs_checks(instance):
     print("PASS: the task strip's Review and bin stand between Tasks and + for the selected task only, both greyed while it works with the bin keeping its place and taking no tone, glyphs centred on the strip's box, the bin red under the pointer, real clicks opening the review sheet and the named Remove task confirm, Cancel keeping everything", flush=True)
 
 
+async def drag_scroll_checks(instance):
+    """A reorder drag scrolls its list, in real Chromium through the drag
+    the browser itself starts: a session row held past the list's end, over
+    the footer, scrolls the list to its end with the row riding the last
+    slot shown and lands last when let go there; held past the top, over
+    the New session button, it scrolls back and lands first; held inside
+    the list's bottom band, the list moves and the slot follows the rows
+    under the still pointer, and a cancelled drag puts the rows back; and
+    a tab held past the strip's end, over the + button, scrolls the strip
+    to its end and lands last."""
+    original = db._session_order_lists(db.connect())
+    extras = [db.create_session("Drag row %02d" % i, "claude", "/home/mira/projects/harbor",
+                                "", "", "", "default") for i in range(30)]
+    runner.broadcast_sessions()
+    intercepted = []
+    original_on_message = instance._on_message
+
+    def on_message(message):
+        if message.get("method") == "Input.dragIntercepted":
+            intercepted.append(message.get("params") or {})
+        return original_on_message(message)
+
+    instance._on_message = on_message
+    list_top = "document.querySelector('.side-scroll').scrollTop"
+    list_end = "(document.querySelector('.side-scroll').scrollHeight - document.querySelector('.side-scroll').clientHeight)"
+    rows = "[...document.querySelectorAll('#sess-groups .sess-item')]"
+    dragged_at = rows + ".findIndex(node => node.classList.contains('dragging'))"
+    marked = "document.querySelector('.side-scroll').classList.contains('reorder-scroll')"
+    unpinned = lambda: db._session_order_lists(db.connect())[1]
+
+    async def mouse(kind, x, y, **extra):
+        await instance.call("Input.dispatchMouseEvent", {"type": kind, "x": x, "y": y, **extra},
+                            session=instance.page_session)
+
+    async def lift(selector):
+        """Press on the element and move until the browser starts its drag."""
+        await until(instance, "!dragSess && !dragTab && sessionOrderPending.size === 0")   # the last reorder has landed
+        spot = await evaluate(instance, "(() => { const r = document.querySelector(%s).getBoundingClientRect();"
+                              " return {x: r.left + r.width / 2, y: r.top + r.height / 2}; })()" % json.dumps(selector))
+        intercepted.clear()
+        await mouse("mouseMoved", spot["x"], spot["y"])
+        await mouse("mousePressed", spot["x"], spot["y"], button="left", clickCount=1)
+        for step in range(1, 8):
+            await mouse("mouseMoved", spot["x"], spot["y"] + step * 6, button="left", buttons=1)
+            await asyncio.sleep(.04)
+        end = time.monotonic() + 5
+        while not intercepted and time.monotonic() < end:
+            await asyncio.sleep(.03)
+        assert intercepted, "the browser started a drag on " + selector
+        return spot, intercepted[0]["data"]
+
+    async def carry(data, x, y, kind="dragOver"):
+        """One drag event at the point; a move onto another element fires
+        only dragenter there, the next one at the same point its dragover,
+        as a real pointer's stream of moves would."""
+        for _ in range(2 if kind == "dragOver" else 1):
+            await instance.call("Input.dispatchDragEvent", {"type": kind, "x": x, "y": y, "data": data},
+                                session=instance.page_session)
+
+    async def hold_at(selector, data, spot, dy=0):
+        """Enter the drag at the lifted row, then hold it at the element."""
+        target = await evaluate(instance, "(() => { const r = document.querySelector(%s).getBoundingClientRect();"
+                                " return {x: r.left + r.width / 2, y: r.top + r.height / 2}; })()" % json.dumps(selector))
+        await carry(data, spot["x"], spot["y"] + 40, "dragEnter")
+        await carry(data, target["x"], target["y"] + dy)
+        return target
+
+    async def let_go(data, at):
+        await carry(data, at["x"], at["y"], "drop")
+        await mouse("mouseReleased", at["x"], at["y"], button="left", clickCount=1)
+
+    try:
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": 1100, "height": 520, "deviceScaleFactor": 1, "mobile": False},
+            session=instance.page_session)
+        await until(instance, rows + ".length >= 35 && " + list_end + " > 600")
+        await evaluate(instance, "document.querySelector('.side-scroll').scrollTop = 0; true")
+        await instance.call("Input.setInterceptDrags", {"enabled": True}, session=instance.page_session)
+
+        # past the end: the list scrolls to its end, the row riding the last slot shown
+        spot, data = await lift("[data-session-key='0:2']")
+        foot = await hold_at(".foot-row", data, spot)
+        await until(instance, "!!document.querySelector('.sess-item.dragging') && " + marked)
+        await asyncio.sleep(.3)
+        early = await evaluate(instance, "({top: %s, slot: %s})" % (list_top, dragged_at))
+        assert 0 < early["top"] < 600, early
+        assert 1 < early["slot"] < 34, early
+        await until(instance, list_top + " >= " + list_end + " - 1")
+        assert await evaluate(instance, dragged_at + " === 34"), "the row is last once the list has scrolled to its end"
+        assert await evaluate(instance, "document.querySelector('.foot-row').closest('.side').dataset.sessionReorderWired === '1'")
+        await let_go(data, foot)
+        await until(instance, "!document.querySelector('.sess-item.dragging') && !" + marked)
+        end = time.monotonic() + 10
+        while unpinned()[-1] != 2 and time.monotonic() < end:
+            await asyncio.sleep(.05)
+        assert unpinned()[-1] == 2, unpinned()
+        await until(instance, rows + ".pop().dataset.sessionKey === '0:2'")
+        assert await evaluate(instance, list_top + " >= " + list_end + " - 1"), "the list stays where the drag left it"
+
+        # past the top: back up, and first
+        spot, data = await lift("[data-session-key='0:2']")
+        head = await hold_at("#btn-new-session", data, spot)
+        await until(instance, list_top + " <= 0")
+        assert await evaluate(instance, dragged_at + " === 0")
+        await let_go(data, head)
+        await until(instance, "!document.querySelector('.sess-item.dragging')")
+        end = time.monotonic() + 10
+        while unpinned()[0] != 2 and time.monotonic() < end:
+            await asyncio.sleep(.05)
+        assert unpinned()[0] == 2, unpinned()
+        await until(instance, rows + "[0].dataset.sessionKey === '0:2'")
+
+        # inside the bottom band: the list moves and the slot follows the still pointer
+        spot, data = await lift("[data-session-key='0:2']")
+        band = await hold_at(".side-scroll", data, spot)
+        box = await evaluate(instance, "document.querySelector('.side-scroll').getBoundingClientRect().bottom")
+        await carry(data, band["x"], box - 12)
+        await until(instance, list_top + " > 40")
+        slot = await evaluate(instance, dragged_at)
+        assert slot > 0, slot
+        await asyncio.sleep(.4)
+        later = await evaluate(instance, "({top: %s, slot: %s})" % (list_top, dragged_at))
+        assert later["slot"] > slot, (slot, later)
+        await carry(data, band["x"], box - 12, "dragCancel")
+        await mouse("mouseReleased", band["x"], box - 12, button="left", clickCount=1)
+        await until(instance, "!document.querySelector('.sess-item.dragging') && !" + marked + " && " +
+                    rows + "[0].dataset.sessionKey === '0:2'")
+        assert unpinned()[0] == 2, "a cancelled drag changes nothing"
+
+        # a tab held past the strip's end, over the + button
+        await evaluate(instance, "for (const s of state.sessions.filter(s => s.name.startsWith('Drag row')).slice(0, 8))"
+                       " openSessionTab(0, s.id, s); true")
+        strip = "document.querySelector('.workspace-pane .tabbar > .tab-scroll > .tabs')"
+        await until(instance, strip + ".scrollWidth > " + strip + ".clientWidth + 200")
+        await evaluate(instance, strip + ".scrollLeft = 0; true")
+        first = await evaluate(instance, strip + ".querySelector('.tab').dataset.tabId")
+        spot, data = await lift(".workspace-pane .tabbar > .tab-scroll > .tabs > .tab")
+        plus = await hold_at(".workspace-pane .tabbar .tab-add-wrap .icon-btn", data, spot)
+        await until(instance, "!!document.querySelector('.tab.dragging') && " + strip + ".classList.contains('reorder-scroll')")
+        await until(instance, strip + ".scrollLeft >= " + strip + ".scrollWidth - " + strip + ".clientWidth - 1")
+        assert await evaluate(instance, "[..." + strip + ".querySelectorAll('.tab')].pop().classList.contains('dragging')"), \
+            "the tab is last once the strip has scrolled to its end"
+        await let_go(data, plus)
+        await until(instance, "!document.querySelector('.tab.dragging') && !" + strip + ".classList.contains('reorder-scroll')")
+        assert await evaluate(instance, "workspacePaneForTab(%s).tabs.slice(-1)[0] === %s" % (json.dumps(first), json.dumps(first))), \
+            "let go over +, the tab lands last"
+    finally:
+        instance._on_message = original_on_message
+        await instance.call("Input.setInterceptDrags", {"enabled": False}, session=instance.page_session)
+        await evaluate(instance, "for (const t of [...state.tabs]) if (t.type === 'session' && t.sid > 7) closeTab(t.id, false);"
+                       " activateTab('s:0:1'); window.demoView = state.views['s:0:1'].activeView(); true")
+        for sid in extras:
+            db.delete_session(sid)
+        pinned, current = db._session_order_lists(db.connect())
+        db.reorder_sessions(original[0] + original[1], pinned + current, pinned)
+        runner.broadcast_sessions()
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False},
+            session=instance.page_session)
+        await until(instance, rows + ".length === 5 && demoView.draftReady")
+    print("PASS: a held session row scrolls the list past either end and lands there, the slot follows the "
+          "rows under a still pointer, a cancelled drag puts them back, and a held tab scrolls its strip", flush=True)
+
 async def session_mention_checks(instance):
     await evaluate(instance, "demoView.composer.set('', true); demoView.composer.ta.focus(); true")
     await type_text(instance, "@Session-P")
@@ -2950,6 +3113,7 @@ async def checks(a, b, hub, capture=False):
     await pane_resize_checks(a)
     await reading_place_checks(a)
     await task_strip_verbs_checks(a)
+    await drag_scroll_checks(a)
     await narrow_composer_checks(a, capture)
     await composer_enter_checks(a, capture)
     await attachment_steering_checks(a, hub)
