@@ -176,11 +176,14 @@ Object.assign(context, {
   syncSessionBrowserChips() {}, state: {tabs: []},
 });
 vm.runInContext([
+  between("function effectiveQueuedConfig(", "/* One workspace tab owns Main"),
   "class HeaderView {",
   between("  handle(d) {", "  /* A browser this session launched"),
   between("  syncBrowserChips() {", "  syncWorkspaceChip() {"),
   between("  updateRunState() {", "  setSteeringState(value) {"),
   between("  setReconnecting(value) {", "  setStatus(text) {"),
+  /* session_meta asks whether the queue strip reads the session */
+  between("  /* Whether a row on the strip reads", "  queueRow("),
   "} globalThis.HeaderView = HeaderView;",
 ].join("\n"), context);
 function header(sid = 1, bid = 0) {

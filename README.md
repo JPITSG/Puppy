@@ -149,8 +149,12 @@ reading anywhere further up is never pulled away from it.
   and reasoning efforts (plus **Fast mode** where the catalog offers a Fast
   tier), OpenCode every provider model that installation knows. Change any of
   them mid-conversation; while work is pending the change waits its turn in
-  the queue and applies in order. Claude's saved aliases and full model IDs,
-  including `[1m]` context selectors, use the matching catalog name and effort
+  the queue and applies in order, its row naming both sides of every field
+  (*Effort Max → Medium*) against what is in force where it stands - the
+  session's settings plus every change queued ahead of it, or the whole
+  queue for a held row, which re-sends to the queue's end. Claude's saved
+  aliases and full model IDs, including `[1m]` context selectors, use the
+  matching catalog name and effort
   choices without rewriting the saved request: every spelling the CLI has
   shown for a model stays that model's alias across catalog refreshes, a
   running turn's picker adds to the list rather than replacing it, and a

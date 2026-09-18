@@ -13878,6 +13878,13 @@ function effectiveQueuedConfig(session, queued) {
   return out;
 }
 
+/* Whether two session rows differ in what a queued change reads from. */
+function sessionConfigMoved(a, b) {
+  const x = effectiveQueuedConfig(a, []), y = effectiveQueuedConfig(b, []);
+  return ["engine", "model", "effort", "permission_mode", "fast_mode"]
+    .some(key => x[key] !== y[key]);
+}
+
 /* One workspace tab owns Main and its task conversations. Leaf SessionViews
    retain their existing sockets, drafts, queues, approvals and controls. */
 function liveViews() {
@@ -16118,13 +16125,21 @@ class SessionView {
         noteSessionActivity(this.tab.bid, this.tab.sid, continued, null, null,
           queueWaiting ? "" : d.completion_status);
         break;
-      case "session_meta":
-        if (this.session && this.session.engine !== d.session.engine)
+      case "session_meta": {
+        const before = this.session;
+        if (before && before.engine !== d.session.engine)
           this.setBackgroundTasks(null);
         this.session = d.session;
+        /* a pending change reads from the session's settings, so a change
+           landing on the row without a queue broadcast (a switch applied at
+           once, a change applied to an idle session) repaints what the
+           rows still waiting - held ones - change from */
+        if (this.queueReadsConfig() && sessionConfigMoved(before, d.session))
+          this.renderQueue(this.queued, this.held, this.pausedQueue, this.queueRevision);
         this.updateHead();
         syncSessionBrowserChips();
         break;
+      }
       case "rate_limit": {
         const engine = engineInfo(this.tab.bid, d.engine);
         if (d.info && d.info.status && d.info.status !== "allowed")
@@ -17542,39 +17557,69 @@ class SessionView {
 
   /* A queue entry is a prompt string, or a pending change: an engine switch
      ({kind:"engine"}), or a configuration change tagged with the engine whose
-     catalog validated it. */
-  describeQueuedConfig(item) {
+     catalog validated it. Every field names both sides, "Effort Max →
+     Medium": `from` is the configuration in force where the row stands (the
+     session's own plus every change queued ahead of it - `queueBaseline`),
+     read with that engine's catalog, and the row's own values are what it
+     makes of them. An empty value is the engine's default on either side. */
+  describeQueuedConfig(item, from) {
+    if (item.kind === "tool") return sessionToolLabel(item.tool);
+    const base = from || effectiveQueuedConfig(this.session, []);
+    const was = engineInfo(this.tab.bid, base.engine);
     const eng = engineInfo(this.tab.bid, item.engine);
     const parts = [];
-    if (item.kind === "tool") return sessionToolLabel(item.tool);
+    const change = (label, before, after) =>
+      parts.push(`${label} ${before || "default"} → ${after || "default"}`);
+    const fast = value => value === "on" || value === true ? "on" : "off";
     if (item.kind === "engine") {
-      parts.push("Engine → " + ((eng && eng.label) || item.engine || "?"));
-      if (item.model) parts.push("Model → " + (modelShorthand(eng, item.model) || item.model));
-      if (item.effort) parts.push("Effort → " + (effortShorthand(eng, item.effort) || item.effort));
-      const permission = item.permission_mode;
-      if (permission)
-        parts.push("Permission → " + permissionShorthand(eng, permission));
-      if ((eng && eng.supports_fast_mode === true) || item.fast_mode === "on")
-        parts.push("Fast → " + (item.fast_mode === "on" ? "on" : "off"));
+      const name = (info, key) => (info && info.label) || key || "?";
+      parts.push(`Engine ${name(was, base.engine)} → ${name(eng, item.engine)}`);
+      /* the switch replaces every setting with the row's, so a named model
+         the target's default takes over from is a change like any other */
+      if (item.model || base.model)
+        change("Model", modelShorthand(was, base.model), modelShorthand(eng, item.model));
+      if (item.effort || base.effort)
+        change("Effort", effortShorthand(was, base.effort), effortShorthand(eng, item.effort));
+      if (item.permission_mode || base.permission_mode)
+        change("Permission", permissionShorthand(was, base.permission_mode),
+          permissionShorthand(eng, item.permission_mode));
+      if ((eng && eng.supports_fast_mode === true) || item.fast_mode === "on" || base.fast_mode)
+        parts.push(`Fast ${fast(base.fast_mode)} → ${fast(item.fast_mode)}`);
       return parts.join(" · ");
     }
-    if ("model" in item) parts.push("Model → " + (modelShorthand(eng, item.model) || "default"));
-    if ("effort" in item) parts.push("Effort → " + (effortShorthand(eng, item.effort) || "default"));
+    if ("model" in item)
+      change("Model", modelShorthand(was, base.model), modelShorthand(eng, item.model));
+    if ("effort" in item)
+      change("Effort", effortShorthand(was, base.effort), effortShorthand(eng, item.effort));
     if ("permission_mode" in item)
-      parts.push("Permission → " + permissionShorthand(eng, item.permission_mode));
+      change("Permission", permissionShorthand(was, base.permission_mode),
+        permissionShorthand(eng, item.permission_mode));
     if ("fast_mode" in item)
-      parts.push("Fast → " + (item.fast_mode === "on" ? "on" : "off"));
+      parts.push(`Fast ${fast(base.fast_mode)} → ${fast(item.fast_mode)}`);
     return parts.join(" · ") || "Setting change";
   }
 
-  queueRow(item, marker, held, paused = false) {
+  /* What is in force just ahead of queue position `index`: the session's
+     configuration plus the rows before it, in their visible order. A held
+     row re-sends to the queue's end, so its baseline is the whole queue's. */
+  queueBaseline(index) {
+    return effectiveQueuedConfig(this.session, (this.queued || []).slice(0, index));
+  }
+
+  /* Whether a row on the strip reads its from side from the session */
+  queueReadsConfig() {
+    return [...(this.queued || []), ...(this.held || [])].some(item =>
+      item && typeof item === "object" && item.kind !== "tool");
+  }
+
+  queueRow(item, marker, held, paused = false, from = null) {
     const cfg = !!(item && typeof item === "object");
     const ident = cfg ? item.key || "" : item;
     const row = el("div", "q-item" + (cfg ? " q-cfg" : "") +
       (held ? " q-held" : "") + (paused ? " q-paused" : ""));
     row.appendChild(el("span", "q-n" + (held ? " q-bang" : ""), marker));
     let text;
-    if (cfg) text = this.describeQueuedConfig(item);
+    if (cfg) text = this.describeQueuedConfig(item, from);
     else {
       /* one compact line, so attachments are counted rather than spelled out */
       const parsed = splitAttachmentMarkers(item);
@@ -17623,7 +17668,8 @@ class SessionView {
        the part that needs a decision. Never capped - each is waiting on the
        user, and hiding one behind "+N more" is how it gets forgotten. */
     held.forEach((item, i) => {
-      const { row, ident, cfg } = this.queueRow(item, "!", true);
+      const { row, ident, cfg } = this.queueRow(item, "!", true, false,
+        this.queueBaseline(q.length));
       const resend = el("button", "q-resend");
       resend.type = "button";
       resend.appendChild(refreshIcon(12));
@@ -17648,7 +17694,8 @@ class SessionView {
     this.wireQueueDropZone(live);
     shown.forEach((item, i) => {
       const isPaused = pausedSet.has(i);
-      const { row, ident, cfg } = this.queueRow(item, String(i + 1), false, isPaused);
+      const { row, ident, cfg } = this.queueRow(item, String(i + 1), false, isPaused,
+        this.queueBaseline(i));
       row.classList.add("q-live");
       row.dataset.queueIndex = String(i);
       if (!cfg && backendSupportsQueueEdit(this.tab.bid)) {
