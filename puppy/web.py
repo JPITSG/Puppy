@@ -1707,11 +1707,13 @@ async def ws_session(request: web.Request):
                     await _session_write_error(ws, data, message)
                 continue
             if t == "approval_response":
+                answers = data.get("answers")
                 await h.approval_response(
                     data.get("request_id", ""),
                     "allow" if data.get("behavior") == "allow" else "deny",
                     message=data.get("message", ""),
-                    updated_permissions=data.get("updated_permissions"))
+                    updated_permissions=data.get("updated_permissions"),
+                    answers=answers if isinstance(answers, dict) else None)
             elif t == "message":
                 text = data.get("text", "")
                 supplied_draft = data.get("draft")

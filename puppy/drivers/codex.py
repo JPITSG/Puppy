@@ -1526,7 +1526,7 @@ class CodexDriver(Driver):
         }}
 
     def approval_payload(self, request_id, behavior, original_input, message="",
-                         updated_permissions=None, request=None):
+                         updated_permissions=None, request=None, answers=None):
         return self._approval_decision(
             request or {"request_id": request_id}, behavior,
             updated_permissions=updated_permissions, message=message)

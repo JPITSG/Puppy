@@ -35,7 +35,7 @@ There is no build step, no npm, no daemon besides Puppy itself: Python 3.9+,
   the story from a transcript handoff.
 - **Talk to the agent while it works.** Steer a running turn, ask it a side
   question it answers without derailing its work, queue the next prompts, approve
-  or deny tool calls, all from the same box.
+  or deny tool calls and answer the questions it asks you, all from the same box.
 - **Tasks in parallel.** Spin off tasks that work in isolated Git clones of your
   project, review their diffs, and apply the winners to your working tree.
 - **A fleet, not a box.** Pair other machines as backends, run sessions there,
@@ -257,6 +257,18 @@ you can:
   allow-and-switch-mode. Cards stay visible until the backend confirms the
   response; their controls are disabled while reconnecting or awaiting
   confirmation.
+- **Answer its questions** – when Claude Code asks you something with its
+  AskUserQuestion tool, the same card becomes a form: each question with its
+  header, its options as radios (or checkboxes for a multi-select) with their
+  descriptions and previews, an *Other* box under every one for your own
+  words, and a text or number field for its open-ended kinds. *Answer* sends
+  what you filled in - the engine reads it back as its own answers, so the
+  model sees "Your questions have been answered: …" - and *Skip* leaves the
+  questions unanswered in the engine's own words. The transcript's tool card
+  shows the questions as asked and marks what was chosen once the result
+  arrives. Answers ride the existing approval reply, so a console attaching
+  mid-question sees the same form, and a request the console cannot read
+  stays an ordinary permission card.
 - **Stop** – interrupt the turn; the engine gets an orderly shutdown and the
   answer so far is kept.
 

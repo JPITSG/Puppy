@@ -924,7 +924,7 @@ class OpenCodeDriver(Driver):
         return next(iter(available.values()), "once" if allow else "reject")
 
     def approval_payload(self, request_id, behavior, original_input, message="",
-                         updated_permissions=None, request=None):
+                         updated_permissions=None, request=None, answers=None):
         request = request or {}
         always = any(isinstance(item, dict) and item.get("type") == "allowAlways"
                      for item in updated_permissions or [])

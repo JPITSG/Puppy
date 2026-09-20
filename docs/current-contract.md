@@ -111,6 +111,18 @@ This cleanup preserves transaction rollback, interrupted-operation recovery,
 offline retry, historical transcript rendering, and external engine/Chromium
 capability handling. Those remain part of normal operation.
 
+A question the engine asks the person is the ordinary approval with two
+additive fields: the claude driver marks an `AskUserQuestion` permission
+request `kind: "question"` and carries `questions` (the rows `puppy/questions.py`
+read from the tool's input, each with its `index`, `key` - the engine's own
+question text - `question`, `header`, `description`, `kind`, `multi` and
+`options`) and `question_title`; `approval_request` and the attach snapshot's
+`pending_approval` carry them alike. The console's `approval_response` may
+add `answers`, a map from row index to a label, a list of labels or the
+person's text; the driver keys it by question text into the allow's
+`updatedInput.answers`, an empty map is a deliberate skip, and a reply
+without one is the plain allow. No persisted shape or capability changes.
+
 Scratch promotion is additive `workspace-move`: both execution runtimes serve
 `POST /api/sessions/{sid}/workspace/move` with exactly `{destination: string}`
 and return `{ok: true, session}`. See the [backend contract](../backend/README.md).

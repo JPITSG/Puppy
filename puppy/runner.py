@@ -2560,10 +2560,16 @@ class SessionHub:
                     pass
 
     async def approval_response(self, request_id: str, behavior: str,
-                                message: str = "", updated_permissions=None) -> None:
+                                message: str = "", updated_permissions=None,
+                                answers=None) -> None:
+        """Answer the pending approval. ``answers`` is the person's reply to
+        a ``kind: "question"`` request, by row index; the driver turns it
+        into the engine's own shape (an allow without one is "no answer")."""
         pending = self.pending_approval
         if not pending or pending.get("request_id") != request_id:
             return
+        if not isinstance(answers, dict):
+            answers = None
         self.pending_approval = None
         if session_tasks.record(self.id):
             broadcast_sessions()
@@ -2574,7 +2580,8 @@ class SessionHub:
                                               message=self._unscrub_value(message),
                                               updated_permissions=self._unscrub_value(
                                                   updated_permissions),
-                                              request=pending)
+                                              request=pending,
+                                              answers=self._unscrub_value(answers))
             await self._write_stdin(payload)
         except Exception as e:
             log.error("approval write failed for session %s: %s", self.id, e)

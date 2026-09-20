@@ -13535,6 +13535,7 @@ function displayValue(value, limit = 12000) {
 function toolIconNode(tool) {
   if (TOOL_ICON_DRAWERS[tool]) return TOOL_ICON_DRAWERS[tool]();
   const name = String(tool || "").toLowerCase();
+  if (isQuestionTool(tool) || /question/.test(name)) return askActionIcon(12);
   if (/(web|search|browse|fetch|url)/.test(name)) return globeIcon(12);
   if (/(read|view|image)/.test(name)) return attachmentFileIcon(12);
   if (/(write|edit|patch|change|file)/.test(name)) return queueEditIcon(12);
@@ -13560,6 +13561,8 @@ function toolLabel(tool) {
 function toolSummary(tool, input) {
   if (input == null) return "";
   if (typeof input !== "object") return displayValue(input, 120);
+  const asked = questionRows(tool, input);
+  if (asked) return displayValue(asked.rows.map(row => row.question).join(" · "), 120).replace(/\s+/g, " ");
   for (const key of ["command", "file_path", "path", "pattern", "query", "url"])
     if (input[key]) return displayValue(input[key], 120).replace(/\s+/g, " ");
   if (Array.isArray(input.queries))
@@ -13651,6 +13654,8 @@ function fillToolResultInto(card, d) {
   if (card._backgroundTaskUpdate)
     backgroundTaskStateInto(card, card._backgroundTaskUpdate.data);
   const body = card.querySelector(".tool-body");
+  if (card._questions && !d.is_error)
+    questionMarkChosen(card._questions.list, card._questions.rows, d.content);
   body.appendChild(el("div", "tb-label", d.is_error ? "error" : "result"));
   body.appendChild(linkifyInto(el("pre"), displayValue(d.content) || "(Empty)"));
 }
@@ -13674,6 +13679,297 @@ function attachBackgroundTaskUpdate(card, update) {
   }
 }
 
+/* ================= questions the engine asks =================
+   Claude Code's AskUserQuestion reaches the console as an approval the node
+   marked `kind: "question"`, carrying the rows `puppy/questions.py` read
+   from the tool's input; the transcript's tool card sees the same call as
+   the engine's raw input. `questionRows` reads both - the node's rows or the
+   engine's own shape - into one list and is kept in lockstep with that
+   module, so a renamed key, a string option or an unknown kind draws rather
+   than breaks. The answer travels back as `answers` on the ordinary approval
+   reply, by row index; the node keys it by the question's own text, which
+   is what the CLI matches on. */
+const QUESTION_TOOL_NAMES = new Set(["askuserquestion", "askuserquestions", "askuser",
+  "askquestion", "askquestions", "userquestion", "userquestions", "question", "questions"]);
+const QUESTION_KINDS = {
+  choice: "choice", choices: "choice", select: "choice", single: "choice", multi: "choice",
+  multiselect: "choice", text: "text", string: "text", freeform: "text", input: "text",
+  textarea: "text", open: "text", number: "number", numeric: "number", integer: "number",
+  int: "number", float: "number",
+};
+const QUESTION_LIMIT = 12, QUESTION_OPTION_LIMIT = 24;
+const QUESTION_TEXT_KEYS = ["key", "question", "text", "prompt", "title", "label"];
+const QUESTION_OPTION_KEYS = ["options", "choices", "answers", "items"];
+const QUESTION_MULTI_KEYS = ["multi", "multiSelect", "multi_select", "multiselect", "multiple",
+  "allowMultiple", "allow_multiple"];
+const QUESTION_OTHER = "Other";
+
+function questionToolName(name) {
+  let text = String(name || "");
+  if (text.includes("__")) text = text.slice(text.lastIndexOf("__") + 2);
+  return text.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+function isQuestionTool(name) { return QUESTION_TOOL_NAMES.has(questionToolName(name)); }
+function questionText(value, limit) {
+  if (typeof value === "string") return value.trim().slice(0, limit);
+  return typeof value === "number" && Number.isFinite(value) ? String(value) : "";
+}
+function questionFirst(row, keys, limit) {
+  for (const key of keys) {
+    const text = questionText(row[key], limit);
+    if (text) return text;
+  }
+  return "";
+}
+function questionOptions(row) {
+  const raw = QUESTION_OPTION_KEYS.map(key => row[key]).find(Array.isArray);
+  if (!raw) return [];
+  const rows = [], seen = new Set();
+  for (const entry of raw) {
+    if (rows.length >= QUESTION_OPTION_LIMIT) break;
+    let label, description = "", preview = "";
+    if (entry && typeof entry === "object") {
+      label = questionFirst(entry, ["label", "value", "title", "text", "name"], 400);
+      description = questionFirst(entry, ["description", "help", "hint", "detail"], 4000);
+      preview = questionText(entry.preview, 20000);
+    } else label = questionText(entry, 400);
+    if (!label || seen.has(label)) continue;
+    seen.add(label);
+    rows.push({ label, description, preview });
+  }
+  return rows;
+}
+function questionRow(entry, index) {
+  if (typeof entry === "string") entry = { question: entry };
+  if (!entry || typeof entry !== "object") return null;
+  const key = QUESTION_TEXT_KEYS.map(name => entry[name]).find(v => typeof v === "string" && v.trim());
+  if (!key) return null;
+  const options = questionOptions(entry);
+  let kind = QUESTION_KINDS[questionToolName(
+    questionFirst(entry, ["kind", "type", "input_type", "inputType"], 40))] || "";
+  if (!kind) kind = options.length ? "choice" : "text";
+  if (kind === "choice" && !options.length) kind = "text";
+  const multi = kind === "choice" && QUESTION_MULTI_KEYS.some(name =>
+    entry[name] === true || ["true", "1", "yes"].includes(String(entry[name] ?? "").toLowerCase()));
+  const row = {
+    index, key, question: questionText(key, 4000),
+    header: ["header", "short", "chip", "tag", "title", "label"].map(name =>
+      entry[name] !== key ? questionText(entry[name], 400) : "").find(Boolean) || "",
+    description: questionFirst(entry, ["description", "help", "hint", "detail"], 4000),
+    kind, multi, options: kind === "choice" ? options : [],
+    placeholder: questionText(entry.placeholder, 400),
+  };
+  if (kind === "number") {
+    for (const [name, keys] of [["min", ["min", "minimum"]], ["max", ["max", "maximum"]],
+                                ["step", ["step"]], ["default", ["defaultValue", "default_value", "default"]]])
+      for (const source of keys) {
+        const value = entry[source];
+        const number = typeof value === "number" ? value :
+          typeof value === "string" && value.trim() !== "" ? Number(value) : NaN;
+        if (Number.isFinite(number)) { row[name] = number; break; }
+      }
+    row.unit = questionText(entry.unit, 400);
+  }
+  return row;
+}
+/* The rows a call asks and its optional title, or null when the input is
+   not a question at all. A `questions` list is one whatever the tool is
+   called; the other spellings are read only under the tool's own name. */
+function questionRows(tool, input) {
+  if (!input || typeof input !== "object") return null;
+  let raw = null;
+  if (Array.isArray(input.questions)) raw = input.questions;
+  else if (input.questions && typeof input.questions === "object") raw = [input.questions];
+  else if (isQuestionTool(tool)) {
+    for (const key of ["prompts", "items"]) if (Array.isArray(input[key])) { raw = input[key]; break; }
+    if (!raw) {
+      const single = input.question;
+      if (single && typeof single === "object") raw = [single];
+      else if (typeof single === "string" && single.trim()) raw = [input];
+      else if (QUESTION_OPTION_KEYS.some(key => Array.isArray(input[key]))) raw = [input];
+    }
+  }
+  if (!raw) return null;
+  const rows = [];
+  for (const entry of raw.slice(0, QUESTION_LIMIT)) {
+    const row = questionRow(entry, rows.length);
+    if (row) rows.push(row);
+  }
+  return rows.length ? { rows, title: questionText(input.title, 4000) } : null;
+}
+function questionRowsOfRequest(req) {
+  return req && req.kind === "question" ?
+    questionRows(req.tool_name, { questions: req.questions, title: req.question_title }) : null;
+}
+function questionHeadInto(item, row) {
+  const head = el("div", "aq-head");
+  if (row.header) head.appendChild(el("span", "aq-header", row.header));
+  head.appendChild(el("span", "aq-q", row.question));
+  item.appendChild(head);
+  if (row.description) item.appendChild(el("div", "aq-desc", row.description));
+}
+function questionPreviewNode(text) {
+  const box = el("div", "aq-preview");
+  const body = el("div", "md");
+  body.innerHTML = md(text || "");
+  decorateMarkdownLinks(body);
+  box.appendChild(body);
+  return box;
+}
+function questionOptionText(option) {
+  const text = el("span", "aq-opt-text");
+  text.appendChild(el("span", "aq-opt-label", option.label));
+  if (option.description) text.appendChild(el("span", "aq-opt-desc", option.description));
+  return text;
+}
+function questionRangeHint(row) {
+  const parts = [];
+  if (row.min !== undefined && row.max !== undefined) parts.push(`${row.min} – ${row.max}`);
+  else if (row.min !== undefined) parts.push(`at least ${row.min}`);
+  else if (row.max !== undefined) parts.push(`at most ${row.max}`);
+  if (row.unit) parts.push(row.unit);
+  return parts.join(" ");
+}
+/* The card's form: every row's own inputs, and `read()` collecting what was
+   answered by row index - a label, a list of labels, or the person's words
+   through the Other box, which is always there because the CLI promises it. */
+function questionFormNode(rows, title) {
+  const list = el("div", "aq-list");
+  if (title) list.appendChild(el("div", "aq-title", title));
+  const readers = rows.map((row, i) => {
+    const item = el("div", "aq-item");
+    questionHeadInto(item, row);
+    let read;
+    if (row.kind === "choice") {
+      const box = el("div", "aq-options");
+      const type = row.multi ? "checkbox" : "radio";
+      const name = `aq-${i}`;
+      const picks = row.options.map(option => {
+        const label = el("label", "check aq-opt");
+        const input = el("input");
+        input.type = type; input.name = name; input.value = option.label;
+        label.appendChild(input);
+        label.appendChild(questionOptionText(option));
+        box.appendChild(label);
+        if (option.preview) box.appendChild(questionPreviewNode(option.preview));
+        return { input, label: option.label };
+      });
+      const other = el("label", "check aq-opt aq-other");
+      const toggle = el("input");
+      toggle.type = type; toggle.name = name; toggle.value = "";
+      toggle.setAttribute("aria-label", QUESTION_OTHER);
+      const text = el("input", "aq-other-input");
+      text.type = "text"; text.placeholder = `${QUESTION_OTHER}…`;
+      text.setAttribute("spellcheck", "false"); text.setAttribute("autocorrect", "off");
+      text.oninput = () => { if (text.value.trim()) toggle.checked = true; };
+      other.appendChild(toggle); other.appendChild(text);
+      box.appendChild(other);
+      item.appendChild(box);
+      read = () => {
+        const words = toggle.checked ? text.value.trim() : "";
+        if (row.multi) {
+          const labels = picks.filter(pick => pick.input.checked).map(pick => pick.label);
+          if (words) labels.push(words);
+          return labels.length ? labels : undefined;
+        }
+        const pick = picks.find(pick => pick.input.checked);
+        return pick ? pick.label : words || undefined;
+      };
+    } else {
+      const field = el("input", row.kind === "number" ? "aq-number" : "aq-text");
+      field.type = row.kind === "number" ? "number" : "text";
+      field.placeholder = row.placeholder || (row.kind === "number" ? "" : "Your answer");
+      field.setAttribute("spellcheck", "false"); field.setAttribute("autocorrect", "off");
+      const line = el("div", "aq-field");
+      line.appendChild(field);
+      if (row.kind === "number") {
+        for (const name of ["min", "max", "step"]) if (row[name] !== undefined) field.setAttribute(name, String(row[name]));
+        if (row.default !== undefined) field.value = String(row.default);
+        const hint = questionRangeHint(row);
+        if (hint) line.appendChild(el("span", "aq-unit", hint));
+      }
+      item.appendChild(line);
+      read = () => field.value.trim() || undefined;
+    }
+    list.appendChild(item);
+    return read;
+  });
+  const read = () => {
+    const answers = {};
+    let count = 0;
+    readers.forEach((get, i) => {
+      const value = get();
+      if (value !== undefined) { answers[String(rows[i].index)] = value; count++; }
+    });
+    return { answers, count };
+  };
+  return { node: list, read };
+}
+/* The transcript's reading of the same call: the questions and their
+   options, with what was chosen marked once the result names it. */
+function questionListNode(rows, title) {
+  const list = el("div", "aq-list");
+  if (title) list.appendChild(el("div", "aq-title", title));
+  for (const row of rows) {
+    const item = el("div", "aq-item");
+    item.dataset.index = String(row.index);
+    questionHeadInto(item, row);
+    if (row.kind === "choice") {
+      const box = el("div", "aq-options");
+      for (const option of row.options) {
+        const line = el("div", "aq-opt");
+        line.dataset.label = option.label;
+        line.appendChild(questionOptionText(option));
+        box.appendChild(line);
+        if (option.preview) box.appendChild(questionPreviewNode(option.preview));
+      }
+      item.appendChild(box);
+    } else if (row.kind === "number") {
+      const hint = questionRangeHint(row);
+      if (hint) item.appendChild(el("div", "aq-hint", `a number · ${hint}`));
+    }
+    list.appendChild(item);
+  }
+  return list;
+}
+/* The CLI's result names each answer as "<question>"="<answer>", the labels
+   of a multi-select joined ", ". Read them back to mark the chosen options
+   and show the person's own words; anything unreadable marks nothing. */
+function questionAnswerIn(content, key) {
+  const lead = `"${key}"="`;
+  const at = content.indexOf(lead);
+  if (at < 0) return null;
+  const start = at + lead.length;
+  for (let quote = content.indexOf('"', start); quote >= 0; quote = content.indexOf('"', quote + 1)) {
+    const after = content.slice(quote + 1, quote + 4);
+    if (after === "" || after.startsWith(', "') || after.startsWith(". ") || after.startsWith(".\n") || after === ".")
+      return content.slice(start, quote);
+  }
+  return null;
+}
+function questionMarkChosen(list, rows, content) {
+  if (typeof content !== "string" || !content) return;
+  for (const row of rows) {
+    const value = questionAnswerIn(content, row.key);
+    if (!value) continue;
+    const item = list.querySelector(`.aq-item[data-index="${row.index}"]`);
+    if (!item) continue;
+    let matched = false;
+    for (const line of item.querySelectorAll(".aq-opt")) {
+      const label = line.dataset.label;
+      const picked = value === label || (row.multi && (value.split(", ").includes(label) ||
+        value.includes(JSON.stringify(label))));
+      if (picked) { line.classList.add("chosen"); matched = true; }
+    }
+    if (!matched && value !== "(no option selected)") {
+      const answer = el("div", "aq-answer");
+      answer.appendChild(el("span", "aq-answer-label", "Answer"));
+      answer.appendChild(el("span", "aq-answer-text", value));
+      item.appendChild(answer);
+    }
+  }
+}
+
 function toolCardNode(data, completed = false) {
   const d = data || {};
   const n = el("div", "tool-card" + (d.is_error ? " err" : ""));
@@ -13690,7 +13986,12 @@ function toolCardNode(data, completed = false) {
   toolStateInto(stateEl, completed, d.is_error);
   head.appendChild(stateEl);
   const body = el("div", "tool-body");
-  if (d.input !== undefined) {
+  const asked = questionRows(d.tool, d.input);
+  if (asked) {
+    /* the questions as asked, readable; the result marks what was chosen */
+    body.appendChild(el("div", "tb-label", asked.rows.length > 1 ? "questions" : "question"));
+    n._questions = { rows: asked.rows, list: body.appendChild(questionListNode(asked.rows, asked.title)) };
+  } else if (d.input !== undefined) {
     body.appendChild(el("div", "tb-label", "input"));
     body.appendChild(linkifyInto(el("pre"), displayValue(d.input)));
   }
@@ -15194,6 +15495,7 @@ class SessionView {
     this.askPending = null;
     this.approvalRequest = null;
     this.approvalPending = false;
+    this.questionForm = null;
     this.controlRequests = new Map(); // active-turn socket handoffs awaiting correlated replies
     /* Question cards awaiting their answer, by request id - the answer is its
        own event and folds into the card it belongs to, exactly as a tool
@@ -17486,11 +17788,17 @@ class SessionView {
     this.approvalEl.querySelectorAll(".ap-btns button").forEach(button => {
       button.disabled = disabled;
     });
+    /* Answer waits for an answer; Skip is always a choice */
+    const answer = this.questionForm && this.approvalEl.querySelector(".aq-answer-btn");
+    if (answer) answer.disabled = disabled || !this.questionForm.read().count;
   }
   showApproval(req) {
+    const asked = questionRowsOfRequest(req);
+    if (asked) return this.showQuestion(req, asked);
     this.approvalRequest = req;
     this.approvalPending = false;
-    this.approvalEl.classList.remove("hidden");
+    this.questionForm = null;
+    this.approvalEl.classList.remove("hidden", "question");
     this.approvalEl.innerHTML = "";
     this.approvalEl.appendChild(el("div", "ap-title", `⚠ Approval: ${req.display_name || req.tool_name}` +
       (req.description ? ` · ${req.description}` : "")));
@@ -17527,14 +17835,55 @@ class SessionView {
     this.updateApprovalControl();
     this.scrollBottom(true);
   }
+  /* A question the engine asks the person, on the approval card's surface
+     with a form in place of the command: every row's options as radios or
+     checkboxes (an Other box under them, always), a text box or a number
+     field for the extended kinds. Answer sends what was filled in by row;
+     Skip answers nothing, which the CLI tells the model in its own words. */
+  showQuestion(req, asked) {
+    this.approvalRequest = req;
+    this.approvalPending = false;
+    this.approvalEl.classList.remove("hidden");
+    this.approvalEl.classList.add("question");
+    this.approvalEl.innerHTML = "";
+    const title = el("div", "ap-title");
+    title.appendChild(askActionIcon(14));
+    title.appendChild(el("span", "ap-title-text",
+      asked.title ? `Question · ${asked.title}` : asked.rows.length > 1 ? "Questions" : "Question"));
+    this.approvalEl.appendChild(title);
+    const form = el("form", "aq-form");
+    form.setAttribute("novalidate", "");
+    this.questionForm = questionFormNode(asked.rows, "");
+    form.appendChild(this.questionForm.node);
+    const btns = el("div", "ap-btns");
+    const skip = el("button", "btn btn-sm", "Skip");
+    skip.type = "button";
+    skip.onclick = () => this.respondApproval(req, "allow", undefined, {});
+    btns.appendChild(skip);
+    const answer = el("button", "btn btn-ok btn-sm aq-answer-btn", "Answer");
+    answer.type = "submit";
+    btns.appendChild(answer);
+    form.onsubmit = event => {
+      event.preventDefault();
+      const read = this.questionForm ? this.questionForm.read() : { count: 0 };
+      if (read.count) this.respondApproval(req, "allow", undefined, read.answers);
+    };
+    form.oninput = form.onchange = () => this.updateApprovalControl();
+    form.appendChild(btns);
+    this.approvalEl.appendChild(form);
+    this.updateApprovalControl();
+    this.scrollBottom(true);
+  }
   hideApproval() {
     this.approvalRequest = null;
     this.approvalPending = false;
+    this.questionForm = null;
     this.approvalEl.removeAttribute("aria-busy");
     this.approvalEl.classList.add("hidden");
+    this.approvalEl.classList.remove("question");
     this.approvalEl.innerHTML = "";
   }
-  respondApproval(req, behavior, updated_permissions) {
+  respondApproval(req, behavior, updated_permissions, answers) {
     if (!this.approvalRequest || this.approvalRequest.request_id !== req.request_id ||
         this.approvalPending) return;
     if (this.approvalBlocked()) {
@@ -17545,6 +17894,7 @@ class SessionView {
       this.ws.send(JSON.stringify({
         type: "approval_response", request_id: req.request_id,
         behavior, updated_permissions: updated_permissions || undefined,
+        answers: answers || undefined,
       }));
       /* send() queues bytes locally. Only approval_resolved (or the next
          attach snapshot) proves the backend handled this request. */

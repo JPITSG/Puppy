@@ -920,8 +920,14 @@ class Driver:
 
     def approval_payload(self, request_id: str, behavior: str, original_input: dict,
                          message: str = "", updated_permissions=None,
-                         request=None) -> dict:
-        """stdin JSON answering an approval request (stdin-stream engines)."""
+                         request=None, answers=None) -> dict:
+        """stdin JSON answering an approval request (stdin-stream engines).
+
+        ``answers`` is the person's reply to a request the driver marked
+        ``kind: "question"`` (see puppy.questions): a map from the row index
+        to the chosen label, labels or text. Drivers that never ask one
+        ignore it.
+        """
         raise NotImplementedError
 
     def cancel_approval_payload(self, request: dict):

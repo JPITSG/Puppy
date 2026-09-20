@@ -95,6 +95,7 @@ vm.runInContext([
   between("function applyNodeStateSnapshot(", "function applyRemoteStreamState("),
   between("function syncRemoteStateViews()", "function remoteStoppingMessage("),
   between("const SESSION_TOOLS =", "function sessionToolLabel("),
+  between("/* ================= questions the engine asks", "function toolCardNode("),
   between("class SessionView {", "/* ================= TermView"),
   between("class TermView {", "/* ================= SettingsView"),
   between("class SearchView {", "/* ================= modals"),

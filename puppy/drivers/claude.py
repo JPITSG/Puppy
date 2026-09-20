@@ -9,6 +9,14 @@ Spawns the official `claude` binary per turn in headless stream-json mode:
 Interactive permission prompts arrive as control_request/can_use_tool on stdout
 and are answered with control_response on stdin (verified against claude 2.1.219).
 
+The AskUserQuestion tool rides that same channel (verified against claude
+2.1.278): its can_use_tool carries the questions as the tool input, and the
+allow's updatedInput carries the person's answers back, keyed by each
+question's own text - which is all the CLI matches on. puppy.questions reads
+the input into the rows the console draws and builds that map; a request it
+cannot read stays an ordinary approval, and an allow without answers is the
+CLI's own "The user did not answer the questions."
+
 Side questions ("/btw") are a client-originated control_request, verified
 against claude 2.1.258: request {subtype:"side_question", question, history?}
 answered by exactly one control_response {response, synthetic, refusal_fallback?}
@@ -42,7 +50,7 @@ import logging
 import os
 import re
 
-from puppy import quota
+from puppy import questions, quota
 from puppy.drivers import base as driver_base
 from puppy.drivers.base import Driver, ToolUnavailable, stringify_content
 from puppy.user_paths import service_home
@@ -666,9 +674,14 @@ class ClaudeDriver(Driver):
                                      if row.get("id") != task_id])
 
     def approval_payload(self, request_id, behavior, original_input, message="",
-                         updated_permissions=None, request=None):
+                         updated_permissions=None, request=None, answers=None):
         if behavior == "allow":
             resp = {"behavior": "allow", "updatedInput": original_input or {}}
+            if answers is not None and isinstance(request, dict) and \
+                    request.get("kind") == "question":
+                # the person's answers, keyed the way the CLI reads them
+                resp["updatedInput"] = questions.reply_input(
+                    original_input, request.get("questions"), answers)
             if updated_permissions:
                 resp["updatedPermissions"] = updated_permissions
         else:
@@ -973,7 +986,7 @@ class ClaudeDriver(Driver):
         if t == "control_request":
             req = ev.get("request") or {}
             if req.get("subtype") == "can_use_tool":
-                return [{"a": "approval", "req": {
+                approval = {
                     "request_id": ev.get("request_id", ""),
                     "tool_name": req.get("tool_name", "?"),
                     "display_name": req.get("display_name") or req.get("tool_name", "?"),
@@ -981,7 +994,14 @@ class ClaudeDriver(Driver):
                     "description": req.get("description", ""),
                     "suggestions": req.get("permission_suggestions") or [],
                     "tool_use_id": req.get("tool_use_id", ""),
-                }}]
+                }
+                # a question to the person, drawn as a form rather than a
+                # permission card; anything unreadable stays an approval
+                asked = questions.questions_from(approval["tool_name"], approval["input"])
+                if asked is not None:
+                    approval["kind"] = "question"
+                    approval["questions"], approval["question_title"] = asked
+                return [{"a": "approval", "req": approval}]
             return []
 
         if t == "control_cancel_request":
