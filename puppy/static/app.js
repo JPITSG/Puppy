@@ -1358,17 +1358,17 @@ function parseClockSetting(value) {
 function clockSettingExample() {
   return state.clockFormat === "12h" ? "3:30 AM" : "03:30";
 }
-/* One stamp for "when": the clock alone today, the day and clock this year,
-   the year as well beyond it - the shortest form that still places a search
-   hit, a sync, an apply or a request in time. Only the live transcript's
-   result rows use the bare clock (fmtTime): they are always today. */
+/* One stamp for "when": the day and the clock, with the year as well beyond
+   this year - one shape whatever the day, so a list of search hits, syncs,
+   applies, requests or commits reads evenly down its column (a bare clock
+   for today's would set them apart from yesterday's). Only the live
+   transcript's result rows use the bare clock (fmtTime): they are always
+   today. */
 function fmtStamp(ts) {
   const d = new Date(Number(ts) * 1000);
   if (Number.isNaN(d.getTime())) return "";
-  const now = new Date();
-  if (d.toDateString() === now.toDateString()) return fmtTime(ts);
   const opts = { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" };
-  if (d.getFullYear() !== now.getFullYear()) opts.year = "numeric";
+  if (d.getFullYear() !== new Date().getFullYear()) opts.year = "numeric";
   return fmtDateTime(ts, opts);
 }
 function fmtTokens(n) {

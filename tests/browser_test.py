@@ -6005,8 +6005,10 @@ console.log(JSON.stringify(result));
         "midnight": "12:05 AM", "morning": "3:30 AM",
         "afternoon": "3:30 PM", "am": "00:05", "pm": "12:05",
         "dotted": "15:30", "reject12": "", "example12": "3:30 AM",
-        "stamps24h": [["h23", False, False], ["h23", True, False], ["h23", True, True]],
-        "stamps12h": [["h12", False, False], ["h12", True, False], ["h12", True, True]],
+        # today carries its day like any other, so a column of stamps reads
+        # evenly; only another year adds the year
+        "stamps24h": [["h23", True, False], ["h23", True, False], ["h23", True, True]],
+        "stamps12h": [["h12", True, False], ["h12", True, False], ["h12", True, True]],
         "invalidStamp": "",
     }
     assert 'time.type = "time"' not in ui_source
