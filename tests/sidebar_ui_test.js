@@ -401,7 +401,7 @@ assert.equal(bare.document.querySelectorAll(".si-git").length, 0);
   };
   const sessions = [];
   let dialog = null, reopen = null, replies = [], requests = [], renders = 0, dialogs = [];
-  let actionsOffered = true, logOffered = false, confirmAnswer = true, confirms = [], toasts = [];
+  let actionsOffered = true, logOffered = false, confirmAnswer = true, confirms = [], toasts = [], stampOptions = null;
   const modal = (html, className = "", again = null) => {
     const m = document.createElement("div");
     m.className = "modal" + (className ? " " + className : "");
@@ -430,6 +430,7 @@ assert.equal(bare.document.querySelectorAll(".si-git").length, 0);
     toast: (text, tone) => { toasts.push([text, tone]); },
     backendConnectionAllowed: () => true, sessionLocationLabel: s => `…/${s.cwd.split("/").pop()}`,
     fmtStamp: at => `at ${at}`, navigationSessionDialog: (bid, sid, open) => open(bid, { id: sid, cwd: "/p", git: null }),
+    fmtDateTime: (at, options) => { stampOptions = JSON.parse(JSON.stringify(options)); return `on ${at}`; },
   });
   vm.runInContext([
     between("function sessionGitWork(", "/* The row itself is a button"),
@@ -789,8 +790,13 @@ assert.equal(bare.document.querySelectorAll(".si-git").length, 0);
     assert.equal(logCaption(), "History · 250");
     const rows = logRows();
     assert.equal(rows.length, 100);
-    assert.equal(rows[0], "h0 Entry 250"); assert.equal(rows[99], "h99 Entry 151");
-    assert.equal(dialog.m.querySelector(".session-git-log .sgl-line .sgl-hash").textContent, "h0", "the hash in the help colour");
+    // each line: when the commit was made, its hash, its subject
+    assert.equal(rows[0], "on 0 h0 Entry 250"); assert.equal(rows[99], "on 99 h99 Entry 151");
+    assert.deepEqual(stampOptions, { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" },
+      "the full date and time on every line, one width");
+    const firstLine = dialog.m.querySelector(".session-git-log .sgl-line");
+    assert.equal(firstLine.querySelector(".sgl-when").textContent, "on 0", "the stamp in the help colour");
+    assert.equal(firstLine.querySelector(".sgl-hash").textContent, "h0", "the hash in the help colour");
     assert.ok(dialog.m.querySelector(".session-git-log .sgl-log"), "the lines stand in one block");
     assert.equal(foot(), "Load 100 more");
     // a scroll short of the foot asks nothing; one at the foot asks for
@@ -813,7 +819,7 @@ assert.equal(bare.document.querySelectorAll(".si-git").length, 0);
     assert.equal(foot(), "Loading…");
     await settle();
     assert.equal(logRows().length, 200);
-    assert.equal(logRows()[100], "h100 Entry 150");
+    assert.equal(logRows()[100], "on 100 h100 Entry 150");
     assert.equal(foot(), "Load 50 more", "the foot counts what is left");
     // the last page by a press on Load more: no more after it
     replies = [hundred(200, 250)];
@@ -821,7 +827,7 @@ assert.equal(bare.document.querySelectorAll(".si-git").length, 0);
     assert.equal(requests[3][1], "sessions/3/git/log?skip=200&limit=100");
     await settle();
     assert.equal(logRows().length, 250);
-    assert.equal(logRows()[249], "h249 Entry 1");
+    assert.equal(logRows()[249], "on 249 h249 Entry 1");
     assert.equal(foot(), null, "nothing more: no foot");
     scrollTo(4000, 5000);
     assert.equal(requests.length, 4, "a scroll at the foot of a complete history asks nothing");

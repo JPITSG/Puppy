@@ -179,7 +179,10 @@ clean repository says `Nothing to commit` and `Nothing to push`; one without
 a remote, `No remote to push to`; what the bounds cut ends a list as `… and
 40 more paths`. **History**, on nodes advertising `session-git-log`, is the
 short log of everything on `HEAD`: its caption carries the total, each line
-is one commit's abbreviated hash (in the help colour) and subject and never
+is one commit's date and time (the full numeric date and clock in the
+viewer's locale on the server's 12/24-hour setting, one width on every line
+so the columns align), its abbreviated hash - both in the help colour - and
+its subject, and never
 wraps - the box scrolls sideways for a long subject - and it is read a page
 of 100 at a time through `GET /api/sessions/{sid}/git/log?skip=N&limit=100`
 (`{"ok": true, "total", "skip", "commits": [{"hash", "subject", "author",

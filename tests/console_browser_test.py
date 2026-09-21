@@ -12,6 +12,7 @@ import base64
 import json
 import math
 import os
+import re
 from pathlib import Path
 import shlex
 import shutil
@@ -84,9 +85,12 @@ DEMO_GIT_DETAIL = {"/home/mira/projects/" + folder: dict(detail) for folder, det
 
 # The short log behind the sheet's History, per project: the garden's runs
 # to 250 commits so the list pages, and its newest subject is long enough
-# to overflow the box sideways.
+# to overflow the box sideways. The commits stand an hour apart down from
+# a fixed moment (2026-09-14 08:30 UTC), so the lane can say what each
+# line's stamp must read in the browser's own locale.
 DEMO_GIT_LOG = {"/home/mira/projects/harbor": 3, "/home/mira/projects/garden": 250,
                 "/home/mira/projects/atlas": 12}
+DEMO_GIT_LOG_AT = 1789374600
 DEMO_GIT_LONG_SUBJECT = ("Shade map for the north beds, with the irrigation lines redrawn so every "
                          "raised bed drains toward the path and nothing pools by the shed door")
 
@@ -99,8 +103,15 @@ def demo_log(cwd, skip, limit):
     for at in range(skip, min(total, skip + limit)):
         commits.append({"hash": "{:07x}".format(0x4f2c9ab - at), "author": "Mira Holt",
                         "subject": DEMO_GIT_LONG_SUBJECT if at == 0 else "Entry {}".format(total - at),
-                        "at": int(time.time()) - 3600 * at})
+                        "at": DEMO_GIT_LOG_AT - 3600 * at})
     return {"total": total, "skip": skip, "commits": commits, "more": skip + len(commits) < total}
+
+
+# What a History line's stamp must read for the commit made `at`: the full
+# numeric date and time in the browser's locale on the server's clock -
+# Intl's own answer, so the lane never trusts the console's helper for it.
+DEMO_GIT_STAMP_JS = """(at => new Date(at * 1000).toLocaleString([], {year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hourCycle: state.clockFormat === '12h' ? 'h12' : 'h23'}))"""
 
 
 def demo_git(cwd, listing=False):
@@ -1466,7 +1477,6 @@ async def session_mention_checks(instance):
         c.applyMention(c.mention.items.find(i=>i.kind==='session-insert'));
     })()""")
     value = await evaluate(instance, "demoView.composer.ta.value")
-    import re
     assert re.fullmatch(r"@Session-Phone-navigation-[A-Z0-9]{4} ", value), value
     await evaluate(instance, "demoView.composer.set('', true); demoView.composer.hideMention(); true")
     # Rendered links resolve the alias through the real HTTP endpoint.
@@ -2844,7 +2854,9 @@ async def git_sheet_checks(a):
     reading again; Back closing it and Forward opening a fresh one; and, on
     a phone, the commit's author and time stepping under its subject with
     nothing pushed off the screen; the History's first hundred lines in the
-    list's monospace, one line each however long, the box scrolling sideways
+    list's monospace - each commit's date and time as Intl renders that
+    moment, one width, then its hash and subject - one line each however
+    long, the box scrolling sideways
     and the next hundred read by a real scroll to its foot. The type is the console's: the fact
     labels and the captions in the field voice, the kind kickers on the
     kicker step, the lists in the one monospace; the facts stand on the
@@ -2980,7 +2992,9 @@ async def git_sheet_checks(a):
     assert all(sheet["row"].values()), sheet["row"]
     assert sheet["focused"], sheet
     # the History: the first hundred lines of the short log in the list's
-    # own monospace, the newest first with its hash in the help colour, a
+    # own monospace, the newest first, each line the commit's full date and
+    # time, then its hash, both in the help colour, then its subject - the
+    # stamps one width, so the hashes and subjects stand in columns - a
     # line that never wraps however long its subject - the box scrolls
     # sideways for it, the sheet and the page no wider - and the foot
     # offering the next hundred
@@ -2990,7 +3004,11 @@ async def git_sheet_checks(a):
         const lines = Array.from(box.querySelectorAll('.sgl-line'));
         const help = (() => { const probe = document.createElement('span'); document.body.appendChild(probe);
             probe.style.color = 'var(--txt3)'; const c = style(probe).color; probe.remove(); return c; })();
+        const stamp = %s, when = line => line.querySelector('.sgl-when');
+        const widths = new Set(lines.map(line => when(line).getBoundingClientRect().width));
         return {count: lines.length, first: lines[0].textContent, last: lines[99].textContent,
+            when: when(lines[0]).textContent, whenHelp: style(when(lines[0])).color === help,
+            stamps: [stamp(%d), stamp(%d)], oneWidth: widths.size === 1,
             hash: lines[0].querySelector('.sgl-hash').textContent, hashHelp: style(lines[0].querySelector('.sgl-hash')).color === help,
             /* the trim takes the leading off the first line, so a wrapped
                line is one taller than two line-heights, not one unlike its
@@ -3002,8 +3020,12 @@ async def git_sheet_checks(a):
             mono: style(box).fontFamily === style(m.querySelector('.session-git-list')).fontFamily,
             foot: box.querySelector('.sgl-foot').textContent, footButton: !!box.querySelector('.sgl-foot button.sgl-load'),
             scrolls: box.scrollHeight > box.clientHeight};
-    })()""")
-    assert log["count"] == 100 and log["first"] == "4f2c9ab " + DEMO_GIT_LONG_SUBJECT and log["last"] == "4f2c948 Entry 151", log
+    })()""" % (DEMO_GIT_STAMP_JS, DEMO_GIT_LOG_AT, DEMO_GIT_LOG_AT - 3600 * 99))
+    newest, hundredth = log["stamps"]
+    assert re.fullmatch(r"(?=.*\d{4})(?=.*\d\d:\d\d).+", newest) and newest != hundredth, log["stamps"]
+    assert log["count"] == 100 and log["first"] == newest + " 4f2c9ab " + DEMO_GIT_LONG_SUBJECT, log
+    assert log["last"] == hundredth + " 4f2c948 Entry 151", log
+    assert log["when"] == newest and log["whenHelp"] and log["oneWidth"], log
     assert log["hash"] == "4f2c9ab" and log["hashHelp"] and log["mono"], log
     assert log["oneLine"] and log["pre"] and log["sideways"] and log["pageFits"] and log["sheetWidth"] == 640, log
     assert log["foot"] == "Load 100 more" and log["footButton"] and log["scrolls"], log
@@ -3022,11 +3044,12 @@ async def git_sheet_checks(a):
         await asyncio.sleep(0.05)
     await until(a, pages + " === 2 && document.querySelectorAll('.session-git-log .sgl-line').length === 200")
     more = await evaluate(a, """(() => {
-        const box = document.querySelector('.session-git-log'), lines = box.querySelectorAll('.sgl-line');
+        const box = document.querySelector('.session-git-log'), lines = box.querySelectorAll('.sgl-line'), stamp = %s;
         return {hundredth: lines[100].textContent, last: lines[199].textContent, foot: box.querySelector('.sgl-foot').textContent,
+            stamps: [stamp(%d), stamp(%d)],
             kept: lines[99].getBoundingClientRect().bottom <= lines[100].getBoundingClientRect().top + 1,
-            pages: %s}; })()""" % pages)
-    assert more["hundredth"] == "4f2c947 Entry 150" and more["last"] == "4f2c8e4 Entry 51", more
+            pages: %s}; })()""" % (DEMO_GIT_STAMP_JS, DEMO_GIT_LOG_AT - 3600 * 100, DEMO_GIT_LOG_AT - 3600 * 199, pages))
+    assert more["hundredth"] == more["stamps"][0] + " 4f2c947 Entry 150" and more["last"] == more["stamps"][1] + " 4f2c8e4 Entry 51", more
     assert more["foot"] == "Load 50 more" and more["kept"] and more["pages"] == 2, more
     # a press on the mark opened the sheet and nothing else: the row it sits
     # on was not selected by it
@@ -3171,7 +3194,7 @@ async def git_sheet_checks(a):
     print("PASS: the Git sheet opened by a real click on the orange mark - facts, grouped paths and the "
           "unpushed commit in the console's own type, read over the node's route, read again by Refresh, "
           "closed by Back and reopened fresh by Forward, and fitting a phone with its four buttons on two "
-          "lines; the History's first hundred lines unwrapped in a box that scrolls sideways, the next "
+          "lines; the History's first hundred lines - stamp, hash, subject - unwrapped in a box that scrolls sideways, the next "
           "hundred by a real scroll to its foot, and a fresh read starting it over; Push and Revert by "
           "real clicks over the node's routes, the confirm before a revert, each taking its count off the "
           "mark and its button off the row with a toast", flush=True)
