@@ -795,8 +795,8 @@ assert.equal(bare.document.querySelectorAll(".si-git").length, 0);
     assert.deepEqual(stampOptions, { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" },
       "the full date and time on every line, one width");
     const firstLine = dialog.m.querySelector(".session-git-log .sgl-line");
-    assert.equal(firstLine.querySelector(".sgl-when").textContent, "on 0", "the stamp in the help colour");
-    assert.equal(firstLine.querySelector(".sgl-hash").textContent, "h0", "the hash in the help colour");
+    assert.equal(firstLine.querySelector(".sgl-when").textContent, "on 0", "the stamp in its own span (the help colour)");
+    assert.equal(firstLine.querySelector(".sgl-hash").textContent, "h0", "the hash in its own span (the facts' value colour)");
     assert.ok(dialog.m.querySelector(".session-git-log .sgl-log"), "the lines stand in one block");
     assert.equal(foot(), "Load 100 more");
     // a scroll short of the foot asks nothing; one at the foot asks for

@@ -2855,8 +2855,9 @@ async def git_sheet_checks(a):
     a phone, the commit's author and time stepping under its subject with
     nothing pushed off the screen; the History's first hundred lines in the
     list's monospace - each commit's date and time as Intl renders that
-    moment, one width, then its hash and subject - one line each however
-    long, the box scrolling sideways
+    moment, one width, in the help colour, then its hash in the Upstream
+    fact's colour, then its subject at full strength - one line each
+    however long, the box scrolling sideways
     and the next hundred read by a real scroll to its foot. The type is the console's: the fact
     labels and the captions in the field voice, the kind kickers on the
     kicker step, the lists in the one monospace; the facts stand on the
@@ -2993,7 +2994,10 @@ async def git_sheet_checks(a):
     assert sheet["focused"], sheet
     # the History: the first hundred lines of the short log in the list's
     # own monospace, the newest first, each line the commit's full date and
-    # time, then its hash, both in the help colour, then its subject - the
+    # time in the help colour, then its hash in the colour the Upstream
+    # fact's "origin/main · 1 ahead" is written in, then its subject at the
+    # list's full strength - three colours, so the three parts read apart,
+    # and the unpushed commit's hash in that same second colour - the
     # stamps one width, so the hashes and subjects stand in columns - a
     # line that never wraps however long its subject - the box scrolls
     # sideways for it, the sheet and the page no wider - and the foot
@@ -3004,12 +3008,18 @@ async def git_sheet_checks(a):
         const lines = Array.from(box.querySelectorAll('.sgl-line'));
         const help = (() => { const probe = document.createElement('span'); document.body.appendChild(probe);
             probe.style.color = 'var(--txt3)'; const c = style(probe).color; probe.remove(); return c; })();
+        const upstream = style(Array.from(m.querySelectorAll('.ws-fact'))
+            .find(row => row.querySelector('.field-lbl').textContent === 'Upstream').querySelector('.wsf-v')).color;
         const stamp = %s, when = line => line.querySelector('.sgl-when');
         const widths = new Set(lines.map(line => when(line).getBoundingClientRect().width));
         return {count: lines.length, first: lines[0].textContent, last: lines[99].textContent,
             when: when(lines[0]).textContent, whenHelp: style(when(lines[0])).color === help,
             stamps: [stamp(%d), stamp(%d)], oneWidth: widths.size === 1,
-            hash: lines[0].querySelector('.sgl-hash').textContent, hashHelp: style(lines[0].querySelector('.sgl-hash')).color === help,
+            hash: lines[0].querySelector('.sgl-hash').textContent,
+            hashUpstream: style(lines[0].querySelector('.sgl-hash')).color === upstream,
+            unpushedHashUpstream: style(m.querySelector('.sgl-commits .sgl-hash')).color === upstream,
+            threeColours: new Set([help, upstream, style(lines[0]).color]).size === 3,
+            subjectFull: style(lines[0]).color === style(box).color,
             /* the trim takes the leading off the first line, so a wrapped
                line is one taller than two line-heights, not one unlike its
                neighbour; the long subject runs past the box's edge instead */
@@ -3026,7 +3036,8 @@ async def git_sheet_checks(a):
     assert log["count"] == 100 and log["first"] == newest + " 4f2c9ab " + DEMO_GIT_LONG_SUBJECT, log
     assert log["last"] == hundredth + " 4f2c948 Entry 151", log
     assert log["when"] == newest and log["whenHelp"] and log["oneWidth"], log
-    assert log["hash"] == "4f2c9ab" and log["hashHelp"] and log["mono"], log
+    assert log["hash"] == "4f2c9ab" and log["hashUpstream"] and log["unpushedHashUpstream"] and log["mono"], log
+    assert log["threeColours"] and log["subjectFull"], log
     assert log["oneLine"] and log["pre"] and log["sideways"] and log["pageFits"] and log["sheetWidth"] == 640, log
     assert log["foot"] == "Load 100 more" and log["footButton"] and log["scrolls"], log
     # a real scroll to the foot asks for the next hundred, once; the lines
@@ -3194,7 +3205,7 @@ async def git_sheet_checks(a):
     print("PASS: the Git sheet opened by a real click on the orange mark - facts, grouped paths and the "
           "unpushed commit in the console's own type, read over the node's route, read again by Refresh, "
           "closed by Back and reopened fresh by Forward, and fitting a phone with its four buttons on two "
-          "lines; the History's first hundred lines - stamp, hash, subject - unwrapped in a box that scrolls sideways, the next "
+          "lines; the History's first hundred lines - stamp, hash, subject, each in its own colour - unwrapped in a box that scrolls sideways, the next "
           "hundred by a real scroll to its foot, and a fresh read starting it over; Push and Revert by "
           "real clicks over the node's routes, the confirm before a revert, each taking its count off the "
           "mark and its button off the row with a toast", flush=True)

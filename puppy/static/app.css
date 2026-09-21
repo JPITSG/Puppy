@@ -3413,13 +3413,16 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
    are grouped the way git's own status groups them - a kicker per kind,
    the verb git would use in the help colour, the path at full strength,
    the columns aligned within the group like git aligns its own - and a
-   commit is its abbreviated hash, its subject and, in the help colour, who
-   made it and when, which steps under the subject on a phone. The History
-   is the short log, one line per commit - its full date and time and its
-   hash in the help colour, then its subject - that never wraps - the box
-   scrolls sideways for a long subject, and its lines stand in one block
-   (.sgl-log) like the other lists' groups - with the foot's Load more in
-   the quiet text-action voice, in the list's own type.
+   commit is its abbreviated hash in the facts' value colour (--txt2, what
+   the Upstream fact's "origin/main · 1 ahead" is written in), its subject
+   at full strength and, in the help colour, who made it and when, which
+   steps under the subject on a phone. The History is the short log, one
+   line per commit - its full date and time in the help colour, its hash
+   in that value colour, then its subject at full strength, so the three
+   read apart - that never wraps - the box scrolls sideways for a long
+   subject, and its lines stand in one block (.sgl-log) like the other
+   lists' groups - with the foot's Load more in the quiet text-action
+   voice, in the list's own type.
    The button row holds Close and Refresh, and the two actions exactly while
    they apply: Push, the primary, at the row's end, and Revert on its own
    side at the start like the engine-defaults sheet's Reset, so the
@@ -3440,7 +3443,8 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
   color:var(--txt3);margin-bottom:2px;
 }
 .sgl-rows{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:0 10px}
-.sgl-what,.sgl-from,.sgl-hash,.sgl-when,.sgl-meta,.sgl-empty,.sgl-more{color:var(--txt3)}
+.sgl-what,.sgl-from,.sgl-when,.sgl-meta,.sgl-empty,.sgl-more{color:var(--txt3)}
+.sgl-hash{color:var(--txt2)}
 .sgl-what,.sgl-meta{white-space:nowrap}
 .sgl-path,.sgl-subject{min-width:0}
 .sgl-path.full{grid-column:1/-1}

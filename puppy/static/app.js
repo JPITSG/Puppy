@@ -6577,11 +6577,13 @@ function modalSessionGit(bid, s) {
     else return;
     historyList.appendChild(foot);
   };
-  /* one line per commit - when, hash, subject - never wrapped: the box
-     scrolls sideways instead. The stamp is the full date and time on every
-     line (fmtStamp's shortening of today's and this year's would leave the
-     column ragged), in the viewer's locale on the server's clock like every
-     other stamp, so the hashes and subjects stand in columns. */
+  /* one line per commit - when, hash, subject, each in its own colour: the
+     stamp in the help colour, the hash in the facts' value colour, the
+     subject at full strength - never wrapped: the box scrolls sideways
+     instead. The stamp is the full date and time on every line (fmtStamp's
+     shortening of today's and this year's would leave the column ragged),
+     in the viewer's locale on the server's clock like every other stamp, so
+     the hashes and subjects stand in columns. */
   const historyLine = commit => {
     const line = el("div", "sgl-line");
     const when = typeof commit.at === "number" ? fmtDateTime(commit.at, SESSION_GIT_LOG_STAMP) : "";

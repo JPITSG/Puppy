@@ -181,8 +181,10 @@ a remote, `No remote to push to`; what the bounds cut ends a list as `… and
 short log of everything on `HEAD`: its caption carries the total, each line
 is one commit's date and time (the full numeric date and clock in the
 viewer's locale on the server's 12/24-hour setting, one width on every line
-so the columns align), its abbreviated hash - both in the help colour - and
-its subject, and never
+so the columns align) in the help colour, its abbreviated hash in the colour
+the facts' values take (the Upstream fact's `origin/main · 1 ahead`; the
+unpushed list's hashes take it too) and its subject at full strength - three
+colours, so the three parts read apart - and never
 wraps - the box scrolls sideways for a long subject - and it is read a page
 of 100 at a time through `GET /api/sessions/{sid}/git/log?skip=N&limit=100`
 (`{"ok": true, "total", "skip", "commits": [{"hash", "subject", "author",
