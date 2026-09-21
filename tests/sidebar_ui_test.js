@@ -401,7 +401,7 @@ assert.equal(bare.document.querySelectorAll(".si-git").length, 0);
   };
   const sessions = [];
   let dialog = null, reopen = null, replies = [], requests = [], renders = 0, dialogs = [];
-  let actionsOffered = true, logOffered = false, confirmAnswer = true, confirms = [], toasts = [], stampOptions = null;
+  let actionsOffered = true, logOffered = false, confirmAnswer = true, confirms = [], toasts = [];
   const modal = (html, className = "", again = null) => {
     const m = document.createElement("div");
     m.className = "modal" + (className ? " " + className : "");
@@ -430,7 +430,6 @@ assert.equal(bare.document.querySelectorAll(".si-git").length, 0);
     toast: (text, tone) => { toasts.push([text, tone]); },
     backendConnectionAllowed: () => true, sessionLocationLabel: s => `…/${s.cwd.split("/").pop()}`,
     fmtStamp: at => `at ${at}`, navigationSessionDialog: (bid, sid, open) => open(bid, { id: sid, cwd: "/p", git: null }),
-    fmtDateTime: (at, options) => { stampOptions = JSON.parse(JSON.stringify(options)); return `on ${at}`; },
   });
   vm.runInContext([
     between("function sessionGitWork(", "/* The row itself is a button"),
@@ -754,7 +753,8 @@ assert.equal(bare.document.querySelectorAll(".si-git").length, 0);
     dialog.close();
     actionsOffered = true;
 
-    // The History: the short log of everything on HEAD, one line a commit,
+    // The History: the short log of everything on HEAD on the unpushed
+    // list's own commit grid (hash, subject, author · stamp),
     // read a page at a time through the node's own route once the sheet's
     // read has answered - never before it, and never on a node without the
     // route - its caption the node's total, the next page asked for when
@@ -763,7 +763,14 @@ assert.equal(bare.document.querySelectorAll(".si-git").length, 0);
     // over with a page from before it dropped.
     const page = (skip, total, subjects) => ({ ok: true, total, skip, more: skip + subjects.length < total,
       commits: subjects.map((subject, at) => ({ hash: `h${skip + at}`, subject, author: "Mira", at: skip + at })) });
-    const logRows = () => [...dialog.m.querySelectorAll(".session-git-log .sgl-line")].map(row => row.textContent);
+    /* the history's rows as the unpushed list's are read: one cell each
+       for the hash, the subject and the author · stamp, three a commit */
+    const logRows = () => {
+      const grid = dialog.m.querySelector(".session-git-log .sgl-commits");
+      const cells = grid ? grid.children.map(cell => cell.textContent) : [];
+      assert.equal(cells.length % 3, 0, "three cells a commit");
+      return Array.from({ length: cells.length / 3 }, (_, at) => cells.slice(3 * at, 3 * at + 3));
+    };
     const foot = () => { const node = dialog.m.querySelector(".session-git-log .sgl-foot"); return node ? node.textContent : null; };
     const logCaption = () => captions().find(caption => caption.startsWith("History"));
     const hundred = (skip, total) => page(skip, total, Array.from({ length: Math.min(100, total - skip) },
@@ -790,14 +797,17 @@ assert.equal(bare.document.querySelectorAll(".si-git").length, 0);
     assert.equal(logCaption(), "History · 250");
     const rows = logRows();
     assert.equal(rows.length, 100);
-    // each line: when the commit was made, its hash, its subject
-    assert.equal(rows[0], "on 0 h0 Entry 250"); assert.equal(rows[99], "on 99 h99 Entry 151");
-    assert.deepEqual(stampOptions, { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" },
-      "the full date and time on every line, one width");
-    const firstLine = dialog.m.querySelector(".session-git-log .sgl-line");
-    assert.equal(firstLine.querySelector(".sgl-when").textContent, "on 0", "the stamp in its own span (the help colour)");
-    assert.equal(firstLine.querySelector(".sgl-hash").textContent, "h0", "the hash in its own span (the facts' value colour)");
-    assert.ok(dialog.m.querySelector(".session-git-log .sgl-log"), "the lines stand in one block");
+    // each row as the unpushed list draws one: the hash, the subject, and
+    // who made it and when through the console's one stamp
+    assert.deepEqual(rows[0], ["h0", "Entry 250", "Mira · at 0"]);
+    assert.deepEqual(rows[99], ["h99", "Entry 151", "Mira · at 99"]);
+    const grid = dialog.m.querySelector(".session-git-log .sgl-commits");
+    assert.deepEqual(grid.children.slice(0, 3).map(cell => cell.className), ["sgl-hash", "sgl-subject", "sgl-meta"],
+      "the unpushed list's own cells");
+    assert.deepEqual(lists()[1], [["abc1234", "One", "Mira · at 1", "def5678", "Two", "Mira · at 2"]],
+      "the unpushed list itself, drawn the same way");
+    assert.deepEqual(lists()[2][0].slice(0, 6), ["h0", "Entry 250", "Mira · at 0", "h1", "Entry 249", "Mira · at 1"],
+      "and read the same way");
     assert.equal(foot(), "Load 100 more");
     // a scroll short of the foot asks nothing; one at the foot asks for
     // the next page, and a second scroll while it is on its way asks no
@@ -819,7 +829,7 @@ assert.equal(bare.document.querySelectorAll(".si-git").length, 0);
     assert.equal(foot(), "Loading…");
     await settle();
     assert.equal(logRows().length, 200);
-    assert.equal(logRows()[100], "on 100 h100 Entry 150");
+    assert.deepEqual(logRows()[100], ["h100", "Entry 150", "Mira · at 100"]);
     assert.equal(foot(), "Load 50 more", "the foot counts what is left");
     // the last page by a press on Load more: no more after it
     replies = [hundred(200, 250)];
@@ -827,7 +837,7 @@ assert.equal(bare.document.querySelectorAll(".si-git").length, 0);
     assert.equal(requests[3][1], "sessions/3/git/log?skip=200&limit=100");
     await settle();
     assert.equal(logRows().length, 250);
-    assert.equal(logRows()[249], "on 249 h249 Entry 1");
+    assert.deepEqual(logRows()[249], ["h249", "Entry 1", "Mira · at 249"]);
     assert.equal(foot(), null, "nothing more: no foot");
     scrollTo(4000, 5000);
     assert.equal(requests.length, 4, "a scroll at the foot of a complete history asks nothing");

@@ -178,14 +178,12 @@ commit as its hash, subject and, in the help colour, author and time. A
 clean repository says `Nothing to commit` and `Nothing to push`; one without
 a remote, `No remote to push to`; what the bounds cut ends a list as `… and
 40 more paths`. **History**, on nodes advertising `session-git-log`, is the
-short log of everything on `HEAD`: its caption carries the total, each line
-is one commit's date and time (the full numeric date and clock in the
-viewer's locale on the server's 12/24-hour setting, one width on every line
-so the columns align) in the help colour, its abbreviated hash in the colour
-the facts' values take (the Upstream fact's `origin/main · 1 ahead`; the
-unpushed list's hashes take it too) and its subject at full strength - three
-colours, so the three parts read apart - and never
-wraps - the box scrolls sideways for a long subject - and it is read a page
+short log of everything on `HEAD`: its caption carries the total, its rows
+are the unpushed list's own - each commit's abbreviated hash (in the colour
+the facts' values take, the Upstream fact's `origin/main · 1 ahead`), its
+subject at full strength, and its author and time in the help colour, on
+the same three-column grid, the author and time stepping under the subject
+on a phone - and it is read a page
 of 100 at a time through `GET /api/sessions/{sid}/git/log?skip=N&limit=100`
 (`{"ok": true, "total", "skip", "commits": [{"hash", "subject", "author",
 "at"}, …], "more"}`; `limit` is 1 to 100, `skip` any count from 0, anything

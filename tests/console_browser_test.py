@@ -85,9 +85,9 @@ DEMO_GIT_DETAIL = {"/home/mira/projects/" + folder: dict(detail) for folder, det
 
 # The short log behind the sheet's History, per project: the garden's runs
 # to 250 commits so the list pages, and its newest subject is long enough
-# to overflow the box sideways. The commits stand an hour apart down from
-# a fixed moment (2026-09-14 08:30 UTC), so the lane can say what each
-# line's stamp must read in the browser's own locale.
+# to wrap in the box. The commits stand an hour apart down from a fixed
+# moment (2026-09-14 08:30 UTC), so the lane can say what each row's stamp
+# must read.
 DEMO_GIT_LOG = {"/home/mira/projects/harbor": 3, "/home/mira/projects/garden": 250,
                 "/home/mira/projects/atlas": 12}
 DEMO_GIT_LOG_AT = 1789374600
@@ -105,13 +105,6 @@ def demo_log(cwd, skip, limit):
                         "subject": DEMO_GIT_LONG_SUBJECT if at == 0 else "Entry {}".format(total - at),
                         "at": DEMO_GIT_LOG_AT - 3600 * at})
     return {"total": total, "skip": skip, "commits": commits, "more": skip + len(commits) < total}
-
-
-# What a History line's stamp must read for the commit made `at`: the full
-# numeric date and time in the browser's locale on the server's clock -
-# Intl's own answer, so the lane never trusts the console's helper for it.
-DEMO_GIT_STAMP_JS = """(at => new Date(at * 1000).toLocaleString([], {year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', hourCycle: state.clockFormat === '12h' ? 'h12' : 'h23'}))"""
 
 
 def demo_git(cwd, listing=False):
@@ -2853,12 +2846,12 @@ async def git_sheet_checks(a):
     review sheet's list surface, read over the node's own route; Refresh
     reading again; Back closing it and Forward opening a fresh one; and, on
     a phone, the commit's author and time stepping under its subject with
-    nothing pushed off the screen; the History's first hundred lines in the
-    list's monospace - each commit's date and time as Intl renders that
-    moment, one width, in the help colour, then its hash in the Upstream
-    fact's colour, then its subject at full strength - one line each
-    however long, the box scrolling sideways
-    and the next hundred read by a real scroll to its foot. The type is the console's: the fact
+    nothing pushed off the screen; the History's first hundred commits on
+    the unpushed list's own grid - the same cells in the same columns, the
+    hash in the Upstream fact's colour, the subject at full strength and
+    wrapping when long, the author and the console's one stamp in the help
+    colour - and the next hundred read by a real scroll to its foot. The
+    type is the console's: the fact
     labels and the captions in the field voice, the kind kickers on the
     kicker step, the lists in the one monospace; the facts stand on the
     review sheet's column, its own step under the title and one row under
@@ -2880,7 +2873,7 @@ async def git_sheet_checks(a):
     pages = "performance.getEntriesByType('resource').filter(e => e.name.includes('/api/sessions/%d/git/log?')).length" % garden["id"]
     await until(a, "!!document.querySelector('.session-git-modal') && " + reads + " === 1 && "
                    "!document.querySelector('.session-git-modal').hasAttribute('aria-busy') && "
-                   + pages + " === 1 && document.querySelectorAll('.session-git-log .sgl-line').length === 100")
+                   + pages + " === 1 && document.querySelectorAll('.session-git-log .sgl-hash').length === 100")
     sheet = await evaluate(a, """(() => {
         const m = document.querySelector('.session-git-modal');
         const probe = document.createElement('span'); document.body.appendChild(probe);
@@ -2992,55 +2985,57 @@ async def git_sheet_checks(a):
                                 ["Refresh", False, False, False], ["Push", False, True, False]], sheet
     assert all(sheet["row"].values()), sheet["row"]
     assert sheet["focused"], sheet
-    # the History: the first hundred lines of the short log in the list's
-    # own monospace, the newest first, each line the commit's full date and
-    # time in the help colour, then its hash in the colour the Upstream
-    # fact's "origin/main · 1 ahead" is written in, then its subject at the
-    # list's full strength - three colours, so the three parts read apart,
-    # and the unpushed commit's hash in that same second colour - the
-    # stamps one width, so the hashes and subjects stand in columns - a
-    # line that never wraps however long its subject - the box scrolls
-    # sideways for it, the sheet and the page no wider - and the foot
+    # the History: the first hundred commits of the short log on the
+    # unpushed list's own grid - the same three cells a commit (the hash in
+    # the colour the Upstream fact's "origin/main · 1 ahead" is written in,
+    # the subject at the list's full strength, the author and the
+    # console's one stamp in the help colour) in the same columns, the
+    # newest first, a long subject wrapping in its column rather than
+    # widening the box, the sheet and the page no wider - and the foot
     # offering the next hundred
     log = await evaluate(a, """(() => {
         const m = document.querySelector('.session-git-modal'), box = m.querySelector('.session-git-log');
         const style = node => getComputedStyle(node);
-        const lines = Array.from(box.querySelectorAll('.sgl-line'));
+        const unpushed = m.querySelector('.sgl-commits'), grid = box.querySelector('.sgl-commits');
+        const cells = Array.from(grid.children), row = n => cells.slice(3 * n, 3 * n + 3);
         const help = (() => { const probe = document.createElement('span'); document.body.appendChild(probe);
             probe.style.color = 'var(--txt3)'; const c = style(probe).color; probe.remove(); return c; })();
         const upstream = style(Array.from(m.querySelectorAll('.ws-fact'))
             .find(row => row.querySelector('.field-lbl').textContent === 'Upstream').querySelector('.wsf-v')).color;
-        const stamp = %s, when = line => line.querySelector('.sgl-when');
-        const widths = new Set(lines.map(line => when(line).getBoundingClientRect().width));
-        return {count: lines.length, first: lines[0].textContent, last: lines[99].textContent,
-            when: when(lines[0]).textContent, whenHelp: style(when(lines[0])).color === help,
-            stamps: [stamp(%d), stamp(%d)], oneWidth: widths.size === 1,
-            hash: lines[0].querySelector('.sgl-hash').textContent,
-            hashUpstream: style(lines[0].querySelector('.sgl-hash')).color === upstream,
-            unpushedHashUpstream: style(m.querySelector('.sgl-commits .sgl-hash')).color === upstream,
-            threeColours: new Set([help, upstream, style(lines[0]).color]).size === 3,
-            subjectFull: style(lines[0]).color === style(box).color,
-            /* the trim takes the leading off the first line, so a wrapped
-               line is one taller than two line-heights, not one unlike its
-               neighbour; the long subject runs past the box's edge instead */
-            oneLine: lines.every(line => line.getBoundingClientRect().height < 2 * parseFloat(style(box).lineHeight)) &&
-                lines[0].scrollWidth > box.clientWidth && lines[1].scrollWidth <= box.clientWidth,
-            pre: style(box).whiteSpace === 'pre', sideways: box.scrollWidth > box.clientWidth && style(box).overflowX === 'auto',
+        const left = cell => cell.getBoundingClientRect().left;
+        return {count: cells.length / 3, first: row(0).map(cell => cell.textContent), last: row(99).map(cell => cell.textContent),
+            stamps: [fmtStamp(%d), fmtStamp(%d)],
+            cells: row(0).map(cell => cell.className), unpushedCells: Array.from(unpushed.children).map(cell => cell.className),
+            /* the computed template is the tracks' pixel widths, which
+               the two lists' contents set apart, so the grids are compared
+               by class and by where their hash and subject columns stand */
+            sameGrid: unpushed !== grid && grid.className === unpushed.className && style(grid).display === 'grid' &&
+                style(grid).columnGap === style(unpushed).columnGap &&
+                Math.abs(left(row(0)[0]) - left(unpushed.children[0])) < 1 &&
+                Math.abs(left(row(0)[1]) - left(unpushed.children[1])) < 1,
+            columns: cells.every((cell, at) => Math.abs(left(cell) - left(cells[at %% 3])) < 1) &&
+                left(row(0)[1]) > left(row(0)[0]) && left(row(0)[2]) > left(row(0)[1]),
+            hashUpstream: style(row(0)[0]).color === upstream && style(unpushed.children[0]).color === upstream,
+            subjectFull: style(row(0)[1]).color === style(box).color, metaHelp: style(row(0)[2]).color === help,
+            threeColours: new Set([help, upstream, style(box).color]).size === 3,
+            wraps: row(0)[1].getBoundingClientRect().height > 1.5 * parseFloat(style(box).lineHeight) &&
+                row(1)[1].getBoundingClientRect().height < 1.5 * parseFloat(style(box).lineHeight),
+            noSideways: box.scrollWidth <= box.clientWidth,
             sheetWidth: m.getBoundingClientRect().width, pageFits: document.documentElement.scrollWidth <= innerWidth,
             mono: style(box).fontFamily === style(m.querySelector('.session-git-list')).fontFamily,
             foot: box.querySelector('.sgl-foot').textContent, footButton: !!box.querySelector('.sgl-foot button.sgl-load'),
             scrolls: box.scrollHeight > box.clientHeight};
-    })()""" % (DEMO_GIT_STAMP_JS, DEMO_GIT_LOG_AT, DEMO_GIT_LOG_AT - 3600 * 99))
+    })()""" % (DEMO_GIT_LOG_AT, DEMO_GIT_LOG_AT - 3600 * 99))
     newest, hundredth = log["stamps"]
-    assert re.fullmatch(r"(?=.*\d{4})(?=.*\d\d:\d\d).+", newest) and newest != hundredth, log["stamps"]
-    assert log["count"] == 100 and log["first"] == newest + " 4f2c9ab " + DEMO_GIT_LONG_SUBJECT, log
-    assert log["last"] == hundredth + " 4f2c948 Entry 151", log
-    assert log["when"] == newest and log["whenHelp"] and log["oneWidth"], log
-    assert log["hash"] == "4f2c9ab" and log["hashUpstream"] and log["unpushedHashUpstream"] and log["mono"], log
-    assert log["threeColours"] and log["subjectFull"], log
-    assert log["oneLine"] and log["pre"] and log["sideways"] and log["pageFits"] and log["sheetWidth"] == 640, log
+    assert re.fullmatch(r"(?=.*\d\d:\d\d).+", newest) and newest != hundredth, log["stamps"]
+    assert log["count"] == 100 and log["first"] == ["4f2c9ab", DEMO_GIT_LONG_SUBJECT, "Mira Holt · " + newest], log
+    assert log["last"] == ["4f2c948", "Entry 151", "Mira Holt · " + hundredth], log
+    assert log["cells"] == ["sgl-hash", "sgl-subject", "sgl-meta"] and log["unpushedCells"] == log["cells"], log
+    assert log["sameGrid"] and log["columns"] and log["mono"], log
+    assert log["hashUpstream"] and log["subjectFull"] and log["metaHelp"] and log["threeColours"], log
+    assert log["wraps"] and log["noSideways"] and log["pageFits"] and log["sheetWidth"] == 640, log
     assert log["foot"] == "Load 100 more" and log["footButton"] and log["scrolls"], log
-    # a real scroll to the foot asks for the next hundred, once; the lines
+    # a real scroll to the foot asks for the next hundred, once; the rows
     # already shown keep their place under it
     spot = await evaluate(a, """(() => { const box = document.querySelector('.session-git-log');
         box.scrollIntoView({block: 'center'});
@@ -3053,14 +3048,16 @@ async def git_sheet_checks(a):
         await a.call("Input.dispatchMouseEvent", {"type": "mouseWheel", "x": spot["x"], "y": spot["y"],
                      "deltaX": 0, "deltaY": 400}, session=a.page_session)
         await asyncio.sleep(0.05)
-    await until(a, pages + " === 2 && document.querySelectorAll('.session-git-log .sgl-line').length === 200")
+    await until(a, pages + " === 2 && document.querySelectorAll('.session-git-log .sgl-hash').length === 200")
     more = await evaluate(a, """(() => {
-        const box = document.querySelector('.session-git-log'), lines = box.querySelectorAll('.sgl-line'), stamp = %s;
-        return {hundredth: lines[100].textContent, last: lines[199].textContent, foot: box.querySelector('.sgl-foot').textContent,
-            stamps: [stamp(%d), stamp(%d)],
-            kept: lines[99].getBoundingClientRect().bottom <= lines[100].getBoundingClientRect().top + 1,
-            pages: %s}; })()""" % (DEMO_GIT_STAMP_JS, DEMO_GIT_LOG_AT - 3600 * 100, DEMO_GIT_LOG_AT - 3600 * 199, pages))
-    assert more["hundredth"] == more["stamps"][0] + " 4f2c947 Entry 150" and more["last"] == more["stamps"][1] + " 4f2c8e4 Entry 51", more
+        const box = document.querySelector('.session-git-log'), cells = Array.from(box.querySelector('.sgl-commits').children);
+        const row = n => cells.slice(3 * n, 3 * n + 3).map(cell => cell.textContent), hashes = box.querySelectorAll('.sgl-hash');
+        return {hundredth: row(100), last: row(199), foot: box.querySelector('.sgl-foot').textContent,
+            stamps: [fmtStamp(%d), fmtStamp(%d)],
+            kept: hashes[99].getBoundingClientRect().bottom <= hashes[100].getBoundingClientRect().top + 1,
+            pages: %s}; })()""" % (DEMO_GIT_LOG_AT - 3600 * 100, DEMO_GIT_LOG_AT - 3600 * 199, pages))
+    assert more["hundredth"] == ["4f2c947", "Entry 150", "Mira Holt · " + more["stamps"][0]], more
+    assert more["last"] == ["4f2c8e4", "Entry 51", "Mira Holt · " + more["stamps"][1]], more
     assert more["foot"] == "Load 50 more" and more["kept"] and more["pages"] == 2, more
     # a press on the mark opened the sheet and nothing else: the row it sits
     # on was not selected by it
@@ -3072,7 +3069,7 @@ async def git_sheet_checks(a):
                      "button": "left", "clickCount": 1}, session=a.page_session)
     await until(a, reads + " === 2 && !document.querySelector('.session-git-modal').hasAttribute('aria-busy') && " + pages + " === 3")
     assert await evaluate(a, "document.querySelectorAll('.session-git-modal .sgl-rows').length === 3")
-    assert await evaluate(a, "document.querySelectorAll('.session-git-log .sgl-line').length === 100"), "a fresh read starts the history over"
+    assert await evaluate(a, "document.querySelectorAll('.session-git-log .sgl-hash').length === 100"), "a fresh read starts the history over"
     # Back closes the sheet; Forward opens a fresh one, read anew
     await evaluate(a, "history.back(); true")
     await until(a, "!document.querySelector('.session-git-modal')")
@@ -3205,7 +3202,7 @@ async def git_sheet_checks(a):
     print("PASS: the Git sheet opened by a real click on the orange mark - facts, grouped paths and the "
           "unpushed commit in the console's own type, read over the node's route, read again by Refresh, "
           "closed by Back and reopened fresh by Forward, and fitting a phone with its four buttons on two "
-          "lines; the History's first hundred lines - stamp, hash, subject, each in its own colour - unwrapped in a box that scrolls sideways, the next "
+          "lines; the History's first hundred commits on the unpushed list's own grid, the next "
           "hundred by a real scroll to its foot, and a fresh read starting it over; Push and Revert by "
           "real clicks over the node's routes, the confirm before a revert, each taking its count off the "
           "mark and its button off the row with a toast", flush=True)

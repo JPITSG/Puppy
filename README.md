@@ -209,9 +209,8 @@ reading anywhere further up is never pulled away from it.
   conflicts) with what `git` would do with it - and every unpushed commit with
   its hash, subject, author and time (the first 500 paths and 200 commits,
   the rest counted). Under those, **History** is the short log of everything
-  on the branch, one line per commit - the date and time it was made, its
-  hash, its subject - never
-  wrapped - the box scrolls sideways for a long subject - read a hundred
+  on the branch, listed exactly as the unpushed commits are (hash, subject,
+  author and time), read a hundred
   commits at a time: the first hundred once the sheet has read the
   repository, the next hundred whenever the list is scrolled to its foot or
   its **Load more** is pressed, the caption counting them all. It reads the

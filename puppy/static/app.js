@@ -6367,8 +6367,6 @@ function sessionGitState(git) {
    many pixels of its foot. */
 const SESSION_GIT_LOG_PAGE = 100;
 const SESSION_GIT_LOG_NEAR = 40;
-/* every History line's stamp: numeric date and time in full, one width */
-const SESSION_GIT_LOG_STAMP = { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" };
 
 /* The kinds' headings in the sheet, in the tooltip's order. */
 const SESSION_GIT_KIND_NAMES = {
@@ -6383,15 +6381,14 @@ const SESSION_GIT_KIND_NAMES = {
    behind the unpushed count on the review sheet's list surface, grouped
    the way git's own status groups them, each caption carrying the count
    the mark's label carries after a separator - and, where the node serves
-   it, the History: the short log of everything on HEAD, one line per
-   commit (when it was made, its hash and its subject) that never wraps,
-   the box scrolling sideways instead, read SESSION_GIT_LOG_PAGE commits at
-   a time through the node's paged route: the first page once the read has
-   answered, the next when the list is scrolled to its foot or its foot's
-   Load more is pressed, its caption carrying the total. A page that fails
-   keeps what was listed with the reason at the foot and a Try again; a
-   fresh read starts the history over, and a page from before it is
-   dropped.
+   it, the History: the short log of everything on HEAD, listed exactly
+   as the unpushed commits are (the same rows: hash, subject, who made it
+   and when), read SESSION_GIT_LOG_PAGE commits at a time through the
+   node's paged route: the first page once the read has answered, the
+   next when the list is scrolled to its foot or its foot's Load more is
+   pressed, its caption carrying the total. A page that fails keeps what
+   was listed with the reason at the foot and a Try again; a fresh read
+   starts the history over, and a page from before it is dropped.
    It reads fresh on opening and on Refresh through the node's own route,
    and that read brings the row's record up to date like a focus re-check,
    so the sheet and the mark never disagree; until it answers, the facts
@@ -6525,6 +6522,15 @@ function modalSessionGit(bid, s) {
     if (count(detail.more_paths))
       list.appendChild(el("div", "sgl-more", `… and ${plural(detail.more_paths, "more path")}`));
   };
+  /* one commit's row on the .sgl-commits grid, for both commit lists: its
+     hash, its subject, and who made it and when in the help colour */
+  const commitRow = (rows, commit) => {
+    rows.appendChild(el("span", "sgl-hash", String(commit.hash || "")));
+    rows.appendChild(el("span", "sgl-subject", String(commit.subject || "")));
+    const meta = [commit.author, typeof commit.at === "number" ? fmtStamp(commit.at) : ""]
+      .filter(Boolean).join(" · ");
+    rows.appendChild(el("span", "sgl-meta", meta));
+  };
   const fillCommits = list => {
     if (record && record.unpushed === null) {
       list.appendChild(el("div", "sgl-empty", "No remote to push to"));
@@ -6533,13 +6539,7 @@ function modalSessionGit(bid, s) {
     const entries = Array.isArray(detail.commits) ? detail.commits : [];
     if (!entries.length) { list.appendChild(el("div", "sgl-empty", "Nothing to push")); return; }
     const rows = el("div", "sgl-commits");
-    for (const commit of entries) {
-      rows.appendChild(el("span", "sgl-hash", String(commit.hash || "")));
-      rows.appendChild(el("span", "sgl-subject", String(commit.subject || "")));
-      const meta = [commit.author, typeof commit.at === "number" ? fmtStamp(commit.at) : ""]
-        .filter(Boolean).join(" · ");
-      rows.appendChild(el("span", "sgl-meta", meta));
-    }
+    for (const commit of entries) commitRow(rows, commit);
     list.appendChild(rows);
     if (count(detail.more_commits))
       list.appendChild(el("div", "sgl-more", `… and ${plural(detail.more_commits, "more commit")}`));
@@ -6577,30 +6577,14 @@ function modalSessionGit(bid, s) {
     else return;
     historyList.appendChild(foot);
   };
-  /* one line per commit - when, hash, subject, each in its own colour: the
-     stamp in the help colour, the hash in the facts' value colour, the
-     subject at full strength - never wrapped: the box scrolls sideways
-     instead. The stamp is the full date and time on every line (fmtStamp's
-     shortening of today's and this year's would leave the column ragged),
-     in the viewer's locale on the server's clock like every other stamp, so
-     the hashes and subjects stand in columns. */
-  const historyLine = commit => {
-    const line = el("div", "sgl-line");
-    const when = typeof commit.at === "number" ? fmtDateTime(commit.at, SESSION_GIT_LOG_STAMP) : "";
-    if (when) {
-      line.appendChild(el("span", "sgl-when", when));
-      line.appendChild(document.createTextNode(" "));
-    }
-    line.appendChild(el("span", "sgl-hash", String(commit.hash || "")));
-    line.appendChild(document.createTextNode(" " + String(commit.subject || "")));
-    return line;
-  };
+  /* the history's rows are the unpushed list's rows, on the same grid, so
+     the two lists read as one; a page appends its rows to that grid */
   const fillHistory = list => {
     historyList = list;
     list.classList.add("session-git-log");
-    const lines = el("div", "sgl-log");
-    for (const commit of (history ? history.commits : [])) lines.appendChild(historyLine(commit));
-    list.appendChild(lines);
+    const rows = el("div", "sgl-commits");
+    for (const commit of (history ? history.commits : [])) commitRow(rows, commit);
+    list.appendChild(rows);
     renderHistoryFoot();
     /* the next page as the foot comes into view; a still pointer at the
        foot asks once, since a page on its way holds the rest */
@@ -6630,8 +6614,8 @@ function modalSessionGit(bid, s) {
       page.commits = page.commits.concat(commits);
       page.total = answer && typeof answer.total === "number" ? answer.total : page.commits.length;
       page.more = !!(answer && answer.more) && commits.length > 0;
-      const lines = historyList && historyList.querySelector(".sgl-log");
-      if (lines) for (const commit of commits) lines.appendChild(historyLine(commit));
+      const rows = historyList && historyList.querySelector(".sgl-commits");
+      if (rows) for (const commit of commits) commitRow(rows, commit);
     }
     setHistoryNote();
     renderHistoryFoot();
