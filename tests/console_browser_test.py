@@ -82,6 +82,27 @@ DEMO_GIT_DETAIL = {"/home/mira/projects/" + folder: dict(detail) for folder, det
                "more_paths": 0, "more_commits": 0}))}
 
 
+# The short log behind the sheet's History, per project: the garden's runs
+# to 250 commits so the list pages, and its newest subject is long enough
+# to overflow the box sideways.
+DEMO_GIT_LOG = {"/home/mira/projects/harbor": 3, "/home/mira/projects/garden": 250,
+                "/home/mira/projects/atlas": 12}
+DEMO_GIT_LONG_SUBJECT = ("Shade map for the north beds, with the irrigation lines redrawn so every "
+                         "raised bed drains toward the path and nothing pools by the shed door")
+
+
+def demo_log(cwd, skip, limit):
+    total = DEMO_GIT_LOG.get(str(cwd))
+    if total is None:
+        raise session_git.GitRefused("fatal: not a git repository (or any of the parent directories): .git")
+    commits = []
+    for at in range(skip, min(total, skip + limit)):
+        commits.append({"hash": "{:07x}".format(0x4f2c9ab - at), "author": "Mira Holt",
+                        "subject": DEMO_GIT_LONG_SUBJECT if at == 0 else "Entry {}".format(total - at),
+                        "at": int(time.time()) - 3600 * at})
+    return {"total": total, "skip": skip, "commits": commits, "more": skip + len(commits) < total}
+
+
 def demo_git(cwd, listing=False):
     record = dict(DEMO_GIT.get(str(cwd), {"repo": False}), checked_at=time.time())
     if listing and record["repo"] is True:
@@ -2822,7 +2843,9 @@ async def git_sheet_checks(a):
     review sheet's list surface, read over the node's own route; Refresh
     reading again; Back closing it and Forward opening a fresh one; and, on
     a phone, the commit's author and time stepping under its subject with
-    nothing pushed off the screen. The type is the console's: the fact
+    nothing pushed off the screen; the History's first hundred lines in the
+    list's monospace, one line each however long, the box scrolling sideways
+    and the next hundred read by a real scroll to its foot. The type is the console's: the fact
     labels and the captions in the field voice, the kind kickers on the
     kicker step, the lists in the one monospace; the facts stand on the
     review sheet's column, its own step under the title and one row under
@@ -2841,8 +2864,10 @@ async def git_sheet_checks(a):
     for kind in ("mousePressed", "mouseReleased"):
         await a.call("Input.dispatchMouseEvent", {"type": kind, "x": spot["x"], "y": spot["y"],
                      "button": "left", "clickCount": 1}, session=a.page_session)
+    pages = "performance.getEntriesByType('resource').filter(e => e.name.includes('/api/sessions/%d/git/log?')).length" % garden["id"]
     await until(a, "!!document.querySelector('.session-git-modal') && " + reads + " === 1 && "
-                   "!document.querySelector('.session-git-modal').hasAttribute('aria-busy')")
+                   "!document.querySelector('.session-git-modal').hasAttribute('aria-busy') && "
+                   + pages + " === 1 && document.querySelectorAll('.session-git-log .sgl-line').length === 100")
     sheet = await evaluate(a, """(() => {
         const m = document.querySelector('.session-git-modal');
         const probe = document.createElement('span'); document.body.appendChild(probe);
@@ -2939,7 +2964,8 @@ async def git_sheet_checks(a):
     # the captions at that same step: Changes under the last fact, Unpushed
     # commits under the first list and above its own
     assert all(abs(step - sheet["reviewStep"]) < .5 for step in sheet["captionSteps"].values()), sheet["captionSteps"]
-    assert sheet["captions"] == ["Changes · 3 · 1 staged, 1 unstaged, 1 untracked", "Unpushed commits · 1 · not on origin"], sheet
+    assert sheet["captions"] == ["Changes · 3 · 1 staged, 1 unstaged, 1 untracked", "Unpushed commits · 1 · not on origin",
+                                 "History · 250"], sheet
     assert sheet["kinds"] == ["Staged", "Unstaged", "Untracked"], sheet
     assert sheet["rows"] == [["modified", "src/planner.css"], ["modified", "src/beds.js"], ["notes/spring.md"]], sheet
     assert sheet["commit"][:2] == ["4f2c9ab", "Shade map for the north beds"] and sheet["commit"][2].startswith("Mira Holt · "), sheet
@@ -2953,22 +2979,72 @@ async def git_sheet_checks(a):
                                 ["Refresh", False, False, False], ["Push", False, True, False]], sheet
     assert all(sheet["row"].values()), sheet["row"]
     assert sheet["focused"], sheet
+    # the History: the first hundred lines of the short log in the list's
+    # own monospace, the newest first with its hash in the help colour, a
+    # line that never wraps however long its subject - the box scrolls
+    # sideways for it, the sheet and the page no wider - and the foot
+    # offering the next hundred
+    log = await evaluate(a, """(() => {
+        const m = document.querySelector('.session-git-modal'), box = m.querySelector('.session-git-log');
+        const style = node => getComputedStyle(node);
+        const lines = Array.from(box.querySelectorAll('.sgl-line'));
+        const help = (() => { const probe = document.createElement('span'); document.body.appendChild(probe);
+            probe.style.color = 'var(--txt3)'; const c = style(probe).color; probe.remove(); return c; })();
+        return {count: lines.length, first: lines[0].textContent, last: lines[99].textContent,
+            hash: lines[0].querySelector('.sgl-hash').textContent, hashHelp: style(lines[0].querySelector('.sgl-hash')).color === help,
+            /* the trim takes the leading off the first line, so a wrapped
+               line is one taller than two line-heights, not one unlike its
+               neighbour; the long subject runs past the box's edge instead */
+            oneLine: lines.every(line => line.getBoundingClientRect().height < 2 * parseFloat(style(box).lineHeight)) &&
+                lines[0].scrollWidth > box.clientWidth && lines[1].scrollWidth <= box.clientWidth,
+            pre: style(box).whiteSpace === 'pre', sideways: box.scrollWidth > box.clientWidth && style(box).overflowX === 'auto',
+            sheetWidth: m.getBoundingClientRect().width, pageFits: document.documentElement.scrollWidth <= innerWidth,
+            mono: style(box).fontFamily === style(m.querySelector('.session-git-list')).fontFamily,
+            foot: box.querySelector('.sgl-foot').textContent, footButton: !!box.querySelector('.sgl-foot button.sgl-load'),
+            scrolls: box.scrollHeight > box.clientHeight};
+    })()""")
+    assert log["count"] == 100 and log["first"] == "4f2c9ab " + DEMO_GIT_LONG_SUBJECT and log["last"] == "4f2c948 Entry 151", log
+    assert log["hash"] == "4f2c9ab" and log["hashHelp"] and log["mono"], log
+    assert log["oneLine"] and log["pre"] and log["sideways"] and log["pageFits"] and log["sheetWidth"] == 640, log
+    assert log["foot"] == "Load 100 more" and log["footButton"] and log["scrolls"], log
+    # a real scroll to the foot asks for the next hundred, once; the lines
+    # already shown keep their place under it
+    spot = await evaluate(a, """(() => { const box = document.querySelector('.session-git-log');
+        box.scrollIntoView({block: 'center'});
+        const r = box.getBoundingClientRect(); return {x: r.x + r.width / 2, y: r.y + r.height / 2, inView: r.top >= 0 && r.bottom <= innerHeight}; })()""")
+    assert spot["inView"], spot
+    for _ in range(40):
+        asked = await evaluate(a, pages + " >= 2")
+        if asked:
+            break
+        await a.call("Input.dispatchMouseEvent", {"type": "mouseWheel", "x": spot["x"], "y": spot["y"],
+                     "deltaX": 0, "deltaY": 400}, session=a.page_session)
+        await asyncio.sleep(0.05)
+    await until(a, pages + " === 2 && document.querySelectorAll('.session-git-log .sgl-line').length === 200")
+    more = await evaluate(a, """(() => {
+        const box = document.querySelector('.session-git-log'), lines = box.querySelectorAll('.sgl-line');
+        return {hundredth: lines[100].textContent, last: lines[199].textContent, foot: box.querySelector('.sgl-foot').textContent,
+            kept: lines[99].getBoundingClientRect().bottom <= lines[100].getBoundingClientRect().top + 1,
+            pages: %s}; })()""" % pages)
+    assert more["hundredth"] == "4f2c947 Entry 150" and more["last"] == "4f2c8e4 Entry 51", more
+    assert more["foot"] == "Load 50 more" and more["kept"] and more["pages"] == 2, more
     # a press on the mark opened the sheet and nothing else: the row it sits
     # on was not selected by it
     assert await evaluate(a, "document.querySelector('.sess-item.active') ? document.querySelector('.sess-item.active').querySelector('.si-name').textContent : ''") == active
     # Refresh reads again, once per press
-    button = await evaluate(a, "(() => { const r = document.querySelector('#session-git-refresh').getBoundingClientRect(); return {x: r.x + r.width / 2, y: r.y + r.height / 2}; })()")
+    button = await evaluate(a, "(() => { const b = document.querySelector('#session-git-refresh'); b.scrollIntoView({block: 'center'}); const r = b.getBoundingClientRect(); return {x: r.x + r.width / 2, y: r.y + r.height / 2}; })()")
     for kind in ("mousePressed", "mouseReleased"):
         await a.call("Input.dispatchMouseEvent", {"type": kind, "x": button["x"], "y": button["y"],
                      "button": "left", "clickCount": 1}, session=a.page_session)
-    await until(a, reads + " === 2 && !document.querySelector('.session-git-modal').hasAttribute('aria-busy')")
+    await until(a, reads + " === 2 && !document.querySelector('.session-git-modal').hasAttribute('aria-busy') && " + pages + " === 3")
     assert await evaluate(a, "document.querySelectorAll('.session-git-modal .sgl-rows').length === 3")
+    assert await evaluate(a, "document.querySelectorAll('.session-git-log .sgl-line').length === 100"), "a fresh read starts the history over"
     # Back closes the sheet; Forward opens a fresh one, read anew
     await evaluate(a, "history.back(); true")
     await until(a, "!document.querySelector('.session-git-modal')")
     await evaluate(a, "history.forward(); true")
     await until(a, "!!document.querySelector('.session-git-modal') && " + reads + " === 3 && "
-                   "!document.querySelector('.session-git-modal').hasAttribute('aria-busy')")
+                   "!document.querySelector('.session-git-modal').hasAttribute('aria-busy') && " + pages + " === 4")
     # a phone: the commit's author and time step under the subject, and the
     # sheet keeps to the screen
     await a.call("Emulation.setDeviceMetricsOverride", {"width": 390, "height": 844,
@@ -2997,7 +3073,7 @@ async def git_sheet_checks(a):
     assert phone["names"] == ["Revert", "Close", "Refresh", "Push"], phone
     assert all(phone["lines"]) and all(phone["edges"]) and phone["words"], phone
     assert len(set(phone["widths"])) == 1 and phone["widths"][0] > 100, phone
-    button = await evaluate(a, "(() => { const r = document.querySelector('#session-git-close').getBoundingClientRect(); return {x: r.x + r.width / 2, y: r.y + r.height / 2}; })()")
+    button = await evaluate(a, "(() => { const b = document.querySelector('#session-git-close'); b.scrollIntoView({block: 'center'}); const r = b.getBoundingClientRect(); return {x: r.x + r.width / 2, y: r.y + r.height / 2}; })()")
     for kind in ("mousePressed", "mouseReleased"):
         await a.call("Input.dispatchMouseEvent", {"type": kind, "x": button["x"], "y": button["y"],
                      "button": "left", "clickCount": 1}, session=a.page_session)
@@ -3027,7 +3103,9 @@ async def git_sheet_checks(a):
         listing["paths"] = []
 
     async def press(selector):
-        spot = await evaluate(a, "(() => { const r = document.querySelector(%s).getBoundingClientRect(); return {x: r.x + r.width / 2, y: r.y + r.height / 2}; })()" % json.dumps(selector))
+        # the sheet is taller than the screen with its History listed, and a
+        # real click needs its button on the screen
+        spot = await evaluate(a, "(() => { const b = document.querySelector(%s); b.scrollIntoView({block: 'center'}); const r = b.getBoundingClientRect(); return {x: r.x + r.width / 2, y: r.y + r.height / 2}; })()" % json.dumps(selector))
         for kind in ("mousePressed", "mouseReleased"):
             await a.call("Input.dispatchMouseEvent", {"type": kind, "x": spot["x"], "y": spot["y"],
                          "button": "left", "clickCount": 1}, session=a.page_session)
@@ -3093,8 +3171,10 @@ async def git_sheet_checks(a):
     print("PASS: the Git sheet opened by a real click on the orange mark - facts, grouped paths and the "
           "unpushed commit in the console's own type, read over the node's route, read again by Refresh, "
           "closed by Back and reopened fresh by Forward, and fitting a phone with its four buttons on two "
-          "lines; Push and Revert by real clicks over the node's routes, the confirm before a revert, "
-          "each taking its count off the mark and its button off the row with a toast", flush=True)
+          "lines; the History's first hundred lines unwrapped in a box that scrolls sideways, the next "
+          "hundred by a real scroll to its foot, and a fresh read starting it over; Push and Revert by "
+          "real clicks over the node's routes, the confirm before a revert, each taking its count off the "
+          "mark and its button off the row with a toast", flush=True)
 
 
 async def checks(a, b, hub, capture=False):
@@ -4669,7 +4749,7 @@ async def main(args):
     server = None
     try:
         with patch.object(webui, "_engines_payload", engines), patch.object(webui, "_node_user", return_value="mira"), \
-                patch.object(session_git, "inspect", demo_git):
+                patch.object(session_git, "inspect", demo_git), patch.object(session_git, "_log_page", demo_log):
             app, sid = await fixture()
             server = web.AppRunner(app)
             await server.setup()

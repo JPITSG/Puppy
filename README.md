@@ -208,7 +208,13 @@ reading anywhere further up is never pulled away from it.
   every path grouped as `git status` groups them (staged, unstaged, untracked,
   conflicts) with what `git` would do with it - and every unpushed commit with
   its hash, subject, author and time (the first 500 paths and 200 commits,
-  the rest counted). It reads the repository afresh when opened and on
+  the rest counted). Under those, **History** is the short log of everything
+  on the branch, one line per commit with its hash and subject, never
+  wrapped - the box scrolls sideways for a long subject - read a hundred
+  commits at a time: the first hundred once the sheet has read the
+  repository, the next hundred whenever the list is scrolled to its foot or
+  its **Load more** is pressed, the caption counting them all. It reads the
+  repository afresh when opened and on
   Refresh, and the mark follows what it finds. The sheet also acts on the
   two counts: **Push** appears while there are commits to push and somewhere
   to push them - the branch's upstream, or the only remote, which the push

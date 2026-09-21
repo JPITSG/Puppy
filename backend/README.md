@@ -855,6 +855,14 @@ repository, `detail` alone when `git` refused (the reason in the record's
 is never counted as a mutation. The console makes a repository's mark a
 button that opens the sheet only for nodes that advertise this.
 
+Nodes advertising `session-git-log` also serve the sheet's History, `GET
+/api/sessions/{sid}/git/log?skip=N&limit=M`: one page of the short log of
+everything on `HEAD` as `{"ok": true, "total", "skip", "commits": [{"hash",
+"subject", "author", "at"}, …], "more"}`, newest first, `limit` 1 to 100 (the
+default) and `skip` any count from 0 (anything else `400`), git's refusal a
+`409` with its reason, an unborn branch a `total` of 0. It is a read like the
+sheet's, never counted as a mutation.
+
 Nodes advertising `session-git-actions` also serve the sheet's two writes,
 `POST /api/sessions/{sid}/git/push` and `POST /api/sessions/{sid}/git/revert`
 (an empty JSON body). Push sends the checked-out branch's commits where a

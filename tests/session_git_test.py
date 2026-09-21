@@ -424,6 +424,53 @@ def listing() -> None:
     print("listing: paths by kind with git's codes and old names, commits, upstream, bounds and refusals")
 
 
+def history() -> None:
+    """The sheet's History: the short log of everything on HEAD, a page at
+    a time - the total the node counted, the commits from ``skip`` on with
+    LOG_PAGE at most, whether more follow - against a real repository."""
+    project = TREE / "history"
+    project.mkdir()
+    git(project, "init", "-q")
+    # an unborn branch: nothing to list and nothing to count
+    assert session_git._log_page(str(project), 0, 100) == {
+        "total": 0, "skip": 0, "commits": [], "more": False}
+    for at in range(1, 251):
+        (project / "log.txt").write_text("{}\n".format(at))
+        git(project, "add", "log.txt")
+        git(project, "commit", "-q", "-m", "Entry {} with a subject long enough to test the width".format(at))
+    first = session_git._log_page(str(project), 0, 100)
+    assert first["total"] == 250 and first["skip"] == 0 and first["more"] is True, first
+    assert len(first["commits"]) == 100 and first["commits"][0]["subject"].startswith("Entry 250 "), first["commits"][0]
+    assert first["commits"][-1]["subject"].startswith("Entry 151 ")
+    commit = first["commits"][0]
+    assert set(commit) == {"hash", "subject", "author", "at"} and commit["author"] == "Puppy tests", commit
+    assert isinstance(commit["at"], int) and len(commit["hash"]) >= 7, commit
+    second = session_git._log_page(str(project), 100, 100)
+    assert second["skip"] == 100 and second["more"] is True and len(second["commits"]) == 100
+    assert second["commits"][0]["subject"].startswith("Entry 150 ")
+    last = session_git._log_page(str(project), 200, 100)
+    assert last["more"] is False and len(last["commits"]) == 50, last["more"]
+    assert last["commits"][-1]["subject"].startswith("Entry 1 ")
+    assert first["commits"] + second["commits"] + last["commits"] == \
+        session_git._commits(str(project), "HEAD", limit=250), "the pages are the log in order"
+    # past the end: nothing, and no git log run for it
+    assert session_git._log_page(str(project), 900, 100) == {
+        "total": 250, "skip": 900, "commits": [], "more": False}
+    # a smaller page, and a session in a subdirectory reading the same log
+    (project / "sub").mkdir()
+    page = session_git._log_page(str(project / "sub"), 3, 5)
+    assert page["total"] == 250 and len(page["commits"]) == 5 and page["more"] is True
+    assert page["commits"][0]["subject"].startswith("Entry 247 "), page["commits"][0]
+    # outside a repository git refuses, and the reason is git's
+    try:
+        session_git._log_page(str(TREE / "plain"), 0, 100)
+    except session_git.GitRefused as exc:
+        assert "not a git repository" in str(exc), exc
+    else:
+        raise AssertionError("a directory outside any repository answered a page")
+    print("history: the short log paged from a real repository, in order, bounded, from a subdirectory, refused outside one")
+
+
 async def listed(client, headers):
     response = await client.get("/api/sessions", headers=headers)
     assert response.status == 200
@@ -547,6 +594,62 @@ async def api_contract(factory) -> None:
             assert response.status == 401
             response = await client.get(sheet.format(987654), headers=headers)
             assert response.status == 404
+
+            # the sheet's History: one page of the short log through its
+            # own route - the repository's unborn branch has none to list,
+            # outside a repository and for a directory that is not there
+            # git's refusal is the answer, and the page's bounds are held
+            assert protocol.SESSION_GIT_LOG_CAPABILITY in app["puppy_capabilities"]
+            log_route = "/api/sessions/{}/git/log"
+            response = await client.get(log_route.format(ids[0]), headers=headers)
+            data = await response.json()
+            assert response.status == 200 and data == {
+                "ok": True, "total": 0, "skip": 0, "commits": [], "more": False}, data
+            for sid in ids[1:]:
+                response = await client.get(log_route.format(sid), headers=headers)
+                data = await response.json()
+                assert response.status == 409 and data["error"], (sid, data)
+            for query in ("skip=-1", "skip=x", "limit=0", "limit=101", "limit=1.5", "skip=1&limit="):
+                response = await client.get(log_route.format(ids[0]) + "?" + query, headers=headers)
+                assert response.status == (200 if query.endswith("limit=") else 400), (query, response.status)
+            response = await client.get(log_route.format(ids[0]))
+            assert response.status == 401
+            response = await client.get(log_route.format(987654), headers=headers)
+            assert response.status == 404
+            # a repository with commits, read from a session in a
+            # subdirectory: the whole log paged two at a time, newest first,
+            # the last page short and the one past the end empty
+            paged = TREE / "paged" / str(int(time.time() * 1000))
+            (paged / "sub").mkdir(parents=True)
+            git(paged, "init", "-q")
+            for subject in ("first", "second", "third"):
+                (paged / "log.txt").write_text(subject + "\n")
+                git(paged, "add", "log.txt")
+                git(paged, "commit", "-q", "-m", subject)
+            paged_sid = db.create_session("", "claude", str(paged / "sub"), "", "", "", "default")
+            try:
+                pages = []
+                for skip in (0, 2, 4):
+                    response = await client.get(log_route.format(paged_sid) + "?skip={}&limit=2".format(skip),
+                                                headers=headers)
+                    data = await response.json()
+                    assert response.status == 200 and data["ok"] is True and data["total"] == 3, data
+                    assert data["skip"] == skip, data
+                    pages.append(data)
+                assert [c["subject"] for c in pages[0]["commits"]] == ["third", "second"], pages[0]
+                assert pages[0]["more"] is True and pages[1]["more"] is False and pages[2]["more"] is False
+                assert [c["subject"] for c in pages[1]["commits"]] == ["first"] and pages[2]["commits"] == []
+                assert all(c["author"] == "Puppy tests" and isinstance(c["at"], int) and len(c["hash"]) >= 7
+                           for c in pages[0]["commits"]), pages[0]
+                # the default page is the whole short log here, and the
+                # read is a read: never counted as a mutation
+                before = app.get("puppy_mutations")
+                response = await client.get(log_route.format(paged_sid), headers=headers)
+                data = await response.json()
+                assert [c["subject"] for c in data["commits"]] == ["third", "second", "first"] and data["more"] is False
+                assert app.get("puppy_mutations") == before
+            finally:
+                db.delete_session(paged_sid)
             # a focus refresh answers at once and publishes a changed mark
             response = await client.post(refresh.format(ids[1]), headers=headers)
             assert response.status == 200
@@ -753,6 +856,7 @@ async def actions(client, headers, app) -> None:
         # where a push would go, with the one remote and no upstream yet
         assert data["detail"]["push_to"] == "origin/main" and data["detail"]["upstream"] is None, data
         assert data["git"]["unpushed"] == 1 and data["git"]["changes"] == 0, data
+
 
         # Push: the commit sent to the one remote, the upstream set by the
         # push, the answer the read's fresh look plus what went where, the
@@ -976,6 +1080,7 @@ async def main() -> None:
         discovery()
         work_state()
         listing()
+        history()
         config_shape()
         await api_contract(webui.build_app)
         await api_contract(backend_app)

@@ -2625,6 +2625,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "session-git" in ping["capabilities"]
         assert "session-git-detail" in ping["capabilities"]
         assert "session-git-actions" in ping["capabilities"]
+        assert "session-git-log" in ping["capabilities"]
         assert "session-pinning" in ping["capabilities"]
         assert "session-order-recency" in ping["capabilities"]
         assert "completion-events" in ping["capabilities"]

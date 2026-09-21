@@ -401,7 +401,7 @@ assert.equal(bare.document.querySelectorAll(".si-git").length, 0);
   };
   const sessions = [];
   let dialog = null, reopen = null, replies = [], requests = [], renders = 0, dialogs = [];
-  let actionsOffered = true, confirmAnswer = true, confirms = [], toasts = [];
+  let actionsOffered = true, logOffered = false, confirmAnswer = true, confirms = [], toasts = [];
   const modal = (html, className = "", again = null) => {
     const m = document.createElement("div");
     m.className = "modal" + (className ? " " + className : "");
@@ -422,6 +422,7 @@ assert.equal(bare.document.querySelectorAll(".si-git").length, 0);
     sessionsFor: () => sessions, renderSidebar: () => { renders++; },
     sidebarSessionKey: (bid, sid) => `${bid}:${sid}`, backendSupportsSessionGit: () => true,
     backendSupportsSessionGitActions: () => actionsOffered,
+    backendSupportsSessionGitLog: () => logOffered,
     modalConfirm: (title, text, options) => {
       confirms.push([title, text, JSON.parse(JSON.stringify(options))]);
       return Promise.resolve(confirmAnswer);
@@ -751,6 +752,142 @@ assert.equal(bare.document.querySelectorAll(".si-git").length, 0);
     assert.deepEqual(buttons(), [["Close", "", false], ["Refresh", "", false]]);
     dialog.close();
     actionsOffered = true;
+
+    // The History: the short log of everything on HEAD, one line a commit,
+    // read a page at a time through the node's own route once the sheet's
+    // read has answered - never before it, and never on a node without the
+    // route - its caption the node's total, the next page asked for when
+    // the list is scrolled to its foot or Load more is pressed, a failed
+    // page kept with its reason and a Try again, a fresh read starting it
+    // over with a page from before it dropped.
+    const page = (skip, total, subjects) => ({ ok: true, total, skip, more: skip + subjects.length < total,
+      commits: subjects.map((subject, at) => ({ hash: `h${skip + at}`, subject, author: "Mira", at: skip + at })) });
+    const logRows = () => [...dialog.m.querySelectorAll(".session-git-log .sgl-line")].map(row => row.textContent);
+    const foot = () => { const node = dialog.m.querySelector(".session-git-log .sgl-foot"); return node ? node.textContent : null; };
+    const logCaption = () => captions().find(caption => caption.startsWith("History"));
+    const hundred = (skip, total) => page(skip, total, Array.from({ length: Math.min(100, total - skip) },
+      (_, at) => `Entry ${total - skip - at}`));
+    const look = { ok: true, git: { ...work.git }, root: "/home/mira/garden", detail: listing };
+    replies = [look];
+    requests.length = 0;
+    context.modalSessionGit(0, work);
+    await settle();
+    assert.equal(logCaption(), undefined, "a node without the route has no History");
+    assert.deepEqual(requests.map(r => r[1]), ["sessions/3/git"]);
+    dialog.close();
+    logOffered = true;
+    replies = [look, hundred(0, 250)];
+    requests.length = 0;
+    context.modalSessionGit(0, work);
+    // until the read answers the caption has no count and the list waits
+    assert.equal(logCaption(), "History · …");
+    assert.deepEqual(lists()[2], ["Loading…"]);
+    assert.deepEqual(requests.map(r => r[1]), ["sessions/3/git"], "no page before the read");
+    await settle();
+    assert.deepEqual(requests.map(r => r[1]), ["sessions/3/git", "sessions/3/git/log?skip=0&limit=100"]);
+    assert.deepEqual(requests[1][2], { timeoutMs: 45000 });
+    assert.equal(logCaption(), "History · 250");
+    const rows = logRows();
+    assert.equal(rows.length, 100);
+    assert.equal(rows[0], "h0 Entry 250"); assert.equal(rows[99], "h99 Entry 151");
+    assert.equal(dialog.m.querySelector(".session-git-log .sgl-line .sgl-hash").textContent, "h0", "the hash in the help colour");
+    assert.ok(dialog.m.querySelector(".session-git-log .sgl-log"), "the lines stand in one block");
+    assert.equal(foot(), "Load 100 more");
+    // a scroll short of the foot asks nothing; one at the foot asks for
+    // the next page, and a second scroll while it is on its way asks no
+    // second time
+    // a read rebuilds the list, so the box is looked up afresh each time
+    const logBox = () => dialog.m.querySelector(".session-git-log");
+    const scrollTo = (top, height = 2000) => {
+      const box = logBox();
+      box.scrollHeight = height; box.clientHeight = 300; box.scrollTop = top;
+      box.dispatchEvent(new FakeEvent("scroll"));
+    };
+    scrollTo(1000);
+    assert.equal(requests.length, 2, "short of the foot");
+    replies = [hundred(100, 250)];
+    scrollTo(1700);
+    logBox().dispatchEvent(new FakeEvent("scroll"));
+    assert.equal(requests.length, 3);
+    assert.equal(requests[2][1], "sessions/3/git/log?skip=100&limit=100");
+    assert.equal(foot(), "Loading…");
+    await settle();
+    assert.equal(logRows().length, 200);
+    assert.equal(logRows()[100], "h100 Entry 150");
+    assert.equal(foot(), "Load 50 more", "the foot counts what is left");
+    // the last page by a press on Load more: no more after it
+    replies = [hundred(200, 250)];
+    dialog.m.querySelector(".session-git-log .sgl-load").click();
+    assert.equal(requests[3][1], "sessions/3/git/log?skip=200&limit=100");
+    await settle();
+    assert.equal(logRows().length, 250);
+    assert.equal(logRows()[249], "h249 Entry 1");
+    assert.equal(foot(), null, "nothing more: no foot");
+    scrollTo(4000, 5000);
+    assert.equal(requests.length, 4, "a scroll at the foot of a complete history asks nothing");
+    // a fresh read starts the history over, and a page from before it
+    // lands nowhere
+    let late = null;
+    context.api = (bid, path, options) => {
+      requests.push([bid, path, JSON.parse(JSON.stringify(options))]);
+      if (path.includes("/git/log?skip=100")) return new Promise(resolve => { late = resolve; });
+      const reply = replies.shift();
+      return reply instanceof Error ? Promise.reject(reply) : Promise.resolve(reply);
+    };
+    replies = [look, hundred(0, 250)];
+    dialog.m.querySelector("#session-git-refresh").click();
+    // a refresh sends the read alone; the sheet re-reads the log after it
+    await settle();
+    assert.deepEqual(requests.slice(4).map(r => r[1]), ["sessions/3/git", "sessions/3/git/log?skip=0&limit=100"]);
+    assert.equal(logRows().length, 100);
+    scrollTo(1700);
+    assert.equal(requests[6][1], "sessions/3/git/log?skip=100&limit=100");
+    replies = [look, hundred(0, 3)];
+    dialog.m.querySelector("#session-git-refresh").click();
+    await settle();
+    assert.equal(logCaption(), "History · 3");
+    assert.equal(logRows().length, 3);
+    late(hundred(100, 250));
+    await settle();
+    assert.equal(logRows().length, 3, "the page from before the read is dropped");
+    assert.equal(foot(), null);
+    // a page that fails keeps what was listed, says why at the foot, and
+    // Try again asks for the same page
+    context.api = (bid, path, options) => {
+      requests.push([bid, path, JSON.parse(JSON.stringify(options))]);
+      const reply = replies.shift();
+      return reply instanceof Error ? Promise.reject(reply) : Promise.resolve(reply);
+    };
+    replies = [look, hundred(0, 250), new Error("HTTP 503")];
+    dialog.m.querySelector("#session-git-refresh").click();
+    await settle();
+    scrollTo(1700);
+    await settle();
+    assert.equal(logRows().length, 100);
+    assert.equal(foot(), "Could not read the history · HTTP 503 Try again");
+    replies = [hundred(100, 250)];
+    dialog.m.querySelector(".session-git-log .sgl-load").click();
+    assert.equal(requests[requests.length - 1][1], "sessions/3/git/log?skip=100&limit=100");
+    await settle();
+    assert.equal(logRows().length, 200);
+    assert.equal(foot(), "Load 50 more");
+    dialog.close();
+    // an unborn branch: nothing to list, and the foot says so
+    replies = [look, page(0, 0, [])];
+    context.modalSessionGit(0, work);
+    await settle();
+    assert.equal(logCaption(), "History · 0");
+    assert.deepEqual(logRows(), []);
+    assert.equal(foot(), "No commits yet");
+    // a read that fails on opening lists nothing and asks for no page
+    replies = [new Error("HTTP 503")];
+    requests.length = 0;
+    context.modalSessionGit(0, { ...work, git: { ...work.git } });
+    await settle();
+    assert.deepEqual(requests.map(r => r[1]), ["sessions/3/git"]);
+    assert.equal(logCaption(), undefined);
+    dialog.close();
+    logOffered = false;
     console.log("sidebar git sheet tests passed");
   };
   run().catch(error => { console.error(error); process.exit(1); });

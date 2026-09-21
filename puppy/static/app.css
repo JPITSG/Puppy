@@ -406,16 +406,16 @@ a{color:var(--acc2)}
 /* Quiet text actions share one voice: the archive toggle here, the queue
    strip's "+N more" and a search hit's "Show all". Each rule below adds only
    its own placement. */
-.linklike,.queue-strip .q-more,.sh-more{
+.linklike,.queue-strip .q-more,.sh-more,.sgl-load{
   background:none;border:none;color:var(--txt3);font:inherit;font-size:var(--fs-xs);line-height:1;
   cursor:pointer;border-radius:var(--btn-r);
   text-decoration:underline;text-decoration-color:transparent;text-underline-offset:3px;
   transition:color var(--t-base) var(--ease),text-decoration-color var(--t-base) var(--ease);
 }
 @media (hover:hover){
-  .linklike:hover,.queue-strip .q-more:hover,.sh-more:hover{color:var(--txt);text-decoration-color:var(--line3)}
+  .linklike:hover,.queue-strip .q-more:hover,.sh-more:hover,.sgl-load:hover{color:var(--txt);text-decoration-color:var(--line3)}
 }
-.linklike:active,.queue-strip .q-more:active,.sh-more:active{color:var(--txt2)}
+.linklike:active,.queue-strip .q-more:active,.sh-more:active,.sgl-load:active{color:var(--txt2)}
 .linklike{display:inline-flex;align-items:center;padding:8px 6px}
 /* ---------- sidebar quick-search ---------- */
 /* One bordered field holding the input and its two icon actions, sitting
@@ -3414,7 +3414,11 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
    the verb git would use in the help colour, the path at full strength,
    the columns aligned within the group like git aligns its own - and a
    commit is its abbreviated hash, its subject and, in the help colour, who
-   made it and when, which steps under the subject on a phone.
+   made it and when, which steps under the subject on a phone. The History
+   is the short log, one line per commit that never wraps - the box
+   scrolls sideways for a long subject, and its lines stand in one block
+   (.sgl-log) like the other lists' groups - with the foot's Load more in
+   the quiet text-action voice, in the list's own type.
    The button row holds Close and Refresh, and the two actions exactly while
    they apply: Push, the primary, at the row's end, and Revert on its own
    side at the start like the engine-defaults sheet's Reset, so the
@@ -3442,6 +3446,10 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
 .sgl-commits{display:grid;grid-template-columns:max-content minmax(0,1fr) max-content;gap:0 10px}
 .sgl-meta{grid-column:3}
 .sgl-more{margin-top:4px}
+.session-git-log{white-space:pre;overflow-wrap:normal;overflow-x:auto}
+.sgl-log{display:block}
+.session-git-log .sgl-foot{white-space:normal}
+.sgl-load{display:inline;padding:0;font-size:inherit;line-height:inherit;text-decoration-color:var(--line3)}
 @media (max-width:560px){
   .sgl-commits{grid-template-columns:max-content minmax(0,1fr)}
   .sgl-meta{grid-column:2}

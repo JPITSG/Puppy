@@ -5865,6 +5865,15 @@ function backendSupportsSessionGitActions(bid) {
     backend.capabilities.includes("session-git-actions");
 }
 
+/* The sheet's History pages the short log through a route of its own, so
+   the list is drawn only where the node serves it. */
+function backendSupportsSessionGitLog(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(b => b.id === bid);
+  return !!backend && Array.isArray(backend.capabilities) &&
+    backend.capabilities.includes("session-git-log");
+}
+
 /* Between the pin and the notes: whether the working directory is inside a
    Git work tree, and whether that repository is holding work. The node
    answers from its own cache - re-checked on its git_check_minutes timer,
@@ -6353,6 +6362,12 @@ function sessionGitState(git) {
     "Nothing to commit or push", tone: "ok" };
 }
 
+/* The History is read this many commits a page (the node's own page size),
+   and the next page is asked for once the list is scrolled to within this
+   many pixels of its foot. */
+const SESSION_GIT_LOG_PAGE = 100;
+const SESSION_GIT_LOG_NEAR = 40;
+
 /* The kinds' headings in the sheet, in the tooltip's order. */
 const SESSION_GIT_KIND_NAMES = {
   staged: "Staged", unstaged: "Unstaged", untracked: "Untracked", conflicts: "Conflicts",
@@ -6365,7 +6380,15 @@ const SESSION_GIT_KIND_NAMES = {
    node looked - then the paths behind the changes count and the commits
    behind the unpushed count on the review sheet's list surface, grouped
    the way git's own status groups them, each caption carrying the count
-   the mark's label carries after a separator.
+   the mark's label carries after a separator - and, where the node serves
+   it, the History: the short log of everything on HEAD, one line per
+   commit (its hash and subject) that never wraps, the box scrolling
+   sideways instead, read SESSION_GIT_LOG_PAGE commits at a time through
+   the node's paged route: the first page once the read has answered, the
+   next when the list is scrolled to its foot or its foot's Load more is
+   pressed, its caption carrying the total. A page that fails keeps what
+   was listed with the reason at the foot and a Try again; a fresh read
+   starts the history over, and a page from before it is dropped.
    It reads fresh on opening and on Refresh through the node's own route,
    and that read brings the row's record up to date like a focus re-check,
    so the sheet and the mark never disagree; until it answers, the facts
@@ -6399,12 +6422,19 @@ function modalSessionGit(bid, s) {
   const closeButton = m.querySelector("#session-git-close");
   const refresh = m.querySelector("#session-git-refresh");
   const actions = backendSupportsSessionGitActions(bid);
+  const logs = backendSupportsSessionGitLog(bid);
   /* the session and its directory under the title, as the agent-notes
      editor names them */
   intro.textContent = `${s.name || `Session ${s.id}`} · ${sessionLocationLabel(s, bid)}`;
   /* the row's record until the read answers, then the read's own */
   let record = s.git && typeof s.git === "object" ? s.git : null;
   let root = null, detail = null;
+  /* the history as read so far: its commits, the total the node counted,
+     whether more follow, the page on its way and the last page's failure;
+     a read starts it over, and the generation drops a page that answers
+     for a history since replaced */
+  let history = null, historyList = null, historyGeneration = 0;
+  const freshHistory = () => ({ commits: [], total: null, more: true, loading: false, error: "" });
   const count = value => typeof value === "number" && value > 0 ? value : 0;
   const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
@@ -6511,14 +6541,101 @@ function modalSessionGit(bid, s) {
     if (count(detail.more_commits))
       list.appendChild(el("div", "sgl-more", `… and ${plural(detail.more_commits, "more commit")}`));
   };
+  /* the History's caption: the node's count once a page has said it */
+  const historyNote = () => history && typeof history.total === "number" ? String(history.total) : "…";
+  const setHistoryNote = () => {
+    const caption = historyList && historyList.parentNode &&
+      historyList.parentNode.querySelector(".field-lbl .field-optional");
+    if (caption) caption.textContent = historyNote();
+  };
+  /* the list's foot says what the history is doing: a page on its way,
+     more to load (a press or a scroll to the foot asks for it), a page
+     that failed with the reason and a way to try again, or nothing more */
+  const renderHistoryFoot = () => {
+    if (!historyList) return;
+    for (const old of historyList.querySelectorAll(".sgl-foot")) old.remove();
+    if (!history) return;
+    const foot = el("div", "sgl-foot sgl-more");
+    if (history.loading) foot.textContent = "Loading…";
+    else if (history.error) {
+      foot.appendChild(document.createTextNode(`Could not read the history · ${history.error} `));
+      const again = el("button", "sgl-load", "Try again");
+      again.type = "button";
+      again.onclick = () => loadHistory();
+      foot.appendChild(again);
+    } else if (history.more) {
+      const left = typeof history.total === "number" ? history.total - history.commits.length : 0;
+      const load = el("button", "sgl-load",
+        `Load ${left > 0 ? Math.min(left, SESSION_GIT_LOG_PAGE) : SESSION_GIT_LOG_PAGE} more`);
+      load.type = "button";
+      load.onclick = () => loadHistory();
+      foot.appendChild(load);
+    } else if (!history.commits.length) foot.textContent = "No commits yet";
+    else return;
+    historyList.appendChild(foot);
+  };
+  /* one line per commit, never wrapped: the box scrolls sideways instead */
+  const historyLine = commit => {
+    const line = el("div", "sgl-line");
+    line.appendChild(el("span", "sgl-hash", String(commit.hash || "")));
+    line.appendChild(document.createTextNode(" " + String(commit.subject || "")));
+    return line;
+  };
+  const fillHistory = list => {
+    historyList = list;
+    list.classList.add("session-git-log");
+    const lines = el("div", "sgl-log");
+    for (const commit of (history ? history.commits : [])) lines.appendChild(historyLine(commit));
+    list.appendChild(lines);
+    renderHistoryFoot();
+    /* the next page as the foot comes into view; a still pointer at the
+       foot asks once, since a page on its way holds the rest */
+    list.addEventListener("scroll", () => {
+      if (list.scrollTop + list.clientHeight >= list.scrollHeight - SESSION_GIT_LOG_NEAR) loadHistory();
+    });
+  };
+  const loadHistory = async () => {
+    if (!logs || !history || history.loading || !history.more || !m.isConnected) return;
+    const generation = historyGeneration, page = history;
+    page.loading = true;
+    page.error = "";
+    renderHistoryFoot();
+    let answer = null, failure = "";
+    try {
+      answer = await api(bid, `sessions/${s.id}/git/log?skip=${page.commits.length}&limit=${SESSION_GIT_LOG_PAGE}`,
+        { timeoutMs: 45000 });
+    } catch (err) {
+      failure = err.message || "the history could not be read";
+    }
+    if (!m.isConnected || generation !== historyGeneration || history !== page) return;
+    page.loading = false;
+    if (failure) {
+      page.error = failure;
+    } else {
+      const commits = answer && Array.isArray(answer.commits) ? answer.commits : [];
+      page.commits = page.commits.concat(commits);
+      page.total = answer && typeof answer.total === "number" ? answer.total : page.commits.length;
+      page.more = !!(answer && answer.more) && commits.length > 0;
+      const lines = historyList && historyList.querySelector(".sgl-log");
+      if (lines) for (const commit of commits) lines.appendChild(historyLine(commit));
+    }
+    setHistoryNote();
+    renderHistoryFoot();
+  };
+  const restartHistory = () => {
+    historyGeneration++;
+    history = logs ? freshHistory() : null;
+  };
   const renderBody = loading => {
     body.replaceChildren();
+    historyList = null;
     /* nothing to list outside a repository, when git would not read it (the
        State fact carries the reason), or when the read itself failed */
     if (!record || record.repo !== true || record.error || !(loading || detail)) return;
     const waiting = list => list.appendChild(el("div", "sgl-empty", "Loading…"));
     section("Changes", changesNote(), loading ? waiting : fillPaths);
     section("Unpushed commits", commitsNote(), loading ? waiting : fillCommits);
+    if (logs) section("History", historyNote(), loading ? waiting : fillHistory);
   };
 
   /* the actions, drawn from what the record and the read say: a button
@@ -6580,9 +6697,11 @@ function modalSessionGit(bid, s) {
     detail = data && data.detail && typeof data.detail === "object" ? data.detail : null;
     sessionGitAnswered(bid, s.id, record);
     s.git = record;
+    restartHistory();
     renderFacts();
     renderBody(false);
     renderActions();
+    loadHistory();
   };
   const fail = (err, fallback) => {
     error.textContent = err.message || fallback;

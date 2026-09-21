@@ -91,6 +91,10 @@ DETAIL_KEYS = ("branch", "staged", "unstaged", "untracked", "conflicts")
 # most, the rest reported as a count (``more_paths``/``more_commits``).
 DETAIL_PATHS = 500
 DETAIL_COMMITS = 200
+# The sheet's history - the short log of everything on HEAD - is read a page
+# at a time as the console scrolls it: this many commits per page at most,
+# from the ``skip`` the console names.
+LOG_PAGE = 100
 # What a listing inspection carries beyond the record: the work tree's root
 # and the listing itself. Neither belongs in the cache or a payload.
 _LISTING_KEYS = ("root", "detail")
@@ -276,14 +280,17 @@ def _parse_status(text: str) -> dict:
     return {"head": head, "rows": rows}
 
 
-def _commits(cwd: str) -> list:
-    """The commits on HEAD that no remote-tracking branch holds, newest
-    first, at most DETAIL_COMMITS of them: the abbreviated hash git chooses
-    for this repository, the subject, the author and the commit time. NUL
-    separates the fields and ends each record, so a subject is carried
-    exactly."""
-    out = _git(cwd, "log", "HEAD", "--not", "--remotes", "-z",
-               "--max-count={}".format(DETAIL_COMMITS), "--format=%h%x00%s%x00%an%x00%ct")
+def _commits(cwd: str, *revs: str, skip: int = 0, limit=None) -> list:
+    """The commits git lists for ``revs`` - ``HEAD --not --remotes`` for
+    the unpushed ones, ``HEAD`` alone for the history - newest first, at
+    most ``limit`` of them (DETAIL_COMMITS unless given) from ``skip`` on:
+    the abbreviated hash git chooses for this repository, the subject, the
+    author and the commit time. NUL separates the fields and ends each
+    record, so a subject is carried exactly."""
+    if limit is None:
+        limit = DETAIL_COMMITS
+    out = _git(cwd, "log", *revs, "-z", "--skip={}".format(int(skip)),
+               "--max-count={}".format(int(limit)), "--format=%h%x00%s%x00%an%x00%ct")
     fields = out.split("\0")
     commits = []
     for at in range(0, len(fields) - 3, 4):
@@ -345,7 +352,7 @@ def work_state(cwd: str, listing: bool = False) -> dict:
         except ValueError:
             raise GitRefused("git rev-list answered {!r}".format(count[:40]))
         if listing and unpushed:
-            commits = _commits(cwd)
+            commits = _commits(cwd, "HEAD", "--not", "--remotes")
     state["unpushed"] = unpushed
     if listing:
         paths = []
@@ -568,6 +575,44 @@ async def detail(session: dict) -> dict:
     if _store(cwd, entry):
         _broadcast()
     return {"git": _public(entry), "root": entry.get("root"), "detail": entry.get("detail")}
+
+
+# ---- the history ----
+
+def _log_page(cwd: str, skip: int, limit: int) -> dict:
+    """One page of the short log: the ``total`` commits on HEAD (0 on an
+    unborn branch, which has none to list), the ``commits`` from ``skip``
+    on - ``limit`` at most, as ``_commits`` reads them - and whether
+    ``more`` follow. Run in a thread like an inspection; git is asked from
+    the session's own directory, so a directory outside a repository is
+    git's refusal. Raises GitRefused when git would not answer."""
+    if _run_git(cwd, "rev-parse", "--verify", "-q", "HEAD^{commit}").returncode:
+        # no HEAD to count from: either an unborn branch or no repository,
+        # which rev-parse tells apart by refusing the directory itself
+        _git(cwd, "rev-parse", "--git-dir")
+        return {"total": 0, "skip": skip, "commits": [], "more": False}
+    count = _git(cwd, "rev-list", "--count", "HEAD").strip()
+    try:
+        total = int(count)
+    except ValueError:
+        raise GitRefused("git rev-list answered {!r}".format(count[:40]))
+    commits = _commits(cwd, "HEAD", skip=skip, limit=limit) if skip < total else []
+    return {"total": total, "skip": skip, "commits": commits,
+            "more": skip + len(commits) < total}
+
+
+async def history(session: dict, skip: int = 0, limit: int = LOG_PAGE) -> dict:
+    """The sheet's history, one page: what ``_log_page`` reads for the
+    session's directory, in a thread so a slow repository never holds the
+    loop. Bounds are the caller's: ``skip`` is any count from 0, ``limit``
+    at most LOG_PAGE."""
+    cwd = str((session or {}).get("cwd") or "")
+    if not cwd:
+        raise GitRefused("the session has no working directory")
+    skip = max(0, int(skip))
+    limit = max(1, min(int(limit), LOG_PAGE))
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _log_page, cwd, skip, limit)
 
 
 # ---- the actions ----
@@ -865,6 +910,37 @@ async def h_detail(request: web.Request):
     return web.json_response(dict({"ok": True}, **await detail(session)))
 
 
+def _page_int(request: web.Request, name: str, default: int, low: int, high: int) -> int:
+    """A whole number from the query, within its bounds; anything else is
+    the caller's mistake."""
+    raw = request.query.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise web.HTTPBadRequest(text=json.dumps({"error": "{} must be a whole number".format(name)}),
+                                 content_type="application/json")
+    if value < low or value > high:
+        raise web.HTTPBadRequest(text=json.dumps({"error": "{} must be between {} and {}".format(
+            name, low, high)}), content_type="application/json")
+    return value
+
+
+async def h_history(request: web.Request):
+    """The sheet's short log, one page: ``skip`` (from 0) and ``limit`` (1
+    to LOG_PAGE, the default) name it; git's refusal is a 409 with its
+    reason, like the actions' refusals."""
+    session = _session_or_404(request)
+    skip = _page_int(request, "skip", 0, 0, 2147483647)
+    limit = _page_int(request, "limit", LOG_PAGE, 1, LOG_PAGE)
+    try:
+        page = await history(session, skip, limit)
+    except GitRefused as exc:
+        return web.json_response({"error": str(exc)}, status=409)
+    return web.json_response(dict({"ok": True}, **page))
+
+
 @operations.cancellable
 async def h_action(request: web.Request):
     """Push or revert. The operation header makes a push cancellable while
@@ -884,12 +960,13 @@ async def h_action(request: web.Request):
 
 
 def register(app) -> None:
-    """Both runtimes: the worker, the focus refresh, the sheet's read and
-    its two actions."""
+    """Both runtimes: the worker, the focus refresh, the sheet's read, its
+    paged history and its two actions."""
     if app.get("puppy_session_git_registered"):
         return
     app["puppy_session_git_registered"] = True
     app.router.add_get("/api/sessions/{sid:\\d+}/git", h_detail)
+    app.router.add_get("/api/sessions/{sid:\\d+}/git/log", h_history)
     app.router.add_post("/api/sessions/{sid:\\d+}" + REFRESH_SUFFIX, h_refresh)
     app.router.add_post("/api/sessions/{sid:\\d+}/git/{action:" + "|".join(ACTIONS) + "}", h_action)
     app.cleanup_ctx.append(_lifecycle)

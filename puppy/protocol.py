@@ -185,6 +185,12 @@ SESSION_GIT_DETAIL_CAPABILITY = "session-git-detail"
 # operation-cancel header. A console offers Push and Revert only for nodes
 # that advertise this.
 SESSION_GIT_ACTIONS_CAPABILITY = "session-git-actions"
+# The sheet's history: GET /api/sessions/{sid}/git/log?skip=&limit= answers
+# one page of the short log of everything on HEAD (``total``, ``skip``,
+# ``commits`` of hash/subject/author/at newest first, ``more``), at most 100
+# a page, git's refusal as a 409 reason. A console draws the History list
+# only for nodes that advertise this.
+SESSION_GIT_LOG_CAPABILITY = "session-git-log"
 # Node-owned pinned flags and session order. Drag-and-drop requires the
 # complete starting order and pin cohort as compare tokens.
 SESSION_PINNING_CAPABILITY = "session-pinning"
@@ -313,6 +319,7 @@ BASE_CAPABILITIES = (
     SESSION_GIT_CAPABILITY,
     SESSION_GIT_DETAIL_CAPABILITY,
     SESSION_GIT_ACTIONS_CAPABILITY,
+    SESSION_GIT_LOG_CAPABILITY,
     SESSION_PINNING_CAPABILITY,
     SESSION_ORDER_RECENCY_CAPABILITY,
     COMPLETION_EVENTS_CAPABILITY,

@@ -177,7 +177,22 @@ not on origin`, `· 2 · not on any remote`, `· 0`, `· no remote`) and lists e
 commit as its hash, subject and, in the help colour, author and time. A
 clean repository says `Nothing to commit` and `Nothing to push`; one without
 a remote, `No remote to push to`; what the bounds cut ends a list as `… and
-40 more paths`. The sheet reads on opening and on **Refresh** (one press, one
+40 more paths`. **History**, on nodes advertising `session-git-log`, is the
+short log of everything on `HEAD`: its caption carries the total, each line
+is one commit's abbreviated hash (in the help colour) and subject and never
+wraps - the box scrolls sideways for a long subject - and it is read a page
+of 100 at a time through `GET /api/sessions/{sid}/git/log?skip=N&limit=100`
+(`{"ok": true, "total", "skip", "commits": [{"hash", "subject", "author",
+"at"}, …], "more"}`; `limit` is 1 to 100, `skip` any count from 0, anything
+else a `400`; git's refusal - no repository, a directory that is not there -
+a `409` with its reason; an unborn branch a total of 0). The first page is
+asked for once the sheet's read has answered, never before it; the next
+whenever the list is scrolled to within 40px of its foot or the foot's
+**Load N more** is pressed, one page at a time; a page that fails keeps
+what was listed with `Could not read the history · <reason>` and **Try
+again** at the foot; `No commits yet` is the foot of an empty log; a fresh
+read (opening, Refresh, an action's answer) starts the history over and a
+page from before it is dropped. The sheet reads on opening and on **Refresh** (one press, one
 read, the button held while it runs), keeps the facts and captions from the
 row's record until the read answers, hands the fresh record to the row so the
 mark never disagrees with the sheet, keeps the last listing and reports

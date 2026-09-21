@@ -179,6 +179,15 @@ node without it names a session from its first line as before. The `titles`
 config section is a persisted-shape change (above); nothing else changes a
 backup shape.
 
+The sheet's History is additive `session-git-log`: both execution runtimes
+serve `GET /api/sessions/{sid}/git/log?skip=N&limit=M`, one page of the
+short log of everything on `HEAD` - `{ok, total, skip, commits: [{hash,
+subject, author, at}], more}`, newest first, `limit` 1 to 100 (the default)
+and `skip` from 0, anything else `400`, git's refusal `409` with its reason,
+an unborn branch a `total` of 0 - read from the session's own directory. A
+console draws the History list only for nodes that advertise this. Nothing
+is persisted and the read is never counted as a mutation.
+
 The sheet's actions are additive `session-git-actions`: both execution
 runtimes serve `POST /api/sessions/{sid}/git/push` (the checked-out branch's
 commits sent to its upstream, or to the one remote - `remote.pushDefault`
