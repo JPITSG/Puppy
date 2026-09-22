@@ -134,10 +134,12 @@ out; the sheet reports an error only when no node answered.
 - **Tiles**: the total, the fresh input, the cache (read and written), the
   output (with its reasoning part), the turns and how many sessions they were
   in, and the estimated cost when any engine reported one.
-- **By**: the columns are split per **Backend**, **Engine** or **Model**
-  (the engine catalog's name for it where it has one - a requested alias
-  and the id the engine resolved it to are one model - the id otherwise,
-  and "*Engine* default" for a turn on the engine's default model).
+- **By**: the columns are split per **Backend**, **Engine** or **Model**.
+  A model is one series per engine under the name its engine's catalog
+  gives it - a requested alias, the id the engine resolved it to, and one
+  model two backends' catalogs file under different rows are one series -
+  or under its id where the catalog does not name it, and "*Engine*
+  default" for a turn on the engine's default model.
   **Tokens** counts **All** of them, or only the input, the cache or the
   output: the chart, its readout, the breakdown and the sessions follow it,
   while the tiles always show every kind.
@@ -147,7 +149,9 @@ out; the sheet reports an error only when no node answered.
   orange, Codex's teal, OpenCode's violet); past seven series the smallest
   fold into *Other*. The line above the plot reads the range - its total and
   its busiest column - and hovering, tapping or the arrow keys (Home, End,
-  Escape) read one column at a time.
+  Escape) read one column at a time. Every series keeps its place in that
+  line whatever the column holds - a series the column did not use reads
+  nought in the help colour - so reading the chart never moves it.
 - **Breakdown** is the chart's table: every series with its total, its share
   and its input, cache and output (on a phone, under its name).
 - **Sessions** lists the twelve heaviest sessions across the nodes with

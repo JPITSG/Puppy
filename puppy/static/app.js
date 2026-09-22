@@ -8944,13 +8944,14 @@ function usageModelLabel(bid, engine, model) {
   return (option && option.label) || model;
 }
 
-/* A model's identity in the chart: the catalog row its spelling names - a
-   requested alias and the id the engine resolved it to are one model - else
-   the spelling itself. */
+/* A model's identity in the chart: the name its engine's catalog gives the
+   row its spelling names - a requested alias and the id the engine resolved
+   it to are one model, and so is one model two backends' catalogs file
+   under different spellings - else the spelling itself. */
 function usageModelId(bid, engine, model) {
   if (!model) return "";
   const option = engineModelOption(engineInfo(bid, engine), model);
-  return option ? option.value : model;
+  return option ? `\u0002${option.label || option.value}` : model;
 }
 
 function usageSeriesKey(row, lens) {
@@ -9297,14 +9298,16 @@ function modalTokenUsage() {
     if (!bucket && chart.peak) head.appendChild(el("span", "tu-read-note",
       `peak ${usageBucketLabel(chart.peak, chart.unit, false)} · ${fmtUsage(chart.peak.total)}`));
     readout.appendChild(head);
+    /* every series every time, in the same place: a column reads its value
+       for each one - a quiet one in the help colour - so the list never
+       re-wraps and the plot under it never moves */
     const items = [...chart.shown, ...(chart.folded.length ? [{ key: USAGE_OTHER, slot: 0,
       label: `Other (${chart.folded.length})` }] : [])];
     const list = el("div", "tu-read-series");
     for (const item of items) {
       const value = bucket ? bucket.values.get(item.key) || 0 :
         item.key === USAGE_OTHER ? chart.folded.reduce((sum, series) => sum + series.value, 0) : item.value;
-      if (!value) continue;
-      const row = el("span", "tu-read-item");
+      const row = el("span", "tu-read-item" + (value ? "" : " none"));
       const key = el("span", "tu-key");
       key.style.background = usageColor(item.slot);
       row.appendChild(key);
@@ -9406,12 +9409,10 @@ function modalTokenUsage() {
       name.appendChild(swatch);
       const text = el("span", "tu-name-text");
       text.appendChild(el("span", "tu-name-label", item.label));
-      /* under the name: the split the wide columns show (on a phone, where
-         they are not shown) and the engine's own cost estimate, if any */
+      /* under the name, on a phone: the split the wide columns show */
       const sub = el("span", "tu-name-sub");
       sub.appendChild(el("span", "tu-split", `in ${fmtUsage(item.input)} · cache ` +
         `${fmtUsage(item.cache_read + item.cache_write)} · out ${fmtUsage(item.output)}`));
-      if (item.cost) sub.appendChild(el("span", "tu-cost", `≈ ${fmtUsd(item.cost)}`));
       text.appendChild(sub);
       name.appendChild(text);
       row.appendChild(name);

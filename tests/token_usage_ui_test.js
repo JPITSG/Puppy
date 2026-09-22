@@ -80,7 +80,8 @@ function consoleFor(options = {}) {
       const backend = state.backends.find(b => b.id === bid);
       return !!backend && backend.capabilities.includes(capability);
     },
-    engineInfo: (bid, key) => state.engines.find(engine => engine.key === key) || null,
+    engineInfo: (bid, key) => ((options.catalogs || {})[bid] || state.engines)
+      .find(engine => engine.key === key) || null,
     engineModelOption: (engine, model) => ((engine && engine.model_options) || []).find(option =>
       option.value === model || (option.aliases || []).includes(model)),
     fmtDateTime: (ts, opts) => {
@@ -190,6 +191,21 @@ const text = (root, selector) => [...root.querySelectorAll(selector)].map(item =
       spelled("claude-sonnet-9", 2)], "model", "all");
     assert.deepEqual(plain(merged.map(item => [item.label, item.value])),
       [["Opus 5.5 (1M)", 12], ["claude-sonnet-9", 2]]);
+    // and so is one model two backends' catalogs file under different rows:
+    // it is the name the catalog gives it, per engine
+    const fleet = consoleFor({ catalogs: {
+      0: [{ key: "claude", label: "Claude Code", model_options: [
+        { value: "fable[1m]", label: "Fable", aliases: ["fable", "claude-fable-5-1"] }] },
+        { key: "codex", label: "Codex", model_options: [{ value: "fable", label: "Fable" }] }],
+      5: [{ key: "claude", label: "Claude Code", model_options: [
+        { value: "fable", label: "Fable", aliases: ["claude-fable-5-1[1m]"] }] }] } }).context;
+    const onBackend = (bid, engine, model, input) => ({ ...spelled(model, input), bid, engine });
+    const fleetModels = fleet.usageSeries([onBackend(0, "claude", "claude-fable-5-1", 5),
+      onBackend(5, "claude", "claude-fable-5-1[1m]", 7), onBackend(5, "claude", "fable", 1),
+      onBackend(0, "codex", "fable", 3)], "model", "all");
+    assert.deepEqual(plain(fleetModels.map(item => [item.label, item.value])),
+      [["Fable · Claude Code", 13], ["Fable · Codex", 3]],
+      "one series per engine's model, the engine named only where two engines share a name");
 
     /* ---------- the sheet ---------- */
     const today = Date.UTC(2026, 8, 22) / 1000;
@@ -252,7 +268,9 @@ const text = (root, selector) => [...root.querySelectorAll(selector)].map(item =
     assert.deepEqual(text(m, ".tu-table .tu-name-label"), ["Studio", "Workshop"]);
     assert.deepEqual(text(m, ".tu-table .tu-total"), ["4.8k", "777"]);
     assert.deepEqual(text(m, ".tu-pct"), ["86%", "14%"]);
-    assert.equal(m.querySelector(".tu-table .tu-cost").textContent, "≈ $0.51");
+    assert.equal(m.querySelector(".tu-table .tu-cost"), null, "no cost under a row");
+    assert.deepEqual(text(m, ".tu-table .tu-name-sub"), ["in 911 · cache 3.6k · out 271", "in 7 · cache 700 · out 70"],
+      "only the split a phone shows under the name");
     // the readout: the range's total and its peak, then every series
     assert.equal(m.querySelector(".tu-read-when").textContent, "Last 30 days");
     assert.equal(m.querySelector(".tu-read-sum").textContent, "5.6k");
@@ -267,10 +285,12 @@ const text = (root, selector) => [...root.querySelectorAll(selector)].map(item =
     assert.equal(m.querySelectorAll(".tu-plot .tu-hot").length, 1);
     plot.dispatchEvent(new FakeEvent("keydown", { key: "ArrowLeft" }));
     assert.equal(m.querySelector(".tu-read-when").textContent, "Mon, Sep 21");
-    assert.deepEqual(text(m, ".tu-read-item"), ["1.1kStudio"], "only what that day used");
+    assert.deepEqual(text(m, ".tu-read-item"), ["1.1kStudio", "0Workshop"],
+      "every series in its place, whatever the day used");
+    assert.deepEqual(text(m, ".tu-read-item.none"), ["0Workshop"]);
     plot.dispatchEvent(new FakeEvent("keydown", { key: "Home" }));
     assert.equal(m.querySelector(".tu-read-when").textContent, "Mon, Aug 24");
-    assert.deepEqual(text(m, ".tu-read-item"), [], "a quiet day lists nothing");
+    assert.deepEqual(text(m, ".tu-read-item.none"), ["0Studio", "0Workshop"], "a quiet day reads nought for each");
     const escape = new FakeEvent("keydown", { key: "Escape", cancelable: true, bubbles: true });
     plot.dispatchEvent(escape);
     assert.equal(escape.defaultPrevented, true, "the sheet stays open");

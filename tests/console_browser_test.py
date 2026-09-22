@@ -109,12 +109,12 @@ def demo_log(cwd, skip, limit):
 
 # The invented token history behind the Token usage sheet: sixty days of the
 # preview sessions' turns, quieter at weekends, each on its engine's invented
-# model - an extended model some days, a helper model beside it on some turns
-# - plus a title job now and then. Deterministic, so the lane can say what
-# the sheet must show.
+# model - every third day on its second model instead, so no day uses them
+# all, and a helper model beside it on some turns - plus a title job now and
+# then. Deterministic, so the lane can say what the sheet must show.
 DEMO_USAGE_DAYS = 60
 DEMO_USAGE_MODELS = {"claude": ("preview-standard", "preview-extended"),
-                     "codex": ("preview-swift",), "opencode": ("vendor/preview-open",)}
+                     "codex": ("preview-swift", "preview-deep"), "opencode": ("vendor/preview-open",)}
 
 
 def demo_token_usage(now=None):
@@ -131,7 +131,7 @@ def demo_token_usage(now=None):
             models = DEMO_USAGE_MODELS.get(engine, ("preview-standard",))
             for turn in range(turns):
                 at = start - 3600 * (2 + (turn * 5 + index) % 9)
-                model = models[(day // 9 + turn) % len(models)]
+                model = models[-1] if day % 3 == 0 else models[0]
                 scale = 1 + ((day * 13 + turn * 7 + index * 3) % 10) / 4
                 ref = "turn:{}:{}".format(session["id"], day * 100 + turn)
                 amounts = {"input": int(900 * scale), "output": int(14000 * scale),
@@ -4623,7 +4623,9 @@ async def token_usage_checks(instance, capture=False):
     surface gap between segments, the rounded end on the stack's top alone
     and each engine in its validated hue in both themes, text never in a
     series colour; a real hover and the arrow keys read one column, Escape
-    goes back to the range without closing the sheet; on a phone nothing
+    goes back to the range without closing the sheet, and a pointer run
+    across every column by model moves neither the plot nor any series in
+    the readout, on a desktop or a phone; on a phone nothing
     overflows, the table folds its split under the names and the dates under
     the chart never touch; Back closes the sheet and Forward reads a fresh
     one; and a real click on a session opens it."""
@@ -4793,6 +4795,58 @@ async def token_usage_checks(instance, capture=False):
     await key("Escape", 27)
     await until(instance, "document.querySelector('.tu-read-when').textContent === 'Last 30 days'")
     assert await evaluate(instance, "!!document.querySelector('.token-usage-modal')"), "the sheet stays open"
+    # The readout stands still while it is read. By model, where the days
+    # used different models, the pointer runs across every column: the plot
+    # never moves, the readout keeps its height and every series keeps its
+    # place, a column without one reading nought - on a desktop and a phone.
+    await press(".token-usage-modal .tu-lens .seg-btn:nth-child(3)")
+    await until(instance, "document.querySelector('.tu-lens .seg-btn.on').textContent === 'Model'")
+    readout = """(() => {
+        const m=document.querySelector('.token-usage-modal');
+        return {plot:m.querySelector('.tu-plot').getBoundingClientRect().top,
+                height:m.querySelector('.tu-readout').getBoundingClientRect().height,
+                items:[...m.querySelectorAll('.tu-read-item')].map(item => {
+                    const r=item.getBoundingClientRect();
+                    return [Math.round(r.left*2)/2, Math.round(r.top*2)/2, Math.round(r.width*2)/2];
+                }),
+                none:m.querySelectorAll('.tu-read-item.none').length,
+                clipped:[...m.querySelectorAll('.tu-read-value')].filter(n => n.scrollWidth > n.clientWidth + .5).length,
+                when:m.querySelector('.tu-read-when').textContent};
+    })()"""
+
+    async def steady(where):
+        drawn = await evaluate(instance, columns)
+        rest = await evaluate(instance, readout)
+        assert len(rest["items"]) >= 4 and rest["none"] == 0, (where, rest)
+        y = (drawn["box"]["top"] + drawn["box"]["bottom"]) / 2
+        seen, quiet = rest["when"], 0
+        for column in sorted(drawn["columns"], key=lambda parts: parts[0]["left"]):
+            x = (column[0]["left"] + column[0]["right"]) / 2
+            await instance.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y},
+                                session=instance.page_session)
+            await until(instance, "document.querySelector('.tu-read-when').textContent !== %s" % json.dumps(seen))
+            read = await evaluate(instance, readout)
+            seen = read["when"]
+            quiet += read["none"] > 0
+            assert abs(read["plot"] - rest["plot"]) < .01 and abs(read["height"] - rest["height"]) < .01, \
+                (where, seen, rest, read)
+            assert read["items"] == rest["items"] and read["clipped"] == 0, (where, seen, rest, read)
+        assert quiet, (where, "no column lacked a model, so nothing was proved")
+        await instance.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": drawn["box"]["top"] - 120},
+                            session=instance.page_session)
+        await until(instance, "document.querySelector('.tu-read-when').textContent === 'Last 30 days'")
+
+    await steady("desktop")
+    await instance.call("Emulation.setDeviceMetricsOverride", {
+        "width": 390, "height": 844, "deviceScaleFactor": 2, "mobile": True},
+        session=instance.page_session)
+    await evaluate(instance, "new Promise(resolve => setTimeout(() => requestAnimationFrame(() => requestAnimationFrame(resolve)), 120))")
+    await steady("phone")
+    await instance.call("Emulation.setDeviceMetricsOverride", {
+        "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False},
+        session=instance.page_session)
+    await press(".token-usage-modal .tu-lens .seg-btn:nth-child(2)")
+    await until(instance, "document.querySelector('.tu-lens .seg-btn.on').textContent === 'Engine'")
     if capture:
         shot = await instance.call("Page.captureScreenshot", {"format": "png"}, session=instance.page_session)
         (BASE / "data" / "token-usage-desktop.png").write_bytes(base64.b64decode(shot["data"]))
@@ -4851,7 +4905,8 @@ async def token_usage_checks(instance, capture=False):
                              "'puppy.usage.measure']) localStorage.removeItem(lsKey(key)); true")
     print("PASS: token usage sheet - the button between the bell and the tray, the node's own report "
           "read over its route, thin stacked columns with surface gaps in each engine's validated hue in "
-          "both themes, hover and key readouts, a phone layout that keeps to the screen, Back/Forward "
+          "both themes, hover and key readouts that never move the plot, a phone layout that keeps to "
+          "the screen, Back/Forward "
           "and a session opened from its row", flush=True)
 
 

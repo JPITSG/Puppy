@@ -720,7 +720,8 @@ with a window of history around it.
   reports one. The stacked chart splits each day (or week or month) by
   backend, engine or model and counts all tokens or only input, cache or
   output; each engine keeps its own colour and every series keeps its colour
-  as the choices change. Hover, tap or use the arrow keys to read a column.
+  as the choices change. Hover, tap or use the arrow keys to read a column in
+  the line above the chart, where every series keeps its place.
   Under it, a breakdown table lists every series with its share, and the
   heaviest sessions open with a press. Deleting a session never rewrites what
   it used. Each ledger lives in its node's database; the browser remembers

@@ -3510,15 +3510,25 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
 .tu-control .field-lbl{margin:0}
 .tu-figure{margin:10px 0 0}
 .tu-readout{min-height:42px;display:flex;flex-direction:column;gap:3px}
-.tu-read-head{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;min-width:0}
+/* the readout stands still while it is read: the head is one line whatever
+   it says (the peak note gives way first), every series keeps its place in
+   the list below it, and a figure takes the width of the widest one it could
+   show, so a column with other figures - or none - never re-wraps the list
+   and the plot under it never moves */
+.tu-read-head{display:flex;align-items:baseline;gap:8px;min-width:0;white-space:nowrap}
 .tu-read-when{font-size:var(--fs-sm);color:var(--txt2)}
 .tu-read-sum{font-size:var(--fs-2xl);font-weight:600;color:var(--txt);font-variant-numeric:tabular-nums}
-.tu-read-note{font-size:var(--fs-xs);color:var(--txt3)}
+.tu-read-note{font-size:var(--fs-xs);color:var(--txt3);min-width:0;overflow:hidden;text-overflow:ellipsis}
 .tu-read-series{display:flex;flex-wrap:wrap;gap:2px 14px;min-width:0}
 .tu-read-item{display:inline-flex;align-items:center;gap:6px;min-width:0;font-size:var(--fs-xs)}
 /* a line key, not a box: at this density a filled square would be data ink */
 .tu-key{flex:0 0 auto;width:10px;height:3px;border-radius:2px;background:var(--viz-other)}
-.tu-read-value{color:var(--txt);font-weight:600;font-variant-numeric:tabular-nums}
+.tu-read-value{
+  flex:0 0 auto;min-width:5ch;text-align:right;
+  color:var(--txt);font-weight:600;font-variant-numeric:tabular-nums;
+}
+.tu-read-item.none .tu-key{opacity:.35}
+.tu-read-item.none .tu-read-value,.tu-read-item.none .tu-read-label{color:var(--txt3)}
 .tu-read-label{color:var(--txt2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:220px}
 .tu-plot{position:relative;margin-top:6px;border-radius:var(--r-xs);outline:none;touch-action:pan-y}
 .tu-plot:focus-visible{outline:2px solid var(--acc);outline-offset:3px}
