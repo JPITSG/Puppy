@@ -115,6 +115,10 @@ vm.runInContext([
   between("async function modalNewTask(", "/* The review sheet:"),
 ].join("\n"), context);
 const { Composer } = vm.runInContext("({ Composer })", context);
+/* the spelling tally is the checker's own (spellcheck_ui_test.js); here only
+   that a created task's prompt is handed to it as a sent message */
+const learned = [];
+context.spellLearnSent = text => learned.push(text);
 const nodes = new Proxy({}, { get: (_, key) => dialog.m.querySelector(key) });
 const open = async () => { await context.modalNewTask(workspace); return nodes; };
 const values = n => ({ engine: n["#nt-engines"].querySelectorAll(".ep").find(card => card.classList.contains("sel")).dataset.key,
@@ -183,7 +187,9 @@ const deletes = from => requests.slice(from).filter(r => r.method === "DELETE").
   assert.equal(n["#nt-model"].disabled, false);
   assert.equal(n["#nt-prompt"].readOnly, false);
   assert.equal(n[".attach-add"].disabled, false);
+  assert.deepEqual(learned, [], "a task that was not created sent nothing");
   fail = false; await n["#nt-start"].onclick();
+  assert.deepEqual(learned, ["A task"], "the created task's prompt counts as sent");
   assert.deepEqual(requests[1], requests[0], "retry keeps the same identity and choices");
   assert.equal(requests[0].bid, 7);
   assert.equal(requests[0].route, "sessions/10/tasks");

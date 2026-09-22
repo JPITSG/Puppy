@@ -340,9 +340,16 @@ dialog's — carries two switches:
   still typing it. Code fences, inline code, paths, URLs, identifiers,
   acronyms, versions, `@` mentions and attachment markers are never checked.
   Right-click (or long-press on Android) a marked word for suggestions, or
-  **Add to dictionary** to keep the word in this browser for good; clicking
-  anywhere else closes the list. The underlines move with your text the moment
-  it re-wraps, so a `Ctrl+J` that pushes a line down takes them with it.
+  **Add to dictionary** to keep the word for good; clicking anywhere else
+  closes the list. The added words are Puppy's, not the browser's: every
+  browser signed in to the instance shares one list, and a backup carries
+  it. A marked word you send anyway, five times within seven days - from
+  whichever browsers - is added for you: each message counts once, however
+  often the word is in it, sends older than seven days no longer count, and
+  a notice says so; right-click any added word, learned or added by hand,
+  for **Remove from dictionary**. The underlines move with your text the
+  moment it re-wraps, so a `Ctrl+J` that pushes a line down takes them with
+  it.
 - **Autocorrect** (off by default) fixes a clear typo as you finish the word,
   and is unavailable while spell check is off. It is deliberately timid: it
   only replaces a word it does not know, only with a common word one edit away
@@ -354,8 +361,10 @@ dialog's — carries two switches:
   word is left alone for the rest of the message — and `Ctrl+Z` takes one back
   too. Pasted text is never rewritten.
 
-The dictionary is fetched once per console, only when a prompt box with spell
-check on is on screen, and both switches are remembered per browser. The word
+The bundled dictionary is fetched once per console, only when a prompt box
+with spell check on is on screen, and the added words arrive on the console's
+live stream; both switches are remembered per browser, the added words and
+the count of sends behind them by the instance. The word
 list, its build script and the rules behind every correction are described in
 [docs/spellcheck.md](docs/spellcheck.md).
 
@@ -710,7 +719,8 @@ with a window of history around it.
   model, status, duration and directory. Arm or silence it with the bell in the
   footer.
 - **Backup and restore.** Export one `.tar.gz` with settings, accounts, backend
-  registrations, sessions and transcripts, notification history, uploads,
+  registrations, sessions and transcripts, notification history, the words
+  added to the spelling dictionary, uploads,
   scratch workspaces, task copies, tabs and drafts. Import validates the whole
   archive first, only runs while the instance is idle, and rolls back if the
   install fails. **Cancel**
@@ -937,6 +947,7 @@ node tests/toast_ui_test.js          # notice grammar, tones, lives, folded repe
 node tests/notices_ui_test.js        # the notification box: its slide, rows, live arrivals, its clear
 python3 tests/notices_test.py        # the notification history record, routes and stream topic
 node tests/spellcheck_ui_test.js     # the bundled dictionary, its marks and autocorrect
+python3 tests/spelling_test.py       # the added words: the record, the learning rule, routes and stream topic
 node tests/host_panel_ui_test.js     # the host box: charts, latency rows, process tree
 python3 tests/host_metrics_test.py   # CPU history, the process tree and backend latency
 python3 tests/backend_test.py        # headless package, auth, protocol, capabilities

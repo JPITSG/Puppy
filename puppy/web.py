@@ -17,6 +17,7 @@ from aiohttp import WSMsgType, web
 from puppy import (__version__, agent_notes, auth, backends, bind_verify, browser,
                    cli_auto_upgrade, cli_releases,
                    cli_upgrade, config, db, engine_defaults, host_metrics, listener_handoff, notices, notify, operations,
+                   spelling,
                    live_websockets, localization, protocol, runner, search, session_git, snapshots,
                    session_titles, spawn_exec,
                    state_stream, system_prompts, terminal, uploads, vnc,
@@ -54,10 +55,12 @@ async def state_change_guard(request: web.Request, handler):
                 "restore" if busy == "restore" else "backup")}, status=503)
     # A notice report, like a clear of the history, is one atomic row the
     # backup copies whole, and a toast can be raised at the very moment Export
-    # is pressed: counting it would refuse that backup for nothing. A Git
-    # re-check changes nothing a backup could copy at all, and focusing a
-    # session raises one. The busy refusal above still applies to both.
+    # is pressed: counting it would refuse that backup for nothing; the
+    # spelling dictionary's record is one such row too, and a send reports
+    # to it. A Git re-check changes nothing a backup could copy at all, and
+    # focusing a session raises one. The busy refusal above still applies.
     if mutating and not snapshot_path and request.path != notices.API_PATH and \
+            not request.path.startswith(spelling.API_PATH) and \
             not request.path.endswith(session_git.REFRESH_SUFFIX):
         request.app["puppy_mutations"] = request.app.get("puppy_mutations", 0) + 1
         try:
@@ -289,6 +292,7 @@ async def _publish_restored_state(app: web.Application) -> None:
     runner.publish_state({"type": "notify", **notify.public_state()})
     runner.publish_state({"type": "titles", **session_titles.public_state()})
     notices.publish()
+    spelling.publish()
     for payload in await _state_stream_snapshots(app, None, probes=False):
         runner.publish_state(payload)
     state_stream.wake()
@@ -1947,6 +1951,52 @@ async def h_notices_clear(request: web.Request):
     return web.json_response(payload)
 
 
+# ---- the spelling dictionary ----
+# The words added to the console's checker, shared by every console: the
+# list rides the ``spelling`` state topic, a console whose stream is not
+# there reads it, Add and Remove from dictionary write it, and every sent
+# message reports its marked words so the checker can learn.
+
+def _spelling_answer(call):
+    try:
+        return web.json_response(call())
+    except spelling.ShapeError as exc:
+        log.error("%s", exc)
+        return web.json_response({"error": str(exc)}, status=500)
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+
+async def h_spelling_get(request: web.Request):
+    return _spelling_answer(spelling.publish)
+
+
+async def h_spelling_add(request: web.Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid word"}, status=400)
+    if not isinstance(body, dict) or set(body) != {"word"} or not isinstance(body["word"], str):
+        return web.json_response({"error": "supply a word"}, status=400)
+    return _spelling_answer(lambda: spelling.add(body["word"]))
+
+
+async def h_spelling_remove(request: web.Request):
+    return _spelling_answer(lambda: spelling.remove(request.match_info["word"]))
+
+
+async def h_spelling_sent(request: web.Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid report"}, status=400)
+    if not isinstance(body, dict) or set(body) != {"words"} or \
+            not isinstance(body["words"], list) or \
+            not all(isinstance(word, str) for word in body["words"]):
+        return web.json_response({"error": "supply the words"}, status=400)
+    return _spelling_answer(lambda: spelling.sent(body["words"]))
+
+
 async def h_notify_toggle(request: web.Request):
     body = await request.json()
     if not isinstance(body, dict) or set(body) != {"enabled"}:
@@ -2211,6 +2261,15 @@ def build_app(runtime_web: dict = None,
         notices.validate_persisted(db.connect())
         notices.publish()
     app.on_startup.append(publish_notices)
+    r.add_get(spelling.API_PATH, h_spelling_get)
+    r.add_post(spelling.API_PATH + "/words", h_spelling_add)
+    r.add_delete(spelling.API_PATH + "/words/{word}", h_spelling_remove)
+    r.add_post(spelling.API_PATH + "/sent", h_spelling_sent)
+
+    async def publish_spelling(_app):
+        spelling.validate_persisted(db.connect())
+        spelling.publish()
+    app.on_startup.append(publish_spelling)
     r.add_get("/api/settings", h_settings_get)
     r.add_patch("/api/settings", h_settings_patch)
     r.add_post("/api/settings/bind/prepare", h_bind_prepare)

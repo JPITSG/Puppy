@@ -2,13 +2,17 @@
    quota: the bundled dictionary is read straight off disk and the shared
    prompt box runs against the fake DOM.
 
-   Three things are checked here. The asset itself (its exact header, its
+   Four things are checked here. The asset itself (its exact header, its
    declared count, its sorted order, and that the gzip sibling every browser
    is served is the same file). The checker (what it knows, what it refuses to
    look at, what it suggests, and what it will and will not correct on its
-   own). And the box (the browser's checker switched off, the two switches in
+   own). The box (the browser's checker switched off, the two switches in
    its tools menu, the marks painted under the text, autocorrect finishing a
-   word, and every rule about when it must keep its hands off). */
+   word, and every rule about when it must keep its hands off). And the
+   words added to the dictionary, which are the controller's: nothing marked
+   until its list is known, Add and Remove from dictionary going over its
+   routes, every send reporting its marked words, and a word the controller
+   says it learned known at once with the notice saying so. */
 "use strict";
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -64,8 +68,12 @@ assert.ok(fs.existsSync(path.join(root, "puppy/static/dict/COPYRIGHT")),
 
 const document = new FakeDocument();
 const storage = new Map();
-const calls = { toasts: [], menus: [], edited: 0 };
+const calls = { toasts: [], menus: [], edited: 0, requests: [] };
 let dictionaryReply = async () => ({ ok: true, text: async () => dictText });
+/* the controller behind the dictionary's routes: what it answers next */
+let replies = [];
+const spellingPayload = (words, extra = {}) => ({ type: "spelling", words, learn_sends: 5, learn_days: 7,
+  state_topic: "spelling", state_revision: 1, runtime_id: "r", ...extra });
 const icon = () => document.createElement("svg");
 const context = vm.createContext({
   document, window: { CSS: { supports: () => true }, innerWidth: 1200, innerHeight: 800 },
@@ -73,7 +81,13 @@ const context = vm.createContext({
   URL: { createObjectURL: () => "blob:fake", revokeObjectURL: () => {} },
   AbortController, setTimeout, clearTimeout, getComputedStyle: () => ({}),
   fetch: (url, init) => dictionaryReply(url, init),
-  api: async () => ({}),
+  api: async (bid, route, options = {}) => {
+    calls.requests.push({ bid, route, method: options.method || "GET", body: options.body });
+    const reply = replies.length ? replies.shift() : spellingPayload([]);
+    if (reply instanceof Error) throw reply;
+    return reply;
+  },
+  acceptStateSnapshot: () => true,
   toast: (text, tone) => calls.toasts.push({ text, tone }), TOAST_LONG: 7000,
   esc: text => String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"),
   apiPath: (bid, route) => (bid ? `/api/b/${bid}/` : "/api/") + route,
@@ -109,10 +123,12 @@ vm.runInContext([
 const {
   Composer, composerBoxHtml, spellPrefs, setSpellPref, spellMenuChecks, spellDictionary,
   parseSpellDictionary, loadSpellDictionary, spellWordKnown, spellMisspellings,
-  spellSuggestions, spellAutocorrection, spellRememberWord,
+  spellSuggestions, spellAutocorrection, spellRememberWord, spellForgetWord, spellLearnSent,
+  spellPersonal, applySpelling, loadSpellPersonal,
 } = vm.runInContext(`({ Composer, composerBoxHtml, spellPrefs, setSpellPref, spellMenuChecks,
   spellDictionary, parseSpellDictionary, loadSpellDictionary, spellWordKnown, spellMisspellings,
-  spellSuggestions, spellAutocorrection, spellRememberWord })`, context);
+  spellSuggestions, spellAutocorrection, spellRememberWord, spellForgetWord, spellLearnSent,
+  spellPersonal, applySpelling, loadSpellPersonal })`, context);
 
 // A file that is not exactly the shipped shape is refused, never repaired.
 assert.equal(parseSpellDictionary("#puppy-dictionary 2 en\n#words 1\nthe\n"), null);
@@ -123,15 +139,43 @@ assert.ok(parseSpellDictionary("#puppy-dictionary 1 en\n#words 2\nthe\t0\nzebra\
 
 /* values cross the VM boundary, so compare plain node-side arrays */
 const marks = text => [...spellMisspellings(text)].map(mark => mark.word);
+const requests = () => JSON.parse(JSON.stringify(calls.requests));
 const settle = async () => { for (let i = 0; i < 8; i++) await new Promise(r => setImmediate(r)); };
 
 (async () => {
-  // Nothing is misspelled while the dictionary is still on its way.
+  // Nothing is misspelled while the dictionary is still on its way - the
+  // bundled list, or the controller's list of the words added to it.
   assert.deepEqual(marks("teh recieve"), []);
   assert.equal(spellWordKnown("teh"), true);
   await loadSpellDictionary();
   assert.ok(spellDictionary.data, "the bundled dictionary loaded");
   assert.deepEqual(calls.toasts, []);
+  assert.equal(spellPersonal.words, null);
+  assert.deepEqual(marks("teh recieve"), [], "no marks until the added words are known");
+  assert.equal(spellWordKnown("teh"), true);
+  // the list over HTTP, when the stream has not brought it: one read
+  replies = [spellingPayload(["Zorbium"])];
+  await loadSpellPersonal();
+  assert.deepEqual(calls.requests.map(r => [r.bid, r.route, r.method]), [[0, "spelling", "GET"]]);
+  assert.deepEqual([...spellPersonal.words], ["zorbium"], "held lower-case, as the list keeps it");
+  assert.equal(spellWordKnown("Zorbium"), true);
+  assert.deepEqual(marks("teh zorbium"), ["teh"]);
+  calls.requests.length = 0;
+  // a read that fails is tried again later, not on every keystroke, and
+  // the tools menu says why nothing is marked
+  spellPersonal.words = null;
+  replies = [new Error("HTTP 503")];
+  await loadSpellPersonal();
+  assert.equal(spellPersonal.words, null);
+  assert.equal(loadSpellPersonal(), null, "no second read straight away");
+  assert.equal(calls.requests.length, 1);
+  assert.match(spellMenuChecks()[0].hint, /^Could not read the words added to the dictionary · HTTP 503$/);
+  assert.deepEqual(calls.toasts, [], "a list that could not be read raises no notice of its own");
+  // the stream's frame is the usual way the list arrives
+  applySpelling(spellingPayload([]));
+  assert.deepEqual([...spellPersonal.words], []);
+  assert.equal(spellMenuChecks()[0].hint, "Underline words Puppy's own dictionary does not know");
+  calls.requests.length = 0;
 
   // Words, their possessives, their cases, and the app's own supplement.
   for (const word of ["the", "receive", "separate", "definitely", "occurrence", "Puppy's",
@@ -597,14 +641,124 @@ const settle = async () => { for (let i = 0; i < 8; i++) await new Promise(r => 
   i.ta.dispatchEvent(plain);
   assert.equal(plain.defaultPrevented, false);
   assert.equal(calls.menus.length, 0);
-  // "Add to dictionary" is this browser's own list, and it takes effect at once
+  // "Add to dictionary" goes to the controller, and its answer - the list
+  // as it now is - takes effect at once, in every box
   const j = makeBox();
   type(j.composer, "our zorbium works");
   j.composer.spellDraw(true);
   assert.deepEqual(painted(j.box), ["zorbium"]);
-  spellRememberWord("Zorbium");
-  assert.deepEqual(JSON.parse(storage.get("puppy.dictionary")), ["zorbium"]);
+  calls.requests.length = 0;
+  replies = [spellingPayload(["zorbium"])];
+  await spellRememberWord("Zorbium");
+  assert.deepEqual(requests(), [{ bid: 0, route: "spelling/words", method: "POST", body: { word: "zorbium" } }]);
+  assert.deepEqual([...spellPersonal.words], ["zorbium"]);
   assert.deepEqual(painted(j.box), []);
+  assert.equal(storage.has("puppy.dictionary"), false, "nothing of the list is kept in the browser");
+  // a refusal is said, and the list stays as it was
+  replies = [new Error("not a word the dictionary can hold")];
+  await spellRememberWord("x1");
+  assert.deepEqual(calls.toasts.pop(), { text: "Could not add “x1” to the dictionary · not a word the dictionary can hold", tone: "bad" });
+  assert.deepEqual([...spellPersonal.words], ["zorbium"]);
+  calls.requests.length = 0;
+
+  /* ---------- what the checker learns ---------- */
+
+  // Every send reports the message's marked words to the controller - each
+  // once, lower-case, however often it appears, never a word the checker
+  // does not mark - and the controller's answer is the list plus whatever
+  // it learned, which is known at once and said in a notice.
+  const send = text => {
+    const box = makeBox();
+    type(box.composer, text);
+    box.composer.take();
+    box.composer.destroy();
+  };
+  calls.toasts.length = 0;
+  calls.requests.length = 0;
+  replies = [spellingPayload(["zorbium"], { learned: [] })];
+  send("run the eval now, the Eval matters");
+  await settle();
+  assert.deepEqual(requests(), [{ bid: 0, route: "spelling/sent", method: "POST", body: { words: ["eval"] } }]);
+  assert.equal(spellWordKnown("eval"), false, "not yet learned");
+  assert.deepEqual(calls.toasts, []);
+  calls.requests.length = 0;
+  replies = [spellingPayload(["eval", "zorbium"], { learned: ["eval"] })];
+  send("eval and frobz, said the zorbium");
+  await settle();
+  assert.deepEqual(requests()[0].body, { words: ["eval", "frobz"] }, "marked words only, in order");
+  assert.equal(spellWordKnown("eval"), true, "the controller's answer is the list");
+  assert.equal(spellWordKnown("Eval"), true);
+  assert.deepEqual(calls.toasts, [{ text: "Added “eval” to the dictionary · sent 5 times in 7 days · right-click it to remove it", tone: "ok" }]);
+  calls.toasts.length = 0;
+  calls.requests.length = 0;
+  // the notice counts what the controller says it counts
+  replies = [spellingPayload(["blorf", "eval", "zorbium"], { learned: ["blorf"], learn_sends: 3, learn_days: 2 })];
+  send("blorf");
+  await settle();
+  assert.equal(calls.toasts[0].text, "Added “blorf” to the dictionary · sent 3 times in 2 days · right-click it to remove it");
+  calls.toasts.length = 0;
+  applySpelling(spellingPayload(["eval", "zorbium"]));
+  calls.requests.length = 0;
+  // a message with nothing marked reports nothing: code, a directive, a
+  // word it knows, one the list holds
+  send("run `blorf` and @Browser A8AR and the word receive, eval");
+  await settle();
+  assert.deepEqual(calls.requests, []);
+  // nor does anything with spell check off, or before the list is known
+  setSpellPref("check", false);
+  send("blorf blorf");
+  await settle();
+  assert.deepEqual(calls.requests, []);
+  setSpellPref("check", true);
+  const knownWords = spellPersonal.words;
+  spellPersonal.words = null;
+  spellLearnSent("blorf again");
+  await settle();
+  assert.deepEqual(calls.requests, [], "no list, no marks, no report");
+  spellPersonal.words = knownWords;
+  // a report the controller could not take is a lost count, nothing more
+  replies = [new Error("HTTP 503")];
+  send("blorf once more");
+  await settle();
+  assert.equal(calls.requests.length, 1);
+  assert.deepEqual(calls.toasts, []);
+  assert.equal(spellWordKnown("blorf"), false);
+  calls.requests.length = 0;
+  // Remove from dictionary: the way back for a learned word (or one added
+  // by hand), from the same menu, on the word itself
+  const learned = makeBox();
+  type(learned.composer, "run the eval now");
+  learned.composer.spellDraw(true);
+  assert.deepEqual(painted(learned.box), [], "a learned word carries no mark");
+  learned.ta.selectionStart = learned.ta.selectionEnd = 10;   // inside "eval"
+  const backEvent = new FakeEvent("contextmenu", { clientX: 30, clientY: 40 });
+  learned.ta.dispatchEvent(backEvent);
+  assert.equal(backEvent.defaultPrevented, true);
+  const wayBack = calls.menus.pop();
+  assert.equal(wayBack.label, "Spelling of eval");
+  assert.deepEqual([...wayBack.opts].map(option => [option.label, !!option.disabled]),
+    [["In the dictionary", true]]);
+  assert.deepEqual([...wayBack.footers].map(footer => footer.label), ["Remove from dictionary"]);
+  replies = [spellingPayload(["zorbium"])];
+  await wayBack.footers[0].run();
+  assert.deepEqual(requests(), [{ bid: 0, route: "spelling/words/eval", method: "DELETE" }]);
+  assert.equal(spellWordKnown("eval"), false, "marked again as soon as the list comes back");
+  assert.deepEqual(painted(learned.box), ["eval"]);
+  calls.requests.length = 0;
+  // a word with an apostrophe travels encoded
+  applySpelling(spellingPayload(["agents’", "zorbium"]));
+  replies = [spellingPayload(["zorbium"])];
+  await spellForgetWord("agents’");
+  assert.equal(calls.requests[0].route, "spelling/words/agents%E2%80%99");
+  calls.requests.length = 0;
+  // a right-click on a word the bundled dictionary knows still leaves the
+  // browser's menu alone
+  learned.ta.selectionStart = learned.ta.selectionEnd = 5;      // inside "the"
+  const known = new FakeEvent("contextmenu", { clientX: 10, clientY: 10 });
+  learned.ta.dispatchEvent(known);
+  assert.equal(known.defaultPrevented, false);
+  assert.equal(calls.menus.length, 0);
+  learned.composer.destroy();
 
   // Leaving the box takes its marks with it.
   const k = makeBox();
@@ -643,5 +797,7 @@ const settle = async () => { for (let i = 0; i < 8; i++) await new Promise(r => 
 
   await settle();
   console.log("PASS: bundled dictionary shape, what the checker knows and skips, " +
-    "suggestions and timid autocorrection, and the prompt box's switches, marks and menus");
+    "suggestions and timid autocorrection, the prompt box's switches, marks and menus, " +
+    "and the controller's added words - nothing marked until known, Add and Remove over its routes, " +
+    "every send reporting its marked words, and a learned word known at once with its notice");
 })().catch(error => { console.error(error); process.exit(1); });

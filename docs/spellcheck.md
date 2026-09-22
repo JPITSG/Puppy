@@ -16,9 +16,9 @@ chat's and the New task dialog's), stored as the exact values `"1"` and `"0"`:
 
 Autocorrect cannot outlive the checker it depends on: switching spell check off
 switches autocorrect off and persists both, and asking for autocorrect turns
-spell check back on. `puppy.dictionary` is this browser's own added words, an
-exact JSON array of lower-case strings written through the shared
-`storedStringSet`/`saveStringSet` helpers.
+spell check back on. The words added to the dictionary are not the browser's
+at all: they are the controller's, one list for every console signed in to
+the instance (see [The added words](#the-added-words)).
 
 ## The asset
 
@@ -169,6 +169,70 @@ character like any other. A word restored this way still carries its underline:
 keeping a word Puppy does not know is not the same as telling it the word is
 spelled right, which is what **Add to dictionary** is for.
 
+## The added words
+
+The words added to the checker - by hand through **Add to dictionary**, or by
+the checker learning them - are kept by the controller, so a person's words
+follow them from a desktop to a phone and a backup carries them.
+`puppy/spelling.py` owns them in one exact-shape `spelling` meta record:
+
+```
+{"format": 1,
+ "words": ["eval", "zorbium"],                 # lower-case, sorted, unique, at most 5000
+ "tally": {"frobz": [1789374600, 1789461000]}} # the sends behind a word not yet learned
+```
+
+A word is letters (the accented Latin ones a dictionary word may carry) and
+the apostrophes that hold a contraction or a possessive together, at most 64
+characters, in lower case; `spelling.normalize` is the one reader of that
+form and anything else is refused with a 400. Each tally entry is a
+non-empty ascending list of epoch seconds, fewer than the learning threshold
+(reaching it moves the word into `words`), never for a word the list already
+holds, and there are at most 500 of them. The record is validated at the full
+runtime's startup and on a snapshot restore and never repaired: a malformed
+one refuses to start, and every route answers 500 until the operator fixes
+it. The headless backend has no console and serves none of this.
+
+The list rides the `spelling` state topic (`{type: "spelling", words,
+learn_sends, learn_days}`, published at startup, after a restore and on every
+change), so every console holds the same list at once; `GET /api/spelling`
+answers a console whose stream is not there to bring it. The console keeps it
+as `spellPersonal.words` and marks nothing until it is known: a word the list
+holds must never be underlined for the moment it takes to arrive. **Add to
+dictionary** is `POST /api/spelling/words {"word"}` and **Remove from
+dictionary** `DELETE /api/spelling/words/{word}`; each answers the list as it
+now is (the same revision-stamped payload as the stream, so neither can
+rewind the other), a refusal is a `bad` toast, and nothing about the list is
+kept in browser storage.
+
+## Learning
+
+A word the dictionary does not know but the person keeps sending - `eval`, a
+product, a colleague - is probably theirs, so the checker adds it by itself.
+`spellLearnSent(text)` runs for every sent message: `Composer.take()` hands
+over the box's text on every send (the chat, steering, a side question, a
+shared draft's accepted send) and the New task dialog hands over a created
+task's prompt. The message's marked words - each once, however often it
+appears - go to `POST /api/spelling/sent {"words": [...]}` (at most 200), and
+the controller counts them: every send is dated to the second, sends older
+than `LEARN_DAYS` (7) days fall off before every count, and a word now sent
+`LEARN_SENDS` (5) times joins `words` exactly as **Add to dictionary** would
+and is named in the answer's `learned`, which the console turns into an `ok`
+toast - `Added "eval" to the dictionary · sent 5 times in 7 days · right-click
+it to remove it`. Because the tally is the controller's, five sends spread
+over the person's browsers add up, and five spread over a fortnight never do.
+A word the list already holds is not counted; with spell check off, no
+dictionary or no list yet, nothing is marked, so nothing is reported; code,
+paths, directives and everything else the scan skips never count either; and
+a report the controller could not take (a backup in progress, a lost
+connection) is a lost count, nothing more - the console raises no notice for
+it.
+
+The way back is on the word itself: right-clicking a word the list holds -
+learned or added by hand - opens the same menu with one line, `In the
+dictionary`, and **Remove from dictionary** (`spellForgetWord`), which marks
+the word again as soon as the list comes back and starts its count over.
+
 ## The marks
 
 A textarea cannot carry marks, and a contenteditable box would cost the
@@ -243,6 +307,8 @@ box included - closes it.
   draft, renews typing presence and travels to other devices like any
   keystroke. Text arriving from a peer, from prompt recall or from a queued
   message brought back for editing is marked but never corrected.
-- **Nothing is sent anywhere.** The checker is client-side; no backend route,
-  capability, config value or persisted node state is involved, so a backend of
-  any version behaves the same.
+- **Nothing typed is sent anywhere to be checked.** The checking is
+  client-side against the bundled list; what reaches the controller is the
+  list of added words and, with each sent message, the marked words it
+  carried - never the text. No backend node, capability or config value is
+  involved, so a backend of any version behaves the same.

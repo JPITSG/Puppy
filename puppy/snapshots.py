@@ -723,6 +723,12 @@ def _validate_database(path: Path):
         except ValueError as exc:
             raise SnapshotError(
                 "snapshot database contains invalid notification history") from exc
+        from puppy import spelling
+        try:
+            spelling.validate_persisted(connection)
+        except ValueError as exc:
+            raise SnapshotError(
+                "snapshot database contains an invalid spelling dictionary") from exc
         orphan = connection.execute(
             "SELECT 1 FROM events e LEFT JOIN sessions s ON s.id=e.session_id "
             "WHERE s.id IS NULL LIMIT 1").fetchone()

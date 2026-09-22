@@ -4127,6 +4127,8 @@ function handleUpdatesMessage(d) {
     if (typeof d.text === "string" && d.text) toast(d.text, d.level || "info", TOAST_LONG);
   } else if (d.type === "notices") {
     applyNotices(d);
+  } else if (d.type === "spelling") {
+    applySpelling(d);
   } else if (d.type === "browser") {
     state.browser = { ...state.browser, enabled: !!d.enabled };
     if (d.enabled === false) closeBrowserTabsForBackend(0);
@@ -11144,13 +11146,24 @@ function spawnEffortOptionsFor(engine, modelOption) {
      autocorrect   replaces a clear single-candidate typo as you finish the
                    word; forced off and unavailable while spell check is off,
                    because a correction you cannot see marked is not a
-                   correction you can trust. */
+                   correction you can trust.
+
+   The words added to the checker - Add to dictionary's, and the ones it
+   learns by itself - are the controller's, one list for every console
+   signed in to this instance (puppy/spelling.py): it rides the `spelling`
+   state topic, Add and Remove from dictionary write it over its routes,
+   and every sent message reports its marked words so the controller can
+   count them. A marked word sent again and again - five sends within seven
+   days, whichever console they came from - is a word of the person's own
+   ("eval", a product, a colleague) and joins the list exactly as Add to
+   dictionary would, with a notice saying so and Remove from dictionary as
+   the way back. */
 
 const SPELL_DICTIONARY_URL = "/static/dict/en.txt";
 const SPELL_DICTIONARY_HEAD = "#puppy-dictionary 1 en";
 const SPELL_PREF_CHECK = "puppy.spellcheck";
 const SPELL_PREF_CORRECT = "puppy.autocorrect";
-const SPELL_PERSONAL_KEY = "puppy.dictionary";
+const SPELL_REPORT_WORDS = 200;     // the most marked words one send reports
 const SPELL_MAX_CHARS = 20000;      // a longer draft is left alone entirely
 const SPELL_DRAW_DELAY = 140;       // typing settles before the marks move
 const SPELL_RETRY_MS = 60000;       // a failed dictionary fetch may be retried
@@ -11213,12 +11226,15 @@ function setSpellPref(key, on) {
 
 /* The two rows every prompt box's tools menu carries. */
 function spellMenuChecks() {
-  const loading = !spellDictionary.data && !!spellDictionary.loading;
+  const loading = (!spellDictionary.data && !!spellDictionary.loading) ||
+    (!spellPersonal.words && !!spellPersonal.loading);
   return [{
     label: "Spell check", on: spellPrefs.check,
     hint: spellDictionary.error && spellPrefs.check ?
       "Could not load the bundled dictionary · " + spellDictionary.error :
-      loading ? "Loading the bundled dictionary…" :
+      spellPersonal.error && !spellPersonal.words && spellPrefs.check ?
+      "Could not read the words added to the dictionary · " + spellPersonal.error :
+      loading ? "Loading the dictionary…" :
       "Underline words Puppy's own dictionary does not know",
     onToggle: () => setSpellPref("check", !spellPrefs.check),
   }, {
@@ -11333,29 +11349,113 @@ function spellLookup(word) {
   return null;
 }
 
-let spellPersonalCache = null;
-function spellPersonalWords() {
-  if (!spellPersonalCache) spellPersonalCache = storedStringSet(SPELL_PERSONAL_KEY);
-  return spellPersonalCache;
+/* ---- the words added to the dictionary ---- */
+
+/* The controller's list, as the `spelling` state topic last brought it (or
+   a read of this console's own, when the stream was not there): a Set of
+   lower-case words, or null until it is known. Nothing is marked until
+   then - a word the list holds must never be underlined for the moment it
+   takes to arrive - and nothing is reported either. */
+const spellPersonal = { words: null, loading: null, error: "", failedAt: 0, sends: 5, days: 7 };
+function spellPersonalWords() { return spellPersonal.words; }
+
+function applySpelling(payload) {
+  if (!payload || !Array.isArray(payload.words)) return;
+  spellPersonal.words = new Set(payload.words.filter(word => typeof word === "string")
+    .map(word => word.toLowerCase()));
+  spellPersonal.error = "";
+  if (Number.isInteger(payload.learn_sends) && payload.learn_sends > 0) spellPersonal.sends = payload.learn_sends;
+  if (Number.isInteger(payload.learn_days) && payload.learn_days > 0) spellPersonal.days = payload.learn_days;
+  for (const composer of Composer.live) composer.syncSpell();
+  syncOpenChoiceMenus();   // a tools menu open through the wait says so
 }
 
-/* "Add to dictionary": this browser's own list, kept beside the bundled one
-   and never sent anywhere. */
-function spellRememberWord(word) {
-  const value = String(word || "").toLowerCase();
+/* An HTTP answer carries the same revision stamp as the stream, so the two
+   cannot rewind each other: whichever arrives second is simply the same list. */
+function ingestSpellingPayload(payload) {
+  if (!payload || payload.type !== "spelling") return;
+  if (!acceptStateSnapshot(0, payload)) return;
+  applySpelling(payload);
+}
+
+/* The list over HTTP, the first time a box would have used it before the
+   stream brought it; a failed read is tried again after SPELL_RETRY_MS. */
+function loadSpellPersonal() {
+  if (spellPersonal.words || spellPersonal.loading) return spellPersonal.loading;
+  if (spellPersonal.error && Date.now() - spellPersonal.failedAt < SPELL_RETRY_MS) return null;
+  spellPersonal.loading = (async () => {
+    try {
+      ingestSpellingPayload(await api(0, "spelling", { timeoutMs: 9000 }));
+    } catch (error) {
+      spellPersonal.error = (error && error.message) || "unavailable";
+      spellPersonal.failedAt = Date.now();
+    } finally {
+      spellPersonal.loading = null;
+      for (const composer of Composer.live) composer.syncSpell();
+      syncOpenChoiceMenus();
+    }
+  })();
+  return spellPersonal.loading;
+}
+
+/* "Add to dictionary": the word joins the controller's list, for every
+   console; the answer is the list, and so is the stream's next frame. */
+async function spellRememberWord(word) {
+  const value = String(word || "").trim().toLowerCase();
   if (!value) return;
-  const words = spellPersonalWords();
-  words.add(value);
-  saveStringSet(SPELL_PERSONAL_KEY, words);
-  for (const composer of Composer.live) composer.spellDraw(true);
+  try {
+    ingestSpellingPayload(await api(0, "spelling/words",
+      { method: "POST", body: { word: value }, timeoutMs: 9000 }));
+  } catch (error) {
+    toast(`Could not add “${value}” to the dictionary · ${error.message || "request failed"}`, "bad");
+  }
+}
+
+/* "Remove from dictionary": the way back for a word the list holds,
+   whether a person added it or the checker learned it. The word is marked
+   again as soon as the list comes back, and its count starts over. */
+async function spellForgetWord(word) {
+  const value = String(word || "").trim().toLowerCase();
+  if (!value) return;
+  try {
+    ingestSpellingPayload(await api(0, "spelling/words/" + encodeURIComponent(value),
+      { method: "DELETE", timeoutMs: 9000 }));
+  } catch (error) {
+    toast(`Could not remove “${value}” from the dictionary · ${error.message || "request failed"}`, "bad");
+  }
+}
+
+/* A message was sent: its marked words - each once, however often it
+   appears - are reported to the controller, which counts every send from
+   every console and answers with the list and whatever it learned: a word
+   sent five times within seven days is now in the dictionary, and the
+   notice says so. With spell check off, no dictionary or no list yet,
+   nothing is marked, so nothing is reported; a report that could not be
+   made is a lost count, nothing more. */
+async function spellLearnSent(text) {
+  if (!spellPrefs.check || !spellDictionary.data || !spellPersonal.words) return;
+  const sent = [...new Set(spellMisspellings(text).map(mark => mark.word.toLowerCase()))];
+  if (!sent.length) return;
+  let answer;
+  try {
+    answer = await api(0, "spelling/sent",
+      { method: "POST", body: { words: sent.slice(0, SPELL_REPORT_WORDS) }, timeoutMs: 9000 });
+  } catch (_) { return; }
+  ingestSpellingPayload(answer);
+  const learned = answer && Array.isArray(answer.learned) ? answer.learned : [];
+  for (const word of learned) {
+    if (typeof word !== "string" || !word) continue;
+    toast(`Added “${word}” to the dictionary · sent ${spellPersonal.sends} times in ` +
+      `${spellPersonal.days} days · right-click it to remove it`, "ok", TOAST_LONG);
+  }
 }
 
 /* Is this token spelled? A possessive or a plural possessive is checked on
    its stem, so "Puppy's" and "the agents'" pass on the words they are made
    of. With no dictionary loaded nothing is misspelled. */
 function spellWordKnown(word) {
-  if (!spellDictionary.data) return true;
-  if (spellPersonalWords().has(word.toLowerCase())) return true;
+  if (!spellDictionary.data || !spellPersonal.words) return true;
+  if (spellPersonal.words.has(word.toLowerCase())) return true;
   if (spellLookup(word)) return true;
   const stem = word.replace(/['’]s$/i, "").replace(/['’]$/, "");
   return stem !== word && stem.length > 1 && !!spellLookup(stem);
@@ -11435,6 +11535,19 @@ function spellScanWords(text, visit) {
     if (region < regions.length && regions[region][0] < end) continue;
     if (spellProseToken(text, start, end, match[0])) visit(start, end, match[0]);
   }
+}
+
+/* The prose word at `at` that the dictionary's added words vouch for, or
+   null: the word whose menu offers Remove from dictionary. */
+function spellPersonalHit(text, at) {
+  const own = spellPersonal.words;
+  if (!own || typeof text !== "string" || !text || text.length > SPELL_MAX_CHARS) return null;
+  let hit = null;
+  spellScanWords(text, (start, end, word) => {
+    if (!hit && at >= start && at <= end && own.has(word.toLowerCase()))
+      hit = { start, end, word };
+  });
+  return hit;
 }
 
 /* [{start, end, word}] for everything the dictionary does not know. */
@@ -11982,13 +12095,19 @@ class Composer {
   }
 
   /* Repaint the marks, after the typing settles unless asked for now. The
-     dictionary is fetched the first time a box with spell check on would have
-     used it, so a console that never types never pays for it. */
+     dictionary - the bundled list and the words added to it - is fetched
+     the first time a box with spell check on would have used it, so a
+     console that never types never pays for it. */
   spellDraw(now = false) {
     if (this.spellTimer) { clearTimeout(this.spellTimer); this.spellTimer = null; }
     if (this.closed) return;
     if (!spellPrefs.check) { this.spellClear(); return; }
-    if (!spellDictionary.data) { this.spellClear(); loadSpellDictionary(); return; }
+    if (!spellDictionary.data || !spellPersonal.words) {
+      this.spellClear();
+      loadSpellDictionary();
+      loadSpellPersonal();
+      return;
+    }
     if (now) { this.spellPaint(); return; }
     /* The marks already on the screen belong to words that just moved: carry
        them there now, so nothing waits for the scan to catch up. */
@@ -12250,16 +12369,33 @@ class Composer {
   }
 
   /* Right-click (and Android's long press) on a marked word: what Puppy would
-     type instead, and a way to say the word was right all along. Anywhere
-     else in the box the browser's own menu is left alone. */
+     type instead, and a way to say the word was right all along. On a word
+     the dictionary's added words vouch for - added by hand or learned - the
+     same menu offers the way back. Anywhere else in the box the browser's
+     own menu is left alone. */
   spellContextMenu(event) {
-    if (this.closed || this.busy || !spellPrefs.check || !spellDictionary.data) return;
+    if (this.closed || this.busy || !spellPrefs.check || !spellDictionary.data ||
+        !spellPersonal.words) return;
     const ta = this.ta;
     const caret = Math.min(ta.selectionStart, ta.selectionEnd);
     const hit = spellMisspellings(ta.value)
       .find(mark => caret >= mark.start && caret <= mark.end);
-    if (!hit) return;
+    const own = hit ? null : spellPersonalHit(ta.value, caret);
+    if (!hit && !own) return;
     event.preventDefault();
+    const at = event.clientX > 0 || event.clientY > 0 ? { x: event.clientX, y: event.clientY } : null;
+    const ownerView = this.host.menuOwner ? this.host.menuOwner() : null;
+    if (own) {
+      openChoiceMenu(ta, {
+        actions: true,
+        label: `Spelling of ${own.word}`,
+        opts: [{ value: "", label: "In the dictionary", disabled: true }],
+        onPick: () => {},
+        footers: [{ label: "Remove from dictionary", run: () => spellForgetWord(own.word) }],
+        at, ownerView,
+      });
+      return;
+    }
     const suggestions = spellSuggestions(hit.word);
     openChoiceMenu(ta, {
       actions: true,
@@ -12269,9 +12405,7 @@ class Composer {
         [{ value: "", label: "No suggestions", disabled: true }],
       onPick: (value) => this.spellReplaceWord(hit, value),
       footers: [{ label: "Add to dictionary", run: () => spellRememberWord(hit.word) }],
-      at: event.clientX > 0 || event.clientY > 0 ?
-        { x: event.clientX, y: event.clientY } : null,
-      ownerView: this.host.menuOwner ? this.host.menuOwner() : null,
+      at, ownerView,
     });
   }
 
@@ -12317,6 +12451,7 @@ class Composer {
     this.stopHistory();
     this.stopTyping();
     this.locallyEdited = false;
+    spellLearnSent(this.ta.value);   // the marked words of a sent message count
     const message = this.message();
     this.attachments.forEach(a => this.retireSentAttachment(a));
     this.attachments = [];
@@ -15177,6 +15312,7 @@ async function modalNewTask(workspace) {
     try {
       submitted = true;
       const data = await api(bid, `sessions/${sid}/tasks`, { method: "POST", timeoutMs: 180000, body, operation: "Preparing task", cancelClose: cancelCreation });
+      spellLearnSent(prompt);     // a created task's prompt is a sent message
       const list = sessionsFor(bid);
       if (!list.some(s => s.id === data.session.id)) list.push(data.session);
       if (!m.isConnected) { renderSidebar(); return; }

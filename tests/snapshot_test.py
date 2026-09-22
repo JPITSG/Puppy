@@ -24,7 +24,7 @@ from tests.scratch import private_root  # noqa: E402
 TEST_ROOT = private_root("snapshot-")
 os.environ["PUPPY_DATA"] = str(TEST_ROOT / "data")
 
-from puppy import (auth, cli_releases, config, db, listener_handoff, notices, notify,
+from puppy import (auth, cli_releases, config, db, listener_handoff, notices, notify, spelling,
                    runner as session_runner, snapshots, terminal, uploads,
                    web_tls, workspace_sync,
                    workspaces)  # noqa: E402
@@ -175,7 +175,7 @@ async def exercise_http(archive_ui: dict, session_id: int, project: Path) -> Non
             ready = await updates.receive_json(timeout=3)
             assert ready["type"] == "updates_ready" and ready["stream_version"] == 1
             wanted = {"sessions", "node", "backends", "workspace_links", "notify",
-                      "notices"}
+                      "notices", "spelling"}
             streamed = {}
             deadline = time.monotonic() + 6
             while wanted - set(streamed) and time.monotonic() < deadline:
@@ -192,6 +192,8 @@ async def exercise_http(archive_ui: dict, session_id: int, project: Path) -> Non
             assert [item["text"] for item in streamed["notices"]["items"]] == \
                 ["NAS: Could not save", "Session deleted"], \
                 "the restored notification history is on the stream"
+            assert streamed["spelling"]["words"] == ["eval", "zorbium"], \
+                "the restored spelling dictionary is on the stream"
     finally:
         await runner.cleanup()
 
@@ -336,6 +338,15 @@ async def main() -> None:
         notices.record("NAS: Could not save", "bad")
         saved_notices = notices.payload()["items"]
         assert [item["count"] for item in saved_notices] == [2, 1]
+        # So is the spelling dictionary: the words added to it and the tally
+        # behind the ones it is learning.
+        spelling.add("zorbium")
+        spelling.add("eval")
+        spelling.sent(["frobz"])
+        saved_spelling = json.loads(db.query_one(
+            "SELECT value FROM meta WHERE key=?", (spelling.META_KEY,))["value"])
+        assert saved_spelling["words"] == ["eval", "zorbium"] and \
+            list(saved_spelling["tally"]) == ["frobz"]
         db.execute(
             "INSERT INTO workspace_links(uid,exec_backend,session_id,ws_backend,"
             "root,lease,state,generation,conflicts,resolutions,last_error,created_at) "
@@ -420,6 +431,18 @@ async def main() -> None:
             lambda: snapshots._validate_database(invalid_notices_db),
             "notification history")
         invalid_notices_db.unlink()
+        invalid_spelling_db = TEST_ROOT / "invalid-spelling.db"
+        db.backup_to(str(invalid_spelling_db))
+        invalid_spelling_connection = sqlite3.connect(str(invalid_spelling_db))
+        invalid_spelling_connection.execute(
+            "UPDATE meta SET value='{\"format\":1,\"words\":[\"Eval\"],\"tally\":{}}' "
+            "WHERE key=?", (spelling.META_KEY,))
+        invalid_spelling_connection.commit()
+        invalid_spelling_connection.close()
+        expect_snapshot_error(
+            lambda: snapshots._validate_database(invalid_spelling_db),
+            "spelling dictionary")
+        invalid_spelling_db.unlink()
         missing_transport_db = TEST_ROOT / "missing-web-transport.db"
         db.backup_to(str(missing_transport_db))
         missing_transport_connection = sqlite3.connect(str(missing_transport_db))
@@ -932,6 +955,8 @@ async def main() -> None:
             saved_completion["completion_id"]
         assert restored_completion["cwd"] == str(project)
         assert notices.payload()["items"] == saved_notices
+        assert json.loads(db.query_one(
+            "SELECT value FROM meta WHERE key=?", (spelling.META_KEY,))["value"]) == saved_spelling
         restored_mirror = Path(restored_linked["cwd"])
         assert restored_mirror.is_dir()
         assert not (restored_mirror / "clean-cache.txt").exists()
