@@ -25,7 +25,7 @@ TEST_ROOT = private_root("snapshot-")
 os.environ["PUPPY_DATA"] = str(TEST_ROOT / "data")
 
 from puppy import (auth, cli_releases, config, db, listener_handoff, notices, notify, spelling,
-                   runner as session_runner, snapshots, terminal, uploads,
+                   runner as session_runner, snapshots, terminal, token_usage, uploads,
                    web_tls, workspace_sync,
                    workspaces)  # noqa: E402
 from puppy.web import build_app  # noqa: E402
@@ -347,6 +347,19 @@ async def main() -> None:
             "SELECT value FROM meta WHERE key=?", (spelling.META_KEY,))["value"])
         assert saved_spelling["words"] == ["eval", "zorbium"] and \
             list(saved_spelling["tally"]) == ["frobz"]
+        # And the token ledger: what every engine run used, one record a day,
+        # outliving the sessions it counts.
+        assert token_usage.store([
+            ["turn:{}:7".format(linked_id), 1789992000.0, linked_id, "turn", "claude",
+             "preview-standard", 12, 340, 5600, 78, 0, 0.0412],
+            ["spawn:ab12cd34:1789995600", 1789995600.5, None, "title", "codex",
+             "", 90, 12, 0, 0, 4, None]]) == 2
+
+        def usage_records():
+            return {row["key"]: row["value"] for row in db.query(
+                "SELECT key,value FROM meta WHERE key GLOB ?", (token_usage.PREFIX + "*",))}
+        saved_usage = usage_records()
+        assert list(saved_usage) == ["token_usage.2026-09-21"], saved_usage
         db.execute(
             "INSERT INTO workspace_links(uid,exec_backend,session_id,ws_backend,"
             "root,lease,state,generation,conflicts,resolutions,last_error,created_at) "
@@ -443,6 +456,18 @@ async def main() -> None:
             lambda: snapshots._validate_database(invalid_spelling_db),
             "spelling dictionary")
         invalid_spelling_db.unlink()
+        invalid_usage_db = TEST_ROOT / "invalid-usage.db"
+        db.backup_to(str(invalid_usage_db))
+        invalid_usage_connection = sqlite3.connect(str(invalid_usage_db))
+        invalid_usage_connection.execute(
+            "UPDATE meta SET value='{\"format\":1,\"rows\":[]}' WHERE key=?",
+            ("token_usage.2026-09-21",))
+        invalid_usage_connection.commit()
+        invalid_usage_connection.close()
+        expect_snapshot_error(
+            lambda: snapshots._validate_database(invalid_usage_db),
+            "token usage ledger")
+        invalid_usage_db.unlink()
         missing_transport_db = TEST_ROOT / "missing-web-transport.db"
         db.backup_to(str(missing_transport_db))
         missing_transport_connection = sqlite3.connect(str(missing_transport_db))
@@ -668,6 +693,9 @@ async def main() -> None:
         db.execute("DELETE FROM meta WHERE key IN (?,?)", (
             "completion_log", "session_completion.{}".format(linked_id)))
         notices.record("mutated after export", "warn")
+        token_usage.store([["turn:{}:8".format(linked_id), 1790078400.0, linked_id, "turn",
+                            "claude", "", 1, 1, 0, 0, 0, None]])
+        assert list(usage_records()) == ["token_usage.2026-09-21", "token_usage.2026-09-22"]
         db.execute("DELETE FROM meta WHERE key=?", (notices.META_KEY,))
         assert notices.payload()["items"] == []
         (Path(mirror_cwd) / "newer-cache.txt").write_text(
@@ -957,6 +985,7 @@ async def main() -> None:
         assert notices.payload()["items"] == saved_notices
         assert json.loads(db.query_one(
             "SELECT value FROM meta WHERE key=?", (spelling.META_KEY,))["value"]) == saved_spelling
+        assert usage_records() == saved_usage, "the ledger comes back as recorded, and only it"
         restored_mirror = Path(restored_linked["cwd"])
         assert restored_mirror.is_dir()
         assert not (restored_mirror / "clean-cache.txt").exists()

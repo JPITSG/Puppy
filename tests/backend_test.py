@@ -2626,6 +2626,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "session-git-detail" in ping["capabilities"]
         assert "session-git-actions" in ping["capabilities"]
         assert "session-git-log" in ping["capabilities"]
+        assert "token-usage" in ping["capabilities"]
         assert "session-pinning" in ping["capabilities"]
         assert "session-order-recency" in ping["capabilities"]
         assert "completion-events" in ping["capabilities"]
@@ -2654,6 +2655,20 @@ async def exercise_node(url: str, token: str, expected_version: str,
                             ssl=pinned) as response:
             assert response.status == 400
         async with http.get(url + "/api/search?q=zx", ssl=pinned) as response:
+            assert response.status == 401
+        # and the token ledger: an empty one answers a range cleanly, a
+        # malformed range is a 400, and nothing is read without the token
+        async with http.get(url + "/api/token-usage?since=86400&until=172800",
+                            headers=good, ssl=pinned) as response:
+            usage = await response.json()
+            assert response.status == 200, usage
+            assert usage["ok"] is True and usage["buckets"] == [], usage
+            assert usage["totals"]["turns"] == 0 and usage["first_at"] is None, usage
+        async with http.get(url + "/api/token-usage?since=9&until=3",
+                            headers=good, ssl=pinned) as response:
+            assert response.status == 400
+        async with http.get(url + "/api/token-usage?since=86400&until=172800",
+                            ssl=pinned) as response:
             assert response.status == 401
         async with http.get(url + "/api/system-prompt", headers=good,
                             ssl=pinned) as response:

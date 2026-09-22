@@ -529,6 +529,9 @@ class SpawnJob:
         self.error = str(error or "")[:4000]
         self.finished_at = time.time()
         self.finished_clock = time.monotonic()
+        # what the run used is counted wherever it ran, whatever its verdict
+        from puppy import token_usage
+        token_usage.record_job(self)
         self.done.set()
 
     # ---- the one-shot engine run ----

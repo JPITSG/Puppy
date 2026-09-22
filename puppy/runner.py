@@ -17,7 +17,7 @@ import uuid
 from puppy import (agent_notes, browser_agent, config, db, handoff, notify, spawn_agent,
                    system_prompts, terminal_agent, vnc_agent,
                    session_agent, session_git, session_links, uploads, workspace_sync,
-                   workspaces, session_tasks, session_titles)
+                   workspaces, session_tasks, session_titles, token_usage)
 from puppy.drivers import get_driver
 from puppy.drivers import base as driver_base
 from puppy.drivers.base import clean_env
@@ -3194,7 +3194,7 @@ class SessionHub:
                         session["engine"], str(data.get("error") or ""))
                 if tool:
                     data["tool"] = tool
-                self._emit("result", data)
+                token_usage.record_turn(session, self._emit("result", data))
                 # A turn result completes the model's work, not necessarily
                 # every protocol request. Drain outstanding acknowledgements
                 # and side answers before ending the JSONL service.

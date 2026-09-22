@@ -542,6 +542,22 @@ The CLI also accepts `--turn-timeout 0`. Settings initialize new turns/jobs;
 unattended timer changes rearm existing unviewed instances immediately.
 See [the complete contract and required manual config preparation](../docs/timeouts.md).
 
+## Token usage
+
+Every node counts the tokens its engines use and serves them at `GET
+/api/token-usage?since=&until=&step=&offset=` behind the additive
+`token-usage` capability. Each session turn is recorded as it ends - split by
+model where the engine breaks the turn down (Claude Code's `modelUsage`) -
+and so is each spawned agent and title job, as one exact-shape meta record
+per UTC day, `token_usage.<YYYY-MM-DD>`, in the node's own database. A record
+of any other shape stops the node at startup rather than being repaired. The
+report sums the requested span per hour (`step=3600`) or per day starting at
+`offset` seconds from UTC midnight (`step=86400`, whole minutes within
+fourteen hours), per engine and model, in total, for the 20 heaviest sessions
+and per job source; a span above five years or a malformed parameter is a
+`400`. The read is never counted as a mutation. See
+[Token usage](../docs/token-usage.md).
+
 ## Host activity
 
 Every node serves `GET /api/host/metrics` behind the additive `host-metrics-v1`

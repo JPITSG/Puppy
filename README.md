@@ -699,7 +699,7 @@ with a window of history around it.
   a notice to keep it or swipe it right to dismiss it.
 - **Notification history.** Every notice shown is also kept by the instance,
   so a line that scrolled away can be read later from any browser. The tray in
-  the footer, between the bell and *Sign out*, slides open a box under the
+  the footer, between the usage chart and *Sign out*, slides open a box under the
   engine stats listing the last 100 notifications newest first - each with its
   outcome dot, its text and the time it last arrived - and slides shut again
   like the host box, with which it shares that space. A notice repeating the
@@ -709,6 +709,22 @@ with a window of history around it.
   empties the history for every console. The list is stored in the instance's
   database, updates live in every open console, and a notice raised while the
   instance is unreachable is reported once the connection returns.
+- **Token usage.** Every node keeps a ledger of the tokens its engines used:
+  each session turn as it ends, split by model where the engine breaks a turn
+  down (Claude Code's subagents and helper calls), plus spawned agents and
+  session-title runs. The chart button in the footer, between the bell and the
+  notification tray, opens a sheet that asks the instance and every reachable
+  backend at once and names any it could not ask. Pick 7, 30 or 90 days or
+  all of it; tiles give the total, fresh input, cache reads and writes, output
+  with its reasoning part, turns, and the engine's own cost estimate where it
+  reports one. The stacked chart splits each day (or week or month) by
+  backend, engine or model and counts all tokens or only input, cache or
+  output; each engine keeps its own colour and every series keeps its colour
+  as the choices change. Hover, tap or use the arrow keys to read a column.
+  Under it, a breakdown table lists every series with its share, and the
+  heaviest sessions open with a press. Deleting a session never rewrites what
+  it used. Each ledger lives in its node's database; the browser remembers
+  only its three choices. See [token usage](docs/token-usage.md).
 - **Completion alerts.** Run separate success and failure commands on a chosen
   backend when a session finishes everything it had queued (play a sound, ping
   your home automation). Leave either command empty to skip that outcome;
@@ -720,7 +736,7 @@ with a window of history around it.
   footer.
 - **Backup and restore.** Export one `.tar.gz` with settings, accounts, backend
   registrations, sessions and transcripts, notification history, the words
-  added to the spelling dictionary, uploads,
+  added to the spelling dictionary, the instance's token ledger, uploads,
   scratch workspaces, task copies, tabs and drafts. Import validates the whole
   archive first, only runs while the instance is idle, and rolls back if the
   install fails. **Cancel**
@@ -948,6 +964,8 @@ node tests/notices_ui_test.js        # the notification box: its slide, rows, li
 python3 tests/notices_test.py        # the notification history record, routes and stream topic
 node tests/spellcheck_ui_test.js     # the bundled dictionary, its marks and autocorrect
 python3 tests/spelling_test.py       # the added words: the record, the learning rule, routes and stream topic
+node tests/token_usage_ui_test.js    # the Token usage sheet: nodes asked, sums, columns, colours, readout
+python3 tests/token_usage_test.py    # the token ledger: counts, day records, the report and its route
 node tests/host_panel_ui_test.js     # the host box: charts, latency rows, process tree
 python3 tests/host_metrics_test.py   # CPU history, the process tree and backend latency
 python3 tests/backend_test.py        # headless package, auth, protocol, capabilities

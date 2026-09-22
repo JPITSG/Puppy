@@ -729,6 +729,12 @@ def _validate_database(path: Path):
         except ValueError as exc:
             raise SnapshotError(
                 "snapshot database contains an invalid spelling dictionary") from exc
+        from puppy import token_usage
+        try:
+            token_usage.validate_persisted(connection)
+        except ValueError as exc:
+            raise SnapshotError(
+                "snapshot database contains an invalid token usage ledger") from exc
         orphan = connection.execute(
             "SELECT 1 FROM events e LEFT JOIN sessions s ON s.id=e.session_id "
             "WHERE s.id IS NULL LIMIT 1").fetchone()

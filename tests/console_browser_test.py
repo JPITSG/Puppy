@@ -29,7 +29,7 @@ os.environ["PUPPY_DATA"] = str(ROOT / "data")
 
 from aiohttp import web
 from aiohttp.test_utils import TestServer
-from puppy import auth, backends, browser, config, db, notices, runner, search, session_git, session_tasks, session_aliases, terminal
+from puppy import auth, backends, browser, config, db, notices, runner, search, session_git, session_tasks, session_aliases, terminal, token_usage
 from puppy import web as webui
 from puppy.drivers import all_drivers
 
@@ -107,6 +107,53 @@ def demo_log(cwd, skip, limit):
     return {"total": total, "skip": skip, "commits": commits, "more": skip + len(commits) < total}
 
 
+# The invented token history behind the Token usage sheet: sixty days of the
+# preview sessions' turns, quieter at weekends, each on its engine's invented
+# model - an extended model some days, a helper model beside it on some turns
+# - plus a title job now and then. Deterministic, so the lane can say what
+# the sheet must show.
+DEMO_USAGE_DAYS = 60
+DEMO_USAGE_MODELS = {"claude": ("preview-standard", "preview-extended"),
+                     "codex": ("preview-swift",), "opencode": ("vendor/preview-open",)}
+
+
+def demo_token_usage(now=None):
+    now = now or time.time()
+    sessions = [row for row in db.list_sessions() if not session_tasks.record(row["id"])]
+    rows = []
+    for day in range(DEMO_USAGE_DAYS):
+        start = now - (DEMO_USAGE_DAYS - 1 - day) * 86400
+        weekday = time.localtime(start).tm_wday
+        weight = 0.35 if weekday >= 5 else 1.0
+        for index, session in enumerate(sessions):
+            turns = int((3 + (day * 7 + index * 5) % 6) * weight)
+            engine = session["engine"]
+            models = DEMO_USAGE_MODELS.get(engine, ("preview-standard",))
+            for turn in range(turns):
+                at = start - 3600 * (2 + (turn * 5 + index) % 9)
+                model = models[(day // 9 + turn) % len(models)]
+                scale = 1 + ((day * 13 + turn * 7 + index * 3) % 10) / 4
+                ref = "turn:{}:{}".format(session["id"], day * 100 + turn)
+                amounts = {"input": int(900 * scale), "output": int(14000 * scale),
+                           "cache_read": int(420000 * scale), "cache_write": int(9000 * scale),
+                           "reasoning": int(5000 * scale) if engine != "claude" else 0}
+                cost = round(0.9 * scale, 4) if engine == "claude" else None
+                rows.append(token_usage._row(ref, at, session["id"], "turn", engine, model,
+                                             amounts, cost))
+                if engine == "claude" and turn % 3 == 0:
+                    rows.append(token_usage._row(ref, at, session["id"], "turn", engine,
+                                                 "preview-helper", {"input": 2400, "output": 300,
+                                                 "cache_read": 0, "cache_write": 0, "reasoning": 0},
+                                                 0.004))
+        if day % 4 == 0:
+            rows.append(token_usage._row("spawn:title{}:{}".format(day, int(start)), start - 1800,
+                                         None, "title", "claude", "preview-helper",
+                                         {"input": 600, "output": 20, "cache_read": 0,
+                                          "cache_write": 0, "reasoning": 0}, 0.001))
+    token_usage.store(rows)
+    return rows
+
+
 def demo_git(cwd, listing=False):
     record = dict(DEMO_GIT.get(str(cwd), {"repo": False}), checked_at=time.time())
     if listing and record["repo"] is True:
@@ -168,6 +215,7 @@ async def fixture():
     for kind, data in events:
         db.add_event(sid, kind, data)
     search.reconcile()
+    demo_token_usage()
     for cwd in DEMO_GIT:
         session_git._store(cwd, demo_git(cwd))
     app = webui.build_app()
@@ -3242,6 +3290,7 @@ async def checks(a, b, hub, capture=False):
     await usage_error_checks(a, capture)
     await host_panel_checks(a, capture)
     await notices_panel_checks(a, capture)
+    await token_usage_checks(a, capture)
     # Measure real layout: an idle status must not reserve a row below tools.
     for width, height in [(1440, 900), (390, 844)]:
         await a.call("Emulation.setDeviceMetricsOverride", {"width": width, "height": height,
@@ -4303,7 +4352,7 @@ async def host_panel_checks(instance, capture=False):
 
 async def notices_panel_checks(instance, capture=False):
     """The tray's box, in a real browser: a real click on the tray between the
-    bell and Sign out opens it, an empty history is the head alone centred
+    usage chart and Sign out opens it, an empty history is the head alone centred
     between the rules with its pill's clear disabled, a notice raised in the
     page reaches the controller over the real route and lands at the top of
     the open box, a repeat counts up on the row it already has, the dots stand
@@ -4323,7 +4372,7 @@ async def notices_panel_checks(instance, capture=False):
                 drawn:tray.querySelector('svg')!==null, width:r.width, height:r.height};
     })()""")
     assert point["expanded"] == "false", point
-    assert point["before"] == "btn-bell" and point["after"] == "btn-logout", point
+    assert point["before"] == "btn-usage" and point["after"] == "btn-logout", point
     assert point["drawn"] and point["width"] > 0 and point["height"] > 0, point
     await evaluate(instance, "openHostPanel(); true")
     await until(instance, "hostPanel.open")
@@ -4551,6 +4600,259 @@ async def notices_panel_checks(instance, capture=False):
           "clear disabled, counted repeats, dot column, a scrolling hundred cleared by "
           "one real click - that shares the footer with the host box and slides shut",
           flush=True)
+
+
+# The chart palette the validator passed on the console's two surfaces
+# (#12141a dark, #ffffff light): the Engine grouping wears each engine's slot.
+USAGE_PALETTE = {
+    "dark": {"claude": "#d95926", "codex": "#199e70", "opencode": "#9085e9"},
+    "light": {"claude": "#eb6834", "codex": "#1baf7a", "opencode": "#4a3aa7"},
+}
+
+
+def css_rgb(colour):
+    value = colour.lstrip("#")
+    return "rgb({}, {}, {})".format(*(int(value[at:at + 2], 16) for at in (0, 2, 4)))
+
+
+async def token_usage_checks(instance, capture=False):
+    """The Token usage sheet, in a real browser: the chart button stands
+    between the bell and the tray, drawn and sized like them; a real click
+    opens the sheet, which reads this node's ledger over the real route and
+    shows what the node's own report says; stacked columns stay thin with the
+    surface gap between segments, the rounded end on the stack's top alone
+    and each engine in its validated hue in both themes, text never in a
+    series colour; a real hover and the arrow keys read one column, Escape
+    goes back to the range without closing the sheet; on a phone nothing
+    overflows, the table folds its split under the names and the dates under
+    the chart never touch; Back closes the sheet and Forward reads a fresh
+    one; and a real click on a session opens it."""
+    await instance.call("Emulation.setDeviceMetricsOverride", {
+        "width": 1440, "height": 900, "deviceScaleFactor": 1,
+        "mobile": False}, session=instance.page_session)
+    await evaluate(instance, "applyTheme('dark'); for (const key of ['puppy.usage.range',"
+                             "'puppy.usage.by','puppy.usage.measure']) "
+                             "localStorage.removeItem(lsKey(key)); true")
+    await asyncio.sleep(.35)
+    point = await evaluate(instance, """(() => {
+        const button=document.getElementById('btn-usage'), tray=document.getElementById('btn-notices');
+        const r=button.getBoundingClientRect(), t=tray.getBoundingClientRect();
+        const glyph=button.querySelector('svg').getBoundingClientRect();
+        const trayGlyph=tray.querySelector('svg').getBoundingClientRect();
+        return {x:r.x+r.width/2, y:r.y+r.height/2, before:button.previousElementSibling.id,
+                after:button.nextElementSibling.id, label:button.getAttribute('aria-label'),
+                box:[r.width, r.height, r.top], trayBox:[t.width, t.height, t.top],
+                glyph:[glyph.width, glyph.height], trayGlyph:[trayGlyph.width, trayGlyph.height],
+                centre:glyph.top+glyph.height/2-(r.top+r.height/2)};
+    })()""")
+    assert point["before"] == "btn-bell" and point["after"] == "btn-notices", point
+    assert point["label"] == "Token usage", point
+    assert point["box"] == point["trayBox"] and point["glyph"] == point["trayGlyph"], point
+    assert abs(point["centre"]) < .6, point
+    reads = "performance.getEntriesByType('resource').filter(e=>e.name.includes('/api/token-usage?')).length"
+    before = await evaluate(instance, reads)
+    for kind in ("mousePressed", "mouseReleased"):
+        await instance.call("Input.dispatchMouseEvent", {
+            "type": kind, "x": point["x"], "y": point["y"], "button": "left",
+            "clickCount": 1}, session=instance.page_session)
+    settled = ("!!document.querySelector('.token-usage-modal .tu-plot svg') && "
+               "!document.querySelector('.token-usage-modal').hasAttribute('aria-busy')")
+    await until(instance, settled)
+    assert await evaluate(instance, reads) == before + 1, "one read of this node"
+    # What the sheet shows is what the node's report says for the same span.
+    span = await evaluate(instance, "usageSpan('30')")
+    served = token_usage.report(span["since"], span["until"])
+    totals = served["totals"]
+    whole = totals["input"] + totals["output"] + totals["cache_read"] + totals["cache_write"]
+    expected = await evaluate(instance, "[%d,%d,%d,%d].map(fmtUsage).concat([(%d).toLocaleString(), fmtUsd(%r)])" % (
+        whole, totals["input"], totals["cache_read"] + totals["cache_write"], totals["output"],
+        totals["turns"], totals["cost"]))
+    shown = await evaluate(instance, """(() => {
+        const m=document.querySelector('.token-usage-modal'), all=s=>[...m.querySelectorAll(s)].map(n=>n.textContent);
+        return {labels:all('.tu-tile-label'), tiles:all('.tu-tile-value'), pressed:all('.seg-btn.on'),
+                legend:all('.tu-legend-item'), rows:all('.tu-table .tu-name-label'),
+                sessions:all('.tu-session-name'), caption:m.querySelector('.tu-sessions-section .field-optional').textContent,
+                openable:m.querySelectorAll('button.tu-session').length,
+                clipped:[...m.querySelectorAll('.tu-tile-value,.tu-tile-sub')].filter(n=>n.scrollWidth>n.clientWidth+1).length};
+    })()""")
+    assert shown["labels"] == ["Total", "Input", "Cache", "Output", "Turns", "Est. cost"], shown
+    assert shown["tiles"] == expected, (shown, expected)
+    assert shown["pressed"] == ["30 days", "Backend", "All"] and shown["clipped"] == 0, shown
+    assert shown["rows"] == ["Studio"] and shown["legend"] == [], "one backend is one series, with no legend"
+    names = [entry["name"] for entry in served["sessions"]]
+    assert shown["sessions"] == names + ["Session titles"], (shown, names)
+    assert shown["caption"] == "· {}".format(served["session_count"]) and shown["openable"] == len(names), shown
+
+    async def press(selector):
+        spot = await evaluate(instance, """(() => {
+            const r=document.querySelector(%s).getBoundingClientRect();
+            return {x:r.x+r.width/2, y:r.y+r.height/2};
+        })()""" % json.dumps(selector))
+        for kind in ("mousePressed", "mouseReleased"):
+            await instance.call("Input.dispatchMouseEvent", {
+                "type": kind, "x": spot["x"], "y": spot["y"], "button": "left",
+                "clickCount": 1}, session=instance.page_session)
+
+    await press(".token-usage-modal .tu-lens .seg-btn:nth-child(2)")
+    await until(instance, "document.querySelector('.tu-lens .seg-btn.on').textContent === 'Engine'")
+    assert await evaluate(instance, reads) == before + 1, "a grouping redraws what is in hand"
+    columns = """(() => {
+        const plot=document.querySelector('.token-usage-modal .tu-plot'), box=plot.getBoundingClientRect();
+        const columns=new Map();
+        for (const bar of plot.querySelectorAll('.tu-bar')) {
+            const r=bar.getBoundingClientRect(), key=Math.round(r.left*4);
+            if (!columns.has(key)) columns.set(key, []);
+            columns.get(key).push({top:r.top, bottom:r.bottom, left:r.left, right:r.right,
+                round:bar.getAttribute('d').includes('Q'), fill:getComputedStyle(bar).fill});
+        }
+        const legend=[...document.querySelectorAll('.token-usage-modal .tu-legend-item')].map(item => ({
+            label:item.textContent, swatch:getComputedStyle(item.querySelector('.tu-swatch')).backgroundColor,
+            colour:getComputedStyle(item.querySelector('.tu-legend-label')).color}));
+        const texts=[...document.querySelectorAll('.token-usage-modal .tu-tile-value,.token-usage-modal .tu-read-value,'+
+            '.token-usage-modal .tu-name-label,.token-usage-modal .tu-tick,.token-usage-modal .tu-read-label')]
+            .map(node => node.tagName.toLowerCase() === 'text' ? getComputedStyle(node).fill : getComputedStyle(node).color);
+        const base=plot.querySelector('.tu-base').getBoundingClientRect();
+        return {box:{left:box.left, right:box.right, top:box.top, bottom:box.bottom},
+                baseline:base.top+base.height/2, columns:[...columns.values()], legend, texts,
+                engines:['claude','codex','opencode'].map(key => engineInfo(0, key).label)};
+    })()"""
+    for theme in ("dark", "light"):
+        await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
+        await asyncio.sleep(.2)
+        drawn = await evaluate(instance, columns)
+        palette = {key: css_rgb(value) for key, value in USAGE_PALETTE[theme].items()}
+        assert [item["label"] for item in drawn["legend"]] == drawn["engines"], drawn["legend"]
+        assert [item["swatch"] for item in drawn["legend"]] == \
+            [palette["claude"], palette["codex"], palette["opencode"]], (theme, drawn["legend"])
+        assert len(drawn["columns"]) == 30, len(drawn["columns"])
+        colours = set(palette.values())
+        assert not colours & set(drawn["texts"] + [item["colour"] for item in drawn["legend"]]), \
+            "text wears text colours, never a series colour"
+        # the baseline is a 1px hairline centred half a pixel under the
+        # plot's floor: the stack stands on its top edge
+        floor = drawn["baseline"] - .5
+        for column in drawn["columns"]:
+            column.sort(key=lambda part: part["top"])
+            assert all(drawn["box"]["left"] <= part["left"] and part["right"] <= drawn["box"]["right"]
+                       and part["right"] - part["left"] <= 24.01 for part in column), column
+            # bottom to top in slot order: the engines' own hues, one each
+            assert [part["fill"] for part in reversed(column)] == \
+                [palette["claude"], palette["codex"], palette["opencode"]], (theme, column)
+            assert column[0]["round"] and not any(part["round"] for part in column[1:]), column
+            assert abs(column[-1]["bottom"] - floor) < .05, (column, floor)
+            for upper, lower in zip(column, column[1:]):
+                assert abs(lower["top"] - upper["bottom"] - 2) < .05, (upper, lower)
+    await evaluate(instance, "applyTheme('dark'); true")
+    # A real hover reads the column under the pointer; leaving goes back to
+    # the whole range.
+    drawn = await evaluate(instance, columns)
+    ordered = sorted(drawn["columns"], key=lambda column: column[0]["left"])
+    target = ordered[10]
+    x = (target[0]["left"] + target[0]["right"]) / 2
+    y = (drawn["box"]["top"] + drawn["box"]["bottom"]) / 2
+    await instance.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y},
+                        session=instance.page_session)
+    day = await evaluate(instance, """(() => {
+        const s=usageSpan('30'), d=new Date(s.since*1000); d.setDate(d.getDate()+10);
+        const next=new Date(d); next.setDate(next.getDate()+1);
+        return {start:d.getTime()/1000, end:next.getTime()/1000,
+                label:usageBucketLabel({start:d.getTime()/1000}, 'day', true)};
+    })()""")
+    await until(instance, "document.querySelector('.tu-read-when').textContent === %s" % json.dumps(day["label"]))
+    used = sum(row[3] + row[4] + row[5] + row[6] for row in served["buckets"]
+               if day["start"] <= row[0] < day["end"])
+    hover = await evaluate(instance, """(() => {
+        const m=document.querySelector('.token-usage-modal');
+        return {sum:m.querySelector('.tu-read-sum').textContent, expected:fmtUsage(%d),
+                hot:m.querySelectorAll('.tu-hot').length, dim:m.querySelectorAll('.tu-bar.dim').length,
+                bars:m.querySelectorAll('.tu-bar').length};
+    })()""" % used)
+    assert hover["sum"] == hover["expected"] and hover["hot"] == 1, hover
+    assert hover["dim"] == hover["bars"] - len(target), hover
+    await instance.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": drawn["box"]["top"] - 120},
+                        session=instance.page_session)
+    await until(instance, "document.querySelector('.tu-read-when').textContent === 'Last 30 days'")
+    # The keys read one column at a time; Escape is the reader's, not the sheet's.
+    await evaluate(instance, "document.querySelector('.token-usage-modal .tu-plot').focus(); true")
+
+    async def key(name, code):
+        for kind in ("rawKeyDown", "keyUp"):
+            await instance.call("Input.dispatchKeyEvent", {
+                "type": kind, "key": name, "code": name, "windowsVirtualKeyCode": code},
+                session=instance.page_session)
+
+    today = await evaluate(instance, """(() => {
+        const d=new Date(); d.setHours(0,0,0,0); const y=new Date(d); y.setDate(y.getDate()-1);
+        return [usageBucketLabel({start:d.getTime()/1000}, 'day', true),
+                usageBucketLabel({start:y.getTime()/1000}, 'day', true)];
+    })()""")
+    await key("End", 35)
+    await until(instance, "document.querySelector('.tu-read-when').textContent === %s" % json.dumps(today[0]))
+    await key("ArrowLeft", 37)
+    await until(instance, "document.querySelector('.tu-read-when').textContent === %s" % json.dumps(today[1]))
+    await key("Escape", 27)
+    await until(instance, "document.querySelector('.tu-read-when').textContent === 'Last 30 days'")
+    assert await evaluate(instance, "!!document.querySelector('.token-usage-modal')"), "the sheet stays open"
+    if capture:
+        shot = await instance.call("Page.captureScreenshot", {"format": "png"}, session=instance.page_session)
+        (BASE / "data" / "token-usage-desktop.png").write_bytes(base64.b64decode(shot["data"]))
+    # A phone: the sheet keeps to the screen, the chart is redrawn at its
+    # width with dates that never touch, and the table's split rides under
+    # each name instead of in columns of its own.
+    await instance.call("Emulation.setDeviceMetricsOverride", {
+        "width": 390, "height": 844, "deviceScaleFactor": 2, "mobile": True},
+        session=instance.page_session)
+    await evaluate(instance, "new Promise(resolve => setTimeout(() => requestAnimationFrame(() => requestAnimationFrame(resolve)), 120))")
+    for theme in ("light", "dark"):
+        await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
+        phone = await evaluate(instance, """(() => {
+            const m=document.querySelector('.token-usage-modal'), r=m.getBoundingClientRect();
+            const plot=m.querySelector('.tu-plot'), svg=plot.querySelector('svg');
+            const dates=[...svg.querySelectorAll('.tu-tick')].filter(t => t.getAttribute('text-anchor') !== 'end' ||
+                    +t.getAttribute('y') > +svg.getAttribute('height') - 10)
+                .map(t => t.getBoundingClientRect()).filter(b => b.top > plot.getBoundingClientRect().bottom - 20)
+                .sort((a, b) => a.left - b.left);
+            const wide=[...m.querySelectorAll('.tu-wide')].every(n => getComputedStyle(n).display === 'none');
+            const split=[...m.querySelectorAll('.tu-split')].every(n => getComputedStyle(n).display !== 'none' && n.getBoundingClientRect().width > 0);
+            const inside=[...m.querySelectorAll('.seg,.tu-tile,.tu-table,.tu-sessions,.tu-legend')]
+                .every(n => n.getBoundingClientRect().right <= r.right + .5 && n.getBoundingClientRect().left >= r.left - .5);
+            return {fits:r.left >= 0 && r.right <= innerWidth, overflow:m.scrollWidth - m.clientWidth,
+                    svg:+svg.getAttribute('width'), plot:Math.round(plot.clientWidth), wide, split, inside,
+                    dates:dates.map(b => [b.left, b.right]),
+                    clipped:[...m.querySelectorAll('.tu-tile-value')].filter(n => n.scrollWidth > n.clientWidth + 1).length};
+        })()""")
+        assert phone["fits"] and phone["overflow"] <= 1 and phone["inside"], phone
+        assert phone["svg"] == phone["plot"] and phone["wide"] and phone["split"], phone
+        assert phone["clipped"] == 0 and len(phone["dates"]) >= 2, phone
+        for (_, right), (left, _) in zip(phone["dates"], phone["dates"][1:]):
+            assert left - right >= 4, phone["dates"]
+        if capture:
+            shot = await instance.call("Page.captureScreenshot", {"format": "png"}, session=instance.page_session)
+            (BASE / "data" / ("token-usage-mobile-" + theme + ".png")).write_bytes(base64.b64decode(shot["data"]))
+    await instance.call("Emulation.setDeviceMetricsOverride", {
+        "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False},
+        session=instance.page_session)
+    # Back closes the sheet; Forward opens a fresh one that reads again and
+    # keeps the grouping chosen here.
+    await evaluate(instance, "history.back(); true")
+    await until(instance, "!document.querySelector('.token-usage-modal')")
+    await evaluate(instance, "history.forward(); true")
+    await until(instance, settled + " && document.querySelector('.tu-lens .seg-btn.on').textContent === 'Engine'")
+    assert await evaluate(instance, reads) == before + 2
+    # A session's row opens that session and puts the sheet away.
+    first = await evaluate(instance, "document.querySelector('button.tu-session .tu-session-name').textContent")
+    sid = next(entry["id"] for entry in served["sessions"] if entry["name"] == first)
+    opened_before = await evaluate(instance, "!!state.views['s:0:%d']" % sid)
+    await press(".token-usage-modal button.tu-session")
+    await until(instance, "!document.querySelector('.token-usage-modal') && !!state.views['s:0:%d']" % sid)
+    if not opened_before:
+        await evaluate(instance, "closeTab('s:0:%d'); true" % sid)
+    await evaluate(instance, "activateTab('s:0:1'); for (const key of ['puppy.usage.range','puppy.usage.by',"
+                             "'puppy.usage.measure']) localStorage.removeItem(lsKey(key)); true")
+    print("PASS: token usage sheet - the button between the bell and the tray, the node's own report "
+          "read over its route, thin stacked columns with surface gaps in each engine's validated hue in "
+          "both themes, hover and key readouts, a phone layout that keeps to the screen, Back/Forward "
+          "and a session opened from its row", flush=True)
 
 
 async def navigation_checks(instance, url, sid):

@@ -33,6 +33,16 @@
   --r-xs:4px; --r-md:11px;
   /* type scale: every font-size in this sheet is one of these steps */
   --fs-xl:13.5px; --fs-3xl:16px;
+  /* the one figure step: a stat tile's value (the token usage sheet) */
+  --fs-4xl:20px;
+  /* The charts' categorical palette: eight hues in a fixed order, stepped
+     for this surface and validated as a set against it (lightness band,
+     chroma floor, colour-blind separation of neighbours, contrast), and the
+     recessive grey that a chart's folded tail wears. Charts assign slots in
+     order, never by rank, and never generate a ninth. */
+  --viz-1:#3987e5; --viz-2:#d95926; --viz-3:#199e70; --viz-4:#c98500;
+  --viz-5:#d55181; --viz-6:#008300; --viz-7:#9085e9; --viz-8:#e66767;
+  --viz-other:#5d6475;
   /* motion: three durations on the one curve below */
   --t-fast:.12s; --t-slow:.25s;
   /* layers, from floating chrome up to the tooltip that tops everything */
@@ -3208,6 +3218,11 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 
 /* ---------- light theme ---------- */
 html.light{
+  /* the same eight hues at the steps validated for the light surface; three
+     sit under 3:1 on white, so every chart's legend and table view carry them */
+  --viz-1:#2a78d6; --viz-2:#eb6834; --viz-3:#1baf7a; --viz-4:#eda100;
+  --viz-5:#e87ba4; --viz-6:#008300; --viz-7:#4a3aa7; --viz-8:#e34948;
+  --viz-other:#868e9d;
   color-scheme:light;
   --panel:#ffffff;
   --line:rgba(15,23,42,.10);
@@ -3451,4 +3466,133 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
 @media (max-width:560px){
   .sgl-commits{grid-template-columns:max-content minmax(0,1fr)}
   .sgl-meta{grid-column:2}
+}
+
+/* ---------- token usage ----------
+   The sheet the footer's chart button opens: the range above everything it
+   scopes, the totals as stat tiles, then the chart with its grouping and
+   measure above it, the readout a hover, tap or arrow key fills, the legend
+   under it, and the chart's table view - the breakdown - with the heaviest
+   sessions after that. Marks follow the chart rules: columns at most 24px
+   wide with a 4px rounded top on the stack and square elsewhere, a 2px
+   surface gap between touching segments, solid hairline grid, text in text
+   colours only - a series' colour is its swatch, key or bar, never its words.
+   While a range is being read the last render stays, dimmed. */
+.token-usage-modal{--modal-w:var(--modal-w-wide)}
+.token-usage-modal .modal-copy{margin-bottom:12px}
+.tu-filters{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.tu-notes{display:flex;flex-direction:column;gap:2px;margin-top:8px}
+.tu-note{font-size:var(--fs-xs);color:var(--txt3);overflow-wrap:anywhere}
+.tu-body{transition:opacity var(--t-base) var(--ease)}
+.tu-body.loading{opacity:.5}
+.tu-tiles{
+  display:grid;grid-template-columns:repeat(auto-fit,minmax(112px,1fr));gap:8px;margin-top:14px;
+}
+.tu-tile{
+  min-width:0;padding:10px 12px 9px;background:var(--panel2);
+  border:1px solid var(--line);border-radius:var(--r-sm);
+}
+.tu-tile-label{
+  font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.09em;color:var(--txt3);
+}
+.tu-tile-value{
+  margin-top:4px;font-size:var(--fs-4xl);font-weight:600;line-height:1.15;color:var(--txt);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+/* a sub-line wraps rather than cutting its figures short; the tiles of a
+   row share the tallest one's height */
+.tu-tile-sub{margin-top:2px;font-size:var(--fs-xs);line-height:1.35;color:var(--txt3);overflow-wrap:anywhere}
+.tu-chart-head{
+  display:flex;align-items:center;justify-content:space-between;gap:8px 16px;flex-wrap:wrap;
+  margin-top:16px;
+}
+.tu-control{display:flex;align-items:center;gap:8px;min-width:0}
+.tu-control .field-lbl{margin:0}
+.tu-figure{margin:10px 0 0}
+.tu-readout{min-height:42px;display:flex;flex-direction:column;gap:3px}
+.tu-read-head{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;min-width:0}
+.tu-read-when{font-size:var(--fs-sm);color:var(--txt2)}
+.tu-read-sum{font-size:var(--fs-2xl);font-weight:600;color:var(--txt);font-variant-numeric:tabular-nums}
+.tu-read-note{font-size:var(--fs-xs);color:var(--txt3)}
+.tu-read-series{display:flex;flex-wrap:wrap;gap:2px 14px;min-width:0}
+.tu-read-item{display:inline-flex;align-items:center;gap:6px;min-width:0;font-size:var(--fs-xs)}
+/* a line key, not a box: at this density a filled square would be data ink */
+.tu-key{flex:0 0 auto;width:10px;height:3px;border-radius:2px;background:var(--viz-other)}
+.tu-read-value{color:var(--txt);font-weight:600;font-variant-numeric:tabular-nums}
+.tu-read-label{color:var(--txt2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:220px}
+.tu-plot{position:relative;margin-top:6px;border-radius:var(--r-xs);outline:none;touch-action:pan-y}
+.tu-plot:focus-visible{outline:2px solid var(--acc);outline-offset:3px}
+.tu-svg{display:block;overflow:visible}
+.tu-grid{fill:none;stroke:var(--line);stroke-width:1;shape-rendering:crispEdges}
+.tu-base{fill:none;stroke:var(--line2);stroke-width:1;shape-rendering:crispEdges}
+.tu-tick{font-family:var(--sans);font-size:var(--fs-2xs);fill:var(--txt3);font-variant-numeric:tabular-nums}
+.tu-bar{transition:opacity var(--t-fast) var(--ease)}
+.tu-bar.dim{opacity:.35}
+.tu-hot{fill:var(--hov-soft)}
+.tu-plot-empty{
+  position:absolute;left:0;right:0;top:38%;text-align:center;
+  font-size:var(--fs-sm);color:var(--txt3);pointer-events:none;
+}
+.tu-legend{display:flex;flex-wrap:wrap;gap:4px 14px;margin-top:10px}
+.tu-legend:empty{display:none}
+.tu-legend-item{display:inline-flex;align-items:center;gap:6px;min-width:0;font-size:var(--fs-xs);color:var(--txt2)}
+.tu-legend-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:240px}
+.tu-swatch{flex:0 0 auto;width:10px;height:10px;border-radius:2px;background:var(--viz-other)}
+.tu-section{margin-top:16px}
+.tu-section .field-lbl{margin-bottom:6px}
+.tu-table,.tu-sessions{
+  display:flex;flex-direction:column;background:var(--panel2);
+  border:1px solid var(--line2);border-radius:var(--r-sm);padding:4px 0;
+}
+.tu-row{
+  display:grid;grid-template-columns:minmax(0,1fr) 64px minmax(96px,150px) 60px 60px 60px;
+  align-items:center;gap:0 12px;padding:6px 12px;min-width:0;
+}
+.tu-row+.tu-row{border-top:1px solid var(--line)}
+.tu-head{padding-top:4px;padding-bottom:5px}
+.tu-head .tu-cell{
+  font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.09em;color:var(--txt3);
+}
+.tu-head .tu-cell:nth-child(n+2){text-align:right}
+.tu-head .tu-cell:nth-child(3){text-align:left}
+.tu-cell{min-width:0;font-size:var(--fs-sm);color:var(--txt2)}
+.tu-num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.tu-total{color:var(--txt);font-weight:600}
+.tu-name{display:flex;align-items:center;gap:8px}
+.tu-name-text{display:flex;flex-direction:column;min-width:0}
+.tu-name-label{color:var(--txt);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tu-name-sub{font-size:var(--fs-xs);color:var(--txt3);display:flex;flex-wrap:wrap;gap:0 8px}
+.tu-name-sub:empty{display:none}
+.tu-split{display:none}
+.tu-share{display:flex;align-items:center;gap:8px}
+.tu-track{flex:1 1 auto;height:6px;border-radius:3px;background:var(--line);overflow:hidden}
+.tu-fill{display:block;height:100%;border-radius:3px}
+.tu-pct{flex:0 0 36px;text-align:right;font-size:var(--fs-xs);color:var(--txt3);font-variant-numeric:tabular-nums}
+.tu-empty{padding:8px 12px;font-size:var(--fs-sm);color:var(--txt3)}
+.tu-session{
+  display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:0 10px;
+  width:100%;padding:7px 12px;margin:0;border:0;background:none;text-align:left;
+  font:inherit;color:inherit;
+}
+.tu-session+.tu-session{border-top:1px solid var(--line)}
+button.tu-session{cursor:pointer;transition:background var(--t-fast) var(--ease)}
+@media (hover:hover){button.tu-session:hover{background:var(--hov-soft)}}
+button.tu-session:focus-visible{outline:2px solid var(--acc);outline-offset:-2px}
+.tu-dot{width:var(--dot);height:var(--dot);border-radius:50%;background:var(--txt3)}
+.tu-session-text{display:flex;flex-direction:column;min-width:0}
+.tu-session-name{font-size:var(--fs-sm);color:var(--txt);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tu-session-sub{font-size:var(--fs-xs);color:var(--txt3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tu-session-figure{display:flex;flex-direction:column;align-items:flex-end}
+.tu-session-figure .tu-num{font-size:var(--fs-sm);color:var(--txt);font-weight:600}
+.tu-session-turns{font-size:var(--fs-xs);color:var(--txt3);white-space:nowrap}
+@media (max-width:560px){
+  .tu-tiles{grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:6px}
+  .tu-tile{padding:8px 10px 7px}
+  .tu-chart-head{justify-content:flex-start}
+  /* a phone keeps the name, the total and the share; the split rides
+     under the name instead of in columns of its own */
+  .tu-row{grid-template-columns:minmax(0,1fr) 56px 76px;gap:0 10px;padding:6px 10px}
+  .tu-wide,.tu-head .tu-cell:nth-child(n+4){display:none}
+  .tu-split{display:inline}
+  .tu-read-label{max-width:150px}
 }

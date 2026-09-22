@@ -17,7 +17,7 @@ from aiohttp import WSMsgType, web
 from puppy import (__version__, agent_notes, auth, backends, bind_verify, browser,
                    cli_auto_upgrade, cli_releases,
                    cli_upgrade, config, db, engine_defaults, host_metrics, listener_handoff, notices, notify, operations,
-                   spelling,
+                   spelling, token_usage,
                    live_websockets, localization, protocol, runner, search, session_git, snapshots,
                    session_titles, spawn_exec,
                    state_stream, system_prompts, terminal, uploads, vnc,
@@ -2143,6 +2143,7 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     app.on_startup.append(validate_queues)
     operations.register(app)
     host_metrics.register(app)
+    token_usage.register(app)
     cli_releases.register(app)
     cli_auto_upgrade.register(app)
     system_prompts.register(app)

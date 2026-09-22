@@ -28,9 +28,14 @@ Normalized transcript event kinds (persisted):
                  The transcript line reads outcome, duration, input tokens
                  (input_tokens plus any cache_read/cache_creation keys, so a
                  driver whose input already counts cached tokens must not
-                 also emit those keys), total output tokens (including any
-                 reasoning_output_tokens subset) and clock time for every
-                 engine. Engine-native or API-only measurements stay in their
+                 also emit those keys - it names that cached part
+                 cached_input_tokens, a subset of input_tokens), total output
+                 tokens (including any reasoning_output_tokens subset) and
+                 clock time for every engine. model_usage (optional) breaks
+                 the turn down by model, {model: {the same usage keys,
+                 cost_usd?}}, when the engine reports it; the node's token
+                 ledger (token_usage.py) prefers it when it covers usage.
+                 Engine-native or API-only measurements stay in their
                  explicitly scoped fields and are not displayed as wall time.
                  usage_scope="last_request"
                  explicitly labels an engine fallback that cannot recover a

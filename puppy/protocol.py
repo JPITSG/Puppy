@@ -191,6 +191,12 @@ SESSION_GIT_ACTIONS_CAPABILITY = "session-git-actions"
 # a page, git's refusal as a 409 reason. A console draws the History list
 # only for nodes that advertise this.
 SESSION_GIT_LOG_CAPABILITY = "session-git-log"
+# The node's token ledger: GET /api/token-usage?since=&until=&step=&offset=
+# answers what every engine run on this node used in that span - summed per
+# time bucket (an hour, or a day at a fixed offset), engine and model, in
+# total, for the heaviest sessions and for runs that belong to no session
+# here. A console charts only the nodes that advertise this.
+TOKEN_USAGE_CAPABILITY = "token-usage"
 # Node-owned pinned flags and session order. Drag-and-drop requires the
 # complete starting order and pin cohort as compare tokens.
 SESSION_PINNING_CAPABILITY = "session-pinning"
@@ -320,6 +326,7 @@ BASE_CAPABILITIES = (
     SESSION_GIT_DETAIL_CAPABILITY,
     SESSION_GIT_ACTIONS_CAPABILITY,
     SESSION_GIT_LOG_CAPABILITY,
+    TOKEN_USAGE_CAPABILITY,
     SESSION_PINNING_CAPABILITY,
     SESSION_ORDER_RECENCY_CAPABILITY,
     COMPLETION_EVENTS_CAPABILITY,

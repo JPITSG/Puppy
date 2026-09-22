@@ -313,6 +313,37 @@ def _task_notice(ev) -> str:
         label, summary or ev.get("task_id") or "unknown task")
 
 
+_MODEL_USAGE_FIELDS = (("input_tokens", "inputTokens"), ("output_tokens", "outputTokens"),
+                       ("cache_read_input_tokens", "cacheReadInputTokens"),
+                       ("cache_creation_input_tokens", "cacheCreationInputTokens"))
+
+
+def _model_usage(model_usage) -> dict:
+    """The result's per-model breakdown (modelUsage) in the usage vocabulary,
+    each model's cost beside its tokens. Like total_cost_usd it accumulates
+    over the process, so the last result's covers every wake-up of the turn -
+    and every model the turn used, its subagents' and background calls'
+    included, which the result's own usage (the main loop's) does not."""
+    if not isinstance(model_usage, dict):
+        return {}
+    out = {}
+    for model, entry in model_usage.items():
+        if not isinstance(entry, dict) or not str(model or "").strip():
+            continue
+        row = {}
+        for target, origin in _MODEL_USAGE_FIELDS:
+            value = entry.get(origin)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+                row[target] = int(value)
+        if not any(row.values()):
+            continue
+        cost = entry.get("costUSD")
+        if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost >= 0:
+            row["cost_usd"] = float(cost)
+        out[str(model).strip()[:200]] = row
+    return out
+
+
 def _context_window(model_usage, model) -> int:
     """The window of the model this turn ran on, from the result's per-model
     usage map (contextWindow per model id); the only or largest entry when
@@ -1063,6 +1094,9 @@ class ClaudeDriver(Driver):
                 "usage": dict(folded),
                 "error": (ev.get("result") or "")[:2000] if ev.get("is_error") else "",
             }
+            model_usage = _model_usage(ev.get("modelUsage"))
+            if model_usage:
+                data["model_usage"] = model_usage
             if ctx.get("wakeups"):
                 data["wakeups"] = int(ctx["wakeups"])
             if data["ok"] and ctx.get("background_tasks") and not ctx.get("tool"):

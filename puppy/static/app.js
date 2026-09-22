@@ -115,6 +115,32 @@ function logoutIcon(size) {
   return svg;
 }
 
+/* The token usage sheet's button: three columns standing on a baseline,
+   drawn in the footer set's 24-box at its 1.5 weight - the bell's neighbour. */
+function usageIcon(size) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const draw = (d) => {
+    const p = document.createElementNS(NS, "path");
+    p.setAttribute("d", d);
+    p.setAttribute("fill", "none");
+    p.setAttribute("stroke", "currentColor");
+    p.setAttribute("stroke-width", "1.5");
+    p.setAttribute("stroke-linecap", "round");
+    p.setAttribute("stroke-linejoin", "round");
+    svg.appendChild(p);
+  };
+  draw("M3.5 20.5h17");
+  draw("M6.5 17v-5.5");
+  draw("M12 17V5.5");
+  draw("M17.5 17v-8.5");
+  return svg;
+}
+
 /* The tray the footer's notification list opens from: an in-tray with its
    shelf, drawn in the same 24-box at the same 1.5 weight as the bell and the
    sign-out arrow it stands between. */
@@ -8750,6 +8776,821 @@ function renderNoticesPanel(problem = "") {
 
 $("btn-notices").onclick = () => toggleNoticesPanel();
 
+/* ================= token usage =================
+   The footer's chart button opens this sheet: what every engine run used,
+   read from each node's own ledger (puppy/token_usage.py, GET
+   /api/token-usage behind the additive token-usage capability) and drawn per
+   backend, engine or model. This console and every reachable backend that
+   serves the route are asked at once; a backend that is unreachable, or too
+   old to keep a ledger, is named under the range rather than silently left
+   out. The browser keeps nothing but the three choices (range, grouping,
+   measure), exact strings or the default.
+
+   The chart is stacked columns - one per day, week or month, each split by
+   the chosen grouping - on the palette validated for this console's two
+   surfaces (--viz-1..8). A grouping keeps its colour while the sheet is used:
+   survivors keep their slot across a change of range or measure, the stack
+   runs in slot order so touching segments are the validated neighbours, and
+   past USAGE_SLOTS series the tail folds into Other. An engine wears its own
+   hue at the palette's chart step (USAGE_ENGINE_SLOTS). Hover, a tap or the
+   arrow keys read a column in the line above the plot; the breakdown under
+   it is the chart's table view, so no value lives in the chart alone. */
+const USAGE_RANGES = [
+  { key: "7", label: "7 days", days: 7 },
+  { key: "30", label: "30 days", days: 30 },
+  { key: "90", label: "90 days", days: 90 },
+  { key: "all", label: "All", days: 0 },
+];
+const USAGE_LENSES = [
+  { key: "backend", label: "Backend" }, { key: "engine", label: "Engine" },
+  { key: "model", label: "Model" },
+];
+const USAGE_MEASURES = [
+  { key: "all", label: "All" }, { key: "input", label: "Input" },
+  { key: "cache", label: "Cache" }, { key: "output", label: "Output" },
+];
+const USAGE_PREFS = { range: "puppy.usage.range", lens: "puppy.usage.by", measure: "puppy.usage.measure" };
+const USAGE_SLOTS = 7;             // coloured series; the rest fold into Other
+const USAGE_OTHER = "\u0000other";
+/* each engine's own hue among the palette's slots: Claude's orange, Codex's
+   teal, OpenCode's violet */
+const USAGE_ENGINE_SLOTS = { claude: 2, codex: 3, opencode: 7 };
+const USAGE_ALL_SPAN = 5 * 365 * 86400;   // "All" asks this far back, by the day
+const USAGE_SESSIONS = 12;
+const USAGE_PLOT_H = 190, USAGE_PLOT_H_PHONE = 150;
+/* a slot per series key and grouping, kept for the page's life */
+const usageSlots = { backend: new Map(), engine: new Map(), model: new Map() };
+
+function usagePref(name, choices, fallback) {
+  const value = lsGet(USAGE_PREFS[name]);
+  return choices.some(choice => choice.key === value) ? value : fallback;
+}
+
+function setUsagePref(name, value) {
+  try { lsSet(USAGE_PREFS[name], value); } catch (_) { /* storage is optional */ }
+}
+
+/* 1,234 · 12.3k · 4.5M · 1.2B - the console's token figures, whole below a thousand */
+function fmtUsage(n) {
+  const value = Math.max(0, Number(n) || 0);
+  const cut = (amount, unit) => {
+    const text = amount >= 100 ? String(Math.round(amount)) : amount.toFixed(1);
+    return text.replace(/\.0$/, "") + unit;
+  };
+  if (value >= 1e9) return cut(value / 1e9, "B");
+  if (value >= 1e6) return cut(value / 1e6, "M");
+  if (value >= 1e3) return cut(value / 1e3, "k");
+  return String(Math.round(value));
+}
+
+/* a share as the breakdown prints it: whole from 10%, a decimal below, and
+   never a nought for something that was used */
+function usagePercent(share) {
+  if (!(share > 0)) return "0%";
+  if (share >= .995) return "100%";
+  if (share >= .1) return `${Math.round(share * 100)}%`;
+  return share < .001 ? "<0.1%" : `${(share * 100).toFixed(1)}%`;
+}
+
+function fmtUsd(value) {
+  const amount = Number(value) || 0;
+  return "$" + (amount >= 100 ? Math.round(amount).toLocaleString() : amount.toFixed(2));
+}
+
+function usageMeasure(row, measure) {
+  if (measure === "input") return row.input;
+  if (measure === "output") return row.output;
+  if (measure === "cache") return row.cache_read + row.cache_write;
+  return row.input + row.output + row.cache_read + row.cache_write;
+}
+
+/* The span a range asks for: from the first local midnight it covers to
+   now, by the hour (folded into local days here, exactly); "All" by the day
+   at this browser's offset from UTC. */
+function usageSpan(rangeKey, now = Date.now() / 1000) {
+  const range = USAGE_RANGES.find(item => item.key === rangeKey) || USAGE_RANGES[1];
+  const until = Math.ceil(now) + 60;
+  if (!range.days) {
+    const offset = -new Date(now * 1000).getTimezoneOffset() * 60 || 0;
+    return { range, since: until - USAGE_ALL_SPAN, until, step: 86400, offset };
+  }
+  const today = new Date(now * 1000);
+  const start = new Date(today.getFullYear(), today.getMonth(), today.getDate() - (range.days - 1));
+  return { range, since: Math.floor(start.getTime() / 1000), until, step: 3600, offset: 0 };
+}
+
+/* The nodes to ask: this instance and every backend, each with the reason it
+   cannot be asked, when it cannot. */
+function usageNodes() {
+  const nodes = [{ bid: 0, name: backendName(0) }];
+  for (const backend of state.backends || []) nodes.push({ bid: backend.id, name: backend.name });
+  return nodes.map(node => {
+    if (node.bid && !backendConnectionAllowed(node.bid))
+      return { ...node, skip: backendStateNote(remoteAvailability(node.bid), false) || "Backend unavailable" };
+    if (!nodeHasCapability(node.bid, "token-usage"))
+      return { ...node, skip: "Keeps no token ledger yet · update Puppy on it" };
+    return node;
+  });
+}
+
+async function readTokenUsage(span) {
+  const query = `token-usage?since=${span.since}&until=${span.until}&step=${span.step}&offset=${span.offset}`;
+  return Promise.all(usageNodes().map(async node => {
+    if (node.skip) return node;
+    try {
+      return { ...node, data: await api(node.bid, query, { timeoutMs: 20000 }) };
+    } catch (error) {
+      return { ...node, error: error.message || "request failed" };
+    }
+  }));
+}
+
+/* Every node's buckets as plain rows, and the totals summed across them. */
+function usageRows(results) {
+  const rows = [];
+  const totals = { input: 0, output: 0, cache_read: 0, cache_write: 0, reasoning: 0,
+    turns: 0, cost: null, sessions: 0, first_at: null, nodes: 0 };
+  for (const result of results) {
+    const data = result.data;
+    if (!data || !Array.isArray(data.buckets)) continue;
+    totals.nodes++;
+    const columns = Array.isArray(data.columns) ? data.columns : [];
+    const at = name => columns.indexOf(name);
+    for (const bucket of data.buckets) {
+      if (!Array.isArray(bucket)) continue;
+      const pick = name => Number(bucket[at(name)]) || 0;
+      rows.push({ bid: result.bid, at: pick("at"), engine: String(bucket[at("engine")] || ""),
+        model: String(bucket[at("model")] || ""), input: pick("input"), output: pick("output"),
+        cache_read: pick("cache_read"), cache_write: pick("cache_write"),
+        reasoning: pick("reasoning"), cost: bucket[at("cost")] == null ? null : pick("cost") });
+    }
+    const sum = data.totals || {};
+    for (const key of ["input", "output", "cache_read", "cache_write", "reasoning", "turns"])
+      totals[key] += Number(sum[key]) || 0;
+    if (sum.cost != null) totals.cost = (totals.cost || 0) + (Number(sum.cost) || 0);
+    totals.sessions += Number(data.session_count) || 0;
+    if (typeof data.first_at === "number" && (totals.first_at === null || data.first_at < totals.first_at))
+      totals.first_at = data.first_at;
+  }
+  return { rows, totals };
+}
+
+/* The model's name as its engine's catalog spells it, else the id itself. */
+function usageModelLabel(bid, engine, model) {
+  const info = engineInfo(bid, engine);
+  const engineLabel = (info && info.label) || engine;
+  if (!model) return `${engineLabel} default`;
+  const option = engineModelOption(info, model);
+  return (option && option.label) || model;
+}
+
+/* A model's identity in the chart: the catalog row its spelling names - a
+   requested alias and the id the engine resolved it to are one model - else
+   the spelling itself. */
+function usageModelId(bid, engine, model) {
+  if (!model) return "";
+  const option = engineModelOption(engineInfo(bid, engine), model);
+  return option ? option.value : model;
+}
+
+function usageSeriesKey(row, lens) {
+  if (lens === "backend") return `b:${row.bid}`;
+  if (lens === "engine") return `e:${row.engine}`;
+  return `m:${row.engine}\u0001${usageModelId(row.bid, row.engine, row.model)}`;
+}
+
+function usageSeriesLabel(row, lens) {
+  if (lens === "backend") return backendName(row.bid);
+  const info = engineInfo(row.bid, row.engine);
+  if (lens === "engine") return (info && info.label) || row.engine;
+  return usageModelLabel(row.bid, row.engine, row.model);
+}
+
+/* The series of one grouping, heaviest first by the measure, each with its
+   totals; a model's label says its engine too wherever two engines share one. */
+function usageSeries(rows, lens, measure) {
+  const byKey = new Map();
+  for (const row of rows) {
+    const key = usageSeriesKey(row, lens);
+    let series = byKey.get(key);
+    if (!series) {
+      series = { key, label: usageSeriesLabel(row, lens), engine: row.engine, bid: row.bid,
+        input: 0, output: 0, cache_read: 0, cache_write: 0, reasoning: 0, cost: null };
+      byKey.set(key, series);
+    }
+    for (const name of ["input", "output", "cache_read", "cache_write", "reasoning"])
+      series[name] += row[name];
+    if (row.cost != null) series.cost = (series.cost || 0) + row.cost;
+  }
+  const list = [...byKey.values()].map(series => ({ ...series, value: usageMeasure(series, measure) }));
+  if (lens === "model") {
+    const labels = new Map();
+    for (const series of list) labels.set(series.label, (labels.get(series.label) || 0) + 1);
+    for (const series of list) if (labels.get(series.label) > 1) {
+      const info = engineInfo(series.bid, series.engine);
+      series.label += ` · ${(info && info.label) || series.engine}`;
+    }
+  }
+  return list.sort((a, b) => b.value - a.value || a.label.localeCompare(b.label));
+}
+
+/* Slots for the series on show: a series keeps the slot it was given while
+   the page lives unless a heavier one on show already holds it; a new one
+   takes the lowest slot free on this chart. Past USAGE_SLOTS, Other. */
+function usageAssignSlots(series, lens) {
+  const memory = usageSlots[lens];
+  const shown = series.filter(item => item.value > 0);
+  const colored = shown.slice(0, USAGE_SLOTS), folded = shown.slice(USAGE_SLOTS);
+  const taken = new Set();
+  const reserved = lens === "engine" ? new Set(Object.values(USAGE_ENGINE_SLOTS)) : new Set();
+  for (const item of colored) {
+    let slot = lens === "engine" && USAGE_ENGINE_SLOTS[item.engine] ? USAGE_ENGINE_SLOTS[item.engine] :
+      memory.get(item.key);
+    if (!slot || taken.has(slot)) slot = 0;
+    item.slot = slot;
+    if (slot) taken.add(slot);
+  }
+  for (const item of colored) {
+    if (item.slot) continue;
+    const free = [1, 2, 3, 4, 5, 6, 7, 8].find(n => !taken.has(n) && !reserved.has(n)) ||
+      [1, 2, 3, 4, 5, 6, 7, 8].find(n => !taken.has(n));
+    item.slot = free || 0;
+    if (item.slot) taken.add(item.slot);
+  }
+  for (const item of colored) if (item.slot && !(lens === "engine" && USAGE_ENGINE_SLOTS[item.engine]))
+    memory.set(item.key, item.slot);
+  for (const item of folded) item.slot = 0;
+  for (const item of series) if (item.value <= 0) item.slot = 0;
+  return { colored, folded };
+}
+
+function usageColor(slot) {
+  return slot ? `var(--viz-${slot})` : "var(--viz-other)";
+}
+
+/* The columns the chart draws: a day, a week (from Monday) or a month each,
+   from the range's start - or the first day any node counted, when that is
+   later: nothing before it was counted, which is not the same as nothing
+   used - to today, empty ones included. */
+function usageUnit(span, firstAt, now = Date.now() / 1000) {
+  if (span.range.days) return "day";
+  const days = firstAt ? (now - firstAt) / 86400 : 0;
+  return days <= 120 ? "day" : days <= 730 ? "week" : "month";
+}
+
+function usageBucketStart(at, unit) {
+  const date = new Date(at * 1000);
+  if (unit === "month") return new Date(date.getFullYear(), date.getMonth(), 1);
+  const day = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  if (unit === "week") day.setDate(day.getDate() - ((day.getDay() + 6) % 7));
+  return day;
+}
+
+function usageBucketKey(date) {
+  return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
+}
+
+function usageBuckets(span, unit, firstAt, now = Date.now() / 1000) {
+  const startAt = Math.max(span.since, firstAt || (span.range.days ? span.since : now));
+  let cursor = usageBucketStart(startAt, unit);
+  const end = usageBucketStart(now, unit).getTime();
+  const buckets = [];
+  while (cursor.getTime() <= end && buckets.length < 2000) {
+    buckets.push({ key: usageBucketKey(cursor), start: cursor.getTime() / 1000, values: new Map(), total: 0 });
+    const next = new Date(cursor);
+    if (unit === "month") next.setMonth(next.getMonth() + 1);
+    else next.setDate(next.getDate() + (unit === "week" ? 7 : 1));
+    cursor = next;
+  }
+  return buckets;
+}
+
+/* A row's column: an hour's own local day; a day kept at a fixed offset, its
+   middle, so a daylight-saving hour never moves it into its neighbour. */
+function usageRowDate(row, span) {
+  return span.step === 86400 ? row.at + 43200 : row.at;
+}
+
+function usageFill(buckets, rows, span, unit, lens, measure, seriesSlot) {
+  const index = new Map(buckets.map((bucket, at) => [bucket.key, at]));
+  for (const row of rows) {
+    const at = index.get(usageBucketKey(usageBucketStart(usageRowDate(row, span), unit)));
+    if (at === undefined) continue;
+    const value = usageMeasure(row, measure);
+    if (!value) continue;
+    const bucket = buckets[at];
+    const key = usageSeriesKey(row, lens);
+    const slotKey = seriesSlot.has(key) ? key : USAGE_OTHER;
+    bucket.values.set(slotKey, (bucket.values.get(slotKey) || 0) + value);
+    bucket.total += value;
+  }
+}
+
+function usageBucketLabel(bucket, unit, long) {
+  const at = bucket.start;
+  const thisYear = new Date(at * 1000).getFullYear() === new Date().getFullYear();
+  if (unit === "month")
+    return fmtDateTime(at, long ? { month: "long", year: "numeric" } :
+      { month: "short", ...(thisYear ? {} : { year: "2-digit" }) });
+  const opts = long ? { weekday: "short", month: "short", day: "numeric" } : { month: "short", day: "numeric" };
+  if (!thisYear) opts.year = "numeric";
+  const text = fmtDateTime(at, opts);
+  return unit === "week" && long ? `Week of ${text}` : text;
+}
+
+/* A clean axis: 0 and up to four steps of 1, 2, 2.5 or 5 times a power of ten. */
+function usageTicks(max) {
+  if (!(max > 0)) return [0];
+  const rough = max / 4;
+  const power = Math.pow(10, Math.floor(Math.log10(rough)));
+  const step = [1, 2, 2.5, 5, 10].map(f => f * power).find(value => value >= rough) || 10 * power;
+  const ticks = [];
+  for (let value = 0; value <= max + step * 1e-9; value += step) ticks.push(value);
+  if (ticks[ticks.length - 1] < max) ticks.push(ticks[ticks.length - 1] + step);
+  return ticks;
+}
+
+/* One column's path: square at the baseline and between segments, the 4px
+   rounded end on the top of its stack only. */
+function usageBarPath(x, y, w, h, round) {
+  if (!round) return `M${x} ${y}h${w}v${h}h${-w}Z`;
+  const r = Math.min(4, w / 2, h);
+  return `M${x} ${y + h}V${y + r}Q${x} ${y} ${x + r} ${y}H${x + w - r}Q${x + w} ${y} ${x + w} ${y + r}V${y + h}Z`;
+}
+
+function usageSvg(tag, attrs = {}) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [name, value] of Object.entries(attrs)) node.setAttribute(name, String(value));
+  return node;
+}
+
+/* The chart itself, drawn at the plot's own pixel width. */
+function drawUsageChart(plot, chart, active) {
+  const width = Math.max(240, Math.round(plot.clientWidth || 640));
+  const phone = width < 480;
+  const plotH = phone ? USAGE_PLOT_H_PHONE : USAGE_PLOT_H;
+  const top = 8, axisH = 20;
+  const ticks = usageTicks(chart.max);
+  const tickText = ticks.map(fmtUsage);
+  const left = Math.max(26, 8 + 6.5 * Math.max(...tickText.map(text => text.length)));
+  const plotW = width - left - 4;
+  const svg = usageSvg("svg", { class: "tu-svg", width, height: top + plotH + axisH,
+    viewBox: `0 0 ${width} ${top + plotH + axisH}`, "aria-hidden": "true" });
+  const scale = ticks[ticks.length - 1] > 0 ? plotH / ticks[ticks.length - 1] : 0;
+  const baseline = top + plotH;
+  for (let i = 0; i < ticks.length; i++) {
+    const y = Math.round(baseline - ticks[i] * scale) + .5;
+    svg.appendChild(usageSvg("path", { class: i ? "tu-grid" : "tu-base", d: `M${left} ${y}H${width - 4}` }));
+    const label = usageSvg("text", { class: "tu-tick", x: left - 6, y: y + 3.5, "text-anchor": "end" });
+    label.textContent = tickText[i];
+    svg.appendChild(label);
+  }
+  const n = chart.buckets.length;
+  const band = n ? plotW / n : plotW;
+  const barW = Math.max(1, Math.min(24, band >= 6 ? band * .64 : band - 1));
+  const order = [...chart.shown, { key: USAGE_OTHER, slot: 0 }];
+  chart.buckets.forEach((bucket, at) => {
+    const x = left + at * band + (band - barW) / 2;
+    if (active === at)
+      svg.appendChild(usageSvg("rect", { class: "tu-hot", x: left + at * band, y: top,
+        width: band, height: plotH }));
+    let y = baseline;
+    const parts = order.filter(item => (bucket.values.get(item.key) || 0) > 0);
+    parts.forEach((item, index) => {
+      const value = bucket.values.get(item.key);
+      let h = value * scale;
+      const topmost = index === parts.length - 1;
+      /* the stack stands on the baseline and the 2px surface gap is taken
+         off the top of every segment with another above it; a sliver still
+         shows */
+      const gap = topmost ? 0 : Math.min(2, Math.max(0, h - 1));
+      h = Math.max(1, h);
+      const shape = usageSvg("path", { class: "tu-bar" + (active !== null && active !== at ? " dim" : ""),
+        d: usageBarPath(+x.toFixed(2), +(y - h + gap).toFixed(2), +barW.toFixed(2),
+          +Math.max(1, h - gap).toFixed(2), topmost) });
+      shape.style.fill = usageColor(item.slot);
+      svg.appendChild(shape);
+      y -= h;
+    });
+  });
+  /* dates under the columns: every so many to keep them apart, the last
+     always, and none so close to it that the two would touch */
+  const every = Math.max(1, Math.ceil(72 / Math.max(1, band)));
+  const labelled = [];
+  for (let at = 0; at < n; at += every) if (at === n - 1 || n - 1 - at >= every) labelled.push(at);
+  if (n && labelled[labelled.length - 1] !== n - 1) labelled.push(n - 1);
+  for (const at of labelled) {
+    const first = n > 1 && at === 0, last = n > 1 && at === n - 1;
+    const x = first ? left + at * band + (band - barW) / 2 :
+      last ? left + at * band + (band + barW) / 2 : left + at * band + band / 2;
+    const label = usageSvg("text", { class: "tu-tick", x: +x.toFixed(2), y: baseline + 15,
+      "text-anchor": first ? "start" : last ? "end" : "middle" });
+    label.textContent = usageBucketLabel(chart.buckets[at], chart.unit, false);
+    svg.appendChild(label);
+  }
+  chart.geometry = { left, band, top, plotH };
+  plot.replaceChildren(svg);
+}
+
+function modalTokenUsage() {
+  const { m, close, onClose } = modal(`<h2>Token usage</h2>
+    <p class="modal-copy tu-intro">What every engine used on each backend</p>
+    <div class="tu-filters"><div class="seg tu-range" role="group" aria-label="Time range"></div></div>
+    <div class="tu-notes hidden" role="status"></div>
+    <div class="tu-body">
+      <div class="tu-tiles"></div>
+      <div class="tu-chart-head">
+        <div class="tu-control"><span class="field-lbl">By</span>
+          <div class="seg tu-lens" role="group" aria-label="Group by"></div></div>
+        <div class="tu-control"><span class="field-lbl">Tokens</span>
+          <div class="seg tu-measure" role="group" aria-label="Tokens counted"></div></div>
+      </div>
+      <figure class="tu-figure">
+        <div class="tu-readout" aria-live="polite"></div>
+        <div class="tu-plot" tabindex="0" role="group"
+          aria-label="Token usage chart · the arrow keys read one column at a time"></div>
+        <div class="tu-legend"></div>
+      </figure>
+      <div class="tu-section tu-breakdown"><div class="field-lbl">Breakdown <span class="field-optional"></span></div>
+        <div class="tu-table" role="table"></div></div>
+      <div class="tu-section tu-sessions-section"><div class="field-lbl">Sessions <span class="field-optional"></span></div>
+        <div class="tu-sessions"></div></div>
+    </div>
+    <p class="form-error hidden" role="alert"></p>
+    <div class="m-btns"><button type="button" class="btn" id="tu-close">Close</button>
+      <button type="button" class="btn" id="tu-refresh">Refresh</button></div>`,
+    "token-usage-modal", () => modalTokenUsage());
+  const $$ = selector => m.querySelector(selector);
+  const plot = $$(".tu-plot"), readout = $$(".tu-readout"), body = $$(".tu-body");
+  const error = $$(".form-error"), notes = $$(".tu-notes"), refresh = $$("#tu-refresh");
+  const view = {
+    range: usagePref("range", USAGE_RANGES, "30"),
+    lens: usagePref("lens", USAGE_LENSES, "backend"),
+    measure: usagePref("measure", USAGE_MEASURES, "all"),
+    results: null, span: null, chart: null, active: null, generation: 0, loading: false,
+  };
+  $$("#tu-close").onclick = close;
+
+  /* the three choices: built once and marked in place, so the button a
+     press or a key landed on keeps the focus */
+  const segments = [];
+  const segment = (name, host, choices, apply) => {
+    for (const choice of choices) {
+      const button = el("button", "seg-btn", choice.label);
+      button.type = "button";
+      button.onclick = () => {
+        if (view[name] === choice.key) return;
+        view[name] = choice.key;
+        setUsagePref(name, choice.key);
+        syncControls();
+        apply();
+      };
+      host.appendChild(button);
+      segments.push({ name, key: choice.key, button });
+    }
+  };
+  const syncControls = () => {
+    for (const { name, key, button } of segments) {
+      button.classList.toggle("on", view[name] === key);
+      button.setAttribute("aria-pressed", view[name] === key ? "true" : "false");
+    }
+  };
+  const renderControls = () => {
+    segment("range", $$(".tu-range"), USAGE_RANGES, () => load());
+    segment("lens", $$(".tu-lens"), USAGE_LENSES, () => render());
+    segment("measure", $$(".tu-measure"), USAGE_MEASURES, () => render());
+    syncControls();
+  };
+
+  const tile = (label, value, sub) => {
+    const node = el("div", "tu-tile");
+    node.appendChild(el("div", "tu-tile-label", label));
+    node.appendChild(el("div", "tu-tile-value", value));
+    node.appendChild(el("div", "tu-tile-sub", sub || " "));
+    return node;
+  };
+  const renderTiles = totals => {
+    const tiles = $$(".tu-tiles");
+    tiles.replaceChildren();
+    const all = totals.input + totals.output + totals.cache_read + totals.cache_write;
+    tiles.appendChild(tile("Total", fmtUsage(all),
+      `${totals.nodes} ${totals.nodes === 1 ? "backend" : "backends"}`));
+    tiles.appendChild(tile("Input", fmtUsage(totals.input), "uncached"));
+    tiles.appendChild(tile("Cache", fmtUsage(totals.cache_read + totals.cache_write),
+      `${fmtUsage(totals.cache_read)} read · ${fmtUsage(totals.cache_write)} written`));
+    tiles.appendChild(tile("Output", fmtUsage(totals.output),
+      totals.reasoning ? `${fmtUsage(totals.reasoning)} reasoning` : ""));
+    tiles.appendChild(tile("Turns", totals.turns.toLocaleString(),
+      totals.sessions ? `in ${totals.sessions} ${totals.sessions === 1 ? "session" : "sessions"}` : ""));
+    if (totals.cost) tiles.appendChild(tile("Est. cost", fmtUsd(totals.cost), "where reported"));
+  };
+
+  const readLine = at => {
+    const chart = view.chart;
+    readout.replaceChildren();
+    if (!chart) return;
+    const bucket = at === null ? null : chart.buckets[at];
+    const head = el("div", "tu-read-head");
+    head.appendChild(el("span", "tu-read-when", bucket ? usageBucketLabel(bucket, chart.unit, true) :
+      view.span.range.days ? `Last ${view.span.range.label}` : "All time"));
+    head.appendChild(el("span", "tu-read-sum", fmtUsage(bucket ? bucket.total : chart.total)));
+    if (!bucket && chart.peak) head.appendChild(el("span", "tu-read-note",
+      `peak ${usageBucketLabel(chart.peak, chart.unit, false)} · ${fmtUsage(chart.peak.total)}`));
+    readout.appendChild(head);
+    const items = [...chart.shown, ...(chart.folded.length ? [{ key: USAGE_OTHER, slot: 0,
+      label: `Other (${chart.folded.length})` }] : [])];
+    const list = el("div", "tu-read-series");
+    for (const item of items) {
+      const value = bucket ? bucket.values.get(item.key) || 0 :
+        item.key === USAGE_OTHER ? chart.folded.reduce((sum, series) => sum + series.value, 0) : item.value;
+      if (!value) continue;
+      const row = el("span", "tu-read-item");
+      const key = el("span", "tu-key");
+      key.style.background = usageColor(item.slot);
+      row.appendChild(key);
+      row.appendChild(el("span", "tu-read-value", fmtUsage(value)));
+      row.appendChild(el("span", "tu-read-label", item.label));
+      list.appendChild(row);
+    }
+    readout.appendChild(list);
+  };
+  const paint = () => {
+    drawUsageChart(plot, view.chart, view.active);
+    if (!view.chart.total) plot.appendChild(el("div", "tu-plot-empty", view.span.range.days ?
+      `No tokens used in the last ${view.span.range.label}` : "No tokens used yet"));
+  };
+  const setActive = at => {
+    if (!view.chart || !view.chart.total) return;
+    const count = view.chart.buckets.length;
+    view.active = at === null || !count ? null : Math.max(0, Math.min(count - 1, at));
+    paint();
+    readLine(view.active);
+  };
+  const bandAt = event => {
+    const chart = view.chart;
+    if (!chart || !chart.geometry) return null;
+    const box = plot.getBoundingClientRect();
+    const x = event.clientX - box.left - chart.geometry.left;
+    const at = Math.floor(x / chart.geometry.band);
+    return at >= 0 && at < chart.buckets.length ? at : null;
+  };
+  plot.addEventListener("pointermove", event => {
+    if (event.pointerType === "touch") return;
+    const at = bandAt(event);
+    if (at !== view.active) setActive(at);
+  });
+  plot.addEventListener("pointerleave", event => {
+    if (event.pointerType !== "touch" && view.active !== null) setActive(null);
+  });
+  plot.addEventListener("pointerdown", event => {
+    if (event.pointerType !== "touch") return;
+    const at = bandAt(event);
+    setActive(at === view.active ? null : at);
+  });
+  plot.addEventListener("keydown", event => {
+    if (!view.chart) return;
+    const last = view.chart.buckets.length - 1;
+    const moves = { ArrowLeft: -1, ArrowRight: 1 };
+    let at = null;
+    if (event.key in moves) at = view.active === null ? (moves[event.key] < 0 ? last : 0) : view.active + moves[event.key];
+    else if (event.key === "Home") at = 0;
+    else if (event.key === "End") at = last;
+    else if (event.key === "Escape" && view.active !== null) {
+      event.preventDefault(); event.stopPropagation(); setActive(null); return;
+    } else return;
+    event.preventDefault();
+    setActive(at);
+  });
+  plot.addEventListener("blur", () => { if (view.active !== null) setActive(null); });
+
+  const renderLegend = chart => {
+    const legend = $$(".tu-legend");
+    legend.replaceChildren();
+    const items = [...chart.shown, ...(chart.folded.length ? [{ slot: 0,
+      label: `Other (${chart.folded.length})` }] : [])];
+    if (items.length < 2) return;
+    for (const item of items) {
+      const row = el("span", "tu-legend-item");
+      const swatch = el("span", "tu-swatch");
+      swatch.style.background = usageColor(item.slot);
+      row.appendChild(swatch);
+      row.appendChild(el("span", "tu-legend-label", item.label));
+      legend.appendChild(row);
+    }
+  };
+  const renderTable = (series, total) => {
+    const table = $$(".tu-table");
+    const lens = USAGE_LENSES.find(item => item.key === view.lens);
+    $$(".tu-breakdown .field-optional").textContent = `· by ${lens.label.toLowerCase()}`;
+    table.replaceChildren();
+    const head = el("div", "tu-row tu-head");
+    head.setAttribute("role", "row");
+    for (const text of ["", "Total", "Share", "Input", "Cache", "Output"]) {
+      const cell = el("span", "tu-cell", text);
+      cell.setAttribute("role", "columnheader");
+      head.appendChild(cell);
+    }
+    table.appendChild(head);
+    const shown = series.filter(item => item.value > 0);
+    if (!shown.length) {
+      table.appendChild(el("div", "tu-empty", "Nothing used in this range"));
+      return;
+    }
+    for (const item of shown) {
+      const row = el("div", "tu-row");
+      row.setAttribute("role", "row");
+      const name = el("span", "tu-cell tu-name");
+      name.setAttribute("role", "cell");
+      const swatch = el("span", "tu-swatch");
+      swatch.style.background = usageColor(item.slot);
+      name.appendChild(swatch);
+      const text = el("span", "tu-name-text");
+      text.appendChild(el("span", "tu-name-label", item.label));
+      /* under the name: the split the wide columns show (on a phone, where
+         they are not shown) and the engine's own cost estimate, if any */
+      const sub = el("span", "tu-name-sub");
+      sub.appendChild(el("span", "tu-split", `in ${fmtUsage(item.input)} · cache ` +
+        `${fmtUsage(item.cache_read + item.cache_write)} · out ${fmtUsage(item.output)}`));
+      if (item.cost) sub.appendChild(el("span", "tu-cost", `≈ ${fmtUsd(item.cost)}`));
+      text.appendChild(sub);
+      name.appendChild(text);
+      row.appendChild(name);
+      const share = total ? item.value / total : 0;
+      const cells = [
+        ["tu-num tu-total", fmtUsage(item.value)],
+        ["tu-share", null],
+        ["tu-num tu-wide", fmtUsage(item.input)],
+        ["tu-num tu-wide", fmtUsage(item.cache_read + item.cache_write)],
+        ["tu-num tu-wide", fmtUsage(item.output)],
+      ];
+      for (const [cls, value] of cells) {
+        const cell = el("span", "tu-cell " + cls, value === null ? undefined : value);
+        cell.setAttribute("role", "cell");
+        if (value === null) {
+          const track = el("span", "tu-track");
+          const fill = el("span", "tu-fill");
+          fill.style.width = `${Math.max(share > 0 ? 1.5 : 0, share * 100).toFixed(1)}%`;
+          fill.style.background = usageColor(item.slot);
+          track.appendChild(fill);
+          cell.appendChild(track);
+          cell.appendChild(el("span", "tu-pct", usagePercent(share)));
+        }
+        row.appendChild(cell);
+      }
+      table.appendChild(row);
+    }
+  };
+  const renderSessions = () => {
+    const host = $$(".tu-sessions");
+    host.replaceChildren();
+    const entries = [];
+    const jobs = { title: null, spawn: null };
+    for (const result of view.results || []) {
+      const data = result.data;
+      if (!data) continue;
+      for (const entry of Array.isArray(data.sessions) ? data.sessions : [])
+        entries.push({ ...entry, bid: result.bid });
+      for (const source of ["title", "spawn"]) {
+        const job = data.jobs && data.jobs[source];
+        if (!job) continue;
+        const into = jobs[source] || (jobs[source] = { input: 0, output: 0, cache_read: 0, cache_write: 0, turns: 0 });
+        for (const name of ["input", "output", "cache_read", "cache_write", "turns"]) into[name] += Number(job[name]) || 0;
+      }
+    }
+    const value = entry => usageMeasure({ input: Number(entry.input) || 0, output: Number(entry.output) || 0,
+      cache_read: Number(entry.cache_read) || 0, cache_write: Number(entry.cache_write) || 0 }, view.measure);
+    entries.sort((a, b) => value(b) - value(a));
+    const count = (view.results || []).reduce((sum, result) =>
+      sum + (result.data ? Number(result.data.session_count) || 0 : 0), 0);
+    const listed = entries.filter(entry => value(entry) > 0).slice(0, USAGE_SESSIONS);
+    $$(".tu-sessions-section .field-optional").textContent =
+      count > listed.length ? `· the ${listed.length} heaviest of ${count}` : `· ${count}`;
+    const row = (label, sub, amount, turns, dotColor, open, noun = "turn") => {
+      const node = el(open ? "button" : "div", "tu-session" + (open ? " tu-open" : ""));
+      if (open) { node.type = "button"; node.onclick = open; }
+      const dot = el("span", "tu-dot");
+      if (dotColor) dot.style.background = dotColor;
+      node.appendChild(dot);
+      const text = el("span", "tu-session-text");
+      text.appendChild(el("span", "tu-session-name", label));
+      text.appendChild(el("span", "tu-session-sub", sub));
+      node.appendChild(text);
+      const figure = el("span", "tu-session-figure");
+      figure.appendChild(el("span", "tu-num", fmtUsage(amount)));
+      figure.appendChild(el("span", "tu-session-turns", `${turns} ${noun}${turns === 1 ? "" : "s"}`));
+      node.appendChild(figure);
+      host.appendChild(node);
+    };
+    for (const entry of listed) {
+      const engines = (entry.engines || []).map(key => {
+        const info = engineInfo(entry.bid, key);
+        return (info && info.label) || key;
+      }).join(", ");
+      const parts = [backendName(entry.bid)];
+      if (engines) parts.push(engines);
+      if (entry.parent) parts.push(`task of ${entry.parent_name || `session ${entry.parent}`}`);
+      const known = !entry.deleted && findSessionMeta(entry.bid, entry.id);
+      row(entry.deleted ? "Deleted session" : entry.name || `Session ${entry.id}`, parts.join(" · "),
+        value(entry), Number(entry.turns) || 0, entry.deleted ? "" : entry.color,
+        known ? () => { close(); openSessionTab(entry.bid, entry.id, known); } : null);
+    }
+    if (jobs.title && value(jobs.title) > 0)
+      row("Session titles", "generated names", value(jobs.title), jobs.title.turns, "", null, "run");
+    if (jobs.spawn && value(jobs.spawn) > 0)
+      row("Spawned agents", "for another backend's sessions", value(jobs.spawn), jobs.spawn.turns, "", null, "run");
+    if (!host.children.length) host.appendChild(el("div", "tu-empty", "No session used tokens in this range"));
+  };
+
+  /* Everything below the range, from the results in hand. */
+  const render = () => {
+    if (!view.results) return;
+    const { rows, totals } = usageRows(view.results);
+    const unit = usageUnit(view.span, totals.first_at);
+    const series = usageSeries(rows, view.lens, view.measure);
+    const { colored, folded } = usageAssignSlots(series, view.lens);
+    const shown = [...colored].sort((a, b) => (a.slot || 99) - (b.slot || 99));
+    const buckets = usageBuckets(view.span, unit, totals.first_at);
+    usageFill(buckets, rows, view.span, unit, view.lens, view.measure,
+      new Set(colored.map(item => item.key)));
+    const total = buckets.reduce((sum, bucket) => sum + bucket.total, 0);
+    const peak = buckets.reduce((best, bucket) => bucket.total > (best ? best.total : 0) ? bucket : best, null);
+    view.chart = { buckets, unit, shown, folded, total, peak,
+      max: buckets.reduce((max, bucket) => Math.max(max, bucket.total), 0) };
+    if (view.active !== null && view.active >= buckets.length) view.active = null;
+    renderTiles(totals);
+    const intro = $$(".tu-intro");
+    intro.textContent = "What every engine used on each backend" + (totals.first_at ?
+      ` · counted since ${fmtDateTime(totals.first_at, { month: "short", day: "numeric", year: "numeric" })}` : "");
+    plot.classList.toggle("empty", !total);
+    paint();
+    readLine(view.active);
+    renderLegend(view.chart);
+    renderTable(series, series.reduce((sum, item) => sum + item.value, 0));
+    renderSessions();
+  };
+
+  const renderNotes = () => {
+    notes.replaceChildren();
+    const lines = [];
+    for (const result of view.results || []) {
+      if (result.skip) lines.push(`${result.name}: ${result.skip}`);
+      else if (result.error) lines.push(`${result.name}: Could not read its token usage · ${result.error}`);
+    }
+    for (const line of lines) notes.appendChild(el("div", "tu-note", line));
+    notes.classList.toggle("hidden", !lines.length);
+  };
+
+  /* One read of every node for the range; a newer read drops an older one's
+     answer, and the last render stays on screen, dimmed, while it runs. */
+  const load = async () => {
+    const generation = ++view.generation;
+    const span = usageSpan(view.range);
+    view.loading = true;
+    body.classList.add("loading");
+    refresh.disabled = true;
+    m.setAttribute("aria-busy", "true");
+    error.classList.add("hidden");
+    if (!view.results) readout.textContent = "Reading token usage…";
+    const results = await readTokenUsage(span);
+    if (!m.isConnected || generation !== view.generation) return;
+    view.loading = false;
+    body.classList.remove("loading");
+    refresh.disabled = false;
+    m.removeAttribute("aria-busy");
+    view.results = results;
+    view.span = span;
+    view.active = null;
+    renderNotes();
+    if (!results.some(result => result.data)) {
+      const reason = results.find(result => result.error);
+      error.textContent = reason ? `Could not read token usage · ${reason.error}` :
+        "No backend keeps a token ledger yet";
+      error.classList.remove("hidden");
+    }
+    render();
+  };
+  refresh.onclick = () => { if (!view.loading) load(); };
+
+  /* the plot follows the sheet's width: a resize redraws it at its new size */
+  if (typeof ResizeObserver === "function") {
+    let frame = 0, lastWidth = 0;
+    const watcher = new ResizeObserver(() => {
+      const width = Math.round(plot.clientWidth);
+      if (!view.chart || width === lastWidth) return;
+      lastWidth = width;
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => { if (view.chart) paint(); });
+    });
+    watcher.observe(plot);
+    onClose(() => { watcher.disconnect(); cancelAnimationFrame(frame); });
+  }
+  renderControls();
+  load();
+  return { m, close, view, load };
+}
+
+$("btn-usage").onclick = () => modalTokenUsage();
+
 $("toggle-archived").onclick = () => { state.showArchived = !state.showArchived; renderSidebar(); };
 
 /* ---- sidebar quick-search ----
@@ -10505,6 +11346,7 @@ if (logoutButton) {
   logoutButton.onclick = signOut;
 }
 $("btn-notices").appendChild(trayIcon(14));
+$("btn-usage").appendChild(usageIcon(14));
 
 $("btn-bell").onclick = async () => {
   const want = !(state.notify && state.notify.enabled);

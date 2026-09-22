@@ -65,6 +65,12 @@ still contain a value written before that release.
   `session_title.<sid>` records are exact `{format: 1, state, text,
   placeholder, requested_at}` rows belonging to existing sessions. See
   [Session titles](session-titles.md).
+- `token_usage.<YYYY-MM-DD>` records are exact `{format: 1, rows}` days of the
+  token ledger: each row `[ref, at, session, source, engine, model, input,
+  output, cache_read, cache_write, reasoning, cost]`, ordered by time, ref and
+  model, inside its UTC day. Startup and backup validation reject any other
+  shape. A node that has counted nothing has no records, so nothing needs
+  preparing by hand. See [Token usage](token-usage.md).
 
 ## Runtime APIs and console
 
@@ -220,6 +226,15 @@ snapshot restore discard old observations, including in-flight results. Neither
 surface adds persisted state, changes a backup shape, or moves an availability
 verdict. Host metrics requests require the capability; latency uses the existing
 ping route and is controller-only.
+
+Token usage is additive `token-usage`: both execution runtimes serve
+`GET /api/token-usage?since=&until=&step=&offset=`, the node's own ledger
+summed per hour (`step=3600`) or per day at a fixed offset (`step=86400`),
+per engine and model, in total, per session and per job source, with `turns`
+counting turns alone. Every runtime records its own turns, spawned agents and
+title jobs as they end. A console asks every node that advertises this and
+names the rest; the read is never counted as a mutation, and only the
+instance's own ledger is in its backup.
 
 Cancellation is additive: `operation-cancel-v1` covers audited preparation
 requests and authenticated operation controls; `engine-upgrade-cancel`,
