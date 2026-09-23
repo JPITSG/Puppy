@@ -144,7 +144,7 @@ textarea::-webkit-scrollbar-track,.md pre::-webkit-scrollbar-track,
   margin:var(--r-sm);
 }
 .menu::-webkit-scrollbar-track,.choice-menu::-webkit-scrollbar-track,
-.mention-pop::-webkit-scrollbar-track{margin:var(--r-md)}
+.mention-pop::-webkit-scrollbar-track,.approval.question::-webkit-scrollbar-track{margin:var(--r-md)}
 .modal::-webkit-scrollbar-track{margin:var(--r-lg)}
 /* where a vertical and a horizontal bar meet: the browser's default there is
    an opaque square that ignores the theme */
@@ -1597,6 +1597,14 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
    of the command: the questions with their options as radios or checkboxes,
    an Other box under each, a text or number field for the extended kinds,
    and Skip then Answer, the least consequential press first */
+/* A question belongs to the transcript's scroll chain. Its own box stays
+   within the available chat height; wheel and touch input then pass to the
+   history at either edge without a scripted scroll handler. Round down to
+   whole pixels: a fractional scrollport can stop a wheel at its bottom
+   without handing it to the parent, even when scrollTop is at its limit. */
+.chat-scroll>.approval.question{
+  margin:12px auto 0;width:100%;max-height:round(down,70%,1px);overflow:auto;
+}
 .approval.question .ap-title svg{display:block;flex:none}
 .aq-form{display:block}
 .aq-list{display:flex;flex-direction:column;gap:12px;margin:10px 0}

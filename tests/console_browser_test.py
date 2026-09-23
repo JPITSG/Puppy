@@ -648,6 +648,145 @@ async def reply_image_checks(instance, capture=False):
     print("PASS: large reply images fit the transcript without distortion or horizontal overflow; small images retain their natural size in both themes", flush=True)
 
 
+async def question_scroll_checks(instance, capture=False):
+    """A real wheel scrolls the question first, then its history at either
+    edge. The card fits the chat pane, including short windows and phones;
+    its last choice and answer controls remain reachable."""
+    await evaluate(instance, """(() => {
+        window.questionScrollStatus=demoView.status;
+        demoView.status='running';demoView.updateRunState();
+        window.questionScrollHistory=el('div','msg assistant');
+        for(let i=0;i<18;i++) questionScrollHistory.appendChild(
+            el('p',null,'Earlier dashboard discussion '+(i+1)+': keep the activity feed easy to scan.'));
+        demoView.inner.appendChild(questionScrollHistory);
+        const preview=Array.from({length:12},(_,i)=>
+            '- Detail '+(i+1)+': keep the project status and recent updates readable.').join('\\n');
+        window.questionScrollReq={request_id:'question-scroll',tool_name:'AskUserQuestion',kind:'question',
+            questions:[{question:'Which dashboard layout should I use?',header:'Layout',options:[
+                {label:'Compact overview',description:'Summary cards followed by the activity feed.',preview},
+                {label:'Activity first',description:'Recent updates followed by the summary cards.',preview},
+                {label:'Split workspace',description:'Both sections together on wider screens.',preview}
+            ]}]};
+        for(const option of questionScrollReq.questions[0].options)
+            option.preview='### '+option.label+' details\\n\\n'+preview;
+        window.questionScrollState=()=>{
+            const q=demoView.approvalEl,s=demoView.scroll,r=q.getBoundingClientRect(),b=s.getBoundingClientRect();
+            return {question:q.scrollTop,history:s.scrollTop,max:q.scrollHeight-q.clientHeight,
+                nested:s.contains(q),top:r.top,bottom:r.bottom,height:r.height,width:r.width,left:r.left,
+                chatTop:b.top,chatBottom:b.bottom,chatHeight:s.clientHeight,
+                overflow:q.scrollWidth>q.clientWidth,
+                composerBottom:demoView.composer.box.getBoundingClientRect().bottom};
+        };
+        return true;
+    })()""")
+
+    async def read():
+        return await evaluate(instance, "questionScrollState()")
+
+    async def wheel(delta):
+        await instance.call("Input.dispatchMouseEvent", {"type": "mouseWheel", "x": x, "y": y,
+                            "deltaX": 0, "deltaY": delta}, session=instance.page_session)
+        await asyncio.sleep(.25)
+        return await read()
+
+    try:
+        for width, height in [(1440, 900), (1074, 961), (390, 844), (900, 400)]:
+            await instance.call("Emulation.setDeviceMetricsOverride", {"width": width, "height": height,
+                "deviceScaleFactor": 1, "mobile": width == 390}, session=instance.page_session)
+            for light in (False, True):
+                await evaluate(instance, "document.documentElement.classList.toggle('light',%s); demoView.showApproval(questionScrollReq)" % json.dumps(light))
+                start = await read()
+                assert start["nested"] and start["max"] > start["height"], start
+                assert start["top"] >= start["chatTop"] and start["bottom"] <= start["chatBottom"], start
+                assert start["height"] < start["chatHeight"] and not start["overflow"], start
+                assert start["composerBottom"] <= height and start["question"] == 0, start
+                x = start["left"] + start["width"] / 2
+                y = start["bottom"] - min(20, start["height"] / 10)
+                await instance.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y}, session=instance.page_session)
+
+                # Inside the question only its own contents move, in either direction.
+                down = await wheel(120)
+                assert down["question"] > start["question"] and down["history"] == start["history"], (start, down)
+                up = await wheel(-60)
+                assert up["question"] < down["question"] and up["history"] == start["history"], (down, up)
+
+                # At the upper edge the same wheel goes to the chat history.
+                await wheel(-2000)
+                top = await wheel(-60)
+                assert top["question"] == 0 and top["history"] < start["history"], (start, top)
+
+                # At the lower edge it returns toward the history's tail.
+                # The previous upward scroll left room for this movement.
+                await wheel(2000)
+                bottom = await wheel(40)
+                assert abs(bottom["question"]-bottom["max"]) <= 1 and bottom["history"] > top["history"], (top, bottom)
+                await evaluate(instance, "demoView.scrollBottom(true)")
+                visible = await evaluate(instance, """(() => {
+                    const card=demoView.approvalEl,r=card.getBoundingClientRect();
+                    return [...card.querySelectorAll('.aq-other-input,.ap-btns button')].every(node=>{
+                        const b=node.getBoundingClientRect();return b.top>=r.top&&b.bottom<=r.bottom;
+                    });
+                })()""")
+                assert visible, (width, height, light, bottom)
+                if capture and height != 400:
+                    shot = await instance.call("Page.captureScreenshot", {"format": "png"}, session=instance.page_session)
+                    (BASE / "data" / ("question-scroll-{}-{}.png".format(width, "light" if light else "dark"))).write_bytes(
+                        base64.b64decode(shot["data"]))
+
+                # A new question starts at its beginning; ordinary approvals
+                # still use their existing position above the composer.
+                await evaluate(instance, "demoView.showApproval(questionScrollReq)")
+                assert (await read())["question"] == 0
+                # Keyboard focus must reveal the answer controls inside both
+                # scroll boxes, without submitting or losing the selection.
+                await evaluate(instance, """(() => {
+                    const q=demoView.approvalEl;q.querySelector('input[type=radio]').checked=true;
+                    demoView.updateApprovalControl();q.querySelector('.aq-other-input').focus();
+                })()""")
+                for _ in range(2):
+                    for kind in ("keyDown", "keyUp"):
+                        await instance.call("Input.dispatchKeyEvent", {"type": kind, "key": "Tab", "code": "Tab",
+                            "windowsVirtualKeyCode": 9}, session=instance.page_session)
+                assert await evaluate(instance, """(() => {
+                    const q=demoView.approvalEl,a=q.querySelector('.aq-answer-btn');
+                    const b=a.getBoundingClientRect(),r=q.getBoundingClientRect(),s=demoView.scroll.getBoundingClientRect();
+                    return document.activeElement===a&&!a.disabled&&b.top>=Math.max(r.top,s.top)&&b.bottom<=Math.min(r.bottom,s.bottom);
+                })()""")
+                await evaluate(instance, "demoView.showApproval({...questionScrollReq,questions:[{question:'Ready?',options:['Continue','Wait']}]})")
+                if height != 400:
+                    assert (await read())["max"] == 0, "short questions do not need their own scrollbar"
+                await evaluate(instance, "demoView.showApproval({request_id:'plain',tool_name:'Read',input:{file_path:'src/dashboard.css'}})")
+                assert await evaluate(instance, "demoView.approvalEl.parentNode===demoView.root && !demoView.approvalEl.classList.contains('question')")
+                await evaluate(instance, "demoView.hideApproval()")
+
+        # A scrollable code preview keeps its own native place in the chain:
+        # code first, then the question, then the history.
+        await instance.call("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 900,
+            "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
+        point = await evaluate(instance, """(() => {
+            const preview='```text\\n'+Array.from({length:80},(_,i)=>'preview line '+(i+1)).join('\\n')+
+                '\\n```\\n\\n'+Array.from({length:20},()=>'- More layout details.').join('\\n');
+            demoView.showApproval({...questionScrollReq,questions:[{question:'Use this layout?',options:[
+                {label:'Continue',preview},{label:'Wait'}]}]});
+            const r=demoView.approvalEl.querySelector('pre').getBoundingClientRect();
+            return {x:r.x+r.width/2,y:r.y+r.height/2};
+        })()""")
+        x, y = point["x"], point["y"]
+        start = await read()
+        code = await wheel(80)
+        assert await evaluate(instance, "demoView.approvalEl.querySelector('pre').scrollTop>0")
+        assert code["question"] == 0 and code["history"] == start["history"], (start, code)
+        await wheel(2000)
+        parent = await wheel(80)
+        assert parent["question"] > 0 and parent["history"] == start["history"], (start, parent)
+    finally:
+        await evaluate(instance, "demoView.hideApproval(); questionScrollHistory.remove(); demoView.status=questionScrollStatus; demoView.updateRunState(); document.documentElement.classList.remove('light')")
+        await instance.call("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 900,
+            "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
+        await evaluate(instance, "demoView.scrollBottom(true)")
+    print("PASS: tall questions stay inside the chat pane; real wheel input scrolls the question first and chains to history at both ends, with reachable answers on desktop, phone and short windows in both themes", flush=True)
+
+
 async def side_question_wrap_checks(instance, capture=False):
     await evaluate(instance, r"""(() => {
         const hash='0123456789abcdef'.repeat(4);
@@ -2353,6 +2492,8 @@ async def scrollbar_corner_checks(instance, capture=False):
         for(let i=1;i<=40;i++) menu.appendChild(el('div',null,'row '+i)).style.paddingLeft='24px';
         const modal=place(el('div','modal'),'modal','height:120px;box-shadow:none');
         modal.appendChild(el('div',null,lines)).style.cssText='white-space:pre;padding-left:24px';
+        place(el('div','approval question',lines),'question',
+            'height:96px;overflow:auto;white-space:pre;margin:0;width:320px;box-shadow:none');
         place(el('div',null,lines),'square pane',
             'height:96px;overflow:auto;white-space:pre;background:var(--panel2)');
         // Sampled from a screenshot of one box: the image is decoded in the
@@ -2425,7 +2566,7 @@ async def scrollbar_corner_checks(instance, capture=False):
         if corner:
             assert not close(thumb, expected[0]), (label, name, parked, "thumb is not the background", thumb)
 
-    boxes = ("textarea", "code block", "review diff", "choice menu", "modal", "square pane")
+    boxes = ("textarea", "code block", "review diff", "choice menu", "modal", "question", "square pane")
     try:
         for scale in (1, 2):
             await instance.call("Emulation.setDeviceMetricsOverride", {
@@ -2465,7 +2606,7 @@ async def scrollbar_corner_checks(instance, capture=False):
             "width": 1440, "height": 900, "deviceScaleFactor": 1,
             "mobile": False}, session=instance.page_session)
     print("PASS: a rounded scroll box's thumb starts after the box's radius at both ends of a "
-          "vertical or horizontal bar (textarea, code block, review diff, choice menu, modal), "
+          "vertical or horizontal bar (textarea, code block, review diff, choice menu, modal, question), "
           "the corner keeps the box's background, and a square pane's thumb runs to the edge, "
           "in both themes at 1x/2x", flush=True)
 
@@ -3533,6 +3674,7 @@ async def checks(a, b, hub, capture=False):
     await new_session_choices_checks(a, capture)
     await reply_image_checks(a, capture)
     await side_question_wrap_checks(a, capture)
+    await question_scroll_checks(a, capture)
     await status_color_checks(a, capture)
     await identity_pill_checks(a, capture)
     await vnc_throughput_checks(a, capture)
@@ -5469,6 +5611,9 @@ async def main(args):
             if args.token_usage_only:
                 await token_usage_checks(instances[0], args.screenshots)
                 return
+            if args.question_scroll_only:
+                await question_scroll_checks(instances[0], args.screenshots)
+                return
             await sidebar_width_checks(instances[0], args.screenshots)
             if args.sidebar_width_only:
                 return
@@ -5500,5 +5645,6 @@ if __name__ == "__main__":
     parser.add_argument("--navigation-only", action="store_true")
     parser.add_argument("--task-refresh-only", action="store_true")
     parser.add_argument("--token-usage-only", action="store_true")
+    parser.add_argument("--question-scroll-only", action="store_true")
     parser.add_argument("--sidebar-width-only", action="store_true")
     asyncio.run(main(parser.parse_args()))

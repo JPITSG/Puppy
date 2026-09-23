@@ -18967,6 +18967,8 @@ class SessionView {
   showApproval(req) {
     const asked = questionRowsOfRequest(req);
     if (asked) return this.showQuestion(req, asked);
+    if (this.approvalEl.parentNode !== this.root)
+      this.root.insertBefore(this.approvalEl, this.queueEl.nextSibling);
     this.approvalRequest = req;
     this.approvalPending = false;
     this.questionForm = null;
@@ -19015,6 +19017,10 @@ class SessionView {
   showQuestion(req, asked) {
     this.approvalRequest = req;
     this.approvalPending = false;
+    /* Nest the bounded question inside the history so the browser owns
+       scrolling within the card and chaining to the transcript at its ends. */
+    if (this.approvalEl.parentNode !== this.scroll)
+      this.scroll.insertBefore(this.approvalEl, this.tailPill);
     this.approvalEl.classList.remove("hidden");
     this.approvalEl.classList.add("question");
     this.approvalEl.innerHTML = "";
@@ -19043,6 +19049,7 @@ class SessionView {
     form.oninput = form.onchange = () => this.updateApprovalControl();
     form.appendChild(btns);
     this.approvalEl.appendChild(form);
+    this.approvalEl.scrollTop = 0;
     this.updateApprovalControl();
     this.scrollBottom(true);
   }

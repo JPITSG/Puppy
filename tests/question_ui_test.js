@@ -97,9 +97,12 @@ const ROWS = [
   const sent = [];
   const view = Object.create(SessionView.prototype);
   Object.assign(view, { tab: { bid: 0, sid: 1 }, root: mount(el("div")),
-    approvalEl: mount(el("div", "approval hidden")), reconnecting: false, questionForm: null,
+    approvalEl: el("div", "approval hidden"), reconnecting: false, questionForm: null,
+    scroll: el("div", "chat-scroll"), tailPill: el("div", "tail-pill"), queueEl: el("div", "queue-strip"),
     scrollBottom() {}, renderStatus() {}, updateSteerControl() {}, setBackgroundTasks() {},
     ws: { readyState: 1, send: text => sent.push(JSON.parse(text)) } });
+  view.root.append(view.scroll, view.queueEl, view.approvalEl);
+  view.scroll.appendChild(view.tailPill);
   const req = { request_id: "perm-q", tool_name: "AskUserQuestion", input: RAW, kind: "question",
     questions: ROWS, question_title: "Release", suggestions: [] };
   const card = view.approvalEl;

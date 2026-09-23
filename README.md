@@ -274,7 +274,8 @@ you can:
   shows the questions as asked and marks what was chosen once the result
   arrives. Answers ride the existing approval reply, so a console attaching
   mid-question sees the same form, and a request the console cannot read
-  stays an ordinary permission card.
+  stays an ordinary permission card. Tall questions scroll within their card;
+  at the top or bottom, scrolling continues into the chat history.
 - **Stop** – interrupt the turn; the engine gets an orderly shutdown and the
   answer so far is kept.
 
