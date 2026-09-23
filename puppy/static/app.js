@@ -11422,13 +11422,14 @@ if (document.fonts) document.fonts.ready.then(syncSideMinimum);
    grid is masked against that width so it never collides with the session
    list, and a stale 256 would leave a bare strip once the list is gone. */
 let sideMotionTimer = null;
-function setSideCollapsed(on, animate = true) {
+function setSideCollapsed(on, animate = true, contentWidth = null) {
   const app = $("app");
   const root = document.documentElement;
   const open = savedSideWidth();
-  // the width the contents keep while the column slides, so they travel with
-  // it instead of reflowing narrower and narrower on the way out
-  root.style.setProperty("--side-w-open", open + "px");
+  // Keep the frame already on screen, including a reversed animation or a
+  // drag released below the minimum. A hidden column opens at its saved width.
+  const fromWidth = contentWidth || (animate && $("side").querySelector(".side-content").getBoundingClientRect().width) || open;
+  root.style.setProperty("--side-w-open", fromWidth + "px");
   /* Transitioned only while the toggle runs. The resize grip writes --side-w
      on every pointermove, and a standing transition would make that drag lag
      behind the pointer. */
@@ -11517,11 +11518,12 @@ function setSideCollapsed(on, animate = true) {
     /* Pin the pointer-owned frame while CSS regains its transitions. Removing
        these inline values one frame later gives the browser an exact start
        and lets setSideCollapsed own the persisted endpoint as usual. */
+    const contentWidth = side.querySelector(".side-content").getBoundingClientRect().width;
     side.style.width = currentWidth + "px";
     side.style.opacity = String(currentOpacity);
     side.style.visibility = "visible";
     clearDragClasses();
-    setSideCollapsed(collapsed, true);
+    setSideCollapsed(collapsed, true, contentWidth);
     if (settleFrame !== null) cancelAnimationFrame(settleFrame);
     const reduced = window.matchMedia &&
       window.matchMedia("(prefers-reduced-motion: reduce)").matches;

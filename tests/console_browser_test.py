@@ -1049,7 +1049,7 @@ async def usage_error_checks(instance, capture=False):
     print('PASS: complete usage-refresh errors and long identifiers remain visible without overflow on desktop and phones in both themes',flush=True)
 
 
-async def sidebar_width_checks(instance):
+async def sidebar_width_checks(instance, capture=False):
     """The footer fits at its worst case, through every way of setting width."""
     async def viewport(width, phone=False):
         await instance.call("Emulation.setDeviceMetricsOverride", {
@@ -1066,6 +1066,31 @@ async def sidebar_width_checks(instance):
     async def settled():
         await until(instance, "!$('app').classList.contains('side-animating') && "
                     "!$('app').classList.contains('side-dragging')")
+
+    motion = """(() => {
+        const rect=n=>{const r=n.getBoundingClientRect();return {left:r.left,right:r.right,width:r.width}};
+        return {side:rect($('side')),main:rect(document.querySelector('.main')),
+            opacity:Number(getComputedStyle($('side')).opacity),
+            parts:[...$('side').querySelectorAll('.side-actions,.side-scroll,.side-search,.side-foot')].map(rect)};
+    })()"""
+
+    async def sample_motion(action=""):
+        await evaluate(instance, """window.sideFrames=[]; %s;
+            (()=>{const frames=sideFrames; const sample=()=>{frames.push(%s);
+                if($('app').classList.contains('side-animating') || $('app').classList.contains('side-dragging'))
+                    requestAnimationFrame(sample)}; sample()})(); true""" % (action, motion))
+
+    async def moved_together(content_width):
+        await settled()
+        frames = await evaluate(instance, "sideFrames")
+        moving = [frame for frame in frames if 0 < frame["side"]["width"] < content_width - 1]
+        assert len(moving) >= 2, frames
+        for frame in moving:
+            width = frame["side"]["width"]
+            head = frame["parts"][0]
+            assert abs(head["width"] - content_width) < .1, frame
+            assert abs(head["left"] - (width - content_width)) < .1, frame
+            assert abs(frame["main"]["left"] - width) < .1, frame
 
     async def fits(where):
         value = await evaluate(instance, """(() => {
@@ -1106,11 +1131,35 @@ async def sidebar_width_checks(instance):
         # Shrinking from a normal width cannot leave a squeezed footer behind.
         await evaluate(instance, "lsSet('puppy.sidew','360'); setSideCollapsed(false,false); true")
         await mouse("mousePressed", 360)
+        await mouse("mouseMoved", minimum)
+        before_slide = await evaluate(instance, motion)
         await mouse("mouseMoved", 200)
+        sliding = await evaluate(instance, motion)
+        assert abs(sliding["main"]["left"] - 200) < .1, sliding
+        assert 0 < sliding["opacity"] < 1, sliding
+        for before, moving in zip(before_slide["parts"], sliding["parts"]):
+            assert abs(moving["left"] - before["left"] - (200 - minimum)) < .1, (before_slide, sliding)
+            assert abs(moving["width"] - before["width"]) < .1, (before_slide, sliding)
+        if capture:
+            shot = await instance.call("Page.captureScreenshot", {"format": "png"}, session=instance.page_session)
+            (BASE / "data" / ("sidebar-slide-" + theme + ".png")).write_bytes(base64.b64decode(shot["data"]))
         await asyncio.sleep(.15)  # release by position rather than fling speed
+        await sample_motion()
         await mouse("mouseReleased", 200)
-        await settled()
+        await moved_together(minimum)
         await fits(theme + " after dragging below the minimum")
+        # Releasing into a full collapse holds the same content width as the
+        # drag; the button then brings the saved wider sidebar in from the left.
+        await mouse("mousePressed", 360)
+        await mouse("mouseMoved", 80)
+        await asyncio.sleep(.15)
+        await sample_motion()
+        await mouse("mouseReleased", 80)
+        await moved_together(minimum)
+        assert await evaluate(instance, "$('side').getBoundingClientRect().width===0")
+        await sample_motion("document.querySelector('.burger').click()")
+        await moved_together(360)
+        assert await fits(theme + " button reopen") == 360
         edge = await evaluate(instance, "$('side').getBoundingClientRect().right")
         for count in (1, 2):
             await mouse("mousePressed", edge, count)
@@ -1128,8 +1177,9 @@ async def sidebar_width_checks(instance):
         await mouse("mousePressed", 4)
         await mouse("mouseMoved", minimum - 10)
         await asyncio.sleep(.15)
+        await sample_motion()
         await mouse("mouseReleased", minimum - 10)
-        await settled()
+        await moved_together(minimum)
         assert await fits(theme + " reopen from collapsed reload") == minimum
 
     # The minimum follows actual controls and font metrics, not today's count
@@ -1154,7 +1204,9 @@ async def sidebar_width_checks(instance):
     await evaluate(instance, """lsDel('puppy.sidew'); setSideCollapsed(false,false); applyTheme('dark'); syncBell();
         openSessionTab(0,1,findSessionMeta(0,1)); window.demoView=state.views['s:0:1'].activeView(); true""")
     await until(instance, "demoView.draftReady")
-    print("PASS: sidebar footer fits every button and CPU 100% after narrow saved widths, drag, reset, "
+    await evaluate(instance, "delete window.sideFrames; true")
+    print("PASS: sidebar slides left with its contents and fades through drag, release and reopening; "
+          "footer fits every button and CPU 100% after narrow saved widths, drag, reset, "
           "collapsed reload and reopen; measured controls/fonts, steady CPU digit changes and both themes "
           "on desktop and 320/390px phones", flush=True)
 
@@ -5417,7 +5469,7 @@ async def main(args):
             if args.token_usage_only:
                 await token_usage_checks(instances[0], args.screenshots)
                 return
-            await sidebar_width_checks(instances[0])
+            await sidebar_width_checks(instances[0], args.screenshots)
             if args.sidebar_width_only:
                 return
             await session_activity_checks(*instances)

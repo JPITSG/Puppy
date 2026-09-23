@@ -199,6 +199,7 @@ a{color:var(--acc2)}
   width:var(--side-w);flex-shrink:0;display:flex;flex-direction:column;height:100%;
   background:transparent;z-index:30;position:relative;
 }
+.side-content{display:flex;flex-direction:column;flex:1;min-height:0;min-width:0}
 .side::after{
   content:"";position:absolute;top:0;right:0;bottom:0;width:1px;pointer-events:none;
   background:var(--line);
@@ -960,19 +961,19 @@ select.choice-native{display:none!important}
      writes --side-w on every pointermove, and a standing transition there would
      drag behind the pointer.
 
-     While it slides, the contents hold the width they had - otherwise the list
-     would reflow narrower on every frame, ellipsising names and reshuffling the
-     status boxes on the way out. overflow is clipped for the same span only,
-     because at rest the resize grip deliberately overhangs the edge by 3px. */
+     The contents hold their width and follow the right edge, sliding past the
+     viewport's left edge as the workspace grows. Their shared wrapper keeps
+     every inset and margin intact. Overflow is hidden for the motion only;
+     at rest the resize grip deliberately overhangs the edge by 3px. */
   .app.side-animating .side{
     overflow:hidden;
     transition:width var(--slide-time) var(--ease),opacity var(--slide-fade-time) var(--ease);
   }
-  /* Contents only. The resize grip is absolutely positioned and 7px wide, and
-     stretching it to the open width turned it into a full-width band sitting
-     under the cursor - hovered for the whole slide, lighting its accent line
-     at the viewport edge and then fading it out again at the settled edge. */
-  .app.side-animating .side>*:not(.side-resize){min-width:var(--side-w-open,256px)}
+  /* Only the contents travel; the grip stays on the column's visible edge. */
+  .app.side-animating .side-content,
+  .app.side-drag-revealing .side-content,
+  .app.side-drag-collapsing .side-content{width:100%;align-self:flex-end}
+  .app.side-animating .side-content{min-width:var(--side-w-open,256px)}
   /* A moving edge cannot be grabbed, and sweeping it under a resting cursor
      should not light it either: no hit-testing, so :hover never matches. */
   .app.side-animating .side-resize{pointer-events:none}
@@ -987,13 +988,12 @@ select.choice-native{display:none!important}
   }
   .app.side-animating .drawer-edge{pointer-events:none}
   /* Width and opacity are written directly from the pointer while dragging.
-     Override the resting collapsed visibility, and clip full-width contents
-     rather than allowing labels and status rows to reflow on every pixel. */
+     Below the minimum, the contents slide left together at that width. */
   .app.side-dragging .side{transition:none;will-change:width,opacity}
   .app.side-dragging.side-collapsed .side{width:var(--side-w);visibility:visible}
   .app.side-drag-revealing .side,.app.side-drag-collapsing .side{overflow:hidden}
-  .app.side-drag-revealing .side>*:not(.side-resize){min-width:var(--side-w-open,256px)}
-  .app.side-drag-collapsing .side>*:not(.side-resize){min-width:var(--side-w-min)}
+  .app.side-drag-revealing .side-content{min-width:var(--side-w-open,256px)}
+  .app.side-drag-collapsing .side-content{min-width:var(--side-w-min)}
   /* the resting collapsed state: no transition, so a reload starts settled */
   .app.side-collapsed .side{width:0;opacity:0;visibility:hidden}
   /* going out, stay visible for the whole slide and only then leave the tree */
